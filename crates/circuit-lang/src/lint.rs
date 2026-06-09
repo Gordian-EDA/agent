@@ -116,8 +116,15 @@ pub fn lint(d: &Design, provider: &dyn SymbolProvider) -> Diagnostics {
                 names.push(net.as_str());
             }
         }
+        // A genuine typo forks a net, leaving one side with 0–1 pins. When BOTH
+        // nets have ≥2 pins they are deliberate (GPIO buses: PA0/PA1/…), and
+        // warning floods real designs — skip those pairs.
+        let pin_count = |n: &str| net_pins.get(n).map_or(0, Vec::len);
         for (i, a) in names.iter().enumerate() {
             for b in &names[i + 1..] {
+                if pin_count(a) >= 2 && pin_count(b) >= 2 {
+                    continue;
+                }
                 if strsim::levenshtein(a, b) == 1 {
                     diags.push(Diagnostic::warning(
                         "near-name",
@@ -229,6 +236,25 @@ nets:
         assert!(diags.0.iter().any(|d| d.code == "near-name")); // I2C_SDA vs I2C1_SDA
         assert!(diags.0.iter().any(|d| d.code == "unreferenced-net"));
         assert!(!diags.has_errors());
+    }
+
+    #[test]
+    fn near_name_skips_pairs_where_both_nets_are_multi_pin() {
+        // GPIO-bus pattern: PA0/PA1 each connect MCU + header — intentional,
+        // not a typo. Validated against real LLM output: without this rule a
+        // bluepill design produces 400+ false near-name warnings.
+        let diags = run("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: M:CPU, pins: {VDD: 3V3, VSS: GND, PB6: PA0, PB7: PA1}}
+      R1: {part: R, pins: {1: PA0, 2: PA1}}
+");
+        assert!(
+            !diags.0.iter().any(|d| d.code == "near-name"),
+            "multi-pin near-named nets must not warn: {diags:?}"
+        );
     }
 
     #[test]

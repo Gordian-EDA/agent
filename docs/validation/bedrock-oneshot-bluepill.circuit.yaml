@@ -1,0 +1,105 @@
+version: 1
+name: stm32h7_bluepill
+rails: [3V3, GND, VBUS]
+
+blocks:
+  power:
+    layout: {edge: top}
+    components:
+      J1:
+        part: Connector:USB_C_Receptacle_USB2.0_16P
+        pins:
+          VBUS: VBUS
+          GND: GND
+          CC1: USB_CC1
+          CC2: USB_CC2
+          D+: USB_DP
+          D-: USB_DM
+          SBU1: nc
+          SBU2: nc
+          SHIELD: GND
+      R1: {part: R, value: 5.1k, between: [USB_CC1, GND]}
+      R2: {part: R, value: 5.1k, between: [USB_CC2, GND]}
+      U1:
+        part: Regulator_Linear:AMS1117-3.3
+        pins:
+          VI: VBUS
+          VO: 3V3
+          GND: GND
+      C1: {part: C, value: 10uF, between: [VBUS, GND]}
+      C2: {part: C, value: 22uF, between: [3V3, GND]}
+      C3: {part: C, value: 100nF, between: [3V3, GND]}
+
+  mcu:
+    layout: {edge: left}
+    components:
+      U2:
+        part: MCU_ST_STM32H7:STM32H743VITx
+        decouple: {100nF: 10, 4.7uF: 2}
+        pins:
+          VDD: 3V3
+          VSS: GND
+          VDDA: 3V3
+          VSSA: GND
+          VBAT: 3V3
+          VREF+: 3V3
+          "48": VCAP1
+          "73": VCAP2
+          NRST: NRST
+          BOOT0: BOOT0
+          PA11: USB_DM
+          PA12: USB_DP
+          PB6: I2C1_SCL
+          PB7: I2C1_SDA
+          PA0: PA0
+          PA1: PA1
+          PA2: PA2
+          PA3: PA3
+          PA4: PA4
+          PA5: PA5
+          PA6: PA6
+          PA7: PA7
+          PB0: PB0
+          PB1: PB1
+      C4: {part: C, value: 2.2uF, between: [VCAP1, GND]}
+      C5: {part: C, value: 2.2uF, between: [VCAP2, GND]}
+      C6: {part: C, value: 100nF, between: [NRST, GND]}
+      R3: {part: R, value: 10k, between: [BOOT0, GND]}
+      R4: {part: R, value: 4.7k, between: [I2C1_SCL, 3V3]}
+      R5: {part: R, value: 4.7k, between: [I2C1_SDA, 3V3]}
+
+  headers:
+    layout: {edge: right}
+    components:
+      J2:
+        part: Connector_Generic:Conn_01x10
+        pins:
+          "1": 3V3
+          "2": GND
+          "3": PA0
+          "4": PA1
+          "5": PA2
+          "6": PA3
+          "7": PA4
+          "8": PA5
+          "9": PA6
+          "10": PA7
+      J3:
+        part: Connector_Generic:Conn_01x10
+        pins:
+          "1": PB0
+          "2": PB1
+          "3": I2C1_SCL
+          "4": I2C1_SDA
+          "5": USB_DP
+          "6": USB_DM
+          "7": NRST
+          "8": BOOT0
+          "9": VBUS
+          "10": GND
+
+nets:
+  I2C1_SCL: {class: i2c}
+  I2C1_SDA: {class: i2c}
+  USB_DP: {class: usb}
+  USB_DM: {class: usb}

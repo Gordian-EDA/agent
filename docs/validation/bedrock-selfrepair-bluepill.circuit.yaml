@@ -1,0 +1,325 @@
+version: 1
+name: stm32h7_bluepill
+rails: [3V3, GND, VBUS]
+
+blocks:
+  power:
+    layout: {edge: top}
+    components:
+      J1:
+        part: Connector_Generic:Conn_01x03
+        value: PWR_HDR
+        pins:
+          1: VBUS
+          2: 3V3
+          3: GND
+      U2:
+        part: Regulator_Linear:AMS1117-3.3
+        value: AMS1117-3.3
+        pins:
+          GND: GND
+          VI: VBUS
+          VO: 3V3
+      C1:
+        part: C
+        value: 10uF
+        between: [VBUS, GND]
+      C2:
+        part: C
+        value: 10uF
+        between: [3V3, GND]
+      C3:
+        part: C
+        value: 100nF
+        between: [3V3, GND]
+
+  usb:
+    layout: {edge: left}
+    components:
+      J2:
+        part: Connector:USB_C_Receptacle_USB2.0_14P
+        value: USB-C
+        pins:
+          VBUS: VBUS
+          GND: GND
+          CC1: USB_CC1
+          CC2: USB_CC2
+          D+: USB_DP
+          D-: USB_DM
+          SHIELD: GND
+      R1:
+        part: R
+        value: 5.1k
+        between: [USB_CC1, GND]
+      R2:
+        part: R
+        value: 5.1k
+        between: [USB_CC2, GND]
+
+  mcu:
+    layout: {edge: bottom}
+    components:
+      U1:
+        part: MCU_ST_STM32H7:STM32H743VITx
+        value: STM32H743VIT6
+        decouple: {100nF: 10, 4.7uF: 2}
+        pins:
+          VDD: 3V3
+          VDDA: 3V3
+          VBAT: 3V3
+          VREF+: 3V3
+          VCAP: VCAP_NET
+          VSS: GND
+          VSSA: GND
+          NRST: NRST
+          BOOT0: BOOT0
+          PA11: USB_DM
+          PA12: USB_DP
+          PB6: I2C1_SCL
+          PB7: I2C1_SDA
+          PA0: GPIO_PA0
+          PA1: GPIO_PA1
+          PA2: GPIO_PA2
+          PA3: GPIO_PA3
+          PA4: GPIO_PA4
+          PA5: GPIO_PA5
+          PA6: GPIO_PA6
+          PA7: GPIO_PA7
+          PA8: GPIO_PA8
+          PA9: GPIO_PA9
+          PA10: GPIO_PA10
+          PA13: SWDIO
+          PA14: SWCLK
+          PA15: GPIO_PA15
+          PB0: GPIO_PB0
+          PB1: GPIO_PB1
+          PB2: GPIO_PB2
+          PB3: GPIO_PB3
+          PB4: GPIO_PB4
+          PB5: GPIO_PB5
+          PB8: GPIO_PB8
+          PB9: GPIO_PB9
+          PB10: GPIO_PB10
+          PB11: GPIO_PB11
+          PB12: GPIO_PB12
+          PB13: GPIO_PB13
+          PB14: GPIO_PB14
+          PB15: GPIO_PB15
+          PC0: GPIO_PC0
+          PC1: GPIO_PC1
+          PC4: GPIO_PC4
+          PC5: GPIO_PC5
+          PC6: GPIO_PC6
+          PC7: GPIO_PC7
+          PC8: GPIO_PC8
+          PC9: GPIO_PC9
+          PC10: GPIO_PC10
+          PC11: GPIO_PC11
+          PC12: GPIO_PC12
+          PC13: GPIO_PC13
+          PC14: OSC32_IN
+          PC15: OSC32_OUT
+          PD0: GPIO_PD0
+          PD1: GPIO_PD1
+          PD2: GPIO_PD2
+          PD3: GPIO_PD3
+          PD4: GPIO_PD4
+          PD5: GPIO_PD5
+          PD6: GPIO_PD6
+          PD7: GPIO_PD7
+          PD8: GPIO_PD8
+          PD9: GPIO_PD9
+          PD10: GPIO_PD10
+          PD11: GPIO_PD11
+          PD12: GPIO_PD12
+          PD13: GPIO_PD13
+          PD14: GPIO_PD14
+          PD15: GPIO_PD15
+          PE0: GPIO_PE0
+          PE1: GPIO_PE1
+          PE2: GPIO_PE2
+          PE3: GPIO_PE3
+          PE4: GPIO_PE4
+          PE5: GPIO_PE5
+          PE6: GPIO_PE6
+          PE7: GPIO_PE7
+          PE8: GPIO_PE8
+          PE9: GPIO_PE9
+          PE10: GPIO_PE10
+          PE11: GPIO_PE11
+          PE12: GPIO_PE12
+          PE13: GPIO_PE13
+          PE14: GPIO_PE14
+          PE15: GPIO_PE15
+          PH0: HSE_IN
+          PH1: HSE_OUT
+      C4:
+        part: C
+        value: 2.2uF
+        between: [VCAP_NET, GND]
+      C5:
+        part: C
+        value: 100nF
+        between: [NRST, GND]
+      R3:
+        part: R
+        value: 10k
+        between: [BOOT0, GND]
+      Y1:
+        part: Device:Crystal
+        value: 25MHz
+        pins:
+          1: HSE_IN
+          2: HSE_OUT
+      C6:
+        part: C
+        value: 20pF
+        between: [HSE_IN, GND]
+      C7:
+        part: C
+        value: 20pF
+        between: [HSE_OUT, GND]
+      Y2:
+        part: Device:Crystal
+        value: 32.768kHz
+        pins:
+          1: OSC32_IN
+          2: OSC32_OUT
+      C8:
+        part: C
+        value: 6.8pF
+        between: [OSC32_IN, GND]
+      C9:
+        part: C
+        value: 6.8pF
+        between: [OSC32_OUT, GND]
+
+  i2c:
+    layout: {edge: right}
+    components:
+      R4:
+        part: R
+        value: 4.7k
+        between: [I2C1_SDA, 3V3]
+      R5:
+        part: R
+        value: 4.7k
+        between: [I2C1_SCL, 3V3]
+      J3:
+        part: Connector_Generic:Conn_01x04
+        value: I2C_HDR
+        pins:
+          1: 3V3
+          2: GND
+          3: I2C1_SCL
+          4: I2C1_SDA
+
+  headers:
+    layout: {edge: right}
+    components:
+      J4:
+        part: Connector_Generic:Conn_02x20_Odd_Even
+        value: HDR_LEFT
+        pins:
+          1: 3V3
+          2: GND
+          3: GPIO_PA0
+          4: GPIO_PA1
+          5: GPIO_PA2
+          6: GPIO_PA3
+          7: GPIO_PA4
+          8: GPIO_PA5
+          9: GPIO_PA6
+          10: GPIO_PA7
+          11: GPIO_PA8
+          12: GPIO_PA9
+          13: GPIO_PA10
+          14: GPIO_PA15
+          15: GPIO_PB0
+          16: GPIO_PB1
+          17: GPIO_PB2
+          18: GPIO_PB3
+          19: GPIO_PB4
+          20: GPIO_PB5
+          21: GPIO_PB8
+          22: GPIO_PB9
+          23: GPIO_PB10
+          24: GPIO_PB11
+          25: GPIO_PB12
+          26: GPIO_PB13
+          27: GPIO_PB14
+          28: GPIO_PB15
+          29: GPIO_PC0
+          30: GPIO_PC1
+          31: GPIO_PC4
+          32: GPIO_PC5
+          33: GPIO_PC6
+          34: GPIO_PC7
+          35: GPIO_PC8
+          36: GPIO_PC9
+          37: GPIO_PC10
+          38: GPIO_PC11
+          39: GPIO_PC12
+          40: GPIO_PC13
+      J5:
+        part: Connector_Generic:Conn_02x20_Odd_Even
+        value: HDR_RIGHT
+        pins:
+          1: GPIO_PD0
+          2: GPIO_PD1
+          3: GPIO_PD2
+          4: GPIO_PD3
+          5: GPIO_PD4
+          6: GPIO_PD5
+          7: GPIO_PD6
+          8: GPIO_PD7
+          9: GPIO_PD8
+          10: GPIO_PD9
+          11: GPIO_PD10
+          12: GPIO_PD11
+          13: GPIO_PD12
+          14: GPIO_PD13
+          15: GPIO_PD14
+          16: GPIO_PD15
+          17: GPIO_PE0
+          18: GPIO_PE1
+          19: GPIO_PE2
+          20: GPIO_PE3
+          21: GPIO_PE4
+          22: GPIO_PE5
+          23: GPIO_PE6
+          24: GPIO_PE7
+          25: GPIO_PE8
+          26: GPIO_PE9
+          27: GPIO_PE10
+          28: GPIO_PE11
+          29: GPIO_PE12
+          30: GPIO_PE13
+          31: GPIO_PE14
+          32: GPIO_PE15
+          33: SWDIO
+          34: SWCLK
+          35: NRST
+          36: BOOT0
+          37: 3V3
+          38: GND
+          39: 3V3
+          40: GND
+
+  debug:
+    layout: {edge: top}
+    components:
+      J6:
+        part: Connector_Generic:Conn_01x04
+        value: SWD_HDR
+        pins:
+          1: 3V3
+          2: SWDIO
+          3: SWCLK
+          4: GND
+
+nets:
+  I2C1_SDA: {class: i2c}
+  I2C1_SCL: {class: i2c}
+  USB_DP: {class: usb}
+  USB_DM: {class: usb}
