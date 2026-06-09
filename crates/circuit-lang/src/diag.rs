@@ -26,10 +26,22 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     pub fn error(code: &'static str, message: impl Into<String>) -> Self {
-        Self { severity: Severity::Error, code, message: message.into(), span: None, suggestion: None }
+        Self {
+            severity: Severity::Error,
+            code,
+            message: message.into(),
+            span: None,
+            suggestion: None,
+        }
     }
     pub fn warning(code: &'static str, message: impl Into<String>) -> Self {
-        Self { severity: Severity::Warning, code, message: message.into(), span: None, suggestion: None }
+        Self {
+            severity: Severity::Warning,
+            code,
+            message: message.into(),
+            span: None,
+            suggestion: None,
+        }
     }
     pub fn with_span(mut self, span: Span) -> Self {
         self.span = Some(span);
@@ -93,9 +105,15 @@ mod tests {
     fn diagnostics_collection_tracks_errors() {
         let mut ds = Diagnostics::default();
         assert!(!ds.has_errors());
-        ds.push(Diagnostic::warning("single-pin-net", "net `X` has only one pin"));
+        ds.push(Diagnostic::warning(
+            "single-pin-net",
+            "net `X` has only one pin",
+        ));
         assert!(!ds.has_errors());
-        ds.push(Diagnostic::error("pin-conflict", "pin `1` of R1 mapped twice"));
+        ds.push(Diagnostic::error(
+            "pin-conflict",
+            "pin `1` of R1 mapped twice",
+        ));
         assert!(ds.has_errors());
         assert_eq!(ds.0.len(), 2);
     }

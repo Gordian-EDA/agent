@@ -1,1 +1,8 @@
 /target
+
+# Local secrets — AWS Bedrock credentials, never commit
+.env
+.env.*
+
+# Git worktrees (superpowers)
+/.worktrees/
