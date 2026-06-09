@@ -5,6 +5,12 @@ use indexmap::IndexMap;
 use std::fmt::Write;
 
 /// Quote a YAML scalar only when needed.
+///
+/// Note: `':'` is treated as a safe (unquoted) character. This is valid ONLY
+/// because emission is always flow-style (`{…}`), where `:` is the key/value
+/// separator and a bare `:` inside a flow scalar is unambiguous. If block-style
+/// mapping values are ever introduced, `':'` must be removed from the safe set
+/// (or such scalars quoted), since `a: b` in block context parses as a mapping.
 fn q(s: &str) -> String {
     // YAML null tokens are all-alphanumeric but parse back as null, so they
     // must be quoted to survive round-trip (mirrors `yaml::is_null`).
