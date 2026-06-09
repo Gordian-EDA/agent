@@ -10,7 +10,10 @@ use indexmap::IndexMap;
 pub fn parse_str(src: &str) -> (Option<SurfaceDesign>, Diagnostics) {
     let mut diags = Diagnostics::default();
     let root = match yaml::load(src) {
-        Ok(n) => n,
+        Ok((n, ds)) => {
+            diags.extend(ds);
+            n
+        }
         Err(ds) => return (None, ds),
     };
     let mut p = Parser { diags: &mut diags };
@@ -568,5 +571,37 @@ blocks:
 ";
         let (_, diags) = parse_str(src);
         assert!(diags.0.iter().any(|d| d.code == "expected-map"));
+    }
+
+    #[test]
+    fn duplicate_component_refdes_in_one_map_errors() {
+        let src = "
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: R, value: 1k, pins: {1: A, 2: GND}}
+      R1: {part: C, value: 2k, pins: {1: A, 2: GND}}
+";
+        let (_, diags) = parse_str(src);
+        assert!(
+            diags.0.iter().any(|d| d.code == "duplicate-key"),
+            "expected duplicate-key, got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_field_key_errors() {
+        let (_, diags) = parse_str(
+            "version: 1\nblocks: {main: {components: {R1: {part: R, value: 1k, value: 2k}}}}",
+        );
+        assert!(diags.0.iter().any(|d| d.code == "duplicate-key"));
+    }
+
+    #[test]
+    fn multiple_documents_error() {
+        let src = "version: 1\nblocks: {main: {components: {}}}\n---\nversion: 1\nblocks: {other: {components: {}}}";
+        let (_, diags) = parse_str(src);
+        assert!(diags.0.iter().any(|d| d.code == "multiple-documents"));
     }
 }
