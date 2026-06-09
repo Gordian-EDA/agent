@@ -1,0 +1,13 @@
+[package]
+name = "kicad-bridge"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+circuit-lang = { path = "../circuit-lang" }
+strsim.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
