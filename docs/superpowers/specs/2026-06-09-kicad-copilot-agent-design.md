@@ -161,7 +161,7 @@ Component-level hints are excluded: intra-block placement is connectivity-driven
 
 **Synthesized-component identity** (`decouple` is the only v1 sugar that creates components): synthesized caps are written with `ap_role: decouple`, `ap_parent: U1`, `ap_index: n` properties. The reconciler matches them by `(parent, role, index)` — not refdes — and **lift re-sugars them** back into one `decouple:` line. The LLM never sees them individually. This tag mechanism is the general carrier for any future synthesizing sugar.
 
-Lift output = canonical kernel + re-sugared role-tagged synthetics. Canonical ordering: blocks in placement order, components by refdes, pins in symbol pin order, nets alphabetical.
+Lift output = canonical kernel + re-sugared role-tagged synthetics. Canonical ordering: blocks in placement order, components by refdes, pins in symbol pin order, nets alphabetical, `lint.allow` sorted.
 
 ### 5.6 Deliberately excluded (and why)
 
@@ -200,7 +200,7 @@ parse (YAML 1.2; single doc only, dup keys = error) → strict schema check → 
       parts exist in libs (fuzzy suggestions on miss)
       pins resolve on symbols ("pin 'PB66' not found on U1 — did you mean PB6?")
       pin-on-one-net · power-input-connected · polarized-`between` warn
-      single-pin-net warn · near-name warn · unreferenced-declared-net warn
+      single-pin-net warn · near-name warn · unreferenced-net warn
   → reconcile → diff report → [approval gate] → write + snapshot
   → kicad-cli sch erc → parsed findings back to agent
 ```
