@@ -1,7 +1,7 @@
 //! Sugar -> kernel lowering (spec §5.5). The reconciler and lints see
 //! only the output of this pass.
 
-use crate::diag::{Diagnostic, Diagnostics};
+use crate::diag::Diagnostics;
 use crate::model::*;
 use crate::provider::SymbolProvider;
 use crate::surface::*;
@@ -96,6 +96,7 @@ struct RawPin {
     unit: Option<String>,
     pin: String,
     target: String,
+    #[allow(dead_code)] // read in Task 8 (pin-ref resolution)
     span: crate::diag::Span,
 }
 
@@ -146,7 +147,6 @@ fn synth_decouple(_d: &mut Design, _s: &SurfaceDesign, _diags: &mut Diagnostics)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::PinTarget;
     use crate::parse::parse_str;
     use crate::provider::MockSymbolProvider;
 
