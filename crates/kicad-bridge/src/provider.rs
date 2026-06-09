@@ -42,6 +42,9 @@ impl RealSymbolProvider {
 
     /// Run `f` against the named library, loading it on first reference.
     /// Returns `None` if the library does not exist or fails to parse.
+    ///
+    /// The closure must not reenter the provider — the `RefCell` borrow on
+    /// the lib cache is held across `f`.
     fn with_lib<R>(&self, lib: &str, f: impl FnOnce(&SymbolLib) -> R) -> Option<R> {
         let mut libs = self.libs.borrow_mut();
         let slot = libs.entry(lib.to_string()).or_insert_with(|| {
