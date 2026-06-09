@@ -10,6 +10,7 @@ edition = "2024"
 saphyr = "0.0.6"
 saphyr-parser = "0.0.6"
 indexmap = "2"
+kiutils_kicad = "0.3"
 strsim = "0.11"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

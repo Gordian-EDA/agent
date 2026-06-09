@@ -8,6 +8,7 @@ circuit-lang = { path = "../circuit-lang" }
 strsim.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+kiutils_kicad.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
