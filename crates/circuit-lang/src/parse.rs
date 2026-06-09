@@ -313,16 +313,24 @@ impl Parser<'_> {
             span: Some(n.span()),
             ..Default::default()
         };
-        match Self::get(m, "part").and_then(|v| self.scalar(v, "part")) {
-            Some(p) => c.part = p,
-            None => self.err("missing-part", "`part:` is required".into(), n.span()),
+        // A present-but-null `part:` is treated as missing (one `missing-part`
+        // diagnostic), not an `expected-scalar`: the value is effectively absent.
+        match Self::get(m, "part") {
+            Some(v) if !matches!(v, Node::Null(_)) => {
+                if let Some(p) = self.scalar(v, "part") {
+                    c.part = p;
+                }
+            }
+            _ => self.err("missing-part", "`part:` is required".into(), n.span()),
         }
         c.value = Self::get(m, "value").and_then(|v| self.scalar(v, "value"));
         c.footprint = Self::get(m, "footprint").and_then(|v| self.scalar(v, "footprint"));
         if let Some(d) = Self::get(m, "dnp").and_then(|v| self.bool_field(v, "dnp")) {
             c.dnp = d;
         }
-        if let Some(Node::Map(pm, _)) = Self::get(m, "props") {
+        if let Some(pn) = Self::get(m, "props")
+            && let Some(pm) = self.map_node(pn, "props")
+        {
             for ((k, _), v) in pm {
                 if let Some(s) = self.scalar(v, "prop value") {
                     c.props.insert(k.clone(), s);
@@ -489,5 +497,76 @@ blocks:
         let (_, diags) = parse_str(src);
         assert!(diags.0.iter().any(|d| d.code == "bad-refdes"));
         assert!(diags.0.iter().any(|d| d.code == "bad-net-name")); // space
+    }
+
+    #[test]
+    fn empty_part_yields_missing_part_not_literal_tilde() {
+        // Empty / null / `~` part must be rejected as missing, never minted
+        // into the literal string `"~"`/`"null"`.
+        for v in ["", "null", "~"] {
+            let src = format!(
+                "version: 1\nblocks:\n  main:\n    components:\n      R1: {{part: {v}, value: 1k}}\n"
+            );
+            let (d, diags) = parse_str(&src);
+            assert!(
+                diags.0.iter().any(|x| x.code == "missing-part"),
+                "part `{v}` should be missing-part, got {diags:?}"
+            );
+            // And we must not get a confusing extra `expected-scalar` for it.
+            assert!(
+                !diags.0.iter().any(|x| x.code == "expected-scalar"),
+                "part `{v}` should not also emit expected-scalar"
+            );
+            // The part field never becomes the literal "~"/"null".
+            if let Some(d) = d {
+                assert_ne!(d.blocks["main"].components["R1"].part, "~");
+                assert_ne!(d.blocks["main"].components["R1"].part, "null");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_pin_target_is_rejected_not_minted() {
+        let src = "
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: R, pins: {1: }}
+";
+        let (d, diags) = parse_str(src);
+        // Empty pin target must surface as expected-scalar, not a silent "~".
+        assert!(diags.0.iter().any(|x| x.code == "expected-scalar"));
+        if let Some(d) = d {
+            assert!(!d.blocks["main"].components["R1"].pins.contains_key("1"));
+        }
+    }
+
+    #[test]
+    fn quoted_null_stays_a_string() {
+        // A quoted "null" is a genuine string, not YAML null.
+        let src = "
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: \"null\"}
+";
+        let (d, diags) = parse_str(src);
+        assert!(!diags.has_errors(), "{diags:?}");
+        assert_eq!(d.unwrap().blocks["main"].components["R1"].part, "null");
+    }
+
+    #[test]
+    fn non_map_props_emits_expected_map() {
+        let src = "
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: R, props: somestring}
+";
+        let (_, diags) = parse_str(src);
+        assert!(diags.0.iter().any(|d| d.code == "expected-map"));
     }
 }

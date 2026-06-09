@@ -8,7 +8,7 @@
 //! scalars to typed `Scalar`s and lose the literal form.
 
 use crate::diag::{Diagnostic, Diagnostics, Span};
-use saphyr::{MarkedYaml, Scalar, YamlData};
+use saphyr::{MarkedYaml, Scalar, ScalarStyle, YamlData};
 use saphyr_parser::Parser;
 
 #[derive(Debug, Clone)]
@@ -57,6 +57,22 @@ fn mark_span(node: &MarkedYaml) -> Span {
     }
 }
 
+/// True if `data` is a YAML null per the 1.2 core schema: an *unquoted*
+/// (plain-style) scalar that is empty or one of `~`, `null`, `Null`, `NULL`.
+/// With `early_parse(false)` an empty/`null`/`~` value surfaces as a plain
+/// `Representation` (empty normalizes to `~`), so without this check it would
+/// silently become the literal string `"~"`/`"null"` and pass scalar checks.
+/// Quoted `"null"`/`'null'` remain genuine strings.
+fn is_null<'a>(data: &YamlData<'a, MarkedYaml<'a>>) -> bool {
+    match data {
+        YamlData::Representation(s, ScalarStyle::Plain, _) => {
+            matches!(s.as_ref(), "" | "~" | "null" | "Null" | "NULL")
+        }
+        YamlData::Value(Scalar::Null) => true,
+        _ => false,
+    }
+}
+
 /// Returns the literal source string of a scalar node, or `None` for
 /// collections / null / bad values.
 fn scalar_string<'a>(data: &YamlData<'a, MarkedYaml<'a>>) -> Option<String> {
@@ -89,6 +105,7 @@ fn convert(node: MarkedYaml) -> Node {
             Node::Map(entries, span)
         }
         YamlData::Sequence(s) => Node::Seq(s.into_iter().map(convert).collect(), span),
+        ref d if is_null(d) => Node::Null(span),
         ref d => match scalar_string(d) {
             Some(s) => Node::Scalar(s, span),
             None => Node::Null(span),
