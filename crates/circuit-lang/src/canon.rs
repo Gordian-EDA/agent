@@ -6,7 +6,10 @@ use std::fmt::Write;
 
 /// Quote a YAML scalar only when needed.
 fn q(s: &str) -> String {
+    // YAML null tokens are all-alphanumeric but parse back as null, so they
+    // must be quoted to survive round-trip (mirrors `yaml::is_null`).
     let safe = !s.is_empty()
+        && !matches!(s, "null" | "Null" | "NULL")
         && s.chars().next().unwrap().is_ascii_alphanumeric()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || "_.+:~/-".contains(c));
@@ -26,7 +29,7 @@ pub fn natural_lt(a: &str, b: &str) -> bool {
     split(a) < split(b)
 }
 
-fn sorted<'a, V>(m: &'a IndexMap<String, V>) -> Vec<(&'a String, &'a V)> {
+fn sorted<V>(m: &IndexMap<String, V>) -> Vec<(&String, &V)> {
     let mut v: Vec<_> = m.iter().collect();
     v.sort_by(|(a, _), (b, _)| {
         if natural_lt(a, b) {
@@ -89,14 +92,16 @@ pub fn to_canonical_yaml(d: &Design) -> String {
         // Re-sugar: collect decouple synths per parent (value -> count).
         let mut decouple: IndexMap<&str, IndexMap<&str, u32>> = IndexMap::new();
         for (_, c) in block.components.iter() {
-            if let Origin::Synthesized { parent, role, .. } = &c.origin {
-                if role == "decouple" {
-                    *decouple
-                        .entry(parent.as_str())
-                        .or_default()
-                        .entry(c.value.as_deref().unwrap_or("?"))
-                        .or_default() += 1;
-                }
+            if let Origin::Synthesized { parent, role, .. } = &c.origin
+                && role == "decouple"
+            {
+                // Desugar always sets `value` on synthesized decouple caps.
+                let value = c.value.as_deref().expect("decouple synth has value");
+                *decouple
+                    .entry(parent.as_str())
+                    .or_default()
+                    .entry(value)
+                    .or_default() += 1;
             }
         }
 
@@ -122,7 +127,9 @@ pub fn to_canonical_yaml(d: &Design) -> String {
                 fields.push(format!("props: {{{}}}", ps.join(", ")));
             }
             if let Some(dec) = decouple.get(refdes.as_str()) {
-                let ds: Vec<String> = dec
+                let mut entries: Vec<_> = dec.iter().collect();
+                entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+                let ds: Vec<String> = entries
                     .iter()
                     .map(|(v, n)| format!("{}: {}", q(v), n))
                     .collect();
@@ -216,6 +223,39 @@ blocks:
             to_canonical_yaml(&d2),
             "canonical emit must be a fixpoint"
         );
+    }
+
+    const SRC2: &str = "
+version: 1
+blocks:
+  b:
+    components:
+      U1:
+        part: M:OP
+        units:
+          A: {pins: {'+': X, OUT: nc}}
+          B: {pins: {'-': Y}}
+        pins: {VDD: 3V3}
+      R1: {part: R, value: 'null', props: {note: 'a b', mpn: '@x'}, pins: {1: A, 2: '+5V'}}
+nets:
+  X: {class: analog}
+";
+
+    #[test]
+    fn canonical_round_trips_units_nc_class_and_quoting() {
+        let d1 = compile(SRC2);
+        let out1 = to_canonical_yaml(&d1);
+        // Quoting edge cases survive: null-like value, space, leading symbol.
+        assert!(out1.contains("value: 'null'"));
+        assert!(out1.contains("'a b'"));
+        assert!(out1.contains("'+5V'"));
+        // nc pin, net class, and multi-unit emission present.
+        assert!(out1.contains("OUT: nc"));
+        assert!(out1.contains("class: analog"));
+        assert!(out1.contains("units:"));
+        let d2 = compile(&out1);
+        assert_eq!(d1, d2, "round-trip must preserve the kernel model");
+        assert_eq!(out1, to_canonical_yaml(&d2), "emit must be a fixpoint");
     }
 
     #[test]
