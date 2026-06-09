@@ -100,8 +100,58 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
 
     resolve_pins(&mut d, raw_pins, &mut diags);
     synth_decouple(&mut d, s, provider, &mut diags); // Task 8
+    materialize_auto_nc(&mut d, provider); // Task R6
 
     (d, diags)
+}
+
+/// Final desugar pass: for every component whose symbol is known, any physical
+/// pin not covered by an author key and whose `etype` is not `PowerInput`
+/// becomes an explicit `nc` (spec §5.3.5). A net-mapped pin, an explicit `nc`,
+/// or a stacked name covering the pin all count as coverage; power-input pins
+/// are skipped (lint.rs already errors when they are left unconnected).
+/// Markers are keyed by pin number and inserted in symbol pin order, so the
+/// pass is deterministic and idempotent across a canonical round-trip.
+fn materialize_auto_nc(d: &mut Design, provider: &dyn SymbolProvider) {
+    for block in d.blocks.values_mut() {
+        for comp in block.components.values_mut() {
+            let Some(meta) = provider.symbol(&comp.part) else {
+                continue; // unknown symbol — leave pins as authored
+            };
+            // Physical pin numbers already covered by an author key (number
+            // first, then name; a stacked name covers all its physical pins).
+            let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            let keys: Vec<&String> = comp
+                .pins
+                .keys()
+                .chain(comp.units.values().flatten().map(|(k, _)| k))
+                .collect();
+            for key in keys {
+                let by_number = meta.pins.iter().filter(|p| p.number == *key);
+                let mut matched = false;
+                for p in by_number {
+                    covered.insert(p.number.as_str());
+                    matched = true;
+                }
+                if !matched {
+                    for p in meta.pins.iter().filter(|p| p.name == *key) {
+                        covered.insert(p.number.as_str());
+                    }
+                }
+            }
+            // Insert in symbol pin order for determinism.
+            let to_nc: Vec<String> = meta
+                .pins
+                .iter()
+                .filter(|p| p.etype != crate::provider::PinType::PowerInput)
+                .filter(|p| !covered.contains(p.number.as_str()))
+                .map(|p| p.number.clone())
+                .collect();
+            for number in to_nc {
+                comp.pins.insert(number, PinTarget::NoConnect);
+            }
+        }
+    }
 }
 
 struct RawPin {
@@ -881,6 +931,57 @@ blocks:
             .filter(|c| matches!(c.origin, crate::model::Origin::Synthesized { .. }))
             .count();
         assert_eq!(caps, 1);
+    }
+
+    #[test]
+    fn unmentioned_non_power_pins_become_no_connect() {
+        use crate::provider::{MockSymbolProvider, PinType};
+        let mut p = MockSymbolProvider::with_basics();
+        p.add(
+            "M:Chip",
+            vec![
+                ("1", "PA0", PinType::Other, 1),
+                ("2", "PB6", PinType::Other, 1),
+            ],
+        );
+        let (s, _) = crate::parse::parse_str(
+            "
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: M:Chip, pins: {PA0: SIG}}
+",
+        );
+        let (d, diags) = desugar(&s.unwrap(), &p);
+        assert!(!diags.has_errors(), "{:?}", diags);
+        let u1 = &d.blocks["main"].components["U1"];
+        // unmentioned non-power pin PB6 (number "2") is auto-NC
+        assert_eq!(u1.pins["2"], crate::model::PinTarget::NoConnect);
+        // mentioned pin still on its net
+        assert_eq!(u1.pins["PA0"], crate::model::PinTarget::Net("SIG".into()));
+    }
+
+    #[test]
+    fn auto_nc_is_idempotent_through_canon() {
+        use crate::provider::{MockSymbolProvider, PinType};
+        let mut p = MockSymbolProvider::with_basics();
+        p.add(
+            "M:Chip",
+            vec![
+                ("1", "PA0", PinType::Other, 1),
+                ("2", "PB6", PinType::Other, 1),
+            ],
+        );
+        let (s1, _) = crate::parse::parse_str(
+            "version: 1\nblocks: {main: {components: {U1: {part: M:Chip, pins: {PA0: SIG}}}}}",
+        );
+        let (d1, _) = desugar(&s1.unwrap(), &p);
+        let out1 = crate::canon::to_canonical_yaml(&d1);
+        let (s2, _) = crate::parse::parse_str(&out1);
+        let (d2, _) = desugar(&s2.unwrap(), &p);
+        assert_eq!(d1, d2);
+        assert_eq!(out1, crate::canon::to_canonical_yaml(&d2));
     }
 
     #[test]

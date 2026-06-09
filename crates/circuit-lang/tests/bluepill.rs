@@ -94,6 +94,14 @@ fn bluepill_compiles_clean() {
         PinTarget::Net("N_J1_CC1".into())
     );
 
+    // auto-no-connect: J2 mentions pins 1-5; the remaining non-power pins
+    // 6-10 of the 10-pin header are materialized as nc by the kernel.
+    let j2 = &d.blocks["headers"].components["J2"];
+    for n in ["6", "7", "8", "9", "10"] {
+        assert_eq!(j2.pins[n], PinTarget::NoConnect, "J2 pin {n} should be nc");
+    }
+    assert_eq!(j2.pins["1"], PinTarget::Net("3V3".into()));
+
     // canonical fixpoint on the real design
     let canon1 = circuit_lang::canon::to_canonical_yaml(&d);
     let r2 = compile(&canon1, &provider());
