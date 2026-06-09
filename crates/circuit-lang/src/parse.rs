@@ -69,6 +69,24 @@ impl Parser<'_> {
         }
     }
 
+    /// Strict boolean: only the literals `true`/`false` are accepted;
+    /// anything else (e.g. `ture`, `yes`) is a diagnostic, not silent `false`.
+    fn bool_field(&mut self, n: &Node, ctx: &str) -> Option<bool> {
+        let s = self.scalar(n, ctx)?;
+        match s.as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            other => {
+                self.err(
+                    "bad-bool",
+                    format!("expected `true` or `false` for {ctx}, found `{other}`"),
+                    n.span(),
+                );
+                None
+            }
+        }
+    }
+
     fn map_node<'n>(&mut self, n: &'n Node, ctx: &str) -> Option<&'n [((String, Span), Node)]> {
         match n {
             Node::Map(m, _) => Some(m),
@@ -102,9 +120,11 @@ impl Parser<'_> {
             )),
         }
 
-        let mut d = SurfaceDesign::default();
-        d.name = Self::get(map, "name").and_then(|n| self.scalar(n, "name"));
-        d.description = Self::get(map, "description").and_then(|n| self.scalar(n, "description"));
+        let mut d = SurfaceDesign {
+            name: Self::get(map, "name").and_then(|n| self.scalar(n, "name")),
+            description: Self::get(map, "description").and_then(|n| self.scalar(n, "description")),
+            ..Default::default()
+        };
 
         if let Some(Node::Seq(items, _)) = Self::get(map, "rails") {
             for it in items {
@@ -152,12 +172,12 @@ impl Parser<'_> {
                 .push(Diagnostic::error("no-blocks", "`blocks:` is required")),
         }
 
-        if let Some(n) = Self::get(map, "nets") {
-            if let Some(nm) = self.map_node(n, "nets") {
-                for ((net, nspan), nnode) in nm {
-                    self.check_net_name(net, *nspan);
-                    d.nets.insert(net.clone(), self.net_attrs(nnode));
-                }
+        if let Some(n) = Self::get(map, "nets")
+            && let Some(nm) = self.map_node(n, "nets")
+        {
+            for ((net, nspan), nnode) in nm {
+                self.check_net_name(net, *nspan);
+                d.nets.insert(net.clone(), self.net_attrs(nnode));
             }
         }
         Some(d)
@@ -180,8 +200,8 @@ impl Parser<'_> {
         };
         if let Some(m) = self.map_node(n, "net attributes") {
             self.check_keys(m, &["power", "class"], "net attributes");
-            if let Some(p) = Self::get(m, "power").and_then(|v| self.scalar(v, "power")) {
-                out.power = p == "true";
+            if let Some(p) = Self::get(m, "power").and_then(|v| self.bool_field(v, "power")) {
+                out.power = p;
             }
             out.class = Self::get(m, "class").and_then(|v| self.scalar(v, "class"));
         }
@@ -199,27 +219,27 @@ impl Parser<'_> {
         if let Some(l) = Self::get(m, "layout") {
             b.layout = self.layout(l);
         }
-        if let Some(cn) = Self::get(m, "components") {
-            if let Some(cm) = self.map_node(cn, "components") {
-                for ((refdes, rspan), cnode) in cm {
-                    let ok = refdes
+        if let Some(cn) = Self::get(m, "components")
+            && let Some(cm) = self.map_node(cn, "components")
+        {
+            for ((refdes, rspan), cnode) in cm {
+                let ok = refdes
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_uppercase())
+                    && refdes
                         .chars()
-                        .next()
-                        .is_some_and(|c| c.is_ascii_uppercase())
-                        && refdes
-                            .chars()
-                            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-                        && refdes.chars().last().is_some_and(|c| c.is_ascii_digit());
-                    if !ok {
-                        self.err(
-                            "bad-refdes",
-                            format!("`{refdes}` is not a valid refdes (expected e.g. U1, R10)"),
-                            *rspan,
-                        );
-                    }
-                    if let Some(c) = self.component(cnode) {
-                        b.components.insert(refdes.clone(), c);
-                    }
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && refdes.chars().last().is_some_and(|c| c.is_ascii_digit());
+                if !ok {
+                    self.err(
+                        "bad-refdes",
+                        format!("`{refdes}` is not a valid refdes (expected e.g. U1, R10)"),
+                        *rspan,
+                    );
+                }
+                if let Some(c) = self.component(cnode) {
+                    b.components.insert(refdes.clone(), c);
                 }
             }
         }
@@ -230,7 +250,9 @@ impl Parser<'_> {
         let mut h = LayoutHint::default();
         if let Some(m) = self.map_node(n, "layout") {
             self.check_keys(m, &["edge", "near"], "layout");
-            if let Some(e) = Self::get(m, "edge").and_then(|v| self.scalar(v, "edge")) {
+            if let Some(ev) = Self::get(m, "edge")
+                && let Some(e) = self.scalar(ev, "edge")
+            {
                 h.edge = match e.as_str() {
                     "left" => Some(Edge::Left),
                     "right" => Some(Edge::Right),
@@ -240,7 +262,7 @@ impl Parser<'_> {
                         self.err(
                             "bad-edge",
                             format!("`{other}` is not an edge (left|right|top|bottom)"),
-                            n.span(),
+                            ev.span(),
                         );
                         None
                     }
@@ -255,7 +277,7 @@ impl Parser<'_> {
         if let Some(m) = self.map_node(n, "pins") {
             for ((pin, pspan), v) in m {
                 if let Some(t) = self.scalar(v, "pin target") {
-                    if t != "nc" && !t.eq_ignore_ascii_case("nc") && !t.contains('.') {
+                    if !t.eq_ignore_ascii_case("nc") && !t.contains('.') {
                         self.check_net_name(&t, v.span());
                     }
                     if out.insert(pin.clone(), (t, v.span())).is_some() {
@@ -297,8 +319,8 @@ impl Parser<'_> {
         }
         c.value = Self::get(m, "value").and_then(|v| self.scalar(v, "value"));
         c.footprint = Self::get(m, "footprint").and_then(|v| self.scalar(v, "footprint"));
-        if let Some(d) = Self::get(m, "dnp").and_then(|v| self.scalar(v, "dnp")) {
-            c.dnp = d == "true";
+        if let Some(d) = Self::get(m, "dnp").and_then(|v| self.bool_field(v, "dnp")) {
+            c.dnp = d;
         }
         if let Some(Node::Map(pm, _)) = Self::get(m, "props") {
             for ((k, _), v) in pm {
@@ -312,17 +334,17 @@ impl Parser<'_> {
             self.pin_map(pn, &mut pins);
             c.pins = pins;
         }
-        if let Some(un) = Self::get(m, "units") {
-            if let Some(um) = self.map_node(un, "units") {
-                for ((uname, _), unode) in um {
-                    if let Some(uim) = self.map_node(unode, "unit") {
-                        self.check_keys(uim, &["pins"], "unit");
-                        let mut pins = IndexMap::new();
-                        if let Some(pn) = Self::get(uim, "pins") {
-                            self.pin_map(pn, &mut pins);
-                        }
-                        c.units.insert(uname.clone(), pins);
+        if let Some(un) = Self::get(m, "units")
+            && let Some(um) = self.map_node(un, "units")
+        {
+            for ((uname, _), unode) in um {
+                if let Some(uim) = self.map_node(unode, "unit") {
+                    self.check_keys(uim, &["pins"], "unit");
+                    let mut pins = IndexMap::new();
+                    if let Some(pn) = Self::get(uim, "pins") {
+                        self.pin_map(pn, &mut pins);
                     }
+                    c.units.insert(uname.clone(), pins);
                 }
             }
         }
@@ -342,22 +364,22 @@ impl Parser<'_> {
                 ),
             }
         }
-        if let Some(dn) = Self::get(m, "decouple") {
-            if let Some(dm) = self.map_node(dn, "decouple") {
-                for ((val, vspan), cnt) in dm {
-                    match self
-                        .scalar(cnt, "decouple count")
-                        .and_then(|s| s.parse::<u32>().ok())
-                    {
-                        Some(k) if k >= 1 => {
-                            c.decouple.insert(val.clone(), k);
-                        }
-                        _ => self.err(
-                            "bad-decouple",
-                            format!("decouple count for `{val}` must be a positive integer"),
-                            *vspan,
-                        ),
+        if let Some(dn) = Self::get(m, "decouple")
+            && let Some(dm) = self.map_node(dn, "decouple")
+        {
+            for ((val, vspan), cnt) in dm {
+                match self
+                    .scalar(cnt, "decouple count")
+                    .and_then(|s| s.parse::<u32>().ok())
+                {
+                    Some(k) if k >= 1 => {
+                        c.decouple.insert(val.clone(), k);
                     }
+                    _ => self.err(
+                        "bad-decouple",
+                        format!("decouple count for `{val}` must be a positive integer"),
+                        *vspan,
+                    ),
                 }
             }
         }

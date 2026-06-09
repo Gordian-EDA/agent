@@ -50,10 +50,10 @@ pub fn load(src: &str) -> Result<Node, Diagnostics> {
 }
 
 fn mark_span(node: &MarkedYaml) -> Span {
-    // saphyr markers are 1-based line and 1-based col.
+    // saphyr markers are 1-based line and 0-based col; `Span` is 1-based.
     Span {
         line: node.span.start.line(),
-        col: node.span.start.col(),
+        col: node.span.start.col() + 1,
     }
 }
 
@@ -89,9 +89,9 @@ fn convert(node: MarkedYaml) -> Node {
             Node::Map(entries, span)
         }
         YamlData::Sequence(s) => Node::Seq(s.into_iter().map(convert).collect(), span),
-        ref d if scalar_string(d).is_some() => {
-            Node::Scalar(scalar_string(&node.data).unwrap(), span)
-        }
-        _ => Node::Null(span),
+        ref d => match scalar_string(d) {
+            Some(s) => Node::Scalar(s, span),
+            None => Node::Null(span),
+        },
     }
 }
