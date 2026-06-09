@@ -63,16 +63,16 @@ pub fn lint(d: &Design, provider: &dyn SymbolProvider) -> Diagnostics {
                     diags.push(e);
                 }
                 for p in hits {
-                    if let Some(prev) = covered.insert(&p.number, key) {
-                        if prev != key.as_str() {
-                            diags.push(Diagnostic::error(
-                                "pin-conflict",
-                                format!(
-                                    "{refdes}: physical pin {} claimed by both `{prev}` and `{key}`",
-                                    p.number
-                                ),
-                            ));
-                        }
+                    if let Some(prev) = covered.insert(&p.number, key)
+                        && prev != key.as_str()
+                    {
+                        diags.push(Diagnostic::error(
+                            "pin-conflict",
+                            format!(
+                                "{refdes}: physical pin {} claimed by both `{prev}` and `{key}`",
+                                p.number
+                            ),
+                        ));
                     }
                 }
             }
@@ -80,10 +80,7 @@ pub fn lint(d: &Design, provider: &dyn SymbolProvider) -> Diagnostics {
             // Every power-input pin must be covered AND on a net.
             for p in meta.pins.iter().filter(|p| p.etype == PinType::PowerInput) {
                 let on_net = covered.get(p.number.as_str()).is_some_and(|key| {
-                    comp.pins
-                        .get(*key)
-                        .or_else(|| comp.units.values().find_map(|u| u.get(*key)))
-                        .is_some_and(|t| matches!(t, PinTarget::Net(_)))
+                    pin_target_for(comp, key).is_some_and(|t| matches!(t, PinTarget::Net(_)))
                 });
                 if !on_net {
                     diags.push(Diagnostic::error(
@@ -126,6 +123,14 @@ pub fn lint(d: &Design, provider: &dyn SymbolProvider) -> Diagnostics {
         }
     }
     diags
+}
+
+/// Resolve a component pin map key to its `PinTarget`, searching the top-level
+/// pin map first and then any unit pin maps.
+fn pin_target_for<'a>(comp: &'a Component, key: &str) -> Option<&'a PinTarget> {
+    comp.pins
+        .get(key)
+        .or_else(|| comp.units.values().find_map(|u| u.get(key)))
 }
 
 #[cfg(test)]
