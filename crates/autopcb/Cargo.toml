@@ -1,0 +1,7 @@
+[package]
+name = "autopcb"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+circuit-lang = { path = "../circuit-lang" }

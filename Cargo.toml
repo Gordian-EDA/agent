@@ -1,6 +1,13 @@
-[package]
-name = "auto-pcb"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
+saphyr = "0.0.6"
+indexmap = "2"
+strsim = "0.11"
+thiserror = "2"
