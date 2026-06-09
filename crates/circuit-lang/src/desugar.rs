@@ -172,6 +172,41 @@ fn sanitize(pin: &str) -> String {
         .collect()
 }
 
+/// Union-find over pin nodes keyed by `(refdes, pin)`. `make` interns a
+/// node, `union` merges two, `find` returns a node's root (path-compressed).
+#[derive(Default)]
+struct PinUnionFind {
+    nodes: Vec<(String, String)>,
+    index: std::collections::HashMap<(String, String), usize>,
+    parent: Vec<usize>,
+}
+
+impl PinUnionFind {
+    fn make(&mut self, r: &str, p: &str) -> usize {
+        let nodes = &mut self.nodes;
+        let parent = &mut self.parent;
+        *self
+            .index
+            .entry((r.to_string(), p.to_string()))
+            .or_insert_with(|| {
+                nodes.push((r.to_string(), p.to_string()));
+                parent.push(nodes.len() - 1);
+                nodes.len() - 1
+            })
+    }
+    fn find(&mut self, mut i: usize) -> usize {
+        while self.parent[i] != i {
+            self.parent[i] = self.parent[self.parent[i]];
+            i = self.parent[i];
+        }
+        i
+    }
+    fn union(&mut self, i: usize, j: usize) {
+        let (ri, rj) = (self.find(i), self.find(j));
+        self.parent[ri] = rj;
+    }
+}
+
 fn resolve_pins(d: &mut Design, raw: Vec<RawPin>, diags: &mut Diagnostics) {
     // refdes -> block (for pin-ref targets and on-demand pin creation)
     let comp_block: std::collections::HashMap<String, String> = d
@@ -180,43 +215,26 @@ fn resolve_pins(d: &mut Design, raw: Vec<RawPin>, diags: &mut Diagnostics) {
         .flat_map(|(b, bl)| bl.components.keys().map(move |r| (r.clone(), b.clone())))
         .collect();
 
-    // Union-find over pin nodes keyed by (refdes, pin).
-    let mut nodes: Vec<(String, String)> = Vec::new();
-    let mut index: std::collections::HashMap<(String, String), usize> =
-        std::collections::HashMap::new();
-    let mut parent: Vec<usize> = Vec::new();
-    let node = |r: &str,
-                p: &str,
-                nodes: &mut Vec<(String, String)>,
-                index: &mut std::collections::HashMap<(String, String), usize>,
-                parent: &mut Vec<usize>|
-     -> usize {
-        *index
-            .entry((r.to_string(), p.to_string()))
-            .or_insert_with(|| {
-                nodes.push((r.to_string(), p.to_string()));
-                parent.push(nodes.len() - 1);
-                nodes.len() - 1
-            })
-    };
-    fn find(parent: &mut [usize], mut i: usize) -> usize {
-        while parent[i] != i {
-            parent[i] = parent[parent[i]];
-            i = parent[i];
-        }
-        i
-    }
-
+    let mut uf = PinUnionFind::default();
     let mut named: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     let mut placement: Vec<(RawPin, usize)> = Vec::new(); // node idx per raw pin
     let mut extra_nodes: Vec<usize> = Vec::new(); // pin-ref targets (may be unmapped)
+    // (refdes, pin) explicitly declared `nc`; a pin-ref onto one of these is
+    // electrically contradictory and must be diagnosed, not silently merged.
+    let mut nc_pins: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+
+    for rp in &raw {
+        if rp.target.eq_ignore_ascii_case("nc") {
+            nc_pins.insert((rp.refdes.clone(), rp.pin.clone()));
+        }
+    }
 
     for rp in raw {
         if rp.target.eq_ignore_ascii_case("nc") {
             write_pin(d, &rp, PinTarget::NoConnect);
             continue;
         }
-        let i = node(&rp.refdes, &rp.pin, &mut nodes, &mut index, &mut parent);
+        let i = uf.make(&rp.refdes, &rp.pin);
         // pin-ref? "<REFDES>.<pin>" where REFDES exists
         let is_ref = rp
             .target
@@ -237,50 +255,91 @@ fn resolve_pins(d: &mut Design, raw: Vec<RawPin>, diags: &mut Diagnostics) {
         }
         if is_ref {
             let (tr, tp) = rp.target.split_once('.').unwrap();
-            let j = node(tr, tp, &mut nodes, &mut index, &mut parent);
-            let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
-            parent[ri] = rj;
+            if nc_pins.contains(&(tr.to_string(), tp.to_string())) {
+                diags.push(
+                    Diagnostic::error(
+                        "pinref-to-nc",
+                        format!(
+                            "{}.{}: target `{}` refers to a pin declared `nc` (no-connect) — \
+                             the two sides cannot share a net",
+                            rp.refdes, rp.pin, rp.target
+                        ),
+                    )
+                    .with_span(rp.span),
+                );
+                continue;
+            }
+            let j = uf.make(tr, tp);
+            uf.union(i, j);
             extra_nodes.push(j);
         } else {
-            let root = find(&mut parent, i);
+            let root = uf.find(i);
             named.insert(root, rp.target.clone());
         }
         placement.push((rp, i));
     }
 
-    // consolidate names after all unions
+    let group_name = name_groups(&mut uf, &named, &placement, diags);
+    write_back(d, &mut uf, &comp_block, &group_name, placement, extra_nodes);
+}
+
+/// Assign one net name per union-find group: an explicit author name where one
+/// exists (diagnosing conflicts), else `N_<smallest member>`.
+fn name_groups(
+    uf: &mut PinUnionFind,
+    named: &std::collections::HashMap<usize, String>,
+    placement: &[(RawPin, usize)],
+    diags: &mut Diagnostics,
+) -> std::collections::HashMap<usize, String> {
     let mut group_name: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
-    for (i, name) in &named {
-        let root = find(&mut parent, *i);
+    let node_span: std::collections::HashMap<usize, crate::diag::Span> =
+        placement.iter().map(|(rp, i)| (*i, rp.span)).collect();
+    for (i, name) in named {
+        let root = uf.find(*i);
         if let Some(prev) = group_name.insert(root, name.clone())
             && &prev != name
         {
-            diags.push(Diagnostic::error(
+            let mut diag = Diagnostic::error(
                 "net-conflict",
                 format!("nets `{prev}` and `{name}` joined by pin-refs"),
-            ));
+            );
+            if let Some(span) = node_span.get(i) {
+                diag = diag.with_span(*span);
+            }
+            diags.push(diag);
         }
     }
     // unnamed groups: N_<smallest member>
-    for i in 0..nodes.len() {
-        let root = find(&mut parent, i);
-        group_name.entry(root).or_insert_with(|| {
-            let mut members: Vec<String> = (0..nodes.len())
-                .filter(|&j| find(&mut parent, j) == root)
-                .map(|j| format!("{}_{}", nodes[j].0, sanitize(&nodes[j].1)))
+    let roots: Vec<usize> = (0..uf.nodes.len()).map(|i| uf.find(i)).collect();
+    for root in &roots {
+        group_name.entry(*root).or_insert_with(|| {
+            let mut members: Vec<String> = (0..uf.nodes.len())
+                .filter(|&j| roots[j] == *root)
+                .map(|j| format!("{}_{}", uf.nodes[j].0, sanitize(&uf.nodes[j].1)))
                 .collect();
             members.sort();
             format!("N_{}", members[0])
         });
     }
+    group_name
+}
 
+/// Write resolved nets onto the design, creating pin-ref target pins on demand.
+fn write_back(
+    d: &mut Design,
+    uf: &mut PinUnionFind,
+    comp_block: &std::collections::HashMap<String, String>,
+    group_name: &std::collections::HashMap<usize, String>,
+    placement: Vec<(RawPin, usize)>,
+    extra_nodes: Vec<usize>,
+) {
     for (rp, i) in placement {
-        let root = find(&mut parent, i);
+        let root = uf.find(i);
         write_pin(d, &rp, PinTarget::Net(group_name[&root].clone()));
     }
     // pin-ref targets that had no own mapping: create one on the component
     for j in extra_nodes {
-        let (r, p) = nodes[j].clone();
+        let (r, p) = uf.nodes[j].clone();
         let block = comp_block[&r].clone();
         let comp = d
             .blocks
@@ -291,7 +350,7 @@ fn resolve_pins(d: &mut Design, raw: Vec<RawPin>, diags: &mut Diagnostics) {
             .unwrap();
         let already = comp.pins.contains_key(&p) || comp.units.values().any(|u| u.contains_key(&p));
         if !already {
-            let root = find(&mut parent, j);
+            let root = uf.find(j);
             comp.pins
                 .insert(p, PinTarget::Net(group_name[&root].clone()));
         }
@@ -345,13 +404,17 @@ fn synth_decouple(d: &mut Design, s: &SurfaceDesign, diags: &mut Diagnostics) {
             let vdd = rail(&["VDD", "VCC"]);
             let gnd = rail(&["VSS", "GND"]);
             if vdd.len() != 1 || gnd.len() != 1 {
-                diags.push(Diagnostic::error(
+                let mut diag = Diagnostic::error(
                     "decouple-ambiguous",
                     format!(
                         "{refdes}: decouple needs exactly one VDD*/VCC* net and one \
                          VSS*/GND* net (found {vdd:?} / {gnd:?}) — write the caps explicitly"
                     ),
-                ));
+                );
+                if let Some(span) = sc.span {
+                    diag = diag.with_span(span);
+                }
+                diags.push(diag);
                 continue;
             }
             let (vdd, gnd) = (vdd[0].clone(), gnd[0].clone());
@@ -499,6 +562,25 @@ blocks:
         assert_eq!(
             main.components["J1"].pins["CC1"],
             PinTarget::Net("N_J1_CC1".into())
+        );
+    }
+
+    #[test]
+    fn pin_ref_to_nc_pin_errors() {
+        // Referring to a pin its owner declared `nc` is electrically
+        // contradictory; it must be diagnosed, not silently split into a
+        // dangling single-pin net (regression: the two sides used to disagree).
+        let (_, diags) = run("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: M:X, pins: {PB6: nc}}
+      J2: {part: M:Conn, pins: {3: U1.PB6}}
+");
+        assert!(
+            diags.0.iter().any(|d| d.code == "pinref-to-nc"),
+            "{diags:?}"
         );
     }
 
