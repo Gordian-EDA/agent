@@ -118,6 +118,9 @@ nets:                               # optional — ATTRIBUTES ONLY, never member
   <NET_NAME>:
     power: true                     # global net, rendered as power symbols at pins
     class: <netclass>               # → KiCAD net class (feeds Pillar 3 rules)
+
+lint:                               # optional — lint suppression (§5.3.9)
+  allow: [<code>, ...]              # silence named lints (e.g. single-pin-net, near-name)
 ```
 
 ~15 keys. `value`/`footprint`/`dnp` are first-class because they map to KiCAD's canonical fields/flags; everything else goes through `props`.
@@ -128,11 +131,11 @@ nets:                               # optional — ATTRIBUTES ONLY, never member
 2. **Nets exist by reference** — `PA12: USB_DP` creates the net. The `nets:` section only decorates. Declared-but-unreferenced → warning.
 3. **Pin key resolution:** exact pin-*number* match first, then pin-*name*; a name matching several physical pins (stacked `VDD`) connects **all** of them. One line powers a 100-pin MCU.
 4. **A pin maps to exactly one net.** Two mappings for one pin → hard error.
-5. **NC policy:** explicit reserved word `nc` (case-insensitive) places a no-connect marker. Unmentioned pins get automatic no-connect markers, **except** unconnected *power-input* pins, which are a hard compile error (forgetting the H7's VCAP pins fails loudly rather than being silenced).
+5. **NC policy:** explicit reserved word `nc` (case-insensitive) places a no-connect marker. Auto-no-connect is **materialized in the circuit-lang kernel**: a final desugar pass enumerates each known symbol's physical pins and inserts `nc` (keyed by pin number) for every unmentioned pin, **except** unconnected *power-input* pins, which are a hard compile error (forgetting the H7's VCAP pins fails loudly rather than being silenced). Consequence: because the kernel model carries these markers explicitly, canonical lift YAML **lists the auto-`nc` pins** (they round-trip as ordinary `nc` entries; the pass is idempotent).
 6. **Strict schema.** Unknown keys are errors with did-you-mean suggestions (`decuople:` → `decouple?`). Strictness is LLM-friendliness in a self-repair loop. Growth goes through `version:`.
-7. **YAML 1.2 core schema parsing is mandated.** Relays have pins named `NO`; values like `4.7k`/`NO` must never lex as booleans (the Norway problem). Pin keys normalize to strings.
-8. **Naming:** nets `UPPER_SNAKE`, no spaces, `/` reserved (future hierarchy); refdes `[A-Z]+[0-9]+`; blocks `lower_snake`.
-9. **Anti-typo lints** (declaration-free nets are a typo hazard): *single-pin-net warning* (almost always a mistake) and *near-name warning* ("`I2C_SDA` and `I2C1_SDA` differ by one char — intentional?"). Suppressible.
+7. **YAML 1.2 core schema parsing is mandated.** Relays have pins named `NO`; values like `4.7k`/`NO` must never lex as booleans (the Norway problem). Pin keys normalize to strings. **A single YAML document only** — multiple documents (`---`-separated) are a hard error (`multiple-documents`). **Duplicate map keys** within one mapping (a repeated refdes or field) are a hard error (`duplicate-key`), never silently last-wins.
+8. **Naming:** nets `UPPER_SNAKE`, no spaces, `/` reserved (future hierarchy); refdes strictly `[A-Z]+[0-9]+` (uppercase-letter prefix then digits, nothing interleaved); blocks `lower_snake`. **Enforcement:** net-name casing (a lowercase letter in a net name) is a **warning** (`net-name-case`) — it never blocks compilation; refdes shape and block-name violations remain hard errors.
+9. **Anti-typo lints** (declaration-free nets are a typo hazard): *single-pin-net warning* (almost always a mistake) and *near-name warning* ("`I2C_SDA` and `I2C1_SDA` differ by one char — intentional?"; near-name compares the union of referenced and declared-only nets). **Suppressible** via the top-level `lint.allow` list (§5.2): any code listed there — e.g. `single-pin-net`, `near-name`, `unreferenced-net` — is silenced. The allow-set round-trips through canonical lift (sorted, emitted only when non-empty).
 10. **Blocks are a partition** — every component in exactly one block; blocks are grouping + placement only (no electrical meaning, no namespacing; refdes are globally unique). Trivial designs use a single `main` block.
 
 ### 5.4 Layout hints (a namespace, not sugar)
@@ -192,7 +195,7 @@ R7: {part: Device:R, value: 4.7k,
 Every `apply_design`/`validate_design` runs:
 
 ```
-parse (YAML 1.2) → strict schema check → desugar → kernel model
+parse (YAML 1.2; single doc only, dup keys = error) → strict schema check → desugar → kernel model
   → semantic lints:
       parts exist in libs (fuzzy suggestions on miss)
       pins resolve on symbols ("pin 'PB66' not found on U1 — did you mean PB6?")
