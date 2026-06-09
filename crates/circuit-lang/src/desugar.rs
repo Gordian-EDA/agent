@@ -1,7 +1,7 @@
 //! Sugar -> kernel lowering (spec §5.5). The reconciler and lints see
 //! only the output of this pass.
 
-use crate::diag::Diagnostics;
+use crate::diag::{Diagnostic, Diagnostics};
 use crate::model::*;
 use crate::provider::SymbolProvider;
 use crate::surface::*;
@@ -100,13 +100,71 @@ struct RawPin {
     span: crate::diag::Span,
 }
 
-/// Task 7 fills this in. No-op until then.
 fn apply_between(
-    _refdes: &str,
-    _sc: &mut SurfaceComponent,
-    _provider: &dyn SymbolProvider,
-    _diags: &mut Diagnostics,
+    refdes: &str,
+    sc: &mut SurfaceComponent,
+    provider: &dyn SymbolProvider,
+    diags: &mut Diagnostics,
 ) {
+    let Some(((a, aspan), (b, bspan))) = sc.between.take() else {
+        return;
+    };
+    let part = alias(&sc.part);
+    let Some(meta) = provider.symbol(&part) else {
+        let mut d = Diagnostic::error(
+            "between-unknown-symbol",
+            format!("{refdes}: cannot desugar `between` — unknown symbol `{part}`"),
+        )
+        .with_span(aspan);
+        if let Some(s) = provider.suggest(&part).into_iter().next() {
+            d = d.with_suggestion(s);
+        }
+        diags.push(d);
+        return;
+    };
+    if meta.pins.len() != 2 {
+        diags.push(
+            Diagnostic::error(
+                "between-arity",
+                format!(
+                    "{refdes}: `between` needs a 2-pin symbol; `{part}` has {} pins",
+                    meta.pins.len()
+                ),
+            )
+            .with_span(aspan),
+        );
+        return;
+    }
+    // Polarized-part lint (spec §5.5): warn, suggest named pins.
+    let polarized = matches!(part.as_str(), "Device:D" | "Device:LED" | "Device:CP")
+        || meta.pins.iter().any(|p| p.name == "A" || p.name == "K");
+    if polarized {
+        diags.push(
+            Diagnostic::warning(
+                "between-polarized",
+                format!(
+                    "{refdes}: `{part}` is polarized; `between` maps pin order ({}, {}) — \
+                     prefer named pins {{{}: …, {}: …}}",
+                    meta.pins[0].number, meta.pins[1].number, meta.pins[0].name, meta.pins[1].name
+                ),
+            )
+            .with_span(aspan),
+        );
+    }
+    for (pin, target, span) in [
+        (meta.pins[0].number.clone(), a, aspan),
+        (meta.pins[1].number.clone(), b, bspan),
+    ] {
+        if sc.pins.insert(pin.clone(), (target, span)).is_some() {
+            diags.push(
+                Diagnostic::error(
+                    "pin-conflict",
+                    format!("{refdes}: pin `{pin}` set by both `between` and `pins`"),
+                )
+                .with_span(span),
+            );
+        }
+    }
 }
 
 /// Task 8 replaces this with pin-ref-aware resolution. For now:
@@ -182,5 +240,45 @@ blocks:
             PinTarget::Net("3V3".into())
         );
         assert_eq!(main.components["U1"].pins["EN"], PinTarget::NoConnect);
+    }
+
+    #[test]
+    fn between_desugars_in_pin_number_order() {
+        let (d, diags) = run("
+version: 1
+blocks:
+  main:
+    components:
+      C1: {part: C, value: 10uF, between: [VBUS, GND]}
+");
+        assert!(!diags.has_errors(), "{:?}", diags);
+        let c1 = &d.blocks["main"].components["C1"];
+        assert_eq!(c1.pins["1"], PinTarget::Net("VBUS".into()));
+        assert_eq!(c1.pins["2"], PinTarget::Net("GND".into()));
+    }
+
+    #[test]
+    fn between_on_polarized_part_warns() {
+        let (_, diags) = run("
+version: 1
+blocks:
+  main:
+    components:
+      D1: {part: LED, between: [STATUS, GND]}
+");
+        assert!(!diags.has_errors());
+        assert!(diags.0.iter().any(|d| d.code == "between-polarized"));
+    }
+
+    #[test]
+    fn between_on_unknown_or_non_2pin_symbol_errors() {
+        let (_, diags) = run("
+version: 1
+blocks:
+  main:
+    components:
+      X1: {part: Nope:Nada, between: [A, B]}
+");
+        assert!(diags.0.iter().any(|d| d.code == "between-unknown-symbol"));
     }
 }
