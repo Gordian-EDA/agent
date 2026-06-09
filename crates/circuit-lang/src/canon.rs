@@ -63,6 +63,11 @@ pub fn to_canonical_yaml(d: &Design) -> String {
     if let Some(desc) = &d.description {
         writeln!(o, "description: {}", q(desc)).unwrap();
     }
+    if !d.lint_allow.is_empty() {
+        // `lint_allow` is a BTreeSet, so iteration is already sorted/deterministic.
+        let codes: Vec<String> = d.lint_allow.iter().map(|c| q(c)).collect();
+        writeln!(o, "lint: {{allow: [{}]}}", codes.join(", ")).unwrap();
+    }
     o.push_str("blocks:\n");
     for (bname, block) in &d.blocks {
         writeln!(o, "  {}:", q(bname)).unwrap();
@@ -291,6 +296,29 @@ blocks:
             out1,
             to_canonical_yaml(&d2),
             "canonical emit must be a text fixpoint"
+        );
+    }
+
+    #[test]
+    fn canonical_round_trips_lint_allow() {
+        let src = "
+version: 1
+lint: {allow: [near-name, single-pin-net]}
+blocks:
+  main:
+    components:
+      R1: {part: R, pins: {1: A, 2: GND}}
+";
+        let d1 = compile(src);
+        let out1 = to_canonical_yaml(&d1);
+        // Emitted sorted (BTreeSet order) and present.
+        assert!(out1.contains("lint: {allow: [near-name, single-pin-net]}"));
+        let d2 = compile(&out1);
+        assert_eq!(d1, d2, "lint.allow must survive the round-trip");
+        assert_eq!(
+            out1,
+            to_canonical_yaml(&d2),
+            "canonical emit must be a fixpoint"
         );
     }
 

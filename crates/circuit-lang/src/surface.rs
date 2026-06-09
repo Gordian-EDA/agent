@@ -12,6 +12,8 @@ pub struct SurfaceDesign {
     pub rails: Vec<(String, Span)>,
     pub blocks: IndexMap<String, SurfaceBlock>,
     pub nets: IndexMap<String, SurfaceNet>,
+    /// Lint codes suppressed via top-level `lint: {allow: [...]}`.
+    pub lint_allow: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

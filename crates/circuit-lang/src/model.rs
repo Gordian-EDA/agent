@@ -12,6 +12,8 @@ pub struct Design {
     pub description: Option<String>,
     pub blocks: IndexMap<BlockName, Block>,
     pub nets: IndexMap<NetName, NetAttrs>,
+    /// Lint codes suppressed via the top-level `lint: {allow: [...]}` section.
+    pub lint_allow: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

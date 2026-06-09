@@ -24,6 +24,7 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
     let mut d = Design {
         name: s.name.clone(),
         description: s.description.clone(),
+        lint_allow: s.lint_allow.iter().cloned().collect(),
         ..Default::default()
     };
 

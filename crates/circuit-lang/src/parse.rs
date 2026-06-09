@@ -108,7 +108,15 @@ impl Parser<'_> {
         let map = self.map_node(root, "top level")?;
         self.check_keys(
             map,
-            &["version", "name", "description", "rails", "blocks", "nets"],
+            &[
+                "version",
+                "name",
+                "description",
+                "rails",
+                "blocks",
+                "nets",
+                "lint",
+            ],
             "top level",
         );
         // version: required, == 1
@@ -181,6 +189,28 @@ impl Parser<'_> {
             for ((net, nspan), nnode) in nm {
                 self.check_net_name(net, *nspan);
                 d.nets.insert(net.clone(), self.net_attrs(nnode));
+            }
+        }
+
+        if let Some(n) = Self::get(map, "lint")
+            && let Some(lm) = self.map_node(n, "lint")
+        {
+            self.check_keys(lm, &["allow"], "lint");
+            if let Some(an) = Self::get(lm, "allow") {
+                match an {
+                    Node::Seq(items, _) => {
+                        for it in items {
+                            if let Some(s) = self.scalar(it, "lint.allow entry") {
+                                d.lint_allow.push(s);
+                            }
+                        }
+                    }
+                    _ => self.err(
+                        "expected-seq",
+                        "`lint.allow` must be a list of lint codes".into(),
+                        an.span(),
+                    ),
+                }
             }
         }
         Some(d)

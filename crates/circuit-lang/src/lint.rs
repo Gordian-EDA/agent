@@ -95,31 +95,46 @@ pub fn lint(d: &Design, provider: &dyn SymbolProvider) -> Diagnostics {
         }
     }
 
-    for (net, pins) in &net_pins {
-        if pins.len() == 1 && !d.nets.get(*net).map(|a| a.power).unwrap_or(false) {
-            diags.push(Diagnostic::warning(
-                "single-pin-net",
-                format!("net `{net}` has only one pin ({}) — typo?", pins[0]),
-            ));
-        }
-    }
-    let names: Vec<&str> = net_pins.keys().copied().collect();
-    for (i, a) in names.iter().enumerate() {
-        for b in &names[i + 1..] {
-            if strsim::levenshtein(a, b) == 1 {
+    let allow = |code: &str| d.lint_allow.contains(code);
+
+    if !allow("single-pin-net") {
+        for (net, pins) in &net_pins {
+            if pins.len() == 1 && !d.nets.get(*net).map(|a| a.power).unwrap_or(false) {
                 diags.push(Diagnostic::warning(
-                    "near-name",
-                    format!("nets `{a}` and `{b}` differ by one character — intentional?"),
+                    "single-pin-net",
+                    format!("net `{net}` has only one pin ({}) — typo?", pins[0]),
                 ));
             }
         }
     }
-    for (net, _) in &d.nets {
-        if !net_pins.contains_key(net.as_str()) {
-            diags.push(Diagnostic::warning(
-                "unreferenced-net",
-                format!("net `{net}` is declared in `nets:` but no pin references it"),
-            ));
+    if !allow("near-name") {
+        // Compare against the dedup union of referenced and declared-only nets,
+        // so a typo'd `nets:` entry one edit away from a wired net still warns.
+        let mut names: Vec<&str> = net_pins.keys().copied().collect();
+        for net in d.nets.keys() {
+            if !net_pins.contains_key(net.as_str()) {
+                names.push(net.as_str());
+            }
+        }
+        for (i, a) in names.iter().enumerate() {
+            for b in &names[i + 1..] {
+                if strsim::levenshtein(a, b) == 1 {
+                    diags.push(Diagnostic::warning(
+                        "near-name",
+                        format!("nets `{a}` and `{b}` differ by one character — intentional?"),
+                    ));
+                }
+            }
+        }
+    }
+    if !allow("unreferenced-net") {
+        for (net, _) in &d.nets {
+            if !net_pins.contains_key(net.as_str()) {
+                diags.push(Diagnostic::warning(
+                    "unreferenced-net",
+                    format!("net `{net}` is declared in `nets:` but no pin references it"),
+                ));
+            }
         }
     }
     diags
@@ -214,6 +229,41 @@ nets:
         assert!(diags.0.iter().any(|d| d.code == "near-name")); // I2C_SDA vs I2C1_SDA
         assert!(diags.0.iter().any(|d| d.code == "unreferenced-net"));
         assert!(!diags.has_errors());
+    }
+
+    #[test]
+    fn near_name_compares_declared_only_nets() {
+        let diags = run("
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: R, pins: {1: I2C_SDA, 2: GND}}
+nets:
+  I2C1_SDA: {class: x}
+");
+        assert!(
+            diags.0.iter().any(|d| d.code == "near-name"),
+            "declared-only net one edit away must warn"
+        );
+    }
+
+    #[test]
+    fn lint_allow_suppresses_codes() {
+        let diags = run("
+version: 1
+lint: {allow: [single-pin-net, near-name, unreferenced-net]}
+blocks:
+  main:
+    components:
+      R1: {part: R, pins: {1: I2C_SDA, 2: GND}}
+      TP1: {part: R, pins: {1: PROBE_ONLY, 2: PROBE_ONLY}}
+nets:
+  I2C1_SDA: {class: x}
+");
+        assert!(!diags.0.iter().any(|d| d.code == "single-pin-net"));
+        assert!(!diags.0.iter().any(|d| d.code == "near-name"));
+        assert!(!diags.0.iter().any(|d| d.code == "unreferenced-net"));
     }
 
     #[test]
