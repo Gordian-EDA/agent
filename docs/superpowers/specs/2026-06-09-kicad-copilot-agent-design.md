@@ -306,7 +306,7 @@ Dependency DAG: `circuit-lang` ← `sch-engine` → `kicad-bridge`; `agent` orch
 - **`circuit-lang`:** unit + golden desugar tables + round-trip property (parse → canonical emit → parse idempotent).
 - **`sch-engine`:** `insta` snapshot tests — YAML in, `.kicad_sch` out, byte-snapshotted (determinism makes this possible); reconcile scenarios (add/remove/rename/user-moved/user-rewired) as table tests.
 - **`kicad-bridge`:** integration suite gated on KiCAD being installed (`kicad-cli` netlist/ERC against fixture schematics).
-- **E2E:** mocked-LLM transcripts (recorded tool sequences) driving the full stack in temp projects. **The bluepill-H7 design is the canonical fixture** — the founding prompt is the acceptance test, asserted ERC-clean.
+- **E2E:** use real LLMs (./.env contains a valid AWS_BEARER_TOKEN_BEDROCK key) to test the full agent. **The bluepill-H7 design is the canonical fixture** — the founding prompt is the acceptance test, asserted ERC-clean.
 
 ---
 
