@@ -194,6 +194,12 @@ impl Parser<'_> {
                 span,
             );
         }
+        if name.chars().any(|c| c.is_ascii_lowercase()) {
+            self.diags.push(
+                Diagnostic::warning("net-name-case", format!("net `{name}` is not UPPER_SNAKE"))
+                    .with_span(span),
+            );
+        }
     }
 
     fn net_attrs(&mut self, n: &Node) -> SurfaceNet {
@@ -226,14 +232,19 @@ impl Parser<'_> {
             && let Some(cm) = self.map_node(cn, "components")
         {
             for ((refdes, rspan), cnode) in cm {
-                let ok = refdes
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_uppercase())
-                    && refdes
-                        .chars()
-                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-                    && refdes.chars().last().is_some_and(|c| c.is_ascii_digit());
+                // Strict `[A-Z]+[0-9]+`: split at the first ASCII digit; the
+                // prefix must be a non-empty run of uppercase letters and the
+                // suffix a non-empty run of digits, with nothing interleaved.
+                let split = refdes.find(|c: char| c.is_ascii_digit());
+                let ok = match split {
+                    Some(i) if i > 0 => {
+                        let (prefix, suffix) = refdes.split_at(i);
+                        prefix.chars().all(|c| c.is_ascii_uppercase())
+                            && !suffix.is_empty()
+                            && suffix.chars().all(|c| c.is_ascii_digit())
+                    }
+                    _ => false,
+                };
                 if !ok {
                     self.err(
                         "bad-refdes",
@@ -603,5 +614,40 @@ blocks:
         let src = "version: 1\nblocks: {main: {components: {}}}\n---\nversion: 1\nblocks: {other: {components: {}}}";
         let (_, diags) = parse_str(src);
         assert!(diags.0.iter().any(|d| d.code == "multiple-documents"));
+    }
+
+    #[test]
+    fn refdes_must_be_letters_then_digits() {
+        for bad in ["R1A2", "RA1B2", "R2C3"] {
+            let src = format!(
+                "version: 1\nblocks: {{main: {{components: {{{bad}: {{part: R, pins: {{1: A, 2: B}}}}}}}}}}"
+            );
+            let (_, d) = parse_str(&src);
+            assert!(
+                d.0.iter().any(|x| x.code == "bad-refdes"),
+                "{bad} should be rejected"
+            );
+        }
+        for ok in ["R1", "U10", "J2"] {
+            let src = format!(
+                "version: 1\nblocks: {{main: {{components: {{{ok}: {{part: R, pins: {{1: A, 2: B}}}}}}}}}}"
+            );
+            let (_, d) = parse_str(&src);
+            assert!(
+                !d.0.iter().any(|x| x.code == "bad-refdes"),
+                "{ok} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn lowercase_net_name_warns() {
+        let (_, d) = parse_str(
+            "version: 1\nblocks: {main: {components: {R1: {part: R, pins: {1: sda, 2: GND}}}}}",
+        );
+        assert!(
+            d.0.iter()
+                .any(|x| x.code == "net-name-case" && x.severity == crate::diag::Severity::Warning)
+        );
     }
 }
