@@ -3,6 +3,7 @@
 
 pub mod desugar;
 pub mod diag;
+pub mod lint;
 pub mod model;
 pub mod parse;
 pub mod provider;
