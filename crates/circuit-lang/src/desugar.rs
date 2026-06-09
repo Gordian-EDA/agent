@@ -39,6 +39,9 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
 
     // surface components -> kernel components (pins still raw, resolved below)
     let mut raw_pins: Vec<RawPin> = Vec::new();
+    // A refdes must be globally unique across all blocks; a second occurrence
+    // would corrupt `comp_block` and pin-ref resolution, so it is a hard error.
+    let mut seen_refdes: std::collections::HashSet<RefDes> = std::collections::HashSet::new();
     for (bname, sb) in &s.blocks {
         let mut block = Block {
             note: sb.note.clone(),
@@ -46,6 +49,17 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
             components: IndexMap::new(),
         };
         for (refdes, sc) in &sb.components {
+            if !seen_refdes.insert(refdes.clone()) {
+                let mut diag = Diagnostic::error(
+                    "duplicate-refdes",
+                    format!("refdes `{refdes}` is declared more than once across blocks"),
+                );
+                if let Some(span) = sc.span {
+                    diag = diag.with_span(span);
+                }
+                diags.push(diag);
+                continue;
+            }
             let mut sc = sc.clone();
             apply_between(refdes, &mut sc, provider, &mut diags); // Task 7
             let comp = Component {
@@ -219,6 +233,11 @@ fn resolve_pins(d: &mut Design, raw: Vec<RawPin>, diags: &mut Diagnostics) {
     let mut named: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     let mut placement: Vec<(RawPin, usize)> = Vec::new(); // node idx per raw pin
     let mut extra_nodes: Vec<usize> = Vec::new(); // pin-ref targets (may be unmapped)
+    // First concrete net name assigned to each node (by node index). A
+    // component-level pin and a unit-level pin collapse to the same node, so a
+    // comp pin and a unit pin that name *different* nets are a hard conflict —
+    // silently unioning/overwriting would corrupt connectivity.
+    let mut node_net: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     // (refdes, pin) explicitly declared `nc`; a pin-ref onto one of these is
     // electrically contradictory and must be diagnosed, not silently merged.
     let mut nc_pins: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
@@ -273,6 +292,23 @@ fn resolve_pins(d: &mut Design, raw: Vec<RawPin>, diags: &mut Diagnostics) {
             uf.union(i, j);
             extra_nodes.push(j);
         } else {
+            if let Some(prev) = node_net.get(&i)
+                && prev != &rp.target
+            {
+                diags.push(
+                    Diagnostic::error(
+                        "pin-conflict",
+                        format!(
+                            "{}.{}: pin maps to two different nets `{}` and `{}` \
+                             (component- vs unit-level)",
+                            rp.refdes, rp.pin, prev, rp.target
+                        ),
+                    )
+                    .with_span(rp.span),
+                );
+            } else {
+                node_net.insert(i, rp.target.clone());
+            }
             let root = uf.find(i);
             named.insert(root, rp.target.clone());
         }
@@ -294,32 +330,78 @@ fn name_groups(
     let mut group_name: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     let node_span: std::collections::HashMap<usize, crate::diag::Span> =
         placement.iter().map(|(rp, i)| (*i, rp.span)).collect();
+    // Collect all author names per group root, deterministically. HashMap
+    // iteration order is randomized, so accumulate into a sorted set per root
+    // and pick the lexicographically smallest name as the group's winner;
+    // emit one `net-conflict` per distinct extra name (names listed sorted).
+    // `name -> span` lets the conflict diag point at a node naming the loser.
+    let mut group_names: std::collections::HashMap<usize, std::collections::BTreeSet<String>> =
+        std::collections::HashMap::new();
+    let mut name_span: std::collections::HashMap<(usize, String), crate::diag::Span> =
+        std::collections::HashMap::new();
     for (i, name) in named {
         let root = uf.find(*i);
-        if let Some(prev) = group_name.insert(root, name.clone())
-            && &prev != name
-        {
+        group_names.entry(root).or_default().insert(name.clone());
+        if let Some(span) = node_span.get(i) {
+            name_span.entry((root, name.clone())).or_insert(*span);
+        }
+    }
+    for (root, names) in &group_names {
+        let mut it = names.iter();
+        let winner = it.next().expect("non-empty group name set").clone();
+        for other in it {
             let mut diag = Diagnostic::error(
                 "net-conflict",
-                format!("nets `{prev}` and `{name}` joined by pin-refs"),
+                format!("nets `{winner}` and `{other}` joined by pin-refs"),
             );
-            if let Some(span) = node_span.get(i) {
+            if let Some(span) = name_span.get(&(*root, other.clone())) {
                 diag = diag.with_span(*span);
             }
             diags.push(diag);
         }
+        group_name.insert(*root, winner);
     }
-    // unnamed groups: N_<smallest member>
+    // unnamed groups: N_<smallest member>. `sanitize` maps distinct pin names
+    // (e.g. `A_B` and `A.B`) to the same string, so distinct roots can collide
+    // on a base name. Compute (root, smallest-member, base) for every unnamed
+    // root, then disambiguate collisions deterministically: sort colliding
+    // roots by smallest member and append `_2`, `_3`, … to all but the first.
     let roots: Vec<usize> = (0..uf.nodes.len()).map(|i| uf.find(i)).collect();
+    let mut unnamed: Vec<(usize, String, String)> = Vec::new(); // (root, smallest, base)
+    let mut seen_roots: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for root in &roots {
-        group_name.entry(*root).or_insert_with(|| {
-            let mut members: Vec<String> = (0..uf.nodes.len())
-                .filter(|&j| roots[j] == *root)
-                .map(|j| format!("{}_{}", uf.nodes[j].0, sanitize(&uf.nodes[j].1)))
-                .collect();
-            members.sort();
-            format!("N_{}", members[0])
-        });
+        if group_name.contains_key(root) || !seen_roots.insert(*root) {
+            continue;
+        }
+        let mut members: Vec<String> = (0..uf.nodes.len())
+            .filter(|&j| roots[j] == *root)
+            .map(|j| format!("{}_{}", uf.nodes[j].0, sanitize(&uf.nodes[j].1)))
+            .collect();
+        members.sort();
+        let smallest = members.into_iter().next().expect("non-empty group");
+        let base = format!("N_{smallest}");
+        unnamed.push((*root, smallest, base));
+    }
+    // Group roots by base name; disambiguate within each colliding group.
+    let mut by_base: std::collections::BTreeMap<String, Vec<(String, usize)>> =
+        std::collections::BTreeMap::new();
+    for (root, smallest, base) in unnamed {
+        by_base.entry(base).or_default().push((smallest, root));
+    }
+    for (base, mut group) in by_base {
+        if group.len() == 1 {
+            group_name.insert(group[0].1, base);
+            continue;
+        }
+        group.sort(); // by smallest member (then root) for determinism
+        for (n, (_, root)) in group.into_iter().enumerate() {
+            let name = if n == 0 {
+                base.clone()
+            } else {
+                format!("{base}_{}", n + 1)
+            };
+            group_name.insert(root, name);
+        }
     }
     group_name
 }
@@ -628,6 +710,76 @@ blocks:
                 role: "decouple".into(),
                 index: 1
             }
+        );
+    }
+
+    #[test]
+    fn comp_and_unit_same_pin_different_nets_is_hard_error() {
+        let (_, diags) = run("
+version: 1
+blocks:
+  main:
+    components:
+      U1:
+        part: M:Op
+        pins: {1: NET_A}
+        units:
+          A: {pins: {1: NET_B}}
+");
+        assert!(
+            diags.0.iter().any(|d| d.code == "pin-conflict"),
+            "comp+unit duplicate pin must hard-error, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn duplicate_refdes_across_blocks_errors() {
+        let (_, diags) = run("
+version: 1
+blocks:
+  a: {components: {R1: {part: R, pins: {1: NA1, 2: NA2}}}}
+  b: {components: {R1: {part: R, pins: {1: NB1, 2: NB2}}}}
+");
+        assert!(diags.0.iter().any(|d| d.code == "duplicate-refdes"));
+    }
+
+    #[test]
+    fn net_name_for_joined_named_groups_is_deterministic() {
+        // run many times; the conflict-resolved winner must be stable (lexicographically smallest)
+        for _ in 0..50 {
+            let (d, _) = run("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: M:X, pins: {1: NET_A}}
+      J2: {part: M:Y, pins: {1: NET_B, 2: U1.1}}
+");
+            // U1.1 and J2.2 are joined; both groups named -> deterministic winner NET_A (smallest)
+            assert_eq!(
+                d.blocks["main"].components["J2"].pins["2"],
+                crate::model::PinTarget::Net("NET_A".into())
+            );
+        }
+    }
+
+    #[test]
+    fn generated_unnamed_net_names_are_unique() {
+        let (d, _) = run("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: M:X, pins: {VDD: 3V3}}
+      Z8: {part: M:Y, pins: {1: U1.A_B}}
+      Z9: {part: M:Y, pins: {1: U1.A.B}}
+");
+        let n8 = &d.blocks["main"].components["Z8"].pins["1"];
+        let n9 = &d.blocks["main"].components["Z9"].pins["1"];
+        assert_ne!(
+            n8, n9,
+            "distinct unnamed nets must get distinct generated names"
         );
     }
 
