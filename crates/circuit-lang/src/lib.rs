@@ -2,3 +2,5 @@
 //! auto-pcb circuit markup language (spec §5). Pure — no I/O.
 
 pub mod diag;
+pub mod model;
+pub mod surface;
