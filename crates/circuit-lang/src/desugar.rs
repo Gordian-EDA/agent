@@ -99,7 +99,7 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
     }
 
     resolve_pins(&mut d, raw_pins, &mut diags);
-    synth_decouple(&mut d, s, &mut diags); // Task 8
+    synth_decouple(&mut d, s, provider, &mut diags); // Task 8
 
     (d, diags)
 }
@@ -468,20 +468,42 @@ fn write_pin(d: &mut Design, rp: &RawPin, target: PinTarget) {
     }
 }
 
-fn synth_decouple(d: &mut Design, s: &SurfaceDesign, diags: &mut Diagnostics) {
+fn synth_decouple(
+    d: &mut Design,
+    s: &SurfaceDesign,
+    provider: &dyn SymbolProvider,
+    diags: &mut Diagnostics,
+) {
     for (bname, sb) in &s.blocks {
         for (refdes, sc) in &sb.components {
             if sc.decouple.is_empty() {
                 continue;
             }
             let comp = &d.blocks[bname].components[refdes];
+            // Author pin-map keys may be pin NUMBERS (e.g. `{1: 3V3}`), so the
+            // VDD*/VSS* prefix test must run against the symbol's pin NAME, not
+            // the raw key. Resolve each key via the provider (number-first, then
+            // name); fall back to the raw key only when the symbol is unknown.
+            let meta = provider.symbol(&comp.part);
+            let resolved_name = |key: &str| -> String {
+                let Some(meta) = meta else {
+                    return key.to_string();
+                };
+                if let Some(pm) = meta.pins.iter().find(|p| p.number == key) {
+                    return pm.name.clone();
+                }
+                if let Some(pm) = meta.pins.iter().find(|p| p.name == key) {
+                    return pm.name.clone();
+                }
+                key.to_string()
+            };
             let rail = |prefixes: &[&str]| -> Vec<NetName> {
                 let mut nets: Vec<NetName> = comp
                     .pins
                     .iter()
                     .chain(comp.units.values().flatten())
                     .filter(|(k, _)| {
-                        let k = k.to_ascii_uppercase();
+                        let k = resolved_name(k).to_ascii_uppercase();
                         prefixes.iter().any(|p| k.starts_with(p))
                     })
                     .filter_map(|(_, t)| match t {
@@ -512,7 +534,12 @@ fn synth_decouple(d: &mut Design, s: &SurfaceDesign, diags: &mut Diagnostics) {
             let (vdd, gnd) = (vdd[0].clone(), gnd[0].clone());
             let mut idx = 0u32;
             let mut synths = Vec::new();
-            for (value, count) in &sc.decouple {
+            // Assign `Origin::Synthesized { index }` in the SAME order `canon`
+            // re-sugars decouple — by value string — so `compile(canon(d)) == d`
+            // holds even when the author lists values out of sorted order.
+            let mut entries: Vec<(&String, &u32)> = sc.decouple.iter().collect();
+            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            for (value, count) in entries {
                 for _ in 0..*count {
                     idx += 1;
                     let mut c = Component {
@@ -819,6 +846,41 @@ blocks:
             n8, n9,
             "distinct unnamed nets must get distinct generated names"
         );
+    }
+
+    #[test]
+    fn decouple_resolves_power_pins_by_number() {
+        use crate::provider::{MockSymbolProvider, PinType};
+        let mut p = MockSymbolProvider::with_basics();
+        p.add(
+            "M:CPU",
+            vec![
+                ("1", "VDD", PinType::PowerInput, 1),
+                ("2", "VSS", PinType::PowerInput, 1),
+            ],
+        );
+        let (s, _) = crate::parse::parse_str(
+            "
+version: 1
+rails: [3V3, GND]
+blocks:
+  mcu:
+    components:
+      U1: {part: M:CPU, decouple: {100nF: 1}, pins: {1: 3V3, 2: GND}}
+",
+        );
+        let (d, diags) = desugar(&s.unwrap(), &p);
+        assert!(
+            !diags.0.iter().any(|x| x.code == "decouple-ambiguous"),
+            "{:?}",
+            diags
+        );
+        let caps = d.blocks["mcu"]
+            .components
+            .values()
+            .filter(|c| matches!(c.origin, crate::model::Origin::Synthesized { .. }))
+            .count();
+        assert_eq!(caps, 1);
     }
 
     #[test]

@@ -259,6 +259,42 @@ nets:
     }
 
     #[test]
+    fn decouple_multivalue_round_trip_is_model_stable() {
+        // compile() lives in lib.rs; use parse+desugar here with a provider exposing VDD/VSS by name.
+        use crate::provider::{MockSymbolProvider, PinType};
+        let mut p = MockSymbolProvider::with_basics();
+        p.add(
+            "M:CPU",
+            vec![
+                ("VDD", "VDD", PinType::PowerInput, 1),
+                ("VSS", "VSS", PinType::PowerInput, 1),
+            ],
+        );
+        let src = "
+version: 1
+rails: [3V3, GND]
+blocks:
+  mcu:
+    components:
+      U1: {part: M:CPU, decouple: {10uF: 1, 100nF: 1}, pins: {VDD: 3V3, VSS: GND}}
+";
+        let (s1, _) = crate::parse::parse_str(src);
+        let (d1, _) = crate::desugar::desugar(&s1.unwrap(), &p);
+        let out1 = to_canonical_yaml(&d1);
+        let (s2, _) = crate::parse::parse_str(&out1);
+        let (d2, _) = crate::desugar::desugar(&s2.unwrap(), &p);
+        assert_eq!(
+            d1, d2,
+            "kernel model must be stable across canonical round-trip"
+        );
+        assert_eq!(
+            out1,
+            to_canonical_yaml(&d2),
+            "canonical emit must be a text fixpoint"
+        );
+    }
+
+    #[test]
     fn natural_refdes_ordering() {
         assert!(natural_lt("U2", "U10"));
         assert!(natural_lt("C9", "C12"));
