@@ -12,6 +12,7 @@ saphyr-parser = "0.0.6"
 indexmap = "2"
 kiutils_kicad = "0.3"
 strsim = "0.11"
+elsa = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
