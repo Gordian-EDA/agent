@@ -148,6 +148,16 @@ fn apply_between(
         );
         return;
     }
+    // Map `between` args by numeric pin NUMBER, not library order: first arg →
+    // lowest-numbered pin, second arg → highest (spec §5.5). Fall back to string
+    // order for non-numeric pin numbers.
+    let mut ordered: Vec<&crate::provider::PinMeta> = meta.pins.iter().collect();
+    ordered.sort_by(
+        |x, y| match (x.number.parse::<u64>(), y.number.parse::<u64>()) {
+            (Ok(nx), Ok(ny)) => nx.cmp(&ny),
+            _ => x.number.cmp(&y.number),
+        },
+    );
     // Polarized-part lint (spec §5.5): warn, suggest named pins.
     let polarized = matches!(part.as_str(), "Device:D" | "Device:LED" | "Device:CP")
         || meta.pins.iter().any(|p| p.name == "A" || p.name == "K");
@@ -158,15 +168,15 @@ fn apply_between(
                 format!(
                     "{refdes}: `{part}` is polarized; `between` maps pin order ({}, {}) — \
                      prefer named pins {{{}: …, {}: …}}",
-                    meta.pins[0].number, meta.pins[1].number, meta.pins[0].name, meta.pins[1].name
+                    ordered[0].number, ordered[1].number, ordered[0].name, ordered[1].name
                 ),
             )
             .with_span(aspan),
         );
     }
     for (pin, target, span) in [
-        (meta.pins[0].number.clone(), a, aspan),
-        (meta.pins[1].number.clone(), b, bspan),
+        (ordered[0].number.clone(), a, aspan),
+        (ordered[1].number.clone(), b, bspan),
     ] {
         if sc.pins.insert(pin.clone(), (target, span)).is_some() {
             diags.push(
@@ -581,6 +591,34 @@ blocks:
         let c1 = &d.blocks["main"].components["C1"];
         assert_eq!(c1.pins["1"], PinTarget::Net("VBUS".into()));
         assert_eq!(c1.pins["2"], PinTarget::Net("GND".into()));
+    }
+
+    #[test]
+    fn between_assigns_by_numeric_pin_order() {
+        // symbol whose library lists pins out of numeric order: index0=number "2", index1=number "1"
+        use crate::provider::{MockSymbolProvider, PinType};
+        let mut p = MockSymbolProvider::with_basics();
+        p.add(
+            "My:Weird",
+            vec![
+                ("2", "~", PinType::Passive, 1),
+                ("1", "~", PinType::Passive, 1),
+            ],
+        );
+        let (s, _) = crate::parse::parse_str(
+            "
+version: 1
+blocks:
+  main:
+    components:
+      X1: {part: My:Weird, between: [AAA, BBB]}
+",
+        );
+        let (d, diags) = desugar(&s.unwrap(), &p);
+        assert!(!diags.has_errors(), "{:?}", diags);
+        let x1 = &d.blocks["main"].components["X1"];
+        assert_eq!(x1.pins["1"], crate::model::PinTarget::Net("AAA".into())); // a -> lowest pin number
+        assert_eq!(x1.pins["2"], crate::model::PinTarget::Net("BBB".into()));
     }
 
     #[test]
