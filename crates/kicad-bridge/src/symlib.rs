@@ -3,18 +3,16 @@
 //! Backend: `kiutils_kicad`. Its AST nests `<NAME>_<unit>_<bodystyle>`
 //! sub-symbol blocks inside the parent [`kiutils_kicad::Symbol`] as `units`,
 //! so unit blocks are merged structurally and never appear as top-level
-//! symbols. We add `extends` chain resolution (≤ 4 hops, cycle-safe) and
-//! unit-number extraction from the sub-block names on top.
+//! symbols. We add `extends` chain resolution (arbitrary depth, cycle-safe
+//! via a visited set) and unit-number extraction from the sub-block names
+//! on top.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
 
 use circuit_lang::{PinMeta, PinType, SymbolMeta};
 use kiutils_kicad::{SymPin, Symbol, SymbolLibFile};
-
-/// Maximum `extends` hops before giving up (guards against cycles).
-const MAX_EXTENDS_HOPS: u8 = 4;
 
 /// A loaded `.kicad_sym` library: symbol name → merged, extends-resolved
 /// pin metadata.
@@ -47,7 +45,7 @@ impl SymbolLib {
         let symbols = raw
             .keys()
             .map(|name| {
-                let pins = resolve_pins(&raw, name, 0).unwrap_or_default();
+                let pins = resolve_pins(&raw, name, &mut HashSet::new());
                 (name.clone(), SymbolMeta { pins })
             })
             .collect();
@@ -107,20 +105,28 @@ fn pin_meta(pin: &SymPin, unit: u8) -> Option<PinMeta> {
 }
 
 /// Resolve a symbol's pins, following `extends` when it has none of its own.
-fn resolve_pins(
-    raw: &HashMap<String, (Vec<PinMeta>, Option<String>)>,
-    name: &str,
-    hops: u8,
-) -> Option<Vec<PinMeta>> {
-    if hops > MAX_EXTENDS_HOPS {
-        return None; // extends cycle / runaway chain guard
+///
+/// Chains of arbitrary depth are supported; `visited` guarantees termination
+/// on `extends` cycles. A cycle or a missing parent is not an error: the
+/// symbol simply keeps the pins it has (none, since we only descend past
+/// pinless symbols) and downstream lookups surface unknown-pin diagnostics
+/// against that honest, empty pin set.
+fn resolve_pins<'a>(
+    raw: &'a HashMap<String, (Vec<PinMeta>, Option<String>)>,
+    name: &'a str,
+    visited: &mut HashSet<&'a str>,
+) -> Vec<PinMeta> {
+    if !visited.insert(name) {
+        return Vec::new(); // extends cycle: terminate deliberately
     }
-    let (pins, extends) = raw.get(name)?;
+    let Some((pins, extends)) = raw.get(name) else {
+        return Vec::new(); // missing parent: keep the pins we have
+    };
     if !pins.is_empty() {
-        return Some(pins.clone());
+        return pins.clone();
     }
     match extends {
-        Some(parent) => resolve_pins(raw, parent, hops + 1),
-        None => Some(Vec::new()),
+        Some(parent) => resolve_pins(raw, parent, visited),
+        None => Vec::new(),
     }
 }

@@ -47,6 +47,61 @@ fn extends_chain_resolves() {
 }
 
 #[test]
+fn deep_extends_chain_resolves() {
+    let Some(l) = lib("Filter") else {
+        eprintln!("SKIP");
+        return;
+    };
+    // Depth-4 chain in the real KiCAD library:
+    // MAX7409xUA -> MAX7408xUA -> MAX7408xPA -> MAX7400xPA -> MAX7400xSA
+    let s = l.symbol("MAX7409xUA").unwrap();
+    assert_eq!(s.pins.len(), 8);
+}
+
+#[test]
+fn extends_cycle_terminates_with_zero_pins() {
+    let lib_text = r#"(kicad_symbol_lib
+	(version 20231120)
+	(generator "test")
+	(symbol "A"
+		(extends "B")
+	)
+	(symbol "B"
+		(extends "A")
+	)
+)
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cycle.kicad_sym");
+    std::fs::write(&path, lib_text).unwrap();
+    let l = SymbolLib::load(&path).unwrap();
+    // A cycle must terminate (no hang, no recursion overflow) and yield the
+    // pins the symbol actually has: none.
+    let a = l.symbol("A").unwrap();
+    assert!(a.pins.is_empty());
+    let b = l.symbol("B").unwrap();
+    assert!(b.pins.is_empty());
+}
+
+#[test]
+fn missing_extends_parent_keeps_own_pins() {
+    let lib_text = r#"(kicad_symbol_lib
+	(version 20231120)
+	(generator "test")
+	(symbol "Orphan"
+		(extends "DoesNotExist")
+	)
+)
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("orphan.kicad_sym");
+    std::fs::write(&path, lib_text).unwrap();
+    let l = SymbolLib::load(&path).unwrap();
+    let s = l.symbol("Orphan").unwrap();
+    assert!(s.pins.is_empty());
+}
+
+#[test]
 fn multi_unit_symbol_reports_units() {
     let Some(l) = lib("Amplifier_Operational") else {
         eprintln!("SKIP");
