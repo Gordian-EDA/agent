@@ -4,5 +4,6 @@
 pub mod diag;
 pub mod model;
 pub mod parse;
+pub mod provider;
 pub mod surface;
 mod yaml;
