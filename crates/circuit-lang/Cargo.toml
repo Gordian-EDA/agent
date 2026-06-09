@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 saphyr.workspace = true
+saphyr-parser.workspace = true
 indexmap.workspace = true
 strsim.workspace = true
 thiserror.workspace = true
