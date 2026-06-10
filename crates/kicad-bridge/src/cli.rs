@@ -114,6 +114,57 @@ impl KicadCli {
         let xml = std::fs::read_to_string(out.path())?;
         parse_netlist_xml(&xml)
     }
+
+    /// Run `kicad-cli sch export svg` on `schematic`, writing into `out_dir`.
+    ///
+    /// KiCAD names the output `<schematic stem>.svg` inside `out_dir`; the
+    /// resolved path is returned. Returns `Err` on execution failure (binary
+    /// missing, schematic failed to load) or if the expected file was not
+    /// produced.
+    pub fn export_svg(&self, schematic: &Path, out_dir: &Path) -> io::Result<std::path::PathBuf> {
+        std::fs::create_dir_all(out_dir)?;
+        let output = Command::new(&self.cli_path)
+            .args(["sch", "export", "svg"])
+            .arg("--output")
+            .arg(out_dir)
+            .arg(schematic)
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("kicad-cli sch export svg failed: {}", stderr.trim()),
+            ));
+        }
+        let stem = schematic
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "schematic has no stem"))?;
+        let svg = out_dir.join(format!("{stem}.svg"));
+        if svg.is_file() {
+            return Ok(svg);
+        }
+        // Fallback: glob for the first *.svg produced in out_dir (KiCAD may
+        // use a page-numbered name on some versions).
+        let first = std::fs::read_dir(out_dir)?
+            .flatten()
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| x.eq_ignore_ascii_case("svg"))
+                    .unwrap_or(false)
+            })
+            .map(|e| e.path())
+            .next();
+        match first {
+            Some(path) => Ok(path),
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("expected SVG not produced at {}", svg.display()),
+            )),
+        }
+    }
 }
 
 /// A parsed `kicad-cli sch export netlist --format kicadxml` result: the
