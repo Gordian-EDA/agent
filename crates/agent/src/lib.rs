@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod config;
 pub mod llm;
+pub mod render;
 pub mod tools;
 
 pub use agent::{Agent, AgentEvent, Approvals, AutoApprove, TurnOutcome, TurnOutcomeSummary};

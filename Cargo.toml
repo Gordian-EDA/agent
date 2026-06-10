@@ -30,3 +30,5 @@ ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures = "0.3"
 pulldown-cmark = { version = "0.13", default-features = false }
+resvg = { version = "0.47", default-features = false }
+base64 = "0.22"
