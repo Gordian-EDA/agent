@@ -415,6 +415,7 @@ impl Agent {
                 result_blocks.push(ContentBlock::ToolResult {
                     tool_use_id: call.id.clone(),
                     content,
+                    images: Vec::new(),
                 });
             }
             self.history.push(Message {
@@ -642,6 +643,7 @@ fn repair_history(history: &mut Vec<Message>) {
                         "note": "the turn was cancelled before this tool ran",
                     })
                     .to_string(),
+                    images: Vec::new(),
                 })
                 .collect();
             history.push(Message {
@@ -889,6 +891,7 @@ mod tests {
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
+                ..
             } => {
                 assert_eq!(tool_use_id, "tu_9");
                 assert!(content.contains("cancelled"));

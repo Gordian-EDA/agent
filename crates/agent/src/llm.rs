@@ -43,6 +43,15 @@ impl Role {
     }
 }
 
+/// An image attached to a tool result, already base64-encoded for the wire.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageData {
+    /// Converse wire format identifier: "png", "jpeg", "gif", or "webp".
+    pub format: String,
+    /// Base64-encoded image bytes.
+    pub base64: String,
+}
+
 /// A single block of message content.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ContentBlock {
@@ -58,6 +67,9 @@ pub enum ContentBlock {
     ToolResult {
         tool_use_id: String,
         content: String,
+        /// Images attached to the result (rendered schematics). Empty for
+        /// text-only results.
+        images: Vec<ImageData>,
     },
 }
 
@@ -268,12 +280,24 @@ fn content_block_to_wire(block: &ContentBlock) -> Value {
         ContentBlock::ToolResult {
             tool_use_id,
             content,
-        } => json!({
-            "toolResult": {
-                "toolUseId": tool_use_id,
-                "content": [{ "text": content }],
+            images,
+        } => {
+            let mut blocks = vec![json!({ "text": content })];
+            for img in images {
+                blocks.push(json!({
+                    "image": {
+                        "format": img.format,
+                        "source": { "bytes": img.base64 },
+                    }
+                }));
             }
-        }),
+            json!({
+                "toolResult": {
+                    "toolUseId": tool_use_id,
+                    "content": blocks,
+                }
+            })
+        }
     }
 }
 
@@ -392,6 +416,7 @@ mod tests {
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "tu_1".to_string(),
                     content: "ok".to_string(),
+                    images: Vec::new(),
                 }],
             },
         ];
@@ -473,5 +498,27 @@ mod tests {
     fn parse_errors_on_malformed_response() {
         let raw = json!({ "nonsense": true });
         assert!(parse_completion(&raw).is_err());
+    }
+
+    #[test]
+    fn tool_result_with_image_maps_to_converse_image_block() {
+        let c = client();
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tu_9".to_string(),
+                content: "{\"ok\":true}".to_string(),
+                images: vec![ImageData {
+                    format: "png".to_string(),
+                    base64: "aGVsbG8=".to_string(),
+                }],
+            }],
+        }];
+        let body = c.build_request("sys", &messages, &[]);
+
+        let content = &body["messages"][0]["content"][0]["toolResult"]["content"];
+        assert_eq!(content[0]["text"], "{\"ok\":true}");
+        assert_eq!(content[1]["image"]["format"], "png");
+        assert_eq!(content[1]["image"]["source"]["bytes"], "aGVsbG8=");
     }
 }
