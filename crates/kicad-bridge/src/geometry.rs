@@ -4,8 +4,10 @@
 //! `circuit_lang::PinMeta` deliberately omits:
 //!
 //! 1. **Pin geometry** — each pin's local position (`at`), `angle`, and
-//!    `length`, so the engine can compute the sheet-space connection endpoint
-//!    of every pin (local tip = `at` projected `length` along `angle`).
+//!    `length`. The connection endpoint is the pin's local `at` itself (the
+//!    tip where wires attach); `length` runs from `at` *into* the symbol body
+//!    along `angle`, so the engine uses `at` directly (NOT `at + length`) when
+//!    transforming to sheet coordinates.
 //! 2. **The full symbol definition** — the balanced `(symbol "Lib:Name" …)`
 //!    S-expression block to splice into the schematic's `(lib_symbols)` set.
 //!
