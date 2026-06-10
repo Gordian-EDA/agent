@@ -60,10 +60,21 @@ fn grid_dims(n: usize) -> (usize, usize) {
     (cols, rows)
 }
 
-/// Deterministic, natural refdes order for a block's components, with each
-/// synthesized component pulled to sit immediately after its parent so decouple
-/// caps land adjacent to the part they belong to.
-fn block_refdes_order(block: &Block) -> Vec<RefDes> {
+/// A physically-grouped set of cells laid out together: an authored component
+/// (the parent, always first) followed by its synthesized children (decouple
+/// caps). Every other component is a singleton cluster of length 1. Keeping a
+/// parent and its caps in one cluster lets the layout place them in a compact
+/// sub-grid so caps never wrap onto a far row.
+type Cluster = Vec<RefDes>;
+
+/// Deterministic clusters for a block's components.
+///
+/// Each authored (non-synthesized) component becomes a cluster led by that
+/// component, followed by its decouple caps in `(role, index)` order. Clusters
+/// are emitted in natural refdes order of their parent, so the same `Design`
+/// always yields the same cluster sequence. Synthesized parts whose parent
+/// lives in another block (rare) trail at the end as singletons.
+fn block_clusters(block: &Block) -> Vec<Cluster> {
     // Authored (and any non-synthesized) refdes in natural order.
     let mut roots: Vec<RefDes> = block
         .components
@@ -104,16 +115,86 @@ fn block_refdes_order(block: &Block) -> Vec<RefDes> {
     }
     orphans.sort();
 
-    let mut order: Vec<RefDes> = Vec::with_capacity(block.components.len());
+    let mut clusters: Vec<Cluster> = Vec::with_capacity(roots.len());
     for root in &roots {
-        order.push(root.clone());
+        let mut cluster: Cluster = vec![root.clone()];
         if let Some(kids) = children.get(root) {
-            order.extend(kids.iter().map(|(_, _, r)| r.clone()));
+            cluster.extend(kids.iter().map(|(_, _, r)| r.clone()));
+        }
+        clusters.push(cluster);
+    }
+    // Synthesized parts whose parent lives in another block trail as singletons.
+    clusters.extend(orphans.into_iter().map(|(_, _, r)| vec![r]));
+    clusters
+}
+
+/// Lay a block's clusters into grid cells.
+///
+/// Returns the `(refdes, col, row)` cell for every component plus the block's
+/// total `(cols, rows)` footprint. Singletons pack left-to-right into rows of
+/// width `block_width`. A multi-cell cluster never straddles that packing: it
+/// starts at column 0 of a fresh row and fills its own compact
+/// `ceil(sqrt(len))`-wide sub-grid anchored at the parent, so each decouple cap
+/// stays within a few cells of its parent. Deterministic: cluster order and
+/// cell assignment depend only on the block.
+fn layout_block_cells(block: &Block) -> (Vec<(RefDes, usize, usize)>, usize, usize) {
+    let clusters = block_clusters(block);
+    let total: usize = clusters.iter().map(|c| c.len()).sum();
+    // Overall block packing width: ~square in the total cell count, and at least
+    // wide enough to hold the widest cluster's sub-grid so nothing overflows.
+    let widest_cluster = clusters
+        .iter()
+        .map(|c| sub_cols(c.len()))
+        .max()
+        .unwrap_or(1);
+    let block_width = grid_dims(total).0.max(widest_cluster).max(1);
+
+    let mut cells: Vec<(RefDes, usize, usize)> = Vec::with_capacity(total);
+    let mut row = 0usize; // current packing row
+    let mut col = 0usize; // next free column in the current packing row
+    let mut max_rows = 0usize;
+
+    for cluster in &clusters {
+        if cluster.len() == 1 {
+            // Singleton: pack into the current row, wrapping at block_width.
+            if col >= block_width {
+                row += 1;
+                col = 0;
+            }
+            cells.push((cluster[0].clone(), col, row));
+            max_rows = max_rows.max(row + 1);
+            col += 1;
+        } else {
+            // Multi-cell cluster: drop to a fresh row so the parent leads its own
+            // compact sub-grid and its caps cannot wrap away across the block.
+            if col != 0 {
+                row += 1;
+                col = 0;
+            }
+            let cw = sub_cols(cluster.len());
+            for (k, refdes) in cluster.iter().enumerate() {
+                let sub_col = k % cw;
+                let sub_row = k / cw;
+                cells.push((refdes.clone(), sub_col, row + sub_row));
+            }
+            let ch = cluster.len().div_ceil(cw);
+            max_rows = max_rows.max(row + ch);
+            row += ch; // next cluster starts below this sub-grid
+            // `col` is already 0 here (reset above on entry / fresh row).
         }
     }
-    // Synthesized parts whose parent lives in another block (rare) trail the end.
-    order.extend(orphans.into_iter().map(|(_, _, r)| r));
-    order
+
+    (cells, block_width.max(1), max_rows)
+}
+
+/// Sub-grid column count for a cluster of `len` cells: ~square, columns first.
+/// A cluster laid out `ceil(sqrt(len))` columns wide keeps its farthest cap
+/// within `ceil(sqrt(len)) - 1` cells of the parent on each axis.
+fn sub_cols(len: usize) -> usize {
+    if len <= 1 {
+        return 1;
+    }
+    ((len as f64).sqrt().ceil() as usize).max(1)
 }
 
 /// Compute deterministic positions for every component in `design`.
@@ -141,11 +222,12 @@ pub fn place(design: &Design) -> Layout {
     ranks.sort_unstable();
     ranks.dedup();
     for rank in &ranks {
-        // Widest block in this band determines the band's column count.
+        // Widest block in this band determines the band's column count. Use the
+        // cluster layout's footprint so band widths match actual placement.
         let max_cols = blocks
             .iter()
             .filter(|(_, b)| band_rank(b.layout.edge) == *rank)
-            .map(|(_, b)| grid_dims(b.components.len()).0)
+            .map(|(_, b)| layout_block_cells(b).1)
             .max()
             .unwrap_or(1);
         band_x.insert(*rank, cursor_x);
@@ -161,17 +243,14 @@ pub fn place(design: &Design) -> Layout {
         let x0 = band_x[&rank];
         let y0 = *band_y.entry(rank).or_insert(MARGIN_MM);
 
-        let order = block_refdes_order(block);
-        let (cols, rows) = grid_dims(order.len());
-        for (i, refdes) in order.iter().enumerate() {
-            let col = i % cols;
-            let row = i / cols;
-            let p = snap_point([x0 + col as f64 * CELL_MM, y0 + row as f64 * CELL_MM]);
+        let (cells, _cols, rows) = layout_block_cells(block);
+        for (refdes, col, row) in &cells {
+            let p = snap_point([x0 + *col as f64 * CELL_MM, y0 + *row as f64 * CELL_MM]);
             positions.insert(refdes.clone(), p);
         }
 
         // Advance this band's cursor past the block's region plus a gutter.
-        let used_rows = if order.is_empty() { 0 } else { rows };
+        let used_rows = if cells.is_empty() { 0 } else { rows };
         band_y.insert(rank, y0 + used_rows as f64 * CELL_MM + BLOCK_GAP_MM);
     }
 
@@ -348,15 +427,127 @@ blocks:
 
         let layout = place(&design);
         let u1 = layout.positions["U1"];
-        // Each cap must be within one cell pitch of its parent (adjacent).
+        // Each cap must sit within the compact-cluster bound of its parent.
+        let bound = cluster_bound(1 + cap_keys.len());
         for cap in cap_keys {
             let p = layout.positions[cap];
             let d = ((p[0] - u1[0]).powi(2) + (p[1] - u1[1]).powi(2)).sqrt();
             assert!(
-                d <= CELL_MM * 1.5,
+                d <= bound,
                 "decouple cap {cap} at {p:?} not adjacent to U1 at {u1:?} (dist {d})"
             );
         }
+    }
+
+    /// Compact-cluster adjacency bound for a cluster of `cluster_len` cells
+    /// (parent + caps). The cluster is laid out in a `ceil(sqrt(cluster_len))`
+    /// wide sub-grid anchored at the parent, so the farthest cap is at most
+    /// `cw - 1` cells away on each axis; its Euclidean distance from the parent
+    /// is therefore at most `CELL_MM * sqrt(2) * (cw - 1)`. A small grid-snap
+    /// tolerance covers the 1.27 mm rounding. This is far tighter than a full
+    /// wide row (where a wrapped cap lands 50+ mm away).
+    fn cluster_bound(cluster_len: usize) -> f64 {
+        let cw = (cluster_len as f64).sqrt().ceil();
+        CELL_MM * std::f64::consts::SQRT_2 * (cw - 1.0) + 2.0 * crate::grid::GRID_MM
+    }
+
+    /// Reviewer's pathology: a block of singleton components (R1..R5) followed
+    /// by a decoupled part (U6 with three 100 nF caps). Under the old row-major
+    /// layout U6 lands at the end of a row and its caps wrap onto the next row,
+    /// landing 50+ mm away. The cluster layout must keep every cap inside U6's
+    /// compact sub-grid, within the cluster adjacency bound.
+    #[test]
+    fn decouple_caps_stay_adjacent_when_parent_at_row_boundary() {
+        use circuit_lang::{PinType, SymbolProvider};
+
+        let mut provider = circuit_lang::MockSymbolProvider::new();
+        provider
+            .add(
+                "Device:R",
+                vec![
+                    ("1", "~", PinType::Passive, 1),
+                    ("2", "~", PinType::Passive, 1),
+                ],
+            )
+            .add(
+                "Device:C",
+                vec![
+                    ("1", "~", PinType::Passive, 1),
+                    ("2", "~", PinType::Passive, 1),
+                ],
+            )
+            .add(
+                "MCU:M",
+                vec![
+                    ("1", "VDD", PinType::PowerInput, 1),
+                    ("2", "VSS", PinType::PowerInput, 1),
+                    ("3", "IO", PinType::Passive, 1),
+                ],
+            );
+        assert!(provider.symbol("MCU:M").is_some());
+
+        // Five singletons then a decoupled part: 5 + 1 + 3 = 9 cells. Under the
+        // old grid (cols = ceil(sqrt(9)) = 3), U6 would land at col 2 (row end)
+        // and its caps wrap to the next row.
+        let src = "
+version: 1
+name: t
+rails: [3V3, GND]
+blocks:
+  blk:
+    components:
+      R1: {part: R, value: 1k, between: [N1, GND]}
+      R2: {part: R, value: 2k, between: [N2, GND]}
+      R3: {part: R, value: 3k, between: [N3, GND]}
+      R4: {part: R, value: 4k, between: [N4, GND]}
+      R5: {part: R, value: 5k, between: [N5, GND]}
+      U6: {part: MCU:M, decouple: {100nF: 3}, pins: {VDD: 3V3, VSS: GND, IO: SIG}}
+";
+        let result = circuit_lang::compile(src, &provider);
+        assert!(!result.diagnostics.has_errors(), "{:?}", result.diagnostics);
+        let design = result.design.expect("compiles");
+
+        let blk = &design.blocks["blk"];
+        let cap_keys: Vec<&str> = blk
+            .components
+            .iter()
+            .filter(|(_, c)| {
+                matches!(
+                    &c.origin,
+                    circuit_lang::model::Origin::Synthesized { role, parent, .. }
+                        if role == "decouple" && parent == "U6"
+                )
+            })
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(cap_keys.len(), 3, "expected 3 decouple caps for U6");
+
+        // Cluster = U6 + its 3 caps.
+        let cluster_len = 1 + cap_keys.len();
+        let bound = cluster_bound(cluster_len);
+
+        let layout = place(&design);
+        let u6 = layout.positions["U6"];
+        for cap in &cap_keys {
+            let p = layout.positions[*cap];
+            let d = ((p[0] - u6[0]).powi(2) + (p[1] - u6[1]).powi(2)).sqrt();
+            assert!(
+                d <= bound,
+                "decouple cap {cap} at {p:?} is {d:.1} mm from U6 at {u6:?}, \
+                 exceeds compact-cluster bound {bound:.1} mm"
+            );
+        }
+
+        // Sanity: the bound genuinely excludes the old row-wrap distance, which
+        // separated a cap from its parent by well over 50 mm.
+        assert!(
+            bound < 50.0,
+            "adjacency bound {bound:.1} mm must be tight enough to catch row-wrap"
+        );
+
+        // No overlaps and determinism still hold for clustered layout.
+        assert!(no_overlaps(&layout), "components overlap: {layout:?}");
+        assert_eq!(layout, place(&design));
     }
 
     #[test]
