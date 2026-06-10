@@ -391,6 +391,8 @@ dependencies = [
  "circuit-lang",
  "indexmap",
  "kicad-bridge",
+ "kiutils_kicad",
+ "tempfile",
  "uuid",
 ]
 
