@@ -6,3 +6,5 @@
 
 # Git worktrees (superpowers)
 /.worktrees/
+
+design.kicad_sch
