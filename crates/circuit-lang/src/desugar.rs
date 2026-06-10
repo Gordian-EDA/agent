@@ -107,6 +107,8 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
         .filter(|(_, a)| a.power)
         .map(|(n, _)| n.clone())
         .collect();
+    // Synthesized decouple caps don't exist yet here; they set their own
+    // RailSpan role inline in synth_decouple below.
     for block in d.blocks.values_mut() {
         for comp in block.components.values_mut() {
             comp.layout_role = infer_layout_role(&comp.pins, &power_nets);

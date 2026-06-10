@@ -40,8 +40,9 @@ pub enum Edge {
 /// Placement-relevant role inferred at desugar time (spec Phase 2 item 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutRole {
-    /// A two-pin passive strung between a power rail and ground: drawn
-    /// vertical, rail-side pin up, ground-side pin down.
+    /// A two-pin passive spanning at least one power net (e.g. rail↔ground, or
+    /// rail↔rail). Drawn vertical; when one pin is ground it is flipped so the
+    /// ground-side pin sits at the bottom (orientation policy lives in sch-engine).
     RailSpan,
 }
 
