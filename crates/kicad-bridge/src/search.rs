@@ -11,6 +11,10 @@
 //!
 //! Pin counts are resolved lazily: only the symbols actually returned by
 //! [`SymbolIndex::search`] are parsed, via [`RealSymbolProvider`].
+//!
+//! Ranking uses `fuzzy-matcher`'s `SkimMatcherV2` (fzf-style subsequence
+//! scoring) — the project's standard fuzzy matcher; reuse it rather than adding
+//! another. `strsim` edit distance backs only the typo fallback in `rank`.
 
 use std::fs;
 use std::io;
