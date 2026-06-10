@@ -99,6 +99,19 @@ impl ToolCtx {
         })
     }
 
+    /// Build a context for a real project directory using the project's
+    /// conventional schematic name `design.kicad_sch`.
+    ///
+    /// `project_dir` is created if it does not exist. The schematic itself need
+    /// not exist yet — the agent's first `apply_design(commit:true)` writes it.
+    /// This is the constructor the headless `autopcb agent` subcommand uses.
+    pub fn for_project(env: KicadEnv, project_dir: PathBuf) -> Result<Self> {
+        std::fs::create_dir_all(&project_dir)
+            .with_context(|| format!("creating project dir {}", project_dir.display()))?;
+        let sch_path = project_dir.join("design.kicad_sch");
+        Self::new(env, project_dir, sch_path)
+    }
+
     /// Detect a real KiCAD installation and build a context over a fresh
     /// temporary project (no schematic yet). Returns `None` when no KiCAD is
     /// found, so tests SKIP gracefully off the project's test environment.
