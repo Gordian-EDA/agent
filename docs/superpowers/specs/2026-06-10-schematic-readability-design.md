@@ -39,6 +39,9 @@ Phase 3: idiom library + DSL hints    (circuit-lang, sch-engine)
 Phase 4: vision critique loop         (agent prompt + flow)
 ```
 
+Cross-cutting (lands with Phase 1, used by all later phases): the `.autopcb/` draft
+workspace and incremental-edit tool surface (see "Draft workspace" below).
+
 ## Phase 1 — `render_schematic` tool
 
 New agent tool exposing the current schematic as an image.
@@ -55,9 +58,51 @@ New agent tool exposing the current schematic as an image.
 - **Tool shape:** `render_schematic {region?: "full" | <block_name>}` — full sheet
   default; per-block crop (from the block's placement bbox) for zoomed inspection.
   Crop support may land after the full-sheet version.
-- **TUI:** PNG written to `<project>/.autopcb/render-NNN.png`, path shown in transcript.
+- **TUI:** PNG written to `.autopcb/renders/render-NNN.png`, path shown in transcript.
 - **Dev harness:** script renders every `validation/` example for eyeball regression
   checks while building later phases.
+
+## Draft workspace (`.autopcb/`) + incremental editing
+
+Today the agent's only write path is `apply_design {yaml}` — whole-document
+replacement, with no persistent YAML anywhere (`get_design` lifts the `.kicad_sch` on
+demand). Whole-document rewrites are token-expensive per iteration and are where silent
+mutations happen (the netlist-level diff gate won't catch a quietly dropped `note:` or
+hint). The vision loop multiplies both costs.
+
+**Project-local state directory** (gitignored by default):
+
+```
+.autopcb/
+  draft.circuit.yaml    # the persistent working draft — source for apply_design
+  draft.meta.json       # sch content-hash the draft was seeded from, timestamps
+  renders/              # render-NNN.png from render_schematic
+  session/              # reserved: transcript/context for a future resume feature
+```
+
+**Tool surface changes:**
+
+- `create_design {yaml}` — seed `draft.circuit.yaml` from scratch (anchored edits
+  cannot create from nothing). Fails if a draft exists unless `overwrite: true`.
+- `edit_design {old_string, new_string, replace_all?}` — anchored string replacement on
+  the draft, Claude-Edit-style: `old_string` must match exactly once (or pass
+  `replace_all`); no match / ambiguous match → clean error. Anchored replacement is
+  deliberately chosen over diff/patch formats, which LLMs emit unreliably. Each edit
+  response includes compile diagnostics for the resulting draft, so the model gets
+  immediate validation feedback per edit.
+- `get_design {}` — returns the draft if present; otherwise lifts the `.kicad_sch`
+  **and seeds the draft from the lift** (canonical form — lift output is sorted, so
+  `old_string` anchors are stable), making `edit_design` immediately usable.
+- `apply_design {commit?}` — `yaml` becomes optional: omitted → applies the current
+  draft. Passing `yaml` explicitly still works (one-shot use, back-compat).
+
+**Staleness rule:** `draft.meta.json` records the content hash of the `.kicad_sch` the
+draft was seeded from. If the schematic changed since (user edited in KiCAD),
+`get_design`/`apply_design` surface a conflict note instead of silently clobbering; the
+agent re-lifts and merges deliberately.
+
+The existing snapshot store and the session-resume feature itself are out of scope
+here; `.autopcb/` just gives them an obvious home later.
 
 ## Phase 2 — Engine layout primitives (deterministic, minimal DSL change)
 
@@ -166,7 +211,8 @@ blocks:
   image against a layout rubric in the system prompt (no text overlap, power up / GND
   down, signal flow left→right, related parts adjacent, blocks titled, sheet balanced),
   and edits *hints* and re-applies if defects remain. Hard cap: 3 vision rounds per
-  request (configurable).
+  request (configurable). Iterations use `edit_design` against the draft — a few
+  anchored hint edits per round, not a whole-document rewrite.
 - **Lint before vision:** deterministic layout lint runs first (free, textual) so
   vision rounds are spent on what only vision can see.
 - **Apply-gate ergonomics:** the diff classifier marks diffs **layout-only** (netlist
@@ -201,4 +247,5 @@ blocks:
 
 - Multi-sheet / hierarchical schematics (single A4 sheet assumed).
 - Auto-routed signal wires between blocks (labels remain the inter-block connectivity).
+- Session resume (the `.autopcb/session/` directory is reserved for it, nothing more).
 - PCB layout.
