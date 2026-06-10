@@ -26,6 +26,7 @@ impl Workspace {
         Ok(Self { root })
     }
 
+    /// Path of the working draft (`draft.circuit.yaml`) inside `.autopcb/`.
     pub fn draft_path(&self) -> PathBuf {
         self.root.join("draft.circuit.yaml")
     }
@@ -36,7 +37,8 @@ impl Workspace {
     }
 
     /// Write the draft and record which schematic text it was seeded from
-    /// (`None` when no schematic exists yet).
+    /// (`None` when no schematic exists yet). Passing `sch_text = None` records
+    /// a null hash, so a later `draft_is_stale(Some(_))` returns `true`.
     pub fn write_draft(&self, yaml: &str, sch_text: Option<&str>) -> io::Result<()> {
         std::fs::write(self.draft_path(), yaml)?;
         let meta = serde_json::json!({
@@ -49,7 +51,10 @@ impl Workspace {
     /// seeded from (the user edited it in KiCAD out-of-band).
     pub fn draft_is_stale(&self, current_sch_text: Option<&str>) -> bool {
         let Ok(meta) = std::fs::read_to_string(self.root.join("draft.meta.json")) else {
-            return false; // no meta -> nothing to compare against
+            // No meta: a draft without a recorded seed hash can't be trusted
+            // (e.g. a partial write), so treat it as stale; a fresh workspace
+            // with no draft at all is simply not stale.
+            return self.draft_path().exists();
         };
         let recorded: Option<u64> = serde_json::from_str::<serde_json::Value>(&meta)
             .ok()
@@ -61,7 +66,10 @@ impl Workspace {
     /// The next free `renders/render-NNN.png` path.
     pub fn next_render_path(&self) -> io::Result<PathBuf> {
         let dir = self.root.join("renders");
-        for n in 1..10_000u32 {
+        // TOCTOU note: the returned path is not reserved. This is a
+        // single-process UI tool, so we accept the tiny window between this
+        // existence check and the caller's write rather than locking.
+        for n in 1..=999u32 {
             let p = dir.join(format!("render-{n:03}.png"));
             if !p.exists() {
                 return Ok(p);
