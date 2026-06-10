@@ -78,6 +78,20 @@ struct PinLabel {
     uuid_key: String,
 }
 
+/// One `(no_connect …)` marker emitted at a pin's sheet-space endpoint.
+///
+/// KiCAD's ERC flags an *unconnected* pin (no wire, no label, no marker) on most
+/// pin types. A `(no_connect)` marker placed exactly on the pin endpoint tells
+/// ERC the disconnection is intentional, silencing that pin's complaint. The
+/// kernel auto-NCs every symbol pin the author did not mention (they arrive as
+/// `PinTarget::NoConnect` in the `Design`); each becomes one of these markers.
+struct NoConnect {
+    /// Grid-snapped sheet-space position of the pin's connection endpoint.
+    at: [f64; 2],
+    /// Stable key for the marker uuid: `"<refdes>:<pin>:<index>"`.
+    uuid_key: String,
+}
+
 /// Accumulates placed symbols and emits a deterministic `.kicad_sch` document.
 #[derive(Default)]
 pub struct SchematicWriter {
@@ -89,6 +103,8 @@ pub struct SchematicWriter {
     /// Net-name labels at pin endpoints, in insertion order; sorted by uuid_key
     /// at `finish` for deterministic output.
     labels: Vec<PinLabel>,
+    /// `(no_connect)` markers at intentionally-unconnected pin endpoints.
+    no_connects: Vec<NoConnect>,
 }
 
 impl SchematicWriter {
@@ -161,7 +177,81 @@ impl SchematicWriter {
         pin: &str,
         net: &str,
     ) -> io::Result<()> {
-        // Recover the instance's lib_id + recorded sheet position/orientation.
+        let endpoints = self.pin_endpoints(env, refdes, pin)?;
+        for (idx, at) in endpoints.into_iter().enumerate() {
+            self.labels.push(PinLabel {
+                net: net.to_string(),
+                at,
+                uuid_key: format!("{refdes}:{pin}:{net}:{idx}"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Place a `(no_connect)` marker at the endpoint(s) of one pin.
+    ///
+    /// This is the dual of [`Self::add_pin_label`] for *intentionally*
+    /// unconnected pins: where a label binds a pin to a net, a no-connect marker
+    /// declares the disconnection deliberate so KiCAD's ERC does not report the
+    /// pin as floating. The kernel auto-NCs every symbol pin the author left
+    /// unmentioned (they arrive as `PinTarget::NoConnect`); emitting a marker for
+    /// each keeps ERC clean on those.
+    ///
+    /// Pin resolution is identical to [`Self::add_pin_label`] (number first, then
+    /// name; a name may match several physical pins, each getting its own
+    /// marker), so a labelled pin and a no-connected pin land on the very same
+    /// endpoint. The marker uuid is content-derived for byte-identical re-emit.
+    ///
+    /// Returns an error if `refdes` was never placed, if its geometry cannot be
+    /// loaded, or if no pin matches `pin` by number or name.
+    pub fn add_no_connect(&mut self, env: &KicadEnv, refdes: &str, pin: &str) -> io::Result<()> {
+        let endpoints = self.pin_endpoints(env, refdes, pin)?;
+        for (idx, at) in endpoints.into_iter().enumerate() {
+            self.no_connects.push(NoConnect {
+                at,
+                uuid_key: format!("{refdes}:{pin}:{idx}"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Register a `PWR_FLAG` power source on `net`.
+    ///
+    /// KiCAD ERC treats a net carrying only power-*input* pins (e.g. an MCU's
+    /// `VDD`/`VSS`) and net-name labels as undriven — there is no power *source*
+    /// on it — and reports `power_pin_not_driven` at error severity. A
+    /// `power:PWR_FLAG` symbol is the canonical fix: it is a graphic-only symbol
+    /// whose single pin is typed `power_out`, so dropping one on each power net
+    /// (with a label binding it to that net) supplies the missing source. The
+    /// flag's reference is the hidden `#FLG…` form KiCAD uses for power symbols;
+    /// such `#`-prefixed references are excluded from the netlist's component
+    /// list, so a flag never inflates the BOM/component count.
+    ///
+    /// `at` is the flag's instance position; its single pin sits at the symbol
+    /// origin, so the net label is attached there. Returns an error if the
+    /// `power:PWR_FLAG` symbol cannot be resolved from `env`.
+    pub fn add_power_flag(
+        &mut self,
+        env: &KicadEnv,
+        net: &str,
+        refdes: &str,
+        at: [f64; 2],
+    ) -> io::Result<()> {
+        self.add_symbol(env, "power:PWR_FLAG", refdes, "PWR_FLAG", at, 0.0)?;
+        // Label the flag's single pin with the net so it drives that net.
+        self.add_pin_label(env, refdes, "1", net)?;
+        Ok(())
+    }
+
+    /// Resolve a pin reference to its sheet-space connection endpoint(s).
+    ///
+    /// Looks up the placed instance for `refdes`, loads its symbol geometry, and
+    /// matches `pin` by number first then name (a name may match several physical
+    /// pins). Each match is transformed through the instance's
+    /// position/orientation/mirror into a grid-snapped sheet point. Shared by
+    /// label, no-connect, and power-flag emission so they always agree on where a
+    /// pin's connection point lands.
+    fn pin_endpoints(&self, env: &KicadEnv, refdes: &str, pin: &str) -> io::Result<Vec<[f64; 2]>> {
         let inst = self
             .instances
             .iter()
@@ -179,8 +269,7 @@ impl SchematicWriter {
         let geom = SymbolGeometry::load(env, &inst.lib_id)?;
 
         // Resolve the pin: number first, then name. A name may match several
-        // physical pins (e.g. multiple GND pins), so collect all matches and
-        // label each. Number matches are unique, so this yields one pin.
+        // physical pins (e.g. multiple GND pins), so collect all matches.
         let matches: Vec<&PinGeom> = {
             let by_number: Vec<&PinGeom> = geom.pins.iter().filter(|p| p.number == pin).collect();
             if !by_number.is_empty() {
@@ -196,15 +285,10 @@ impl SchematicWriter {
             ));
         }
 
-        for (idx, pg) in matches.into_iter().enumerate() {
-            let at = pin_endpoint(pg, inst_at, inst_angle, inst_mirror);
-            self.labels.push(PinLabel {
-                net: net.to_string(),
-                at,
-                uuid_key: format!("{refdes}:{pin}:{net}:{idx}"),
-            });
-        }
-        Ok(())
+        Ok(matches
+            .into_iter()
+            .map(|pg| pin_endpoint(pg, inst_at, inst_angle, inst_mirror))
+            .collect())
     }
 
     /// Assemble the complete `.kicad_sch` document as a deterministic string.
@@ -231,6 +315,14 @@ impl SchematicWriter {
             out.push('\n');
         }
         out.push_str("\t)\n");
+
+        // `(no_connect)` markers at intentionally-unconnected pins, sorted by
+        // their stable uuid_key for deterministic order/uuids.
+        let mut no_connects = self.no_connects;
+        no_connects.sort_by(|a, b| a.uuid_key.cmp(&b.uuid_key));
+        for nc in &no_connects {
+            out.push_str(&render_no_connect(nc));
+        }
 
         // Net-name labels at pin endpoints, sorted by their stable uuid_key so
         // the emitted order (and uuids) are deterministic.
@@ -343,6 +435,25 @@ fn render_label(label: &PinLabel) -> String {
     let _ = writeln!(s, "\t(label \"{net}\"");
     let _ = writeln!(s, "\t\t(at {x} {y} 0)");
     s.push_str("\t\t(effects (font (size 1.27 1.27)) (justify left bottom))\n");
+    let _ = writeln!(s, "\t\t(uuid \"{uuid}\")");
+    s.push_str("\t)\n");
+    s
+}
+
+/// Render one `(no_connect …)` marker at a pin endpoint.
+///
+/// The marker carries only its `(at …)` position and a content-derived uuid. Its
+/// position must coincide with the pin's connection endpoint (the same point a
+/// label would attach to) for KiCAD to associate it with that pin and suppress
+/// the unconnected-pin ERC report.
+fn render_no_connect(nc: &NoConnect) -> String {
+    let x = fmt_coord(nc.at[0]);
+    let y = fmt_coord(nc.at[1]);
+    let uuid = stable_uuid("no_connect", &nc.uuid_key);
+
+    let mut s = String::new();
+    let _ = writeln!(s, "\t(no_connect");
+    let _ = writeln!(s, "\t\t(at {x} {y})");
     let _ = writeln!(s, "\t\t(uuid \"{uuid}\")");
     s.push_str("\t)\n");
     s
