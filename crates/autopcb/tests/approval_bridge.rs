@@ -82,6 +82,7 @@ fn tool_call(id: &str, name: &str, input: Value) -> Completion {
             input,
         }],
         stop_reason: "tool_use".into(),
+        ..Default::default()
     }
 }
 
@@ -90,6 +91,7 @@ fn final_text(t: &str) -> Completion {
         text: t.into(),
         tool_calls: Vec::new(),
         stop_reason: "end_turn".into(),
+        ..Default::default()
     }
 }
 

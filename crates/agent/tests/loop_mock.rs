@@ -67,6 +67,7 @@ fn tool_call(id: &str, name: &str, input: serde_json::Value) -> Completion {
             input,
         }],
         stop_reason: "tool_use".to_string(),
+        ..Default::default()
     }
 }
 
@@ -76,6 +77,7 @@ fn final_text(text: &str) -> Completion {
         text: text.to_string(),
         tool_calls: Vec::new(),
         stop_reason: "end_turn".to_string(),
+        ..Default::default()
     }
 }
 

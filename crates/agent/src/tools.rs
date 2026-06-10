@@ -1,4 +1,4 @@
-//! The six-tool registry the agent drives (spec §10).
+//! The eight-tool registry the agent drives (spec §10).
 //!
 //! Each tool is a thin, deterministic wrapper over logic that already lives in
 //! `circuit-lang`, `kicad-bridge`, and `sch-engine`. The registry exposes:
@@ -9,7 +9,7 @@
 //!   carry diagnostic strings and "did you mean" suggestions rather than just an
 //!   error flag, so the model can correct itself on the next turn.
 //!
-//! ## The six tools
+//! ## The eight tools
 //!
 //! | name | input | output |
 //! |---|---|---|
@@ -17,8 +17,10 @@
 //! | `get_symbol_info` | `{lib_id}` | `{lib_id, pins: [{number,name,type,unit}]}` or `{error, suggestions}` |
 //! | `get_design` | `{}` | `{yaml}` (lifted) or `{yaml: "", note}` |
 //! | `validate_design` | `{yaml}` | `{ok, diagnostics, errors, warnings}` |
-//! | `apply_design` | `{yaml, commit?}` | dry-run diff, or (commit) `{written, erc}` |
+//! | `apply_design` | `{yaml, commit?}` | dry-run diff, or (commit) `{written, path, erc}` |
 //! | `run_erc` | `{}` | `{errors, warnings, violations: [...]}` |
+//! | `project_info` | `{}` | `{project_dir, sch_path, sch_exists, snapshots, cwd}` |
+//! | `read_schematic` | `{path}` | `{path, yaml, note?}` or `{error}` |
 //!
 //! ## `apply_design`: dry-run vs commit
 //!
@@ -35,10 +37,16 @@
 //!
 //! `search_symbols` is backed by [`SymbolIndex`], whose `build` scans every
 //! installed `.kicad_sym` (~0.5 s). The index is built **once per `ToolCtx`**
-//! and cached in a [`OnceCell`]; subsequent searches reuse it.
+//! and cached in a [`OnceLock`]; subsequent searches reuse it.
+//!
+//! ## Threading
+//!
+//! [`ToolCtx`] is `Send + Sync` (asserted below) so the agent loop can run
+//! tool calls on `spawn_blocking` threads — keeping a single-threaded UI
+//! responsive while a tool compiles, renders, or shells out to `kicad-cli`.
 
-use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
@@ -74,10 +82,16 @@ pub struct ToolCtx {
     /// Per-write history / undo store.
     snapshots: SnapshotStore,
     /// Cross-library name index, built on first `search_symbols` and reused.
-    index: OnceCell<SymbolIndex>,
+    index: OnceLock<SymbolIndex>,
     /// Keeps a test tempdir alive for the ctx's lifetime; `None` for real ctxs.
     _tempdir: Option<tempfile::TempDir>,
 }
+
+/// Tool execution happens on blocking threads; the context must cross them.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<ToolCtx>();
+};
 
 impl ToolCtx {
     /// Build a context for an existing project directory.
@@ -94,7 +108,7 @@ impl ToolCtx {
             sch_path,
             provider,
             snapshots,
-            index: OnceCell::new(),
+            index: OnceLock::new(),
             _tempdir: None,
         })
     }
@@ -128,7 +142,7 @@ impl ToolCtx {
             sch_path,
             provider,
             snapshots,
-            index: OnceCell::new(),
+            index: OnceLock::new(),
             _tempdir: Some(tempdir),
         })
     }
@@ -270,6 +284,34 @@ impl Tools {
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
+            ToolDef {
+                name: "project_info".into(),
+                description: "Return the current project's paths and state: the \
+                    project directory, the schematic path the tools read/write, \
+                    whether that file exists yet, how many undo snapshots there \
+                    are, and the process working directory. Use this when the \
+                    user asks where files live or whether you can see their \
+                    schematic."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            ToolDef {
+                name: "read_schematic".into(),
+                description: "Read ANY .kicad_sch file on disk and return it \
+                    lifted to circuit-YAML. The path may be absolute, start \
+                    with ~, or be relative to the project directory. Use this \
+                    to inspect a schematic the user references by path; it does \
+                    not change which file the project edits."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string",
+                            "description": "Path to a .kicad_sch file, e.g. \"/home/me/boards/x.kicad_sch\" or \"~/boards/x.kicad_sch\"." }
+                    },
+                    "required": ["path"]
+                }),
+            },
         ]
     }
 
@@ -283,6 +325,8 @@ impl Tools {
             "validate_design" => validate_design(input, ctx),
             "apply_design" => apply_design(input, ctx),
             "run_erc" => run_erc(ctx),
+            "project_info" => project_info(ctx),
+            "read_schematic" => read_schematic(input, ctx),
             other => bail!("unknown tool: {other}"),
         }
     }
@@ -457,6 +501,7 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
     Ok(json!({
         "ok": true,
         "written": true,
+        "path": ctx.sch_path.display().to_string(),
         "diff": diff,
         "erc": { "errors": erc.error_count(), "warnings": erc.warning_count() },
     }))
@@ -551,7 +596,89 @@ fn design_diff(prior: Option<&Design>, new: &Design) -> Value {
     })
 }
 
-// ── 6. run_erc ─────────────────────────────────────────────────────────────
+// ── 6. project_info ────────────────────────────────────────────────────────
+
+fn project_info(ctx: &ToolCtx) -> Result<Value> {
+    let snapshots = ctx
+        .snapshots
+        .list(&ctx.sch_path)
+        .map(|v| v.len())
+        .unwrap_or(0);
+    Ok(json!({
+        "project_dir": ctx.project_dir.display().to_string(),
+        "sch_path": ctx.sch_path.display().to_string(),
+        "sch_exists": ctx.sch_path.exists(),
+        "snapshots": snapshots,
+        "cwd": std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+    }))
+}
+
+// ── 7. read_schematic ──────────────────────────────────────────────────────
+
+fn read_schematic(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let raw = require_str(&input, "path")?;
+    let path = resolve_user_path(&raw, &ctx.project_dir);
+
+    if !path.is_file() {
+        return Ok(json!({
+            "error": format!("no file at `{}`", path.display()),
+            "note": "the path may be absolute, start with ~, or be relative to the project dir",
+        }));
+    }
+    if path.extension().and_then(|e| e.to_str()) != Some("kicad_sch") {
+        return Ok(json!({
+            "error": format!("`{}` is not a .kicad_sch schematic", path.display()),
+        }));
+    }
+
+    let yaml = match lift(&ctx.env, &path) {
+        Ok(yaml) => yaml,
+        Err(e) => {
+            return Ok(json!({
+                "error": format!("could not lift `{}`: {e}", path.display()),
+            }));
+        }
+    };
+
+    let mut out = json!({
+        "path": path.display().to_string(),
+        "yaml": yaml,
+    });
+    if same_file(&path, &ctx.sch_path) {
+        out["note"] =
+            json!("this IS the project's current schematic (the one apply_design writes)");
+    }
+    Ok(out)
+}
+
+/// Resolve a user-supplied path: expand a leading `~`, and anchor relative
+/// paths at the project directory (the agent's natural working root).
+fn resolve_user_path(raw: &str, project_dir: &Path) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    let p = PathBuf::from(raw);
+    if p.is_absolute() {
+        p
+    } else {
+        project_dir.join(p)
+    }
+}
+
+/// Whether two paths name the same existing file (canonicalized comparison;
+/// falls back to literal equality when either cannot be canonicalized).
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
+}
+
+// ── 8. run_erc ─────────────────────────────────────────────────────────────
 
 fn run_erc(ctx: &ToolCtx) -> Result<Value> {
     if !ctx.sch_path.exists() {

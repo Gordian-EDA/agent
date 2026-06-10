@@ -131,6 +131,11 @@ pub async fn run(project_dir: PathBuf) -> Result<()> {
         status.kicad_connected = false;
     }
     let mut app = App::new(status);
+    app.transcript.push(app::Entry::system(format!(
+        "project: {} — schematic: {}",
+        project_dir.display(),
+        sch_path.display()
+    )));
     if agent_handle.is_none() {
         app.transcript.push(app::Entry::system(
             "agent unavailable: need KiCAD + AWS_BEARER_TOKEN_BEDROCK (set in .env). UI is read-only.",
@@ -175,6 +180,10 @@ impl Shell {
             }
             Action::CancelTurn => self.cancel_turn(app),
             Action::Undo => self.undo(app),
+            Action::ClearContext => self.clear_context(app),
+            Action::UnwindTurn => self.unwind_turn(app),
+            Action::Compact => self.spawn_compact(app),
+            Action::ShowContext => self.show_context(app),
             Action::SpawnTurn(prompt) => self.spawn_turn(app, prompt),
         }
     }
@@ -218,7 +227,7 @@ impl Shell {
         app.update(Msg::TurnEnded(None));
     }
 
-    /// `:undo` — restore the previous schematic from the snapshot store.
+    /// `/undo` — restore the previous schematic from the snapshot store.
     fn undo(&self, app: &mut App) {
         let Some(store) = &self.snapshots else {
             app.transcript
@@ -233,6 +242,88 @@ impl Shell {
                 .transcript
                 .push(app::Entry::system(format!("undo failed: {e}"))),
         }
+    }
+
+    /// `/clear` — the transcript is already wiped; drop the agent's history
+    /// too so the next turn truly starts fresh.
+    fn clear_context(&self, app: &mut App) {
+        let dropped = self.with_idle_agent(|agent| {
+            let messages = agent.context_stats().messages;
+            agent.clear_history();
+            messages
+        });
+        app.status.ctx_tokens = 0;
+        let note = match dropped {
+            Some(n) => format!("cleared transcript and agent context ({n} messages dropped)"),
+            None => "transcript cleared (agent unavailable or busy — context untouched)".into(),
+        };
+        app.transcript.push(app::Entry::system(note));
+    }
+
+    /// Double-Esc — pop the agent's last turn and roll the transcript back.
+    fn unwind_turn(&self, app: &mut App) {
+        let popped = self.with_idle_agent(|agent| agent.pop_last_turn());
+        app.apply_unwind(popped.unwrap_or(false));
+    }
+
+    /// `/context` — print project paths and context/token stats.
+    fn show_context(&self, app: &mut App) {
+        let stats = self.with_idle_agent(|agent| agent.context_stats());
+        let s = &app.status;
+        let mut lines = vec![
+            format!("schematic: {}", s.sch_path),
+            format!(
+                "model: {} ({}) · turns {} · applied {}",
+                s.model, s.provider, s.turn_count, s.applied_count
+            ),
+            format!(
+                "tokens: ctx {} · session {} in / {} out",
+                s.ctx_tokens, s.total_input_tokens, s.total_output_tokens
+            ),
+        ];
+        match stats {
+            Some(c) => lines.push(format!(
+                "context: {} unwindable turns · {} messages · ~{}k chars",
+                c.turns,
+                c.messages,
+                c.approx_chars / 1000
+            )),
+            None => lines.push("context: agent unavailable or busy".into()),
+        }
+        for l in lines {
+            app.transcript.push(app::Entry::system(l));
+        }
+    }
+
+    /// `/compact` — run the agent's context compaction with turn plumbing
+    /// (running flag is already set; `done_tx` clears it via `TurnEnded`).
+    fn spawn_compact(&mut self, app: &mut App) {
+        let Some(handle) = self.agent.clone() else {
+            app.running = false;
+            app.turn_started = None;
+            app.transcript
+                .push(app::Entry::system("agent unavailable — nothing to compact"));
+            return;
+        };
+        let events_tx = self.events_tx.clone();
+        let done_tx = self.done_tx.clone();
+        self.turn_task = Some(tokio::task::spawn_local(async move {
+            let mut agent = handle.lock().await;
+            let err = agent
+                .compact(Some(&events_tx))
+                .await
+                .err()
+                .map(|e| format!("{e:#}"));
+            let _ = done_tx.send(err);
+        }));
+    }
+
+    /// Run `f` over the agent when it exists and is idle (the turn task holds
+    /// the lock for a whole turn, so `try_lock` failing means "busy").
+    fn with_idle_agent<R>(&self, f: impl FnOnce(&mut Agent) -> R) -> Option<R> {
+        let handle = self.agent.as_ref()?;
+        let mut agent = handle.try_lock().ok()?;
+        Some(f(&mut agent))
     }
 }
 

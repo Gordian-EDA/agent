@@ -12,6 +12,13 @@
 //! it on demand via `get_design`, keeps context small, and self-repairs off the
 //! structured diagnostics that the tools return.
 //!
+//! ## Context is persistent
+//!
+//! The conversation lives in [`Agent::history`] and is carried across turns, so
+//! "are you done?" after a build refers to the build. The history can be
+//! unwound one turn at a time ([`Agent::pop_last_turn`]), cleared
+//! ([`Agent::clear_history`]), or compacted into a summary ([`Agent::compact`]).
+//!
 //! ## The apply-gate (dry-run → approve → commit)
 //!
 //! `apply_design` is the only write. When the model asks to commit
@@ -28,7 +35,9 @@
 //! [`AutoApprove`] is the headless test/automation implementation; the TUI
 //! supplies an interactive one later.
 
-use anyhow::Result;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
@@ -103,8 +112,31 @@ pub enum AgentEvent {
     ToolFinished { name: String, summary: String },
     /// An approved `apply_design` committed; carries post-write ERC counts.
     Applied { errors: usize, warnings: usize },
+    /// Provider-reported token usage for one model call. `input_tokens` is the
+    /// full prompt size (system + history + tools) — i.e. the live context.
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
+    /// `compact` replaced the conversation history with a summary pair.
+    Compacted {
+        messages_before: usize,
+        messages_after: usize,
+    },
     /// The turn finished.
     TurnDone(TurnOutcomeSummary),
+}
+
+/// Counters describing the live conversation context, for a `/context` view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContextStats {
+    /// User turns currently held (and unwindable) in the history.
+    pub turns: usize,
+    /// Messages in the history (user, assistant, and tool-result messages).
+    pub messages: usize,
+    /// Total characters across all blocks — a rough proxy for tokens (~4
+    /// chars/token) when the provider has not reported usage yet.
+    pub approx_chars: usize,
 }
 
 /// A typed handle for the optional UI event sink. `None` is the headless case.
@@ -132,10 +164,22 @@ pub struct TurnOutcome {
 /// An agent session over one project. Holds the LLM client, the tool context
 /// (KiCAD env + project paths + symbol provider + snapshot store), and the tool
 /// registry.
+///
+/// The context lives in an [`Arc`] because every tool call executes on the
+/// blocking thread pool (see [`Agent::run_tool_blocking`]) — a compile, render,
+/// or `kicad-cli` subprocess must never stall the caller's (possibly
+/// single-threaded, UI-owning) async runtime.
 pub struct Agent {
     client: Box<dyn LlmClient>,
-    ctx: ToolCtx,
+    ctx: Arc<ToolCtx>,
     tools: Tools,
+    /// The whole session's conversation, carried across turns so the model
+    /// remembers what it did. Tool results live here too — context is
+    /// everything the next request will see.
+    history: Vec<Message>,
+    /// `history.len()` at the start of each user turn, so [`Agent::pop_last_turn`]
+    /// can unwind exactly one exchange.
+    turn_starts: Vec<usize>,
 }
 
 impl Agent {
@@ -143,9 +187,100 @@ impl Agent {
     pub fn new(client: Box<dyn LlmClient>, ctx: ToolCtx) -> Self {
         Self {
             client,
-            ctx,
+            ctx: Arc::new(ctx),
             tools: Tools::new(),
+            history: Vec::new(),
+            turn_starts: Vec::new(),
         }
+    }
+
+    /// Drop the entire conversation history (a fresh start; files untouched).
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+        self.turn_starts.clear();
+    }
+
+    /// Unwind the most recent user turn: remove its user message and everything
+    /// after it from the history. Returns `false` when there is nothing to pop
+    /// (fresh agent, or everything before a compaction barrier).
+    pub fn pop_last_turn(&mut self) -> bool {
+        match self.turn_starts.pop() {
+            Some(start) => {
+                self.history.truncate(start);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Counters for the live context (turns / messages / approximate size).
+    pub fn context_stats(&self) -> ContextStats {
+        let approx_chars = self
+            .history
+            .iter()
+            .flat_map(|m| &m.content)
+            .map(|b| match b {
+                ContentBlock::Text(t) => t.len(),
+                ContentBlock::ToolUse { input, .. } => input.to_string().len(),
+                ContentBlock::ToolResult { content, .. } => content.len(),
+            })
+            .sum();
+        ContextStats {
+            turns: self.turn_starts.len(),
+            messages: self.history.len(),
+            approx_chars,
+        }
+    }
+
+    /// Compact the conversation: one tool-less model call summarizes the
+    /// history, which is then replaced by a `[user summary, assistant ack]`
+    /// pair. Returns `(messages_before, messages_after)` and emits
+    /// [`AgentEvent::Compacted`]. Compaction is a barrier: prior turns can no
+    /// longer be unwound.
+    pub async fn compact(&mut self, events: Events<'_>) -> Result<(usize, usize)> {
+        let before = self.history.len();
+        if before == 0 {
+            return Ok((0, 0));
+        }
+        repair_history(&mut self.history);
+
+        // Tool defs stay in the request: Converse rejects histories containing
+        // toolUse/toolResult blocks unless a toolConfig is present.
+        let defs = self.tools.defs();
+        let mut messages = self.history.clone();
+        messages.push(Message::user(COMPACT_PROMPT));
+        let completion = self
+            .client
+            .complete(&system_prompt(), &messages, &defs)
+            .await?;
+        emit(
+            events,
+            AgentEvent::Usage {
+                input_tokens: completion.input_tokens,
+                output_tokens: completion.output_tokens,
+            },
+        );
+
+        let summary = completion.text.trim().to_string();
+        if summary.is_empty() {
+            anyhow::bail!("compaction failed: the model returned no summary text");
+        }
+        self.history = vec![
+            Message::user(format!(
+                "[Conversation summary — earlier context was compacted]\n{summary}"
+            )),
+            Message::assistant("Understood — I'll continue from that summary."),
+        ];
+        self.turn_starts.clear();
+        let after = self.history.len();
+        emit(
+            events,
+            AgentEvent::Compacted {
+                messages_before: before,
+                messages_after: after,
+            },
+        );
+        Ok((before, after))
     }
 
     /// The tool context (project paths, KiCAD env). Exposed for callers that
@@ -154,12 +289,28 @@ impl Agent {
         &self.ctx
     }
 
+    /// Execute one tool on the blocking pool. Tools are synchronous and can
+    /// take seconds (symbol-index build, reconciled render, ERC subprocess);
+    /// off-loading them keeps an interactive caller redrawing.
+    async fn run_tool_blocking(&self, name: &str, input: Value) -> Result<Value> {
+        let ctx = Arc::clone(&self.ctx);
+        let name = name.to_string();
+        tokio::task::spawn_blocking(move || Tools::new().run(&name, input, &ctx))
+            .await
+            .context("tool execution task failed")?
+    }
+
     /// Drive one user turn to completion.
     ///
     /// Loops: call the model → run any requested tools (gating `apply_design`
     /// commits through `approvals`) → feed results back → repeat, until the model
     /// returns a final text with no pending tool calls, or [`MAX_ITERATIONS`] is
     /// reached.
+    ///
+    /// The turn appends to the agent's persistent history, so later turns see
+    /// the full conversation. A turn that was cancelled mid-flight may leave a
+    /// ragged tail (a dangling `tool_use`); [`repair_history`] patches that
+    /// before the new turn starts.
     ///
     /// `events`, when `Some`, receives [`AgentEvent`]s as the loop runs so a UI
     /// can render assistant text and tool-call cards live. Headless callers pass
@@ -173,13 +324,23 @@ impl Agent {
         let system = system_prompt();
         let defs = self.tools.defs();
 
-        let mut messages: Vec<Message> = vec![Message::user(user_msg)];
+        repair_history(&mut self.history);
+        self.turn_starts.push(self.history.len());
+        self.history.push(Message::user(user_msg));
+
         let mut applied = false;
         let mut tool_calls_made = 0usize;
         let mut final_text = String::new();
 
         for _ in 0..MAX_ITERATIONS {
-            let completion = self.client.complete(&system, &messages, &defs).await?;
+            let completion = self.client.complete(&system, &self.history, &defs).await?;
+            emit(
+                events,
+                AgentEvent::Usage {
+                    input_tokens: completion.input_tokens,
+                    output_tokens: completion.output_tokens,
+                },
+            );
 
             // Surface any assistant text the moment we have it.
             if !completion.text.is_empty() {
@@ -199,7 +360,7 @@ impl Agent {
                     input: call.input.clone(),
                 });
             }
-            messages.push(Message {
+            self.history.push(Message {
                 role: Role::Assistant,
                 content: assistant_blocks,
             });
@@ -248,7 +409,7 @@ impl Agent {
                     content,
                 });
             }
-            messages.push(Message {
+            self.history.push(Message {
                 role: Role::User,
                 content: result_blocks,
             });
@@ -294,7 +455,7 @@ impl Agent {
             self.gated_apply(&call.input, approvals, applied, events)
                 .await
         } else {
-            self.tools.run(&call.name, call.input.clone(), &self.ctx)
+            self.run_tool_blocking(&call.name, call.input.clone()).await
         };
 
         match result {
@@ -315,7 +476,7 @@ impl Agent {
         // 1. Dry-run (commit:false) to get the diff WITHOUT writing.
         let mut dry_input = input.clone();
         dry_input["commit"] = json!(false);
-        let dry = self.tools.run("apply_design", dry_input, &self.ctx)?;
+        let dry = self.run_tool_blocking("apply_design", dry_input).await?;
 
         // If the YAML doesn't even compile, there is nothing to approve — return
         // the diagnostics straight back so the model self-repairs.
@@ -337,7 +498,7 @@ impl Agent {
         // 3. Approved → commit (writes + snapshots + ERC).
         let mut commit_input = input.clone();
         commit_input["commit"] = json!(true);
-        let committed = self.tools.run("apply_design", commit_input, &self.ctx)?;
+        let committed = self.run_tool_blocking("apply_design", commit_input).await?;
         if committed.get("written").and_then(Value::as_bool) == Some(true) {
             *applied = true;
             let errors = committed
@@ -416,6 +577,15 @@ fn tool_summary(name: &str, input: &Value, result_json: &str) -> String {
             let warnings = result.get("warnings").and_then(Value::as_u64).unwrap_or(0);
             format!("{errors} errors, {warnings} warnings")
         }
+        "project_info" => result
+            .get("sch_path")
+            .and_then(Value::as_str)
+            .unwrap_or("project state")
+            .to_string(),
+        "read_schematic" => {
+            let path = input.get("path").and_then(Value::as_str).unwrap_or("?");
+            format!("lifted {path}")
+        }
         _ => "done".to_string(),
     }
 }
@@ -423,6 +593,59 @@ fn tool_summary(name: &str, input: &Value, result_json: &str) -> String {
 /// Whether an `apply_design` input intends to write (`commit: true`).
 fn wants_commit(input: &Value) -> bool {
     input.get("commit").and_then(Value::as_bool) == Some(true)
+}
+
+/// The instruction `compact` sends as the final user message.
+const COMPACT_PROMPT: &str = "Summarize this conversation so far for your own \
+future reference: the user's goals, every design decision made, the current \
+state of the schematic (components, nets, anything applied), and any open \
+issues. Reply with ONLY the summary text — no tool calls.";
+
+/// Patch a ragged history tail left by a cancelled or failed turn so the next
+/// Converse request is valid:
+///
+/// - a trailing assistant message with `tool_use` blocks that never got their
+///   results is given synthetic "cancelled" `tool_result`s;
+/// - a trailing user message (e.g. tool results whose follow-up completion
+///   never ran) is closed with a synthetic assistant note, keeping the
+///   user/assistant alternation Converse requires once the next user turn is
+///   appended.
+fn repair_history(history: &mut Vec<Message>) {
+    let Some(last) = history.last() else {
+        return;
+    };
+
+    if last.role == Role::Assistant {
+        let dangling: Vec<String> = last
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        if !dangling.is_empty() {
+            let results = dangling
+                .into_iter()
+                .map(|id| ContentBlock::ToolResult {
+                    tool_use_id: id,
+                    content: json!({
+                        "cancelled": true,
+                        "note": "the turn was cancelled before this tool ran",
+                    })
+                    .to_string(),
+                })
+                .collect();
+            history.push(Message {
+                role: Role::User,
+                content: results,
+            });
+        }
+    }
+
+    if history.last().map(|m| m.role) == Some(Role::User) {
+        history.push(Message::assistant("(turn interrupted)"));
+    }
 }
 
 /// The system prompt: the circuit-YAML language spec (kernel + sugar), the
@@ -529,6 +752,15 @@ Each component is keyed by its refdes and has:
    — explain or revise.
 7. `run_erc()` — re-run KiCAD's Electrical Rules Check on the current schematic.
 
+Two more tools answer questions rather than edit:
+
+- `project_info()` — the project directory, the schematic path your writes go
+  to, whether it exists yet, and the undo-snapshot count. Use it when the user
+  asks where the file is or whether you can see their project.
+- `read_schematic(path)` — lift ANY .kicad_sch on disk (absolute, ~, or
+  project-relative path) to circuit-YAML, read-only. Use it when the user
+  points you at a schematic by path.
+
 Doctrine: search before you reference a part; read pins with get_symbol_info;
 validate before you apply; preview (commit:false) before you commit (commit:true).
 Aim for ERC-clean designs. When you are finished, reply with a short plain-text
@@ -568,6 +800,57 @@ mod tests {
             &json!({ "error": "boom" }).to_string(),
         );
         assert_eq!(s, "error: boom");
+    }
+
+    #[test]
+    fn repair_history_closes_a_dangling_tool_use() {
+        let mut history = vec![
+            Message::user("add a resistor"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text("searching".into()),
+                    ContentBlock::ToolUse {
+                        id: "tu_9".into(),
+                        name: "search_symbols".into(),
+                        input: json!({ "query": "R" }),
+                    },
+                ],
+            },
+        ];
+        repair_history(&mut history);
+        // Synthetic result for tu_9, then a closing assistant note.
+        assert_eq!(history.len(), 4, "{history:#?}");
+        match &history[2].content[0] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+            } => {
+                assert_eq!(tool_use_id, "tu_9");
+                assert!(content.contains("cancelled"));
+            }
+            other => panic!("expected a tool result, got {other:?}"),
+        }
+        assert_eq!(history[3].role, Role::Assistant);
+    }
+
+    #[test]
+    fn repair_history_closes_a_trailing_user_message() {
+        let mut history = vec![Message::user("hello")];
+        repair_history(&mut history);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].role, Role::Assistant);
+    }
+
+    #[test]
+    fn repair_history_leaves_clean_histories_alone() {
+        let mut empty: Vec<Message> = Vec::new();
+        repair_history(&mut empty);
+        assert!(empty.is_empty());
+
+        let mut clean = vec![Message::user("hi"), Message::assistant("done")];
+        repair_history(&mut clean);
+        assert_eq!(clean.len(), 2, "a finished exchange needs no repair");
     }
 
     #[test]

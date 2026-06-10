@@ -12,7 +12,7 @@
 //! ├──────────────────────────────────────────────────────────────┤
 //! │ > input…                                                      │
 //! ├──────────────────────────────────────────────────────────────┤
-//! │ bedrock · opus · turns 2 · applied 1 ········· :help :undo    │
+//! │ bedrock · opus · turns 2 · ctx 23.4k (12%) ····· /help /undo  │
 //! └──────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -33,6 +33,19 @@ use super::md::{self, MdLine, WrapMode};
 
 /// Braille spinner shown in the transcript title while a turn runs.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Nominal context window used for the status-bar percentage (Claude-class
+/// models on Bedrock).
+const CONTEXT_WINDOW_TOKENS: u64 = 200_000;
+
+/// Compact token count: `950`, `23.4k`, `1.2M`.
+fn fmt_tokens(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => format!("{:.1}k", n as f64 / 1_000.0),
+        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
+    }
+}
 
 /// Width of the speaker gutter (`"you  "` / `"ai   "` / indent).
 const GUTTER: usize = 5;
@@ -66,10 +79,75 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     draw_input(f, chunks[3], app);
     draw_status(f, chunks[4], app);
+    draw_completions(f, chunks[3], app);
 
     if app.help {
         draw_help(f, area);
     }
+}
+
+/// The `/command` completion popup, floated just above the input pane.
+fn draw_completions(f: &mut Frame, input_area: Rect, app: &App) {
+    let Some((matches, selected)) = app.completion_view() else {
+        return;
+    };
+    let name_w = matches.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    let lines: Vec<Line> = matches
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let highlight = selected == Some(i);
+            let style = if highlight {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            Line::from(vec![
+                Span::styled(format!(" {:<name_w$}  ", c.name), style),
+                Span::styled(
+                    c.desc.to_string(),
+                    if highlight {
+                        Style::default().fg(Color::Black).bg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+            ])
+        })
+        .collect();
+
+    let w = (lines
+        .iter()
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0) as u16
+        + 2)
+    .min(input_area.width);
+    let h = (matches.len() as u16 + 2).min(input_area.y); // never above the screen top
+    let popup = Rect {
+        x: input_area.x,
+        y: input_area.y.saturating_sub(h),
+        width: w.max(20).min(input_area.width),
+        height: h,
+    };
+    f.render_widget(Clear, popup);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" Tab to complete "),
+        ),
+        popup,
+    );
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
@@ -407,11 +485,16 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
             "approve or reject the change above ([a]/[r])",
             Style::default().fg(Color::Yellow),
         ))
+    } else if app.esc_armed {
+        Line::from(Span::styled(
+            "Esc again: unwind the last turn (context only) — any key cancels",
+            Style::default().fg(Color::Yellow),
+        ))
     } else if app.input.is_empty() {
         let placeholder = if app.running {
             "agent is working…"
         } else {
-            "type a prompt — :help for commands"
+            "type a prompt — /help for commands, Tab completes"
         };
         Line::from(vec![
             Span::styled("> ", Style::default().fg(Color::Blue)),
@@ -441,20 +524,26 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let s = &app.status;
-    let left = format!(
+    let mut left = format!(
         " {} · {} · turns {} · applied {}",
         s.provider,
         short_model(&s.model),
         s.turn_count,
         s.applied_count,
     );
+    if s.ctx_tokens > 0 {
+        let pct = (s.ctx_tokens as f64 / CONTEXT_WINDOW_TOKENS as f64 * 100.0).round() as u64;
+        left.push_str(&format!(" · ctx {} ({pct}%)", fmt_tokens(s.ctx_tokens)));
+    }
     // Context-sensitive key hints.
     let right = if app.pending.is_some() {
         "a approve · r reject · Esc reject "
     } else if app.running {
         "Esc cancel turn · Ctrl-C quit "
+    } else if app.esc_armed {
+        "Esc unwind last turn "
     } else {
-        ":help  :undo  :auto  :clear  :quit "
+        "/help  /undo  /auto  /clear  /quit "
     };
     // Pad the middle so the right hint sits at the edge (count chars, not
     // bytes — the model label can contain multibyte punctuation).
@@ -469,37 +558,39 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
-    let w = 60u16.min(area.width.saturating_sub(4));
-    let h = 16u16.min(area.height.saturating_sub(2));
+    let w = 64u16.min(area.width.saturating_sub(4));
+    let h = 23u16.min(area.height.saturating_sub(2));
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
         width: w,
         height: h,
     };
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             "auto-pcb copilot — help",
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from("Type a prompt, Enter to send."),
+        Line::from("Type a prompt, Enter to send. Tab completes /commands."),
         Line::from("a / r            approve / reject a proposed change"),
         Line::from("Up / Down        recall prompt history"),
         Line::from("PgUp/PgDn/wheel  scroll the transcript"),
         Line::from("Ctrl-U/W/A/E     line editing (kill line/word, home/end)"),
         Line::from("Esc              close help / reject gate / clear input"),
-        Line::from("                 / cancel the running turn / quit"),
-        Line::from(":auto            toggle auto-approve (yolo)"),
-        Line::from(":undo            restore the previous schematic"),
-        Line::from(":clear           clear the transcript"),
-        Line::from(":quit / Ctrl-C   exit"),
+        Line::from("                 / cancel the running turn"),
+        Line::from("Esc Esc          unwind the last turn (context only)"),
+        Line::from("Ctrl-C           exit"),
         Line::from(""),
-        Line::from(Span::styled(
-            "Esc to close.",
-            Style::default().fg(Color::DarkGray),
-        )),
     ];
+    for c in crate::tui::app::COMMANDS {
+        lines.push(Line::from(format!("{:<16} {}", c.name, c.desc)));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Esc to close.",
+        Style::default().fg(Color::DarkGray),
+    )));
     f.render_widget(Clear, popup);
     f.render_widget(
         Paragraph::new(lines)
@@ -782,6 +873,63 @@ mod tests {
     }
 
     #[test]
+    fn completion_popup_lists_matches_and_highlights_selection() {
+        let mut a = app();
+        for c in "/c".chars() {
+            a.update(Msg::Char(c));
+        }
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(text.contains("/clear"), "popup lists /clear:\n{text}");
+        assert!(text.contains("/compact"), "popup lists /compact:\n{text}");
+        assert!(text.contains("Tab to complete"), "popup title:\n{text}");
+
+        a.update(Msg::Complete);
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(text.contains("/clear"), "first match filled:\n{text}");
+    }
+
+    #[test]
+    fn no_completion_popup_for_plain_prompts() {
+        let mut a = app();
+        for c in "hello".chars() {
+            a.update(Msg::Char(c));
+        }
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(!text.contains("Tab to complete"), "no popup:\n{text}");
+    }
+
+    #[test]
+    fn status_bar_shows_context_tokens_after_usage() {
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::Usage {
+            input_tokens: 23_000,
+            output_tokens: 400,
+        }));
+        let text = render_to_string(&mut a, 100, 24);
+        assert!(text.contains("ctx 23.4k"), "token display:\n{text}");
+        assert!(text.contains("(12%)"), "window percentage:\n{text}");
+    }
+
+    #[test]
+    fn esc_armed_shows_the_unwind_hint() {
+        let mut a = app();
+        a.update(Msg::Cancel);
+        assert!(a.esc_armed);
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(
+            text.contains("unwind the last turn"),
+            "unwind hint:\n{text}"
+        );
+    }
+
+    #[test]
+    fn fmt_tokens_scales() {
+        assert_eq!(fmt_tokens(950), "950");
+        assert_eq!(fmt_tokens(23_400), "23.4k");
+        assert_eq!(fmt_tokens(1_200_000), "1.2M");
+    }
+
+    #[test]
     fn status_bar_shows_the_model_name() {
         let mut a = app();
         let text = render_to_string(&mut a, 80, 24);
@@ -793,7 +941,7 @@ mod tests {
     fn status_bar_hints_follow_the_mode() {
         let mut a = app();
         let idle = render_to_string(&mut a, 80, 24);
-        assert!(idle.contains(":help"), "idle hints:\n{idle}");
+        assert!(idle.contains("/help"), "idle hints:\n{idle}");
 
         for c in "go".chars() {
             a.update(Msg::Char(c));
@@ -826,6 +974,7 @@ mod tests {
         a.help = true;
         let text = render_to_string(&mut a, 80, 24);
         assert!(text.contains("help"), "help overlay:\n{text}");
-        assert!(text.contains(":undo"), "help lists commands:\n{text}");
+        assert!(text.contains("/undo"), "help lists commands:\n{text}");
+        assert!(text.contains("Esc Esc"), "help covers unwind:\n{text}");
     }
 }
