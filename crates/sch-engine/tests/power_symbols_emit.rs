@@ -58,6 +58,42 @@ blocks:
 }
 
 #[test]
+fn rail_span_passive_flips_when_pin1_is_ground() {
+    let Some(env) = KicadEnv::detect() else {
+        eprintln!("SKIP: no KiCAD environment detected");
+        return;
+    };
+    let design = compile(&env, "
+version: 1
+name: t
+rails: [3V3, GND]
+blocks:
+  a:
+    components:
+      C1: {part: Device:C, value: 100nF, between: [3V3, GND]}
+      C2: {part: Device:C, value: 100nF, between: [GND, 3V3]}
+");
+    let text = sch_engine::emit_design(&env, &design).unwrap();
+
+    // Assert via kiutils: C1 pin1=3V3 -> angle 0; C2 pin1=GND -> flipped 180.
+    let tmp = tempfile::tempdir().unwrap();
+    let sch = tmp.path().join("t.kicad_sch");
+    std::fs::write(&sch, &text).unwrap();
+    let doc = kiutils_kicad::SchematicFile::read(&sch).unwrap();
+    let angle_of = |refdes: &str| {
+        doc.ast().symbols.iter()
+            .find(|s| s.reference.as_deref() == Some(refdes))
+            .and_then(|s| s.angle)
+    };
+    assert_eq!(angle_of("C1"), Some(0.0), "C1 (pin1=3V3) should be upright");
+    assert_eq!(angle_of("C2"), Some(180.0), "C2 (pin1=GND) should be flipped");
+
+    // ERC stays clean.
+    let erc = KicadCli::new(&env).erc(&sch).unwrap();
+    assert_eq!(erc.error_count(), 0, "{:?}", erc.violations);
+}
+
+#[test]
 fn signal_labels_sit_on_stubs_and_orient_away_from_the_body() {
     let Some(env) = KicadEnv::detect() else {
         eprintln!("SKIP: no KiCAD environment detected");

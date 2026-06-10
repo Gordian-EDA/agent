@@ -100,10 +100,52 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
     }
 
     resolve_pins(&mut d, raw_pins, &mut diags);
+    // Power nets (rails + explicit `power: true`) drive RailSpan inference.
+    let power_nets: std::collections::BTreeSet<String> = d
+        .nets
+        .iter()
+        .filter(|(_, a)| a.power)
+        .map(|(n, _)| n.clone())
+        .collect();
+    for block in d.blocks.values_mut() {
+        for comp in block.components.values_mut() {
+            comp.layout_role = infer_layout_role(&comp.pins, &power_nets);
+        }
+    }
     synth_decouple(&mut d, s, provider, &mut diags); // Task 8
     materialize_auto_nc(&mut d, provider); // Task R6
 
     (d, diags)
+}
+
+/// True when `net` is a declared power net (rail).
+fn is_power_net(net: &str, power_nets: &std::collections::BTreeSet<String>) -> bool {
+    power_nets.contains(net)
+}
+
+/// Infer a [`LayoutRole`] for a two-pin passive spanning a power rail.
+///
+/// Qualifies as `RailSpan` when the component has exactly two pins, both mapped
+/// to nets, and at least one of those nets is a declared power net.
+fn infer_layout_role(
+    pins: &indexmap::IndexMap<String, PinTarget>,
+    power_nets: &std::collections::BTreeSet<String>,
+) -> Option<LayoutRole> {
+    if pins.len() != 2 {
+        return None;
+    }
+    let nets: Vec<&str> = pins
+        .values()
+        .filter_map(|t| match t {
+            PinTarget::Net(n) => Some(n.as_str()),
+            PinTarget::NoConnect => None,
+        })
+        .collect();
+    if nets.len() == 2 && nets.iter().any(|n| is_power_net(n, power_nets)) {
+        Some(LayoutRole::RailSpan)
+    } else {
+        None
+    }
 }
 
 /// Final desugar pass: for every component whose symbol is known, any physical
@@ -601,6 +643,8 @@ fn synth_decouple(
                             role: "decouple".into(),
                             index: idx,
                         },
+                        // Decouple caps are rail<->GND by construction.
+                        layout_role: Some(LayoutRole::RailSpan),
                         ..Default::default()
                     };
                     c.pins.insert("1".into(), PinTarget::Net(vdd.clone()));
@@ -983,6 +1027,32 @@ blocks:
         let (d2, _) = desugar(&s2.unwrap(), &p);
         assert_eq!(d1, d2);
         assert_eq!(out1, crate::canon::to_canonical_yaml(&d2));
+    }
+
+    #[test]
+    fn between_rails_infers_rail_span_role() {
+        let provider = crate::MockSymbolProvider::with_basics();
+        let result = crate::compile(
+            "
+version: 1
+name: t
+rails: [3V3, GND]
+blocks:
+  a:
+    components:
+      C1: {part: C, value: 100nF, between: [3V3, GND]}
+      R1: {part: R, value: 10k, between: [A, B]}
+",
+            &provider,
+        );
+        assert!(!result.diagnostics.has_errors(), "{:?}", result.diagnostics);
+        let d = result.design.unwrap();
+        use crate::model::LayoutRole;
+        assert_eq!(
+            d.blocks["a"].components["C1"].layout_role,
+            Some(LayoutRole::RailSpan)
+        );
+        assert_eq!(d.blocks["a"].components["R1"].layout_role, None);
     }
 
     #[test]

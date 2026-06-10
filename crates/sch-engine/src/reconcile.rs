@@ -49,6 +49,21 @@ fn is_ground(net: &str) -> bool {
     n.contains("GND") || n.starts_with("VSS")
 }
 
+/// Initial orientation for a freshly placed component. RailSpan passives stand
+/// vertical with the ground-side pin down; KiCAD's Device:R / Device:C bodies
+/// are already vertical at angle 0 with pin "1" on top, so the only decision is
+/// whether to flip: pin "1" tied to ground -> 180°.
+fn initial_angle(comp: &circuit_lang::model::Component) -> f64 {
+    use circuit_lang::model::LayoutRole;
+    if comp.layout_role != Some(LayoutRole::RailSpan) {
+        return 0.0;
+    }
+    match comp.pins.get("1") {
+        Some(PinTarget::Net(n)) if is_ground(n) => 180.0,
+        _ => 0.0,
+    }
+}
+
 /// Choose the power-symbol lib_id for a rail. Exact `power:` match first, then
 /// common aliases, then a donor whose Value is overridden to the rail name.
 fn power_lib_id(net: &str, provider: &RealSymbolProvider) -> String {
@@ -272,7 +287,7 @@ pub fn emit_design_reconciled(
                 Some(p) => (snap_point(p.at), p.angle, p.uuid.clone()),
                 None => (
                     auto.positions.get(refdes).copied().unwrap_or([0.0, 0.0]),
-                    0.0,
+                    initial_angle(comp),
                     None,
                 ),
             };

@@ -37,6 +37,14 @@ pub enum Edge {
     Bottom,
 }
 
+/// Placement-relevant role inferred at desugar time (spec Phase 2 item 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutRole {
+    /// A two-pin passive strung between a power rail and ground: drawn
+    /// vertical, rail-side pin up, ground-side pin down.
+    RailSpan,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Component {
     pub part: String, // full lib_id after alias desugar, e.g. "Device:R"
@@ -49,6 +57,8 @@ pub struct Component {
     /// Multi-unit parts: unit letter -> pin map.
     pub units: IndexMap<String, IndexMap<String, PinTarget>>,
     pub origin: Origin,
+    /// Placement role inferred at desugar time, if any.
+    pub layout_role: Option<LayoutRole>,
 }
 
 impl Default for Component {
@@ -62,6 +72,7 @@ impl Default for Component {
             pins: IndexMap::new(),
             units: IndexMap::new(),
             origin: Origin::Authored,
+            layout_role: None,
         }
     }
 }
