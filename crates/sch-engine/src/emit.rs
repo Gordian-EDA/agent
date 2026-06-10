@@ -243,6 +243,7 @@ impl SchematicWriter {
         at: [f64; 2],
         angle: f64,
     ) -> io::Result<()> {
+        debug_assert!(refdes.starts_with('#'), "power symbol refdes must be #-prefixed, got {refdes:?}");
         self.add_symbol(env, lib_id, refdes, net, at, angle)
     }
 
@@ -564,9 +565,10 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     // (KiCAD convention: #PWR…, #FLG…) — they must not appear in the netlist
     // component list or on the visible schematic.
     let hide_ref = inst.refdes.starts_with('#');
-    // Hide the Value text for PWR_FLAG instances — the graphic makes the flag
-    // self-evident and the "PWR_FLAG" string would clutter power rail junctions.
-    let hide_val = inst.value == "PWR_FLAG";
+    // Hide the Value of PWR_FLAG symbols (keyed on lib_id) — the graphic makes
+    // the flag self-evident and the "PWR_FLAG" string would clutter power rail
+    // junctions.
+    let hide_val = inst.lib_id == "power:PWR_FLAG";
 
     let mut s = String::new();
     s.push_str("\t(symbol\n");

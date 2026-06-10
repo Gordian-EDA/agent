@@ -49,8 +49,8 @@ fn power_symbol_value_names_the_net() {
             .map(|n| n.name.clone())
             .unwrap_or_default()
     };
-    assert_eq!(net_of("R1", "2"), "GND");
-    assert_eq!(net_of("R1", "1"), "RAIL_CUSTOM");
+    assert_eq!(net_of("R1", "2"), "GND", "R1 pin 2 should be on the GND net");
+    assert_eq!(net_of("R1", "1"), "RAIL_CUSTOM", "R1 pin 1 should be on the RAIL_CUSTOM net (Value-rename)");
 
     // (d) the coincident PWR_FLAG drives GND -> zero ERC errors on that net.
     let erc = KicadCli::new(&env).erc(&sch).expect("erc");
