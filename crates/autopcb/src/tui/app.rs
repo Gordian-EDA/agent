@@ -251,15 +251,27 @@ pub enum Action {
     /// `/clear` — drop the agent's conversation history (the transcript is
     /// already cleared by the time this is returned).
     ClearContext,
-    /// Double-Esc — pop the agent's last turn; the shell answers back via
-    /// [`App::apply_unwind`].
-    UnwindTurn,
+    /// Double-Esc — the shell fetches the agent's unwindable turns and opens the
+    /// picker via [`App::open_unwind`].
+    OpenUnwind,
+    /// The picker was confirmed: pop this many of the agent's most recent turns,
+    /// then roll the transcript back via [`App::apply_unwind_to`].
+    UnwindTo(usize),
     /// `/compact` — run the agent's context compaction (spinner like a turn).
     Compact,
     /// `/context` — the shell gathers agent stats and prints them.
     ShowContext,
     /// Tear down the TUI and exit.
     Quit,
+}
+
+/// The double-Esc unwind picker: a floating list of recent prompts the user can
+/// roll the conversation back to. `prompts` is newest-first; `selected` is a
+/// 0-based index into it. Selecting row *i* unwinds `i + 1` turns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnwindPicker {
+    pub prompts: Vec<String>,
+    pub selected: usize,
 }
 
 /// The full cockpit state.
@@ -293,8 +305,13 @@ pub struct App {
     pub running: bool,
     /// When the in-flight turn started (drives the elapsed display).
     pub turn_started: Option<Instant>,
+    /// `total_output_tokens` snapshot at turn start, so the running line can show
+    /// the output tokens streamed *this* turn ([`App::turn_output_tokens`]).
+    pub turn_output_base: u64,
     /// Animation frame counter, advanced by [`Msg::Tick`] while running.
     pub spinner: usize,
+    /// The unwind picker, while the user is choosing how far to roll back.
+    pub unwind: Option<UnwindPicker>,
     /// Whether `:help` is showing.
     pub help: bool,
     /// Lines scrolled up from the bottom of the transcript (0 = follow tail).
@@ -323,7 +340,9 @@ impl App {
             pending: None,
             running: false,
             turn_started: None,
+            turn_output_base: 0,
             spinner: 0,
+            unwind: None,
             help: false,
             scroll: 0,
             status,
@@ -337,6 +356,28 @@ impl App {
 
     /// Apply one message, mutating state and returning the shell's next action.
     pub fn update(&mut self, msg: Msg) -> Action {
+        // While the unwind picker owns the screen it is modal: arrow keys move the
+        // selection, Enter confirms, Esc cancels, and every other key is swallowed
+        // so it can't disturb the input or scroll underneath.
+        if self.unwind.is_some() {
+            return match msg {
+                Msg::HistoryPrev | Msg::ScrollUp => {
+                    self.unwind_move(-1);
+                    Action::None
+                }
+                Msg::HistoryNext | Msg::ScrollDown => {
+                    self.unwind_move(1);
+                    Action::None
+                }
+                Msg::Submit | Msg::Approve => self.confirm_unwind(),
+                Msg::Cancel => {
+                    self.unwind = None;
+                    Action::None
+                }
+                _ => Action::None,
+            };
+        }
+
         // Any user action other than another Esc disarms the pending unwind.
         if !matches!(
             msg,
@@ -487,33 +528,75 @@ impl App {
             Action::CancelTurn
         } else if self.esc_armed {
             self.esc_armed = false;
-            Action::UnwindTurn
+            Action::OpenUnwind
         } else {
             self.esc_armed = true;
             Action::None
         }
     }
 
-    /// The shell's answer to [`Action::UnwindTurn`]: roll the transcript back
-    /// to before the last user message when the agent actually popped a turn.
-    /// Files are untouched either way — `/undo` is the schematic-level undo.
-    pub fn apply_unwind(&mut self, popped: bool) {
-        if !popped {
+    /// Open the unwind picker over the agent's unwindable turns (newest-first
+    /// prompt previews the shell just fetched). An empty list — fresh agent or
+    /// everything behind a compaction barrier — just notes "nothing to unwind".
+    pub fn open_unwind(&mut self, prompts: Vec<String>) {
+        if prompts.is_empty() {
             self.transcript.push(Entry::system("nothing to unwind"));
             return;
         }
-        if let Some(at) = self
+        self.unwind = Some(UnwindPicker {
+            prompts,
+            selected: 0,
+        });
+    }
+
+    /// Move the picker selection by `delta`, clamped to the list.
+    fn unwind_move(&mut self, delta: i32) {
+        if let Some(p) = self.unwind.as_mut() {
+            let last = p.prompts.len().saturating_sub(1);
+            p.selected = (p.selected as i32 + delta).clamp(0, last as i32) as usize;
+        }
+    }
+
+    /// Confirm the picker: close it and ask the shell to drop `selected + 1`
+    /// turns (the selected prompt and everything after it).
+    fn confirm_unwind(&mut self) -> Action {
+        match self.unwind.take() {
+            Some(p) => Action::UnwindTo(p.selected + 1),
+            None => Action::None,
+        }
+    }
+
+    /// The shell's answer to [`Action::UnwindTo`]: roll the transcript back over
+    /// the `popped` turns the agent actually dropped. Files are untouched —
+    /// `/undo` is the schematic-level undo.
+    pub fn apply_unwind_to(&mut self, popped: usize) {
+        if popped == 0 {
+            self.transcript.push(Entry::system("nothing to unwind"));
+            return;
+        }
+        // Truncate at the `popped`-th-from-last user message, dropping it and
+        // everything after.
+        let cut = self
             .transcript
             .iter()
-            .rposition(|e| e.speaker == Speaker::User)
-        {
+            .enumerate()
+            .filter(|(_, e)| e.speaker == Speaker::User)
+            .map(|(i, _)| i)
+            .rev()
+            .nth(popped - 1);
+        if let Some(at) = cut {
             self.transcript.truncate(at);
         }
-        self.status.turn_count = self.status.turn_count.saturating_sub(1);
+        self.status.turn_count = self.status.turn_count.saturating_sub(popped);
         self.scroll = 0;
-        self.transcript.push(Entry::system(
-            "unwound the last turn (context only — /undo restores the schematic)",
-        ));
+        let what = if popped == 1 {
+            "the last turn".to_string()
+        } else {
+            format!("{popped} turns")
+        };
+        self.transcript.push(Entry::system(format!(
+            "unwound {what} (context only — /undo restores the schematic)"
+        )));
     }
 
     /// Submit the input line: a `/command` or a prompt.
@@ -545,9 +628,7 @@ impl App {
         }
         self.transcript.push(Entry::user(line.clone()));
         self.status.turn_count += 1;
-        self.running = true;
-        self.turn_started = Some(Instant::now());
-        self.scroll = 0;
+        self.begin_turn();
         Action::SpawnTurn(line)
     }
 
@@ -582,9 +663,7 @@ impl App {
                         .push(Entry::system("can't compact while a turn is running"));
                     return Action::None;
                 }
-                self.running = true;
-                self.turn_started = Some(Instant::now());
-                self.scroll = 0;
+                self.begin_turn();
                 self.transcript.push(Entry::system("compacting context…"));
                 Action::Compact
             }
@@ -730,9 +809,25 @@ impl App {
         self.pending.is_none()
     }
 
+    /// Mark a turn (a prompt or `/compact`) as started: spin up the running
+    /// flag, the elapsed clock, the per-turn token baseline, and follow the tail.
+    fn begin_turn(&mut self) {
+        self.running = true;
+        self.turn_started = Some(Instant::now());
+        self.turn_output_base = self.status.total_output_tokens;
+        self.scroll = 0;
+    }
+
     /// Seconds the in-flight turn has been running, if any.
     pub fn turn_elapsed_secs(&self) -> Option<u64> {
         self.turn_started.map(|t| t.elapsed().as_secs())
+    }
+
+    /// Output tokens streamed during the current turn (for the running line).
+    pub fn turn_output_tokens(&self) -> u64 {
+        self.status
+            .total_output_tokens
+            .saturating_sub(self.turn_output_base)
     }
 
     // ── input-line editing helpers ────────────────────────────────────
@@ -1050,7 +1145,11 @@ mod tests {
         assert!(!a.esc_armed, "clearing the input is its own Esc step");
         assert_eq!(a.update(Msg::Cancel), Action::None);
         assert!(a.esc_armed, "second Esc arms the unwind");
-        assert_eq!(a.update(Msg::Cancel), Action::UnwindTurn);
+        assert_eq!(
+            a.update(Msg::Cancel),
+            Action::OpenUnwind,
+            "third Esc opens the picker"
+        );
         assert!(!a.esc_armed, "the unwind consumed the arming");
         assert!(!a.should_quit);
     }
@@ -1072,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_unwind_rolls_the_transcript_back_to_before_the_user_turn() {
+    fn apply_unwind_to_rolls_the_transcript_back_to_before_the_user_turn() {
         let mut a = app();
         type_str(&mut a, "build it");
         a.update(Msg::Submit);
@@ -1080,7 +1179,7 @@ mod tests {
         a.update(Msg::TurnEnded(None));
         let turns_before = a.status.turn_count;
 
-        a.apply_unwind(true);
+        a.apply_unwind_to(1);
         assert!(
             !a.transcript
                 .iter()
@@ -1099,12 +1198,84 @@ mod tests {
         assert_eq!(a.status.turn_count, turns_before - 1);
 
         let len = a.transcript.len();
-        a.apply_unwind(false);
+        a.apply_unwind_to(0);
         assert!(
             a.transcript[len..]
                 .iter()
                 .any(|e| e.text.contains("nothing"))
         );
+    }
+
+    #[test]
+    fn apply_unwind_to_rolls_back_multiple_turns_at_once() {
+        let mut a = app();
+        for prompt in ["first", "second", "third"] {
+            type_str(&mut a, prompt);
+            a.update(Msg::Submit);
+            a.update(Msg::Agent(AgentEvent::AssistantText(format!("re: {prompt}"))));
+            a.update(Msg::TurnEnded(None));
+        }
+        assert_eq!(a.status.turn_count, 3);
+
+        // Pick the 2nd-newest prompt ("second"): drop it and "third".
+        a.apply_unwind_to(2);
+        assert!(
+            a.transcript.iter().any(|e| e.text == "first"),
+            "the kept turn survives: {:?}",
+            a.transcript
+        );
+        assert!(
+            !a.transcript
+                .iter()
+                .any(|e| e.text == "second" || e.text == "third"),
+            "the selected turn and everything after are gone: {:?}",
+            a.transcript
+        );
+        assert_eq!(a.status.turn_count, 1);
+        assert!(a.transcript.iter().any(|e| e.text.contains("2 turns")));
+    }
+
+    #[test]
+    fn unwind_picker_opens_navigates_and_confirms() {
+        let mut a = app();
+        // Newest-first prompts, as the agent would report them.
+        a.open_unwind(vec![
+            "swap the regulator".into(),
+            "add usb-c".into(),
+            "make the board".into(),
+        ]);
+        let p = a.unwind.as_ref().expect("picker open");
+        assert_eq!(p.selected, 0, "latest turn preselected");
+
+        // Down moves toward older turns; up clamps back at the top.
+        a.update(Msg::HistoryNext);
+        a.update(Msg::HistoryNext);
+        assert_eq!(a.unwind.as_ref().unwrap().selected, 2);
+        a.update(Msg::HistoryNext); // clamps at the last row
+        assert_eq!(a.unwind.as_ref().unwrap().selected, 2);
+        a.update(Msg::HistoryPrev);
+        assert_eq!(a.unwind.as_ref().unwrap().selected, 1);
+
+        // Enter confirms: drop selected + 1 = 2 turns, picker closes.
+        assert_eq!(a.update(Msg::Submit), Action::UnwindTo(2));
+        assert!(a.unwind.is_none(), "confirm closes the picker");
+    }
+
+    #[test]
+    fn unwind_picker_esc_cancels_without_acting() {
+        let mut a = app();
+        a.open_unwind(vec!["a".into(), "b".into()]);
+        assert!(a.unwind.is_some());
+        assert_eq!(a.update(Msg::Cancel), Action::None);
+        assert!(a.unwind.is_none(), "Esc closes the picker, no unwind");
+    }
+
+    #[test]
+    fn unwind_picker_is_empty_when_nothing_to_unwind() {
+        let mut a = app();
+        a.open_unwind(vec![]);
+        assert!(a.unwind.is_none(), "no picker for an empty list");
+        assert!(a.transcript.iter().any(|e| e.text.contains("nothing")));
     }
 
     #[test]

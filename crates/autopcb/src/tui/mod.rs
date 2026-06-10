@@ -181,7 +181,8 @@ impl Shell {
             Action::CancelTurn => self.cancel_turn(app),
             Action::Undo => self.undo(app),
             Action::ClearContext => self.clear_context(app),
-            Action::UnwindTurn => self.unwind_turn(app),
+            Action::OpenUnwind => self.open_unwind(app),
+            Action::UnwindTo(k) => self.unwind_to(app, k),
             Action::Compact => self.spawn_compact(app),
             Action::ShowContext => self.show_context(app),
             Action::SpawnTurn(prompt) => self.spawn_turn(app, prompt),
@@ -260,10 +261,18 @@ impl Shell {
         app.transcript.push(app::Entry::system(note));
     }
 
-    /// Double-Esc — pop the agent's last turn and roll the transcript back.
-    fn unwind_turn(&self, app: &mut App) {
-        let popped = self.with_idle_agent(|agent| agent.pop_last_turn());
-        app.apply_unwind(popped.unwrap_or(false));
+    /// Double-Esc — fetch the agent's unwindable turns and open the picker. When
+    /// the agent is busy (or has nothing to offer) `open_unwind` notes it.
+    fn open_unwind(&self, app: &mut App) {
+        let turns = self.with_idle_agent(|agent| agent.unwindable_turns());
+        app.open_unwind(turns.unwrap_or_default());
+    }
+
+    /// The picker was confirmed — pop `k` of the agent's most recent turns and
+    /// roll the transcript back over however many were actually dropped.
+    fn unwind_to(&self, app: &mut App, k: usize) {
+        let popped = self.with_idle_agent(|agent| agent.pop_turns(k));
+        app.apply_unwind_to(popped.unwrap_or(0));
     }
 
     /// `/context` — print project paths and context/token stats.

@@ -204,13 +204,21 @@ impl Agent {
     /// after it from the history. Returns `false` when there is nothing to pop
     /// (fresh agent, or everything before a compaction barrier).
     pub fn pop_last_turn(&mut self) -> bool {
-        match self.turn_starts.pop() {
-            Some(start) => {
-                self.history.truncate(start);
-                true
-            }
-            None => false,
-        }
+        self.pop_turns(1) == 1
+    }
+
+    /// Unwind the `k` most recent turns at once, returning how many were actually
+    /// popped (fewer than `k` once the history is exhausted or a compaction
+    /// barrier is hit). The selector built from [`Agent::unwindable_turns`] uses
+    /// this to roll back to an arbitrary point.
+    pub fn pop_turns(&mut self, k: usize) -> usize {
+        pop_n(&mut self.history, &mut self.turn_starts, k)
+    }
+
+    /// Prompt previews for every turn that can still be unwound, newest first —
+    /// the rows the double-Esc unwind picker offers.
+    pub fn unwindable_turns(&self) -> Vec<String> {
+        turn_previews(&self.history, &self.turn_starts)
     }
 
     /// Counters for the live context (turns / messages / approximate size).
@@ -648,6 +656,62 @@ fn repair_history(history: &mut Vec<Message>) {
     }
 }
 
+/// The first text block of a message, if any (a user turn's prompt lives here).
+fn first_text(m: &Message) -> Option<&str> {
+    m.content.iter().find_map(|b| match b {
+        ContentBlock::Text(t) => Some(t.as_str()),
+        _ => None,
+    })
+}
+
+/// Collapse a prompt to a single trimmed line, truncated for a picker row.
+fn preview(text: &str) -> String {
+    const MAX: usize = 60;
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() > MAX {
+        let mut s: String = one_line.chars().take(MAX - 1).collect();
+        s.push('…');
+        s
+    } else {
+        one_line
+    }
+}
+
+/// Newest-first prompt previews for the turns recorded in `turn_starts`. Each is
+/// the first text block of that turn's user message (at `history[start]`),
+/// single-lined and truncated. Turns behind a compaction barrier aren't listed —
+/// `turn_starts` no longer carries them.
+fn turn_previews(history: &[Message], turn_starts: &[usize]) -> Vec<String> {
+    turn_starts
+        .iter()
+        .rev()
+        .map(|&start| {
+            history
+                .get(start)
+                .and_then(first_text)
+                .map(preview)
+                .unwrap_or_else(|| "(prompt)".to_string())
+        })
+        .collect()
+}
+
+/// Pop the `k` most recent turns: drop each turn's start index and truncate the
+/// history back to it. Returns how many were actually popped (fewer than `k`
+/// once `turn_starts` is exhausted — e.g. at a compaction barrier).
+fn pop_n(history: &mut Vec<Message>, turn_starts: &mut Vec<usize>, k: usize) -> usize {
+    let mut popped = 0;
+    while popped < k {
+        match turn_starts.pop() {
+            Some(start) => {
+                history.truncate(start);
+                popped += 1;
+            }
+            None => break,
+        }
+    }
+    popped
+}
+
 /// The system prompt: the circuit-YAML language spec (kernel + sugar), the
 /// workflow doctrine, and the real-library guidance from validation.
 ///
@@ -851,6 +915,50 @@ mod tests {
         let mut clean = vec![Message::user("hi"), Message::assistant("done")];
         repair_history(&mut clean);
         assert_eq!(clean.len(), 2, "a finished exchange needs no repair");
+    }
+
+    #[test]
+    fn turn_previews_are_newest_first_and_single_lined() {
+        // Two turns; turn_starts points at each user message's index.
+        let history = vec![
+            Message::user("  first   prompt  "),
+            Message::assistant("ok"),
+            Message::user("second prompt"),
+            Message::assistant("done"),
+        ];
+        let starts = vec![0, 2];
+        let p = turn_previews(&history, &starts);
+        assert_eq!(p, vec!["second prompt".to_string(), "first prompt".to_string()]);
+    }
+
+    #[test]
+    fn preview_truncates_long_prompts_with_an_ellipsis() {
+        let p = preview(&"x".repeat(100));
+        assert_eq!(p.chars().count(), 60, "capped at MAX");
+        assert!(p.ends_with('…'));
+        assert_eq!(preview("short"), "short");
+    }
+
+    #[test]
+    fn pop_n_truncates_history_and_reports_the_real_count() {
+        let mut history = vec![
+            Message::user("t1"),
+            Message::assistant("a1"),
+            Message::user("t2"),
+            Message::assistant("a2"),
+            Message::user("t3"),
+            Message::assistant("a3"),
+        ];
+        let mut starts = vec![0, 2, 4];
+
+        assert_eq!(pop_n(&mut history, &mut starts, 2), 2, "popped two");
+        assert_eq!(starts, vec![0], "only the oldest turn remains");
+        assert_eq!(history.len(), 2, "history truncated to t1's exchange");
+
+        // Asking for more than is left pops the rest and reports the true count.
+        assert_eq!(pop_n(&mut history, &mut starts, 5), 1);
+        assert!(history.is_empty() && starts.is_empty());
+        assert_eq!(pop_n(&mut history, &mut starts, 1), 0, "nothing left to pop");
     }
 
     #[test]

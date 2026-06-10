@@ -47,8 +47,9 @@ fn fmt_tokens(n: u64) -> String {
     }
 }
 
-/// Width of the speaker gutter (`"you  "` / `"ai   "` / indent).
-const GUTTER: usize = 5;
+/// Left margin (in columns) before transcript/diff/input content, so prose
+/// doesn't hug the terminal edge now that the border boxes are gone.
+const MARGIN: u16 = 1;
 
 /// Draw the whole cockpit.
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -60,15 +61,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .as_ref()
         .map(|d| diff_height(d, area.width))
         .unwrap_or(0);
+    // The running indicator takes a row only while a turn is in flight.
+    let running_h = u16::from(app.running);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),      // header / title
-            Constraint::Min(3),         // transcript
-            Constraint::Length(diff_h), // proposed-changes pane
-            Constraint::Length(3),      // input line
-            Constraint::Length(1),      // status bar
+            Constraint::Length(1),         // header
+            Constraint::Min(3),            // transcript
+            Constraint::Length(diff_h),    // proposed-changes pane
+            Constraint::Length(running_h), // running indicator
+            Constraint::Length(1),         // input line
+            Constraint::Length(1),         // status bar
         ])
         .split(area);
 
@@ -77,12 +81,26 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.pending.is_some() {
         draw_diff(f, chunks[2], app);
     }
-    draw_input(f, chunks[3], app);
-    draw_status(f, chunks[4], app);
-    draw_completions(f, chunks[3], app);
+    if app.running {
+        draw_running(f, chunks[3], app);
+    }
+    draw_input(f, chunks[4], app);
+    draw_status(f, chunks[5], app);
+    draw_completions(f, chunks[4], app);
+    draw_unwind(f, chunks[4], app);
 
     if app.help {
         draw_help(f, area);
+    }
+}
+
+/// Inset a pane by [`MARGIN`] columns on the left (full height).
+fn body(area: Rect) -> Rect {
+    Rect {
+        x: area.x + MARGIN,
+        y: area.y,
+        width: area.width.saturating_sub(MARGIN),
+        height: area.height,
     }
 }
 
@@ -157,7 +175,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
         "○"
     };
     let auto = if app.auto { "auto ON" } else { "auto OFF" };
-    let title = Line::from(vec![
+    let spans = vec![
         Span::styled(" auto-pcb ", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("── "),
         Span::styled(
@@ -182,94 +200,94 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
                 Color::DarkGray
             }),
         ),
-    ]);
-    f.render_widget(Paragraph::new(title), area);
+    ];
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    // The `↑n` scrolled-back indicator used to live in the transcript border
+    // title; with the border gone it sits at the header's right edge, overlaid
+    // so it stays visible even when the title overflows a narrow terminal.
+    if app.scroll > 0 {
+        let ind = format!(" ↑{} ", app.scroll);
+        let iw = (ind.chars().count() as u16).min(area.width);
+        let ind_area = Rect {
+            x: area.x + area.width - iw,
+            y: area.y,
+            width: iw,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                ind,
+                Style::default().fg(Color::DarkGray),
+            ))),
+            ind_area,
+        );
+    }
 }
 
 fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
-    let inner_w = area.width.saturating_sub(2).max(1) as usize;
+    let inner = body(area);
+    let body_w = inner.width.max(1) as usize;
     let lines: Vec<Line> = app
         .transcript
         .iter()
-        .flat_map(|e| render_entry(e, inner_w))
+        .flat_map(|e| render_entry(e, body_w))
         .collect();
 
-    let inner_h = area.height.saturating_sub(2); // borders
     let total = lines.len() as u16;
     // scroll == 0 follows the tail; larger scrolls back into history. Clamp it
     // so over-scrolling never leaves the viewport stuck above the content.
-    let max_top = total.saturating_sub(inner_h);
+    let max_top = total.saturating_sub(inner.height);
     app.scroll = app.scroll.min(max_top);
     let top = max_top - app.scroll;
 
-    let mut title = String::from(" transcript ");
-    if app.running {
-        let frame = SPINNER[app.spinner % SPINNER.len()];
-        let secs = app.turn_elapsed_secs().unwrap_or(0);
-        title = format!(" transcript · {frame} agent working {secs}s ");
-    }
-    if app.scroll > 0 {
-        title.push_str(&format!("· ↑{} ", app.scroll));
-    }
-
-    let para = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .scroll((top, 0));
-    f.render_widget(para, area);
+    let para = Paragraph::new(lines).scroll((top, 0));
+    f.render_widget(para, inner);
 }
 
-/// Style one transcript entry into wrapped `Line`s: the first row carries the
-/// speaker gutter, continuation rows are indented under it. Assistant text is
-/// rendered as markdown; everything else is plain.
+/// Style one transcript entry into wrapped `Line`s. Each speaker gets a marker
+/// repeated on every wrapped row instead of a label: the user a colored accent
+/// bar, everyone else a plain indent. Assistant text is rendered as markdown.
 fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
-    let (gutter, gutter_style, body_style) = match e.speaker {
+    // (marker, marker_style, body_style, render_as_markdown)
+    let (marker, marker_style, body_style, markdown) = match e.speaker {
         Speaker::User => (
-            "you  ",
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
+            "▌ ",
+            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
             Style::default(),
+            false,
         ),
-        Speaker::Assistant => (
-            "ai   ",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-            Style::default(),
-        ),
+        Speaker::Assistant => ("  ", Style::default(), Style::default(), true),
         Speaker::Tool => (
-            "     ",
+            "  ",
             Style::default(),
             Style::default().fg(Color::Magenta),
+            false,
         ),
         Speaker::System => (
-            "     ",
+            "  ",
             Style::default(),
             Style::default().fg(Color::DarkGray),
+            false,
         ),
     };
-    let body_w = width.saturating_sub(GUTTER).max(1);
-    let logical: Vec<MdLine> = match e.speaker {
-        Speaker::Assistant => md::render_markdown(&e.text, body_style),
-        _ => e
-            .text
+    let body_w = width.saturating_sub(marker.chars().count()).max(1);
+    let logical: Vec<MdLine> = if markdown {
+        md::render_markdown(&e.text, body_style)
+    } else {
+        e.text
             .split('\n')
             .map(|l| MdLine {
                 segments: vec![(l.to_string(), body_style)],
                 wrap: WrapMode::Word,
             })
-            .collect(),
+            .collect()
     };
 
     let mut lines = Vec::new();
     for ml in &logical {
         for row in wrap_segments(&ml.segments, body_w, ml.wrap == WrapMode::Preserve) {
-            let lead = if lines.is_empty() {
-                Span::styled(gutter, gutter_style)
-            } else {
-                Span::raw(" ".repeat(GUTTER))
-            };
-            let mut spans = vec![lead];
+            let mut spans = vec![Span::styled(marker, marker_style)];
             spans.extend(row);
             lines.push(Line::from(spans));
         }
@@ -277,7 +295,7 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
     if lines.is_empty() {
         // e.g. an entry that was nothing but fence markers — still take a row
         // so the scroll math stays exact per entry.
-        lines.push(Line::from(Span::styled(gutter, gutter_style)));
+        lines.push(Line::from(Span::styled(marker, marker_style)));
     }
     lines
 }
@@ -395,18 +413,41 @@ fn spans_of(chars: &[(char, Style)]) -> Vec<Span<'static>> {
     out
 }
 
-/// Rows the apply-gate pane needs for this diff at this terminal width
-/// (summary line wrapped + the hint line + borders), capped so a huge diff
-/// can't squeeze out the transcript.
+/// The running indicator that replaces the old transcript-title spinner: an
+/// animated frame, elapsed seconds, the output tokens streamed this turn, and
+/// the interrupt hint. Drawn only while a turn is in flight.
+fn draw_running(f: &mut Frame, area: Rect, app: &App) {
+    let frame = SPINNER[app.spinner % SPINNER.len()];
+    let secs = app.turn_elapsed_secs().unwrap_or(0);
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut spans = vec![
+        Span::styled(
+            format!("{frame} "),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("working", Style::default().fg(Color::Yellow)),
+        Span::styled(format!(" · {secs}s"), dim),
+    ];
+    let toks = app.turn_output_tokens();
+    if toks > 0 {
+        spans.push(Span::styled(format!(" · ↓{} tok", fmt_tokens(toks)), dim));
+    }
+    spans.push(Span::styled(" · esc to interrupt", dim));
+    f.render_widget(Paragraph::new(Line::from(spans)), body(area));
+}
+
+/// Rows the apply-gate pane needs for this diff at this terminal width (summary
+/// line wrapped + the hint line), capped so a huge diff can't squeeze out the
+/// transcript.
 fn diff_height(d: &PendingDiff, width: u16) -> u16 {
-    let inner_w = width.saturating_sub(2).max(1) as usize;
+    let inner_w = width.saturating_sub(MARGIN).max(1) as usize;
     let summary_w: usize = 20 // "◆ PROPOSED CHANGES  "
         + d.added.iter().chain(&d.removed).chain(&d.changed)
             .map(|r| r.chars().count() + 2)
             .sum::<usize>()
         + 16; // " nets nn→nn "
     let summary_rows = summary_w.div_ceil(inner_w) as u16;
-    (summary_rows + 1 + 2).clamp(4, 8)
+    (summary_rows + 1).clamp(2, 6)
 }
 
 fn draw_diff(f: &mut Frame, area: Rect, app: &App) {
@@ -457,28 +498,13 @@ fn draw_diff(f: &mut Frame, area: Rect, app: &App) {
         ),
     ]);
 
-    let para = Paragraph::new(vec![Line::from(spans), hint])
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow))
-                .title(" apply-gate "),
-        )
-        .wrap(Wrap { trim: true });
-    f.render_widget(para, area);
+    let para = Paragraph::new(vec![Line::from(spans), hint]).wrap(Wrap { trim: true });
+    f.render_widget(para, body(area));
 }
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
-    let inner_w = area.width.saturating_sub(2).max(3) as usize;
-    let avail = inner_w - 2; // minus the "> " prompt
-
-    let title = if app.pending.is_some() {
-        " input · waiting on the apply-gate "
-    } else if app.running {
-        " input · draft the next prompt (Esc cancels the turn) "
-    } else {
-        " input "
-    };
+    let inner = body(area);
+    let avail = (inner.width as usize).saturating_sub(2).max(1); // minus the "> " prompt
 
     let line = if app.pending.is_some() {
         Line::from(Span::styled(
@@ -487,7 +513,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         ))
     } else if app.esc_armed {
         Line::from(Span::styled(
-            "Esc again: unwind the last turn (context only) — any key cancels",
+            "Esc again: open the unwind picker (context only) — any key cancels",
             Style::default().fg(Color::Yellow),
         ))
     } else if app.input.is_empty() {
@@ -497,7 +523,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
             "type a prompt — /help for commands, Tab completes"
         };
         Line::from(vec![
-            Span::styled("> ", Style::default().fg(Color::Blue)),
+            Span::styled("› ", Style::default().fg(Color::Blue)),
             Span::styled(placeholder, Style::default().fg(Color::DarkGray)),
         ])
     } else {
@@ -506,20 +532,85 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         let start = app.cursor.saturating_sub(avail.saturating_sub(1));
         let visible: String = chars.iter().skip(start).take(avail).collect();
         Line::from(vec![
-            Span::styled("> ", Style::default().fg(Color::Blue)),
+            Span::styled("› ", Style::default().fg(Color::Blue)),
             Span::raw(visible),
         ])
     };
 
-    let para = Paragraph::new(line).block(Block::default().borders(Borders::ALL).title(title));
-    f.render_widget(para, area);
+    f.render_widget(Paragraph::new(line), inner);
 
     // A real terminal cursor at the edit point (only while typing is live).
     if app.input_active() {
         let start = app.cursor.saturating_sub(avail.saturating_sub(1));
-        let x = area.x + 1 + 2 + (app.cursor - start) as u16;
-        f.set_cursor_position((x.min(area.x + area.width.saturating_sub(2)), area.y + 1));
+        let x = inner.x + 2 + (app.cursor - start) as u16; // "› " is 2 cols
+        f.set_cursor_position((x.min(inner.x + inner.width.saturating_sub(1)), inner.y));
     }
+}
+
+/// The double-Esc unwind picker, floated just above the input pane. Lists the
+/// agent's recent prompts newest-first; the selected row (and everything below
+/// it in time) is what an Enter would unwind.
+fn draw_unwind(f: &mut Frame, input_area: Rect, app: &App) {
+    let Some(p) = app.unwind.as_ref() else {
+        return;
+    };
+    let idx_w = p.prompts.len().to_string().len();
+    let lines: Vec<Line> = p
+        .prompts
+        .iter()
+        .enumerate()
+        .map(|(i, prompt)| {
+            let sel = i == p.selected;
+            let (lead, lead_style, text_style) = if sel {
+                let hl = Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD);
+                ("▶ ", hl, Style::default().fg(Color::Black).bg(Color::Cyan))
+            } else {
+                (
+                    "  ",
+                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(Color::Gray),
+                )
+            };
+            Line::from(vec![
+                Span::styled(format!("{lead}↶{:<idx_w$} ", i + 1), lead_style),
+                Span::styled(prompt.clone(), text_style),
+            ])
+        })
+        .collect();
+
+    let content_w = lines
+        .iter()
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0) as u16;
+    // `.max().min()` not `clamp()`: a terminal narrower than the floor would
+    // make clamp(lo, hi) panic with lo > hi.
+    let w = (content_w + 2).max(24).min(input_area.width);
+    let h = (p.prompts.len() as u16 + 2).min(input_area.y); // never above the screen top
+    let popup = Rect {
+        x: input_area.x,
+        y: input_area.y.saturating_sub(h),
+        width: w,
+        height: h,
+    };
+    f.render_widget(Clear, popup);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" unwind to… · ↑↓ Enter · Esc cancels "),
+        ),
+        popup,
+    );
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
@@ -535,21 +626,36 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
         let pct = (s.ctx_tokens as f64 / CONTEXT_WINDOW_TOKENS as f64 * 100.0).round() as u64;
         left.push_str(&format!(" · ctx {} ({pct}%)", fmt_tokens(s.ctx_tokens)));
     }
-    // Context-sensitive key hints.
+    // Context-sensitive key hints. While running, the interrupt hint already
+    // lives on the running line, so the bar only needs the hard-quit reminder.
     let right = if app.pending.is_some() {
         "a approve · r reject · Esc reject "
     } else if app.running {
-        "Esc cancel turn · Ctrl-C quit "
+        "Ctrl-C quit "
     } else if app.esc_armed {
         "Esc unwind last turn "
     } else {
         "/help  /undo  /auto  /clear  /quit "
     };
-    // Pad the middle so the right hint sits at the edge (count chars, not
-    // bytes — the model label can contain multibyte punctuation).
+
+    // Compose a bar exactly `width` columns wide: pin `right` to the edge, give
+    // `left` the rest, and ellipsize `left` rather than let the two collide.
+    // (Char counts, not bytes — the labels carry multibyte punctuation.)
     let width = area.width as usize;
-    let pad = width.saturating_sub(left.chars().count() + right.chars().count());
-    let text = format!("{left}{}{right}", " ".repeat(pad));
+    let right_len = right.chars().count();
+    let text = if width <= right_len {
+        right.chars().take(width).collect::<String>()
+    } else {
+        let avail = width - right_len; // columns to the left of the hint
+        let left = if left.chars().count() > avail {
+            let kept: String = left.chars().take(avail.saturating_sub(1)).collect();
+            format!("{kept}…")
+        } else {
+            left
+        };
+        let pad = avail.saturating_sub(left.chars().count());
+        format!("{left}{}{right}", " ".repeat(pad))
+    };
     let para = Paragraph::new(Line::from(Span::styled(
         text,
         Style::default().bg(Color::DarkGray).fg(Color::White),
@@ -825,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn running_turn_shows_spinner_in_title() {
+    fn running_turn_shows_the_status_line() {
         let mut a = app();
         for c in "go".chars() {
             a.update(Msg::Char(c));
@@ -833,7 +939,31 @@ mod tests {
         a.update(Msg::Submit);
         a.update(Msg::Tick);
         let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("agent working"), "spinner title:\n{text}");
+        assert!(text.contains("working"), "running verb:\n{text}");
+        assert!(text.contains("esc to interrupt"), "interrupt hint:\n{text}");
+    }
+
+    #[test]
+    fn running_line_shows_streamed_output_tokens() {
+        let mut a = app();
+        for c in "go".chars() {
+            a.update(Msg::Char(c));
+        }
+        a.update(Msg::Submit);
+        a.update(Msg::Agent(AgentEvent::Usage {
+            input_tokens: 100,
+            output_tokens: 1200,
+        }));
+        a.update(Msg::Tick);
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(text.contains("↓1.2k tok"), "per-turn output tokens:\n{text}");
+    }
+
+    #[test]
+    fn idle_app_has_no_running_line() {
+        let mut a = app();
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(!text.contains("esc to interrupt"), "no running line idle:\n{text}");
     }
 
     #[test]
@@ -852,17 +982,18 @@ mod tests {
     }
 
     #[test]
-    fn big_diffs_get_a_taller_pane_capped_at_eight() {
+    fn big_diffs_get_a_taller_pane_capped() {
         let small = PendingDiff {
             added: vec!["U1".into()],
             ..Default::default()
         };
-        assert_eq!(diff_height(&small, 80), 4);
+        // One summary row + the hint row, borderless.
+        assert_eq!(diff_height(&small, 80), 2);
         let big = PendingDiff {
             added: (0..60).map(|i| format!("U{i}")).collect(),
             ..Default::default()
         };
-        assert_eq!(diff_height(&big, 80), 8);
+        assert_eq!(diff_height(&big, 80), 6, "capped so it can't eat the transcript");
     }
 
     #[test]
@@ -917,9 +1048,33 @@ mod tests {
         assert!(a.esc_armed);
         let text = render_to_string(&mut a, 80, 24);
         assert!(
-            text.contains("unwind the last turn"),
+            text.contains("open the unwind picker"),
             "unwind hint:\n{text}"
         );
+    }
+
+    #[test]
+    fn user_message_has_an_accent_bar_and_no_speaker_labels() {
+        let mut a = app();
+        for c in "hello there".chars() {
+            a.update(Msg::Char(c));
+        }
+        a.update(Msg::Submit);
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(text.contains("▌"), "user accent bar:\n{text}");
+        assert!(text.contains("hello there"), "user text:\n{text}");
+        assert!(!text.contains("you  "), "no `you` gutter label:\n{text}");
+        assert!(!text.contains("ai   "), "no `ai` gutter label:\n{text}");
+    }
+
+    #[test]
+    fn unwind_picker_overlay_lists_prompts_and_hint() {
+        let mut a = app();
+        a.open_unwind(vec!["swap the regulator".into(), "add usb-c".into()]);
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(text.contains("unwind to"), "picker title:\n{text}");
+        assert!(text.contains("swap the regulator"), "newest prompt:\n{text}");
+        assert!(text.contains("add usb-c"), "older prompt:\n{text}");
     }
 
     #[test]
@@ -948,16 +1103,37 @@ mod tests {
         }
         a.update(Msg::Submit);
         let running = render_to_string(&mut a, 80, 24);
+        // The interrupt hint now lives on the running line; the bar keeps the
+        // hard-quit reminder.
         assert!(
-            running.contains("Esc cancel turn"),
-            "running hints:\n{running}"
+            running.contains("esc to interrupt"),
+            "running line hint:\n{running}"
         );
+        assert!(running.contains("Ctrl-C quit"), "running bar hint:\n{running}");
 
         a.update(Msg::PendingDiff(json!({
             "diff": { "added": ["U1"], "removed": [], "changed": [] }
         })));
         let gated = render_to_string(&mut a, 80, 24);
         assert!(gated.contains("a approve"), "gate hints:\n{gated}");
+    }
+
+    #[test]
+    fn status_bar_ellipsizes_instead_of_colliding_with_hints() {
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::Usage {
+            input_tokens: 19_000,
+            output_tokens: 200,
+        }));
+        // A terminal too narrow for the full status + the full key hints.
+        let text = render_to_string(&mut a, 56, 24);
+        let bar = text.lines().last().expect("status row");
+        // Exactly one row's width — the dark bar fills the whole line, with no
+        // doubled/overlapping content where the two halves used to collide.
+        assert_eq!(bar.chars().count(), 56, "bar fills the width exactly:\n{bar}");
+        // The right-edge hints survive intact; the left status is ellipsized.
+        assert!(bar.contains("/quit"), "right hint pinned to the edge:\n{bar}");
+        assert!(bar.contains('…'), "left status is truncated, not overlapped:\n{bar}");
     }
 
     #[test]

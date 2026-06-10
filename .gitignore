@@ -8,3 +8,4 @@
 /.worktrees/
 
 design.kicad_sch
+*.kicad_sch
