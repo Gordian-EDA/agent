@@ -68,6 +68,9 @@ fn power_lib_id(net: &str, provider: &RealSymbolProvider) -> String {
             return a.to_string();
         }
     }
+    // Non-standard positive rails (1V8, VDDA, VBUS, …) fall back to the generic
+    // VCC arrow; the Value override still names the net correctly. Extend the
+    // alias table above if a distinct glyph is wanted.
     if is_ground(net) {
         "power:GND".into()
     } else {

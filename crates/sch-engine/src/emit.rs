@@ -306,6 +306,9 @@ impl SchematicWriter {
             return;
         }
         let uuid_key = format!("{}:{}:{}:{}", a[0], a[1], b[0], b[1]);
+        if self.wires.iter().any(|w| w.uuid_key == uuid_key) {
+            return;
+        }
         self.wires.push(Wire { a, b, uuid_key });
     }
 
@@ -888,22 +891,11 @@ mod tests {
         w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0).unwrap();
         w.add_symbol(&env, "Device:R", "R2", "1k", [101.6, 63.5], 90.0).unwrap();
         let d1 = w.pin_dirs(&env, "R1", "1").unwrap();
-        // Device:R pin 1 at local (0, 3.81), angle=270 in symbol file.
-        // Outward angle = 270+180 = 90 (pointing +x in symbol space).
-        // At instance angle 0, no mirror: outward in sheet space is East (+x).
-        // BUT wait — Device:R is a vertical resistor at angle 0, pin 1 is at top.
-        // So pin 1 is "above" the body = North in sheet space.
-        // We check the actual result vs expected after seeing real geometry.
-        // The actual assertion is validated by the ERC=0 integration test.
-        assert!(
-            d1[0].1 == Dir::North || d1[0].1 == Dir::South || d1[0].1 == Dir::East || d1[0].1 == Dir::West,
-            "pin_dirs must return a valid direction, got {:?}",
-            d1[0].1
-        );
+        // Device:R pin 1 (local (0, 3.81), angle 270) at instance angle 0:
+        // endpoint is above the body, outward points up -> North on the sheet.
+        assert_eq!(d1[0].1, Dir::North, "R1 pin 1 stub should point North (up)");
         let d2 = w.pin_dirs(&env, "R2", "1").unwrap();
-        assert!(
-            d2[0].1 == Dir::North || d2[0].1 == Dir::South || d2[0].1 == Dir::East || d2[0].1 == Dir::West,
-            "pin_dirs must return a valid direction for rotated symbol"
-        );
+        // At instance angle 90 the same pin rotates to point West.
+        assert_eq!(d2[0].1, Dir::West, "R2 pin 1 stub should point West");
     }
 }
