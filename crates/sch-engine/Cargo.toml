@@ -1,0 +1,10 @@
+[package]
+name = "sch-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+circuit-lang = { path = "../circuit-lang" }
+kicad-bridge = { path = "../kicad-bridge" }
+uuid.workspace = true
+indexmap.workspace = true
