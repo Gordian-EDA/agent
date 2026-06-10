@@ -85,6 +85,23 @@ struct PinLabel {
     /// index disambiguates the (rare) case where a pin *name* matches multiple
     /// physical pins, each of which gets its own label.
     uuid_key: String,
+    /// Direction the stub points (away from the symbol body). Drives the label's
+    /// rotation angle + justification so the text reads away from the body. The
+    /// legacy `add_pin_label` path defaults to `Dir::East` (angle 0, justify
+    /// left), keeping its output byte-identical to pre-stub emission.
+    dir: Dir,
+    /// Present for stub-mounted signal labels: the stub wire to emit and the
+    /// pin endpoint to retract onto if the stub end collides with a foreign net.
+    /// `None` for legacy labels placed directly on the pin endpoint.
+    stub: Option<Stub>,
+}
+
+/// A retractable stub wire backing a signal label: the pin endpoint the stub
+/// starts at. The stub end is the owning [`PinLabel`]'s `at`. If retracted, the
+/// wire is dropped and the label is moved back to `pin_at`.
+#[derive(Clone, Copy)]
+struct Stub {
+    pin_at: [f64; 2],
 }
 
 /// One `(wire …)` segment between two grid-snapped sheet points.
@@ -253,6 +270,47 @@ impl SchematicWriter {
                 net: net.to_string(),
                 at,
                 uuid_key: format!("{refdes}:{pin}:{net}:{idx}"),
+                // Legacy/no-stub path: East -> angle 0, justify left bottom,
+                // byte-identical to pre-stub label output.
+                dir: Dir::East,
+                stub: None,
+            });
+        }
+        Ok(())
+    }
+
+    /// Signal-net connectivity with breathing room: a stub wire out of the pin
+    /// and the net label at the stub's far end, oriented along the stub so the
+    /// text reads away from the symbol body.
+    ///
+    /// Displacing the label off the pin endpoint risks landing it on a *foreign*
+    /// connection point (most often a horizontal power pin's power symbol, which
+    /// `emit_power_pin` parks one row over via a riser): a label there would
+    /// silently merge two nets. No fixed stub length is collision-free in a dense
+    /// auto-placed sheet. So the label/stub is recorded as *retractable* and a
+    /// finalize pass ([`SchematicWriter::retract_colliding_stubs`]) drops the stub
+    /// (snapping the label back onto its always-safe pin endpoint) for any signal
+    /// label whose stub end coincides with another net's anchor. The pin endpoint
+    /// is the same place the pre-stub emitter put the label, so the fallback is
+    /// proven connectivity-safe.
+    pub fn add_signal_label(
+        &mut self,
+        env: &KicadEnv,
+        refdes: &str,
+        pin: &str,
+        net: &str,
+    ) -> io::Result<()> {
+        const STUB_MM: f64 = 3.81;
+        for (idx, (ep, dir)) in self.pin_dirs(env, refdes, pin)?.into_iter().enumerate() {
+            let ep = snap_point(ep);
+            let v = dir.vec();
+            let end = snap_point([ep[0] + v[0] * STUB_MM, ep[1] + v[1] * STUB_MM]);
+            self.labels.push(PinLabel {
+                net: net.to_string(),
+                at: end,
+                uuid_key: format!("{refdes}:{pin}:{net}:{idx}"),
+                dir,
+                stub: Some(Stub { pin_at: ep }),
             });
         }
         Ok(())
@@ -483,12 +541,123 @@ impl SchematicWriter {
             .collect())
     }
 
+    /// Retract any signal stub whose wire or far-end label would touch a *foreign*
+    /// net's geometry, then emit the surviving stub wires.
+    ///
+    /// Displacing a signal label off its pin by a stub can make it (or its wire)
+    /// touch another net's geometry, silently merging the two nets — KiCAD reads a
+    /// shared point or a wire-end-on-wire T-junction as a deliberate connection,
+    /// so there is *no ERC error* to catch it. The collisions come in several
+    /// flavours (label on a power symbol parked one row over by `emit_power_pin`'s
+    /// riser; a stub end landing on a neighbour's stub wire; a stub crossing a
+    /// foreign pin) and no fixed stub length avoids them all in a dense
+    /// auto-placed sheet. Rather than chase each flavour, we resolve it with one
+    /// occupancy model.
+    ///
+    /// **Foreign geometry** at pass start = every *fixed* connection point (power
+    /// symbol pins — origin, net = the Value; no-connect markers — a reserved
+    /// sentinel net; legacy labels; and every signal stub's own pin endpoint,
+    /// always safe) plus every existing wire **segment** (all wires present here
+    /// are power stubs/risers — a signal net never coincides with a power net, so
+    /// any touch is foreign).
+    ///
+    /// Signal stubs are then walked in deterministic `uuid_key` order. A stub is
+    /// **retracted** — its label snapped back onto its always-safe pin endpoint
+    /// (orientation reset to `East`), no wire emitted — when its end coincides
+    /// with a foreign point, its end lies on a foreign segment, or its segment
+    /// passes through a foreign point. A *surviving* stub registers its endpoint
+    /// and segment as occupancy so a later differing-net stub cannot then collide
+    /// with it. The pin-endpoint fallback reproduces the proven pre-stub
+    /// connectivity, so retraction only ever removes an accidental merge.
+    fn retract_colliding_stubs(&mut self) {
+        use std::collections::BTreeMap;
+
+        // Sentinel "net" for no-connect anchors: a stub on a no-connect pin is
+        // still a wrong attachment, so treat it as a foreign net.
+        const NC: &str = "\0no_connect";
+        // Sentinel net for the pre-existing power wires (all power-net, never a
+        // signal net — any signal touch is therefore foreign).
+        const PWR: &str = "\0power_wire";
+
+        let bits = |p: [f64; 2]| {
+            let p = snap_point(p);
+            (p[0].to_bits(), p[1].to_bits())
+        };
+
+        // Foreign points: net name(s) at each occupied point.
+        let mut points: BTreeMap<(u64, u64), std::collections::BTreeSet<String>> = BTreeMap::new();
+        let add_point = |p: [f64; 2], net: &str, m: &mut BTreeMap<(u64, u64), std::collections::BTreeSet<String>>| {
+            m.entry(bits(p)).or_default().insert(net.to_string());
+        };
+        // Foreign axis-aligned segments: (a, b, net).
+        let mut segments: Vec<([f64; 2], [f64; 2], String)> = Vec::new();
+
+        for inst in &self.instances {
+            if inst.refdes.starts_with('#') || inst.lib_id.starts_with("power:") {
+                add_point(inst.at, &inst.value, &mut points);
+            }
+        }
+        for nc in &self.no_connects {
+            add_point(nc.at, NC, &mut points);
+        }
+        for label in &self.labels {
+            match &label.stub {
+                None => add_point(label.at, &label.net, &mut points),
+                Some(stub) => add_point(stub.pin_at, &label.net, &mut points),
+            }
+        }
+        // Existing wires are all power stubs/risers.
+        for w in &self.wires {
+            segments.push((w.a, w.b, PWR.to_string()));
+        }
+
+        // Deterministic processing order for stub labels.
+        let mut order: Vec<usize> = (0..self.labels.len())
+            .filter(|&i| self.labels[i].stub.is_some())
+            .collect();
+        order.sort_by(|&a, &b| self.labels[a].uuid_key.cmp(&self.labels[b].uuid_key));
+
+        for i in order {
+            let net = self.labels[i].net.clone();
+            let end = self.labels[i].at;
+            let pin_at = self.labels[i].stub.unwrap().pin_at;
+
+            // Collision if: the end coincides with a foreign point; the end lies
+            // on a foreign segment; or the stub segment passes through a foreign
+            // point. (The pin endpoint is this net's own anchor, never foreign.)
+            let end_on_point = points
+                .get(&bits(end))
+                .is_some_and(|nets| nets.iter().any(|n| *n != net));
+            let end_on_seg = segments
+                .iter()
+                .any(|(a, b, n)| *n != net && point_on_segment(end, *a, *b));
+            let seg_thru_point = points.iter().any(|(&(xb, yb), nets)| {
+                let p = [f64::from_bits(xb), f64::from_bits(yb)];
+                nets.iter().any(|n| *n != net) && point_on_segment(p, pin_at, end)
+            });
+
+            if end_on_point || end_on_seg || seg_thru_point {
+                self.labels[i].at = pin_at;
+                self.labels[i].dir = Dir::East;
+                self.labels[i].stub = None;
+            } else {
+                self.add_wire(pin_at, end);
+                add_point(end, &net, &mut points);
+                segments.push((pin_at, end, net));
+            }
+        }
+    }
+
     /// Assemble the complete `.kicad_sch` document as a deterministic string.
     ///
     /// `lib_symbols` are emitted sorted by `lib_id` (via the backing
     /// `BTreeMap`); symbol instances are emitted sorted by refdes. All uuids are
     /// content-derived, so the same placements always produce identical bytes.
-    pub fn finish(self) -> String {
+    pub fn finish(mut self) -> String {
+        // Resolve signal-stub collisions and materialize the surviving stub wires
+        // before any rendering, so labels/wires below render the reconciled state.
+        self.retract_colliding_stubs();
+
         let root_uuid = stable_uuid("sheet", ROOT_SHEET_KEY);
 
         let mut out = String::new();
@@ -625,23 +794,61 @@ fn pin_endpoint(pin: &PinGeom, inst_at: [f64; 2], inst_angle: f64, mirror: bool)
     snap_point(sheet)
 }
 
+/// Whether point `p` lies on the axis-aligned segment `a`–`b` (endpoints
+/// included), within grid-snap floating-point dust.
+///
+/// All stub/power wires are horizontal or vertical, so the test reduces to: `p`
+/// is collinear with the segment's constant axis and within its varying-axis
+/// span. Endpoints count as "on" — a stub end meeting a foreign wire's endpoint
+/// is just as much a connection as meeting its middle.
+fn point_on_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> bool {
+    const EPS: f64 = 1e-6;
+    let within = |v: f64, lo: f64, hi: f64| v >= lo - EPS && v <= hi + EPS;
+    if (a[0] - b[0]).abs() < EPS {
+        // Vertical segment: x constant.
+        (p[0] - a[0]).abs() < EPS && within(p[1], a[1].min(b[1]), a[1].max(b[1]))
+    } else if (a[1] - b[1]).abs() < EPS {
+        // Horizontal segment: y constant.
+        (p[1] - a[1]).abs() < EPS && within(p[0], a[0].min(b[0]), a[0].max(b[0]))
+    } else {
+        // Non-axis-aligned (should not occur for our wires): fall back to the
+        // collinearity + bounding-box test.
+        let cross = (p[0] - a[0]) * (b[1] - a[1]) - (p[1] - a[1]) * (b[0] - a[0]);
+        cross.abs() < EPS
+            && within(p[0], a[0].min(b[0]), a[0].max(b[0]))
+            && within(p[1], a[1].min(b[1]), a[1].max(b[1]))
+    }
+}
+
 /// Render one net-name label at a pin endpoint into a `(label …)` block.
 ///
 /// The net name is free-form (LLM-/user-derived), so it is escaped before
-/// embedding. The label rotation is fixed at 0: a label connects to whatever pin
-/// shares its `(at …)` position regardless of label text orientation, so the
-/// rotation only affects how the text reads, not connectivity. The uuid is
-/// content-derived from the label's stable key for byte-identical re-emission.
+/// embedding. The label's rotation + justification derive from its `dir` so the
+/// text reads *away* from the symbol body along the stub: East→0/left,
+/// West→180/right, North→90/left, South→270/right. (Rotation does not affect
+/// connectivity — a label binds to whatever pin shares its `(at …)` — only how
+/// the text reads.) The `East` case is byte-identical to the pre-stub output
+/// (angle 0, justify left bottom). The uuid is content-derived from the label's
+/// stable key for byte-identical re-emission.
 fn render_label(label: &PinLabel) -> String {
     let x = fmt_coord(label.at[0]);
     let y = fmt_coord(label.at[1]);
     let net = escape_sexpr_string(&label.net);
     let uuid = stable_uuid("label", &label.uuid_key);
+    let (angle, justify) = match label.dir {
+        Dir::East => (0, "left"),
+        Dir::West => (180, "right"),
+        Dir::North => (90, "left"),
+        Dir::South => (270, "right"),
+    };
 
     let mut s = String::new();
     let _ = writeln!(s, "\t(label \"{net}\"");
-    let _ = writeln!(s, "\t\t(at {x} {y} 0)");
-    s.push_str("\t\t(effects (font (size 1.27 1.27)) (justify left bottom))\n");
+    let _ = writeln!(s, "\t\t(at {x} {y} {angle})");
+    let _ = writeln!(
+        s,
+        "\t\t(effects (font (size 1.27 1.27)) (justify {justify} bottom))"
+    );
     let _ = writeln!(s, "\t\t(uuid \"{uuid}\")");
     s.push_str("\t)\n");
     s
@@ -882,6 +1089,23 @@ mod tests {
         };
 
         assert_eq!(build(), build(), "re-emit must be byte-identical");
+    }
+
+    #[test]
+    fn label_orientation_per_direction() {
+        let mk = |dir| PinLabel {
+            net: "X".into(),
+            at: [0.0, 0.0],
+            uuid_key: "k".into(),
+            dir,
+            stub: None,
+        };
+        assert!(render_label(&mk(Dir::East)).contains("(at 0 0 0)"));
+        assert!(render_label(&mk(Dir::East)).contains("justify left"));
+        assert!(render_label(&mk(Dir::West)).contains("(at 0 0 180)"));
+        assert!(render_label(&mk(Dir::West)).contains("justify right"));
+        assert!(render_label(&mk(Dir::North)).contains("(at 0 0 90)"));
+        assert!(render_label(&mk(Dir::South)).contains("(at 0 0 270)"));
     }
 
     #[test]

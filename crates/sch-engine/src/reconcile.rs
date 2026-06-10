@@ -434,7 +434,7 @@ fn emit_pin(
             if power_nets.contains(net) {
                 emit_power_pin(w, env, provider, refdes, pin, net, power_attach)
             } else {
-                w.add_pin_label(env, refdes, pin, net)
+                w.add_signal_label(env, refdes, pin, net)
             }
         }
         PinTarget::NoConnect => w.add_no_connect(env, refdes, pin),

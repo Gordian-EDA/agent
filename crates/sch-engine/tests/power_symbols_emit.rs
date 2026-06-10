@@ -56,3 +56,34 @@ blocks:
     let erc = KicadCli::new(&env).erc(&sch).unwrap();
     assert_eq!(erc.error_count(), 0, "{:?}", erc.violations);
 }
+
+#[test]
+fn signal_labels_sit_on_stubs_and_orient_away_from_the_body() {
+    let Some(env) = KicadEnv::detect() else {
+        eprintln!("SKIP: no KiCAD environment detected");
+        return;
+    };
+    let design = compile(&env, "
+version: 1
+name: t
+rails: [GND]
+blocks:
+  a:
+    components:
+      R1: {part: Device:R, value: 10k, between: [SIG, GND]}
+      R2: {part: Device:R, value: 10k, between: [SIG, GND]}
+");
+    let text = sch_engine::emit_design(&env, &design).unwrap();
+    assert!(text.contains("(label \"SIG\""));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let sch = tmp.path().join("t.kicad_sch");
+    std::fs::write(&sch, &text).unwrap();
+    let nl = kicad_bridge::cli::KicadCli::new(&env).netlist(&sch).unwrap();
+    let sig = nl.nets.iter().find(|n| n.name.ends_with("SIG")).expect("SIG net");
+    assert_eq!(sig.nodes.len(), 2, "both R pins join SIG through their stubs: {sig:?}");
+
+    // ERC stays clean.
+    let erc = kicad_bridge::cli::KicadCli::new(&env).erc(&sch).unwrap();
+    assert_eq!(erc.error_count(), 0, "{:?}", erc.violations);
+}
