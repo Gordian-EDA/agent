@@ -34,9 +34,46 @@ use kicad_bridge::env::KicadEnv;
 use kicad_bridge::provider::RealSymbolProvider;
 use kiutils_kicad::SchematicFile;
 
-use crate::emit::SchematicWriter;
+use crate::emit::{Dir, SchematicWriter};
 use crate::grid::snap_point;
 use crate::place;
+
+/// Stub wire length from a pin to its power symbol, in mm (3 grid units = 3.81mm).
+const STUB_MM: f64 = 3.81;
+/// Vertical riser from a horizontal stub to a power symbol, in mm (2 grid units).
+const RISER_MM: f64 = 2.54;
+
+/// Ground-ish rails point down; everything else points up.
+fn is_ground(net: &str) -> bool {
+    let n = net.to_ascii_uppercase();
+    n.contains("GND") || n.starts_with("VSS")
+}
+
+/// Choose the power-symbol lib_id for a rail. Exact `power:` match first, then
+/// common aliases, then a donor whose Value is overridden to the rail name.
+fn power_lib_id(net: &str, provider: &RealSymbolProvider) -> String {
+    use circuit_lang::SymbolProvider as _;
+    let exact = format!("power:{net}");
+    if provider.symbol(&exact).is_some() {
+        return exact;
+    }
+    let alias = match net {
+        "3V3" => Some("power:+3V3"),
+        "5V" => Some("power:+5V"),
+        "12V" => Some("power:+12V"),
+        _ => None,
+    };
+    if let Some(a) = alias {
+        if provider.symbol(a).is_some() {
+            return a.to_string();
+        }
+    }
+    if is_ground(net) {
+        "power:GND".into()
+    } else {
+        "power:VCC".into()
+    }
+}
 
 /// Property key for the block a component belongs to.
 pub const AP_BLOCK: &str = "ap_block";
@@ -206,11 +243,22 @@ pub fn emit_design_reconciled(
     let mut w = SchematicWriter::new();
     let provider = RealSymbolProvider::new(env.clone());
 
-    // Net bookkeeping for power-flag synthesis, identical to `emit_design`.
+    // Collect power nets (declared via `rails:` or explicit `power: true`).
+    let power_nets: std::collections::BTreeSet<String> = design
+        .nets
+        .iter()
+        .filter(|(_, a)| a.power)
+        .map(|(n, _)| n.clone())
+        .collect();
+
+    // Net bookkeeping for power-flag synthesis.
     let mut used_nets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut driven_nets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut power_input_nets: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
+    // Records the last power-symbol attachment point per net (for flag placement).
+    let mut power_attach: std::collections::BTreeMap<String, [f64; 2]> =
+        std::collections::BTreeMap::new();
 
     for (block_name, block) in &design.blocks {
         for (refdes, comp) in &block.components {
@@ -233,20 +281,41 @@ pub fn emit_design_reconciled(
             let meta = provider.symbol(&comp.part);
 
             for (pin, target) in &comp.pins {
-                emit_pin(&mut w, env, refdes, pin, target, &mut used_nets)?;
+                emit_pin(
+                    &mut w,
+                    env,
+                    &provider,
+                    refdes,
+                    pin,
+                    target,
+                    &power_nets,
+                    &mut used_nets,
+                    &mut power_attach,
+                )?;
                 record_power_role(meta, pin, target, &mut driven_nets, &mut power_input_nets);
             }
             for unit_pins in comp.units.values() {
                 for (pin, target) in unit_pins {
-                    emit_pin(&mut w, env, refdes, pin, target, &mut used_nets)?;
+                    emit_pin(
+                        &mut w,
+                        env,
+                        &provider,
+                        refdes,
+                        pin,
+                        target,
+                        &power_nets,
+                        &mut used_nets,
+                        &mut power_attach,
+                    )?;
                     record_power_role(meta, pin, target, &mut driven_nets, &mut power_input_nets);
                 }
             }
         }
     }
 
-    // Power flags: exactly as in `emit_design`. The flag column is anchored to
-    // the rightmost *current* placement (auto or preserved) so flags stay clear.
+    // Power flags: for nets that got a power symbol, place a flag pin-coincident
+    // at the recorded attach point. For nets without a power symbol (undeclared
+    // power-input nets still using a label), use the right-column flag placement.
     let mut needs_flag: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     needs_flag.extend(power_input_nets.iter().map(String::as_str));
     for (net, attrs) in &design.nets {
@@ -271,11 +340,18 @@ pub fn emit_design_reconciled(
         })
         .fold(0.0_f64, f64::max);
     let power_x = rightmost + 50.8;
+
     for (flag_idx, net) in needs_flag.iter().enumerate() {
-        let y = 25.4 + flag_idx as f64 * 12.7;
-        let at = snap_point([power_x, y]);
         let refdes = format!("#FLG{:02}", flag_idx + 1);
-        w.add_power_flag(env, net, &refdes, at)?;
+        if let Some(&attach) = power_attach.get(*net) {
+            // Place the flag pin-coincident with the existing power symbol.
+            w.add_power_flag_at(env, &refdes, attach)?;
+        } else {
+            // Fallback: right-column label-based flag for undeclared power nets.
+            let y = 25.4 + flag_idx as f64 * 12.7;
+            let at = snap_point([power_x, y]);
+            w.add_power_flag(env, net, &refdes, at)?;
+        }
     }
 
     Ok(w.finish())
@@ -334,21 +410,88 @@ fn record_power_role(
 }
 
 /// Emit one pin's connectivity (label or no-connect), recording referenced nets.
+///
+/// Power-net pins get a power symbol + stub wire instead of a text label.
+/// Signal-net pins get the usual text label.
+#[allow(clippy::too_many_arguments)]
 fn emit_pin(
     w: &mut SchematicWriter,
     env: &KicadEnv,
+    provider: &RealSymbolProvider,
     refdes: &str,
     pin: &str,
     target: &PinTarget,
+    power_nets: &std::collections::BTreeSet<String>,
     used_nets: &mut std::collections::BTreeSet<String>,
+    power_attach: &mut std::collections::BTreeMap<String, [f64; 2]>,
 ) -> io::Result<()> {
     match target {
         PinTarget::Net(net) => {
             used_nets.insert(net.clone());
-            w.add_pin_label(env, refdes, pin, net)
+            if power_nets.contains(net) {
+                emit_power_pin(w, env, provider, refdes, pin, net, power_attach)
+            } else {
+                w.add_pin_label(env, refdes, pin, net)
+            }
         }
         PinTarget::NoConnect => w.add_no_connect(env, refdes, pin),
     }
+}
+
+/// Emit a power symbol (+ stub wire) for a power-net pin.
+///
+/// Places a stub wire from the pin endpoint outward along the pin's direction,
+/// then places a power symbol at the end of the stub (or via a riser for
+/// horizontal pins). Records the attach point in `power_attach` for later
+/// flag placement.
+fn emit_power_pin(
+    w: &mut SchematicWriter,
+    env: &KicadEnv,
+    provider: &RealSymbolProvider,
+    refdes: &str,
+    pin: &str,
+    net: &str,
+    power_attach: &mut std::collections::BTreeMap<String, [f64; 2]>,
+) -> io::Result<()> {
+    let lib_id = power_lib_id(net, provider);
+    let down = is_ground(net);
+
+    for (idx, (ep, dir)) in w.pin_dirs(env, refdes, pin)?.into_iter().enumerate() {
+        let v = dir.vec();
+        let stub_end = [ep[0] + v[0] * STUB_MM, ep[1] + v[1] * STUB_MM];
+        w.add_wire(ep, stub_end);
+
+        let (attach, angle) = match dir {
+            Dir::North | Dir::South => {
+                // Vertical pin: place the power symbol directly at the stub end.
+                // For ground symbols (pointing down), the conventional orientation
+                // is angle=0. For VCC-like (pointing up), also angle=0.
+                // The key is that the power symbol's single pin (at origin) is at
+                // `attach` — the connection point.
+                let angle = if down && dir == Dir::South {
+                    0.0
+                } else if !down && dir == Dir::North {
+                    0.0
+                } else {
+                    // Pin points wrong way for this net type — use 180° flip.
+                    180.0
+                };
+                (stub_end, angle)
+            }
+            Dir::East | Dir::West => {
+                // Horizontal pin: add a riser (down for GND, up for VCC) to bring
+                // the power symbol to a conventional vertical position.
+                let dy = if down { RISER_MM } else { -RISER_MM };
+                let attach = [stub_end[0], stub_end[1] + dy];
+                w.add_wire(stub_end, attach);
+                (attach, 0.0)
+            }
+        };
+        let pref = format!("#PWR_{refdes}_{pin}_{idx}");
+        w.add_power_symbol(env, &lib_id, &pref, net, attach, angle)?;
+        power_attach.entry(net.to_string()).or_insert(attach);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
