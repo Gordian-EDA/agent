@@ -9,6 +9,7 @@ pub mod config;
 pub mod llm;
 pub mod render;
 pub mod tools;
+pub mod workspace;
 
 pub use agent::{Agent, AgentEvent, Approvals, AutoApprove, TurnOutcome, TurnOutcomeSummary};
 pub use config::Config;

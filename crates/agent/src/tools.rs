@@ -83,6 +83,8 @@ pub struct ToolCtx {
     snapshots: SnapshotStore,
     /// Cross-library name index, built on first `search_symbols` and reused.
     index: OnceLock<SymbolIndex>,
+    /// Project-local persistent state directory `.autopcb/`.
+    workspace: crate::workspace::Workspace,
     /// Keeps a test tempdir alive for the ctx's lifetime; `None` for real ctxs.
     _tempdir: Option<tempfile::TempDir>,
 }
@@ -101,6 +103,8 @@ impl ToolCtx {
     pub fn new(env: KicadEnv, project_dir: PathBuf, sch_path: PathBuf) -> Result<Self> {
         let snapshots = SnapshotStore::for_project(&project_dir)
             .with_context(|| format!("opening snapshot store in {}", project_dir.display()))?;
+        let workspace = crate::workspace::Workspace::for_project(&project_dir)
+            .with_context(|| format!("opening .autopcb workspace in {}", project_dir.display()))?;
         let provider = RealSymbolProvider::new(env.clone());
         Ok(Self {
             env,
@@ -109,6 +113,7 @@ impl ToolCtx {
             provider,
             snapshots,
             index: OnceLock::new(),
+            workspace,
             _tempdir: None,
         })
     }
@@ -135,6 +140,7 @@ impl ToolCtx {
         let project_dir = tempdir.path().to_path_buf();
         let sch_path = project_dir.join("project.kicad_sch");
         let snapshots = SnapshotStore::for_project(&project_dir).ok()?;
+        let workspace = crate::workspace::Workspace::for_project(&project_dir).ok()?;
         let provider = RealSymbolProvider::new(env.clone());
         Some(Self {
             env,
@@ -143,6 +149,7 @@ impl ToolCtx {
             provider,
             snapshots,
             index: OnceLock::new(),
+            workspace,
             _tempdir: Some(tempdir),
         })
     }
@@ -170,6 +177,11 @@ impl ToolCtx {
     /// The snapshot / undo store for this project.
     pub fn snapshots(&self) -> &SnapshotStore {
         &self.snapshots
+    }
+
+    /// The project's `.autopcb/` persistent state.
+    pub fn workspace(&self) -> &crate::workspace::Workspace {
+        &self.workspace
     }
 
     /// The cross-library symbol index, built once and cached.
