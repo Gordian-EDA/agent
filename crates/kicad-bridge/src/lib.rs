@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod env;
+pub mod geometry;
 pub mod provider;
 pub mod search;
 pub mod snapshot;

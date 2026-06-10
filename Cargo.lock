@@ -170,6 +170,7 @@ dependencies = [
  "circuit-lang",
  "elsa",
  "kiutils_kicad",
+ "kiutils_sexpr",
  "quick-xml",
  "serde",
  "serde_json",
