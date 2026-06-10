@@ -25,6 +25,7 @@ name = "autopcb"
 version = "0.1.0"
 dependencies = [
  "circuit-lang",
+ "kicad-bridge",
 ]
 
 [[package]]

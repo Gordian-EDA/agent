@@ -5,3 +5,4 @@ edition.workspace = true
 
 [dependencies]
 circuit-lang = { path = "../circuit-lang" }
+kicad-bridge = { path = "../kicad-bridge" }
