@@ -19,6 +19,39 @@ fn device_r_pin_geometry() {
     let ys: Vec<f64> = g.pins.iter().map(|p| p.at[1]).collect();
     assert!(ys.contains(&3.81) && ys.contains(&-3.81), "{ys:?}");
     assert!(g.pins.iter().all(|p| (p.length - 1.27).abs() < 1e-9));
+    // Device:R is single-unit: every pin carries unit identity 1.
+    assert!(
+        g.pins.iter().all(|p| p.unit == 1),
+        "single-unit symbol must report unit 1 for all pins: {:?}",
+        g.pins.iter().map(|p| p.unit).collect::<Vec<_>>()
+    );
+}
+
+/// Multi-unit symbols (op-amps, logic gates) flatten every unit's pins into the
+/// one `pins` Vec, so `pins.len()` overcounts a single placed unit. Each pin
+/// must carry its `unit` so `sch-engine` can filter per-unit. `LM358` is a
+/// dual op-amp: its pins span unit 1 and unit 2.
+#[test]
+fn multi_unit_symbol_carries_unit_identity() {
+    let Some(env) = KicadEnv::detect() else {
+        eprintln!("SKIP: no KiCAD install detected");
+        return;
+    };
+    let g = SymbolGeometry::load(&env, "Amplifier_Operational:LM358").unwrap();
+    let max_unit = g.pins.iter().map(|p| p.unit).max().unwrap_or(0);
+    assert!(
+        max_unit >= 2,
+        "LM358 is multi-unit; pins must span at least units 1 and 2, got max {max_unit} from {:?}",
+        g.pins
+            .iter()
+            .map(|p| (p.number.clone(), p.unit))
+            .collect::<Vec<_>>()
+    );
+    // Every pin must carry a real (1-based) unit, never 0.
+    assert!(
+        g.pins.iter().all(|p| p.unit >= 1),
+        "all pins must carry a 1-based unit"
+    );
 }
 
 #[test]

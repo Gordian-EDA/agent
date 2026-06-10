@@ -58,6 +58,12 @@ pub struct PinGeom {
     pub angle: f64,
     /// Pin line length in mm.
     pub length: f64,
+    /// 1-based unit this pin belongs to. Multi-unit symbols (op-amps, logic
+    /// gates) split their pins across units; this carries the identity so a
+    /// consumer placing a specific unit can filter. Unit 0 / common pins are
+    /// folded to 1 (matching `symlib.rs::PinMeta`); direct (non-sub-block)
+    /// pins are unit 1.
+    pub unit: u8,
 }
 
 /// Geometry plus the embeddable `(lib_symbols)` definition for one symbol.
@@ -65,7 +71,11 @@ pub struct PinGeom {
 pub struct SymbolGeometry {
     /// Fully-qualified `Lib:Name` identifier.
     pub lib_id: String,
-    /// All pins (own pins, or the parent's pins when the symbol `extends`).
+    /// All pins (own pins, or the parent's pins when the symbol `extends`),
+    /// flattened across **every** unit. For a multi-unit symbol this Vec holds
+    /// the pins of all units interleaved, so `pins.len()` is the total pin count
+    /// across the whole symbol, **not** the per-unit count. A consumer placing a
+    /// specific unit must filter by [`PinGeom::unit`].
     pub pins: Vec<PinGeom>,
     /// The balanced `(symbol "Lib:Name" …)` block ready to splice into a
     /// schematic's `(lib_symbols)`. For derived symbols this is the parent's
@@ -160,21 +170,44 @@ fn pins_of(sym: &Symbol) -> Vec<&SymPin> {
     out
 }
 
-/// Build [`PinGeom`]s from a symbol's owned pins, dropping any pin missing the
-/// geometry we require (number/at/length).
+/// Build [`PinGeom`]s from a symbol's owned pins, tagging each with its 1-based
+/// unit and dropping any pin missing the geometry we require (number/at/length).
+///
+/// Direct pins are unit 1; sub-block pins take the unit digit parsed from the
+/// `<NAME>_<unit>_<bodystyle>` block name (unit 0 / common folded to 1).
 fn collect_pins(sym: &Symbol) -> Vec<PinGeom> {
-    pins_of(sym)
-        .into_iter()
-        .filter_map(|p| {
-            Some(PinGeom {
-                number: p.number.clone()?,
-                name: p.name.clone().unwrap_or_default(),
-                at: p.at?,
-                angle: p.angle.unwrap_or(0.0),
-                length: p.length?,
-            })
-        })
-        .collect()
+    let mut out: Vec<PinGeom> = sym.pins.iter().filter_map(|p| pin_geom(p, 1)).collect();
+    for unit in &sym.units {
+        let unit_no = unit
+            .name
+            .as_deref()
+            .and_then(unit_number)
+            // Unit 0 holds graphics / pins common to all units; PinGeom units
+            // are 1-based, so fold it into unit 1.
+            .map_or(1, |u| u.max(1));
+        out.extend(unit.pins.iter().filter_map(|p| pin_geom(p, unit_no)));
+    }
+    out
+}
+
+/// Build a single [`PinGeom`] for `unit`, dropping pins lacking number/at/length.
+fn pin_geom(p: &SymPin, unit: u8) -> Option<PinGeom> {
+    Some(PinGeom {
+        number: p.number.clone()?,
+        name: p.name.clone().unwrap_or_default(),
+        at: p.at?,
+        angle: p.angle.unwrap_or(0.0),
+        length: p.length?,
+        unit,
+    })
+}
+
+/// Extract the unit number from a sub-block name like `LM358_1_1`
+/// (`<NAME>_<unit>_<bodystyle>`). Mirrors `symlib.rs::unit_number`.
+fn unit_number(block_name: &str) -> Option<u8> {
+    let mut parts = block_name.rsplitn(3, '_');
+    let _bodystyle = parts.next()?;
+    parts.next()?.parse().ok()
 }
 
 /// Extract and retarget the `(symbol …)` block for `lib_id`.
