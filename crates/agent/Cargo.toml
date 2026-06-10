@@ -11,5 +11,11 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+circuit-lang = { path = "../circuit-lang" }
+kicad-bridge = { path = "../kicad-bridge" }
+sch-engine = { path = "../sch-engine" }
+indexmap.workspace = true
+tempfile.workspace = true
+
 [dev-dependencies]
 tokio.workspace = true

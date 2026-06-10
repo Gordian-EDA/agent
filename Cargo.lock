@@ -8,10 +8,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "circuit-lang",
  "dotenvy",
+ "indexmap",
+ "kicad-bridge",
  "reqwest",
+ "sch-engine",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
