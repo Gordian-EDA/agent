@@ -110,7 +110,7 @@ async fn loop_runs_tools_and_gates_apply_on_yes() {
     let mut approvals = AutoApprove::yes();
 
     let outcome = agent
-        .run_turn("add a 10k resistor between A and GND", &mut approvals)
+        .run_turn("add a 10k resistor between A and GND", &mut approvals, None)
         .await
         .unwrap();
 
@@ -144,7 +144,7 @@ async fn loop_rejects_apply_on_no_and_does_not_write() {
     let mut approvals = AutoApprove::no();
 
     let outcome = agent
-        .run_turn("add a 10k resistor between A and GND", &mut approvals)
+        .run_turn("add a 10k resistor between A and GND", &mut approvals, None)
         .await
         .unwrap();
 

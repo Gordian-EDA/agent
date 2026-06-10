@@ -4,7 +4,12 @@
 //! - `autopcb agent [--project <dir>] "<prompt>"` runs ONE headless agent turn
 //!   against real Bedrock + real KiCAD, auto-approving the write, and prints the
 //!   turn outcome plus the final ERC result. This is the CLI form of the
-//!   interactive copilot (the ratatui TUI is a later task).
+//!   interactive copilot.
+//! - `autopcb tui [--project <dir>]` launches the ratatui copilot cockpit
+//!   (spec §11): a chat transcript, a proposed-changes apply-gate, and an input
+//!   line, driving the same agent interactively.
+
+mod tui;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -33,16 +38,73 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("tui") => match run_tui_command(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::FAILURE
+            }
+        },
         Some(other) => {
             eprintln!("error: unknown command `{other}`");
             eprintln!(
                 "usage:\n  \
                  autopcb                              print version\n  \
-                 autopcb agent [--project <dir>] \"<prompt>\"   run one agent turn"
+                 autopcb agent [--project <dir>] \"<prompt>\"   run one agent turn\n  \
+                 autopcb tui [--project <dir>]                  launch the copilot cockpit"
             );
             ExitCode::FAILURE
         }
     }
+}
+
+/// Parse `tui` args into a project directory, defaulting to a temp project when
+/// `--project` is omitted so `autopcb tui` always launches with somewhere to
+/// write.
+fn parse_tui_args(args: &[String]) -> Result<PathBuf> {
+    let mut project_dir: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--project" | "-p" => {
+                let dir = args
+                    .get(i + 1)
+                    .context("--project requires a directory argument")?;
+                project_dir = Some(PathBuf::from(dir));
+                i += 2;
+            }
+            other => {
+                project_dir = Some(PathBuf::from(other));
+                i += 1;
+            }
+        }
+    }
+    Ok(project_dir.unwrap_or_else(default_tui_project_dir))
+}
+
+/// A stable default project directory for `autopcb tui` with no `--project`:
+/// `<temp-dir>/autopcb-tui`. Created so the agent has a place to write.
+fn default_tui_project_dir() -> PathBuf {
+    std::env::temp_dir().join("autopcb-tui")
+}
+
+/// Run the `tui` subcommand: launch the cockpit on a single-threaded Tokio
+/// runtime + `LocalSet`.
+///
+/// The agent's [`ToolCtx`] is intentionally **not** `Send` (its symbol caches use
+/// non-thread-safe interior mutability), so the turn task is spawned with
+/// `spawn_local` and the whole UI runs on one thread. A current-thread runtime
+/// gives us a `LocalSet` to host that.
+fn run_tui_command(args: &[String]) -> Result<()> {
+    let project_dir = parse_tui_args(args)?;
+    std::fs::create_dir_all(&project_dir)
+        .with_context(|| format!("creating project dir {}", project_dir.display()))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("starting the Tokio runtime")?;
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&runtime, tui::run(project_dir))
 }
 
 /// Parse `agent` args into `(project_dir, prompt)`.
@@ -123,7 +185,7 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     let mut approvals = AutoApprove::yes();
 
     let outcome = runtime
-        .block_on(agent.run_turn(&prompt, &mut approvals))
+        .block_on(agent.run_turn(&prompt, &mut approvals, None))
         .context("running the agent turn")?;
 
     // 5. Report the outcome.

@@ -51,7 +51,7 @@ async fn bluepill_founding_prompt_yields_erc_clean_schematic() {
     let mut approvals = AutoApprove::yes();
 
     let outcome = agent
-        .run_turn(FOUNDING_PROMPT, &mut approvals)
+        .run_turn(FOUNDING_PROMPT, &mut approvals, None)
         .await
         .expect("the agent turn should complete");
 

@@ -29,7 +29,9 @@
 //! supplies an interactive one later.
 
 use anyhow::Result;
+use async_trait::async_trait;
 use serde_json::{Value, json};
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::llm::{ContentBlock, LlmClient, Message, Role};
 use crate::tools::{ToolCtx, Tools};
@@ -41,10 +43,15 @@ const MAX_ITERATIONS: usize = 12;
 
 /// The human apply-gate. The loop calls [`Approvals::approve`] with the dry-run
 /// diff before any `apply_design` write; returning `false` cancels the write.
-pub trait Approvals {
+///
+/// `approve` is **async**: in the TUI the gate blocks the agent turn until the
+/// user presses `a`/`r`, which is inherently a wait on another task. Headless
+/// implementations ([`AutoApprove`]) return immediately.
+#[async_trait]
+pub trait Approvals: Send {
     /// Decide whether to commit the proposed change, given the dry-run diff
     /// (the `apply_design` dry-run JSON: `{ok, would_write, diff, rendered_len}`).
-    fn approve(&mut self, diff: &Value) -> bool;
+    async fn approve(&mut self, diff: &Value) -> bool;
 }
 
 /// A non-interactive [`Approvals`] that always answers the same way. Used by
@@ -65,9 +72,48 @@ impl AutoApprove {
     }
 }
 
+#[async_trait]
 impl Approvals for AutoApprove {
-    fn approve(&mut self, _diff: &Value) -> bool {
+    async fn approve(&mut self, _diff: &Value) -> bool {
         self.answer
+    }
+}
+
+/// A summary of one finished turn, carried in [`AgentEvent::TurnDone`] so the UI
+/// can update its counters without owning the loop's internals.
+#[derive(Clone, Debug)]
+pub struct TurnOutcomeSummary {
+    /// Whether an approved write actually committed this turn.
+    pub applied: bool,
+    /// How many tool calls the loop executed.
+    pub tool_calls_made: usize,
+    /// The model's final text reply.
+    pub final_text: String,
+}
+
+/// Events the agent loop emits as it runs, for a live UI. The headless paths
+/// pass `None` and never see these.
+#[derive(Clone, Debug)]
+pub enum AgentEvent {
+    /// The model produced assistant text (interleaved with tool calls or final).
+    AssistantText(String),
+    /// A tool call is about to run.
+    ToolStarted { name: String },
+    /// A tool call finished; `summary` is a short one-line digest for a card.
+    ToolFinished { name: String, summary: String },
+    /// An approved `apply_design` committed; carries post-write ERC counts.
+    Applied { errors: usize, warnings: usize },
+    /// The turn finished.
+    TurnDone(TurnOutcomeSummary),
+}
+
+/// A typed handle for the optional UI event sink. `None` is the headless case.
+type Events<'a> = Option<&'a UnboundedSender<AgentEvent>>;
+
+/// Best-effort emit: a closed receiver (UI gone) is ignored.
+fn emit(events: Events<'_>, ev: AgentEvent) {
+    if let Some(tx) = events {
+        let _ = tx.send(ev);
     }
 }
 
@@ -114,10 +160,15 @@ impl Agent {
     /// commits through `approvals`) → feed results back → repeat, until the model
     /// returns a final text with no pending tool calls, or [`MAX_ITERATIONS`] is
     /// reached.
+    ///
+    /// `events`, when `Some`, receives [`AgentEvent`]s as the loop runs so a UI
+    /// can render assistant text and tool-call cards live. Headless callers pass
+    /// `None`.
     pub async fn run_turn(
         &mut self,
         user_msg: &str,
         approvals: &mut dyn Approvals,
+        events: Events<'_>,
     ) -> Result<TurnOutcome> {
         let system = system_prompt();
         let defs = self.tools.defs();
@@ -129,6 +180,11 @@ impl Agent {
 
         for _ in 0..MAX_ITERATIONS {
             let completion = self.client.complete(&system, &messages, &defs).await?;
+
+            // Surface any assistant text the moment we have it.
+            if !completion.text.is_empty() {
+                emit(events, AgentEvent::AssistantText(completion.text.clone()));
+            }
 
             // Record the assistant turn (text + any tool_use blocks) verbatim so
             // the next request carries a faithful transcript.
@@ -151,6 +207,14 @@ impl Agent {
             // No tool calls → the model is done; return its text.
             if completion.tool_calls.is_empty() {
                 final_text = completion.text;
+                emit(
+                    events,
+                    AgentEvent::TurnDone(TurnOutcomeSummary {
+                        applied,
+                        tool_calls_made,
+                        final_text: final_text.clone(),
+                    }),
+                );
                 return Ok(TurnOutcome {
                     applied,
                     final_text,
@@ -163,7 +227,22 @@ impl Agent {
             let mut result_blocks: Vec<ContentBlock> = Vec::new();
             for call in &completion.tool_calls {
                 tool_calls_made += 1;
-                let content = self.run_tool_call(call, approvals, &mut applied);
+                emit(
+                    events,
+                    AgentEvent::ToolStarted {
+                        name: call.name.clone(),
+                    },
+                );
+                let content = self
+                    .run_tool_call(call, approvals, &mut applied, events)
+                    .await;
+                emit(
+                    events,
+                    AgentEvent::ToolFinished {
+                        name: call.name.clone(),
+                        summary: tool_summary(&call.name, &call.input, &content),
+                    },
+                );
                 result_blocks.push(ContentBlock::ToolResult {
                     tool_use_id: call.id.clone(),
                     content,
@@ -185,6 +264,14 @@ impl Agent {
         if final_text.is_empty() {
             final_text = "(agent reached its iteration limit without a final answer)".to_string();
         }
+        emit(
+            events,
+            AgentEvent::TurnDone(TurnOutcomeSummary {
+                applied,
+                tool_calls_made,
+                final_text: final_text.clone(),
+            }),
+        );
         Ok(TurnOutcome {
             applied,
             final_text,
@@ -196,14 +283,16 @@ impl Agent {
     /// to the model. `apply_design` commits are routed through the apply-gate;
     /// every other tool runs directly. Tool errors are surfaced as a structured
     /// `{error: ...}` result (not propagated) so the model can self-repair.
-    fn run_tool_call(
+    async fn run_tool_call(
         &self,
         call: &crate::llm::ToolCall,
         approvals: &mut dyn Approvals,
         applied: &mut bool,
+        events: Events<'_>,
     ) -> String {
         let result = if call.name == "apply_design" && wants_commit(&call.input) {
-            self.gated_apply(&call.input, approvals, applied)
+            self.gated_apply(&call.input, approvals, applied, events)
+                .await
         } else {
             self.tools.run(&call.name, call.input.clone(), &self.ctx)
         };
@@ -216,11 +305,12 @@ impl Agent {
 
     /// The apply-gate: dry-run to get the diff, ask for approval, and only then
     /// commit. On rejection nothing is written and the model is told.
-    fn gated_apply(
+    async fn gated_apply(
         &self,
         input: &Value,
         approvals: &mut dyn Approvals,
         applied: &mut bool,
+        events: Events<'_>,
     ) -> Result<Value> {
         // 1. Dry-run (commit:false) to get the diff WITHOUT writing.
         let mut dry_input = input.clone();
@@ -233,8 +323,9 @@ impl Agent {
             return Ok(dry);
         }
 
-        // 2. Human apply-gate on the dry-run diff.
-        if !approvals.approve(&dry) {
+        // 2. Human apply-gate on the dry-run diff (awaits a UI keypress / a
+        //    headless answer).
+        if !approvals.approve(&dry).await {
             return Ok(json!({
                 "ok": true,
                 "written": false,
@@ -249,8 +340,83 @@ impl Agent {
         let committed = self.tools.run("apply_design", commit_input, &self.ctx)?;
         if committed.get("written").and_then(Value::as_bool) == Some(true) {
             *applied = true;
+            let errors = committed
+                .pointer("/erc/errors")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let warnings = committed
+                .pointer("/erc/warnings")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            emit(events, AgentEvent::Applied { errors, warnings });
         }
         Ok(committed)
+    }
+}
+
+/// A short, human-readable one-liner for a finished tool call, used to label a
+/// collapsed tool-call card in the UI. Reads the structured JSON result.
+fn tool_summary(name: &str, input: &Value, result_json: &str) -> String {
+    let result: Value = serde_json::from_str(result_json).unwrap_or(Value::Null);
+    if let Some(err) = result.get("error").and_then(Value::as_str) {
+        return format!("error: {err}");
+    }
+    match name {
+        "search_symbols" => {
+            let q = input.get("query").and_then(Value::as_str).unwrap_or("");
+            let n = result
+                .get("hits")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            format!("\"{q}\" → {n} hits")
+        }
+        "get_symbol_info" => {
+            let lib = input.get("lib_id").and_then(Value::as_str).unwrap_or("");
+            let n = result
+                .get("pins")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            format!("{lib} → {n} pins")
+        }
+        "get_design" => "lifted current design".to_string(),
+        "validate_design" => {
+            let errors = result.get("errors").and_then(Value::as_u64).unwrap_or(0);
+            let warnings = result.get("warnings").and_then(Value::as_u64).unwrap_or(0);
+            format!("{errors} errors, {warnings} warnings")
+        }
+        "apply_design" => {
+            if result.get("written").and_then(Value::as_bool) == Some(true) {
+                let errors = result
+                    .pointer("/erc/errors")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                format!("written (ERC {errors} errors)")
+            } else if result.get("rejected").and_then(Value::as_bool) == Some(true) {
+                "rejected".to_string()
+            } else if result.get("would_write").and_then(Value::as_bool) == Some(true) {
+                let added = result
+                    .pointer("/diff/added")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                let removed = result
+                    .pointer("/diff/removed")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                format!("preview: +{added} -{removed}")
+            } else {
+                "ok".to_string()
+            }
+        }
+        "run_erc" => {
+            let errors = result.get("errors").and_then(Value::as_u64).unwrap_or(0);
+            let warnings = result.get("warnings").and_then(Value::as_u64).unwrap_or(0);
+            format!("{errors} errors, {warnings} warnings")
+        }
+        _ => "done".to_string(),
     }
 }
 
@@ -373,11 +539,35 @@ summary of what you did — no tool call.
 mod tests {
     use super::*;
 
-    #[test]
-    fn auto_approve_yes_and_no() {
+    #[tokio::test]
+    async fn auto_approve_yes_and_no() {
         let diff = json!({ "diff": { "added": ["R1"] } });
-        assert!(AutoApprove::yes().approve(&diff));
-        assert!(!AutoApprove::no().approve(&diff));
+        assert!(AutoApprove::yes().approve(&diff).await);
+        assert!(!AutoApprove::no().approve(&diff).await);
+    }
+
+    #[test]
+    fn tool_summary_reads_structured_results() {
+        let s = tool_summary(
+            "search_symbols",
+            &json!({ "query": "STM32" }),
+            &json!({ "hits": [1, 2, 3] }).to_string(),
+        );
+        assert_eq!(s, "\"STM32\" → 3 hits");
+
+        let s = tool_summary(
+            "apply_design",
+            &json!({}),
+            &json!({ "written": true, "erc": { "errors": 0 } }).to_string(),
+        );
+        assert!(s.contains("written"), "got: {s}");
+
+        let s = tool_summary(
+            "get_design",
+            &json!({}),
+            &json!({ "error": "boom" }).to_string(),
+        );
+        assert_eq!(s, "error: boom");
     }
 
     #[test]

@@ -9,7 +9,7 @@ pub mod config;
 pub mod llm;
 pub mod tools;
 
-pub use agent::{Agent, Approvals, AutoApprove, TurnOutcome};
+pub use agent::{Agent, AgentEvent, Approvals, AutoApprove, TurnOutcome, TurnOutcomeSummary};
 pub use config::Config;
 pub use llm::{
     BedrockClient, Completion, ContentBlock, LlmClient, Message, Role, ToolCall, ToolDef,
