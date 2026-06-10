@@ -34,7 +34,7 @@ use std::fmt::Write as _;
 use std::io;
 
 use kicad_bridge::env::KicadEnv;
-use kicad_bridge::geometry::SymbolGeometry;
+use kicad_bridge::geometry::{PinGeom, SymbolGeometry};
 
 use crate::grid::snap_point;
 use crate::ids::stable_uuid;
@@ -55,6 +55,27 @@ struct Instance {
     at: [f64; 2],
     /// Orientation in degrees (0/90/180/270).
     angle: f64,
+    /// Whether the instance is mirrored on the X axis (`(mirror x)`). We do not
+    /// emit mirror today, but the endpoint transform handles it so connectivity
+    /// stays correct once placement gains mirroring.
+    mirror: bool,
+}
+
+/// One net-name label emitted at a pin's sheet-space connection endpoint.
+///
+/// A label whose `(at …)` coincides with a pin endpoint binds that pin to the
+/// named net; two pins carrying labels with the same net name are joined by
+/// KiCAD with no wires (proven in `emit_spike.rs`). The label uuid is derived
+/// from `(refdes, pin, net)` so re-emitting the same design is byte-identical.
+struct PinLabel {
+    /// Net name (free-form; escaped at render time).
+    net: String,
+    /// Grid-snapped sheet-space position of the pin's connection endpoint.
+    at: [f64; 2],
+    /// Stable key for the label uuid: `"<refdes>:<pin>:<net>:<index>"`. The
+    /// index disambiguates the (rare) case where a pin *name* matches multiple
+    /// physical pins, each of which gets its own label.
+    uuid_key: String,
 }
 
 /// Accumulates placed symbols and emits a deterministic `.kicad_sch` document.
@@ -65,6 +86,9 @@ pub struct SchematicWriter {
     lib_symbols: BTreeMap<String, String>,
     /// Placed instances, in insertion order; sorted by refdes at `finish`.
     instances: Vec<Instance>,
+    /// Net-name labels at pin endpoints, in insertion order; sorted by uuid_key
+    /// at `finish` for deterministic output.
+    labels: Vec<PinLabel>,
 }
 
 impl SchematicWriter {
@@ -104,7 +128,82 @@ impl SchematicWriter {
             value: value.to_string(),
             at: snap_point(at),
             angle,
+            mirror: false,
         });
+        Ok(())
+    }
+
+    /// Place a net-name label at the connection endpoint of one pin.
+    ///
+    /// This is the connectivity mechanism: a label whose position coincides with
+    /// a pin's sheet-space connection point binds that pin to the named net, and
+    /// two pins carrying labels with the *same* net name are joined by KiCAD with
+    /// no wires (proven in `crates/kicad-bridge/examples/emit_spike.rs`). Power
+    /// nets get plain labels too — they suffice for ERC connectivity; power
+    /// symbols are an optional later enhancement.
+    ///
+    /// `pin` is resolved against the symbol geometry **by number first, then by
+    /// name** (matching `circuit-lang`'s pin resolution). A pin *name* may match
+    /// several physical pins; in that case a label is emitted at **every**
+    /// matching pin so they all join the net.
+    ///
+    /// The endpoint is computed from the placed instance's recorded position and
+    /// orientation (and mirror, when present): the pin's local connection point
+    /// is rotated/flipped into sheet space and snapped to the grid. See
+    /// [`pin_endpoint`] for the exact transform.
+    ///
+    /// Returns an error if `refdes` was never placed, if its geometry cannot be
+    /// loaded, or if no pin matches `pin` by number or name.
+    pub fn add_pin_label(
+        &mut self,
+        env: &KicadEnv,
+        refdes: &str,
+        pin: &str,
+        net: &str,
+    ) -> io::Result<()> {
+        // Recover the instance's lib_id + recorded sheet position/orientation.
+        let inst = self
+            .instances
+            .iter()
+            .find(|i| i.refdes == refdes)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no placed symbol with refdes {refdes:?}"),
+                )
+            })?;
+        let inst_at = inst.at;
+        let inst_angle = inst.angle;
+        let inst_mirror = inst.mirror;
+
+        let geom = SymbolGeometry::load(env, &inst.lib_id)?;
+
+        // Resolve the pin: number first, then name. A name may match several
+        // physical pins (e.g. multiple GND pins), so collect all matches and
+        // label each. Number matches are unique, so this yields one pin.
+        let matches: Vec<&PinGeom> = {
+            let by_number: Vec<&PinGeom> = geom.pins.iter().filter(|p| p.number == pin).collect();
+            if !by_number.is_empty() {
+                by_number
+            } else {
+                geom.pins.iter().filter(|p| p.name == pin).collect()
+            }
+        };
+        if matches.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no pin {pin:?} (by number or name) on {}", inst.lib_id),
+            ));
+        }
+
+        for (idx, pg) in matches.into_iter().enumerate() {
+            let at = pin_endpoint(pg, inst_at, inst_angle, inst_mirror);
+            self.labels.push(PinLabel {
+                net: net.to_string(),
+                at,
+                uuid_key: format!("{refdes}:{pin}:{net}:{idx}"),
+            });
+        }
         Ok(())
     }
 
@@ -132,6 +231,14 @@ impl SchematicWriter {
             out.push('\n');
         }
         out.push_str("\t)\n");
+
+        // Net-name labels at pin endpoints, sorted by their stable uuid_key so
+        // the emitted order (and uuids) are deterministic.
+        let mut labels = self.labels;
+        labels.sort_by(|a, b| a.uuid_key.cmp(&b.uuid_key));
+        for label in &labels {
+            out.push_str(&render_label(label));
+        }
 
         // Symbol instances, sorted by refdes for deterministic output.
         let mut instances = self.instances;
@@ -174,6 +281,71 @@ fn escape_sexpr_string(s: &str) -> String {
 /// position could render as `0` or `-0`), so we collapse negative zero here.
 fn fmt_coord(v: f64) -> f64 {
     if v == 0.0 { 0.0 } else { v }
+}
+
+/// Compute the sheet-space connection endpoint of a pin on a placed instance.
+///
+/// ## What "connection endpoint" means
+///
+/// In a `.kicad_sym`, a pin's `(at x y angle)` is the pin's **connection point**
+/// — the tip where wires/labels attach — and the pin line extends `length` mm
+/// *into the symbol body* along `angle`. So the connection point is exactly the
+/// pin's local `at`; no `length` projection is applied (projecting by `length`
+/// would land inside the body, off the connection). This matches the proven
+/// `emit_spike.rs`, where Device:R pin 1 at local `(0, 3.81)` maps to sheet
+/// `(inst_x, inst_y - 3.81)`.
+///
+/// ## The transform (symbol space → sheet space)
+///
+/// KiCAD symbol Y grows **upward**; the schematic sheet Y grows **downward**. A
+/// placed instance applies, in order: an optional X-mirror, a rotation by the
+/// instance `angle`, then the Y-flip into sheet space, then a translation to the
+/// instance position. Concretely, for a local point `(lx, ly)`:
+///
+/// 1. **Mirror** (`(mirror x)`): negate `lx` → `(-lx, ly)`.
+/// 2. **Rotate** by the instance angle θ (KiCAD rotates counter-clockwise in
+///    symbol space): `(lx·cosθ − ly·sinθ, lx·sinθ + ly·cosθ)`.
+/// 3. **Y-flip + translate**: `sheet = (inst_x + rx, inst_y − ry)`.
+///
+/// At θ = 0 with no mirror this reduces to `(inst_x + lx, inst_y − ly)`, the
+/// spike's proven form. Angles are restricted to 0/90/180/270 in practice, so
+/// the sin/cos are exact (±1, 0) and the result stays on the grid; we still snap
+/// to absorb floating-point dust.
+fn pin_endpoint(pin: &PinGeom, inst_at: [f64; 2], inst_angle: f64, mirror: bool) -> [f64; 2] {
+    let (mut lx, ly) = (pin.at[0], pin.at[1]);
+    if mirror {
+        lx = -lx;
+    }
+
+    let theta = inst_angle.to_radians();
+    let (s, c) = theta.sin_cos();
+    let rx = lx * c - ly * s;
+    let ry = lx * s + ly * c;
+
+    let sheet = [inst_at[0] + rx, inst_at[1] - ry];
+    snap_point(sheet)
+}
+
+/// Render one net-name label at a pin endpoint into a `(label …)` block.
+///
+/// The net name is free-form (LLM-/user-derived), so it is escaped before
+/// embedding. The label rotation is fixed at 0: a label connects to whatever pin
+/// shares its `(at …)` position regardless of label text orientation, so the
+/// rotation only affects how the text reads, not connectivity. The uuid is
+/// content-derived from the label's stable key for byte-identical re-emission.
+fn render_label(label: &PinLabel) -> String {
+    let x = fmt_coord(label.at[0]);
+    let y = fmt_coord(label.at[1]);
+    let net = escape_sexpr_string(&label.net);
+    let uuid = stable_uuid("label", &label.uuid_key);
+
+    let mut s = String::new();
+    let _ = writeln!(s, "\t(label \"{net}\"");
+    let _ = writeln!(s, "\t\t(at {x} {y} 0)");
+    s.push_str("\t\t(effects (font (size 1.27 1.27)) (justify left bottom))\n");
+    let _ = writeln!(s, "\t\t(uuid \"{uuid}\")");
+    s.push_str("\t)\n");
+    s
 }
 
 /// Render one placed symbol instance into its `(symbol …)` S-expression block.
@@ -282,6 +454,62 @@ mod tests {
         assert_eq!(escape_sexpr_string("a\\b"), "a\\\\b");
         // `\"` in the input becomes `\\\"` (backslash escaped, then quote escaped).
         assert_eq!(escape_sexpr_string("\\\""), "\\\\\\\"");
+    }
+
+    /// A PinGeom with only the fields the endpoint transform reads.
+    fn pin_at(x: f64, y: f64) -> PinGeom {
+        PinGeom {
+            number: "1".to_string(),
+            name: "~".to_string(),
+            at: [x, y],
+            angle: 0.0,
+            length: 1.27,
+            unit: 1,
+        }
+    }
+
+    /// Assert two points are equal within grid-snap floating-point dust.
+    fn pt_close(got: [f64; 2], want: [f64; 2]) {
+        let eps = 1e-6;
+        assert!(
+            (got[0] - want[0]).abs() < eps && (got[1] - want[1]).abs() < eps,
+            "got {got:?}, want {want:?}"
+        );
+    }
+
+    #[test]
+    fn pin_endpoint_angle0_matches_spike() {
+        // Device:R pin 1 local (0, 3.81) at instance (127, 63.5) angle 0:
+        // the spike's proven sheet endpoint is (127.0, 59.69) — inst_y - 3.81.
+        let p = pin_at(0.0, 3.81);
+        pt_close(pin_endpoint(&p, [127.0, 63.5], 0.0, false), [127.0, 59.69]);
+        // Pin 2 local (0, -3.81) -> (127.0, 67.31).
+        let p2 = pin_at(0.0, -3.81);
+        pt_close(pin_endpoint(&p2, [127.0, 63.5], 0.0, false), [127.0, 67.31]);
+    }
+
+    #[test]
+    fn pin_endpoint_rotations() {
+        // Local (0, 3.81). Sheet form is (inst_x + rx, inst_y - ry) where
+        // (rx, ry) is the local point rotated CCW by the instance angle.
+        let p = pin_at(0.0, 3.81);
+        let inst = [127.0, 63.5];
+        // 90 deg: (rx, ry) = (-3.81, 0) -> sheet (123.19, 63.5).
+        pt_close(pin_endpoint(&p, inst, 90.0, false), [123.19, 63.5]);
+        // 180 deg: (rx, ry) = (0, -3.81) -> sheet (127.0, 67.31).
+        pt_close(pin_endpoint(&p, inst, 180.0, false), [127.0, 67.31]);
+        // 270 deg: (rx, ry) = (3.81, 0) -> sheet (130.81, 63.5).
+        pt_close(pin_endpoint(&p, inst, 270.0, false), [130.81, 63.5]);
+    }
+
+    #[test]
+    fn pin_endpoint_mirror_negates_local_x() {
+        // A pin offset in X: mirror negates local x before rotation. At angle 0,
+        // local (2.54, 0) mirrors to (-2.54, 0) -> sheet (124.46, 63.5).
+        let p = pin_at(2.54, 0.0);
+        let inst = [127.0, 63.5];
+        pt_close(pin_endpoint(&p, inst, 0.0, false), [129.54, 63.5]);
+        pt_close(pin_endpoint(&p, inst, 0.0, true), [124.46, 63.5]);
     }
 
     #[test]
