@@ -35,6 +35,7 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
 
     match key.code {
         KeyCode::Enter => Some(Msg::Submit),
+        KeyCode::Tab => Some(Msg::Complete),
         KeyCode::Backspace => Some(Msg::Backspace),
         KeyCode::Delete => Some(Msg::Delete),
         KeyCode::Left => Some(Msg::CursorLeft),
@@ -85,6 +86,15 @@ mod tests {
     fn esc_maps_to_cancel() {
         let a = app();
         assert!(matches!(map_key(&a, key(KeyCode::Esc)), Some(Msg::Cancel)));
+    }
+
+    #[test]
+    fn tab_maps_to_complete() {
+        let a = app();
+        assert!(matches!(
+            map_key(&a, key(KeyCode::Tab)),
+            Some(Msg::Complete)
+        ));
     }
 
     #[test]

@@ -183,7 +183,7 @@ fn get_design_tool_notes_absent_schematic() {
 }
 
 #[test]
-fn defs_lists_all_six_tools() {
+fn defs_lists_all_eight_tools() {
     let tools = Tools::new();
     let names: Vec<String> = tools.defs().into_iter().map(|d| d.name).collect();
     for expected in [
@@ -193,9 +193,156 @@ fn defs_lists_all_six_tools() {
         "validate_design",
         "apply_design",
         "run_erc",
+        "project_info",
+        "read_schematic",
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
+}
+
+#[test]
+fn project_info_reports_paths_and_state() {
+    let Some(ctx) = ToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let tools = Tools::new();
+    let out = tools
+        .run("project_info", serde_json::json!({}), &ctx)
+        .unwrap();
+    assert_eq!(
+        out["sch_path"],
+        serde_json::json!(ctx.sch_path().display().to_string())
+    );
+    assert_eq!(out["sch_exists"], serde_json::json!(false));
+    assert_eq!(
+        out["project_dir"],
+        serde_json::json!(ctx.project_dir().display().to_string())
+    );
+    assert!(out["snapshots"].is_number(), "snapshot count: {out}");
+
+    // After a commit the same tool reports the file as present.
+    tools
+        .run(
+            "apply_design",
+            serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+            &ctx,
+        )
+        .unwrap();
+    let out = tools
+        .run("project_info", serde_json::json!({}), &ctx)
+        .unwrap();
+    assert_eq!(out["sch_exists"], serde_json::json!(true), "got: {out}");
+}
+
+#[test]
+fn read_schematic_lifts_an_external_file_by_absolute_path() {
+    let Some(ctx) = ToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let tools = Tools::new();
+    // Write a real schematic into the project, then read it back as if it were
+    // an arbitrary external path.
+    tools
+        .run(
+            "apply_design",
+            serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+            &ctx,
+        )
+        .unwrap();
+    let abs = ctx.sch_path().display().to_string();
+    let out = tools
+        .run("read_schematic", serde_json::json!({ "path": abs }), &ctx)
+        .unwrap();
+    let yaml = out["yaml"].as_str().expect("lifted yaml");
+    assert!(yaml.contains("R1"), "lifted yaml carries R1: {yaml}");
+    assert!(
+        out.get("note").is_some(),
+        "reading the project's own schematic is noted: {out}"
+    );
+}
+
+#[test]
+fn read_schematic_resolves_relative_to_the_project_dir() {
+    let Some(ctx) = ToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let tools = Tools::new();
+    tools
+        .run(
+            "apply_design",
+            serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+            &ctx,
+        )
+        .unwrap();
+    let rel = ctx.sch_path().file_name().unwrap().to_string_lossy();
+    let out = tools
+        .run("read_schematic", serde_json::json!({ "path": rel }), &ctx)
+        .unwrap();
+    assert!(
+        out["yaml"].as_str().is_some_and(|y| y.contains("R1")),
+        "relative path resolves against the project dir: {out}"
+    );
+}
+
+#[test]
+fn read_schematic_errors_cleanly_for_missing_or_wrong_files() {
+    let Some(ctx) = ToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let tools = Tools::new();
+
+    let out = tools
+        .run(
+            "read_schematic",
+            serde_json::json!({ "path": "/no/such/file.kicad_sch" }),
+            &ctx,
+        )
+        .unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("no file")),
+        "missing file is a structured error: {out}"
+    );
+
+    let not_sch = ctx.project_dir().join("readme.txt");
+    std::fs::write(&not_sch, "hello").unwrap();
+    let out = tools
+        .run(
+            "read_schematic",
+            serde_json::json!({ "path": not_sch.display().to_string() }),
+            &ctx,
+        )
+        .unwrap();
+    assert!(
+        out["error"]
+            .as_str()
+            .is_some_and(|e| e.contains(".kicad_sch")),
+        "wrong extension is a structured error: {out}"
+    );
+}
+
+#[test]
+fn apply_design_commit_reports_the_written_path() {
+    let Some(ctx) = ToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let tools = Tools::new();
+    let out = tools
+        .run(
+            "apply_design",
+            serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+            &ctx,
+        )
+        .unwrap();
+    assert_eq!(
+        out["path"],
+        serde_json::json!(ctx.sch_path().display().to_string()),
+        "commit result carries the written path: {out}"
+    );
 }
 
 #[test]

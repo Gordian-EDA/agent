@@ -104,7 +104,7 @@ pub struct ToolCall {
 }
 
 /// The parsed result of a single completion request.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Completion {
     /// All text blocks, concatenated.
     pub text: String,
@@ -112,6 +112,11 @@ pub struct Completion {
     pub tool_calls: Vec<ToolCall>,
     /// Raw stop reason from the provider (e.g. `end_turn`, `tool_use`).
     pub stop_reason: String,
+    /// Prompt tokens the provider reports for this call (0 when absent).
+    /// This is the size of everything sent: system + history + tools.
+    pub input_tokens: u64,
+    /// Generated tokens the provider reports for this call (0 when absent).
+    pub output_tokens: u64,
 }
 
 /// Provider-agnostic completion interface.
@@ -310,10 +315,20 @@ pub(crate) fn parse_completion(value: &Value) -> Result<Completion> {
         .unwrap_or("")
         .to_string();
 
+    let usage = |key: &str| {
+        value
+            .get("usage")
+            .and_then(|u| u.get(key))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
+
     Ok(Completion {
         text,
         tool_calls,
         stop_reason,
+        input_tokens: usage("inputTokens"),
+        output_tokens: usage("outputTokens"),
     })
 }
 
@@ -411,6 +426,19 @@ mod tests {
         assert_eq!(completion.text, "42");
         assert!(completion.tool_calls.is_empty());
         assert_eq!(completion.stop_reason, "end_turn");
+        assert_eq!(completion.input_tokens, 10);
+        assert_eq!(completion.output_tokens, 1);
+    }
+
+    #[test]
+    fn missing_usage_defaults_to_zero_tokens() {
+        let raw = json!({
+            "output": { "message": { "role": "assistant", "content": [{ "text": "hi" }] } },
+            "stopReason": "end_turn"
+        });
+        let completion = parse_completion(&raw).unwrap();
+        assert_eq!(completion.input_tokens, 0);
+        assert_eq!(completion.output_tokens, 0);
     }
 
     #[test]

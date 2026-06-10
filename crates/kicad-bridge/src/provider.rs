@@ -4,14 +4,17 @@
 //! Libraries are loaded lazily, one `.kicad_sym` file per referenced lib,
 //! and looked-up [`SymbolMeta`]s are memoized. The trait hands out
 //! `Option<&SymbolMeta>`, so memoized metas need stable addresses across an
-//! append-only cache: [`elsa::FrozenMap`] (boxed values, interior
+//! append-only cache: [`elsa::sync::FrozenMap`] (boxed values, interior
 //! mutability, no `unsafe` here, nothing leaked) provides exactly that.
+//!
+//! The provider is `Send + Sync` (sync `FrozenMap` + `Mutex`'d lib cache) so
+//! tool execution can run on a blocking thread pool without freezing a UI.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use circuit_lang::{SymbolMeta, SymbolProvider};
-use elsa::FrozenMap;
+use elsa::sync::FrozenMap;
 
 use crate::env::KicadEnv;
 use crate::symlib::SymbolLib;
@@ -26,7 +29,7 @@ pub struct RealSymbolProvider {
     env: KicadEnv,
     /// Lazily loaded libraries; `None` records a missing/unparsable lib so
     /// it is only attempted once.
-    libs: RefCell<HashMap<String, Option<SymbolLib>>>,
+    libs: Mutex<HashMap<String, Option<SymbolLib>>>,
     /// Memoized per-lib_id metadata with address stability (append-only).
     metas: FrozenMap<String, Box<SymbolMeta>>,
 }
@@ -35,7 +38,7 @@ impl RealSymbolProvider {
     pub fn new(env: KicadEnv) -> Self {
         Self {
             env,
-            libs: RefCell::new(HashMap::new()),
+            libs: Mutex::new(HashMap::new()),
             metas: FrozenMap::new(),
         }
     }
@@ -43,10 +46,10 @@ impl RealSymbolProvider {
     /// Run `f` against the named library, loading it on first reference.
     /// Returns `None` if the library does not exist or fails to parse.
     ///
-    /// The closure must not reenter the provider — the `RefCell` borrow on
-    /// the lib cache is held across `f`.
+    /// The closure must not reenter the provider — the lock on the lib cache
+    /// is held across `f`.
     fn with_lib<R>(&self, lib: &str, f: impl FnOnce(&SymbolLib) -> R) -> Option<R> {
-        let mut libs = self.libs.borrow_mut();
+        let mut libs = self.libs.lock().expect("symbol lib cache poisoned");
         let slot = libs.entry(lib.to_string()).or_insert_with(|| {
             let path = self.env.symbol_dir.join(format!("{lib}.kicad_sym"));
             SymbolLib::load(&path).ok()

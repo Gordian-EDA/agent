@@ -101,6 +101,47 @@ impl PendingDiff {
     }
 }
 
+/// One `/command` the input line accepts, for dispatch and Tab completion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandSpec {
+    /// Full spelling including the leading slash, e.g. `/help`.
+    pub name: &'static str,
+    /// One-line description shown in the completion popup and help.
+    pub desc: &'static str,
+}
+
+/// Every command, in display order.
+pub const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "/help",
+        desc: "show keys and commands",
+    },
+    CommandSpec {
+        name: "/auto",
+        desc: "toggle auto-approve (yolo)",
+    },
+    CommandSpec {
+        name: "/undo",
+        desc: "restore the previous schematic",
+    },
+    CommandSpec {
+        name: "/clear",
+        desc: "clear the transcript AND the agent's context",
+    },
+    CommandSpec {
+        name: "/context",
+        desc: "show project paths and context/token stats",
+    },
+    CommandSpec {
+        name: "/compact",
+        desc: "summarize the conversation to shrink context",
+    },
+    CommandSpec {
+        name: "/quit",
+        desc: "exit",
+    },
+];
+
 /// Static-ish status shown in the status bar.
 #[derive(Clone, Debug)]
 pub struct Status {
@@ -116,6 +157,13 @@ pub struct Status {
     pub applied_count: usize,
     /// How many user turns ran this session.
     pub turn_count: usize,
+    /// Live context size: prompt tokens of the latest model call (system +
+    /// history + tools), plus its output — what the *next* call will roughly
+    /// resend. 0 until the first call reports usage.
+    pub ctx_tokens: u64,
+    /// Cumulative provider-reported tokens this session.
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
 }
 
 impl Status {
@@ -132,6 +180,9 @@ impl Status {
             kicad_connected,
             applied_count: 0,
             turn_count: 0,
+            ctx_tokens: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
         }
     }
 }
@@ -157,7 +208,9 @@ pub enum Msg {
     /// Recall the previous / next prompt from history (Up / Down).
     HistoryPrev,
     HistoryNext,
-    /// Enter — submit the input line (a prompt or a `:command`).
+    /// Tab — complete / cycle the `/command` matching the input.
+    Complete,
+    /// Enter — submit the input line (a prompt or a `/command`).
     Submit,
     /// Approve the pending diff (`a`).
     Approve,
@@ -166,8 +219,8 @@ pub enum Msg {
     /// Scroll the transcript up / down by one line.
     ScrollUp,
     ScrollDown,
-    /// Esc — close help / reject a gate / clear input / cancel a turn / quit,
-    /// in that order of precedence.
+    /// Esc — close help / reject a gate / clear input / cancel a turn / arm
+    /// (then perform) a context unwind, in that order of precedence.
     Cancel,
     /// Ctrl-C — quit unconditionally.
     ForceQuit,
@@ -195,6 +248,16 @@ pub enum Action {
     CancelTurn,
     /// Restore the previous schematic from the snapshot store.
     Undo,
+    /// `/clear` — drop the agent's conversation history (the transcript is
+    /// already cleared by the time this is returned).
+    ClearContext,
+    /// Double-Esc — pop the agent's last turn; the shell answers back via
+    /// [`App::apply_unwind`].
+    UnwindTurn,
+    /// `/compact` — run the agent's context compaction (spinner like a turn).
+    Compact,
+    /// `/context` — the shell gathers agent stats and prints them.
+    ShowContext,
     /// Tear down the TUI and exit.
     Quit,
 }
@@ -213,6 +276,14 @@ pub struct App {
     pub history_pos: Option<usize>,
     /// The live draft stashed while browsing history.
     draft: String,
+    /// First idle Esc pressed: the next Esc unwinds the last turn. Any other
+    /// user action disarms.
+    pub esc_armed: bool,
+    /// The typed `/`-prefix Tab completion is cycling against (the input
+    /// itself once Tab starts rewriting it no longer matches).
+    completion_stem: Option<String>,
+    /// Index into the stem's matches that the input currently shows.
+    pub completion_idx: Option<usize>,
     /// Apply-gate mode: when `false` (default) every write needs approval; when
     /// `true` (`:auto`) writes commit without a prompt.
     pub auto: bool,
@@ -245,6 +316,9 @@ impl App {
             history: Vec::new(),
             history_pos: None,
             draft: String::new(),
+            esc_armed: false,
+            completion_stem: None,
+            completion_idx: None,
             auto: false,
             pending: None,
             running: false,
@@ -263,6 +337,28 @@ impl App {
 
     /// Apply one message, mutating state and returning the shell's next action.
     pub fn update(&mut self, msg: Msg) -> Action {
+        // Any user action other than another Esc disarms the pending unwind.
+        if !matches!(
+            msg,
+            Msg::Cancel | Msg::Tick | Msg::Agent(_) | Msg::PendingDiff(_) | Msg::TurnEnded(_)
+        ) {
+            self.esc_armed = false;
+        }
+        // Any input change other than Tab itself restarts completion cycling.
+        if !matches!(
+            msg,
+            Msg::Complete
+                | Msg::Tick
+                | Msg::Agent(_)
+                | Msg::PendingDiff(_)
+                | Msg::TurnEnded(_)
+                | Msg::ScrollUp
+                | Msg::ScrollDown
+        ) {
+            self.completion_stem = None;
+            self.completion_idx = None;
+        }
+
         match msg {
             Msg::Char(c) => {
                 // While a diff is pending, the keyboard belongs to the gate.
@@ -325,6 +421,12 @@ impl App {
                 self.history_next();
                 Action::None
             }
+            Msg::Complete => {
+                if self.pending.is_none() {
+                    self.complete_next();
+                }
+                Action::None
+            }
             Msg::Submit => self.submit(),
             Msg::Approve => self.resolve_pending(true),
             Msg::Reject => self.resolve_pending(false),
@@ -369,7 +471,8 @@ impl App {
     }
 
     /// Esc, layered: close help → reject the gate → clear a non-empty input →
-    /// cancel a running turn → quit.
+    /// cancel a running turn → arm, then perform, a one-turn context unwind.
+    /// Esc never quits; that's `Ctrl-C` or `/quit`.
     fn cancel(&mut self) -> Action {
         if self.help {
             self.help = false;
@@ -382,21 +485,55 @@ impl App {
         } else if self.running {
             self.transcript.push(Entry::system("turn cancelled"));
             Action::CancelTurn
+        } else if self.esc_armed {
+            self.esc_armed = false;
+            Action::UnwindTurn
         } else {
-            self.should_quit = true;
-            Action::Quit
+            self.esc_armed = true;
+            Action::None
         }
     }
 
-    /// Submit the input line: a `:command` or a prompt.
+    /// The shell's answer to [`Action::UnwindTurn`]: roll the transcript back
+    /// to before the last user message when the agent actually popped a turn.
+    /// Files are untouched either way — `/undo` is the schematic-level undo.
+    pub fn apply_unwind(&mut self, popped: bool) {
+        if !popped {
+            self.transcript.push(Entry::system("nothing to unwind"));
+            return;
+        }
+        if let Some(at) = self
+            .transcript
+            .iter()
+            .rposition(|e| e.speaker == Speaker::User)
+        {
+            self.transcript.truncate(at);
+        }
+        self.status.turn_count = self.status.turn_count.saturating_sub(1);
+        self.scroll = 0;
+        self.transcript.push(Entry::system(
+            "unwound the last turn (context only — /undo restores the schematic)",
+        ));
+    }
+
+    /// Submit the input line: a `/command` or a prompt.
     fn submit(&mut self) -> Action {
         let line = self.input.trim().to_string();
         if line.is_empty() {
             return Action::None;
         }
-        if let Some(cmd) = line.strip_prefix(':') {
+        if line.starts_with('/') {
             self.clear_input();
-            return self.run_command(cmd);
+            return self.run_command(&line);
+        }
+        if let Some(cmd) = line.strip_prefix(':') {
+            // The old prefix: nudge instead of sending ":help" to the model.
+            self.clear_input();
+            self.transcript.push(Entry::system(format!(
+                "commands now start with / — try /{}",
+                cmd.trim()
+            )));
+            return Action::None;
         }
         if self.running {
             // Don't start a second turn; the draft stays in the input line.
@@ -414,17 +551,17 @@ impl App {
         Action::SpawnTurn(line)
     }
 
-    /// Run a `:command`.
-    fn run_command(&mut self, cmd: &str) -> Action {
-        match cmd.trim() {
-            "auto" => {
+    /// Run a `/command` (the leading slash is included in `line`).
+    fn run_command(&mut self, line: &str) -> Action {
+        match line.trim() {
+            "/auto" => {
                 self.auto = !self.auto;
                 let state = if self.auto { "ON (yolo)" } else { "OFF" };
                 self.transcript
                     .push(Entry::system(format!("apply-gate auto-approve: {state}")));
                 Action::None
             }
-            "undo" => {
+            "/undo" => {
                 if self.running {
                     self.transcript
                         .push(Entry::system("can't undo while a turn is running"));
@@ -433,26 +570,88 @@ impl App {
                     Action::Undo
                 }
             }
-            "clear" => {
+            "/clear" => {
                 self.transcript.clear();
                 self.scroll = 0;
-                self.transcript.push(Entry::system("transcript cleared"));
-                Action::None
+                Action::ClearContext
             }
-            "help" => {
+            "/context" => Action::ShowContext,
+            "/compact" => {
+                if self.running {
+                    self.transcript
+                        .push(Entry::system("can't compact while a turn is running"));
+                    return Action::None;
+                }
+                self.running = true;
+                self.turn_started = Some(Instant::now());
+                self.scroll = 0;
+                self.transcript.push(Entry::system("compacting context…"));
+                Action::Compact
+            }
+            "/help" => {
                 self.help = !self.help;
                 Action::None
             }
-            "quit" | "q" => {
+            "/quit" | "/q" => {
                 self.should_quit = true;
                 Action::Quit
             }
             other => {
-                self.transcript
-                    .push(Entry::system(format!("unknown command :{other}")));
+                self.transcript.push(Entry::system(format!(
+                    "unknown command {other} — /help lists them"
+                )));
                 Action::None
             }
         }
+    }
+
+    // ── `/command` Tab completion ─────────────────────────────────────
+
+    /// The commands matching a `/`-prefix stem (no completion once a space is
+    /// typed — arguments are not completable).
+    fn matches_for(stem: &str) -> Vec<&'static CommandSpec> {
+        if !stem.starts_with('/') || stem.contains(' ') {
+            return Vec::new();
+        }
+        COMMANDS
+            .iter()
+            .filter(|c| c.name.starts_with(stem))
+            .collect()
+    }
+
+    /// What the completion popup should show for the current input: the
+    /// matching commands and which one (if any) the input currently is.
+    /// `None` when completion does not apply.
+    pub fn completion_view(&self) -> Option<(Vec<&'static CommandSpec>, Option<usize>)> {
+        if self.pending.is_some() {
+            return None;
+        }
+        let stem = self.completion_stem.as_deref().unwrap_or(&self.input);
+        let matches = Self::matches_for(stem);
+        if matches.is_empty() {
+            return None;
+        }
+        Some((matches, self.completion_idx))
+    }
+
+    /// Tab: fill the input with the next command matching the typed stem.
+    fn complete_next(&mut self) {
+        let stem = self
+            .completion_stem
+            .clone()
+            .unwrap_or_else(|| self.input.clone());
+        let matches = Self::matches_for(&stem);
+        if matches.is_empty() {
+            return;
+        }
+        let idx = match self.completion_idx {
+            Some(i) => (i + 1) % matches.len(),
+            None => 0,
+        };
+        self.completion_stem = Some(stem);
+        self.completion_idx = Some(idx);
+        self.input = matches[idx].name.to_string();
+        self.cursor = self.char_len();
     }
 
     /// Resolve a pending apply-gate decision. No-op (returns `None`) if nothing
@@ -499,6 +698,23 @@ impl App {
                 self.status.applied_count += 1;
                 self.transcript.push(Entry::system(format!(
                     "applied — ERC {errors} errors, {warnings} warnings"
+                )));
+            }
+            AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+            } => {
+                // What the next request will roughly resend is this whole call.
+                self.status.ctx_tokens = input_tokens + output_tokens;
+                self.status.total_input_tokens += input_tokens;
+                self.status.total_output_tokens += output_tokens;
+            }
+            AgentEvent::Compacted {
+                messages_before,
+                messages_after,
+            } => {
+                self.transcript.push(Entry::system(format!(
+                    "context compacted: {messages_before} → {messages_after} messages"
                 )));
             }
             AgentEvent::TurnDone(_) => {
@@ -766,55 +982,229 @@ mod tests {
         let mut a = app();
         type_str(&mut a, "go");
         a.update(Msg::Submit);
-        type_str(&mut a, ":help");
+        type_str(&mut a, "/help");
         a.update(Msg::Submit);
-        assert!(a.help, ":help should toggle even mid-turn");
+        assert!(a.help, "/help should toggle even mid-turn");
     }
 
     #[test]
     fn auto_command_toggles_the_gate_flag() {
         let mut a = app();
         assert!(!a.auto);
-        type_str(&mut a, ":auto");
+        type_str(&mut a, "/auto");
         assert_eq!(a.update(Msg::Submit), Action::None);
-        assert!(a.auto, ":auto should toggle the flag ON");
-        type_str(&mut a, ":auto");
+        assert!(a.auto, "/auto should toggle the flag ON");
+        type_str(&mut a, "/auto");
         a.update(Msg::Submit);
-        assert!(!a.auto, ":auto again toggles it OFF");
+        assert!(!a.auto, "/auto again toggles it OFF");
     }
 
     #[test]
-    fn clear_command_resets_the_transcript() {
+    fn clear_command_resets_transcript_and_requests_context_clear() {
         let mut a = app();
         type_str(&mut a, "hello");
         a.update(Msg::Submit);
         a.update(Msg::TurnEnded(None));
-        type_str(&mut a, ":clear");
-        a.update(Msg::Submit);
-        assert_eq!(a.transcript.len(), 1, "only the 'cleared' note remains");
+        type_str(&mut a, "/clear");
+        assert_eq!(a.update(Msg::Submit), Action::ClearContext);
+        assert!(
+            a.transcript.is_empty(),
+            "transcript wiped; shell adds the note"
+        );
         assert_eq!(a.scroll, 0);
     }
 
     #[test]
-    fn quit_command_and_esc_quit() {
+    fn colon_commands_get_a_migration_hint() {
         let mut a = app();
-        type_str(&mut a, ":quit");
+        type_str(&mut a, ":help");
+        assert_eq!(a.update(Msg::Submit), Action::None);
+        assert!(!a.help, "the old prefix must not run the command");
+        assert!(
+            a.transcript
+                .iter()
+                .any(|e| e.text.contains("commands now start with /")),
+            "{:?}",
+            a.transcript
+        );
+    }
+
+    #[test]
+    fn quit_is_command_or_ctrl_c_but_not_esc() {
+        let mut a = app();
+        type_str(&mut a, "/quit");
         assert_eq!(a.update(Msg::Submit), Action::Quit);
         assert!(a.should_quit);
 
         let mut b = app();
-        assert_eq!(b.update(Msg::Cancel), Action::Quit);
-        assert!(b.should_quit);
+        assert_eq!(b.update(Msg::Cancel), Action::None, "first idle Esc arms");
+        assert!(!b.should_quit, "Esc never quits");
     }
 
     #[test]
-    fn esc_clears_a_nonempty_input_before_quitting() {
+    fn esc_clears_a_nonempty_input_then_arms_unwind() {
         let mut a = app();
         type_str(&mut a, "half-typed");
         assert_eq!(a.update(Msg::Cancel), Action::None);
         assert!(a.input.is_empty());
-        assert!(!a.should_quit, "first Esc only clears the line");
-        assert_eq!(a.update(Msg::Cancel), Action::Quit);
+        assert!(!a.esc_armed, "clearing the input is its own Esc step");
+        assert_eq!(a.update(Msg::Cancel), Action::None);
+        assert!(a.esc_armed, "second Esc arms the unwind");
+        assert_eq!(a.update(Msg::Cancel), Action::UnwindTurn);
+        assert!(!a.esc_armed, "the unwind consumed the arming");
+        assert!(!a.should_quit);
+    }
+
+    #[test]
+    fn typing_disarms_a_pending_unwind() {
+        let mut a = app();
+        a.update(Msg::Cancel);
+        assert!(a.esc_armed);
+        a.update(Msg::Char('x'));
+        assert!(!a.esc_armed, "any user action disarms");
+        // Ticks and agent events must NOT disarm (they arrive on their own).
+        a.update(Msg::Cancel);
+        a.update(Msg::Cancel);
+        let mut b = app();
+        b.update(Msg::Cancel);
+        b.update(Msg::Tick);
+        assert!(b.esc_armed, "ticks don't disarm");
+    }
+
+    #[test]
+    fn apply_unwind_rolls_the_transcript_back_to_before_the_user_turn() {
+        let mut a = app();
+        type_str(&mut a, "build it");
+        a.update(Msg::Submit);
+        a.update(Msg::Agent(AgentEvent::AssistantText("working".into())));
+        a.update(Msg::TurnEnded(None));
+        let turns_before = a.status.turn_count;
+
+        a.apply_unwind(true);
+        assert!(
+            !a.transcript
+                .iter()
+                .any(|e| e.speaker == Speaker::User && e.text == "build it"),
+            "user entry removed: {:?}",
+            a.transcript
+        );
+        assert!(
+            !a.transcript.iter().any(|e| e.text == "working"),
+            "assistant reply removed too"
+        );
+        assert!(
+            a.transcript.iter().any(|e| e.text.contains("unwound")),
+            "confirmation note shown"
+        );
+        assert_eq!(a.status.turn_count, turns_before - 1);
+
+        let len = a.transcript.len();
+        a.apply_unwind(false);
+        assert!(
+            a.transcript[len..]
+                .iter()
+                .any(|e| e.text.contains("nothing"))
+        );
+    }
+
+    #[test]
+    fn compact_command_spins_like_a_turn() {
+        let mut a = app();
+        type_str(&mut a, "/compact");
+        assert_eq!(a.update(Msg::Submit), Action::Compact);
+        assert!(a.running, "compaction shows the working spinner");
+        a.update(Msg::TurnEnded(None));
+        assert!(!a.running);
+    }
+
+    #[test]
+    fn compact_while_running_is_refused() {
+        let mut a = app();
+        type_str(&mut a, "go");
+        a.update(Msg::Submit);
+        type_str(&mut a, "/compact");
+        assert_eq!(a.update(Msg::Submit), Action::None);
+        assert!(
+            a.transcript
+                .iter()
+                .any(|e| e.text.contains("can't compact")),
+            "{:?}",
+            a.transcript
+        );
+    }
+
+    #[test]
+    fn context_command_requests_stats() {
+        let mut a = app();
+        type_str(&mut a, "/context");
+        assert_eq!(a.update(Msg::Submit), Action::ShowContext);
+    }
+
+    #[test]
+    fn tab_cycles_through_matching_commands() {
+        let mut a = app();
+        type_str(&mut a, "/c");
+        let (matches, idx) = a.completion_view().expect("matches for /c");
+        let names: Vec<&str> = matches.iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["/clear", "/context", "/compact"]);
+        assert_eq!(idx, None, "nothing highlighted before the first Tab");
+
+        a.update(Msg::Complete);
+        assert_eq!(a.input, "/clear");
+        a.update(Msg::Complete);
+        assert_eq!(a.input, "/context", "Tab cycles against the typed stem");
+        a.update(Msg::Complete);
+        assert_eq!(a.input, "/compact");
+        a.update(Msg::Complete);
+        assert_eq!(a.input, "/clear", "cycling wraps");
+
+        // Typing again resets the cycle to the new stem.
+        a.update(Msg::Backspace);
+        assert!(a.completion_view().is_some());
+        assert_eq!(a.completion_idx, None, "edit resets the cycle");
+    }
+
+    #[test]
+    fn completion_does_not_apply_to_prompts_or_arguments() {
+        let mut a = app();
+        type_str(&mut a, "hello");
+        assert!(a.completion_view().is_none());
+        a.update(Msg::Complete);
+        assert_eq!(a.input, "hello", "Tab is inert outside / commands");
+
+        let mut b = app();
+        type_str(&mut b, "/clear now");
+        assert!(b.completion_view().is_none(), "no completion after a space");
+    }
+
+    #[test]
+    fn usage_events_update_token_status() {
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::Usage {
+            input_tokens: 1000,
+            output_tokens: 200,
+        }));
+        a.update(Msg::Agent(AgentEvent::Usage {
+            input_tokens: 1500,
+            output_tokens: 300,
+        }));
+        assert_eq!(a.status.ctx_tokens, 1800, "latest call defines the context");
+        assert_eq!(a.status.total_input_tokens, 2500);
+        assert_eq!(a.status.total_output_tokens, 500);
+    }
+
+    #[test]
+    fn compacted_event_notes_the_shrink() {
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::Compacted {
+            messages_before: 24,
+            messages_after: 2,
+        }));
+        assert!(
+            a.transcript.iter().any(|e| e.text.contains("24 → 2")),
+            "{:?}",
+            a.transcript
+        );
     }
 
     #[test]
@@ -854,14 +1244,14 @@ mod tests {
     #[test]
     fn undo_command_returns_undo_action() {
         let mut a = app();
-        type_str(&mut a, ":undo");
+        type_str(&mut a, "/undo");
         assert_eq!(a.update(Msg::Submit), Action::Undo);
     }
 
     #[test]
     fn help_command_toggles_help_and_esc_dismisses() {
         let mut a = app();
-        type_str(&mut a, ":help");
+        type_str(&mut a, "/help");
         a.update(Msg::Submit);
         assert!(a.help);
         // Esc dismisses help rather than quitting.

@@ -58,9 +58,9 @@ fn main() -> ExitCode {
     }
 }
 
-/// Parse `tui` args into a project directory, defaulting to a temp project when
-/// `--project` is omitted so `autopcb tui` always launches with somewhere to
-/// write.
+/// Parse `tui` args into a project directory, defaulting to the current
+/// working directory when `--project` is omitted — so `autopcb tui` edits
+/// `./design.kicad_sch` right where you launched it.
 fn parse_tui_args(args: &[String]) -> Result<PathBuf> {
     let mut project_dir: Option<PathBuf> = None;
     let mut i = 0;
@@ -82,10 +82,11 @@ fn parse_tui_args(args: &[String]) -> Result<PathBuf> {
     Ok(project_dir.unwrap_or_else(default_tui_project_dir))
 }
 
-/// A stable default project directory for `autopcb tui` with no `--project`:
-/// `<temp-dir>/autopcb-tui`. Created so the agent has a place to write.
+/// The default project directory for `autopcb tui` with no `--project`: the
+/// current working directory, so the schematic lands next to where the user
+/// launched the cockpit (never in a hidden tempdir).
 fn default_tui_project_dir() -> PathBuf {
-    std::env::temp_dir().join("autopcb-tui")
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// Run the `tui` subcommand: launch the cockpit on a single-threaded Tokio
