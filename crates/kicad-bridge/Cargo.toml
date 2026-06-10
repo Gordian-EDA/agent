@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 circuit-lang = { path = "../circuit-lang" }
 strsim.workspace = true
+fuzzy-matcher.workspace = true
 elsa.workspace = true
 serde.workspace = true
 serde_json.workspace = true
