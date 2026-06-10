@@ -9,18 +9,21 @@
 //!   carry diagnostic strings and "did you mean" suggestions rather than just an
 //!   error flag, so the model can correct itself on the next turn.
 //!
-//! ## The eight tools
+//! ## The eleven tools
 //!
 //! | name | input | output |
 //! |---|---|---|
 //! | `search_symbols` | `{query, limit?}` | `{hits: [{lib_id, pin_count}]}` |
 //! | `get_symbol_info` | `{lib_id}` | `{lib_id, pins: [{number,name,type,unit}]}` or `{error, suggestions}` |
-//! | `get_design` | `{}` | `{yaml}` (lifted) or `{yaml: "", note}` |
+//! | `get_design` | `{}` | `{yaml, source, stale?, note?}` |
 //! | `validate_design` | `{yaml}` | `{ok, diagnostics, errors, warnings}` |
-//! | `apply_design` | `{yaml, commit?}` | dry-run diff, or (commit) `{written, path, erc}` |
+//! | `apply_design` | `{yaml?, commit?, ...}` | dry-run diff, or (commit) `{written, path, erc}` |
 //! | `run_erc` | `{}` | `{errors, warnings, violations: [...]}` |
 //! | `project_info` | `{}` | `{project_dir, sch_path, sch_exists, snapshots, cwd}` |
 //! | `read_schematic` | `{path}` | `{path, yaml, note?}` or `{error}` |
+//! | `render_schematic` | `{}` | `{ok, png_path, note}` (+image attached) or `{error}` |
+//! | `create_design` | `{yaml, overwrite?}` | compile report + `{draft_written}` or `{error}` |
+//! | `edit_design` | `{old_string, new_string, replace_all?}` | compile report + `{replacements}` or `{error}` |
 //!
 //! ## `apply_design`: dry-run vs commit
 //!
@@ -600,8 +603,9 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         .erc(&ctx.sch_path)
         .with_context(|| format!("running ERC on {}", ctx.sch_path.display()))?;
 
-    // If applying the draft, the schematic now matches it — refresh the meta
-    // hash so the draft is no longer flagged stale. (No-op when no draft exists.)
+    // Record the hash of the just-written schematic (current_sch_text reads the
+    // file we wrote above) so the applied draft is no longer flagged stale.
+    // No-op when no draft exists (an explicit-yaml apply must not create one).
     if ctx.workspace().read_draft().is_some() {
         ctx.workspace()
             .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
