@@ -26,6 +26,7 @@ version = "0.1.0"
 dependencies = [
  "circuit-lang",
  "kicad-bridge",
+ "sch-engine",
 ]
 
 [[package]]

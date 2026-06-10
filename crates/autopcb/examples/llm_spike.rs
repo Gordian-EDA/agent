@@ -21,16 +21,48 @@ fn main() {
     match args.as_slice() {
         [flag, lib_id] if flag == "--dump" => dump(env, lib_id),
         [flag, query] if flag == "--search" => search(&env, query),
+        [flag, yaml_path, out_path] if flag == "--emit" => emit(env, yaml_path, out_path),
         [yaml_path] => compile_design(env, yaml_path),
         _ => {
             eprintln!(
                 "usage: llm_spike --dump <Lib:Symbol>\n       \
                  llm_spike --search <query>\n       \
+                 llm_spike --emit <design.circuit.yaml> <out.kicad_sch>\n       \
                  llm_spike <design.circuit.yaml>"
             );
             std::process::exit(2);
         }
     }
+}
+
+/// Compile a circuit YAML and emit a `.kicad_sch`, then run ERC on it.
+fn emit(env: KicadEnv, yaml_path: &str, out_path: &str) {
+    let provider = RealSymbolProvider::new(env.clone());
+    let src = std::fs::read_to_string(yaml_path).expect("read yaml");
+    let result = circuit_lang::compile(&src, &provider);
+    for d in result
+        .diagnostics
+        .0
+        .iter()
+        .filter(|d| matches!(d.severity, circuit_lang::Severity::Error))
+    {
+        eprintln!("{d}");
+    }
+    let Some(design) = result.design else {
+        eprintln!("COMPILE FAILED");
+        std::process::exit(1);
+    };
+    let text = sch_engine::emit_design(&env, &design).expect("emit");
+    std::fs::write(out_path, &text).expect("write .kicad_sch");
+    let comps: usize = design.blocks.values().map(|b| b.components.len()).sum();
+    let report = kicad_bridge::cli::KicadCli::new(&env)
+        .erc(std::path::Path::new(out_path))
+        .expect("erc");
+    println!(
+        "EMITTED {out_path}: {comps} components, ERC {} errors / {} warnings",
+        report.error_count(),
+        report.warning_count()
+    );
 }
 
 /// Print a symbol's pins, or suggestions when it is not found.
