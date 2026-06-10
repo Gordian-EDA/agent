@@ -9,10 +9,11 @@
 //!
 //! ```text
 //!   crossterm EventStream ─┐
-//!   agent AgentEvent mpsc ─┼─ tokio::select! ─► App::update ─► Action ─► shell
-//!   apply-gate mpsc       ─┘                                   (spawn turn,
-//!                                                               resolve gate,
-//!                                                               undo, quit)
+//!   agent AgentEvent mpsc ─┼─ tokio::select! ─► App::update ─► Action ─► Shell
+//!   apply-gate mpsc       ─┤                                   (spawn turn,
+//!   animation tick        ─┘                                    resolve gate,
+//!                                                               cancel, undo,
+//!                                                               quit)
 //! ```
 //!
 //! ### The apply-gate across tasks
@@ -31,25 +32,33 @@ pub mod ui;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Duration;
 
 use agent::tools::ToolCtx;
 use agent::{Agent, AgentEvent, Approvals};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
 use kicad_bridge::env::KicadEnv;
+use kicad_bridge::snapshot::SnapshotStore;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::{Mutex, oneshot};
+use tokio::task::JoinHandle;
 
 use app::{Action, App, Msg, Status};
+
+/// How often the shell wakes the app for spinner/elapsed redraws.
+const TICK: Duration = Duration::from_millis(120);
 
 /// A pending apply-gate request: the dry-run diff and the channel the UI uses to
 /// answer it.
@@ -109,7 +118,7 @@ pub async fn run(project_dir: PathBuf) -> Result<()> {
     };
 
     let sch_path = project_dir.join("design.kicad_sch");
-    let snapshots = kicad_bridge::snapshot::SnapshotStore::for_project(&project_dir).ok();
+    let snapshots = SnapshotStore::for_project(&project_dir).ok();
 
     let mut status = Status::new(
         provider,
@@ -134,47 +143,161 @@ pub async fn run(project_dir: PathBuf) -> Result<()> {
     result
 }
 
-/// The async event loop: select over keyboard input, agent events, and gate
-/// requests; update the app; act on the returned action; redraw.
+/// The side-effecting half of the cockpit: everything the [`Action`]s returned
+/// by [`App::update`] need to touch (channels, the agent handle, the in-flight
+/// turn task, the snapshot store).
+struct Shell {
+    agent: Option<SharedAgent>,
+    events_tx: UnboundedSender<AgentEvent>,
+    gate_tx: UnboundedSender<GateRequest>,
+    done_tx: UnboundedSender<Option<String>>,
+    sch_path: PathBuf,
+    snapshots: Option<SnapshotStore>,
+    /// The oneshot answering the currently open apply-gate, if any.
+    pending_gate: Option<oneshot::Sender<bool>>,
+    /// The in-flight turn task (aborted by [`Action::CancelTurn`]).
+    turn_task: Option<JoinHandle<()>>,
+}
+
+impl Shell {
+    /// Perform the side effect an [`Action`] calls for.
+    fn handle(&mut self, app: &mut App, action: Action) {
+        match action {
+            Action::None => {}
+            Action::Quit => {
+                app.should_quit = true;
+            }
+            Action::ResolveApproval(decision) => {
+                if let Some(reply) = self.pending_gate.take() {
+                    let _ = reply.send(decision);
+                }
+            }
+            Action::CancelTurn => self.cancel_turn(app),
+            Action::Undo => self.undo(app),
+            Action::SpawnTurn(prompt) => self.spawn_turn(app, prompt),
+        }
+    }
+
+    fn spawn_turn(&mut self, app: &mut App, prompt: String) {
+        let Some(handle) = self.agent.clone() else {
+            app.running = false;
+            app.turn_started = None;
+            app.transcript
+                .push(app::Entry::system("agent unavailable — cannot run a turn"));
+            return;
+        };
+        let events_tx = self.events_tx.clone();
+        let gate_tx = self.gate_tx.clone();
+        let done_tx = self.done_tx.clone();
+        // spawn_local: the agent's ToolCtx is not Send, so the turn runs on
+        // this thread's LocalSet rather than the shared scheduler.
+        self.turn_task = Some(tokio::task::spawn_local(async move {
+            let mut approvals = TuiApprovals { gate_tx };
+            let mut agent = handle.lock().await;
+            let result = agent
+                .run_turn(&prompt, &mut approvals, Some(&events_tx))
+                .await;
+            let err = result.err().map(|e| format!("{e:#}"));
+            let _ = done_tx.send(err);
+        }));
+    }
+
+    /// Esc on a running turn: abort the task mid-flight. The agent gives up
+    /// whatever it was doing (an LLM round-trip, a tool call) but nothing has
+    /// been written — writes only happen behind the gate, and an open gate is
+    /// answered "no" here.
+    fn cancel_turn(&mut self, app: &mut App) {
+        if let Some(task) = self.turn_task.take() {
+            task.abort();
+        }
+        if let Some(reply) = self.pending_gate.take() {
+            let _ = reply.send(false);
+        }
+        // The aborted task never sends done_tx, so close the turn ourselves.
+        app.update(Msg::TurnEnded(None));
+    }
+
+    /// `:undo` — restore the previous schematic from the snapshot store.
+    fn undo(&self, app: &mut App) {
+        let Some(store) = &self.snapshots else {
+            app.transcript
+                .push(app::Entry::system("no snapshot store for this project"));
+            return;
+        };
+        match store.undo(&self.sch_path) {
+            Ok(()) => app
+                .transcript
+                .push(app::Entry::system("undo: restored the previous schematic")),
+            Err(e) => app
+                .transcript
+                .push(app::Entry::system(format!("undo failed: {e}"))),
+        }
+    }
+}
+
+/// The async event loop: select over keyboard/mouse input, agent events, gate
+/// requests, and the animation tick; update the app; act on the returned
+/// action; redraw.
 async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
     agent_handle: Option<SharedAgent>,
     sch_path: PathBuf,
-    snapshots: Option<kicad_bridge::snapshot::SnapshotStore>,
+    snapshots: Option<SnapshotStore>,
 ) -> Result<()> {
-    let mut keys = EventStream::new();
+    let mut input = EventStream::new();
     let (events_tx, mut events_rx): (UnboundedSender<AgentEvent>, UnboundedReceiver<AgentEvent>) =
         unbounded_channel();
     let (gate_tx, mut gate_rx): (UnboundedSender<GateRequest>, UnboundedReceiver<GateRequest>) =
         unbounded_channel();
-    // (diff, completion channel) waiting for a/r when the gate is open.
-    let mut pending_gate: Option<oneshot::Sender<bool>> = None;
     // Joins back when the spawned turn finishes (so input unlocks even on error).
     let (done_tx, mut done_rx): (
         UnboundedSender<Option<String>>,
         UnboundedReceiver<Option<String>>,
     ) = unbounded_channel();
 
+    let mut shell = Shell {
+        agent: agent_handle,
+        events_tx,
+        gate_tx,
+        done_tx,
+        sch_path,
+        snapshots,
+        pending_gate: None,
+        turn_task: None,
+    };
+    let mut tick = tokio::time::interval(TICK);
+
     terminal.draw(|f| ui::draw(f, app))?;
 
     loop {
         tokio::select! {
-            // ── keyboard ──────────────────────────────────────────────
-            maybe_key = keys.next() => {
-                match maybe_key {
+            // ── keyboard / mouse ──────────────────────────────────────
+            maybe_ev = input.next() => {
+                match maybe_ev {
                     Some(Ok(Event::Key(key))) => {
                         if let Some(msg) = event::map_key(app, key) {
                             let action = app.update(msg);
-                            handle_action(
-                                app, action, &agent_handle, &events_tx, &gate_tx,
-                                &done_tx, &sch_path, &snapshots, &mut pending_gate,
-                            );
+                            shell.handle(app, action);
                         }
                     }
-                    Some(Ok(_)) => {} // resize / mouse / paste: just redraw below
+                    Some(Ok(Event::Mouse(m))) => {
+                        match m.kind {
+                            MouseEventKind::ScrollUp => { app.update(Msg::ScrollUp); }
+                            MouseEventKind::ScrollDown => { app.update(Msg::ScrollDown); }
+                            _ => {}
+                        }
+                    }
+                    Some(Ok(_)) => {} // resize / paste: just redraw below
                     Some(Err(_)) | None => break,
                 }
+            }
+            // ── animation tick (spinner / elapsed while running) ──────
+            _ = tick.tick() => {
+                if !app.running {
+                    continue; // nothing animates; skip the redraw
+                }
+                app.update(Msg::Tick);
             }
             // ── live agent events ─────────────────────────────────────
             Some(ev) = events_rx.recv() => {
@@ -187,12 +310,13 @@ async fn event_loop(
                     let _ = reply.send(true);
                     app.transcript.push(app::Entry::system("auto-approved (yolo)"));
                 } else {
-                    pending_gate = Some(reply);
+                    shell.pending_gate = Some(reply);
                     app.update(Msg::PendingDiff(diff));
                 }
             }
             // ── spawned turn finished ─────────────────────────────────
             Some(err) = done_rx.recv() => {
+                shell.turn_task = None;
                 app.update(Msg::TurnEnded(err));
             }
         }
@@ -200,86 +324,17 @@ async fn event_loop(
         // A pending gate that's still open when we quit must be answered, or the
         // agent task would hang forever waiting on the oneshot.
         if app.should_quit {
-            if let Some(reply) = pending_gate.take() {
+            if let Some(reply) = shell.pending_gate.take() {
                 let _ = reply.send(false);
+            }
+            if let Some(task) = shell.turn_task.take() {
+                task.abort();
             }
             break;
         }
         terminal.draw(|f| ui::draw(f, app))?;
     }
     Ok(())
-}
-
-/// Perform the side effect an [`Action`] calls for.
-#[allow(clippy::too_many_arguments)]
-fn handle_action(
-    app: &mut App,
-    action: Action,
-    agent_handle: &Option<SharedAgent>,
-    events_tx: &UnboundedSender<AgentEvent>,
-    gate_tx: &UnboundedSender<GateRequest>,
-    done_tx: &UnboundedSender<Option<String>>,
-    sch_path: &PathBuf,
-    snapshots: &Option<kicad_bridge::snapshot::SnapshotStore>,
-    pending_gate: &mut Option<oneshot::Sender<bool>>,
-) {
-    match action {
-        Action::None => {}
-        Action::Quit => {
-            app.should_quit = true;
-        }
-        Action::ResolveApproval(decision) => {
-            if let Some(reply) = pending_gate.take() {
-                let _ = reply.send(decision);
-            }
-        }
-        Action::Undo => {
-            undo(app, sch_path, snapshots);
-        }
-        Action::SpawnTurn(prompt) => {
-            let Some(handle) = agent_handle.clone() else {
-                app.running = false;
-                app.transcript
-                    .push(app::Entry::system("agent unavailable — cannot run a turn"));
-                return;
-            };
-            let events_tx = events_tx.clone();
-            let gate_tx = gate_tx.clone();
-            let done_tx = done_tx.clone();
-            // spawn_local: the agent's ToolCtx is not Send, so the turn runs on
-            // this thread's LocalSet rather than the shared scheduler.
-            tokio::task::spawn_local(async move {
-                let mut approvals = TuiApprovals { gate_tx };
-                let mut agent = handle.lock().await;
-                let result = agent
-                    .run_turn(&prompt, &mut approvals, Some(&events_tx))
-                    .await;
-                let err = result.err().map(|e| format!("{e:#}"));
-                let _ = done_tx.send(err);
-            });
-        }
-    }
-}
-
-/// `:undo` — restore the previous schematic from the snapshot store.
-fn undo(
-    app: &mut App,
-    sch_path: &PathBuf,
-    snapshots: &Option<kicad_bridge::snapshot::SnapshotStore>,
-) {
-    let Some(store) = snapshots else {
-        app.transcript
-            .push(app::Entry::system("no snapshot store for this project"));
-        return;
-    };
-    match store.undo(sch_path) {
-        Ok(()) => app
-            .transcript
-            .push(app::Entry::system("undo: restored the previous schematic")),
-        Err(e) => app
-            .transcript
-            .push(app::Entry::system(format!("undo failed: {e}"))),
-    }
 }
 
 /// Enter raw mode + the alternate screen and build the ratatui terminal.

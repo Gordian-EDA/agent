@@ -2,7 +2,9 @@
 //!
 //! Kept separate from the shell so the mapping is a pure function and easy to
 //! reason about: the gate keys (`a`/`r`) are only special while a diff is
-//! pending; otherwise everything routes to the input line.
+//! pending; otherwise everything routes to the input line. Up/Down recall
+//! prompt history (like a shell); PageUp/PageDown and the mouse wheel scroll
+//! the transcript.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -17,9 +19,16 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
         return None;
     }
 
-    // Ctrl-C always quits.
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        return Some(Msg::Cancel);
+    // Control chords (readline-style line editing + hard quit).
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return match key.code {
+            KeyCode::Char('c') => Some(Msg::ForceQuit),
+            KeyCode::Char('u') => Some(Msg::KillToStart),
+            KeyCode::Char('w') => Some(Msg::KillWordBack),
+            KeyCode::Char('a') => Some(Msg::Home),
+            KeyCode::Char('e') => Some(Msg::End),
+            _ => None,
+        };
     }
 
     let gate_open = app.pending.is_some();
@@ -27,9 +36,20 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
     match key.code {
         KeyCode::Enter => Some(Msg::Submit),
         KeyCode::Backspace => Some(Msg::Backspace),
+        KeyCode::Delete => Some(Msg::Delete),
+        KeyCode::Left => Some(Msg::CursorLeft),
+        KeyCode::Right => Some(Msg::CursorRight),
+        KeyCode::Home => Some(Msg::Home),
+        KeyCode::End => Some(Msg::End),
         KeyCode::Esc => Some(Msg::Cancel),
-        KeyCode::PageUp | KeyCode::Up => Some(Msg::ScrollUp),
-        KeyCode::PageDown | KeyCode::Down => Some(Msg::ScrollDown),
+        KeyCode::PageUp => Some(Msg::ScrollUp),
+        KeyCode::PageDown => Some(Msg::ScrollDown),
+        // Up/Down edit history while the input line is live; with the gate
+        // open they fall back to scrolling the transcript.
+        KeyCode::Up if app.input_active() => Some(Msg::HistoryPrev),
+        KeyCode::Down if app.input_active() => Some(Msg::HistoryNext),
+        KeyCode::Up => Some(Msg::ScrollUp),
+        KeyCode::Down => Some(Msg::ScrollDown),
         // While the apply-gate is open, a/r are decisions, not text.
         KeyCode::Char('a') if gate_open => Some(Msg::Approve),
         KeyCode::Char('r') if gate_open => Some(Msg::Reject),
@@ -68,10 +88,70 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_cancels() {
+    fn ctrl_c_force_quits() {
         let a = app();
         let k = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert!(matches!(map_key(&a, k), Some(Msg::Cancel)));
+        assert!(matches!(map_key(&a, k), Some(Msg::ForceQuit)));
+    }
+
+    #[test]
+    fn readline_chords_map_to_editing_msgs() {
+        let a = app();
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        assert!(matches!(map_key(&a, ctrl('u')), Some(Msg::KillToStart)));
+        assert!(matches!(map_key(&a, ctrl('w')), Some(Msg::KillWordBack)));
+        assert!(matches!(map_key(&a, ctrl('a')), Some(Msg::Home)));
+        assert!(matches!(map_key(&a, ctrl('e')), Some(Msg::End)));
+    }
+
+    #[test]
+    fn arrows_move_the_cursor() {
+        let a = app();
+        assert!(matches!(
+            map_key(&a, key(KeyCode::Left)),
+            Some(Msg::CursorLeft)
+        ));
+        assert!(matches!(
+            map_key(&a, key(KeyCode::Right)),
+            Some(Msg::CursorRight)
+        ));
+        assert!(matches!(map_key(&a, key(KeyCode::Home)), Some(Msg::Home)));
+        assert!(matches!(map_key(&a, key(KeyCode::End)), Some(Msg::End)));
+    }
+
+    #[test]
+    fn up_recalls_history_when_input_is_live() {
+        let a = app();
+        assert!(matches!(
+            map_key(&a, key(KeyCode::Up)),
+            Some(Msg::HistoryPrev)
+        ));
+        assert!(matches!(
+            map_key(&a, key(KeyCode::Down)),
+            Some(Msg::HistoryNext)
+        ));
+    }
+
+    #[test]
+    fn up_scrolls_when_the_gate_is_open() {
+        let mut a = app();
+        a.update(Msg::PendingDiff(json!({
+            "diff": { "added": ["U1"], "removed": [], "changed": [] }
+        })));
+        assert!(matches!(map_key(&a, key(KeyCode::Up)), Some(Msg::ScrollUp)));
+    }
+
+    #[test]
+    fn page_keys_always_scroll() {
+        let a = app();
+        assert!(matches!(
+            map_key(&a, key(KeyCode::PageUp)),
+            Some(Msg::ScrollUp)
+        ));
+        assert!(matches!(
+            map_key(&a, key(KeyCode::PageDown)),
+            Some(Msg::ScrollDown)
+        ));
     }
 
     #[test]
