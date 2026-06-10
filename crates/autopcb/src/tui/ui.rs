@@ -16,9 +16,11 @@
 //! └──────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! The transcript is wrapped by [`wrap_text`] (not `Paragraph::wrap`) so the
-//! scroll arithmetic — tail-following, clamping, the `↑n` indicator — is exact
-//! in visual rows.
+//! The transcript is wrapped by [`wrap_segments`] (not `Paragraph::wrap`) so
+//! the scroll arithmetic — tail-following, clamping, the `↑n` indicator — is
+//! exact in visual rows. Assistant prose is rendered through the markdown
+//! module ([`super::md`]) first; wrapping styled segments rather than plain
+//! strings is what lets bold/code spans survive line breaks.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -27,6 +29,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use super::app::{App, Entry, PendingDiff, Speaker};
+use super::md::{self, MdLine, WrapMode};
 
 /// Braille spinner shown in the transcript title while a turn runs.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -138,7 +141,8 @@ fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 /// Style one transcript entry into wrapped `Line`s: the first row carries the
-/// speaker gutter, continuation rows are indented under it.
+/// speaker gutter, continuation rows are indented under it. Assistant text is
+/// rendered as markdown; everything else is plain.
 fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
     let (gutter, gutter_style, body_style) = match e.speaker {
         Speaker::User => (
@@ -167,72 +171,148 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
         ),
     };
     let body_w = width.saturating_sub(GUTTER).max(1);
-    wrap_text(&e.text, body_w)
-        .into_iter()
-        .enumerate()
-        .map(|(i, piece)| {
-            let lead = if i == 0 {
+    let logical: Vec<MdLine> = match e.speaker {
+        Speaker::Assistant => md::render_markdown(&e.text, body_style),
+        _ => e
+            .text
+            .split('\n')
+            .map(|l| MdLine {
+                segments: vec![(l.to_string(), body_style)],
+                wrap: WrapMode::Word,
+            })
+            .collect(),
+    };
+
+    let mut lines = Vec::new();
+    for ml in &logical {
+        for row in wrap_segments(&ml.segments, body_w, ml.wrap == WrapMode::Preserve) {
+            let lead = if lines.is_empty() {
                 Span::styled(gutter, gutter_style)
             } else {
                 Span::raw(" ".repeat(GUTTER))
             };
-            Line::from(vec![lead, Span::styled(piece, body_style)])
+            let mut spans = vec![lead];
+            spans.extend(row);
+            lines.push(Line::from(spans));
+        }
+    }
+    if lines.is_empty() {
+        // e.g. an entry that was nothing but fence markers — still take a row
+        // so the scroll math stays exact per entry.
+        lines.push(Line::from(Span::styled(gutter, gutter_style)));
+    }
+    lines
+}
+
+/// Wrap styled segments into rows of at most `width` chars, preserving each
+/// char's style across breaks. Always returns at least one (possibly empty)
+/// row so every logical line occupies a row.
+///
+/// `preserve` does a plain char-chunk wrap (code blocks: every space matters);
+/// otherwise this is a greedy word wrap that collapses whitespace runs, keeps
+/// the line's leading indent as a hanging indent, and hard-breaks words longer
+/// than a row.
+fn wrap_segments(
+    segments: &[(String, Style)],
+    width: usize,
+    preserve: bool,
+) -> Vec<Vec<Span<'static>>> {
+    let width = width.max(1);
+    let flat: Vec<(char, Style)> = segments
+        .iter()
+        .flat_map(|(t, s)| t.chars().map(move |c| (c, *s)))
+        .collect();
+
+    if preserve {
+        if flat.is_empty() {
+            return vec![Vec::new()];
+        }
+        return flat.chunks(width).map(spans_of).collect();
+    }
+
+    // Leading whitespace becomes a hanging indent (so wrapped bullets stay
+    // aligned under their marker's nesting level).
+    let lead = flat
+        .iter()
+        .take_while(|(c, _)| c.is_whitespace())
+        .count()
+        .min(width.saturating_sub(1));
+    let avail = width - lead;
+
+    // Tokenize the rest into styled words; whitespace runs collapse.
+    let mut words: Vec<Vec<(char, Style)>> = Vec::new();
+    let mut cur: Vec<(char, Style)> = Vec::new();
+    for &(c, s) in &flat[lead..] {
+        if c.is_whitespace() {
+            if !cur.is_empty() {
+                words.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push((c, s));
+        }
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+
+    let mut rows: Vec<Vec<(char, Style)>> = Vec::new();
+    let mut row: Vec<(char, Style)> = Vec::new();
+    for mut word in words {
+        loop {
+            let sep = usize::from(!row.is_empty());
+            if row.len() + sep + word.len() <= avail {
+                if sep == 1 {
+                    // Style the separator like its neighbor so span runs merge.
+                    let st = row.last().map(|&(_, s)| s).unwrap_or_default();
+                    row.push((' ', st));
+                }
+                row.extend(word);
+                break;
+            }
+            if !row.is_empty() {
+                rows.push(std::mem::take(&mut row));
+                continue;
+            }
+            // A word longer than a whole row: hard-break it.
+            rows.push(word[..avail].to_vec());
+            word = word[avail..].to_vec();
+        }
+    }
+    rows.push(row); // also preserves intentionally blank lines
+
+    rows.into_iter()
+        .map(|r| {
+            let mut spans = Vec::new();
+            if lead > 0 {
+                spans.push(Span::raw(" ".repeat(lead)));
+            }
+            spans.extend(spans_of(&r));
+            spans
         })
         .collect()
 }
 
-/// Greedy word-wrap by char count. Respects embedded newlines; words longer
-/// than `width` are hard-broken. Always returns at least one (possibly empty)
-/// piece so every entry occupies a row.
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut out = Vec::new();
-    for raw_line in text.split('\n') {
-        let mut current = String::new();
-        let mut current_len = 0usize;
-        for word in raw_line.split(' ') {
-            let mut word = word;
-            // Hard-break words that can never fit on one row.
-            loop {
-                let wlen = word.chars().count();
-                let sep = if current_len == 0 { 0 } else { 1 };
-                if current_len + sep + wlen <= width {
-                    if sep == 1 {
-                        current.push(' ');
-                        current_len += 1;
-                    }
-                    current.push_str(word);
-                    current_len += wlen;
-                    break;
-                }
-                if wlen > width {
-                    // Fill the rest of this row with the word's head.
-                    let take = width - current_len - if current_len == 0 { 0 } else { 1 };
-                    if take == 0 {
-                        out.push(std::mem::take(&mut current));
-                        current_len = 0;
-                        continue;
-                    }
-                    if current_len > 0 {
-                        current.push(' ');
-                    }
-                    let split = word
-                        .char_indices()
-                        .nth(take)
-                        .map(|(i, _)| i)
-                        .unwrap_or(word.len());
-                    current.push_str(&word[..split]);
-                    out.push(std::mem::take(&mut current));
-                    current_len = 0;
-                    word = &word[split..];
-                    continue;
-                }
-                // The word fits on a fresh row.
-                out.push(std::mem::take(&mut current));
-                current_len = 0;
+/// Merge a styled char run back into `Span`s (consecutive equal styles join).
+fn spans_of(chars: &[(char, Style)]) -> Vec<Span<'static>> {
+    let mut out: Vec<Span> = Vec::new();
+    let mut buf = String::new();
+    let mut style: Option<Style> = None;
+    for &(c, s) in chars {
+        match style {
+            Some(cur) if cur == s => buf.push(c),
+            Some(cur) => {
+                out.push(Span::styled(std::mem::take(&mut buf), cur));
+                buf.push(c);
+                style = Some(s);
+            }
+            None => {
+                buf.push(c);
+                style = Some(s);
             }
         }
-        out.push(current);
+    }
+    if let Some(cur) = style {
+        out.push(Span::styled(buf, cur));
     }
     out
 }
@@ -488,23 +568,103 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn wrap_text_wraps_at_word_boundaries() {
-        assert_eq!(wrap_text("one two three", 8), vec!["one two", "three"]);
-        assert_eq!(wrap_text("short", 8), vec!["short"]);
-        assert_eq!(wrap_text("", 8), vec![""]);
+    /// Plain text of one wrapped row.
+    fn row_text(row: &[Span]) -> String {
+        row.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn plain(s: &str) -> Vec<(String, Style)> {
+        vec![(s.to_string(), Style::default())]
     }
 
     #[test]
-    fn wrap_text_respects_embedded_newlines() {
-        assert_eq!(wrap_text("a\nb", 10), vec!["a", "b"]);
+    fn wrap_segments_wraps_at_word_boundaries() {
+        let rows = wrap_segments(&plain("one two three"), 8, false);
+        let texts: Vec<String> = rows.iter().map(|r| row_text(r)).collect();
+        assert_eq!(texts, vec!["one two", "three"]);
+        assert_eq!(wrap_segments(&plain(""), 8, false).len(), 1);
     }
 
     #[test]
-    fn wrap_text_hard_breaks_long_words() {
-        assert_eq!(
-            wrap_text("supercalifragilistic", 7),
-            vec!["superca", "lifragi", "listic"]
+    fn wrap_segments_hard_breaks_long_words() {
+        let rows = wrap_segments(&plain("supercalifragilistic"), 7, false);
+        let texts: Vec<String> = rows.iter().map(|r| row_text(r)).collect();
+        assert_eq!(texts, vec!["superca", "lifragi", "listic"]);
+    }
+
+    #[test]
+    fn wrap_segments_keeps_styles_across_breaks() {
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let segs = vec![
+            ("plain words then ".to_string(), Style::default()),
+            ("boldly styled tail".to_string(), bold),
+        ];
+        let rows = wrap_segments(&segs, 22, false);
+        assert!(rows.len() > 1, "must wrap to test style survival");
+        // Every char from the bold segment keeps its style, wherever it lands.
+        let styled: Vec<(String, Style)> = rows
+            .iter()
+            .flatten()
+            .map(|s| (s.content.to_string(), s.style))
+            .collect();
+        assert!(
+            styled
+                .iter()
+                .any(|(t, st)| t.contains("tail") && *st == bold),
+            "bold survives the wrap: {styled:?}"
+        );
+    }
+
+    #[test]
+    fn wrap_segments_preserve_mode_keeps_spaces() {
+        let rows = wrap_segments(&plain("  indented: code"), 8, true);
+        let texts: Vec<String> = rows.iter().map(|r| row_text(r)).collect();
+        assert_eq!(texts, vec!["  indent", "ed: code"]);
+    }
+
+    #[test]
+    fn wrapped_bullets_hang_under_their_indent() {
+        let segs = vec![(
+            "  • a nested bullet that wraps".to_string(),
+            Style::default(),
+        )];
+        let rows = wrap_segments(&segs, 14, false);
+        assert!(rows.len() > 1);
+        for r in &rows {
+            assert!(
+                row_text(r).starts_with("  "),
+                "hanging indent: {:?}",
+                row_text(r)
+            );
+        }
+    }
+
+    #[test]
+    fn assistant_markdown_renders_styled_not_literal() {
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::AssistantText(
+            "I added **R1** with `10k`:\n- pull-up\n```yaml\nnets:\n```".into(),
+        )));
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(text.contains("R1"), "bold text shows:\n{text}");
+        assert!(!text.contains("**"), "bold markers stripped:\n{text}");
+        assert!(!text.contains('`'), "code markers stripped:\n{text}");
+        assert!(text.contains("• pull-up"), "bullet normalized:\n{text}");
+        assert!(text.contains("nets:"), "fence content shows:\n{text}");
+        assert!(!text.contains("yaml"), "fence marker line hidden:\n{text}");
+    }
+
+    #[test]
+    fn user_text_is_never_markdown_rendered() {
+        let mut a = app();
+        for c in "literally **stars**".chars() {
+            a.update(Msg::Char(c));
+        }
+        a.update(Msg::Submit);
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(
+            text.contains("**stars**"),
+            "user input stays literal:\n{text}"
         );
     }
 

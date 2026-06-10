@@ -27,6 +27,7 @@
 
 pub mod app;
 pub mod event;
+pub mod md;
 pub mod ui;
 
 use std::io::{self, Stdout};
