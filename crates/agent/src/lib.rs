@@ -4,10 +4,12 @@
 //! authenticated with a bearer token. Everything is kept behind the
 //! [`llm::LlmClient`] trait so the provider can be swapped later.
 
+pub mod agent;
 pub mod config;
 pub mod llm;
 pub mod tools;
 
+pub use agent::{Agent, Approvals, AutoApprove, TurnOutcome};
 pub use config::Config;
 pub use llm::{
     BedrockClient, Completion, ContentBlock, LlmClient, Message, Role, ToolCall, ToolDef,
