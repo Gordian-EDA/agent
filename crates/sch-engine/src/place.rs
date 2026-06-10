@@ -21,10 +21,18 @@ pub struct Layout {
     pub positions: IndexMap<RefDes, [f64; 2]>,
 }
 
-/// Fixed grid-cell pitch for a component, in mm. Generous — sheet space is free
-/// and a wide pitch keeps symbols, their labels, and decouple caps clear of each
-/// other so ERC stays clean.
+/// Per-refdes approximate body extents `[width, height]` in mm, as produced by
+/// [`kicad_bridge::geometry::SymbolGeometry::approx_size`]. A refdes absent from
+/// the map falls back to the legacy fixed [`CELL_MM`] cell.
+pub type SizeMap = IndexMap<RefDes, [f64; 2]>;
+
+/// Fixed grid-cell pitch for a component with no known size, in mm. Generous —
+/// sheet space is free and a wide pitch keeps symbols, their labels, and
+/// decouple caps clear of each other so ERC stays clean.
 const CELL_MM: f64 = 25.4;
+
+/// Clearance added around a symbol's bbox for stubs, labels, and fields, mm.
+const CLEARANCE_MM: f64 = 15.24;
 
 /// Horizontal gutter between block columns (edge bands), in mm.
 const BAND_GAP_MM: f64 = 12.7;
@@ -49,15 +57,17 @@ fn band_rank(edge: Option<Edge>) -> u8 {
     }
 }
 
-/// Grid dimensions (cols, rows) for `n` cells: ~square, columns first.
-fn grid_dims(n: usize) -> (usize, usize) {
-    if n == 0 {
-        return (1, 1);
+/// Snap a length up to the 2.54 mm placement grid.
+fn snap_up(v: f64) -> f64 {
+    (v / 2.54).ceil() * 2.54
+}
+
+/// A component's cell extents: bbox + clearance, or the legacy fallback.
+fn cell_of(refdes: &RefDes, sizes: &SizeMap) -> [f64; 2] {
+    match sizes.get(refdes) {
+        Some(s) => [snap_up(s[0] + CLEARANCE_MM), snap_up(s[1] + CLEARANCE_MM)],
+        None => [CELL_MM, CELL_MM],
     }
-    let cols = (n as f64).sqrt().ceil() as usize;
-    let cols = cols.max(1);
-    let rows = n.div_ceil(cols);
-    (cols, rows)
 }
 
 /// A physically-grouped set of cells laid out together: an authored component
@@ -128,73 +138,54 @@ fn block_clusters(block: &Block) -> Vec<Cluster> {
     clusters
 }
 
-/// Lay a block's clusters into grid cells.
-///
-/// Returns the `(refdes, col, row)` cell for every component plus the block's
-/// total `(cols, rows)` footprint. Singletons pack left-to-right into rows of
-/// width `block_width`. A multi-cell cluster never straddles that packing: it
-/// starts at column 0 of a fresh row and fills its own compact
-/// `ceil(sqrt(len))`-wide sub-grid anchored at the parent, so each decouple cap
-/// stays within a few cells of its parent. Deterministic: cluster order and
-/// cell assignment depend only on the block.
-fn layout_block_cells(block: &Block) -> (Vec<(RefDes, usize, usize)>, usize, usize) {
-    let clusters = block_clusters(block);
-    let total: usize = clusters.iter().map(|c| c.len()).sum();
-    // Overall block packing width: ~square in the total cell count, and at least
-    // wide enough to hold the widest cluster's sub-grid so nothing overflows.
-    let widest_cluster = clusters
-        .iter()
-        .map(|c| sub_cols(c.len()))
-        .max()
-        .unwrap_or(1);
-    let block_width = grid_dims(total).0.max(widest_cluster).max(1);
-
-    let mut cells: Vec<(RefDes, usize, usize)> = Vec::with_capacity(total);
-    let mut row = 0usize; // current packing row
-    let mut col = 0usize; // next free column in the current packing row
-    let mut max_rows = 0usize;
-
-    for cluster in &clusters {
-        if cluster.len() == 1 {
-            // Singleton: pack into the current row, wrapping at block_width.
-            if col >= block_width {
-                row += 1;
-                col = 0;
-            }
-            cells.push((cluster[0].clone(), col, row));
-            max_rows = max_rows.max(row + 1);
-            col += 1;
-        } else {
-            // Multi-cell cluster: drop to a fresh row so the parent leads its own
-            // compact sub-grid and its caps cannot wrap away across the block.
-            if col != 0 {
-                row += 1;
-                col = 0;
-            }
-            let cw = sub_cols(cluster.len());
-            for (k, refdes) in cluster.iter().enumerate() {
-                let sub_col = k % cw;
-                let sub_row = k / cw;
-                cells.push((refdes.clone(), sub_col, row + sub_row));
-            }
-            let ch = cluster.len().div_ceil(cw);
-            max_rows = max_rows.max(row + ch);
-            row += ch; // next cluster starts below this sub-grid
-            // `col` is already 0 here (reset above on entry / fresh row).
-        }
+/// One cluster laid out: per-refdes offsets (cell CENTERS) relative to the
+/// cluster's top-left corner, plus the cluster envelope [w, h]. A multi-cell
+/// cluster (parent + decouple caps) places the parent's cell, then a single
+/// row of cap cells to its right, top-aligned (the decoupling bank).
+fn layout_cluster(cluster: &Cluster, sizes: &SizeMap) -> (Vec<(RefDes, [f64; 2])>, [f64; 2]) {
+    let parent_cell = cell_of(&cluster[0], sizes);
+    let mut offsets = vec![(
+        cluster[0].clone(),
+        [parent_cell[0] / 2.0, parent_cell[1] / 2.0],
+    )];
+    let mut x = parent_cell[0];
+    let mut h = parent_cell[1];
+    for child in &cluster[1..] {
+        let c = cell_of(child, sizes);
+        offsets.push((child.clone(), [x + c[0] / 2.0, c[1] / 2.0]));
+        x += c[0];
+        h = h.max(c[1]);
     }
-
-    (cells, block_width.max(1), max_rows)
+    (offsets, [x, h])
 }
 
-/// Sub-grid column count for a cluster of `len` cells: ~square, columns first.
-/// A cluster laid out `ceil(sqrt(len))` columns wide keeps its farthest cap
-/// within `ceil(sqrt(len)) - 1` cells of the parent on each axis.
-fn sub_cols(len: usize) -> usize {
-    if len <= 1 {
-        return 1;
+/// Lay a block's clusters into rows of envelopes, wrapping at a ~square target
+/// width. Returns per-refdes positions relative to the block origin plus the
+/// block envelope [w, h].
+fn layout_block(block: &Block, sizes: &SizeMap) -> (Vec<(RefDes, [f64; 2])>, [f64; 2]) {
+    let clusters = block_clusters(block);
+    let laid: Vec<_> = clusters.iter().map(|c| layout_cluster(c, sizes)).collect();
+    let total_area: f64 = laid.iter().map(|(_, e)| e[0] * e[1]).sum();
+    let target_w = total_area
+        .sqrt()
+        .max(laid.iter().map(|(_, e)| e[0]).fold(0.0, f64::max));
+
+    let mut out = Vec::new();
+    let (mut x, mut y, mut row_h, mut max_w) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for (offsets, env) in &laid {
+        if x > 0.0 && x + env[0] > target_w {
+            y += row_h;
+            x = 0.0;
+            row_h = 0.0;
+        }
+        for (refdes, off) in offsets {
+            out.push((refdes.clone(), [x + off[0], y + off[1]]));
+        }
+        x += env[0];
+        row_h = row_h.max(env[1]);
+        max_w = max_w.max(x);
     }
-    ((len as f64).sqrt().ceil() as usize).max(1)
+    (out, [max_w, y + row_h])
 }
 
 /// Compute deterministic positions for every component in `design`.
@@ -203,16 +194,23 @@ fn sub_cols(len: usize) -> usize {
 /// Right band rightmost); within a band each block stacks downward and occupies
 /// a rectangular region; within a region components fill a ~square grid of
 /// fixed-pitch, grid-snapped cells. Same `Design` -> same `Layout`.
-pub fn place(design: &Design) -> Layout {
+pub fn place(design: &Design, sizes: &SizeMap) -> Layout {
     // Stable block order: by band rank, then original `Design` order.
     let mut blocks: Vec<(&str, &Block)> =
         design.blocks.iter().map(|(n, b)| (n.as_str(), b)).collect();
     blocks.sort_by_key(|(_, b)| band_rank(b.layout.edge));
     // `sort_by_key` is stable, so equal-rank blocks keep `Design` order.
 
+    // Pre-compute each block's relative layout + envelope once; reuse below for
+    // both band-width accumulation and final placement.
+    let laid: Vec<(Vec<(RefDes, [f64; 2])>, [f64; 2])> = blocks
+        .iter()
+        .map(|(_, b)| layout_block(b, sizes))
+        .collect();
+
     // x-base for each band: bands laid left-to-right in ascending rank. Each
-    // band is as wide as its widest block's grid; we accumulate widths so bands
-    // never overlap horizontally.
+    // band is as wide as its widest block's envelope; we accumulate widths in mm
+    // so bands never overlap horizontally.
     let mut band_x: IndexMap<u8, f64> = IndexMap::new();
     let mut cursor_x = MARGIN_MM;
     let mut ranks: Vec<u8> = blocks
@@ -222,36 +220,33 @@ pub fn place(design: &Design) -> Layout {
     ranks.sort_unstable();
     ranks.dedup();
     for rank in &ranks {
-        // Widest block in this band determines the band's column count. Use the
-        // cluster layout's footprint so band widths match actual placement.
-        let max_cols = blocks
+        // Widest block envelope in this band determines the band's width.
+        let max_w = blocks
             .iter()
-            .filter(|(_, b)| band_rank(b.layout.edge) == *rank)
-            .map(|(_, b)| layout_block_cells(b).1)
-            .max()
-            .unwrap_or(1);
+            .zip(laid.iter())
+            .filter(|((_, b), _)| band_rank(b.layout.edge) == *rank)
+            .map(|(_, (_, env))| env[0])
+            .fold(0.0_f64, f64::max);
         band_x.insert(*rank, cursor_x);
-        cursor_x += max_cols as f64 * CELL_MM + BAND_GAP_MM;
+        cursor_x += max_w + BAND_GAP_MM;
     }
 
     let mut positions: IndexMap<RefDes, [f64; 2]> = IndexMap::new();
     // Independent vertical cursor per band so stacked blocks don't collide.
     let mut band_y: IndexMap<u8, f64> = IndexMap::new();
 
-    for (_name, block) in &blocks {
+    for ((_name, block), (rels, env)) in blocks.iter().zip(laid.iter()) {
         let rank = band_rank(block.layout.edge);
         let x0 = band_x[&rank];
         let y0 = *band_y.entry(rank).or_insert(MARGIN_MM);
 
-        let (cells, _cols, rows) = layout_block_cells(block);
-        for (refdes, col, row) in &cells {
-            let p = snap_point([x0 + *col as f64 * CELL_MM, y0 + *row as f64 * CELL_MM]);
+        for (refdes, rel) in rels {
+            let p = snap_point([x0 + rel[0], y0 + rel[1]]);
             positions.insert(refdes.clone(), p);
         }
 
-        // Advance this band's cursor past the block's region plus a gutter.
-        let used_rows = if cells.is_empty() { 0 } else { rows };
-        band_y.insert(rank, y0 + used_rows as f64 * CELL_MM + BLOCK_GAP_MM);
+        // Advance this band's cursor past the block's envelope plus a gutter.
+        band_y.insert(rank, y0 + env[1] + BLOCK_GAP_MM);
     }
 
     Layout { positions }
@@ -353,7 +348,7 @@ blocks:
     #[test]
     fn places_blocks_into_non_overlapping_regions_on_grid() {
         let design = small_two_block_design();
-        let layout = place(&design);
+        let layout = place(&design, &SizeMap::new());
 
         // Every component has a position.
         let total: usize = design.blocks.values().map(|b| b.components.len()).sum();
@@ -368,7 +363,7 @@ blocks:
         assert!(no_overlaps(&layout), "components overlap: {:?}", layout);
 
         // Determinism: same design -> same layout.
-        assert_eq!(layout, place(&design));
+        assert_eq!(layout, place(&design, &SizeMap::new()));
     }
 
     #[test]
@@ -425,30 +420,29 @@ blocks:
             .collect();
         assert_eq!(cap_keys.len(), 2, "expected 2 decouple caps");
 
-        let layout = place(&design);
+        let layout = place(&design, &SizeMap::new());
         let u1 = layout.positions["U1"];
-        // Each cap must sit within the compact-cluster bound of its parent.
-        let bound = cluster_bound(1 + cap_keys.len());
-        for cap in cap_keys {
-            let p = layout.positions[cap];
-            let d = ((p[0] - u1[0]).powi(2) + (p[1] - u1[1]).powi(2)).sqrt();
+        // With the decoupling-bank layout the caps form a single row to the RIGHT
+        // of their parent: every cap sits at a larger x and within a reasonable
+        // horizontal span of the parent (no wrapping onto a far row).
+        let span = (1 + cap_keys.len()) as f64 * CELL_MM;
+        for cap in &cap_keys {
+            let p = layout.positions[*cap];
             assert!(
-                d <= bound,
-                "decouple cap {cap} at {p:?} not adjacent to U1 at {u1:?} (dist {d})"
+                p[0] > u1[0],
+                "decouple cap {cap} at {p:?} must sit right of U1 at {u1:?}"
+            );
+            assert!(
+                (p[0] - u1[0]) <= span,
+                "decouple cap {cap} at {p:?} too far right of U1 at {u1:?} (span {span})"
             );
         }
-    }
-
-    /// Compact-cluster adjacency bound for a cluster of `cluster_len` cells
-    /// (parent + caps). The cluster is laid out in a `ceil(sqrt(cluster_len))`
-    /// wide sub-grid anchored at the parent, so the farthest cap is at most
-    /// `cw - 1` cells away on each axis; its Euclidean distance from the parent
-    /// is therefore at most `CELL_MM * sqrt(2) * (cw - 1)`. A small grid-snap
-    /// tolerance covers the 1.27 mm rounding. This is far tighter than a full
-    /// wide row (where a wrapped cap lands 50+ mm away).
-    fn cluster_bound(cluster_len: usize) -> f64 {
-        let cw = (cluster_len as f64).sqrt().ceil();
-        CELL_MM * std::f64::consts::SQRT_2 * (cw - 1.0) + 2.0 * crate::grid::GRID_MM
+        // All caps share one row (same y as each other).
+        let cap_ys: Vec<f64> = cap_keys.iter().map(|c| layout.positions[*c][1]).collect();
+        assert!(
+            cap_ys.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-6),
+            "decouple caps must share one row: {cap_ys:?}"
+        );
     }
 
     /// Reviewer's pathology: a block of singleton components (R1..R5) followed
@@ -522,38 +516,105 @@ blocks:
             .collect();
         assert_eq!(cap_keys.len(), 3, "expected 3 decouple caps for U6");
 
-        // Cluster = U6 + its 3 caps.
-        let cluster_len = 1 + cap_keys.len();
-        let bound = cluster_bound(cluster_len);
+        // Cluster = U6 + its 3 caps. The decoupling bank places caps in one row
+        // immediately right of U6, so the farthest cap is at most the bank's
+        // total cell width away — never wrapped onto a distant row.
+        let bank_span = (1 + cap_keys.len()) as f64 * CELL_MM;
 
-        let layout = place(&design);
+        let layout = place(&design, &SizeMap::new());
         let u6 = layout.positions["U6"];
+        let cap_ys: Vec<f64> = cap_keys.iter().map(|c| layout.positions[*c][1]).collect();
         for cap in &cap_keys {
             let p = layout.positions[*cap];
-            let d = ((p[0] - u6[0]).powi(2) + (p[1] - u6[1]).powi(2)).sqrt();
             assert!(
-                d <= bound,
-                "decouple cap {cap} at {p:?} is {d:.1} mm from U6 at {u6:?}, \
-                 exceeds compact-cluster bound {bound:.1} mm"
+                p[0] > u6[0],
+                "decouple cap {cap} at {p:?} must sit right of U6 at {u6:?}"
+            );
+            assert!(
+                (p[0] - u6[0]) <= bank_span,
+                "decouple cap {cap} at {p:?} is {:.1} mm right of U6 at {u6:?}, \
+                 exceeds bank span {bank_span:.1} mm",
+                p[0] - u6[0]
             );
         }
-
-        // Sanity: the bound genuinely excludes the old row-wrap distance, which
-        // separated a cap from its parent by well over 50 mm.
+        // Caps share one row (no row-wrap). The bank span is far tighter than the
+        // old row-major layout, where a wrapped cap landed 50+ mm away.
         assert!(
-            bound < 50.0,
-            "adjacency bound {bound:.1} mm must be tight enough to catch row-wrap"
+            cap_ys.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-6),
+            "decouple caps must share one bank row: {cap_ys:?}"
+        );
+        assert!(
+            bank_span < 5.0 * CELL_MM,
+            "bank span {bank_span:.1} mm must stay compact"
         );
 
-        // No overlaps and determinism still hold for clustered layout.
+        // No overlaps and determinism still hold for the bank layout.
         assert!(no_overlaps(&layout), "components overlap: {layout:?}");
-        assert_eq!(layout, place(&design));
+        assert_eq!(layout, place(&design, &SizeMap::new()));
+    }
+
+    /// The decoupling-bank invariant in isolation: a part's synthesized caps form
+    /// a single horizontal row immediately to the right of their parent.
+    #[test]
+    fn decouple_caps_form_a_row_beside_parent() {
+        use circuit_lang::{PinType, SymbolProvider};
+
+        let mut provider = circuit_lang::MockSymbolProvider::new();
+        provider
+            .add(
+                "Device:C",
+                vec![
+                    ("1", "~", PinType::Passive, 1),
+                    ("2", "~", PinType::Passive, 1),
+                ],
+            )
+            .add(
+                "MCU:M",
+                vec![
+                    ("1", "VDD", PinType::PowerInput, 1),
+                    ("2", "VSS", PinType::PowerInput, 1),
+                    ("3", "IO", PinType::Passive, 1),
+                ],
+            );
+
+        let src = "
+version: 1
+name: t
+rails: [3V3, GND]
+blocks:
+  mcu:
+    components:
+      U1: {part: MCU:M, decouple: {100nF: 2}, pins: {VDD: 3V3, VSS: GND, IO: SIG}}
+";
+        let result = circuit_lang::compile(src, &provider);
+        assert!(!result.diagnostics.has_errors(), "{:?}", result.diagnostics);
+        let design = result.design.expect("compiles");
+
+        let cap_keys: Vec<&str> = design.blocks["mcu"]
+            .components
+            .iter()
+            .filter(|(_, c)| matches!(c.origin, circuit_lang::model::Origin::Synthesized { .. }))
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(cap_keys.len(), 2, "expected 2 decouple caps");
+
+        let layout = place(&design, &SizeMap::new());
+        let u1 = layout.positions["U1"];
+        let caps: Vec<[f64; 2]> = cap_keys.iter().map(|c| layout.positions[*c]).collect();
+        for p in &caps {
+            assert!(
+                p[0] > u1[0],
+                "caps sit to the right of the parent: {p:?} vs {u1:?}"
+            );
+        }
+        // All caps share one row (same y).
+        assert!(caps.windows(2).all(|w| (w[0][1] - w[1][1]).abs() < 1e-6));
     }
 
     #[test]
     fn edge_hints_push_blocks_to_sheet_sides() {
         let design = design_with_edge_hints();
-        let layout = place(&design);
+        let layout = place(&design, &SizeMap::new());
         let ax = block_centroid_x(&layout, &design, "a");
         let bx = block_centroid_x(&layout, &design, "b");
         assert!(

@@ -131,6 +131,24 @@ impl SymbolGeometry {
     pub fn definition_sexpr(&self) -> &str {
         &self.raw_definition
     }
+
+    /// Approximate body extents `[width, height]` in mm, derived from pin
+    /// connection points (pins bound the drawn body closely for almost every
+    /// KiCAD symbol). Floors at 5.08 mm and pads 2.54 mm per side so even a
+    /// bare two-pin passive gets a sane footprint.
+    pub fn approx_size(&self) -> [f64; 2] {
+        let (mut min_x, mut max_x, mut min_y, mut max_y) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for p in &self.pins {
+            min_x = min_x.min(p.at[0]);
+            max_x = max_x.max(p.at[0]);
+            min_y = min_y.min(p.at[1]);
+            max_y = max_y.max(p.at[1]);
+        }
+        [
+            (max_x - min_x).max(5.08) + 5.08,
+            (max_y - min_y).max(5.08) + 5.08,
+        ]
+    }
 }
 
 /// Find a top-level symbol by its bare name.

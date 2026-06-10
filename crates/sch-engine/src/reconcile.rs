@@ -255,7 +255,18 @@ pub fn emit_design_reconciled(
     design: &Design,
     prior: Option<&str>,
 ) -> io::Result<String> {
-    let auto = place::place(design);
+    // Per-component approximate sizes drive bbox-aware placement cells. Load
+    // each part's geometry; parts whose geometry can't load fall back to the
+    // fixed legacy cell inside the placer.
+    let mut sizes = place::SizeMap::new();
+    for block in design.blocks.values() {
+        for (refdes, comp) in &block.components {
+            if let Ok(g) = kicad_bridge::geometry::SymbolGeometry::load(env, &comp.part) {
+                sizes.insert(refdes.clone(), g.approx_size());
+            }
+        }
+    }
+    let auto = place::place(design, &sizes);
     let prior_map = prior.map(parse_prior).unwrap_or_default();
 
     let mut w = SchematicWriter::new();

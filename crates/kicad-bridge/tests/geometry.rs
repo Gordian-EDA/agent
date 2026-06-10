@@ -27,6 +27,17 @@ fn device_r_pin_geometry() {
     );
 }
 
+#[test]
+fn approx_size_scales_with_symbol() {
+    let Some(env) = KicadEnv::detect() else {
+        eprintln!("SKIP: no KiCAD install detected");
+        return;
+    };
+    let r = SymbolGeometry::load(&env, "Device:R").unwrap().approx_size();
+    assert!(r[1] > r[0], "R is taller than wide: {r:?}");
+    assert!(r[1] <= 15.0, "passive stays small: {r:?}");
+}
+
 /// Multi-unit symbols (op-amps, logic gates) flatten every unit's pins into the
 /// one `pins` Vec, so `pins.len()` overcounts a single placed unit. Each pin
 /// must carry its `unit` so `sch-engine` can filter per-unit. `LM358` is a
