@@ -570,8 +570,6 @@ impl SchematicWriter {
     /// with it. The pin-endpoint fallback reproduces the proven pre-stub
     /// connectivity, so retraction only ever removes an accidental merge.
     fn retract_colliding_stubs(&mut self) {
-        use std::collections::BTreeMap;
-
         // Sentinel "net" for no-connect anchors: a stub on a no-connect pin is
         // still a wrong attachment, so treat it as a foreign net.
         const NC: &str = "\0no_connect";
@@ -593,7 +591,9 @@ impl SchematicWriter {
         let mut segments: Vec<([f64; 2], [f64; 2], String)> = Vec::new();
 
         for inst in &self.instances {
-            if inst.refdes.starts_with('#') || inst.lib_id.starts_with("power:") {
+            // Power-symbol/flag pin origins (identified by `power:` lib_id) occupy
+            // the points that signal stubs must not be retracted onto.
+            if inst.lib_id.starts_with("power:") {
                 add_point(inst.at, &inst.value, &mut points);
             }
         }
@@ -1106,6 +1106,8 @@ mod tests {
         assert!(render_label(&mk(Dir::West)).contains("justify right"));
         assert!(render_label(&mk(Dir::North)).contains("(at 0 0 90)"));
         assert!(render_label(&mk(Dir::South)).contains("(at 0 0 270)"));
+        assert!(render_label(&mk(Dir::North)).contains("justify left"));
+        assert!(render_label(&mk(Dir::South)).contains("justify right"));
     }
 
     #[test]
