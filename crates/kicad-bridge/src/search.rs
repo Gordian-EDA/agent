@@ -16,6 +16,8 @@ use std::fs;
 use std::io;
 
 use circuit_lang::SymbolProvider;
+use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::env::KicadEnv;
 use crate::provider::RealSymbolProvider;
@@ -85,33 +87,17 @@ impl SymbolIndex {
 
     /// Return the `n` best matches for `query`.
     ///
-    /// Ranking: case-insensitive substring matches (on the normalized name)
-    /// first, then by normalized levenshtein distance; non-alphanumeric
-    /// characters are treated as word separators on both sides. Pin counts
-    /// are resolved lazily, for the returned hits only.
+    /// Ranking is fzf-style subsequence scoring (see [`rank`]). Pin counts are
+    /// resolved lazily, for the returned hits only.
     pub fn search(&self, query: &str, n: usize) -> Vec<Hit> {
         let needle = normalize(query);
         if needle.is_empty() {
             return Vec::new();
         }
 
-        // (tier, distance, index): tier 0 = substring match, tier 1 = fuzzy.
-        let mut ranked: Vec<(u8, f64, usize)> = self
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                let tier = u8::from(!e.normalized.contains(&needle));
-                let distance = 1.0 - strsim::normalized_levenshtein(&needle, &e.normalized);
-                (tier, distance, i)
-            })
-            .collect();
-        ranked.sort_by(|a, b| a.partial_cmp(b).expect("distances are finite"));
-
-        ranked
+        rank(&self.entries, &needle, n)
             .into_iter()
-            .take(n)
-            .map(|(_, _, i)| {
+            .map(|i| {
                 let lib_id = self.entries[i].lib_id.clone();
                 let pin_count = self
                     .provider
@@ -121,6 +107,52 @@ impl SymbolIndex {
             })
             .collect()
     }
+}
+
+/// Rank `entries` against an already-normalized `needle`, returning the indices
+/// of the best `n`, best first.
+///
+/// Primary ranking is fzf-style subsequence scoring via [`SkimMatcherV2`]
+/// (higher score = better; candidates the needle is not a subsequence of score
+/// `None` and drop out). When fewer than `n` candidates match as a subsequence
+/// — e.g. the query has a transposition — the remainder is backfilled by edit
+/// distance, so the caller is never starved of candidates. Ordering is
+/// deterministic: fuzzy ties break on shorter normalized text then `lib_id`;
+/// backfill ties break on `lib_id`.
+fn rank(entries: &[Entry], needle: &str, n: usize) -> Vec<usize> {
+    let matcher = SkimMatcherV2::default();
+
+    let mut fuzzy: Vec<(i64, usize)> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| matcher.fuzzy_match(&e.normalized, needle).map(|s| (s, i)))
+        .collect();
+    fuzzy.sort_by(|&(sa, ia), &(sb, ib)| {
+        sb.cmp(&sa)
+            .then_with(|| entries[ia].normalized.len().cmp(&entries[ib].normalized.len()))
+            .then_with(|| entries[ia].lib_id.cmp(&entries[ib].lib_id))
+    });
+
+    let mut chosen: Vec<usize> = fuzzy.into_iter().take(n).map(|(_, i)| i).collect();
+    if chosen.len() >= n {
+        return chosen;
+    }
+
+    // Backfill: never starve the agent of candidates on a typo / non-subsequence.
+    let taken: std::collections::HashSet<usize> = chosen.iter().copied().collect();
+    let mut rest: Vec<(f64, usize)> = entries
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !taken.contains(i))
+        .map(|(i, e)| (1.0 - strsim::normalized_levenshtein(needle, &e.normalized), i))
+        .collect();
+    rest.sort_by(|&(da, ia), &(db, ib)| {
+        da.partial_cmp(&db)
+            .expect("distances are finite")
+            .then_with(|| entries[ia].lib_id.cmp(&entries[ib].lib_id))
+    });
+    chosen.extend(rest.into_iter().take(n - chosen.len()).map(|(_, i)| i));
+    chosen
 }
 
 /// Lowercase and collapse runs of non-alphanumeric characters into single
@@ -200,6 +232,50 @@ fn symbol_block_name(rest: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build an `Entry` the way `build` does: normalized over the full lib_id.
+    fn entry(lib_id: &str) -> Entry {
+        Entry {
+            normalized: normalize(lib_id),
+            lib_id: lib_id.to_string(),
+        }
+    }
+
+    #[test]
+    fn fuzzy_ranks_fragment_match_first() {
+        let entries = vec![
+            entry("Device:R"),
+            entry("MCU_ST_STM32F1:STM32F103C8Tx"),
+            entry("MCU_ST_STM32H7:STM32H743VITx"),
+        ];
+        let ranked = rank(&entries, &normalize("stm32h743"), 3);
+        assert_eq!(
+            entries[ranked[0]].lib_id, "MCU_ST_STM32H7:STM32H743VITx",
+            "the precise part should rank first for a clean fragment"
+        );
+    }
+
+    #[test]
+    fn qualified_query_matches_via_lib_name() {
+        let entries = vec![
+            entry("Device:C"),
+            entry("Connector:Conn_01x02"),
+            entry("Device:R"),
+        ];
+        let ranked = rank(&entries, &normalize("Device:R"), 3);
+        assert_eq!(entries[ranked[0]].lib_id, "Device:R");
+    }
+
+    #[test]
+    fn typo_returns_closest_via_backfill() {
+        let entries = vec![entry("Connector_Audio:AudioJack3"), entry("Device:R")];
+        // "deivce" transposes "device"; the 'v' before 'i' breaks the
+        // subsequence, so SkimMatcherV2 finds nothing and backfill by edit
+        // distance must still return the closest candidate.
+        let ranked = rank(&entries, &normalize("deivce"), 1);
+        assert_eq!(ranked.len(), 1, "backfill must guarantee n results");
+        assert_eq!(entries[ranked[0]].lib_id, "Device:R");
+    }
 
     #[test]
     fn normalize_treats_non_alnum_as_separators() {
