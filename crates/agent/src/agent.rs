@@ -42,7 +42,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::llm::{ContentBlock, LlmClient, Message, Role};
+use crate::llm::{ContentBlock, ImageData, LlmClient, Message, Role};
 use crate::tools::{ToolCtx, Tools};
 
 /// Safety cap on LLM round-trips per turn. Generous enough for
@@ -402,7 +402,7 @@ impl Agent {
                         name: call.name.clone(),
                     },
                 );
-                let content = self
+                let (content, images) = self
                     .run_tool_call(call, approvals, &mut applied, events)
                     .await;
                 emit(
@@ -415,7 +415,7 @@ impl Agent {
                 result_blocks.push(ContentBlock::ToolResult {
                     tool_use_id: call.id.clone(),
                     content,
-                    images: Vec::new(),
+                    images,
                 });
             }
             self.history.push(Message {
@@ -449,17 +449,18 @@ impl Agent {
         })
     }
 
-    /// Execute one tool call, returning the JSON-stringified result to feed back
-    /// to the model. `apply_design` commits are routed through the apply-gate;
-    /// every other tool runs directly. Tool errors are surfaced as a structured
-    /// `{error: ...}` result (not propagated) so the model can self-repair.
+    /// Execute one tool call, returning the JSON-stringified result and any
+    /// images to feed back to the model. `apply_design` commits are routed
+    /// through the apply-gate; every other tool runs directly. Tool errors are
+    /// surfaced as a structured `{error: ...}` result (not propagated) so the
+    /// model can self-repair.
     async fn run_tool_call(
         &self,
         call: &crate::llm::ToolCall,
         approvals: &mut dyn Approvals,
         applied: &mut bool,
         events: Events<'_>,
-    ) -> String {
+    ) -> (String, Vec<ImageData>) {
         let result = if call.name == "apply_design" && wants_commit(&call.input) {
             self.gated_apply(&call.input, approvals, applied, events)
                 .await
@@ -468,8 +469,11 @@ impl Agent {
         };
 
         match result {
-            Ok(value) => value.to_string(),
-            Err(e) => json!({ "error": e.to_string() }).to_string(),
+            Ok(mut value) => {
+                let images = take_images(&mut value);
+                (value.to_string(), images)
+            }
+            Err(e) => (json!({ "error": e.to_string() }).to_string(), Vec::new()),
         }
     }
 
@@ -521,6 +525,30 @@ impl Agent {
             emit(events, AgentEvent::Applied { errors, warnings });
         }
         Ok(committed)
+    }
+}
+
+/// Pull a `_image_path` out of a tool result: load + base64 the PNG, strip the
+/// key so the model's text view stays clean. An unreadable file degrades to
+/// "no image" rather than failing the tool call.
+fn take_images(value: &mut Value) -> Vec<ImageData> {
+    use base64::Engine as _;
+    let Some(path) = value
+        .get(crate::tools::IMAGE_PATH_KEY)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return Vec::new();
+    };
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove(crate::tools::IMAGE_PATH_KEY);
+    }
+    match std::fs::read(&path) {
+        Ok(bytes) => vec![ImageData {
+            format: "png".to_string(),
+            base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }],
+        Err(_) => Vec::new(),
     }
 }
 
@@ -595,6 +623,7 @@ fn tool_summary(name: &str, input: &Value, result_json: &str) -> String {
             let path = input.get("path").and_then(Value::as_str).unwrap_or("?");
             format!("lifted {path}")
         }
+        "render_schematic" => "rendered schematic to PNG".to_string(),
         _ => "done".to_string(),
     }
 }

@@ -324,6 +324,16 @@ impl Tools {
                     "required": ["path"]
                 }),
             },
+            ToolDef {
+                name: "render_schematic".into(),
+                description: "Render the current schematic to a PNG image and \
+                    return it so you can SEE the sheet. Use after apply_design \
+                    to inspect layout quality: overlapping text, crowding, \
+                    confusing arrangement. The PNG is also saved under \
+                    .autopcb/renders/."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
         ]
     }
 
@@ -339,6 +349,7 @@ impl Tools {
             "run_erc" => run_erc(ctx),
             "project_info" => project_info(ctx),
             "read_schematic" => read_schematic(input, ctx),
+            "render_schematic" => render_schematic(ctx),
             other => bail!("unknown tool: {other}"),
         }
     }
@@ -688,6 +699,39 @@ fn same_file(a: &Path, b: &Path) -> bool {
         (Ok(ca), Ok(cb)) => ca == cb,
         _ => a == b,
     }
+}
+
+// ── 9. render_schematic ────────────────────────────────────────────────────
+
+/// Result key carrying a PNG path for the agent loop to attach as an image
+/// block (and strip from the JSON the model sees as text).
+pub const IMAGE_PATH_KEY: &str = "_image_path";
+
+/// Long-edge pixel cap for rendered schematics (Claude vision sweet spot).
+const RENDER_MAX_PX: u32 = 1600;
+
+fn render_schematic(ctx: &ToolCtx) -> Result<Value> {
+    if !ctx.sch_path.exists() {
+        return Ok(json!({
+            "error": "no schematic yet — apply a design first",
+        }));
+    }
+    let tmp = tempfile::tempdir().context("creating temp dir for svg export")?;
+    let svg_path = KicadCli::new(&ctx.env)
+        .export_svg(&ctx.sch_path, tmp.path())
+        .context("exporting schematic SVG")?;
+    let svg = std::fs::read_to_string(&svg_path)?;
+    let png = crate::render::svg_to_png(&svg, RENDER_MAX_PX)?;
+    let path = ctx.workspace().next_render_path()?;
+    std::fs::write(&path, &png)
+        .with_context(|| format!("writing {}", path.display()))?;
+    let mut obj = json!({
+        "ok": true,
+        "png_path": path.display().to_string(),
+        "note": "image attached; also saved to png_path for the user to open",
+    });
+    obj[IMAGE_PATH_KEY] = json!(path.display().to_string());
+    Ok(obj)
 }
 
 // ── 8. run_erc ─────────────────────────────────────────────────────────────

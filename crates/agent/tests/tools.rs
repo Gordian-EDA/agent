@@ -358,3 +358,45 @@ fn unknown_tool_is_an_error() {
             .is_err()
     );
 }
+
+#[test]
+fn render_schematic_returns_png_and_image_path() {
+    let Some(ctx) = agent::tools::ToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD environment detected");
+        return;
+    };
+    let tools = agent::tools::Tools::new();
+
+    // No schematic yet -> structured error, no crash.
+    let out = tools
+        .run("render_schematic", serde_json::json!({}), &ctx)
+        .unwrap();
+    assert!(out.get("error").is_some());
+
+    // Write a minimal schematic via apply_design, then render it.
+    let yaml = "
+version: 1
+name: t
+rails: [GND]
+blocks:
+  a:
+    components:
+      R1: {part: Device:R, value: 1k, between: [N1, GND]}
+";
+    let applied = tools
+        .run(
+            "apply_design",
+            serde_json::json!({ "yaml": yaml, "commit": true }),
+            &ctx,
+        )
+        .unwrap();
+    assert_eq!(applied["written"], serde_json::json!(true));
+
+    let out = tools
+        .run("render_schematic", serde_json::json!({}), &ctx)
+        .unwrap();
+    let png_path = out["_image_path"].as_str().expect("image path");
+    let bytes = std::fs::read(png_path).unwrap();
+    assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+    assert!(png_path.contains(".autopcb/renders/render-001.png"));
+}
