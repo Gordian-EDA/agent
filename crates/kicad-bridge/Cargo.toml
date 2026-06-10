@@ -11,3 +11,4 @@ serde.workspace = true
 serde_json.workspace = true
 kiutils_kicad.workspace = true
 tempfile.workspace = true
+quick-xml.workspace = true
