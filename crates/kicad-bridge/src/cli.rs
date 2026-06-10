@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use quick_xml::Reader;
@@ -24,7 +24,7 @@ use serde::Deserialize;
 
 /// A handle to `kicad-cli` for running schematic-level checks.
 pub struct KicadCli {
-    cli_path: std::path::PathBuf,
+    cli_path: PathBuf,
 }
 
 impl KicadCli {
@@ -118,10 +118,12 @@ impl KicadCli {
     /// Run `kicad-cli sch export svg` on `schematic`, writing into `out_dir`.
     ///
     /// KiCAD names the output `<schematic stem>.svg` inside `out_dir`; the
-    /// resolved path is returned. Returns `Err` on execution failure (binary
-    /// missing, schematic failed to load) or if the expected file was not
-    /// produced.
-    pub fn export_svg(&self, schematic: &Path, out_dir: &Path) -> io::Result<std::path::PathBuf> {
+    /// resolved path is returned. If the expected `<stem>.svg` is not present,
+    /// falls back to the lexicographically-first `*.svg` in `out_dir` (KiCAD
+    /// may emit page-numbered names such as `stem-2.svg` on some versions).
+    /// Returns `Err` on execution failure (binary missing, schematic failed to
+    /// load) or if no SVG file was produced.
+    pub fn export_svg(&self, schematic: &Path, out_dir: &Path) -> io::Result<PathBuf> {
         std::fs::create_dir_all(out_dir)?;
         let output = Command::new(&self.cli_path)
             .args(["sch", "export", "svg"])
@@ -131,10 +133,13 @@ impl KicadCli {
             .output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("kicad-cli sch export svg failed: {}", stderr.trim()),
-            ));
+            let stderr = stderr.trim();
+            let detail = if stderr.is_empty() {
+                "kicad-cli sch export svg failed".to_string()
+            } else {
+                format!("kicad-cli sch export svg failed: {stderr}")
+            };
+            return Err(io::Error::new(io::ErrorKind::InvalidData, detail));
         }
         let stem = schematic
             .file_stem()
@@ -144,20 +149,22 @@ impl KicadCli {
         if svg.is_file() {
             return Ok(svg);
         }
-        // Fallback: glob for the first *.svg produced in out_dir (KiCAD may
-        // use a page-numbered name on some versions).
-        let first = std::fs::read_dir(out_dir)?
+        // Fallback: collect all *.svg files in out_dir, sort lexicographically
+        // (yielding natural KiCAD page order: stem.svg < stem-2.svg < …), and
+        // return the first. This is deterministic regardless of filesystem
+        // hash-ordering.
+        let mut svgs: Vec<PathBuf> = std::fs::read_dir(out_dir)?
             .flatten()
-            .filter(|e| {
-                e.path()
-                    .extension()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
                     .and_then(|x| x.to_str())
                     .map(|x| x.eq_ignore_ascii_case("svg"))
                     .unwrap_or(false)
             })
-            .map(|e| e.path())
-            .next();
-        match first {
+            .collect();
+        svgs.sort();
+        match svgs.into_iter().next() {
             Some(path) => Ok(path),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
