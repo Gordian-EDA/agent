@@ -227,6 +227,40 @@ impl SchematicWriter {
         Ok(())
     }
 
+    /// Place a power symbol (graphic power port) whose **Value names the net**.
+    ///
+    /// KiCAD derives a power port's global net from the symbol's Value field,
+    /// so a stock `power:GND` drives `GND` and any donor symbol with an
+    /// overridden Value drives that custom rail. The single pin of every
+    /// `power:` symbol sits at the symbol origin, so `at` IS the connection
+    /// point. `refdes` must be `#`-prefixed (hidden, netlist-excluded).
+    pub fn add_power_symbol(
+        &mut self,
+        env: &KicadEnv,
+        lib_id: &str,
+        refdes: &str,
+        net: &str,
+        at: [f64; 2],
+        angle: f64,
+    ) -> io::Result<()> {
+        self.add_symbol(env, lib_id, refdes, net, at, angle)
+    }
+
+    /// Place a `PWR_FLAG` whose pin is **pin-coincident** with `at`.
+    ///
+    /// Power nets are joined by global power ports, and a *local* label does
+    /// not merge with a global net — so the flag attaches by position, not by
+    /// label: its pin (at the symbol origin) lands exactly on an existing
+    /// power-port connection point.
+    pub fn add_power_flag_at(
+        &mut self,
+        env: &KicadEnv,
+        refdes: &str,
+        at: [f64; 2],
+    ) -> io::Result<()> {
+        self.add_symbol(env, "power:PWR_FLAG", refdes, "PWR_FLAG", at, 0.0)
+    }
+
     /// Place a `(no_connect)` marker at the endpoint(s) of one pin.
     ///
     /// This is the dual of [`Self::add_pin_label`] for *intentionally*
@@ -526,6 +560,14 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     let val_x = fmt_coord(x + 2.54);
     let val_y = fmt_coord(y + 1.27);
 
+    // Hide Reference for power/flag symbols whose refdes is `#`-prefixed
+    // (KiCAD convention: #PWR…, #FLG…) — they must not appear in the netlist
+    // component list or on the visible schematic.
+    let hide_ref = inst.refdes.starts_with('#');
+    // Hide the Value text for PWR_FLAG instances — the graphic makes the flag
+    // self-evident and the "PWR_FLAG" string would clutter power rail junctions.
+    let hide_val = inst.value == "PWR_FLAG";
+
     let mut s = String::new();
     s.push_str("\t(symbol\n");
     let _ = writeln!(s, "\t\t(lib_id \"{lib_id}\")");
@@ -538,11 +580,19 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     let _ = writeln!(s, "\t\t(uuid \"{sym_uuid}\")");
     let _ = writeln!(s, "\t\t(property \"Reference\" \"{refdes}\"");
     let _ = writeln!(s, "\t\t\t(at {ref_x} {ref_y} 0)");
-    s.push_str("\t\t\t(effects (font (size 1.27 1.27)) (justify left))\n");
+    if hide_ref {
+        s.push_str("\t\t\t(effects (font (size 1.27 1.27)) (justify left) (hide yes))\n");
+    } else {
+        s.push_str("\t\t\t(effects (font (size 1.27 1.27)) (justify left))\n");
+    }
     s.push_str("\t\t)\n");
     let _ = writeln!(s, "\t\t(property \"Value\" \"{value}\"");
     let _ = writeln!(s, "\t\t\t(at {val_x} {val_y} 0)");
-    s.push_str("\t\t\t(effects (font (size 1.27 1.27)) (justify left))\n");
+    if hide_val {
+        s.push_str("\t\t\t(effects (font (size 1.27 1.27)) (justify left) (hide yes))\n");
+    } else {
+        s.push_str("\t\t\t(effects (font (size 1.27 1.27)) (justify left))\n");
+    }
     s.push_str("\t\t)\n");
     let _ = writeln!(s, "\t\t(property \"Footprint\" \"\"");
     let _ = writeln!(s, "\t\t\t(at {x} {y} 0)");
