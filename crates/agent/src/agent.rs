@@ -548,7 +548,10 @@ fn take_images(value: &mut Value) -> Vec<ImageData> {
             format: "png".to_string(),
             base64: base64::engine::general_purpose::STANDARD.encode(bytes),
         }],
-        Err(_) => Vec::new(),
+        Err(e) => {
+            eprintln!("render image unreadable at {path}: {e}");
+            Vec::new()
+        }
     }
 }
 
