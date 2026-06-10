@@ -63,9 +63,10 @@ impl SymbolIndex {
                 continue;
             };
             for name in top_level_symbol_names(&text) {
+                let lib_id = format!("{lib}:{name}");
                 entries.push(Entry {
-                    normalized: normalize(&name),
-                    lib_id: format!("{lib}:{name}"),
+                    normalized: normalize(&lib_id),
+                    lib_id,
                 });
             }
         }
@@ -275,6 +276,42 @@ mod tests {
         let ranked = rank(&entries, &normalize("deivce"), 1);
         assert_eq!(ranked.len(), 1, "backfill must guarantee n results");
         assert_eq!(entries[ranked[0]].lib_id, "Device:R");
+    }
+
+    #[test]
+    fn build_indexes_full_lib_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Device.kicad_sym"),
+            "(kicad_symbol_lib (symbol \"R\"))",
+        )
+        .expect("write lib");
+        let index =
+            SymbolIndex::build(&KicadEnv::with_symbol_dir(dir.path().to_path_buf())).expect("build");
+
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(index.entries[0].lib_id, "Device:R");
+        assert_eq!(
+            index.entries[0].normalized, "device r",
+            "the library name must be part of the searchable field"
+        );
+    }
+
+    #[test]
+    fn empty_normalized_query_returns_no_hits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Device.kicad_sym"),
+            "(kicad_symbol_lib (symbol \"R\"))",
+        )
+        .expect("write lib");
+        let index =
+            SymbolIndex::build(&KicadEnv::with_symbol_dir(dir.path().to_path_buf())).expect("build");
+
+        assert!(
+            index.search("@@@", 5).is_empty(),
+            "a query that normalizes to empty must yield no hits"
+        );
     }
 
     #[test]
