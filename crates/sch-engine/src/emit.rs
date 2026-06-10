@@ -152,6 +152,30 @@ impl SchematicWriter {
     }
 }
 
+/// Escape a free-form string for embedding inside a double-quoted S-expr atom.
+///
+/// KiCAD S-expressions quote string atoms with `"`; a literal backslash or
+/// double-quote in the payload must be escaped or the document fails to parse.
+/// Order matters: escape backslash first, then the quote, so the backslash we
+/// add in front of a quote is not itself doubled.
+///
+/// Apply this to every LLM-/user-derived string written as `"…"` (e.g. the
+/// component value). Do **not** apply it to the verbatim `raw_definition`
+/// splice (already valid KiCAD output) or to internally generated tokens
+/// (uuids, validated lib_ids).
+fn escape_sexpr_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Format a snapped coordinate, canonicalizing `-0.0` to `0.0`.
+///
+/// Snapping can produce `-0.0`, which `f64`'s `Display` renders as `-0`. That
+/// is harmless to KiCAD but breaks byte-for-byte determinism (the same logical
+/// position could render as `0` or `-0`), so we collapse negative zero here.
+fn fmt_coord(v: f64) -> f64 {
+    if v == 0.0 { 0.0 } else { v }
+}
+
 /// Render one placed symbol instance into its `(symbol …)` S-expression block.
 ///
 /// The instance uuid is keyed on the refdes; the property/effects layout and
@@ -160,18 +184,20 @@ impl SchematicWriter {
 /// is the schematic's own `root_uuid` — this is what binds the placement to its
 /// reference/unit annotation.
 fn render_instance(inst: &Instance, root_uuid: &str) -> String {
-    let [x, y] = inst.at;
+    let x = fmt_coord(inst.at[0]);
+    let y = fmt_coord(inst.at[1]);
     let angle = inst.angle;
     let lib_id = &inst.lib_id;
-    let refdes = &inst.refdes;
-    let value = &inst.value;
+    // Free-form, LLM-/user-derived strings must be escaped before embedding.
+    let refdes = escape_sexpr_string(&inst.refdes);
+    let value = escape_sexpr_string(&inst.value);
 
-    let sym_uuid = stable_uuid("symbol", refdes);
+    let sym_uuid = stable_uuid("symbol", &inst.refdes);
     // Property text offsets mirror the spike's working layout.
-    let ref_x = x + 2.54;
-    let ref_y = y - 1.27;
-    let val_x = x + 2.54;
-    let val_y = y + 1.27;
+    let ref_x = fmt_coord(x + 2.54);
+    let ref_y = fmt_coord(y - 1.27);
+    let val_x = fmt_coord(x + 2.54);
+    let val_y = fmt_coord(y + 1.27);
 
     let mut s = String::new();
     s.push_str("\t(symbol\n");
@@ -202,4 +228,75 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     s.push('\n');
     s.push_str("\t)\n");
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `add_symbol` needs a real symbol library to resolve geometry, so these
+    /// tests SKIP-gracefully when no KiCAD environment is detected.
+    fn detect_env() -> Option<KicadEnv> {
+        match KicadEnv::detect() {
+            Some(env) => Some(env),
+            None => {
+                eprintln!("SKIP: no KiCAD environment detected");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn escapes_free_form_strings_in_output() {
+        let Some(env) = detect_env() else { return };
+
+        // A value containing a double-quote (e.g. inches) must be escaped so the
+        // emitted S-expr stays well-formed. LLM-derived values make this real.
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "Device:R", "R1", "4.7\"", [127.0, 63.5], 0.0)
+            .unwrap();
+        let text = w.finish();
+
+        // The quote inside the value must be backslash-escaped in the output.
+        assert!(
+            text.contains("4.7\\\""),
+            "value quote must be escaped (expected `4.7\\\"`):\n{text}"
+        );
+
+        // And the result must still parse as a valid KiCAD schematic.
+        let tmp = tempfile::Builder::new()
+            .suffix(".kicad_sch")
+            .tempfile()
+            .unwrap();
+        std::fs::write(tmp.path(), &text).unwrap();
+        kiutils_kicad::SchematicFile::read(tmp.path())
+            .expect("kiutils must parse output with an escaped value");
+    }
+
+    #[test]
+    fn escape_sexpr_string_backslash_then_quote() {
+        // Backslash is escaped first, then quote — order matters so that an
+        // escaped quote's backslash is not itself re-escaped.
+        assert_eq!(escape_sexpr_string("a"), "a");
+        assert_eq!(escape_sexpr_string("4.7\""), "4.7\\\"");
+        assert_eq!(escape_sexpr_string("a\\b"), "a\\\\b");
+        // `\"` in the input becomes `\\\"` (backslash escaped, then quote escaped).
+        assert_eq!(escape_sexpr_string("\\\""), "\\\\\\\"");
+    }
+
+    #[test]
+    fn reemit_is_byte_identical() {
+        let Some(env) = detect_env() else { return };
+
+        let build = || {
+            let mut w = SchematicWriter::new();
+            w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0)
+                .unwrap();
+            w.add_symbol(&env, "Device:R", "R2", "4.7k", [101.6, 63.5], 90.0)
+                .unwrap();
+            w.finish()
+        };
+
+        assert_eq!(build(), build(), "re-emit must be byte-identical");
+    }
 }
