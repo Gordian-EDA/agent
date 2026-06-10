@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 circuit-lang = { path = "../circuit-lang" }
 kicad-bridge = { path = "../kicad-bridge" }
+kiutils_kicad.workspace = true
+tempfile.workspace = true
 uuid.workspace = true
 indexmap.workspace = true
 

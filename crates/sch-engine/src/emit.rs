@@ -59,6 +59,15 @@ struct Instance {
     /// emit mirror today, but the endpoint transform handles it so connectivity
     /// stays correct once placement gains mirroring.
     mirror: bool,
+    /// Extra hidden properties to write on this symbol, in insertion order. The
+    /// reconciliation identity tags (`ap_block`/`ap_role`/`ap_parent`/`ap_index`)
+    /// ride here so the emitted file is self-describing for the next
+    /// lift/reconcile (spec §4/§7).
+    extra_props: Vec<(String, String)>,
+    /// An explicit instance uuid to reuse (e.g. a surviving symbol's prior uuid
+    /// during reconciliation, so diffs stay minimal). `None` falls back to the
+    /// content-derived `stable_uuid("symbol", refdes)`.
+    uuid: Option<String>,
 }
 
 /// One net-name label emitted at a pin's sheet-space connection endpoint.
@@ -131,6 +140,34 @@ impl SchematicWriter {
         at: [f64; 2],
         angle: f64,
     ) -> io::Result<()> {
+        self.add_symbol_full(env, lib_id, refdes, value, at, angle, &[], None)
+    }
+
+    /// Place one symbol instance with reconciliation metadata.
+    ///
+    /// The fuller form of [`Self::add_symbol`]: in addition to the placement, it
+    /// attaches `extra_props` (the hidden `ap_*` identity tags that make the
+    /// emitted file self-describing for the next lift/reconcile, spec §4/§7) and
+    /// an optional explicit instance `uuid` to reuse a surviving symbol's prior
+    /// id (so re-emitting after a user edit produces a minimal diff). `uuid =
+    /// None` falls back to the content-derived `stable_uuid("symbol", refdes)`.
+    ///
+    /// `at` is grid-snapped exactly as in [`Self::add_symbol`]; passing a
+    /// position read back from a prior `.kicad_sch` therefore preserves it (the
+    /// editor already keeps placements on-grid). Returns the error from
+    /// [`SymbolGeometry::load`] if the symbol cannot be resolved.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_symbol_full(
+        &mut self,
+        env: &KicadEnv,
+        lib_id: &str,
+        refdes: &str,
+        value: &str,
+        at: [f64; 2],
+        angle: f64,
+        extra_props: &[(String, String)],
+        uuid: Option<String>,
+    ) -> io::Result<()> {
         // Register the lib_symbol body once per lib_id (dedup).
         if !self.lib_symbols.contains_key(lib_id) {
             let geom = SymbolGeometry::load(env, lib_id)?;
@@ -145,6 +182,8 @@ impl SchematicWriter {
             at: snap_point(at),
             angle,
             mirror: false,
+            extra_props: extra_props.to_vec(),
+            uuid,
         });
         Ok(())
     }
@@ -475,7 +514,12 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     let refdes = escape_sexpr_string(&inst.refdes);
     let value = escape_sexpr_string(&inst.value);
 
-    let sym_uuid = stable_uuid("symbol", &inst.refdes);
+    // Reuse the prior instance uuid for a surviving symbol (minimal diff on
+    // reconcile); otherwise derive it from the refdes for byte-identical re-emit.
+    let sym_uuid = inst
+        .uuid
+        .clone()
+        .unwrap_or_else(|| stable_uuid("symbol", &inst.refdes));
     // Property text offsets mirror the spike's working layout.
     let ref_x = fmt_coord(x + 2.54);
     let ref_y = fmt_coord(y - 1.27);
@@ -504,6 +548,22 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     let _ = writeln!(s, "\t\t\t(at {x} {y} 0)");
     s.push_str("\t\t\t(effects (font (size 1.27 1.27)) (hide yes))\n");
     s.push_str("\t\t)\n");
+
+    // Hidden reconciliation identity tags (`ap_*`), in insertion order. These
+    // make the file self-describing: on the next lift/reconcile a synthesized
+    // part is matched by `(ap_parent, ap_role, ap_index)` and every part by its
+    // block. They are hidden so they never clutter the schematic visually. Keys
+    // and values are internally generated (block/role names, refdes, indices),
+    // but escaping them is cheap insurance against odd block names.
+    for (key, val) in &inst.extra_props {
+        let k = escape_sexpr_string(key);
+        let v = escape_sexpr_string(val);
+        let _ = writeln!(s, "\t\t(property \"{k}\" \"{v}\"");
+        let _ = writeln!(s, "\t\t\t(at {x} {y} 0)");
+        s.push_str("\t\t\t(effects (font (size 1.27 1.27)) (hide yes))\n");
+        s.push_str("\t\t)\n");
+    }
+
     let _ = writeln!(
         s,
         "\t\t(instances\n\t\t\t(project \"\"\n\t\t\t\t(path \"/{root_uuid}\"\n\t\t\t\t\t(reference \"{refdes}\")\n\t\t\t\t\t(unit 1)\n\t\t\t\t)\n\t\t\t)\n\t\t)"
