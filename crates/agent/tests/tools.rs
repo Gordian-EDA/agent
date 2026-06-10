@@ -183,7 +183,7 @@ fn get_design_tool_notes_absent_schematic() {
 }
 
 #[test]
-fn defs_lists_all_eight_tools() {
+fn defs_lists_all_tools() {
     let tools = Tools::new();
     let names: Vec<String> = tools.defs().into_iter().map(|d| d.name).collect();
     for expected in [
@@ -195,9 +195,13 @@ fn defs_lists_all_eight_tools() {
         "run_erc",
         "project_info",
         "read_schematic",
+        "render_schematic",
+        "create_design",
+        "edit_design",
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
+    assert_eq!(names.len(), 11, "expected exactly 11 tools, got {}: {:?}", names.len(), names);
 }
 
 #[test]
@@ -357,6 +361,88 @@ fn unknown_tool_is_an_error() {
             .run("no_such_tool", serde_json::json!({}), &ctx)
             .is_err()
     );
+}
+
+#[test]
+fn draft_lifecycle_create_edit_apply() {
+    let Some(ctx) = agent::tools::ToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD environment detected");
+        return;
+    };
+    let tools = agent::tools::Tools::new();
+    let yaml = "
+version: 1
+name: t
+rails: [GND]
+blocks:
+  a:
+    components:
+      R1: {part: Device:R, value: 1k, between: [N1, GND]}
+";
+
+    // edit before create -> structured error.
+    let out = tools.run("edit_design",
+        serde_json::json!({"old_string": "x", "new_string": "y"}), &ctx).unwrap();
+    assert!(out["error"].as_str().unwrap().contains("no draft"));
+
+    // create seeds the draft and validates it.
+    let out = tools.run("create_design", serde_json::json!({"yaml": yaml}), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true));
+    // create again without overwrite -> error; with overwrite -> ok.
+    let out = tools.run("create_design", serde_json::json!({"yaml": yaml}), &ctx).unwrap();
+    assert!(out["error"].as_str().unwrap().contains("draft already exists"));
+
+    // Anchored edit: ambiguity and uniqueness rules.
+    let out = tools.run("edit_design",
+        serde_json::json!({"old_string": "NOT-PRESENT", "new_string": "y"}), &ctx).unwrap();
+    assert!(out["error"].as_str().unwrap().contains("not found"));
+    let out = tools.run("edit_design",
+        serde_json::json!({"old_string": "value: 1k", "new_string": "value: 4.7k"}), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true));
+    assert_eq!(out["replacements"], serde_json::json!(1));
+
+    // apply_design with NO yaml applies the draft.
+    let out = tools.run("apply_design", serde_json::json!({"commit": true}), &ctx).unwrap();
+    assert_eq!(out["written"], serde_json::json!(true));
+
+    // get_design now prefers the draft and reports its source.
+    let out = tools.run("get_design", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["source"], serde_json::json!("draft"));
+    assert!(out["yaml"].as_str().unwrap().contains("4.7k"));
+}
+
+#[test]
+fn get_design_seeds_draft_from_lift_and_flags_staleness() {
+    let Some(ctx) = agent::tools::ToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD environment detected");
+        return;
+    };
+    let tools = agent::tools::Tools::new();
+    let yaml = "
+version: 1
+name: t
+rails: [GND]
+blocks:
+  a:
+    components:
+      R1: {part: Device:R, value: 1k, between: [N1, GND]}
+";
+    // Write a schematic with explicit yaml (no draft involved).
+    tools.run("apply_design",
+        serde_json::json!({"yaml": yaml, "commit": true}), &ctx).unwrap();
+
+    // get_design lifts AND seeds the draft.
+    let out = tools.run("get_design", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["source"], serde_json::json!("lifted"));
+    let out2 = tools.run("get_design", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out2["source"], serde_json::json!("draft"));
+    assert_eq!(out2.get("stale"), None);
+
+    // Out-of-band sch edit -> staleness surfaces.
+    let sch = std::fs::read_to_string(ctx.sch_path()).unwrap();
+    std::fs::write(ctx.sch_path(), format!("{sch}\n")).unwrap();
+    let out3 = tools.run("get_design", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out3["stale"], serde_json::json!(true));
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! The eight-tool registry the agent drives (spec §10).
+//! The eleven-tool registry the agent drives (spec §10).
 //!
 //! Each tool is a thin, deterministic wrapper over logic that already lives in
 //! `circuit-lang`, `kicad-bridge`, and `sch-engine`. The registry exposes:
@@ -247,9 +247,14 @@ impl Tools {
             },
             ToolDef {
                 name: "get_design".into(),
-                description: "Return the current schematic lifted back into \
-                    canonical circuit-YAML. If no schematic exists yet, returns an \
-                    empty yaml with a note."
+                description: "Return the working draft (circuit-YAML) when one \
+                    exists, seeding it from the current schematic if needed. If \
+                    a draft already exists, returns it (source=draft) and flags \
+                    stale=true when the .kicad_sch changed out-of-band since the \
+                    draft was seeded. If no draft exists, lifts the schematic \
+                    (source=lifted), seeds the draft so edit_design is immediately \
+                    usable, and returns the lifted YAML. If no schematic exists \
+                    yet, returns an empty yaml with a note."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
@@ -275,16 +280,17 @@ impl Tools {
                     it returns a diff (added/removed/changed refdes + net delta) \
                     and does NOT write. With commit=true it writes the .kicad_sch, \
                     snapshots the prior, runs ERC, and returns the ERC counts. \
-                    Compilation errors are returned as diagnostics with ok=false."
+                    Compilation errors are returned as diagnostics with ok=false. \
+                    If yaml is omitted, applies the current draft (see \
+                    create_design/edit_design)."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "yaml": { "type": "string", "description": "The circuit-YAML source to apply." },
+                        "yaml": { "type": "string", "description": "The circuit-YAML source to apply. If omitted, the current draft is used." },
                         "commit": { "type": "boolean",
                             "description": "Write the schematic (true) or dry-run and only return the diff (false, default)." }
-                    },
-                    "required": ["yaml"]
+                    }
                 }),
             },
             ToolDef {
@@ -334,6 +340,41 @@ impl Tools {
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
+            ToolDef {
+                name: "create_design".into(),
+                description: "Create the working draft (circuit-YAML) from \
+                    scratch. The draft is the document edit_design patches and \
+                    apply_design (with no yaml argument) applies. Fails if a \
+                    draft already exists unless overwrite=true. Returns compile \
+                    diagnostics for the new draft."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "yaml": { "type": "string", "description": "The full circuit-YAML draft content." },
+                        "overwrite": { "type": "boolean", "description": "Replace an existing draft (default false)." }
+                    },
+                    "required": ["yaml"]
+                }),
+            },
+            ToolDef {
+                name: "edit_design".into(),
+                description: "Patch the working draft by exact string \
+                    replacement: old_string must occur exactly once (or pass \
+                    replace_all=true). Far cheaper and safer than resending the \
+                    whole document. Returns compile diagnostics for the edited \
+                    draft so you get immediate validation feedback."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "old_string": { "type": "string", "description": "Exact text to find in the draft." },
+                        "new_string": { "type": "string", "description": "Replacement text." },
+                        "replace_all": { "type": "boolean", "description": "Replace every occurrence (default false)." }
+                    },
+                    "required": ["old_string", "new_string"]
+                }),
+            },
         ]
     }
 
@@ -350,6 +391,8 @@ impl Tools {
             "project_info" => project_info(ctx),
             "read_schematic" => read_schematic(input, ctx),
             "render_schematic" => render_schematic(ctx),
+            "create_design" => create_design(input, ctx),
+            "edit_design" => edit_design(input, ctx),
             other => bail!("unknown tool: {other}"),
         }
     }
@@ -428,13 +471,33 @@ fn pin_type_str(t: circuit_lang::PinType) -> &'static str {
 
 // ── 3. get_design ──────────────────────────────────────────────────────────
 
+fn current_sch_text(ctx: &ToolCtx) -> Option<String> {
+    std::fs::read_to_string(&ctx.sch_path).ok()
+}
+
 fn get_design(ctx: &ToolCtx) -> Result<Value> {
+    if let Some(draft) = ctx.workspace().read_draft() {
+        let mut out = json!({ "yaml": draft, "source": "draft" });
+        if ctx.workspace().draft_is_stale(current_sch_text(ctx).as_deref()) {
+            out["stale"] = json!(true);
+            out["note"] = json!(
+                "the .kicad_sch changed since this draft was seeded (user edit \
+                 in KiCAD?) — call read_schematic on the project schematic to \
+                 see the current state, then reconcile your draft deliberately"
+            );
+        }
+        return Ok(out);
+    }
     if !ctx.sch_path.exists() {
         return Ok(json!({ "yaml": "", "note": "no schematic yet" }));
     }
     let yaml = lift(&ctx.env, &ctx.sch_path)
         .with_context(|| format!("lifting {}", ctx.sch_path.display()))?;
-    Ok(json!({ "yaml": yaml }))
+    // Seed the draft so edit_design is immediately usable.
+    ctx.workspace()
+        .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
+    Ok(json!({ "yaml": yaml, "source": "lifted",
+               "note": "draft seeded from the schematic; use edit_design for changes" }))
 }
 
 // ── 4. validate_design ─────────────────────────────────────────────────────
@@ -470,7 +533,22 @@ fn compile_report(diags: &circuit_lang::Diagnostics) -> Value {
 // ── 5. apply_design ────────────────────────────────────────────────────────
 
 fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
-    let yaml = require_str(&input, "yaml")?;
+    let explicit_yaml = input.get("yaml").and_then(Value::as_str).map(str::to_string);
+    let yaml = match explicit_yaml.clone() {
+        Some(y) => y,
+        None => match ctx.workspace().read_draft() {
+            Some(d) => d,
+            None => {
+                return Ok(json!({
+                    "error": "no yaml given and no draft exists — pass yaml, or \
+                              create a draft via get_design/create_design",
+                }));
+            }
+        },
+    };
+    let stale = explicit_yaml.is_none()
+        && ctx.workspace().draft_is_stale(current_sch_text(ctx).as_deref());
+
     let commit = input
         .get("commit")
         .and_then(Value::as_bool)
@@ -503,6 +581,7 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         return Ok(json!({
             "ok": true,
             "would_write": true,
+            "stale_draft_warning": stale,
             "diff": diff,
             "rendered_len": rendered.len(),
         }));
@@ -521,10 +600,18 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         .erc(&ctx.sch_path)
         .with_context(|| format!("running ERC on {}", ctx.sch_path.display()))?;
 
+    // If applying the draft, the schematic now matches it — refresh the meta
+    // hash so the draft is no longer flagged stale. (No-op when no draft exists.)
+    if ctx.workspace().read_draft().is_some() {
+        ctx.workspace()
+            .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
+    }
+
     Ok(json!({
         "ok": true,
         "written": true,
         "path": ctx.sch_path.display().to_string(),
+        "stale_draft_warning": stale,
         "diff": diff,
         "erc": { "errors": erc.error_count(), "warnings": erc.warning_count() },
     }))
@@ -733,7 +820,62 @@ fn run_erc(ctx: &ToolCtx) -> Result<Value> {
     }))
 }
 
-// ── 9. render_schematic ────────────────────────────────────────────────────
+// ── 9. create_design / edit_design ────────────────────────────────────────
+
+fn create_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let yaml = require_str(&input, "yaml")?;
+    let overwrite = input.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
+    if ctx.workspace().read_draft().is_some() && !overwrite {
+        return Ok(json!({
+            "error": "a draft already exists — pass overwrite=true to replace it, \
+                      or use edit_design to modify it",
+        }));
+    }
+    ctx.workspace()
+        .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
+    let mut report = compile_report(&compile(&yaml, &ctx.provider).diagnostics);
+    report["draft_written"] = json!(true);
+    Ok(report)
+}
+
+fn edit_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let old = require_str(&input, "old_string")?;
+    let new = require_str(&input, "new_string")?;
+    let replace_all = input.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
+
+    let Some(draft) = ctx.workspace().read_draft() else {
+        return Ok(json!({
+            "error": "no draft exists — call get_design (seeds a draft from the \
+                      current schematic) or create_design first",
+        }));
+    };
+    let count = draft.matches(&*old).count();
+    if count == 0 {
+        return Ok(json!({
+            "error": format!("old_string not found in the draft (it must match \
+                              exactly, including whitespace): {old:?}"),
+        }));
+    }
+    if count > 1 && !replace_all {
+        return Ok(json!({
+            "error": format!("old_string matches {count} times — make it more \
+                              specific or pass replace_all=true"),
+        }));
+    }
+    let edited = if replace_all {
+        draft.replace(&*old, &*new)
+    } else {
+        draft.replacen(&*old, &*new, 1)
+    };
+    ctx.workspace()
+        .write_draft(&edited, current_sch_text(ctx).as_deref())?;
+
+    let mut report = compile_report(&compile(&edited, &ctx.provider).diagnostics);
+    report["replacements"] = json!(if replace_all { count } else { 1 });
+    Ok(report)
+}
+
+// ── 10. render_schematic ────────────────────────────────────────────────────
 
 /// Result key carrying a PNG path for the agent loop to attach as an image
 /// block (and strip from the JSON the model sees as text).
