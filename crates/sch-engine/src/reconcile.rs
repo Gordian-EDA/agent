@@ -845,6 +845,9 @@ pub fn emit_design_reconciled(
     let prior_map = prior.map(parse_prior).unwrap_or_default();
 
     let mut w = SchematicWriter::new();
+    if let Some(name) = &design.name {
+        w.set_title(name);
+    }
     let provider = RealSymbolProvider::new(env.clone());
 
     // Collect power nets (declared via `rails:` or explicit `power: true`).
@@ -1299,7 +1302,7 @@ pub fn emit_design_reconciled(
             continue;
         };
         let frame = (b[2] - b[0]) * (b[3] - b[1]);
-        if content > 0.0 && frame > 3.0 * content {
+        if content > 0.0 && frame > 8.0 * content {
             layout_warnings.push(format!(
                 "sparse: block {block_name} frame is {:.0}x its content area",
                 frame / content

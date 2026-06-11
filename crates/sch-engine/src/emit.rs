@@ -232,6 +232,8 @@ pub struct SchematicWriter {
     /// Pin geometry per lib_id, cached at first load, for pin-text obstacles
     /// in `solve_text_positions`.
     sym_pins: BTreeMap<String, Vec<PinGeom>>,
+    /// Sheet title (the design name), rendered into the title block.
+    title: Option<String>,
 }
 
 impl SchematicWriter {
@@ -488,6 +490,11 @@ impl SchematicWriter {
             return;
         }
         self.junctions.push(Junction { at, uuid_key });
+    }
+
+    /// Set the sheet title (rendered in the drawing frame's title block).
+    pub fn set_title(&mut self, title: &str) {
+        self.title = Some(title.to_string());
     }
 
     /// Add free-standing text to the sheet.
@@ -1140,6 +1147,10 @@ impl SchematicWriter {
         out.push_str("\t(generator_version \"0.1\")\n");
         let _ = writeln!(out, "\t(uuid \"{root_uuid}\")");
         out.push_str("\t(paper \"A4\")\n");
+        if let Some(title) = &self.title {
+            let t = escape_sexpr_string(title);
+            let _ = writeln!(out, "\t(title_block\n\t\t(title \"{t}\")\n\t)");
+        }
 
         // lib_symbols set, sorted by lib_id (BTreeMap order).
         out.push_str("\t(lib_symbols\n");

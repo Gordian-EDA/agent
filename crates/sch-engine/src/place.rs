@@ -164,7 +164,7 @@ struct LocalPlan {
 }
 
 /// Gap between an anchor row and the north/south cluster rows, mm.
-const SIDE_ROW_GAP_MM: f64 = 10.16;
+const SIDE_ROW_GAP_MM: f64 = 5.08;
 
 /// Horizontal gap between clusters sharing a north/south row, mm.
 const SIDE_ROW_PITCH_MM: f64 = 5.08;
@@ -254,13 +254,19 @@ fn layout_block_anchor_centric(
             cluster_nets.push(bank.a_net.clone());
             cluster_nets.push(bank.b_net.clone());
         }
-        let side = cluster_side(
-            &cluster.anchor_taps,
-            pin_ends,
-            &cluster_nets,
-            is_vplus,
-            &crate::grammar::is_ground,
-        );
+        let side = if cluster.chains.is_empty() && !cluster.banks.is_empty() {
+            // A pure bank (parallel decouple caps) always reads best as the
+            // bottom row, reference-style — even though it touches a V+ rail.
+            Side::South
+        } else {
+            cluster_side(
+                &cluster.anchor_taps,
+                pin_ends,
+                &cluster_nets,
+                is_vplus,
+                &crate::grammar::is_ground,
+            )
+        };
         // Primary tap: first tap with a known pin end on a placed anchor AND a
         // tap point in the geometry. The pin endpoint is snapped here so the
         // recorded join is dust-free (anchor centers and pin offsets are both
@@ -1139,10 +1145,11 @@ blocks:
             .expect("join recorded");
         assert_eq!(join.0[1], join.1[1], "straight horizontal join");
         assert!(layout.positions["R1"][0] > u1[0], "R1 east of U1");
-        // The 9V/GND bank is tap-less; V+ priority sends it ABOVE the anchor.
+        // A pure decouple bank always takes the bottom row (reference style),
+        // even though it touches the 9V rail.
         assert!(
-            layout.positions["C5"][1] < u1[1],
-            "bank above the anchor: C5={:?} U1={:?}",
+            layout.positions["C5"][1] > u1[1],
+            "bank below the anchor: C5={:?} U1={:?}",
             layout.positions["C5"],
             u1
         );

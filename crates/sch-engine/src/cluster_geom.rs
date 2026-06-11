@@ -299,7 +299,7 @@ fn normalize(g: &mut ClusterGeom, sizes: SizeFn) {
         grow(*p, [2.54, 5.08]);
     }
     for (_, p, _) in &g.labels {
-        grow(*p, [12.7, 1.27]);
+        grow(*p, [6.35, 1.27]);
     }
     // junctions and tap_points always sit on wires/nodes, so they can't be the
     // sole content; ports and labels can, and are translated below, so they must
