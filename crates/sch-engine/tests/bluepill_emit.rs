@@ -58,51 +58,30 @@ fn bluepill_design_emits_and_ercs_clean() {
 
     // Phase 2 readability oracle: the deterministic layout lint.
     //
-    // Intentional current limitation (NOT a temporary shim): bank members (the
-    // parallel decouple caps) are packed tight at BANK_PITCH, so their real KiCAD
-    // symbol bboxes overlap — a readability nuance, NOT a connectivity one (ERC
-    // and the netlist above are clean). The layout lint is not yet bank-aware, so
-    // it flags these expected overlaps; we tolerate ONLY overlaps where BOTH
-    // symbols are capacitors (the bank members), and any other collision is still
-    // a hard failure. Task 12 makes the layout lint bank-aware and restores the
-    // strict `is_empty()` oracle.
-    let is_cap = |refdes: &str| -> bool {
-        design
-            .blocks
-            .values()
-            .flat_map(|b| b.components.iter())
-            .any(|(r, c)| r == refdes && c.part == "Device:C")
-    };
-    let warned_symbol = |w: &str, marker: &str| -> Option<String> {
-        w.split(marker)
-            .nth(1)
-            .map(|s| s.trim().trim_start_matches("symbol ").trim().to_string())
-    };
-    let unexpected: Vec<&String> = out
+    // The overlap lint is now BANK-AWARE (Task 12): same-bank adjacencies (the
+    // parallel decouple caps packed tight at BANK_PITCH, sharing a bus with no
+    // per-cap labels) are recognized in the engine as intentional and never
+    // warned, while every other collision — bank-vs-anchor, cap-vs-non-cap,
+    // label-vs-anything — still trips the lint. So the COLLISION oracle is
+    // strict again: the validated bluepill must emit with ZERO `… overlaps …`
+    // warnings. (Task 9 had relaxed this to tolerate cap-on-cap overlaps as a
+    // test-level hack; that hack is gone now that the engine filters same-bank
+    // pairs structurally.)
+    //
+    // `layout_warnings` also carries the Task-12 advisory notes (`grammar: …`
+    // degradations and `sparse: …` whitespace hints) — those are readability
+    // advisories, NOT collisions, so the strict collision oracle filters to the
+    // overlap warnings. The bluepill's compact `power` block does trip a `sparse`
+    // hint, which is expected and not a layout error.
+    let collisions: Vec<&String> = out
         .layout_warnings
         .iter()
-        .filter(|w| {
-            // A bank-member overlap is "symbol X overlaps symbol Y" with X and Y
-            // both caps. Anything else (labels, non-cap bodies) is unexpected.
-            let lhs = w
-                .strip_prefix("symbol ")
-                .and_then(|s| s.split(" overlaps ").next())
-                .map(str::to_string);
-            let rhs = warned_symbol(w, "overlaps ");
-            match (lhs, rhs) {
-                (Some(l), Some(r)) => !(is_cap(&l) && is_cap(&r)),
-                _ => true,
-            }
-        })
+        .filter(|w| w.contains(" overlaps "))
         .collect();
     assert!(
-        unexpected.is_empty(),
-        "unexpected layout collisions on bluepill (non-bank):\n{}",
-        unexpected
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
+        collisions.is_empty(),
+        "layout collisions on bluepill: {:?}",
+        collisions
     );
 }
 

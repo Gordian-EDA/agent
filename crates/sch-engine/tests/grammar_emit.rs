@@ -116,3 +116,32 @@ blocks:
     let c1_orig = sch_engine::test_util::symbol_at(&out.sch, "C1");
     assert_eq!(c1, [c1_orig[0] + 25.4, c1_orig[1] + 12.7], "drag survived");
 }
+
+#[test]
+fn degradations_and_sparseness_surface_in_warnings() {
+    let Some(env) = KicadEnv::detect() else {
+        eprintln!("SKIP: no KiCAD environment detected");
+        return;
+    };
+    // R1/R2/R3 form a pure cycle -> one cycle-break degradation note.
+    let src = "
+version: 1
+name: cyc
+rails: []
+blocks:
+  fb:
+    components:
+      R1: {part: Device:R, value: 1k, between: [N1, N2]}
+      R2: {part: Device:R, value: 1k, between: [N2, N3]}
+      R3: {part: Device:R, value: 1k, between: [N3, N1]}
+";
+    let design = compile(&env, src);
+    let out = sch_engine::emit_design_reconciled(&env, &design, None, &Default::default()).unwrap();
+    assert!(
+        out.layout_warnings
+            .iter()
+            .any(|w| w.starts_with("grammar: block fb: cycle")),
+        "{:?}",
+        out.layout_warnings
+    );
+}

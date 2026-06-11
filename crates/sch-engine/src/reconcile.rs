@@ -952,8 +952,11 @@ pub fn emit_design_reconciled(
     }
 
     // Block frames + titles: drawn around the current positions, regenerated
-    // every emit like all decoration.
+    // every emit like all decoration. Each block's computed content bbox `b` is
+    // captured into `frame_bounds` for the post-emit sparseness lint.
     const FRAME_PAD_MM: f64 = 7.62;
+    let mut frame_bounds: std::collections::BTreeMap<String, [f64; 4]> =
+        std::collections::BTreeMap::new();
     for (block_name, block) in &design.blocks {
         let mut bounds: Option<[f64; 4]> = None; // min_x, min_y, max_x, max_y
         for refdes in block.components.keys() {
@@ -970,6 +973,7 @@ pub fn emit_design_reconciled(
             b[3] = b[3].max(at[1] + half[1]);
         }
         let Some(b) = bounds else { continue };
+        frame_bounds.insert(block_name.clone(), b);
         let start = [b[0] - FRAME_PAD_MM, b[1] - FRAME_PAD_MM];
         let end = [b[2] + FRAME_PAD_MM, b[3] + FRAME_PAD_MM];
         w.add_rect(start, end, &format!("frame:{block_name}"));
@@ -1000,7 +1004,54 @@ pub fn emit_design_reconciled(
     // pass first so the lint sees exactly what `finish` will emit. The pass is
     // idempotent, so `finish`'s own call below is a harmless no-op.
     w.retract_colliding_stubs();
-    let layout_warnings = w.layout_warnings();
+
+    // Bank-aware overlap lint: every PAIR of members within a single bank is an
+    // intentional same-bus adjacency (caps packed at BANK_PITCH share a bus, so
+    // they carry no per-cap labels and their bodies don't truly collide even
+    // though the label-padded lint cells do). Build the structured allowlist
+    // (sorted refdes pairs) so only those specific adjacencies are exempted.
+    let mut bank_pairs: std::collections::BTreeSet<(String, String)> =
+        std::collections::BTreeSet::new();
+    for graph in gi.graphs.values() {
+        for cluster in &graph.clusters {
+            for bank in &cluster.banks {
+                for i in 0..bank.members.len() {
+                    for j in (i + 1)..bank.members.len() {
+                        let (a, b) = (bank.members[i].clone(), bank.members[j].clone());
+                        bank_pairs.insert(if a <= b { (a, b) } else { (b, a) });
+                    }
+                }
+            }
+        }
+    }
+    let mut layout_warnings = w.layout_warnings_excluding(&bank_pairs);
+
+    // Surface grammar degradations (cycle-break notes etc.) so downstream sees
+    // where the analysis had to give up structure. `analyze` already prefixes
+    // each note with `block <name>: …`.
+    for graph in gi.graphs.values() {
+        layout_warnings.extend(graph.degradations.iter().map(|d| format!("grammar: {d}")));
+    }
+    // Sparseness: a block whose frame area dwarfs its content reads as floating
+    // parts; surface it so the vision loop isn't spent on mechanical whitespace.
+    for (block_name, block) in &design.blocks {
+        let content: f64 = block
+            .components
+            .keys()
+            .map(|r| gi.sizes.get(r).map(|s| s[0] * s[1]).unwrap_or(129.0))
+            .sum();
+        let Some(b) = frame_bounds.get(block_name) else {
+            continue;
+        };
+        let frame = (b[2] - b[0]) * (b[3] - b[1]);
+        if content > 0.0 && frame > 3.0 * content {
+            layout_warnings.push(format!(
+                "sparse: block {block_name} frame is {:.0}x its content area",
+                frame / content
+            ));
+        }
+    }
+
     Ok(EmitOutput {
         sch: w.finish(),
         layout_warnings,

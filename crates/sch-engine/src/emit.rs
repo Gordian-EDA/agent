@@ -1200,6 +1200,24 @@ impl SchematicWriter {
     /// The output is sorted, so the same placement always yields the same
     /// warning list regardless of the underlying Vec order.
     pub fn layout_warnings(&self) -> Vec<String> {
+        self.layout_warnings_excluding(&std::collections::BTreeSet::new())
+    }
+
+    /// Same readability lint as [`Self::layout_warnings`], but suppresses an
+    /// overlap warning for any symbol pair whose two owning refdes form an
+    /// entry in `ignore_pairs` (stored normalized: sorted so `(A,B) == (B,A)`).
+    ///
+    /// Used to silence INTENTIONAL same-bank adjacency: bank members (parallel
+    /// decouple caps packed at `BANK_PITCH`) sit tight on purpose and share a
+    /// bus rather than carrying per-cap labels, so their padded label-clearance
+    /// cells overlap even though the real symbol bodies don't collide. The
+    /// allowlist is structured (refdes pairs), not string-matched, so only the
+    /// specific intentional adjacencies are exempted; any other collision —
+    /// bank-vs-anchor, cap-vs-non-cap, label-vs-anything — still warns.
+    pub fn layout_warnings_excluding(
+        &self,
+        ignore_pairs: &std::collections::BTreeSet<(String, String)>,
+    ) -> Vec<String> {
         // Each item carries its owning refdes so a label is never flagged against
         // the symbol body it belongs to (its stub emerges from that body, and
         // post-retraction it sits right on that symbol's pin — both legitimate).
@@ -1249,6 +1267,18 @@ impl SchematicWriter {
                 // unaffected (their owners differ).
                 if items[i].2 == items[j].2 {
                     continue;
+                }
+                // Skip an intentional same-bank adjacency: both items must be the
+                // SYMBOL bodies (labels share the bus, not a refdes pair) and the
+                // sorted refdes pair must be in the allowlist.
+                let both_symbols = items[i].0.starts_with("symbol ")
+                    && items[j].0.starts_with("symbol ");
+                if both_symbols {
+                    let (a, b) = (items[i].2.clone(), items[j].2.clone());
+                    let pair = if a <= b { (a, b) } else { (b, a) };
+                    if ignore_pairs.contains(&pair) {
+                        continue;
+                    }
                 }
                 if boxes_overlap(&items[i].1, &items[j].1) {
                     warnings.push(format!("{} overlaps {}", items[i].0, items[j].0));
