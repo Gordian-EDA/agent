@@ -58,15 +58,14 @@ fn bluepill_design_emits_and_ercs_clean() {
 
     // Phase 2 readability oracle: the deterministic layout lint.
     //
-    // TEMPORARY (Task 9 shim): `place` now packs grammar clusters/banks via
-    // `cluster_geom`, but emission still drops every component at its raw
-    // `place` position (cluster-as-unit emission with proper wiring lands in
-    // Task 11). In this intermediate state bank members (the parallel decouple
-    // caps) sit at `emit_bank`'s tight BANK_PITCH, which overlaps their real
-    // KiCAD symbol bboxes — a readability regression, NOT a connectivity one
-    // (ERC and the netlist above are clean). Tolerate ONLY overlaps where BOTH
-    // symbols are capacitors (the bank members); any other collision is still a
-    // hard failure. Task 11 must restore the strict `is_empty()` oracle.
+    // Intentional current limitation (NOT a temporary shim): bank members (the
+    // parallel decouple caps) are packed tight at BANK_PITCH, so their real KiCAD
+    // symbol bboxes overlap — a readability nuance, NOT a connectivity one (ERC
+    // and the netlist above are clean). The layout lint is not yet bank-aware, so
+    // it flags these expected overlaps; we tolerate ONLY overlaps where BOTH
+    // symbols are capacitors (the bank members), and any other collision is still
+    // a hard failure. Task 12 makes the layout lint bank-aware and restores the
+    // strict `is_empty()` oracle.
     let is_cap = |refdes: &str| -> bool {
         design
             .blocks

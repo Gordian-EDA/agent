@@ -118,6 +118,19 @@ pub enum Relayout {
     Blocks(std::collections::BTreeSet<String>),
 }
 
+impl Relayout {
+    /// Whether prior placements for `block_name` must be discarded (placer lays
+    /// the block out fresh). The single source of the relayout decision — shared
+    /// by `resolve_placement` and the cluster-origin loop.
+    fn forces(&self, block_name: &str) -> bool {
+        match self {
+            Relayout::All => true,
+            Relayout::Blocks(names) => names.contains(block_name),
+            Relayout::None => false,
+        }
+    }
+}
+
 /// The layout revision of one component: a content hash of its
 /// placement-relevant inputs. Membership is deliberately NOT hashed — adding a
 /// neighbor must not blow away drags.
@@ -155,7 +168,11 @@ fn member_rev(
     layout_rev(block, comp, Some(cluster))
 }
 
-/// Content hash of a cluster's placement-relevant structure.
+/// Content hash of a cluster's placement-relevant structure. A change to any of
+/// the hashed inputs re-places the cluster (drags survive only structure-
+/// preserving edits). Hashed, and thus triggering a re-place:
+///   - each chain's class, plus every link's refdes and its `(a_net -> b_net)`;
+///   - each bank's `(a_net, b_net)` plus its member list.
 pub fn grammar_rev(cluster: &crate::grammar::Cluster) -> String {
     use std::fmt::Write as _;
     let mut desc = String::new();
@@ -210,11 +227,7 @@ fn resolve_placement(
 ) -> ResolvedPlacement {
     let identity = Identity::of(refdes, &comp.origin);
     let rev = layout_rev(block, comp, None);
-    let block_relayout = match relayout {
-        Relayout::All => true,
-        Relayout::Blocks(names) => names.contains(block_name),
-        Relayout::None => false,
-    };
+    let block_relayout = relayout.forces(block_name);
     // An old file with no recorded rev preserves (migration path); a recorded rev
     // must match to preserve.
     let prior_ok = |p: &PriorPlacement| p.layout_rev.as_deref().is_none_or(|r| r == rev);
@@ -414,7 +427,12 @@ pub struct EmitOutput {
 pub(crate) struct GrammarInputs {
     pub sizes: place::SizeMap,
     pub graphs: IndexMap<String, crate::grammar::BlockGraph>,
+    /// Per-block cluster geometry, indexed parallel to `graphs[block].clusters`
+    /// by cluster index `ci`: `geoms[block][ci]` is the geometry of
+    /// `graphs[block].clusters[ci]`.
     pub geoms: IndexMap<String, Vec<crate::cluster_geom::ClusterGeom>>,
+    /// Angle-0 sheet endpoint + outward direction of each anchor pin, keyed by
+    /// `(anchor refdes, pin)`, used to slot clusters against their anchor pins.
     pub anchor_pin_ends: place::AnchorPinEnds,
     /// Cluster membership per refdes.
     pub members: IndexMap<String, MemberInfo>,
@@ -423,6 +441,11 @@ pub(crate) struct GrammarInputs {
 }
 
 /// Where a refdes sits inside its owning cluster's geometry.
+///
+/// `cluster_key` and `cluster_idx` are two views of the SAME membership:
+/// `cluster_key == place::cluster_key(block, cluster_idx)`. `cluster_key` indexes
+/// the `origins` map; `cluster_idx` indexes `graphs[block].clusters` / the
+/// parallel `geoms[block]`.
 pub(crate) struct MemberInfo {
     /// [`place::cluster_key`] of the owning cluster.
     pub cluster_key: String,
@@ -611,6 +634,124 @@ pub(crate) fn build_grammar_inputs(env: &KicadEnv, design: &Design) -> GrammarIn
     }
 }
 
+/// Resolve every cluster's sheet ORIGIN before placing members (a self-contained
+/// emission phase). A cluster is rigid: its representative member
+/// (`members()[0]`) anchors the whole group. If that member's prior placement
+/// survives (identity match, rev unchanged, block not forced to relayout), the
+/// origin is recovered from it (`prior.at - rep_local`) so a user's whole-cluster
+/// drag is preserved; otherwise the placer's auto origin is used and every member
+/// counts toward `relayout_blocks`.
+///
+/// NOTE on member_rev redundancy: this loop computes `member_rev` for the
+/// representative, and the component loop later recomputes `member_rev` for every
+/// member. That recomputation is NOT eliminated here because `member_rev` →
+/// `layout_rev` hashes `comp.layout_role` (a per-COMPONENT field): a cluster can
+/// mix a `RailSpan` passive with `None`-role members, so members of one cluster
+/// can get *different* revs. Caching the representative's rev by cluster-key would
+/// change the rev written to `ap_layout_rev` for the differing members — a
+/// behavior change the layout_rev tests would catch. So the per-member recompute
+/// stays; only the origin decision is lifted out here.
+fn resolve_cluster_origins(
+    design: &Design,
+    gi: &GrammarInputs,
+    auto: &place::Layout,
+    prior_map: &HashMap<Identity, PriorPlacement>,
+    relayout: &Relayout,
+    relayout_blocks: &mut std::collections::BTreeMap<String, usize>,
+) -> IndexMap<String, [f64; 2]> {
+    let mut origins: IndexMap<String, [f64; 2]> = IndexMap::new();
+    for (block_name, graph) in &gi.graphs {
+        let block = &design.blocks[block_name.as_str()];
+        for (ci, cluster) in graph.clusters.iter().enumerate() {
+            let key = place::cluster_key(block_name, ci);
+            let auto_origin = auto
+                .cluster_origins
+                .get(&key)
+                .copied()
+                .unwrap_or([0.0, 0.0]);
+            let members = cluster.members();
+            let Some(rep) = members.first() else {
+                origins.insert(key, snap_point(auto_origin));
+                continue;
+            };
+            let Some(rep_comp) = block.components.get(rep.as_str()) else {
+                origins.insert(key, snap_point(auto_origin));
+                continue;
+            };
+            let rep_local = gi.members.get(rep).map(|m| m.local).unwrap_or([0.0, 0.0]);
+            let rev = member_rev(block, rep_comp, cluster);
+            let block_relayout = relayout.forces(block_name);
+            let prior = prior_map.get(&Identity::of(rep, &rep_comp.origin));
+            let origin = match prior {
+                Some(p)
+                    if !block_relayout && p.layout_rev.as_deref().is_none_or(|r| r == rev) =>
+                {
+                    [p.at[0] - rep_local[0], p.at[1] - rep_local[1]]
+                }
+                Some(_) => {
+                    *relayout_blocks.entry(block_name.clone()).or_insert(0) += members.len();
+                    auto_origin
+                }
+                None => auto_origin,
+            };
+            origins.insert(key, snap_point(origin));
+        }
+    }
+    origins
+}
+
+/// Cluster DECORATION (a self-contained emission phase): translate each cluster's
+/// geometry by its sheet origin and emit the wires/junctions/power-ports/labels
+/// that wire its members together, then close the anchor-slot join wires.
+///
+/// The `#PWR_CL{n:02}` counter is global across all clusters and advances in the
+/// deterministic iteration order of `gi.graphs` (an IndexMap) × each block's
+/// `clusters` × `geom.ports` — so the pwr_n numbering is reproducible run-to-run.
+#[allow(clippy::too_many_arguments)]
+fn emit_cluster_decoration(
+    w: &mut SchematicWriter,
+    env: &KicadEnv,
+    gi: &GrammarInputs,
+    origins: &IndexMap<String, [f64; 2]>,
+    auto: &place::Layout,
+    provider: &RealSymbolProvider,
+    used_nets: &mut std::collections::BTreeSet<String>,
+    power_attach: &mut std::collections::BTreeMap<String, [f64; 2]>,
+) -> io::Result<()> {
+    // Global counter: `#PWR_CL{n:02}` numbering depends on gi.graphs IndexMap
+    // order (deterministic), so the port references are reproducible.
+    let mut pwr_n = 0usize;
+    for (block_name, graph) in &gi.graphs {
+        for (ci, _cluster) in graph.clusters.iter().enumerate() {
+            let key = place::cluster_key(block_name, ci);
+            let o = origins[&key];
+            let t = |p: [f64; 2]| [p[0] + o[0], p[1] + o[1]];
+            let geom = &gi.geoms[block_name][ci];
+            for (a, b, net) in &geom.wires {
+                w.add_wire_on_net(t(*a), t(*b), net);
+            }
+            for j in &geom.junctions {
+                w.add_junction(t(*j));
+            }
+            for (net, p) in &geom.ports {
+                pwr_n += 1;
+                let lib = power_lib_id(net, provider);
+                w.add_power_symbol(env, &lib, &format!("#PWR_CL{pwr_n:02}"), net, t(*p), 0.0)?;
+                used_nets.insert(net.clone());
+                power_attach.entry(net.clone()).or_insert(t(*p));
+            }
+            for (net, p, dir) in &geom.labels {
+                w.add_cluster_label(net, t(*p), *dir);
+                used_nets.insert(net.clone());
+            }
+        }
+    }
+    for (a, b, net) in &auto.joins {
+        w.add_wire_on_net(*a, *b, net);
+    }
+    Ok(())
+}
+
 /// The reconciliation-aware core of emission (spec §4/§7).
 ///
 /// Identical to the one-shot `emit_design` except that, given a prior
@@ -659,57 +800,16 @@ pub fn emit_design_reconciled(
     let mut relayout_blocks: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
 
-    // Resolve every cluster's sheet ORIGIN before placing members. A cluster is
-    // rigid: its representative member (`members()[0]`) anchors the whole group.
-    // If that member's prior placement survives (identity match, rev unchanged,
-    // block not forced to relayout), the origin is recovered from it
-    // (`prior.at - rep_local`) so a user's whole-cluster drag is preserved;
-    // otherwise the placer's auto origin is used and every member counts toward
-    // `relayout_blocks`.
-    let mut origins: IndexMap<String, [f64; 2]> = IndexMap::new();
-    for (block_name, graph) in &gi.graphs {
-        let block = &design.blocks[block_name.as_str()];
-        for (ci, cluster) in graph.clusters.iter().enumerate() {
-            let key = place::cluster_key(block_name, ci);
-            let auto_origin = auto
-                .cluster_origins
-                .get(&key)
-                .copied()
-                .unwrap_or([0.0, 0.0]);
-            let members = cluster.members();
-            let Some(rep) = members.first() else {
-                origins.insert(key, snap_point(auto_origin));
-                continue;
-            };
-            let Some(rep_comp) = block.components.get(rep.as_str()) else {
-                origins.insert(key, snap_point(auto_origin));
-                continue;
-            };
-            let rep_local = gi.members.get(rep).map(|m| m.local).unwrap_or([0.0, 0.0]);
-            let rev = member_rev(block, rep_comp, cluster);
-            let block_relayout = match relayout {
-                Relayout::All => true,
-                Relayout::Blocks(names) => names.contains(block_name.as_str()),
-                Relayout::None => false,
-            };
-            let prior = prior_map.get(&Identity::of(rep, &rep_comp.origin));
-            let origin = match prior {
-                Some(p)
-                    if !block_relayout
-                        && p.layout_rev.as_deref().is_none_or(|r| r == rev) =>
-                {
-                    [p.at[0] - rep_local[0], p.at[1] - rep_local[1]]
-                }
-                Some(_) => {
-                    *relayout_blocks.entry(block_name.clone()).or_insert(0) +=
-                        members.len();
-                    auto_origin
-                }
-                None => auto_origin,
-            };
-            origins.insert(key, snap_point(origin));
-        }
-    }
+    // Resolve every cluster's sheet ORIGIN before placing members (a phase lifted
+    // into `resolve_cluster_origins`). Accumulates into `relayout_blocks`.
+    let origins = resolve_cluster_origins(
+        design,
+        &gi,
+        &auto,
+        &prior_map,
+        relayout,
+        &mut relayout_blocks,
+    );
 
     // Net bookkeeping for power-flag synthesis.
     let mut used_nets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -770,7 +870,13 @@ pub fn emit_design_reconciled(
             // Covered pins (their connectivity is the cluster's own wiring) skip
             // per-pin label/power-symbol emission, but `record_power_role` still
             // runs for EVERY pin so power-flag bookkeeping sees the full picture.
-            for (pin, target) in &comp.pins {
+            // Component-level pins and every unit's pins are handled identically,
+            // so walk them as one stream to keep the skip logic single-sourced.
+            let all_pins = comp
+                .pins
+                .iter()
+                .chain(comp.units.values().flat_map(|u| u.iter()));
+            for (pin, target) in all_pins {
                 if !gi.covered.contains(&(refdes.clone(), pin.clone())) {
                     emit_pin(
                         &mut w,
@@ -786,60 +892,23 @@ pub fn emit_design_reconciled(
                 }
                 record_power_role(meta, pin, target, &mut driven_nets, &mut power_input_nets);
             }
-            for unit_pins in comp.units.values() {
-                for (pin, target) in unit_pins {
-                    if !gi.covered.contains(&(refdes.clone(), pin.clone())) {
-                        emit_pin(
-                            &mut w,
-                            env,
-                            &provider,
-                            refdes,
-                            pin,
-                            target,
-                            &power_nets,
-                            &mut used_nets,
-                            &mut power_attach,
-                        )?;
-                    }
-                    record_power_role(meta, pin, target, &mut driven_nets, &mut power_input_nets);
-                }
-            }
         }
     }
 
     // Cluster DECORATION: translate each cluster's geometry by its origin and
-    // emit the wires/junctions/ports/labels that wire its members together.
-    // Power ports become ONE power symbol per port (`#PWR_CL…`); labels join the
-    // cluster to the rest of the sheet. Anchor-slot join wires close last.
-    let mut pwr_n = 0usize;
-    for (block_name, graph) in &gi.graphs {
-        for (ci, _cluster) in graph.clusters.iter().enumerate() {
-            let key = place::cluster_key(block_name, ci);
-            let o = origins[&key];
-            let t = |p: [f64; 2]| [p[0] + o[0], p[1] + o[1]];
-            let geom = &gi.geoms[block_name][ci];
-            for (a, b, net) in &geom.wires {
-                w.add_wire_on_net(t(*a), t(*b), net);
-            }
-            for j in &geom.junctions {
-                w.add_junction(t(*j));
-            }
-            for (net, p) in &geom.ports {
-                pwr_n += 1;
-                let lib = power_lib_id(net, &provider);
-                w.add_power_symbol(env, &lib, &format!("#PWR_CL{pwr_n:02}"), net, t(*p), 0.0)?;
-                used_nets.insert(net.clone());
-                power_attach.entry(net.clone()).or_insert(t(*p));
-            }
-            for (net, p, dir) in &geom.labels {
-                w.add_cluster_label(net, t(*p), *dir);
-                used_nets.insert(net.clone());
-            }
-        }
-    }
-    for (a, b, net) in &auto.joins {
-        w.add_wire_on_net(*a, *b, net);
-    }
+    // emit the wires/junctions/ports/labels that wire its members together, then
+    // close the anchor-slot join wires (a phase lifted into
+    // `emit_cluster_decoration`).
+    emit_cluster_decoration(
+        &mut w,
+        env,
+        &gi,
+        &origins,
+        &auto,
+        &provider,
+        &mut used_nets,
+        &mut power_attach,
+    )?;
 
     // A component's *emitted* position (frames/rightmost). The map is the single
     // source: it records exactly what the component loop wrote.
