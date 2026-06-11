@@ -267,6 +267,7 @@ fn layout_block_anchor_centric(
         // grid values in exact arithmetic).
         let primary = cluster.anchor_taps.iter().find_map(|(net, aref, apin)| {
             let &(off, dir) = pin_ends.get(&(aref.clone(), apin.clone()))?;
+            let aidx = anchor_pos.get_index_of(aref.as_str())?;
             let &apos = anchor_pos.get(aref.as_str())?;
             let &tap = geom.tap_points.get(net)?;
             Some((
@@ -274,6 +275,7 @@ fn layout_block_anchor_centric(
                 snap_point([apos[0] + off[0], apos[1] + off[1]]),
                 dir,
                 tap,
+                aidx,
             ))
         });
 
@@ -294,27 +296,42 @@ fn layout_block_anchor_centric(
             grow(&mut plan.bbox, mn, mx);
         };
 
-        match (side, &primary) {
-            // East/West: tap-aligned slot with a straight join. Snap x ONCE up
-            // front; keep y EXACT (pin.y - tap.y) so the join stays horizontal.
-            (Side::East, Some((net, pin, Dir::East, tap))) => {
-                let mut o = [
-                    snap_point([pin[0] + JOIN_MM, 0.0])[0],
-                    pin[1] - tap[1],
-                ];
+        // Whether the horizontal join segment at `y`, spanning `xa..xb`,
+        // crosses any occupied rect. A join that crosses a rect would run a
+        // wire THROUGH another unit's body — an electrical short waiting to
+        // happen — so such a slot is rejected outright (the cluster falls back
+        // to a row, keeping label connectivity).
+        // `skip` is the tapped anchor's own rect index (anchors occupy the
+        // first `graph.anchors.len()` slots): the pin endpoint legitimately
+        // sits inside its own anchor's padded rect.
+        let seg_clear = |y: f64, xa: f64, xb: f64, skip: usize, occ: &[([f64; 2], [f64; 2])]| {
+            let (lo, hi) = (xa.min(xb), xa.max(xb));
+            occ.iter().enumerate().all(|(k, (mn, mx))| {
+                k == skip || !(mn[1] < y && y < mx[1] && mn[0] < hi && lo < mx[0])
+            })
+        };
+
+        // East/West: tap-aligned slot with a straight join. Snap x ONCE up
+        // front; keep y EXACT (pin.y - tap.y) so the join stays horizontal.
+        // Returns false when no SAFE slot exists (overlap cap, or the join
+        // would cross an earlier unit) — the cluster then takes row placement.
+        let slotted = match (side, &primary) {
+            (Side::East, Some((net, pin, Dir::East, tap, aidx))) => {
+                let mut o = [snap_point([pin[0] + JOIN_MM, 0.0])[0], pin[1] - tap[1]];
                 let mut tries = 0;
                 while overlaps_any(o, env, &occupied) && tries < PUSH_CAP {
                     o[0] += PUSH_MM;
                     tries += 1;
                 }
-                if tries == PUSH_CAP {
-                    leftovers.push(ci);
-                    continue;
-                }
                 let tap_sheet = [o[0] + tap[0], o[1] + tap[1]];
-                commit(o, Some((*pin, tap_sheet, net.clone())), &mut plan, &mut occupied);
+                if tries < PUSH_CAP && seg_clear(pin[1], pin[0], tap_sheet[0], *aidx, &occupied) {
+                    commit(o, Some((*pin, tap_sheet, net.clone())), &mut plan, &mut occupied);
+                    true
+                } else {
+                    false
+                }
             }
-            (Side::West, Some((net, pin, Dir::West, tap))) => {
+            (Side::West, Some((net, pin, Dir::West, tap, aidx))) => {
                 let mut o = [
                     snap_point([pin[0] - JOIN_MM - env[0], 0.0])[0],
                     pin[1] - tap[1],
@@ -324,40 +341,54 @@ fn layout_block_anchor_centric(
                     o[0] -= PUSH_MM;
                     tries += 1;
                 }
-                if tries == PUSH_CAP {
-                    leftovers.push(ci);
-                    continue;
-                }
                 let tap_sheet = [o[0] + tap[0], o[1] + tap[1]];
-                commit(o, Some((*pin, tap_sheet, net.clone())), &mut plan, &mut occupied);
+                if tries < PUSH_CAP && seg_clear(pin[1], pin[0], tap_sheet[0], *aidx, &occupied) {
+                    commit(o, Some((*pin, tap_sheet, net.clone())), &mut plan, &mut occupied);
+                    true
+                } else {
+                    false
+                }
             }
-            // North/South rows: x near the tap pin when known, else a running
-            // cursor; push outward (away from the anchor row) on overlap. No
-            // join wires — label connectivity until the router slice.
-            _ => {
-                let (start_y, dir_y, cursor) = match side {
-                    Side::North => (row_top - SIDE_ROW_GAP_MM - env[1], -PUSH_MM, &mut north_cursor),
-                    _ => (row_bottom + SIDE_ROW_GAP_MM, PUSH_MM, &mut south_cursor),
-                };
-                let x0 = match &primary {
-                    Some((_, pin, _, _)) => pin[0] - env[0] / 2.0,
-                    None => *cursor,
-                };
-                let mut o = [snap_point([x0, 0.0])[0], start_y];
-                let mut tries = 0;
-                while overlaps_any(o, env, &occupied) && tries < PUSH_CAP {
-                    o[1] += dir_y;
-                    tries += 1;
-                }
-                if tries == PUSH_CAP {
-                    leftovers.push(ci);
-                    continue;
-                }
-                if primary.is_none() {
-                    *cursor = o[0] + env[0] + SIDE_ROW_PITCH_MM;
-                }
-                commit(o, None, &mut plan, &mut occupied);
+            _ => false,
+        };
+
+        // North/South rows: x near the tap pin when known, else a running
+        // cursor; push outward (away from the anchor row) on overlap. No
+        // join wires — label connectivity until the router slice. Also the
+        // fallback for E/W clusters whose slot was unsafe.
+        if !slotted {
+            let ns = match side {
+                Side::North => Side::North,
+                Side::South => Side::South,
+                // E/W cluster that couldn't slot: rail polarity decides.
+                _ => side_of_tapless(&cluster_nets, is_vplus, &crate::grammar::is_ground),
+            };
+            let (start_y, dir_y, cursor) = match ns {
+                Side::North => (
+                    row_top - SIDE_ROW_GAP_MM - env[1],
+                    -PUSH_MM,
+                    &mut north_cursor,
+                ),
+                _ => (row_bottom + SIDE_ROW_GAP_MM, PUSH_MM, &mut south_cursor),
+            };
+            let x0 = match &primary {
+                Some((_, pin, _, _, _)) => pin[0] - env[0] / 2.0,
+                None => *cursor,
+            };
+            let mut o = [snap_point([x0, 0.0])[0], start_y];
+            let mut tries = 0;
+            while overlaps_any(o, env, &occupied) && tries < PUSH_CAP {
+                o[1] += dir_y;
+                tries += 1;
             }
+            if tries == PUSH_CAP {
+                leftovers.push(ci);
+                continue;
+            }
+            if primary.is_none() {
+                *cursor = o[0] + env[0] + SIDE_ROW_PITCH_MM;
+            }
+            commit(o, None, &mut plan, &mut occupied);
         }
     }
 

@@ -144,8 +144,10 @@ fn layout_rev(
     comp: &circuit_lang::model::Component,
     cluster: Option<&crate::grammar::Cluster>,
 ) -> String {
+    // The placer token re-places everything once when the placement ALGORITHM
+    // changes (anchor-centric placer = v2); bump it on future placer rewrites.
     let mut desc = format!(
-        "edge={:?}|near={:?}|role={:?}",
+        "placer=v2|edge={:?}|near={:?}|role={:?}",
         block.layout.edge, block.layout.near, comp.layout_role,
     );
     // Cluster members additionally hash the cluster's placement-relevant
