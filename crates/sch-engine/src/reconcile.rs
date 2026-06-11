@@ -259,10 +259,24 @@ pub fn emit_design_reconciled(
     // each part's geometry; parts whose geometry can't load fall back to the
     // fixed legacy cell inside the placer.
     let mut sizes = place::SizeMap::new();
+    let mut size_cache: std::collections::HashMap<String, [f64; 2]> =
+        std::collections::HashMap::new();
     for block in design.blocks.values() {
         for (refdes, comp) in &block.components {
-            if let Ok(g) = kicad_bridge::geometry::SymbolGeometry::load(env, &comp.part) {
-                sizes.insert(refdes.clone(), g.approx_size());
+            let size = match size_cache.get(&comp.part) {
+                Some(s) => Some(*s),
+                None => {
+                    let loaded = kicad_bridge::geometry::SymbolGeometry::load(env, &comp.part)
+                        .ok()
+                        .map(|g| g.approx_size());
+                    if let Some(s) = loaded {
+                        size_cache.insert(comp.part.clone(), s);
+                    }
+                    loaded
+                }
+            };
+            if let Some(s) = size {
+                sizes.insert(refdes.clone(), s);
             }
         }
     }

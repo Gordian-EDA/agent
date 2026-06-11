@@ -2,9 +2,11 @@
 //!
 //! Turns a [`circuit_lang::Design`] into per-component sheet positions. This is
 //! pure geometry — no I/O, no KiCAD. The MVP bar (spec §8) is *tidy,
-//! grid-aligned, ERC-clean* rather than beautiful: each block occupies a
-//! rectangular region, components fall into a fixed-cell grid inside it, and
-//! edge hints push regions toward sheet sides. Same `Design` -> same `Layout`.
+//! grid-aligned, ERC-clean* rather than beautiful: each component gets a cell
+//! sized to its symbol bounding box plus clearance; clusters (a parent plus its
+//! decouple caps as a horizontal bank) are packed into rows that wrap at a
+//! ~square width; blocks are arranged into vertical bands by edge hint. Same
+//! `Design` -> same `Layout`.
 
 use circuit_lang::Design;
 use circuit_lang::model::{Block, Edge, Origin, RefDes};
@@ -192,8 +194,8 @@ fn layout_block(block: &Block, sizes: &SizeMap) -> (Vec<(RefDes, [f64; 2])>, [f6
 ///
 /// Blocks are grouped into vertical bands by edge hint (Left band leftmost,
 /// Right band rightmost); within a band each block stacks downward and occupies
-/// a rectangular region; within a region components fill a ~square grid of
-/// fixed-pitch, grid-snapped cells. Same `Design` -> same `Layout`.
+/// a rectangular region; within a region components fill bbox-sized cells packed
+/// into rows (clusters kept atomic), grid-snapped. Same `Design` -> same `Layout`.
 pub fn place(design: &Design, sizes: &SizeMap) -> Layout {
     // Stable block order: by band rank, then original `Design` order.
     let mut blocks: Vec<(&str, &Block)> =
@@ -557,7 +559,7 @@ blocks:
     /// a single horizontal row immediately to the right of their parent.
     #[test]
     fn decouple_caps_form_a_row_beside_parent() {
-        use circuit_lang::{PinType, SymbolProvider};
+        use circuit_lang::PinType;
 
         let mut provider = circuit_lang::MockSymbolProvider::new();
         provider
