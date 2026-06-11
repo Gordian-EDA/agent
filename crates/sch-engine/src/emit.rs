@@ -115,6 +115,13 @@ struct Wire {
     uuid_key: String,
 }
 
+/// One `(junction …)` dot marking a deliberate ≥3-way wire join.
+struct Junction {
+    at: [f64; 2],
+    /// Stable key for the junction uuid (content-derived from the position).
+    uuid_key: String,
+}
+
 /// Free-standing sheet text (block titles / annotations).
 struct SheetText {
     text: String,
@@ -182,6 +189,8 @@ pub struct SchematicWriter {
     no_connects: Vec<NoConnect>,
     /// Wire segments added via `add_wire`, sorted by `uuid_key` at `finish`.
     wires: Vec<Wire>,
+    /// Junction dots added via `add_junction`, sorted by `uuid_key` at `finish`.
+    junctions: Vec<Junction>,
     /// Free-standing sheet texts (block titles / notes), sorted by `uuid_key`.
     texts: Vec<SheetText>,
     /// Graphic rectangles (block frames), sorted by `uuid_key`.
@@ -404,6 +413,16 @@ impl SchematicWriter {
             return;
         }
         self.wires.push(Wire { a, b, uuid_key });
+    }
+
+    /// Add a junction dot at a wire join. Deduplicated by position.
+    pub fn add_junction(&mut self, at: [f64; 2]) {
+        let at = snap_point(at);
+        let uuid_key = format!("{}:{}", at[0], at[1]);
+        if self.junctions.iter().any(|j| j.uuid_key == uuid_key) {
+            return;
+        }
+        self.junctions.push(Junction { at, uuid_key });
     }
 
     /// Add free-standing text to the sheet.
@@ -770,6 +789,19 @@ impl SchematicWriter {
                 fmt_coord(wire.a[1]),
                 fmt_coord(wire.b[0]),
                 fmt_coord(wire.b[1]),
+            );
+        }
+
+        // Junction dots, sorted by uuid_key for deterministic order/uuids.
+        let mut junctions = self.junctions;
+        junctions.sort_by(|a, b| a.uuid_key.cmp(&b.uuid_key));
+        for j in &junctions {
+            let uuid = stable_uuid("junction", &j.uuid_key);
+            let _ = writeln!(
+                out,
+                "\t(junction\n\t\t(at {} {})\n\t\t(diameter 0)\n\t\t(color 0 0 0 0)\n\t\t(uuid \"{uuid}\")\n\t)",
+                fmt_coord(j.at[0]),
+                fmt_coord(j.at[1]),
             );
         }
 
@@ -1299,6 +1331,20 @@ mod tests {
         w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0).unwrap();
         w.add_symbol(&env, "Device:R", "R2", "2k", [177.8, 63.5], 0.0).unwrap();
         assert!(w.layout_warnings().is_empty());
+    }
+
+    #[test]
+    fn junctions_render_sorted_and_deduped() {
+        let mut w = SchematicWriter::new();
+        w.add_junction([50.8, 25.4]);
+        w.add_junction([25.4, 25.4]);
+        w.add_junction([50.8, 25.4]); // duplicate -> dropped
+        let sch = w.finish();
+        let count = sch.matches("(junction").count();
+        assert_eq!(count, 2);
+        let first = sch.find("(at 25.4 25.4)").unwrap();
+        let second = sch.find("(at 50.8 25.4)").unwrap();
+        assert!(first < second, "junctions sorted by uuid_key");
     }
 
     #[test]
