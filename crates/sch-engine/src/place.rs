@@ -112,6 +112,7 @@ pub(crate) enum Side {
 pub(crate) fn cluster_side(
     taps: &[(String, String, String)],
     pin_ends: &AnchorPinEnds,
+    fallback_nets: &[String],
     is_vplus: &dyn Fn(&str) -> bool,
     is_gnd: &dyn Fn(&str) -> bool,
 ) -> Side {
@@ -125,8 +126,7 @@ pub(crate) fn cluster_side(
             };
         }
     }
-    let nets: Vec<String> = taps.iter().map(|(n, _, _)| n.clone()).collect();
-    side_of_tapless(&nets, is_vplus, is_gnd)
+    side_of_tapless(fallback_nets, is_vplus, is_gnd)
 }
 
 /// Rail-polarity side for a cluster with no resolvable tap: V+ -> North
@@ -144,6 +144,249 @@ pub(crate) fn side_of_tapless(
     } else {
         Side::South
     }
+}
+
+/// A block laid out anchor-centrically, in BLOCK-LOCAL coordinates (the anchor
+/// row sits on local y = 0; north clusters go negative). The caller translates
+/// by a grid-snapped shift, so all the local relationships (tap alignment,
+/// join straightness) survive verbatim.
+struct LocalPlan {
+    /// Anchor centers (local, grid-aligned).
+    anchors: Vec<(RefDes, [f64; 2])>,
+    /// Cluster members: (refdes, local position, angle).
+    members: Vec<(RefDes, [f64; 2], f64)>,
+    /// (cluster index, local origin).
+    cluster_origins: Vec<(usize, [f64; 2])>,
+    /// (pin endpoint, tap point, net), local.
+    joins: Vec<([f64; 2], [f64; 2], String)>,
+    /// Local bbox [min_x, min_y, max_x, max_y] over every placed rect.
+    bbox: [f64; 4],
+}
+
+/// Gap between an anchor row and the north/south cluster rows, mm.
+const SIDE_ROW_GAP_MM: f64 = 10.16;
+
+/// Horizontal gap between clusters sharing a north/south row, mm.
+const SIDE_ROW_PITCH_MM: f64 = 5.08;
+
+/// Outward-push step when a slotted cluster overlaps, mm (2 grid units).
+const PUSH_MM: f64 = 2.54;
+
+/// Maximum outward-push steps before a cluster falls back to the leftover row.
+const PUSH_CAP: usize = 40;
+
+/// Anchor-centric layout of one block, in local coordinates.
+///
+/// Anchors line up left-to-right on local y=0; each cluster slots beside the
+/// anchor pin it taps (East/West, tap-aligned so the join wire is straight) or
+/// stacks in a row above (V+ feeds) / below (ground/banks). Overlaps resolve
+/// by pushing outward along the assigned side; a cluster that cannot find a
+/// free spot within [`PUSH_CAP`] steps joins the leftover row at the bottom.
+fn layout_block_anchor_centric(
+    block: &Block,
+    graph: &BlockGraph,
+    geoms: &[ClusterGeom],
+    sizes: &SizeMap,
+    pin_ends: &AnchorPinEnds,
+    is_vplus: &dyn Fn(&str) -> bool,
+) -> LocalPlan {
+    let mut plan = LocalPlan {
+        anchors: Vec::new(),
+        members: Vec::new(),
+        cluster_origins: Vec::new(),
+        joins: Vec::new(),
+        bbox: [f64::MAX, f64::MAX, f64::MIN, f64::MIN],
+    };
+    // Occupied rects: (min, max). Anchor rects use the BODY size plus a small
+    // pad (not the label-clearance cell) so slotted clusters sit snug; the
+    // push loop resolves any genuine collision.
+    let mut occupied: Vec<([f64; 2], [f64; 2])> = Vec::new();
+    fn grow(b: &mut [f64; 4], mn: [f64; 2], mx: [f64; 2]) {
+        b[0] = b[0].min(mn[0]);
+        b[1] = b[1].min(mn[1]);
+        b[2] = b[2].max(mx[0]);
+        b[3] = b[3].max(mx[1]);
+    }
+
+    // 1. Anchor row on y = 0.
+    let mut anchor_pos: IndexMap<&str, [f64; 2]> = IndexMap::new();
+    let mut x = 0.0;
+    for anchor in &graph.anchors {
+        let cell = cell_of(anchor, sizes);
+        let body = sizes
+            .get(anchor)
+            .map(|s| [s[0] + 5.08, s[1] + 5.08])
+            .unwrap_or(cell);
+        let center = snap_point([x + cell[0] / 2.0, 0.0]);
+        anchor_pos.insert(anchor.as_str(), center);
+        plan.anchors.push((anchor.clone(), center));
+        let (mn, mx) = (
+            [center[0] - body[0] / 2.0, center[1] - body[1] / 2.0],
+            [center[0] + body[0] / 2.0, center[1] + body[1] / 2.0],
+        );
+        occupied.push((mn, mx));
+        grow(&mut plan.bbox, mn, mx);
+        x += cell[0] + BAND_GAP_MM;
+    }
+    let row_top = occupied.iter().map(|(mn, _)| mn[1]).fold(0.0, f64::min);
+    let row_bottom = occupied.iter().map(|(_, mx)| mx[1]).fold(0.0, f64::max);
+
+    // 2./3. Clusters by side.
+    let mut north_cursor = 0.0;
+    let mut south_cursor = 0.0;
+    let mut leftovers: Vec<usize> = Vec::new();
+    for (ci, cluster) in graph.clusters.iter().enumerate() {
+        let Some(geom) = geoms.get(ci) else {
+            leftovers.push(ci);
+            continue;
+        };
+        let env = geom.envelope;
+        // The cluster's own nets, for rail-polarity fallback when no tap
+        // resolves (e.g. a rail-rail decouple bank has no anchor taps at all).
+        let mut cluster_nets: Vec<String> = Vec::new();
+        for chain in &cluster.chains {
+            for l in &chain.links {
+                cluster_nets.push(l.a_net.clone());
+                cluster_nets.push(l.b_net.clone());
+            }
+        }
+        for bank in &cluster.banks {
+            cluster_nets.push(bank.a_net.clone());
+            cluster_nets.push(bank.b_net.clone());
+        }
+        let side = cluster_side(
+            &cluster.anchor_taps,
+            pin_ends,
+            &cluster_nets,
+            is_vplus,
+            &crate::grammar::is_ground,
+        );
+        // Primary tap: first tap with a known pin end on a placed anchor AND a
+        // tap point in the geometry. The pin endpoint is snapped here so the
+        // recorded join is dust-free (anchor centers and pin offsets are both
+        // grid values in exact arithmetic).
+        let primary = cluster.anchor_taps.iter().find_map(|(net, aref, apin)| {
+            let &(off, dir) = pin_ends.get(&(aref.clone(), apin.clone()))?;
+            let &apos = anchor_pos.get(aref.as_str())?;
+            let &tap = geom.tap_points.get(net)?;
+            Some((
+                net.clone(),
+                snap_point([apos[0] + off[0], apos[1] + off[1]]),
+                dir,
+                tap,
+            ))
+        });
+
+        let commit = |o: [f64; 2],
+                          join: Option<([f64; 2], [f64; 2], String)>,
+                          plan: &mut LocalPlan,
+                          occupied: &mut Vec<([f64; 2], [f64; 2])>| {
+            plan.cluster_origins.push((ci, o));
+            for (refdes, local, angle) in &geom.placements {
+                plan.members
+                    .push((refdes.clone(), [o[0] + local[0], o[1] + local[1]], *angle));
+            }
+            if let Some(j) = join {
+                plan.joins.push(j);
+            }
+            let (mn, mx) = (o, [o[0] + env[0], o[1] + env[1]]);
+            occupied.push((mn, mx));
+            grow(&mut plan.bbox, mn, mx);
+        };
+
+        match (side, &primary) {
+            // East/West: tap-aligned slot with a straight join. Snap x ONCE up
+            // front; keep y EXACT (pin.y - tap.y) so the join stays horizontal.
+            (Side::East, Some((net, pin, Dir::East, tap))) => {
+                let mut o = [
+                    snap_point([pin[0] + JOIN_MM, 0.0])[0],
+                    pin[1] - tap[1],
+                ];
+                let mut tries = 0;
+                while overlaps_any(o, env, &occupied) && tries < PUSH_CAP {
+                    o[0] += PUSH_MM;
+                    tries += 1;
+                }
+                if tries == PUSH_CAP {
+                    leftovers.push(ci);
+                    continue;
+                }
+                let tap_sheet = [o[0] + tap[0], o[1] + tap[1]];
+                commit(o, Some((*pin, tap_sheet, net.clone())), &mut plan, &mut occupied);
+            }
+            (Side::West, Some((net, pin, Dir::West, tap))) => {
+                let mut o = [
+                    snap_point([pin[0] - JOIN_MM - env[0], 0.0])[0],
+                    pin[1] - tap[1],
+                ];
+                let mut tries = 0;
+                while overlaps_any(o, env, &occupied) && tries < PUSH_CAP {
+                    o[0] -= PUSH_MM;
+                    tries += 1;
+                }
+                if tries == PUSH_CAP {
+                    leftovers.push(ci);
+                    continue;
+                }
+                let tap_sheet = [o[0] + tap[0], o[1] + tap[1]];
+                commit(o, Some((*pin, tap_sheet, net.clone())), &mut plan, &mut occupied);
+            }
+            // North/South rows: x near the tap pin when known, else a running
+            // cursor; push outward (away from the anchor row) on overlap. No
+            // join wires — label connectivity until the router slice.
+            _ => {
+                let (start_y, dir_y, cursor) = match side {
+                    Side::North => (row_top - SIDE_ROW_GAP_MM - env[1], -PUSH_MM, &mut north_cursor),
+                    _ => (row_bottom + SIDE_ROW_GAP_MM, PUSH_MM, &mut south_cursor),
+                };
+                let x0 = match &primary {
+                    Some((_, pin, _, _)) => pin[0] - env[0] / 2.0,
+                    None => *cursor,
+                };
+                let mut o = [snap_point([x0, 0.0])[0], start_y];
+                let mut tries = 0;
+                while overlaps_any(o, env, &occupied) && tries < PUSH_CAP {
+                    o[1] += dir_y;
+                    tries += 1;
+                }
+                if tries == PUSH_CAP {
+                    leftovers.push(ci);
+                    continue;
+                }
+                if primary.is_none() {
+                    *cursor = o[0] + env[0] + SIDE_ROW_PITCH_MM;
+                }
+                commit(o, None, &mut plan, &mut occupied);
+            }
+        }
+    }
+
+    // 5. Leftovers: packed in a row below everything placed so far.
+    if !leftovers.is_empty() {
+        let extents: Vec<[f64; 2]> = leftovers
+            .iter()
+            .map(|&ci| geoms.get(ci).map(|g| g.envelope).unwrap_or([CELL_MM, CELL_MM]))
+            .collect();
+        let (origins, _) = pack_units(&extents);
+        let y0 = plan.bbox[3] + BLOCK_GAP_MM;
+        for (k, &ci) in leftovers.iter().enumerate() {
+            let o = [origins[k][0], y0 + origins[k][1]];
+            let env = extents[k];
+            plan.cluster_origins.push((ci, o));
+            if let Some(geom) = geoms.get(ci) {
+                for (refdes, local, angle) in &geom.placements {
+                    plan.members
+                        .push((refdes.clone(), [o[0] + local[0], o[1] + local[1]], *angle));
+                }
+            }
+            let (mn, mx) = (o, [o[0] + env[0], o[1] + env[1]]);
+            occupied.push((mn, mx));
+            grow(&mut plan.bbox, mn, mx);
+        }
+    }
+
+    let _ = block;
+    plan
 }
 
 /// One packable unit inside a block: a standalone anchor, or a grammar cluster
@@ -270,8 +513,20 @@ pub fn place_with_anchor_pins(
 
     let empty_graph = BlockGraph::default();
 
-    // Pre-compute each block's unit order, packed unit origins, and envelope
-    // once; reuse below for both band-width accumulation and final placement.
+    // Whether a net counts as a positive supply for side classification: a
+    // declared power net that is not a ground.
+    let is_vplus = |n: &str| {
+        design
+            .nets
+            .get(n)
+            .map(|a| a.power)
+            .unwrap_or(false)
+            && !crate::grammar::is_ground(n)
+    };
+
+    // Pre-compute each block's layout plan once; reuse below for both
+    // band-width accumulation and final placement. Blocks WITH anchors get the
+    // anchor-centric local plan; anchor-less blocks keep row packing.
     struct Packed<'a> {
         units: Vec<Unit>,
         extents: Vec<[f64; 2]>,
@@ -279,10 +534,33 @@ pub fn place_with_anchor_pins(
         env: [f64; 2],
         block_name: &'a str,
     }
-    let packed: Vec<Packed> = blocks
+    enum BlockPlan<'a> {
+        Packed(Packed<'a>),
+        Centric { plan: LocalPlan, block_name: &'a str },
+    }
+    impl BlockPlan<'_> {
+        fn env(&self) -> [f64; 2] {
+            match self {
+                BlockPlan::Packed(p) => p.env,
+                BlockPlan::Centric { plan, .. } => [
+                    (plan.bbox[2] - plan.bbox[0]).max(0.0),
+                    (plan.bbox[3] - plan.bbox[1]).max(0.0),
+                ],
+            }
+        }
+    }
+    let packed: Vec<BlockPlan> = blocks
         .iter()
         .map(|(name, block)| {
             let graph = graphs.get(*name).unwrap_or(&empty_graph);
+            if !graph.anchors.is_empty() {
+                let empty_geoms: Vec<ClusterGeom> = Vec::new();
+                let gs = geoms.get(*name).unwrap_or(&empty_geoms);
+                let plan = layout_block_anchor_centric(
+                    block, graph, gs, sizes, pin_ends, &is_vplus,
+                );
+                return BlockPlan::Centric { plan, block_name: name };
+            }
             let units = block_units(block, graph);
             let extents: Vec<[f64; 2]> = units
                 .iter()
@@ -296,7 +574,7 @@ pub fn place_with_anchor_pins(
                 })
                 .collect();
             let (origins, env) = pack_units(&extents);
-            Packed { units, extents, origins, env, block_name: name }
+            BlockPlan::Packed(Packed { units, extents, origins, env, block_name: name })
         })
         .collect();
 
@@ -317,7 +595,7 @@ pub fn place_with_anchor_pins(
             .iter()
             .zip(packed.iter())
             .filter(|((_, b), _)| band_rank(b.layout.edge) == *rank)
-            .map(|(_, p)| p.env[0])
+            .map(|(_, p)| p.env()[0])
             .fold(0.0_f64, f64::max);
         band_x.insert(*rank, cursor_x);
         cursor_x += max_w + BAND_GAP_MM;
@@ -330,10 +608,56 @@ pub fn place_with_anchor_pins(
     // Independent vertical cursor per band so stacked blocks don't collide.
     let mut band_y: IndexMap<u8, f64> = IndexMap::new();
 
-    for ((_name, block), p) in blocks.iter().zip(packed.iter()) {
+    for ((_name, block), bp) in blocks.iter().zip(packed.iter()) {
         let rank = band_rank(block.layout.edge);
         let block_x0 = band_x[&rank];
         let block_y0 = *band_y.entry(rank).or_insert(MARGIN_MM);
+
+        // Anchor-centric block: translate the local plan by a grid-snapped
+        // shift so every local relationship (tap alignment, straight joins)
+        // survives verbatim, then advance the band cursor.
+        let p = match bp {
+            BlockPlan::Centric { plan, block_name } => {
+                let shift = snap_point([block_x0 - plan.bbox[0], block_y0 - plan.bbox[1]]);
+                for (refdes, at) in &plan.anchors {
+                    positions.insert(refdes.clone(), snap_point([at[0] + shift[0], at[1] + shift[1]]));
+                    angles.insert(refdes.clone(), 0.0);
+                }
+                for (refdes, at, angle) in &plan.members {
+                    positions.insert(refdes.clone(), snap_point([at[0] + shift[0], at[1] + shift[1]]));
+                    angles.insert(refdes.clone(), *angle);
+                }
+                for (ci, o) in &plan.cluster_origins {
+                    cluster_origins.insert(
+                        cluster_key(block_name, *ci),
+                        [o[0] + shift[0], o[1] + shift[1]],
+                    );
+                }
+                for (pin, tap, net) in &plan.joins {
+                    joins.push((
+                        [pin[0] + shift[0], pin[1] + shift[1]],
+                        [tap[0] + shift[0], tap[1] + shift[1]],
+                        net.clone(),
+                    ));
+                }
+                let env = bp.env();
+                band_y.insert(rank, block_y0 + env[1] + BLOCK_GAP_MM);
+                // Fallback guard for components the plan missed.
+                let mut fallback_y = block_y0 + env[1] + BLOCK_GAP_MM;
+                for refdes in block.components.keys() {
+                    if positions.contains_key(refdes) {
+                        continue;
+                    }
+                    let cell = cell_of(refdes, sizes);
+                    let center = [block_x0 + cell[0] / 2.0, fallback_y + cell[1] / 2.0];
+                    positions.insert(refdes.clone(), snap_point(center));
+                    angles.insert(refdes.clone(), 0.0);
+                    fallback_y += cell[1] + BLOCK_GAP_MM;
+                }
+                continue;
+            }
+            BlockPlan::Packed(p) => p,
+        };
 
         // Each placed unit's rect [min, max] in sheet mm, tagged with the cluster
         // index it belongs to (None for anchors) — used for anchor-slot overlap.
@@ -741,6 +1065,70 @@ blocks:
         );
     }
 
+    /// East-tap cluster lands right of the IC with a straight join; the 9V
+    /// decouple bank (tap-less, V+ touching) lands above the anchor row.
+    #[test]
+    fn anchor_centric_block_slots_clusters_by_side() {
+        let design = compile(
+            "
+version: 1
+name: t
+rails: [9V, GND]
+blocks:
+  a:
+    components:
+      U1: {part: Mock:BIG, pins: {A: CC1, B: N2, C: N3, D: N4}}
+      R1: {part: Device:R, value: 5k1, between: [CC1, GND]}
+      C5: {part: Device:C, value: 100n, between: [9V, GND]}
+      C6: {part: Device:C, value: 100n, between: [9V, GND]}
+",
+        );
+        let provider = place_test_provider();
+        let graphs: IndexMap<String, BlockGraph> = design
+            .blocks
+            .keys()
+            .map(|n| (n.clone(), crate::grammar::analyze(&design, n, &provider)))
+            .collect();
+        let mock_pins = |_: &str, pin: &str| match pin {
+            "1" => Some([0.0, -3.81]),
+            "2" => Some([0.0, 3.81]),
+            _ => None,
+        };
+        let geoms = build_test_geoms(&design, &graphs, &mock_pins);
+        let mut pin_ends = AnchorPinEnds::new();
+        pin_ends.insert(("U1".into(), "A".into()), ([10.16, 0.0], Dir::East));
+
+        let layout = place_with_anchor_pins(&design, &SizeMap::new(), &graphs, &geoms, &pin_ends);
+        let u1 = layout.positions["U1"];
+        // R-divider cluster East of U1 with a straight join on CC1.
+        let join = layout
+            .joins
+            .iter()
+            .find(|(_, _, n)| n == "CC1")
+            .expect("join recorded");
+        assert_eq!(join.0[1], join.1[1], "straight horizontal join");
+        assert!(layout.positions["R1"][0] > u1[0], "R1 east of U1");
+        // The 9V/GND bank is tap-less; V+ priority sends it ABOVE the anchor.
+        assert!(
+            layout.positions["C5"][1] < u1[1],
+            "bank above the anchor: C5={:?} U1={:?}",
+            layout.positions["C5"],
+            u1
+        );
+        // Bank members pack intentionally tight (BANK_PITCH), so the blanket
+        // no_overlaps helper does not apply; assert the ANCHOR keeps clear of
+        // every cluster member instead.
+        for (r, pos) in &layout.positions {
+            if r == "U1" {
+                continue;
+            }
+            assert!(
+                (pos[0] - u1[0]).abs() >= 10.0 || (pos[1] - u1[1]).abs() >= 10.0,
+                "{r} overlaps U1: {pos:?} vs {u1:?}"
+            );
+        }
+    }
+
     #[test]
     fn cluster_side_follows_primary_tap_direction() {
         let mut pin_ends = AnchorPinEnds::new();
@@ -748,8 +1136,14 @@ blocks:
         pin_ends.insert(("U1".into(), "B".into()), ([-10.16, 0.0], Dir::West));
         let taps_e = vec![("N1".to_string(), "U1".to_string(), "A".to_string())];
         let taps_w = vec![("N2".to_string(), "U1".to_string(), "B".to_string())];
-        assert_eq!(cluster_side(&taps_e, &pin_ends, &|_| false, &|_| false), Side::East);
-        assert_eq!(cluster_side(&taps_w, &pin_ends, &|_| false, &|_| false), Side::West);
+        assert_eq!(
+            cluster_side(&taps_e, &pin_ends, &[], &|_| false, &|_| false),
+            Side::East
+        );
+        assert_eq!(
+            cluster_side(&taps_w, &pin_ends, &[], &|_| false, &|_| false),
+            Side::West
+        );
     }
 
     #[test]
@@ -807,7 +1201,13 @@ blocks:
         let u1 = layout.positions["U1"];
         let pin = [u1[0] + 10.16, u1[1]];
         let join = layout.joins.iter().find(|(_, _, n)| n == "CC1").expect("join wire recorded");
-        assert_eq!(join.0, pin, "join starts at the pin endpoint");
+        // Compare with tolerance: the engine snaps the recorded endpoint, the
+        // test's `u1 + 10.16` carries float dust.
+        assert!(
+            (join.0[0] - pin[0]).abs() < 1e-6 && (join.0[1] - pin[1]).abs() < 1e-6,
+            "join starts at the pin endpoint: {:?} vs {pin:?}",
+            join.0
+        );
         assert_eq!(join.0[1], join.1[1], "straight horizontal join");
         assert!(join.1[0] > pin[0], "cluster sits East of the pin");
     }
