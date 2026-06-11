@@ -793,25 +793,34 @@ impl SchematicWriter {
         }
     }
 
-    /// Assign collision-free Reference/Value positions (and, as later tasks
-    /// extend this, stub-label positions) via the greedy candidate solver in
-    /// `textplace.rs`.
+    /// Assign collision-free positions to all movable text via the greedy
+    /// candidate solver in `textplace.rs`.
     ///
-    /// Obstacles: symbol bodies (angle-aware extents, exempt for text owned by
-    /// that refdes), wires, and labels. Movables: each visible-field instance's
-    /// Reference+Value pair, tried right / left / above / below of the body
-    /// (wide bodies prefer above/below — the KiCAD convention for horizontal
-    /// passives). The first candidate of an unrotated symbol reproduces the
-    /// legacy fixed right-of-body offsets, so an uncrowded sheet keeps its
-    /// conventional look.
+    /// **Obstacles:** symbol bodies (angle-aware extents, exempt for text
+    /// owned by that refdes), pin name/number text, wires, no-connect markers,
+    /// and fixed (stub-less) labels.
     ///
-    /// Idempotent: every assignment is recomputed from scratch on each call,
-    /// so reconcile may run it early (to lint solved geometry) and `finish`'s
-    /// own call is a harmless re-run.
+    /// **Movables, most-constrained first:**
+    /// 1. *Stub signal labels* (2 candidates): stay at the stub end, or
+    ///    retract onto the always-safe pin endpoint keeping the outward dir
+    ///    (the stub wire is dropped when retraction wins).
+    /// 2. *Reference+Value field pairs* (4 candidates): right / left / above /
+    ///    below of the body; wide bodies (rotated passives) prefer
+    ///    above/below. The first candidate of an unrotated symbol reproduces
+    ///    the legacy fixed right-of-body offsets, so an uncrowded sheet keeps
+    ///    its conventional look.
+    /// 3. *Power-symbol Values* (rail names; 3 candidates): beyond the symbol
+    ///    tip (above for up-pointing rails, below for down-pointing), else
+    ///    right / left — so adjacent rails never merge their names.
+    ///
+    /// Idempotent: every assignment is recomputed from scratch on each call
+    /// (a retract-chosen label has no stub on the re-run and becomes a fixed
+    /// obstacle at the same position), so reconcile may run it early to lint
+    /// solved geometry and `finish`'s own call is a harmless re-run.
     pub(crate) fn solve_text_positions(&mut self) {
         use crate::textplace::{
-            choose, label_box, rotated_half_extents, text_width, wire_box, BBox, Movable,
-            ObKind, Obstacle,
+            choose, label_box, pin_text_boxes, rotated_half_extents, text_width, wire_box,
+            BBox, Movable, ObKind, Obstacle,
         };
         // Round a candidate coordinate to 0.01 mm: field anchors are derived
         // from float sums (position + extents) and would otherwise render as
@@ -819,6 +828,7 @@ impl SchematicWriter {
         // inputs, same rounding).
         let r2 = |v: f64| (v * 100.0).round() / 100.0;
 
+        // ---- Obstacles ----
         let mut obstacles: Vec<Obstacle> = Vec::new();
         for inst in &self.instances {
             let h = rotated_half_extents(inst.half_extents, inst.angle);
@@ -831,34 +841,117 @@ impl SchematicWriter {
                 ],
                 kind: ObKind::OwnExempt(inst.refdes.clone()),
             });
+            // Pin name/number text (skip power/flag graphics — single
+            // unnamed pin, no meaningful pin text).
+            if !inst.refdes.starts_with('#') {
+                if let Some(pins) = self.sym_pins.get(&inst.lib_id) {
+                    for pg in pins {
+                        for b in pin_text_boxes(pg, inst.at, inst.angle, inst.mirror) {
+                            obstacles.push(Obstacle { bbox: b, kind: ObKind::Hard });
+                        }
+                    }
+                }
+            }
         }
         for w in &self.wires {
             obstacles.push(Obstacle { bbox: wire_box(w.a, w.b), kind: ObKind::Hard });
         }
-        for l in &self.labels {
+        for nc in &self.no_connects {
             obstacles.push(Obstacle {
-                bbox: label_box(l.at, l.dir, text_width(&l.net)),
+                bbox: [nc.at[0] - 0.64, nc.at[1] - 0.64, nc.at[0] + 0.64, nc.at[1] + 0.64],
                 kind: ObKind::Hard,
             });
         }
+        // Fixed (stub-less) labels are obstacles; stub labels become movables.
+        for l in &self.labels {
+            if l.stub.is_none() {
+                obstacles.push(Obstacle {
+                    bbox: label_box(l.at, l.dir, text_width(&l.net)),
+                    kind: ObKind::Hard,
+                });
+            }
+        }
 
-        // Field movables: one per visible-field instance, deterministic refdes
-        // order. Each candidate is the UNION box of the Reference+Value pair;
-        // the per-candidate anchor pair rides in a parallel vec for apply.
-        let mut order: Vec<usize> = (0..self.instances.len())
-            .filter(|&i| !self.instances[i].refdes.starts_with('#'))
-            .collect();
-        order.sort_by(|&a, &b| self.instances[a].refdes.cmp(&self.instances[b].refdes));
-
+        // ---- Movables ----
+        // What to mutate for each movable, parallel to `movables`.
+        enum Apply {
+            /// labels[i]: candidate 1 retracts onto the pin endpoint.
+            StubLabel(usize),
+            /// instances[i]: per-candidate (Reference, Value) anchors.
+            Fields(usize, Vec<(TextPos, TextPos)>),
+            /// instances[i]: per-candidate Value anchor (power rail name).
+            PowerVal(usize, Vec<TextPos>),
+        }
         let mut movables: Vec<Movable> = Vec::new();
-        let mut apply: Vec<(usize, Vec<(TextPos, TextPos)>)> = Vec::new();
+        let mut applies: Vec<Apply> = Vec::new();
+
+        // 1. Stub labels, deterministic uuid_key order (most constrained).
+        let mut stub_idx: Vec<usize> = (0..self.labels.len())
+            .filter(|&i| self.labels[i].stub.is_some())
+            .collect();
+        stub_idx.sort_by(|&a, &b| self.labels[a].uuid_key.cmp(&self.labels[b].uuid_key));
+        for &i in &stub_idx {
+            let l = &self.labels[i];
+            let wdt = text_width(&l.net);
+            let owner = l.uuid_key.split(':').next().unwrap_or("").to_string();
+            movables.push(Movable {
+                owner: Some(owner),
+                candidates: vec![
+                    label_box(l.at, l.dir, wdt),
+                    label_box(l.stub.unwrap().pin_at, l.dir, wdt),
+                ],
+            });
+            applies.push(Apply::StubLabel(i));
+        }
+
+        // 2./3. Fields and power values, deterministic refdes order.
+        let mut order: Vec<usize> = (0..self.instances.len()).collect();
+        order.sort_by(|&a, &b| self.instances[a].refdes.cmp(&self.instances[b].refdes));
         for &i in &order {
             let inst = &self.instances[i];
             let h = rotated_half_extents(inst.half_extents, inst.angle);
             let (cx, cy) = (inst.at[0], inst.at[1]);
             let (minx, miny, maxx, maxy) = (cx - h[0], cy - h[1], cx + h[0], cy + h[1]);
-            let rw = text_width(&inst.refdes);
             let vw = text_width(&inst.value);
+
+            if inst.refdes.starts_with('#') {
+                // Power symbol: the Value IS the rail name. PWR_FLAG hides
+                // its Value, so there is nothing to place.
+                if inst.lib_id == "power:PWR_FLAG" {
+                    continue;
+                }
+                let above = (
+                    TextPos { at: [r2(cx), r2(miny - 0.64)], justify: Justify::Center },
+                    [cx - vw / 2.0, miny - 2.24, cx + vw / 2.0, miny - 0.64] as BBox,
+                );
+                let below = (
+                    TextPos { at: [r2(cx), r2(maxy + 2.24)], justify: Justify::Center },
+                    [cx - vw / 2.0, maxy + 0.64, cx + vw / 2.0, maxy + 2.24],
+                );
+                let right = (
+                    TextPos { at: [r2(maxx + 0.64), r2(cy + 0.8)], justify: Justify::Left },
+                    [maxx + 0.64, cy - 0.8, maxx + 0.64 + vw, cy + 0.8],
+                );
+                let left = (
+                    TextPos { at: [r2(minx - 0.64), r2(cy + 0.8)], justify: Justify::Right },
+                    [minx - 0.64 - vw, cy - 0.8, minx - 0.64, cy + 0.8],
+                );
+                // A 180-rotated power symbol points down (GND family): the
+                // name goes below the graphic; otherwise above.
+                let cands = if inst.angle == 180.0 {
+                    vec![below, right, left]
+                } else {
+                    vec![above, right, left]
+                };
+                movables.push(Movable {
+                    owner: Some(inst.refdes.clone()),
+                    candidates: cands.iter().map(|c| c.1).collect(),
+                });
+                applies.push(Apply::PowerVal(i, cands.into_iter().map(|c| c.0).collect()));
+                continue;
+            }
+
+            let rw = text_width(&inst.refdes);
             let wmax = rw.max(vw);
             // Each candidate: (ref anchor, val anchor, union bbox). Text is
             // bottom-anchored and 1.6 tall, so a line anchored at Y occupies
@@ -894,14 +987,36 @@ impl SchematicWriter {
                 owner: Some(inst.refdes.clone()),
                 candidates: cands.iter().map(|c| c.2).collect(),
             });
-            apply.push((i, cands.into_iter().map(|c| (c.0, c.1)).collect()));
+            applies.push(Apply::Fields(i, cands.into_iter().map(|c| (c.0, c.1)).collect()));
         }
 
+        // ---- Solve and apply ----
         let picks = choose(&obstacles, &movables);
-        for ((i, cands), pick) in apply.into_iter().zip(picks) {
-            let (r, v) = cands[pick];
-            self.instances[i].ref_pos = Some(r);
-            self.instances[i].val_pos = Some(v);
+        for (apply, pick) in applies.into_iter().zip(picks) {
+            match apply {
+                Apply::StubLabel(i) => {
+                    if pick == 1 {
+                        let pin_at = self.labels[i].stub.unwrap().pin_at;
+                        let end = self.labels[i].at;
+                        // Drop the stub wire retract_colliding_stubs
+                        // materialized (content-derived key).
+                        let a = snap_point(pin_at);
+                        let b = snap_point(end);
+                        let key = format!("{}:{}:{}:{}", a[0], a[1], b[0], b[1]);
+                        self.wires.retain(|w| w.uuid_key != key);
+                        self.labels[i].at = pin_at;
+                        self.labels[i].stub = None;
+                    }
+                }
+                Apply::Fields(i, cands) => {
+                    let (r, v) = cands[pick];
+                    self.instances[i].ref_pos = Some(r);
+                    self.instances[i].val_pos = Some(v);
+                }
+                Apply::PowerVal(i, cands) => {
+                    self.instances[i].val_pos = Some(cands[pick]);
+                }
+            }
         }
     }
 

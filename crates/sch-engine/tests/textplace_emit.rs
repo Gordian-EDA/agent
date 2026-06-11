@@ -38,6 +38,61 @@ fn fields_dodge_neighbor_body() {
     );
 }
 
+/// A 555's west-side trigger pin carries a signal label on a stub. The solver
+/// must keep it at the stub end (its first candidate) — regression guard
+/// against over-aggressive obstacle modeling force-retracting everything.
+#[test]
+fn timer_pin_labels_stay_on_stub_ends() {
+    let Some(env) = detect_env() else { return };
+    let mut w = SchematicWriter::new();
+    w.add_symbol(&env, "Timer:NE555P", "U1", "NE555P", [152.4, 101.6], 0.0).unwrap();
+    w.add_signal_label(&env, "U1", "2", "N_TR").unwrap();
+    let sch = w.finish();
+    // Pin 2 is on the west side; its stub extends west 3.81mm and the label
+    // must stay there (dir West renders angle 180).
+    assert!(
+        sch.contains("(label \"N_TR\"") && sch.contains(" 180)"),
+        "west-side stub label survives, reading west:\n{sch}"
+    );
+}
+
+/// Two power symbols close together: their Value texts (rail names) must not
+/// land in overlapping boxes (the VCCDVCC3V3 artifact). Values are solver-
+/// moved fields, so assert the rendered boxes are disjoint.
+#[test]
+fn adjacent_power_rail_values_do_not_merge() {
+    let Some(env) = detect_env() else { return };
+    let mut w = SchematicWriter::new();
+    w.add_power_symbol(&env, "power:VCC", "#PWR01", "VCCD", [101.6, 101.6], 0.0).unwrap();
+    w.add_power_symbol(&env, "power:VCC", "#PWR02", "VCC3V3", [106.68, 101.6], 0.0).unwrap();
+    let sch = w.finish();
+    let pos = |val: &str| -> (f64, f64) {
+        let seg = sch
+            .split(&format!("(property \"Value\" \"{val}\""))
+            .nth(1)
+            .unwrap();
+        let at = seg.split("(at ").next().map(|_| seg).unwrap();
+        let at = at.split("(at ").nth(1).unwrap();
+        let mut it = at.split_whitespace();
+        (
+            it.next().unwrap().parse().unwrap(),
+            it.next().unwrap().parse().unwrap(),
+        )
+    };
+    let (x1, y1) = pos("VCCD");
+    let (x2, y2) = pos("VCC3V3");
+    // Conservative center-justified extents: width 1.1/char, height 1.6,
+    // bottom-anchored. Disjoint if x-ranges or y-ranges are.
+    let w1 = 4.0 * 1.1;
+    let w2 = 6.0 * 1.1;
+    let overlap_x = (x1 - w1 / 2.0) < (x2 + w2 / 2.0) && (x2 - w2 / 2.0) < (x1 + w1 / 2.0);
+    let overlap_y = (y1 - 1.6) < y2 && (y2 - 1.6) < y1;
+    assert!(
+        !(overlap_x && overlap_y),
+        "power rail values must not overlap: VCCD at ({x1}, {y1}), VCC3V3 at ({x2}, {y2})\n{sch}"
+    );
+}
+
 /// With no neighbors, the first (conventional) candidate is chosen and the
 /// output keeps the legacy right-of-body field placement byte-for-byte.
 #[test]
