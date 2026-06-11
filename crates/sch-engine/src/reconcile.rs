@@ -710,6 +710,7 @@ fn resolve_cluster_origins(
 /// deterministic iteration order of `gi.graphs` (an IndexMap) × each block's
 /// `clusters` × `geom.ports` — so the pwr_n numbering is reproducible run-to-run.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn emit_cluster_decoration(
     w: &mut SchematicWriter,
     env: &KicadEnv,
@@ -717,9 +718,11 @@ fn emit_cluster_decoration(
     origins: &IndexMap<String, [f64; 2]>,
     auto: &place::Layout,
     provider: &RealSymbolProvider,
+    pending: &mut PendingNets,
     used_nets: &mut std::collections::BTreeSet<String>,
     power_attach: &mut std::collections::BTreeMap<String, [f64; 2]>,
 ) -> io::Result<()> {
+    const EPS: f64 = 1e-6;
     // Global counter: `#PWR_CL{n:02}` numbering depends on gi.graphs IndexMap
     // order (deterministic), so the port references are reproducible.
     let mut pwr_n = 0usize;
@@ -729,7 +732,41 @@ fn emit_cluster_decoration(
             let o = origins[&key];
             let t = |p: [f64; 2]| [p[0] + o[0], p[1] + o[1]];
             let geom = &gi.geoms[block_name][ci];
+            // A label's STUB wire (the short spur from the net's node to the
+            // label text) is deferred together with the label: if the routing
+            // pass wires the net, neither is drawn. Structural wires emit now.
+            let is_label_stub = |a: [f64; 2], b: [f64; 2], net: &str| {
+                geom.labels.iter().find_map(|(ln, lp, dir)| {
+                    if ln != net {
+                        return None;
+                    }
+                    let eq = |p: [f64; 2], q: [f64; 2]| {
+                        (p[0] - q[0]).abs() < EPS && (p[1] - q[1]).abs() < EPS
+                    };
+                    if eq(a, *lp) {
+                        Some((b, *lp, *dir))
+                    } else if eq(b, *lp) {
+                        Some((a, *lp, *dir))
+                    } else {
+                        None
+                    }
+                })
+            };
             for (a, b, net) in &geom.wires {
+                if let Some((tap, lp, dir)) = is_label_stub(*a, *b, net) {
+                    pending
+                        .cluster_labels
+                        .entry(net.clone())
+                        .or_default()
+                        .push((t(tap), t(lp), dir));
+                    pending
+                        .blocks
+                        .entry(net.clone())
+                        .or_default()
+                        .insert(block_name.to_string());
+                    used_nets.insert(net.clone());
+                    continue;
+                }
                 w.add_wire_on_net(t(*a), t(*b), net);
             }
             for j in &geom.junctions {
@@ -742,8 +779,28 @@ fn emit_cluster_decoration(
                 used_nets.insert(net.clone());
                 power_attach.entry(net.clone()).or_insert(t(*p));
             }
+            // Labels whose stub was deferred above are covered; a label with
+            // NO matching stub wire (sits directly on geometry) defers too,
+            // tap == label position.
             for (net, p, dir) in &geom.labels {
-                w.add_cluster_label(net, t(*p), *dir);
+                let already = pending
+                    .cluster_labels
+                    .get(net.as_str())
+                    .is_some_and(|v| v.iter().any(|(_, lp, _)| {
+                        (lp[0] - t(*p)[0]).abs() < EPS && (lp[1] - t(*p)[1]).abs() < EPS
+                    }));
+                if !already {
+                    pending
+                        .cluster_labels
+                        .entry(net.clone())
+                        .or_default()
+                        .push((t(*p), t(*p), *dir));
+                    pending
+                        .blocks
+                        .entry(net.clone())
+                        .or_default()
+                        .insert(block_name.to_string());
+                }
                 used_nets.insert(net.clone());
             }
         }
@@ -825,6 +882,9 @@ pub fn emit_design_reconciled(
         })
         .collect();
 
+    // Signal connectivity deferred for the routing pass (wires vs labels).
+    let mut pending = PendingNets::default();
+
     // Net bookkeeping for power-flag synthesis.
     let mut used_nets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut driven_nets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -896,11 +956,13 @@ pub fn emit_design_reconciled(
                         &mut w,
                         env,
                         &provider,
+                        block_name,
                         refdes,
                         pin,
                         target,
                         &power_nets,
                         &join_points,
+                        &mut pending,
                         &mut used_nets,
                         &mut power_attach,
                     )?;
@@ -921,6 +983,7 @@ pub fn emit_design_reconciled(
         &origins,
         &auto,
         &provider,
+        &mut pending,
         &mut used_nets,
         &mut power_attach,
     )?;
@@ -963,6 +1026,164 @@ pub fn emit_design_reconciled(
             let y = 25.4 + flag_idx as f64 * 12.7;
             let at = snap_point([power_x, y]);
             w.add_power_flag(env, net, &refdes, at)?;
+        }
+    }
+
+    // ---- Routing pass: wires for local nets, labels as fallback ----
+    //
+    // Every deferred net is either ROUTED (real wires + junction dots; its
+    // labels are dropped — terminals connect by copper) or LABELED exactly as
+    // the pre-router engine did (per-pin stub labels + cluster label with its
+    // stub wire). Routable = non-power, all terminals in ONE block, >= 2
+    // terminals. A routable net that fails to route falls back to labels AND
+    // records a degradation note (spec: visible degradation, never an error).
+    let mut route_notes: Vec<String> = Vec::new();
+    {
+        // Scene: fixed geometry + every OTHER pending terminal as a foreign
+        // anchor (those points become labels or wires later; touching one
+        // would merge nets).
+        let mut scene = w.route_scene();
+        for (net, eps) in &pending.signals {
+            for (_, _, p, _) in eps {
+                scene.points.push((*p, net.clone()));
+            }
+        }
+        for (net, ls) in &pending.cluster_labels {
+            for (tap, _, _) in ls {
+                scene.points.push((*tap, net.clone()));
+            }
+        }
+
+        let all_nets: std::collections::BTreeSet<String> = pending
+            .signals
+            .keys()
+            .chain(pending.cluster_labels.keys())
+            .cloned()
+            .collect();
+
+        for net in &all_nets {
+            let sigs = pending.signals.get(net.as_str()).cloned().unwrap_or_default();
+            let clabels = pending
+                .cluster_labels
+                .get(net.as_str())
+                .cloned()
+                .unwrap_or_default();
+
+            // Terminals: signal pin endpoints (with outward dir) + cluster taps.
+            let mut terminals: Vec<([f64; 2], Option<crate::emit::Dir>)> = Vec::new();
+            for (_, _, p, dir) in &sigs {
+                terminals.push((*p, Some(*dir)));
+            }
+            for (tap, _, _) in &clabels {
+                terminals.push((*tap, None));
+            }
+
+            let single_block = pending
+                .blocks
+                .get(net.as_str())
+                .map(|b| b.len() == 1)
+                .unwrap_or(false);
+            let routable = single_block && terminals.len() >= 2;
+
+            let mut routed_paths: Option<Vec<crate::route::Path>> = None;
+            if routable {
+                let pts: Vec<[f64; 2]> = terminals.iter().map(|t| t.0).collect();
+                let mut paths: Vec<crate::route::Path> = Vec::new();
+                let mut ok = true;
+                for (i, j) in crate::route::mst_edges(&pts) {
+                    // Prefer starting from a terminal with a known outward
+                    // dir (a pin); synthesize a direction toward the target
+                    // otherwise.
+                    let (a, da, b) = match (terminals[i].1, terminals[j].1) {
+                        (Some(d), _) => (pts[i], d, pts[j]),
+                        (None, Some(d)) => (pts[j], d, pts[i]),
+                        (None, None) => {
+                            let d = if (pts[j][0] - pts[i][0]).abs()
+                                >= (pts[j][1] - pts[i][1]).abs()
+                            {
+                                if pts[j][0] >= pts[i][0] {
+                                    crate::emit::Dir::East
+                                } else {
+                                    crate::emit::Dir::West
+                                }
+                            } else if pts[j][1] >= pts[i][1] {
+                                crate::emit::Dir::South
+                            } else {
+                                crate::emit::Dir::North
+                            };
+                            (pts[i], d, pts[j])
+                        }
+                    };
+                    match crate::route::route_edge(a, da, b, net, &scene) {
+                        Some(p) => paths.push(p),
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    routed_paths = Some(paths);
+                }
+            }
+
+            match routed_paths {
+                Some(paths) => {
+                    for path in &paths {
+                        for seg in path.windows(2) {
+                            w.add_wire_on_net(seg[0], seg[1], net);
+                            scene.segments.push((seg[0], seg[1], net.clone()));
+                        }
+                    }
+                    // Junction dots: 3-way meets among the routed paths plus
+                    // the net's pre-existing wires (cluster wiring at taps).
+                    let mut all: Vec<crate::route::Path> = paths.clone();
+                    for (a, b) in w.wire_segments_on_net(net) {
+                        all.push(vec![a, b]);
+                    }
+                    for j in crate::route::junction_points(&all) {
+                        w.add_junction(j);
+                    }
+                    // A route ending INSIDE an existing same-net wire is a T
+                    // that junction_points (ends-only) cannot see.
+                    for (p, _) in &terminals {
+                        let interior = w.wire_segments_on_net(net).iter().any(|(a, b)| {
+                            let ends = ((p[0] - a[0]).abs() < 1e-6
+                                && (p[1] - a[1]).abs() < 1e-6)
+                                || ((p[0] - b[0]).abs() < 1e-6 && (p[1] - b[1]).abs() < 1e-6);
+                            !ends && crate::emit::point_on_segment(*p, *a, *b)
+                        });
+                        if interior {
+                            w.add_junction(*p);
+                        }
+                    }
+                }
+                None => {
+                    // Label fallback: classic per-pin stub labels (dedup by
+                    // pin — add_signal_label covers all endpoints of a pin)
+                    // and cluster labels with their stub wires.
+                    let mut seen: std::collections::BTreeSet<(String, String)> =
+                        std::collections::BTreeSet::new();
+                    for (refdes, pin, _, _) in &sigs {
+                        if seen.insert((refdes.clone(), pin.clone())) {
+                            w.add_signal_label(env, refdes, pin, net)?;
+                        }
+                    }
+                    for (tap, lp, dir) in &clabels {
+                        w.add_wire_on_net(*tap, *lp, net);
+                        w.add_cluster_label(net, *lp, *dir);
+                    }
+                    if routable {
+                        let block = pending
+                            .blocks
+                            .get(net.as_str())
+                            .and_then(|b| b.iter().next().cloned())
+                            .unwrap_or_default();
+                        route_notes
+                            .push(format!("route: block {block}: net {net} fell back to labels"));
+                    }
+                }
+            }
         }
     }
 
@@ -1064,6 +1285,8 @@ pub fn emit_design_reconciled(
     for graph in gi.graphs.values() {
         layout_warnings.extend(graph.degradations.iter().map(|d| format!("grammar: {d}")));
     }
+    // Routing degradations: local nets that fell back to label connectivity.
+    layout_warnings.extend(route_notes);
     // Sparseness: a block whose frame area dwarfs its content reads as floating
     // parts; surface it so the vision loop isn't spent on mechanical whitespace.
     for (block_name, block) in &design.blocks {
@@ -1142,20 +1365,36 @@ fn record_power_role(
     }
 }
 
-/// Emit one pin's connectivity (label or no-connect), recording referenced nets.
+/// Connectivity work deferred until routing can decide wires vs labels.
+#[derive(Default)]
+struct PendingNets {
+    /// net -> signal endpoints: (refdes, pin, snapped endpoint, outward dir).
+    signals: std::collections::BTreeMap<String, Vec<(String, String, [f64; 2], crate::emit::Dir)>>,
+    /// net -> cluster label specs: (tap point on the cluster wiring, label
+    /// position, label dir). The tap is the net's wire terminal; the label
+    /// stub wire tap->pos is only drawn when the net falls back to labels.
+    cluster_labels: std::collections::BTreeMap<String, Vec<([f64; 2], [f64; 2], crate::emit::Dir)>>,
+    /// net -> blocks touched (routing is intra-block only).
+    blocks: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+/// Emit one pin's connectivity, recording referenced nets.
 ///
-/// Power-net pins get a power symbol + stub wire instead of a text label.
-/// Signal-net pins get the usual text label.
+/// Power-net pins get a power symbol + stub wire immediately. Signal-net pins
+/// are DEFERRED into `pending`: the routing pass later draws them as wires or
+/// falls back to the classic stub label. No-connects emit immediately.
 #[allow(clippy::too_many_arguments)]
 fn emit_pin(
     w: &mut SchematicWriter,
     env: &KicadEnv,
     provider: &RealSymbolProvider,
+    block_name: &str,
     refdes: &str,
     pin: &str,
     target: &PinTarget,
     power_nets: &std::collections::BTreeSet<String>,
     join_points: &std::collections::BTreeSet<(u64, u64)>,
+    pending: &mut PendingNets,
     used_nets: &mut std::collections::BTreeSet<String>,
     power_attach: &mut std::collections::BTreeMap<String, [f64; 2]>,
 ) -> io::Result<()> {
@@ -1165,17 +1404,26 @@ fn emit_pin(
             if power_nets.contains(net) {
                 emit_power_pin(w, env, provider, refdes, pin, net, power_attach)
             } else {
-                // A pin already wired by a placement join needs no label: the
-                // join wire connects it to the cluster, whose single label
-                // names the net. A label here would just duplicate the text.
-                let joined = w.pin_dirs(env, refdes, pin)?.iter().any(|(ep, _)| {
-                    let p = crate::grid::snap_point(*ep);
-                    join_points.contains(&(p[0].to_bits(), p[1].to_bits()))
-                });
-                if joined {
-                    return Ok(());
+                for (ep, dir) in w.pin_dirs(env, refdes, pin)? {
+                    let p = crate::grid::snap_point(ep);
+                    // A pin already wired by a placement join needs neither
+                    // label nor route: the join wire connects it to the
+                    // cluster, whose single label names the net.
+                    if join_points.contains(&(p[0].to_bits(), p[1].to_bits())) {
+                        continue;
+                    }
+                    pending
+                        .signals
+                        .entry(net.clone())
+                        .or_default()
+                        .push((refdes.to_string(), pin.to_string(), p, dir));
+                    pending
+                        .blocks
+                        .entry(net.clone())
+                        .or_default()
+                        .insert(block_name.to_string());
                 }
-                w.add_signal_label(env, refdes, pin, net)
+                Ok(())
             }
         }
         PinTarget::NoConnect => w.add_no_connect(env, refdes, pin),

@@ -71,6 +71,19 @@ fn fixtures_emit_erc_clean_with_truthful_netlists() {
         let sch = tmp.path().join(format!("{name}.kicad_sch"));
         std::fs::write(&sch, &out.sch).unwrap();
 
+        // Wiring oracle: every local net routes as real wires; a `route:`
+        // warning means a net silently degraded to label connectivity. The
+        // reference fixtures are exactly the sheets that must fully wire.
+        let route_fallbacks: Vec<&String> = out
+            .layout_warnings
+            .iter()
+            .filter(|w| w.starts_with("route:"))
+            .collect();
+        assert!(
+            route_fallbacks.is_empty(),
+            "{name}: local nets fell back to labels: {route_fallbacks:?}"
+        );
+
         // ERC clean.
         let erc = KicadCli::new(&env).erc(&sch).unwrap();
         assert_eq!(erc.error_count(), 0, "{name}: {:#?}", erc.violations);

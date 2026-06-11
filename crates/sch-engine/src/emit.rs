@@ -1060,6 +1060,64 @@ impl SchematicWriter {
         }
     }
 
+    /// Build the routing obstacle scene from everything placed so far.
+    ///
+    /// Solids are symbol bodies SHRUNK by 2.54 mm per side: `approx_size` pads
+    /// 2.54 beyond the pin endpoints, so shrinking puts pin connection points
+    /// exactly ON the solid boundary (open-interval checks let wires depart
+    /// from them) while the glyph stays protected. Points carry the same
+    /// foreign-anchor model as `retract_colliding_stubs` (power origins,
+    /// no-connects, label anchors); wire segments carry their net (the power
+    /// sentinel for unattributed stubs/risers).
+    pub(crate) fn route_scene(&self) -> crate::route::RouteScene {
+        use crate::textplace::rotated_half_extents;
+        const NC: &str = "\0no_connect";
+        const PWR: &str = "\0power_wire";
+        let mut scene = crate::route::RouteScene {
+            solids: Vec::new(),
+            points: Vec::new(),
+            segments: Vec::new(),
+        };
+        for inst in &self.instances {
+            if inst.refdes.starts_with('#') {
+                // Power symbols: the single pin at the origin is the anchor.
+                scene.points.push((inst.at, inst.value.clone()));
+                continue;
+            }
+            let h = rotated_half_extents(inst.half_extents, inst.angle);
+            let (hx, hy) = ((h[0] - 2.54).max(1.27), (h[1] - 2.54).max(1.27));
+            scene.solids.push([
+                inst.at[0] - hx,
+                inst.at[1] - hy,
+                inst.at[0] + hx,
+                inst.at[1] + hy,
+            ]);
+        }
+        for nc in &self.no_connects {
+            scene.points.push((nc.at, NC.to_string()));
+        }
+        for l in &self.labels {
+            scene.points.push((l.at, l.net.clone()));
+            if let Some(stub) = &l.stub {
+                scene.points.push((stub.pin_at, l.net.clone()));
+            }
+        }
+        for w in &self.wires {
+            let net = w.net.clone().unwrap_or_else(|| PWR.to_string());
+            scene.segments.push((w.a, w.b, net));
+        }
+        scene
+    }
+
+    /// Wire segments attributed to `net` (for junction counting at taps).
+    pub(crate) fn wire_segments_on_net(&self, net: &str) -> Vec<([f64; 2], [f64; 2])> {
+        self.wires
+            .iter()
+            .filter(|w| w.net.as_deref() == Some(net))
+            .map(|w| (w.a, w.b))
+            .collect()
+    }
+
     /// Assemble the complete `.kicad_sch` document as a deterministic string.
     ///
     /// `lib_symbols` are emitted sorted by `lib_id` (via the backing
