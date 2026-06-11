@@ -167,6 +167,15 @@ mod tests {
     }
 
     #[test]
+    fn rotate_end0_inverts_y_and_rotates() {
+        // angle 0 is identity; 180 flips the sheet-space y end.
+        let id = rotate_end0([0.0, -3.81], 0.0);
+        assert!((id[0]).abs() < 1e-9 && (id[1] + 3.81).abs() < 1e-9, "{id:?}");
+        let flipped = rotate_end0([0.0, -3.81], 180.0);
+        assert!((flipped[0]).abs() < 1e-9 && (flipped[1] - 3.81).abs() < 1e-9, "{flipped:?}");
+    }
+
+    #[test]
     fn stack_chain_places_pin_to_pin_downward() {
         let mut g = ClusterGeom::default();
         // D1 oriented a=pin2 (needs 180°), R2 a=pin1 (0°).
