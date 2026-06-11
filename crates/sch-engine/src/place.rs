@@ -97,6 +97,55 @@ fn cell_of(refdes: &RefDes, sizes: &SizeMap) -> [f64; 2] {
     }
 }
 
+/// Which side of its anchor a cluster attaches to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Side {
+    East,
+    West,
+    North,
+    South,
+}
+
+/// Side from the PRIMARY anchor tap (first tap whose pin direction is known —
+/// anchor_taps order is deterministic from `analyze`). Falls back to rail
+/// polarity (`side_of_tapless`) over the taps' nets when no tap resolves.
+pub(crate) fn cluster_side(
+    taps: &[(String, String, String)],
+    pin_ends: &AnchorPinEnds,
+    is_vplus: &dyn Fn(&str) -> bool,
+    is_gnd: &dyn Fn(&str) -> bool,
+) -> Side {
+    for (_net, aref, apin) in taps {
+        if let Some(&(_, dir)) = pin_ends.get(&(aref.clone(), apin.clone())) {
+            return match dir {
+                Dir::East => Side::East,
+                Dir::West => Side::West,
+                Dir::North => Side::North,
+                Dir::South => Side::South,
+            };
+        }
+    }
+    let nets: Vec<String> = taps.iter().map(|(n, _, _)| n.clone()).collect();
+    side_of_tapless(&nets, is_vplus, is_gnd)
+}
+
+/// Rail-polarity side for a cluster with no resolvable tap: V+ -> North
+/// (supply feeds hang from the top), ground-only -> South, neither -> South
+/// (decoupling/banks read best at the bottom, matching the references).
+pub(crate) fn side_of_tapless(
+    nets: &[String],
+    is_vplus: &dyn Fn(&str) -> bool,
+    is_gnd: &dyn Fn(&str) -> bool,
+) -> Side {
+    if nets.iter().any(|n| is_vplus(n)) {
+        Side::North
+    } else if nets.iter().any(|n| is_gnd(n)) {
+        Side::South
+    } else {
+        Side::South
+    }
+}
+
 /// One packable unit inside a block: a standalone anchor, or a grammar cluster
 /// referenced by its index in the block's deterministic cluster order.
 enum Unit {
@@ -689,6 +738,33 @@ blocks:
         assert!(
             ax < bx,
             "left-edge block (x={ax}) must be left of right-edge block (x={bx})"
+        );
+    }
+
+    #[test]
+    fn cluster_side_follows_primary_tap_direction() {
+        let mut pin_ends = AnchorPinEnds::new();
+        pin_ends.insert(("U1".into(), "A".into()), ([10.16, 0.0], Dir::East));
+        pin_ends.insert(("U1".into(), "B".into()), ([-10.16, 0.0], Dir::West));
+        let taps_e = vec![("N1".to_string(), "U1".to_string(), "A".to_string())];
+        let taps_w = vec![("N2".to_string(), "U1".to_string(), "B".to_string())];
+        assert_eq!(cluster_side(&taps_e, &pin_ends, &|_| false, &|_| false), Side::East);
+        assert_eq!(cluster_side(&taps_w, &pin_ends, &|_| false, &|_| false), Side::West);
+    }
+
+    #[test]
+    fn tapless_cluster_side_follows_rail_polarity() {
+        // V+ wins when both rails are present: the cluster hangs from the
+        // supply; its ground end points down anyway.
+        let is_vplus = |n: &str| n == "9V";
+        let is_gnd = |n: &str| n == "GND";
+        assert_eq!(
+            side_of_tapless(&["9V".into(), "N1".into()], &is_vplus, &is_gnd),
+            Side::North
+        );
+        assert_eq!(
+            side_of_tapless(&["N1".into(), "GND".into()], &is_vplus, &is_gnd),
+            Side::South
         );
     }
 
