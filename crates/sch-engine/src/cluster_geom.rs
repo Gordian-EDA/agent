@@ -149,9 +149,13 @@ pub fn emit_bank(
 /// Body extents `[w, h]` per refdes (for envelope/normalize).
 pub type SizeFn<'a> = &'a dyn Fn(&str) -> [f64; 2];
 
-/// Lay out one cluster. `labeled` is the set of nets that must carry a net
-/// label somewhere in this cluster (anchor-tapped, cross-block, or multi-way
-/// nodes) — each gets exactly one label at its node/joint point.
+/// Lay one cluster into LOCAL geometry (y grows down), `normalize`d before
+/// return so all coordinates are ≥ MARGIN and `envelope` is filled. `labeled`
+/// is the set of nets that must carry exactly one net label somewhere in this
+/// cluster (anchor-tapped, cross-block, or multi-way nodes), placed at the
+/// net's node/joint point. `sizes(refdes)` returns `[w, h]` body extents for
+/// envelope computation. Clusters with a Series spine are not yet supported
+/// (Task 8 — `lay_spine` panics).
 pub fn layout_cluster(
     cluster: &Cluster,
     block: &Block,
@@ -163,6 +167,7 @@ pub fn layout_cluster(
     let mut joints: Vec<(NetName, [f64; 2])> = Vec::new();
     let mut node_x: IndexMap<NetName, f64> = IndexMap::new();
     let mut node_slot: IndexMap<NetName, (f64, f64)> = IndexMap::new(); // (next down x, next up x)
+    // Next free x column for standalone items; monotonic high-water mark.
     let mut x_cursor = 0.0_f64;
 
     // Spine: the longest Series chain (Task 8 lays it; absent here = star case).
@@ -249,6 +254,8 @@ pub fn layout_cluster(
     }
     for net in labeled {
         if let Some(&p) = points.get(net) {
+            // Post-increment slot high-water mark, so the label lands to the
+            // right of every hang on this node.
             let ext = node_slot.get(net).map(|s| s.0.max(s.1)).unwrap_or(p[0] + SLOT_PITCH);
             let lp = [ext.max(p[0] + SLOT_PITCH), p[1]];
             g.wires.push((p, lp, net.clone()));
@@ -286,7 +293,10 @@ fn normalize(g: &mut ClusterGeom, sizes: SizeFn) {
     for (_, p, _) in &g.labels {
         grow(*p, [12.7, 1.27]);
     }
-    if g.placements.is_empty() && g.wires.is_empty() {
+    // junctions and tap_points always sit on wires/nodes, so they can't be the
+    // sole content; ports and labels can, and are translated below, so they must
+    // also gate the early return.
+    if g.placements.is_empty() && g.wires.is_empty() && g.ports.is_empty() && g.labels.is_empty() {
         g.envelope = [0.0, 0.0];
         return;
     }
