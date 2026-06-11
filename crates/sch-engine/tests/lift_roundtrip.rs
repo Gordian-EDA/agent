@@ -141,7 +141,7 @@ fn emit_then_lift_roundtrips_connectivity_and_structure() {
     let design = circuit_lang::compile(src, &provider).design.unwrap();
 
     // emit -> temp .kicad_sch
-    let text = sch_engine::emit_design(&env, &design).unwrap();
+    let text = sch_engine::emit_design(&env, &design).unwrap().sch;
     let tmp = tempfile::Builder::new()
         .suffix(".kicad_sch")
         .tempfile()

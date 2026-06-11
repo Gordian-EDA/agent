@@ -27,7 +27,7 @@ blocks:
       C1: {part: Device:C, value: 100nF, between: [3V3, GND]}
       R1: {part: Device:R, value: 10k, between: [SIG, GND]}
 ");
-    let text = sch_engine::emit_design(&env, &design).unwrap();
+    let text = sch_engine::emit_design(&env, &design).unwrap().sch;
 
     // No power-net text labels; SIG keeps its label.
     assert!(!text.contains("(label \"GND\""), "GND must not be a label");
@@ -73,7 +73,7 @@ blocks:
       C1: {part: Device:C, value: 100nF, between: [3V3, GND]}
       C2: {part: Device:C, value: 100nF, between: [GND, 3V3]}
 ");
-    let text = sch_engine::emit_design(&env, &design).unwrap();
+    let text = sch_engine::emit_design(&env, &design).unwrap().sch;
 
     // Assert via kiutils: C1 pin1=3V3 -> angle 0; C2 pin1=GND -> flipped 180.
     let tmp = tempfile::tempdir().unwrap();
@@ -108,7 +108,7 @@ blocks:
     components:
       R1: {part: Device:R, value: 1k, between: [A, GND]}
 ");
-    let text = sch_engine::emit_design(&env, &design).unwrap();
+    let text = sch_engine::emit_design(&env, &design).unwrap().sch;
     assert!(text.contains("(text \"power_supply\""), "block title text");
     assert!(text.contains("(rectangle"), "block frame");
 
@@ -136,7 +136,7 @@ blocks:
       R1: {part: Device:R, value: 10k, between: [SIG, GND]}
       R2: {part: Device:R, value: 10k, between: [SIG, GND]}
 ");
-    let text = sch_engine::emit_design(&env, &design).unwrap();
+    let text = sch_engine::emit_design(&env, &design).unwrap().sch;
     assert!(text.contains("(label \"SIG\""));
 
     let tmp = tempfile::tempdir().unwrap();

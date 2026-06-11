@@ -52,7 +52,7 @@ fn emit(env: KicadEnv, yaml_path: &str, out_path: &str) {
         eprintln!("COMPILE FAILED");
         std::process::exit(1);
     };
-    let text = sch_engine::emit_design(&env, &design).expect("emit");
+    let text = sch_engine::emit_design(&env, &design).expect("emit").sch;
     std::fs::write(out_path, &text).expect("write .kicad_sch");
     let comps: usize = design.blocks.values().map(|b| b.components.len()).sum();
     let report = kicad_bridge::cli::KicadCli::new(&env)

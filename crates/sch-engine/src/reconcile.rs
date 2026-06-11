@@ -237,6 +237,15 @@ fn tempfile_with(text: &str) -> io::Result<tempfile::NamedTempFile> {
     Ok(tmp)
 }
 
+/// The rendered schematic plus deterministic readability findings.
+pub struct EmitOutput {
+    /// The assembled `.kicad_sch` document text.
+    pub sch: String,
+    /// One human-readable warning per overlapping symbol/label pair (empty when
+    /// the layout is clean). A side-channel only: it does not alter `sch`.
+    pub layout_warnings: Vec<String>,
+}
+
 /// The reconciliation-aware core of emission (spec §4/§7).
 ///
 /// Identical to the one-shot `emit_design` except that, given a prior
@@ -254,7 +263,7 @@ pub fn emit_design_reconciled(
     env: &KicadEnv,
     design: &Design,
     prior: Option<&str>,
-) -> io::Result<String> {
+) -> io::Result<EmitOutput> {
     // Per-component approximate sizes drive bbox-aware placement cells. Load
     // each part's geometry; parts whose geometry can't load fall back to the
     // fixed legacy cell inside the placer.
@@ -443,7 +452,14 @@ pub fn emit_design_reconciled(
         }
     }
 
-    Ok(w.finish())
+    // Compute readability findings on the pre-finish vecs (their order is the
+    // deterministic emission order from reconcile); `layout_warnings` borrows
+    // `&self`, so call it before the `finish(self)` move.
+    let layout_warnings = w.layout_warnings();
+    Ok(EmitOutput {
+        sch: w.finish(),
+        layout_warnings,
+    })
 }
 
 /// The hidden `ap_*` identity properties for a component.

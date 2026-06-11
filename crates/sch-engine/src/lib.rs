@@ -21,6 +21,7 @@ use circuit_lang::Design;
 use kicad_bridge::env::KicadEnv;
 
 pub use crate::reconcile::emit_design_reconciled;
+pub use crate::reconcile::EmitOutput;
 
 /// Emit a complete `circuit_lang::Design` as a deterministic, ERC-clean
 /// `.kicad_sch` document.
@@ -75,7 +76,7 @@ pub use crate::reconcile::emit_design_reconciled;
 ///
 /// Returns the first I/O error from symbol resolution / endpoint computation, or
 /// the assembled schematic text.
-pub fn emit_design(env: &KicadEnv, design: &Design) -> io::Result<String> {
+pub fn emit_design(env: &KicadEnv, design: &Design) -> io::Result<EmitOutput> {
     // The from-scratch emit is reconciliation against an empty prior: every
     // component is "new", so all positions come from the placer. Keeping a single
     // code path means `ap_*` identity tags and the placement/power-flag logic can

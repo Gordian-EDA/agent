@@ -576,8 +576,9 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         None
     };
 
-    let rendered = emit_design_reconciled(&ctx.env, &design, prior_text.as_deref())
+    let emitted = emit_design_reconciled(&ctx.env, &design, prior_text.as_deref())
         .context("rendering reconciled schematic")?;
+    let rendered = emitted.sch;
     let diff = design_diff(prior_design.as_ref(), &design);
 
     if !commit {
@@ -587,6 +588,7 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
             "stale_draft_warning": stale,
             "diff": diff,
             "rendered_len": rendered.len(),
+            "layout_warnings": emitted.layout_warnings,
         }));
     }
 
@@ -618,6 +620,7 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         "stale_draft_warning": stale,
         "diff": diff,
         "erc": { "errors": erc.error_count(), "warnings": erc.warning_count() },
+        "layout_warnings": emitted.layout_warnings,
     }))
 }
 

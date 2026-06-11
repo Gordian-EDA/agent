@@ -25,7 +25,7 @@ fn bluepill_design_emits_and_ercs_clean() {
         .design
         .expect("compiles");
 
-    let text = emit_design(&env, &design).unwrap();
+    let text = emit_design(&env, &design).unwrap().sch;
     let tmp = tempfile::Builder::new()
         .suffix(".kicad_sch")
         .tempfile()
@@ -66,8 +66,8 @@ fn emit_is_byte_deterministic() {
     let src = include_str!("../../../docs/validation/bedrock-oneshot-bluepill.circuit.yaml");
     let design = circuit_lang::compile(src, &provider).design.unwrap();
     assert_eq!(
-        emit_design(&env, &design).unwrap(),
-        emit_design(&env, &design).unwrap(),
+        emit_design(&env, &design).unwrap().sch,
+        emit_design(&env, &design).unwrap().sch,
         "re-emitting the same Design must be byte-identical"
     );
 }

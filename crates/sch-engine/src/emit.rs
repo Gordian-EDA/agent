@@ -1048,6 +1048,64 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     s
 }
 
+/// An axis-aligned bbox: [min_x, min_y, max_x, max_y].
+type BBox = [f64; 4];
+
+/// Whether two axis-aligned boxes overlap (open intervals, so edge-touching is
+/// not a collision — symbols flush against a frame don't trip the lint).
+fn boxes_overlap(a: &BBox, b: &BBox) -> bool {
+    a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+}
+
+impl SchematicWriter {
+    /// Deterministic readability lint over everything placed so far: symbol
+    /// bodies (from their half-extents) and label text (estimated at 1.1 mm per
+    /// character along the label's direction, 1.6 mm tall). Returns one
+    /// human-readable warning per overlapping pair. Power symbols (#-prefixed)
+    /// and wires are exempt (they legitimately touch the pins they serve).
+    ///
+    /// The output is sorted, so the same placement always yields the same
+    /// warning list regardless of the underlying Vec order.
+    pub fn layout_warnings(&self) -> Vec<String> {
+        let mut items: Vec<(String, BBox)> = Vec::new();
+        for inst in &self.instances {
+            if inst.refdes.starts_with('#') {
+                continue;
+            }
+            let h = inst.half_extents;
+            items.push((
+                format!("symbol {}", inst.refdes),
+                [
+                    inst.at[0] - h[0],
+                    inst.at[1] - h[1],
+                    inst.at[0] + h[0],
+                    inst.at[1] + h[1],
+                ],
+            ));
+        }
+        for label in &self.labels {
+            let len = label.net.chars().count() as f64 * 1.1;
+            let b = match label.dir {
+                Dir::East => [label.at[0], label.at[1] - 1.6, label.at[0] + len, label.at[1]],
+                Dir::West => [label.at[0] - len, label.at[1] - 1.6, label.at[0], label.at[1]],
+                Dir::North => [label.at[0] - 1.6, label.at[1] - len, label.at[0], label.at[1]],
+                Dir::South => [label.at[0], label.at[1], label.at[0] + 1.6, label.at[1] + len],
+            };
+            items.push((format!("label \"{}\" at {:?}", label.net, label.at), b));
+        }
+        let mut warnings = Vec::new();
+        for i in 0..items.len() {
+            for j in (i + 1)..items.len() {
+                if boxes_overlap(&items[i].1, &items[j].1) {
+                    warnings.push(format!("{} overlaps {}", items[i].0, items[j].0));
+                }
+            }
+        }
+        warnings.sort();
+        warnings
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1191,6 +1249,26 @@ mod tests {
         assert!(render_label(&mk(Dir::South)).contains("(at 0 0 270)"));
         assert!(render_label(&mk(Dir::North)).contains("justify left"));
         assert!(render_label(&mk(Dir::South)).contains("justify right"));
+    }
+
+    #[test]
+    fn layout_lint_flags_overlapping_text() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        // Two symbols stacked nearly on top of each other -> collision.
+        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0).unwrap();
+        w.add_symbol(&env, "Device:R", "R2", "2k", [127.0, 64.77], 0.0).unwrap();
+        let warnings = w.layout_warnings();
+        assert!(
+            warnings.iter().any(|s| s.contains("R1") && s.contains("R2")),
+            "expected an R1/R2 overlap warning, got {warnings:?}"
+        );
+
+        // Far apart -> clean.
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0).unwrap();
+        w.add_symbol(&env, "Device:R", "R2", "2k", [177.8, 63.5], 0.0).unwrap();
+        assert!(w.layout_warnings().is_empty());
     }
 
     #[test]

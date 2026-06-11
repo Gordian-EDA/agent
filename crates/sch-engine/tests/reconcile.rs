@@ -88,7 +88,7 @@ fn surviving_symbols_keep_their_positions() {
 
     // v1: a 2-part design.
     let d2 = design2(&provider);
-    let v1 = emit_design(&env, &d2).unwrap();
+    let v1 = emit_design(&env, &d2).unwrap().sch;
 
     // Find R1's emitted `(at x y a)` line so we can rewrite it to a distinctive
     // spot, simulating a user moving R1 in the KiCAD editor.
@@ -119,7 +119,7 @@ fn surviving_symbols_keep_their_positions() {
 
     // v2: a 3-part design reconciled against the user-edited base.
     let d3 = design3(&provider);
-    let v2 = emit_design_reconciled(&env, &d3, Some(&modified_base)).unwrap();
+    let v2 = emit_design_reconciled(&env, &d3, Some(&modified_base)).unwrap().sch;
 
     // R1 survives by refdes -> keeps the user move.
     let (r1_v2_at, r1_v2_uuid) = read_symbol(&v2, "R1");

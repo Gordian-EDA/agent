@@ -55,7 +55,7 @@ fn power_input_on_undeclared_net_ercs_clean() {
         "DRIVEME must NOT be a declared power net for this regression to be meaningful"
     );
 
-    let text = emit_design(&env, &design).unwrap();
+    let text = emit_design(&env, &design).unwrap().sch;
     let tmp = tempfile::Builder::new()
         .suffix(".kicad_sch")
         .tempfile()
