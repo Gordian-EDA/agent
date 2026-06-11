@@ -10,13 +10,17 @@ use circuit_lang::model::{Block, Component, NetName, PinTarget, RefDes};
 use indexmap::IndexMap;
 
 use crate::emit::Dir;
-use crate::grammar::Bank;
+use crate::grammar::{Bank, Chain, ChainClass, Cluster, is_ground};
 use crate::grid::snap_point;
 
 /// Horizontal pitch between bank members, mm.
 pub const BANK_PITCH: f64 = 7.62;
 /// Bus offset beyond the outermost pin ends, mm.
 const BUS_DROP: f64 = 2.54;
+/// Horizontal pitch between node hang slots, mm.
+pub const SLOT_PITCH: f64 = 10.16;
+/// Padding around cluster content after normalize, mm.
+const MARGIN: f64 = 5.08;
 
 /// Sheet-space pin-end offset (relative to symbol origin, y down) for
 /// `(refdes, pin)` at instance angle 0. `None` for unknown pins.
@@ -142,6 +146,186 @@ pub fn emit_bank(
     g.tap_points.insert(bank.a_net.clone(), [top_pts[0][0], bus_top]);
 }
 
+/// Body extents `[w, h]` per refdes (for envelope/normalize).
+pub type SizeFn<'a> = &'a dyn Fn(&str) -> [f64; 2];
+
+/// Lay out one cluster. `labeled` is the set of nets that must carry a net
+/// label somewhere in this cluster (anchor-tapped, cross-block, or multi-way
+/// nodes) — each gets exactly one label at its node/joint point.
+pub fn layout_cluster(
+    cluster: &Cluster,
+    block: &Block,
+    labeled: &BTreeSet<NetName>,
+    pins: PinEndFn,
+    sizes: SizeFn,
+) -> ClusterGeom {
+    let mut g = ClusterGeom::default();
+    let mut joints: Vec<(NetName, [f64; 2])> = Vec::new();
+    let mut node_x: IndexMap<NetName, f64> = IndexMap::new();
+    let mut node_slot: IndexMap<NetName, (f64, f64)> = IndexMap::new(); // (next down x, next up x)
+    let mut x_cursor = 0.0_f64;
+
+    // Spine: the longest Series chain (Task 8 lays it; absent here = star case).
+    let spine = cluster
+        .chains
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.class == ChainClass::Series)
+        .max_by(|(ia, a), (ib, b)| a.links.len().cmp(&b.links.len()).then(ib.cmp(ia)))
+        .map(|(i, _)| i);
+    if let Some(si) = spine {
+        lay_spine(&mut g, &cluster.chains[si], &mut node_x, &mut joints, pins);
+    }
+
+    for (i, chain) in cluster.chains.iter().enumerate() {
+        if Some(i) == spine {
+            continue;
+        }
+        match chain.class {
+            ChainClass::ToRail => {
+                let node = chain.start_net().to_string();
+                let down = is_ground(chain.end_net());
+                let nx = *node_x.entry(node.clone()).or_insert_with(|| {
+                    let x = x_cursor;
+                    x_cursor += SLOT_PITCH;
+                    x
+                });
+                let slot = node_slot.entry(node.clone()).or_insert((nx, nx));
+                let x = if down { slot.0 } else { slot.1 };
+                if down {
+                    slot.0 += SLOT_PITCH;
+                } else {
+                    slot.1 += SLOT_PITCH;
+                }
+                if x != nx {
+                    g.wires.push(([nx.min(x), 0.0], [nx.max(x), 0.0], node.clone()));
+                    g.junctions.push([x, 0.0]);
+                }
+                let (end, js) = stack_chain(&mut g, &chain.links, [x, 0.0], down, pins);
+                joints.extend(js);
+                g.ports.push((chain.end_net().to_string(), end));
+                g.tap_points.entry(node.clone()).or_insert([nx, 0.0]);
+                x_cursor = x_cursor.max(x + SLOT_PITCH);
+            }
+            ChainClass::RailRail => {
+                let x = x_cursor;
+                x_cursor += SLOT_PITCH;
+                let top = [x, 0.0];
+                g.ports.push((chain.start_net().to_string(), top));
+                let (end, js) = stack_chain(&mut g, &chain.links, top, true, pins);
+                joints.extend(js);
+                g.ports.push((chain.end_net().to_string(), end));
+            }
+            ChainClass::Series => {
+                // Secondary series chain (Task 8 lays the primary); run it
+                // horizontally below the content. Lay vertically for now as a
+                // safe fallback; Task 8 refines.
+                let y = 30.0;
+                let (_, js) = stack_chain(&mut g, &chain.links, [0.0, y], true, pins);
+                joints.extend(js);
+            }
+        }
+    }
+
+    for bank in &cluster.banks {
+        let origin = match node_x.get(&bank.a_net) {
+            Some(&nx) => [nx, BUS_DROP + 3.81],
+            None => {
+                let x = x_cursor;
+                x_cursor += bank.members.len() as f64 * BANK_PITCH + SLOT_PITCH;
+                [x, 0.0]
+            }
+        };
+        emit_bank(&mut g, bank, origin, block, pins);
+    }
+
+    // One label per labeled net, at its node/joint point, past the last slot.
+    let mut points: IndexMap<NetName, [f64; 2]> = IndexMap::new();
+    for (net, &x) in &node_x {
+        points.insert(net.clone(), [x, 0.0]);
+    }
+    for (net, p) in &joints {
+        points.entry(net.clone()).or_insert(*p);
+    }
+    for net in labeled {
+        if let Some(&p) = points.get(net) {
+            let ext = node_slot.get(net).map(|s| s.0.max(s.1)).unwrap_or(p[0] + SLOT_PITCH);
+            let lp = [ext.max(p[0] + SLOT_PITCH), p[1]];
+            g.wires.push((p, lp, net.clone()));
+            g.labels.push((net.clone(), lp, Dir::East));
+            g.tap_points.entry(net.clone()).or_insert(p);
+        }
+    }
+
+    normalize(&mut g, sizes);
+    g
+}
+
+/// Translate all geometry so the bbox min corner lands at (MARGIN, MARGIN);
+/// fill `envelope`.
+fn normalize(g: &mut ClusterGeom, sizes: SizeFn) {
+    let mut min = [f64::MAX, f64::MAX];
+    let mut max = [f64::MIN, f64::MIN];
+    let mut grow = |p: [f64; 2], half: [f64; 2]| {
+        min[0] = min[0].min(p[0] - half[0]);
+        min[1] = min[1].min(p[1] - half[1]);
+        max[0] = max[0].max(p[0] + half[0]);
+        max[1] = max[1].max(p[1] + half[1]);
+    };
+    for (refdes, at, _) in &g.placements {
+        let s = sizes(refdes);
+        grow(*at, [s[0] / 2.0, s[1] / 2.0]);
+    }
+    for (a, b, _) in &g.wires {
+        grow(*a, [0.0; 2]);
+        grow(*b, [0.0; 2]);
+    }
+    for (_, p) in &g.ports {
+        grow(*p, [2.54, 5.08]);
+    }
+    for (_, p, _) in &g.labels {
+        grow(*p, [12.7, 1.27]);
+    }
+    if g.placements.is_empty() && g.wires.is_empty() {
+        g.envelope = [0.0, 0.0];
+        return;
+    }
+    let d = [MARGIN - min[0], MARGIN - min[1]];
+    let t = |p: [f64; 2]| [p[0] + d[0], p[1] + d[1]];
+    for (_, at, _) in &mut g.placements {
+        *at = t(*at);
+    }
+    for (a, b, _) in &mut g.wires {
+        *a = t(*a);
+        *b = t(*b);
+    }
+    for j in &mut g.junctions {
+        *j = t(*j);
+    }
+    for (_, p) in &mut g.ports {
+        *p = t(*p);
+    }
+    for (_, p, _) in &mut g.labels {
+        *p = t(*p);
+    }
+    for p in g.tap_points.values_mut() {
+        *p = t(*p);
+    }
+    g.envelope = [max[0] - min[0] + 2.0 * MARGIN, max[1] - min[1] + 2.0 * MARGIN];
+}
+
+/// Placeholder until Task 8: a cluster reaching here has no Series chain in the
+/// star/bank cases this task covers. Task 8 implements horizontal spines.
+fn lay_spine(
+    _g: &mut ClusterGeom,
+    _chain: &Chain,
+    _node_x: &mut IndexMap<NetName, f64>,
+    _joints: &mut Vec<(NetName, [f64; 2])>,
+    _pins: PinEndFn,
+) {
+    unimplemented!("Task 8");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +373,64 @@ mod tests {
         assert_eq!(end, [0.0, 15.24]);
         assert_eq!(joints, vec![("MID".to_string(), [0.0, 7.62])]);
         assert_eq!(g.covered.len(), 4);
+    }
+
+    #[test]
+    fn divider_star_hangs_up_and_down_with_node_wire_and_label() {
+        let d = crate::grammar::tests::compile(
+            "
+version: 1
+name: t
+rails: [VCC, GND]
+blocks:
+  a:
+    components:
+      R7: {part: Device:R, value: 649k, between: [VCC, OUT]}
+      R8: {part: Device:R, value: 200k, between: [OUT, GND]}
+      C3: {part: Device:C, value: 47n, between: [OUT, GND]}
+",
+        );
+        let g = crate::grammar::analyze(&d, "a", &crate::grammar::tests::provider());
+        assert_eq!(g.clusters.len(), 1);
+        let mut labeled = std::collections::BTreeSet::new();
+        labeled.insert("OUT".to_string());
+        let geom = layout_cluster(&g.clusters[0], &d.blocks["a"], &labeled, &mock_pins, &|_| {
+            [5.08, 10.16]
+        });
+
+        let pos = |r: &str| {
+            geom.placements.iter().find(|(refdes, _, _)| refdes == r).map(|(_, at, _)| *at).unwrap()
+        };
+        // STRUCTURAL INTENT (adjust the exact refdes below to the TRUE
+        // deterministic order — see the note after this test):
+        // R7 is the only UP hang; two DOWN hangs sit side by side one SLOT_PITCH
+        // apart sharing a row; the up hang shares the node x with the first
+        // down hang.
+        let up = pos("R7");
+        let downs = [pos("R8"), pos("C3")];
+        // exactly the two down-hangs share a y, and R7 is above them:
+        assert_eq!(downs[0][1], downs[1][1], "down hangs share a row");
+        assert!(up[1] < downs[0][1], "R7 hangs up, above the down hangs");
+        // the two down-hangs are one SLOT_PITCH apart on x:
+        let dx = (downs[0][0] - downs[1][0]).abs();
+        assert_eq!(dx, SLOT_PITCH, "down hangs are one slot apart");
+        // the up hang shares x with the LEFT (node-x) down hang:
+        let left_down = downs[0][0].min(downs[1][0]);
+        assert_eq!(up[0], left_down, "up hang shares node x with the left down hang");
+
+        // Ports: one VCC (up), two GND (one per down-hang).
+        assert_eq!(geom.ports.iter().filter(|(n, _)| n == "VCC").count(), 1);
+        assert_eq!(geom.ports.iter().filter(|(n, _)| n == "GND").count(), 2);
+        // Node wire on OUT, one junction at the offset tap, OUT label reads East.
+        assert!(geom.wires.iter().any(|(_, _, n)| n == "OUT"));
+        assert_eq!(geom.junctions.len(), 1);
+        let label = geom.labels.iter().find(|(n, _, _)| n == "OUT").unwrap();
+        assert!(matches!(label.2, Dir::East));
+        // Normalized: nothing at negative coordinates, envelope positive.
+        assert!(geom.envelope[0] > 0.0 && geom.envelope[1] > 0.0);
+        for (_, at, _) in &geom.placements {
+            assert!(at[0] >= 0.0 && at[1] >= 0.0, "normalized: {at:?}");
+        }
     }
 
     #[test]
