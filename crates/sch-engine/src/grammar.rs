@@ -5,6 +5,8 @@
 //! and clusters (Tasks 2-3). Pure analysis — no KiCAD, no I/O, no geometry.
 //! Consumed by `cluster_geom` (local geometry) and `place` (macro placement).
 
+use std::collections::BTreeSet;
+
 use circuit_lang::model::{Block, Component, NetName, PinTarget, RefDes};
 use circuit_lang::{Design, SymbolProvider};
 use indexmap::IndexMap;
@@ -114,8 +116,6 @@ pub fn net_uses(
     uses
 }
 
-use std::collections::BTreeSet;
-
 /// One chain element oriented along its chain: `a` is toward the chain start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Link {
@@ -136,6 +136,7 @@ impl Link {
         });
         let (p1, n1) = nets.next().expect("chain element has two net pins");
         let (p2, n2) = nets.next().expect("chain element has two net pins");
+        debug_assert!(n1 == from_net || n2 == from_net, "Link::of: from_net {from_net:?} is not a net of {refdes}");
         if n1 == from_net {
             Link { refdes: refdes.into(), a_pin: p1, a_net: n1, b_pin: p2, b_net: n2 }
         } else {
@@ -460,7 +461,12 @@ blocks:
         );
         assert_eq!(chains.len(), 1);
         assert_eq!(chains[0].len(), 3);
-        assert_eq!(chains[0][0].refdes, "R1");
+        // Pin the deterministic walk order: smallest leftover refdes (R1) breaks
+        // the cycle, entered from its first net (N1); the walk then proceeds
+        // R1 → R2 → R3.
+        let refs: Vec<&str> = chains[0].iter().map(|l| l.refdes.as_str()).collect();
+        assert_eq!(refs, ["R1", "R2", "R3"], "walk sequence must be deterministic");
+        assert_eq!(chains[0][0].a_net, "N1", "R1 must be entered from N1 (its first net)");
         assert_eq!(notes.len(), 1, "cycle break must be reported: {notes:?}");
     }
 }
