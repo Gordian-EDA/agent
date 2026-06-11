@@ -36,7 +36,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use agent::tools::ToolCtx;
-use agent::{Agent, AgentEvent, Approvals};
+use agent::{Agent, AgentEvent, Approvals, StopReason};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use crossterm::event::{
@@ -56,7 +56,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 
-use app::{Action, App, Msg, Status};
+use app::{Action, App, Msg, Status, TurnEndReason};
 
 /// How often the shell wakes the app for spinner/elapsed redraws.
 const TICK: Duration = Duration::from_millis(120);
@@ -156,7 +156,7 @@ struct Shell {
     agent: Option<SharedAgent>,
     events_tx: UnboundedSender<AgentEvent>,
     gate_tx: UnboundedSender<GateRequest>,
-    done_tx: UnboundedSender<Option<String>>,
+    done_tx: UnboundedSender<TurnEndReason>,
     sch_path: PathBuf,
     snapshots: Option<SnapshotStore>,
     /// The oneshot answering the currently open apply-gate, if any.
@@ -208,8 +208,14 @@ impl Shell {
             let result = agent
                 .run_turn(&prompt, &mut approvals, Some(&events_tx))
                 .await;
-            let err = result.err().map(|e| format!("{e:#}"));
-            let _ = done_tx.send(err);
+            let reason = match result {
+                Ok(o) => match o.stop_reason {
+                    StopReason::Completed => TurnEndReason::Completed,
+                    StopReason::IterationCap => TurnEndReason::IterationCap,
+                },
+                Err(e) => TurnEndReason::Error(format!("{e:#}")),
+            };
+            let _ = done_tx.send(reason);
         }));
     }
 
@@ -224,8 +230,9 @@ impl Shell {
         if let Some(reply) = self.pending_gate.take() {
             let _ = reply.send(false);
         }
-        // The aborted task never sends done_tx, so close the turn ourselves.
-        app.update(Msg::TurnEnded(None));
+        // The aborted task never sends done_tx, so close the turn ourselves —
+        // flagged as a user interruption so the indicator reads "Interrupted".
+        app.update(Msg::TurnEnded(TurnEndReason::Interrupted));
     }
 
     /// `/undo` — restore the previous schematic from the snapshot store.
@@ -318,12 +325,11 @@ impl Shell {
         let done_tx = self.done_tx.clone();
         self.turn_task = Some(tokio::task::spawn_local(async move {
             let mut agent = handle.lock().await;
-            let err = agent
-                .compact(Some(&events_tx))
-                .await
-                .err()
-                .map(|e| format!("{e:#}"));
-            let _ = done_tx.send(err);
+            let reason = match agent.compact(Some(&events_tx)).await {
+                Ok(_) => TurnEndReason::Compacted,
+                Err(e) => TurnEndReason::Error(format!("{e:#}")),
+            };
+            let _ = done_tx.send(reason);
         }));
     }
 
@@ -353,8 +359,8 @@ async fn event_loop(
         unbounded_channel();
     // Joins back when the spawned turn finishes (so input unlocks even on error).
     let (done_tx, mut done_rx): (
-        UnboundedSender<Option<String>>,
-        UnboundedReceiver<Option<String>>,
+        UnboundedSender<TurnEndReason>,
+        UnboundedReceiver<TurnEndReason>,
     ) = unbounded_channel();
 
     let mut shell = Shell {
@@ -416,9 +422,9 @@ async fn event_loop(
                 }
             }
             // ── spawned turn finished ─────────────────────────────────
-            Some(err) = done_rx.recv() => {
+            Some(reason) = done_rx.recv() => {
                 shell.turn_task = None;
-                app.update(Msg::TurnEnded(err));
+                app.update(Msg::TurnEnded(reason));
             }
         }
 

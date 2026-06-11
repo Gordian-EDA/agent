@@ -30,11 +30,30 @@ pub enum Speaker {
     System,
 }
 
+/// The severity tint of a [`Speaker::System`] line. The renderer maps it to a
+/// color; defined here (not as a ratatui `Color`) so this state machine stays
+/// free of the rendering crate. Only system lines vary — every other speaker
+/// ignores it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NoticeLevel {
+    /// The default dim/gray note (paths, undo confirmations, hints).
+    #[default]
+    Plain,
+    /// A clean success (green) — a turn that finished.
+    Success,
+    /// A caution (yellow) — a turn truncated at the iteration cap.
+    Warn,
+    /// A failure (red) — a turn that errored out.
+    Error,
+}
+
 /// One line in the chat transcript.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub speaker: Speaker,
     pub text: String,
+    /// Severity tint for system lines; ignored for other speakers.
+    pub level: NoticeLevel,
 }
 
 impl Entry {
@@ -42,24 +61,36 @@ impl Entry {
         Self {
             speaker: Speaker::User,
             text: text.into(),
+            level: NoticeLevel::Plain,
         }
     }
     pub fn assistant(text: impl Into<String>) -> Self {
         Self {
             speaker: Speaker::Assistant,
             text: text.into(),
+            level: NoticeLevel::Plain,
         }
     }
     pub fn tool(text: impl Into<String>) -> Self {
         Self {
             speaker: Speaker::Tool,
             text: text.into(),
+            level: NoticeLevel::Plain,
         }
     }
     pub fn system(text: impl Into<String>) -> Self {
         Self {
             speaker: Speaker::System,
             text: text.into(),
+            level: NoticeLevel::Plain,
+        }
+    }
+    /// A system line with a severity tint (success/warn/error).
+    pub fn notice(level: NoticeLevel, text: impl Into<String>) -> Self {
+        Self {
+            speaker: Speaker::System,
+            text: text.into(),
+            level,
         }
     }
 }
@@ -230,9 +261,29 @@ pub enum Msg {
     Agent(AgentEvent),
     /// The apply-gate fired: a dry-run diff awaits a decision.
     PendingDiff(Value),
-    /// A turn finished (the spawned task joined). Clears the running flag even
-    /// if no `TurnDone` event arrived (e.g. the turn errored).
-    TurnEnded(Option<String>),
+    /// A turn finished (the spawned task joined). This is the single, reliable
+    /// teardown point — it fires exactly once per turn (from the join channel,
+    /// or directly from the shell on a user abort) and carries *why* the turn
+    /// stopped so the indicator can be labelled. Clears the running flag even if
+    /// no `TurnDone` event arrived (e.g. the turn errored or was interrupted).
+    TurnEnded(TurnEndReason),
+}
+
+/// Why an in-flight turn stopped, carried on [`Msg::TurnEnded`]. The agent loop
+/// reports `Completed`/`IterationCap` (via its `StopReason`); the shell adds
+/// `Interrupted` (user abort) and `Error`; `/compact` reports `Compacted`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TurnEndReason {
+    /// The model returned a final reply — a clean finish.
+    Completed,
+    /// The loop hit its per-turn iteration cap and was cut off mid-work.
+    IterationCap,
+    /// The user pressed Esc to abort the turn.
+    Interrupted,
+    /// The turn failed (provider/network/tool error); carries the message.
+    Error(String),
+    /// A `/compact` run finished (its own shrink note is shown separately).
+    Compacted,
 }
 
 /// What the shell must do after an [`App::update`].
@@ -308,6 +359,11 @@ pub struct App {
     /// `total_output_tokens` snapshot at turn start, so the running line can show
     /// the output tokens streamed *this* turn ([`App::turn_output_tokens`]).
     pub turn_output_base: u64,
+    /// Tool calls started during the current turn, counted from `ToolStarted`
+    /// events. Tracked here (not read from `TurnOutcome`) so the end indicator
+    /// can report a count even when the turn was interrupted or errored — paths
+    /// that never return an outcome.
+    pub turn_tool_calls: usize,
     /// Animation frame counter, advanced by [`Msg::Tick`] while running.
     pub spinner: usize,
     /// The unwind picker, while the user is choosing how far to roll back.
@@ -341,6 +397,7 @@ impl App {
             running: false,
             turn_started: None,
             turn_output_base: 0,
+            turn_tool_calls: 0,
             spinner: 0,
             unwind: None,
             help: false,
@@ -498,14 +555,8 @@ impl App {
                 self.pending = Some(PendingDiff::from_dry_run(&v));
                 Action::None
             }
-            Msg::TurnEnded(err) => {
-                self.running = false;
-                self.turn_started = None;
-                self.pending = None;
-                if let Some(e) = err {
-                    self.transcript
-                        .push(Entry::system(format!("turn error: {e}")));
-                }
+            Msg::TurnEnded(reason) => {
+                self.end_turn(reason);
                 Action::None
             }
         }
@@ -524,7 +575,9 @@ impl App {
             self.clear_input();
             Action::None
         } else if self.running {
-            self.transcript.push(Entry::system("turn cancelled"));
+            // The shell aborts the task and replies with `TurnEnded(Interrupted)`,
+            // which posts the "⊘ Interrupted after …" indicator — no separate
+            // note needed here.
             Action::CancelTurn
         } else if self.esc_armed {
             self.esc_armed = false;
@@ -754,6 +807,7 @@ impl App {
                 }
             }
             AgentEvent::ToolStarted { name } => {
+                self.turn_tool_calls += 1;
                 self.transcript
                     .push(Entry::tool(format!("▸ {name}(…) running…")));
             }
@@ -797,8 +851,12 @@ impl App {
                 )));
             }
             AgentEvent::TurnDone(_) => {
+                // Stop the spinner promptly, but leave `turn_started` for the
+                // upcoming `TurnEnded` to read the elapsed time from. `TurnEnded`
+                // owns the rest of teardown and is the sole indicator source, so
+                // the two signals can arrive in either order without double-
+                // printing or losing the clock.
                 self.running = false;
-                self.turn_started = None;
             }
         }
     }
@@ -815,7 +873,59 @@ impl App {
         self.running = true;
         self.turn_started = Some(Instant::now());
         self.turn_output_base = self.status.total_output_tokens;
+        self.turn_tool_calls = 0;
         self.scroll = 0;
+    }
+
+    /// Tear a turn down and post its end indicator. The sole teardown point:
+    /// clears `running`/`turn_started`/`pending` and pushes one labelled,
+    /// tinted system line saying *why* the turn stopped — a clean finish, the
+    /// iteration-cap cutoff, a user interruption, or an error — with the elapsed
+    /// time and tool-call count. `Compacted` posts no line (the shrink note from
+    /// the `Compacted` event already covers it). Idempotent: a second call (the
+    /// `TurnDone`/`TurnEnded` pair can't both reach here, but a stray repeat) is
+    /// harmless because `turn_started` is already cleared.
+    fn end_turn(&mut self, reason: TurnEndReason) {
+        let secs = self.turn_elapsed_secs().unwrap_or(0);
+        let calls = Self::count_phrase(self.turn_tool_calls, "tool call");
+        self.running = false;
+        self.turn_started = None;
+        self.pending = None;
+
+        let entry = match reason {
+            TurnEndReason::Compacted => None,
+            TurnEndReason::Completed => Some(Entry::notice(
+                NoticeLevel::Success,
+                format!("✓ Cogitated for {secs}s · {calls}"),
+            )),
+            TurnEndReason::IterationCap => Some(Entry::notice(
+                NoticeLevel::Warn,
+                format!(
+                    "⚠ Hit the per-turn step limit after {secs}s · {calls} \
+                     — send \"continue\" to resume"
+                ),
+            )),
+            TurnEndReason::Interrupted => Some(Entry::notice(
+                NoticeLevel::Plain,
+                format!("⊘ Interrupted after {secs}s · {calls}"),
+            )),
+            TurnEndReason::Error(e) => Some(Entry::notice(
+                NoticeLevel::Error,
+                format!("✗ Stopped after {secs}s — {e}"),
+            )),
+        };
+        if let Some(entry) = entry {
+            self.transcript.push(entry);
+        }
+    }
+
+    /// `"1 tool call"` / `"3 tool calls"` — pluralize a count for the indicator.
+    fn count_phrase(n: usize, noun: &str) -> String {
+        if n == 1 {
+            format!("1 {noun}")
+        } else {
+            format!("{n} {noun}s")
+        }
     }
 
     /// Seconds the in-flight turn has been running, if any.
@@ -1003,10 +1113,10 @@ mod tests {
         let mut a = app();
         type_str(&mut a, "first");
         a.update(Msg::Submit);
-        a.update(Msg::TurnEnded(None));
+        a.update(Msg::TurnEnded(TurnEndReason::Completed));
         type_str(&mut a, "second");
         a.update(Msg::Submit);
-        a.update(Msg::TurnEnded(None));
+        a.update(Msg::TurnEnded(TurnEndReason::Completed));
 
         type_str(&mut a, "draft");
         a.update(Msg::HistoryPrev);
@@ -1026,7 +1136,7 @@ mod tests {
         let mut a = app();
         type_str(&mut a, "same");
         a.update(Msg::Submit);
-        a.update(Msg::TurnEnded(None));
+        a.update(Msg::TurnEnded(TurnEndReason::Completed));
         type_str(&mut a, "same");
         a.update(Msg::Submit);
         assert_eq!(a.history, vec!["same"]);
@@ -1099,7 +1209,7 @@ mod tests {
         let mut a = app();
         type_str(&mut a, "hello");
         a.update(Msg::Submit);
-        a.update(Msg::TurnEnded(None));
+        a.update(Msg::TurnEnded(TurnEndReason::Completed));
         type_str(&mut a, "/clear");
         assert_eq!(a.update(Msg::Submit), Action::ClearContext);
         assert!(
@@ -1176,7 +1286,7 @@ mod tests {
         type_str(&mut a, "build it");
         a.update(Msg::Submit);
         a.update(Msg::Agent(AgentEvent::AssistantText("working".into())));
-        a.update(Msg::TurnEnded(None));
+        a.update(Msg::TurnEnded(TurnEndReason::Completed));
         let turns_before = a.status.turn_count;
 
         a.apply_unwind_to(1);
@@ -1213,7 +1323,7 @@ mod tests {
             type_str(&mut a, prompt);
             a.update(Msg::Submit);
             a.update(Msg::Agent(AgentEvent::AssistantText(format!("re: {prompt}"))));
-            a.update(Msg::TurnEnded(None));
+            a.update(Msg::TurnEnded(TurnEndReason::Completed));
         }
         assert_eq!(a.status.turn_count, 3);
 
@@ -1284,8 +1394,12 @@ mod tests {
         type_str(&mut a, "/compact");
         assert_eq!(a.update(Msg::Submit), Action::Compact);
         assert!(a.running, "compaction shows the working spinner");
-        a.update(Msg::TurnEnded(None));
+        a.update(Msg::TurnEnded(TurnEndReason::Compacted));
         assert!(!a.running);
+        assert!(
+            !a.transcript.iter().any(|e| e.text.contains("Cogitated")),
+            "compaction posts no end indicator (it has its own shrink note)"
+        );
     }
 
     #[test]
@@ -1386,9 +1500,17 @@ mod tests {
         assert!(a.running);
         assert_eq!(a.update(Msg::Cancel), Action::CancelTurn);
         assert!(!a.should_quit, "cancelling a turn must not quit");
-        // The shell confirms the abort by sending TurnEnded.
-        a.update(Msg::TurnEnded(None));
+        // Esc itself posts no note now; the shell confirms the abort by sending
+        // TurnEnded(Interrupted), which posts the interruption indicator.
+        a.update(Msg::TurnEnded(TurnEndReason::Interrupted));
         assert!(!a.running);
+        assert!(
+            a.transcript
+                .iter()
+                .any(|e| e.text.contains("Interrupted") && e.level == NoticeLevel::Plain),
+            "interruption indicator posted: {:?}",
+            a.transcript
+        );
     }
 
     #[test]
@@ -1511,7 +1633,10 @@ mod tests {
     }
 
     #[test]
-    fn turn_done_clears_running() {
+    fn turn_done_stops_spinner_but_keeps_the_clock_for_turn_ended() {
+        // TurnDone now only stops the spinner; it leaves `turn_started` intact so
+        // the following TurnEnded can read the elapsed time. TurnEnded owns the
+        // rest of teardown.
         let mut a = app();
         a.running = true;
         a.turn_started = Some(Instant::now());
@@ -1520,8 +1645,80 @@ mod tests {
             tool_calls_made: 3,
             final_text: "done".into(),
         })));
-        assert!(!a.running);
-        assert!(a.turn_started.is_none());
+        assert!(!a.running, "spinner stops");
+        assert!(
+            a.turn_started.is_some(),
+            "the clock survives until TurnEnded reads it"
+        );
+
+        a.update(Msg::TurnEnded(TurnEndReason::Completed));
+        assert!(a.turn_started.is_none(), "TurnEnded clears the clock");
+    }
+
+    #[test]
+    fn turn_ended_posts_a_labelled_indicator_per_reason() {
+        // Completed → green "Cogitated", with a pluralized tool-call count.
+        let mut a = app();
+        type_str(&mut a, "go");
+        a.update(Msg::Submit);
+        a.update(Msg::Agent(AgentEvent::ToolStarted {
+            name: "get_design".into(),
+        }));
+        a.update(Msg::TurnEnded(TurnEndReason::Completed));
+        let last = a.transcript.last().unwrap();
+        assert!(last.text.contains("Cogitated"), "{}", last.text);
+        assert!(last.text.contains("1 tool call"), "singular: {}", last.text);
+        assert_eq!(last.level, NoticeLevel::Success);
+        assert!(!a.running && a.turn_started.is_none());
+
+        // IterationCap → yellow warning with the resume hint.
+        let mut a = app();
+        type_str(&mut a, "go");
+        a.update(Msg::Submit);
+        a.update(Msg::TurnEnded(TurnEndReason::IterationCap));
+        let last = a.transcript.last().unwrap();
+        assert!(last.text.contains("step limit"), "{}", last.text);
+        assert!(last.text.contains("continue"), "resume hint: {}", last.text);
+        assert!(last.text.contains("0 tool calls"), "plural: {}", last.text);
+        assert_eq!(last.level, NoticeLevel::Warn);
+
+        // Error → red, carries the message.
+        let mut a = app();
+        type_str(&mut a, "go");
+        a.update(Msg::Submit);
+        a.update(Msg::TurnEnded(TurnEndReason::Error("throttled".into())));
+        let last = a.transcript.last().unwrap();
+        assert!(last.text.contains("throttled"), "{}", last.text);
+        assert_eq!(last.level, NoticeLevel::Error);
+    }
+
+    #[test]
+    fn turn_done_then_turn_ended_posts_exactly_one_indicator() {
+        // The pair can arrive in either select order; only TurnEnded posts, so
+        // there is never a double line nor a lost clock.
+        for done_first in [true, false] {
+            let mut a = app();
+            type_str(&mut a, "go");
+            a.update(Msg::Submit);
+            let done = Msg::Agent(AgentEvent::TurnDone(TurnOutcomeSummary {
+                applied: false,
+                tool_calls_made: 0,
+                final_text: "ok".into(),
+            }));
+            if done_first {
+                a.update(done);
+                a.update(Msg::TurnEnded(TurnEndReason::Completed));
+            } else {
+                a.update(Msg::TurnEnded(TurnEndReason::Completed));
+                a.update(done);
+            }
+            let indicators = a
+                .transcript
+                .iter()
+                .filter(|e| e.text.contains("Cogitated"))
+                .count();
+            assert_eq!(indicators, 1, "exactly one indicator (done_first={done_first})");
+        }
     }
 
     #[test]

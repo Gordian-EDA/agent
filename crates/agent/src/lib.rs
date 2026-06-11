@@ -11,7 +11,9 @@ pub mod render;
 pub mod tools;
 pub mod workspace;
 
-pub use agent::{Agent, AgentEvent, Approvals, AutoApprove, TurnOutcome, TurnOutcomeSummary};
+pub use agent::{
+    Agent, AgentEvent, Approvals, AutoApprove, StopReason, TurnOutcome, TurnOutcomeSummary,
+};
 pub use config::Config;
 pub use llm::{
     BedrockClient, Completion, ContentBlock, LlmClient, Message, Role, ToolCall, ToolDef,

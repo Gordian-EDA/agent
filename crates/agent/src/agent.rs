@@ -149,6 +149,20 @@ fn emit(events: Events<'_>, ev: AgentEvent) {
     }
 }
 
+/// Why a [`Agent::run_turn`] stopped. Distinguishes a clean finish from the
+/// safety-cap cutoff so the UI can tell the user the turn was *truncated* rather
+/// than completed. (Interruptions and provider errors never reach here — they
+/// surface on the shell's join path, not as a returned `TurnOutcome`.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopReason {
+    /// The model returned a final text with no pending tool calls — done.
+    Completed,
+    /// The loop hit [`MAX_ITERATIONS`] before the model finished; the turn was
+    /// cut off mid-work. The conversation persists, so a follow-up "continue"
+    /// resumes it.
+    IterationCap,
+}
+
 /// The result of one [`Agent::run_turn`].
 #[derive(Clone, Debug)]
 pub struct TurnOutcome {
@@ -159,6 +173,8 @@ pub struct TurnOutcome {
     /// How many tool calls the loop executed (counts each model-requested call;
     /// the dry-run probe before an approved commit is internal and not counted).
     pub tool_calls_made: usize,
+    /// Whether the loop finished cleanly or was cut off at the iteration cap.
+    pub stop_reason: StopReason,
 }
 
 /// An agent session over one project. Holds the LLM client, the tool context
@@ -388,6 +404,7 @@ impl Agent {
                     applied,
                     final_text,
                     tool_calls_made,
+                    stop_reason: StopReason::Completed,
                 });
             }
 
@@ -446,6 +463,7 @@ impl Agent {
             applied,
             final_text,
             tool_calls_made,
+            stop_reason: StopReason::IterationCap,
         })
     }
 

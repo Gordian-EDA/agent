@@ -28,7 +28,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use super::app::{App, Entry, PendingDiff, Speaker};
+use super::app::{App, Entry, NoticeLevel, PendingDiff, Speaker};
 use super::md::{self, MdLine, WrapMode};
 
 /// Braille spinner shown in the transcript title while a turn runs.
@@ -264,12 +264,17 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
             Style::default().fg(Color::Magenta),
             false,
         ),
-        Speaker::System => (
-            "  ",
-            Style::default(),
-            Style::default().fg(Color::DarkGray),
-            false,
-        ),
+        Speaker::System => {
+            // Most system notes are dim; turn-end indicators carry a severity
+            // tint (a finished turn green, a cap cutoff yellow, an error red).
+            let color = match e.level {
+                NoticeLevel::Plain => Color::DarkGray,
+                NoticeLevel::Success => Color::Green,
+                NoticeLevel::Warn => Color::Yellow,
+                NoticeLevel::Error => Color::Red,
+            };
+            ("  ", Style::default(), Style::default().fg(color), false)
+        }
     };
     let body_w = width.saturating_sub(marker.chars().count()).max(1);
     let logical: Vec<MdLine> = if markdown {
