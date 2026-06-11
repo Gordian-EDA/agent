@@ -169,6 +169,8 @@ pub fn layout_cluster(
     let mut node_slot: IndexMap<NetName, (f64, f64)> = IndexMap::new(); // (next down x, next up x)
     // Next free x column for standalone items; monotonic high-water mark.
     let mut x_cursor = 0.0_f64;
+    // Row cursor for non-spine Series chains, dropping below the main content.
+    let mut y_secondary = 40.0_f64;
 
     // Spine: the longest Series chain (Task 8 lays it; absent here = star case).
     let spine = cluster
@@ -222,12 +224,11 @@ pub fn layout_cluster(
                 g.ports.push((chain.end_net().to_string(), end));
             }
             ChainClass::Series => {
-                // Secondary series chain (Task 8 lays the primary); run it
-                // horizontally below the content. Lay vertically for now as a
-                // safe fallback; Task 8 refines.
-                let y = 30.0;
-                let (_, js) = stack_chain(&mut g, &chain.links, [0.0, y], true, pins);
+                // A non-spine Series chain (rare): lay it horizontally below the
+                // main content. Each subsequent one drops another row.
+                let (_, js) = lay_horizontal(&mut g, &chain.links, [0.0, y_secondary], pins, &mut node_x);
                 joints.extend(js);
+                y_secondary += 20.0;
             }
         }
     }
@@ -252,14 +253,20 @@ pub fn layout_cluster(
     for (net, p) in &joints {
         points.entry(net.clone()).or_insert(*p);
     }
+    let spine_start: Option<NetName> = spine.map(|si| cluster.chains[si].start_net().to_string());
     for net in labeled {
         if let Some(&p) = points.get(net) {
-            // Post-increment slot high-water mark, so the label lands to the
-            // right of every hang on this node.
-            let ext = node_slot.get(net).map(|s| s.0.max(s.1)).unwrap_or(p[0] + SLOT_PITCH);
-            let lp = [ext.max(p[0] + SLOT_PITCH), p[1]];
-            g.wires.push((p, lp, net.clone()));
-            g.labels.push((net.clone(), lp, Dir::East));
+            // The spine's start net labels to the LEFT (signal arrives from the
+            // left); everything else labels to the right of its node.
+            let west = spine_start.as_deref() == Some(net.as_str());
+            let (lp, dir) = if west {
+                ([p[0] - SLOT_PITCH, p[1]], Dir::West)
+            } else {
+                let ext = node_slot.get(net).map(|s| s.0.max(s.1)).unwrap_or(p[0] + SLOT_PITCH);
+                ([ext.max(p[0] + SLOT_PITCH), p[1]], Dir::East)
+            };
+            g.wires.push(([p[0].min(lp[0]), p[1]], [p[0].max(lp[0]), p[1]], net.clone()));
+            g.labels.push((net.clone(), lp, dir));
             g.tap_points.entry(net.clone()).or_insert(p);
         }
     }
@@ -324,16 +331,58 @@ fn normalize(g: &mut ClusterGeom, sizes: SizeFn) {
     g.envelope = [max[0] - min[0] + 2.0 * MARGIN, max[1] - min[1] + 2.0 * MARGIN];
 }
 
-/// Placeholder until Task 8: a cluster reaching here has no Series chain in the
-/// star/bank cases this task covers. Task 8 implements horizontal spines.
+/// Lay the primary Series chain horizontally at y=0, left→right, elements at
+/// 90°/270° (vertical bodies turned horizontal), pin-coincident joins.
+/// Registers each through-net's x position in `node_x` so hangs/banks attach
+/// at the right column.
 fn lay_spine(
-    _g: &mut ClusterGeom,
-    _chain: &Chain,
-    _node_x: &mut IndexMap<NetName, f64>,
-    _joints: &mut Vec<(NetName, [f64; 2])>,
-    _pins: PinEndFn,
+    g: &mut ClusterGeom,
+    chain: &Chain,
+    node_x: &mut IndexMap<NetName, f64>,
+    joints: &mut Vec<(NetName, [f64; 2])>,
+    pins: PinEndFn,
 ) {
-    unimplemented!("Task 8");
+    let (end, js) = lay_horizontal(g, &chain.links, [0.0, 0.0], pins, node_x);
+    joints.extend(js);
+    node_x.insert(chain.start_net().to_string(), 0.0);
+    node_x.insert(chain.end_net().to_string(), end[0]);
+}
+
+/// Place a chain's elements in a horizontal row left→right starting at `start`,
+/// each at 90°/270° so its body lies horizontal and its a-end is on the left.
+/// Registers each interior through-net's x in `node_x`. Returns the final b-end
+/// and the inter-link joints.
+fn lay_horizontal(
+    g: &mut ClusterGeom,
+    links: &[crate::grammar::Link],
+    start: [f64; 2],
+    pins: PinEndFn,
+    node_x: &mut IndexMap<NetName, f64>,
+) -> ([f64; 2], Vec<(NetName, [f64; 2])>) {
+    let mut p = start;
+    let mut joints = Vec::new();
+    for (i, l) in links.iter().enumerate() {
+        let ea = pins(&l.refdes, &l.a_pin).unwrap_or([0.0, -3.81]);
+        let eb = pins(&l.refdes, &l.b_pin).unwrap_or([0.0, 3.81]);
+        // Pick 90/270 so the rotated a-end sits on the LEFT (approach side).
+        let angle = if rotate_end0(ea, 90.0)[0] < rotate_end0(eb, 90.0)[0] {
+            90.0
+        } else {
+            270.0
+        };
+        let ra = rotate_end0(ea, angle);
+        let rb = rotate_end0(eb, angle);
+        let center = snap_point([p[0] - ra[0], p[1] - ra[1]]);
+        g.placements.push((l.refdes.clone(), center, angle));
+        g.covered.insert((l.refdes.clone(), l.a_pin.clone()));
+        g.covered.insert((l.refdes.clone(), l.b_pin.clone()));
+        p = snap_point(add2(center, rb));
+        if i + 1 < links.len() {
+            joints.push((l.b_net.clone(), p));
+            node_x.insert(l.b_net.clone(), p[0]);
+        }
+    }
+    (p, joints)
 }
 
 #[cfg(test)]
@@ -476,5 +525,81 @@ blocks:
         assert_eq!(g.wires.len(), 8); // 6 stubs + 2 bus wires
         assert_eq!(g.junctions.len(), 4); // interior+port member on both buses
         assert_eq!(g.covered.len(), 6);
+    }
+
+    #[test]
+    fn power_entry_spine_runs_left_to_right_with_riser_and_bank_below() {
+        // F1 (BUS_5V -> N_VI) is a Series spine; bank {C1,C2} hangs at node N_VI.
+        let d = crate::grammar::tests::compile(
+            "
+version: 1
+name: t
+rails: [5V_IN, GND]
+blocks:
+  a:
+    components:
+      F1: {part: Device:R, value: Polyfuse, between: [BUS_5V, N_VI]}
+      C1: {part: Device:C, value: 10u, between: [N_VI, GND]}
+      C2: {part: Device:C, value: 1u, between: [N_VI, GND]}
+      U1:
+        part: Mock:REG
+        pins: {VI: N_VI, GND: GND, VO: N_VO, EN: N_VI}
+  ext:
+    components:
+      R9: {part: Device:R, value: 1k, between: [BUS_5V, GND]}
+",
+        );
+        let g = crate::grammar::analyze(&d, "a", &crate::grammar::tests::provider());
+        let cluster = g
+            .clusters
+            .iter()
+            .find(|c| c.chains.iter().any(|ch| ch.links[0].refdes == "F1"))
+            .unwrap();
+        let labeled: std::collections::BTreeSet<String> =
+            ["BUS_5V".to_string(), "N_VI".to_string()].into();
+        let geom = layout_cluster(cluster, &d.blocks["a"], &labeled, &mock_pins, &|_| {
+            [5.08, 10.16]
+        });
+
+        let f1 = geom.placements.iter().find(|(r, _, _)| r == "F1").unwrap();
+        assert_eq!(f1.2, 90.0, "spine elements lie horizontal");
+        let c1 = geom.placements.iter().find(|(r, _, _)| r == "C1").unwrap();
+        assert!(c1.1[1] > f1.1[1], "bank hangs below the spine");
+        let bus = geom.labels.iter().find(|(n, _, _)| n == "BUS_5V").unwrap();
+        assert!(matches!(bus.2, Dir::West), "spine start label reads West");
+        assert!(geom.labels.iter().any(|(n, _, _)| n == "N_VI"));
+    }
+
+    #[test]
+    fn pin_tapped_chain_hangs_to_gnd_with_single_port() {
+        // Q (anchor-tapped) -> R1 -> D1 -> GND: a ToRail hang, label at top, one
+        // GND port at the bottom.
+        let d = crate::grammar::tests::compile(
+            "
+version: 1
+name: t
+rails: [VCC, GND]
+blocks:
+  a:
+    components:
+      R1: {part: Device:R, value: 1k, between: [Q, MID]}
+      D1: {part: Device:LED, value: red, between: [MID, GND]}
+      U1:
+        part: Mock:REG
+        pins: {VI: VCC, GND: GND, VO: Q, EN: VCC}
+",
+        );
+        let g = crate::grammar::analyze(&d, "a", &crate::grammar::tests::provider());
+        assert_eq!(g.clusters.len(), 1);
+        let labeled: std::collections::BTreeSet<String> = ["Q".to_string()].into();
+        let geom = layout_cluster(&g.clusters[0], &d.blocks["a"], &labeled, &mock_pins, &|_| {
+            [5.08, 10.16]
+        });
+        let gnd_ports: Vec<_> = geom.ports.iter().filter(|(n, _)| n == "GND").collect();
+        assert_eq!(gnd_ports.len(), 1);
+        let q = geom.labels.iter().find(|(n, _, _)| n == "Q").unwrap();
+        let r1 = geom.placements.iter().find(|(r, _, _)| r == "R1").unwrap();
+        assert!(gnd_ports[0].1[1] > r1.1[1], "GND below the chain");
+        assert!(q.1[1] < gnd_ports[0].1[1], "Q label at the top of the hang");
     }
 }
