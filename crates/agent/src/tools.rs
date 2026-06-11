@@ -564,6 +564,29 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
+    // Parse the relayout escape hatch first, before any heavy compile/lift/emit
+    // work, so a mis-called hatch fails fast. An unrecognized STRING is an error
+    // (the LLM meant "all" or a block list and typo'd), not a silent no-op.
+    let relayout = match input.get("relayout") {
+        None | Some(Value::Null) => sch_engine::reconcile::Relayout::None,
+        Some(Value::String(s)) if s == "all" => sch_engine::reconcile::Relayout::All,
+        Some(Value::String(other)) => {
+            return Ok(json!({
+                "error": format!(
+                    "relayout string must be \"all\" or a list of block names, got {other:?}"
+                ),
+            }));
+        }
+        Some(Value::Array(items)) => sch_engine::reconcile::Relayout::Blocks(
+            items.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+        ),
+        Some(other) => {
+            return Ok(json!({
+                "error": format!("relayout must be \"all\" or a list of block names, got {other}"),
+            }));
+        }
+    };
+
     // Compile first; never render or write a design with errors.
     let result = compile(&yaml, &ctx.provider);
     let Some(design) = result.design else {
@@ -581,14 +604,6 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         compile(&prior_yaml, &ctx.provider).design
     } else {
         None
-    };
-
-    let relayout = match input.get("relayout") {
-        Some(Value::String(s)) if s == "all" => sch_engine::reconcile::Relayout::All,
-        Some(Value::Array(items)) => sch_engine::reconcile::Relayout::Blocks(
-            items.iter().filter_map(Value::as_str).map(str::to_string).collect(),
-        ),
-        _ => sch_engine::reconcile::Relayout::None,
     };
 
     let emitted = emit_design_reconciled(&ctx.env, &design, prior_text.as_deref(), &relayout)

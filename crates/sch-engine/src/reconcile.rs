@@ -124,12 +124,94 @@ pub enum Relayout {
 /// The layout revision of one component: a content hash of its
 /// placement-relevant inputs. Membership is deliberately NOT hashed — adding a
 /// neighbor must not blow away drags.
+///
+/// `near` is hashed proactively: the placer does not honor it yet (only `edge`),
+/// but including it now means the rev forward-covers `near` so that, once the
+/// placer does honor it, changing `near` will correctly re-place — no migration
+/// of already-emitted files needed.
 fn layout_rev(block: &circuit_lang::model::Block, comp: &circuit_lang::model::Component) -> String {
     let desc = format!(
         "edge={:?}|near={:?}|role={:?}",
         block.layout.edge, block.layout.near, comp.layout_role,
     );
     crate::ids::stable_uuid("layout_rev", &desc)
+}
+
+/// The reconciled placement of one component: its emitted position/angle/uuid,
+/// the layout-rev it was computed under, and whether it was re-placed (had a
+/// prior but the rev changed or relayout forced a fresh placement).
+///
+/// The SINGLE source of truth for both emission and decoration (power column,
+/// block frames): both the main placement loop and the decoration loops call
+/// [`resolve_placement`], so framing can never diverge from what was actually
+/// emitted (the bug this slice was built to avoid).
+struct ResolvedPlacement {
+    /// Emitted sheet position (mm) — always concrete (the placer positions every
+    /// component), so decoration uses it directly without a `None` fallback.
+    at: [f64; 2],
+    /// Emitted orientation in degrees.
+    angle: f64,
+    /// The instance uuid to reuse (`Some` only when preserving a prior).
+    uuid: Option<String>,
+    /// Whether this component was re-placed (prior existed but the rev changed or
+    /// relayout forced a fresh placement).
+    replaced: bool,
+    /// The layout-rev this component was placed under (recomputed here once; the
+    /// caller reuses it for `ap_properties` rather than hashing twice).
+    rev: String,
+}
+
+/// Resolve one component's reconciled placement — the single decision shared by
+/// emission and decoration. Surviving + still-valid (rev matches, no relayout)
+/// preserves the prior position/angle/uuid; otherwise the placer's auto-position
+/// is used, flagged `replaced` when a prior existed.
+fn resolve_placement(
+    prior_map: &HashMap<Identity, PriorPlacement>,
+    auto: &place::Layout,
+    relayout: &Relayout,
+    block_name: &str,
+    block: &circuit_lang::model::Block,
+    refdes: &str,
+    comp: &circuit_lang::model::Component,
+) -> ResolvedPlacement {
+    let identity = Identity::of(refdes, &comp.origin);
+    let rev = layout_rev(block, comp);
+    let block_relayout = match relayout {
+        Relayout::All => true,
+        Relayout::Blocks(names) => names.contains(block_name),
+        Relayout::None => false,
+    };
+    // An old file with no recorded rev preserves (migration path); a recorded rev
+    // must match to preserve.
+    let prior_ok = |p: &PriorPlacement| p.layout_rev.as_deref().is_none_or(|r| r == rev);
+    let fresh = || auto.positions.get(refdes).copied().unwrap_or([0.0, 0.0]);
+
+    match prior_map.get(&identity) {
+        // Surviving + still-valid -> prior position/angle/uuid.
+        Some(p) if !block_relayout && prior_ok(p) => ResolvedPlacement {
+            at: snap_point(p.at),
+            angle: p.angle,
+            uuid: p.uuid.clone(),
+            replaced: false,
+            rev,
+        },
+        // Prior existed but rev changed or relayout forced it -> placer, replaced.
+        Some(_) => ResolvedPlacement {
+            at: fresh(),
+            angle: initial_angle(comp),
+            uuid: None,
+            replaced: true,
+            rev,
+        },
+        // Genuinely new -> placer, not a re-placement.
+        None => ResolvedPlacement {
+            at: fresh(),
+            angle: initial_angle(comp),
+            uuid: None,
+            replaced: false,
+            rev,
+        },
+    }
 }
 
 /// Stable identity used to match a component across re-emits (spec §7).
@@ -352,37 +434,15 @@ pub fn emit_design_reconciled(
 
     for (block_name, block) in &design.blocks {
         for (refdes, comp) in &block.components {
-            let identity = Identity::of(refdes, &comp.origin);
-
-            let rev = layout_rev(block, comp);
-            let block_relayout = match relayout {
-                Relayout::All => true,
-                Relayout::Blocks(names) => names.contains(block_name),
-                Relayout::None => false,
-            };
-            // An old file with no recorded rev preserves (migration path); a
-            // recorded rev must match to preserve.
-            let prior_ok = |p: &PriorPlacement| p.layout_rev.as_deref().is_none_or(|r| r == rev);
-
-            // Surviving + still-valid -> prior position/angle/uuid; otherwise
-            // (new, rev changed, or relayout forced) -> placer.
-            let (at, angle, uuid, replaced) = match prior_map.get(&identity) {
-                Some(p) if !block_relayout && prior_ok(p) => {
-                    (snap_point(p.at), p.angle, p.uuid.clone(), false)
-                }
-                Some(_) => (
-                    auto.positions.get(refdes).copied().unwrap_or([0.0, 0.0]),
-                    initial_angle(comp),
-                    None,
-                    true,
-                ),
-                None => (
-                    auto.positions.get(refdes).copied().unwrap_or([0.0, 0.0]),
-                    initial_angle(comp),
-                    None,
-                    false,
-                ),
-            };
+            // Single source of truth for placement (shared with the decoration
+            // loops below via `resolved_at`).
+            let ResolvedPlacement {
+                at,
+                angle,
+                uuid,
+                replaced,
+                rev,
+            } = resolve_placement(&prior_map, &auto, relayout, block_name, block, refdes, comp);
             if replaced {
                 *relayout_blocks.entry(block_name.to_string()).or_insert(0) += 1;
             }
@@ -426,26 +486,16 @@ pub fn emit_design_reconciled(
         }
     }
 
-    // Resolve a component's *emitted* position, mirroring the placement decision
-    // above (decoration loops below must frame the positions actually written,
-    // not the stale prior of a re-placed component).
+    // Resolve a component's *emitted* position via the SAME helper the main loop
+    // used, so the decoration loops below frame the positions actually written,
+    // never the stale prior of a re-placed component. Always concrete (the placer
+    // positions every component), so no `None` fallback is needed.
     let resolved_at = |block_name: &str,
                        block: &circuit_lang::model::Block,
                        refdes: &str,
                        comp: &circuit_lang::model::Component|
-     -> Option<[f64; 2]> {
-        let identity = Identity::of(refdes, &comp.origin);
-        let rev = layout_rev(block, comp);
-        let block_relayout = match relayout {
-            Relayout::All => true,
-            Relayout::Blocks(names) => names.contains(block_name),
-            Relayout::None => false,
-        };
-        let prior_ok = |p: &PriorPlacement| p.layout_rev.as_deref().is_none_or(|r| r == rev);
-        match prior_map.get(&identity) {
-            Some(p) if !block_relayout && prior_ok(p) => Some(snap_point(p.at)),
-            _ => auto.positions.get(refdes).copied(),
-        }
+     -> [f64; 2] {
+        resolve_placement(&prior_map, &auto, relayout, block_name, block, refdes, comp).at
     };
 
     // Power flags: for nets that got a power symbol, place a flag pin-coincident
@@ -466,7 +516,7 @@ pub fn emit_design_reconciled(
         .blocks
         .iter()
         .flat_map(|(bn, b)| b.components.iter().map(move |(refdes, comp)| (bn, b, refdes, comp)))
-        .filter_map(|(bn, b, refdes, comp)| resolved_at(bn, b, refdes, comp).map(|p| p[0]))
+        .map(|(bn, b, refdes, comp)| resolved_at(bn, b, refdes, comp)[0])
         .fold(0.0_f64, f64::max);
     let power_x = rightmost + 50.8;
 
@@ -489,9 +539,7 @@ pub fn emit_design_reconciled(
     for (block_name, block) in &design.blocks {
         let mut bounds: Option<[f64; 4]> = None; // min_x, min_y, max_x, max_y
         for (refdes, comp) in &block.components {
-            let Some(at) = resolved_at(block_name, block, refdes, comp) else {
-                continue;
-            };
+            let at = resolved_at(block_name, block, refdes, comp);
             let half = sizes
                 .get(refdes)
                 .map(|s| [s[0] / 2.0, s[1] / 2.0])
