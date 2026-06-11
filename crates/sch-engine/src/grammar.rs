@@ -1,12 +1,9 @@
 //! Structural layout grammar — netlist-graph classification.
 //!
-//! Implements the analysis half of `docs/superpowers/specs/`
-//! `2026-06-10-layout-grammar-design.md`: every component classifies as an
-//! anchor or a chain element; chains form by walking degree-2 nets; chains
-//! classify by their endpoints; parallel rail-rail chains group into banks;
-//! chains sharing signal nodes group into clusters. Pure analysis — no KiCAD,
-//! no I/O, no geometry. Consumed by `cluster_geom` (local geometry) and
-//! `place` (macro placement).
+//! Currently covers component role classification (`Anchor` vs `ChainElement`)
+//! and per-net pin incidence (`net_uses`). Will grow to cover chains, banks,
+//! and clusters (Tasks 2-3). Pure analysis — no KiCAD, no I/O, no geometry.
+//! Consumed by `cluster_geom` (local geometry) and `place` (macro placement).
 
 use circuit_lang::model::{Component, NetName, PinTarget, RefDes};
 use circuit_lang::{Design, SymbolProvider};
@@ -38,6 +35,8 @@ pub fn role_of(comp: &Component, provider: &dyn SymbolProvider) -> Role {
         .unwrap_or_else(|| {
             comp.pins.len() + comp.units.values().map(IndexMap::len).sum::<usize>()
         });
+    // `comp.pins.len() == 2` is belt-and-suspenders: when the provider is
+    // unknown and `units.is_empty()`, `n` already equals `comp.pins.len()`.
     let two_nets = n == 2
         && comp.units.is_empty()
         && comp.pins.len() == 2
@@ -51,16 +50,7 @@ pub fn role_of(comp: &Component, provider: &dyn SymbolProvider) -> Role {
 
 /// Sort a vec by a natural-order string key (stable, deterministic).
 fn natural_sort_by_key<T>(v: &mut [T], key: impl Fn(&T) -> String) {
-    v.sort_by(|a, b| {
-        let (ka, kb) = (key(a), key(b));
-        if circuit_lang::canon::natural_lt(&ka, &kb) {
-            std::cmp::Ordering::Less
-        } else if circuit_lang::canon::natural_lt(&kb, &ka) {
-            std::cmp::Ordering::Greater
-        } else {
-            std::cmp::Ordering::Equal
-        }
-    });
+    v.sort_by(|a, b| circuit_lang::canon::natural_cmp(&key(a), &key(b)));
 }
 
 /// Per-net pin incidence within one block, split by role.
@@ -94,7 +84,7 @@ pub fn net_uses(
         for (pin, target) in all_pins(comp) {
             let PinTarget::Net(net) = target else { continue };
             let u = uses.entry(net.clone()).or_default();
-            u.power = design.nets.get(net).is_some_and(|a| a.power);
+            u.power |= design.nets.get(net).is_some_and(|a| a.power);
             match role {
                 Role::ChainElement => u.chain_pins.push((refdes.clone(), pin.clone())),
                 Role::Anchor => u.anchor_pins.push((refdes.clone(), pin.clone())),
@@ -116,18 +106,11 @@ pub fn net_uses(
         }
     }
     for u in uses.values_mut() {
+        // NUL separates refdes from pin so "(R1, pin2)" can't collide with "(R, pin12)".
         natural_sort_by_key(&mut u.chain_pins, |p| format!("{}\u{0000}{}", p.0, p.1));
         natural_sort_by_key(&mut u.anchor_pins, |p| format!("{}\u{0000}{}", p.0, p.1));
     }
-    uses.sort_by(|k1, _v1, k2, _v2| {
-        if circuit_lang::canon::natural_lt(k1, k2) {
-            std::cmp::Ordering::Less
-        } else if circuit_lang::canon::natural_lt(k2, k1) {
-            std::cmp::Ordering::Greater
-        } else {
-            std::cmp::Ordering::Equal
-        }
-    });
+    uses.sort_by(|k1, _v1, k2, _v2| circuit_lang::canon::natural_cmp(k1, k2));
     uses
 }
 
@@ -258,5 +241,15 @@ blocks:
         assert!(is_ground("VSS"));
         assert!(!is_ground("VCC"));
         assert!(!is_ground("3V3"));
+    }
+
+    #[test]
+    fn unknown_part_with_two_net_pins_is_a_chain_element() {
+        use circuit_lang::model::{Component, PinTarget};
+        let mut c = Component::default();
+        c.part = "Unknown:X".into();
+        c.pins.insert("1".into(), PinTarget::Net("A".into()));
+        c.pins.insert("2".into(), PinTarget::Net("B".into()));
+        assert_eq!(role_of(&c, &provider()), Role::ChainElement);
     }
 }

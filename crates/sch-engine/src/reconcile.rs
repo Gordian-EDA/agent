@@ -35,6 +35,7 @@ use kicad_bridge::provider::RealSymbolProvider;
 use kiutils_kicad::SchematicFile;
 
 use crate::emit::{Dir, SchematicWriter};
+use crate::grammar::is_ground;
 use crate::grid::snap_point;
 use crate::place;
 
@@ -42,8 +43,6 @@ use crate::place;
 const STUB_MM: f64 = 3.81;
 /// Vertical riser from a horizontal stub to a power symbol, in mm (2 grid units).
 const RISER_MM: f64 = 2.54;
-
-use crate::grammar::is_ground;
 
 /// Initial orientation for a freshly placed component. RailSpan passives stand
 /// vertical with the ground-side pin down; KiCAD's Device:R / Device:C bodies

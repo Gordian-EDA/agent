@@ -35,6 +35,20 @@ pub fn natural_lt(a: &str, b: &str) -> bool {
     split(a) < split(b)
 }
 
+/// Three-way natural ordering: `Less` / `Equal` / `Greater`.
+///
+/// Use this wherever a comparator is needed (e.g. `sort_by`); it avoids
+/// repeating the two-call `natural_lt` pattern.
+pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    if natural_lt(a, b) {
+        std::cmp::Ordering::Less
+    } else if natural_lt(b, a) {
+        std::cmp::Ordering::Greater
+    } else {
+        std::cmp::Ordering::Equal
+    }
+}
+
 fn sorted<V>(m: &IndexMap<String, V>) -> Vec<(&String, &V)> {
     let mut v: Vec<_> = m.iter().collect();
     v.sort_by(|(a, _), (b, _)| {
@@ -333,5 +347,13 @@ blocks:
         assert!(natural_lt("U2", "U10"));
         assert!(natural_lt("C9", "C12"));
         assert!(!natural_lt("R10", "R2"));
+    }
+
+    #[test]
+    fn natural_cmp_orders_correctly() {
+        use std::cmp::Ordering;
+        assert_eq!(natural_cmp("N2", "N10"), Ordering::Less);
+        assert_eq!(natural_cmp("N10", "N2"), Ordering::Greater);
+        assert_eq!(natural_cmp("R1", "R1"), Ordering::Equal);
     }
 }
