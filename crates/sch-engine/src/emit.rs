@@ -687,7 +687,8 @@ impl SchematicWriter {
     ///
     /// Signal stubs are then walked in deterministic `uuid_key` order. A stub is
     /// **retracted** — its label snapped back onto its always-safe pin endpoint
-    /// (orientation reset to `East`), no wire emitted — when its end coincides
+    /// (keeping its outward orientation, so the text reads away from the
+    /// body), no wire emitted — when its end coincides
     /// with a foreign point, its end lies on a foreign segment, or its segment
     /// passes through a foreign point. A *surviving* stub registers its endpoint
     /// and segment as occupancy so a later differing-net stub cannot then collide
@@ -779,8 +780,10 @@ impl SchematicWriter {
             });
 
             if end_on_point || end_on_seg || seg_thru_point {
+                // Keep the outward dir: the text still reads away from the
+                // body (an East reset would run a west-side pin's text back
+                // across the pin line, over the pin name).
                 self.labels[i].at = pin_at;
-                self.labels[i].dir = Dir::East;
                 self.labels[i].stub = None;
             } else {
                 self.add_wire(pin_at, end);
@@ -1656,6 +1659,25 @@ mod tests {
         let d2 = w.pin_dirs(&env, "R2", "1").unwrap();
         // At instance angle 90 the same pin rotates to point West.
         assert_eq!(d2[0].1, Dir::West, "R2 pin 1 stub should point West");
+    }
+
+    #[test]
+    fn retracted_label_keeps_outward_direction() {
+        // Device:R pin 1 at angle 0 points North; a foreign wire across the
+        // stub end forces retraction. The label must land on the pin endpoint
+        // KEEPING dir North (angle 90 in the rendered label) so the text still
+        // reads away from the body — not reset to East across the pin line.
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0).unwrap();
+        w.add_signal_label(&env, "R1", "1", "SIG").unwrap();
+        // Foreign wire through the stub end (127.0, 55.88).
+        w.add_wire_on_net([121.92, 55.88], [132.08, 55.88], "OTHER");
+        let sch = w.finish();
+        assert!(
+            sch.contains("(label \"SIG\"\n\t\t(at 127 59.69 90)"),
+            "retracted label keeps its North orientation:\n{sch}"
+        );
     }
 
     #[test]

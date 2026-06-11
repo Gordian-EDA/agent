@@ -996,8 +996,9 @@ pub fn emit_design_reconciled(
     }
 
     // Lint the POST-retraction geometry. `finish` retracts colliding signal
-    // stubs (moving a label off its stub end back onto the pin endpoint, dir
-    // East, stub cleared) before rendering, so linting `w` as-is would bbox
+    // stubs (moving a label off its stub end back onto the pin endpoint,
+    // keeping its outward dir, stub cleared) before rendering, so linting `w`
+    // as-is would bbox
     // labels at positions/orientations that never get emitted — yielding false
     // positives (overlaps retraction removes) and false negatives (a retracted
     // label now on its pin may overlap its own body, unseen). Run the retraction
