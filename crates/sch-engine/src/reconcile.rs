@@ -126,12 +126,49 @@ pub enum Relayout {
 /// but including it now means the rev forward-covers `near` so that, once the
 /// placer does honor it, changing `near` will correctly re-place — no migration
 /// of already-emitted files needed.
-fn layout_rev(block: &circuit_lang::model::Block, comp: &circuit_lang::model::Component) -> String {
-    let desc = format!(
+fn layout_rev(
+    block: &circuit_lang::model::Block,
+    comp: &circuit_lang::model::Component,
+    cluster: Option<&crate::grammar::Cluster>,
+) -> String {
+    let mut desc = format!(
         "edge={:?}|near={:?}|role={:?}",
         block.layout.edge, block.layout.near, comp.layout_role,
     );
+    // Cluster members additionally hash the cluster's placement-relevant
+    // structure, so a YAML edit that changes chains/banks re-places the block.
+    if let Some(c) = cluster {
+        use std::fmt::Write as _;
+        let _ = write!(desc, "|cluster={}", grammar_rev(c));
+    }
     crate::ids::stable_uuid("layout_rev", &desc)
+}
+
+/// The layout-rev of a cluster member: its component `layout_rev` extended with
+/// the owning cluster's `grammar_rev`, so a YAML edit that restructures the
+/// cluster re-places it (drags only survive structure-preserving edits).
+fn member_rev(
+    block: &circuit_lang::model::Block,
+    comp: &circuit_lang::model::Component,
+    cluster: &crate::grammar::Cluster,
+) -> String {
+    layout_rev(block, comp, Some(cluster))
+}
+
+/// Content hash of a cluster's placement-relevant structure.
+pub fn grammar_rev(cluster: &crate::grammar::Cluster) -> String {
+    use std::fmt::Write as _;
+    let mut desc = String::new();
+    for c in &cluster.chains {
+        let _ = write!(desc, "chain[{:?}]:", c.class);
+        for l in &c.links {
+            let _ = write!(desc, "{}({}->{})|", l.refdes, l.a_net, l.b_net);
+        }
+    }
+    for b in &cluster.banks {
+        let _ = write!(desc, "bank[{}/{}]:{:?}|", b.a_net, b.b_net, b.members);
+    }
+    crate::ids::stable_uuid("grammar_rev", &desc)
 }
 
 /// The reconciled placement of one component: its emitted position/angle/uuid,
@@ -172,7 +209,7 @@ fn resolve_placement(
     comp: &circuit_lang::model::Component,
 ) -> ResolvedPlacement {
     let identity = Identity::of(refdes, &comp.origin);
-    let rev = layout_rev(block, comp);
+    let rev = layout_rev(block, comp, None);
     let block_relayout = match relayout {
         Relayout::All => true,
         Relayout::Blocks(names) => names.contains(block_name),
@@ -372,28 +409,40 @@ pub struct EmitOutput {
     pub relayout_blocks: std::collections::BTreeMap<String, usize>,
 }
 
-/// The reconciliation-aware core of emission (spec §4/§7).
-///
-/// Identical to the one-shot `emit_design` except that, given a prior
-/// `.kicad_sch` text, each surviving component (matched by [`Identity`]) reuses
-/// its prior `(at …)`, angle, and instance uuid; only components absent from the
-/// prior are auto-placed by [`place::place`]. Every emitted symbol is tagged
-/// with its `ap_*` identity properties so the result stays self-describing for
-/// the next round. `prior = None` reduces exactly to the from-scratch emit.
-///
-/// Connectivity (labels), no-connect markers, and power flags are regenerated
-/// from the current `Design` every time — they are cheap, deterministic, and
-/// always correct for the current model — so a deleted component's labels and
-/// markers naturally drop out.
-pub fn emit_design_reconciled(
-    env: &KicadEnv,
-    design: &Design,
-    prior: Option<&str>,
-    relayout: &Relayout,
-) -> io::Result<EmitOutput> {
-    // Per-component approximate sizes drive bbox-aware placement cells. Load
-    // each part's geometry; parts whose geometry can't load fall back to the
-    // fixed legacy cell inside the placer.
+/// All grammar-derived emission inputs, built once per emit and shared by the
+/// placer, the rigid-member component loop, and cluster decoration.
+pub(crate) struct GrammarInputs {
+    pub sizes: place::SizeMap,
+    pub graphs: IndexMap<String, crate::grammar::BlockGraph>,
+    pub geoms: IndexMap<String, Vec<crate::cluster_geom::ClusterGeom>>,
+    pub anchor_pin_ends: place::AnchorPinEnds,
+    /// Cluster membership per refdes.
+    pub members: IndexMap<String, MemberInfo>,
+    /// All cluster-covered pins.
+    pub covered: std::collections::BTreeSet<(String, String)>,
+}
+
+/// Where a refdes sits inside its owning cluster's geometry.
+pub(crate) struct MemberInfo {
+    /// [`place::cluster_key`] of the owning cluster.
+    pub cluster_key: String,
+    /// Index of the cluster within its block's `BlockGraph::clusters`.
+    pub cluster_idx: usize,
+    /// Local symbol-origin position inside the cluster geometry.
+    pub local: [f64; 2],
+    /// Engine-chosen orientation, degrees.
+    pub angle: f64,
+}
+
+/// Build every grammar-derived input the cluster-as-unit emission needs:
+/// per-component sizes, per-block grammar graphs, per-cluster geometry (with the
+/// set of nets that carry a label), anchor pin endpoints for slotting, and the
+/// member/covered-pin walk over the geometry.
+pub(crate) fn build_grammar_inputs(env: &KicadEnv, design: &Design) -> GrammarInputs {
+    let provider = RealSymbolProvider::new(env.clone());
+
+    // 1. Per-component approximate sizes (bbox-aware placement cells). Parts
+    //    whose geometry can't load fall back to the placer's fixed legacy cell.
     let mut sizes = place::SizeMap::new();
     let mut size_cache: std::collections::HashMap<String, [f64; 2]> =
         std::collections::HashMap::new();
@@ -416,62 +465,68 @@ pub fn emit_design_reconciled(
             }
         }
     }
-    // TEMPORARY shim (full cluster-as-unit emission lands in Task 11): build the
-    // grammar graphs + cluster geometry the new `place` signature requires.
-    // Banks/clusters MOVE to their packed positions, but connectivity stays
-    // unchanged: emission re-derives every label/power symbol from the current
-    // `Design` at the component's emitted position+angle. The placer records the
-    // orientation it chose per cluster member; `resolve_placement` emits at that
-    // angle (not `initial_angle`) so a member's pin ends land where the cluster
-    // geometry joined them — otherwise a flipped element would swap its pins and
-    // short two nets.
-    let provider_for_grammar = RealSymbolProvider::new(env.clone());
+
+    // 2. Per-block grammar analysis.
     let mut graphs: IndexMap<String, crate::grammar::BlockGraph> = IndexMap::new();
     for block_name in design.blocks.keys() {
         graphs.insert(
             block_name.clone(),
-            crate::grammar::analyze(design, block_name, &provider_for_grammar),
+            crate::grammar::analyze(design, block_name, &provider),
         );
     }
 
-    // Real angle-0 sheet-space pin ends per (refdes, pin), so cluster_geom orients
-    // each element by its TRUE pin sides (a fallback `|_,_| None` would guess and
-    // produce geometry inconsistent with the emitted symbol — shorting nets). The
-    // angle-0 sheet end of a local pin `p` is `[p.x, -p.y]` (the inverse of
-    // `transform_offset(.., 0, false)`). Cached per part by lib_id.
-    let mut pin_ends: std::collections::HashMap<String, std::collections::HashMap<(String, String), [f64; 2]>> =
+    // 3. Pin callback: angle-0 sheet end of `(refdes, pin)` via `emit::pin_end0`
+    //    (first end — multi-end pin names don't occur on 2-pin passives), so
+    //    cluster geometry orients each element by its TRUE pin sides (consistent
+    //    with what emission draws). pin_end0's loader caches geometry per part.
+    let mut refdes_part: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    let mut refdes_part: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for block in design.blocks.values() {
         for (refdes, comp) in &block.components {
             refdes_part.insert(refdes.clone(), comp.part.clone());
-            if pin_ends.contains_key(&comp.part) {
-                continue;
-            }
-            let mut ends = std::collections::HashMap::new();
-            if let Ok(geom) = kicad_bridge::geometry::SymbolGeometry::load(env, &comp.part) {
-                for p in &geom.pins {
-                    let end0 = [p.at[0], -p.at[1]];
-                    ends.insert((p.number.clone(), String::new()), end0);
-                    ends.entry((String::new(), p.name.clone())).or_insert(end0);
-                }
-            }
-            pin_ends.insert(comp.part.clone(), ends);
         }
     }
     let pin_cb = |refdes: &str, pin: &str| -> Option<[f64; 2]> {
         let part = refdes_part.get(refdes)?;
-        let ends = pin_ends.get(part)?;
-        // Resolve by pin number first, then by pin name.
-        ends.get(&(pin.to_string(), String::new()))
-            .or_else(|| ends.get(&(String::new(), pin.to_string())))
-            .copied()
+        crate::emit::pin_end0(env, part, pin)
+            .ok()
+            .and_then(|ends| ends.into_iter().next())
     };
 
+    // 4. Power nets (declared rails / explicit power) — excluded from labeling.
+    let power_nets: std::collections::BTreeSet<String> = design
+        .nets
+        .iter()
+        .filter(|(_, a)| a.power)
+        .map(|(n, _)| n.clone())
+        .collect();
+
+    // 5. Per-cluster geometry. `labeled` = nets that must carry exactly one net
+    //    label in this block: external, anchor-tapped, or multi-way (>2 chain
+    //    pins) signal nets, minus power nets.
     let mut geoms: IndexMap<String, Vec<crate::cluster_geom::ClusterGeom>> = IndexMap::new();
     for (block_name, g) in &graphs {
-        let block = &design.blocks[block_name];
-        let labeled = std::collections::BTreeSet::new();
+        let block = &design.blocks[block_name.as_str()];
+        let uses = crate::grammar::net_uses(design, block_name, &provider);
+        let mut labeled: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (net, u) in &uses {
+            if power_nets.contains(net) {
+                continue;
+            }
+            // Label a non-power net when it must reach outside the cluster's own
+            // internal wiring:
+            //  - external (cross-block label connectivity),
+            //  - anchor-tapped (an anchor pin joins it),
+            //  - a multi-way node (>2 chain pins — one clarity tap on the star),
+            //  - an OPEN endpoint (exactly one chain pin and no anchor pin): its
+            //    single covered pin is otherwise dangling, so without a label the
+            //    pin would ERC as `pin_not_connected`. (A 2-chain-pin through/node
+            //    net is wired pin-to-pin internally and needs no label.)
+            let open_endpoint = u.chain_pins.len() == 1 && u.anchor_pins.is_empty();
+            if u.external || !u.anchor_pins.is_empty() || u.chain_pins.len() > 2 || open_endpoint {
+                labeled.insert(net.clone());
+            }
+        }
         let gs = g
             .clusters
             .iter()
@@ -487,7 +542,106 @@ pub fn emit_design_reconciled(
             .collect();
         geoms.insert(block_name.clone(), gs);
     }
-    let auto = place::place(design, &sizes, &graphs, &geoms);
+
+    // 6. Anchor pin endpoints for slotting: for every (net, aref, apin) in every
+    //    cluster's anchor_taps, the pin's angle-0 offset + outward direction.
+    let mut anchor_pin_ends = place::AnchorPinEnds::new();
+    for (block_name, g) in &graphs {
+        let block = &design.blocks[block_name.as_str()];
+        for cluster in &g.clusters {
+            for (_net, aref, apin) in &cluster.anchor_taps {
+                let key = (aref.clone(), apin.clone());
+                if anchor_pin_ends.contains_key(&key) {
+                    continue;
+                }
+                let Some(comp) = block.components.get(aref.as_str()) else {
+                    continue;
+                };
+                let Ok(ends) = crate::emit::pin_end0(env, &comp.part, apin) else {
+                    continue;
+                };
+                let Some(&off) = ends.first() else { continue };
+                // Pin angle for direction: load geometry, resolve number-then-name.
+                let Ok(geom) = kicad_bridge::geometry::SymbolGeometry::load(env, &comp.part) else {
+                    continue;
+                };
+                let pg = geom
+                    .pins
+                    .iter()
+                    .find(|p| p.number == *apin)
+                    .or_else(|| geom.pins.iter().find(|p| p.name == *apin));
+                let Some(pg) = pg else { continue };
+                let dir = crate::emit::quantize_dir(pg.angle, 0.0, false);
+                anchor_pin_ends.insert(key, (off, dir));
+            }
+        }
+    }
+
+    // 7. Members + covered pins, walked from the geometry.
+    let mut members: IndexMap<String, MemberInfo> = IndexMap::new();
+    let mut covered: std::collections::BTreeSet<(String, String)> =
+        std::collections::BTreeSet::new();
+    for (block_name, gs) in &geoms {
+        for (ci, geom) in gs.iter().enumerate() {
+            let key = place::cluster_key(block_name, ci);
+            for (refdes, local, angle) in &geom.placements {
+                members.insert(
+                    refdes.clone(),
+                    MemberInfo {
+                        cluster_key: key.clone(),
+                        cluster_idx: ci,
+                        local: *local,
+                        angle: *angle,
+                    },
+                );
+            }
+            for (r, p) in &geom.covered {
+                covered.insert((r.clone(), p.clone()));
+            }
+        }
+    }
+
+    GrammarInputs {
+        sizes,
+        graphs,
+        geoms,
+        anchor_pin_ends,
+        members,
+        covered,
+    }
+}
+
+/// The reconciliation-aware core of emission (spec §4/§7).
+///
+/// Identical to the one-shot `emit_design` except that, given a prior
+/// `.kicad_sch` text, each surviving component (matched by [`Identity`]) reuses
+/// its prior `(at …)`, angle, and instance uuid; only components absent from the
+/// prior are auto-placed by [`place::place`]. Every emitted symbol is tagged
+/// with its `ap_*` identity properties so the result stays self-describing for
+/// the next round. `prior = None` reduces exactly to the from-scratch emit.
+///
+/// Connectivity (labels), no-connect markers, and power flags are regenerated
+/// from the current `Design` every time — they are cheap, deterministic, and
+/// always correct for the current model — so a deleted component's labels and
+/// markers naturally drop out.
+pub fn emit_design_reconciled(
+    env: &KicadEnv,
+    design: &Design,
+    prior: Option<&str>,
+    relayout: &Relayout,
+) -> io::Result<EmitOutput> {
+    // Build every grammar-derived input (sizes, graphs, cluster geometry, anchor
+    // pin ends, cluster membership, covered pins) once. Clusters emit as rigid
+    // wired units: members place at `origin + local`, the cluster draws its own
+    // wires/buses/ports/labels, and covered pins skip per-pin label emission.
+    let gi = build_grammar_inputs(env, design);
+    let auto = place::place_with_anchor_pins(
+        design,
+        &gi.sizes,
+        &gi.graphs,
+        &gi.geoms,
+        &gi.anchor_pin_ends,
+    );
     let prior_map = prior.map(parse_prior).unwrap_or_default();
 
     let mut w = SchematicWriter::new();
@@ -501,6 +655,62 @@ pub fn emit_design_reconciled(
         .map(|(n, _)| n.clone())
         .collect();
 
+    // Per-block tally of components re-placed (rev changed or relayout forced).
+    let mut relayout_blocks: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+
+    // Resolve every cluster's sheet ORIGIN before placing members. A cluster is
+    // rigid: its representative member (`members()[0]`) anchors the whole group.
+    // If that member's prior placement survives (identity match, rev unchanged,
+    // block not forced to relayout), the origin is recovered from it
+    // (`prior.at - rep_local`) so a user's whole-cluster drag is preserved;
+    // otherwise the placer's auto origin is used and every member counts toward
+    // `relayout_blocks`.
+    let mut origins: IndexMap<String, [f64; 2]> = IndexMap::new();
+    for (block_name, graph) in &gi.graphs {
+        let block = &design.blocks[block_name.as_str()];
+        for (ci, cluster) in graph.clusters.iter().enumerate() {
+            let key = place::cluster_key(block_name, ci);
+            let auto_origin = auto
+                .cluster_origins
+                .get(&key)
+                .copied()
+                .unwrap_or([0.0, 0.0]);
+            let members = cluster.members();
+            let Some(rep) = members.first() else {
+                origins.insert(key, snap_point(auto_origin));
+                continue;
+            };
+            let Some(rep_comp) = block.components.get(rep.as_str()) else {
+                origins.insert(key, snap_point(auto_origin));
+                continue;
+            };
+            let rep_local = gi.members.get(rep).map(|m| m.local).unwrap_or([0.0, 0.0]);
+            let rev = member_rev(block, rep_comp, cluster);
+            let block_relayout = match relayout {
+                Relayout::All => true,
+                Relayout::Blocks(names) => names.contains(block_name.as_str()),
+                Relayout::None => false,
+            };
+            let prior = prior_map.get(&Identity::of(rep, &rep_comp.origin));
+            let origin = match prior {
+                Some(p)
+                    if !block_relayout
+                        && p.layout_rev.as_deref().is_none_or(|r| r == rev) =>
+                {
+                    [p.at[0] - rep_local[0], p.at[1] - rep_local[1]]
+                }
+                Some(_) => {
+                    *relayout_blocks.entry(block_name.clone()).or_insert(0) +=
+                        members.len();
+                    auto_origin
+                }
+                None => auto_origin,
+            };
+            origins.insert(key, snap_point(origin));
+        }
+    }
+
     // Net bookkeeping for power-flag synthesis.
     let mut used_nets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut driven_nets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -510,24 +720,46 @@ pub fn emit_design_reconciled(
     let mut power_attach: std::collections::BTreeMap<String, [f64; 2]> =
         std::collections::BTreeMap::new();
 
-    // Per-block tally of components re-placed (rev changed or relayout forced).
-    let mut relayout_blocks: std::collections::BTreeMap<String, usize> =
-        std::collections::BTreeMap::new();
+    // What each component was ACTUALLY emitted at. The single source of truth
+    // for frames/rightmost: filled in the component loop, read by the decoration
+    // loops, so framing can never diverge from emission.
+    let mut emitted_at: IndexMap<String, [f64; 2]> = IndexMap::new();
 
     for (block_name, block) in &design.blocks {
         for (refdes, comp) in &block.components {
-            // Single source of truth for placement (shared with the decoration
-            // loops below via `resolved_at`).
-            let ResolvedPlacement {
-                at,
-                angle,
-                uuid,
-                replaced,
-                rev,
-            } = resolve_placement(&prior_map, &auto, relayout, block_name, block, refdes, comp);
-            if replaced {
-                *relayout_blocks.entry(block_name.to_string()).or_insert(0) += 1;
-            }
+            // Cluster members short-circuit `resolve_placement`: their position
+            // is `origin + local` and their angle comes from the cluster
+            // geometry (emitting at a different angle would swap pin ends and
+            // short nets). The instance uuid is still preserved by identity when
+            // the prior had one. Non-members take the existing anchor path.
+            let (at, angle, uuid, rev) = match gi.members.get(refdes.as_str()) {
+                Some(m) => {
+                    let o = origins[&m.cluster_key];
+                    let at = snap_point([o[0] + m.local[0], o[1] + m.local[1]]);
+                    let cluster = &gi.graphs[block_name].clusters[m.cluster_idx];
+                    let rev = member_rev(block, comp, cluster);
+                    let uuid = prior_map
+                        .get(&Identity::of(refdes, &comp.origin))
+                        .and_then(|p| p.uuid.clone());
+                    (at, m.angle, uuid, rev)
+                }
+                None => {
+                    let ResolvedPlacement {
+                        at,
+                        angle,
+                        uuid,
+                        replaced,
+                        rev,
+                    } = resolve_placement(
+                        &prior_map, &auto, relayout, block_name, block, refdes, comp,
+                    );
+                    if replaced {
+                        *relayout_blocks.entry(block_name.to_string()).or_insert(0) += 1;
+                    }
+                    (at, angle, uuid, rev)
+                }
+            };
+            emitted_at.insert(refdes.clone(), at);
 
             let value = comp.value.as_deref().unwrap_or("");
             let extra = ap_properties(block_name, &comp.origin, &rev);
@@ -535,22 +767,11 @@ pub fn emit_design_reconciled(
 
             let meta = provider.symbol(&comp.part);
 
+            // Covered pins (their connectivity is the cluster's own wiring) skip
+            // per-pin label/power-symbol emission, but `record_power_role` still
+            // runs for EVERY pin so power-flag bookkeeping sees the full picture.
             for (pin, target) in &comp.pins {
-                emit_pin(
-                    &mut w,
-                    env,
-                    &provider,
-                    refdes,
-                    pin,
-                    target,
-                    &power_nets,
-                    &mut used_nets,
-                    &mut power_attach,
-                )?;
-                record_power_role(meta, pin, target, &mut driven_nets, &mut power_input_nets);
-            }
-            for unit_pins in comp.units.values() {
-                for (pin, target) in unit_pins {
+                if !gi.covered.contains(&(refdes.clone(), pin.clone())) {
                     emit_pin(
                         &mut w,
                         env,
@@ -562,22 +783,68 @@ pub fn emit_design_reconciled(
                         &mut used_nets,
                         &mut power_attach,
                     )?;
+                }
+                record_power_role(meta, pin, target, &mut driven_nets, &mut power_input_nets);
+            }
+            for unit_pins in comp.units.values() {
+                for (pin, target) in unit_pins {
+                    if !gi.covered.contains(&(refdes.clone(), pin.clone())) {
+                        emit_pin(
+                            &mut w,
+                            env,
+                            &provider,
+                            refdes,
+                            pin,
+                            target,
+                            &power_nets,
+                            &mut used_nets,
+                            &mut power_attach,
+                        )?;
+                    }
                     record_power_role(meta, pin, target, &mut driven_nets, &mut power_input_nets);
                 }
             }
         }
     }
 
-    // Resolve a component's *emitted* position via the SAME helper the main loop
-    // used, so the decoration loops below frame the positions actually written,
-    // never the stale prior of a re-placed component. Always concrete (the placer
-    // positions every component), so no `None` fallback is needed.
-    let resolved_at = |block_name: &str,
-                       block: &circuit_lang::model::Block,
-                       refdes: &str,
-                       comp: &circuit_lang::model::Component|
-     -> [f64; 2] {
-        resolve_placement(&prior_map, &auto, relayout, block_name, block, refdes, comp).at
+    // Cluster DECORATION: translate each cluster's geometry by its origin and
+    // emit the wires/junctions/ports/labels that wire its members together.
+    // Power ports become ONE power symbol per port (`#PWR_CL…`); labels join the
+    // cluster to the rest of the sheet. Anchor-slot join wires close last.
+    let mut pwr_n = 0usize;
+    for (block_name, graph) in &gi.graphs {
+        for (ci, _cluster) in graph.clusters.iter().enumerate() {
+            let key = place::cluster_key(block_name, ci);
+            let o = origins[&key];
+            let t = |p: [f64; 2]| [p[0] + o[0], p[1] + o[1]];
+            let geom = &gi.geoms[block_name][ci];
+            for (a, b, net) in &geom.wires {
+                w.add_wire_on_net(t(*a), t(*b), net);
+            }
+            for j in &geom.junctions {
+                w.add_junction(t(*j));
+            }
+            for (net, p) in &geom.ports {
+                pwr_n += 1;
+                let lib = power_lib_id(net, &provider);
+                w.add_power_symbol(env, &lib, &format!("#PWR_CL{pwr_n:02}"), net, t(*p), 0.0)?;
+                used_nets.insert(net.clone());
+                power_attach.entry(net.clone()).or_insert(t(*p));
+            }
+            for (net, p, dir) in &geom.labels {
+                w.add_cluster_label(net, t(*p), *dir);
+                used_nets.insert(net.clone());
+            }
+        }
+    }
+    for (a, b, net) in &auto.joins {
+        w.add_wire_on_net(*a, *b, net);
+    }
+
+    // A component's *emitted* position (frames/rightmost). The map is the single
+    // source: it records exactly what the component loop wrote.
+    let resolved_at = |refdes: &str| -> [f64; 2] {
+        emitted_at.get(refdes).copied().unwrap_or([0.0, 0.0])
     };
 
     // Power flags: for nets that got a power symbol, place a flag pin-coincident
@@ -596,9 +863,9 @@ pub fn emit_design_reconciled(
 
     let rightmost = design
         .blocks
-        .iter()
-        .flat_map(|(bn, b)| b.components.iter().map(move |(refdes, comp)| (bn, b, refdes, comp)))
-        .map(|(bn, b, refdes, comp)| resolved_at(bn, b, refdes, comp)[0])
+        .values()
+        .flat_map(|b| b.components.keys())
+        .map(|refdes| resolved_at(refdes)[0])
         .fold(0.0_f64, f64::max);
     let power_x = rightmost + 50.8;
 
@@ -620,9 +887,10 @@ pub fn emit_design_reconciled(
     const FRAME_PAD_MM: f64 = 7.62;
     for (block_name, block) in &design.blocks {
         let mut bounds: Option<[f64; 4]> = None; // min_x, min_y, max_x, max_y
-        for (refdes, comp) in &block.components {
-            let at = resolved_at(block_name, block, refdes, comp);
-            let half = sizes
+        for refdes in block.components.keys() {
+            let at = resolved_at(refdes);
+            let half = gi
+                .sizes
                 .get(refdes)
                 .map(|s| [s[0] / 2.0, s[1] / 2.0])
                 .unwrap_or([12.7, 12.7]);
@@ -710,11 +978,7 @@ fn record_power_role(
 ) {
     let PinTarget::Net(net) = target else { return };
     let Some(meta) = meta else { return };
-    let matched = meta
-        .pins
-        .iter()
-        .find(|p| p.number == pin)
-        .or_else(|| meta.pins.iter().find(|p| p.name == pin));
+    let matched = circuit_lang::find_pin(&meta.pins, pin);
     match matched.map(|pm| pm.etype) {
         Some(PinType::PowerOutput) => {
             driven_nets.insert(net.clone());

@@ -357,11 +357,16 @@ pub fn place_with_anchor_pins(
                 };
                 // Anchors are emitted at angle 0; pin end is anchor origin + off.
                 let pin = [anchor_pos[0] + off[0], anchor_pos[1] + off[1]];
-                let new_o = match dir {
+                let raw_o = match dir {
                     Dir::East => [pin[0] + JOIN_MM, pin[1] - tap_local[1]],
                     Dir::West => [pin[0] - JOIN_MM - geom.envelope[0], pin[1] - tap_local[1]],
                     _ => unreachable!(),
                 };
+                // Snap x to the grid ONCE, up front, so the rect we overlap-check
+                // is exactly the rect we commit (no post-check drift). Keep y EXACT
+                // (`pin.y - tap_local.y`) so `tap_sheet.y == pin.y` and the join
+                // wire stays perfectly horizontal — snapping y could break that.
+                let new_o = [snap_point([raw_o[0], 0.0])[0], raw_o[1]];
                 // Overlap against every OTHER unit's rect in this block.
                 let others: Vec<([f64; 2], [f64; 2])> = unit_rects
                     .iter()
@@ -372,7 +377,6 @@ pub fn place_with_anchor_pins(
                     continue;
                 }
                 // Commit: relocate members + cluster origin, record the join.
-                let new_o = snap_point(new_o);
                 cluster_origins.insert(cluster_key(p.block_name, ci), new_o);
                 for (refdes, local, angle) in &geom.placements {
                     positions.insert(

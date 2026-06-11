@@ -344,12 +344,7 @@ fn end_score(
     for (refdes, pin) in &u.anchor_pins {
         let comp = &block.components[refdes.as_str()];
         let Some(meta) = provider.symbol(&comp.part) else { continue };
-        let etype = meta
-            .pins
-            .iter()
-            .find(|p| &p.number == pin)
-            .or_else(|| meta.pins.iter().find(|p| &p.name == pin))
-            .map(|p| p.etype);
+        let etype = circuit_lang::find_pin(&meta.pins, pin).map(|p| p.etype);
         match etype {
             Some(PinType::PowerOutput) => score -= 2,
             Some(PinType::PowerInput) => score += 2,

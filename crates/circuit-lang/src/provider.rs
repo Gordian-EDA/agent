@@ -24,6 +24,16 @@ pub struct SymbolMeta {
     pub pins: Vec<PinMeta>,
 }
 
+/// Resolve a pin reference (`id`) within a pin list, matching by **number
+/// first, then by name**. This is `circuit-lang`'s canonical pin-resolution
+/// order; reuse it instead of hand-rolling the same `find().or_else(find())`
+/// (see `grammar::end_score`, `reconcile::record_power_role`).
+pub fn find_pin<'a>(pins: &'a [PinMeta], id: &str) -> Option<&'a PinMeta> {
+    pins.iter()
+        .find(|p| p.number == id)
+        .or_else(|| pins.iter().find(|p| p.name == id))
+}
+
 pub trait SymbolProvider {
     fn symbol(&self, lib_id: &str) -> Option<&SymbolMeta>;
     /// Closest known lib_ids for an unknown one (for diagnostics).

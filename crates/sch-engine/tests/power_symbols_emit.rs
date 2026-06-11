@@ -137,14 +137,28 @@ blocks:
       R2: {part: Device:R, value: 10k, between: [SIG, GND]}
 ");
     let text = sch_engine::emit_design(&env, &design).unwrap().sch;
-    assert!(text.contains("(label \"SIG\""));
+    // R1 and R2 share node SIG, so they now form one cluster: SIG is a 2-pin
+    // through-node, joined PIN-COINCIDENTLY inside the cluster (no per-pin label,
+    // no wire — the two SIG pins are stacked on the same point). Connectivity is
+    // the contract, not the representation: assert it via the netlist below.
 
     let tmp = tempfile::tempdir().unwrap();
     let sch = tmp.path().join("t.kicad_sch");
     std::fs::write(&sch, &text).unwrap();
     let nl = kicad_bridge::cli::KicadCli::new(&env).netlist(&sch).unwrap();
-    let sig = nl.nets.iter().find(|n| n.name.ends_with("SIG")).expect("SIG net");
-    assert_eq!(sig.nodes.len(), 2, "both R pins join SIG through their stubs: {sig:?}");
+    // Find the SIG net by its membership (R1.1 and R2.1), not by name: with no
+    // label the net is auto-named, but the two non-ground R pins must still
+    // share exactly one net.
+    let r1_top = nl
+        .nets
+        .iter()
+        .find(|n| n.nodes.contains(&("R1".to_string(), "1".to_string())))
+        .expect("R1.1 net");
+    assert!(
+        r1_top.nodes.contains(&("R2".to_string(), "1".to_string())),
+        "both R top pins join one net: {r1_top:?}"
+    );
+    assert_eq!(r1_top.nodes.len(), 2, "exactly the two R top pins: {r1_top:?}");
 
     // ERC stays clean.
     let erc = kicad_bridge::cli::KicadCli::new(&env).erc(&sch).unwrap();

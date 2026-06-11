@@ -428,6 +428,24 @@ impl SchematicWriter {
         self.wires.push(Wire { a, b, uuid_key, net });
     }
 
+    /// Place a cluster net label at `at`, oriented `dir`.
+    ///
+    /// Thin entry point for cluster decoration: a cluster emits exactly one
+    /// label per externally-visible net at the net's tap point, so connectivity
+    /// joins to the rest of the sheet without per-pin label spam. The label is
+    /// keyed on `cluster:{net}:{x}:{y}` (position-derived) and carries no stub —
+    /// it sits directly on the cluster wire it labels.
+    pub fn add_cluster_label(&mut self, net: &str, at: [f64; 2], dir: Dir) {
+        let at = snap_point(at);
+        self.labels.push(PinLabel {
+            net: net.to_string(),
+            at,
+            uuid_key: format!("cluster:{net}:{}:{}", at[0], at[1]),
+            dir,
+            stub: None,
+        });
+    }
+
     /// Add a junction dot at a wire join. Deduplicated by position.
     pub fn add_junction(&mut self, at: [f64; 2]) {
         let at = snap_point(at);
@@ -500,27 +518,7 @@ impl SchematicWriter {
             .into_iter()
             .map(|pg| {
                 let ep = pin_endpoint(pg, inst_at, inst_angle, inst_mirror);
-                // Outward direction in symbol space: angle+180 from the pin line.
-                // The pin `angle` in the symbol file points from the connection
-                // tip INTO the body; outward (away from body) is angle+180.
-                let theta = (pg.angle + 180.0).to_radians();
-                let (mut dx, dy) = (theta.cos(), theta.sin());
-                if inst_mirror {
-                    dx = -dx;
-                }
-                let phi = inst_angle.to_radians();
-                let (s, c) = phi.sin_cos();
-                let rx = dx * c - dy * s;
-                let ry = dx * s + dy * c;
-                // Sheet flip: sheet-space y component is -ry (symbol Y up, sheet Y down).
-                let sy = -ry;
-                let dir = if rx.abs() >= sy.abs() {
-                    if rx >= 0.0 { Dir::East } else { Dir::West }
-                } else if sy >= 0.0 {
-                    Dir::South
-                } else {
-                    Dir::North
-                };
+                let dir = quantize_dir(pg.angle, inst_angle, inst_mirror);
                 (ep, dir)
             })
             .collect())
@@ -903,7 +901,7 @@ fn escape_sexpr_string(s: &str) -> String {
 /// Snapping can produce `-0.0`, which `f64`'s `Display` renders as `-0`. That
 /// is harmless to KiCAD but breaks byte-for-byte determinism (the same logical
 /// position could render as `0` or `-0`), so we collapse negative zero here.
-fn fmt_coord(v: f64) -> f64 {
+pub(crate) fn fmt_coord(v: f64) -> f64 {
     if v == 0.0 { 0.0 } else { v }
 }
 
@@ -913,6 +911,59 @@ fn fmt_coord(v: f64) -> f64 {
 /// This is the offset half of [`pin_endpoint`]: mirror → rotate → y-flip,
 /// returning `[rx, -ry]`. Cluster geometry reuses it to reason about pin ends
 /// before any instance position is known.
+/// Angle-0 sheet-space pin-end offsets (relative to the symbol origin) of a
+/// pin, resolved against `lib_id`'s geometry by number first then name.
+///
+/// The single source of truth for "where does this pin land at instance angle
+/// 0" — used by cluster geometry's pin callback (which takes the first end) and
+/// by anchor-pin slotting (offset + [`quantize_dir`]). A pin *name* can match
+/// several physical pins, so a `Vec` is returned. The offset is
+/// `transform_offset(pin.at, 0.0, false)`, i.e. `[pin.x, -pin.y]`.
+pub(crate) fn pin_end0(env: &KicadEnv, lib_id: &str, pin: &str) -> io::Result<Vec<[f64; 2]>> {
+    let geom = SymbolGeometry::load(env, lib_id)?;
+    let matches: Vec<&PinGeom> = {
+        let by_number: Vec<&PinGeom> = geom.pins.iter().filter(|p| p.number == pin).collect();
+        if !by_number.is_empty() {
+            by_number
+        } else {
+            geom.pins.iter().filter(|p| p.name == pin).collect()
+        }
+    };
+    Ok(matches
+        .into_iter()
+        .map(|pg| transform_offset(pg.at, 0.0, false))
+        .collect())
+}
+
+/// Quantize a pin's outward direction to the four sheet axes.
+///
+/// `pin_angle` is the pin's local `(at … angle)` in the symbol — it points from
+/// the connection tip INTO the body, so outward (away from the body) is
+/// `pin_angle + 180`. That outward vector is transformed by the instance
+/// orientation (mirror → rotate → sheet Y-flip) exactly like the endpoint, then
+/// snapped to the dominant axis. Shared by [`SchematicWriter::pin_dirs`] (stub
+/// directions) and anchor-pin slotting (cluster join sides).
+pub(crate) fn quantize_dir(pin_angle: f64, inst_angle: f64, mirror: bool) -> Dir {
+    let theta = (pin_angle + 180.0).to_radians();
+    let (mut dx, dy) = (theta.cos(), theta.sin());
+    if mirror {
+        dx = -dx;
+    }
+    let phi = inst_angle.to_radians();
+    let (s, c) = phi.sin_cos();
+    let rx = dx * c - dy * s;
+    let ry = dx * s + dy * c;
+    // Sheet flip: sheet-space y component is -ry (symbol Y up, sheet Y down).
+    let sy = -ry;
+    if rx.abs() >= sy.abs() {
+        if rx >= 0.0 { Dir::East } else { Dir::West }
+    } else if sy >= 0.0 {
+        Dir::South
+    } else {
+        Dir::North
+    }
+}
+
 pub(crate) fn transform_offset(local: [f64; 2], angle: f64, mirror: bool) -> [f64; 2] {
     let (mut x, y) = (local[0], local[1]);
     if mirror {

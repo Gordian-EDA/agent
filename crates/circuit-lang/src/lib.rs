@@ -13,7 +13,7 @@ mod yaml;
 
 pub use diag::{Diagnostic, Diagnostics, Severity, Span};
 pub use model::Design;
-pub use provider::{MockSymbolProvider, PinMeta, PinType, SymbolMeta, SymbolProvider};
+pub use provider::{find_pin, MockSymbolProvider, PinMeta, PinType, SymbolMeta, SymbolProvider};
 
 pub struct CompileResult {
     /// Some only when there are no errors (warnings allowed).
