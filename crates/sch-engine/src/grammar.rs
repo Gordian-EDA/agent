@@ -251,6 +251,10 @@ pub enum ChainClass {
     Series,
 }
 
+/// A classified, oriented run of [`Link`]s.
+///
+/// `links[0].a_net` is the canonical left/driving end; `links.last().b_net` is
+/// the right/sink end.  The orientation and class are fixed by [`classify`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chain {
     pub links: Vec<Link>,
@@ -258,9 +262,11 @@ pub struct Chain {
 }
 
 impl Chain {
+    /// The `a_net` of the first link — the canonical driving/left endpoint.
     pub fn start_net(&self) -> &str {
         &self.links[0].a_net
     }
+    /// The `b_net` of the last link — the canonical sink/right endpoint.
     pub fn end_net(&self) -> &str {
         &self.links[self.links.len() - 1].b_net
     }
@@ -305,13 +311,23 @@ impl Cluster {
 pub struct BlockGraph {
     /// Natural-ordered anchors.
     pub anchors: Vec<RefDes>,
-    /// Clusters in deterministic first-member order.
+    /// Placement clusters in deterministic order.
+    ///
+    /// Order is determined by the first member of each cluster encountered
+    /// during chain/bank assignment (i.e. the natural-order net that triggered
+    /// the cluster's creation).  Empty slots from merge operations are removed
+    /// by `analyze` before this field is populated.
     pub clusters: Vec<Cluster>,
     /// Human-readable degradation notes (cycle breaks etc.).
     pub degradations: Vec<String>,
 }
 
-/// Lower score wants to be the LEFT (driving) end of a Series chain.
+/// Score an endpoint net's preference for being the LEFT (driving/source) end.
+///
+/// Sign convention: **lower score = wants to be the left (`a`) end.**
+/// A PowerOutput anchor pin on the net contributes −2 (source, drives left);
+/// a PowerInput pin contributes +2 (sink, pushed right); an external (cross-block)
+/// net contributes −1 (incoming signal treated as arriving from the left).
 fn end_score(
     net: &str,
     uses: &IndexMap<NetName, NetUse>,
@@ -342,6 +358,13 @@ fn end_score(
     score
 }
 
+/// Orient a raw link sequence and derive its [`ChainClass`].
+///
+/// Mutates `links` in-place so that the canonically-left (driving/source) end
+/// becomes `links[0].a_net`.  For RailRail, positive rail first; for ToRail,
+/// the non-rail (node) end first.  For Series, the end with the lower
+/// [`end_score`] goes left; when scores are equal the naturally-smaller net
+/// name is placed at `a` (tie-break ensures a deterministic canonical form).
 fn classify(
     mut links: Vec<Link>,
     uses: &IndexMap<NetName, NetUse>,
@@ -443,9 +466,19 @@ pub fn analyze(design: &Design, block_name: &str, provider: &dyn SymbolProvider)
     let mut clusters: Vec<Cluster> = Vec::new();
     let mut net_cluster: IndexMap<String, usize> = IndexMap::new();
 
-    // Assign a set of node-nets to a cluster index, MERGING when the nodes
-    // already map to two different existing clusters (a bridging item).
-    // Returns the resulting cluster index.
+    /// Assign `nodes` to a cluster, merging pre-existing clusters as needed.
+    ///
+    /// When all nodes are new a fresh [`Cluster::default()`] is pushed and its
+    /// index returned.  When a bridging item connects two already-distinct
+    /// clusters, every cluster with a higher index is drained into the
+    /// lowest-index one via [`std::mem::take`], leaving the drained slot as an
+    /// empty `Cluster::default()`.  All `net_cluster` entries that pointed to a
+    /// drained slot are remapped to `lowest`.
+    ///
+    /// **Invariant for callers:** after all assignments are done the cluster vec
+    /// will contain empty slots from merges.  Callers **must** call
+    /// `clusters.retain(|c| !c.chains.is_empty() || !c.banks.is_empty())` before
+    /// using the vec.  `analyze` does this after both assignment loops.
     fn assign(
         nodes: &[String],
         clusters: &mut Vec<Cluster>,
