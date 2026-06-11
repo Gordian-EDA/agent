@@ -113,6 +113,9 @@ struct Wire {
     b: [f64; 2],
     /// Stable key for the wire uuid (content-derived from the endpoints).
     uuid_key: String,
+    /// The net this wire belongs to, when known (cluster-generated wires).
+    /// `None` for legacy power stubs/risers (treated as a reserved foreign net).
+    net: Option<String>,
 }
 
 /// One `(junction …)` dot marking a deliberate ≥3-way wire join.
@@ -403,6 +406,16 @@ impl SchematicWriter {
     /// The `uuid_key` is content-derived so repeated calls with the same
     /// endpoints produce one deterministic wire.
     pub fn add_wire(&mut self, a: [f64; 2], b: [f64; 2]) {
+        self.push_wire(a, b, None);
+    }
+
+    /// Add a wire that belongs to a known net (cluster geometry). Same-net
+    /// touches against it are deliberate joins, not collisions.
+    pub fn add_wire_on_net(&mut self, a: [f64; 2], b: [f64; 2], net: &str) {
+        self.push_wire(a, b, Some(net.to_string()));
+    }
+
+    fn push_wire(&mut self, a: [f64; 2], b: [f64; 2], net: Option<String>) {
         let a = snap_point(a);
         let b = snap_point(b);
         if a == b {
@@ -412,7 +425,7 @@ impl SchematicWriter {
         if self.wires.iter().any(|w| w.uuid_key == uuid_key) {
             return;
         }
-        self.wires.push(Wire { a, b, uuid_key });
+        self.wires.push(Wire { a, b, uuid_key, net });
     }
 
     /// Add a junction dot at a wire join. Deduplicated by position.
@@ -690,9 +703,21 @@ impl SchematicWriter {
                 Some(stub) => add_point(stub.pin_at, &label.net, &mut points),
             }
         }
-        // Existing wires are all power stubs/risers.
+        // Existing wires: power stubs/risers carry the reserved PWR net; cluster
+        // wires carry their real net so same-net stubs may touch them.
         for w in &self.wires {
-            segments.push((w.a, w.b, PWR.to_string()));
+            let net = w.net.clone().unwrap_or_else(|| PWR.to_string());
+            segments.push((w.a, w.b, net.clone()));
+            // Only register endpoints as points for wires with a known net, so
+            // that a same-net stub whose end lands exactly on a cluster wire
+            // endpoint is recognized as a deliberate join. Power-wire endpoints
+            // stay off the points map (they already block via the segment check,
+            // and adding them under PWR would over-retract power stubs that
+            // happen to share the same location).
+            if let Some(n) = &w.net {
+                add_point(w.a, n, &mut points);
+                add_point(w.b, n, &mut points);
+            }
         }
 
         // Deterministic processing order for stub labels.
@@ -1360,5 +1385,51 @@ mod tests {
         let d2 = w.pin_dirs(&env, "R2", "1").unwrap();
         // At instance angle 90 the same pin rotates to point West.
         assert_eq!(d2[0].1, Dir::West, "R2 pin 1 stub should point West");
+    }
+
+    #[test]
+    fn same_net_wire_touch_survives_foreign_retracts() {
+        // Device:R pin 1 at (127, 63.5) angle 0:
+        //   pin endpoint = (127.0, 59.69)  (inst_y - 3.81)
+        //   stub direction = North, STUB_MM = 3.81 -> stub end = (127.0, 55.88)
+        //
+        // Device:R pin 1 at (177.8, 63.5) angle 0:
+        //   pin endpoint = (177.8, 59.69)
+        //   stub end = (177.8, 55.88)
+        //
+        // A horizontal SIG cluster wire running through R1's stub end (127.0, 55.88)
+        // is same-net -> R1's stub must survive (label stays at stub end, not pin
+        // endpoint). A horizontal OTHER cluster wire running through R2's stub end
+        // (177.8, 55.88) is foreign -> R2's stub retracts (label snaps to pin ep).
+        let Some(env) = KicadEnv::detect() else {
+            eprintln!("SKIP: no KiCAD environment detected");
+            return;
+        };
+
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0).unwrap();
+        w.add_symbol(&env, "Device:R", "R2", "1k", [177.8, 63.5], 0.0).unwrap();
+        w.add_signal_label(&env, "R1", "1", "SIG").unwrap();
+        w.add_signal_label(&env, "R2", "1", "SIG").unwrap();
+
+        // SIG wire spans R1's stub end at y=55.88 -> same-net, stub survives.
+        w.add_wire_on_net([121.92, 55.88], [132.08, 55.88], "SIG");
+        // OTHER wire spans R2's stub end at y=55.88 -> foreign, stub retracts.
+        w.add_wire_on_net([172.72, 55.88], [182.88, 55.88], "OTHER");
+
+        let sch = w.finish();
+
+        // R2's stub retracted: its SIG label must now sit at R2's pin endpoint (177.8, 59.69).
+        assert!(
+            sch.contains("(label \"SIG\"\n\t\t(at 177.8 59.69"),
+            "R2 label must retract to its pin endpoint (177.8, 59.69):\n{sch}"
+        );
+
+        // R1's stub survived: its SIG label must NOT sit at R1's pin endpoint (127, 59.69).
+        // (It should be at the stub end (127, 55.88) instead.)
+        assert!(
+            !sch.contains("(label \"SIG\"\n\t\t(at 127 59.69"),
+            "R1 label must NOT retract to pin endpoint (127, 59.69) — same-net wire should allow the stub to survive:\n{sch}"
+        );
     }
 }
