@@ -264,6 +264,66 @@ pub(crate) fn route_edge(a: Pt, dir_a: Dir, b: Pt, net: &str, scene: &RouteScene
     best.map(|(_, _, p)| p)
 }
 
+/// Minimum-spanning-tree edges over terminals by Manhattan distance (Prim's,
+/// deterministic: ties broken by smaller terminal index).
+pub(crate) fn mst_edges(terminals: &[Pt]) -> Vec<(usize, usize)> {
+    let n = terminals.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    let dist = |i: usize, j: usize| {
+        (terminals[i][0] - terminals[j][0]).abs() + (terminals[i][1] - terminals[j][1]).abs()
+    };
+    let mut in_tree = vec![false; n];
+    in_tree[0] = true;
+    let mut edges = Vec::with_capacity(n - 1);
+    for _ in 1..n {
+        let mut best: Option<(f64, usize, usize)> = None;
+        for i in 0..n {
+            if !in_tree[i] {
+                continue;
+            }
+            for j in 0..n {
+                if in_tree[j] {
+                    continue;
+                }
+                let d = dist(i, j);
+                let key = (d, i, j);
+                if best.map_or(true, |b| key < b) {
+                    best = Some(key);
+                }
+            }
+        }
+        let (_, i, j) = best.unwrap();
+        in_tree[j] = true;
+        edges.push((i, j));
+    }
+    edges
+}
+
+/// Junction dots for one net's emitted paths: every point where >= 3 segment
+/// ENDS meet (a T or X formed by deliberate same-net joins).
+pub(crate) fn junction_points(paths: &[Path]) -> Vec<Pt> {
+    let mut counts: std::collections::BTreeMap<(u64, u64), (Pt, usize)> =
+        std::collections::BTreeMap::new();
+    for path in paths {
+        for w in path.windows(2) {
+            for p in [w[0], w[1]] {
+                let key = (p[0].to_bits(), p[1].to_bits());
+                counts.entry(key).or_insert((p, 0)).1 += 1;
+            }
+        }
+    }
+    // Interior vertices of one polyline count twice (end of one segment,
+    // start of the next) without being junctions; >= 3 distinct segment ends
+    // at a point only happens where separate runs join.
+    counts
+        .into_values()
+        .filter(|(_, c)| *c >= 3)
+        .map(|(p, _)| p)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +375,39 @@ mod tests {
                 .map(|(a, b, n)| (a, b, n.to_string()))
                 .collect(),
         }
+    }
+
+    #[test]
+    fn mst_connects_collinear_terminals_without_redundancy() {
+        let t = [[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]];
+        let edges = mst_edges(&t);
+        assert_eq!(edges.len(), 2);
+        // Adjacent pairs, never the redundant 0-2 long edge.
+        assert!(edges.contains(&(0, 1)));
+        assert!(edges.contains(&(1, 2)));
+    }
+
+    #[test]
+    fn junctions_at_three_way_meets_only() {
+        // A horizontal run plus a vertical drop ending mid-run: the meet point
+        // collects 3 segment ends -> junction. The plain corner of an L does
+        // not (2 ends).
+        let paths = vec![
+            vec![[0.0, 0.0], [10.0, 0.0]],
+            vec![[5.0, -5.0], [5.0, 0.0], [8.0, 0.0]],
+        ];
+        // (5,0) hosts: vertical end + horizontal start (same polyline corner,
+        // 2 ends) -- plus nothing from path 1 (it passes THROUGH x=5 without a
+        // vertex). So no junction there...
+        // ...but if the drop TERMINATES on the run, the run is split at the
+        // tap in real emission. Model that split:
+        let split = vec![
+            vec![[0.0, 0.0], [5.0, 0.0]],
+            vec![[5.0, 0.0], [10.0, 0.0]],
+            vec![[5.0, -5.0], [5.0, 0.0]],
+        ];
+        assert_eq!(junction_points(&paths), Vec::<Pt>::new());
+        assert_eq!(junction_points(&split), vec![[5.0, 0.0]]);
     }
 
     #[test]
