@@ -164,6 +164,106 @@ pub(crate) fn path_ok(path: &Path, net: &str, scene: &RouteScene) -> bool {
     true
 }
 
+/// Clearance candidates keep this far off obstacle edges, mm.
+const CLEAR_MM: f64 = 2.54;
+
+/// Total Manhattan length of a path.
+fn path_len(p: &Path) -> f64 {
+    p.windows(2)
+        .map(|w| (w[0][0] - w[1][0]).abs() + (w[0][1] - w[1][1]).abs())
+        .sum()
+}
+
+/// Route one edge from `a` (a pin, leaving along `dir_a`) to `b` (any
+/// terminal). Tries the plain elbow first; on collision, searches the
+/// canonical 3/4-segment Manhattan families with detour coordinates derived
+/// from obstacle edges (±[`CLEAR_MM`]), grid-snapped, picking the shortest
+/// valid path (ties: fewer bends, then smaller coordinates — deterministic).
+/// Returns None when nothing in the family fits — the caller falls back to
+/// label connectivity.
+pub(crate) fn route_edge(a: Pt, dir_a: Dir, b: Pt, net: &str, scene: &RouteScene) -> Option<Path> {
+    let quick = elbow(a, dir_a, b);
+    if path_ok(&quick, net, scene) {
+        return Some(quick);
+    }
+
+    // Candidate detour coordinates: obstacle edges +- clearance (snapped AWAY
+    // from the edge so snapping never re-enters the obstacle), the lead
+    // coordinates, terminal coordinates, and the midline (snapped nearest).
+    let snap_dn = |v: f64| (v / 1.27).floor() * 1.27;
+    let snap_up = |v: f64| (v / 1.27).ceil() * 1.27;
+    let snap_nr = |v: f64| (v / 1.27).round() * 1.27;
+    let mut xs: Vec<f64> = Vec::new();
+    let mut ys: Vec<f64> = Vec::new();
+    for r in &scene.solids {
+        xs.push(snap_dn(r[0] - CLEAR_MM));
+        xs.push(snap_up(r[2] + CLEAR_MM));
+        ys.push(snap_dn(r[1] - CLEAR_MM));
+        ys.push(snap_up(r[3] + CLEAR_MM));
+    }
+    xs.push(snap_nr((a[0] + b[0]) / 2.0));
+    ys.push(snap_nr((a[1] + b[1]) / 2.0));
+    xs.push(a[0] + LEAD_MM);
+    xs.push(a[0] - LEAD_MM);
+    ys.push(a[1] + LEAD_MM);
+    ys.push(a[1] - LEAD_MM);
+    xs.push(b[0]);
+    ys.push(b[1]);
+    let dedup_sorted = |mut v: Vec<f64>| {
+        v.sort_by(|p, q| p.partial_cmp(q).unwrap());
+        v.dedup_by(|p, q| (*p - *q).abs() < EPS);
+        v
+    };
+    let xs = dedup_sorted(xs);
+    let ys = dedup_sorted(ys);
+
+    let lead_ok = |x1: f64, y1: f64| match dir_a {
+        Dir::East => x1 >= a[0] + LEAD_MM - EPS,
+        Dir::West => x1 <= a[0] - LEAD_MM + EPS,
+        Dir::North => y1 <= a[1] - LEAD_MM + EPS,
+        Dir::South => y1 >= a[1] + LEAD_MM - EPS,
+    };
+
+    let mut best: Option<(f64, usize, Path)> = None;
+    let consider = |raw: Path, best: &mut Option<(f64, usize, Path)>| {
+        let p = simplify(raw);
+        if p.len() < 2 || !path_ok(&p, net, scene) {
+            return;
+        }
+        let key = (path_len(&p), p.len());
+        match best {
+            Some((l, n, _)) if (*l, *n) <= key => {}
+            _ => *best = Some((key.0, key.1, p)),
+        }
+    };
+
+    match dir_a {
+        Dir::East | Dir::West => {
+            for &x1 in &xs {
+                if !lead_ok(x1, 0.0) {
+                    continue;
+                }
+                consider(vec![a, [x1, a[1]], [x1, b[1]], b], &mut best);
+                for &y1 in &ys {
+                    consider(vec![a, [x1, a[1]], [x1, y1], [b[0], y1], b], &mut best);
+                }
+            }
+        }
+        Dir::North | Dir::South => {
+            for &y1 in &ys {
+                if !lead_ok(0.0, y1) {
+                    continue;
+                }
+                consider(vec![a, [a[0], y1], [b[0], y1], b], &mut best);
+                for &x1 in &xs {
+                    consider(vec![a, [a[0], y1], [x1, y1], [x1, b[1]], b], &mut best);
+                }
+            }
+        }
+    }
+    best.map(|(_, _, p)| p)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +315,42 @@ mod tests {
                 .map(|(a, b, n)| (a, b, n.to_string()))
                 .collect(),
         }
+    }
+
+    #[test]
+    fn route_edge_clear_field_returns_elbow() {
+        let s = scene(vec![], vec![], vec![]);
+        let p = route_edge([0.0, 0.0], Dir::East, [10.0, -5.0], "A", &s).unwrap();
+        assert_eq!(p, elbow([0.0, 0.0], Dir::East, [10.0, -5.0]));
+    }
+
+    #[test]
+    fn route_edge_detours_around_a_rect() {
+        // Block the straight east run with a body; the route must detour and
+        // stay valid.
+        let s = scene(vec![[4.0, -2.0, 6.0, 2.0]], vec![], vec![]);
+        let p = route_edge([0.0, 0.0], Dir::East, [12.7, 0.0], "A", &s).unwrap();
+        assert!(path_ok(&p, "A", &s));
+        assert_eq!(p.first(), Some(&[0.0, 0.0]));
+        assert_eq!(p.last(), Some(&[12.7, 0.0]));
+        // Deterministic.
+        assert_eq!(p, route_edge([0.0, 0.0], Dir::East, [12.7, 0.0], "A", &s).unwrap());
+    }
+
+    #[test]
+    fn route_edge_walled_in_returns_none() {
+        // b is enclosed by a ring of solids covering all detour candidates.
+        let s = scene(
+            vec![
+                [8.0, -20.0, 10.0, 20.0],   // wall east of a
+                [-20.0, -10.0, 20.0, -8.0], // wall north
+                [-20.0, 8.0, 20.0, 10.0],   // wall south
+                [-10.0, -20.0, -8.0, 20.0], // wall west
+            ],
+            vec![],
+            vec![],
+        );
+        assert!(route_edge([0.0, 0.0], Dir::East, [30.0, 0.0], "A", &s).is_none());
     }
 
     #[test]
