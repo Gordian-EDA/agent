@@ -654,9 +654,11 @@ impl SchematicWriter {
     /// **Foreign geometry** at pass start = every *fixed* connection point (power
     /// symbol pins — origin, net = the Value; no-connect markers — a reserved
     /// sentinel net; legacy labels; and every signal stub's own pin endpoint,
-    /// always safe) plus every existing wire **segment** (all wires present here
-    /// are power stubs/risers — a signal net never coincides with a power net, so
-    /// any touch is foreign).
+    /// always safe) plus every existing wire **segment**. Existing wires are
+    /// registered under their own net when known (cluster wires added via
+    /// `add_wire_on_net`) or the reserved `PWR` sentinel (power stubs/risers).
+    /// A stub touching a wire of the *same* net is a deliberate join and
+    /// survives; only a touch with a *different* net is foreign.
     ///
     /// Signal stubs are then walked in deterministic `uuid_key` order. A stub is
     /// **retracted** — its label snapped back onto its always-safe pin endpoint
@@ -734,6 +736,12 @@ impl SchematicWriter {
             // Collision if: the end coincides with a foreign point; the end lies
             // on a foreign segment; or the stub segment passes through a foreign
             // point. (The pin endpoint is this net's own anchor, never foreign.)
+            // Note: because cluster-wire endpoints are registered as points, a
+            // foreign-net cluster wire endpoint landing exactly on this stub's
+            // pin endpoint will trip `seg_thru_point` and conservatively retract
+            // this stub. This is safe — it falls back to label-on-pin, never a
+            // silent merge. Cluster geometry (Task 11) is responsible for not
+            // terminating a wire on a foreign component's pin.
             let end_on_point = points
                 .get(&bits(end))
                 .is_some_and(|nets| nets.iter().any(|n| *n != net));
