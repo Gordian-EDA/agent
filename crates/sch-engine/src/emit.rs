@@ -45,6 +45,22 @@ use crate::ids::stable_uuid;
 /// emit multiple sheets will key the root uuid on sheet identity instead.
 const ROOT_SHEET_KEY: &str = "root";
 
+/// Horizontal text justification for a solved field position. `Center` is
+/// rendered by omitting the justify token (KiCAD's default is centered).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Justify {
+    Left,
+    Right,
+    Center,
+}
+
+/// A solved field text anchor.
+#[derive(Clone, Copy)]
+pub(crate) struct TextPos {
+    pub at: [f64; 2],
+    pub justify: Justify,
+}
+
 /// One placed symbol instance, captured at `add_symbol` time and rendered in
 /// `finish`.
 struct Instance {
@@ -71,6 +87,11 @@ struct Instance {
     /// Half the symbol body's approximate size `[w/2, h/2]`, used to push the
     /// Reference/Value field text clear of the body rather than a fixed offset.
     half_extents: [f64; 2],
+    /// Solver-assigned Reference/Value positions (`solve_text_positions`).
+    /// `None` -> legacy fixed right-of-body offsets (kept for hidden fields
+    /// and as the fallback when the solver has not run).
+    ref_pos: Option<TextPos>,
+    val_pos: Option<TextPos>,
 }
 
 /// One net-name label emitted at a pin's sheet-space connection endpoint.
@@ -202,6 +223,9 @@ pub struct SchematicWriter {
     /// lib_id's geometry is loaded (the dedup branch). Avoids reloading geometry
     /// per instance just to compute its field-clearance half-extents.
     sym_sizes: BTreeMap<String, [f64; 2]>,
+    /// Pin geometry per lib_id, cached at first load, for pin-text obstacles
+    /// in `solve_text_positions`.
+    sym_pins: BTreeMap<String, Vec<PinGeom>>,
 }
 
 impl SchematicWriter {
@@ -262,6 +286,7 @@ impl SchematicWriter {
         if !self.lib_symbols.contains_key(lib_id) {
             let geom = SymbolGeometry::load(env, lib_id)?;
             self.sym_sizes.insert(lib_id.to_string(), geom.approx_size());
+            self.sym_pins.insert(lib_id.to_string(), geom.pins.clone());
             self.lib_symbols
                 .insert(lib_id.to_string(), geom.raw_definition);
         }
@@ -280,6 +305,8 @@ impl SchematicWriter {
             extra_props: extra_props.to_vec(),
             uuid,
             half_extents,
+            ref_pos: None,
+            val_pos: None,
         });
         Ok(())
     }
@@ -763,6 +790,118 @@ impl SchematicWriter {
         }
     }
 
+    /// Assign collision-free Reference/Value positions (and, as later tasks
+    /// extend this, stub-label positions) via the greedy candidate solver in
+    /// `textplace.rs`.
+    ///
+    /// Obstacles: symbol bodies (angle-aware extents, exempt for text owned by
+    /// that refdes), wires, and labels. Movables: each visible-field instance's
+    /// Reference+Value pair, tried right / left / above / below of the body
+    /// (wide bodies prefer above/below — the KiCAD convention for horizontal
+    /// passives). The first candidate of an unrotated symbol reproduces the
+    /// legacy fixed right-of-body offsets, so an uncrowded sheet keeps its
+    /// conventional look.
+    ///
+    /// Idempotent: every assignment is recomputed from scratch on each call,
+    /// so reconcile may run it early (to lint solved geometry) and `finish`'s
+    /// own call is a harmless re-run.
+    pub(crate) fn solve_text_positions(&mut self) {
+        use crate::textplace::{
+            choose, label_box, rotated_half_extents, text_width, wire_box, BBox, Movable,
+            ObKind, Obstacle,
+        };
+        // Round a candidate coordinate to 0.01 mm: field anchors are derived
+        // from float sums (position + extents) and would otherwise render as
+        // 107.94999999999999-style noise. Determinism is unaffected (same
+        // inputs, same rounding).
+        let r2 = |v: f64| (v * 100.0).round() / 100.0;
+
+        let mut obstacles: Vec<Obstacle> = Vec::new();
+        for inst in &self.instances {
+            let h = rotated_half_extents(inst.half_extents, inst.angle);
+            obstacles.push(Obstacle {
+                bbox: [
+                    inst.at[0] - h[0],
+                    inst.at[1] - h[1],
+                    inst.at[0] + h[0],
+                    inst.at[1] + h[1],
+                ],
+                kind: ObKind::OwnExempt(inst.refdes.clone()),
+            });
+        }
+        for w in &self.wires {
+            obstacles.push(Obstacle { bbox: wire_box(w.a, w.b), kind: ObKind::Hard });
+        }
+        for l in &self.labels {
+            obstacles.push(Obstacle {
+                bbox: label_box(l.at, l.dir, text_width(&l.net)),
+                kind: ObKind::Hard,
+            });
+        }
+
+        // Field movables: one per visible-field instance, deterministic refdes
+        // order. Each candidate is the UNION box of the Reference+Value pair;
+        // the per-candidate anchor pair rides in a parallel vec for apply.
+        let mut order: Vec<usize> = (0..self.instances.len())
+            .filter(|&i| !self.instances[i].refdes.starts_with('#'))
+            .collect();
+        order.sort_by(|&a, &b| self.instances[a].refdes.cmp(&self.instances[b].refdes));
+
+        let mut movables: Vec<Movable> = Vec::new();
+        let mut apply: Vec<(usize, Vec<(TextPos, TextPos)>)> = Vec::new();
+        for &i in &order {
+            let inst = &self.instances[i];
+            let h = rotated_half_extents(inst.half_extents, inst.angle);
+            let (cx, cy) = (inst.at[0], inst.at[1]);
+            let (minx, miny, maxx, maxy) = (cx - h[0], cy - h[1], cx + h[0], cy + h[1]);
+            let rw = text_width(&inst.refdes);
+            let vw = text_width(&inst.value);
+            let wmax = rw.max(vw);
+            // Each candidate: (ref anchor, val anchor, union bbox). Text is
+            // bottom-anchored and 1.6 tall, so a line anchored at Y occupies
+            // [Y-1.6, Y].
+            let right = (
+                TextPos { at: [r2(maxx + 1.27), r2(cy - 1.27)], justify: Justify::Left },
+                TextPos { at: [r2(maxx + 1.27), r2(cy + 1.27)], justify: Justify::Left },
+                [maxx + 1.27, cy - 2.87, maxx + 1.27 + wmax, cy + 1.27] as BBox,
+            );
+            let left = (
+                TextPos { at: [r2(minx - 1.27), r2(cy - 1.27)], justify: Justify::Right },
+                TextPos { at: [r2(minx - 1.27), r2(cy + 1.27)], justify: Justify::Right },
+                [minx - 1.27 - wmax, cy - 2.87, minx - 1.27, cy + 1.27],
+            );
+            let above = (
+                TextPos { at: [r2(cx), r2(miny - 3.18)], justify: Justify::Center },
+                TextPos { at: [r2(cx), r2(miny - 0.64)], justify: Justify::Center },
+                [cx - wmax / 2.0, miny - 4.78, cx + wmax / 2.0, miny - 0.64],
+            );
+            let below = (
+                TextPos { at: [r2(cx), r2(maxy + 2.24)], justify: Justify::Center },
+                TextPos { at: [r2(cx), r2(maxy + 4.78)], justify: Justify::Center },
+                [cx - wmax / 2.0, maxy + 0.64, cx + wmax / 2.0, maxy + 4.78],
+            );
+            // Wide bodies (rotated passives) prefer above/below; tall prefer
+            // right/left (the KiCAD convention).
+            let cands = if h[0] > h[1] {
+                vec![above, below, right, left]
+            } else {
+                vec![right, left, above, below]
+            };
+            movables.push(Movable {
+                owner: Some(inst.refdes.clone()),
+                candidates: cands.iter().map(|c| c.2).collect(),
+            });
+            apply.push((i, cands.into_iter().map(|c| (c.0, c.1)).collect()));
+        }
+
+        let picks = choose(&obstacles, &movables);
+        for ((i, cands), pick) in apply.into_iter().zip(picks) {
+            let (r, v) = cands[pick];
+            self.instances[i].ref_pos = Some(r);
+            self.instances[i].val_pos = Some(v);
+        }
+    }
+
     /// Assemble the complete `.kicad_sch` document as a deterministic string.
     ///
     /// `lib_symbols` are emitted sorted by `lib_id` (via the backing
@@ -772,6 +911,9 @@ impl SchematicWriter {
         // Resolve signal-stub collisions and materialize the surviving stub wires
         // before any rendering, so labels/wires below render the reconciled state.
         self.retract_colliding_stubs();
+        // Then place movable text (fields, stub labels) collision-free against
+        // the final geometry. Both passes are idempotent.
+        self.solve_text_positions();
 
         let root_uuid = stable_uuid("sheet", ROOT_SHEET_KEY);
 
@@ -1110,12 +1252,18 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
         .uuid
         .clone()
         .unwrap_or_else(|| stable_uuid("symbol", &inst.refdes));
-    // Push the Reference/Value field text clear of the symbol body using the
-    // instance's per-symbol half-extent, so the text never overlaps the glyph.
-    let ref_x = fmt_coord(x + inst.half_extents[0] + 1.27);
-    let ref_y = fmt_coord(y - 1.27);
-    let val_x = fmt_coord(x + inst.half_extents[0] + 1.27);
-    let val_y = fmt_coord(y + 1.27);
+    // Field anchors: solver-assigned when present, else the legacy fixed
+    // right-of-body offset (text clear of the glyph via the half-extent).
+    let (ref_at, ref_j) = match inst.ref_pos {
+        Some(p) => (p.at, p.justify),
+        None => ([x + inst.half_extents[0] + 1.27, y - 1.27], Justify::Left),
+    };
+    let (val_at, val_j) = match inst.val_pos {
+        Some(p) => (p.at, p.justify),
+        None => ([x + inst.half_extents[0] + 1.27, y + 1.27], Justify::Left),
+    };
+    let (ref_x, ref_y) = (fmt_coord(ref_at[0]), fmt_coord(ref_at[1]));
+    let (val_x, val_y) = (fmt_coord(val_at[0]), fmt_coord(val_at[1]));
 
     // Hide Reference for power/flag symbols whose refdes is `#`-prefixed
     // (KiCAD convention: #PWR…, #FLG…) — they must not appear in the netlist
@@ -1139,17 +1287,33 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     let _ = writeln!(s, "\t\t(property \"Reference\" \"{refdes}\"");
     let _ = writeln!(s, "\t\t\t(at {ref_x} {ref_y} 0)");
     if hide_ref {
-        s.push_str("\t\t\t(effects (font (size 1.27 1.27)) (justify left) (hide yes))\n");
+        let _ = writeln!(
+            s,
+            "\t\t\t(effects (font (size 1.27 1.27)){} (hide yes))",
+            justify_token(ref_j)
+        );
     } else {
-        s.push_str("\t\t\t(effects (font (size 1.27 1.27)) (justify left))\n");
+        let _ = writeln!(
+            s,
+            "\t\t\t(effects (font (size 1.27 1.27)){})",
+            justify_token(ref_j)
+        );
     }
     s.push_str("\t\t)\n");
     let _ = writeln!(s, "\t\t(property \"Value\" \"{value}\"");
     let _ = writeln!(s, "\t\t\t(at {val_x} {val_y} 0)");
     if hide_val {
-        s.push_str("\t\t\t(effects (font (size 1.27 1.27)) (justify left) (hide yes))\n");
+        let _ = writeln!(
+            s,
+            "\t\t\t(effects (font (size 1.27 1.27)){} (hide yes))",
+            justify_token(val_j)
+        );
     } else {
-        s.push_str("\t\t\t(effects (font (size 1.27 1.27)) (justify left))\n");
+        let _ = writeln!(
+            s,
+            "\t\t\t(effects (font (size 1.27 1.27)){})",
+            justify_token(val_j)
+        );
     }
     s.push_str("\t\t)\n");
     let _ = writeln!(s, "\t\t(property \"Footprint\" \"\"");
@@ -1179,6 +1343,16 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     s.push('\n');
     s.push_str("\t)\n");
     s
+}
+
+/// Justify token for a solved field anchor. `Center` omits the token (KiCAD's
+/// default field justification is centered).
+fn justify_token(j: Justify) -> &'static str {
+    match j {
+        Justify::Left => " (justify left)",
+        Justify::Right => " (justify right)",
+        Justify::Center => "",
+    }
 }
 
 /// An axis-aligned bbox: [min_x, min_y, max_x, max_y].
