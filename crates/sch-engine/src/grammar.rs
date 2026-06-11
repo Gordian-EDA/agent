@@ -240,6 +240,275 @@ pub fn raw_chains(
     (chains, notes)
 }
 
+/// What a chain's endpoints say about its rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainClass {
+    /// rail → rail: vertical, positive rail top, GND bottom.
+    RailRail,
+    /// node/open → rail: hangs from its `a` node toward the rail at `b`.
+    ToRail,
+    /// signal → signal: horizontal series run, flow left (`a`) → right (`b`).
+    Series,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chain {
+    pub links: Vec<Link>,
+    pub class: ChainClass,
+}
+
+impl Chain {
+    pub fn start_net(&self) -> &str {
+        &self.links[0].a_net
+    }
+    pub fn end_net(&self) -> &str {
+        &self.links[self.links.len() - 1].b_net
+    }
+}
+
+/// Parallel single-element rail→rail chains on the same net pair: rendered as
+/// one bused bank with a single power symbol per side. `a_net` is the
+/// positive/top net, `b_net` the bottom (ground side when present).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bank {
+    pub a_net: NetName,
+    pub b_net: NetName,
+    /// Natural-ordered member refdes.
+    pub members: Vec<RefDes>,
+}
+
+/// The rigid placement unit: chains joined through shared signal nodes, plus
+/// any banks. A standalone bank or single chain is a cluster by itself.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Cluster {
+    pub chains: Vec<Chain>,
+    pub banks: Vec<Bank>,
+}
+
+impl Cluster {
+    /// Natural-ordered member refdes (chains then banks, deduped).
+    pub fn members(&self) -> Vec<RefDes> {
+        let mut m: Vec<RefDes> = self
+            .chains
+            .iter()
+            .flat_map(|c| c.links.iter().map(|l| l.refdes.clone()))
+            .chain(self.banks.iter().flat_map(|b| b.members.iter().cloned()))
+            .collect();
+        natural_sort_by_key(&mut m, |r| r.clone());
+        m.dedup();
+        m
+    }
+}
+
+/// One block's full grammar analysis.
+#[derive(Debug, Default)]
+pub struct BlockGraph {
+    /// Natural-ordered anchors.
+    pub anchors: Vec<RefDes>,
+    /// Clusters in deterministic first-member order.
+    pub clusters: Vec<Cluster>,
+    /// Human-readable degradation notes (cycle breaks etc.).
+    pub degradations: Vec<String>,
+}
+
+/// Lower score wants to be the LEFT (driving) end of a Series chain.
+fn end_score(
+    net: &str,
+    uses: &IndexMap<NetName, NetUse>,
+    block: &Block,
+    provider: &dyn SymbolProvider,
+) -> i32 {
+    use circuit_lang::PinType;
+    let Some(u) = uses.get(net) else { return 0 };
+    let mut score = 0;
+    for (refdes, pin) in &u.anchor_pins {
+        let comp = &block.components[refdes.as_str()];
+        let Some(meta) = provider.symbol(&comp.part) else { continue };
+        let etype = meta
+            .pins
+            .iter()
+            .find(|p| &p.number == pin)
+            .or_else(|| meta.pins.iter().find(|p| &p.name == pin))
+            .map(|p| p.etype);
+        match etype {
+            Some(PinType::PowerOutput) => score -= 2,
+            Some(PinType::PowerInput) => score += 2,
+            _ => {}
+        }
+    }
+    if u.external {
+        score -= 1; // cross-block signals read as arriving from the left
+    }
+    score
+}
+
+fn classify(
+    mut links: Vec<Link>,
+    uses: &IndexMap<NetName, NetUse>,
+    block: &Block,
+    provider: &dyn SymbolProvider,
+) -> Chain {
+    fn reverse(links: &mut Vec<Link>) {
+        links.reverse();
+        for l in links.iter_mut() {
+            *l = l.reversed();
+        }
+    }
+    let power = |n: &str| uses.get(n).is_some_and(|u| u.power);
+    let s = links[0].a_net.clone();
+    let e = links.last().unwrap().b_net.clone();
+    let class = match (power(&s), power(&e)) {
+        (true, true) => {
+            if is_ground(&s) && !is_ground(&e) {
+                reverse(&mut links);
+            }
+            ChainClass::RailRail
+        }
+        (false, true) => ChainClass::ToRail,
+        (true, false) => {
+            reverse(&mut links);
+            ChainClass::ToRail
+        }
+        (false, false) => {
+            let (ss, es) = (
+                end_score(&s, uses, block, provider),
+                end_score(&e, uses, block, provider),
+            );
+            if ss > es || (ss == es && circuit_lang::canon::natural_lt(&e, &s)) {
+                reverse(&mut links);
+            }
+            ChainClass::Series
+        }
+    };
+    Chain { links, class }
+}
+
+/// Full grammar analysis for one block.
+pub fn analyze(design: &Design, block_name: &str, provider: &dyn SymbolProvider) -> BlockGraph {
+    let block = &design.blocks[block_name];
+    let uses = net_uses(design, block_name, provider);
+
+    let mut anchors: Vec<RefDes> = Vec::new();
+    let mut elements: BTreeSet<RefDes> = BTreeSet::new();
+    for (refdes, comp) in &block.components {
+        match role_of(comp, provider) {
+            Role::Anchor => anchors.push(refdes.clone()),
+            Role::ChainElement => {
+                elements.insert(refdes.clone());
+            }
+        }
+    }
+    natural_sort_by_key(&mut anchors, |r| r.clone());
+
+    let (raw, mut degradations) = raw_chains(block, &uses, &elements);
+    let mut chains: Vec<Chain> = raw
+        .into_iter()
+        .map(|links| classify(links, &uses, block, provider))
+        .collect();
+
+    // Banks: single-link RailRail chains grouped by their (a, b) net pair.
+    let mut banks: Vec<Bank> = Vec::new();
+    let mut keep: Vec<Chain> = Vec::new();
+    let mut groups: IndexMap<(NetName, NetName), Vec<RefDes>> = IndexMap::new();
+    for chain in chains.drain(..) {
+        if chain.class == ChainClass::RailRail && chain.links.len() == 1 {
+            let key = (chain.start_net().to_string(), chain.end_net().to_string());
+            groups.entry(key).or_default().push(chain.links[0].refdes.clone());
+            keep.push(chain); // provisional; pulled out below if its group banks
+        } else {
+            keep.push(chain);
+        }
+    }
+    let banked: BTreeSet<RefDes> = groups
+        .iter()
+        .filter(|(_, members)| members.len() >= 2)
+        .flat_map(|(_, members)| members.iter().cloned())
+        .collect();
+    for ((a, b), mut members) in groups {
+        if members.len() >= 2 {
+            natural_sort_by_key(&mut members, |r| r.clone());
+            banks.push(Bank { a_net: a, b_net: b, members });
+        }
+    }
+    chains = keep
+        .into_iter()
+        .filter(|c| !(c.links.len() == 1 && banked.contains(&c.links[0].refdes)))
+        .collect();
+
+    // Clusters: union chains/banks through shared non-power endpoint nets.
+    // Rails never merge (GND would glue everything together).
+    let node_of = |net: &str| -> Option<String> {
+        uses.get(net).filter(|u| !u.power).map(|_| net.to_string())
+    };
+    let mut clusters: Vec<Cluster> = Vec::new();
+    let mut net_cluster: IndexMap<String, usize> = IndexMap::new();
+
+    // Assign a set of node-nets to a cluster index, MERGING when the nodes
+    // already map to two different existing clusters (a bridging item).
+    // Returns the resulting cluster index.
+    fn assign(
+        nodes: &[String],
+        clusters: &mut Vec<Cluster>,
+        net_cluster: &mut IndexMap<String, usize>,
+    ) -> usize {
+        // Existing distinct indices these nodes already belong to.
+        let mut existing: Vec<usize> = nodes
+            .iter()
+            .filter_map(|n| net_cluster.get(n).copied())
+            .collect();
+        existing.sort_unstable();
+        existing.dedup();
+        let idx = match existing.first() {
+            None => {
+                clusters.push(Cluster::default());
+                clusters.len() - 1
+            }
+            Some(&lowest) => {
+                // Merge every other existing cluster into `lowest`.
+                for &other in existing.iter().skip(1) {
+                    let drained = std::mem::take(&mut clusters[other]);
+                    clusters[lowest].chains.extend(drained.chains);
+                    clusters[lowest].banks.extend(drained.banks);
+                    // Remap any net pointing at `other` to `lowest`.
+                    for v in net_cluster.values_mut() {
+                        if *v == other {
+                            *v = lowest;
+                        }
+                    }
+                }
+                lowest
+            }
+        };
+        for n in nodes {
+            net_cluster.insert(n.clone(), idx);
+        }
+        idx
+    }
+
+    for chain in chains {
+        let nodes: Vec<String> = [chain.start_net(), chain.end_net()]
+            .iter()
+            .filter_map(|n| node_of(n))
+            .collect();
+        let idx = assign(&nodes, &mut clusters, &mut net_cluster);
+        clusters[idx].chains.push(chain);
+    }
+    for bank in banks {
+        let nodes: Vec<String> = [bank.a_net.as_str(), bank.b_net.as_str()]
+            .iter()
+            .filter_map(|n| node_of(n))
+            .collect();
+        let idx = assign(&nodes, &mut clusters, &mut net_cluster);
+        clusters[idx].banks.push(bank);
+    }
+    clusters.retain(|c| !c.chains.is_empty() || !c.banks.is_empty());
+
+    degradations
+        .iter_mut()
+        .for_each(|n| *n = format!("block {block_name}: {n}"));
+    BlockGraph { anchors, clusters, degradations }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +737,142 @@ blocks:
         assert_eq!(refs, ["R1", "R2", "R3"], "walk sequence must be deterministic");
         assert_eq!(chains[0][0].a_net, "N1", "R1 must be entered from N1 (its first net)");
         assert_eq!(notes.len(), 1, "cycle break must be reported: {notes:?}");
+    }
+
+    fn analyze_one(src: &str) -> BlockGraph {
+        let d = compile(src);
+        let name = d.blocks.keys().next().unwrap().clone();
+        analyze(&d, &name, &provider())
+    }
+
+    #[test]
+    fn rail_rail_chain_orients_positive_first() {
+        let g = analyze_one(
+            "
+version: 1
+name: t
+rails: [3V3, GND]
+blocks:
+  a:
+    components:
+      D1: {part: Device:LED, value: red, between: [GND, MID]}
+      R2: {part: Device:R, value: 330, between: [MID, 3V3]}
+",
+        );
+        assert_eq!(g.clusters.len(), 1);
+        let chain = &g.clusters[0].chains[0];
+        assert_eq!(chain.class, ChainClass::RailRail);
+        assert_eq!(chain.links[0].a_net, "3V3", "positive rail first");
+        assert_eq!(chain.links.last().unwrap().b_net, "GND");
+    }
+
+    #[test]
+    fn to_rail_chain_orients_node_first_and_series_flow_uses_pin_types() {
+        // C9 uses COUT (its own isolated node) so it is a standalone single-link
+        // chain and does not chain with F1 through a shared through-net.
+        let g = analyze_one(
+            "
+version: 1
+name: t
+rails: [VCC, GND]
+blocks:
+  a:
+    components:
+      C9: {part: Device:C, value: 47n, between: [GND, COUT]}
+      F1: {part: Device:R, value: 0R, between: [VOUT_REG, OUT]}
+      U1:
+        part: Mock:REG
+        pins: {VI: VCC, GND: GND, VO: VOUT_REG, EN: VCC}
+",
+        );
+        // C9: GND<->COUT must orient COUT (node) first, GND last.
+        let c9 = g.clusters.iter().flat_map(|c| &c.chains)
+            .find(|c| c.links[0].refdes == "C9").unwrap();
+        assert_eq!(c9.class, ChainClass::ToRail);
+        assert_eq!(c9.links[0].a_net, "COUT");
+        // F1: VOUT_REG carries U1's PowerOutput pin -> that end goes LEFT (a).
+        let f1 = g.clusters.iter().flat_map(|c| &c.chains)
+            .find(|c| c.links[0].refdes == "F1").unwrap();
+        assert_eq!(f1.class, ChainClass::Series);
+        assert_eq!(f1.links[0].a_net, "VOUT_REG");
+    }
+
+    #[test]
+    fn parallel_rail_rail_singles_group_into_a_bank() {
+        let g = analyze_one(
+            "
+version: 1
+name: t
+rails: [3V3, GND]
+blocks:
+  a:
+    components:
+      C1: {part: Device:C, value: 100n, between: [3V3, GND]}
+      C2: {part: Device:C, value: 100n, between: [3V3, GND]}
+      C3: {part: Device:C, value: 10u, between: [GND, 3V3]}
+      R9: {part: Device:R, value: 10k, between: [SIG, 3V3]}
+",
+        );
+        let banks: Vec<&Bank> = g.clusters.iter().flat_map(|c| &c.banks).collect();
+        assert_eq!(banks.len(), 1);
+        assert_eq!(banks[0].members, vec!["C1", "C2", "C3"]);
+        assert_eq!(banks[0].a_net, "3V3");
+        assert_eq!(banks[0].b_net, "GND");
+        // R9 (ToRail) stays a chain, not a bank member.
+        assert!(g.clusters.iter().flat_map(|c| &c.chains)
+            .any(|c| c.links[0].refdes == "R9"));
+    }
+
+    #[test]
+    fn chains_sharing_a_node_form_one_cluster() {
+        let g = analyze_one(
+            "
+version: 1
+name: t
+rails: [VCC, GND]
+blocks:
+  a:
+    components:
+      R7: {part: Device:R, value: 649k, between: [VCC, OUT]}
+      R8: {part: Device:R, value: 200k, between: [OUT, GND]}
+      C3: {part: Device:C, value: 47n, between: [OUT, GND]}
+      C5: {part: Device:C, value: 100n, between: [VCC, GND]}
+",
+        );
+        // R7+R8+C3 share node OUT -> one cluster of three chains.
+        // C5 is rail-rail with no node -> its own cluster.
+        assert_eq!(g.clusters.len(), 2, "{:?}", g.clusters);
+        let star = g.clusters.iter().find(|c| c.chains.len() == 3).unwrap();
+        assert!(star.banks.is_empty());
+        let solo = g.clusters.iter().find(|c| c.chains.len() == 1).unwrap();
+        assert_eq!(solo.chains[0].class, ChainClass::RailRail);
+    }
+
+    #[test]
+    fn bridging_chain_merges_two_clusters_into_one() {
+        // Built so two separate node-clusters form first (on nodes NA and NB),
+        // then a chain touching BOTH NA and NB merges them.
+        // RA: NA<->X1 ; RB: NA<->X2  (cluster on NA)
+        // RC: NB<->X3 ; RD: NB<->X4  (cluster on NB)
+        // RBR: NA<->NB                (bridges)
+        // X1..X4 are open (single chain pin each) so they don't extend chains.
+        let g = analyze_one(
+            "
+version: 1
+name: t
+rails: []
+blocks:
+  a:
+    components:
+      R1: {part: Device:R, value: 1k, between: [NA, X1]}
+      R2: {part: Device:R, value: 1k, between: [NA, X2]}
+      R3: {part: Device:R, value: 1k, between: [NB, X3]}
+      R4: {part: Device:R, value: 1k, between: [NB, X4]}
+      R5: {part: Device:R, value: 1k, between: [NA, NB]}
+",
+        );
+        // All five resistors must land in ONE cluster after the bridge merge.
+        assert_eq!(g.clusters.len(), 1, "{:?}", g.clusters);
+        assert_eq!(g.clusters[0].members(), vec!["R1","R2","R3","R4","R5"]);
     }
 }
