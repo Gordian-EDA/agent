@@ -1316,7 +1316,7 @@ fn pin_endpoint(pin: &PinGeom, inst_at: [f64; 2], inst_angle: f64, mirror: bool)
 /// is collinear with the segment's constant axis and within its varying-axis
 /// span. Endpoints count as "on" — a stub end meeting a foreign wire's endpoint
 /// is just as much a connection as meeting its middle.
-fn point_on_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> bool {
+pub(crate) fn point_on_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> bool {
     const EPS: f64 = 1e-6;
     let within = |v: f64, lo: f64, hi: f64| v >= lo - EPS && v <= hi + EPS;
     if (a[0] - b[0]).abs() < EPS {
