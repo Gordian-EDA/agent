@@ -535,13 +535,17 @@ pub fn analyze(design: &Design, block_name: &str, provider: &dyn SymbolProvider)
     }
     clusters.retain(|c| !c.chains.is_empty() || !c.banks.is_empty());
 
-    // Candidate pin anchors per cluster: cluster endpoint nets that join exactly
-    // one in-block anchor pin and are neither power nor external.
+    // Candidate pin anchors per cluster: cluster nets — endpoints AND interior
+    // joints (a rail-rail chain like a 555 timing ladder touches its anchor
+    // only at interior joints) — that join exactly one in-block anchor pin and
+    // are neither power nor external.
     for cluster in &mut clusters {
         let mut nets: std::collections::BTreeSet<NetName> = std::collections::BTreeSet::new();
         for c in &cluster.chains {
-            nets.insert(c.start_net().to_string());
-            nets.insert(c.end_net().to_string());
+            for l in &c.links {
+                nets.insert(l.a_net.clone());
+                nets.insert(l.b_net.clone());
+            }
         }
         for b in &cluster.banks {
             nets.insert(b.a_net.clone());

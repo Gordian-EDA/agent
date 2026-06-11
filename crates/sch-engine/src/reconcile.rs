@@ -813,6 +813,18 @@ pub fn emit_design_reconciled(
         &mut relayout_blocks,
     );
 
+    // Pin endpoints already wired by a placement join: their per-pin signal
+    // label would be redundant (the join wire connects them to the cluster,
+    // whose own single label names the net). Keyed by snapped-position bits.
+    let join_points: std::collections::BTreeSet<(u64, u64)> = auto
+        .joins
+        .iter()
+        .map(|(pin, _, _)| {
+            let p = crate::grid::snap_point(*pin);
+            (p[0].to_bits(), p[1].to_bits())
+        })
+        .collect();
+
     // Net bookkeeping for power-flag synthesis.
     let mut used_nets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut driven_nets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -888,6 +900,7 @@ pub fn emit_design_reconciled(
                         pin,
                         target,
                         &power_nets,
+                        &join_points,
                         &mut used_nets,
                         &mut power_attach,
                     )?;
@@ -1142,6 +1155,7 @@ fn emit_pin(
     pin: &str,
     target: &PinTarget,
     power_nets: &std::collections::BTreeSet<String>,
+    join_points: &std::collections::BTreeSet<(u64, u64)>,
     used_nets: &mut std::collections::BTreeSet<String>,
     power_attach: &mut std::collections::BTreeMap<String, [f64; 2]>,
 ) -> io::Result<()> {
@@ -1151,6 +1165,16 @@ fn emit_pin(
             if power_nets.contains(net) {
                 emit_power_pin(w, env, provider, refdes, pin, net, power_attach)
             } else {
+                // A pin already wired by a placement join needs no label: the
+                // join wire connects it to the cluster, whose single label
+                // names the net. A label here would just duplicate the text.
+                let joined = w.pin_dirs(env, refdes, pin)?.iter().any(|(ep, _)| {
+                    let p = crate::grid::snap_point(*ep);
+                    join_points.contains(&(p[0].to_bits(), p[1].to_bits()))
+                });
+                if joined {
+                    return Ok(());
+                }
                 w.add_signal_label(env, refdes, pin, net)
             }
         }
