@@ -543,12 +543,12 @@ pub fn analyze(design: &Design, block_name: &str, provider: &dyn SymbolProvider)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use circuit_lang::{MockSymbolProvider, PinType};
     use std::collections::BTreeSet;
 
-    pub(super) fn provider() -> MockSymbolProvider {
+    pub(crate) fn provider() -> MockSymbolProvider {
         let mut p = MockSymbolProvider::with_basics();
         // A 4-pin "IC": VI is a power input, VO a power output.
         p.add(
@@ -563,7 +563,7 @@ mod tests {
         p
     }
 
-    pub(super) fn compile(src: &str) -> circuit_lang::Design {
+    pub(crate) fn compile(src: &str) -> circuit_lang::Design {
         let result = circuit_lang::compile(src, &provider());
         assert!(!result.diagnostics.has_errors(), "{:?}", result.diagnostics);
         result.design.unwrap()

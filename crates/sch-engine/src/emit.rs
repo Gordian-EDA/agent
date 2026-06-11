@@ -935,19 +935,25 @@ fn fmt_coord(v: f64) -> f64 {
 /// spike's proven form. Angles are restricted to 0/90/180/270 in practice, so
 /// the sin/cos are exact (±1, 0) and the result stays on the grid; we still snap
 /// to absorb floating-point dust.
-fn pin_endpoint(pin: &PinGeom, inst_at: [f64; 2], inst_angle: f64, mirror: bool) -> [f64; 2] {
-    let (mut lx, ly) = (pin.at[0], pin.at[1]);
+/// Transform a symbol-space offset (y up) into a sheet-space offset (y down)
+/// for an instance at `angle` degrees, optionally mirrored. This is the offset
+/// half of `pin_endpoint`; cluster geometry reuses it to reason about pin ends
+/// before any instance exists.
+pub(crate) fn transform_offset(local: [f64; 2], angle: f64, mirror: bool) -> [f64; 2] {
+    let (mut x, y) = (local[0], local[1]);
     if mirror {
-        lx = -lx;
+        x = -x;
     }
+    let phi = angle.to_radians();
+    let (s, c) = phi.sin_cos();
+    let rx = x * c - y * s;
+    let ry = x * s + y * c;
+    [rx, -ry]
+}
 
-    let theta = inst_angle.to_radians();
-    let (s, c) = theta.sin_cos();
-    let rx = lx * c - ly * s;
-    let ry = lx * s + ly * c;
-
-    let sheet = [inst_at[0] + rx, inst_at[1] - ry];
-    snap_point(sheet)
+fn pin_endpoint(pin: &PinGeom, inst_at: [f64; 2], inst_angle: f64, mirror: bool) -> [f64; 2] {
+    let off = transform_offset(pin.at, inst_angle, mirror);
+    snap_point([inst_at[0] + off[0], inst_at[1] + off[1]])
 }
 
 /// Whether point `p` lies on the axis-aligned segment `a`–`b` (endpoints

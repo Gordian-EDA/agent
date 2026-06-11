@@ -8,6 +8,7 @@
 //!   `Design` yields byte-identical output (spec §5.1).
 //! - [`grid`] — snapping coordinates onto KiCAD's 1.27 mm schematic grid.
 
+pub mod cluster_geom;
 pub mod emit;
 pub mod grammar;
 pub mod grid;
