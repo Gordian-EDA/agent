@@ -452,9 +452,15 @@ pub fn emit_design_reconciled(
         }
     }
 
-    // Compute readability findings on the pre-finish vecs (their order is the
-    // deterministic emission order from reconcile); `layout_warnings` borrows
-    // `&self`, so call it before the `finish(self)` move.
+    // Lint the POST-retraction geometry. `finish` retracts colliding signal
+    // stubs (moving a label off its stub end back onto the pin endpoint, dir
+    // East, stub cleared) before rendering, so linting `w` as-is would bbox
+    // labels at positions/orientations that never get emitted — yielding false
+    // positives (overlaps retraction removes) and false negatives (a retracted
+    // label now on its pin may overlap its own body, unseen). Run the retraction
+    // pass first so the lint sees exactly what `finish` will emit. The pass is
+    // idempotent, so `finish`'s own call below is a harmless no-op.
+    w.retract_colliding_stubs();
     let layout_warnings = w.layout_warnings();
     Ok(EmitOutput {
         sch: w.finish(),

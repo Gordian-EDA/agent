@@ -610,6 +610,15 @@ impl SchematicWriter {
     /// auto-placed sheet. Rather than chase each flavour, we resolve it with one
     /// occupancy model.
     ///
+    /// ## Idempotence
+    ///
+    /// The pass only processes labels with `stub.is_some()` and clears `stub` to
+    /// `None` on any that retract; a *surviving* stub keeps its `Some(..)` but its
+    /// emitted wire is `add_wire`-deduped and its endpoint/segment already occupy
+    /// the foreign sets, so re-running collides with nothing new. A second call is
+    /// therefore a no-op. This lets a caller run it early (e.g. to lint the
+    /// post-retraction geometry) and have `finish` run it again harmlessly.
+    ///
     /// **Foreign geometry** at pass start = every *fixed* connection point (power
     /// symbol pins — origin, net = the Value; no-connect markers — a reserved
     /// sentinel net; legacy labels; and every signal stub's own pin endpoint,
@@ -625,7 +634,7 @@ impl SchematicWriter {
     /// and segment as occupancy so a later differing-net stub cannot then collide
     /// with it. The pin-endpoint fallback reproduces the proven pre-stub
     /// connectivity, so retraction only ever removes an accidental merge.
-    fn retract_colliding_stubs(&mut self) {
+    pub(crate) fn retract_colliding_stubs(&mut self) {
         // Sentinel "net" for no-connect anchors: a stub on a no-connect pin is
         // still a wrong attachment, so treat it as a foreign net.
         const NC: &str = "\0no_connect";
@@ -1067,7 +1076,14 @@ impl SchematicWriter {
     /// The output is sorted, so the same placement always yields the same
     /// warning list regardless of the underlying Vec order.
     pub fn layout_warnings(&self) -> Vec<String> {
-        let mut items: Vec<(String, BBox)> = Vec::new();
+        // Each item carries its owning refdes so a label is never flagged against
+        // the symbol body it belongs to (its stub emerges from that body, and
+        // post-retraction it sits right on that symbol's pin — both legitimate).
+        // Symbol items own themselves; label items own the refdes parsed from the
+        // `"<refdes>:<pin>:<net>:<idx>"` uuid_key (substring before the first ':').
+        // A power-flag/legacy label without a real refdes prefix simply won't
+        // match any symbol's refdes, which is harmless.
+        let mut items: Vec<(String, BBox, String)> = Vec::new();
         for inst in &self.instances {
             if inst.refdes.starts_with('#') {
                 continue;
@@ -1081,6 +1097,7 @@ impl SchematicWriter {
                     inst.at[0] + h[0],
                     inst.at[1] + h[1],
                 ],
+                inst.refdes.clone(),
             ));
         }
         for label in &self.labels {
@@ -1091,11 +1108,24 @@ impl SchematicWriter {
                 Dir::North => [label.at[0] - 1.6, label.at[1] - len, label.at[0], label.at[1]],
                 Dir::South => [label.at[0], label.at[1], label.at[0] + 1.6, label.at[1] + len],
             };
-            items.push((format!("label \"{}\" at {:?}", label.net, label.at), b));
+            let owner = label
+                .uuid_key
+                .split(':')
+                .next()
+                .unwrap_or("")
+                .to_string();
+            items.push((format!("label \"{}\" at {:?}", label.net, label.at), b, owner));
         }
         let mut warnings = Vec::new();
         for i in 0..items.len() {
             for j in (i + 1)..items.len() {
+                // Exempt a label from its OWN symbol's body: skip the pair when one
+                // item's owning refdes equals the other's. Distinct refdes (e.g.
+                // R1's label over R2) and label-vs-label / symbol-vs-symbol are
+                // unaffected (their owners differ).
+                if items[i].2 == items[j].2 {
+                    continue;
+                }
                 if boxes_overlap(&items[i].1, &items[j].1) {
                     warnings.push(format!("{} overlaps {}", items[i].0, items[j].0));
                 }
