@@ -5,7 +5,7 @@
 //! and clusters (Tasks 2-3). Pure analysis — no KiCAD, no I/O, no geometry.
 //! Consumed by `cluster_geom` (local geometry) and `place` (macro placement).
 
-use circuit_lang::model::{Component, NetName, PinTarget, RefDes};
+use circuit_lang::model::{Block, Component, NetName, PinTarget, RefDes};
 use circuit_lang::{Design, SymbolProvider};
 use indexmap::IndexMap;
 
@@ -114,10 +114,136 @@ pub fn net_uses(
     uses
 }
 
+use std::collections::BTreeSet;
+
+/// One chain element oriented along its chain: `a` is toward the chain start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    pub refdes: RefDes,
+    pub a_pin: String,
+    pub a_net: NetName,
+    pub b_pin: String,
+    pub b_net: NetName,
+}
+
+impl Link {
+    /// Build a link for `refdes` entered from `from_net` (which becomes `a`).
+    fn of(block: &Block, refdes: &str, from_net: &str) -> Link {
+        let comp = &block.components[refdes];
+        let mut nets = comp.pins.iter().filter_map(|(p, t)| match t {
+            PinTarget::Net(n) => Some((p.clone(), n.clone())),
+            PinTarget::NoConnect => None,
+        });
+        let (p1, n1) = nets.next().expect("chain element has two net pins");
+        let (p2, n2) = nets.next().expect("chain element has two net pins");
+        if n1 == from_net {
+            Link { refdes: refdes.into(), a_pin: p1, a_net: n1, b_pin: p2, b_net: n2 }
+        } else {
+            Link { refdes: refdes.into(), a_pin: p2, a_net: n2, b_pin: p1, b_net: n1 }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn reversed(&self) -> Link {
+        Link {
+            refdes: self.refdes.clone(),
+            a_pin: self.b_pin.clone(),
+            a_net: self.b_net.clone(),
+            b_pin: self.a_pin.clone(),
+            b_net: self.a_net.clone(),
+        }
+    }
+}
+
+/// A net continues a chain iff it joins exactly two chain-element pins and is
+/// neither a rail nor used outside the block. Anchor pins tap such nets
+/// without breaking the walk.
+fn through(uses: &IndexMap<NetName, NetUse>, net: &str) -> bool {
+    uses.get(net)
+        .is_some_and(|u| !u.power && !u.external && u.chain_pins.len() == 2)
+}
+
+/// Walk one maximal chain starting from `start_refdes` entered via `start_net`.
+fn walk(
+    block: &Block,
+    uses: &IndexMap<NetName, NetUse>,
+    start_refdes: &str,
+    start_net: &str,
+    visited: &mut BTreeSet<RefDes>,
+) -> Vec<Link> {
+    let mut links = vec![Link::of(block, start_refdes, start_net)];
+    visited.insert(start_refdes.to_string());
+    loop {
+        let tail = links.last().unwrap().b_net.clone();
+        if !through(uses, &tail) {
+            break;
+        }
+        let next = uses[&tail]
+            .chain_pins
+            .iter()
+            .map(|(r, _)| r)
+            .find(|r| !visited.contains(*r))
+            .cloned();
+        let Some(next) = next else { break };
+        visited.insert(next.clone());
+        links.push(Link::of(block, &next, &tail));
+    }
+    links
+}
+
+/// Maximal element paths plus degradation notes (cycle breaks).
+///
+/// Deterministic: starts are scanned in net-name natural order (non-through
+/// nets only), then chain-pin natural order. Elements left unvisited can only
+/// belong to pure cycles; each cycle is broken at its naturally-smallest
+/// refdes and reported.
+pub fn raw_chains(
+    block: &Block,
+    uses: &IndexMap<NetName, NetUse>,
+    elements: &BTreeSet<RefDes>,
+) -> (Vec<Vec<Link>>, Vec<String>) {
+    let mut visited: BTreeSet<RefDes> = BTreeSet::new();
+    let mut chains = Vec::new();
+    let mut notes = Vec::new();
+
+    for (net, u) in uses {
+        if through(uses, net) {
+            continue;
+        }
+        for (refdes, _) in &u.chain_pins {
+            if !visited.contains(refdes) {
+                chains.push(walk(block, uses, refdes, net, &mut visited));
+            }
+        }
+    }
+
+    let mut leftover: Vec<&RefDes> = elements.iter().filter(|r| !visited.contains(*r)).collect();
+    natural_sort_by_key(&mut leftover, |r| (*r).clone());
+    for refdes in leftover {
+        if visited.contains(refdes) {
+            continue;
+        }
+        let comp = &block.components[refdes.as_str()];
+        let start_net = all_pins(comp)
+            .find_map(|(_, t)| match t {
+                PinTarget::Net(n) => Some(n.clone()),
+                PinTarget::NoConnect => None,
+            })
+            .expect("chain element has nets");
+        notes.push(format!(
+            "cycle through {refdes} broken at net {start_net} (feedback loops degrade to labels)"
+        ));
+        chains.push(walk(block, uses, refdes, &start_net, &mut visited));
+    }
+
+    (chains, notes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use circuit_lang::{MockSymbolProvider, PinType};
+    use std::collections::BTreeSet;
 
     pub(super) fn provider() -> MockSymbolProvider {
         let mut p = MockSymbolProvider::with_basics();
@@ -251,5 +377,90 @@ blocks:
         c.pins.insert("1".into(), PinTarget::Net("A".into()));
         c.pins.insert("2".into(), PinTarget::Net("B".into()));
         assert_eq!(role_of(&c, &provider()), Role::ChainElement);
+    }
+
+    /// Helper: walk raw chains for a one-block design.
+    fn raw(src: &str) -> (Vec<Vec<Link>>, Vec<String>) {
+        let d = compile(src);
+        let p = provider();
+        let name = d.blocks.keys().next().unwrap().clone();
+        let uses = net_uses(&d, &name, &p);
+        let elements: BTreeSet<RefDes> = d.blocks[&name]
+            .components
+            .iter()
+            .filter(|(_, c)| role_of(c, &p) == Role::ChainElement)
+            .map(|(r, _)| r.clone())
+            .collect();
+        raw_chains(&d.blocks[&name], &uses, &elements)
+    }
+
+    #[test]
+    fn divider_node_breaks_chains_into_three() {
+        // OUT joins three chain pins -> not a through-net -> three 1-link chains.
+        let (chains, notes) = raw(
+            "
+version: 1
+name: t
+rails: [VCC, GND]
+blocks:
+  a:
+    components:
+      R7: {part: Device:R, value: 649k, between: [VCC, OUT]}
+      R8: {part: Device:R, value: 200k, between: [OUT, GND]}
+      C3: {part: Device:C, value: 47n, between: [OUT, GND]}
+",
+        );
+        assert!(notes.is_empty());
+        assert_eq!(chains.len(), 3);
+        assert!(chains.iter().all(|c| c.len() == 1));
+    }
+
+    #[test]
+    fn series_elements_chain_through_degree_two_nets_with_anchor_taps() {
+        // 555-style: R1 -(N_DIS)- R2 -(N_THR)- C1, with U1 pins tapping both
+        // internal nets. Anchor taps must NOT break the walk.
+        let (chains, notes) = raw(
+            "
+version: 1
+name: t
+rails: [9V, GND]
+blocks:
+  a:
+    components:
+      R1: {part: Device:R, value: 4k7, between: [9V, N_DIS]}
+      R2: {part: Device:R, value: 10k, between: [N_DIS, N_THR]}
+      C1: {part: Device:C, value: 100u, between: [N_THR, GND]}
+      U1:
+        part: Mock:REG
+        pins: {VI: N_DIS, GND: N_THR, VO: Q, EN: 9V}
+",
+        );
+        assert!(notes.is_empty());
+        assert_eq!(chains.len(), 1, "{chains:?}");
+        let refs: Vec<&str> = chains[0].iter().map(|l| l.refdes.as_str()).collect();
+        assert_eq!(refs, ["R1", "R2", "C1"]);
+        assert_eq!(chains[0][0].a_net, "9V");
+        assert_eq!(chains[0][2].b_net, "GND");
+    }
+
+    #[test]
+    fn pure_cycle_breaks_deterministically() {
+        let (chains, notes) = raw(
+            "
+version: 1
+name: t
+rails: []
+blocks:
+  a:
+    components:
+      R1: {part: Device:R, value: 1k, between: [N1, N2]}
+      R2: {part: Device:R, value: 1k, between: [N2, N3]}
+      R3: {part: Device:R, value: 1k, between: [N3, N1]}
+",
+        );
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0].len(), 3);
+        assert_eq!(chains[0][0].refdes, "R1");
+        assert_eq!(notes.len(), 1, "cycle break must be reported: {notes:?}");
     }
 }
