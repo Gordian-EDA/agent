@@ -1,7 +1,12 @@
 # Schematic Readability: From ERC-Clean to Near-Human Professional
 
 **Date:** 2026-06-10
-**Status:** Approved design, pending implementation plan
+**Status:** PARTIALLY SUPERSEDED — Phases 1–2 (and the draft workspace) are
+implemented as designed (see `2026-06-10-schematic-readability-slice1.md`).
+**Phases 3–4 below are obsolete**: the idiom-library approach was replaced by a
+structural layout grammar. See `2026-06-10-layout-grammar-design.md` for the
+current design of everything past Phase 2 (it also carries the vision loop
+forward). The Phase 3–4 sections are kept only as historical context.
 **Quality bar:** Near-human professional (reference: hand-drawn BluePill schematic with
 titled sections, power symbols, idiomatic sub-circuit layouts)
 
@@ -167,7 +172,7 @@ escape hatch: `apply_design {relayout: "all" | ["block", …]}` — also the mig
 for pre-Phase-2 sheets. The apply-gate diff calls out relayouts explicitly ("block
 `mcu`: layout changed, 14 components re-placed") so they are never silent.
 
-## Phase 3 — DSL hints + idiom library
+## Phase 3 — DSL hints + idiom library (OBSOLETE — superseded by `2026-06-10-layout-grammar-design.md`)
 
 Surface syntax:
 
@@ -205,7 +210,7 @@ blocks:
   A4-modeled sheet with the title-block area reserved.
 - All hints feed `ap_layout_rev` and round-trip via `ap_*` properties.
 
-## Phase 4 — Vision critique loop
+## Phase 4 — Vision critique loop (OBSOLETE HERE — carried forward, unchanged in design, into `2026-06-10-layout-grammar-design.md`)
 
 - **Flow:** after an approved apply, the agent calls `render_schematic`, judges the
   image against a layout rubric in the system prompt (no text overlap, power up / GND
