@@ -43,11 +43,12 @@ pub(crate) struct Movable {
     pub candidates: Vec<BBox>,
 }
 
-/// For each movable (in order), the index of the first candidate that collides
-/// with no obstacle (minus own-body exemptions) and no previously chosen box.
-/// Falls back to candidate 0 when none is free (caller's lint then flags it —
-/// visible degradation, per spec).
-pub(crate) fn choose(obstacles: &[Obstacle], movables: &[Movable]) -> Vec<usize> {
+/// For each movable (in order), `(index, fits)`: the first candidate that
+/// collides with no obstacle (minus own-body exemptions) and no previously
+/// chosen box. Falls back to `(0, false)` when none is free — the caller
+/// decides the degradation (lint-flagged for fields/labels, hidden for
+/// optional text like repeated power-rail names).
+pub(crate) fn choose(obstacles: &[Obstacle], movables: &[Movable]) -> Vec<(usize, bool)> {
     let mut placed: Vec<BBox> = Vec::new();
     let mut out = Vec::with_capacity(movables.len());
     for m in movables {
@@ -57,9 +58,10 @@ pub(crate) fn choose(obstacles: &[Obstacle], movables: &[Movable]) -> Vec<usize>
                 _ => !boxes_overlap(b, &o.bbox),
             }) && placed.iter().all(|p| !boxes_overlap(b, p))
         };
-        let idx = m.candidates.iter().position(|c| free(c)).unwrap_or(0);
+        let pick = m.candidates.iter().position(|c| free(c));
+        let idx = pick.unwrap_or(0);
         placed.push(m.candidates[idx]);
-        out.push(idx);
+        out.push((idx, pick.is_some()));
     }
     out
 }
@@ -172,7 +174,7 @@ mod tests {
             owner: None,
             candidates: vec![[5.0, 5.0, 8.0, 8.0], [12.0, 0.0, 15.0, 3.0]],
         };
-        assert_eq!(choose(&obstacles, &[m]), vec![1]);
+        assert_eq!(choose(&obstacles, &[m]), vec![(1, true)]);
     }
 
     #[test]
@@ -182,7 +184,7 @@ mod tests {
             owner: None,
             candidates: vec![[1.0, 1.0, 2.0, 2.0], [3.0, 3.0, 4.0, 4.0]],
         };
-        assert_eq!(choose(&obstacles, &[m]), vec![0]);
+        assert_eq!(choose(&obstacles, &[m]), vec![(0, false)]);
     }
 
     #[test]
@@ -198,13 +200,13 @@ mod tests {
             owner: Some("R1".into()),
             candidates: vec![[1.0, 1.0, 3.0, 3.0], [5.0, 5.0, 9.0, 9.0]],
         };
-        assert_eq!(choose(&obstacles, &[m]), vec![1]);
-        // A different owner gets no exemption anywhere -> all collide -> 0.
+        assert_eq!(choose(&obstacles, &[m]), vec![(1, true)]);
+        // A different owner gets no exemption anywhere -> all collide -> fallback.
         let m2 = Movable {
             owner: Some("R2".into()),
             candidates: vec![[1.0, 1.0, 3.0, 3.0], [5.0, 5.0, 9.0, 9.0]],
         };
-        assert_eq!(choose(&obstacles, &[m2]), vec![0]);
+        assert_eq!(choose(&obstacles, &[m2]), vec![(0, false)]);
     }
 
     #[test]
@@ -214,14 +216,14 @@ mod tests {
             owner: None,
             candidates: vec![[1.0, 1.0, 4.0, 4.0], [10.0, 10.0, 12.0, 12.0]],
         };
-        assert_eq!(choose(&[], &[a, b]), vec![0, 1]);
+        assert_eq!(choose(&[], &[a, b]), vec![(0, true), (1, true)]);
     }
 
     #[test]
     fn edge_touching_is_not_collision() {
         let obstacles = vec![hard([0.0, 0.0, 10.0, 10.0])];
         let m = Movable { owner: None, candidates: vec![[10.0, 0.0, 14.0, 4.0]] };
-        assert_eq!(choose(&obstacles, &[m]), vec![0]);
+        assert_eq!(choose(&obstacles, &[m]), vec![(0, true)]);
     }
 
     fn bbox_close(got: BBox, want: BBox) {

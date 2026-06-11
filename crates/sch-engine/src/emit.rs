@@ -92,6 +92,12 @@ struct Instance {
     /// and as the fallback when the solver has not run).
     ref_pos: Option<TextPos>,
     val_pos: Option<TextPos>,
+    /// Solver-hidden Value: set when no collision-free spot exists for an
+    /// OPTIONAL text (a power symbol's rail name next to siblings of the same
+    /// rail — the first sibling shows the name, the rest hide). Connectivity
+    /// is unaffected: KiCAD reads a power port's net from the Value field
+    /// whether or not it is displayed.
+    val_hidden: bool,
 }
 
 /// One net-name label emitted at a pin's sheet-space connection endpoint.
@@ -307,6 +313,7 @@ impl SchematicWriter {
             half_extents,
             ref_pos: None,
             val_pos: None,
+            val_hidden: false,
         });
         Ok(())
     }
@@ -997,7 +1004,7 @@ impl SchematicWriter {
 
         // ---- Solve and apply ----
         let picks = choose(&obstacles, &movables);
-        for (apply, pick) in applies.into_iter().zip(picks) {
+        for (apply, (pick, fits)) in applies.into_iter().zip(picks) {
             match apply {
                 Apply::StubLabel(i) => {
                     if pick == 1 {
@@ -1019,7 +1026,12 @@ impl SchematicWriter {
                     self.instances[i].val_pos = Some(v);
                 }
                 Apply::PowerVal(i, cands) => {
+                    // A rail name with no free spot is OPTIONAL text: hide it
+                    // rather than smear it over a sibling. Greedy order means
+                    // the first symbol of a tight same-rail run shows the
+                    // name and the rest hide — the conventional tidy look.
                     self.instances[i].val_pos = Some(cands[pick]);
+                    self.instances[i].val_hidden = !fits;
                 }
             }
         }
@@ -1377,14 +1389,9 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
         .unwrap_or_else(|| stable_uuid("symbol", &inst.refdes));
     // Field anchors: solver-assigned when present, else the legacy fixed
     // right-of-body offset (text clear of the glyph via the half-extent).
-    let (ref_at, ref_j) = match inst.ref_pos {
-        Some(p) => (p.at, p.justify),
-        None => ([x + inst.half_extents[0] + 1.27, y - 1.27], Justify::Left),
-    };
-    let (val_at, val_j) = match inst.val_pos {
-        Some(p) => (p.at, p.justify),
-        None => ([x + inst.half_extents[0] + 1.27, y + 1.27], Justify::Left),
-    };
+    let (rp, vp) = field_anchors(inst);
+    let (ref_at, ref_j) = (rp.at, rp.justify);
+    let (val_at, val_j) = (vp.at, vp.justify);
     let (ref_x, ref_y) = (fmt_coord(ref_at[0]), fmt_coord(ref_at[1]));
     let (val_x, val_y) = (fmt_coord(val_at[0]), fmt_coord(val_at[1]));
 
@@ -1394,8 +1401,8 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     let hide_ref = inst.refdes.starts_with('#');
     // Hide the Value of PWR_FLAG symbols (keyed on lib_id) — the graphic makes
     // the flag self-evident and the "PWR_FLAG" string would clutter power rail
-    // junctions.
-    let hide_val = inst.lib_id == "power:PWR_FLAG";
+    // junctions. Also hide solver-suppressed values (`val_hidden`).
+    let hide_val = inst.lib_id == "power:PWR_FLAG" || inst.val_hidden;
 
     let mut s = String::new();
     s.push_str("\t(symbol\n");
@@ -1468,6 +1475,31 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     s
 }
 
+/// Resolved Reference/Value anchors for an instance: the solver's assignment
+/// when present, else the legacy fixed right-of-body offsets. The single
+/// source of truth shared by `render_instance` and the overlap lint, so the
+/// lint always boxes exactly what gets emitted.
+fn field_anchors(inst: &Instance) -> (TextPos, TextPos) {
+    let legacy = |dy: f64| TextPos {
+        at: [inst.at[0] + inst.half_extents[0] + 1.27, inst.at[1] + dy],
+        justify: Justify::Left,
+    };
+    (
+        inst.ref_pos.unwrap_or_else(|| legacy(-1.27)),
+        inst.val_pos.unwrap_or_else(|| legacy(1.27)),
+    )
+}
+
+/// Bbox of a rendered field text line: bottom-anchored, 1.6 mm tall, width
+/// per `textplace::text_width`, extending per its justification.
+fn field_box(at: [f64; 2], j: Justify, width: f64) -> BBox {
+    match j {
+        Justify::Left => [at[0], at[1] - 1.6, at[0] + width, at[1]],
+        Justify::Right => [at[0] - width, at[1] - 1.6, at[0], at[1]],
+        Justify::Center => [at[0] - width / 2.0, at[1] - 1.6, at[0] + width / 2.0, at[1]],
+    }
+}
+
 /// Justify token for a solved field anchor. `Center` omits the token (KiCAD's
 /// default field justification is centered).
 fn justify_token(j: Justify) -> &'static str {
@@ -1515,19 +1547,46 @@ impl SchematicWriter {
         &self,
         ignore_pairs: &std::collections::BTreeSet<(String, String)>,
     ) -> Vec<String> {
-        // Each item carries its owning refdes so a label is never flagged against
-        // the symbol body it belongs to (its stub emerges from that body, and
-        // post-retraction it sits right on that symbol's pin — both legitimate).
-        // Symbol items own themselves; label items own the refdes parsed from the
-        // `"<refdes>:<pin>:<net>:<idx>"` uuid_key (substring before the first ':').
-        // A power-flag/legacy label without a real refdes prefix simply won't
-        // match any symbol's refdes, which is harmless.
-        let mut items: Vec<(String, BBox, String)> = Vec::new();
+        use crate::textplace::{label_box, pin_text_boxes, rotated_half_extents, text_width};
+
+        /// What an item is, for exemption decisions.
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Kind {
+            Body,
+            PinText,
+            Text,
+        }
+        // Each item carries its owning refdes so intra-symbol pairs can be
+        // exempted where legitimate:
+        //   - anything vs its OWN body (a label on its own pin endpoint sits
+        //     inside the body's generous bbox; fields hug the body edge);
+        //   - own pin text vs own pin text (intra-symbol layout is the
+        //     library's business, not ours).
+        // Same-owner text-vs-pin-text is NOT exempt — a net label over its own
+        // symbol's pin names is exactly the artifact class this lint exists
+        // to catch. Label items own the refdes parsed from the
+        // `"<refdes>:<pin>:<net>:<idx>"` uuid_key (substring before the first
+        // ':'); a power-flag/cluster label without a real refdes prefix simply
+        // won't match any symbol's refdes, which is harmless.
+        let mut items: Vec<(String, BBox, String, Kind)> = Vec::new();
         for inst in &self.instances {
             if inst.refdes.starts_with('#') {
+                // Power/flag graphics are exempt as bodies (they legitimately
+                // touch the pins they serve), but their visible Value text
+                // (the rail name) must not collide with anything: adjacent
+                // rails merging their names is a real artifact class.
+                if inst.lib_id != "power:PWR_FLAG" && !inst.val_hidden {
+                    let (_, vp) = field_anchors(inst);
+                    items.push((
+                        format!("value \"{}\" of {}", inst.value, inst.refdes),
+                        field_box(vp.at, vp.justify, text_width(&inst.value)),
+                        inst.refdes.clone(),
+                        Kind::Text,
+                    ));
+                }
                 continue;
             }
-            let h = inst.half_extents;
+            let h = rotated_half_extents(inst.half_extents, inst.angle);
             items.push((
                 format!("symbol {}", inst.refdes),
                 [
@@ -1537,45 +1596,69 @@ impl SchematicWriter {
                     inst.at[1] + h[1],
                 ],
                 inst.refdes.clone(),
+                Kind::Body,
+            ));
+            if let Some(pins) = self.sym_pins.get(&inst.lib_id) {
+                for pg in pins {
+                    for b in pin_text_boxes(pg, inst.at, inst.angle, inst.mirror) {
+                        items.push((
+                            format!("pin text of {}", inst.refdes),
+                            b,
+                            inst.refdes.clone(),
+                            Kind::PinText,
+                        ));
+                    }
+                }
+            }
+            let (rp, vp) = field_anchors(inst);
+            items.push((
+                format!("field \"{}\"", inst.refdes),
+                field_box(rp.at, rp.justify, text_width(&inst.refdes)),
+                inst.refdes.clone(),
+                Kind::Text,
+            ));
+            items.push((
+                format!("value \"{}\" of {}", inst.value, inst.refdes),
+                field_box(vp.at, vp.justify, text_width(&inst.value)),
+                inst.refdes.clone(),
+                Kind::Text,
             ));
         }
         for label in &self.labels {
-            let len = label.net.chars().count() as f64 * 1.1;
-            let b = match label.dir {
-                Dir::East => [label.at[0], label.at[1] - 1.6, label.at[0] + len, label.at[1]],
-                Dir::West => [label.at[0] - len, label.at[1] - 1.6, label.at[0], label.at[1]],
-                Dir::North => [label.at[0] - 1.6, label.at[1] - len, label.at[0], label.at[1]],
-                Dir::South => [label.at[0], label.at[1], label.at[0] + 1.6, label.at[1] + len],
-            };
+            let b = label_box(label.at, label.dir, text_width(&label.net));
             let owner = label
                 .uuid_key
                 .split(':')
                 .next()
                 .unwrap_or("")
                 .to_string();
-            items.push((format!("label \"{}\" at {:?}", label.net, label.at), b, owner));
+            items.push((
+                format!("label \"{}\" at {:?}", label.net, label.at),
+                b,
+                owner,
+                Kind::Text,
+            ));
         }
         let mut warnings = Vec::new();
         for i in 0..items.len() {
             for j in (i + 1)..items.len() {
-                // Exempt a label from its OWN symbol's body: skip the pair when one
-                // item's owning refdes equals the other's. Distinct refdes (e.g.
-                // R1's label over R2) and label-vs-label / symbol-vs-symbol are
-                // unaffected (their owners differ).
-                if items[i].2 == items[j].2 {
+                let same_owner = items[i].2 == items[j].2;
+                let either_body = items[i].3 == Kind::Body || items[j].3 == Kind::Body;
+                let both_pin_text =
+                    items[i].3 == Kind::PinText && items[j].3 == Kind::PinText;
+                // Exempt own-body pairs and intra-symbol pin-text pairs.
+                if same_owner && (either_body || both_pin_text) {
                     continue;
                 }
-                // Skip an intentional same-bank adjacency: both items must be the
-                // SYMBOL bodies (labels share the bus, not a refdes pair) and the
-                // sorted refdes pair must be in the allowlist.
-                let both_symbols = items[i].0.starts_with("symbol ")
-                    && items[j].0.starts_with("symbol ");
-                if both_symbols {
-                    let (a, b) = (items[i].2.clone(), items[j].2.clone());
-                    let pair = if a <= b { (a, b) } else { (b, a) };
-                    if ignore_pairs.contains(&pair) {
-                        continue;
-                    }
+                // Skip an intentional same-bank adjacency for EVERY item kind:
+                // bank members are packed at BANK_PITCH on purpose, so their
+                // bodies, pin text, and fields all interleave by design. The
+                // allowlist is structured (sorted refdes pairs), so only those
+                // specific adjacencies are exempted.
+                let (a, b) = (items[i].2.clone(), items[j].2.clone());
+                let pair = if a <= b { (a, b) } else { (b, a) };
+                if ignore_pairs.contains(&pair) {
+                    continue;
                 }
                 if boxes_overlap(&items[i].1, &items[j].1) {
                     warnings.push(format!("{} overlaps {}", items[i].0, items[j].0));
@@ -1779,6 +1862,40 @@ mod tests {
         let d2 = w.pin_dirs(&env, "R2", "1").unwrap();
         // At instance angle 90 the same pin rotates to point West.
         assert_eq!(d2[0].1, Dir::West, "R2 pin 1 stub should point West");
+    }
+
+    #[test]
+    fn lint_flags_text_on_pin_names() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "Timer:NE555P", "U1", "NE555P", [152.4, 101.6], 0.0).unwrap();
+        // A fixed cluster label parked on a west-side pin endpoint, reading
+        // East: the text runs back across the pin line over the pin name.
+        // (This is the legacy retracted-label shape the solver now avoids —
+        // the lint must SEE it.)
+        let (ep, _dir) = w.pin_dirs(&env, "U1", "2").unwrap()[0];
+        w.add_cluster_label("X", ep, Dir::East);
+        let warnings = w.layout_warnings();
+        assert!(
+            warnings.iter().any(|s| s.contains("pin text") && s.contains("U1")),
+            "expected a pin-text overlap warning, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn lint_uses_rotated_body_extents() {
+        let Some(env) = detect_env() else { return };
+        // Two 90-degree resistors stacked vertically 10.16 apart: with angle-
+        // blind extents (half-height 6.35) their boxes overlap; with rotated
+        // extents (half-height 5.08) they exactly touch -> no overlap.
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [101.6, 101.6], 90.0).unwrap();
+        w.add_symbol(&env, "Device:R", "R2", "2k", [101.6, 111.76], 90.0).unwrap();
+        let warnings = w.layout_warnings();
+        assert!(
+            !warnings.iter().any(|s| s.contains("symbol R1") && s.contains("symbol R2")),
+            "rotated bodies must use rotated extents, got {warnings:?}"
+        );
     }
 
     #[test]
