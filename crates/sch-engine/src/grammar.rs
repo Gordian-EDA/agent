@@ -289,6 +289,10 @@ pub struct Bank {
 pub struct Cluster {
     pub chains: Vec<Chain>,
     pub banks: Vec<Bank>,
+    /// Candidate pin anchors: cluster endpoint nets joining exactly one anchor
+    /// pin in-block and nothing external: (net, anchor refdes, pin). Populated
+    /// by `analyze`; consumed by placement (Task 10).
+    pub anchor_taps: Vec<(NetName, RefDes, String)>,
 }
 
 impl Cluster {
@@ -535,6 +539,26 @@ pub fn analyze(design: &Design, block_name: &str, provider: &dyn SymbolProvider)
         clusters[idx].banks.push(bank);
     }
     clusters.retain(|c| !c.chains.is_empty() || !c.banks.is_empty());
+
+    // Candidate pin anchors per cluster: cluster endpoint nets that join exactly
+    // one in-block anchor pin and are neither power nor external.
+    for cluster in &mut clusters {
+        let mut nets: std::collections::BTreeSet<NetName> = std::collections::BTreeSet::new();
+        for c in &cluster.chains {
+            nets.insert(c.start_net().to_string());
+            nets.insert(c.end_net().to_string());
+        }
+        for b in &cluster.banks {
+            nets.insert(b.a_net.clone());
+        }
+        for net in nets {
+            let Some(u) = uses.get(&net) else { continue };
+            if !u.power && !u.external && u.anchor_pins.len() == 1 {
+                let (r, p) = &u.anchor_pins[0];
+                cluster.anchor_taps.push((net, r.clone(), p.clone()));
+            }
+        }
+    }
 
     degradations
         .iter_mut()
@@ -909,5 +933,33 @@ blocks:
         );
         assert_eq!(g.clusters.len(), 1, "{:?}", g.clusters);
         assert_eq!(g.clusters[0].members(), vec!["R1", "R2", "R3", "R4", "R5"]);
+    }
+
+    #[test]
+    fn anchor_taps_record_single_pin_endpoint_nets() {
+        // R1 (Q<->MID), D1 (MID<->GND) form one ToRail cluster. U1.VO taps Q
+        // (exactly one anchor pin, no external use) -> one anchor_tap on Q.
+        // MID joins two chain pins and no anchor pin -> none. GND is a rail ->
+        // none.
+        let g = analyze_one(
+            "
+version: 1
+name: t
+rails: [VCC, GND]
+blocks:
+  a:
+    components:
+      R1: {part: Device:R, value: 1k, between: [Q, MID]}
+      D1: {part: Device:LED, value: red, between: [MID, GND]}
+      U1:
+        part: Mock:REG
+        pins: {VI: VCC, GND: GND, VO: Q, EN: VCC}
+",
+        );
+        assert_eq!(g.clusters.len(), 1, "{:?}", g.clusters);
+        assert_eq!(
+            g.clusters[0].anchor_taps,
+            vec![("Q".to_string(), "U1".to_string(), "VO".to_string())]
+        );
     }
 }

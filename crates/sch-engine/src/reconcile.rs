@@ -34,6 +34,8 @@ use kicad_bridge::env::KicadEnv;
 use kicad_bridge::provider::RealSymbolProvider;
 use kiutils_kicad::SchematicFile;
 
+use indexmap::IndexMap;
+
 use crate::emit::{Dir, SchematicWriter};
 use crate::grammar::is_ground;
 use crate::grid::snap_point;
@@ -180,6 +182,20 @@ fn resolve_placement(
     // must match to preserve.
     let prior_ok = |p: &PriorPlacement| p.layout_rev.as_deref().is_none_or(|r| r == rev);
     let fresh = || auto.positions.get(refdes).copied().unwrap_or([0.0, 0.0]);
+    // The placer positions cluster members relative to the orientation it chose
+    // for them; emitting them at a different angle would swap their pin ends and
+    // break connectivity. So a fresh placement uses the placer's angle when it
+    // has one. Anchors get angle 0 from the placer, which equals
+    // `initial_angle` for them (they are never RailSpan); RailSpan passives are
+    // always cluster members, so their geometry angle (which the placer records)
+    // supersedes `initial_angle`. Components the placer never positioned (none in
+    // practice — `analyze` classifies all) fall back to `initial_angle`.
+    let fresh_angle = || {
+        auto.angles
+            .get(refdes)
+            .copied()
+            .unwrap_or_else(|| initial_angle(comp))
+    };
 
     match prior_map.get(&identity) {
         // Surviving + still-valid -> prior position/angle/uuid.
@@ -193,7 +209,7 @@ fn resolve_placement(
         // Prior existed but rev changed or relayout forced it -> placer, replaced.
         Some(_) => ResolvedPlacement {
             at: fresh(),
-            angle: initial_angle(comp),
+            angle: fresh_angle(),
             uuid: None,
             replaced: true,
             rev,
@@ -201,7 +217,7 @@ fn resolve_placement(
         // Genuinely new -> placer, not a re-placement.
         None => ResolvedPlacement {
             at: fresh(),
-            angle: initial_angle(comp),
+            angle: fresh_angle(),
             uuid: None,
             replaced: false,
             rev,
@@ -400,7 +416,78 @@ pub fn emit_design_reconciled(
             }
         }
     }
-    let auto = place::place(design, &sizes);
+    // TEMPORARY shim (full cluster-as-unit emission lands in Task 11): build the
+    // grammar graphs + cluster geometry the new `place` signature requires.
+    // Banks/clusters MOVE to their packed positions, but connectivity stays
+    // unchanged: emission re-derives every label/power symbol from the current
+    // `Design` at the component's emitted position+angle. The placer records the
+    // orientation it chose per cluster member; `resolve_placement` emits at that
+    // angle (not `initial_angle`) so a member's pin ends land where the cluster
+    // geometry joined them — otherwise a flipped element would swap its pins and
+    // short two nets.
+    let provider_for_grammar = RealSymbolProvider::new(env.clone());
+    let mut graphs: IndexMap<String, crate::grammar::BlockGraph> = IndexMap::new();
+    for block_name in design.blocks.keys() {
+        graphs.insert(
+            block_name.clone(),
+            crate::grammar::analyze(design, block_name, &provider_for_grammar),
+        );
+    }
+
+    // Real angle-0 sheet-space pin ends per (refdes, pin), so cluster_geom orients
+    // each element by its TRUE pin sides (a fallback `|_,_| None` would guess and
+    // produce geometry inconsistent with the emitted symbol — shorting nets). The
+    // angle-0 sheet end of a local pin `p` is `[p.x, -p.y]` (the inverse of
+    // `transform_offset(.., 0, false)`). Cached per part by lib_id.
+    let mut pin_ends: std::collections::HashMap<String, std::collections::HashMap<(String, String), [f64; 2]>> =
+        std::collections::HashMap::new();
+    let mut refdes_part: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for block in design.blocks.values() {
+        for (refdes, comp) in &block.components {
+            refdes_part.insert(refdes.clone(), comp.part.clone());
+            if pin_ends.contains_key(&comp.part) {
+                continue;
+            }
+            let mut ends = std::collections::HashMap::new();
+            if let Ok(geom) = kicad_bridge::geometry::SymbolGeometry::load(env, &comp.part) {
+                for p in &geom.pins {
+                    let end0 = [p.at[0], -p.at[1]];
+                    ends.insert((p.number.clone(), String::new()), end0);
+                    ends.entry((String::new(), p.name.clone())).or_insert(end0);
+                }
+            }
+            pin_ends.insert(comp.part.clone(), ends);
+        }
+    }
+    let pin_cb = |refdes: &str, pin: &str| -> Option<[f64; 2]> {
+        let part = refdes_part.get(refdes)?;
+        let ends = pin_ends.get(part)?;
+        // Resolve by pin number first, then by pin name.
+        ends.get(&(pin.to_string(), String::new()))
+            .or_else(|| ends.get(&(String::new(), pin.to_string())))
+            .copied()
+    };
+
+    let mut geoms: IndexMap<String, Vec<crate::cluster_geom::ClusterGeom>> = IndexMap::new();
+    for (block_name, g) in &graphs {
+        let block = &design.blocks[block_name];
+        let labeled = std::collections::BTreeSet::new();
+        let gs = g
+            .clusters
+            .iter()
+            .map(|c| {
+                crate::cluster_geom::layout_cluster(
+                    c,
+                    block,
+                    &labeled,
+                    &pin_cb,
+                    &(|r: &str| sizes.get(r).copied().unwrap_or([5.08, 10.16])),
+                )
+            })
+            .collect();
+        geoms.insert(block_name.clone(), gs);
+    }
+    let auto = place::place(design, &sizes, &graphs, &geoms);
     let prior_map = prior.map(parse_prior).unwrap_or_default();
 
     let mut w = SchematicWriter::new();

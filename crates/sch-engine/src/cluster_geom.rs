@@ -154,8 +154,9 @@ pub type SizeFn<'a> = &'a dyn Fn(&str) -> [f64; 2];
 /// is the set of nets that must carry exactly one net label somewhere in this
 /// cluster (anchor-tapped, cross-block, or multi-way nodes), placed at the
 /// net's node/joint point. `sizes(refdes)` returns `[w, h]` body extents for
-/// envelope computation. Clusters with a Series spine are not yet supported
-/// (Task 8 — `lay_spine` panics).
+/// envelope computation. A cluster's longest Series chain becomes its
+/// horizontal spine (`lay_spine`); hangs and banks attach at the spine's node
+/// columns.
 pub fn layout_cluster(
     cluster: &Cluster,
     block: &Block,
