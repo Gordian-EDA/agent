@@ -119,7 +119,15 @@ pub fn net_uses(
         natural_sort_by_key(&mut u.chain_pins, |p| format!("{}\u{0000}{}", p.0, p.1));
         natural_sort_by_key(&mut u.anchor_pins, |p| format!("{}\u{0000}{}", p.0, p.1));
     }
-    uses.sort_keys();
+    uses.sort_by(|k1, _v1, k2, _v2| {
+        if circuit_lang::canon::natural_lt(k1, k2) {
+            std::cmp::Ordering::Less
+        } else if circuit_lang::canon::natural_lt(k2, k1) {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
     uses
 }
 
@@ -211,6 +219,36 @@ blocks:
         assert!(out.external, "OUT is also used in block b");
         assert!(!out.power);
         assert!(uses["GND"].power);
+    }
+
+    #[test]
+    fn net_uses_keys_in_natural_order() {
+        // Lexicographic order: N10 < N2 (because '1' < '2').
+        // Natural order: N2 < N10 (numeric suffix comparison: 2 < 10).
+        // The map's iteration order must be natural, not lexicographic.
+        let d = compile(
+            "
+version: 1
+name: t
+rails: [VCC, GND]
+blocks:
+  a:
+    components:
+      R1: {part: Device:R, value: 1k, between: [N2, N10]}
+      R2: {part: Device:R, value: 1k, between: [N10, GND]}
+",
+        );
+        let uses = net_uses(&d, "a", &provider());
+        let keys: Vec<&str> = uses.keys().map(|k| k.as_str()).collect();
+        // GND is a power rail; N2 and N10 are plain nets.
+        // Regardless of GND's position, N2 must appear before N10.
+        let pos_n2 = keys.iter().position(|&k| k == "N2").expect("N2 present");
+        let pos_n10 = keys.iter().position(|&k| k == "N10").expect("N10 present");
+        assert!(
+            pos_n2 < pos_n10,
+            "expected N2 before N10 in natural order, but got: {:?}",
+            keys
+        );
     }
 
     #[test]
