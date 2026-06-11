@@ -94,6 +94,33 @@ blocks:
 }
 
 #[test]
+fn blocks_get_title_text_and_frame() {
+    let Some(env) = KicadEnv::detect() else {
+        eprintln!("SKIP: no KiCAD environment detected");
+        return;
+    };
+    let design = compile(&env, "
+version: 1
+name: t
+rails: [GND]
+blocks:
+  power_supply:
+    components:
+      R1: {part: Device:R, value: 1k, between: [A, GND]}
+");
+    let text = sch_engine::emit_design(&env, &design).unwrap();
+    assert!(text.contains("(text \"power_supply\""), "block title text");
+    assert!(text.contains("(rectangle"), "block frame");
+
+    // Frames/text are graphic-only: ERC must stay clean and netlist unaffected.
+    let tmp = tempfile::tempdir().unwrap();
+    let sch = tmp.path().join("t.kicad_sch");
+    std::fs::write(&sch, &text).unwrap();
+    let erc = kicad_bridge::cli::KicadCli::new(&env).erc(&sch).unwrap();
+    assert_eq!(erc.error_count(), 0, "{:?}", erc.violations);
+}
+
+#[test]
 fn signal_labels_sit_on_stubs_and_orient_away_from_the_body() {
     let Some(env) = KicadEnv::detect() else {
         eprintln!("SKIP: no KiCAD environment detected");

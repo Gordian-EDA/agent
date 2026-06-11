@@ -68,6 +68,9 @@ struct Instance {
     /// during reconciliation, so diffs stay minimal). `None` falls back to the
     /// content-derived `stable_uuid("symbol", refdes)`.
     uuid: Option<String>,
+    /// Half the symbol body's approximate size `[w/2, h/2]`, used to push the
+    /// Reference/Value field text clear of the body rather than a fixed offset.
+    half_extents: [f64; 2],
 }
 
 /// One net-name label emitted at a pin's sheet-space connection endpoint.
@@ -109,6 +112,23 @@ struct Wire {
     a: [f64; 2],
     b: [f64; 2],
     /// Stable key for the wire uuid (content-derived from the endpoints).
+    uuid_key: String,
+}
+
+/// Free-standing sheet text (block titles / annotations).
+struct SheetText {
+    text: String,
+    at: [f64; 2],
+    /// Font size (mm); titles 2.54, annotations 1.27.
+    size: f64,
+    bold: bool,
+    uuid_key: String,
+}
+
+/// A graphic rectangle (block frame).
+struct SheetRect {
+    start: [f64; 2],
+    end: [f64; 2],
     uuid_key: String,
 }
 
@@ -162,6 +182,14 @@ pub struct SchematicWriter {
     no_connects: Vec<NoConnect>,
     /// Wire segments added via `add_wire`, sorted by `uuid_key` at `finish`.
     wires: Vec<Wire>,
+    /// Free-standing sheet texts (block titles / notes), sorted by `uuid_key`.
+    texts: Vec<SheetText>,
+    /// Graphic rectangles (block frames), sorted by `uuid_key`.
+    rects: Vec<SheetRect>,
+    /// Approximate symbol body size keyed by `lib_id`, populated when a new
+    /// lib_id's geometry is loaded (the dedup branch). Avoids reloading geometry
+    /// per instance just to compute its field-clearance half-extents.
+    sym_sizes: BTreeMap<String, [f64; 2]>,
 }
 
 impl SchematicWriter {
@@ -216,12 +244,19 @@ impl SchematicWriter {
         extra_props: &[(String, String)],
         uuid: Option<String>,
     ) -> io::Result<()> {
-        // Register the lib_symbol body once per lib_id (dedup).
+        // Register the lib_symbol body once per lib_id (dedup). The same branch
+        // caches the symbol's approximate size by lib_id so field placement need
+        // not reload geometry per instance.
         if !self.lib_symbols.contains_key(lib_id) {
             let geom = SymbolGeometry::load(env, lib_id)?;
+            self.sym_sizes.insert(lib_id.to_string(), geom.approx_size());
             self.lib_symbols
                 .insert(lib_id.to_string(), geom.raw_definition);
         }
+
+        // Cached above on the first instance of this lib_id; reused for the rest.
+        let size = self.sym_sizes.get(lib_id).copied().unwrap_or([0.0, 0.0]);
+        let half_extents = [size[0] / 2.0, size[1] / 2.0];
 
         self.instances.push(Instance {
             lib_id: lib_id.to_string(),
@@ -232,6 +267,7 @@ impl SchematicWriter {
             mirror: false,
             extra_props: extra_props.to_vec(),
             uuid,
+            half_extents,
         });
         Ok(())
     }
@@ -368,6 +404,26 @@ impl SchematicWriter {
             return;
         }
         self.wires.push(Wire { a, b, uuid_key });
+    }
+
+    /// Add free-standing text to the sheet.
+    pub fn add_text(&mut self, text: &str, at: [f64; 2], size: f64, bold: bool, key: &str) {
+        self.texts.push(SheetText {
+            text: text.to_string(),
+            at: snap_point(at),
+            size,
+            bold,
+            uuid_key: key.to_string(),
+        });
+    }
+
+    /// Add a graphic rectangle (no fill, dashed) to the sheet.
+    pub fn add_rect(&mut self, start: [f64; 2], end: [f64; 2], key: &str) {
+        self.rects.push(SheetRect {
+            start: snap_point(start),
+            end: snap_point(end),
+            uuid_key: key.to_string(),
+        });
     }
 
     /// Resolve a pin to its endpoint(s) AND outward direction(s) on the sheet.
@@ -708,6 +764,32 @@ impl SchematicWriter {
             );
         }
 
+        // Free-standing graphic decoration (block titles/notes + frames), both
+        // sorted by uuid_key for deterministic order/uuids.
+        let mut texts = self.texts;
+        texts.sort_by(|a, b| a.uuid_key.cmp(&b.uuid_key));
+        let mut rects = self.rects;
+        rects.sort_by(|a, b| a.uuid_key.cmp(&b.uuid_key));
+        for t in &texts {
+            let body = escape_sexpr_string(&t.text);
+            let uuid = stable_uuid("text", &t.uuid_key);
+            let weight = if t.bold { " bold" } else { "" };
+            let _ = writeln!(
+                out,
+                "\t(text \"{body}\"\n\t\t(exclude_from_sim no)\n\t\t(at {} {} 0)\n\t\t(effects (font (size {sz} {sz}){weight}) (justify left bottom))\n\t\t(uuid \"{uuid}\")\n\t)",
+                fmt_coord(t.at[0]), fmt_coord(t.at[1]), sz = t.size,
+            );
+        }
+        for r in &rects {
+            let uuid = stable_uuid("rect", &r.uuid_key);
+            let _ = writeln!(
+                out,
+                "\t(rectangle\n\t\t(start {} {})\n\t\t(end {} {})\n\t\t(stroke (width 0.1524) (type dash))\n\t\t(fill (type none))\n\t\t(uuid \"{uuid}\")\n\t)",
+                fmt_coord(r.start[0]), fmt_coord(r.start[1]),
+                fmt_coord(r.end[0]), fmt_coord(r.end[1]),
+            );
+        }
+
         // Symbol instances, sorted by refdes for deterministic output.
         let mut instances = self.instances;
         instances.sort_by(|a, b| a.refdes.cmp(&b.refdes));
@@ -895,10 +977,11 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
         .uuid
         .clone()
         .unwrap_or_else(|| stable_uuid("symbol", &inst.refdes));
-    // Property text offsets mirror the spike's working layout.
-    let ref_x = fmt_coord(x + 2.54);
+    // Push the Reference/Value field text clear of the symbol body using the
+    // instance's per-symbol half-extent, so the text never overlaps the glyph.
+    let ref_x = fmt_coord(x + inst.half_extents[0] + 1.27);
     let ref_y = fmt_coord(y - 1.27);
-    let val_x = fmt_coord(x + 2.54);
+    let val_x = fmt_coord(x + inst.half_extents[0] + 1.27);
     let val_y = fmt_coord(y + 1.27);
 
     // Hide Reference for power/flag symbols whose refdes is `#`-prefixed

@@ -397,6 +397,52 @@ pub fn emit_design_reconciled(
         }
     }
 
+    // Block frames + titles: drawn around the current positions, regenerated
+    // every emit like all decoration.
+    const FRAME_PAD_MM: f64 = 7.62;
+    for (block_name, block) in &design.blocks {
+        let mut bounds: Option<[f64; 4]> = None; // min_x, min_y, max_x, max_y
+        for (refdes, comp) in &block.components {
+            let identity = Identity::of(refdes, &comp.origin);
+            let Some(at) = prior_map
+                .get(&identity)
+                .map(|p| p.at)
+                .or_else(|| auto.positions.get(refdes).copied())
+            else {
+                continue;
+            };
+            let half = sizes
+                .get(refdes)
+                .map(|s| [s[0] / 2.0, s[1] / 2.0])
+                .unwrap_or([12.7, 12.7]);
+            let b = bounds.get_or_insert([f64::MAX, f64::MAX, f64::MIN, f64::MIN]);
+            b[0] = b[0].min(at[0] - half[0]);
+            b[1] = b[1].min(at[1] - half[1]);
+            b[2] = b[2].max(at[0] + half[0]);
+            b[3] = b[3].max(at[1] + half[1]);
+        }
+        let Some(b) = bounds else { continue };
+        let start = [b[0] - FRAME_PAD_MM, b[1] - FRAME_PAD_MM];
+        let end = [b[2] + FRAME_PAD_MM, b[3] + FRAME_PAD_MM];
+        w.add_rect(start, end, &format!("frame:{block_name}"));
+        w.add_text(
+            block_name,
+            [start[0], start[1] - 1.27],
+            2.54,
+            true,
+            &format!("title:{block_name}"),
+        );
+        if let Some(note) = &block.note {
+            w.add_text(
+                note,
+                [start[0], end[1] + 3.81],
+                1.27,
+                false,
+                &format!("note:{block_name}"),
+            );
+        }
+    }
+
     Ok(w.finish())
 }
 
