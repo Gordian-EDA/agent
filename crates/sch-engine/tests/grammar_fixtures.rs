@@ -130,6 +130,24 @@ fn fixtures_emit_erc_clean_with_truthful_netlists() {
                 }
             }
         }
+        // No SHORTS: distinct authored nets must map to distinct netlist nets.
+        // (The per-pin loop above catches splits; this catches merges, which ERC
+        // does not flag for passive-only signal nets.) Only authored nets that
+        // actually resolved onto a real netlist net (Some(idx)) are considered;
+        // all-NC nets that never landed anywhere are skipped.
+        let mut nl_to_authored: std::collections::HashMap<usize, &str> =
+            std::collections::HashMap::new();
+        for (authored, nl_idx) in &authored_to_nl {
+            let Some(idx) = nl_idx else { continue };
+            if let Some(prev) = nl_to_authored.insert(*idx, authored) {
+                panic!(
+                    "{name}: authored nets {prev:?} and {authored:?} are shorted \
+                     onto one netlist net {:?}",
+                    nl.nets[*idx].name
+                );
+            }
+        }
+
         // Power rails must surface under their authored name in the netlist.
         for (want, nl_idx) in &authored_to_nl {
             if power_rails.contains(want) {
