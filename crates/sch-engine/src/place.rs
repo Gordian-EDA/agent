@@ -13,6 +13,7 @@ use circuit_lang::model::{Block, Edge, Origin, RefDes};
 use indexmap::IndexMap;
 
 use crate::cluster_geom::ClusterGeom;
+use crate::emit::Dir;
 use crate::grammar::BlockGraph;
 use crate::grid::snap_point;
 
@@ -29,6 +30,9 @@ pub struct Layout {
     pub angles: IndexMap<RefDes, f64>,
     /// Absolute sheet origin of each cluster, keyed by [`cluster_key`].
     pub cluster_origins: IndexMap<String, [f64; 2]>,
+    /// Join wires from an anchor pin endpoint to a pin-anchored cluster's tap
+    /// point: (pin_endpoint, tap_point, net). Empty unless anchor slotting fired.
+    pub joins: Vec<([f64; 2], [f64; 2], String)>,
 }
 
 /// Stable cluster identity for layout + reconciliation: block name + index in
@@ -41,6 +45,13 @@ pub fn cluster_key(block: &str, idx: usize) -> String {
 /// [`kicad_bridge::geometry::SymbolGeometry::approx_size`]. A refdes absent from
 /// the map falls back to the legacy fixed [`CELL_MM`] cell.
 pub type SizeMap = IndexMap<RefDes, [f64; 2]>;
+
+/// Anchor pin geometry: (refdes, pin) -> (offset from the symbol origin at
+/// angle 0, outward direction). Caller derives it from `SymbolGeometry`.
+pub type AnchorPinEnds = IndexMap<(RefDes, String), ([f64; 2], Dir)>;
+
+/// Gap between an anchor pin and an anchored cluster's tap, mm.
+const JOIN_MM: f64 = 5.08;
 
 /// Fixed grid-cell pitch for a component with no known size, in mm. Generous —
 /// sheet space is free and a wide pitch keeps symbols, their labels, and
@@ -173,6 +184,35 @@ pub fn place(
     graphs: &IndexMap<String, BlockGraph>,
     geoms: &IndexMap<String, Vec<ClusterGeom>>,
 ) -> Layout {
+    place_with_anchor_pins(design, sizes, graphs, geoms, &AnchorPinEnds::new())
+}
+
+/// Whether two axis-aligned rects `[a_min, a_max]` and `[b_min, b_max]` overlap.
+/// A tiny epsilon keeps edge-touching rects from counting as an overlap.
+fn overlaps_any(o: [f64; 2], env: [f64; 2], rects: &[([f64; 2], [f64; 2])]) -> bool {
+    const EPS: f64 = 1e-6;
+    let a_min = o;
+    let a_max = [o[0] + env[0], o[1] + env[1]];
+    rects.iter().any(|(b_min, b_max)| {
+        a_min[0] + EPS < b_max[0]
+            && b_min[0] + EPS < a_max[0]
+            && a_min[1] + EPS < b_max[1]
+            && b_min[1] + EPS < a_max[1]
+    })
+}
+
+/// Like [`place`], but given anchor pin endpoints, attempts to slot any cluster
+/// with exactly one in-block anchor tap (East/West pin) beside that pin,
+/// recording a join wire. Clusters that can't be slotted keep their packed
+/// position. Production callers use [`place`] (empty `pin_ends`), so layout is
+/// unchanged unless `pin_ends` is supplied.
+pub fn place_with_anchor_pins(
+    design: &Design,
+    sizes: &SizeMap,
+    graphs: &IndexMap<String, BlockGraph>,
+    geoms: &IndexMap<String, Vec<ClusterGeom>>,
+    pin_ends: &AnchorPinEnds,
+) -> Layout {
     // Stable block order: by band rank, then original `Design` order.
     let mut blocks: Vec<(&str, &Block)> =
         design.blocks.iter().map(|(n, b)| (n.as_str(), b)).collect();
@@ -237,6 +277,7 @@ pub fn place(
     let mut positions: IndexMap<RefDes, [f64; 2]> = IndexMap::new();
     let mut angles: IndexMap<RefDes, f64> = IndexMap::new();
     let mut cluster_origins: IndexMap<String, [f64; 2]> = IndexMap::new();
+    let mut joins: Vec<([f64; 2], [f64; 2], String)> = Vec::new();
     // Independent vertical cursor per band so stacked blocks don't collide.
     let mut band_y: IndexMap<u8, f64> = IndexMap::new();
 
@@ -244,6 +285,10 @@ pub fn place(
         let rank = band_rank(block.layout.edge);
         let block_x0 = band_x[&rank];
         let block_y0 = *band_y.entry(rank).or_insert(MARGIN_MM);
+
+        // Each placed unit's rect [min, max] in sheet mm, tagged with the cluster
+        // index it belongs to (None for anchors) — used for anchor-slot overlap.
+        let mut unit_rects: Vec<(Option<usize>, [f64; 2], [f64; 2])> = Vec::new();
 
         for (i, unit) in p.units.iter().enumerate() {
             let uo = p.origins[i];
@@ -254,12 +299,24 @@ pub fn place(
                         block_x0 + uo[0] + ext[0] / 2.0,
                         block_y0 + uo[1] + ext[1] / 2.0,
                     ];
-                    positions.insert(refdes.clone(), snap_point(center));
+                    let pos = snap_point(center);
+                    positions.insert(refdes.clone(), pos);
                     angles.insert(refdes.clone(), 0.0);
+                    unit_rects.push((
+                        None,
+                        [center[0] - ext[0] / 2.0, center[1] - ext[1] / 2.0],
+                        [center[0] + ext[0] / 2.0, center[1] + ext[1] / 2.0],
+                    ));
                 }
                 Unit::Cluster(ci) => {
                     let o = snap_point([block_x0 + uo[0], block_y0 + uo[1]]);
                     cluster_origins.insert(cluster_key(p.block_name, *ci), o);
+                    let env = geoms
+                        .get(p.block_name)
+                        .and_then(|gs| gs.get(*ci))
+                        .map(|g| g.envelope)
+                        .unwrap_or([0.0, 0.0]);
+                    unit_rects.push((Some(*ci), o, [o[0] + env[0], o[1] + env[1]]));
                     if let Some(geom) = geoms.get(p.block_name).and_then(|gs| gs.get(*ci)) {
                         for (refdes, local, angle) in &geom.placements {
                             positions.insert(
@@ -269,6 +326,67 @@ pub fn place(
                             angles.insert(refdes.clone(), *angle);
                         }
                     }
+                }
+            }
+        }
+
+        // Anchor-slot post-pass: now that every unit in this block is placed and
+        // its rect known, try to relocate each single-tap cluster beside its
+        // in-block anchor pin. Clusters processed in index order; first-fit; a
+        // relocated cluster's new rect is visible to later clusters.
+        if let Some(graph) = graphs.get(p.block_name) {
+            for (ci, cluster) in graph.clusters.iter().enumerate() {
+                if cluster.anchor_taps.len() != 1 {
+                    continue;
+                }
+                let (net, aref, apin) = &cluster.anchor_taps[0];
+                let Some(geom) = geoms.get(p.block_name).and_then(|gs| gs.get(ci)) else {
+                    continue;
+                };
+                let Some(&tap_local) = geom.tap_points.get(net) else {
+                    continue;
+                };
+                let Some(&(off, dir)) = pin_ends.get(&(aref.clone(), apin.clone())) else {
+                    continue;
+                };
+                if dir != Dir::East && dir != Dir::West {
+                    continue;
+                }
+                let Some(&anchor_pos) = positions.get(aref) else {
+                    continue;
+                };
+                // Anchors are emitted at angle 0; pin end is anchor origin + off.
+                let pin = [anchor_pos[0] + off[0], anchor_pos[1] + off[1]];
+                let new_o = match dir {
+                    Dir::East => [pin[0] + JOIN_MM, pin[1] - tap_local[1]],
+                    Dir::West => [pin[0] - JOIN_MM - geom.envelope[0], pin[1] - tap_local[1]],
+                    _ => unreachable!(),
+                };
+                // Overlap against every OTHER unit's rect in this block.
+                let others: Vec<([f64; 2], [f64; 2])> = unit_rects
+                    .iter()
+                    .filter(|(tag, _, _)| *tag != Some(ci))
+                    .map(|(_, mn, mx)| (*mn, *mx))
+                    .collect();
+                if overlaps_any(new_o, geom.envelope, &others) {
+                    continue;
+                }
+                // Commit: relocate members + cluster origin, record the join.
+                let new_o = snap_point(new_o);
+                cluster_origins.insert(cluster_key(p.block_name, ci), new_o);
+                for (refdes, local, angle) in &geom.placements {
+                    positions.insert(
+                        refdes.clone(),
+                        snap_point([new_o[0] + local[0], new_o[1] + local[1]]),
+                    );
+                    angles.insert(refdes.clone(), *angle);
+                }
+                let tap_sheet = [new_o[0] + tap_local[0], new_o[1] + tap_local[1]];
+                joins.push((pin, tap_sheet, net.clone()));
+                // Update this cluster's rect so later clusters see the new spot.
+                if let Some(slot) = unit_rects.iter_mut().find(|(tag, _, _)| *tag == Some(ci)) {
+                    slot.1 = new_o;
+                    slot.2 = [new_o[0] + geom.envelope[0], new_o[1] + geom.envelope[1]];
                 }
             }
         }
@@ -296,6 +414,7 @@ pub fn place(
         positions,
         angles,
         cluster_origins,
+        joins,
     }
 }
 
@@ -303,13 +422,12 @@ pub fn place(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cluster_geom::ClusterGeom;
     use crate::grammar::BlockGraph;
     use circuit_lang::PinType;
     use circuit_lang::model::Edge;
 
     /// Provider with the basics plus two many-pin "ICs" used as anchors.
-    fn provider() -> circuit_lang::MockSymbolProvider {
+    fn place_test_provider() -> circuit_lang::MockSymbolProvider {
         let mut p = circuit_lang::MockSymbolProvider::with_basics();
         p.add(
             "Mock:BIG",
@@ -331,8 +449,36 @@ mod tests {
         p
     }
 
+    /// Build per-block cluster geometries from a design + its graphs, using the
+    /// given pin-end function (shared by cluster-placement tests).
+    fn build_test_geoms(
+        design: &Design,
+        graphs: &IndexMap<String, crate::grammar::BlockGraph>,
+        pins: &dyn Fn(&str, &str) -> Option<[f64; 2]>,
+    ) -> IndexMap<String, Vec<crate::cluster_geom::ClusterGeom>> {
+        graphs
+            .iter()
+            .map(|(n, g)| {
+                let gs = g
+                    .clusters
+                    .iter()
+                    .map(|c| {
+                        crate::cluster_geom::layout_cluster(
+                            c,
+                            &design.blocks[n],
+                            &std::collections::BTreeSet::new(),
+                            &pins,
+                            &|_| [5.08, 10.16],
+                        )
+                    })
+                    .collect();
+                (n.clone(), gs)
+            })
+            .collect()
+    }
+
     fn compile(src: &str) -> Design {
-        let result = circuit_lang::compile(src, &provider());
+        let result = circuit_lang::compile(src, &place_test_provider());
         assert!(
             !result.diagnostics.has_errors(),
             "compile errors: {:?}",
@@ -467,7 +613,7 @@ blocks:
       C2: {part: Device:C, value: 100n, between: [3V3, GND]}
 ",
         );
-        let provider = provider();
+        let provider = place_test_provider();
         let graphs: IndexMap<String, BlockGraph> = design
             .blocks
             .keys()
@@ -478,25 +624,7 @@ blocks:
             "2" => Some([0.0, 3.81]),
             _ => None,
         };
-        let geoms: IndexMap<String, Vec<ClusterGeom>> = graphs
-            .iter()
-            .map(|(n, g)| {
-                let gs = g
-                    .clusters
-                    .iter()
-                    .map(|c| {
-                        crate::cluster_geom::layout_cluster(
-                            c,
-                            &design.blocks[n],
-                            &std::collections::BTreeSet::new(),
-                            &mock_pins,
-                            &|_| [5.08, 10.16],
-                        )
-                    })
-                    .collect();
-                (n.clone(), gs)
-            })
-            .collect();
+        let geoms = build_test_geoms(&design, &graphs, &mock_pins);
 
         let layout = place(&design, &SizeMap::new(), &graphs, &geoms);
         let key = cluster_key("a", 0);
@@ -541,7 +669,7 @@ blocks:
         let graphs: IndexMap<String, BlockGraph> = design
             .blocks
             .keys()
-            .map(|n| (n.clone(), crate::grammar::analyze(&design, n, &provider())))
+            .map(|n| (n.clone(), crate::grammar::analyze(&design, n, &place_test_provider())))
             .collect();
         let layout = place(&design, &sizes, &graphs, &IndexMap::new());
         let (u1, u2) = (layout.positions["U1"], layout.positions["U2"]);
@@ -558,5 +686,49 @@ blocks:
             ax < bx,
             "left-edge block (x={ax}) must be left of right-edge block (x={bx})"
         );
+    }
+
+    #[test]
+    fn single_tap_cluster_slots_beside_its_anchor_pin() {
+        let design = compile(
+            "
+version: 1
+name: t
+rails: [VCC, GND]
+blocks:
+  a:
+    components:
+      R1: {part: Device:R, value: 5k1, between: [CC1, GND]}
+      U1: {part: Mock:BIG, pins: {A: CC1, B: N2, C: N3, D: N4}}
+",
+        );
+        let provider = place_test_provider();
+        let graphs: IndexMap<String, crate::grammar::BlockGraph> = design
+            .blocks
+            .keys()
+            .map(|n| (n.clone(), crate::grammar::analyze(&design, n, &provider)))
+            .collect();
+        assert_eq!(graphs["a"].clusters[0].anchor_taps.len(), 1);
+
+        let mock_pins = |_: &str, pin: &str| match pin {
+            "1" => Some([0.0, -3.81]),
+            "2" => Some([0.0, 3.81]),
+            _ => None,
+        };
+        let geoms = build_test_geoms(&design, &graphs, &mock_pins);
+        // U1's pin A points East from its right side, 10mm from origin.
+        let mut pin_ends = AnchorPinEnds::new();
+        pin_ends.insert(
+            ("U1".to_string(), "A".to_string()),
+            ([10.16, 0.0], crate::emit::Dir::East),
+        );
+
+        let layout = place_with_anchor_pins(&design, &SizeMap::new(), &graphs, &geoms, &pin_ends);
+        let u1 = layout.positions["U1"];
+        let pin = [u1[0] + 10.16, u1[1]];
+        let join = layout.joins.iter().find(|(_, _, n)| n == "CC1").expect("join wire recorded");
+        assert_eq!(join.0, pin, "join starts at the pin endpoint");
+        assert_eq!(join.0[1], join.1[1], "straight horizontal join");
+        assert!(join.1[0] > pin[0], "cluster sits East of the pin");
     }
 }
