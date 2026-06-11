@@ -16,6 +16,7 @@ pub mod ids;
 pub mod lift;
 pub mod place;
 pub mod reconcile;
+mod textplace;
 
 use std::io;
 
