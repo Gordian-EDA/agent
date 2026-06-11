@@ -670,9 +670,10 @@ impl SchematicWriter {
     /// ## Idempotence
     ///
     /// The pass only processes labels with `stub.is_some()` and clears `stub` to
-    /// `None` on any that retract; a *surviving* stub keeps its `Some(..)` but its
-    /// emitted wire is `add_wire`-deduped and its endpoint/segment already occupy
-    /// the foreign sets, so re-running collides with nothing new. A second call is
+    /// `None` on any that retract; a *surviving* stub keeps its `Some(..)`, its
+    /// emitted wire is `add_wire`-deduped, and that wire is registered **on the
+    /// stub's own net**, so a re-run reads it as a deliberate same-net join (not
+    /// a foreign segment) and the survivor survives again. A second call is
     /// therefore a no-op. This lets a caller run it early (e.g. to lint the
     /// post-retraction geometry) and have `finish` run it again harmlessly.
     ///
@@ -786,7 +787,11 @@ impl SchematicWriter {
                 self.labels[i].at = pin_at;
                 self.labels[i].stub = None;
             } else {
-                self.add_wire(pin_at, end);
+                // The stub wire is attributed to its own net: a later pass (or
+                // a re-run of this one) must read it as a deliberate same-net
+                // join, not a foreign PWR-sentinel segment — otherwise the
+                // second call would retract every survivor onto its pin.
+                self.add_wire_on_net(pin_at, end, &net);
                 add_point(end, &net, &mut points);
                 segments.push((pin_at, end, net));
             }
@@ -1774,6 +1779,23 @@ mod tests {
         let d2 = w.pin_dirs(&env, "R2", "1").unwrap();
         // At instance angle 90 the same pin rotates to point West.
         assert_eq!(d2[0].1, Dir::West, "R2 pin 1 stub should point West");
+    }
+
+    #[test]
+    fn solver_is_idempotent_across_finish() {
+        let Some(env) = detect_env() else { return };
+        let build = |presolve: bool| {
+            let mut w = SchematicWriter::new();
+            w.add_symbol(&env, "Device:R", "R1", "1k", [101.6, 101.6], 0.0).unwrap();
+            w.add_symbol(&env, "Device:R", "R2", "2k", [111.76, 101.6], 0.0).unwrap();
+            w.add_signal_label(&env, "R1", "1", "SIG").unwrap();
+            if presolve {
+                w.retract_colliding_stubs();
+                w.solve_text_positions();
+            }
+            w.finish()
+        };
+        assert_eq!(build(false), build(true), "pre-solving must not change output");
     }
 
     #[test]

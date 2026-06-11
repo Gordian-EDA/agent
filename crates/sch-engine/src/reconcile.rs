@@ -1002,9 +1002,11 @@ pub fn emit_design_reconciled(
     // labels at positions/orientations that never get emitted — yielding false
     // positives (overlaps retraction removes) and false negatives (a retracted
     // label now on its pin may overlap its own body, unseen). Run the retraction
-    // pass first so the lint sees exactly what `finish` will emit. The pass is
-    // idempotent, so `finish`'s own call below is a harmless no-op.
+    // pass first, then the text-position solver, so the lint sees exactly what
+    // `finish` will emit. Both passes are idempotent, so `finish`'s own calls
+    // below are harmless no-ops.
     w.retract_colliding_stubs();
+    w.solve_text_positions();
 
     // Bank-aware overlap lint: every PAIR of members within a single bank is an
     // intentional same-bus adjacency (caps packed at BANK_PITCH share a bus, so
