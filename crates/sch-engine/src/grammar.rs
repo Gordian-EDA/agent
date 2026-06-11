@@ -850,12 +850,15 @@ blocks:
 
     #[test]
     fn bridging_chain_merges_two_clusters_into_one() {
-        // Built so two separate node-clusters form first (on nodes NA and NB),
-        // then a chain touching BOTH NA and NB merges them.
-        // RA: NA<->X1 ; RB: NA<->X2  (cluster on NA)
-        // RC: NB<->X3 ; RD: NB<->X4  (cluster on NB)
-        // RBR: NA<->NB                (bridges)
-        // X1..X4 are open (single chain pin each) so they don't extend chains.
+        // Two clusters form early via the open start-nets A0 and A1 (processed
+        // before the node nets M0/M1 in natural order), then R5 (M0<->M1) is
+        // walked during M0's turn when M0 and M1 ALREADY belong to two
+        // different clusters -> exercises assign()'s merge branch.
+        //   R1: A0 <-> M1   (start A0 -> cluster on M1)
+        //   R2: A1 <-> M0   (start A1 -> cluster on M0)
+        //   R3: B0 <-> M0   (filler: pads M0 to degree 3 so it stays non-through)
+        //   R4: B1 <-> M1   (filler: pads M1 to degree 3)
+        //   R5: M0 <-> M1   (bridge -> merges the two clusters)
         let g = analyze_one(
             "
 version: 1
@@ -864,15 +867,14 @@ rails: []
 blocks:
   a:
     components:
-      R1: {part: Device:R, value: 1k, between: [NA, X1]}
-      R2: {part: Device:R, value: 1k, between: [NA, X2]}
-      R3: {part: Device:R, value: 1k, between: [NB, X3]}
-      R4: {part: Device:R, value: 1k, between: [NB, X4]}
-      R5: {part: Device:R, value: 1k, between: [NA, NB]}
+      R1: {part: Device:R, value: 1k, between: [A0, M1]}
+      R2: {part: Device:R, value: 1k, between: [A1, M0]}
+      R3: {part: Device:R, value: 1k, between: [B0, M0]}
+      R4: {part: Device:R, value: 1k, between: [B1, M1]}
+      R5: {part: Device:R, value: 1k, between: [M0, M1]}
 ",
         );
-        // All five resistors must land in ONE cluster after the bridge merge.
         assert_eq!(g.clusters.len(), 1, "{:?}", g.clusters);
-        assert_eq!(g.clusters[0].members(), vec!["R1","R2","R3","R4","R5"]);
+        assert_eq!(g.clusters[0].members(), vec!["R1", "R2", "R3", "R4", "R5"]);
     }
 }
