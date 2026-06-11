@@ -486,3 +486,69 @@ blocks:
     assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
     assert!(png_path.contains(".autopcb/renders/render-001.png"));
 }
+
+#[test]
+fn apply_design_surfaces_layout_warnings_and_relayout_blocks() {
+    let Some(ctx) = agent::tools::ToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD environment detected");
+        return;
+    };
+    let tools = agent::tools::Tools::new();
+    let yaml = "
+version: 1
+name: t
+rails: [GND]
+blocks:
+  a:
+    components:
+      R1: {part: Device:R, value: 1k, between: [N1, GND]}
+";
+    // Commit so a prior schematic exists for the re-apply below.
+    let out = tools.run("apply_design",
+        serde_json::json!({ "yaml": yaml, "commit": true }), &ctx).unwrap();
+    assert_eq!(out["written"], serde_json::json!(true));
+    // Both new EmitOutput fields are present in the result JSON.
+    assert!(out["layout_warnings"].is_array(), "layout_warnings present: {out}");
+    assert!(out["relayout_blocks"].is_object(), "relayout_blocks present: {out}");
+    // A clean single-R layout has no collisions.
+    assert_eq!(out["layout_warnings"].as_array().unwrap().len(), 0);
+
+    // Dry-run path also carries them.
+    let dry = tools.run("apply_design", serde_json::json!({ "yaml": yaml }), &ctx).unwrap();
+    assert!(dry["layout_warnings"].is_array(), "dry-run layout_warnings: {dry}");
+    assert!(dry["relayout_blocks"].is_object(), "dry-run relayout_blocks: {dry}");
+}
+
+#[test]
+fn apply_design_relayout_argument_branches() {
+    let Some(ctx) = agent::tools::ToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD environment detected");
+        return;
+    };
+    let tools = agent::tools::Tools::new();
+    let yaml = "
+version: 1
+name: t
+rails: [GND]
+blocks:
+  a:
+    components:
+      R1: {part: Device:R, value: 1k, between: [N1, GND]}
+";
+    // relayout="all" is accepted (dry-run, no commit needed).
+    let out = tools.run("apply_design",
+        serde_json::json!({ "yaml": yaml, "relayout": "all" }), &ctx).unwrap();
+    assert!(out.get("error").is_none(), "relayout=all should be accepted: {out}");
+    assert!(out["relayout_blocks"].is_object());
+
+    // relayout as a block list is accepted.
+    let out = tools.run("apply_design",
+        serde_json::json!({ "yaml": yaml, "relayout": ["a"] }), &ctx).unwrap();
+    assert!(out.get("error").is_none(), "relayout=[a] should be accepted: {out}");
+
+    // An unrecognized relayout string is rejected with a structured error.
+    let out = tools.run("apply_design",
+        serde_json::json!({ "yaml": yaml, "relayout": "nonsense" }), &ctx).unwrap();
+    let err = out["error"].as_str().expect("error string for bad relayout");
+    assert!(err.contains("relayout"), "error should mention relayout: {err}");
+}
