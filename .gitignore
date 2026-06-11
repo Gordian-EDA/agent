@@ -9,3 +9,5 @@
 
 design.kicad_sch
 *.kicad_sch
+
+docs/validation/*.png

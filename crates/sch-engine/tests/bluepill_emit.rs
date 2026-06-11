@@ -25,12 +25,13 @@ fn bluepill_design_emits_and_ercs_clean() {
         .design
         .expect("compiles");
 
-    let text = emit_design(&env, &design).unwrap().sch;
+    let out = emit_design(&env, &design).unwrap();
+    let text = &out.sch;
     let tmp = tempfile::Builder::new()
         .suffix(".kicad_sch")
         .tempfile()
         .unwrap();
-    std::fs::write(tmp.path(), &text).unwrap();
+    std::fs::write(tmp.path(), text).unwrap();
 
     // KiCAD loads it; the netlist has every component.
     let nl = KicadCli::new(&env).netlist(tmp.path()).unwrap();
@@ -53,6 +54,13 @@ fn bluepill_design_emits_and_ercs_clean() {
             .iter()
             .filter(|v| v.severity == "error")
             .collect::<Vec<_>>()
+    );
+
+    // Phase 2 readability oracle: the deterministic layout lint must be clean.
+    assert!(
+        out.layout_warnings.is_empty(),
+        "layout collisions on bluepill:\n{}",
+        out.layout_warnings.join("\n")
     );
 }
 
