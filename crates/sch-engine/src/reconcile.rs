@@ -1008,26 +1008,40 @@ pub fn emit_design_reconciled(
     w.retract_colliding_stubs();
     w.solve_text_positions();
 
-    // Bank-aware overlap lint: every PAIR of members within a single bank is an
-    // intentional same-bus adjacency (caps packed at BANK_PITCH share a bus, so
-    // they carry no per-cap labels and their bodies don't truly collide even
-    // though the label-padded lint cells do). Build the structured allowlist
-    // (sorted refdes pairs) so only those specific adjacencies are exempted.
-    let mut bank_pairs: std::collections::BTreeSet<(String, String)> =
+    // Adjacency-aware overlap lint: two structured allowlists of intentional
+    // tight pairs (sorted refdes pairs), exempted from overlap warnings.
+    //
+    // - Every PAIR of members within a single bank: caps packed at BANK_PITCH
+    //   share a bus, carry no per-cap labels, and their bodies don't truly
+    //   collide even though the label-padded lint cells do.
+    // - CONSECUTIVE links of a chain: chain members join pin-to-pin, and the
+    //   body bbox model pads ~2.54mm beyond each pin endpoint, so adjacent
+    //   joined members always interpenetrate by the padding. Only consecutive
+    //   links are exempted — a chain folding back onto a distant member still
+    //   warns.
+    let mut adjacency_pairs: std::collections::BTreeSet<(String, String)> =
         std::collections::BTreeSet::new();
+    let allow = |a: &str, b: &str, set: &mut std::collections::BTreeSet<(String, String)>| {
+        let (a, b) = (a.to_string(), b.to_string());
+        set.insert(if a <= b { (a, b) } else { (b, a) });
+    };
     for graph in gi.graphs.values() {
         for cluster in &graph.clusters {
             for bank in &cluster.banks {
                 for i in 0..bank.members.len() {
                     for j in (i + 1)..bank.members.len() {
-                        let (a, b) = (bank.members[i].clone(), bank.members[j].clone());
-                        bank_pairs.insert(if a <= b { (a, b) } else { (b, a) });
+                        allow(&bank.members[i], &bank.members[j], &mut adjacency_pairs);
                     }
+                }
+            }
+            for chain in &cluster.chains {
+                for pair in chain.links.windows(2) {
+                    allow(&pair[0].refdes, &pair[1].refdes, &mut adjacency_pairs);
                 }
             }
         }
     }
-    let mut layout_warnings = w.layout_warnings_excluding(&bank_pairs);
+    let mut layout_warnings = w.layout_warnings_excluding(&adjacency_pairs);
 
     // Surface grammar degradations (cycle-break notes etc.) so downstream sees
     // where the analysis had to give up structure. `analyze` already prefixes

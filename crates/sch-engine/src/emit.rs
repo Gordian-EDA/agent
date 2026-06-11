@@ -988,13 +988,36 @@ impl SchematicWriter {
                 TextPos { at: [r2(cx), r2(maxy + 4.78)], justify: Justify::Center },
                 [cx - wmax / 2.0, maxy + 0.64, cx + wmax / 2.0, maxy + 4.78],
             );
+            // Corner fallbacks for crowded symbols (an IC whose four sides all
+            // carry labels/power): the field pair tucks against a body corner.
+            let above_left = (
+                TextPos { at: [r2(minx), r2(miny - 3.18)], justify: Justify::Left },
+                TextPos { at: [r2(minx), r2(miny - 0.64)], justify: Justify::Left },
+                [minx, miny - 4.78, minx + wmax, miny - 0.64] as BBox,
+            );
+            let above_right = (
+                TextPos { at: [r2(maxx), r2(miny - 3.18)], justify: Justify::Right },
+                TextPos { at: [r2(maxx), r2(miny - 0.64)], justify: Justify::Right },
+                [maxx - wmax, miny - 4.78, maxx, miny - 0.64],
+            );
+            let below_left = (
+                TextPos { at: [r2(minx), r2(maxy + 2.24)], justify: Justify::Left },
+                TextPos { at: [r2(minx), r2(maxy + 4.78)], justify: Justify::Left },
+                [minx, maxy + 0.64, minx + wmax, maxy + 4.78],
+            );
+            let below_right = (
+                TextPos { at: [r2(maxx), r2(maxy + 2.24)], justify: Justify::Right },
+                TextPos { at: [r2(maxx), r2(maxy + 4.78)], justify: Justify::Right },
+                [maxx - wmax, maxy + 0.64, maxx, maxy + 4.78],
+            );
             // Wide bodies (rotated passives) prefer above/below; tall prefer
-            // right/left (the KiCAD convention).
-            let cands = if h[0] > h[1] {
+            // right/left (the KiCAD convention). Corners are fallbacks.
+            let mut cands = if h[0] > h[1] {
                 vec![above, below, right, left]
             } else {
                 vec![right, left, above, below]
             };
+            cands.extend([above_left, above_right, below_left, below_right]);
             movables.push(Movable {
                 owner: Some(inst.refdes.clone()),
                 candidates: cands.iter().map(|c| c.2).collect(),
@@ -1394,6 +1417,17 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     let (val_at, val_j) = (vp.at, vp.justify);
     let (ref_x, ref_y) = (fmt_coord(ref_at[0]), fmt_coord(ref_at[1]));
     let (val_x, val_y) = (fmt_coord(val_at[0]), fmt_coord(val_at[1]));
+    // KiCAD renders a field's text angle RELATIVE to the symbol's rotation,
+    // with an auto-flip that already keeps 180-rotated text readable. So a
+    // 90/270 symbol needs the inverse angle to render horizontal text, while
+    // 0/180 symbols take 0 (compensating 180 with 180 renders upside-down —
+    // verified empirically against kicad-cli 10.0.3). The solver models all
+    // field text as horizontal, so this keeps geometry and render in sync.
+    let field_angle = match inst.angle.rem_euclid(360.0) as i32 {
+        90 => 270,
+        270 => 90,
+        _ => 0,
+    };
 
     // Hide Reference for power/flag symbols whose refdes is `#`-prefixed
     // (KiCAD convention: #PWR…, #FLG…) — they must not appear in the netlist
@@ -1415,7 +1449,7 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     s.push_str("\t\t(dnp no)\n");
     let _ = writeln!(s, "\t\t(uuid \"{sym_uuid}\")");
     let _ = writeln!(s, "\t\t(property \"Reference\" \"{refdes}\"");
-    let _ = writeln!(s, "\t\t\t(at {ref_x} {ref_y} 0)");
+    let _ = writeln!(s, "\t\t\t(at {ref_x} {ref_y} {field_angle})");
     if hide_ref {
         let _ = writeln!(
             s,
@@ -1431,7 +1465,7 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     }
     s.push_str("\t\t)\n");
     let _ = writeln!(s, "\t\t(property \"Value\" \"{value}\"");
-    let _ = writeln!(s, "\t\t\t(at {val_x} {val_y} 0)");
+    let _ = writeln!(s, "\t\t\t(at {val_x} {val_y} {field_angle})");
     if hide_val {
         let _ = writeln!(
             s,
@@ -1883,6 +1917,22 @@ mod tests {
     }
 
     #[test]
+    fn rotated_symbol_fields_render_horizontal() {
+        // KiCAD field angles are relative to the symbol rotation; a 90-degree
+        // symbol must carry 270-degree fields so the text reads horizontal.
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [101.6, 101.6], 90.0).unwrap();
+        let sch = w.finish();
+        let seg = sch.split("(property \"Reference\" \"R1\"").nth(1).unwrap();
+        let at_line = seg.lines().nth(1).unwrap();
+        assert!(
+            at_line.trim_end().ends_with(" 270)"),
+            "90-degree symbol fields must compensate to 270, got {at_line:?}"
+        );
+    }
+
+    #[test]
     fn lint_uses_rotated_body_extents() {
         let Some(env) = detect_env() else { return };
         // Two 90-degree resistors stacked vertically 10.16 apart: with angle-
@@ -1978,5 +2028,24 @@ mod tests {
             !sch.contains("(label \"SIG\"\n\t\t(at 127 59.69"),
             "R1 label must NOT retract to pin endpoint (127, 59.69) — same-net wire should allow the stub to survive:\n{sch}"
         );
+    }
+}
+
+#[cfg(test)]
+mod repro_tests {
+    use super::*;
+    use kicad_bridge::env::KicadEnv;
+
+    #[test]
+    fn u1_fields_dodge_out_label() {
+        let Some(env) = KicadEnv::detect() else { eprintln!("SKIP"); return };
+        let mut w = SchematicWriter::new();
+        w.add_symbol(&env, "Timer:NE555P", "U1", "", [45.72, 45.72], 0.0).unwrap();
+        w.add_signal_label(&env, "U1", "OUT", "N_Q").unwrap();
+        let sch = w.finish();
+        let seg = sch.split("(property \"Reference\" \"U1\"").nth(1).unwrap();
+        let at = seg.lines().nth(1).unwrap();
+        println!("U1 ref at: {at}");
+        assert!(!at.contains("(at 59.69"), "U1 ref must not sit on the N_Q label:\n{at}");
     }
 }
