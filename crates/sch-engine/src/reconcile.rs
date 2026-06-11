@@ -43,11 +43,7 @@ const STUB_MM: f64 = 3.81;
 /// Vertical riser from a horizontal stub to a power symbol, in mm (2 grid units).
 const RISER_MM: f64 = 2.54;
 
-/// Ground-ish rails point down; everything else points up.
-fn is_ground(net: &str) -> bool {
-    let n = net.to_ascii_uppercase();
-    n.contains("GND") || n.starts_with("VSS")
-}
+use crate::grammar::is_ground;
 
 /// Initial orientation for a freshly placed component. RailSpan passives stand
 /// vertical with the ground-side pin down; KiCAD's Device:R / Device:C bodies

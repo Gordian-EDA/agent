@@ -9,6 +9,7 @@
 //! - [`grid`] — snapping coordinates onto KiCAD's 1.27 mm schematic grid.
 
 pub mod emit;
+pub mod grammar;
 pub mod grid;
 pub mod ids;
 pub mod lift;
