@@ -22,6 +22,7 @@ use kicad_bridge::env::KicadEnv;
 
 pub use crate::reconcile::emit_design_reconciled;
 pub use crate::reconcile::EmitOutput;
+pub use crate::reconcile::Relayout;
 
 /// Emit a complete `circuit_lang::Design` as a deterministic, ERC-clean
 /// `.kicad_sch` document.
@@ -81,5 +82,5 @@ pub fn emit_design(env: &KicadEnv, design: &Design) -> io::Result<EmitOutput> {
     // component is "new", so all positions come from the placer. Keeping a single
     // code path means `ap_*` identity tags and the placement/power-flag logic can
     // never drift between the one-shot and the re-emit cases.
-    emit_design_reconciled(env, design, None)
+    emit_design_reconciled(env, design, None, &Relayout::None)
 }

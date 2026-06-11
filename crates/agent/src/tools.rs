@@ -292,7 +292,14 @@ impl Tools {
                     "properties": {
                         "yaml": { "type": "string", "description": "The circuit-YAML source to apply. If omitted, the current draft is used." },
                         "commit": { "type": "boolean",
-                            "description": "Write the schematic (true) or dry-run and only return the diff (false, default)." }
+                            "description": "Write the schematic (true) or dry-run and only return the diff (false, default)." },
+                        "relayout": {
+                            "description": "Discard preserved positions and re-place: \"all\", or a list of block names.",
+                            "anyOf": [
+                                { "type": "string", "enum": ["all"] },
+                                { "type": "array", "items": { "type": "string" } }
+                            ]
+                        }
                     }
                 }),
             },
@@ -576,7 +583,15 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         None
     };
 
-    let emitted = emit_design_reconciled(&ctx.env, &design, prior_text.as_deref())
+    let relayout = match input.get("relayout") {
+        Some(Value::String(s)) if s == "all" => sch_engine::reconcile::Relayout::All,
+        Some(Value::Array(items)) => sch_engine::reconcile::Relayout::Blocks(
+            items.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+        ),
+        _ => sch_engine::reconcile::Relayout::None,
+    };
+
+    let emitted = emit_design_reconciled(&ctx.env, &design, prior_text.as_deref(), &relayout)
         .context("rendering reconciled schematic")?;
     let rendered = emitted.sch;
     let diff = design_diff(prior_design.as_ref(), &design);
@@ -589,6 +604,7 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
             "diff": diff,
             "rendered_len": rendered.len(),
             "layout_warnings": emitted.layout_warnings,
+            "relayout_blocks": emitted.relayout_blocks,
         }));
     }
 
@@ -621,6 +637,7 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         "diff": diff,
         "erc": { "errors": erc.error_count(), "warnings": erc.warning_count() },
         "layout_warnings": emitted.layout_warnings,
+        "relayout_blocks": emitted.relayout_blocks,
     }))
 }
 

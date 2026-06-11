@@ -13,7 +13,7 @@
 use kicad_bridge::env::KicadEnv;
 use kicad_bridge::provider::RealSymbolProvider;
 use kiutils_kicad::SchematicFile;
-use sch_engine::{emit_design, emit_design_reconciled};
+use sch_engine::{Relayout, emit_design, emit_design_reconciled};
 
 /// Compile a tiny design from YAML with real symbols so emission resolves.
 fn compile(src: &str, provider: &RealSymbolProvider) -> circuit_lang::Design {
@@ -119,7 +119,7 @@ fn surviving_symbols_keep_their_positions() {
 
     // v2: a 3-part design reconciled against the user-edited base.
     let d3 = design3(&provider);
-    let v2 = emit_design_reconciled(&env, &d3, Some(&modified_base)).unwrap().sch;
+    let v2 = emit_design_reconciled(&env, &d3, Some(&modified_base), &Relayout::None).unwrap().sch;
 
     // R1 survives by refdes -> keeps the user move.
     let (r1_v2_at, r1_v2_uuid) = read_symbol(&v2, "R1");

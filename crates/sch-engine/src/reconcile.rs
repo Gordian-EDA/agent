@@ -103,8 +103,34 @@ pub const AP_PARENT: &str = "ap_parent";
 /// Property key for a synthesized component's index within `(parent, role)`.
 pub const AP_INDEX: &str = "ap_index";
 
+/// Property key recording the layout-revision a component was placed under.
+pub const AP_LAYOUT_REV: &str = "ap_layout_rev";
+
 /// The `ap_role` value written for authored components.
 pub const ROLE_AUTHORED: &str = "authored";
+
+/// Which prior placements to discard on re-emit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Relayout {
+    /// Honor every surviving prior placement whose layout-rev still matches.
+    #[default]
+    None,
+    /// Discard all prior placements; the placer lays out everything fresh.
+    All,
+    /// Discard prior placements only for the named blocks.
+    Blocks(std::collections::BTreeSet<String>),
+}
+
+/// The layout revision of one component: a content hash of its
+/// placement-relevant inputs. Membership is deliberately NOT hashed — adding a
+/// neighbor must not blow away drags.
+fn layout_rev(block: &circuit_lang::model::Block, comp: &circuit_lang::model::Component) -> String {
+    let desc = format!(
+        "edge={:?}|near={:?}|role={:?}",
+        block.layout.edge, block.layout.near, comp.layout_role,
+    );
+    crate::ids::stable_uuid("layout_rev", &desc)
+}
 
 /// Stable identity used to match a component across re-emits (spec §7).
 ///
@@ -150,6 +176,9 @@ pub struct PriorPlacement {
     pub angle: f64,
     /// The symbol instance uuid, reused on re-emit so diffs stay minimal.
     pub uuid: Option<String>,
+    /// The layout-revision recorded when this symbol was last placed, if any.
+    /// `None` for an older file written before `ap_layout_rev` existed.
+    pub layout_rev: Option<String>,
 }
 
 /// Parse a prior `.kicad_sch` document into `identity → prior placement`.
@@ -223,6 +252,7 @@ pub fn parse_prior(prior: &str) -> HashMap<Identity, PriorPlacement> {
                 at,
                 angle,
                 uuid: sym.uuid.clone(),
+                layout_rev: prop(AP_LAYOUT_REV).map(str::to_string),
             },
         );
     }
@@ -244,6 +274,9 @@ pub struct EmitOutput {
     /// One human-readable warning per overlapping symbol/label pair (empty when
     /// the layout is clean). A side-channel only: it does not alter `sch`.
     pub layout_warnings: Vec<String>,
+    /// Per-block count of components re-placed this emit (rev changed or a
+    /// `Relayout` forced it). Empty when every surviving placement was preserved.
+    pub relayout_blocks: std::collections::BTreeMap<String, usize>,
 }
 
 /// The reconciliation-aware core of emission (spec §4/§7).
@@ -263,6 +296,7 @@ pub fn emit_design_reconciled(
     env: &KicadEnv,
     design: &Design,
     prior: Option<&str>,
+    relayout: &Relayout,
 ) -> io::Result<EmitOutput> {
     // Per-component approximate sizes drive bbox-aware placement cells. Load
     // each part's geometry; parts whose geometry can't load fall back to the
@@ -312,22 +346,49 @@ pub fn emit_design_reconciled(
     let mut power_attach: std::collections::BTreeMap<String, [f64; 2]> =
         std::collections::BTreeMap::new();
 
+    // Per-block tally of components re-placed (rev changed or relayout forced).
+    let mut relayout_blocks: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+
     for (block_name, block) in &design.blocks {
         for (refdes, comp) in &block.components {
             let identity = Identity::of(refdes, &comp.origin);
 
-            // Surviving component -> prior position/angle/uuid; new -> placer.
-            let (at, angle, uuid) = match prior_map.get(&identity) {
-                Some(p) => (snap_point(p.at), p.angle, p.uuid.clone()),
+            let rev = layout_rev(block, comp);
+            let block_relayout = match relayout {
+                Relayout::All => true,
+                Relayout::Blocks(names) => names.contains(block_name),
+                Relayout::None => false,
+            };
+            // An old file with no recorded rev preserves (migration path); a
+            // recorded rev must match to preserve.
+            let prior_ok = |p: &PriorPlacement| p.layout_rev.as_deref().is_none_or(|r| r == rev);
+
+            // Surviving + still-valid -> prior position/angle/uuid; otherwise
+            // (new, rev changed, or relayout forced) -> placer.
+            let (at, angle, uuid, replaced) = match prior_map.get(&identity) {
+                Some(p) if !block_relayout && prior_ok(p) => {
+                    (snap_point(p.at), p.angle, p.uuid.clone(), false)
+                }
+                Some(_) => (
+                    auto.positions.get(refdes).copied().unwrap_or([0.0, 0.0]),
+                    initial_angle(comp),
+                    None,
+                    true,
+                ),
                 None => (
                     auto.positions.get(refdes).copied().unwrap_or([0.0, 0.0]),
                     initial_angle(comp),
                     None,
+                    false,
                 ),
             };
+            if replaced {
+                *relayout_blocks.entry(block_name.to_string()).or_insert(0) += 1;
+            }
 
             let value = comp.value.as_deref().unwrap_or("");
-            let extra = ap_properties(block_name, &comp.origin);
+            let extra = ap_properties(block_name, &comp.origin, &rev);
             w.add_symbol_full(env, &comp.part, refdes, value, at, angle, &extra, uuid)?;
 
             let meta = provider.symbol(&comp.part);
@@ -365,6 +426,28 @@ pub fn emit_design_reconciled(
         }
     }
 
+    // Resolve a component's *emitted* position, mirroring the placement decision
+    // above (decoration loops below must frame the positions actually written,
+    // not the stale prior of a re-placed component).
+    let resolved_at = |block_name: &str,
+                       block: &circuit_lang::model::Block,
+                       refdes: &str,
+                       comp: &circuit_lang::model::Component|
+     -> Option<[f64; 2]> {
+        let identity = Identity::of(refdes, &comp.origin);
+        let rev = layout_rev(block, comp);
+        let block_relayout = match relayout {
+            Relayout::All => true,
+            Relayout::Blocks(names) => names.contains(block_name),
+            Relayout::None => false,
+        };
+        let prior_ok = |p: &PriorPlacement| p.layout_rev.as_deref().is_none_or(|r| r == rev);
+        match prior_map.get(&identity) {
+            Some(p) if !block_relayout && prior_ok(p) => Some(snap_point(p.at)),
+            _ => auto.positions.get(refdes).copied(),
+        }
+    };
+
     // Power flags: for nets that got a power symbol, place a flag pin-coincident
     // at the recorded attach point. For nets without a power symbol (undeclared
     // power-input nets still using a label), use the right-column flag placement.
@@ -381,15 +464,9 @@ pub fn emit_design_reconciled(
 
     let rightmost = design
         .blocks
-        .values()
-        .flat_map(|b| b.components.iter())
-        .filter_map(|(refdes, comp)| {
-            let identity = Identity::of(refdes, &comp.origin);
-            prior_map
-                .get(&identity)
-                .map(|p| p.at[0])
-                .or_else(|| auto.positions.get(refdes).map(|p| p[0]))
-        })
+        .iter()
+        .flat_map(|(bn, b)| b.components.iter().map(move |(refdes, comp)| (bn, b, refdes, comp)))
+        .filter_map(|(bn, b, refdes, comp)| resolved_at(bn, b, refdes, comp).map(|p| p[0]))
         .fold(0.0_f64, f64::max);
     let power_x = rightmost + 50.8;
 
@@ -412,12 +489,7 @@ pub fn emit_design_reconciled(
     for (block_name, block) in &design.blocks {
         let mut bounds: Option<[f64; 4]> = None; // min_x, min_y, max_x, max_y
         for (refdes, comp) in &block.components {
-            let identity = Identity::of(refdes, &comp.origin);
-            let Some(at) = prior_map
-                .get(&identity)
-                .map(|p| p.at)
-                .or_else(|| auto.positions.get(refdes).copied())
-            else {
+            let Some(at) = resolved_at(block_name, block, refdes, comp) else {
                 continue;
             };
             let half = sizes
@@ -465,6 +537,7 @@ pub fn emit_design_reconciled(
     Ok(EmitOutput {
         sch: w.finish(),
         layout_warnings,
+        relayout_blocks,
     })
 }
 
@@ -474,8 +547,11 @@ pub fn emit_design_reconciled(
 /// `ap_role`/`ap_parent`/`ap_index`, while authored parts carry the explicit
 /// `ap_role = "authored"` sentinel so a reader can distinguish "authored" from
 /// "tags missing" (an older file) without ambiguity.
-fn ap_properties(block_name: &str, origin: &Origin) -> Vec<(String, String)> {
-    let mut props = vec![(AP_BLOCK.to_string(), block_name.to_string())];
+fn ap_properties(block_name: &str, origin: &Origin, rev: &str) -> Vec<(String, String)> {
+    let mut props = vec![
+        (AP_BLOCK.to_string(), block_name.to_string()),
+        (AP_LAYOUT_REV.to_string(), rev.to_string()),
+    ];
     match origin {
         Origin::Authored => {
             props.push((AP_ROLE.to_string(), ROLE_AUTHORED.to_string()));
@@ -636,9 +712,10 @@ mod tests {
 
     #[test]
     fn ap_properties_tags_authored_and_synthesized() {
-        let authored = ap_properties("blk", &Origin::Authored);
+        let authored = ap_properties("blk", &Origin::Authored, "rev0");
         assert!(authored.contains(&(AP_BLOCK.to_string(), "blk".to_string())));
         assert!(authored.contains(&(AP_ROLE.to_string(), ROLE_AUTHORED.to_string())));
+        assert!(authored.contains(&(AP_LAYOUT_REV.to_string(), "rev0".to_string())));
 
         let synth = ap_properties(
             "blk",
@@ -647,6 +724,7 @@ mod tests {
                 role: "decouple".to_string(),
                 index: 0,
             },
+            "rev0",
         );
         assert!(synth.contains(&(AP_PARENT.to_string(), "U1".to_string())));
         assert!(synth.contains(&(AP_ROLE.to_string(), "decouple".to_string())));
