@@ -49,7 +49,7 @@ full-resolution).
 
 ### Task 1: crossing assignment (`crossing.rs` in pcb-engine)
 
-- [ ] `pub fn assign_crossings(problem, mesh, plan) -> CrossingAssignment`:
+- [x] `pub fn assign_crossings(problem, mesh, plan) -> CrossingAssignment`:
       for every mesh edge used by the plan, collect all (net, crossing)
       uses per layer; place concrete crossing points spaced ≥ track pitch
       along the unblocked portion of the shared boundary. Order nets along
@@ -60,7 +60,7 @@ full-resolution).
       usable length still can't fit the slots — boundary blocked unevenly —
       report it as an `AssignmentOverflow` failure, never squeeze below
       clearance).
-- [ ] `CrossingAssignment`: per net, per path, the ordered list of concrete
+- [x] `CrossingAssignment`: per net, per path, the ordered list of concrete
       entry/exit points (mm, layer) replacing the default midpoints —
       shaped so Task 2 can consume a per-cell work order: `CellJob { leaf,
       connection, layer(s), terminals: Vec<Terminal> }` where Terminal =
@@ -69,7 +69,7 @@ full-resolution).
       the leaf where a via fits (clearance to foreign copper, computed
       against problem geometry); default = leaf center, nudged
       deterministically (spiral over detailed-grid offsets) until it fits.
-- [ ] Serializable; determinism test (assign twice, byte-equal); tests on
+- [x] Serializable; determinism test (assign twice, byte-equal); tests on
       `congested.json` + `quad.json`: every plan crossing got a concrete
       point, spacing ≥ track pitch on every boundary, points lie ON the
       shared boundary within epsilon, via sites clear of foreign copper.
