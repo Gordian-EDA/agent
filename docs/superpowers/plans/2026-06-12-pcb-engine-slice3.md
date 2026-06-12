@@ -300,32 +300,54 @@ orthogonal vs octilinear, pad-snap variants, pop caps, via-skip — all recorded
 > tightening that to 0 is the detailed-rip-up work item). Nothing existing
 > is weakened: slice-1 defeat and global-gate assertions all stand.
 
-- [ ] Author `fixtures/congested-relief.json`: congested.json's topology
-      (solid bottom wall, central + relief gaps) with the relief gap
-      widened (and/or a third gap) so total wall capacity comfortably
-      exceeds 8 (slack ≥ 2), while greedy slice-1 STILL fails (≥ 1 failed
-      net — same tighten-don't-delete rule as congested.json). Iterate
-      until both hold.
-- [ ] Gate test (pcb-engine `tests/detailed_gate.rs`):
+- [x] Author `fixtures/congested-relief.json`: congested.json's topology
+      (solid bottom wall) with the top wall opened into **THREE gaps**
+      instead of two. **Final geometry** (x = 30 wall, board 60×60,
+      `minTraceWidth` 0.25 ⇒ track pitch 0.45 mm): relief-low gap 2.6 mm
+      (y 2.7–5.3), central gap 1.8 mm (y 29.1–30.9), relief-high gap 2.6 mm
+      (y 54.7–57.3) — top-wall segments centred at y 1.35/17.2/42.8/58.65.
+      Measured **top-layer wall crossing capacity = 12** for 8 nets ⇒
+      **slack 4** (≥ 2). The 1.8 mm central gap is the slice-1-defeat lever
+      (kept at congested.json's width); the two 2.6 mm relief gaps supply
+      the slack. N0's right pad moved to y = 55 (from 57) so the top-right
+      pad fan-out clears a finisher near-miss; topology is otherwise
+      congested.json's reversed-endpoint funnel. **Iterations: ~7** —
+      single relief 4.4 mm (detailed failed N2), central 3.0/2.6 mm (slice-1
+      solved it / detailed clashed in the gaps), two relief 3.0 mm (worse),
+      landing on 3 gaps + the N0 pad nudge. BOTH conditions hold: slice-1
+      `route()` fails 1 net (N7); `route_detailed()` 0 failed + `lint()`
+      EMPTY; `route_auto` → Detailed.
+- [x] Gate test (pcb-engine `tests/detailed_gate.rs`):
       `congested-relief.json` — `route(…)` fails AND `route_detailed(…)`
       has 0 failed nets AND `lint()` is EMPTY AND `route_auto` returns
-      Detailed. `congested.json` — geometry-clean (no clearance/via/width
-      violations) with EXACTLY 3 finisher failures (a count change in
-      either direction is a real engine change: investigate, update the
+      Detailed. `congested.json` — geometry-clean (0 clearance/via/width
+      violations) with EXACTLY 3 finisher failures (N0/N2/N7; a count change
+      in either direction is a real engine change — investigate, update the
       comment, never silently). `quad.json`/`led-r.json` — clean through
-      `route_detailed` (already true; assert here as the gate's record).
-      Metrics comparison table printed via the test (naive vs pipeline on
-      all fixtures where each succeeds) and asserted ≥ sane bounds
-      (pipeline wirelength within 3× of naive where both succeed —
-      honesty bound, comment actuals).
-- [ ] KiCAD e2e (kicad-bridge `tests/pcb_route_e2e.rs` extension): route
-      `two_res.kicad_pcb` through `route_detailed` as well; write, DRC:
-      zero violations / zero unconnected (same carve-out for the known
-      `lib_footprint_mismatch` warnings). In-house lint also clean —
-      cross-oracle disagreement is a bug to chase, not suppress.
-- [ ] Render `congested-detailed.svg` (existing `render_svg` on the
-      pipeline's solution) in the render-all helper; EYEBALL it.
-      Commit: `feat(pcb-engine): detailed routing gate — congested board clean`
+      `route_detailed` (asserted here as the gate's record). Metrics table
+      printed (naive vs pipeline, all fixtures) with the 3× wirelength
+      honesty bound asserted where both succeed (actuals: led-r 43.25/42.30
+      = 1.02×, quad 232.22/222.30 = 1.04×).
+- [x] KiCAD e2e (kicad-bridge `tests/pcb_route_e2e.rs` extension): the
+      detailed-pipeline entry **`route_auto`** routes `two_res.kicad_pcb`;
+      write, DRC: zero copper-class violations / zero unconnected (same
+      `lib_footprint_mismatch` carve-out); in-house lint clean.
+      **FINDING — `route_detailed` alone does NOT route two_res:** its
+      *global* stage honestly fails `GND` (`"global: no mesh path …"`).
+      Cause is coarse-mesh resolution, not geometry: the two resistors' pads
+      (~1.8 mm apart) fall in **one quadtree leaf** that reads top-layer
+      capacity 0 for *both* nets (mutually foreign), and the global router
+      seeds a net's tree at its pad's **top-layer** leaf-node — which the net
+      reaches on bottom but cannot via up to (top cap 0 there). Slice-1's
+      fine grid (cell-per-pad) routes it cleanly, so `route_auto` falls back
+      and the board is DRC-clean. The e2e ASSERTS this finding (route_detailed
+      fails GND with global provenance) so an engine improvement that closes
+      it trips the test and prompts updating the note. Mesh refinement around
+      closely-spaced pads (or seeding the tree on every layer a pad touches)
+      is the follow-up — not a gate fudge.
+- [x] Render `congested-relief.svg` + `{congested-relief,congested}-detailed.svg`
+      (route_detailed solutions) in the render-all helper; eyeballed.
+      Commit: `feat(pcb-engine): detailed routing gate — medium board clean end-to-end`
 
 ### Task 5: wrap-up (inline, main loop)
 

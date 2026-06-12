@@ -755,7 +755,12 @@ mod tests {
             "quad.json",
             "tscircuit-shape.json",
             "congested.json",
+            "congested-relief.json",
         ];
+        // Fixtures whose route_detailed solution is also rendered as
+        // `{stem}-detailed.svg` for wrap-up eyeballing (the medium-board gate and
+        // the zero-slack stress board).
+        let detailed_render = ["congested-relief.json", "congested.json"];
         for name in fixtures {
             let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures")
@@ -792,6 +797,24 @@ mod tests {
             std::fs::write(&global_path, global_svg.as_bytes())
                 .unwrap_or_else(|e| panic!("write {}: {e}", global_path.display()));
             eprintln!("rendered: {}", global_path.display());
+
+            // Detailed-pipeline SVG for the gate fixtures (route_detailed copper),
+            // so the wrap-up can eyeball the clean medium board and the stress
+            // board's honest partial route.
+            if detailed_render.contains(&name) {
+                let detailed = crate::pipeline::route_detailed(&p);
+                if !detailed.failed.is_empty() {
+                    eprintln!(
+                        "WARN: {name} route_detailed has {} failed net(s) -- highlighting in SVG",
+                        detailed.failed.len()
+                    );
+                }
+                let detailed_svg = render_svg(&p, &detailed.solution, &detailed.failed);
+                let detailed_path = out_dir.join(format!("{stem}-detailed.svg"));
+                std::fs::write(&detailed_path, detailed_svg.as_bytes())
+                    .unwrap_or_else(|e| panic!("write {}: {e}", detailed_path.display()));
+                eprintln!("rendered: {}", detailed_path.display());
+            }
         }
     }
 }
