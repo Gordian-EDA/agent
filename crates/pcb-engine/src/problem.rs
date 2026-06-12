@@ -154,6 +154,22 @@ pub struct Bounds {
     pub max_y: f64,
 }
 
+// ── FailedNet ────────────────────────────────────────────────────────────────
+
+/// A net a router could not fully connect, with a human-readable cause.
+///
+/// Shared by the slice-1 grid router ([`crate::router`]) and the slice-2 global
+/// router ([`crate::pathing`]) so failure provenance has one type across stages.
+/// Serializable: the global router's congestion report carries these as data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FailedNet {
+    /// Connection name.
+    pub connection: String,
+    /// Human-readable cause.
+    pub reason: String,
+}
+
 // ── RouteSolution ─────────────────────────────────────────────────────────────
 
 /// The result of routing a [`RouteProblem`]: copper traces and vias.

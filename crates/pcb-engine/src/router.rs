@@ -26,6 +26,9 @@ use crate::astar::{self, AStarCosts, State};
 use crate::grid::{self, RouteGrid};
 use crate::problem::{LayerRef, Point2, RouteProblem, RouteSolution, Trace, Via};
 
+#[doc(inline)]
+pub use crate::problem::FailedNet;
+
 /// The tunable design constants for the router, in one place.
 ///
 /// Grid pitch and obstacle inflation are computed from the problem's design
@@ -35,15 +38,6 @@ use crate::problem::{LayerRef, Point2, RouteProblem, RouteSolution, Trace, Via};
 pub struct DesignConstants {
     /// A* movement costs (bend, via), in grid-step units.
     pub costs: AStarCosts,
-}
-
-/// A net the router could not fully route.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FailedNet {
-    /// Connection name.
-    pub connection: String,
-    /// Human-readable cause.
-    pub reason: String,
 }
 
 /// The outcome of [`route`]: the emitted copper plus any nets that failed.

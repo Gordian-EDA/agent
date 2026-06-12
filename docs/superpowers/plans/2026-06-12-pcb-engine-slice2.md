@@ -58,27 +58,27 @@ iteration, max iterations ≈ 40.
 
 ### Task 2: congestion-costed pathing + rip-up (`pathing.rs`)
 
-- [ ] Per-net A* over the leaf graph (state = (layer, leaf); layer change
+- [x] Per-net A* over the leaf graph (state = (layer, leaf); layer change
       inside a leaf costs via penalty and requires capacity on both
       layers). Edge traversal cost = euclidean center distance × (1 +
       congestion penalty + history cost). Heuristic: euclidean distance to
       nearest target cell — admissible. Deterministic heap tie-break (cost,
       leaf id, layer).
-- [ ] Multi-point nets: route point 0's cell to nearest of the remaining
+- [x] Multi-point nets: route point 0's cell to nearest of the remaining
       target cells, then grow the tree (same point-to-tree approach as
       slice 1, over cells).
-- [ ] Negotiated rip-up & reroute (PathFinder): route all nets (order:
+- [x] Negotiated rip-up & reroute (PathFinder): route all nets (order:
       slice-1's half-perimeter ascending, tie-break name); while any edge
       usage > capacity and iter < max: bump history cost on overflowed
       edges, rip up ONLY nets crossing overflowed edges, reroute them
       (deterministic order). Track per-iteration overflow total.
-- [ ] `pub fn global_route(problem) -> GlobalRouteResult` with
+- [x] `pub fn global_route(problem) -> GlobalRouteResult` with
       `GlobalPlan { nets: Vec<NetPlan> }`, `NetPlan { connection, paths:
       Vec<CellPath> }` (cell sequence + entry/exit boundary segments +
       layer per step), plus `CongestionReport { iterations, final_overflow,
       edge_hotspots (top-N by usage/capacity), unrouted: Vec<FailedNet> }`.
       All serializable. Feasible ⇔ `final_overflow == 0 && unrouted.is_empty()`.
-- [ ] Tests: two nets through a one-track channel — second net detours or
+- [x] Tests: two nets through a one-track channel — second net detours or
       reports honestly; deliberately impossible (zero-capacity cut) →
       unrouted reported with reason, no panic, no infinite loop (iteration
       cap hit visibly); determinism (two runs serialize byte-equal);

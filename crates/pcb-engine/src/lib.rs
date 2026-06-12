@@ -11,6 +11,7 @@ pub mod connectivity;
 pub mod grid;
 pub mod lint;
 pub mod mesh;
+pub mod pathing;
 pub mod problem;
 pub mod router;
 pub mod svg;
