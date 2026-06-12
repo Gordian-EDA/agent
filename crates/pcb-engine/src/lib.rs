@@ -6,4 +6,5 @@
 //! - [`problem`] — [`RouteProblem`] / [`RouteSolution`] data model,
 //!   SimpleRouteJson-compatible.
 
+pub mod connectivity;
 pub mod problem;
