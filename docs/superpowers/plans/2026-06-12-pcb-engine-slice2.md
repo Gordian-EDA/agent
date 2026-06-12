@@ -138,11 +138,18 @@ iteration, max iterations ≈ 40.
 
 ### Task 6: wrap-up (inline, main loop)
 
-- [ ] `cargo test --workspace` green; pcb-engine clippy clean; render all
+- [x] `cargo test --workspace` green; pcb-engine clippy clean; render all
       fixtures incl. global overlays and EYEBALL THE PNGs (slice-1 lesson:
       a render catches what both oracles miss); tick spec slice-2 row /
       status; record tuned constants + findings in the spec; update memory.
       Commit: `chore(pcb-engine): slice 2 wrap-up`
+      (451 workspace tests pre-fix, 78 in pcb-engine, 0 failures; one
+      clippy cast warning from Task 5 fixed in wrap-up. PNGs eyeballed:
+      global overlay shows hotspots exactly at the two wall gaps with the
+      negotiated relief detour; slice-1 view shows the honest 3-net defeat.
+      Findings recorded in the spec: rip-up is a safety net, not the
+      workhorse — prospective congestion cost load-balances symmetric
+      layouts on the first pass.)
 
 ## Self-review notes
 

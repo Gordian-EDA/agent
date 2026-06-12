@@ -1,7 +1,7 @@
 # PCB Copper Autorouter (`pcb-engine`) — Design
 
 **Date:** 2026-06-12
-**Status:** Approved (slices 0–1 complete; slice 2 next)
+**Status:** Approved (slices 0–2 complete; slice 3 next)
 **Scope lock:** copper autorouting, built in-house in Rust, in this repo.
 
 ## Problem
@@ -137,6 +137,33 @@ crates/
   warning-severity `lib_footprint_mismatch` bookkeeping entries appear
   (fixture's inline footprints vs installed lib; pre-existing, copper-
   independent, documented carve-out in the e2e test).
+
+**Slice-2 findings (2026-06-12, gate passed):**
+
+- Constants as planned (track pitch `w_min + clearance` = 0.45 mm on the
+  fixtures — note: 2× the slice-1 *grid* pitch, easy to conflate; congestion
+  `(usage/cap)² × K`, K=8; history +1/iteration; 40-iteration cap; via base
+  0.5; hotspot top-8).
+- **Prospective congestion cost is near-optimal on symmetric layouts:** the
+  first routing pass already load-balances, so rip-up almost never engages
+  (iterations = 0 on every organic fixture tried). Negotiation only kicks in
+  when the alternative is *initially* costlier than overflowing and history
+  cost must accumulate to tip it — the gate fixture (`congested.json`) is
+  deliberately asymmetric for this reason (solid bottom-layer wall kills via
+  relief; a far corner gap is the only alternative; converges in 3
+  iterations). Expect the same dynamic on real boards: rip-up is a safety
+  net, not the workhorse.
+- **Structurally-impassable vs congested edges:** mesh edges with zero
+  per-layer capacity (boundary fully keepout-covered) are hard walls in
+  pathing; congested-but-nonzero edges stay passable for negotiation.
+  Without the distinction, true cuts "overflow through solid copper"
+  instead of failing honestly.
+- The plan's feasibility is the mesh's own bookkeeping — slice 3 must
+  re-verify everything in exact geometry (lint), per the slice-2 plan's
+  self-review note.
+- `FailedNet` moved to `problem.rs` (shared by router and pathing;
+  re-exported from `router` so the slice-1 API is unchanged). Lint now
+  validates layer names (`InvalidLayer`), closing the slice-1 blind spot.
 
 ## Reuse from this repo
 

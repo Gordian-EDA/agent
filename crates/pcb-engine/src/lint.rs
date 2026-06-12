@@ -149,7 +149,7 @@ pub enum DrcViolation {
 pub fn lint(problem: &RouteProblem, solution: &RouteSolution) -> Vec<DrcViolation> {
     let items = collect_items(problem, solution);
     let clearance = problem.clearance;
-    let layer_count = problem.layer_count.max(1) as u32;
+    let layer_count = problem.layer_count.max(1);
 
     let mut out = Vec::new();
 
