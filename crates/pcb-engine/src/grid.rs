@@ -76,7 +76,17 @@ impl RouteGrid {
     /// rasterized into each layer it occupies. Cells whose inflated disc would
     /// leave `bounds` are blocked for everyone (board edge).
     pub fn build(problem: &RouteProblem) -> RouteGrid {
-        let pitch = grid_pitch(problem);
+        Self::build_with_pitch(problem, grid_pitch(problem))
+    }
+
+    /// [`Self::build`] over the whole board at an explicit `pitch` (mm). The
+    /// detailed router ([`crate::detail`]) uses a *finer* pitch than slice-1 so a
+    /// trace's emitted cell-centre points sit closer to the ideal centreline,
+    /// shrinking the grid-snap distortion that the exact-geometry lint measures at
+    /// dense crossings. Slice-1 calls [`Self::build`] (the design pitch) and is
+    /// unaffected. Obstacle/board-edge semantics are identical to [`Self::build`].
+    pub fn build_with_pitch(problem: &RouteProblem, pitch: f64) -> RouteGrid {
+        let pitch = pitch.max(MIN_PITCH_MM);
         let inflation = obstacle_inflation(problem);
 
         let b = &problem.bounds;
@@ -151,7 +161,18 @@ impl RouteGrid {
     /// lattices (floating-point floor mismatches make exact lattice alignment
     /// unreliable, and snapping is exact regardless).
     pub fn build_window(problem: &RouteProblem, window: &crate::mesh::Rect) -> RouteGrid {
-        let pitch = grid_pitch(problem);
+        Self::build_window_with_pitch(problem, window, grid_pitch(problem))
+    }
+
+    /// [`Self::build_window`] at an explicit `pitch` (mm) — the detailed router
+    /// uses a finer pitch than slice-1 for better geometric fidelity (smaller
+    /// grid-snap distortion). See [`Self::build_with_pitch`].
+    pub fn build_window_with_pitch(
+        problem: &RouteProblem,
+        window: &crate::mesh::Rect,
+        pitch: f64,
+    ) -> RouteGrid {
+        let pitch = pitch.max(MIN_PITCH_MM);
         let inflation = obstacle_inflation(problem);
         let b = &problem.bounds;
 
@@ -288,6 +309,53 @@ impl RouteGrid {
                     continue;
                 }
                 self.mark_net(layer, hx as usize, hy as usize, conn);
+            }
+        }
+    }
+
+    /// Mark `(layer, ix, iy)` and every cell whose centre is closer than
+    /// `min_dist` (mm, **Euclidean**) to that cell's centre as copper owned by
+    /// `conn` — an exact-geometry clearance halo.
+    ///
+    /// This is the detailed stage's halo. Where [`Self::mark_net_halo`] uses a
+    /// square Chebyshev ring of cells (conservative: it over-blocks the diagonal
+    /// to ~`radius·√2·pitch` and blocks even a foreign cell sitting at *exactly*
+    /// the legal clearance), this blocks a foreign cell only when its centre would
+    /// sit strictly inside the legal centre-to-centre spacing `min_dist`
+    /// (= `min_trace_width + clearance`). A foreign trace centred at exactly
+    /// `min_dist` is legal (its edge gap equals `clearance`), so it is left
+    /// routable — which is what lets dense boundary crossings spaced at one track
+    /// pitch coexist. Slice-1's full-board router keeps the Chebyshev halo
+    /// unchanged; this method is used only by [`crate::detail`].
+    pub fn mark_net_halo_euclid(
+        &mut self,
+        layer: usize,
+        ix: usize,
+        iy: usize,
+        conn: usize,
+        min_dist: f64,
+    ) {
+        if layer >= self.layer_count {
+            return;
+        }
+        // Cells within `min_dist` of the centre lie within a Chebyshev box of
+        // `ceil(min_dist / pitch)` cells; test each by exact Euclidean distance.
+        let r = (min_dist / self.pitch).ceil() as isize;
+        // Strictly-inside test: a centre exactly `min_dist` away is legal copper.
+        let thresh = min_dist - 1e-9;
+        let thresh2 = thresh * thresh;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let hx = ix as isize + dx;
+                let hy = iy as isize + dy;
+                if hx < 0 || hy < 0 || hx >= self.nx as isize || hy >= self.ny as isize {
+                    continue;
+                }
+                let off_x = dx as f64 * self.pitch;
+                let off_y = dy as f64 * self.pitch;
+                if off_x * off_x + off_y * off_y <= thresh2 {
+                    self.mark_net(layer, hx as usize, hy as usize, conn);
+                }
             }
         }
     }

@@ -702,15 +702,23 @@ fn place_slots(usable: &[(f64, f64)], n: usize, pitch: f64) -> Option<Vec<f64>> 
             coords.push(mid);
             continue;
         }
-        // k slots at `pitch` spacing, centred: span = (k-1)*pitch, must be ≤ len.
-        let span = (k as f64 - 1.0) * pitch;
-        let start = mid - span / 2.0;
-        // Clamp the run inside [lo, hi] (it fits by construction, but guard FP).
-        let start = start.max(lo).min(hi - span).max(lo);
+        // Spread the k slots across the usable interval rather than packing them at
+        // the minimum pitch in the centre. Maximising mutual spacing (up to the room
+        // available) gives a saturated boundary the margin the detailed router needs
+        // to absorb its grid-snap distortion without two crossings' approach traces
+        // converging below clearance. We keep an end margin (up to half a pitch) so
+        // no slot hugs a boundary end — two boundaries meeting at a leaf corner would
+        // otherwise each place a slot on that shared corner, stacking two foreign
+        // nets' crossings. Spacing never drops below `pitch` (the interval holds k
+        // slots at pitch by construction, so `len/(k-1) ≥ pitch`).
+        let max_span = len - pitch; // leave ≥ half a pitch at each end when possible
+        let min_span = (k as f64 - 1.0) * pitch; // tightest legal packing
+        let span = max_span.max(min_span).min(len);
+        let step = span / (k as f64 - 1.0);
+        let start = (mid - span / 2.0).max(lo).min(hi - span).max(lo);
         for s in 0..k {
-            coords.push(start + s as f64 * pitch);
+            coords.push(start + s as f64 * step);
         }
-        let _ = len;
     }
     coords.sort_by(|p, q| p.total_cmp(q));
     Some(coords)

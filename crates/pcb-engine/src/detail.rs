@@ -124,51 +124,100 @@ pub fn route_cells(
     assignment: &CrossingAssignment,
 ) -> CellRouteResult {
     let layer_count = problem.layer_count.max(1) as usize;
-    let pitch = grid::grid_pitch(problem);
     let track_pitch = mesh.track_pitch;
-    // Clearance halo radius in grid cells — identical formula to the slice-1
-    // router so per-cell clearance matches the full-board router.
-    let halo = (((problem.min_trace_width + problem.clearance) / pitch).ceil() as usize).max(1);
-    // Octilinear costs for the detailed stage; orthogonal default elsewhere.
+    // The detailed stage routes on a grid FINER than the slice-1 design pitch: a
+    // half-pitch lattice. The finer the grid, the closer an emitted cell-centre
+    // point sits to the ideal centreline, so the grid-snap distortion the exact-
+    // geometry lint measures at dense crossings shrinks (here to ≤ a quarter of the
+    // design pitch). Slice-1 keeps the design pitch and is untouched.
+    let pitch = grid::grid_pitch(problem) / 2.0;
+    // Exact-geometry clearance halo: the legal centre-to-centre spacing between a
+    // foreign trace and this net's copper is `min_trace_width + clearance` (mm,
+    // Euclidean). The detailed router blocks foreign cells strictly inside that
+    // distance — a foreign centreline at exactly the spacing is legal (its edge gap
+    // equals `clearance`). We widen it by one cell-centre snap displacement (≤ half
+    // a cell diagonal) so even a crossing endpoint snapped to its exact mm — off
+    // its cell centre — keeps the legal spacing from a foreign interior cell. The
+    // slice-1 full-board router keeps its Chebyshev halo; this is detail-only.
+    let snap_disp = pitch * std::f64::consts::SQRT_2 / 2.0;
+    let halo = problem.min_trace_width + problem.clearance;
+    // A via is a through-hole disc: the legal centre-to-centre spacing from a via
+    // to a foreign trace's centreline is `via_radius + clearance + trace
+    // half-width`, again widened by the snap displacement and marked on every layer
+    // (the barrel is through-hole).
+    let via_halo = problem.via_diameter / 2.0
+        + problem.clearance
+        + problem.min_trace_width / 2.0
+        + snap_disp;
+    // A spontaneous mid-path via must keep its barrel clear of foreign copper by
+    // the via clearance, so the search checks a Chebyshev halo of this many cells
+    // on every layer before placing a via (conservatively covers the Euclidean disc
+    // the lint measures).
+    let via_clear_radius_cells = (via_halo / pitch).ceil() as usize;
     let costs = AStarCosts {
         moves: MoveSet::Octilinear,
+        via_clear_radius_cells,
+        via: 60,
         ..AStarCosts::default()
     };
 
-    // Group jobs by leaf, then order nets within a leaf by the slice-1 global
-    // net order restricted to nets present in the leaf.
+    // Route jobs in global net-rank order (slice-1 half-perimeter rank, ties by
+    // name), and within a net by leaf id. Routing a whole net's cells before the
+    // next net's — rather than leaf-by-leaf — matches the slice-1 net order the
+    // global stage negotiated around, so a net's cells are laid as one connected
+    // run and later (higher-rank) nets see the earlier ones' copper on the shared
+    // grid and keep clearance / route around it.
     let net_rank = net_rank(problem);
-
-    let mut jobs_by_leaf: BTreeMap<LeafId, Vec<&CellJob>> = BTreeMap::new();
-    for job in &assignment.jobs {
-        jobs_by_leaf.entry(job.leaf).or_default().push(job);
-    }
+    let mut ordered_jobs: Vec<&CellJob> = assignment.jobs.iter().collect();
+    ordered_jobs.sort_by(|p, q| {
+        let rp = net_rank.get(&p.connection).copied().unwrap_or(usize::MAX);
+        let rq = net_rank.get(&q.connection).copied().unwrap_or(usize::MAX);
+        rp.cmp(&rq)
+            .then_with(|| p.connection.cmp(&q.connection))
+            .then_with(|| p.leaf.cmp(&q.leaf))
+    });
 
     let mut cell_routes: Vec<CellRoute> = Vec::new();
     let mut failed: Vec<FailedNet> = Vec::new();
 
-    for (leaf, mut jobs) in jobs_by_leaf {
-        let leaf_rect = &mesh.leaves[leaf].rect;
-        let window = inflate_clamp(leaf_rect, track_pitch, problem);
-        // One grid per leaf, shared across the leaf's nets so later nets avoid
-        // earlier ones' copper (slice-1 marking discipline, scoped to the cell).
-        let mut wgrid = RouteGrid::build_window(problem, &window);
+    // One shared full-board grid (at the fine detailed pitch) for the whole stage.
+    // Per-cell window grids are blind to each other's copper, so a net routed in
+    // one leaf cannot keep clearance from a foreign net in the abutting leaf, and a
+    // via barrel cannot avoid foreign copper laid down later. A single grid makes
+    // ALL routed copper — traces and via barrels alike — visible to every later
+    // job, so cross-cell clearance holds by construction. Each job's A* is bounded
+    // to its leaf window so routes stay cell-local; only the occupancy is shared.
+    let mut grid = RouteGrid::build_with_pitch(problem, pitch);
 
-        // Net order within this leaf: slice-1 rank, ties by name (stable).
-        jobs.sort_by(|p, q| {
-            let rp = net_rank.get(&p.connection).copied().unwrap_or(usize::MAX);
-            let rq = net_rank.get(&q.connection).copied().unwrap_or(usize::MAX);
-            rp.cmp(&rq).then_with(|| p.connection.cmp(&q.connection))
-        });
-
-        for job in jobs {
-            match route_one_job(job, &mut wgrid, layer_count, halo, costs) {
-                Ok(route) => cell_routes.push(route),
-                Err(reason) => failed.push(FailedNet {
-                    connection: job.connection.clone(),
-                    reason: format!("cell {leaf}: {reason}"),
-                }),
+    // Reserve every via barrel up front. A via site is assigned (in `crossing`)
+    // before any trace is routed, so a foreign trace could otherwise be laid right
+    // through where a via will later sit — order-dependent and unrepairable once
+    // the trace exists. Stamping each via's through-hole halo (every layer, owned
+    // by its net) before routing makes vias first-class obstacles: foreign traces
+    // route around them, the owning net still passes its own barrel.
+    for job in &assignment.jobs {
+        let Some(conn_idx) = grid.connection_index(&job.connection) else {
+            continue;
+        };
+        for t in &job.terminals {
+            if t.kind == TerminalKind::Via {
+                let (vx, vy) = grid.cell_of(t.at.x, t.at.y);
+                for l in 0..grid.layer_count {
+                    grid.mark_net_halo_euclid(l, vx, vy, conn_idx, via_halo);
+                }
             }
+        }
+    }
+
+    for job in ordered_jobs {
+        let leaf_rect = &mesh.leaves[job.leaf].rect;
+        let window = inflate_clamp(leaf_rect, track_pitch, problem);
+        match route_one_job(job, &mut grid, &window, layer_count, halo, via_halo, costs) {
+            Ok(route) => cell_routes.push(route),
+            Err(reason) => failed.push(FailedNet {
+                connection: job.connection.clone(),
+                reason: format!("cell {}: {reason}", job.leaf),
+            }),
         }
     }
 
@@ -185,16 +234,21 @@ pub fn route_cells(
 /// nearest tree cell, allowing vias). Routed copper + a clearance halo are marked
 /// so later nets in the same cell avoid it. Returns the cell-local copper, or an
 /// error string (the caller adds the leaf id).
+#[allow(clippy::too_many_arguments)]
 fn route_one_job(
     job: &CellJob,
     wgrid: &mut RouteGrid,
+    window: &Rect,
     layer_count: usize,
-    halo: usize,
+    halo: f64,
+    via_halo: f64,
     costs: AStarCosts,
 ) -> Result<CellRoute, String> {
     let conn_idx = wgrid
         .connection_index(&job.connection)
         .ok_or_else(|| "connection has no grid index".to_string())?;
+    // Confine this job's A* to the leaf window (one-track-pitch inflated leaf).
+    let bounds = window_cell_bounds(wgrid, window);
 
     // De-duplicate terminals that map to the same (layer, cell): a pad and an
     // entry can coincide. Keep insertion order (the deterministic job order).
@@ -235,12 +289,13 @@ fn route_one_job(
 
     {
         let seed = terminals[0].1;
-        wgrid.mark_net_halo(seed.layer, seed.ix, seed.iy, conn_idx, halo);
+        wgrid.mark_net_halo_euclid(seed.layer, seed.ix, seed.iy, conn_idx, halo);
     }
 
     // Single-terminal job: nothing to connect, but record any pad/via the cell
     // owns. A lone via terminal still needs its site recorded so Task 3 can drop
-    // the via even when no in-cell copper run reaches it on both layers.
+    // the via even when no in-cell copper run reaches it on both layers. (The via
+    // barrel halo is marked for every via at the end of the job.)
     for (t, _s) in &terminals {
         if t.kind == TerminalKind::Via {
             push_via(&mut vias, &t.at);
@@ -248,7 +303,14 @@ fn route_one_job(
     }
 
     for (t, start) in terminals.iter().skip(1) {
-        let path = astar::search(wgrid, conn_idx, &[*start], &tree_cells, costs)
+        // First try confined to the leaf window (keeps routes cell-local). If that
+        // fails — a saturated tiny leaf can wall a crossing off at the detailed
+        // pitch — retry UNCONFINED on the shared grid: the route may dip into a
+        // neighbouring leaf to get around foreign copper. Cross-cell clearance still
+        // holds (the shared grid carries every net's halo), and the endpoint snap
+        // keeps the stitching contract; only the locality relaxes.
+        let path = astar::search_bounded(wgrid, conn_idx, &[*start], &tree_cells, costs, Some(bounds))
+            .or_else(|| astar::search_bounded(wgrid, conn_idx, &[*start], &tree_cells, costs, None))
             .ok_or_else(|| {
                 format!(
                     "no in-cell path for terminal {:?} at ({:.4},{:.4}) (congestion or enclosure)",
@@ -258,11 +320,21 @@ fn route_one_job(
 
         // Mark copper + halo and fold the path into the tree.
         for s in &path {
-            wgrid.mark_net_halo(s.layer, s.ix, s.iy, conn_idx, halo);
+            wgrid.mark_net_halo_euclid(s.layer, s.ix, s.iy, conn_idx, halo);
             tree_cells.push(*s);
         }
 
         emit_path(wgrid, &path, &snap, &mut traces, &mut vias);
+    }
+
+    // Every via this job produced (assigned site or a layer change mid-path) is a
+    // through-hole barrel: mark its full via halo on every layer so later foreign
+    // copper keeps the via clearance away from the barrel.
+    for v in &vias {
+        let (vx, vy) = wgrid.cell_of(v.at.x, v.at.y);
+        for l in 0..wgrid.layer_count {
+            wgrid.mark_net_halo_euclid(l, vx, vy, conn_idx, via_halo);
+        }
     }
 
     Ok(CellRoute {
@@ -352,6 +424,22 @@ fn push_via(vias: &mut Vec<CellVia>, at: &Point2) {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/// The inclusive cell-index rectangle of the shared grid that covers `window`.
+/// A job's A* is confined to this box so routes stay cell-local even though the
+/// grid spans the whole board (shared occupancy). The box is inflated by one cell
+/// each side so a terminal snapped onto the window edge — and the cell beyond it
+/// the route legitimately needs to hug — stays reachable.
+fn window_cell_bounds(grid: &RouteGrid, window: &Rect) -> astar::CellBounds {
+    let (ix0, iy0) = grid.cell_of(window.min_x, window.min_y);
+    let (ix1, iy1) = grid.cell_of(window.max_x, window.max_y);
+    astar::CellBounds {
+        ix0: ix0.saturating_sub(1),
+        iy0: iy0.saturating_sub(1),
+        ix1: (ix1 + 1).min(grid.nx.saturating_sub(1)),
+        iy1: (iy1 + 1).min(grid.ny.saturating_sub(1)),
+    }
+}
 
 /// Inflate a leaf rect by one track pitch and clamp to the board bounds — the
 /// per-cell routing window (see [`RouteGrid::build_window`]).
@@ -732,15 +820,25 @@ mod tests {
         let plan = global_route(&p).plan;
         let a = assign_crossings(&p, &mesh, &plan);
         let r = route_cells(&p, &mesh, &a);
-        let pitch = grid::grid_pitch(&p);
+        // The detailed router routes on a finer lattice than the design pitch
+        // (`grid_pitch/2`), so a *non*-terminal interior point of a multi-crossing
+        // net can sit within a fraction of the design pitch of *another* of the
+        // net's crossings without being that crossing's snapped endpoint. The
+        // snap-exactness invariant is local: an endpoint that is its OWN crossing's
+        // terminal is byte-exact. Use a "near" threshold well under the detailed
+        // pitch so only an endpoint genuinely snapped to a crossing is asserted
+        // exact (a quarter of the detailed pitch — below the cell-centre spacing, so
+        // a foreign interior cell-centre never trips it).
+        let pitch = grid::grid_pitch(&p) / 2.0;
+        let near = pitch / 4.0;
         for cr in &r.cell_routes {
             for t in &cr.traces {
                 for end in [&t.points[0], &t.points[t.points.len() - 1]] {
                     for x in a.crossings.iter().filter(|x| x.connection == cr.connection) {
                         let dx = (end.x - x.at.x).abs();
                         let dy = (end.y - x.at.y).abs();
-                        // Within half a pitch of a crossing ⇒ must be exact.
-                        if dx < pitch / 2.0 && dy < pitch / 2.0 {
+                        // Within a quarter detailed pitch of a crossing ⇒ must be exact.
+                        if dx < near && dy < near {
                             assert!(
                                 dx < 1e-12 && dy < 1e-12,
                                 "endpoint near crossing {} must be byte-exact (got Δ=({dx:.6},{dy:.6}))",

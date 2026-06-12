@@ -70,6 +70,14 @@ pub struct AStarCosts {
     /// Which neighbour moves the planar search uses. Defaults to
     /// [`MoveSet::Orthogonal`] so slice-1 callers are unchanged.
     pub moves: MoveSet,
+    /// Clearance radius (in grid cells) a via barrel must keep clear of foreign
+    /// copper on *every* layer before the search may place a via at a cell. `0`
+    /// (the default) means only the via cell itself is checked — bit-identical to
+    /// the slice-1 behaviour. The detailed router sets this to the via-clearance
+    /// halo in cells so a spontaneous mid-path via cannot land too close to a
+    /// foreign trace already routed (the lint measures the via barrel in exact
+    /// geometry).
+    pub via_clear_radius_cells: usize,
 }
 
 impl Default for AStarCosts {
@@ -81,6 +89,7 @@ impl Default for AStarCosts {
             via: 25,
             diag: DIAG_COST,
             moves: MoveSet::Orthogonal,
+            via_clear_radius_cells: 0,
         }
     }
 }
@@ -115,6 +124,24 @@ enum Heading {
     Via,
 }
 
+/// An inclusive cell-index rectangle the planar search may not leave. Used by the
+/// detailed router to confine a job's A* to its leaf window while the underlying
+/// grid spans the whole board (shared cross-cell occupancy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellBounds {
+    pub ix0: usize,
+    pub iy0: usize,
+    pub ix1: usize,
+    pub iy1: usize,
+}
+
+impl CellBounds {
+    #[inline]
+    fn contains(&self, ix: usize, iy: usize) -> bool {
+        ix >= self.ix0 && ix <= self.ix1 && iy >= self.iy0 && iy <= self.iy1
+    }
+}
+
 /// A* from any of `starts` to the nearest of `targets`, routing for connection
 /// index `conn` over `grid`. Returns the cell path (start → target inclusive)
 /// of minimum cost, or `None` when no target is reachable.
@@ -128,9 +155,26 @@ pub fn search(
     targets: &[State],
     costs: AStarCosts,
 ) -> Option<Vec<State>> {
+    search_bounded(grid, conn, starts, targets, costs, None)
+}
+
+/// [`search`], optionally confined to a [`CellBounds`] cell rectangle: planar
+/// moves whose target cell lies outside `bounds` are pruned (via moves stay in
+/// place, so they are always allowed). With `bounds == None` this is exactly
+/// [`search`] — slice-1 callers pass `None` (via the [`search`] wrapper) and are
+/// bit-identical to before this parameter existed.
+pub fn search_bounded(
+    grid: &RouteGrid,
+    conn: usize,
+    starts: &[State],
+    targets: &[State],
+    costs: AStarCosts,
+    bounds: Option<CellBounds>,
+) -> Option<Vec<State>> {
     if starts.is_empty() || targets.is_empty() {
         return None;
     }
+    let in_bounds = |ix: usize, iy: usize| bounds.is_none_or(|b| b.contains(ix, iy));
     // Target cell set for O(1) goal tests and the multi-target heuristic.
     let target_cells: Vec<(usize, usize)> = {
         let mut v: Vec<(usize, usize)> = targets.iter().map(|t| (t.ix, t.iy)).collect();
@@ -200,6 +244,9 @@ pub fn search(
             if nx < 0 || ny < 0 || nx >= grid.nx as isize || ny >= grid.ny as isize {
                 continue;
             }
+            if !in_bounds(nx as usize, ny as usize) {
+                continue;
+            }
             let next = State {
                 layer: cur.layer,
                 ix: nx as usize,
@@ -227,6 +274,9 @@ pub fn search(
                 let nx = cur.ix as isize + dx;
                 let ny = cur.iy as isize + dy;
                 if nx < 0 || ny < 0 || nx >= grid.nx as isize || ny >= grid.ny as isize {
+                    continue;
+                }
+                if !in_bounds(nx as usize, ny as usize) {
                     continue;
                 }
                 let next = State {
@@ -266,8 +316,11 @@ pub fn search(
             }
         }
 
-        // Via: change layer in place, if the barrel is clear on every layer.
-        if grid.layer_count > 1 && via_barrel_clear(grid, conn, cur.ix, cur.iy) {
+        // Via: change layer in place, if the barrel — and its clearance halo — is
+        // clear on every layer.
+        if grid.layer_count > 1
+            && via_barrel_clear(grid, conn, cur.ix, cur.iy, costs.via_clear_radius_cells)
+        {
             for layer in 0..grid.layer_count {
                 if layer == cur.layer {
                     continue;
@@ -312,9 +365,33 @@ const DIAGONALS: [(Heading, isize, isize); 4] = [
     (Heading::MinusXMinusY, -1, -1),
 ];
 
-/// Is the cell free for `conn` on *every* layer (through-via barrel check)?
-fn via_barrel_clear(grid: &RouteGrid, conn: usize, ix: usize, iy: usize) -> bool {
-    (0..grid.layer_count).all(|l| grid.is_free_for(l, ix, iy, conn))
+/// Is the cell free for `conn` on *every* layer (through-via barrel check), and —
+/// when `radius_cells > 0` — is every cell whose centre lies within `radius_cells`
+/// (Euclidean) also free for `conn` on every layer? The Euclidean disc (not a
+/// Chebyshev box) enforces a via's clearance halo at its true geometry, so a
+/// spontaneous via cannot sit too close to foreign copper without over-blocking the
+/// box corners.
+fn via_barrel_clear(grid: &RouteGrid, conn: usize, ix: usize, iy: usize, radius_cells: usize) -> bool {
+    let r = radius_cells as isize;
+    let r2 = (radius_cells * radius_cells) as isize;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy > r2 {
+                continue; // outside the Euclidean clearance disc
+            }
+            let hx = ix as isize + dx;
+            let hy = iy as isize + dy;
+            if hx < 0 || hy < 0 || hx >= grid.nx as isize || hy >= grid.ny as isize {
+                // Off-grid (off-board) reads blocked: a via barrel may not poke
+                // past the board edge.
+                return false;
+            }
+            if !(0..grid.layer_count).all(|l| grid.is_free_for(l, hx as usize, hy as usize, conn)) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Relax the edge into `next` with cost `tentative`, arriving by `arrive_dir`.

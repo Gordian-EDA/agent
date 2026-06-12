@@ -157,6 +157,73 @@ full-resolution).
       separate, metrics sum). DONE (12 tests in `pipeline::tests`).
       Commit: `feat(pcb-engine): detailed routing pipeline with fallback`
 
+### Task 3.5 — Fidelity fix: exact-geometry halos (`fix(pcb-engine): detail-stage clearance fidelity — exact-geometry halos`)
+
+The over-conservative per-cell clearance model was replaced with exact-geometry
+halos. **What changed:**
+
+- **Euclidean clearance halo** (`grid::mark_net_halo_euclid`): a foreign cell is
+  blocked only when its centre is *strictly* inside the legal centre-to-centre
+  spacing `w_min + clearance` (= 0.45 mm), Euclidean — a foreign centreline at
+  exactly the spacing is legal. Replaces the slice-1 Chebyshev radius-2 box (which
+  blocked legal cells at axis distance 0.45 and over-blocked diagonals to 0.64).
+  Slice-1's `route()` keeps its Chebyshev halo (a separate method) and is
+  **bit-identical** (serialize-compared before/after on all three fixtures).
+- **Finer detail grid** (`grid::build_with_pitch`, `RouteGrid::pitch/2`): the
+  detailed stage routes on a half-design-pitch lattice (0.1125 mm), shrinking the
+  cell-centre snap distortion the exact lint measures at dense crossings to ≤ a
+  quarter of the design pitch. Slice-1 keeps the design pitch.
+- **Shared full-board occupancy grid** for the detailed stage so a net keeps
+  clearance from foreign copper routed in *abutting* leaves (per-cell windows are
+  blind to each other); each job's A* is still **bounded** to its leaf window
+  (`astar::search_bounded` + `CellBounds`), with an unconfined retry on failure.
+- **Via barrels as first-class obstacles**: every assigned via site is reserved up
+  front and every via gets a through-hole clearance halo on all layers; the A* via
+  move checks a Euclidean clearance disc (`AStarCosts::via_clear_radius_cells`,
+  `via_barrel_clear`) so a spontaneous via cannot strand its barrel near foreign
+  copper. Slice-1 default radius 0 ⇒ unchanged.
+- **Slot spreading** (`crossing::place_slots`): crossing slots spread across the
+  usable boundary (with an end margin so two boundaries' slots never stack at a
+  shared leaf corner) instead of minimal-pitch packing, giving saturated
+  boundaries snap margin.
+
+**Measured before/after** (failed nets through `route_detailed`; `lint()`
+clearance/via violations through `route_detailed` in parentheses):
+
+| fixture    | before        | after        |
+|------------|---------------|--------------|
+| led-r      | 0  (0 geom)   | 0  (0 geom)  |
+| quad       | 4  (0 geom)   | 4  (0 geom)  |
+| congested  | 27 (0 geom)   | 21 (0 geom)  |
+
+**Geometry fidelity is fully fixed**: there are **zero clearance / via DRC
+violations** in any fixture's `route_detailed` output (all remaining `lint`
+entries are downstream `Connectivity::Unconnected` from the *dropped* failed
+nets, not geometry defects). Slice-1 invariant; `global_gate` green.
+
+**Honest residual (FINDING — the strict 0-failed gate is NOT reached):** the
+remaining failures are routing-*completeness* gaps, not geometry:
+
+1. **congested's wall is exactly saturated.** The top-layer wall has total
+   crossing capacity **8** for **8** nets (relief gap = 5, central gap = 3),
+   *zero* slack (measured per-edge). The nets funnel-and-turn through 1.15–1.95 mm
+   gaps at exactly track pitch; the turns need room the saturated gap does not
+   have. **Capacity calibration (avenue c) is off the table here**: any wall-edge
+   derate makes the global plan infeasible, breaking `global_gate`'s feasibility
+   assertion; and increasing capacity (floor+1) makes congested first-pass
+   feasible, breaking the rip-up-engagement assertion. Confirmed both directions
+   break the gate.
+2. **quad's centre is physically over-converged.** Six nets cross within one tiny
+   central quadtree leaf; on a single layer their crossings cannot all keep
+   clearance, and the global plan's layer split + crossing-projection ordering does
+   not de-conflict them enough for the per-cell A* to realise.
+
+Reaching 0 failed nets needs a **rip-up/reroute detailed router** (negotiate the
+saturated wall the way the global stage negotiates capacity) and/or a stronger
+**crossing-assignment de-confliction** at over-converged centres — the slice-3.5
+crossing-heuristic work the plan's self-review anticipated, materially larger than
+a clearance-fidelity fix. Task 4's strict gate stays deferred on that finding.
+
 ### Task 4: the slice gate — congested fixture clean + KiCAD e2e + metrics
 
 - [ ] Gate test (pcb-engine `tests/detailed_gate.rs`): `congested.json` —
