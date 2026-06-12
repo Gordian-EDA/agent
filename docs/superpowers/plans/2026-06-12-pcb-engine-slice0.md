@@ -49,8 +49,8 @@ lint against before any router exists.
 **Files:** `crates/pcb-engine/Cargo.toml` (members glob picks it up),
 `src/lib.rs`, `src/problem.rs`.
 
-- [ ] Deps: `serde` (derive), `serde_json`, `thiserror` — all workspace.
-- [ ] Model, serde-compatible with SimpleRouteJson (`#[serde(rename_all =
+- [x] Deps: `serde` (derive), `serde_json`, `thiserror` — all workspace.
+- [x] Model, serde-compatible with SimpleRouteJson (`#[serde(rename_all =
       "camelCase")]`, extensions `#[serde(default)]`):
 
 ```rust
@@ -79,32 +79,32 @@ pub struct Bounds { pub min_x: f64, pub max_x: f64, pub min_y: f64, pub max_y: f
 
   `LayerRef` = newtype over `String` with helpers `top()/bottom()/index(layer_count)`
   (upstream uses string names; keep them, map to indices at solve time).
-- [ ] `RouteSolution`: `traces: Vec<Trace { connection: String, layer: LayerRef,
+- [x] `RouteSolution`: `traces: Vec<Trace { connection: String, layer: LayerRef,
       width: f64, path: Vec<Point2> }>`, `vias: Vec<Via { connection, at: Point2,
       diameter, drill }>`. Serde camelCase too (our own format).
-- [ ] Tests (`tests/problem.rs`): parse a verbatim upstream-shaped JSON string
+- [x] Tests (`tests/problem.rs`): parse a verbatim upstream-shaped JSON string
       (no extension fields) → defaults applied; serialize → parse round-trip
       equality; unknown fields REJECTED on our solution type but TOLERATED on
       `RouteProblem` (upstream files carry extras we don't model).
-- [ ] `cargo test -p pcb-engine` green.
+- [x] `cargo test -p pcb-engine` green.
       Commit: `feat(pcb-engine): RouteProblem model, SimpleRouteJson-compatible`
 
 ### Task 2: JSON fixtures
 
 **Files:** `crates/pcb-engine/fixtures/*.json`.
 
-- [ ] `led-r.json` — hand-authored: 2 layers, one 2-point connection between
+- [x] `led-r.json` — hand-authored: 2 layers, one 2-point connection between
       two SMD pads plus a GND connection, a couple of foreign-net obstacle
       pads in the way. Small (≤ 30×20 mm).
-- [ ] `quad.json` — ~6 connections crossing each other so naive routing must
+- [x] `quad.json` — ~6 connections crossing each other so naive routing must
       use both layers (forces vias in slice 1).
-- [ ] `tscircuit-sample.json` — try fetching one real problem from the
+- [x] `tscircuit-sample.json` — try fetching one real problem from the
       archived dataset (`github.com/tscircuit/autorouting`, raw files); if
       network/dataset shape doesn't cooperate, hand-author one matching the
       documented format EXACTLY (upstream field set only, no extension keys)
       and name it `tscircuit-shape.json` instead — the point is locking the
       parser to the upstream shape.
-- [ ] Fixture-loading test asserting each parses and passes basic sanity
+- [x] Fixture-loading test asserting each parses and passes basic sanity
       (bounds non-empty, points inside bounds, referenced layers < layerCount).
       Commit: `test(pcb-engine): routing problem fixtures`
 
@@ -113,7 +113,7 @@ pub struct Bounds { pub min_x: f64, pub max_x: f64, pub min_y: f64, pub max_y: f
 The PCB analog of the schematic injectivity oracle — needed BEFORE any
 router so slice 1 has its gate ready.
 
-- [ ] `pub fn check(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Violation>`
+- [x] `pub fn check(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Violation>`
       with `Violation` enum: `Unconnected { connection, point_index }`,
       `CrossNetMerge { a, b }` (+ Display).
       Geometry: union-find over copper elements — a trace segment touches a
@@ -121,7 +121,7 @@ router so slice 1 has its gate ready.
       layers at their position; obstacles with `connected_to` count as that
       connection's copper (pads). Two different connections' element sets
       sharing a union-find root = `CrossNetMerge`.
-- [ ] Tests: hand-built tiny solutions — fully connected → empty; missing
+- [x] Tests: hand-built tiny solutions — fully connected → empty; missing
       segment → `Unconnected`; trace touching a foreign pad → `CrossNetMerge`;
       via joining layers makes a cross-layer connection count as connected.
       Commit: `feat(pcb-engine): copper connectivity oracle`
@@ -134,13 +134,13 @@ router so slice 1 has its gate ready.
 dependency of kicad-bridge (it is pure; the dependency direction matches
 `sch-engine → kicad-bridge` being forbidden — bridge depends on engine).
 
-- [ ] Author the fixture board BY HAND: KiCAD-9-format `(kicad_pcb (version
+- [x] Author the fixture board BY HAND: KiCAD-9-format `(kicad_pcb (version
       20241229) …)` with `(general)`, 2 copper layers, `(setup)`, a `(net 0 "")
       (net 1 "GND") (net 2 "SIG")` table, an `Edge.Cuts` `gr_rect` outline,
       and two 0805-style 2-pad footprints (one rotated 90°) with pads on the
       nets. Keep it minimal but VALID — `PcbFile::read` must report zero
       diagnostics (test asserts this).
-- [ ] `pub fn read_problem(path: &Path) -> io::Result<BoardProblem>` where
+- [x] `pub fn read_problem(path: &Path) -> io::Result<BoardProblem>` where
       `BoardProblem { problem: RouteProblem, nets: …, pad_index: … }` maps:
       nets→connections (skip net 0 / unnamed), pad absolute positions
       (rotate pad `at` by footprint rotation — see verified facts — then
@@ -148,24 +148,24 @@ dependency of kicad-bridge (it is pure; the dependency direction matches
       `pointsToConnect` (pad center, layer from pad layers), existing
       segments/vias/zones→obstacles, `Edge.Cuts` bbox→bounds, `setup`/dru
       defaults→trace width & clearance extensions.
-- [ ] Tests: fixture parses; expected pad absolute coordinates (assert the
+- [x] Tests: fixture parses; expected pad absolute coordinates (assert the
       rotated footprint's pads land where hand-math says); two connections
       with 2 points each; bounds match the outline rect.
       Commit: `feat(kicad-bridge): .kicad_pcb → RouteProblem`
 
 ### Task 5: kicad-bridge trace/via write-back
 
-- [ ] `pub fn write_solution(path: &Path, solution: &RouteSolution, nets: &…) -> io::Result<()>`:
+- [x] `pub fn write_solution(path: &Path, solution: &RouteSolution, nets: &…) -> io::Result<()>`:
       render `(segment (start x y) (end x y) (width w) (layer "F.Cu") (net n)
       (uuid …))` and `(via (at x y) (size s) (drill d) (layers "F.Cu" "B.Cu")
       (net n) (uuid …))` text (uuid v5 from a fixed namespace + content, like
       `sch-engine/src/ids.rs` — deterministic output); splice before the
       final `)`; layer names from `LayerRef` ("top"→"F.Cu", "bottom"→"B.Cu",
       inner i→"In{i}.Cu").
-- [ ] Validate after write: `PcbFile::read` re-parses with zero NEW
+- [x] Validate after write: `PcbFile::read` re-parses with zero NEW
       diagnostics; `ast().segments/vias` counts grew by exactly the emitted
       number; original bytes before the splice point unchanged (lossless).
-- [ ] Round-trip test: read fixture → hand-build a 2-segment + 1-via
+- [x] Round-trip test: read fixture → hand-build a 2-segment + 1-via
       solution → write → re-read → re-extract `RouteProblem` → the new
       copper appears as obstacles `connectedTo` the right connection; run
       the connectivity oracle on the re-read copper.
@@ -173,7 +173,7 @@ dependency of kicad-bridge (it is pure; the dependency direction matches
 
 ### Task 6: workspace hygiene
 
-- [ ] `cargo test --workspace` green (known pre-existing failure: `cli_erc`
+- [x] `cargo test --workspace` green (known pre-existing failure: `cli_erc`
       on KiCAD < 8 — if the machine's KiCAD upgrade landed it must pass; do
       NOT mask it otherwise, it's a known-env issue, leave it failing).
       `cargo clippy --workspace` no new warnings. Update spec slice-0 row if

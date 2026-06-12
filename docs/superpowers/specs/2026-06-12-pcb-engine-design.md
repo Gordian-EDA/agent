@@ -97,8 +97,14 @@ crates/
    run on every `.kicad_pcb` we emit; skipped (visibly) on older KiCAD.
 3. **tscircuit benchmark dataset (external benchmark):** solve-rate,
    via count, total wirelength on their problem set. Frozen upstream
-   (repo archived 2025) — treat as a fixed corpus, vendor samples in
-   `crates/pcb-engine/fixtures/`.
+   (repo archived 2025). **Slice-0 finding:** the archived repo ships no
+   raw SimpleRouteJson files (its datasets are generated, and the checked-in
+   fixtures are circuit-json envelopes), so the parser is locked to the
+   documented shape via the hand-authored
+   `crates/pcb-engine/fixtures/tscircuit-shape.json` instead. Benchmark
+   problems must be generated via their tooling (or converted) when slice
+   2–3 needs them — a small converter is acceptable; treat upstream format
+   docs as the contract.
 
 ## Build order (slices, harness green at each)
 
