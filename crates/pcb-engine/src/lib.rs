@@ -7,4 +7,5 @@
 //!   SimpleRouteJson-compatible.
 
 pub mod connectivity;
+pub mod grid;
 pub mod problem;

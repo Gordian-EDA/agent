@@ -24,16 +24,16 @@ bend cost ≈ 2 steps; obstacle inflation = `clearance + min_trace_width/2`.
 
 ### Task 1: grid model (`grid.rs` in pcb-engine)
 
-- [ ] `RouteGrid::build(problem) -> RouteGrid`: per-layer occupancy bitmaps
+- [x] `RouteGrid::build(problem) -> RouteGrid`: per-layer occupancy bitmaps
       over `bounds` at the pitch above. Rasterize each obstacle inflated by
       the inflation constant into every layer it occupies. Cells store the
       blocking connection name index (or BLOCKED_ALL for keepouts/foreign
       copper with no net) so lookups can answer "free for connection c?" —
       a pad never blocks its own connection. Board edge: cells whose
       inflated disc leaves `bounds` are blocked.
-- [ ] Coordinate mapping helpers (`cell ↔ mm center`), deterministic
+- [x] Coordinate mapping helpers (`cell ↔ mm center`), deterministic
       (floor-based, no float accumulation: `x = min_x + (i as f64)*pitch`).
-- [ ] Tests: a pad blocks neighboring cells within inflation on its layer
+- [x] Tests: a pad blocks neighboring cells within inflation on its layer
       only; own-net query passes over it; out-of-bounds blocked; mapping
       round-trips.
       Commit: `feat(pcb-engine): routing grid with net-aware occupancy`
