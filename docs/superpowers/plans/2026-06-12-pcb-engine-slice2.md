@@ -87,21 +87,31 @@ iteration, max iterations ≈ 40.
 
 ### Task 3: gate fixture + acceptance test (`fixtures/congested.json`, tests)
 
-- [ ] Author `fixtures/congested.json` (hand-written or via a small
+- [x] Author `fixtures/congested.json` (hand-written or via a small
       deterministic generator test-helper, checked-in JSON either way): a
       2-layer board with a pin-field / crossing pattern where greedy
       slice-1 ordering walls off later nets (e.g. ≥ 8 nets forced through
       a narrow channel between keepouts with capacity for fewer on one
       layer). Requirements: valid per the slice-0 model, parses, and is
       MINIMAL enough to debug by eye in the SVG render.
-- [ ] The gate test, in `tests/` or `router`/`pathing` integration: assert
+      Final geometry: 60×60 mm 2-layer board; 3 mm vertical wall at x=30,
+      bottom layer SOLID (no via-relief), top layer with a narrow central
+      gap (1.8 mm @ y=30, every net's natural crossing) + a far corner
+      relief gap (2.6 mm @ y=4). 8 nets, vertically-reversed endpoints, all
+      on top so they cross in the central gap.
+- [x] The gate test, in `tests/` or `router`/`pathing` integration: assert
       `router::route(congested)` has ≥ 1 failed net (proving the fixture
       defeats slice 1 — if the naive router ever starts solving it, the
       fixture must be tightened, not the assertion deleted) AND
       `global_route(congested)` is feasible (0 overflow, 0 unrouted).
-- [ ] Congestion report sanity on the fixture: hotspots non-empty during
+      `tests/global_gate.rs`: slice 1 fails 3 nets (N0/N1/N7); global is
+      feasible. Comments forbid weakening the assertions.
+- [x] Congestion report sanity on the fixture: hotspots non-empty during
       iteration (report the iteration count > 1 to prove rip-up engaged —
       capture via the report, not internal prints).
+      iterations=3, overflow_history=[1,1,1,0] (first pass overflows the
+      central gap by 1; negotiation routes a net to the corner relief),
+      hotspots non-empty, serialize-twice byte-equal.
       Commit: `feat(pcb-engine): congested gate fixture for global routing`
 
 ### Task 4: mesh/plan SVG overlay (`svg.rs` extension)
