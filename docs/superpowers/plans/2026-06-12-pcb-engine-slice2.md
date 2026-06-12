@@ -34,7 +34,7 @@ iteration, max iterations ≈ 40.
 
 ### Task 1: quadtree capacity mesh (`mesh.rs` in pcb-engine)
 
-- [ ] `CapacityMesh::build(problem) -> CapacityMesh`: quadtree subdivision
+- [x] `CapacityMesh::build(problem) -> CapacityMesh`: quadtree subdivision
       of `bounds` per layer-agnostic XY (capacity is per-layer inside the
       cell). Subdivide while a cell intersects an obstacle edge and depth
       < max depth (constant above). Leaves store, per layer: free area
@@ -43,13 +43,13 @@ iteration, max iterations ≈ 40.
       Keepouts/foreign copper cut capacity; a net's own pads do NOT cut
       capacity for that net (store blocking connection indices like
       slice-1's grid, coarse per-cell list is fine).
-- [ ] Leaf adjacency: edges between leaves sharing a boundary segment
+- [x] Leaf adjacency: edges between leaves sharing a boundary segment
       (handle the quadtree T-junction case: one big leaf ↔ several small).
       Edge capacity per layer = `floor(shared boundary length /
       track_pitch)`, reduced by the obstacle-covered portion of that
       boundary. Deterministic leaf ids (Morton/path order) and edge order.
-- [ ] `cell_at(point) -> LeafId` lookup for pad → cell seeding.
-- [ ] Tests: empty board → single leaf (or shallow tree) with sane
+- [x] `cell_at(point) -> LeafId` lookup for pad → cell seeding.
+- [x] Tests: empty board → single leaf (or shallow tree) with sane
       capacity; one central obstacle forces subdivision around it and cuts
       capacity; T-junction adjacency correct; own-net pad does not cut its
       own capacity; determinism (build twice, identical serialization);
