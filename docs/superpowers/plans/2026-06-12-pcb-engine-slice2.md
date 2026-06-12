@@ -129,7 +129,7 @@ iteration, max iterations ≈ 40.
 
 ### Task 5: lint carry-over — layer-name validity
 
-- [ ] New lint check `InvalidLayer`: any trace whose
+- [x] New lint check `InvalidLayer`: any trace whose
       `layer.index(problem.layer_count)` is `None`, and any route point
       likewise (the slice-1 blind spot, institutionalized). Add to
       `DrcViolation`, wire into `lint()`, trigger-test it (a trace on

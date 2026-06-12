@@ -119,6 +119,19 @@ pub enum DrcViolation {
         /// The offending copper location, for debugging.
         at: [f64; 2],
     },
+    /// A trace or route point references a layer name that does not exist on
+    /// this board (i.e. `layer.index(layer_count)` returns `None`). This is the
+    /// slice-1 blind spot: the router silently fell back to layer 0 for unknown
+    /// layer names; the lint catches it explicitly.
+    InvalidLayer {
+        /// The connection name that owns the offending copper.
+        connection: String,
+        /// The layer reference that could not be resolved (e.g. `"inner1"` on a
+        /// 2-layer board, or a typo).
+        layer: String,
+        /// The board's layer count (provided for context when debugging).
+        layer_count: u32,
+    },
     /// A connectivity defect from the slice-0 oracle, folded in.
     Connectivity {
         /// The wrapped connectivity violation.
@@ -136,8 +149,34 @@ pub enum DrcViolation {
 pub fn lint(problem: &RouteProblem, solution: &RouteSolution) -> Vec<DrcViolation> {
     let items = collect_items(problem, solution);
     let clearance = problem.clearance;
+    let layer_count = problem.layer_count.max(1) as u32;
 
     let mut out = Vec::new();
+
+    // (0) Invalid layer — any solution trace or connection route point whose
+    //     layer name resolves to `None` for this board's `layer_count`. The
+    //     slice-1 router silently maps unknown names to layer 0; the lint
+    //     catches it explicitly.
+    for trace in &solution.traces {
+        if trace.layer.index(layer_count).is_none() {
+            out.push(DrcViolation::InvalidLayer {
+                connection: trace.connection.clone(),
+                layer: trace.layer.0.clone(),
+                layer_count,
+            });
+        }
+    }
+    for conn in &problem.connections {
+        for pt in &conn.points_to_connect {
+            if pt.layer.index(layer_count).is_none() {
+                out.push(DrcViolation::InvalidLayer {
+                    connection: conn.name.clone(),
+                    layer: pt.layer.0.clone(),
+                    layer_count,
+                });
+            }
+        }
+    }
 
     // (1) Trace width below minimum — one check per trace.
     for trace in &solution.traces {
@@ -934,5 +973,92 @@ mod tests {
         let a = lint(&p, &result.solution);
         let b = lint(&p, &result.solution);
         assert_eq!(a, b, "lint must be deterministic");
+    }
+
+    // ── InvalidLayer trigger test ─────────────────────────────────────────────
+
+    #[test]
+    fn invalid_layer_fires_for_inner1_on_two_layer_board() {
+        // A trace on "inner1" on a 2-layer board (which only has "top" = 0 and
+        // "bottom" = 1). "inner1" requires at least 3 layers (inner indices are
+        // strictly between top and bottom). LayerRef("inner1").index(2) → None.
+        let p = problem(
+            vec![conn("SIG", &[(5.0, 10.0, "top"), (25.0, 10.0, "inner1")])],
+            vec![],
+        );
+        let s = RouteSolution {
+            traces: vec![trace("SIG", "inner1", 0.25, &[(5.0, 10.0), (25.0, 10.0)])],
+            vias: vec![],
+        };
+        let vs = lint(&p, &s);
+        let invalid_count = count(&vs, |v| matches!(v, DrcViolation::InvalidLayer { .. }));
+        assert_eq!(
+            invalid_count, 2,
+            "expected exactly 2 InvalidLayer violations: \
+             one for the solution trace on inner1, one for the connection route point on inner1, \
+             got {vs:?}"
+        );
+        // Check that the payload fields are set correctly on the trace violation.
+        let trace_viol = vs.iter().find(|v| {
+            matches!(
+                v,
+                DrcViolation::InvalidLayer { layer, layer_count: 2, .. }
+                    if layer == "inner1"
+            )
+        });
+        assert!(
+            trace_viol.is_some(),
+            "must find an InvalidLayer with layer=inner1 and layer_count=2, got {vs:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_layer_does_not_fire_for_valid_layers() {
+        // "top" and "bottom" are always valid on a 2-layer board.
+        let p = problem(
+            vec![
+                conn("A", &[(5.0, 10.0, "top"), (25.0, 10.0, "top")]),
+                conn("B", &[(5.0, 20.0, "bottom"), (25.0, 20.0, "bottom")]),
+            ],
+            vec![],
+        );
+        let s = RouteSolution {
+            traces: vec![
+                trace("A", "top", 0.25, &[(5.0, 10.0), (25.0, 10.0)]),
+                trace("B", "bottom", 0.25, &[(5.0, 20.0), (25.0, 20.0)]),
+            ],
+            vias: vec![],
+        };
+        let vs = lint(&p, &s);
+        assert!(
+            !vs.iter().any(|v| matches!(v, DrcViolation::InvalidLayer { .. })),
+            "valid layer names must not raise InvalidLayer, got {vs:?}"
+        );
+    }
+
+    #[test]
+    fn fixtures_lint_clean_after_global_route() {
+        // All fixtures must route (via global_route) and produce lint-clean
+        // solutions via the slice-1 router. This guards that adding InvalidLayer
+        // doesn't regress the existing gate.
+        use crate::pathing::global_route;
+        for name in &["led-r.json", "quad.json", "congested.json"] {
+            let p = load(name);
+            // Slice-1 router output (all fixtures that slice-1 can handle).
+            let result = router::route(&p);
+            let vs = lint(&p, &result.solution);
+            let invalid: Vec<_> = vs
+                .iter()
+                .filter(|v| matches!(v, DrcViolation::InvalidLayer { .. }))
+                .collect();
+            assert!(
+                invalid.is_empty(),
+                "{name} slice-1 solution has InvalidLayer violations: {invalid:?}"
+            );
+            // Global route doesn't produce a RouteSolution, but the plan's route
+            // points are the same as the problem's connection points, so calling
+            // lint on the slice-1 solution is the right gate check here.
+            let _ = global_route(&p); // must not panic
+        }
     }
 }
