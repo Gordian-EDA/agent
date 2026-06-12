@@ -76,6 +76,59 @@ impl KicadCli {
         }
     }
 
+    /// Run `kicad-cli pcb drc` on `pcb` and parse the JSON report.
+    ///
+    /// Mirrors [`erc`](Self::erc): with `--exit-code-violations` the process
+    /// returns nonzero *when violations exist*, which is a normal outcome, not a
+    /// failure — the report is still written. We therefore key success on whether
+    /// the report file parses, reserving the `Err` path for genuine execution
+    /// failures (binary missing, board failed to load) where no report is
+    /// produced and stderr carries the cause.
+    ///
+    /// `--all-track-errors` reports every error per track (not just the first);
+    /// the JSON splits findings into separate `violations`, `unconnected_items`,
+    /// and `schematic_parity` arrays. We capture the first two — copper DRC and
+    /// missing connections — which together are the slice-1 acceptance gate.
+    pub fn drc(&self, pcb: &Path) -> io::Result<DrcReport> {
+        let out = tempfile::Builder::new()
+            .prefix("autopcb-drc-")
+            .suffix(".json")
+            .tempfile()?;
+
+        let output = Command::new(&self.cli_path)
+            .args([
+                "pcb",
+                "drc",
+                "--format",
+                "json",
+                "--all-track-errors",
+                "--exit-code-violations",
+            ])
+            .arg("--output")
+            .arg(out.path())
+            .arg(pcb)
+            .output()?;
+
+        // As with ERC, the report file is the source of truth: written for both
+        // the "no violations" (exit 0) and "violations found" (nonzero) cases,
+        // but not when the board fails to load. Parse it; only fall back to an
+        // error — surfacing stderr — when that fails.
+        let json = std::fs::read_to_string(out.path())?;
+        match serde_json::from_str::<DrcReport>(&json) {
+            Ok(report) => Ok(report),
+            Err(parse_err) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stderr = stderr.trim();
+                let detail = if stderr.is_empty() {
+                    format!("could not parse DRC report ({parse_err})")
+                } else {
+                    format!("kicad-cli pcb drc failed: {stderr}")
+                };
+                Err(io::Error::new(io::ErrorKind::InvalidData, detail))
+            }
+        }
+    }
+
     /// Run `kicad-cli sch export netlist --format kicadxml` on `schematic` and
     /// parse the result into a [`Netlist`].
     ///
@@ -410,6 +463,47 @@ impl ErcReport {
     }
 }
 
+/// The parsed `kicad-cli pcb drc --format json` report.
+///
+/// Unlike ERC's per-sheet nesting, the PCB DRC report is flat: top-level
+/// `violations`, `unconnected_items`, and `schematic_parity` arrays, each a list
+/// of [`Violation`]s sharing the same `severity`/`type`/`description`/`items`
+/// shape. We capture `violations` (copper/track design-rule findings) and
+/// `unconnected_items` (missing connections / airwires) — the two arrays the
+/// acceptance gate asserts are empty. `schematic_parity` is left out: it is only
+/// populated under `--schematic-parity`, which the routed-board gate does not
+/// request (there is no schematic alongside the fixture).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DrcReport {
+    /// Copper / track design-rule violations.
+    #[serde(default)]
+    pub violations: Vec<Violation>,
+    /// Missing connections — pads/items that should be on the same net but are
+    /// not joined by copper (the routed-board gate requires this to be empty).
+    #[serde(default)]
+    pub unconnected_items: Vec<Violation>,
+}
+
+impl DrcReport {
+    /// Number of `error`-severity entries across `violations` + `unconnected_items`.
+    pub fn error_count(&self) -> usize {
+        self.count_severity("error")
+    }
+
+    /// Number of `warning`-severity entries across `violations` + `unconnected_items`.
+    pub fn warning_count(&self) -> usize {
+        self.count_severity("warning")
+    }
+
+    fn count_severity(&self, severity: &str) -> usize {
+        self.violations
+            .iter()
+            .chain(self.unconnected_items.iter())
+            .filter(|v| v.severity == severity)
+            .count()
+    }
+}
+
 /// One sheet's worth of violations in the report JSON.
 #[derive(Deserialize)]
 struct Sheet {
@@ -475,6 +569,69 @@ mod tests {
             dangling.items[0].uuid.as_deref(),
             Some("11111111-0000-4000-8000-000000000001")
         );
+    }
+
+    // Captured shape from `kicad-cli pcb drc --format json` (10.0.3): a flat
+    // report with separate `violations`, `unconnected_items`, and
+    // `schematic_parity` arrays. Here: two warning-level footprint mismatches in
+    // `violations`, one error-level missing connection in `unconnected_items`.
+    const DRC_JSON: &str = r#"{
+        "$schema": "https://schemas.kicad.org/drc.v1.json",
+        "kicad_version": "10.0.3",
+        "coordinate_units": "mm",
+        "source": "two_res.kicad_pcb",
+        "violations": [
+            { "severity": "warning", "type": "lib_footprint_mismatch",
+              "description": "Footprint 'R_0805_2012Metric' does not match copy in library 'Resistor_SMD'",
+              "items": [ { "description": "Footprint R1",
+                           "uuid": "00000000-0000-0000-0000-000000000010" } ] },
+            { "severity": "warning", "type": "lib_footprint_mismatch",
+              "description": "Footprint 'R_0805_2012Metric' does not match copy in library 'Resistor_SMD'",
+              "items": [ { "description": "Footprint R2" } ] }
+        ],
+        "unconnected_items": [
+            { "severity": "error", "type": "unconnected_items",
+              "description": "Missing connection between items",
+              "items": [ { "description": "Pad 2 [GND] of R1 on F.Cu",
+                           "uuid": "00000000-0000-0000-0000-000000000014" },
+                         { "description": "Pad 2 [GND] of R2 on F.Cu" } ] }
+        ],
+        "schematic_parity": []
+    }"#;
+
+    #[test]
+    fn drc_report_parses_violations_and_unconnected_items() {
+        let report: DrcReport = serde_json::from_str(DRC_JSON).unwrap();
+        assert_eq!(report.violations.len(), 2);
+        assert_eq!(report.unconnected_items.len(), 1);
+
+        // Counts span both arrays.
+        assert_eq!(report.error_count(), 1); // the missing connection
+        assert_eq!(report.warning_count(), 2); // the two footprint mismatches
+
+        let unconnected = &report.unconnected_items[0];
+        assert_eq!(unconnected.kind, "unconnected_items");
+        assert_eq!(unconnected.severity, "error");
+        assert_eq!(unconnected.items.len(), 2);
+        assert_eq!(
+            unconnected.items[0].uuid.as_deref(),
+            Some("00000000-0000-0000-0000-000000000014")
+        );
+    }
+
+    #[test]
+    fn drc_report_clean_board_has_no_violations() {
+        let clean = r#"{
+            "$schema": "https://schemas.kicad.org/drc.v1.json",
+            "violations": [],
+            "unconnected_items": [],
+            "schematic_parity": []
+        }"#;
+        let report: DrcReport = serde_json::from_str(clean).unwrap();
+        assert!(report.violations.is_empty());
+        assert!(report.unconnected_items.is_empty());
+        assert_eq!(report.error_count(), 0);
+        assert_eq!(report.warning_count(), 0);
     }
 
     // Captured verbatim from `kicad-cli sch export netlist --format kicadxml`
