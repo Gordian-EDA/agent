@@ -429,7 +429,12 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
 /// Drop near-duplicate points and merge collinear runs (including 45° runs).
 /// Fresh copy of the simplify idea in `router.rs`, extended to merge diagonal
 /// collinearity so a straight 45° staircase of cells collapses to two points.
-fn simplify(path: Vec<Point2>) -> Vec<Point2> {
+///
+/// Shared with [`crate::pipeline`], which re-runs it over per-net polylines
+/// stitched across cells (so a joined run that is collinear across a former cell
+/// boundary collapses too) — the 45°-aware simplify lives here, its natural home
+/// as the detailed stage's emitter, rather than being duplicated.
+pub(crate) fn simplify(path: Vec<Point2>) -> Vec<Point2> {
     const EPS: f64 = 1e-9;
     let mut deduped: Vec<Point2> = Vec::with_capacity(path.len());
     for p in path {
