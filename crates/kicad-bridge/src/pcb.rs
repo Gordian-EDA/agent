@@ -41,12 +41,14 @@
 //!   or track width, so there is nothing board-specific to read.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::io;
 use std::path::Path;
 
 use kiutils_kicad::{PcbAst, PcbFile, PcbFootprint, PcbPad};
 use pcb_engine::problem::{
-    Bounds, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem,
+    Bounds, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace,
+    Via,
 };
 
 /// A board parsed into a routing problem plus the mappings write-back needs.
@@ -427,6 +429,302 @@ fn board_bounds(ast: &PcbAst) -> Bounds {
         min_y,
         max_y,
     }
+}
+
+// ── write-back: emit traces & vias ───────────────────────────────────────────
+//
+// `kiutils_kicad`'s `PcbDocument` cannot append segments/vias (its `ast_mut`
+// edits are rejected at `write()`; only title-block/property setters round-trip).
+// So write-back follows the house "render text, validate by re-parse" precedent
+// (`sch-engine/src/emit.rs`): we render the `(segment …)` / `(via …)`
+// s-expressions ourselves, splice them in before the file's final closing paren
+// — preserving every original byte outside the insertion point — then re-read
+// with `PcbFile::read` and assert the counts grew by exactly what we emitted with
+// no new diagnostics. The render is fully deterministic (content-derived v5
+// UUIDs, minimal number formatting), so identical input yields byte-identical
+// output.
+
+/// Fixed namespace UUID for auto-pcb **board** copper identifiers
+/// (`5c1a7d4e-3f62-5b89-a0d1-2e3f4a5b6c7d`). Distinct from the schematic
+/// namespace in `sch-engine/src/ids.rs` so a segment and a symbol never collide.
+/// Do not change: doing so would alter every emitted segment/via UUID.
+const PCB_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x5c1a_7d4e_3f62_5b89_a0d1_2e3f_4a5b_6c7d);
+
+/// Content-derived UUID for emitted copper. The same `key` always yields the
+/// same canonical hyphenated UUID (byte-identical re-emit).
+fn copper_uuid(key: &str) -> String {
+    uuid::Uuid::new_v5(&PCB_NAMESPACE, key.as_bytes())
+        .as_hyphenated()
+        .to_string()
+}
+
+/// Format an `f64` the way KiCAD writes coordinates: a bare minimal decimal with
+/// no trailing zeros (`10`, `8.9125`), and `-0.0` collapsed to `0`. Mirrors
+/// `sch-engine/src/emit.rs::fmt_coord`'s negative-zero canonicalization.
+fn fmt_num(v: f64) -> String {
+    let v = if v == 0.0 { 0.0 } else { v };
+    // Rust's `{}` for f64 already prints the shortest round-tripping decimal
+    // with no trailing zeros (e.g. `10`, `8.9125`), which matches KiCAD.
+    format!("{v}")
+}
+
+/// Map an engine [`LayerRef`] to this board's KiCAD copper layer name via the
+/// index mapping `read_problem` established (`LayerRef::index → layer_names[i]`).
+fn kicad_layer(layer: &LayerRef, board: &BoardProblem) -> io::Result<String> {
+    let layer_count = board.layer_names.len() as u32;
+    let idx = layer.index(layer_count).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "layer {:?} is out of range for a {layer_count}-layer board",
+                layer.0
+            ),
+        )
+    })?;
+    board.layer_names.get(idx as usize).cloned().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "layer {:?} maps to index {idx} with no board layer",
+                layer.0
+            ),
+        )
+    })
+}
+
+/// The KiCAD net code for a connection, or an `InvalidData` error naming it.
+fn net_code_for(connection: &str, board: &BoardProblem) -> io::Result<i32> {
+    board.net_codes.get(connection).copied().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("connection {connection:?} has no net code on this board"),
+        )
+    })
+}
+
+/// Render one trace polyline into `(segment …)` lines (one per consecutive,
+/// non-degenerate point pair) appended to `out`. Returns the number emitted.
+fn render_trace(out: &mut String, trace: &Trace, board: &BoardProblem) -> io::Result<usize> {
+    let layer = kicad_layer(&trace.layer, board)?;
+    let net = net_code_for(&trace.connection, board)?;
+    let w = fmt_num(trace.width);
+    let mut count = 0;
+    for pair in trace.path.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        if a.x == b.x && a.y == b.y {
+            continue; // skip zero-length pairs
+        }
+        let (x1, y1, x2, y2) = (fmt_num(a.x), fmt_num(a.y), fmt_num(b.x), fmt_num(b.y));
+        let uuid = copper_uuid(&format!("segment:{net}:{x1}:{y1}:{x2}:{y2}:{layer}"));
+        let _ = writeln!(
+            out,
+            "\t(segment (start {x1} {y1}) (end {x2} {y2}) (width {w}) (layer \"{layer}\") (net {net}) (uuid \"{uuid}\"))"
+        );
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Render one via into a `(via …)` line appended to `out`.
+fn render_via(out: &mut String, via: &Via, board: &BoardProblem) -> io::Result<()> {
+    let net = net_code_for(&via.connection, board)?;
+    let (x, y) = (fmt_num(via.at.x), fmt_num(via.at.y));
+    let (size, drill) = (fmt_num(via.diameter), fmt_num(via.drill));
+    // Vias span the full copper stack (top → bottom).
+    let top = board
+        .layer_names
+        .first()
+        .map(String::as_str)
+        .unwrap_or("F.Cu");
+    let bottom = board
+        .layer_names
+        .last()
+        .map(String::as_str)
+        .unwrap_or("B.Cu");
+    let uuid = copper_uuid(&format!("via:{net}:{x}:{y}:{size}:{drill}"));
+    let _ = writeln!(
+        out,
+        "\t(via (at {x} {y}) (size {size}) (drill {drill}) (layers \"{top}\" \"{bottom}\") (net {net}) (uuid \"{uuid}\"))"
+    );
+    Ok(())
+}
+
+/// Render the full copper block (all traces' segments, then all vias). Returns
+/// the rendered text and `(segment_count, via_count)`.
+fn render_solution(
+    solution: &RouteSolution,
+    board: &BoardProblem,
+) -> io::Result<(String, usize, usize)> {
+    let mut block = String::new();
+    let mut segments = 0;
+    for trace in &solution.traces {
+        segments += render_trace(&mut block, trace, board)?;
+    }
+    let vias = solution.vias.len();
+    for via in &solution.vias {
+        render_via(&mut block, via, board)?;
+    }
+    Ok((block, segments, vias))
+}
+
+/// Splice `block` into `source` immediately before the file's final `)` (the
+/// root `(kicad_pcb …)` closer), preserving every original byte. Returns the new
+/// text and the byte offset of the splice point (the length of the unchanged
+/// prefix), so callers can assert prefix bytes are untouched.
+fn splice_before_root_close(source: &str, block: &str) -> io::Result<(String, usize)> {
+    let close = source.rfind(')').ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "board has no closing paren to splice before",
+        )
+    })?;
+    let mut out = String::with_capacity(source.len() + block.len());
+    out.push_str(&source[..close]);
+    out.push_str(block);
+    out.push_str(&source[close..]);
+    Ok((out, close))
+}
+
+/// Emit `solution`'s traces and vias into the `.kicad_pcb` at `path`.
+///
+/// Each trace polyline becomes one `(segment …)` per consecutive non-zero-length
+/// point pair on `(layer "<mapped>")`; each via becomes one `(via …)` spanning
+/// the copper stack. Layer names come from `board.layer_names` (via
+/// `LayerRef::index`) and net codes from `board.net_codes` — a trace whose
+/// connection has no net code is an `InvalidData` error naming it. UUIDs are
+/// deterministic (content-derived v5), so identical input yields byte-identical
+/// output.
+///
+/// The rendered block is spliced before the file's final closing paren, leaving
+/// every original byte intact. The result is staged to a temp file, re-read with
+/// [`PcbFile::read`], and validated (zero diagnostics beyond the pre-write
+/// baseline; segment/via counts grew by exactly the emitted numbers) **before**
+/// it atomically replaces `path` — a board that fails validation is never left
+/// behind.
+pub fn write_solution(
+    path: &Path,
+    solution: &RouteSolution,
+    board: &BoardProblem,
+) -> io::Result<()> {
+    // Baseline: the file must already parse. Capture pre-write counts and the
+    // diagnostic count so post-write validation compares against the real prior
+    // state rather than assuming zero.
+    let baseline = PcbFile::read(path).map_err(map_kiutils_err)?;
+    let base_segments = baseline.ast().segments.len();
+    let base_vias = baseline.ast().vias.len();
+    let base_diags = baseline.diagnostics().len();
+    drop(baseline);
+
+    let source = std::fs::read_to_string(path)?;
+
+    let (block, n_segments, n_vias) = render_solution(solution, board)?;
+    let (spliced, splice_at) = splice_before_root_close(&source, &block)?;
+
+    // Stage to a temp file in the SAME directory (so the final rename is atomic
+    // on the same filesystem), validate, then promote. This mirrors the
+    // staging-then-rename idiom used elsewhere in the bridge.
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = tempfile::Builder::new()
+        .prefix("autopcb-pcb-")
+        .suffix(".kicad_pcb")
+        .tempfile_in(dir)?;
+    std::fs::write(tmp.path(), spliced.as_bytes())?;
+
+    // Re-read & validate before promoting; the temp file is dropped (deleted) on
+    // any early return, so a bad board never replaces the original.
+    let reread = PcbFile::read(tmp.path()).map_err(map_kiutils_err)?;
+    let new_diags = reread.diagnostics().len();
+    if new_diags > base_diags {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "write_solution produced {} new diagnostic(s): {:?}",
+                new_diags - base_diags,
+                reread.diagnostics()
+            ),
+        ));
+    }
+    let got_segments = reread.ast().segments.len();
+    let got_vias = reread.ast().vias.len();
+    if got_segments != base_segments + n_segments {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "segment count mismatch after write: expected {}, got {got_segments}",
+                base_segments + n_segments
+            ),
+        ));
+    }
+    if got_vias != base_vias + n_vias {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "via count mismatch after write: expected {}, got {got_vias}",
+                base_vias + n_vias
+            ),
+        ));
+    }
+    // Lossless prefix: the bytes before the splice point are unchanged.
+    debug_assert_eq!(
+        spliced.as_bytes()[..splice_at],
+        source.as_bytes()[..splice_at]
+    );
+    drop(reread);
+
+    // Validated: atomically replace the original.
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// Extract the copper already routed on a board back into a [`RouteSolution`].
+///
+/// The inverse of [`write_solution`]: each `(segment …)` becomes a 2-point
+/// [`Trace`] (its `connection` resolved from the net code, its `layer` mapped
+/// back to a [`LayerRef`]) and each `(via …)` becomes a [`Via`]. Copper on the
+/// no-net code (0) or an unnamed net is skipped — it carries no connection
+/// identity to attribute. Reused by the round-trip oracle test and slice 1's
+/// e2e to read a board's existing routing as a solution.
+pub fn extract_copper(path: &Path) -> io::Result<RouteSolution> {
+    let doc = PcbFile::read(path).map_err(map_kiutils_err)?;
+    let ast = doc.ast();
+    let layer_names = copper_layers(ast);
+
+    let mut traces = Vec::new();
+    for seg in &ast.segments {
+        let (Some([sx, sy]), Some([ex, ey])) = (seg.start, seg.end) else {
+            continue;
+        };
+        let Some(connection) = net_name(ast, seg.net) else {
+            continue;
+        };
+        let layer = seg
+            .layer
+            .as_deref()
+            .map(|l| layer_ref_for(l, &layer_names))
+            .unwrap_or_else(LayerRef::top);
+        traces.push(Trace {
+            connection,
+            layer,
+            width: seg.width.unwrap_or(0.0),
+            path: vec![Point2 { x: sx, y: sy }, Point2 { x: ex, y: ey }],
+        });
+    }
+
+    let mut vias = Vec::new();
+    for via in &ast.vias {
+        let Some([vx, vy]) = via.at else { continue };
+        let Some(connection) = net_name(ast, via.net) else {
+            continue;
+        };
+        vias.push(Via {
+            connection,
+            at: Point2 { x: vx, y: vy },
+            diameter: via.size.unwrap_or(0.0),
+            drill: via.drill.unwrap_or(0.0),
+        });
+    }
+
+    Ok(RouteSolution { traces, vias })
 }
 
 // ── error mapping ────────────────────────────────────────────────────────────
