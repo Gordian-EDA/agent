@@ -12,8 +12,6 @@
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
-		(in_pos_files yes)
-		(duplicate_pin_numbers_are_jumpers no)
 		(property "Reference" "J"
 			(at 0 22.225 0)
 			(show_name no)
@@ -726,8 +724,6 @@
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
-		(in_pos_files yes)
-		(duplicate_pin_numbers_are_jumpers no)
 		(property "Reference" "J"
 			(at 0 12.7 0)
 			(show_name no)
@@ -1118,8 +1114,6 @@
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
-		(in_pos_files yes)
-		(duplicate_pin_numbers_are_jumpers no)
 		(property "Reference" "C"
 			(at 0.635 2.54 0)
 			(show_name no)
@@ -1273,8 +1267,6 @@
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
-		(in_pos_files yes)
-		(duplicate_pin_numbers_are_jumpers no)
 		(property "Reference" "R"
 			(at 2.032 0 90)
 			(show_name no)
@@ -1407,8 +1399,6 @@
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
-		(in_pos_files yes)
-		(duplicate_pin_numbers_are_jumpers no)
 		(property "Reference" "U"
 			(at -17.78 69.85 0)
 			(show_name no)
@@ -4123,8 +4113,6 @@
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
-		(in_pos_files yes)
-		(duplicate_pin_numbers_are_jumpers no)
 		(property "Reference" "U"
 			(at -3.81 3.175 0)
 			(show_name no)
@@ -4273,7 +4261,7 @@
 		(embedded_fonts no)
 	)
 		(symbol "power:PWR_FLAG"
-		(power global)
+		(power)
 		(pin_numbers
 			(hide yes)
 		)
@@ -4284,8 +4272,6 @@
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
-		(in_pos_files yes)
-		(duplicate_pin_numbers_are_jumpers no)
 		(property "Reference" "#FLG"
 			(at 0 1.905 0)
 			(show_name no)

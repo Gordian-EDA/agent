@@ -7,11 +7,15 @@ fn detects_installed_kicad() {
         return;
     };
     assert!(env.symbol_dir.join("Device.kicad_sym").exists());
-    assert!(
-        env.cli_version.starts_with("10."),
-        "got {}",
-        env.cli_version
-    );
+    // Everything we shell out to (sch erc, netlist, svg export, pcb drc)
+    // exists from KiCAD 8 on; dev boxes run 9 or 10.
+    let major: u32 = env
+        .cli_version
+        .split('.')
+        .next()
+        .and_then(|m| m.parse().ok())
+        .unwrap_or(0);
+    assert!(major >= 8, "unsupported KiCAD {}", env.cli_version);
 }
 
 #[test]
