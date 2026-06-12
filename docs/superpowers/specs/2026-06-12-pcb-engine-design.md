@@ -1,7 +1,7 @@
 # PCB Copper Autorouter (`pcb-engine`) — Design
 
 **Date:** 2026-06-12
-**Status:** Approved (slices 0–1 in flight)
+**Status:** Approved (slices 0–1 complete; slice 2 next)
 **Scope lock:** copper autorouting, built in-house in Rust, in this repo.
 
 ## Problem
@@ -116,6 +116,27 @@ crates/
 | 3 — Detailed routing | Segment→point crossing assignment, high-density hotspot solver, via insertion, stitch + simplify | DRC-clean copper on medium boards; via count + wirelength reported vs benchmark |
 | 4 — Placement (LLM lever) | Deterministic legalizer + force-directed seed; LLM proposes groupings/regions. **Prerequisite:** footprint index in kicad-bridge (analog of `symlib.rs`) + footprint-bearing fixtures | Route success rate ↑ vs fixed placement |
 | 5 — Agent integration | Constraint authoring, failure provenance, vision critique loop, triage rip-up; new agent tools | Agent closes a board it failed first-pass by moving a part / relaxing a rule |
+
+**Slice-1 findings (2026-06-12, gate passed):**
+
+- Design constants as planned (pitch `max(0.1, (w_min + clearance)/2)` —
+  0.225 mm on the fixtures; via 25 steps, bend 2, inflation
+  `clearance + w_min/2`) **plus one addition**: marking only routed *cells*
+  as a net's copper lets foreign nets route one pitch away, which the exact
+  lint flags. The router therefore marks a Chebyshev **clearance halo**
+  (radius `ceil((w_min + clearance)/pitch)` cells, net-owned so the net
+  itself passes through freely) around every routed cell.
+- **Oracle blind spot found & fixed:** the router briefly emitted
+  bottom-layer traces as `inner1`; both in-house oracles passed (vias join
+  all layers, clearance checks are layer-name-gated, so a phantom layer
+  never collides). Caught by eyeballing the SVG render. Lesson: copper
+  oracles don't validate layer *names* — a `LayerRef::index`-validity check
+  belongs in the lint (slice 2 candidate); regression test added meanwhile.
+- E2E on `two_res.kicad_pcb` against kicad-cli 10.0.3: in-house lint and
+  KiCAD DRC **agree** — zero violations, zero unconnected. Only
+  warning-severity `lib_footprint_mismatch` bookkeeping entries appear
+  (fixture's inline footprints vs installed lib; pre-existing, copper-
+  independent, documented carve-out in the e2e test).
 
 ## Reuse from this repo
 

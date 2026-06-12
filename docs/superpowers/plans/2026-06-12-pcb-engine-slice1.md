@@ -121,9 +121,15 @@ violation list incl. `unconnected_items`).
 
 ### Task 7: wrap-up
 
-- [ ] `cargo test --workspace` + clippy clean; render all fixtures; check
+- [x] `cargo test --workspace` + clippy clean; render all fixtures; check
       spec slice-1 row; note any tuning of the design constants in the spec.
       Commit: `chore(pcb-engine): slice 1 wrap-up`
+      (425 tests pass, 0 fail; pcb-engine and kicad-bridge clippy-clean —
+      remaining clippy warnings are pre-existing in circuit-lang/sch-engine/
+      agent, untouched by this slice. Fixtures rendered to
+      `target/pcb-render/`. Spec status + slice-1 findings recorded:
+      clearance-halo constant, layer-name oracle blind spot, oracle
+      agreement at the e2e gate.)
 
 ## Self-review notes
 - The lint (Task 4) deliberately re-measures with exact geometry instead of
