@@ -351,11 +351,17 @@ orthogonal vs octilinear, pad-snap variants, pop caps, via-skip — all recorded
 
 ### Task 5: wrap-up (inline, main loop)
 
-- [ ] `cargo test --workspace` green; clippy clean on touched crates;
+- [x] `cargo test --workspace` green; clippy clean on touched crates;
       render + eyeball ALL fixture PNGs (incl. congested-detailed);
       spec slice-3 row + findings (constants actually used, hotspot
       threshold behavior, benchmark deferral note); memory update.
       Commit: `chore(pcb-engine): slice 3 wrap-up`
+      (488 workspace tests, 0 failures. PNGs eyeballed: relief board's 8
+      nets cross only at the 3 top-layer gaps with via-hops — consistent
+      with empty lint; congested stress case shows clean copper + 3
+      honestly-dropped nets. Spec findings recorded: Euclidean halos,
+      gate revision rationale, zero-slack rip-up work item, mesh
+      granularity finding, metrics, runtime.)
 
 ## Self-review notes
 

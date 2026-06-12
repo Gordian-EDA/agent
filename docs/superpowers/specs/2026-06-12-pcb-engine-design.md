@@ -1,7 +1,7 @@
 # PCB Copper Autorouter (`pcb-engine`) — Design
 
 **Date:** 2026-06-12
-**Status:** Approved (slices 0–2 complete; slice 3 next)
+**Status:** Approved (slices 0–3 complete; slice 4 next)
 **Scope lock:** copper autorouting, built in-house in Rust, in this repo.
 
 ## Problem
@@ -164,6 +164,38 @@ crates/
 - `FailedNet` moved to `problem.rs` (shared by router and pathing;
   re-exported from `router` so the slice-1 API is unchanged). Lint now
   validates layer names (`InvalidLayer`), closing the slice-1 blind spot.
+
+**Slice-3 findings (2026-06-12, gate passed on the revised medium-board
+fixture):**
+
+- Pipeline shipped: `assign_crossings` (slot spreading with end margins) →
+  per-cell octilinear A* on a shared full-board half-pitch grid
+  (0.1125 mm) with **Euclidean exact-geometry halos** (the slice-1
+  Chebyshev box over-blocked legal 0.45 mm spacings — fatal at dense
+  boundaries) → **per-net full-board finisher** (failed nets rerouted
+  pad-to-pad on the residual board, ignoring their assigned crossings) →
+  byte-exact stitch. `route_auto` (detailed, fall back to naive on fewer
+  failures, provenance-tagged) is the production entry point.
+- **Gate revision:** `congested.json` is ZERO-SLACK (8 nets / exactly 8
+  wall slots) — realizing a zero-slack global plan in exact geometry needs
+  a rip-up *detailed* router (prototyped: whole-board reroute reaches 1
+  residual at ~40 s/call; not shipped). The slice-3 gate board is
+  `congested-relief.json` (same defeat-greedy topology, 3 gaps, slack 4):
+  slice-1 fails it, pipeline routes it clean end-to-end. `congested.json`
+  stays asserted as the stress case: geometry-clean copper, **exactly 3**
+  honest finisher failures. Tightening that to 0 = the detailed-rip-up
+  work item (v1.5 candidate).
+- **Mesh granularity finding:** two foreign pads inside one quadtree leaf
+  read capacity 0 for both nets, so `route_detailed` honestly fails
+  two_res's GND at the *global* stage (seeding) while slice-1 routes it
+  trivially — `route_auto` covers it; asserted as a finding test in the
+  kicad e2e. Mesh refinement near pads is a known work item.
+- Metrics on fixtures: detailed ≈ 1.02–1.04× naive wirelength where both
+  succeed, more vias (it spreads load by design). tscircuit benchmark
+  comparison still deferred (no raw upstream problems — slice-0 finding).
+- Runtime: `route_detailed(congested*)` ≈ 20 s (full-board half-pitch
+  finisher grids dominate); pcb-engine suite ≈ 75 s. Acceptable for v1;
+  spatial indexing and grid reuse are the obvious levers later.
 
 ## Reuse from this repo
 
