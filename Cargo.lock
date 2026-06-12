@@ -846,6 +846,7 @@ dependencies = [
  "fuzzy-matcher",
  "kiutils_kicad",
  "kiutils_sexpr",
+ "pcb-engine",
  "quick-xml",
  "serde",
  "serde_json",

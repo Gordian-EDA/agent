@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 circuit-lang = { path = "../circuit-lang" }
+pcb-engine = { path = "../pcb-engine" }
 strsim.workspace = true
 fuzzy-matcher.workspace = true
 elsa.workspace = true
