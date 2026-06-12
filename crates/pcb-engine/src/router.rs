@@ -200,6 +200,7 @@ fn emit_path(
         return;
     }
     let width = problem.min_trace_width;
+    let layer_count = problem.layer_count.max(1) as usize;
 
     // Walk the path, accumulating same-layer runs; a layer change closes the
     // current run (emit a trace), drops a via at the transition cell, and opens
@@ -220,7 +221,7 @@ fn emit_path(
             // Layer change: the via sits at the shared (ix,iy) of prev==cur.
             let at = mm(&prev);
             // Close the current run.
-            push_trace(traces, connection, run_layer, width, std::mem::take(&mut run));
+            push_trace(traces, connection, run_layer, layer_count, width, std::mem::take(&mut run));
             vias.push(Via {
                 connection: connection.to_owned(),
                 at: Point2 { x: at.x, y: at.y },
@@ -232,7 +233,7 @@ fn emit_path(
             run_layer = cur.layer;
         }
     }
-    push_trace(traces, connection, run_layer, width, run);
+    push_trace(traces, connection, run_layer, layer_count, width, run);
 }
 
 /// Push a simplified (collinear-merged) trace if it has ≥ 2 distinct points.
@@ -240,6 +241,7 @@ fn push_trace(
     traces: &mut Vec<Trace>,
     connection: &str,
     layer: usize,
+    layer_count: usize,
     width: f64,
     path: Vec<Point2>,
 ) {
@@ -249,20 +251,22 @@ fn push_trace(
     }
     traces.push(Trace {
         connection: connection.to_owned(),
-        layer: layer_ref(layer),
+        layer: layer_ref(layer, layer_count),
         width,
         path: simplified,
     });
 }
 
-/// The [`LayerRef`] for a numeric copper layer index (0 = top, last = bottom;
-/// inner layers as `inner{n}`).
-fn layer_ref(layer: usize) -> LayerRef {
-    match layer {
-        0 => LayerRef::top(),
-        // Slice-1 boards are 2-layer; index 1 is bottom. Higher indices map to
-        // inner names for completeness.
-        _ => LayerRef(format!("inner{layer}")),
+/// The [`LayerRef`] for a numeric copper layer index (0 = top, last index =
+/// bottom, anything between as `inner{n}`) — the inverse of
+/// [`LayerRef::index`].
+fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
+    if layer == 0 {
+        LayerRef::top()
+    } else if layer + 1 == layer_count {
+        LayerRef::bottom()
+    } else {
+        LayerRef(format!("inner{layer}"))
     }
 }
 
@@ -365,6 +369,26 @@ mod tests {
             assert!(hp >= prev - 1e-12, "net order not non-decreasing by half-perimeter");
             prev = hp;
         }
+    }
+
+    #[test]
+    fn routed_traces_use_layers_valid_for_the_board() {
+        // Regression: grid layer 1 on a 2-layer board is "bottom", not
+        // "inner1" (which LayerRef::index rejects for layer_count = 2).
+        let p = load("quad.json");
+        let r = route(&p);
+        assert!(r.failed.is_empty());
+        let mut saw_bottom = false;
+        for t in &r.solution.traces {
+            assert!(
+                t.layer.index(p.layer_count).is_some(),
+                "trace on layer {:?} invalid for a {}-layer board",
+                t.layer,
+                p.layer_count
+            );
+            saw_bottom |= t.layer == LayerRef::bottom();
+        }
+        assert!(saw_bottom, "quad must use the bottom layer (it has vias)");
     }
 
     #[test]
