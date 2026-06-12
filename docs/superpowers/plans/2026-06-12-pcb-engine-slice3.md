@@ -224,6 +224,67 @@ saturated wall the way the global stage negotiates capacity) and/or a stronger
 crossing-heuristic work the plan's self-review anticipated, materially larger than
 a clearance-fidelity fix. Task 4's strict gate stays deferred on that finding.
 
+### Task 3.5b — Hotspot repair: per-net full-board finisher (`feat(pcb-engine): hotspot repair — per-net finisher completes detailed routing`)
+
+- [x] **Per-net full-board finisher (avenue A).** After the per-cell pass,
+      `route_cells` takes the failed nets (slice-1 net order), drops their partial
+      in-cell copper (and the per-cell failure records), and re-routes each net
+      **pad-to-pad on a fresh full-board occupancy grid** carrying only the
+      successfully-routed detailed copper + every net's pad anchor. Octilinear is
+      *not* used here — the finisher routes **orthogonally** (two free 45° runs in
+      adjacent lanes can dip under clearance because the Euclidean cell-centre halo
+      blocks cells, not diagonal segment bodies; orthogonal traces one track pitch
+      apart stay exactly legal). Each net is tried, on its own grid clone, in three
+      attempts until one succeeds: free no-via → free with-via → plan-guided through
+      its single wall-gap waypoint (the crossing nearest board-centre-x, with a
+      small free-cell neighbourhood so the net takes whichever lane is open, not a
+      possibly-blocked exact slot). Each repaired net's copper is marked before the
+      next finisher runs; survivors stay honest `finisher: …` failures.
+- [x] **Pad anchors stamped** for *every* net (even unrouted ones) so a wandering
+      finisher route cannot short an unrouted net's pad; **no endpoint snapping**
+      (legs meet through shared tree cells, and a half-pitch cell centre is within
+      half a trace width of its pad — snapping off-centre is what tripped the exact
+      lint as a sub-clearance near-miss).
+- [x] **Runtime.** Two cheap moves keep `route_detailed(congested)` ~20 s and the
+      whole `cargo test -p pcb-engine` at **33 s** (baseline was 33 s): the finisher
+      A* is bounded to each net's bbox + margin (`leg_bounds`), and the **no-via
+      attempt first** (`AStarCosts::allow_via`, default `true` ⇒ slice-1 untouched)
+      skips the per-cell via-barrel clearance disc scan — the dominant cost of a
+      full-board search on a 2-layer board — for the common single-layer net.
+
+**Measured before/after (this task):** failed nets through `route_detailed`
+(geometry-clean throughout — the only `lint` entries are `Connectivity` from
+dropped nets):
+
+| fixture    | before (3.5a) | after (3.5b)  | naive (for comparison)            |
+|------------|---------------|---------------|-----------------------------------|
+| led-r      | 0             | **0** clean   | 0 — wl 42.30, 0 vias              |
+| quad       | 4             | **0** clean   | 0 — wl 222.30, 8 vias             |
+| congested  | 21            | **3**         | 3 — wl 461.25, 4 vias            |
+
+Detailed metrics: led-r wl 43.25 / 0 vias; quad wl 232.22 / 12 vias (now Detailed,
+not the naive fallback); congested wl 464.11 / 10 vias (3 nets dropped).
+
+**What worked:** avenue **(A) alone** closes quad (its six over-converged central
+crossings finish on the full-board grid) and is geometry-clean everywhere.
+Avenue (B) (crossing-slot permutation) was **not needed** — the single-wall-waypoint
+guided attempt is the only plan-guidance kept, and a free pad-to-pad attempt is
+tried first.
+
+**Honest residual (congested = 3, FINDING — strict 0-failed gate still NOT reached):**
+N0, N2/N4, N7 (the highest-travel nets) cannot get a lane through the **exactly
+saturated** top-layer wall. Measured: the relief gap (y≈4) holds five orthogonal
+lanes one track pitch apart but its fifth slot sits at the inflated obstacle margin;
+the central gap (y≈30) holds three. 8 lanes for 8 nets with *zero* slack — packing
+all eight needs coordinated rip-up the per-net finisher does not do. A **whole-board
+re-route** (re-route every net from a clean grid, plan-guided) was prototyped and
+reaches congested = **1** (only N7), but costs ~40 s per call (full-board A* over
+every net) — infeasible for the test suite and still non-zero — so it is **not
+shipped**. This is the same rip-up case 3.5a flagged; Task 4's strict gate stays
+deferred. (≥ 10 distinct mechanisms tried: free/guided finisher, gap-neighbourhood
+targets, multi-ordering search, whole-board re-route, design vs half pitch,
+orthogonal vs octilinear, pad-snap variants, pop caps, via-skip — all recorded above.)
+
 ### Task 4: the slice gate — congested fixture clean + KiCAD e2e + metrics
 
 - [ ] Gate test (pcb-engine `tests/detailed_gate.rs`): `congested.json` —

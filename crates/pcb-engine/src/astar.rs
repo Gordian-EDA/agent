@@ -78,6 +78,13 @@ pub struct AStarCosts {
     /// foreign trace already routed (the lint measures the via barrel in exact
     /// geometry).
     pub via_clear_radius_cells: usize,
+    /// Whether the search may place vias (change layer). `true` (the default) keeps
+    /// the slice-1 behaviour. The detailed finisher first tries a net with this
+    /// `false`: a planar (no-via) A* skips the per-cell via-barrel clearance scan —
+    /// the dominant cost of a full-board search on a multi-layer board — and succeeds
+    /// for the common single-layer net; only if that fails does it retry with vias
+    /// allowed. Correct either way (a net that needs a via just falls to the retry).
+    pub allow_via: bool,
 }
 
 impl Default for AStarCosts {
@@ -90,6 +97,7 @@ impl Default for AStarCosts {
             diag: DIAG_COST,
             moves: MoveSet::Orthogonal,
             via_clear_radius_cells: 0,
+            allow_via: true,
         }
     }
 }
@@ -317,8 +325,10 @@ pub fn search_bounded(
         }
 
         // Via: change layer in place, if the barrel — and its clearance halo — is
-        // clear on every layer.
-        if grid.layer_count > 1
+        // clear on every layer. Skipped entirely when the caller forbids vias (a
+        // single-layer net), which also skips the per-cell barrel-clearance scan.
+        if costs.allow_via
+            && grid.layer_count > 1
             && via_barrel_clear(grid, conn, cur.ix, cur.iy, costs.via_clear_radius_cells)
         {
             for layer in 0..grid.layer_count {
