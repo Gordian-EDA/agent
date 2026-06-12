@@ -1,0 +1,84 @@
+{
+  "layerCount": 2,
+  "minTraceWidth": 0.25,
+  "bounds": {
+    "minX": 0.0,
+    "maxX": 30.0,
+    "minY": 0.0,
+    "maxY": 20.0
+  },
+  "connections": [
+    {
+      "name": "SIG",
+      "pointsToConnect": [
+        { "x": 5.0, "y": 10.0, "layer": "top" },
+        { "x": 25.0, "y": 10.0, "layer": "top" }
+      ]
+    },
+    {
+      "name": "GND",
+      "pointsToConnect": [
+        { "x": 5.0, "y": 15.0, "layer": "top" },
+        { "x": 25.0, "y": 15.0, "layer": "top" }
+      ]
+    }
+  ],
+  "obstacles": [
+    {
+      "type": "rect",
+      "layers": ["top"],
+      "center": { "x": 5.0, "y": 10.0 },
+      "width": 1.2,
+      "height": 1.4,
+      "connectedTo": ["SIG"]
+    },
+    {
+      "type": "rect",
+      "layers": ["top"],
+      "center": { "x": 25.0, "y": 10.0 },
+      "width": 1.2,
+      "height": 1.4,
+      "connectedTo": ["SIG"]
+    },
+    {
+      "type": "rect",
+      "layers": ["top"],
+      "center": { "x": 5.0, "y": 15.0 },
+      "width": 1.2,
+      "height": 1.4,
+      "connectedTo": ["GND"]
+    },
+    {
+      "type": "rect",
+      "layers": ["top"],
+      "center": { "x": 25.0, "y": 15.0 },
+      "width": 1.2,
+      "height": 1.4,
+      "connectedTo": ["GND"]
+    },
+    {
+      "type": "rect",
+      "layers": ["top"],
+      "center": { "x": 12.0, "y": 10.0 },
+      "width": 1.2,
+      "height": 1.4,
+      "connectedTo": []
+    },
+    {
+      "type": "rect",
+      "layers": ["top"],
+      "center": { "x": 15.0, "y": 9.5 },
+      "width": 1.2,
+      "height": 1.4,
+      "connectedTo": []
+    },
+    {
+      "type": "rect",
+      "layers": ["top"],
+      "center": { "x": 18.0, "y": 10.0 },
+      "width": 1.2,
+      "height": 1.4,
+      "connectedTo": []
+    }
+  ]
+}
