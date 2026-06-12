@@ -6,6 +6,7 @@
 //! - [`problem`] — [`RouteProblem`] / [`RouteSolution`] data model,
 //!   SimpleRouteJson-compatible.
 
+pub mod astar;
 pub mod connectivity;
 pub mod grid;
 pub mod problem;

@@ -40,14 +40,14 @@ bend cost ≈ 2 steps; obstacle inflation = `clearance + min_trace_width/2`.
 
 ### Task 2: A* core (`astar.rs`)
 
-- [ ] 3-D state `(layer, ix, iy)`; moves: 4-neighbor same-layer (cost 1 +
+- [x] 3-D state `(layer, ix, iy)`; moves: 4-neighbor same-layer (cost 1 +
       bend cost when direction changes), layer change (via cost) allowed only
       where ALL layers' cells are free-for-this-connection (via barrel).
       Heuristic: Manhattan distance / nothing fancy; admissible. Deterministic:
       BinaryHeap keyed `(cost, state)` with total tie-break order.
-- [ ] Multi-target: A* to the NEAREST of a target set (heuristic = min over
+- [x] Multi-target: A* to the NEAREST of a target set (heuristic = min over
       targets) — enables point-to-tree routing.
-- [ ] Tests: straight route on empty grid; detour around a wall; via hop when
+- [x] Tests: straight route on empty grid; detour around a wall; via hop when
       a layer is fully walled; unreachable → None; determinism (twice, equal).
       Commit: `feat(pcb-engine): grid A* with bend and via costs`
 
