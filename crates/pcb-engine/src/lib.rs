@@ -9,5 +9,6 @@
 pub mod astar;
 pub mod connectivity;
 pub mod grid;
+pub mod lint;
 pub mod problem;
 pub mod router;

@@ -72,7 +72,7 @@ bend cost ≈ 2 steps; obstacle inflation = `clearance + min_trace_width/2`.
 
 ### Task 4: DRC lint (`lint.rs`) — the strict oracle
 
-- [ ] `pub fn lint(problem, solution) -> Vec<DrcViolation>` checks, exact
+- [x] `pub fn lint(problem, solution) -> Vec<DrcViolation>` checks, exact
       geometry (segment/segment, segment/rect distances — NOT grid-based;
       the lint must be independent of the router's model):
       `ClearanceTraceTrace` (different connections, same layer, gap <
@@ -81,7 +81,7 @@ bend cost ≈ 2 steps; obstacle inflation = `clearance + min_trace_width/2`.
       slice-0 connectivity violations folded in (one report).
       Brute-force O(n²) pairs is fine at this scale; structure so a spatial
       index can slot in later.
-- [ ] Tests: hand-built violating solutions trigger each variant exactly;
+- [x] Tests: hand-built violating solutions trigger each variant exactly;
       router outputs on both fixtures lint CLEAN (the gate); a deliberately
       too-close pair of parallel traces fails.
       Commit: `feat(pcb-engine): strict DRC lint`

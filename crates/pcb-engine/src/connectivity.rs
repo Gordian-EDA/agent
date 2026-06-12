@@ -46,6 +46,7 @@
 //! between single-net copper are still reported.
 
 use crate::problem::{LayerRef, RouteProblem, RouteSolution};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -53,7 +54,8 @@ use std::fmt;
 const EPS: f64 = 1e-6;
 
 /// A connectivity defect in a [`RouteSolution`] relative to its problem.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Violation {
     /// A connection's point #`point_index` is not joined to its point #0 by the
     /// emitted copper. (Connections with fewer than 2 points pass trivially.)
