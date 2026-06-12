@@ -88,11 +88,11 @@ bend cost ≈ 2 steps; obstacle inflation = `clearance + min_trace_width/2`.
 
 ### Task 5: SVG debug render (`svg.rs`)
 
-- [ ] `pub fn render_svg(problem, solution) -> String`: board outline, pads
+- [x] `pub fn render_svg(problem, solution) -> String`: board outline, pads
       (grey, foreign copper darker), traces (top red, bottom blue, 60%
       opacity so overlaps read), vias (ringed circles), failed nets' points
       highlighted. Pure string assembly (house style — no new deps).
-- [ ] Test: output contains expected element counts; write rendered fixtures
+- [x] Test: output contains expected element counts; write rendered fixtures
       to `target/pcb-render/` in a `#[test]` helper for eyeballing (like the
       sch render harness).
       Commit: `feat(pcb-engine): SVG debug render`
