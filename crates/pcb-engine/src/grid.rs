@@ -178,6 +178,32 @@ impl RouteGrid {
         };
     }
 
+    /// Mark `(layer, ix, iy)` and every cell within `radius_cells` of it (a
+    /// square Chebyshev halo) as copper owned by `conn`.
+    ///
+    /// The halo enforces clearance between this net's copper and *other* nets:
+    /// a foreign trace centred in a haloed cell would sit too close to this
+    /// net's trace. Because the halo is written as `Net(conn)`, the owning net
+    /// can still route through it (it never blocks itself), while foreign nets
+    /// are kept the full clearance away. See [`Self::mark_net`] for the
+    /// per-cell tag-combine rules.
+    pub fn mark_net_halo(&mut self, layer: usize, ix: usize, iy: usize, conn: usize, radius_cells: usize) {
+        if layer >= self.layer_count {
+            return;
+        }
+        let r = radius_cells as isize;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let hx = ix as isize + dx;
+                let hy = iy as isize + dy;
+                if hx < 0 || hy < 0 || hx >= self.nx as isize || hy >= self.ny as isize {
+                    continue;
+                }
+                self.mark_net(layer, hx as usize, hy as usize, conn);
+            }
+        }
+    }
+
     // ── coordinate mapping ───────────────────────────────────────────────────
 
     /// Centre of cell column `ix`, mm. Floor-based: lower edge is
@@ -461,5 +487,24 @@ mod tests {
         // A second net over the same cell hard-blocks it for everyone else.
         g.mark_net(0, cx, cy, gnd);
         assert_eq!(g.cell(0, cx, cy), Cell::BlockedAll);
+    }
+
+    #[test]
+    fn mark_net_halo_blocks_a_chebyshev_ring_for_others() {
+        let mut g = RouteGrid::build(&problem(vec![]));
+        let sig = g.connection_index("SIG").unwrap();
+        let gnd = g.connection_index("GND").unwrap();
+        let (cx, cy) = g.cell_of(5.0, 5.0);
+        g.mark_net_halo(0, cx, cy, sig, 1);
+        // Every cell within Chebyshev radius 1 is SIG-owned (foreign blocked,
+        // owner free); a cell two away is untouched.
+        for dx in -1isize..=1 {
+            for dy in -1isize..=1 {
+                let (hx, hy) = ((cx as isize + dx) as usize, (cy as isize + dy) as usize);
+                assert!(!g.is_free_for(0, hx, hy, gnd), "halo cell blocks foreign");
+                assert!(g.is_free_for(0, hx, hy, sig), "halo cell free for owner");
+            }
+        }
+        assert!(g.is_free_for(0, cx + 2, cy, gnd), "outside halo stays free");
     }
 }

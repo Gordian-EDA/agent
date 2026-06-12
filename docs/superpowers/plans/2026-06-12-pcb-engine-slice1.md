@@ -53,19 +53,19 @@ bend cost ≈ 2 steps; obstacle inflation = `clearance + min_trace_width/2`.
 
 ### Task 3: per-net router + solution assembly (`router.rs`)
 
-- [ ] Net order: ascending by bounding-box half-perimeter of its points
+- [x] Net order: ascending by bounding-box half-perimeter of its points
       (short local nets first), tie-break by name — deterministic.
-- [ ] Per connection: seed targets = cells of point 0; for each further
+- [x] Per connection: seed targets = cells of point 0; for each further
       point, A* from its cells to the routed-tree cell set; on success mark
       path cells as that connection's copper (becomes obstacle for later
       nets via the grid's name index) and record path. Convert cell paths →
       mm polylines, split at layer changes (via at the transition point),
       merge collinear runs (reuse the simplify idea from
       `sch-engine/route.rs`, fresh copy — crates stay decoupled).
-- [ ] `pub fn route(problem) -> RouteResult { solution, failed: Vec<FailedNet> }`
+- [x] `pub fn route(problem) -> RouteResult { solution, failed: Vec<FailedNet> }`
       — `FailedNet { connection, reason }`; a failure never panics and never
       silently drops a net.
-- [ ] Tests: `led-r.json` routes fully; `quad.json` routes fully (asserting
+- [x] Tests: `led-r.json` routes fully; `quad.json` routes fully (asserting
       ≥ 1 via used); connectivity oracle empty on both; determinism
       (serialize solution twice, byte-equal).
       Commit: `feat(pcb-engine): sequential naive grid router`
