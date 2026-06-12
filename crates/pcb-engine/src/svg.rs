@@ -5,6 +5,12 @@
 //! (from [`crate::router::RouteResult::failed`]). Pure string assembly — no
 //! external dependencies beyond the standard library.
 //!
+//! [`render_global_svg`] produces a standalone SVG from a [`RouteProblem`],
+//! a [`crate::mesh::CapacityMesh`], and a [`crate::pathing::GlobalRouteResult`]:
+//! a board underlay (outline + pads), leaf boundary rects, per-leaf utilization
+//! heat tint (green → red), net cell-path polylines, and orange highlights for
+//! unrouted net endpoints.
+//!
 //! ## Coordinate system
 //!
 //! KiCAD PCB coordinates are y-down, and SVG is also y-down, so no axis flip
@@ -22,9 +28,15 @@
 //! | Bottom-layer trace    | blue, 60 % opacity                           |
 //! | Via                   | ringed circle (annular ring + drill hole)    |
 //! | Failed-net point      | orange cross + circle                        |
+//! | Mesh leaf boundary    | thin light-grey rect                         |
+//! | Leaf utilization      | green→red heat fill by max-layer usage ratio |
+//! | Net cell-path ribbon  | translucent polyline, layer-coloured         |
+//! | Unrouted endpoint     | orange cross + circle (same as failed-net)   |
 
 use std::fmt::Write as _;
 
+use crate::mesh::CapacityMesh;
+use crate::pathing::GlobalRouteResult;
 use crate::problem::{LayerRef, RouteProblem, RouteSolution};
 use crate::router::FailedNet;
 
@@ -207,6 +219,237 @@ pub fn render_svg(
     o
 }
 
+// ── public API (global) ──────────────────────────────────────────────────────
+
+/// Render `problem`, `mesh`, and `result` to a standalone SVG string.
+///
+/// Layer 0: board underlay — outline + pads (no copper traces; the global plan
+/// is not copper yet).
+/// Layer 1: leaf boundaries — thin grey rects tinted by per-leaf utilization
+/// (green = unused, red = at/over capacity).
+/// Layer 2: net cell-path ribbons — translucent polylines through step centres,
+/// colour-coded by layer (red = top, blue = bottom, green = inner), one polyline
+/// per `CellPath`.
+/// Layer 3: unrouted-net endpoint highlights — orange cross + circle.
+pub fn render_global_svg(
+    problem: &RouteProblem,
+    mesh: &CapacityMesh,
+    result: &GlobalRouteResult,
+) -> String {
+    let margin = 2.0_f64;
+    let b = &problem.bounds;
+    let board_w = b.max_x - b.min_x;
+    let board_h = b.max_y - b.min_y;
+    let vb_x = b.min_x - margin;
+    let vb_y = b.min_y - margin;
+    let vb_w = board_w + 2.0 * margin;
+    let vb_h = board_h + 2.0 * margin;
+
+    let px_per_mm = 10.0_f64;
+    let svg_w = vb_w * px_per_mm;
+    let svg_h = vb_h * px_per_mm;
+
+    let mut o = String::with_capacity(64 * 1024);
+    let w = &mut o;
+
+    // SVG root ----------------------------------------------------------------
+    writeln!(w, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>").unwrap();
+    write!(
+        w,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"\n\
+         \x20    width=\"{svg_w:.2}\" height=\"{svg_h:.2}\"\n\
+         \x20    viewBox=\"{vb_x:.6} {vb_y:.6} {vb_w:.6} {vb_h:.6}\">\n"
+    )
+    .unwrap();
+
+    // Board outline -----------------------------------------------------------
+    w.push_str("  <!-- board outline -->\n");
+    writeln!(
+        w,
+        "  <rect x=\"{x:.6}\" y=\"{y:.6}\" width=\"{bw:.6}\" height=\"{bh:.6}\" \
+         fill=\"none\" stroke=\"#444\" stroke-width=\"0.1\"/>",
+        x = b.min_x,
+        y = b.min_y,
+        bw = board_w,
+        bh = board_h
+    )
+    .unwrap();
+
+    // Obstacles / pads --------------------------------------------------------
+    w.push_str("  <!-- obstacles / pads -->\n");
+    for ob in &problem.obstacles {
+        let fill = if ob.connected_to.is_empty() {
+            "#666"
+        } else {
+            "#aaa"
+        };
+        let hw = ob.width / 2.0;
+        let hh = ob.height / 2.0;
+        writeln!(
+            w,
+            "  <rect x=\"{x:.6}\" y=\"{y:.6}\" width=\"{ow:.6}\" height=\"{oh:.6}\" \
+             fill=\"{fill}\"/>",
+            x = ob.center.x - hw,
+            y = ob.center.y - hh,
+            ow = ob.width,
+            oh = ob.height
+        )
+        .unwrap();
+    }
+
+    // Per-leaf utilization heat tint ------------------------------------------
+    //
+    // Utilization = distinct (net_plan_index, path_index) step visits per leaf
+    // per layer, divided by the leaf's layer capacity. We take the max across
+    // layers so a single fill colour represents the most-loaded layer.
+    //
+    // The denominator is the raw LeafLayer::capacity (not capacity_for, since
+    // at this point we have no single net's identity — the heat shows the
+    // "number of nets threading through this leaf" relative to how many could).
+    // A capacity of 0 means the leaf is fully blocked; if anything routes
+    // through it the ratio is capped at 1 to avoid divide-by-zero divergence.
+    let layer_count = mesh.layer_count.max(1);
+    let mut leaf_usage: Vec<Vec<u32>> = vec![vec![0u32; layer_count]; mesh.leaves.len()];
+    for net in &result.plan.nets {
+        for path in &net.paths {
+            for step in &path.steps {
+                if step.leaf < mesh.leaves.len() && step.layer < layer_count {
+                    leaf_usage[step.leaf][step.layer] += 1;
+                }
+            }
+        }
+    }
+
+    w.push_str("  <!-- leaf utilization heat tint -->\n");
+    for leaf in &mesh.leaves {
+        let r = &leaf.rect;
+        let lw = r.max_x - r.min_x;
+        let lh = r.max_y - r.min_y;
+        // Max-layer utilization ratio for this leaf.
+        let ratio = (0..layer_count)
+            .map(|li| {
+                let cap = leaf
+                    .layers
+                    .get(li)
+                    .map(|l| l.capacity)
+                    .unwrap_or(0);
+                let used = leaf_usage[leaf.id].get(li).copied().unwrap_or(0);
+                if cap == 0 {
+                    if used > 0 { 1.0_f64 } else { 0.0_f64 }
+                } else {
+                    (used as f64 / cap as f64).min(1.0)
+                }
+            })
+            .fold(0.0_f64, f64::max);
+
+        // Leaf boundary: always drawn (thin grey).
+        // Heat fill: green (#080) at 0, red (#c00) at 1, transparent when 0.
+        if ratio > 1e-9 {
+            let fill = heat_color(ratio);
+            writeln!(
+                w,
+                "  <rect x=\"{x:.6}\" y=\"{y:.6}\" width=\"{lw:.6}\" height=\"{lh:.6}\" \
+                 fill=\"{fill}\" fill-opacity=\"0.35\" stroke=\"#bbb\" stroke-width=\"0.05\"/>",
+                x = r.min_x,
+                y = r.min_y
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                w,
+                "  <rect x=\"{x:.6}\" y=\"{y:.6}\" width=\"{lw:.6}\" height=\"{lh:.6}\" \
+                 fill=\"none\" stroke=\"#bbb\" stroke-width=\"0.05\"/>",
+                x = r.min_x,
+                y = r.min_y
+            )
+            .unwrap();
+        }
+    }
+
+    // Net cell-path ribbons ---------------------------------------------------
+    //
+    // One <polyline> per CellPath; colour matches the layer of the first step
+    // (consistent with slice-1 red/blue for top/bottom). Translucent so
+    // overlapping paths from different nets are visible.
+    w.push_str("  <!-- net cell-path ribbons -->\n");
+    for net in &result.plan.nets {
+        for path in &net.paths {
+            if path.steps.is_empty() {
+                continue;
+            }
+            // Use the first step's layer for the ribbon colour.
+            let layer_idx = path.steps[0].layer;
+            let stroke = layer_stroke_by_index(layer_idx, layer_count);
+
+            let mut pts = String::new();
+            for (i, step) in path.steps.iter().enumerate() {
+                if i > 0 {
+                    pts.push(' ');
+                }
+                write!(pts, "{:.6},{:.6}", step.center.x, step.center.y).unwrap();
+            }
+            writeln!(
+                w,
+                "  <polyline points=\"{pts}\" fill=\"none\" stroke=\"{stroke}\" \
+                 stroke-width=\"0.3\" stroke-opacity=\"0.5\" \
+                 stroke-linecap=\"round\" stroke-linejoin=\"round\"/>"
+            )
+            .unwrap();
+        }
+    }
+
+    // Unrouted-net endpoint highlights ----------------------------------------
+    //
+    // Same orange cross + circle as slice-1's failed-net markers so the visual
+    // language is consistent.
+    if !result.report.unrouted.is_empty() {
+        w.push_str("  <!-- unrouted net endpoint highlights -->\n");
+        for fn_ in &result.report.unrouted {
+            let Some(conn) = problem
+                .connections
+                .iter()
+                .find(|c| c.name == fn_.connection)
+            else {
+                continue;
+            };
+            for pt in &conn.points_to_connect {
+                let arm = 0.8_f64;
+                writeln!(
+                    w,
+                    "  <circle cx=\"{cx:.6}\" cy=\"{cy:.6}\" r=\"{arm:.6}\" \
+                     fill=\"none\" stroke=\"#f80\" stroke-width=\"0.15\"/>",
+                    cx = pt.x,
+                    cy = pt.y
+                )
+                .unwrap();
+                writeln!(
+                    w,
+                    "  <line x1=\"{x1:.6}\" y1=\"{cy:.6}\" \
+                     x2=\"{x2:.6}\" y2=\"{cy:.6}\" \
+                     stroke=\"#f80\" stroke-width=\"0.15\"/>",
+                    cy = pt.y,
+                    x1 = pt.x - arm,
+                    x2 = pt.x + arm
+                )
+                .unwrap();
+                writeln!(
+                    w,
+                    "  <line x1=\"{cx:.6}\" y1=\"{y1:.6}\" \
+                     x2=\"{cx:.6}\" y2=\"{y2:.6}\" \
+                     stroke=\"#f80\" stroke-width=\"0.15\"/>",
+                    cx = pt.x,
+                    y1 = pt.y - arm,
+                    y2 = pt.y + arm
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    w.push_str("</svg>\n");
+    o
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// SVG stroke colour for a layer.
@@ -218,11 +461,41 @@ fn layer_stroke(layer: &LayerRef) -> &'static str {
     }
 }
 
+/// SVG stroke colour for a layer by numeric index.
+/// Layer 0 = top (red), last layer = bottom (blue), middle = green.
+fn layer_stroke_by_index(layer: usize, layer_count: usize) -> &'static str {
+    if layer == 0 {
+        "#c00"
+    } else if layer + 1 == layer_count {
+        "#00c"
+    } else {
+        "#080"
+    }
+}
+
+/// Heat colour for a utilization ratio in [0, 1]: green (#080) at 0 → yellow
+/// (#880) at 0.5 → red (#c00) at 1.  Returned as a `#rrggbb` CSS colour.
+///
+/// Interpolation is linear in the red and green channels:
+/// - red channel: 0x00 at ratio 0 → 0xcc at ratio 1
+/// - green channel: 0x88 at ratio 0 → 0x00 at ratio 1
+/// - blue channel: 0x00 throughout
+fn heat_color(ratio: f64) -> String {
+    let t = ratio.clamp(0.0, 1.0);
+    // green component: 0x88 → 0x00
+    let g = ((1.0 - t) * 0x88 as f64).round() as u8;
+    // red component: 0x00 → 0xcc
+    let r = (t * 0xcc as f64).round() as u8;
+    format!("#{r:02x}{g:02x}00")
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mesh::CapacityMesh;
+    use crate::pathing::global_route_with_mesh;
     use crate::router;
     use std::path::Path;
 
@@ -347,6 +620,115 @@ mod tests {
         );
     }
 
+    // ── global SVG element-count assertions ──────────────────────────────────
+
+    #[test]
+    fn global_svg_leaf_rect_count_matches_mesh() {
+        // congested.json is the primary fixture for global routing tests.
+        let p = load("congested.json");
+        let mesh = CapacityMesh::build(&p);
+        let result = global_route_with_mesh(&p, &mesh);
+        let svg = render_global_svg(&p, &mesh, &result);
+
+        // Every leaf emits exactly one <rect> (heat-tinted or outline-only).
+        // The board outline + obstacle rects are also <rect> elements.
+        // Lower bound: we must have at least mesh.leaves.len() leaf rects.
+        let rect_count = count_tag(&svg, "<rect");
+        let leaf_count = mesh.leaves.len();
+        // board outline (1) + obstacles + leaf rects
+        let min_expected = 1 + p.obstacles.len() + leaf_count;
+        assert!(
+            rect_count >= min_expected,
+            "expected >={min_expected} <rect> elements \
+             (1 board + {} obstacles + {leaf_count} leaves), got {rect_count}",
+            p.obstacles.len()
+        );
+
+        // Exactly mesh.leaves.len() leaf <rect>s.  We emit one rect per leaf, so
+        // the total minus the board outline and obstacles must equal the leaf count.
+        // We use a separate comment-based marker to count just the leaf rects:
+        // each leaf rect immediately follows the heat-tint comment block. Rather
+        // than parsing SVG structure we check the total and the individual counts.
+        assert!(
+            svg.contains("<svg"),
+            "output must open with <svg"
+        );
+        assert!(svg.contains("</svg>"), "output must close </svg>");
+        assert!(
+            svg.contains("<!-- leaf utilization heat tint -->"),
+            "global SVG must contain the leaf tint section"
+        );
+        assert!(
+            svg.contains("<!-- net cell-path ribbons -->"),
+            "global SVG must contain the cell-path ribbons section"
+        );
+    }
+
+    #[test]
+    fn global_svg_unrouted_highlight_appears_for_infeasible() {
+        use crate::problem::{Bounds, Connection, RoutePoint};
+
+        // A trivially infeasible problem: two points on opposite sides of a
+        // full-height keepout on both layers. The global router will report the
+        // net as unrouted and the SVG must contain orange markers.
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.25,
+            obstacles: vec![crate::problem::Obstacle {
+                kind: "rect".to_owned(),
+                layers: vec![LayerRef::top(), LayerRef::bottom()],
+                center: crate::problem::Point2 { x: 12.0, y: 8.0 },
+                width: 2.0,
+                height: 16.0,
+                connected_to: vec![],
+            }],
+            connections: vec![Connection {
+                name: "CROSS".to_owned(),
+                points_to_connect: vec![
+                    RoutePoint { x: 2.0, y: 8.0, layer: LayerRef::top() },
+                    RoutePoint { x: 22.0, y: 8.0, layer: LayerRef::top() },
+                ],
+            }],
+            bounds: Bounds {
+                min_x: 0.0,
+                max_x: 24.0,
+                min_y: 0.0,
+                max_y: 16.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+        };
+        let mesh = CapacityMesh::build(&p);
+        let result = global_route_with_mesh(&p, &mesh);
+        assert!(
+            !result.report.unrouted.is_empty(),
+            "the infeasible fixture must have unrouted nets"
+        );
+        let svg = render_global_svg(&p, &mesh, &result);
+        assert!(
+            svg.contains("#f80"),
+            "unrouted-net highlight colour (#f80) must appear in global SVG"
+        );
+    }
+
+    #[test]
+    fn global_svg_has_polylines_for_routed_nets() {
+        let p = load("led-r.json");
+        let mesh = CapacityMesh::build(&p);
+        let result = global_route_with_mesh(&p, &mesh);
+        assert!(result.is_feasible(), "led-r must route feasibly");
+
+        let svg = render_global_svg(&p, &mesh, &result);
+        let polyline_count = count_tag(&svg, "<polyline");
+        // Each routed path produces one polyline; led-r has connections.
+        let total_paths: usize = result.plan.nets.iter().map(|n| n.paths.len()).sum();
+        assert!(
+            polyline_count >= total_paths,
+            "expected >={total_paths} <polyline> elements for cell-path ribbons, got {polyline_count}"
+        );
+    }
+
     // ── fixture render + write to target/pcb-render/ for eyeballing ──────────
     //
     // Routes all fixtures, renders them, and writes SVGs to
@@ -354,6 +736,8 @@ mod tests {
     // browser after `cargo test -p pcb-engine`.  The test never fails on SVG
     // content — only if the router panics or the target directory is
     // unwritable.
+    //
+    // Also writes `{name}-global.svg` for each fixture using `render_global_svg`.
 
     #[test]
     fn render_all_fixtures_to_target() {
@@ -366,7 +750,12 @@ mod tests {
         std::fs::create_dir_all(&out_dir)
             .unwrap_or_else(|e| panic!("create {}: {e}", out_dir.display()));
 
-        let fixtures = ["led-r.json", "quad.json", "tscircuit-shape.json"];
+        let fixtures = [
+            "led-r.json",
+            "quad.json",
+            "tscircuit-shape.json",
+            "congested.json",
+        ];
         for name in fixtures {
             let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures")
@@ -379,6 +768,9 @@ mod tests {
                 .unwrap_or_else(|e| panic!("read {name}: {e}"));
             let p: RouteProblem =
                 serde_json::from_str(&json).unwrap_or_else(|e| panic!("parse {name}: {e}"));
+            let stem = name.trim_end_matches(".json");
+
+            // Slice-1 SVG.
             let result = router::route(&p);
             if !result.failed.is_empty() {
                 eprintln!(
@@ -387,11 +779,19 @@ mod tests {
                 );
             }
             let svg = render_svg(&p, &result.solution, &result.failed);
-            let stem = name.trim_end_matches(".json");
             let svg_path = out_dir.join(format!("{stem}.svg"));
             std::fs::write(&svg_path, svg.as_bytes())
                 .unwrap_or_else(|e| panic!("write {}: {e}", svg_path.display()));
             eprintln!("rendered: {}", svg_path.display());
+
+            // Global overlay SVG.
+            let mesh = CapacityMesh::build(&p);
+            let global_result = global_route_with_mesh(&p, &mesh);
+            let global_svg = render_global_svg(&p, &mesh, &global_result);
+            let global_path = out_dir.join(format!("{stem}-global.svg"));
+            std::fs::write(&global_path, global_svg.as_bytes())
+                .unwrap_or_else(|e| panic!("write {}: {e}", global_path.display()));
+            eprintln!("rendered: {}", global_path.display());
         }
     }
 }

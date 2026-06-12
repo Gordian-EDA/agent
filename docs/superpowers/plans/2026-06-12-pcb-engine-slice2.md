@@ -116,13 +116,13 @@ iteration, max iterations ≈ 40.
 
 ### Task 4: mesh/plan SVG overlay (`svg.rs` extension)
 
-- [ ] `pub fn render_global_svg(problem, mesh, plan_result) -> String`:
+- [x] `pub fn render_global_svg(problem, mesh, plan_result) -> String`:
       slice-1 board rendering underneath (reuse existing helpers), plus
       leaf boundaries (thin grey), per-leaf utilization heat tint (green →
       red by max-layer usage/capacity), net cell paths as translucent
       ribbons through cell centers, unrouted nets' endpoints highlighted.
       Pure string assembly, no new deps.
-- [ ] Tests: element-count assertions on a fixture; extend the
+- [x] Tests: element-count assertions on a fixture; extend the
       render-all-fixtures helper to also write `*-global.svg` into
       `target/pcb-render/` for eyeballing.
       Commit: `feat(pcb-engine): global plan SVG overlay`
