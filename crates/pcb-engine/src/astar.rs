@@ -4,6 +4,15 @@
 //! - **Step** — to a 4-neighbour cell on the same layer, cost [`STEP_COST`],
 //!   plus [`bend_cost`](AStarCosts::bend) when the heading changes from the
 //!   move that entered the current cell (keeps routes straight).
+//! - **Diagonal step** — to one of the 4 diagonal neighbours on the same layer,
+//!   cost [`AStarCosts::diag`] (= `ceil(√2 × STEP_COST) = 2` in the integer cost
+//!   scale), enabled only when [`AStarCosts::moves`] is [`MoveSet::Octilinear`].
+//!   *Corner-cutting is forbidden*: a diagonal into `(ix±1, iy±1)` is allowed
+//!   only when **both** orthogonally-adjacent cells (`(ix±1, iy)` and
+//!   `(ix, iy±1)`) are also free for this connection, so the 45° corner keeps
+//!   the full clearance two abutting tracks would. Slice-1 callers default to
+//!   [`MoveSet::Orthogonal`] and never see diagonals — their behaviour is
+//!   bit-identical to before this move was added.
 //! - **Via** — change layer in place, cost [`AStarCosts::via`]. Allowed only
 //!   where the cell is free for this connection on *every* layer (the
 //!   conservative through-via barrel check; correct for the v1 2-layer scope).
@@ -28,6 +37,26 @@ use std::collections::BinaryHeap;
 /// Cost of one orthogonal grid step.
 pub const STEP_COST: u32 = 1;
 
+/// Cost of one diagonal grid step: `ceil(√2 × STEP_COST)` in the integer cost
+/// scale. With `STEP_COST = 1` this is `2`, which is strictly cheaper than the
+/// two orthogonal steps (`2 × STEP_COST`) plus the bend they would incur to
+/// cover the same diagonal cell, so octilinear search prefers a true 45° run
+/// over an orthogonal staircase. The Manhattan heuristic stays admissible: a
+/// diagonal closes two cells of Manhattan distance for cost 2 (= 1 per cell),
+/// never under-counting.
+pub const DIAG_COST: u32 = 2;
+
+/// Which neighbour moves the planar search may use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveSet {
+    /// 4-neighbour (N/S/E/W) only — the slice-1 baseline. Bit-identical to the
+    /// router before diagonals existed.
+    Orthogonal,
+    /// 4 orthogonal + 4 diagonal neighbours (45° routing), corner-cutting
+    /// forbidden. Used by the per-cell detailed router ([`crate::detail`]).
+    Octilinear,
+}
+
 /// Tunable A* movement costs, in grid-step units.
 #[derive(Debug, Clone, Copy)]
 pub struct AStarCosts {
@@ -35,12 +64,24 @@ pub struct AStarCosts {
     pub bend: u32,
     /// Cost of a layer change (a via).
     pub via: u32,
+    /// Cost of a single diagonal step (only used when `moves` is
+    /// [`MoveSet::Octilinear`]). Defaults to [`DIAG_COST`].
+    pub diag: u32,
+    /// Which neighbour moves the planar search uses. Defaults to
+    /// [`MoveSet::Orthogonal`] so slice-1 callers are unchanged.
+    pub moves: MoveSet,
 }
 
 impl Default for AStarCosts {
     fn default() -> Self {
-        // Per the design constants: via ≈ 25 grid steps, bend ≈ 2 steps.
-        Self { bend: 2, via: 25 }
+        // Per the design constants: via ≈ 25 grid steps, bend ≈ 2 steps. The
+        // default move set is orthogonal so the slice-1 router is unchanged.
+        Self {
+            bend: 2,
+            via: 25,
+            diag: DIAG_COST,
+            moves: MoveSet::Orthogonal,
+        }
     }
 }
 
@@ -65,6 +106,11 @@ enum Heading {
     MinusX,
     PlusY,
     MinusY,
+    /// Diagonal headings (octilinear search only).
+    PlusXPlusY,
+    PlusXMinusY,
+    MinusXPlusY,
+    MinusXMinusY,
     /// Arrived by a via (layer change) — the next planar step is not a bend.
     Via,
 }
@@ -147,7 +193,7 @@ pub fn search(
         }
         let g_cur = g[cur_id];
 
-        // Planar steps.
+        // Orthogonal planar steps.
         for (dir, dx, dy) in NEIGHBORS {
             let nx = cur.ix as isize + dx;
             let ny = cur.iy as isize + dy;
@@ -171,6 +217,53 @@ pub fn search(
             relax(
                 next, tentative, dir, cur_id, &mut g, &mut came_from, &mut open, &heuristic, sid,
             );
+        }
+
+        // Diagonal planar steps (octilinear search only). Corner-cutting is
+        // forbidden: a diagonal is allowed only when both orthogonally-adjacent
+        // cells are free for this connection, keeping the 45° corner clear.
+        if costs.moves == MoveSet::Octilinear {
+            for (dir, dx, dy) in DIAGONALS {
+                let nx = cur.ix as isize + dx;
+                let ny = cur.iy as isize + dy;
+                if nx < 0 || ny < 0 || nx >= grid.nx as isize || ny >= grid.ny as isize {
+                    continue;
+                }
+                let next = State {
+                    layer: cur.layer,
+                    ix: nx as usize,
+                    iy: ny as usize,
+                };
+                if !grid.is_free_for(next.layer, next.ix, next.iy, conn) {
+                    continue;
+                }
+                // Both orthogonal neighbours bridging this diagonal must be free
+                // (no corner-cutting through a blocked orthogonal pair).
+                let side_x = grid.is_free_for(
+                    cur.layer,
+                    (cur.ix as isize + dx) as usize,
+                    cur.iy,
+                    conn,
+                );
+                let side_y = grid.is_free_for(
+                    cur.layer,
+                    cur.ix,
+                    (cur.iy as isize + dy) as usize,
+                    conn,
+                );
+                if !side_x || !side_y {
+                    continue;
+                }
+                let bend = if matches!(heading, Heading::None | Heading::Via) || heading == dir {
+                    0
+                } else {
+                    costs.bend
+                };
+                let tentative = g_cur + costs.diag + bend;
+                relax(
+                    next, tentative, dir, cur_id, &mut g, &mut came_from, &mut open, &heuristic, sid,
+                );
+            }
         }
 
         // Via: change layer in place, if the barrel is clear on every layer.
@@ -209,6 +302,14 @@ const NEIGHBORS: [(Heading, isize, isize); 4] = [
     (Heading::MinusX, -1, 0),
     (Heading::PlusY, 0, 1),
     (Heading::MinusY, 0, -1),
+];
+
+/// 4 diagonal neighbours as `(heading, dx, dy)` (octilinear search only).
+const DIAGONALS: [(Heading, isize, isize); 4] = [
+    (Heading::PlusXPlusY, 1, 1),
+    (Heading::PlusXMinusY, 1, -1),
+    (Heading::MinusXPlusY, -1, 1),
+    (Heading::MinusXMinusY, -1, -1),
 ];
 
 /// Is the cell free for `conn` on *every* layer (through-via barrel check)?
@@ -434,6 +535,94 @@ mod tests {
         .expect("reachable");
         // Stops at the nearer target.
         assert_eq!(path.last(), Some(&st(0, near_x, near_y)));
+    }
+
+    #[test]
+    fn octilinear_uses_a_diagonal_when_cheaper() {
+        // A corner-to-corner route on an open board: an octilinear search should
+        // take the 45° diagonal (a step that changes BOTH ix and iy at once),
+        // which an orthogonal search can never do.
+        let g = RouteGrid::build(&open_problem());
+        let a = g.connection_index("A").unwrap();
+        let (sx, sy) = g.cell_of(4.0, 4.0);
+        let (tx, ty) = g.cell_of(14.0, 14.0);
+        let costs = AStarCosts {
+            moves: MoveSet::Octilinear,
+            ..AStarCosts::default()
+        };
+        let path = search(&g, a, &[st(0, sx, sy)], &[st(0, tx, ty)], costs)
+            .expect("reachable diagonally");
+        assert_eq!(path.first(), Some(&st(0, sx, sy)));
+        assert_eq!(path.last(), Some(&st(0, tx, ty)));
+        // At least one step moves diagonally (both coordinates change together).
+        let has_diagonal = path
+            .windows(2)
+            .any(|w| w[0].ix != w[1].ix && w[0].iy != w[1].iy);
+        assert!(has_diagonal, "octilinear search must use a 45° diagonal step");
+    }
+
+    #[test]
+    fn orthogonal_never_uses_a_diagonal() {
+        // The same corner-to-corner route with the default (orthogonal) move set
+        // must stay on the 4-neighbour grid — no step changes both coordinates.
+        let g = RouteGrid::build(&open_problem());
+        let a = g.connection_index("A").unwrap();
+        let (sx, sy) = g.cell_of(4.0, 4.0);
+        let (tx, ty) = g.cell_of(14.0, 14.0);
+        let path = search(&g, a, &[st(0, sx, sy)], &[st(0, tx, ty)], AStarCosts::default())
+            .expect("reachable orthogonally");
+        assert!(
+            path.windows(2)
+                .all(|w| (w[0].ix == w[1].ix) || (w[0].iy == w[1].iy)),
+            "orthogonal search must not move diagonally"
+        );
+    }
+
+    #[test]
+    fn corner_cutting_is_forbidden() {
+        // Build an L-shaped wall so the only diagonal that would close the gap
+        // has a BLOCKED orthogonal neighbour on one side — corner-cutting. The
+        // search must refuse that diagonal and detour, never slip through the
+        // corner. We block the two cells orthogonally adjacent to a diagonal hop
+        // and assert no path step cuts the blocked corner.
+        let mut p = open_problem();
+        // A blocking keepout column just right of the start, leaving a diagonal
+        // gap at its corner. Place a small keepout so that the cell directly to
+        // the +x of a key cell is blocked while the diagonal cell is free.
+        p.obstacles
+            .push(pad(&[], (8.0, 8.0), 0.6, 0.6, &["top"]));
+        let g = RouteGrid::build(&p);
+        let a = g.connection_index("A").unwrap();
+        let costs = AStarCosts {
+            moves: MoveSet::Octilinear,
+            ..AStarCosts::default()
+        };
+        let (bx, by) = g.cell_of(8.0, 8.0); // a blocked cell (keepout, inflated)
+        let (sx, sy) = g.cell_of(4.0, 8.0);
+        let (tx, ty) = g.cell_of(14.0, 8.0);
+        let path = search(&g, a, &[st(0, sx, sy)], &[st(0, tx, ty)], costs)
+            .expect("reachable around the keepout");
+        // No two consecutive path cells may form a diagonal that cuts across the
+        // blocked cell (bx,by): that is, a diagonal whose shared orthogonal
+        // neighbour is the blocked cell is illegal.
+        for w in path.windows(2) {
+            let (c, n) = (w[0], w[1]);
+            let diagonal = c.ix != n.ix && c.iy != n.iy && c.layer == n.layer;
+            if diagonal {
+                // The two orthogonal bridge cells of this diagonal.
+                let o1 = (n.ix, c.iy);
+                let o2 = (c.ix, n.iy);
+                assert!(
+                    o1 != (bx, by) && o2 != (bx, by),
+                    "diagonal {c:?}->{n:?} cut the blocked corner ({bx},{by})"
+                );
+                // And both bridge cells must actually be free for A.
+                assert!(
+                    g.is_free_for(0, o1.0, o1.1, a) && g.is_free_for(0, o2.0, o2.1, a),
+                    "diagonal {c:?}->{n:?} crossed a non-free orthogonal neighbour"
+                );
+            }
+        }
     }
 
     #[test]

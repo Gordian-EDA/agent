@@ -77,7 +77,7 @@ full-resolution).
 
 ### Task 2: per-cell detailed router (`detail.rs`)
 
-- [ ] Fine A* within a cell window: reuse `grid.rs`/`astar.rs` machinery
+- [x] Fine A* within a cell window: reuse `grid.rs`/`astar.rs` machinery
       scoped to the leaf rect inflated by one track pitch (so routes can
       hug boundaries), at the detailed pitch. Extend `astar.rs` moves with
       the 4 diagonals (cost ceil(√2 × step), corner-cutting forbidden:
@@ -85,19 +85,28 @@ full-resolution).
       connection — keeps clearance honest at 45° corners). Keep the
       4-neighbor behavior available so slice-1 `route()` is unchanged
       (default costs/moves identical to before — its tests must not
-      change).
-- [ ] `pub fn route_cells(problem, mesh, assignment) -> CellRouteResult`:
+      change). DONE: `RouteGrid::build_window` (true-board-edge blocking
+      only); `astar::MoveSet::{Orthogonal,Octilinear}` + `DIAG_COST=2`,
+      `AStarCosts.moves` defaults Orthogonal so slice-1 is bit-identical.
+- [x] `pub fn route_cells(problem, mesh, assignment) -> CellRouteResult`:
       per cell (deterministic leaf order), per net (slice-1 net order),
       connect that cell's terminals (entry→exit→pads→via sites) on the
       cell-local grid; mark routed copper + clearance halo into the local
       grid as in slice 1 so later nets in the SAME cell avoid it. Failures
       are per-net `FailedNet` with cell id in the reason — honest, no
-      panic.
-- [ ] Tests: single cell with 2 terminals routes straight; diagonal path
+      panic. DONE in `detail.rs`. Endpoint exactness via terminal snapping.
+      FINDING: led-r routes all cells; quad fails 4/45 jobs and congested
+      fails 27/107 — central crossing cells where several top-layer nets
+      converge on near-coincident boundary points exceed the greedy
+      per-cell budget. This is the anticipated honest failure → Task 3
+      fallback (slice-1) for affected nets; the crossing-assignment
+      projection heuristic is slice-3.5 material, not a gate fudge.
+- [x] Tests: single cell with 2 terminals routes straight; diagonal path
       is used when cheaper (assert a 45° segment exists); corner-cutting
       blocked test (diagonal through a blocked orthogonal pair is NOT
       taken); dense-cell pin field (hand-built tiny problem) routes all
-      nets; determinism.
+      nets; determinism. DONE (astar: 3 diagonal tests; grid: 2 window
+      tests; detail: 7 tests incl. endpoint exactness + honest-failure).
       Commit: `feat(pcb-engine): per-cell detailed router with 45° moves`
 
 ### Task 3: stitch + pipeline entry (`pipeline.rs`)

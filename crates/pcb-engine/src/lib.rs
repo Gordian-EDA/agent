@@ -9,6 +9,7 @@
 pub mod astar;
 pub mod connectivity;
 pub mod crossing;
+pub mod detail;
 pub mod grid;
 pub mod lint;
 pub mod mesh;

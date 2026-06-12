@@ -118,6 +118,94 @@ impl RouteGrid {
         grid
     }
 
+    /// Build a [`RouteGrid`] covering only a sub-rectangle `window` of the
+    /// board, at the same pitch and with the same obstacle/clearance semantics as
+    /// [`Self::build`]. Used by the per-cell detailed router ([`crate::detail`])
+    /// to route inside one quadtree leaf without rasterizing the whole board.
+    ///
+    /// The window is expected to be the leaf rect inflated by one track pitch and
+    /// clamped to the board bounds (the caller does the inflation/clamp). Only the
+    /// window is rasterized; only obstacles whose inflated footprint reaches the
+    /// window are blocked.
+    ///
+    /// ## Boundary semantics (deliberate, and tested)
+    ///
+    /// - **True board edges block.** A cell within `obstacle_inflation` of the
+    ///   *real* board bounds (`problem.bounds`) is blocked on every layer, exactly
+    ///   as in [`Self::build`]: copper may not leave the board.
+    /// - **Window edges do NOT block by inflation.** A window edge that is *not*
+    ///   also a board edge is an artefact of the per-cell decomposition, not a
+    ///   physical boundary, so cells at it are usable. This is required: crossing
+    ///   points sit on leaf boundaries, which become window-interior cells after
+    ///   the one-pitch inflation, and a route must be able to reach them.
+    /// - **Routing still stays inside the window.** Movement beyond the grid is
+    ///   impossible (out-of-range cells read [`Cell::BlockedAll`]), so a path
+    ///   physically cannot leave the window even though the window edge itself is
+    ///   routable. Other cells' copper is invisible here by construction — the
+    ///   per-cell router marks only this cell's own routed copper into the window
+    ///   grid, and stitching (Task 3) joins cells at the shared crossing points.
+    ///
+    /// The grid uses the window's own origin (`min` = clamped window min); the
+    /// cross-cell stitching contract is upheld by the detailed router *snapping*
+    /// each terminal endpoint to its exact mm position, not by aligning window
+    /// lattices (floating-point floor mismatches make exact lattice alignment
+    /// unreliable, and snapping is exact regardless).
+    pub fn build_window(problem: &RouteProblem, window: &crate::mesh::Rect) -> RouteGrid {
+        let pitch = grid_pitch(problem);
+        let inflation = obstacle_inflation(problem);
+        let b = &problem.bounds;
+
+        // Clamp the window to the board bounds defensively (the caller should
+        // have done this, but a window cell must never sit off-board).
+        let win_min_x = window.min_x.max(b.min_x);
+        let win_min_y = window.min_y.max(b.min_y);
+        let win_max_x = window.max_x.min(b.max_x);
+        let win_max_y = window.max_y.min(b.max_y);
+
+        // Window origin = window min. Window cells are this grid's own lattice;
+        // the stitching contract relies on *terminal endpoint snapping* (the
+        // detailed router replaces any terminal endpoint with its exact mm
+        // position), NOT on cell-centre alignment between windows — so two
+        // adjacent cells agree on a crossing point byte-for-byte regardless of
+        // their independent lattices.
+        let min_x = win_min_x;
+        let min_y = win_min_y;
+
+        let nx = cells_along(min_x, win_max_x, pitch);
+        let ny = cells_along(min_y, win_max_y, pitch);
+        let layer_count = problem.layer_count.max(1) as usize;
+
+        let mut name_index: BTreeMap<String, usize> = BTreeMap::new();
+        for (i, conn) in problem.connections.iter().enumerate() {
+            name_index.entry(conn.name.clone()).or_insert(i);
+        }
+
+        let plane = nx * ny;
+        let cells = vec![Cell::Free; plane * layer_count];
+
+        let mut grid = RouteGrid {
+            layer_count,
+            nx,
+            ny,
+            pitch,
+            min_x,
+            min_y,
+            cells,
+            name_index,
+        };
+
+        // Block cells within `inflation` of a TRUE board edge only (window edges
+        // that are not board edges stay routable — see the doc comment).
+        grid.block_true_board_edge(inflation, b);
+
+        // Rasterize only obstacles whose inflated footprint reaches the window.
+        for ob in &problem.obstacles {
+            grid.rasterize_obstacle(ob, inflation);
+        }
+
+        grid
+    }
+
     /// Total cells per layer plane.
     #[inline]
     fn plane(&self) -> usize {
@@ -245,6 +333,29 @@ impl RouteGrid {
                     || (cy - self.min_y) < inflation
                     || (max_y - cy) < inflation;
                 if near_edge {
+                    for layer in 0..self.layer_count {
+                        let i = self.idx(layer, ix, iy);
+                        self.cells[i] = Cell::BlockedAll;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Block cells whose centre is within `inflation` of a TRUE board edge (one
+    /// of the four `bounds` edges), on every layer. Used by [`Self::build_window`]
+    /// so a sub-window blocks only physical board edges, not the artificial
+    /// window edges introduced by per-cell decomposition.
+    fn block_true_board_edge(&mut self, inflation: f64, bounds: &crate::problem::Bounds) {
+        for ix in 0..self.nx {
+            for iy in 0..self.ny {
+                let cx = self.cell_center_x(ix);
+                let cy = self.cell_center_y(iy);
+                let near_board_edge = (cx - bounds.min_x) < inflation
+                    || (bounds.max_x - cx) < inflation
+                    || (cy - bounds.min_y) < inflation
+                    || (bounds.max_y - cy) < inflation;
+                if near_board_edge {
                     for layer in 0..self.layer_count {
                         let i = self.idx(layer, ix, iy);
                         self.cells[i] = Cell::BlockedAll;
@@ -487,6 +598,66 @@ mod tests {
         // A second net over the same cell hard-blocks it for everyone else.
         g.mark_net(0, cx, cy, gnd);
         assert_eq!(g.cell(0, cx, cy), Cell::BlockedAll);
+    }
+
+    #[test]
+    fn window_blocks_true_board_edges_but_not_interior_window_edges() {
+        use crate::mesh::Rect;
+        // A 20x20 board. Take a window in the middle that touches the LEFT board
+        // edge but whose right/top/bottom edges are interior to the board.
+        let p = problem(vec![]);
+        let win = Rect {
+            min_x: 0.0,   // touches the real left board edge
+            min_y: 4.0,   // interior (window edge, not board edge)
+            max_x: 6.0,   // interior
+            max_y: 6.0,   // interior
+        };
+        let g = RouteGrid::build_window(&p, &win);
+        let sig = g.connection_index("SIG").unwrap();
+
+        // A cell at the interior window edge (near max_x ~ 6.0, mid-height) must
+        // be routable — it is NOT a board edge.
+        let (ix, iy) = g.cell_of(5.9, 5.0);
+        assert!(
+            g.is_free_for(0, ix, iy, sig),
+            "interior window edge cell must stay routable"
+        );
+
+        // A cell hugging the LEFT board edge (x ~ 0) is blocked: that IS a board
+        // edge.
+        let (lx, ly) = g.cell_of(0.05, 5.0);
+        assert_eq!(
+            g.cell(0, lx, ly),
+            Cell::BlockedAll,
+            "cell at the true board edge must be blocked"
+        );
+    }
+
+    #[test]
+    fn window_covers_its_rect_and_maps_interior_points() {
+        use crate::mesh::Rect;
+        // A window must contain a cell for every interior point, and the cell↔mm
+        // mapping round-trips within the window (the per-cell stitching contract
+        // relies on endpoint snapping, not lattice alignment, so we only require
+        // a consistent local mapping here).
+        let p = problem(vec![]);
+        let win = Rect {
+            min_x: 3.3,
+            min_y: 4.7,
+            max_x: 8.1,
+            max_y: 9.2,
+        };
+        let g = RouteGrid::build_window(&p, &win);
+        for ix in 0..g.nx {
+            for iy in 0..g.ny {
+                let cx = g.cell_center_x(ix);
+                let cy = g.cell_center_y(iy);
+                assert_eq!(g.cell_of(cx, cy), (ix, iy), "window mapping round-trips");
+            }
+        }
+        // An interior window point resolves to an in-range cell.
+        let (ix, iy) = g.cell_of(5.0, 6.0);
+        assert!(ix < g.nx && iy < g.ny);
     }
 
     #[test]
