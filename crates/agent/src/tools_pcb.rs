@@ -30,7 +30,8 @@ use kicad_bridge::cli::{KicadCli, Violation};
 use kicad_bridge::pcb::{read_problem, write_solution};
 use kicad_bridge::placefp::part_from_footprint;
 use kicad_bridge::synth::{synthesize_board, SynthPart};
-use pcb_engine::lint::lint;
+use pcb_engine::connectivity::Violation as ConnViolation;
+use pcb_engine::lint::{DrcViolation, lint};
 use pcb_engine::pathing::global_route;
 use pcb_engine::pipeline::{RouterKind, metrics, route_auto};
 use pcb_engine::placement::{
@@ -937,27 +938,72 @@ fn inject_keepouts(rp: &mut RouteProblem, keepouts: &[Keepout]) {
     }
 }
 
-/// A serialized lint summary: a count by violation `kind` tag. The expectation
-/// is ZERO — a non-zero count means an engine bug escaped the placement/routing
-/// oracles, so the caller flags it loudly.
-fn lint_summary(rp: &RouteProblem, solution: &pcb_engine::problem::RouteSolution) -> (Value, usize) {
-    let violations = lint(rp, solution);
-    let total = violations.len();
+/// A `lint_summary` for a routed solution, split into two buckets.
+///
+/// The connectivity oracle flags an `Unconnected` violation for EVERY net the
+/// router honestly dropped — but a `route_auto` failure is not an engine bug, it
+/// is the board being too tight, exactly what the model triages. So we classify:
+///
+/// - **expected gaps** — `Connectivity::Unconnected` whose net is in the
+///   already-reported `failed` set. These are the honest finisher/global drops;
+///   they are NOT engine bugs (the model already sees them in `failed`).
+/// - **real violations** — geometry defects (clearance, width, via, bounds,
+///   invalid layer), any `CrossNetMerge` (a short — always a bug), and any
+///   `Unconnected` on a net the router claimed to ROUTE. A non-zero real count
+///   means a violation escaped the router's own oracles: an engine bug.
+///
+/// Returns `(by_kind_of_real_violations, real_count, expected_gap_count)`.
+struct LintSplit {
+    /// Counts of REAL violations by serde `kind` tag (empty ⇒ clean copper).
+    by_kind: Value,
+    /// Number of real violations (the engine-bug signal; should be 0).
+    real: usize,
+    /// Number of expected connectivity gaps from already-failed nets.
+    expected_gaps: usize,
+}
+
+fn lint_summary(
+    rp: &RouteProblem,
+    solution: &pcb_engine::problem::RouteSolution,
+    failed: &[FailedNet],
+) -> LintSplit {
+    let failed_nets: std::collections::BTreeSet<&str> =
+        failed.iter().map(|f| f.connection.as_str()).collect();
+
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for v in &violations {
-        // DrcViolation serializes with a `kind` tag (serde tag = "kind").
-        let kind = serde_json::to_value(v)
+    let mut real = 0usize;
+    let mut expected_gaps = 0usize;
+
+    for v in lint(rp, solution) {
+        // An Unconnected on a net the router already reported as failed is the
+        // expected gap, not a bug.
+        if let DrcViolation::Connectivity {
+            violation: ConnViolation::Unconnected { connection, .. },
+        } = &v
+            && failed_nets.contains(connection.as_str())
+        {
+            expected_gaps += 1;
+            continue;
+        }
+        // Everything else is a real violation the router should have prevented.
+        let kind = serde_json::to_value(&v)
             .ok()
             .and_then(|j| j.get("kind").and_then(Value::as_str).map(str::to_owned))
             .unwrap_or_else(|| "unknown".to_owned());
         *counts.entry(kind).or_default() += 1;
+        real += 1;
     }
+
     let by_kind: Value = counts
         .into_iter()
         .map(|(k, c)| (k, json!(c)))
         .collect::<serde_json::Map<_, _>>()
         .into();
-    (by_kind, total)
+    LintSplit {
+        by_kind,
+        real,
+        expected_gaps,
+    }
 }
 
 /// Build the congestion-hotspot enrichment for a FAILED route. `route_auto` does
@@ -1032,7 +1078,7 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         .collect();
 
     let m = metrics(&result.solution);
-    let (by_kind, lint_total) = lint_summary(&rp, &result.solution);
+    let split = lint_summary(&rp, &result.solution, &result.failed);
 
     let router = match result.router {
         RouterKind::Naive => "naive",
@@ -1047,18 +1093,25 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
             "vias": m.via_count,
             "traces": m.trace_count,
         },
-        "lint_summary": by_kind,
+        // lint_summary counts only REAL violations (geometry/short/unexpected
+        // gaps). Expected connectivity gaps from already-failed nets are NOT here
+        // — those are the honest failures the model triages, listed in `failed`.
+        "lint_summary": split.by_kind,
     });
 
-    // A non-zero lint on the routed solution means a violation slipped past the
-    // router's own oracles — surface it LOUDLY (it is an engine bug, not a board
-    // problem the model can fix).
-    if lint_total > 0 {
+    // A non-zero REAL lint on the routed solution means a violation slipped past
+    // the router's own oracles — surface it LOUDLY (it is an engine bug, not a
+    // board problem the model can fix). An expected gap from a failed net is NOT
+    // an engine bug; it flows to the triage branch below.
+    if split.real > 0 {
+        let real = split.real;
         out["engine_bug"] = json!(true);
         out["note"] = json!(format!(
-            "ENGINE BUG: the routed copper has {lint_total} DRC violation(s) that the \
-             router's oracles should have caught — this is not a board you can fix by \
-             triage; report it. Counts by kind are in lint_summary."
+            "ENGINE BUG: the routed copper has {real} DRC violation(s) that the \
+             router's oracles should have caught (over and above the {} expected \
+             gap(s) from failed nets) — this is not a board you can fix by triage; \
+             report it. Counts by kind are in lint_summary.",
+            split.expected_gaps
         ));
     } else if result.failed.is_empty() {
         out["note"] = json!("routed cleanly: zero failed nets, lint clean. Ready to export.");

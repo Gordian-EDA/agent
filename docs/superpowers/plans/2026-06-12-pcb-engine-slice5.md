@@ -141,14 +141,14 @@ harness (scripted triage), plus a creds-gated live smoke.
 
 ### Task 5: the gate — triage loop + prompt
 
-- [ ] System prompt (agent.rs): add the PCB workflow section mirroring
+- [x] System prompt (agent.rs): add the PCB workflow section mirroring
       the schematic workflow docs: search → create_board → hints →
       place → render(look!) → route → triage (read failure reasons; move
       parts or relax rules; NEVER invent coordinates except move_part
       nudges informed by render + part positions from place_board output)
       → export. Include the failure-provenance cheat-sheet (global/
       assign/cell/finisher meanings).
-- [ ] Gate test (mock-loop harness, tests/loop_mock.rs pattern):
+- [x] Gate test (mock-loop harness, tests/loop_mock.rs pattern):
       scripted conversation on a board crafted to fail first pass —
       e.g. draft with a keepout wall + parts locked on opposite sides
       (reuse congested.json's defeat idea at draft level) so route_board
@@ -156,10 +156,17 @@ harness (scripted triage), plus a creds-gated live smoke.
       keepout via set_constraints) + place_board + route_board → 0
       failed. Asserts the full tool sequence works and the final state is
       clean — the spec gate, deterministic.
-- [ ] Live smoke (creds-gated like llm_smoke.rs): short real-LLM run on
+      (`tests/pcb_gate.rs` — relax-a-rule path: a full-height keepout wall
+      fails the first route, a gapped keepout pair closes it. Required a
+      `route_board` fix: separate honest connectivity gaps on failed nets
+      from real engine-bug violations, so a triage-able failure no longer
+      misflags `engine_bug`.)
+- [x] Live smoke (creds-gated like llm_smoke.rs): short real-LLM run on
       the same scenario with max-turns cap; assert it reaches 0 failed OR
       skip visibly without creds. Tolerant assertions (the gate is the
       mock test; this is a reality probe).
+      (`#[ignore]`d `live_smoke_model_triages_a_walled_board`; tolerant —
+      reports what the model did, only a transport/loop failure fails.)
       Commit: `feat(agent): pcb triage loop — slice 5 gate`
 
 ### Task 6: wrap-up (inline, main loop)
