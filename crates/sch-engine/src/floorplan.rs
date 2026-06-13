@@ -341,21 +341,30 @@ fn place_anchors(items: &mut [Item], ir: &LayoutIr, max_layer: i32) {
     }
 }
 
-/// Per-rail region: the anchor-pin centroid x and the outward growth direction
-/// (flanking passives pack away from the IC: a West VI pin grows left, an East
-/// VO pin grows right).
-fn rail_regions(apins: &AnchorPins) -> (BTreeMap<String, f64>, BTreeMap<String, f64>) {
+/// Per-rail region: the anchor-pin centroid x and the outward growth direction.
+/// Flanking passives pack AWAY from the IC body: a West VI pin grows left, an
+/// East VO pin grows right, and a top/bottom rail pin grows toward whichever
+/// side of the chip centre it sits on (so two supply rails split left/right
+/// instead of piling their decoupling caps on one side).
+fn rail_regions(
+    apins: &AnchorPins,
+    anchor_cx: &BTreeMap<String, f64>,
+) -> (BTreeMap<String, f64>, BTreeMap<String, f64>) {
     let mut x = BTreeMap::new();
     let mut dir = BTreeMap::new();
     for (net, pins) in apins {
         let cx = pins.iter().map(|(_, p, _)| p[0]).sum::<f64>() / pins.len() as f64;
         x.insert(net.clone(), cx);
         let mut d = 0.0;
-        for (_, _, dd) in pins {
+        for (rd, p, dd) in pins {
             match dd {
                 Dir::East => d += 1.0,
                 Dir::West => d -= 1.0,
-                _ => {}
+                _ => {
+                    if let Some(c) = anchor_cx.get(rd) {
+                        d += if p[0] >= *c { 1.0 } else { -1.0 };
+                    }
+                }
             }
         }
         dir.insert(net.clone(), if d < 0.0 { -1.0 } else { 1.0 });
@@ -372,7 +381,9 @@ fn place_passives(
     max_layer: i32,
     apins: &AnchorPins,
 ) {
-    let (region_x, region_dir) = rail_regions(apins);
+    let anchor_cx: BTreeMap<String, f64> =
+        items.iter().filter(|i| i.is_anchor).map(|i| (i.refdes.clone(), i.at[0])).collect();
+    let (region_x, region_dir) = rail_regions(apins, &anchor_cx);
     let layer_of = |n: &str| layers.get(n).copied().unwrap_or(0);
     let passives: Vec<usize> = items
         .iter()
@@ -454,9 +465,12 @@ fn place_passives(
     let mut inline_cursor: BTreeMap<(String, i64), i32> = BTreeMap::new();
     for &i in &passives {
         let nets = nets_of(&items[i]);
-        if nets.len() != 2 || nets.iter().any(|(_, n)| ir.rails.get(n) == Some(&Band::Top)) {
+        if nets.len() != 2 {
             continue;
         }
+        // A part with a SIGNAL pin on an IC is tapped beside that pin (a pullup
+        // hugs its signal, not the rail region). Only pure decoupling — both
+        // pins on rails, no signal anchor pin — falls through to rail-flank.
         // Tap pin: a non-rail net on an anchor pin; prefer the anchor with most pins.
         let tap = nets
             .iter()
@@ -466,8 +480,11 @@ fn place_passives(
             .max_by_key(|(rd, _, _)| pincount.get(rd).copied().unwrap_or(0))
             .cloned();
         let Some((anchor, pos, dir)) = tap else { continue };
+        // A part between two non-rail signals is a SERIES element (in-line with
+        // the pin), even if a pull-up gave one end a different power layer.
+        let series = !nets.iter().any(|(_, n)| ir.rails.contains_key(n));
         let vertical = is_vert(&nets);
-        if matches!(dir, Dir::East | Dir::West) && !vertical {
+        if matches!(dir, Dir::East | Dir::West) && series {
             // Series element in-line with the pin, at its row, one slot out
             // (further out for a second part tapping the same pin).
             let half = part_half_span(&items[i].geom);
@@ -547,6 +564,12 @@ fn place_passives(
             if let Some(x) = found {
                 let v = is_vert(&nets);
                 orient_at(&mut items[i], &nets, x, v);
+                let placed_idxs: Vec<usize> = anchor_half
+                    .keys()
+                    .filter_map(|r| items.iter().position(|it| &it.refdes == r))
+                    .chain(placed_x.keys().copied())
+                    .collect();
+                nudge_clear(items, i, &placed_idxs);
                 placed_x.insert(i, x);
                 progress = true;
             }
@@ -567,6 +590,11 @@ fn place_passives(
             .fold(f64::NEG_INFINITY, f64::max);
         let free_base = if free_base.is_finite() { free_base + DX } else { 0.0 };
         let cols = assign_columns(items, layers, 0);
+        let mut placed_idxs: Vec<usize> = anchor_half
+            .keys()
+            .filter_map(|r| items.iter().position(|it| &it.refdes == r))
+            .chain(placed_x.keys().copied())
+            .collect();
         for &i in &leftover {
             let nets = nets_of(&items[i]);
             if nets.len() == 2 {
@@ -577,6 +605,8 @@ fn place_passives(
                 items[i].at = [free_base, (max_layer as f64) * DLAYER / 2.0];
                 items[i].angle = 0.0;
             }
+            nudge_clear(items, i, &placed_idxs);
+            placed_idxs.push(i);
         }
     }
 }
@@ -585,6 +615,33 @@ fn place_passives(
 fn passive_nets(item: &Item) -> Option<Vec<String>> {
     let nets: Vec<String> = item.pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
     (nets.len() == 2).then_some(nets)
+}
+
+/// An item's axis-aligned footprint `[min_x,min_y,max_x,max_y]` (body extents,
+/// rotation-aware), padded so neighbours keep a little air.
+fn footprint(it: &Item) -> [f64; 4] {
+    let s = it.geom.approx_size();
+    let quarter_turn = ((it.angle / 90.0).round() as i64).rem_euclid(2) == 1;
+    let (hw, hh) = if quarter_turn { (s[1] / 2.0, s[0] / 2.0) } else { (s[0] / 2.0, s[1] / 2.0) };
+    [it.at[0] - hw, it.at[1] - hh, it.at[0] + hw, it.at[1] + hh]
+}
+
+fn rects_overlap(a: [f64; 4], b: [f64; 4]) -> bool {
+    a[0] < b[2] - 1e-6 && b[0] < a[2] - 1e-6 && a[1] < b[3] - 1e-6 && b[1] < a[3] - 1e-6
+}
+
+/// Bump item `i` downward (in `DLAYER` steps) until its footprint clears every
+/// already-placed item in `placed`, so the catch-all passes never stack parts
+/// (overlapping bodies block the router and force ugly label fallback).
+fn nudge_clear(items: &mut [Item], i: usize, placed: &[usize]) {
+    for _ in 0..24 {
+        let fi = footprint(&items[i]);
+        let hit = placed.iter().any(|&j| j != i && rects_overlap(fi, footprint(&items[j])));
+        if !hit {
+            return;
+        }
+        items[i].at[1] += DLAYER;
+    }
 }
 
 /// Half the pin-to-pin span of a 2-pin symbol (mm), for placing it one slot off
@@ -1123,20 +1180,33 @@ fn emit_rail(
         }
         return Ok(());
     };
-    let min_x = eps.iter().map(|(p, _)| p[0]).fold(f64::MAX, f64::min);
-    let max_x = eps.iter().map(|(p, _)| p[0]).fold(f64::MIN, f64::max);
-    w.add_wire_on_net([min_x, rail_y], [max_x, rail_y], net);
-    for (ep, _) in eps {
-        w.add_wire_on_net(*ep, [ep[0], rail_y], net);
-        w.add_junction([ep[0], rail_y]);
+    // Each pin's attach point on the rail. A side (E/W) pin leads OUTWARD first
+    // and attaches there, so its riser never runs up the IC edge past the other
+    // pins on that side (which would block their signals).
+    const LEAD: f64 = 2.54;
+    let attach_x = |ep: &[f64; 2], dir: &Dir| match dir {
+        Dir::East => ep[0] + LEAD,
+        Dir::West => ep[0] - LEAD,
+        _ => ep[0],
+    };
+    let span_lo = eps.iter().map(|(p, d)| attach_x(p, d)).fold(f64::MAX, f64::min);
+    let span_hi = eps.iter().map(|(p, d)| attach_x(p, d)).fold(f64::MIN, f64::max);
+    w.add_wire_on_net([span_lo, rail_y], [span_hi, rail_y], net);
+    for (ep, dir) in eps {
+        let ax = attach_x(ep, dir);
+        if (ax - ep[0]).abs() > 1e-6 {
+            w.add_wire_on_net(*ep, [ax, ep[1]], net); // lead out
+        }
+        w.add_wire_on_net([ax, ep[1]], [ax, rail_y], net); // riser
+        w.add_junction([ax, rail_y]);
     }
     // One power symbol at the left end (pin coincident with the rail). A top
     // rail's symbol sits above, a bottom rail's below — both at angle 0.
-    let flag_at = [min_x, rail_y];
+    let flag_at = [span_lo, rail_y];
     w.add_power_symbol(env, &lib, &format!("#PWR_{net}"), net, flag_at, 0.0)?;
     // The ERC flag attaches to the far (right) end of the rail wire — on the
     // net, clear of the power symbol at the left end.
-    flag_points.entry(net.to_string()).or_insert([max_x, rail_y]);
+    flag_points.entry(net.to_string()).or_insert([span_hi, rail_y]);
     Ok(())
 }
 
