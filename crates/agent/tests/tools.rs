@@ -198,10 +198,29 @@ fn defs_lists_all_tools() {
         "render_schematic",
         "create_design",
         "edit_design",
+        "search_footprints",
+        "get_footprint_info",
+        "create_board",
+        "get_board",
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
-    assert_eq!(names.len(), 11, "expected exactly 11 tools, got {}: {:?}", names.len(), names);
+    assert_eq!(names.len(), 15, "expected exactly 15 tools, got {}: {:?}", names.len(), names);
+
+    // Names are unique.
+    let mut sorted = names.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), names.len(), "tool names must be unique: {names:?}");
+
+    // Every def's input_schema is a JSON object with a "type":"object" root —
+    // schema sanity for the model-facing definitions.
+    for def in Tools::new().defs() {
+        assert_eq!(
+            def.input_schema["type"], serde_json::json!("object"),
+            "{} schema root must be an object", def.name
+        );
+    }
 }
 
 #[test]
@@ -551,4 +570,202 @@ blocks:
         serde_json::json!({ "yaml": yaml, "relayout": "nonsense" }), &ctx).unwrap();
     let err = out["error"].as_str().expect("error string for bad relayout");
     assert!(err.contains("relayout"), "error should mention relayout: {err}");
+}
+
+// ── PCB tools (slice 5, Task 1) ──────────────────────────────────────────────
+//
+// These tests source the footprint index from the THREE vendored kicad-bridge
+// fixtures via the `with_footprint_dir_for_test` override, so they run without an
+// installed KiCAD footprint library. The override expects a directory of
+// `.pretty` libraries, so we stage the loose `.kicad_mod` fixtures into a
+// temporary `Fixtures.pretty/` first.
+
+/// Stage the three vendored `.kicad_mod` fixtures into a fresh temp dir laid out
+/// as `<tmp>/Fixtures.pretty/<name>.kicad_mod`, and return the temp dir (kept
+/// alive by the caller) plus its path. The lib nickname is therefore `Fixtures`.
+fn staged_footprint_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../kicad-bridge/tests/fixtures/footprints");
+    let tmp = tempfile::tempdir().unwrap();
+    let pretty = tmp.path().join("Fixtures.pretty");
+    std::fs::create_dir_all(&pretty).unwrap();
+    for name in [
+        "R_0603_1608Metric.kicad_mod",
+        "SOT-23.kicad_mod",
+        "PinHeader_1x02_P2.54mm_Vertical.kicad_mod",
+    ] {
+        std::fs::copy(src.join(name), pretty.join(name)).unwrap();
+    }
+    let path = tmp.path().to_path_buf();
+    (tmp, path)
+}
+
+/// A ctx whose footprint index is the staged vendored fixtures. The returned
+/// TempDir guard must outlive the ctx (it holds the staged `.pretty` dir).
+fn fixture_ctx() -> (ToolCtx, tempfile::TempDir) {
+    let (guard, dir) = staged_footprint_dir();
+    let ctx = ToolCtx::with_footprint_dir_for_test(dir).expect("fixture ctx");
+    (ctx, guard)
+}
+
+#[test]
+fn search_footprints_finds_vendored_fixture() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+    let out = tools
+        .run("search_footprints", serde_json::json!({ "query": "R_0603" }), &ctx)
+        .unwrap();
+    let hits = out["hits"].as_array().expect("hits array");
+    assert!(
+        hits.iter().any(|h| h["lib_id"] == "Fixtures:R_0603_1608Metric"),
+        "expected the R_0603 fixture in hits, got: {out}"
+    );
+    // The R_0603 footprint has 2 pads.
+    let r0603 = hits
+        .iter()
+        .find(|h| h["lib_id"] == "Fixtures:R_0603_1608Metric")
+        .unwrap();
+    assert_eq!(r0603["pad_count"], serde_json::json!(2), "got: {out}");
+}
+
+#[test]
+fn get_footprint_info_returns_pads_courtyard_bbox() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+    let out = tools
+        .run(
+            "get_footprint_info",
+            serde_json::json!({ "lib_id": "Fixtures:SOT-23" }),
+            &ctx,
+        )
+        .unwrap();
+    let pads = out["pads"].as_array().expect("pads array");
+    assert_eq!(pads.len(), 3, "SOT-23 has 3 pads: {out}");
+    let p0 = &pads[0];
+    assert!(p0.get("number").is_some());
+    assert!(p0.get("offset").is_some());
+    assert!(p0.get("size").is_some());
+    assert!(p0.get("technology").is_some());
+    assert!(p0.get("layers").is_some());
+    assert!(out.get("courtyard").is_some(), "courtyard present: {out}");
+    assert!(out["courtyard"].get("width").is_some());
+    assert!(out.get("bbox").is_some(), "bbox present: {out}");
+}
+
+#[test]
+fn get_footprint_info_suggests_for_unknown_lib_id() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+    let out = tools
+        .run(
+            "get_footprint_info",
+            serde_json::json!({ "lib_id": "Fixtures:SOT-32" }),
+            &ctx,
+        )
+        .unwrap();
+    assert!(out.get("error").is_some(), "expected an error: {out}");
+    let suggestions = out["suggestions"].as_array().expect("suggestions");
+    assert!(
+        suggestions.iter().any(|s| s == "Fixtures:SOT-23"),
+        "expected SOT-23 suggested for the SOT-32 typo: {out}"
+    );
+}
+
+#[test]
+fn create_board_resolves_vendored_footprints_and_persists_draft() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+
+    // get_board before any board -> recoverable error.
+    let out = tools.run("get_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(out["error"].as_str().is_some_and(|e| e.contains("no board")), "got: {out}");
+
+    let board = serde_json::json!({
+        "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
+        "parts": [
+            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
+              "pad_nets": { "1": "VIN", "2": "MID" } },
+            { "reference": "U1", "footprint": "Fixtures:SOT-23",
+              "pad_nets": { "1": "MID", "2": "GND", "3": "VOUT" } },
+            { "reference": "J1", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
+              "pad_nets": { "1": "VIN", "2": "GND" } }
+        ]
+    });
+    let out = tools.run("create_board", board.clone(), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "got: {out}");
+    assert_eq!(out["part_count"], serde_json::json!(3), "got: {out}");
+    // VIN(2), MID(2), GND(2), VOUT(1) -> 4 nets; VOUT is a single-pin warning.
+    assert_eq!(out["net_count"], serde_json::json!(4), "got: {out}");
+    let warnings = out["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings.iter().any(|w| w.as_str().unwrap().contains("VOUT")),
+        "VOUT single-pin net should warn: {out}"
+    );
+
+    // The draft persisted; get_board returns it with a derived summary.
+    let out = tools.run("get_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["summary"]["part_count"], serde_json::json!(3), "got: {out}");
+    assert_eq!(out["summary"]["net_count"], serde_json::json!(4), "got: {out}");
+    assert_eq!(out["summary"]["placed"], serde_json::json!(false));
+    assert_eq!(out["summary"]["routed"], serde_json::json!(false));
+    // Rules defaulted to the engine values.
+    assert_eq!(out["draft"]["rules"]["clearance"], serde_json::json!(0.2), "got: {out}");
+    assert_eq!(out["draft"]["rules"]["viaDiameter"], serde_json::json!(0.6), "got: {out}");
+
+    // A second create_board without overwrite is rejected.
+    let out = tools.run("create_board", board, &ctx).unwrap();
+    assert!(out["error"].as_str().is_some_and(|e| e.contains("already exists")), "got: {out}");
+}
+
+#[test]
+fn create_board_unknown_footprint_errors_with_suggestions() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+    let out = tools
+        .run(
+            "create_board",
+            serde_json::json!({
+                "bounds": { "min_x": 0.0, "max_x": 10.0, "min_y": 0.0, "max_y": 10.0 },
+                "parts": [
+                    { "reference": "R1", "footprint": "Fixtures:R_0603_WRONG",
+                      "pad_nets": { "1": "A", "2": "B" } }
+                ]
+            }),
+            &ctx,
+        )
+        .unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("R1") && e.contains("unknown footprint")),
+        "got: {out}"
+    );
+    assert!(out.get("suggestions").is_some(), "expected suggestions: {out}");
+}
+
+#[test]
+fn board_draft_round_trips_through_the_workspace() {
+    use agent::tools_pcb::{BoardDraft, DraftPart, DraftRules};
+    use pcb_engine::placement::PlacementHints;
+    use pcb_engine::problem::Bounds;
+
+    let (ctx, _guard) = fixture_ctx();
+    let mut pad_nets = std::collections::BTreeMap::new();
+    pad_nets.insert("1".to_string(), "VIN".to_string());
+    pad_nets.insert("2".to_string(), "GND".to_string());
+
+    let draft = BoardDraft {
+        bounds: Bounds { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 },
+        rules: DraftRules::default(),
+        parts: vec![DraftPart {
+            reference: "R1".into(),
+            footprint: "Fixtures:R_0603_1608Metric".into(),
+            pad_nets,
+            locked: None,
+        }],
+        keepouts: vec![],
+        hints: PlacementHints::default(),
+        last_placement: None,
+    };
+    draft.save(&ctx).unwrap();
+    let loaded = BoardDraft::load(&ctx).expect("draft loads back");
+    assert_eq!(draft, loaded, "board draft must round-trip byte-equivalent");
 }

@@ -58,6 +58,7 @@ use circuit_lang::model::{Component, Design, PinTarget};
 use circuit_lang::{SymbolProvider, compile};
 use kicad_bridge::cli::KicadCli;
 use kicad_bridge::env::KicadEnv;
+use kicad_bridge::footlib::FootprintIndex;
 use kicad_bridge::provider::RealSymbolProvider;
 use kicad_bridge::search::SymbolIndex;
 use kicad_bridge::snapshot::SnapshotStore;
@@ -86,6 +87,14 @@ pub struct ToolCtx {
     snapshots: SnapshotStore,
     /// Cross-library name index, built on first `search_symbols` and reused.
     index: OnceLock<SymbolIndex>,
+    /// Cross-library footprint index, built on first `search_footprints` /
+    /// `get_footprint_info` / `create_board` and reused. Scanning every
+    /// `.pretty` library is expensive, so (like `index`) it is built once.
+    footprint_index: OnceLock<FootprintIndex>,
+    /// Test override: when set, the footprint index is built from this directory
+    /// of `.pretty` libraries (the vendored fixtures) instead of the installed
+    /// KiCAD footprint share dir, so footprint tests run without KiCAD libs.
+    footprint_dir_override: Option<PathBuf>,
     /// Project-local persistent state directory `.autopcb/`.
     workspace: crate::workspace::Workspace,
     /// Keeps a test tempdir alive for the ctx's lifetime; `None` for real ctxs.
@@ -116,6 +125,8 @@ impl ToolCtx {
             provider,
             snapshots,
             index: OnceLock::new(),
+            footprint_index: OnceLock::new(),
+            footprint_dir_override: None,
             workspace,
             _tempdir: None,
         })
@@ -152,6 +163,43 @@ impl ToolCtx {
             provider,
             snapshots,
             index: OnceLock::new(),
+            footprint_index: OnceLock::new(),
+            footprint_dir_override: None,
+            workspace,
+            _tempdir: Some(tempdir),
+        })
+    }
+
+    /// Build a context over a fresh temporary project whose **footprint index**
+    /// is sourced from `footprint_dir` (a directory of `.pretty` libraries)
+    /// instead of an installed KiCAD share dir. This is the footprint-tool test
+    /// entry point: it needs no KiCAD installation, so the PCB tools can be
+    /// exercised against the vendored fixtures on any machine.
+    ///
+    /// The symbol-side fields still point at a (possibly absent) real KiCAD env
+    /// via [`KicadEnv::detect`]; tests that only touch footprint tools never
+    /// reach them. Returns `None` only if a tempdir or the workspace cannot be
+    /// created.
+    pub fn with_footprint_dir_for_test(footprint_dir: PathBuf) -> Option<Self> {
+        // Symbol-side env is a placeholder (footprint tests never touch it);
+        // the footprint index is built from `footprint_dir`, not from `env`.
+        let env = KicadEnv::detect()
+            .unwrap_or_else(|| KicadEnv::with_symbol_dir(PathBuf::from("/nonexistent")));
+        let tempdir = tempfile::tempdir().ok()?;
+        let project_dir = tempdir.path().to_path_buf();
+        let sch_path = project_dir.join("project.kicad_sch");
+        let snapshots = SnapshotStore::for_project(&project_dir).ok()?;
+        let workspace = crate::workspace::Workspace::for_project(&project_dir).ok()?;
+        let provider = RealSymbolProvider::new(env.clone());
+        Some(Self {
+            env,
+            project_dir,
+            sch_path,
+            provider,
+            snapshots,
+            index: OnceLock::new(),
+            footprint_index: OnceLock::new(),
+            footprint_dir_override: Some(footprint_dir),
             workspace,
             _tempdir: Some(tempdir),
         })
@@ -160,6 +208,13 @@ impl ToolCtx {
     /// The project's `.kicad_sch` path (may not exist).
     pub fn sch_path(&self) -> &Path {
         &self.sch_path
+    }
+
+    /// The project's `.kicad_pcb` path: the schematic path with a `.kicad_pcb`
+    /// extension (`design.kicad_sch` → `design.kicad_pcb`), the board the PCB
+    /// tools export to. May not exist yet.
+    pub fn pcb_path(&self) -> PathBuf {
+        self.sch_path.with_extension("kicad_pcb")
     }
 
     /// The project directory.
@@ -199,6 +254,26 @@ impl ToolCtx {
         // `set` only fails if another thread raced us; dispatch is single-threaded.
         let _ = self.index.set(idx);
         Ok(self.index.get().expect("index just set"))
+    }
+
+    /// The cross-library footprint index, built once and cached.
+    ///
+    /// Building scans every installed `.pretty` library (155 of them) — far
+    /// dearer than the symbol scan — so the result is memoized like
+    /// [`Self::index`]. When a footprint-dir override is set (the test
+    /// constructor), the index is built from that directory of `.pretty`
+    /// libraries instead of the installed KiCAD footprint share dir.
+    pub(crate) fn footprint_index(&self) -> Result<&FootprintIndex> {
+        if let Some(idx) = self.footprint_index.get() {
+            return Ok(idx);
+        }
+        let idx = match &self.footprint_dir_override {
+            Some(dir) => FootprintIndex::build_from_dir(dir)
+                .with_context(|| format!("building footprint index from {}", dir.display()))?,
+            None => FootprintIndex::build(&self.env).context("building footprint index")?,
+        };
+        let _ = self.footprint_index.set(idx);
+        Ok(self.footprint_index.get().expect("footprint index just set"))
     }
 }
 
@@ -385,6 +460,119 @@ impl Tools {
                     "required": ["old_string", "new_string"]
                 }),
             },
+            // ── PCB tools (slice 5) ─────────────────────────────────────────
+            ToolDef {
+                name: "search_footprints".into(),
+                description: "Search every installed KiCAD footprint library by \
+                    name and return the best matches as fully-qualified \
+                    `Lib:Name` ids with their pad counts. Use this to find the \
+                    real footprint lib_id for a part before putting it on a board \
+                    — NEVER guess a footprint lib_id. The pad count is the number \
+                    of pads you must assign nets to in create_board."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string",
+                            "description": "Footprint name or fragment, e.g. \"R_0603\", \"SOT-23\", \"PinHeader 1x02 2.54\"." },
+                        "limit": { "type": "integer",
+                            "description": "Max hits to return (default 8).", "minimum": 1 }
+                    },
+                    "required": ["query"]
+                }),
+            },
+            ToolDef {
+                name: "get_footprint_info".into(),
+                description: "Return the full pad table (number, offset, size, \
+                    technology, copper layers), the courtyard rectangle, and the \
+                    overall bounding box for a fully-qualified `Lib:Name` \
+                    footprint. Use the pad NUMBERS to build the pad_nets map for \
+                    create_board. If the lib_id is unknown, returns an error with \
+                    the closest known suggestions — never guess the id."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "lib_id": { "type": "string",
+                            "description": "Fully-qualified footprint id, e.g. \"Resistor_SMD:R_0603_1608Metric\" or \"Package_TO_SOT_SMD:SOT-23\"." }
+                    },
+                    "required": ["lib_id"]
+                }),
+            },
+            ToolDef {
+                name: "create_board".into(),
+                description: "Create the working board draft from a board outline \
+                    plus a list of parts. Each part names a footprint lib_id \
+                    (resolve it with search_footprints first — never guess) and a \
+                    pad_nets map (pad number → net name; pads sharing a net name \
+                    ARE the net). Footprints are resolved up front: an unknown \
+                    lib_id is a recoverable error with suggestions. Nets with \
+                    fewer than 2 pins are reported as warnings (nothing to route), \
+                    not errors. Fails if a board draft already exists unless \
+                    overwrite=true. The draft persists to .autopcb/board.json; \
+                    place_board / route_board (later) read it. You never give \
+                    coordinates here — placement decides positions."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "bounds": {
+                            "type": "object",
+                            "description": "Board outline in mm (y-down).",
+                            "properties": {
+                                "min_x": { "type": "number" },
+                                "max_x": { "type": "number" },
+                                "min_y": { "type": "number" },
+                                "max_y": { "type": "number" }
+                            },
+                            "required": ["min_x", "max_x", "min_y", "max_y"]
+                        },
+                        "parts": {
+                            "type": "array",
+                            "description": "The parts on the board.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "reference": { "type": "string",
+                                        "description": "Unique reference designator, e.g. \"R1\", \"U2\"." },
+                                    "footprint": { "type": "string",
+                                        "description": "Footprint lib_id from search_footprints, e.g. \"Resistor_SMD:R_0603_1608Metric\"." },
+                                    "pad_nets": {
+                                        "type": "object",
+                                        "description": "Pad number → net name. A pad absent from this map is left unconnected.",
+                                        "additionalProperties": { "type": "string" }
+                                    }
+                                },
+                                "required": ["reference", "footprint"]
+                            }
+                        },
+                        "rules": {
+                            "type": "object",
+                            "description": "Board design rules (mm). Omit for engine defaults (clearance 0.2, min_trace_width 0.2, via_diameter 0.6, via_drill 0.3).",
+                            "properties": {
+                                "clearance": { "type": "number" },
+                                "min_trace_width": { "type": "number" },
+                                "via_diameter": { "type": "number" },
+                                "via_drill": { "type": "number" }
+                            },
+                            "required": ["clearance", "min_trace_width", "via_diameter", "via_drill"]
+                        },
+                        "overwrite": { "type": "boolean",
+                            "description": "Replace an existing board draft (default false)." }
+                    },
+                    "required": ["bounds", "parts"]
+                }),
+            },
+            ToolDef {
+                name: "get_board".into(),
+                description: "Return the current board draft plus a derived \
+                    summary: part count, net count, the per-net pin counts, the \
+                    keepout count, and whether the board has been placed / routed \
+                    yet. Use this to inspect board state before placing or routing, \
+                    or to confirm a create_board / triage edit took effect."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
         ]
     }
 
@@ -403,13 +591,17 @@ impl Tools {
             "render_schematic" => render_schematic(ctx),
             "create_design" => create_design(input, ctx),
             "edit_design" => edit_design(input, ctx),
+            "search_footprints" => crate::tools_pcb::search_footprints(input, ctx),
+            "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
+            "create_board" => crate::tools_pcb::create_board(input, ctx),
+            "get_board" => crate::tools_pcb::get_board(ctx),
             other => bail!("unknown tool: {other}"),
         }
     }
 }
 
 /// Pull a required string field out of the input, with a clear error.
-fn require_str(input: &Value, key: &str) -> Result<String> {
+pub(crate) fn require_str(input: &Value, key: &str) -> Result<String> {
     input
         .get(key)
         .and_then(Value::as_str)

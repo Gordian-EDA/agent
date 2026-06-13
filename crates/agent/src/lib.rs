@@ -9,6 +9,7 @@ pub mod config;
 pub mod llm;
 pub mod render;
 pub mod tools;
+pub mod tools_pcb;
 pub mod workspace;
 
 pub use agent::{

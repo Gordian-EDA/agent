@@ -19,6 +19,7 @@ dependencies = [
  "dotenvy",
  "indexmap",
  "kicad-bridge",
+ "pcb-engine",
  "reqwest",
  "resvg",
  "sch-engine",

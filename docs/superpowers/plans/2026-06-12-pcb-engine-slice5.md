@@ -47,7 +47,7 @@ harness (scripted triage), plus a creds-gated live smoke.
 
 ### Task 1: board draft + part/footprint tools (`tools_pcb.rs`)
 
-- [ ] `BoardDraft` (serde, in agent crate or a small module): bounds,
+- [x] `BoardDraft` (serde, in agent crate or a small module): bounds,
       rules { clearance, min_trace_width, via_diameter, via_drill },
       parts: Vec<DraftPart { reference, footprint: String lib_id,
       pad_nets: map pad# → net, locked: Option<{x,y,rotation}> }>,
@@ -55,10 +55,10 @@ harness (scripted triage), plus a creds-gated live smoke.
       reuse from pcb-engine), last_placement: Option<Vec<Placement>>.
       Persisted at `.autopcb/board.json` via the workspace (mirror the
       schematic draft's load/save conventions exactly).
-- [ ] `ToolCtx`: lazy `FootprintIndex` (mirror the symbol index's
+- [x] `ToolCtx`: lazy `FootprintIndex` (mirror the symbol index's
       OnceCell-or-equivalent pattern; building it scans 155 libs — do it
       once), `pcb_path()` = project_dir/<stem>.kicad_pcb next to sch_path.
-- [ ] Tools: `search_footprints { query, limit }` (index.search →
+- [x] Tools: `search_footprints { query, limit }` (index.search →
       `{hits: [{lib_id, pad_count}]}`); `get_footprint_info { lib_id }`
       (pads with number/offset/size/technology/layers, courtyard, bbox;
       unknown → error + suggest()); `create_board { bounds, parts,
@@ -68,7 +68,7 @@ harness (scripted triage), plus a creds-gated live smoke.
       pins or warn; overwrite flag like create_design); `get_board`
       (current draft + a derived summary: part count, net count, pin
       counts per net, whether placed/routed).
-- [ ] Tests (crates/agent/tests/tools.rs pattern + unit tests; KiCAD-env
+- [x] Tests (crates/agent/tests/tools.rs pattern + unit tests; KiCAD-env
       gating where the index needs real libs, with the vendored-fixture
       fallback where possible): draft round-trip, create_board resolves
       vendored footprints, search/get mirror symbol-tool behavior.
