@@ -1,0 +1,76 @@
+<h2>Why ours looks auto-generated — and the plan</h2>
+<p class="subtitle">Four systematic gaps between our output and the human references. None are "tune a constant" — they're missing layers in the engine.</p>
+
+<div class="section">
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div class="mockup">
+      <div class="mockup-header">HUMAN (divider-filter)</div>
+      <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:1.5;padding:14px">
+        &nbsp;&nbsp;&nbsp;VCC<br>
+        &nbsp;&nbsp;&nbsp;&#9651;<br>
+        &nbsp;&nbsp;&nbsp;│<br>
+        &nbsp;&nbsp;[R7]&nbsp;649k<br>
+        &nbsp;&nbsp;&nbsp;│<br>
+        &nbsp;&nbsp;&nbsp;├────●──── OUT&nbsp;⊳<br>
+        &nbsp;&nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;&nbsp;│<br>
+        &nbsp;&nbsp;[R8]&nbsp;&nbsp;[C3]<br>
+        &nbsp;&nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;&nbsp;│<br>
+        &nbsp;&nbsp;&#9661;&nbsp;&nbsp;&nbsp;&#9661;&nbsp;&nbsp;GND<br>
+        <span style="color:#888">— vertical "totem-pole", current flows down,<br>&nbsp;&nbsp;OUT is a port flag, fills the frame</span>
+      </div>
+    </div>
+    <div class="mockup">
+      <div class="mockup-header">OURS — tiny in the A4 corner</div>
+      <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:1.5;padding:14px">
+        &nbsp;&nbsp;VCC&#8593;<br>
+        [C3]══[R7]──OUT<br>
+        &nbsp;&#9661;&nbsp;&nbsp;[R8]<br>
+        GND&nbsp;&nbsp;&#9661;GND<br>
+        <br>
+        <span style="color:#888">— sideways, no flow direction,<br>
+        &nbsp;&nbsp;crammed in 12% of the sheet,<br>
+        &nbsp;&nbsp;dashed block box around it</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>The four gaps</h3>
+  <table style="width:100%;border-collapse:collapse;font-size:14px">
+    <tr style="border-bottom:2px solid #888"><th style="text-align:left;padding:6px">Gap</th><th style="text-align:left;padding:6px">Human convention</th><th style="text-align:left;padding:6px">What ours does</th></tr>
+    <tr style="border-bottom:1px solid #ddd"><td style="padding:6px"><b>1. Power</b></td><td style="padding:6px">Shared <b>rails</b>: V+ wire across the top, GND wire across the bottom, components tap off them</td><td style="padding:6px">A separate power <b>symbol stamped at every single pin</b> → arrow/triangle confetti</td></tr>
+    <tr style="border-bottom:1px solid #ddd"><td style="padding:6px"><b>2. Flow</b></td><td style="padding:6px">Signal flows <b>left→right</b>, power <b>top→bottom</b>; IC is the centered anchor</td><td style="padding:6px">Local idiom packing in a band; no global direction</td></tr>
+    <tr style="border-bottom:1px solid #ddd"><td style="padding:6px"><b>3. Wires vs labels</b></td><td style="padding:6px">Real routed wires; labels only for true I/O / cross-domain</td><td style="padding:6px">Router gives up across blocks → <b>net-label bombing</b> (N_DIS, N_Q…)</td></tr>
+    <tr><td style="padding:6px"><b>4. Framing</b></td><td style="padding:6px">Sheet sized to content, generous even spacing</td><td style="padding:6px">Content-fit bbox but rendered on full A4 → looks tiny</td></tr>
+  </table>
+</div>
+
+<div class="section">
+  <h3>Proposed shape: two clean layers (the agent never touches geometry)</h3>
+  <div class="mockup">
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:1.6;padding:14px">
+    netlist (circuit-lang YAML — connectivity only, zero coordinates)<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;│<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;▼<br>
+    ┌─────────────────────────────────────────────┐<br>
+    │ <b>LAYER 1 — FLOORPLAN</b> (semantic, no exact mm)        │<br>
+    │ flow ranks (L→R, like mermaid/dagre) · power   │<br>
+    │ rails · IC-anchored idiom clusters · port/label │<br>
+    │ policy.  Deterministic for known idioms;        │<br>
+    │ <i>pluggable LLM subagent for novel topologies</i>       │<br>
+    └─────────────────────────────────────────────┘<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;│&nbsp;&nbsp;&nbsp;(a structured Layout IR)<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;▼<br>
+    ┌─────────────────────────────────────────────┐<br>
+    │ <b>LAYER 2 — GEOMETRY COMPILER</b> (deterministic)       │<br>
+    │ exact grid coords · build real rails as wires · │<br>
+    │ orthogonal router w/ crossing+junction min ·    │<br>
+    │ minimal power symbols · label placement · frame │<br>
+    └─────────────────────────────────────────────┘<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;│<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;▼  .kicad_sch
+    </div>
+  </div>
+  <p class="subtitle">Reuses the good bones (idiom recognition, grid/ids, elbow router). The new part is a global floorplan with real power rails and signal flow — plus a clean seam where an LLM could propose the floorplan for hard cases.</p>
+</div>

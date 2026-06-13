@@ -124,13 +124,26 @@ impl KicadCli {
     /// Returns `Err` on execution failure (binary missing, schematic failed to
     /// load) or if no SVG file was produced.
     pub fn export_svg(&self, schematic: &Path, out_dir: &Path) -> io::Result<PathBuf> {
+        self.export_svg_opts(schematic, out_dir, false)
+    }
+
+    /// Like [`Self::export_svg`] but, when `exclude_sheet` is true, passes
+    /// `--exclude-drawing-sheet` so the page border and title block are omitted —
+    /// yielding a frameless plot that crops cleanly to the drawn content (used
+    /// for content-zoomed eyeball comparison against reference schematics).
+    pub fn export_svg_opts(
+        &self,
+        schematic: &Path,
+        out_dir: &Path,
+        exclude_sheet: bool,
+    ) -> io::Result<PathBuf> {
         std::fs::create_dir_all(out_dir)?;
-        let output = Command::new(&self.cli_path)
-            .args(["sch", "export", "svg"])
-            .arg("--output")
-            .arg(out_dir)
-            .arg(schematic)
-            .output()?;
+        let mut cmd = Command::new(&self.cli_path);
+        cmd.args(["sch", "export", "svg"]).arg("--output").arg(out_dir);
+        if exclude_sheet {
+            cmd.arg("--exclude-drawing-sheet").arg("--no-background-color");
+        }
+        let output = cmd.arg(schematic).output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stderr = stderr.trim();

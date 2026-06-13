@@ -1452,6 +1452,8 @@ dependencies = [
  "indexmap",
  "kicad-bridge",
  "kiutils_kicad",
+ "serde",
+ "serde_json",
  "tempfile",
  "uuid",
 ]

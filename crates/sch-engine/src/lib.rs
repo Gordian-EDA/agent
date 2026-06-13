@@ -10,6 +10,7 @@
 
 pub mod cluster_geom;
 pub mod emit;
+pub mod floorplan;
 pub mod grammar;
 pub mod grid;
 pub mod ids;

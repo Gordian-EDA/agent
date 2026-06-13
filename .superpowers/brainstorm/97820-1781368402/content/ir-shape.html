@@ -1,0 +1,60 @@
+<h2>How much geometry should the Layout IR expose?</h2>
+<p class="subtitle">The subagent emits this; the engine turns it into exact coordinates. The IR must let the LLM express intent without ever touching mm. Two candidate styles — pick the one the LLM is most likely to get right.</p>
+
+<div class="options">
+  <div class="option" data-choice="grid" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Coarse slot-grid + annotations</h3>
+      <p>LLM places each part on a small <b>unitless integer grid</b> (col,row) + orientation, and tags rails/ports. Engine expands cells to real spacing, builds rails, routes. Like an ASCII sketch — LLMs are good at this; no real geometry, just ranks &amp; cells.</p>
+      <div class="mockup"><div class="mockup-body" style="font-family:monospace;font-size:12px;line-height:1.45;padding:12px;white-space:pre">divider-filter:
+rail  +VCC  band=top
+rail  GND   band=bottom
+place R7  col=1 row=1  vert
+place R8  col=1 row=3  vert
+place C3  col=2 row=3  vert
+node  at col1.row2 -> port OUT side=right
+# engine: col->x, row->y, snap, rails, route
+
+   the LLM literally "draws" a coarse
+   2-col x 3-row grid; engine scales it</div></div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="relational" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Relational / intent tree</h3>
+      <p>LLM declares <b>relationships</b>, never positions: "R7,R8 form a column from VCC to GND", "C3 hangs from the OUT node", "decoupling group sits left of U1, below the +5V rail". Engine resolves a relative-placement graph to coordinates. Captures <i>why</i>, robust to spacing — but a richer schema the LLM must learn.</p>
+      <div class="mockup"><div class="mockup-body" style="font-family:monospace;font-size:12px;line-height:1.45;padding:12px;white-space:pre">divider-filter:
+rails: {top: VCC, bottom: GND}
+column divider [R7, R8]:
+  top->VCC  bottom->GND
+  midtap -> port OUT (right)
+shunt C3:
+  from: divider.midtap  to: GND
+ports: {OUT: right}
+# engine owns ALL placement & routing
+# from these relations</div></div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="hybrid" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Hybrid: coarse grid for the skeleton, relations for the rest <span style="color:#2a7">(my recommendation)</span></h3>
+      <p>LLM puts the <b>anchors (ICs) and groups on a coarse grid</b> for global flow (the part it must get right), and uses a few <b>relational tags</b> for passive attachment ("C1,C2 decouple +5V→GND", "OUT exits right"). Best of both: robust global flow + intent for the fiddly local wiring. Engine still owns every coordinate.</p>
+      <div class="mockup"><div class="mockup-body" style="font-family:monospace;font-size:12px;line-height:1.45;padding:12px;white-space:pre">mcp1703:
+flow: left-to-right
+rails: {+5V top, +3V3 top, GND bottom}
+grid:  F1@c0  U1@c1  [D1,R2]@c2
+group input_decoup [C1,C2]:
+  decouple +5V -> GND   under: +5V@c0..c1
+group out_decoup  [C3,C4]:
+  decouple +3V3 -> GND  under: +3V3@c1..c2
+ports: {5V_BUS: left}</div></div>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:14px">All three keep the LLM out of millimeter-land. The difference is how the LLM expresses the layout, and how much the engine has to infer. Click your pick (or tell me in the terminal).</p>

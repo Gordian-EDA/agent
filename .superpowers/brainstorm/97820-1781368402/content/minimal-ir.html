@@ -1,0 +1,54 @@
+<h2>The minimal layout language — four keys</h2>
+<p class="subtitle">The LLM declares the <b>frame</b> (flow, rails, where the ICs go, which nets exit). Everything else is <b>inferred from connectivity</b> by a small fixed rule set. No per-part placement, no orientation flags, no geometry.</p>
+
+<div class="section">
+  <div class="mockup">
+    <div class="mockup-header">The entire language</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:1.5;padding:14px;white-space:pre">flow:  lr                 # global signal direction (default lr) — optional
+rails: { +5V: top, GND: bottom }   # nets drawn as spanning lines + band
+place: { U1: [1,0], MCU: [2,-1] }  # coarse cells — usually just the ICs;
+                                   # ANY refdes may be pinned to override
+ports: { OUT: right, 5V_BUS: left }   # nets that exit as edge flags + side</div>
+  </div>
+  <p class="subtitle">That's it. <code>place</code> takes a coarse unitless cell, never mm. Most parts aren't listed at all — they're placed by inference.</p>
+</div>
+
+<div class="section">
+  <h3>The fixed inference rules (the only "magic", and it's small &amp; predictable)</h3>
+  <ol style="font-size:14px;line-height:1.7">
+    <li>A pin on a rail-net → vertical stub up/down to that rail.</li>
+    <li>A 2-pin part with one pin on the top rail and one on the bottom rail → <b>vertical, between the rails</b> (decoupling / divider leg).</li>
+    <li>A 2-pin part tapping a single IC pin → sits <b>on that pin's side</b>, oriented along the pin.</li>
+    <li>A run of 2-pin parts on a shared private net → <b>series chain</b> laid along the route between its endpoints.</li>
+    <li>Unplaced ICs without cells → ordered along <code>flow</code> by their net adjacency.</li>
+  </ol>
+  <p class="subtitle">Five rules total. If a circuit needs something they don't give, the LLM just pins that part in <code>place</code> — the same primitive, no new grammar.</p>
+</div>
+
+<div class="section">
+  <h3>All four cases in this language</h3>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+    <div class="mockup"><div class="mockup-header">divider-filter</div><div class="mockup-body" style="font-family:monospace;font-size:12px;line-height:1.4;padding:12px;white-space:pre">rails: { VCC: top, GND: bottom }
+ports: { OUT: right }
+# R7,R8,C3 all inferred:
+# R7 VCC->mid, R8/C3 mid->GND</div></div>
+    <div class="mockup"><div class="mockup-header">555-blinker</div><div class="mockup-body" style="font-family:monospace;font-size:12px;line-height:1.4;padding:12px;white-space:pre">rails: { +9V: top, GND: bottom }
+place: { U1: [1,0] }
+# caps flank left, R's flank right
+# by which U1 pin they tap</div></div>
+    <div class="mockup"><div class="mockup-header">mcp1703-power-entry</div><div class="mockup-body" style="font-family:monospace;font-size:12px;line-height:1.4;padding:12px;white-space:pre">flow: lr
+rails: { +5V: top, +3V3: top, GND: bottom }
+place: { U1: [1,0] }
+ports: { 5V_BUS: left }
+# F1 left of U1 (chain to 5V_BUS port)
+# C1,C2 under +5V; C3,C4 under +3V3
+# D1,R2 right of +3V3 -> GND</div></div>
+    <div class="mockup"><div class="mockup-header">uart-level-translator</div><div class="mockup-body" style="font-family:monospace;font-size:12px;line-height:1.4;padding:12px;white-space:pre">rails: { VCC3V3: top, VCCD: top, GNDD: bottom }
+place: { J1: [0,0], U2: [1,0], MCU: [2,-1] }
+ports: { TXD1: ?, RXD1: ? }
+# pullups -> VCC rails, decouplers
+# under rails, series R's in-line</div></div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top:12px">The intelligence lives in the deterministic engine (the 5 rules + a good router), not in a sprawling grammar the LLM must memorize. The LLM only needs to understand four keys. Does this hit the "minimal &amp; elegant" bar?</p>

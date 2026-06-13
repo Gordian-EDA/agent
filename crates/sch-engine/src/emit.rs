@@ -1130,6 +1130,49 @@ impl SchematicWriter {
     /// `lib_symbols` are emitted sorted by `lib_id` (via the backing
     /// `BTreeMap`); symbol instances are emitted sorted by refdes. All uuids are
     /// content-derived, so the same placements always produce identical bytes.
+    /// The page size for a content-fit `User` page: the maximum x/y extent of
+    /// all drawn geometry (symbol bodies, wires, labels, junctions, no-connects)
+    /// plus a margin. `None` when there is nothing to draw.
+    ///
+    /// Geometry is laid out near the origin by the floorplan engine, so the
+    /// content fills a page of `max + margin`. The minimum corner is not
+    /// subtracted (KiCAD's page origin is the top-left); the floorplan
+    /// normalizes content to a small positive margin already.
+    fn content_extent(&self) -> Option<[f64; 2]> {
+        use crate::textplace::{rotated_half_extents, text_width};
+        const PAGE_MARGIN: f64 = 12.7;
+        let mut max_x = f64::MIN;
+        let mut max_y = f64::MIN;
+        let mut acc = |x: f64, y: f64| {
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        };
+        for i in &self.instances {
+            let h = rotated_half_extents(i.half_extents, i.angle);
+            acc(i.at[0] + h[0], i.at[1] + h[1]);
+            for p in [i.ref_pos, i.val_pos].into_iter().flatten() {
+                acc(p.at[0] + 5.0, p.at[1]);
+            }
+        }
+        for w in &self.wires {
+            acc(w.a[0], w.a[1]);
+            acc(w.b[0], w.b[1]);
+        }
+        for l in &self.labels {
+            acc(l.at[0] + text_width(&l.net), l.at[1]);
+        }
+        for j in &self.junctions {
+            acc(j.at[0], j.at[1]);
+        }
+        for nc in &self.no_connects {
+            acc(nc.at[0], nc.at[1]);
+        }
+        if max_x == f64::MIN {
+            return None;
+        }
+        Some([max_x + PAGE_MARGIN, max_y + PAGE_MARGIN])
+    }
+
     pub fn finish(mut self) -> String {
         // Resolve signal-stub collisions and materialize the surviving stub wires
         // before any rendering, so labels/wires below render the reconciled state.
@@ -1146,7 +1189,15 @@ impl SchematicWriter {
         out.push_str("\t(generator \"auto-pcb\")\n");
         out.push_str("\t(generator_version \"0.1\")\n");
         let _ = writeln!(out, "\t(uuid \"{root_uuid}\")");
-        out.push_str("\t(paper \"A4\")\n");
+        // Content-fit page: a custom `User` page just larger than the drawn
+        // content so the schematic fills the view (no tiny-in-an-A4-corner).
+        // Falls back to A4 when there is no content to measure.
+        match self.content_extent() {
+            Some([w, h]) => {
+                let _ = writeln!(out, "\t(paper \"User\" {} {})", fmt_coord(w), fmt_coord(h));
+            }
+            None => out.push_str("\t(paper \"A4\")\n"),
+        }
         if let Some(title) = &self.title {
             let t = escape_sexpr_string(title);
             let _ = writeln!(out, "\t(title_block\n\t\t(title \"{t}\")\n\t)");

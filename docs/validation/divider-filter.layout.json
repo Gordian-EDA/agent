@@ -1,0 +1,5 @@
+{
+  "flow": "lr",
+  "rails": { "VCC": "top", "GND": "bottom" },
+  "ports": { "OUT": "right" }
+}
