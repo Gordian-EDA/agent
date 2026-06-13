@@ -320,6 +320,15 @@ impl SchematicWriter {
         Ok(())
     }
 
+    /// Mirror the most recently added symbol left-to-right (`(mirror y)`). Used
+    /// by the floorplan engine to flip an IC so the pins facing its neighbours
+    /// (e.g. a translator's B-side toward the connector) point the right way.
+    pub fn set_mirror_last(&mut self) {
+        if let Some(i) = self.instances.last_mut() {
+            i.mirror = true;
+        }
+    }
+
     /// Place a net-name label at the connection endpoint of one pin.
     ///
     /// This is the connectivity mechanism: a label whose position coincides with
@@ -1562,6 +1571,11 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     s.push_str("\t(symbol\n");
     let _ = writeln!(s, "\t\t(lib_id \"{lib_id}\")");
     let _ = writeln!(s, "\t\t(at {x} {y} {angle})");
+    // A left-right flip negates local x — that is `(mirror y)` in KiCAD — so the
+    // render matches the endpoint transform (`transform_offset` negates x).
+    if inst.mirror {
+        s.push_str("\t\t(mirror y)\n");
+    }
     s.push_str("\t\t(unit 1)\n");
     s.push_str("\t\t(exclude_from_sim no)\n");
     s.push_str("\t\t(in_bom yes)\n");

@@ -81,6 +81,10 @@ pub struct LayoutIr {
     /// Net → edge side. Nets that exit as labelled ports.
     #[serde(default)]
     pub ports: BTreeMap<String, Side>,
+    /// Anchors (ICs) to flip left-to-right, so the pins facing their neighbours
+    /// point the right way (e.g. a level translator's B-side toward a connector).
+    #[serde(default)]
+    pub mirror: BTreeSet<String>,
 }
 
 impl LayoutIr {
@@ -102,7 +106,13 @@ pub fn baseline_ir(design: &Design) -> LayoutIr {
             rails.insert(net.clone(), band);
         }
     }
-    LayoutIr { flow: Flow::Lr, rails, place: BTreeMap::new(), ports: BTreeMap::new() }
+    LayoutIr {
+        flow: Flow::Lr,
+        rails,
+        place: BTreeMap::new(),
+        ports: BTreeMap::new(),
+        mirror: BTreeSet::new(),
+    }
 }
 
 /// Ground-like net name heuristic.
@@ -174,6 +184,9 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
         let mut probe = SchematicWriter::new();
         for it in items.iter().filter(|i| i.is_anchor) {
             probe.add_symbol(env, &it.part, &it.refdes, &it.value, it.at, it.angle)?;
+            if ir.mirror.contains(&it.refdes) {
+                probe.set_mirror_last();
+            }
         }
         anchor_pin_map(&probe, env, &items)?
     };
@@ -189,6 +202,9 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     }
     for it in &items {
         w.add_symbol(env, &it.part, &it.refdes, &it.value, it.at, it.angle)?;
+        if ir.mirror.contains(&it.refdes) {
+            w.set_mirror_last();
+        }
     }
     for it in &items {
         for (num, _name, net) in &it.pins {
@@ -799,8 +815,10 @@ fn power_lib_id(net: &str) -> String {
         "12V" | "+12V" => "+12V",
         "VCC" => "VCC",
         "VDD" => "VDD",
-        g if g == "GND" || g == "GNDD" || g.starts_with("GND") => "GND",
-        _ => return format!("power:{net}"),
+        g if g.starts_with("GND") || g.starts_with("VSS") || g == "AGND" || g == "DGND" => "GND",
+        // Custom rail (e.g. VCC3V3, VCCD): a generic donor symbol whose Value
+        // names the net — KiCAD derives the global net from the Value field.
+        _ => "VCC",
     };
     format!("power:{alias}")
 }

@@ -1,0 +1,7 @@
+{
+  "flow": "lr",
+  "rails": { "VCC3V3": "top", "VCCD": "top", "GNDD": "bottom" },
+  "place": { "J1": [0, 0], "U2": [2, 0] },
+  "ports": { "TXD1": "right", "RXD1": "right" },
+  "mirror": ["U2"]
+}
