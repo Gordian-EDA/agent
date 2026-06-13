@@ -1,0 +1,6 @@
+{
+  "flow": "lr",
+  "rails": { "5V": "top", "3V3": "top", "GND": "bottom" },
+  "place": { "U1": [1, 0] },
+  "ports": { "5V_BUS": "left" }
+}
