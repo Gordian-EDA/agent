@@ -927,9 +927,13 @@ fn emit_rail(
             let refdes = format!("#PWR_{net}_{idx}");
             w.add_power_symbol(env, &lib, &refdes, net, *ep, angle)?;
         }
-        // Flag attaches to the first power symbol's pin point.
+        // The ERC flag hangs off a short horizontal stub from the first pin, so
+        // it sits clear of the power symbol and the component body.
         if let Some((ep, _)) = eps.first() {
-            flag_points.entry(net.to_string()).or_insert(*ep);
+            let stub = [ep[0] - 5.08, ep[1]];
+            w.add_wire_on_net(*ep, stub, net);
+            w.add_junction(*ep);
+            flag_points.entry(net.to_string()).or_insert(stub);
         }
         return Ok(());
     };
