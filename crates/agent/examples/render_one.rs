@@ -47,6 +47,8 @@ fn main() -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;
     let sch_path = tmp.path().join("out.kicad_sch");
     std::fs::write(&sch_path, emit.sch.as_bytes())?;
+    // Also dump the schematic next to the PNG for geometry inspection.
+    let _ = std::fs::write(format!("{out}.kicad_sch"), emit.sch.as_bytes());
 
     match KicadCli::new(&env).erc(&sch_path) {
         Ok(r) => {

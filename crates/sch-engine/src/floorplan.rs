@@ -128,7 +128,7 @@ fn is_ground(net: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Spacing constants (mm). All on the 1.27 grid.
-const DX: f64 = 22.86; // column pitch (18 grid)
+const DX: f64 = 17.78; // column pitch (14 grid) — compact but leaves routing room
 const DLAYER: f64 = 16.51; // vertical layer pitch (13 grid)
 const MARGIN: f64 = 12.7;
 
@@ -495,13 +495,18 @@ fn place_passives(
             items[i].at = [crate::grid::snap(pos[0] + sign * reach), pos[1]];
             items[i].angle = if native_vertical(&items[i].geom) { 90.0 } else { 0.0 };
             placed_x.insert(i, items[i].at[0]);
+        } else if matches!(dir, Dir::East | Dir::West) {
+            // Vertical tap on a side pin (a pull-up to a rail, or a bypass cap to
+            // GND): hug the pin's column just outside the body, spanning toward
+            // its other net's band. Keeps it next to its pin, not in a far column.
+            let sign = if dir == Dir::East { 1.0 } else { -1.0 };
+            let x = crate::grid::snap(pos[0] + sign * 6.35);
+            orient_at(&mut items[i], &nets, x, vertical);
+            placed_x.insert(i, x);
         } else {
+            // North/South pin: stack in a side column on the pin's side.
             let (ax, ahw) = anchor_half.get(&anchor).copied().unwrap_or((pos[0], 5.08));
-            let right = match dir {
-                Dir::East => true,
-                Dir::West => false,
-                _ => pos[0] >= ax,
-            };
+            let right = pos[0] >= ax;
             let k = side_cursor.entry((anchor.clone(), right)).or_insert(0);
             *k += 1;
             let x = if right { ax + ahw + (*k as f64) * DX } else { ax - ahw - (*k as f64) * DX };
@@ -607,6 +612,57 @@ fn place_passives(
             }
             nudge_clear(items, i, &placed_idxs);
             placed_idxs.push(i);
+        }
+    }
+
+    // Global de-overlap: separate overlapping passives without shoving them into
+    // the IC. Move the more-movable part (a cap before a pin-aligned series R) to
+    // the nearest free column on whichever side has room.
+    deoverlap(items, &passives);
+}
+
+/// Separate overlapping passives by relocating the *movable* one (a cap / any
+/// vertical part — a horizontal pin-aligned series R must keep its row) to the
+/// nearest column, scanning both sides, that clears EVERY other part including
+/// the ICs. Scanning both directions and requiring a fully-clear spot avoids
+/// the cascade that shoving rightward caused.
+fn deoverlap(items: &mut [Item], passives: &[usize]) {
+    let overlaps_any = |items: &[Item], i: usize| -> bool {
+        let fi = footprint(&items[i]);
+        items.iter().enumerate().any(|(j, _)| j != i && rects_overlap(fi, footprint(&items[j])))
+    };
+    for _ in 0..10 {
+        let mut moved = false;
+        for &i in passives {
+            if !overlaps_any(items, i) {
+                continue;
+            }
+            // Only relocate vertical parts; a horizontal series R stays on its
+            // pin's row (the router will reach it).
+            let vertical = ((items[i].angle / 90.0).round() as i64).rem_euclid(2) == 0;
+            if !vertical {
+                continue;
+            }
+            let orig = items[i].at;
+            let mut best: Option<f64> = None;
+            'search: for step in 1..=16 {
+                for sign in [1.0_f64, -1.0] {
+                    let x = crate::grid::snap(orig[0] + sign * step as f64 * DX);
+                    items[i].at[0] = x;
+                    if !overlaps_any(items, i) {
+                        best = Some(x);
+                        break 'search;
+                    }
+                }
+            }
+            items[i].at = orig;
+            if let Some(x) = best {
+                items[i].at[0] = x;
+                moved = true;
+            }
+        }
+        if !moved {
+            break;
         }
     }
 }
@@ -959,6 +1015,16 @@ fn route_signal(
         return Ok(());
     }
 
+    // A LOCAL node — terminals clustered with no component body between them —
+    // is drawn as one clean trunk + stubs (a tee), not an MST of independent
+    // elbows whose overlapping collinear runs over-junction the node.
+    if route_local_tee(w, net, &terms, scene) {
+        if let (Some(side), Some(pi)) = (port, port_idx) {
+            w.add_cluster_label(net, terms[pi].0, side_dir(side));
+        }
+        return Ok(());
+    }
+
     let pts: Vec<[f64; 2]> = terms.iter().map(|t| t.0).collect();
     let mut paths: Vec<crate::route::Path> = Vec::new();
     let mut ok = true;
@@ -1017,6 +1083,68 @@ fn route_signal(
         w.add_cluster_label(net, terms[pi].0, side_dir(side));
     }
     Ok(())
+}
+
+/// Draw a clustered net as a single-trunk tee (one straight trunk + a short
+/// stub from each terminal), returning true if it applied. Used when the
+/// terminals are close together AND no component body sits between them, so a
+/// trunk is safe — far cleaner than an MST of overlapping elbows. Spread or
+/// obstacle-crossing nets return false and fall through to the router.
+fn route_local_tee(
+    w: &mut SchematicWriter,
+    net: &str,
+    terms: &[([f64; 2], Option<Dir>)],
+    scene: &mut crate::route::RouteScene,
+) -> bool {
+    const LOCAL: f64 = 30.48;
+    let xs: Vec<f64> = terms.iter().map(|t| t.0[0]).collect();
+    let ys: Vec<f64> = terms.iter().map(|t| t.0[1]).collect();
+    let (min_x, max_x) = (xs.iter().cloned().fold(f64::MAX, f64::min), xs.iter().cloned().fold(f64::MIN, f64::max));
+    let (min_y, max_y) = (ys.iter().cloned().fold(f64::MAX, f64::min), ys.iter().cloned().fold(f64::MIN, f64::max));
+    if max_x - min_x > LOCAL || max_y - min_y > LOCAL {
+        return false;
+    }
+    // A body strictly inside the terminal bbox would be cut by the trunk.
+    let bbox = [min_x, min_y, max_x, max_y];
+    let hits_body = scene.solids.iter().any(|r| {
+        r[0] < bbox[2] - EPS && bbox[0] < r[2] - EPS && r[1] < bbox[3] - EPS && bbox[1] < r[3] - EPS
+    });
+    if hits_body {
+        return false;
+    }
+    // Trunk along the longer axis, on the (lower-)median terminal line so the
+    // most terminals sit on it without a stub.
+    let median = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v[(v.len() - 1) / 2]
+    };
+    let horizontal = (max_x - min_x) >= (max_y - min_y);
+    if horizontal {
+        let ty = crate::grid::snap(median(ys));
+        w.add_wire_on_net([min_x, ty], [max_x, ty], net);
+        scene.segments.push(([min_x, ty], [max_x, ty], net.to_string()));
+        for (p, _) in terms {
+            if (p[1] - ty).abs() > EPS {
+                w.add_wire_on_net(*p, [p[0], ty], net);
+            }
+            if p[0] > min_x + EPS && p[0] < max_x - EPS {
+                w.add_junction([p[0], ty]);
+            }
+        }
+    } else {
+        let tx = crate::grid::snap(median(xs));
+        w.add_wire_on_net([tx, min_y], [tx, max_y], net);
+        scene.segments.push(([tx, min_y], [tx, max_y], net.to_string()));
+        for (p, _) in terms {
+            if (p[0] - tx).abs() > EPS {
+                w.add_wire_on_net(*p, [tx, p[1]], net);
+            }
+            if p[1] > min_y + EPS && p[1] < max_y - EPS {
+                w.add_junction([tx, p[1]]);
+            }
+        }
+    }
+    true
 }
 
 /// A virtual port-exit point just past the net's pin extent on `side`.
