@@ -22,7 +22,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -31,10 +31,10 @@ use pcb_engine::lint::lint;
 use pcb_engine::pathing::global_route;
 use pcb_engine::pipeline::{RouterKind, metrics, route_auto};
 use pcb_engine::placement::{
-    GroupHint, LockedAt, Part, PlaceProblem, Placement, PlacementHints, Rect, place,
-    to_route_problem,
+    GroupHint, LockedAt, Part, PlaceProblem, PlaceReport, PlaceResult, Placement, PlacementHints,
+    Rect, place, to_route_problem,
 };
-use pcb_engine::problem::{Bounds, LayerRef, Obstacle, Point2, RouteProblem};
+use pcb_engine::problem::{Bounds, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteSolution};
 
 use crate::tools::{ToolCtx, require_str};
 
@@ -1072,4 +1072,137 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     }
 
     Ok(out)
+}
+
+// ── render_board ─────────────────────────────────────────────────────────────
+
+/// Stored route: the full `route.json` shape — solution + failures + router
+/// tag. This mirrors the JSON `route_board` persists so we can recover the
+/// rendered state without re-routing.
+#[derive(Debug, Deserialize)]
+struct StoredRoute {
+    solution: RouteSolution,
+    failed: Vec<FailedNet>,
+    // router field is present in the JSON but we only need it for the key;
+    // its value is a RouterKind enum that serde handles fine.
+    #[allow(dead_code)]
+    router: serde_json::Value,
+}
+
+/// Render the board to a PNG using the placement or routed SVG, save under
+/// `.autopcb/renders/`, and attach via `IMAGE_PATH_KEY`.
+///
+/// `view` may be `"placed"` or `"routed"`. When omitted the default is
+/// `"routed"` when `route.json` exists, `"placed"` otherwise.
+pub fn render_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    // ── load draft ───────────────────────────────────────────────────────────
+    let Some(draft) = crate::tools_pcb::BoardDraft::load(ctx) else {
+        return Ok(json!({
+            "error": "no board draft yet — call create_board first",
+        }));
+    };
+
+    // ── resolve view ─────────────────────────────────────────────────────────
+    let has_route = ctx.workspace().read_route().is_some();
+    let view_str = input.get("view").and_then(Value::as_str);
+    let view = match view_str {
+        Some("placed") => "placed",
+        Some("routed") => "routed",
+        None => {
+            if has_route { "routed" } else { "placed" }
+        }
+        Some(other) => {
+            return Ok(json!({
+                "error": format!(
+                    "unknown view `{other}` — pass \"placed\" or \"routed\", or omit for auto"
+                ),
+            }));
+        }
+    };
+
+    // ── generate SVG ─────────────────────────────────────────────────────────
+    let svg = match view {
+        "placed" => {
+            // Need a last_placement in the draft.
+            let Some(placements) = draft.last_placement.clone() else {
+                return Ok(json!({
+                    "error": "board has not been placed yet — run place_board first, \
+                              then render_board",
+                }));
+            };
+            let problem = match place_problem_from_draft(&draft, ctx) {
+                Ok(p) => p,
+                Err(msg) => return Ok(json!({ "error": msg })),
+            };
+            // Reconstruct a minimal PlaceResult from the stored placements.
+            // render_placement uses .placements to look up part positions, and
+            // problem.parts for courtyard/pad geometry. legal/report are not
+            // used by the renderer — any zero-default values are fine.
+            let result = PlaceResult {
+                placements,
+                legal: true,
+                report: PlaceReport {
+                    overlaps_resolved: 0,
+                    out_of_bounds_clamps: 0,
+                    hpwl: 0.0,
+                },
+            };
+            pcb_engine::svg::render_placement(&problem, &draft.hints, &result)
+        }
+        "routed" => {
+            // Need route.json.
+            let Some(raw) = ctx.workspace().read_route() else {
+                return Ok(json!({
+                    "error": "board has not been routed yet — run route_board first, \
+                              then render_board",
+                }));
+            };
+            // Need placements too (to rebuild the RouteProblem).
+            let Some(placements) = draft.last_placement.clone() else {
+                return Ok(json!({
+                    "error": "board has no placement in the draft — run place_board \
+                              then route_board before rendering the routed view",
+                }));
+            };
+            let stored: StoredRoute = match serde_json::from_str(&raw) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Ok(json!({
+                        "error": format!("route.json is corrupt or schema-mismatch: {e}"),
+                    }));
+                }
+            };
+            let problem = match place_problem_from_draft(&draft, ctx) {
+                Ok(p) => p,
+                Err(msg) => return Ok(json!({ "error": msg })),
+            };
+            let mut rp = to_route_problem(&problem, &placements);
+            inject_keepouts(&mut rp, &draft.keepouts);
+            pcb_engine::svg::render_svg(&rp, &stored.solution, &stored.failed)
+        }
+        // The match above is exhaustive over {"placed","routed"}; the `other`
+        // arm returned early, so this branch is unreachable.
+        _ => unreachable!(),
+    };
+
+    // ── rasterize + persist ──────────────────────────────────────────────────
+    let png = crate::render::svg_to_png(&svg, crate::tools::RENDER_MAX_PX)?;
+    let path = ctx.workspace().next_render_path()?;
+    std::fs::write(&path, &png)
+        .with_context(|| format!("writing render to {}", path.display()))?;
+
+    let mut obj = json!({
+        "ok": true,
+        "view": view,
+        "png_path": path.display().to_string(),
+        "note": format!(
+            "Board ({view} view) rendered and attached. \
+             Top-layer copper = red, bottom = blue, failed nets = orange crosses. \
+             In the placed view, keepout rectangles appear as dark-grey unowned \
+             obstacles and part courtyards as grey outlines. \
+             PNG also saved to png_path for the user to open."
+        ),
+    });
+    obj[crate::tools::IMAGE_PATH_KEY] = json!(path.display().to_string());
+    Ok(obj)
 }

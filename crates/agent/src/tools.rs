@@ -753,6 +753,35 @@ impl Tools {
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
+            ToolDef {
+                name: "render_board".into(),
+                description: "Render the board to a PNG image and attach it so you can \
+                    SEE the board. Call this AFTER place_board to inspect part positions \
+                    and AFTER route_board to inspect the copper. Two views: \
+                    view=\"placed\" shows part courtyards + pads coloured by net + region \
+                    hints (dashed blue) + keepout/obstacle rectangles in dark grey; \
+                    view=\"routed\" shows the full copper + vias + failed-net highlights. \
+                    Colour key (routed view): red = top-layer trace, blue = bottom-layer \
+                    trace, orange cross = failed net endpoint (route that net differently). \
+                    When view is omitted the default is \"routed\" if route.json exists, \
+                    \"placed\" otherwise. Requires place_board (placed view) or route_board \
+                    (routed view); missing state returns a recoverable error. The PNG is \
+                    also saved under .autopcb/renders/."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "view": {
+                            "type": "string",
+                            "enum": ["placed", "routed"],
+                            "description": "Which view to render: \"placed\" (part positions, \
+                                courtyards, pads, region hints) or \"routed\" (full copper, \
+                                vias, failed-net highlights). Omit for auto (routed if routed, \
+                                else placed)."
+                        }
+                    }
+                }),
+            },
         ]
     }
 
@@ -781,6 +810,7 @@ impl Tools {
             "move_part" => crate::tools_pcb::move_part(input, ctx),
             "unlock_part" => crate::tools_pcb::unlock_part(input, ctx),
             "route_board" => crate::tools_pcb::route_board(input, ctx),
+            "render_board" => crate::tools_pcb::render_board(input, ctx),
             other => bail!("unknown tool: {other}"),
         }
     }
@@ -1298,8 +1328,8 @@ fn edit_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
 /// block (and strip from the JSON the model sees as text).
 pub const IMAGE_PATH_KEY: &str = "_image_path";
 
-/// Long-edge pixel cap for rendered schematics (Claude vision sweet spot).
-const RENDER_MAX_PX: u32 = 1600;
+/// Long-edge pixel cap for rendered schematics / board renders (Claude vision sweet spot).
+pub(crate) const RENDER_MAX_PX: u32 = 1600;
 
 fn render_schematic(ctx: &ToolCtx) -> Result<Value> {
     if !ctx.sch_path.exists() {

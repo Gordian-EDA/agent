@@ -107,13 +107,13 @@ harness (scripted triage), plus a creds-gated live smoke.
 
 ### Task 3: vision — `render_board`
 
-- [ ] `render_board { view? "placed"|"routed" (default routed-if-routed) }`
+- [x] `render_board { view? "placed"|"routed" (default routed-if-routed) }`
       — placed: `svg::render_placement`; routed: `svg::render_svg` of the
       stored solution (+ failed-net highlights already built in);
       `render::svg_to_png`, save under workspace renders, attach via
       `IMAGE_PATH_KEY` (mirror render_schematic exactly, including the
       no-board-yet recoverable error).
-- [ ] Test: tools.rs-style — render after place returns ok + png path;
+- [x] Test: tools.rs-style — render after place returns ok + png path;
       image bytes are PNG.
       Commit: `feat(agent): board vision render`
 

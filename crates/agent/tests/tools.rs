@@ -208,10 +208,11 @@ fn defs_lists_all_tools() {
         "move_part",
         "unlock_part",
         "route_board",
+        "render_board",
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
-    assert_eq!(names.len(), 21, "expected exactly 21 tools, got {}: {:?}", names.len(), names);
+    assert_eq!(names.len(), 22, "expected exactly 22 tools, got {}: {:?}", names.len(), names);
 
     // Names are unique.
     let mut sorted = names.clone();
@@ -1003,4 +1004,131 @@ fn set_placement_hints_validates_members() {
         out["error"].as_str().is_some_and(|e| e.contains("NOPE") && e.contains("R1")),
         "unknown member must error listing known refs: {out}"
     );
+}
+
+// ── PCB tools (slice 5, Task 3): render_board ─────────────────────────────────
+
+/// PNG magic bytes — the 8-byte header all valid PNG files start with.
+const PNG_MAGIC: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+#[test]
+fn render_board_before_create_is_recoverable_error() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+    let out = tools.run("render_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("no board")),
+        "render_board before create_board must be a recoverable error: {out}"
+    );
+}
+
+#[test]
+fn render_board_before_place_is_recoverable_error() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+    // Create board but do NOT place.
+    let board = serde_json::json!({
+        "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
+        "parts": [
+            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
+              "pad_nets": { "1": "VIN", "2": "GND" } }
+        ]
+    });
+    assert_eq!(tools.run("create_board", board, &ctx).unwrap()["ok"], serde_json::json!(true));
+
+    // No placement yet: both explicit "placed" and auto (no route) must error.
+    let out = tools.run("render_board", serde_json::json!({"view": "placed"}), &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("place_board")),
+        "render placed before place must error: {out}"
+    );
+    let out = tools.run("render_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("place_board")),
+        "render auto (no route) before place must error: {out}"
+    );
+
+    // Explicit "routed" view before route.json is a distinct error.
+    let out = tools.run("render_board", serde_json::json!({"view": "routed"}), &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("route_board")),
+        "render routed before route must error: {out}"
+    );
+}
+
+#[test]
+fn render_board_placed_returns_ok_and_png_magic() {
+    let (ctx, _g, tools) = placed_board_ctx();
+
+    // Place the board.
+    let out = tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["legal"], serde_json::json!(true), "place: {out}");
+
+    // Render the placed view.
+    let out = tools
+        .run("render_board", serde_json::json!({"view": "placed"}), &ctx)
+        .unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "render_board placed: {out}");
+    assert_eq!(out["view"], serde_json::json!("placed"), "view field: {out}");
+
+    let png_path = out["png_path"].as_str().expect("png_path present");
+    assert!(png_path.contains(".autopcb/renders/"), "path under renders/: {out}");
+    let png_bytes = std::fs::read(png_path).expect("PNG file written");
+    assert_eq!(&png_bytes[..8], PNG_MAGIC, "must be a valid PNG");
+    assert!(png_bytes.len() > 100, "PNG suspiciously small: {} bytes", png_bytes.len());
+
+    // IMAGE_PATH_KEY must be set to the same path (so the agent loop attaches it).
+    assert_eq!(
+        out[agent::tools::IMAGE_PATH_KEY].as_str(),
+        Some(png_path),
+        "IMAGE_PATH_KEY must equal png_path"
+    );
+}
+
+#[test]
+fn render_board_routed_returns_ok_and_png_magic() {
+    let (ctx, _g, tools) = placed_board_ctx();
+
+    // Full flow: place then route.
+    tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    let route_out = tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(
+        route_out["failed"].as_array().unwrap().is_empty(),
+        "small board must route cleanly: {route_out}"
+    );
+
+    // Render the routed view explicitly.
+    let out = tools
+        .run("render_board", serde_json::json!({"view": "routed"}), &ctx)
+        .unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "render_board routed: {out}");
+    assert_eq!(out["view"], serde_json::json!("routed"), "view field: {out}");
+
+    let png_path = out["png_path"].as_str().expect("png_path present");
+    let png_bytes = std::fs::read(png_path).expect("PNG file written");
+    assert_eq!(&png_bytes[..8], PNG_MAGIC, "must be a valid PNG");
+
+    // IMAGE_PATH_KEY set.
+    assert_eq!(
+        out[agent::tools::IMAGE_PATH_KEY].as_str(),
+        Some(png_path),
+        "IMAGE_PATH_KEY must equal png_path"
+    );
+}
+
+#[test]
+fn render_board_default_view_logic() {
+    let (ctx, _g, tools) = placed_board_ctx();
+
+    // After place but before route: auto should pick "placed".
+    tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    let out = tools.run("render_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "auto before route: {out}");
+    assert_eq!(out["view"], serde_json::json!("placed"), "default before route must be placed: {out}");
+
+    // After route: auto should pick "routed".
+    tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
+    let out = tools.run("render_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "auto after route: {out}");
+    assert_eq!(out["view"], serde_json::json!("routed"), "default after route must be routed: {out}");
 }
