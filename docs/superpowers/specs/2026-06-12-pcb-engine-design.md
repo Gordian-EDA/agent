@@ -1,7 +1,7 @@
 # PCB Copper Autorouter (`pcb-engine`) — Design
 
 **Date:** 2026-06-12
-**Status:** Approved (slices 0–3 complete; slice 4 next)
+**Status:** Approved (slices 0–4 complete; slice 5 next)
 **Scope lock:** copper autorouting, built in-house in Rust, in this repo.
 
 ## Problem
@@ -196,6 +196,35 @@ fixture):**
 - Runtime: `route_detailed(congested*)` ≈ 20 s (full-board half-pitch
   finisher grids dominate); pcb-engine suite ≈ 75 s. Acceptable for v1;
   spatial indexing and grid reuse are the obvious levers later.
+
+**Slice-4 findings (2026-06-12, gate passed in metric form):**
+
+- Shipped: `placement.rs` (pure, deterministic force-directed seed +
+  spiral legalizer, exact-geometry legality check; LLM steers via
+  serializable `PlacementHints` — groups/regions/edge affinities; engine
+  fully functional with empty hints), `to_route_problem` handoff,
+  `footlib`→`Part` conversion + template+move board writing in
+  kicad-bridge, full e2e (footprints → place → route_auto → moved board →
+  KiCAD DRC zero violations, cross-oracle agreement).
+- **Gate form:** at 11-part scale a corner-flung locked placement still
+  routes (small pads don't wall like keepouts), so the asserted defeat is
+  the plan-sanctioned metric form: fixed placement ≥ 2× engine on HPWL
+  AND routed wirelength (actuals 3.6×/3.4×); hints improve HPWL further
+  (65.6 → 54.4) and never hurt. A structural failed-net placement defeat
+  needs a bigger/denser board — candidate when benchmark boards arrive.
+- **Courtyard-encloses-pads invariant:** courtyard-margin legality
+  implies pad clearance ONLY if the courtyard encloses the pads (first
+  R_0603 crib used the body rect; foreign pads touched and the
+  connectivity oracle caught the short). kicad-bridge's
+  `part_from_footprint` enforces an origin-symmetric enclosing courtyard.
+- **Template coherence pitfalls for board generation (slice 5):** keep
+  thru-hole pads as net LEAVES (interior thru-hole pins invite via-at-
+  drill → hole_to_hole); author templates silk-free (silk_over_copper on
+  compact layouts); courtyards as closed fp_rect (disjoint fp_lines trip
+  malformed_courtyard); PlaceProblem and template must derive from ONE
+  description (drift surfaces as DRC-unconnected, by design).
+- Empty-hints placements cluster toward the seed corner (legal, routes
+  clean; board-center gravity is a cosmetic v2 lever — or an LLM hint).
 
 ## Reuse from this repo
 

@@ -149,11 +149,15 @@ global n-body.
 
 ### Task 4: wrap-up (inline, main loop)
 
-- [ ] `cargo test --workspace` green; clippy clean on touched crates;
+- [x] `cargo test --workspace` green; clippy clean on touched crates;
       render + EYEBALL placement PNGs (placed state must look like a sane
       board: connector at edge if hinted, no overlaps, decouplers near
       their parts); spec slice-4 row + findings; memory update.
       Commit: `chore(pcb-engine): slice 4 wrap-up`
+      (521 workspace tests, 0 failures. PNGs eyeballed: legal cluster, no
+      overlaps, routed clean; empty-hints corner bias noted in spec
+      findings along with the courtyard invariant and template-coherence
+      pitfalls.)
 
 ## Self-review notes
 
