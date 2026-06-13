@@ -3,6 +3,7 @@ pub mod env;
 pub mod footlib;
 pub mod geometry;
 pub mod pcb;
+pub mod placefp;
 pub mod provider;
 pub mod search;
 pub mod snapshot;

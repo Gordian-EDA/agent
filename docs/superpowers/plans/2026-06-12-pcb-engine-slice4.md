@@ -113,7 +113,7 @@ global n-body.
 
 ### Task 3: kicad-bridge e2e — placed board to DRC-clean .kicad_pcb
 
-- [ ] `kicad-bridge`: build a `PlaceProblem` from real footprints via
+- [x] `kicad-bridge`: build a `PlaceProblem` from real footprints via
       `footlib` (`part_from_footprint(footprint, reference, net_map) ->
       Part` — courtyard + pads with nets), and write a placed+routed board
       out. For writing, PREFER the simpler path: start from a template
@@ -122,11 +122,29 @@ global n-body.
       (update `at`/rotation via kiutils), then `write_solution` the routed
       copper. Full footprint construction from scratch is acceptable if
       kiutils makes it easy — author's call; document which path was taken.
-- [ ] E2E test (version/install-gated like the others): footlib parts →
+      DONE (`src/placefp.rs`): TEMPLATE+MOVE path — `placed_template.kicad_pcb`
+      carries the 3 footprint types with nets; `move_footprints` rewrites each
+      footprint's `(at …)` by text-splice (kiutils footprint edits don't
+      round-trip through `write()`, same limitation `pcb::write_solution`
+      documents). Courtyard-enclosing rule: origin-SYMMETRIC courtyard whose
+      half-extent on each axis = max |coord| over BOTH the `F.CrtYd` and the pad
+      bbox — guarantees it encloses the pads even when KiCAD's courtyard is
+      asymmetric (e.g. PinHeader y -1.77..4.32) or under-covers them.
+- [x] E2E test (version/install-gated like the others): footlib parts →
       place (empty hints) → to_route_problem → route_auto → 0 failed →
       write placed+routed board → `kicad-cli pcb drc` → zero violations,
       zero unconnected (same lib_footprint_mismatch carve-out if it
       appears); in-house lint clean on the same solution.
+      DONE (`tests/placed_board_e2e.rs`): J1(PinHeader thru-hole)+U1(SOT-23)
+      +R1+R2(R_0603); nets VIN{J1.1,U1.1} GND{4} VOUT{U1.3,R1.1,R2.1}. KiCAD
+      DRC: 0 copper violations, 0 unconnected, 4 tolerated lib_footprint_mismatch.
+      COHERENCE FINDING for slice-5 board auto-gen: keep thru-hole pads OFF the
+      interior of multi-pin nets — a 3-pin VIN through J1's drilled pad forces a
+      bottom-layer detour that vias UP at the pad → KiCAD `hole_to_hole`. Also
+      author template silk-free (Ref/Value on F.Fab) so the compact empty-hints
+      cluster never trips `silk_over_copper`; courtyards must be CLOSED shapes
+      (a closed `fp_rect`, not disjoint `fp_line`s) or DRC flags
+      `malformed_courtyard`.
       Commit: `feat(kicad-bridge): placed-board e2e through kicad drc`
 
 ### Task 4: wrap-up (inline, main loop)
