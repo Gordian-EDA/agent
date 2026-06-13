@@ -38,7 +38,7 @@ global n-body.
 
 ### Task 1: placement model + engine (`placement.rs` in pcb-engine)
 
-- [ ] Model (all serde, camelCase, deny_unknown_fields, like problem.rs):
+- [x] Model (all serde, camelCase, deny_unknown_fields, like problem.rs):
       `PlaceProblem { bounds, clearance, parts: Vec<Part>, nets:
       Vec<LogicalNet> }`; `Part { reference, courtyard: Rect-like (w,h
       around origin), pads: Vec<PartPad { number, offset, size, layer(s),
@@ -50,7 +50,7 @@ global n-body.
       `PlacementHints { groups: Vec<GroupHint { name, members, region:
       Option<Rect>, edge: Option<Edge {N|S|E|W}> }> }` — empty hints must
       be valid.
-- [ ] `pub fn place(problem, hints) -> PlaceResult { placements:
+- [x] `pub fn place(problem, hints) -> PlaceResult { placements:
       Vec<Placement { reference, at, rotation }>, legal: bool, report:
       PlaceReport { overlaps_resolved, out_of_bounds_clamps, hpwl } }`:
       deterministic force-directed seed (net springs toward connected
@@ -62,16 +62,16 @@ global n-body.
       never move. `legal` true ⇔ no courtyard overlap (with margin) and
       all in bounds — verify by exact geometry at the end, not by trusting
       the algorithm.
-- [ ] `pub fn to_route_problem(problem, placements) -> RouteProblem`:
+- [x] `pub fn to_route_problem(problem, placements) -> RouteProblem`:
       pads at placed+rotated positions become net-attributed obstacles +
       `connections` (multi-pin nets → points_to_connect), board bounds
       carried over, design rules from a `DesignRules`-ish field or
       defaults consistent with existing fixtures. This is the
       placement→routing handoff and must produce problems the slice-3
       pipeline accepts unchanged.
-- [ ] HPWL metric (half-perimeter wirelength over net bounding boxes) in
+- [x] HPWL metric (half-perimeter wirelength over net bounding boxes) in
       the report — the cheap placement-quality number.
-- [ ] Tests: empty hints on a small problem → legal, deterministic
+- [x] Tests: empty hints on a small problem → legal, deterministic
       (serialize twice); locked part doesn't move; two connected parts end
       closer than two unconnected ones; group with region hint lands its
       members inside the region; edge-affinity part touches its edge band;

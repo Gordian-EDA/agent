@@ -15,6 +15,7 @@ pub mod lint;
 pub mod mesh;
 pub mod pathing;
 pub mod pipeline;
+pub mod placement;
 pub mod problem;
 pub mod router;
 pub mod svg;
