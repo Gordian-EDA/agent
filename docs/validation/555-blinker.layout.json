@@ -1,0 +1,5 @@
+{
+  "flow": "lr",
+  "rails": { "9V": "top", "GND": "bottom" },
+  "place": { "U1": [1, 0] }
+}

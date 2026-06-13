@@ -15,7 +15,7 @@
 //! All exact geometry is decided here; the LLM that emits the IR never sees a
 //! millimetre.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 
 use circuit_lang::model::{Component, Design, PinTarget};
@@ -204,8 +204,8 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     Ok(EmitOutput { sch, layout_warnings: warnings, relayout_blocks: Default::default() })
 }
 
-/// net → anchor-pin sheet endpoints and outward directions.
-type AnchorPins = BTreeMap<String, Vec<([f64; 2], Dir)>>;
+/// net → anchor-pin occurrences: (anchor refdes, sheet endpoint, outward dir).
+type AnchorPins = BTreeMap<String, Vec<(String, [f64; 2], Dir)>>;
 
 fn anchor_pin_map(w: &SchematicWriter, env: &KicadEnv, items: &[Item]) -> io::Result<AnchorPins> {
     let mut map: AnchorPins = BTreeMap::new();
@@ -213,7 +213,7 @@ fn anchor_pin_map(w: &SchematicWriter, env: &KicadEnv, items: &[Item]) -> io::Re
         for (num, _name, net) in &it.pins {
             if let Some(net) = net {
                 for (pos, dir) in w.pin_dirs(env, &it.refdes, num)? {
-                    map.entry(net.clone()).or_default().push((pos, dir));
+                    map.entry(net.clone()).or_default().push((it.refdes.clone(), pos, dir));
                 }
             }
         }
@@ -298,10 +298,10 @@ fn rail_regions(apins: &AnchorPins) -> (BTreeMap<String, f64>, BTreeMap<String, 
     let mut x = BTreeMap::new();
     let mut dir = BTreeMap::new();
     for (net, pins) in apins {
-        let cx = pins.iter().map(|(p, _)| p[0]).sum::<f64>() / pins.len() as f64;
+        let cx = pins.iter().map(|(_, p, _)| p[0]).sum::<f64>() / pins.len() as f64;
         x.insert(net.clone(), cx);
         let mut d = 0.0;
-        for (_, dd) in pins {
+        for (_, _, dd) in pins {
             match dd {
                 Dir::East => d += 1.0,
                 Dir::West => d -= 1.0,
@@ -342,11 +342,18 @@ fn place_passives(
     let mut placed_x: BTreeMap<usize, f64> = BTreeMap::new();
     let mut cursor: BTreeMap<String, i32> = BTreeMap::new();
 
-    // A passive is vertical when its two nets sit in different power layers AND
-    // neither is a port (a port→rail feed flows in horizontally from the edge).
+    // Anchor x-extents, for placing flanking columns just outside the body.
+    let anchor_half: BTreeMap<String, (f64, f64)> = items
+        .iter()
+        .filter(|i| i.is_anchor)
+        .map(|i| (i.refdes.clone(), (i.at[0], i.geom.approx_size()[0] / 2.0)))
+        .collect();
+
+    // A passive is vertical when its two nets sit in different power layers.
+    // (A single-element port→rail feed is made horizontal by giving the feed
+    // port the rail's layer in `layer_nets`, so it falls out of this test.)
     let is_vert = |nets: &[(String, String)]| -> bool {
         layer_of(&nets[0].1) != layer_of(&nets[1].1)
-            && !nets.iter().any(|(_, n)| ir.ports.contains_key(n))
     };
 
     // Orient + position a 2-pin part at column `x`, accounting for the symbol's
@@ -382,6 +389,38 @@ fn place_passives(
             .filter(|n| region_x.contains_key(n) && ir.rails.get(n) == Some(&Band::Top))
             .min_by_key(|n| layer_of(n))
     };
+
+    // Pass 0: anchor taps — a passive on an IC signal pin sits just outside the
+    // body on that pin's side, columns stacking outward (the IC-flanking look).
+    let mut side_cursor: BTreeMap<(String, bool), i32> = BTreeMap::new();
+    for &i in &passives {
+        let nets = nets_of(&items[i]);
+        if nets.len() != 2 {
+            continue;
+        }
+        // A tap pin: a non-rail net of this passive that lands on an anchor pin.
+        let tap = nets.iter().find_map(|(_, net)| {
+            if ir.rails.contains_key(net) {
+                return None;
+            }
+            apins.get(net).and_then(|occ| occ.first()).map(|(rd, pos, dir)| (rd.clone(), *pos, *dir))
+        });
+        if let Some((anchor, pos, dir)) = tap {
+            let (ax, ahw) = anchor_half.get(&anchor).copied().unwrap_or((pos[0], 5.08));
+            let right = match dir {
+                Dir::East => true,
+                Dir::West => false,
+                _ => pos[0] >= ax,
+            };
+            let k = side_cursor.entry((anchor.clone(), right)).or_insert(0);
+            *k += 1;
+            let off = ahw + (*k as f64) * DX;
+            let x = if right { ax + off } else { ax - off };
+            let v = is_vert(&nets);
+            orient_at(&mut items[i], &nets, x, v);
+            placed_x.insert(i, x);
+        }
+    }
 
     // Pass 1a: vertical passives flanking an anchored rail (decoupling, output
     // strands), packed away from the IC. 1b: horizontal feeds on the same rail.
@@ -454,7 +493,7 @@ fn place_passives(
             .values()
             .copied()
             .chain(items.iter().filter(|i| i.is_anchor).map(|i| i.at[0]))
-            .fold(f64::MIN, f64::max);
+            .fold(f64::NEG_INFINITY, f64::max);
         let free_base = if free_base.is_finite() { free_base + DX } else { 0.0 };
         let cols = assign_columns(items, layers, 0);
         for &i in &leftover {
@@ -570,67 +609,101 @@ fn assign_columns(
     col
 }
 
-/// Longest-path layering of nets between top-rail (0) and bottom-rail (max)
-/// boundaries, over the 2-pin-passive graph. Non-rail nets get an interior
-/// layer; rails are pinned to their band.
+/// Two-sided longest-path layering: power flows top (rails at 0) → bottom (rails
+/// at the max layer). A net's layer is its longest-path distance from a top
+/// rail; nets reachable only from the bottom (signal strands hanging to GND,
+/// e.g. an LED+resistor off an IC output) are layered up from the bottom so
+/// they spread into a vertical strand instead of collapsing onto one row.
 fn layer_nets(items: &[Item], ir: &LayoutIr, inc: &Incidence) -> BTreeMap<String, i32> {
-    let mut layer: BTreeMap<String, i32> = BTreeMap::new();
-    let mut top_nets: Vec<String> = Vec::new();
-    let mut bottom_nets: Vec<String> = Vec::new();
-    for (net, band) in &ir.rails {
-        match band {
-            Band::Top => {
-                layer.insert(net.clone(), 0);
-                top_nets.push(net.clone());
-            }
-            Band::Bottom => bottom_nets.push(net.clone()),
-        }
-    }
-    // Relax: a passive edge (a,b) wants layer(b) > layer(a) when a is "more
-    // top". Iterate a few times for the small graphs we handle.
-    // Build undirected edges between net pairs joined by a 2-pin passive.
     let edges: Vec<(String, String)> = items
         .iter()
         .filter(|i| !i.is_anchor)
         .filter_map(|it| {
-            let nets: Vec<String> = it
-                .pins
-                .iter()
-                .filter_map(|(_, _, n)| n.clone())
-                .collect();
-            if nets.len() == 2 {
-                Some((nets[0].clone(), nets[1].clone()))
-            } else {
-                None
-            }
+            let nets: Vec<String> = it.pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
+            (nets.len() == 2).then(|| (nets[0].clone(), nets[1].clone()))
         })
         .collect();
 
-    let bottom_layer = 1 + top_nets.len().max(1) as i32; // provisional; refined below
-    for b in &bottom_nets {
-        layer.insert(b.clone(), bottom_layer);
-    }
-    // Propagate: any net adjacent to a top rail and not a bottom rail sits at 1.
-    // Generalised longest-path from top boundary.
-    for _ in 0..(items.len() + 2) {
-        for (a, b) in &edges {
-            let la = layer.get(a).copied();
-            let lb = layer.get(b).copied();
-            match (la, lb) {
-                (Some(x), None) if !bottom_nets.contains(b) => {
-                    layer.insert(b.clone(), (x + 1).min(bottom_layer - 1).max(1));
+    let top: Vec<String> = ir.rails.iter().filter(|(_, b)| **b == Band::Top).map(|(n, _)| n.clone()).collect();
+    let bottom: Vec<String> = ir.rails.iter().filter(|(_, b)| **b == Band::Bottom).map(|(n, _)| n.clone()).collect();
+    let rails_set: BTreeSet<&String> = ir.rails.keys().collect();
+
+    // Shortest-path (BFS) distance from a seed set, NOT traversing *through* a
+    // rail (rails are barriers, so cycles via the GND/Vcc rails — decoupling
+    // caps, LED loops — don't inflate or diverge). A rail still receives a
+    // distance but its neighbours are not expanded from it.
+    let bfs = |seeds: &[String]| -> BTreeMap<String, i32> {
+        let mut d: BTreeMap<String, i32> = BTreeMap::new();
+        let mut q: VecDeque<String> = VecDeque::new();
+        for s in seeds {
+            d.insert(s.clone(), 0);
+            q.push_back(s.clone());
+        }
+        while let Some(u) = q.pop_front() {
+            let du = d[&u];
+            for (a, b) in &edges {
+                let v = if *a == u {
+                    b
+                } else if *b == u {
+                    a
+                } else {
+                    continue;
+                };
+                if d.contains_key(v) {
+                    continue;
                 }
-                (None, Some(y)) if !bottom_nets.contains(a) => {
-                    layer.insert(a.clone(), (y + 1).min(bottom_layer - 1).max(1));
+                d.insert(v.clone(), du + 1);
+                if !rails_set.contains(v) {
+                    q.push_back(v.clone());
                 }
-                _ => {}
             }
         }
-    }
-    // Any net still unlayered (isolated signal nets) → mid.
-    let _ = inc;
+        d
+    };
+
+    let d_top = bfs(&top);
+    let d_bot = bfs(&bottom);
+    // Max depth among non-bottom nets sets the bottom band one row deeper.
+    let max_top = d_top.iter().filter(|(n, _)| !bottom.contains(n)).map(|(_, &v)| v).max().unwrap_or(1).max(1);
+    let max_layer = max_top + 1;
+
+    let mut layer = BTreeMap::new();
     for net in inc.keys() {
-        layer.entry(net.clone()).or_insert(bottom_layer / 2);
+        let l = if bottom.contains(net) {
+            max_layer
+        } else if let Some(&d) = d_top.get(net) {
+            d.min(max_layer - 1)
+        } else if let Some(&d) = d_bot.get(net) {
+            (max_layer - d).max(1)
+        } else {
+            max_layer / 2
+        };
+        layer.insert(net.clone(), l);
+    }
+
+    // A feed port — a port net joined to exactly one passive whose other end is
+    // a rail (e.g. 5V_BUS → F1 → 5V) — takes that rail's layer so its series
+    // element lays out horizontally as an edge feed, not a vertical span. A
+    // multi-connection port that is really an internal node (e.g. OUT) is left
+    // at its computed layer so its divider/strand stays vertical.
+    for port in ir.ports.keys() {
+        let touching: Vec<&String> = edges
+            .iter()
+            .filter_map(|(a, b)| {
+                if a == port {
+                    Some(b)
+                } else if b == port {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if touching.len() == 1 && ir.rails.contains_key(touching[0]) {
+            if let Some(&rl) = layer.get(touching[0]) {
+                layer.insert(port.clone(), rl);
+            }
+        }
     }
     layer
 }
