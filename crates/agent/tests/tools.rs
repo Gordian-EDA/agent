@@ -209,10 +209,11 @@ fn defs_lists_all_tools() {
         "unlock_part",
         "route_board",
         "render_board",
+        "export_board",
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
-    assert_eq!(names.len(), 22, "expected exactly 22 tools, got {}: {:?}", names.len(), names);
+    assert_eq!(names.len(), 23, "expected exactly 23 tools, got {}: {:?}", names.len(), names);
 
     // Names are unique.
     let mut sorted = names.clone();
@@ -851,6 +852,117 @@ fn full_flow_create_place_route_is_clean() {
     // The solution persisted; get_board reports routed=true.
     let out = tools.run("get_board", serde_json::json!({}), &ctx).unwrap();
     assert_eq!(out["summary"]["routed"], serde_json::json!(true), "{out}");
+}
+
+#[test]
+fn export_board_requires_place_and_route_then_writes_parseable_board() {
+    use kicad_bridge::pcb::{extract_copper, read_problem};
+
+    let (ctx, _g, tools) = placed_board_ctx();
+
+    // export before placement -> recoverable error pointing at place_board.
+    let out = tools.run("export_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("place")),
+        "export before place must tell the model to place first: {out}"
+    );
+
+    // place, but not yet routed -> recoverable error pointing at route_board.
+    tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    let out = tools.run("export_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("rout")),
+        "export before route must tell the model to route first: {out}"
+    );
+
+    // route, then export to an explicit path.
+    let routed = tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(routed["failed"].as_array().unwrap().is_empty(), "route: {routed}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("exported.kicad_pcb");
+    let out = tools
+        .run(
+            "export_board",
+            serde_json::json!({ "path": path.display().to_string() }),
+            &ctx,
+        )
+        .unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "export_board: {out}");
+    assert_eq!(out["part_count"], serde_json::json!(3), "{out}");
+    assert_eq!(out["failed_nets"], serde_json::json!(0), "{out}");
+    assert!(path.exists(), "export must write the board file");
+
+    // The written board parses with read_problem: three parts' pads, the nets,
+    // and the routed copper all round-trip.
+    let board = read_problem(&path).expect("read_problem on exported board");
+    for n in ["VIN", "MID", "GND"] {
+        assert!(board.net_codes.contains_key(n), "net {n} missing: {:?}", board.net_codes);
+    }
+    let copper = extract_copper(&path).expect("extract_copper");
+    assert!(!copper.traces.is_empty(), "exported board carries routed copper");
+
+    // No silkscreen graphics leaked into the synthesized board.
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !text.contains("(layer \"F.SilkS\")") && !text.contains("(layer \"B.SilkS\")"),
+        "exported board must be silk-graphic-free"
+    );
+
+    // DRC is reported as run-or-skipped depending on the environment.
+    assert!(out["drc"].get("ran").is_some(), "drc status present: {out}");
+}
+
+/// Slice-5 export gate (KiCAD-gated): the agent-tools flow
+/// create_board → place_board → route_board → export_board on a small vendored
+/// circuit must yield a board KiCAD's DRC finds zero copper-violation /
+/// unconnected (only the inert `lib_footprint_mismatch` warning is tolerated).
+/// Skips visibly when no KiCAD >= 8 is installed.
+#[test]
+fn export_board_e2e_kicad_drc_clean() {
+    // Build the fixture-footprint ctx; it carries a real KiCAD env when one is
+    // installed (with_footprint_dir_for_test falls back to KicadEnv::detect).
+    let (ctx, _g, tools) = placed_board_ctx();
+    let major: u32 = ctx
+        .env()
+        .cli_version
+        .split('.')
+        .next()
+        .and_then(|m| m.parse().ok())
+        .unwrap_or(0);
+    if major < 8 {
+        eprintln!("SKIP: no KiCAD >= 8 for export_board DRC e2e");
+        return;
+    }
+
+    tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    let routed = tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(routed["failed"].as_array().unwrap().is_empty(), "route: {routed}");
+
+    let out = tools.run("export_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "export_board: {out}");
+
+    let drc = &out["drc"];
+    assert_eq!(drc["ran"], serde_json::json!(true), "DRC should have run: {out}");
+    assert_eq!(
+        drc["copper_violations"], serde_json::json!(0),
+        "exported board must be copper-DRC-clean: {out}"
+    );
+    assert_eq!(
+        drc["unconnected_items"], serde_json::json!(0),
+        "exported board must have zero unconnected items: {out}"
+    );
+    assert_eq!(
+        drc["errors"], serde_json::json!(0),
+        "exported board must have zero error-severity DRC findings: {out}"
+    );
+
+    eprintln!(
+        "export_board e2e OK (KiCAD {}): synthesized board DRC copper-clean, \
+         0 unconnected, {} tolerated footprint warning(s)",
+        ctx.env().cli_version,
+        drc["tolerated_footprint_warnings"]
+    );
 }
 
 #[test]

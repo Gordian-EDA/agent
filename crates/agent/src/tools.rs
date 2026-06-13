@@ -782,6 +782,30 @@ impl Tools {
                     }
                 }),
             },
+            ToolDef {
+                name: "export_board".into(),
+                description: "Export the placed + routed board to a .kicad_pcb file. \
+                    Synthesizes the board from the engine placement (footprints + \
+                    per-pad nets + a board outline) and splices the routed copper onto \
+                    it. Requires a placed AND routed board — run place_board then \
+                    route_board first (else a recoverable error). When a KiCAD 8+ CLI \
+                    is available it runs `kicad-cli pcb drc` and returns the counts \
+                    (copper_violations, unconnected_items; lib_footprint_mismatch \
+                    warnings are a tolerated library-bookkeeping carve-out, not a copper \
+                    fault); otherwise DRC is skipped with a note. Default output path is \
+                    the project's <stem>.kicad_pcb next to the schematic."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Output .kicad_pcb path. Omit to write the \
+                                project's default <stem>.kicad_pcb next to the schematic."
+                        }
+                    }
+                }),
+            },
         ]
     }
 
@@ -811,6 +835,7 @@ impl Tools {
             "unlock_part" => crate::tools_pcb::unlock_part(input, ctx),
             "route_board" => crate::tools_pcb::route_board(input, ctx),
             "render_board" => crate::tools_pcb::render_board(input, ctx),
+            "export_board" => crate::tools_pcb::export_board(input, ctx),
             other => bail!("unknown tool: {other}"),
         }
     }

@@ -479,6 +479,26 @@ impl FootprintIndex {
         parsed
     }
 
+    /// The `.kicad_mod` file path for a `Nickname:Name` id, if the id is known.
+    /// Board synthesis ([`crate::synth::synthesize_board`]) reads the raw source
+    /// text to transform the footprint body, so it needs the on-disk path that
+    /// [`Footprint::load`] already resolves internally.
+    pub fn footprint_path(&self, lib_id: &str) -> Option<&Path> {
+        self.entries
+            .iter()
+            .find(|e| e.lib_id == lib_id)
+            .map(|e| e.path.as_path())
+    }
+
+    /// The raw `.kicad_mod` source text for a `Nickname:Name` id, if known and
+    /// readable. The single description board synthesis transforms (the same file
+    /// [`Self::footprint`] parses), keeping the PlaceProblem and the board
+    /// coherent — see [`crate::synth`].
+    pub fn footprint_source(&self, lib_id: &str) -> Option<String> {
+        let path = self.footprint_path(lib_id)?;
+        std::fs::read_to_string(path).ok()
+    }
+
     /// "Did-you-mean" suggestions for a `Nickname:Name` id whose footprint
     /// could not be found — closest names *within the same library* by edit
     /// distance. Mirrors [`crate::provider`]'s symbol-side `suggest`.

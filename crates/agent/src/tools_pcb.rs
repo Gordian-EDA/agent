@@ -26,7 +26,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use kicad_bridge::cli::{KicadCli, Violation};
+use kicad_bridge::pcb::{read_problem, write_solution};
 use kicad_bridge::placefp::part_from_footprint;
+use kicad_bridge::synth::{synthesize_board, SynthPart};
 use pcb_engine::lint::lint;
 use pcb_engine::pathing::global_route;
 use pcb_engine::pipeline::{RouterKind, metrics, route_auto};
@@ -1205,4 +1208,184 @@ pub fn render_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     });
     obj[crate::tools::IMAGE_PATH_KEY] = json!(path.display().to_string());
     Ok(obj)
+}
+
+// ── export_board ─────────────────────────────────────────────────────────────
+
+/// DRC findings KiCAD raises that are independent of the routed copper: the
+/// inline footprint bodies do not byte-match the installed library copies. This
+/// is the same inert library-bookkeeping warning the e2e tests carve out (see
+/// `placed_board_e2e.rs`); it never reflects a copper or connectivity fault.
+const NON_COPPER_WARNINGS: &[&str] = &["lib_footprint_mismatch", "lib_footprint_issues"];
+
+fn is_non_copper(v: &Violation) -> bool {
+    v.severity == "warning" && NON_COPPER_WARNINGS.contains(&v.kind.as_str())
+}
+
+/// The KiCAD major version, or 0 if unparseable / no real install.
+fn kicad_major(ctx: &ToolCtx) -> u32 {
+    ctx.env()
+        .cli_version
+        .split('.')
+        .next()
+        .and_then(|m| m.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Build the [`SynthPart`]s for the draft from the resolved footprint sources and
+/// the stored placement. Returns a model-readable error string if a footprint's
+/// source text can no longer be loaded, or a part has no placement.
+fn synth_parts_from_draft(
+    draft: &BoardDraft,
+    placements: &[Placement],
+    ctx: &ToolCtx,
+) -> std::result::Result<Vec<SynthPart>, String> {
+    let index = ctx
+        .footprint_index()
+        .map_err(|e| format!("footprint index unavailable: {e}"))?;
+    let by_ref: BTreeMap<&str, &Placement> =
+        placements.iter().map(|p| (p.reference.as_str(), p)).collect();
+
+    let mut parts = Vec::with_capacity(draft.parts.len());
+    for dp in &draft.parts {
+        let source = index.footprint_source(&dp.footprint).ok_or_else(|| {
+            format!(
+                "part {}: footprint `{}` source is no longer readable — re-create the board",
+                dp.reference, dp.footprint
+            )
+        })?;
+        let placement = by_ref.get(dp.reference.as_str()).ok_or_else(|| {
+            format!(
+                "part {} has no placement — re-run place_board before export",
+                dp.reference
+            )
+        })?;
+        parts.push(SynthPart {
+            reference: dp.reference.clone(),
+            lib_id: dp.footprint.clone(),
+            source,
+            pad_nets: dp.pad_nets.clone(),
+            placement: (*placement).clone(),
+        });
+    }
+    Ok(parts)
+}
+
+/// Synthesize the routed board into a `.kicad_pcb`: requires a placed + routed
+/// draft, writes the board (footprints from the engine placement + the stored
+/// copper) and, when a recent enough KiCAD is available, runs `kicad-cli pcb
+/// drc` and reports the counts.
+pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let Some(draft) = BoardDraft::load(ctx) else {
+        return Ok(json!({
+            "error": "no board draft yet — call create_board first",
+        }));
+    };
+    let Some(placements) = draft.last_placement.clone() else {
+        return Ok(json!({
+            "error": "the board is not placed — run place_board (then route_board) before export",
+        }));
+    };
+    let Some(raw_route) = ctx.workspace().read_route() else {
+        return Ok(json!({
+            "error": "the board is not routed — run route_board before export \
+                      (export writes the routed copper)",
+        }));
+    };
+    let stored: StoredRoute = match serde_json::from_str(&raw_route) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(json!({
+                "error": format!("route.json is corrupt or schema-mismatch: {e}"),
+            }));
+        }
+    };
+
+    // Build the synthesis inputs and assemble the board text.
+    let parts = match synth_parts_from_draft(&draft, &placements, ctx) {
+        Ok(p) => p,
+        Err(msg) => return Ok(json!({ "error": msg })),
+    };
+    let board_text = match synthesize_board(&parts, &draft.bounds) {
+        Ok(t) => t,
+        Err(e) => {
+            return Ok(json!({
+                "error": format!("board synthesis failed: {e}"),
+            }));
+        }
+    };
+
+    // Resolve the output path (default = the project's <stem>.kicad_pcb).
+    let path = match input.get("path").and_then(Value::as_str) {
+        Some(p) => std::path::PathBuf::from(p),
+        None => ctx.pcb_path(),
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating export dir {}", parent.display()))?;
+    }
+    std::fs::write(&path, board_text.as_bytes())
+        .with_context(|| format!("writing synthesized board to {}", path.display()))?;
+
+    // Read the just-written board back for its net-code / layer map, then splice
+    // the routed copper onto it. (write_solution validates by re-parse before it
+    // promotes the file, so a malformed splice never lands.)
+    let board = read_problem(&path)
+        .with_context(|| format!("re-reading synthesized board {}", path.display()))?;
+    write_solution(&path, &stored.solution, &board)
+        .with_context(|| format!("writing routed copper onto {}", path.display()))?;
+
+    let mut out = json!({
+        "ok": true,
+        "path": path.display().to_string(),
+        "part_count": draft.parts.len(),
+        "failed_nets": stored.failed.len(),
+        "traces": stored.solution.traces.len(),
+        "vias": stored.solution.vias.len(),
+    });
+
+    // DRC, when a real KiCAD ≥ 8 is on PATH (kicad-cli pcb drc lands in 8).
+    if kicad_major(ctx) >= 8 {
+        match KicadCli::new(ctx.env()).drc(&path) {
+            Ok(report) => {
+                let copper: Vec<&Violation> = report
+                    .violations
+                    .iter()
+                    .filter(|v| !is_non_copper(v))
+                    .collect();
+                let tolerated = report.violations.len() - copper.len();
+                out["drc"] = json!({
+                    "ran": true,
+                    "kicad_version": ctx.env().cli_version,
+                    "copper_violations": copper.len(),
+                    "unconnected_items": report.unconnected_items.len(),
+                    "tolerated_footprint_warnings": tolerated,
+                    "errors": report.error_count(),
+                    "carve_out": "lib_footprint_mismatch warnings are tolerated — they \
+                                  are an inert library-bookkeeping diff, not a copper fault",
+                });
+                out["note"] = json!(if copper.is_empty()
+                    && report.unconnected_items.is_empty()
+                    && report.error_count() == 0
+                {
+                    "board exported and DRC-clean (0 copper violations, 0 unconnected)."
+                } else {
+                    "board exported, but KiCAD DRC found copper/connectivity issues — \
+                     inspect drc, re-route or triage, then export again."
+                });
+            }
+            Err(e) => {
+                out["drc"] = json!({ "ran": false, "error": e.to_string() });
+                out["note"] = json!("board exported; DRC could not run (see drc.error).");
+            }
+        }
+    } else {
+        out["drc"] = json!({
+            "ran": false,
+            "skipped": "no KiCAD >= 8 on PATH (kicad-cli pcb drc needs KiCAD 8+)",
+        });
+        out["note"] = json!("board exported; DRC skipped (no KiCAD CLI available).");
+    }
+
+    Ok(out)
 }

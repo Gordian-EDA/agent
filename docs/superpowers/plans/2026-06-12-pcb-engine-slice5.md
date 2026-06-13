@@ -119,7 +119,7 @@ harness (scripted triage), plus a creds-gated live smoke.
 
 ### Task 4: `export_board` — agent-flow .kicad_pcb emission
 
-- [ ] kicad-bridge: `synthesize_board(parts: &[(reference, Footprint,
+- [x] kicad-bridge: `synthesize_board(parts: &[(reference, Footprint,
       pad_nets)], placements, bounds) -> String` — text-assembled
       `.kicad_pcb` (KiCAD-9-loadable, version header like the existing
       fixtures): skeleton (paper/layers/setup/nets) + each footprint's
@@ -130,11 +130,11 @@ harness (scripted triage), plus a creds-gated live smoke.
       writer's). Edge.Cuts rect from bounds. Then `write_solution` copper
       on top. Unit-test the synthesis against `read_problem` round-trip
       (parse what we wrote; pads land where placed, nets bound).
-- [ ] agent tool `export_board { path? }` — requires routed state; writes
+- [x] agent tool `export_board { path? }` — requires routed state; writes
       via synthesize_board + write_solution; runs `kicad-cli pcb drc`
       when available (env-gated; skip note otherwise) and returns the
       DRC counts in the result. Default path = ctx.pcb_path().
-- [ ] E2E test (gated): create→place→route→export on the 4-part circuit
+- [x] E2E test (gated): create→place→route→export on the 4-part circuit
       from the slice-4 e2e; kicad DRC zero violations/unconnected
       (footprint-mismatch carve-out only).
       Commit: `feat(kicad-bridge,agent): board synthesis and export tool`
