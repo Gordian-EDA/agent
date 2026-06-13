@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod env;
+pub mod footlib;
 pub mod geometry;
 pub mod pcb;
 pub mod provider;
