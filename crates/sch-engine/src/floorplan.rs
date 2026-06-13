@@ -440,22 +440,45 @@ fn place_passives(
             .min_by_key(|n| layer_of(n))
     };
 
-    // Pass 0: anchor taps — a passive on an IC signal pin sits just outside the
-    // body on that pin's side, columns stacking outward (the IC-flanking look).
+    // Anchor pin counts: when a part taps two ICs, the bigger one (more pins) is
+    // the main chip — place the part beside IT, not the connector.
+    let pincount: BTreeMap<String, usize> =
+        items.iter().filter(|i| i.is_anchor).map(|i| (i.refdes.clone(), i.geom.pins.len())).collect();
+
+    // Pass 0: anchor taps — a passive on an IC signal pin sits beside that pin.
+    // A series element (same power layer at both ends, e.g. a termination R)
+    // lies in-line with the pin at the pin's own row, one slot out; anything
+    // else falls back to a side column. Pullups/decoupling (touch a top rail)
+    // are left to the rail-flank pass.
     let mut side_cursor: BTreeMap<(String, bool), i32> = BTreeMap::new();
+    let mut inline_cursor: BTreeMap<(String, i64), i32> = BTreeMap::new();
     for &i in &passives {
         let nets = nets_of(&items[i]);
-        if nets.len() != 2 {
+        if nets.len() != 2 || nets.iter().any(|(_, n)| ir.rails.get(n) == Some(&Band::Top)) {
             continue;
         }
-        // A tap pin: a non-rail net of this passive that lands on an anchor pin.
-        let tap = nets.iter().find_map(|(_, net)| {
-            if ir.rails.contains_key(net) {
-                return None;
-            }
-            apins.get(net).and_then(|occ| occ.first()).map(|(rd, pos, dir)| (rd.clone(), *pos, *dir))
-        });
-        if let Some((anchor, pos, dir)) = tap {
+        // Tap pin: a non-rail net on an anchor pin; prefer the anchor with most pins.
+        let tap = nets
+            .iter()
+            .filter(|(_, n)| !ir.rails.contains_key(n))
+            .filter_map(|(_, n)| apins.get(n))
+            .flatten()
+            .max_by_key(|(rd, _, _)| pincount.get(rd).copied().unwrap_or(0))
+            .cloned();
+        let Some((anchor, pos, dir)) = tap else { continue };
+        let vertical = is_vert(&nets);
+        if matches!(dir, Dir::East | Dir::West) && !vertical {
+            // Series element in-line with the pin, at its row, one slot out
+            // (further out for a second part tapping the same pin).
+            let half = part_half_span(&items[i].geom);
+            let sign = if dir == Dir::East { 1.0 } else { -1.0 };
+            let k = inline_cursor.entry((anchor.clone(), (pos[1] * 100.0) as i64)).or_insert(0);
+            let reach = half + 3.81 + (*k as f64) * (2.0 * half + 5.08);
+            *k += 1;
+            items[i].at = [crate::grid::snap(pos[0] + sign * reach), pos[1]];
+            items[i].angle = if native_vertical(&items[i].geom) { 90.0 } else { 0.0 };
+            placed_x.insert(i, items[i].at[0]);
+        } else {
             let (ax, ahw) = anchor_half.get(&anchor).copied().unwrap_or((pos[0], 5.08));
             let right = match dir {
                 Dir::East => true,
@@ -464,10 +487,8 @@ fn place_passives(
             };
             let k = side_cursor.entry((anchor.clone(), right)).or_insert(0);
             *k += 1;
-            let off = ahw + (*k as f64) * DX;
-            let x = if right { ax + off } else { ax - off };
-            let v = is_vert(&nets);
-            orient_at(&mut items[i], &nets, x, v);
+            let x = if right { ax + ahw + (*k as f64) * DX } else { ax - ahw - (*k as f64) * DX };
+            orient_at(&mut items[i], &nets, x, vertical);
             placed_x.insert(i, x);
         }
     }
@@ -564,6 +585,17 @@ fn place_passives(
 fn passive_nets(item: &Item) -> Option<Vec<String>> {
     let nets: Vec<String> = item.pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
     (nets.len() == 2).then_some(nets)
+}
+
+/// Half the pin-to-pin span of a 2-pin symbol (mm), for placing it one slot off
+/// a pin so its near lead lands just outside the IC.
+fn part_half_span(g: &SymbolGeometry) -> f64 {
+    let p: Vec<_> = g.pins.iter().collect();
+    if p.len() < 2 {
+        return 2.54;
+    }
+    let d = ((p[0].at[0] - p[1].at[0]).powi(2) + (p[0].at[1] - p[1].at[1]).powi(2)).sqrt();
+    (d / 2.0).max(2.54)
 }
 
 /// Whether a symbol's two pins are stacked vertically in its native (angle-0)
@@ -808,24 +840,178 @@ fn wire(
     // y-levels by greedy interval colouring.
     let rail_y_map = assign_rail_levels(&net_eps, ir);
 
+    // Phase A — rails (shared wires + stubs + power symbols), so their wires are
+    // in the writer before we build the routing scene.
     for (net, eps) in &net_eps {
         if let Some(band) = ir.rails.get(net) {
-            let rail_y = rail_y_map.get(net).copied();
-            emit_rail(env, w, net, eps, *band, rail_y, flag_points)?;
-        } else if let Some(side) = ir.ports.get(net) {
-            emit_port(w, net, eps, *side);
-        } else if eps.len() == 1 {
-            // A single-pin signal net (e.g. an unrouted NC_RTS) gets a stubbed
-            // name label — offset from the pin so it clears the body — making it
-            // a named isolated net rather than a floating pin (ERC error).
-            if let Some((i, num)) = inc.get(net).and_then(|p| p.first()) {
-                w.add_signal_label(env, &items[*i].refdes, num, net)?;
-            }
-        } else {
-            connect_node(w, net, eps);
+            emit_rail(env, w, net, eps, *band, rail_y_map.get(net).copied(), flag_points)?;
         }
     }
+
+    // Phase B — the routing scene: component bodies become obstacles, rail wires
+    // become foreign segments, and EVERY signal net's pins become foreign points
+    // so one net's wire can never run onto another's pin (which would merge them
+    // — the old TXD1/RXD1 short).
+    let mut scene = w.route_scene();
+    for (net, eps) in &net_eps {
+        if ir.rails.contains_key(net) {
+            continue;
+        }
+        for (p, _) in eps {
+            scene.points.push((*p, net.clone()));
+        }
+    }
+
+    // Phase C — route every signal/port net with the direction-aware,
+    // obstacle-avoiding elbow router so wires leave pins along their facing
+    // direction and detour around bodies (never through them).
+    for (net, eps) in &net_eps {
+        if ir.rails.contains_key(net) {
+            continue;
+        }
+        route_signal(env, w, items, inc, net, eps, ir.ports.get(net).copied(), &mut scene)?;
+    }
     Ok(())
+}
+
+/// Route one signal/port net's terminals as a tree (MST) with the direction-
+/// aware elbow router. A port adds a virtual terminal just past the net's extent
+/// on the named side, then a label there; failure falls back to per-pin labels.
+fn route_signal(
+    env: &KicadEnv,
+    w: &mut SchematicWriter,
+    items: &[Item],
+    inc: &Incidence,
+    net: &str,
+    eps: &[([f64; 2], Dir)],
+    port: Option<Side>,
+    scene: &mut crate::route::RouteScene,
+) -> io::Result<()> {
+    // Terminals: real pins (with outward dir) + an optional virtual port exit.
+    let mut terms: Vec<([f64; 2], Option<Dir>)> = eps.iter().map(|(p, d)| (*p, Some(*d))).collect();
+    let port_idx = port.map(|side| {
+        terms.push((port_exit_point(eps, side), None));
+        terms.len() - 1
+    });
+
+    if terms.len() < 2 {
+        // Lone pin (no port): a stubbed name label, not a floating pin.
+        if let Some((i, num)) = inc.get(net).and_then(|p| p.first()) {
+            w.add_signal_label(env, &items[*i].refdes, num, net)?;
+        }
+        return Ok(());
+    }
+
+    let pts: Vec<[f64; 2]> = terms.iter().map(|t| t.0).collect();
+    let mut paths: Vec<crate::route::Path> = Vec::new();
+    let mut ok = true;
+    for (i, j) in crate::route::mst_edges(&pts) {
+        let (a, da, b) = match (terms[i].1, terms[j].1) {
+            (Some(d), _) => (pts[i], d, pts[j]),
+            (None, Some(d)) => (pts[j], d, pts[i]),
+            (None, None) => (pts[i], dir_toward(pts[i], pts[j]), pts[j]),
+        };
+        match crate::route::route_edge(a, da, b, net, scene) {
+            Some(p) => paths.push(p),
+            None => {
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    if !ok {
+        // Fallback: per-pin stub labels (still connected by net name).
+        let mut seen = BTreeSet::new();
+        for (i, num) in inc.get(net).into_iter().flatten() {
+            if seen.insert((*i, num.clone())) {
+                w.add_signal_label(env, &items[*i].refdes, num, net)?;
+            }
+        }
+        return Ok(());
+    }
+
+    for path in &paths {
+        for seg in path.windows(2) {
+            w.add_wire_on_net(seg[0], seg[1], net);
+            scene.segments.push((seg[0], seg[1], net.to_string()));
+        }
+    }
+    // Junction dots: 3-way meets among the routed paths.
+    let mut all = paths.clone();
+    for (a, b) in w.wire_segments_on_net(net) {
+        all.push(vec![a, b]);
+    }
+    for j in crate::route::junction_points(&all) {
+        w.add_junction(j);
+    }
+    // A terminal landing inside another same-net segment is a T-join.
+    for (p, _) in &terms {
+        let interior = w.wire_segments_on_net(net).iter().any(|(a, b)| {
+            let ends = near(*p, *a) || near(*p, *b);
+            !ends && crate::emit::point_on_segment(*p, *a, *b)
+        });
+        if interior {
+            w.add_junction(*p);
+        }
+    }
+    // The port label sits at the virtual exit terminal, facing the edge.
+    if let (Some(side), Some(pi)) = (port, port_idx) {
+        w.add_cluster_label(net, terms[pi].0, side_dir(side));
+    }
+    Ok(())
+}
+
+/// A virtual port-exit point just past the net's pin extent on `side`.
+fn port_exit_point(eps: &[([f64; 2], Dir)], side: Side) -> [f64; 2] {
+    const REACH: f64 = 7.62;
+    let xs: Vec<f64> = eps.iter().map(|(p, _)| p[0]).collect();
+    let ys: Vec<f64> = eps.iter().map(|(p, _)| p[1]).collect();
+    let (min_x, max_x) = (xs.iter().cloned().fold(f64::MAX, f64::min), xs.iter().cloned().fold(f64::MIN, f64::max));
+    let (min_y, max_y) = (ys.iter().cloned().fold(f64::MAX, f64::min), ys.iter().cloned().fold(f64::MIN, f64::max));
+    // Align the exit with the pin nearest that edge so the wire runs straight.
+    match side {
+        Side::Right => {
+            let y = eps.iter().max_by(|a, b| a.0[0].total_cmp(&b.0[0])).map(|t| t.0[1]).unwrap_or(min_y);
+            [crate::grid::snap(max_x + REACH), y]
+        }
+        Side::Left => {
+            let y = eps.iter().min_by(|a, b| a.0[0].total_cmp(&b.0[0])).map(|t| t.0[1]).unwrap_or(min_y);
+            [crate::grid::snap(min_x - REACH), y]
+        }
+        Side::Top => {
+            let x = eps.iter().min_by(|a, b| a.0[1].total_cmp(&b.0[1])).map(|t| t.0[0]).unwrap_or(min_x);
+            [x, crate::grid::snap(min_y - REACH)]
+        }
+        Side::Bottom => {
+            let x = eps.iter().max_by(|a, b| a.0[1].total_cmp(&b.0[1])).map(|t| t.0[0]).unwrap_or(max_x);
+            [x, crate::grid::snap(max_y + REACH)]
+        }
+    }
+}
+
+fn side_dir(side: Side) -> Dir {
+    match side {
+        Side::Right => Dir::East,
+        Side::Left => Dir::West,
+        Side::Top => Dir::North,
+        Side::Bottom => Dir::South,
+    }
+}
+
+/// A coarse Manhattan direction from `a` toward `b`.
+fn dir_toward(a: [f64; 2], b: [f64; 2]) -> Dir {
+    if (b[0] - a[0]).abs() >= (b[1] - a[1]).abs() {
+        if b[0] >= a[0] { Dir::East } else { Dir::West }
+    } else if b[1] >= a[1] {
+        Dir::South
+    } else {
+        Dir::North
+    }
+}
+
+fn near(p: [f64; 2], q: [f64; 2]) -> bool {
+    (p[0] - q[0]).abs() < 1e-6 && (p[1] - q[1]).abs() < 1e-6
 }
 
 /// Assign each drawn rail (≥3 pins) a y. Rails in a band share a base y, but
@@ -968,55 +1154,3 @@ fn power_angle(dir: Dir) -> f64 {
     }
 }
 
-/// A port net: route to the named edge and drop a hierarchical-style label.
-fn emit_port(w: &mut SchematicWriter, net: &str, eps: &[([f64; 2], Dir)], side: Side) {
-    // First connect the pins together, then add a label at the chosen side end.
-    connect_node(w, net, eps);
-    // Place the label at the extreme endpoint toward `side`.
-    let pick = match side {
-        Side::Right => eps.iter().max_by(|a, b| a.0[0].total_cmp(&b.0[0])),
-        Side::Left => eps.iter().min_by(|a, b| a.0[0].total_cmp(&b.0[0])),
-        Side::Top => eps.iter().min_by(|a, b| a.0[1].total_cmp(&b.0[1])),
-        Side::Bottom => eps.iter().max_by(|a, b| a.0[1].total_cmp(&b.0[1])),
-    };
-    if let Some((ep, _)) = pick {
-        let dir = match side {
-            Side::Right => Dir::East,
-            Side::Left => Dir::West,
-            Side::Top => Dir::North,
-            Side::Bottom => Dir::South,
-        };
-        w.add_cluster_label(net, *ep, dir);
-    }
-}
-
-/// Connect the endpoints of a node net as a horizontal **bus**: a single
-/// horizontal segment at a common y spanning the endpoints, with a short
-/// vertical stub from each pin down/up to the bus and a junction where an
-/// interior stub meets it. This is the clean "T-node" humans draw (e.g. the
-/// divider's OUT node), not a star of diagonals.
-fn connect_node(w: &mut SchematicWriter, net: &str, eps: &[([f64; 2], Dir)]) {
-    if eps.len() < 2 {
-        return;
-    }
-    if eps.len() == 2 {
-        // Two pins: a plain L (or straight) elbow between them.
-        let (a, b) = (eps[0].0, eps[1].0);
-        w.add_wire_on_net(a, [b[0], a[1]], net);
-        w.add_wire_on_net([b[0], a[1]], b, net);
-        return;
-    }
-    // Bus at the average y of the endpoints.
-    let sum_y: f64 = eps.iter().map(|(p, _)| p[1]).sum();
-    let bus_y = crate::grid::snap(sum_y / eps.len() as f64);
-    let min_x = eps.iter().map(|(p, _)| p[0]).fold(f64::MAX, f64::min);
-    let max_x = eps.iter().map(|(p, _)| p[0]).fold(f64::MIN, f64::max);
-    w.add_wire_on_net([min_x, bus_y], [max_x, bus_y], net);
-    for (ep, _) in eps {
-        w.add_wire_on_net(*ep, [ep[0], bus_y], net);
-        // Junction where an interior pin taps the bus.
-        if ep[0] > min_x + 0.01 && ep[0] < max_x - 0.01 {
-            w.add_junction([ep[0], bus_y]);
-        }
-    }
-}
