@@ -61,7 +61,14 @@ fn render_fixture(env: &KicadEnv, yaml_path: &std::path::Path, out: &std::path::
         anyhow::anyhow!("compile produced no design: {}", errs.join("; "))
     })?;
 
-    let emit = sch_engine::emit_design_reconciled(env, &design, None, &Default::default())
+    // Layout via the floorplan engine: a `<stem>.layout.json` sidecar IR (the
+    // layout subagent's frozen output) when present, else the baseline IR.
+    let ir_path = yaml_path.to_string_lossy().replace(".circuit.yaml", ".layout.json");
+    let ir = match std::fs::read_to_string(&ir_path) {
+        Ok(s) => sch_engine::floorplan::LayoutIr::from_json(&s)?,
+        Err(_) => sch_engine::floorplan::baseline_ir(&design),
+    };
+    let emit = sch_engine::floorplan::emit(env, &design, &ir)
         .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
 
     let tmp = tempfile::tempdir()?;
