@@ -802,43 +802,90 @@ fn wire(
         }
     }
 
-    // Common rail y per band, so every top rail aligns and every bottom rail
-    // aligns (a rail is only drawn as a wire when it has ≥3 pins).
-    let rail_band_y = |want: Band| -> Option<f64> {
-        let ys: Vec<f64> = ir
-            .rails
-            .iter()
-            .filter(|(_, b)| **b == want)
-            .filter_map(|(n, _)| net_eps.get(n))
-            .filter(|e| e.len() >= 3)
-            .flat_map(|e| e.iter().map(|(p, _)| p[1]))
-            .collect();
-        if ys.is_empty() {
-            return None;
-        }
-        Some(match want {
-            Band::Top => ys.iter().cloned().fold(f64::MAX, f64::min) - 5.08,
-            Band::Bottom => ys.iter().cloned().fold(f64::MIN, f64::max) + 5.08,
-        })
-    };
-    let top_y = rail_band_y(Band::Top);
-    let bot_y = rail_band_y(Band::Bottom);
+    // Rail y per net. Rails in a band share a base y so they align, but two
+    // rails whose x-ranges OVERLAP (e.g. VCC3V3 and VCCD flanking one IC) must
+    // sit on different rows or their wires would merge into one net. Assign
+    // y-levels by greedy interval colouring.
+    let rail_y_map = assign_rail_levels(&net_eps, ir);
 
     for (net, eps) in &net_eps {
         if let Some(band) = ir.rails.get(net) {
-            let rail_y = match band {
-                Band::Top => top_y,
-                Band::Bottom => bot_y,
-            };
+            let rail_y = rail_y_map.get(net).copied();
             emit_rail(env, w, net, eps, *band, rail_y, flag_points)?;
         } else if let Some(side) = ir.ports.get(net) {
             emit_port(w, net, eps, *side);
+        } else if eps.len() == 1 {
+            // A single-pin signal net (e.g. an unrouted NC_RTS) gets a name
+            // label so it is a named isolated net, not a floating pin (ERC error).
+            let (ep, dir) = eps[0];
+            w.add_cluster_label(net, ep, dir);
         } else {
             connect_node(w, net, eps);
         }
     }
     Ok(())
 }
+
+/// Assign each drawn rail (≥3 pins) a y. Rails in a band share a base y, but
+/// overlapping x-ranges are pushed to successive rows (away from the content)
+/// via greedy interval colouring, so distinct rails never merge into one wire.
+fn assign_rail_levels(
+    net_eps: &BTreeMap<String, Vec<([f64; 2], Dir)>>,
+    ir: &LayoutIr,
+) -> BTreeMap<String, f64> {
+    const RAIL_GAP: f64 = 6.35;
+    let mut out = BTreeMap::new();
+    for band in [Band::Top, Band::Bottom] {
+        // (net, min_x, max_x), only rails actually drawn as a wire.
+        let mut rails: Vec<(String, f64, f64)> = ir
+            .rails
+            .iter()
+            .filter(|(_, b)| **b == band)
+            .filter_map(|(n, _)| {
+                let e = net_eps.get(n)?;
+                if e.len() < 3 {
+                    return None;
+                }
+                let min_x = e.iter().map(|(p, _)| p[0]).fold(f64::MAX, f64::min);
+                let max_x = e.iter().map(|(p, _)| p[0]).fold(f64::MIN, f64::max);
+                Some((n.clone(), min_x, max_x))
+            })
+            .collect();
+        if rails.is_empty() {
+            continue;
+        }
+        rails.sort_by(|a, b| a.1.total_cmp(&b.1));
+        // Base y: the band edge across all these rails' pins.
+        let ys = rails.iter().filter_map(|(n, _, _)| net_eps.get(n)).flatten().map(|(p, _)| p[1]);
+        let base = match band {
+            Band::Top => ys.fold(f64::MAX, f64::min) - 5.08,
+            Band::Bottom => ys.fold(f64::MIN, f64::max) + 5.08,
+        };
+        // Greedy interval colouring: level = first row with no x-overlap.
+        let mut levels: Vec<Vec<(f64, f64)>> = Vec::new();
+        for (net, lo, hi) in rails {
+            let mut placed = false;
+            for (lvl, occ) in levels.iter_mut().enumerate() {
+                if occ.iter().all(|&(a, b)| hi < a - EPS || lo > b + EPS) {
+                    occ.push((lo, hi));
+                    let y = base + lvl as f64 * RAIL_GAP * if band == Band::Top { -1.0 } else { 1.0 };
+                    out.insert(net.clone(), y);
+                    placed = true;
+                    break;
+                }
+            }
+            if !placed {
+                let lvl = levels.len();
+                levels.push(vec![(lo, hi)]);
+                let y = base + lvl as f64 * RAIL_GAP * if band == Band::Top { -1.0 } else { 1.0 };
+                out.insert(net, y);
+            }
+        }
+    }
+    out
+}
+
+const EPS: f64 = 1e-6;
 
 /// Map a net name to its `power:` symbol lib_id (best-effort, KiCAD aliases).
 fn power_lib_id(net: &str) -> String {
