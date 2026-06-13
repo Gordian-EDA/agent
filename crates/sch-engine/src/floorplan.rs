@@ -19,8 +19,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 
 use circuit_lang::model::{Component, Design, PinTarget};
+use circuit_lang::{find_pin, PinType, SymbolProvider};
 use kicad_bridge::env::KicadEnv;
 use kicad_bridge::geometry::SymbolGeometry;
+use kicad_bridge::provider::RealSymbolProvider;
 use serde::{Deserialize, Serialize};
 
 use crate::emit::{Dir, SchematicWriter};
@@ -213,7 +215,39 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
             }
         }
     }
-    wire(env, &mut w, &items, &inc, ir)?;
+    let mut flag_points: BTreeMap<String, [f64; 2]> = BTreeMap::new();
+    wire(env, &mut w, &items, &inc, ir, &mut flag_points)?;
+
+    // ERC power flags: a net carrying a power-INPUT pin (or a declared rail)
+    // with no power-OUTPUT pin driving it is "undriven" — supply one PWR_FLAG.
+    let provider = RealSymbolProvider::new(env.clone());
+    let (mut driven, mut power_input) = (BTreeSet::new(), BTreeSet::new());
+    for it in &items {
+        let Some(meta) = provider.symbol(&it.part) else { continue };
+        for (num, _name, net) in &it.pins {
+            if let (Some(net), Some(pm)) = (net, find_pin(&meta.pins, num)) {
+                match pm.etype {
+                    PinType::PowerOutput => {
+                        driven.insert(net.clone());
+                    }
+                    PinType::PowerInput => {
+                        power_input.insert(net.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let mut needs_flag: BTreeSet<String> = power_input;
+    needs_flag.extend(ir.rails.keys().cloned());
+    for net in &driven {
+        needs_flag.remove(net);
+    }
+    for net in &needs_flag {
+        if let Some(at) = flag_points.get(net) {
+            w.add_power_flag_at(env, &format!("#FLG_{net}"), *at)?;
+        }
+    }
 
     let warnings = w.layout_warnings();
     let sch = w.finish();
@@ -750,6 +784,7 @@ fn wire(
     items: &[Item],
     inc: &Incidence,
     ir: &LayoutIr,
+    flag_points: &mut BTreeMap<String, [f64; 2]>,
 ) -> io::Result<()> {
     let refdes_of = |i: usize| items[i].refdes.clone();
 
@@ -795,7 +830,7 @@ fn wire(
                 Band::Top => top_y,
                 Band::Bottom => bot_y,
             };
-            emit_rail(env, w, net, eps, *band, rail_y)?;
+            emit_rail(env, w, net, eps, *band, rail_y, flag_points)?;
         } else if let Some(side) = ir.ports.get(net) {
             emit_port(w, net, eps, *side);
         } else {
@@ -834,6 +869,7 @@ fn emit_rail(
     eps: &[([f64; 2], Dir)],
     _band: Band,
     rail_y: Option<f64>,
+    flag_points: &mut BTreeMap<String, [f64; 2]>,
 ) -> io::Result<()> {
     let lib = power_lib_id(net);
     let Some(rail_y) = rail_y.filter(|_| eps.len() >= 3) else {
@@ -841,6 +877,10 @@ fn emit_rail(
             let angle = power_angle(*dir);
             let refdes = format!("#PWR_{net}_{idx}");
             w.add_power_symbol(env, &lib, &refdes, net, *ep, angle)?;
+        }
+        // Flag attaches to the first power symbol's pin point.
+        if let Some((ep, _)) = eps.first() {
+            flag_points.entry(net.to_string()).or_insert(*ep);
         }
         return Ok(());
     };
@@ -855,6 +895,9 @@ fn emit_rail(
     // rail's symbol sits above, a bottom rail's below — both at angle 0.
     let flag_at = [min_x, rail_y];
     w.add_power_symbol(env, &lib, &format!("#PWR_{net}"), net, flag_at, 0.0)?;
+    // The ERC flag attaches to the far (right) end of the rail wire — on the
+    // net, clear of the power symbol at the left end.
+    flag_points.entry(net.to_string()).or_insert([max_x, rail_y]);
     Ok(())
 }
 

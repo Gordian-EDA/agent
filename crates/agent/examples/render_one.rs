@@ -48,6 +48,16 @@ fn main() -> anyhow::Result<()> {
     let sch_path = tmp.path().join("out.kicad_sch");
     std::fs::write(&sch_path, emit.sch.as_bytes())?;
 
+    match KicadCli::new(&env).erc(&sch_path) {
+        Ok(r) => {
+            eprintln!("ERC: {} errors, {} warnings", r.error_count(), r.warning_count());
+            for v in r.violations.iter().take(12) {
+                eprintln!("  [{}] {} — {}", v.severity, v.kind, v.description);
+            }
+        }
+        Err(e) => eprintln!("ERC failed to run: {e}"),
+    }
+
     let svg_path = KicadCli::new(&env).export_svg_opts(&sch_path, tmp.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
     let png = render_cropped(&svg, 2600, 24)?;
