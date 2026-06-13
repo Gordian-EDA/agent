@@ -1,0 +1,404 @@
+{
+  "bounds": {
+    "minX": 0.0,
+    "maxX": 40.0,
+    "minY": 0.0,
+    "maxY": 28.0
+  },
+  "clearance": 0.2,
+  "layerCount": 2,
+  "minTraceWidth": 0.2,
+  "parts": [
+    {
+      "reference": "J1",
+      "courtyardW": 2.0,
+      "courtyardH": 4.6,
+      "pads": [
+        {
+          "number": "1",
+          "offset": {
+            "x": 0.0,
+            "y": -1.27
+          },
+          "width": 1.7,
+          "height": 1.7,
+          "layers": [
+            "top",
+            "bottom"
+          ],
+          "net": "VIN"
+        },
+        {
+          "number": "2",
+          "offset": {
+            "x": 0.0,
+            "y": 1.27
+          },
+          "width": 1.7,
+          "height": 1.7,
+          "layers": [
+            "top",
+            "bottom"
+          ],
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "reference": "U1",
+      "courtyardW": 3.86,
+      "courtyardH": 3.4,
+      "pads": [
+        {
+          "number": "1",
+          "offset": {
+            "x": -0.9375,
+            "y": -0.95
+          },
+          "width": 1.475,
+          "height": 0.6,
+          "layers": [
+            "top"
+          ],
+          "net": "VIN"
+        },
+        {
+          "number": "2",
+          "offset": {
+            "x": -0.9375,
+            "y": 0.95
+          },
+          "width": 1.475,
+          "height": 0.6,
+          "layers": [
+            "top"
+          ],
+          "net": "GND"
+        },
+        {
+          "number": "3",
+          "offset": {
+            "x": 0.9375,
+            "y": 0.0
+          },
+          "width": 1.475,
+          "height": 0.6,
+          "layers": [
+            "top"
+          ],
+          "net": "VOUT"
+        }
+      ]
+    },
+    {
+      "reference": "U2",
+      "courtyardW": 3.86,
+      "courtyardH": 3.4,
+      "pads": [
+        {
+          "number": "1",
+          "offset": {
+            "x": -0.9375,
+            "y": -0.95
+          },
+          "width": 1.475,
+          "height": 0.6,
+          "layers": [
+            "top"
+          ],
+          "net": "VOUT"
+        },
+        {
+          "number": "2",
+          "offset": {
+            "x": -0.9375,
+            "y": 0.95
+          },
+          "width": 1.475,
+          "height": 0.6,
+          "layers": [
+            "top"
+          ],
+          "net": "GND"
+        },
+        {
+          "number": "3",
+          "offset": {
+            "x": 0.9375,
+            "y": 0.0
+          },
+          "width": 1.475,
+          "height": 0.6,
+          "layers": [
+            "top"
+          ],
+          "net": "STAT"
+        }
+      ]
+    },
+    {
+      "reference": "C1",
+      "courtyardW": 2.8,
+      "courtyardH": 1.4,
+      "pads": [
+        {
+          "number": "1",
+          "offset": {
+            "x": -0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "VIN"
+        },
+        {
+          "number": "2",
+          "offset": {
+            "x": 0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "reference": "C2",
+      "courtyardW": 2.8,
+      "courtyardH": 1.4,
+      "pads": [
+        {
+          "number": "1",
+          "offset": {
+            "x": -0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "VOUT"
+        },
+        {
+          "number": "2",
+          "offset": {
+            "x": 0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "reference": "C3",
+      "courtyardW": 2.8,
+      "courtyardH": 1.4,
+      "pads": [
+        {
+          "number": "1",
+          "offset": {
+            "x": -0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "VOUT"
+        },
+        {
+          "number": "2",
+          "offset": {
+            "x": 0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "reference": "C4",
+      "courtyardW": 2.8,
+      "courtyardH": 1.4,
+      "pads": [
+        {
+          "number": "1",
+          "offset": {
+            "x": -0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "STAT"
+        },
+        {
+          "number": "2",
+          "offset": {
+            "x": 0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "reference": "R1",
+      "courtyardW": 2.8,
+      "courtyardH": 1.4,
+      "pads": [
+        {
+          "number": "1",
+          "offset": {
+            "x": -0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "VOUT"
+        },
+        {
+          "number": "2",
+          "offset": {
+            "x": 0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "FB"
+        }
+      ]
+    },
+    {
+      "reference": "R2",
+      "courtyardW": 2.8,
+      "courtyardH": 1.4,
+      "pads": [
+        {
+          "number": "1",
+          "offset": {
+            "x": -0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "FB"
+        },
+        {
+          "number": "2",
+          "offset": {
+            "x": 0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "GND"
+        }
+      ]
+    },
+    {
+      "reference": "R3",
+      "courtyardW": 2.8,
+      "courtyardH": 1.4,
+      "pads": [
+        {
+          "number": "1",
+          "offset": {
+            "x": -0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "STAT"
+        },
+        {
+          "number": "2",
+          "offset": {
+            "x": 0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "LED"
+        }
+      ]
+    },
+    {
+      "reference": "R4",
+      "courtyardW": 2.8,
+      "courtyardH": 1.4,
+      "pads": [
+        {
+          "number": "1",
+          "offset": {
+            "x": -0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "LED"
+        },
+        {
+          "number": "2",
+          "offset": {
+            "x": 0.825,
+            "y": 0.0
+          },
+          "width": 0.8,
+          "height": 0.95,
+          "layers": [
+            "top"
+          ],
+          "net": "GND"
+        }
+      ]
+    }
+  ]
+}

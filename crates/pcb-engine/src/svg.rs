@@ -37,7 +37,8 @@ use std::fmt::Write as _;
 
 use crate::mesh::CapacityMesh;
 use crate::pathing::GlobalRouteResult;
-use crate::problem::{LayerRef, RouteProblem, RouteSolution};
+use crate::placement::{PlaceProblem, PlaceResult, PlacementHints};
+use crate::problem::{LayerRef, Point2, RouteProblem, RouteSolution};
 use crate::router::FailedNet;
 
 // ── public API ───────────────────────────────────────────────────────────────
@@ -450,6 +451,176 @@ pub fn render_global_svg(
     o
 }
 
+// ── public API (placement) ────────────────────────────────────────────────────
+
+/// Render a placement (the output of [`crate::placement::place`]) to a standalone
+/// SVG string: the board outline, each part's courtyard rectangle (outline +
+/// reference text), every pad coloured by a stable hash of its net name, and any
+/// region-hint rectangles drawn dashed.
+///
+/// Coordinates are y-down (same as [`render_svg`]); courtyards/pads are drawn at
+/// their placed + rotated world positions. A part with no placement in `result`
+/// (shouldn't happen — `place` emits one per part) is skipped.
+pub fn render_placement(
+    problem: &PlaceProblem,
+    hints: &PlacementHints,
+    result: &PlaceResult,
+) -> String {
+    let margin = 2.0_f64;
+    let b = &problem.bounds;
+    let board_w = b.max_x - b.min_x;
+    let board_h = b.max_y - b.min_y;
+    let vb_x = b.min_x - margin;
+    let vb_y = b.min_y - margin;
+    let vb_w = board_w + 2.0 * margin;
+    let vb_h = board_h + 2.0 * margin;
+
+    let px_per_mm = 10.0_f64;
+    let svg_w = vb_w * px_per_mm;
+    let svg_h = vb_h * px_per_mm;
+
+    let mut o = String::with_capacity(32 * 1024);
+    let w = &mut o;
+
+    writeln!(w, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>").unwrap();
+    write!(
+        w,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"\n\
+         \x20    width=\"{svg_w:.2}\" height=\"{svg_h:.2}\"\n\
+         \x20    viewBox=\"{vb_x:.6} {vb_y:.6} {vb_w:.6} {vb_h:.6}\">\n"
+    )
+    .unwrap();
+
+    // Board outline -----------------------------------------------------------
+    w.push_str("  <!-- board outline -->\n");
+    writeln!(
+        w,
+        "  <rect x=\"{x:.6}\" y=\"{y:.6}\" width=\"{bw:.6}\" height=\"{bh:.6}\" \
+         fill=\"none\" stroke=\"#444\" stroke-width=\"0.1\"/>",
+        x = b.min_x,
+        y = b.min_y,
+        bw = board_w,
+        bh = board_h
+    )
+    .unwrap();
+
+    // Region-hint rectangles (dashed) -----------------------------------------
+    w.push_str("  <!-- region hints -->\n");
+    for g in &hints.groups {
+        if let Some(r) = &g.region {
+            writeln!(
+                w,
+                "  <rect x=\"{x:.6}\" y=\"{y:.6}\" width=\"{rw:.6}\" height=\"{rh:.6}\" \
+                 fill=\"none\" stroke=\"#08c\" stroke-width=\"0.15\" stroke-dasharray=\"0.6 0.4\"/>",
+                x = r.min_x,
+                y = r.min_y,
+                rw = r.max_x - r.min_x,
+                rh = r.max_y - r.min_y
+            )
+            .unwrap();
+        }
+    }
+
+    // Index placements by reference for lookup.
+    let place_by_ref: std::collections::BTreeMap<&str, &crate::placement::Placement> = result
+        .placements
+        .iter()
+        .map(|p| (p.reference.as_str(), p))
+        .collect();
+
+    // Courtyards + reference text ---------------------------------------------
+    w.push_str("  <!-- courtyards -->\n");
+    for part in &problem.parts {
+        let Some(pl) = place_by_ref.get(part.reference.as_str()) else {
+            continue;
+        };
+        // Rotation swaps the courtyard extents for the quadrant cases.
+        let (hw, hh) = match pl.rotation.rem_euclid(360) {
+            90 | 270 => (part.courtyard_h / 2.0, part.courtyard_w / 2.0),
+            _ => (part.courtyard_w / 2.0, part.courtyard_h / 2.0),
+        };
+        writeln!(
+            w,
+            "  <rect x=\"{x:.6}\" y=\"{y:.6}\" width=\"{cw:.6}\" height=\"{ch:.6}\" \
+             fill=\"none\" stroke=\"#888\" stroke-width=\"0.08\"/>",
+            x = pl.at.x - hw,
+            y = pl.at.y - hh,
+            cw = hw * 2.0,
+            ch = hh * 2.0
+        )
+        .unwrap();
+        // Reference text, centred on the part origin.
+        writeln!(
+            w,
+            "  <text x=\"{x:.6}\" y=\"{y:.6}\" font-size=\"1.0\" fill=\"#333\" \
+             text-anchor=\"middle\" dominant-baseline=\"central\">{r}</text>",
+            x = pl.at.x,
+            y = pl.at.y,
+            r = part.reference
+        )
+        .unwrap();
+    }
+
+    // Pads, coloured by net hash ----------------------------------------------
+    w.push_str("  <!-- pads (coloured by net) -->\n");
+    for part in &problem.parts {
+        let Some(pl) = place_by_ref.get(part.reference.as_str()) else {
+            continue;
+        };
+        for pad in &part.pads {
+            let off = rotate_offset(&pad.offset, pl.rotation);
+            let (pw, ph) = match pl.rotation.rem_euclid(360) {
+                90 | 270 => (pad.height, pad.width),
+                _ => (pad.width, pad.height),
+            };
+            let cx = pl.at.x + off.x;
+            let cy = pl.at.y + off.y;
+            let fill = pad
+                .net
+                .as_deref()
+                .map(net_color)
+                .unwrap_or_else(|| "#bbb".to_owned());
+            writeln!(
+                w,
+                "  <rect x=\"{x:.6}\" y=\"{y:.6}\" width=\"{pw:.6}\" height=\"{ph:.6}\" \
+                 fill=\"{fill}\" fill-opacity=\"0.85\"/>",
+                x = cx - pw / 2.0,
+                y = cy - ph / 2.0
+            )
+            .unwrap();
+        }
+    }
+
+    w.push_str("</svg>\n");
+    o
+}
+
+/// Rotate a pad offset by a quadrant rotation (degrees, y-down) — the same
+/// convention [`crate::placement`] uses for pad world positions.
+fn rotate_offset(off: &Point2, rot: i32) -> Point2 {
+    match rot.rem_euclid(360) {
+        90 => Point2 { x: -off.y, y: off.x },
+        180 => Point2 { x: -off.x, y: -off.y },
+        270 => Point2 { x: off.y, y: -off.x },
+        _ => Point2 { x: off.x, y: off.y },
+    }
+}
+
+/// A stable, readable `#rrggbb` colour derived from a net name (FNV-1a hash →
+/// hue-ish channel spread). Deterministic so the same net always renders the
+/// same colour across boards.
+fn net_color(net: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for byte in net.bytes() {
+        h ^= byte as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    // Spread the hash into three mid-range channels (0x40..=0xbf) so colours
+    // stay distinct and legible on a white board (never too pale/dark).
+    let chan = |shift: u32| 0x40 + ((h >> shift) & 0x7f) as u8;
+    format!("#{:02x}{:02x}{:02x}", chan(0), chan(16), chan(32))
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// SVG stroke colour for a layer.
@@ -816,5 +987,100 @@ mod tests {
                 eprintln!("rendered: {}", detailed_path.display());
             }
         }
+
+        // Placement fixtures: render the PLACED state (engine, empty hints) and
+        // the routed result of that placement, for wrap-up eyeballing.
+        for name in ["place-charger.json"] {
+            let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures")
+                .join(name);
+            if !fixture_path.exists() {
+                eprintln!("SKIP placement render: {name} not found");
+                continue;
+            }
+            let json = std::fs::read_to_string(&fixture_path)
+                .unwrap_or_else(|e| panic!("read {name}: {e}"));
+            let pp: crate::placement::PlaceProblem =
+                serde_json::from_str(&json).unwrap_or_else(|e| panic!("parse {name}: {e}"));
+            let stem = name.trim_end_matches(".json");
+
+            // Placed state (engine, empty hints).
+            let placed = crate::placement::place(&pp, &crate::placement::PlacementHints::default());
+            let placed_svg =
+                render_placement(&pp, &crate::placement::PlacementHints::default(), &placed);
+            let placed_path = out_dir.join(format!("{stem}-placed.svg"));
+            std::fs::write(&placed_path, placed_svg.as_bytes())
+                .unwrap_or_else(|e| panic!("write {}: {e}", placed_path.display()));
+            eprintln!("rendered: {}", placed_path.display());
+
+            // Routed result of that placement (via the existing copper render).
+            let rp = crate::placement::to_route_problem(&pp, &placed.placements);
+            let routed = crate::pipeline::route_auto(&rp);
+            if !routed.failed.is_empty() {
+                eprintln!(
+                    "WARN: {name} placed board has {} failed net(s)",
+                    routed.failed.len()
+                );
+            }
+            let routed_svg = render_svg(&rp, &routed.solution, &routed.failed);
+            let routed_path = out_dir.join(format!("{stem}-routed.svg"));
+            std::fs::write(&routed_path, routed_svg.as_bytes())
+                .unwrap_or_else(|e| panic!("write {}: {e}", routed_path.display()));
+            eprintln!("rendered: {}", routed_path.display());
+        }
+    }
+
+    // ── placement render: element-count assertions ────────────────────────────
+
+    #[test]
+    fn render_placement_has_expected_elements() {
+        use crate::placement::{place, GroupHint, PlacementHints, Rect};
+
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures")
+            .join("place-charger.json");
+        let json = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read place-charger.json: {e}"));
+        let pp: crate::placement::PlaceProblem =
+            serde_json::from_str(&json).unwrap_or_else(|e| panic!("parse: {e}"));
+
+        // Add a region hint so the dashed-rect branch is exercised.
+        let hints = PlacementHints {
+            groups: vec![GroupHint {
+                name: "u1".to_owned(),
+                members: vec!["U1".to_owned(), "C1".to_owned()],
+                region: Some(Rect { min_x: 4.0, max_x: 16.0, min_y: 4.0, max_y: 16.0 }),
+                edge: None,
+            }],
+        };
+        let res = place(&pp, &hints);
+        let svg = render_placement(&pp, &hints, &res);
+
+        // Board outline (1) + one courtyard rect per part + one dashed region rect
+        // + one pad rect per pad.
+        let part_count = pp.parts.len();
+        let pad_count: usize = pp.parts.iter().map(|p| p.pads.len()).sum();
+        let rect_count = count_tag(&svg, "<rect");
+        let expected = 1 + part_count + 1 + pad_count;
+        assert!(
+            rect_count >= expected,
+            "expected >={expected} <rect> (board + {part_count} courtyards + 1 region + \
+             {pad_count} pads), got {rect_count}"
+        );
+
+        // One <text> reference label per part.
+        let text_count = count_tag(&svg, "<text");
+        assert!(
+            text_count >= part_count,
+            "expected >={part_count} <text> reference labels, got {text_count}"
+        );
+
+        // The dashed region hint must appear.
+        assert!(
+            svg.contains("stroke-dasharray"),
+            "a region hint must render as a dashed rect"
+        );
+        assert!(svg.contains("<svg"), "output must open with <svg");
+        assert!(svg.contains("</svg>"), "output must close </svg>");
     }
 }

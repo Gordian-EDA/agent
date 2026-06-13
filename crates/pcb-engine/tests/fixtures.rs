@@ -36,6 +36,15 @@ fn all_fixtures_parse_and_pass_sanity() {
     for entry in entries {
         let path = entry.path();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
+
+        // `place-*.json` are slice-4 PLACEMENT fixtures (`PlaceProblem`, not
+        // `RouteProblem`) — a different model with no top-level obstacles /
+        // connections. Their sanity is gated by `tests/placement_gate.rs`; this
+        // RouteProblem sweep skips them rather than mis-parsing them.
+        if name.starts_with("place-") {
+            continue;
+        }
+
         let json =
             std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{name}: read error: {e}"));
 

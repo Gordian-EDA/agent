@@ -83,20 +83,20 @@ global n-body.
 
 ### Task 2: placement fixtures + the slice gate
 
-- [ ] Fixture `fixtures/place-charger.json` (or similar small board, ~8–14
+- [x] Fixture `fixtures/place-charger.json` (or similar small board, ~8–14
       parts): hand-authored PlaceProblem using REAL footprint dimensions
       (crib courtyard/pad numbers from kicad-bridge's vendored fixture
       footprints: R_0603, SOT-23, PinHeader_1x02 — copy the numbers, the
       JSON stays pure pcb-engine). Include a connector (edge-affinity
       candidate) and a few decoupling-style 2-pin parts.
-- [ ] Fixture `fixtures/place-charger-fixed.json`: the SAME parts with a
+- [x] Fixture `fixtures/place-charger-fixed.json`: the SAME parts with a
       deliberately bad FIXED placement (all locked) that routes poorly:
       iterate until `route_auto(to_route_problem(fixed))` has ≥ 1 failed
       net OR ≥ 2× the HPWL (prefer failed nets — the spec gate is success
       RATE; tune geometry like the congested fixture until the defeat is
       structural, e.g. connected pins on opposite corners with blockers
       between).
-- [ ] Gate test `tests/placement_gate.rs`: (i) engine placement (empty
+- [x] Gate test `tests/placement_gate.rs`: (i) engine placement (empty
       hints) on place-charger → legal; route_auto → 0 failed nets, lint
       EMPTY; (ii) fixed placement → the defeat asserted (failed nets or
       the documented HPWL/wirelength regression — assert what is true,
@@ -105,7 +105,7 @@ global n-body.
       hint for the connector) → legal, routes clean, and HPWL ≤ the
       unhinted run (hints must not hurt; assert ≤ with small epsilon,
       record actuals in comments).
-- [ ] `render_placement` in svg.rs: board, courtyards (outline + ref text),
+- [x] `render_placement` in svg.rs: board, courtyards (outline + ref text),
       pads colored by net, region hint rects dashed; add placement
       fixtures to the render-all helper (place → render placed state;
       also render the routed result via existing render_svg). EYEBALL.
