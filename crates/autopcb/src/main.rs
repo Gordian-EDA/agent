@@ -173,9 +173,14 @@ fn run_agent_command(args: &[String]) -> Result<()> {
          AWS_REGION / AGENT_MODEL) in the environment or a local .env file",
     )?;
 
-    // 3. Tool context over the real project directory.
-    let ctx = ToolCtx::for_project(env.clone(), project_dir.clone())
+    // 3. Tool context over the real project directory. Wire a SEPARATE layout
+    //    subagent client (Layer 1) so `apply_design` produces human-style
+    //    floorplans; it is independent of the conversation client above.
+    let mut ctx = ToolCtx::for_project(env.clone(), project_dir.clone())
         .context("building the tool context for the project")?;
+    if let Ok(layout_client) = agent::llm::from_env() {
+        ctx.set_layout_client(std::sync::Arc::new(layout_client));
+    }
     let sch_path = ctx.sch_path().to_path_buf();
     eprintln!("project: {}", project_dir.display());
     eprintln!("prompt:  {prompt}\n");

@@ -815,10 +815,12 @@ fn wire(
         } else if let Some(side) = ir.ports.get(net) {
             emit_port(w, net, eps, *side);
         } else if eps.len() == 1 {
-            // A single-pin signal net (e.g. an unrouted NC_RTS) gets a name
-            // label so it is a named isolated net, not a floating pin (ERC error).
-            let (ep, dir) = eps[0];
-            w.add_cluster_label(net, ep, dir);
+            // A single-pin signal net (e.g. an unrouted NC_RTS) gets a stubbed
+            // name label — offset from the pin so it clears the body — making it
+            // a named isolated net rather than a floating pin (ERC error).
+            if let Some((i, num)) = inc.get(net).and_then(|p| p.first()) {
+                w.add_signal_label(env, &items[*i].refdes, num, net)?;
+            }
         } else {
             connect_node(w, net, eps);
         }

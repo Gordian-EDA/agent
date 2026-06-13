@@ -61,9 +61,12 @@ use kicad_bridge::env::KicadEnv;
 use kicad_bridge::provider::RealSymbolProvider;
 use kicad_bridge::search::SymbolIndex;
 use kicad_bridge::snapshot::SnapshotStore;
-use sch_engine::{emit_design_reconciled, lift::lift};
+use std::sync::{Arc, Mutex};
 
-use crate::llm::ToolDef;
+use sch_engine::floorplan::{baseline_ir, LayoutIr};
+use sch_engine::lift::lift;
+
+use crate::llm::{LlmClient, ToolDef};
 
 /// Default number of symbol-search hits returned when `limit` is omitted.
 const DEFAULT_SEARCH_LIMIT: usize = 8;
@@ -90,6 +93,13 @@ pub struct ToolCtx {
     workspace: crate::workspace::Workspace,
     /// Keeps a test tempdir alive for the ctx's lifetime; `None` for real ctxs.
     _tempdir: Option<tempfile::TempDir>,
+    /// LLM client for the layout subagent (Layer 1). `None` in tests / when no
+    /// client is wired — `layout_for` then falls back to the deterministic
+    /// baseline IR.
+    layout_client: Option<Arc<dyn LlmClient>>,
+    /// Cache of the last proposed layout, keyed by a design fingerprint, so the
+    /// dry-run, render and commit of one design share a single subagent call.
+    layout_cache: Mutex<Option<(u64, LayoutIr)>>,
 }
 
 /// Tool execution happens on blocking threads; the context must cross them.
@@ -118,6 +128,8 @@ impl ToolCtx {
             index: OnceLock::new(),
             workspace,
             _tempdir: None,
+            layout_client: None,
+            layout_cache: Mutex::new(None),
         })
     }
 
@@ -154,7 +166,48 @@ impl ToolCtx {
             index: OnceLock::new(),
             workspace,
             _tempdir: Some(tempdir),
+            layout_client: None,
+            layout_cache: Mutex::new(None),
         })
+    }
+
+    /// Wire the layout subagent's LLM client (called by `Agent::new`).
+    pub fn set_layout_client(&mut self, client: Arc<dyn LlmClient>) {
+        self.layout_client = Some(client);
+    }
+
+    /// The Layout IR for `design`: the layout subagent's proposal when a client
+    /// is wired and a tokio runtime is reachable (cached per design fingerprint
+    /// so dry-run/render/commit share one call), else the deterministic baseline.
+    fn layout_for(&self, design: &Design) -> LayoutIr {
+        let fp = design_fingerprint(design);
+        if let Some((cached_fp, ir)) = self.layout_cache.lock().unwrap().as_ref() {
+            if *cached_fp == fp {
+                return ir.clone();
+            }
+        }
+        let ir = self.propose_or_baseline(design);
+        *self.layout_cache.lock().unwrap() = Some((fp, ir.clone()));
+        ir
+    }
+
+    fn propose_or_baseline(&self, design: &Design) -> LayoutIr {
+        let Some(client) = self.layout_client.as_ref() else {
+            return baseline_ir(design);
+        };
+        // `apply_design` runs on a spawn_blocking thread (not an async worker),
+        // so blocking on the subagent via the current runtime handle is safe. No
+        // runtime (sync tests) or a subagent error → deterministic baseline.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return baseline_ir(design);
+        };
+        match handle.block_on(crate::layout::propose_layout(&**client, &self.env, design)) {
+            Ok(ir) => ir,
+            Err(e) => {
+                eprintln!("layout subagent failed, using baseline: {e:#}");
+                baseline_ir(design)
+            }
+        }
     }
 
     /// The project's `.kicad_sch` path (may not exist).
@@ -596,8 +649,7 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         return Ok(report);
     };
 
-    // Prior schematic text (for reconciliation) and prior design (for the diff).
-    let prior_text = std::fs::read_to_string(&ctx.sch_path).ok();
+    // Prior design (for the diff), lifted from the existing schematic.
     let prior_design = if ctx.sch_path.exists() {
         let prior_yaml = lift(&ctx.env, &ctx.sch_path)
             .with_context(|| format!("lifting prior {}", ctx.sch_path.display()))?;
@@ -606,8 +658,13 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         None
     };
 
-    let emitted = emit_design_reconciled(&ctx.env, &design, prior_text.as_deref(), &relayout)
-        .context("rendering reconciled schematic")?;
+    // The floorplan engine re-lays-out from scratch via the layout subagent's IR
+    // (or the baseline); `relayout` is accepted for API compatibility but the
+    // human-style layout always re-flows the whole sheet.
+    let _ = &relayout;
+    let ir = ctx.layout_for(&design);
+    let emitted = sch_engine::floorplan::emit(&ctx.env, &design, &ir)
+        .context("rendering schematic")?;
     let rendered = emitted.sch;
     let diff = design_diff(prior_design.as_ref(), &design);
 
@@ -695,6 +752,27 @@ fn component_signature(c: &Component) -> String {
         pins,
         units,
     )
+}
+
+/// A stable fingerprint of a design's connectivity (refdes, part, pins→nets),
+/// used to cache the layout subagent's proposal across the dry-run/render/commit
+/// of one design.
+fn design_fingerprint(design: &Design) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for block in design.blocks.values() {
+        for (refdes, comp) in &block.components {
+            refdes.hash(&mut h);
+            comp.part.hash(&mut h);
+            for (pin, target) in &comp.pins {
+                pin.hash(&mut h);
+                if let PinTarget::Net(n) = target {
+                    n.hash(&mut h);
+                }
+            }
+        }
+    }
+    h.finish()
 }
 
 /// Structured diff between a prior design (possibly `None` for a fresh project)
