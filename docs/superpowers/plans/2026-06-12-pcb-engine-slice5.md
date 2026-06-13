@@ -76,22 +76,22 @@ harness (scripted triage), plus a creds-gated live smoke.
 
 ### Task 2: place / route / constraints / triage tools
 
-- [ ] `place_board { }` — PlaceProblem from draft (parts, rules,
+- [x] `place_board { }` — PlaceProblem from draft (parts, rules,
       keepouts → placement no-go via region? v1: keepouts affect ROUTING
       only; document), hints from draft; run `placement::place`; persist
       placement; return { legal, hpwl, overlaps_resolved, per-part
       positions }.
-- [ ] `set_placement_hints { groups }` — replace draft hints (validated:
+- [x] `set_placement_hints { groups }` — replace draft hints (validated:
       members must be known references; unknown → recoverable error).
-- [ ] `set_constraints { rules?, keepouts?, net_classes? }` — rules/
+- [x] `set_constraints { rules?, keepouts?, net_classes? }` — rules/
       keepouts update the draft (keepouts become BLOCKED_ALL obstacles in
       to_route_problem path — extend the draft→RouteProblem conversion);
       net_classes → honest rejection (vocabulary reserved).
-- [ ] `move_part { reference, x, y, rotation? }` — set locked position in
+- [x] `move_part { reference, x, y, rotation? }` — set locked position in
       draft (the triage lever; engine legalizes on next place_board; if
       the part would sit out of bounds → recoverable error now).
       `unlock_part { reference }` to release.
-- [ ] `route_board { }` — needs placement (else recoverable error);
+- [x] `route_board { }` — needs placement (else recoverable error);
       draft → PlaceProblem → to_route_problem (+ keepout obstacles) →
       `route_auto`; persist solution summary in workspace (full
       RouteSolution JSON at `.autopcb/route.json` for export); return
@@ -99,7 +99,7 @@ harness (scripted triage), plus a creds-gated live smoke.
       vias, traces}, lint_summary (count by kind — should be 0; if not,
       THAT is surfaced loudly), congestion { iterations, hotspots } when
       detailed ran }.
-- [ ] Tests: scripted draft → place → route on a small board (vendored
+- [x] Tests: scripted draft → place → route on a small board (vendored
       footprint dims, no KiCAD needed if FootprintIndex is bypassed by a
       test ctx — follow detect_for_test gating); keepout actually blocks
       (route differs / fails with vs without); move_part round-trip.

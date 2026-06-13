@@ -573,6 +573,186 @@ impl Tools {
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
+            ToolDef {
+                name: "place_board".into(),
+                description: "Place the current board: turn every part's footprint \
+                    + design rules + any locked positions into a placement problem, \
+                    apply the stored placement hints, and run the deterministic \
+                    placer. The placement is persisted to the board draft (route_board \
+                    and render_board read it). Returns legal (true iff no courtyard \
+                    overlap and all parts in bounds), the HPWL wirelength metric, how \
+                    many overlaps the legalizer resolved / parts it clamped, and the \
+                    per-part positions [{reference, x, y, rotation}]. NOTE: keepouts do \
+                    NOT affect placement in v1 — they only block ROUTING (route_board). \
+                    Run create_board first; an unplaceable (too-tight) board returns \
+                    legal=false with a note on how to relax it."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            ToolDef {
+                name: "set_placement_hints".into(),
+                description: "Replace the board's placement hints: a list of groups, \
+                    each with a name, the member references that should cohere, and an \
+                    optional region rectangle to land inside and/or a board edge to \
+                    hug. Members must be parts on the board (an unknown reference is a \
+                    recoverable error listing the known references). Hints only IMPROVE \
+                    placement — they never gate it — and steer the NEXT place_board. \
+                    Use them to express intent (\"keep the decoupling caps near the \
+                    MCU\", \"connectors on the west edge\") instead of coordinates."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "groups": {
+                            "type": "array",
+                            "description": "The placement-hint groups (replaces any prior hints).",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string",
+                                        "description": "Human label for the group, e.g. \"mcu_decoupling\"." },
+                                    "members": {
+                                        "type": "array",
+                                        "items": { "type": "string" },
+                                        "description": "References of the parts in this group."
+                                    },
+                                    "region": {
+                                        "type": "object",
+                                        "description": "Optional rectangle (mm) the members should land inside.",
+                                        "properties": {
+                                            "min_x": { "type": "number" },
+                                            "max_x": { "type": "number" },
+                                            "min_y": { "type": "number" },
+                                            "max_y": { "type": "number" }
+                                        },
+                                        "required": ["min_x", "max_x", "min_y", "max_y"]
+                                    },
+                                    "edge": { "type": "string", "enum": ["n", "s", "e", "w"],
+                                        "description": "Optional board edge the group should hug." }
+                                },
+                                "required": ["name", "members"]
+                            }
+                        }
+                    },
+                    "required": ["groups"]
+                }),
+            },
+            ToolDef {
+                name: "set_constraints".into(),
+                description: "Update the board's constraints in place: `rules` \
+                    (partial — only the fields you name are changed: clearance, \
+                    min_trace_width, via_diameter, via_drill) and/or `keepouts` \
+                    (replaced wholesale; each {rect, layers} must lie within the board \
+                    bounds and name only \"top\"/\"bottom\"). Keepouts block ROUTING on \
+                    their layers (they do NOT affect placement in v1). Changing rules \
+                    or keepouts does NOT move parts, so the placement stands — but it \
+                    invalidates any routed solution, so the stored route is cleared and \
+                    you must run route_board again. `net_classes` is reserved but NOT \
+                    yet supported by the router: passing it is rejected (use rules / \
+                    keepouts instead)."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "rules": {
+                            "type": "object",
+                            "description": "Partial design-rule update (only named fields change).",
+                            "properties": {
+                                "clearance": { "type": "number" },
+                                "min_trace_width": { "type": "number" },
+                                "via_diameter": { "type": "number" },
+                                "via_drill": { "type": "number" }
+                            }
+                        },
+                        "keepouts": {
+                            "type": "array",
+                            "description": "Rectangular routing keepouts (replaces all prior keepouts).",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "rect": {
+                                        "type": "object",
+                                        "properties": {
+                                            "min_x": { "type": "number" },
+                                            "max_x": { "type": "number" },
+                                            "min_y": { "type": "number" },
+                                            "max_y": { "type": "number" }
+                                        },
+                                        "required": ["min_x", "max_x", "min_y", "max_y"]
+                                    },
+                                    "layers": {
+                                        "type": "array",
+                                        "items": { "type": "string", "enum": ["top", "bottom"] },
+                                        "description": "Copper layers this keepout blocks."
+                                    }
+                                },
+                                "required": ["rect", "layers"]
+                            }
+                        },
+                        "net_classes": {
+                            "description": "RESERVED — not yet supported by the router; passing this is rejected."
+                        }
+                    }
+                }),
+            },
+            ToolDef {
+                name: "move_part".into(),
+                description: "Pin a part at a position (the triage lever): lock its \
+                    origin to (x, y) with an optional rotation (0/90/180/270). The \
+                    next place_board legalizes the rest of the board around the lock; \
+                    the part itself never moves. The (x, y) must be a point on the \
+                    board (out of bounds is a recoverable error); an unknown reference \
+                    is a recoverable error. This clears the stored placement and route \
+                    (state changed), so re-run place_board then route_board. Use this \
+                    AFTER looking at render_board and the place_board positions to nudge \
+                    a part — never to author a full layout."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "reference": { "type": "string",
+                            "description": "The part to pin, e.g. \"U1\"." },
+                        "x": { "type": "number", "description": "Part-origin x (mm, on the board)." },
+                        "y": { "type": "number", "description": "Part-origin y (mm, on the board)." },
+                        "rotation": { "type": "integer",
+                            "description": "Rotation in degrees (0/90/180/270; default 0)." }
+                    },
+                    "required": ["reference", "x", "y"]
+                }),
+            },
+            ToolDef {
+                name: "unlock_part".into(),
+                description: "Release a part previously pinned with move_part so the \
+                    placer can move it freely again. Unknown reference is a recoverable \
+                    error. Clears the stored placement and route (state changed) — \
+                    re-run place_board then route_board."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "reference": { "type": "string",
+                            "description": "The part to unlock, e.g. \"U1\"." }
+                    },
+                    "required": ["reference"]
+                }),
+            },
+            ToolDef {
+                name: "route_board".into(),
+                description: "Route the placed board: build the routing problem from \
+                    the placement, add the keepouts as blocking obstacles, and run the \
+                    auto-router (detailed pipeline with a naive fallback). Requires a \
+                    placement — run place_board first (else a recoverable error). The \
+                    full solution is persisted for export; the result returns: router \
+                    (\"detailed\"/\"naive\"), failed nets [{connection, reason}] with \
+                    stage provenance (global:/assign:/cell:/finisher:), metrics \
+                    (wirelength, vias, traces), and lint_summary (DRC violation counts \
+                    by kind — EXPECTED ZERO; a non-zero count sets engine_bug=true and \
+                    is an engine fault, not a board you can fix). When nets fail, a \
+                    congestion report (iterations + edge hotspots) is included to guide \
+                    triage (move_part, relax rules, or remove a keepout)."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
         ]
     }
 
@@ -595,6 +775,12 @@ impl Tools {
             "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
             "create_board" => crate::tools_pcb::create_board(input, ctx),
             "get_board" => crate::tools_pcb::get_board(ctx),
+            "place_board" => crate::tools_pcb::place_board(input, ctx),
+            "set_placement_hints" => crate::tools_pcb::set_placement_hints(input, ctx),
+            "set_constraints" => crate::tools_pcb::set_constraints(input, ctx),
+            "move_part" => crate::tools_pcb::move_part(input, ctx),
+            "unlock_part" => crate::tools_pcb::unlock_part(input, ctx),
+            "route_board" => crate::tools_pcb::route_board(input, ctx),
             other => bail!("unknown tool: {other}"),
         }
     }

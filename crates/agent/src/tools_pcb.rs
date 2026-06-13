@@ -27,8 +27,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use kicad_bridge::placefp::part_from_footprint;
-use pcb_engine::placement::{LockedAt, Placement, PlacementHints};
-use pcb_engine::problem::{Bounds, LayerRef};
+use pcb_engine::lint::lint;
+use pcb_engine::pathing::global_route;
+use pcb_engine::pipeline::{RouterKind, metrics, route_auto};
+use pcb_engine::placement::{
+    GroupHint, LockedAt, Part, PlaceProblem, Placement, PlacementHints, Rect, place,
+    to_route_problem,
+};
+use pcb_engine::problem::{Bounds, LayerRef, Obstacle, Point2, RouteProblem};
 
 use crate::tools::{ToolCtx, require_str};
 
@@ -443,4 +449,627 @@ pub fn get_board(ctx: &ToolCtx) -> Result<Value> {
             "routed": routed,
         },
     }))
+}
+
+// ── draft → engine problem ───────────────────────────────────────────────────
+
+/// Build the [`PlaceProblem`] the placement/routing engine consumes from a
+/// board draft. Every part's footprint is resolved through
+/// [`part_from_footprint`] (the SAME geometry `create_board` validated and the
+/// net-pin counts derive from), then the draft's `locked` position is applied so
+/// the placer pins it. Design rules ride along as the problem's clearance /
+/// trace width / layer count.
+///
+/// Keepouts are deliberately NOT carried here: in v1 they affect ROUTING only
+/// (they become BLOCKED obstacles in [`route_board`]), never placement no-go
+/// regions. An unresolvable footprint (e.g. the index lost a lib between
+/// `create_board` and now) is returned as an `Err(lib_id)` so the caller can
+/// surface a recoverable error naming the part.
+fn place_problem_from_draft(
+    draft: &BoardDraft,
+    ctx: &ToolCtx,
+) -> std::result::Result<PlaceProblem, String> {
+    let index = ctx
+        .footprint_index()
+        .map_err(|e| format!("footprint index unavailable: {e}"))?;
+    let mut parts: Vec<Part> = Vec::with_capacity(draft.parts.len());
+    for dp in &draft.parts {
+        let Some(fp) = index.footprint(&dp.footprint) else {
+            return Err(format!(
+                "part {}: footprint `{}` is no longer resolvable — re-create the board",
+                dp.reference, dp.footprint
+            ));
+        };
+        let mut part = part_from_footprint(&fp, &dp.reference, &dp.pad_nets);
+        // The triage lever: a `move_part`-set lock pins the part for the placer.
+        part.locked = dp.locked.clone();
+        parts.push(part);
+    }
+    Ok(PlaceProblem {
+        bounds: draft.bounds.clone(),
+        clearance: draft.rules.clearance,
+        layer_count: 2,
+        min_trace_width: draft.rules.min_trace_width,
+        parts,
+    })
+}
+
+/// JSON shape for one placed part, returned by `place_board` (and reused as the
+/// model's view of `last_placement`).
+fn placement_json(p: &Placement) -> Value {
+    json!({
+        "reference": p.reference,
+        "x": p.at.x,
+        "y": p.at.y,
+        "rotation": p.rotation,
+    })
+}
+
+// ── place_board ──────────────────────────────────────────────────────────────
+
+pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let Some(mut draft) = BoardDraft::load(ctx) else {
+        return Ok(json!({
+            "error": "no board draft yet — call create_board first",
+        }));
+    };
+
+    let problem = match place_problem_from_draft(&draft, ctx) {
+        Ok(p) => p,
+        Err(msg) => return Ok(json!({ "error": msg })),
+    };
+
+    let result = place(&problem, &draft.hints);
+
+    // Persist the placement into the draft so route_board / render_board / a
+    // later get_board can read it without re-running the placer.
+    draft.last_placement = Some(result.placements.clone());
+    draft.save(ctx)?;
+
+    let positions: Vec<Value> = result.placements.iter().map(placement_json).collect();
+
+    Ok(json!({
+        "legal": result.legal,
+        "hpwl": result.report.hpwl,
+        "overlaps_resolved": result.report.overlaps_resolved,
+        "out_of_bounds_clamps": result.report.out_of_bounds_clamps,
+        "positions": positions,
+        "note": if result.legal {
+            "placement is legal (no courtyard overlap, all parts in bounds). \
+             Call route_board next, or render_board to see it."
+        } else {
+            "placement is NOT legal — the board is too tight for these parts \
+             (courtyard overlap or out of bounds). Enlarge bounds, relax rules, \
+             or move/unlock parts, then place_board again."
+        },
+    }))
+}
+
+// ── set_placement_hints ──────────────────────────────────────────────────────
+
+/// Parse one group hint from snake_case model input, validating its members
+/// against the draft's known references. Returns the engine [`GroupHint`] on
+/// success or a model-readable error string.
+fn parse_group_hint(v: &Value, known_refs: &[&str]) -> std::result::Result<GroupHint, String> {
+    let name = v
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "each group needs a string `name`".to_string())?
+        .to_string();
+    let members_json = v
+        .get("members")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("group `{name}`: needs a `members` array of references"))?;
+    let mut members = Vec::with_capacity(members_json.len());
+    for m in members_json {
+        let r = m
+            .as_str()
+            .ok_or_else(|| format!("group `{name}`: members must be reference strings"))?;
+        if !known_refs.contains(&r) {
+            return Err(format!(
+                "group `{name}`: member `{r}` is not a part on this board — known references: {}",
+                known_refs.join(", ")
+            ));
+        }
+        members.push(r.to_string());
+    }
+    // region / edge are optional; reuse the engine serde so the vocabulary stays
+    // single-sourced (these are camelCase-or-simple shapes the LLM can author).
+    let region = match v.get("region") {
+        None | Some(Value::Null) => None,
+        Some(r) => Some(parse_rect(r).map_err(|e| format!("group `{name}`: region {e}"))?),
+    };
+    let edge = match v.get("edge") {
+        None | Some(Value::Null) => None,
+        Some(e) => Some(parse_edge(e).map_err(|err| format!("group `{name}`: {err}"))?),
+    };
+    Ok(GroupHint {
+        name,
+        members,
+        region,
+        edge,
+    })
+}
+
+/// Parse a `{min_x,max_x,min_y,max_y}` rect from snake_case model input.
+fn parse_rect(v: &Value) -> std::result::Result<Rect, String> {
+    Ok(Rect {
+        min_x: req_num(v, "min_x", "rect")?,
+        max_x: req_num(v, "max_x", "rect")?,
+        min_y: req_num(v, "min_y", "rect")?,
+        max_y: req_num(v, "max_y", "rect")?,
+    })
+}
+
+/// Parse an edge hint ("n"/"s"/"e"/"w", case-insensitive).
+fn parse_edge(v: &Value) -> std::result::Result<pcb_engine::placement::Edge, String> {
+    use pcb_engine::placement::Edge;
+    let s = v
+        .as_str()
+        .ok_or_else(|| "edge must be a string \"n\"/\"s\"/\"e\"/\"w\"".to_string())?;
+    match s.to_ascii_lowercase().as_str() {
+        "n" => Ok(Edge::N),
+        "s" => Ok(Edge::S),
+        "e" => Ok(Edge::E),
+        "w" => Ok(Edge::W),
+        other => Err(format!("edge must be \"n\"/\"s\"/\"e\"/\"w\", got {other:?}")),
+    }
+}
+
+pub fn set_placement_hints(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let Some(mut draft) = BoardDraft::load(ctx) else {
+        return Ok(json!({
+            "error": "no board draft yet — call create_board first",
+        }));
+    };
+
+    let Some(groups_json) = input.get("groups").and_then(Value::as_array) else {
+        return Ok(json!({
+            "error": "missing required `groups` array (each {name, members, region?, edge?})",
+        }));
+    };
+
+    let known_refs: Vec<&str> = draft.parts.iter().map(|p| p.reference.as_str()).collect();
+    let mut groups = Vec::with_capacity(groups_json.len());
+    for g in groups_json {
+        match parse_group_hint(g, &known_refs) {
+            Ok(gh) => groups.push(gh),
+            Err(msg) => return Ok(json!({ "error": msg })),
+        }
+    }
+
+    let summary: Vec<Value> = groups
+        .iter()
+        .map(|g| {
+            json!({
+                "name": g.name,
+                "members": g.members,
+                "region": g.region.is_some(),
+                "edge": g.edge.is_some(),
+            })
+        })
+        .collect();
+
+    draft.hints = PlacementHints { groups };
+    draft.save(ctx)?;
+
+    Ok(json!({
+        "ok": true,
+        "group_count": summary.len(),
+        "groups": summary,
+        "note": "hints stored; they steer the NEXT place_board (they improve, never gate).",
+    }))
+}
+
+// ── set_constraints ──────────────────────────────────────────────────────────
+
+/// Validate a keepout rectangle lies within the board bounds and lists only
+/// known copper layers, then return the engine [`Keepout`].
+fn parse_keepout(v: &Value, bounds: &Bounds, idx: usize) -> std::result::Result<Keepout, String> {
+    let ctxstr = format!("keepouts[{idx}]");
+    let rect_v = v
+        .get("rect")
+        .ok_or_else(|| format!("{ctxstr}: missing `rect` {{min_x,max_x,min_y,max_y}}"))?;
+    let rect = parse_rect(rect_v).map_err(|e| format!("{ctxstr}: rect {e}"))?;
+    if rect.min_x >= rect.max_x || rect.min_y >= rect.max_y {
+        return Err(format!("{ctxstr}: rect is degenerate (min must be < max)"));
+    }
+    // Within bounds (a keepout outside the board is almost certainly a mistake).
+    if rect.min_x < bounds.min_x - 1e-9
+        || rect.max_x > bounds.max_x + 1e-9
+        || rect.min_y < bounds.min_y - 1e-9
+        || rect.max_y > bounds.max_y + 1e-9
+    {
+        return Err(format!(
+            "{ctxstr}: rect [{},{}]x[{},{}] is outside the board bounds [{},{}]x[{},{}]",
+            rect.min_x, rect.max_x, rect.min_y, rect.max_y,
+            bounds.min_x, bounds.max_x, bounds.min_y, bounds.max_y
+        ));
+    }
+    let layers_json = v
+        .get("layers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{ctxstr}: missing `layers` array (e.g. [\"top\",\"bottom\"])"))?;
+    if layers_json.is_empty() {
+        return Err(format!("{ctxstr}: `layers` must name at least one copper layer"));
+    }
+    let mut layers = Vec::with_capacity(layers_json.len());
+    for l in layers_json {
+        let name = l
+            .as_str()
+            .ok_or_else(|| format!("{ctxstr}: layer names must be strings"))?;
+        let layer = LayerRef(name.to_string());
+        // A 2-layer board (v1) resolves only "top"/"bottom"; reject unknowns now.
+        if layer.index(2).is_none() {
+            return Err(format!(
+                "{ctxstr}: unknown layer `{name}` — v1 boards have \"top\" and \"bottom\""
+            ));
+        }
+        layers.push(layer);
+    }
+    Ok(Keepout { rect, layers })
+}
+
+pub fn set_constraints(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let Some(mut draft) = BoardDraft::load(ctx) else {
+        return Ok(json!({
+            "error": "no board draft yet — call create_board first",
+        }));
+    };
+
+    // Net classes are vocabulary-reserved but honestly rejected: the router does
+    // not honor them yet, so accepting them silently would lie about the present.
+    if input.get("net_classes").is_some_and(|v| !v.is_null()) {
+        return Ok(json!({
+            "error": "net classes are reserved but not yet supported by the router \
+                      — use rules/keepouts",
+        }));
+    }
+
+    // Merge rules: a partial `rules` object updates only the fields it names, so
+    // the model can tweak clearance alone without re-sending the whole block.
+    let mut rules_changed = false;
+    if let Some(r) = input.get("rules").filter(|v| !v.is_null()) {
+        if let Some(n) = r.get("clearance").and_then(Value::as_f64) {
+            draft.rules.clearance = n;
+            rules_changed = true;
+        }
+        if let Some(n) = r.get("min_trace_width").and_then(Value::as_f64) {
+            draft.rules.min_trace_width = n;
+            rules_changed = true;
+        }
+        if let Some(n) = r.get("via_diameter").and_then(Value::as_f64) {
+            draft.rules.via_diameter = n;
+            rules_changed = true;
+        }
+        if let Some(n) = r.get("via_drill").and_then(Value::as_f64) {
+            draft.rules.via_drill = n;
+            rules_changed = true;
+        }
+    }
+
+    // Replace keepouts wholesale when present (validated against bounds/layers).
+    let mut keepouts_changed = false;
+    if let Some(ko) = input.get("keepouts").filter(|v| !v.is_null()) {
+        let Some(arr) = ko.as_array() else {
+            return Ok(json!({
+                "error": "keepouts must be an array of {rect, layers}",
+            }));
+        };
+        let mut keepouts = Vec::with_capacity(arr.len());
+        for (i, k) in arr.iter().enumerate() {
+            match parse_keepout(k, &draft.bounds, i) {
+                Ok(keepout) => keepouts.push(keepout),
+                Err(msg) => return Ok(json!({ "error": msg })),
+            }
+        }
+        draft.keepouts = keepouts;
+        keepouts_changed = true;
+    }
+
+    if !rules_changed && !keepouts_changed {
+        return Ok(json!({
+            "error": "nothing to set — pass `rules` (partial updates allowed) \
+                      and/or `keepouts`",
+        }));
+    }
+
+    // Rules/keepouts do not MOVE parts, so the placement stays valid — but the
+    // copper does not: clearance/keepout changes invalidate any routed solution.
+    // Drop the stored route.json so a stale route can't be exported.
+    let route_cleared = clear_route(ctx)?;
+
+    draft.save(ctx)?;
+
+    Ok(json!({
+        "ok": true,
+        "rules": {
+            "clearance": draft.rules.clearance,
+            "min_trace_width": draft.rules.min_trace_width,
+            "via_diameter": draft.rules.via_diameter,
+            "via_drill": draft.rules.via_drill,
+        },
+        "keepout_count": draft.keepouts.len(),
+        "placement_kept": draft.last_placement.is_some(),
+        "route_cleared": route_cleared,
+        "note": "rules/keepouts don't move parts so the placement stands, but the \
+                 routing was invalidated — run route_board again before export.",
+    }))
+}
+
+/// Remove the stored route solution (if any) so a state change can't leave a
+/// stale `route.json` behind. Returns whether a route was actually cleared.
+fn clear_route(ctx: &ToolCtx) -> Result<bool> {
+    if ctx.workspace().read_route().is_none() {
+        return Ok(false);
+    }
+    std::fs::remove_file(ctx.workspace().route_path())?;
+    Ok(true)
+}
+
+// ── move_part / unlock_part ──────────────────────────────────────────────────
+
+pub fn move_part(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let Some(mut draft) = BoardDraft::load(ctx) else {
+        return Ok(json!({
+            "error": "no board draft yet — call create_board first",
+        }));
+    };
+    let reference = require_str(&input, "reference")?;
+    let x = match input.get("x").and_then(Value::as_f64) {
+        Some(v) => v,
+        None => return Ok(json!({ "error": "missing or non-numeric `x`" })),
+    };
+    let y = match input.get("y").and_then(Value::as_f64) {
+        Some(v) => v,
+        None => return Ok(json!({ "error": "missing or non-numeric `y`" })),
+    };
+    let rotation = input
+        .get("rotation")
+        .and_then(Value::as_i64)
+        .map(|r| r as i32)
+        .unwrap_or(0);
+
+    // A part origin must sit within the board (an out-of-bounds nudge is a model
+    // mistake; the engine would clamp it silently, hiding the error). We check
+    // the ORIGIN against bounds — the placer legalizes the courtyard on the next
+    // place_board, but the origin itself must be on the board.
+    let b = &draft.bounds;
+    if x < b.min_x || x > b.max_x || y < b.min_y || y > b.max_y {
+        return Ok(json!({
+            "error": format!(
+                "({x}, {y}) is outside the board bounds [{},{}]x[{},{}] — pick a point on the board",
+                b.min_x, b.max_x, b.min_y, b.max_y
+            ),
+        }));
+    }
+
+    let Some(part) = draft.parts.iter_mut().find(|p| p.reference == reference) else {
+        let known: Vec<&str> = draft.parts.iter().map(|p| p.reference.as_str()).collect();
+        return Ok(json!({
+            "error": format!(
+                "unknown reference `{reference}` — known references: {}",
+                known.join(", ")
+            ),
+        }));
+    };
+    part.locked = Some(LockedAt {
+        at: Point2 { x, y },
+        rotation,
+    });
+
+    // State changed: the stored route is stale, and the placement no longer
+    // reflects the lock until place_board re-runs.
+    let route_cleared = clear_route(ctx)?;
+    draft.last_placement = None;
+    draft.save(ctx)?;
+
+    Ok(json!({
+        "ok": true,
+        "reference": reference,
+        "locked_at": { "x": x, "y": y, "rotation": rotation },
+        "route_cleared": route_cleared,
+        "note": "part pinned here; run place_board (it legalizes around the lock) \
+                 then route_board.",
+    }))
+}
+
+pub fn unlock_part(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let Some(mut draft) = BoardDraft::load(ctx) else {
+        return Ok(json!({
+            "error": "no board draft yet — call create_board first",
+        }));
+    };
+    let reference = require_str(&input, "reference")?;
+
+    let Some(part) = draft.parts.iter_mut().find(|p| p.reference == reference) else {
+        let known: Vec<&str> = draft.parts.iter().map(|p| p.reference.as_str()).collect();
+        return Ok(json!({
+            "error": format!(
+                "unknown reference `{reference}` — known references: {}",
+                known.join(", ")
+            ),
+        }));
+    };
+    let was_locked = part.locked.is_some();
+    part.locked = None;
+
+    let route_cleared = clear_route(ctx)?;
+    draft.last_placement = None;
+    draft.save(ctx)?;
+
+    Ok(json!({
+        "ok": true,
+        "reference": reference,
+        "was_locked": was_locked,
+        "route_cleared": route_cleared,
+        "note": "part released; run place_board to re-place it freely.",
+    }))
+}
+
+// ── route_board ──────────────────────────────────────────────────────────────
+
+/// Inject the draft's keepouts into a [`RouteProblem`] as BLOCKED_ALL obstacles.
+///
+/// We extend the engine's `to_route_problem` output at the agent layer (rather
+/// than forking `to_route_problem`): each keepout becomes an [`Obstacle`] with an
+/// EMPTY `connected_to`, which the lint/router treat as unowned copper — blocking
+/// EVERY net on the listed layers. A keepout rect maps to a centered rect
+/// obstacle per the rect's geometry.
+fn inject_keepouts(rp: &mut RouteProblem, keepouts: &[Keepout]) {
+    for ko in keepouts {
+        let center = Point2 {
+            x: (ko.rect.min_x + ko.rect.max_x) / 2.0,
+            y: (ko.rect.min_y + ko.rect.max_y) / 2.0,
+        };
+        rp.obstacles.push(Obstacle {
+            kind: "rect".to_owned(),
+            layers: ko.layers.clone(),
+            center,
+            width: ko.rect.max_x - ko.rect.min_x,
+            height: ko.rect.max_y - ko.rect.min_y,
+            // No owner ⇒ blocks all nets (a true keepout).
+            connected_to: Vec::new(),
+        });
+    }
+}
+
+/// A serialized lint summary: a count by violation `kind` tag. The expectation
+/// is ZERO — a non-zero count means an engine bug escaped the placement/routing
+/// oracles, so the caller flags it loudly.
+fn lint_summary(rp: &RouteProblem, solution: &pcb_engine::problem::RouteSolution) -> (Value, usize) {
+    let violations = lint(rp, solution);
+    let total = violations.len();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for v in &violations {
+        // DrcViolation serializes with a `kind` tag (serde tag = "kind").
+        let kind = serde_json::to_value(v)
+            .ok()
+            .and_then(|j| j.get("kind").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_else(|| "unknown".to_owned());
+        *counts.entry(kind).or_default() += 1;
+    }
+    let by_kind: Value = counts
+        .into_iter()
+        .map(|(k, c)| (k, json!(c)))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+    (by_kind, total)
+}
+
+/// Build the congestion-hotspot enrichment for a FAILED route. `route_auto` does
+/// not expose the global stage's congestion report, so we re-run the global
+/// router here ONLY on failure to recover the hotspots/iterations for the model's
+/// triage. NOTE (duplication cost): this repeats the global-routing pass that
+/// `route_auto` already ran internally; it is paid only on the failure path, on
+/// boards small enough that one extra global route is cheap. If `route_auto`
+/// later surfaces the congestion report directly, drop this.
+fn congestion_json(rp: &RouteProblem) -> Value {
+    let g = global_route(rp);
+    let hotspots: Vec<Value> = g
+        .report
+        .edge_hotspots
+        .iter()
+        .map(|h| {
+            json!({
+                "edge": h.edge,
+                "leaves": [h.a, h.b],
+                "layer": h.layer,
+                "usage": h.usage,
+                "capacity": h.capacity,
+                "load": h.load,
+            })
+        })
+        .collect();
+    json!({
+        "iterations": g.report.iterations,
+        "final_overflow": g.report.final_overflow,
+        "hotspots": hotspots,
+    })
+}
+
+pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let Some(draft) = BoardDraft::load(ctx) else {
+        return Ok(json!({
+            "error": "no board draft yet — call create_board first",
+        }));
+    };
+    let Some(placements) = draft.last_placement.clone() else {
+        return Ok(json!({
+            "error": "the board is not placed — run place_board first, then route_board",
+        }));
+    };
+
+    let problem = match place_problem_from_draft(&draft, ctx) {
+        Ok(p) => p,
+        Err(msg) => return Ok(json!({ "error": msg })),
+    };
+
+    // Placement → RouteProblem, then inject the keepouts as BLOCKED_ALL obstacles
+    // (the one place v1 keepouts bite: routing, not placement).
+    let mut rp = to_route_problem(&problem, &placements);
+    inject_keepouts(&mut rp, &draft.keepouts);
+
+    let result = route_auto(&rp);
+
+    // Persist the full solution + failures + router for export (Task 4) and the
+    // routed flag (get_board). The solution lives in the workspace; only a small
+    // summary goes back to the model.
+    let stored = json!({
+        "solution": result.solution,
+        "failed": result.failed,
+        "router": result.router,
+    });
+    ctx.workspace().write_route(&serde_json::to_string_pretty(&stored)?)?;
+
+    let failed: Vec<Value> = result
+        .failed
+        .iter()
+        .map(|f| json!({ "connection": f.connection, "reason": f.reason }))
+        .collect();
+
+    let m = metrics(&result.solution);
+    let (by_kind, lint_total) = lint_summary(&rp, &result.solution);
+
+    let router = match result.router {
+        RouterKind::Naive => "naive",
+        RouterKind::Detailed => "detailed",
+    };
+
+    let mut out = json!({
+        "router": router,
+        "failed": failed,
+        "metrics": {
+            "wirelength": m.wirelength,
+            "vias": m.via_count,
+            "traces": m.trace_count,
+        },
+        "lint_summary": by_kind,
+    });
+
+    // A non-zero lint on the routed solution means a violation slipped past the
+    // router's own oracles — surface it LOUDLY (it is an engine bug, not a board
+    // problem the model can fix).
+    if lint_total > 0 {
+        out["engine_bug"] = json!(true);
+        out["note"] = json!(format!(
+            "ENGINE BUG: the routed copper has {lint_total} DRC violation(s) that the \
+             router's oracles should have caught — this is not a board you can fix by \
+             triage; report it. Counts by kind are in lint_summary."
+        ));
+    } else if result.failed.is_empty() {
+        out["note"] = json!("routed cleanly: zero failed nets, lint clean. Ready to export.");
+    } else {
+        // Honest failures: enrich with congestion hotspots so the model can triage
+        // (move a part off a hot edge, relax a rule, or drop a keepout).
+        out["congestion"] = congestion_json(&rp);
+        out["note"] = json!(
+            "some nets did not route — read each failure `reason` (global:/assign:/cell:/\
+             finisher: provenance) and the congestion hotspots, then triage: move_part to \
+             relieve a hot region, relax rules via set_constraints, or remove a blocking \
+             keepout. Re-place and re-route after each change."
+        );
+    }
+
+    Ok(out)
 }
