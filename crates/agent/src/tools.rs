@@ -1335,9 +1335,9 @@ fn edit_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         }));
     }
     let edited = if replace_all {
-        draft.replace(&*old, &*new)
+        draft.replace(&*old, &new)
     } else {
-        draft.replacen(&*old, &*new, 1)
+        draft.replacen(&*old, &new, 1)
     };
     ctx.workspace()
         .write_draft(&edited, current_sch_text(ctx).as_deref())?;

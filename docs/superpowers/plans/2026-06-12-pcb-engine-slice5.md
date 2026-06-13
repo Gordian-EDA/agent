@@ -171,7 +171,7 @@ harness (scripted triage), plus a creds-gated live smoke.
 
 ### Task 6: wrap-up (inline, main loop)
 
-- [ ] `cargo test --workspace` green; clippy clean on touched crates;
+- [x] `cargo test --workspace` green; clippy clean on touched crates;
       render + eyeball; spec slice-5 row + findings; the spec's build-
       order table is now fully delivered — note v2 backlog (pours,
       detailed rip-up, net classes, auto-rotation, benchmark dataset);

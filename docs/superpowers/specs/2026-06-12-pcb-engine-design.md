@@ -1,7 +1,7 @@
 # PCB Copper Autorouter (`pcb-engine`) — Design
 
 **Date:** 2026-06-12
-**Status:** Approved (slices 0–4 complete; slice 5 next)
+**Status:** Approved (slices 0–5 complete; v1 delivered)
 **Scope lock:** copper autorouting, built in-house in Rust, in this repo.
 
 ## Problem
@@ -225,6 +225,77 @@ fixture):**
   description (drift surfaces as DRC-unconnected, by design).
 - Empty-hints placements cluster toward the seed corner (legal, routes
   clean; board-center gravity is a cosmetic v2 lever — or an LLM hint).
+
+**Slice-5 findings (2026-06-13, gate passed):**
+
+- Shipped the agent-facing PCB workflow: a `BoardDraft` persisted at
+  `.autopcb/board.json` (the schematic-draft pattern), the routed solution
+  at `.autopcb/route.json`, and the tool set in
+  `crates/agent/src/tools_pcb.rs` (search_footprints, get_footprint_info,
+  create_board, get_board, place_board, set_placement_hints,
+  set_constraints, move_part/unlock_part, route_board, render_board,
+  export_board) merged into `Tools::defs()`/`run()` — `tools.rs` stays the
+  schematic file. The LLM never emits trace coordinates; positions enter
+  only via `move_part` nudges, legalized by the engine on the next place.
+- **route_board's honest-gap vs engine-bug split** (`tools_pcb.rs`
+  ~943–1114): the connectivity oracle flags `Unconnected` for every net
+  `route_auto` honestly dropped, but a routing drop is NOT an engine bug.
+  route_board separates *expected gaps* (`Unconnected` on a net already in
+  the reported `failed` set — the finisher/global drops the model triages)
+  from *real* lint violations (clearance/width/cross-net merge →
+  `engine_bug=true`, surfaced loudly). Without the split a triage-able
+  failure misflagged engine_bug. `lint_summary` to the model must be 0; a
+  non-zero count means an oracle escaped, and the tool says so explicitly.
+- **Constraint vocabulary v1 = what the router honors today:** board design
+  rules + rectangular keepouts (keepouts become BLOCKED_ALL obstacles on the
+  draft→RouteProblem path). Net classes get schema slots but
+  `set_constraints` rejects them ("not yet supported by the router") —
+  deliberate vocabulary reservation, not a lie about the present.
+- **The gate is deterministic:**
+  `tests/pcb_gate.rs::agent_closes_a_failed_board_by_relaxing_a_keepout` —
+  a mock-loop scripted conversation on a board walled by a full-height
+  keepout (first route fails honestly); the script relaxes the rule to a
+  gapped keepout pair, re-places, re-routes → 0 failed nets. Proves the spec
+  gate forever without creds or model nondeterminism.
+  `live_smoke_model_triages_a_walled_board` is the creds-gated, `#[ignore]`d
+  reality probe (tolerant: only a transport/loop failure fails).
+- **synthesize_board** (kicad-bridge) is the riskiest piece — a
+  text-assembled `.kicad_pcb` (footprint bodies spliced with `(at …)`,
+  per-pad `(net …)`, Edge.Cuts from bounds, copper from `write_solution`).
+  Its oracle is `read_problem` round-trip + `kicad-cli pcb drc`, both
+  pre-existing. The slice-4 template-coherence pitfalls hold: thru-hole pads
+  as net leaves, silk-free layout, closed courtyards; PlaceProblem and the
+  written board derive from ONE description (drift surfaces as
+  DRC-unconnected, by design).
+- Wrap-up verification (2026-06-13): `cargo test --workspace` green
+  (0 failures); clippy clean on the slice-5 code (`tools_pcb.rs`,
+  kicad-bridge synthesis) — fixed 2 stray `deref` lints in the schematic
+  `tools.rs` to leave the agent crate fully clean; rendered led-r / quad /
+  congested-relief through `route_auto` and eyeballed the PNGs (all
+  `failed=0`, keepout wall respected, vias only at layer transitions).
+
+**v1 delivered — v2 backlog:**
+
+The slice 0–5 build order is complete: a deterministic in-house copper
+router (naive fallback + capacity-mesh global + 45° detailed), LLM-steered
+placement, and the full agent loop (create → place → see → route → triage →
+export), DRC-checked end-to-end. Deferred to v2 (vocabulary/structure
+reserved; the router ignores or falls back honestly today):
+
+- **Copper pours** (headline) — GND as pour + stitching vias; v1 routes GND
+  as traces and parses existing zones as obstacles only.
+- **Detailed rip-up router** (v1.5) — closes `congested.json`'s 3 zero-slack
+  residual finisher failures (whole-board prototype reached 1 residual at
+  ~40 s/call; not shipped).
+- **Net classes** — width / diff-pair control; schema reserved,
+  `set_constraints` rejects today.
+- **Auto-rotation** in placement; **mesh refinement near pads** (two foreign
+  pads in one quadtree leaf read capacity 0 → global seeding fails;
+  `route_auto`'s naive fallback covers it).
+- **tscircuit benchmark dataset** — no raw upstream SimpleRouteJson problems
+  (archived repo ships generated fixtures only); a converter/generator is
+  the work item.
+- No interactive push-and-shove (candidate v2 swap for the detailed stage).
 
 ## Reuse from this repo
 
