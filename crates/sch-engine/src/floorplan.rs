@@ -468,10 +468,15 @@ struct Item {
     part: String,
     value: String,
     geom: SymbolGeometry,
-    /// (pin number, pin name, net or None for NC).
+    /// (pin number, pin name, net or None for NC). For a multi-unit part this
+    /// holds only the pins of THIS item's `unit` (each unit is its own Item).
     pins: Vec<(String, String, Option<String>)>,
     at: [f64; 2],
     angle: f64,
+    /// 1-based symbol unit this Item places. Single-unit parts are 1; a
+    /// multi-unit part (op-amp/FPGA) splits into one Item per used unit, all
+    /// sharing `refdes` but emitted as distinct `(unit N)` instances.
+    unit: u8,
 }
 
 /// Resolve a component's pins to (number, name, net) using geometry + the
@@ -589,6 +594,9 @@ fn build_writer(
     }
     for it in items {
         w.add_symbol(env, &it.part, &it.refdes, &it.value, it.at, it.angle)?;
+        if it.unit != 1 {
+            w.set_unit_last(it.unit);
+        }
         if ir.mirror.contains(&it.refdes) {
             w.set_mirror_last();
         }
@@ -653,7 +661,7 @@ fn gather(env: &KicadEnv, design: &Design) -> io::Result<Vec<Item>> {
                 continue;
             }
             let geom = SymbolGeometry::load(env, &comp.part)?;
-            let pins = resolve_pins(comp, &geom);
+            let pins = resolve_pins(comp, &geom); // same order/len as geom.pins
             // An IC/connector (>=3 pins) with no authored value shows its part
             // name (the MPN) so the part is identifiable on the sheet — the
             // reference's "MCP1703A-3302" etc. Passives keep their authored value.
@@ -664,15 +672,45 @@ fn gather(env: &KicadEnv, design: &Design) -> io::Result<Vec<Item>> {
                 }
                 _ => String::new(),
             };
-            items.push(Item {
-                refdes: refdes.clone(),
-                part: comp.part.clone(),
-                value,
-                geom,
-                pins,
-                at: [0.0, 0.0],
-                angle: 0.0,
-            });
+            // MULTI-UNIT SPLIT. A part's pins are spread across symbol units
+            // (op-amp: A=1/2/3, B=5/6/7, power=4/8). KiCAD draws one unit per
+            // placed instance, so we emit one Item per USED unit (a unit carrying
+            // at least one assigned pin), each holding only that unit's pins. A
+            // single-unit part collapses to exactly one Item (unit 1) — identical
+            // to the old behaviour. Without this, only unit 1's pins ever reach the
+            // netlist (the power pins and unit B silently vanish).
+            let pin_unit: Vec<u8> = geom.pins.iter().map(|p| p.unit.max(1)).collect();
+            let mut units: Vec<u8> = pin_unit
+                .iter()
+                .zip(pins.iter())
+                .filter(|pair| pair.1 .2.is_some())
+                .map(|pair| *pair.0)
+                .collect();
+            units.sort_unstable();
+            units.dedup();
+            if units.is_empty() {
+                units.push(1);
+            }
+            for (k, &u) in units.iter().enumerate() {
+                let unit_pins: Vec<(String, String, Option<String>)> = pins
+                    .iter()
+                    .zip(pin_unit.iter())
+                    .filter(|pair| *pair.1 == u)
+                    .map(|pair| pair.0.clone())
+                    .collect();
+                items.push(Item {
+                    refdes: refdes.clone(),
+                    part: comp.part.clone(),
+                    // Show the MPN/value on the FIRST placed unit only — N copies
+                    // of "MCP6002" across the units would just be clutter.
+                    value: if k == 0 { value.clone() } else { String::new() },
+                    geom: geom.clone(),
+                    pins: unit_pins,
+                    at: [0.0, 0.0],
+                    angle: 0.0,
+                    unit: u,
+                });
+            }
         }
     }
     Ok(items)

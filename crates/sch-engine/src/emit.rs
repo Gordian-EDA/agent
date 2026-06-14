@@ -98,6 +98,12 @@ struct Instance {
     /// is unaffected: KiCAD reads a power port's net from the Value field
     /// whether or not it is displayed.
     val_hidden: bool,
+    /// 1-based symbol UNIT this instance draws. A multi-unit part (op-amp, FPGA,
+    /// dual/quad pack) is placed as one instance PER unit, all sharing `refdes`
+    /// but with distinct `unit` (and a unit-distinguished uuid). KiCAD then draws
+    /// only that unit's graphics/pins, so every unit's pins reach the netlist.
+    /// Single-unit parts (the common case) are unit 1.
+    unit: u8,
 }
 
 /// One net-name label emitted at a pin's sheet-space connection endpoint.
@@ -326,8 +332,18 @@ impl SchematicWriter {
             ref_pos: None,
             val_pos: None,
             val_hidden: false,
+            unit: 1,
         });
         Ok(())
+    }
+
+    /// Set the symbol UNIT of the most-recently-added instance (the dual of
+    /// [`Self::set_mirror_last`]). The floorplan engine calls this when it places
+    /// the units of a multi-unit part as separate instances sharing a refdes.
+    pub fn set_unit_last(&mut self, unit: u8) {
+        if let Some(i) = self.instances.last_mut() {
+            i.unit = unit;
+        }
     }
 
     /// Mirror the most recently added symbol left-to-right (`(mirror y)`). Used
@@ -551,7 +567,11 @@ impl SchematicWriter {
         refdes: &str,
         pin: &str,
     ) -> io::Result<Vec<([f64; 2], Dir)>> {
-        let inst = self
+        // A refdes may have SEVERAL instances — one per unit of a multi-unit part,
+        // each at its own position. Pick the first as the lib_id/geometry source
+        // (units share a lib_id), then resolve each matched pin against the
+        // instance that draws ITS unit, so a unit-B pin lands at unit B's body.
+        let any = self
             .instances
             .iter()
             .find(|i| i.refdes == refdes)
@@ -561,15 +581,14 @@ impl SchematicWriter {
                     format!("no placed symbol with refdes {refdes:?}"),
                 )
             })?;
-        let (inst_at, inst_angle, inst_mirror) = (inst.at, inst.angle, inst.mirror);
+        let lib_id = any.lib_id.clone();
         // Pins are cached per lib_id when the symbol is first added, so this hot
         // path (called once per net-pin during routing, and many times over while
         // the refinement loop re-routes candidate placements) never re-reads the
         // `.kicad_sym` from disk. Fall back to a load only if somehow uncached.
-        let cached = self.sym_pins.get(&inst.lib_id).cloned();
-        let pins: Vec<PinGeom> = match cached {
+        let pins: Vec<PinGeom> = match self.sym_pins.get(&lib_id).cloned() {
             Some(p) => p,
-            None => SymbolGeometry::load(env, &inst.lib_id)?.pins,
+            None => SymbolGeometry::load(env, &lib_id)?.pins,
         };
 
         let matches: Vec<&PinGeom> = {
@@ -583,14 +602,24 @@ impl SchematicWriter {
         if matches.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("no pin {pin:?} on {}", inst.lib_id),
+                format!("no pin {pin:?} on {lib_id}"),
             ));
         }
+        // The instance that draws unit `u` (its pins live at its placement); fall
+        // back to `any` when a unit has no dedicated instance (single-unit parts,
+        // or an unplaced unit).
+        let inst_for = |u: u8| -> &Instance {
+            self.instances
+                .iter()
+                .find(|i| i.refdes == refdes && i.unit == u)
+                .unwrap_or(any)
+        };
         Ok(matches
             .into_iter()
             .map(|pg| {
-                let ep = pin_endpoint(pg, inst_at, inst_angle, inst_mirror);
-                let dir = quantize_dir(pg.angle, inst_angle, inst_mirror);
+                let inst = inst_for(pg.unit.max(1));
+                let ep = pin_endpoint(pg, inst.at, inst.angle, inst.mirror);
+                let dir = quantize_dir(pg.angle, inst.angle, inst.mirror);
                 (ep, dir)
             })
             .collect())
@@ -1818,10 +1847,16 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
 
     // Reuse the prior instance uuid for a surviving symbol (minimal diff on
     // reconcile); otherwise derive it from the refdes for byte-identical re-emit.
-    let sym_uuid = inst
-        .uuid
-        .clone()
-        .unwrap_or_else(|| stable_uuid("symbol", &inst.refdes));
+    // A multi-unit part places several instances under one refdes, so units >1
+    // take a unit-distinguished key to keep instance uuids unique. Unit 1 keeps
+    // the bare-refdes key so single-unit parts stay byte-identical.
+    let sym_uuid = inst.uuid.clone().unwrap_or_else(|| {
+        if inst.unit <= 1 {
+            stable_uuid("symbol", &inst.refdes)
+        } else {
+            stable_uuid("symbol", &format!("{}#u{}", inst.refdes, inst.unit))
+        }
+    });
     // Field anchors: solver-assigned when present, else the legacy fixed
     // right-of-body offset (text clear of the glyph via the half-extent).
     let (rp, vp) = field_anchors(inst);
@@ -1859,7 +1894,7 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     if inst.mirror {
         s.push_str("\t\t(mirror y)\n");
     }
-    s.push_str("\t\t(unit 1)\n");
+    let _ = writeln!(s, "\t\t(unit {})", inst.unit);
     s.push_str("\t\t(exclude_from_sim no)\n");
     s.push_str("\t\t(in_bom yes)\n");
     s.push_str("\t\t(on_board yes)\n");
@@ -1919,7 +1954,8 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
 
     let _ = writeln!(
         s,
-        "\t\t(instances\n\t\t\t(project \"\"\n\t\t\t\t(path \"/{root_uuid}\"\n\t\t\t\t\t(reference \"{refdes}\")\n\t\t\t\t\t(unit 1)\n\t\t\t\t)\n\t\t\t)\n\t\t)"
+        "\t\t(instances\n\t\t\t(project \"\"\n\t\t\t\t(path \"/{root_uuid}\"\n\t\t\t\t\t(reference \"{refdes}\")\n\t\t\t\t\t(unit {unit})\n\t\t\t\t)\n\t\t\t)\n\t\t)",
+        unit = inst.unit
     );
     s.push('\n');
     s.push_str("\t)\n");
