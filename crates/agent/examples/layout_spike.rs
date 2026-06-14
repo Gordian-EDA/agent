@@ -1,5 +1,5 @@
-//! Run the layout subagent (Layer 1) live against Bedrock for one fixture,
-//! print the proposed Layout IR, then compile + render it (content-cropped).
+//! Infer a connectivity-driven Layout IR for one fixture, print it, then
+//! compile + render the schematic (content-cropped).
 //!
 //! Usage: cargo run -p agent --example layout_spike -- <in.circuit.yaml> <out.png>
 
@@ -8,8 +8,7 @@ use kicad_bridge::cli::KicadCli;
 use kicad_bridge::env::KicadEnv;
 use kicad_bridge::provider::RealSymbolProvider;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let yaml = args.next().expect("usage: layout_spike <in.circuit.yaml> <out.png>");
     let out = args.next().expect("usage: layout_spike <in.circuit.yaml> <out.png>");
@@ -20,11 +19,10 @@ async fn main() -> anyhow::Result<()> {
     let result = circuit_lang::compile(&src, &provider as &dyn SymbolProvider);
     let design = result.design.ok_or_else(|| anyhow::anyhow!("compile produced no design"))?;
 
-    let client = agent::llm::from_env()?;
-    let ir = agent::layout::propose_layout(&client, &env, &design).await?;
-    eprintln!("--- proposed Layout IR ---\n{}\n", serde_json::to_string_pretty(&ir)?);
-    // Persist the IR + emitted sch next to the PNG so the (non-deterministic) LLM
-    // frame can be re-emitted deterministically while iterating on the engine.
+    let ir = sch_engine::floorplan::infer_ir(&env, &design);
+    eprintln!("--- inferred Layout IR ---\n{}\n", serde_json::to_string_pretty(&ir)?);
+    // Persist the IR + emitted sch next to the PNG so the frame can be inspected
+    // and re-emitted while iterating on the engine.
     std::fs::write(
         std::path::Path::new(&out).with_extension("layout.json"),
         serde_json::to_string_pretty(&ir)?,

@@ -199,11 +199,10 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Build an agent over a project's [`ToolCtx`].
-    /// Build an agent. The tool context may already carry a layout subagent
-    /// client (see [`ToolCtx::set_layout_client`]); the conversation `client`
-    /// here is kept separate so a scripted test mock never gets consumed by the
-    /// layout pass inside `apply_design`.
+    /// Build an agent over a project's [`ToolCtx`]. The conversation `client`
+    /// drives the agent loop; `apply_design` derives its layout frame from the
+    /// netlist (`sch_engine::floorplan::infer_ir`), so no separate layout client
+    /// is involved.
     pub fn new(client: Box<dyn LlmClient>, ctx: ToolCtx) -> Self {
         Self {
             client,

@@ -6,7 +6,6 @@
 
 pub mod agent;
 pub mod config;
-pub mod layout;
 pub mod llm;
 pub mod render;
 pub mod tools;
