@@ -554,11 +554,11 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     }
     apply_cells(&mut items, &cells);
     normalize(&mut items);
-    // Slide satellites onto the axis of the pin they wire to (straight drops),
-    // which the column-centre table layout cannot express.
+    // Continuous-placement polish: iterate the directed slides (onto pin axes,
+    // toward the centroid) AND a free per-axis nudge to convergence — giving the
+    // continuous phase the freedom the column-centre cell table cannot express.
     if std::env::var("NO_REFINE").is_err() {
-        align_to_pins(env, &mut items, &inc, ir, &needs_flag);
-        compact(env, &mut items, &inc, ir, &needs_flag);
+        polish(env, &mut items, &inc, ir, &needs_flag);
     }
     // Guarantee no body overlap: the cost-gated refine can leave two parts
     // touching when separating them would transiently raise routed cost (a local
@@ -1314,6 +1314,95 @@ fn compact(
     }
 }
 
+/// Continuous-placement polish — the post-cell-search optimiser. The cell grid
+/// only places parts at column centres; the directed slides (`align_to_pins`,
+/// `compact`) and a FREE per-axis nudge recover the sub-grid freedom. Running them
+/// run-once-in-sequence is myopic: a part aligned to its pin is never re-considered
+/// after a neighbour compacts away. So iterate {align → compact → free-nudge} to a
+/// fixpoint, all gated by the real routed cost (`score_items`), so it only ever
+/// lowers cost — the references can't regress past their settled minimum, and the
+/// busier sheets get the extra freedom to tighten. `decongest` still guarantees
+/// no overlap afterwards.
+fn polish(
+    env: &KicadEnv,
+    items: &mut [Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+) {
+    // Each pass routes the whole sheet per candidate move, so this is the engine's
+    // hot loop. The directed slides converge in 1-2 iterations on the small
+    // reference sheets (the break fires early); the cap bounds the cost on a dense
+    // board (a 121-ball BGA) where there's always a sub-grid step left to find.
+    let mut prev = score_items(env, items, inc, ir, needs_flag);
+    for _ in 0..3 {
+        align_to_pins(env, items, inc, ir, needs_flag);
+        compact(env, items, inc, ir, needs_flag);
+        free_nudge(env, items, inc, ir, needs_flag);
+        let now = score_items(env, items, inc, ir, needs_flag);
+        if prev - now < 1.0 {
+            break; // converged (or not worth another full sweep)
+        }
+        prev = now;
+    }
+}
+
+/// Free per-axis nudge: try sliding each satellite ±1 grid in x and y, keeping any
+/// move that lowers the routed cost without creating a (clearance-padded) overlap.
+/// The directed slides only move a part TOWARD its pin axis or the centroid; this
+/// reaches the off-axis positions they can never propose (e.g. a part that should
+/// step sideways to uncross a wire), which is the extra freedom `polish` adds over
+/// the old align-then-compact.
+fn free_nudge(
+    env: &KicadEnv,
+    items: &mut [Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+) {
+    let sats: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3).collect();
+    if sats.is_empty() {
+        return;
+    }
+    let mut best = score_items(env, items, inc, ir, needs_flag);
+    for _ in 0..2 {
+        let mut improved = false;
+        for &i in &sats {
+            let orig = items[i].at;
+            let (mut best_pos, mut best_cost) = (orig, best);
+            for (axis, dir) in [(0usize, 1.0), (0, -1.0), (1, 1.0), (1, -1.0)] {
+                let mut p = orig;
+                p[axis] += dir * 1.27;
+                // Keep a full grid of clearance, as `compact` does, so a free nudge
+                // never packs two parts into a touch the readability lint flags.
+                let r = item_rect(&items[i], p);
+                let pad = [r[0] - 1.27, r[1] - 1.27, r[2] + 1.27, r[3] + 1.27];
+                if items
+                    .iter()
+                    .enumerate()
+                    .any(|(j, it)| j != i && rects_overlap(pad, item_rect(it, it.at)))
+                {
+                    continue;
+                }
+                items[i].at = p;
+                let c = score_items(env, items, inc, ir, needs_flag);
+                if c + 0.25 < best_cost {
+                    best_cost = c;
+                    best_pos = p;
+                }
+            }
+            items[i].at = best_pos;
+            if best_pos != orig {
+                best = best_cost;
+                improved = true;
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+}
+
 /// Whether placing item `si` at `at` would overlap any other item's body.
 fn overlaps_any(items: &[Item], si: usize, at: [f64; 2]) -> bool {
     let a = item_rect(&items[si], at);
@@ -1688,8 +1777,11 @@ fn layout_cost(
             // to the side so the resistive divider / indicator chain reads straight
             // (R7 over R8, not R7 over the filter cap C3). Exclude cap legs.
             let cap = |i: usize| items[i].refdes.starts_with('C');
+            // Penalise ANY cross-axis offset, not just >1 grid: a spine should be
+            // EXACTLY collinear. The looser >1.27 tolerance let the free per-axis
+            // nudge slide a leg one grid off the spine (a visible jog) at no cost.
             if va && vb && !cap(ia) && !cap(ib) && is_spine(na, nb)
-                && (items[ia].at[0] - items[ib].at[0]).abs() > 1.27 + EPS
+                && (items[ia].at[0] - items[ib].at[0]).abs() > EPS
             {
                 spine_viol += 1;
             }
