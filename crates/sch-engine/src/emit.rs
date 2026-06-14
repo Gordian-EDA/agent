@@ -139,6 +139,7 @@ struct Stub {
 }
 
 /// One `(wire …)` segment between two grid-snapped sheet points.
+#[derive(Clone)]
 struct Wire {
     a: [f64; 2],
     b: [f64; 2],
@@ -238,6 +239,11 @@ pub struct SchematicWriter {
     sym_pins: BTreeMap<String, Vec<PinGeom>>,
     /// Sheet title (the design name), rendered into the title block.
     title: Option<String>,
+    /// When set, [`Self::prepare`] reframes the drawing so its min corner sits at
+    /// the page margin (the floorplan path, whose edge port labels / rail symbols
+    /// extend past the symbol bodies). Off for direct-writer and legacy paths,
+    /// which place content at fixed absolute coordinates.
+    frame: bool,
 }
 
 impl SchematicWriter {
@@ -446,8 +452,9 @@ impl SchematicWriter {
         env: &KicadEnv,
         refdes: &str,
         at: [f64; 2],
+        angle: f64,
     ) -> io::Result<()> {
-        self.add_symbol(env, "power:PWR_FLAG", refdes, "PWR_FLAG", at, 0.0)
+        self.add_symbol(env, "power:PWR_FLAG", refdes, "PWR_FLAG", at, angle)
     }
 
     /// Add a wire segment between two sheet points (snapped).
@@ -1041,14 +1048,45 @@ impl SchematicWriter {
                 TextPos { at: [r2(maxx), r2(maxy + 4.78)], justify: Justify::Right },
                 [maxx - wmax, maxy + 0.64, maxx, maxy + 4.78],
             );
-            // Wide bodies (rotated passives) prefer above/below; tall prefer
-            // right/left (the KiCAD convention). Corners are fallbacks.
-            let mut cands = if h[0] > h[1] {
-                vec![above, below, right, left]
+            // Multi-pin parts (ICs) carry refdes+value on a HORIZONTAL band
+            // (above/below the body), the reference convention — a long MPN
+            // ("SN74LVC2T45DCUR") on a band clears the horizontal series
+            // neighbours (R15/R13) it would smear onto placed to the side. Such a
+            // wide value rarely fits any fully-clear gap, so the solver falls back
+            // to candidate 0; that candidate must be the band/corner clear of this
+            // IC's OWN pin text (the artifact the lint catches and the eye reads
+            // as broken). We therefore stable-sort the band candidates by how many
+            // of the IC's pin-text boxes they hit: MCP1703 (GND exits bottom) →
+            // above wins; SN74 (VCC top, GND bottom-centre) → below-left/right
+            // win, dodging the centre GND drop. Passives keep the KiCAD
+            // convention: wide (rotated) bodies prefer above/below, tall prefer
+            // right/left.
+            let is_ic =
+                self.sym_pins.get(&inst.lib_id).is_some_and(|p| p.len() >= 3);
+            let cands = if is_ic {
+                let pin_boxes: Vec<BBox> = self
+                    .sym_pins
+                    .get(&inst.lib_id)
+                    .map(|pins| {
+                        pins.iter()
+                            .flat_map(|pg| pin_text_boxes(pg, inst.at, inst.angle, inst.mirror))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let hits = |c: &(TextPos, TextPos, BBox)| {
+                    pin_boxes.iter().filter(|pb| boxes_overlap(&c.2, pb)).count()
+                };
+                let mut bands =
+                    vec![below, above, below_left, below_right, above_left, above_right];
+                bands.sort_by_key(hits);
+                bands.push(right);
+                bands.push(left);
+                bands
+            } else if h[0] > h[1] {
+                vec![above, below, right, left, above_left, above_right, below_left, below_right]
             } else {
-                vec![right, left, above, below]
+                vec![right, left, above, below, above_left, above_right, below_left, below_right]
             };
-            cands.extend([above_left, above_right, below_left, below_right]);
             movables.push(Movable {
                 owner: Some(inst.refdes.clone()),
                 candidates: cands.iter().map(|c| c.2).collect(),
@@ -1167,6 +1205,20 @@ impl SchematicWriter {
         self.labels.iter().filter(|l| !l.global).count()
     }
 
+    /// Bounding boxes of the global/port labels (the edge pentagons), for the
+    /// refinement scorer to keep symbol bodies from colliding with a port label
+    /// (the label is placed during routing, so it is not an `Item`).
+    pub(crate) fn cluster_label_boxes(&self) -> Vec<[f64; 4]> {
+        self.labels
+            .iter()
+            .filter(|l| l.global)
+            .map(|l| {
+                let w = crate::textplace::text_width(&l.net) + 2.54;
+                [l.at[0] - w, l.at[1] - 2.0, l.at[0] + w, l.at[1] + 2.0]
+            })
+            .collect()
+    }
+
     /// Every drawn wire segment with its net (`None` for unattributed power
     /// stubs). For the refinement scorer's crossing / length / short metrics.
     pub(crate) fn wires_with_nets(&self) -> Vec<([f64; 2], [f64; 2], Option<String>)> {
@@ -1221,13 +1273,193 @@ impl SchematicWriter {
         Some([max_x + PAGE_MARGIN, max_y + PAGE_MARGIN])
     }
 
-    pub fn finish(mut self) -> String {
+    /// Split each wire at every junction / other-wire endpoint lying strictly in
+    /// its interior, so every electrical tap is an endpoint-to-endpoint join.
+    ///
+    /// KiCAD's netlister connects wires only where they share an endpoint (with a
+    /// junction dot marking a ≥3-way meet); a tap whose riser ends on a
+    /// through-wire's MID-SPAN does **not** connect unless that through-wire is
+    /// physically split at the tap. The router draws long rails/trunks with
+    /// junction dots but never splits them, so without this pass every mid-span
+    /// tap is silently disconnected (decoupling caps off a rail, a filter cap off
+    /// an OUT trunk, …) — the schematic renders fine but netlists wrong. Run once
+    /// at finalize. Only endpoints-on-interior split a wire, so a clean
+    /// perpendicular crossing of two different nets is never split (and never
+    /// merged): the router already forbids a foreign endpoint on our wire, so any
+    /// interior node is a same-net tap.
+    fn split_wires_at_nodes(&mut self) {
+        const EPS: f64 = 1e-6;
+        let same = |p: [f64; 2], q: [f64; 2]| (p[0] - q[0]).abs() < EPS && (p[1] - q[1]).abs() < EPS;
+        // Candidate split points: every junction position + every wire endpoint.
+        let mut pts: Vec<[f64; 2]> = self.junctions.iter().map(|j| j.at).collect();
+        for w in &self.wires {
+            pts.push(w.a);
+            pts.push(w.b);
+        }
+        let mk = |a: [f64; 2], b: [f64; 2], net: Option<String>| Wire {
+            a,
+            b,
+            uuid_key: format!("{}:{}:{}:{}", a[0], a[1], b[0], b[1]),
+            net,
+        };
+        // Iteratively split until stable (a rail tapped at N points needs N passes).
+        loop {
+            let mut next: Vec<Wire> = Vec::with_capacity(self.wires.len());
+            let mut changed = false;
+            for w in &self.wires {
+                // The interior split point closest to `a` (deterministic order).
+                let mut best: Option<[f64; 2]> = None;
+                let mut best_d = f64::INFINITY;
+                for &p in &pts {
+                    if same(p, w.a) || same(p, w.b) || !point_on_segment(p, w.a, w.b) {
+                        continue;
+                    }
+                    let d = (p[0] - w.a[0]).abs() + (p[1] - w.a[1]).abs();
+                    if d < best_d {
+                        best_d = d;
+                        best = Some(p);
+                    }
+                }
+                match best {
+                    Some(p) => {
+                        next.push(mk(w.a, p, w.net.clone()));
+                        next.push(mk(p, w.b, w.net.clone()));
+                        changed = true;
+                    }
+                    None => next.push(w.clone()),
+                }
+            }
+            self.wires = next;
+            if !changed {
+                break;
+            }
+        }
+        // Dedup any sub-segments that coincide after splitting (keep first).
+        let mut seen = std::collections::BTreeSet::new();
+        self.wires.retain(|w| seen.insert(w.uuid_key.clone()));
+    }
+
+    /// Shift the whole drawing so its true minimum corner — including the rail
+    /// power symbols, edge port labels, and solved field text that extend beyond
+    /// the symbol bodies — lands at the page margin. The floorplan's `normalize`
+    /// only shifts symbol bodies, and it runs *before* wiring adds those edge
+    /// elements, so a left/top port label can otherwise sit at a negative
+    /// coordinate and be clipped off the content-fit page. Run last, after text is
+    /// solved, so field positions move with their symbols.
+    fn reframe(&mut self) {
+        use crate::textplace::{rotated_half_extents, text_width};
+        const M: f64 = 12.7;
+        let (mut minx, mut miny) = (f64::MAX, f64::MAX);
+        let mut lo = |x: f64, y: f64| {
+            minx = minx.min(x);
+            miny = miny.min(y);
+        };
+        for i in &self.instances {
+            let h = rotated_half_extents(i.half_extents, i.angle);
+            lo(i.at[0] - h[0], i.at[1] - h[1]);
+            for p in [i.ref_pos, i.val_pos].into_iter().flatten() {
+                lo(p.at[0] - 5.0, p.at[1] - 1.6);
+            }
+        }
+        for w in &self.wires {
+            lo(w.a[0], w.a[1]);
+            lo(w.b[0], w.b[1]);
+        }
+        for l in &self.labels {
+            // A right-justified edge label (a left/top port) extends back toward
+            // smaller x by its text width; cover both directions conservatively.
+            lo(l.at[0] - text_width(&l.net), l.at[1] - 1.6);
+        }
+        for j in &self.junctions {
+            lo(j.at[0], j.at[1]);
+        }
+        for nc in &self.no_connects {
+            lo(nc.at[0], nc.at[1]);
+        }
+        for t in &self.texts {
+            lo(t.at[0], t.at[1] - 1.6);
+        }
+        for r in &self.rects {
+            lo(r.start[0].min(r.end[0]), r.start[1].min(r.end[1]));
+        }
+        if minx == f64::MAX {
+            return;
+        }
+        // Snap the shift to the grid: all wire/pin geometry is grid-aligned, so a
+        // grid-multiple shift keeps it grid-aligned (KiCAD ERCs off-grid endpoints).
+        // `minx`/`miny` include off-grid text extents, so an unsnapped shift would
+        // knock the whole sheet off the 1.27 mm grid.
+        let (dx, dy) = (crate::grid::snap(M - minx), crate::grid::snap(M - miny));
+        if dx.abs() < 1e-9 && dy.abs() < 1e-9 {
+            return;
+        }
+        let sh = |p: &mut [f64; 2]| {
+            p[0] += dx;
+            p[1] += dy;
+        };
+        for i in &mut self.instances {
+            sh(&mut i.at);
+            if let Some(p) = &mut i.ref_pos {
+                sh(&mut p.at);
+            }
+            if let Some(p) = &mut i.val_pos {
+                sh(&mut p.at);
+            }
+        }
+        for w in &mut self.wires {
+            sh(&mut w.a);
+            sh(&mut w.b);
+        }
+        for l in &mut self.labels {
+            sh(&mut l.at);
+            if let Some(s) = &mut l.stub {
+                sh(&mut s.pin_at);
+            }
+        }
+        for j in &mut self.junctions {
+            sh(&mut j.at);
+        }
+        for nc in &mut self.no_connects {
+            sh(&mut nc.at);
+        }
+        for t in &mut self.texts {
+            sh(&mut t.at);
+        }
+        for r in &mut self.rects {
+            sh(&mut r.start);
+            sh(&mut r.end);
+        }
+    }
+
+    /// Run every geometry-finalizing pass: stub retraction, wire splitting at
+    /// taps, text placement, and reframing. All four are idempotent, so calling
+    /// this before [`Self::layout_warnings`] (to lint the *final* geometry) and
+    /// then [`Self::finish`] (which re-runs it harmlessly) is safe and is how the
+    /// floorplan engine reports truthful, post-solve warnings.
+    pub fn prepare(&mut self) {
         // Resolve signal-stub collisions and materialize the surviving stub wires
         // before any rendering, so labels/wires below render the reconciled state.
         self.retract_colliding_stubs();
+        // Split through-wires at their taps so every junction actually connects in
+        // the netlist (KiCAD won't connect a mid-span tap on an unsplit wire).
+        self.split_wires_at_nodes();
         // Then place movable text (fields, stub labels) collision-free against
-        // the final geometry. Both passes are idempotent.
+        // the final geometry.
         self.solve_text_positions();
+        // Finally reframe so nothing (edge port labels, rail symbols) is clipped
+        // off the content-fit page (floorplan path only).
+        if self.frame {
+            self.reframe();
+        }
+    }
+
+    /// Enable [`Self::reframe`] at finalize (floorplan engine).
+    pub fn set_frame(&mut self, on: bool) {
+        self.frame = on;
+    }
+
+    pub fn finish(mut self) -> String {
+        self.prepare();
 
         let root_uuid = stable_uuid("sheet", ROOT_SHEET_KEY);
 
@@ -2227,7 +2459,8 @@ mod repro_tests {
         let Some(env) = KicadEnv::detect() else { eprintln!("SKIP"); return };
         let mut w = SchematicWriter::new();
         w.add_symbol(&env, "Timer:NE555P", "U1", "", [45.72, 45.72], 0.0).unwrap();
-        w.add_signal_label(&env, "U1", "OUT", "N_Q").unwrap();
+        // KiCad 9's Timer:NE555P names the output pin "Q" (older libs used "OUT").
+        w.add_signal_label(&env, "U1", "Q", "N_Q").unwrap();
         let sch = w.finish();
         let seg = sch.split("(property \"Reference\" \"U1\"").nth(1).unwrap();
         let at = seg.lines().nth(1).unwrap();

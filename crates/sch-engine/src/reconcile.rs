@@ -1023,7 +1023,7 @@ pub fn emit_design_reconciled(
         let refdes = format!("#FLG{:02}", flag_idx + 1);
         if let Some(&attach) = power_attach.get(*net) {
             // Place the flag pin-coincident with the existing power symbol.
-            w.add_power_flag_at(env, &refdes, attach)?;
+            w.add_power_flag_at(env, &refdes, attach, 0.0)?;
         } else {
             // Fallback: right-column label-based flag for undeclared power nets.
             let y = 25.4 + flag_idx as f64 * 12.7;

@@ -23,9 +23,16 @@ async fn main() -> anyhow::Result<()> {
     let client = agent::llm::from_env()?;
     let ir = agent::layout::propose_layout(&client, &env, &design).await?;
     eprintln!("--- proposed Layout IR ---\n{}\n", serde_json::to_string_pretty(&ir)?);
+    // Persist the IR + emitted sch next to the PNG so the (non-deterministic) LLM
+    // frame can be re-emitted deterministically while iterating on the engine.
+    std::fs::write(
+        std::path::Path::new(&out).with_extension("layout.json"),
+        serde_json::to_string_pretty(&ir)?,
+    )?;
 
     let emit = sch_engine::floorplan::emit(&env, &design, &ir)
         .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
+    std::fs::write(std::path::Path::new(&out).with_extension("kicad_sch"), emit.sch.as_bytes())?;
     for w in &emit.layout_warnings {
         eprintln!("layout-warning: {w}");
     }

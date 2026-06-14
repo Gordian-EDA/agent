@@ -20,7 +20,7 @@ fn power_symbol_value_names_the_net() {
     // Donor power:VCC renamed to a custom rail at R1 pin 1.
     w.add_power_symbol(&env, "power:VCC", "#PWR02", "RAIL_CUSTOM", [127.0, 59.69], 0.0).unwrap();
     // PWR_FLAG pin-coincident with the GND attach point (label-free attachment).
-    w.add_power_flag_at(&env, "#FLG01", [127.0, 67.31]).unwrap();
+    w.add_power_flag_at(&env, "#FLG01", [127.0, 67.31], 0.0).unwrap();
 
     let tmp = tempfile::tempdir().unwrap();
     let sch = tmp.path().join("spike.kicad_sch");
