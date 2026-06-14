@@ -6,7 +6,7 @@
 
 use kicad_bridge::cli::KicadCli;
 use kicad_bridge::env::KicadEnv;
-use sch_engine::emit::SchematicWriter;
+use sch_layout::emit::SchematicWriter;
 
 #[test]
 fn two_pins_same_net_name_are_electrically_connected() {

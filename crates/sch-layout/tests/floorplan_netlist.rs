@@ -19,7 +19,7 @@ use circuit_lang::provider::SymbolProvider;
 use kicad_bridge::cli::{KicadCli, Netlist};
 use kicad_bridge::env::KicadEnv;
 use kicad_bridge::provider::RealSymbolProvider;
-use sch_engine::floorplan::{self, LayoutIr};
+use sch_layout::floorplan::{self, LayoutIr};
 
 /// TIER 1 — the hand-tuned reference targets. Held to the FULL bar: electrically
 /// truthful AND zero layout warnings AND ERC-clean. These match the human

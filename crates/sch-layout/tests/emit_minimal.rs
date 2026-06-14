@@ -3,7 +3,7 @@
 
 use kicad_bridge::cli::KicadCli;
 use kicad_bridge::env::KicadEnv;
-use sch_engine::emit::SchematicWriter;
+use sch_layout::emit::SchematicWriter;
 
 #[test]
 fn emits_single_symbol_that_kicad_loads() {

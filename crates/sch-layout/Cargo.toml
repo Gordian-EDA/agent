@@ -1,10 +1,9 @@
 [package]
-name = "sch-engine"
+name = "sch-layout"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-sch-layout = { path = "../sch-layout" }
 circuit-lang = { path = "../circuit-lang" }
 kicad-bridge = { path = "../kicad-bridge" }
 kiutils_kicad.workspace = true

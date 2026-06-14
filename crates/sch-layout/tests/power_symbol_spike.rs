@@ -3,7 +3,7 @@
 
 use kicad_bridge::cli::KicadCli;
 use kicad_bridge::env::KicadEnv;
-use sch_engine::emit::SchematicWriter;
+use sch_layout::emit::SchematicWriter;
 
 #[test]
 fn power_symbol_value_names_the_net() {

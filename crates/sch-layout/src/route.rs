@@ -11,10 +11,10 @@
 
 use crate::emit::Dir;
 
-pub(crate) type Pt = [f64; 2];
+pub type Pt = [f64; 2];
 
 /// A polyline path of axis-aligned segments (consecutive points).
-pub(crate) type Path = Vec<Pt>;
+pub type Path = Vec<Pt>;
 
 /// Minimum lead length out of a pin before the first turn, mm.
 const LEAD_MM: f64 = 2.54;
@@ -76,7 +76,7 @@ pub(crate) fn elbow(a: Pt, dir_a: Dir, b: Pt) -> Path {
 }
 
 /// Routing obstacles, all coordinates sheet mm.
-pub(crate) struct RouteScene {
+pub struct RouteScene {
     /// Solid rects `[min_x, min_y, max_x, max_y]` (symbol bodies): a path
     /// segment may not pass through one (edge-touching is tolerated).
     pub solids: Vec<[f64; 4]>,
@@ -183,7 +183,7 @@ fn path_len(p: &Path) -> f64 {
 /// valid path (ties: fewer bends, then smaller coordinates — deterministic).
 /// Returns None when nothing in the family fits — the caller falls back to
 /// label connectivity.
-pub(crate) fn route_edge(a: Pt, dir_a: Dir, b: Pt, net: &str, scene: &RouteScene) -> Option<Path> {
+pub fn route_edge(a: Pt, dir_a: Dir, b: Pt, net: &str, scene: &RouteScene) -> Option<Path> {
     let quick = elbow(a, dir_a, b);
     if path_ok(&quick, net, scene) {
         return Some(quick);
@@ -268,7 +268,7 @@ pub(crate) fn route_edge(a: Pt, dir_a: Dir, b: Pt, net: &str, scene: &RouteScene
 
 /// Minimum-spanning-tree edges over terminals by Manhattan distance (Prim's,
 /// deterministic: ties broken by smaller terminal index).
-pub(crate) fn mst_edges(terminals: &[Pt]) -> Vec<(usize, usize)> {
+pub fn mst_edges(terminals: &[Pt]) -> Vec<(usize, usize)> {
     let n = terminals.len();
     if n < 2 {
         return Vec::new();
@@ -305,7 +305,7 @@ pub(crate) fn mst_edges(terminals: &[Pt]) -> Vec<(usize, usize)> {
 
 /// Junction dots for one net's emitted paths: every point where >= 3 segment
 /// ENDS meet (a T or X formed by deliberate same-net joins).
-pub(crate) fn junction_points(paths: &[Path]) -> Vec<Pt> {
+pub fn junction_points(paths: &[Path]) -> Vec<Pt> {
     let mut counts: std::collections::BTreeMap<(u64, u64), (Pt, usize)> =
         std::collections::BTreeMap::new();
     for path in paths {

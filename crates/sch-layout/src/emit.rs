@@ -769,7 +769,7 @@ impl SchematicWriter {
     /// and segment as occupancy so a later differing-net stub cannot then collide
     /// with it. The pin-endpoint fallback reproduces the proven pre-stub
     /// connectivity, so retraction only ever removes an accidental merge.
-    pub(crate) fn retract_colliding_stubs(&mut self) {
+    pub fn retract_colliding_stubs(&mut self) {
         // Sentinel "net" for no-connect anchors: a stub on a no-connect pin is
         // still a wrong attachment, so treat it as a foreign net.
         const NC: &str = "\0no_connect";
@@ -896,7 +896,7 @@ impl SchematicWriter {
     /// (a retract-chosen label has no stub on the re-run and becomes a fixed
     /// obstacle at the same position), so reconcile may run it early to lint
     /// solved geometry and `finish`'s own call is a harmless re-run.
-    pub(crate) fn solve_text_positions(&mut self) {
+    pub fn solve_text_positions(&mut self) {
         use crate::textplace::{
             choose, label_box, pin_text_boxes, rotated_half_extents, text_width, wire_box,
             BBox, Movable, ObKind, Obstacle,
@@ -1167,7 +1167,7 @@ impl SchematicWriter {
     /// foreign-anchor model as `retract_colliding_stubs` (power origins,
     /// no-connects, label anchors); wire segments carry their net (the power
     /// sentinel for unattributed stubs/risers).
-    pub(crate) fn route_scene(&self) -> crate::route::RouteScene {
+    pub fn route_scene(&self) -> crate::route::RouteScene {
         use crate::textplace::rotated_half_extents;
         const NC: &str = "\0no_connect";
         const PWR: &str = "\0power_wire";
@@ -1208,7 +1208,7 @@ impl SchematicWriter {
     }
 
     /// Wire segments attributed to `net` (for junction counting at taps).
-    pub(crate) fn wire_segments_on_net(&self, net: &str) -> Vec<([f64; 2], [f64; 2])> {
+    pub fn wire_segments_on_net(&self, net: &str) -> Vec<([f64; 2], [f64; 2])> {
         self.wires
             .iter()
             .filter(|w| w.net.as_deref() == Some(net))
@@ -1630,7 +1630,7 @@ fn escape_sexpr_string(s: &str) -> String {
 /// Snapping can produce `-0.0`, which `f64`'s `Display` renders as `-0`. That
 /// is harmless to KiCAD but breaks byte-for-byte determinism (the same logical
 /// position could render as `0` or `-0`), so we collapse negative zero here.
-pub(crate) fn fmt_coord(v: f64) -> f64 {
+pub fn fmt_coord(v: f64) -> f64 {
     if v == 0.0 { 0.0 } else { v }
 }
 
@@ -1648,7 +1648,7 @@ pub(crate) fn fmt_coord(v: f64) -> f64 {
 /// by anchor-pin slotting (offset + [`quantize_dir`]). A pin *name* can match
 /// several physical pins, so a `Vec` is returned. The offset is
 /// `transform_offset(pin.at, 0.0, false)`, i.e. `[pin.x, -pin.y]`.
-pub(crate) fn pin_end0(env: &KicadEnv, lib_id: &str, pin: &str) -> io::Result<Vec<[f64; 2]>> {
+pub fn pin_end0(env: &KicadEnv, lib_id: &str, pin: &str) -> io::Result<Vec<[f64; 2]>> {
     let geom = SymbolGeometry::load(env, lib_id)?;
     let matches: Vec<&PinGeom> = {
         let by_number: Vec<&PinGeom> = geom.pins.iter().filter(|p| p.number == pin).collect();
@@ -1672,7 +1672,7 @@ pub(crate) fn pin_end0(env: &KicadEnv, lib_id: &str, pin: &str) -> io::Result<Ve
 /// orientation (mirror → rotate → sheet Y-flip) exactly like the endpoint, then
 /// snapped to the dominant axis. Shared by [`SchematicWriter::pin_dirs`] (stub
 /// directions) and anchor-pin slotting (cluster join sides).
-pub(crate) fn quantize_dir(pin_angle: f64, inst_angle: f64, mirror: bool) -> Dir {
+pub fn quantize_dir(pin_angle: f64, inst_angle: f64, mirror: bool) -> Dir {
     let theta = (pin_angle + 180.0).to_radians();
     let (mut dx, dy) = (theta.cos(), theta.sin());
     if mirror {
@@ -1745,7 +1745,7 @@ fn pin_endpoint(pin: &PinGeom, inst_at: [f64; 2], inst_angle: f64, mirror: bool)
 /// is collinear with the segment's constant axis and within its varying-axis
 /// span. Endpoints count as "on" — a stub end meeting a foreign wire's endpoint
 /// is just as much a connection as meeting its middle.
-pub(crate) fn point_on_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> bool {
+pub fn point_on_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> bool {
     const EPS: f64 = 1e-6;
     let within = |v: f64, lo: f64, hi: f64| v >= lo - EPS && v <= hi + EPS;
     if (a[0] - b[0]).abs() < EPS {

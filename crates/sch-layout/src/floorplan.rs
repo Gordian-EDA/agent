@@ -26,7 +26,7 @@ use kicad_bridge::provider::RealSymbolProvider;
 use serde::{Deserialize, Serialize};
 
 use crate::emit::{Dir, SchematicWriter};
-use crate::reconcile::EmitOutput;
+use crate::output::EmitOutput;
 
 // ---------------------------------------------------------------------------
 // The Layout IR — the four-key language the subagent emits.

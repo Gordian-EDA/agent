@@ -17,11 +17,11 @@
 //! - **Synthesized** components (sugar-expanded decouple caps etc.) have no
 //!   stable author-assigned refdes — the kernel may renumber them — so they are
 //!   matched by `(ap_parent, ap_role, ap_index)`, read from the hidden `ap_*`
-//!   properties [`crate::emit`] writes on every symbol. This makes the file
+//!   properties [`sch_layout::emit`] writes on every symbol. This makes the file
 //!   self-describing: the prior emit recorded the identity, so reconcile can
 //!   recover it without re-running the kernel against the old YAML.
 //!
-//! The `ap_*` tags are written by [`crate::emit::SchematicWriter::add_symbol_full`]
+//! The `ap_*` tags are written by [`sch_layout::emit::SchematicWriter::add_symbol_full`]
 //! for *every* emitted symbol, so a schematic emitted by a prior version of this
 //! engine round-trips cleanly here.
 
@@ -36,9 +36,9 @@ use kiutils_kicad::SchematicFile;
 
 use indexmap::IndexMap;
 
-use crate::emit::{Dir, SchematicWriter};
-use crate::grammar::is_ground;
-use crate::grid::snap_point;
+use sch_layout::emit::{Dir, SchematicWriter};
+use sch_layout::grammar::is_ground;
+use sch_layout::grid::snap_point;
 use crate::place;
 
 /// Stub wire length from a pin to its power symbol, in mm (3 grid units = 3.81mm).
@@ -90,46 +90,12 @@ fn power_lib_id(net: &str, provider: &RealSymbolProvider) -> String {
     }
 }
 
-/// Property key for the block a component belongs to.
-pub const AP_BLOCK: &str = "ap_block";
-/// Property key for a synthesized component's role (absent / `"authored"` for
-/// authored parts).
-pub const AP_ROLE: &str = "ap_role";
-/// Property key for a synthesized component's parent refdes.
-pub const AP_PARENT: &str = "ap_parent";
-/// Property key for a synthesized component's index within `(parent, role)`.
-pub const AP_INDEX: &str = "ap_index";
-
-/// Property key recording the layout-revision a component was placed under.
-pub const AP_LAYOUT_REV: &str = "ap_layout_rev";
-
-/// The `ap_role` value written for authored components.
-pub const ROLE_AUTHORED: &str = "authored";
-
-/// Which prior placements to discard on re-emit.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum Relayout {
-    /// Honor every surviving prior placement whose layout-rev still matches.
-    #[default]
-    None,
-    /// Discard all prior placements; the placer lays out everything fresh.
-    All,
-    /// Discard prior placements only for the named blocks.
-    Blocks(std::collections::BTreeSet<String>),
-}
-
-impl Relayout {
-    /// Whether prior placements for `block_name` must be discarded (placer lays
-    /// the block out fresh). The single source of the relayout decision — shared
-    /// by `resolve_placement` and the cluster-origin loop.
-    fn forces(&self, block_name: &str) -> bool {
-        match self {
-            Relayout::All => true,
-            Relayout::Blocks(names) => names.contains(block_name),
-            Relayout::None => false,
-        }
-    }
-}
+// Identity-property keys and the `Relayout` discard policy now live in
+// `sch_layout::output` (shared with the modern engine); re-imported here.
+use sch_layout::{AP_BLOCK, AP_INDEX, AP_LAYOUT_REV, AP_PARENT, AP_ROLE, ROLE_AUTHORED};
+// Re-exported so `sch_engine::reconcile::{EmitOutput, Relayout}` keep resolving
+// for downstream callers (e.g. the agent crate).
+pub use sch_layout::{EmitOutput, Relayout};
 
 /// The layout revision of one component: a content hash of its
 /// placement-relevant inputs. Membership is deliberately NOT hashed — adding a
@@ -142,7 +108,7 @@ impl Relayout {
 fn layout_rev(
     block: &circuit_lang::model::Block,
     comp: &circuit_lang::model::Component,
-    cluster: Option<&crate::grammar::Cluster>,
+    cluster: Option<&sch_layout::grammar::Cluster>,
 ) -> String {
     // The placer token re-places everything once when the placement ALGORITHM
     // changes (anchor-centric placer = v2); bump it on future placer rewrites.
@@ -156,7 +122,7 @@ fn layout_rev(
         use std::fmt::Write as _;
         let _ = write!(desc, "|cluster={}", grammar_rev(c));
     }
-    crate::ids::stable_uuid("layout_rev", &desc)
+    sch_layout::ids::stable_uuid("layout_rev", &desc)
 }
 
 /// The layout-rev of a cluster member: its component `layout_rev` extended with
@@ -165,7 +131,7 @@ fn layout_rev(
 fn member_rev(
     block: &circuit_lang::model::Block,
     comp: &circuit_lang::model::Component,
-    cluster: &crate::grammar::Cluster,
+    cluster: &sch_layout::grammar::Cluster,
 ) -> String {
     layout_rev(block, comp, Some(cluster))
 }
@@ -175,7 +141,7 @@ fn member_rev(
 /// preserving edits). Hashed, and thus triggering a re-place:
 ///   - each chain's class, plus every link's refdes and its `(a_net -> b_net)`;
 ///   - each bank's `(a_net, b_net)` plus its member list.
-pub fn grammar_rev(cluster: &crate::grammar::Cluster) -> String {
+pub fn grammar_rev(cluster: &sch_layout::grammar::Cluster) -> String {
     use std::fmt::Write as _;
     let mut desc = String::new();
     for c in &cluster.chains {
@@ -187,7 +153,7 @@ pub fn grammar_rev(cluster: &crate::grammar::Cluster) -> String {
     for b in &cluster.banks {
         let _ = write!(desc, "bank[{}/{}]:{:?}|", b.a_net, b.b_net, b.members);
     }
-    crate::ids::stable_uuid("grammar_rev", &desc)
+    sch_layout::ids::stable_uuid("grammar_rev", &desc)
 }
 
 /// The reconciled placement of one component: its emitted position/angle/uuid,
@@ -412,27 +378,15 @@ fn tempfile_with(text: &str) -> io::Result<tempfile::NamedTempFile> {
     Ok(tmp)
 }
 
-/// The rendered schematic plus deterministic readability findings.
-pub struct EmitOutput {
-    /// The assembled `.kicad_sch` document text.
-    pub sch: String,
-    /// One human-readable warning per overlapping symbol/label pair (empty when
-    /// the layout is clean). A side-channel only: it does not alter `sch`.
-    pub layout_warnings: Vec<String>,
-    /// Per-block count of components re-placed this emit (rev changed or a
-    /// `Relayout` forced it). Empty when every surviving placement was preserved.
-    pub relayout_blocks: std::collections::BTreeMap<String, usize>,
-}
-
 /// All grammar-derived emission inputs, built once per emit and shared by the
 /// placer, the rigid-member component loop, and cluster decoration.
 pub(crate) struct GrammarInputs {
     pub sizes: place::SizeMap,
-    pub graphs: IndexMap<String, crate::grammar::BlockGraph>,
+    pub graphs: IndexMap<String, sch_layout::grammar::BlockGraph>,
     /// Per-block cluster geometry, indexed parallel to `graphs[block].clusters`
     /// by cluster index `ci`: `geoms[block][ci]` is the geometry of
     /// `graphs[block].clusters[ci]`.
-    pub geoms: IndexMap<String, Vec<crate::cluster_geom::ClusterGeom>>,
+    pub geoms: IndexMap<String, Vec<sch_layout::cluster_geom::ClusterGeom>>,
     /// Angle-0 sheet endpoint + outward direction of each anchor pin, keyed by
     /// `(anchor refdes, pin)`, used to slot clusters against their anchor pins.
     pub anchor_pin_ends: place::AnchorPinEnds,
@@ -492,11 +446,11 @@ pub(crate) fn build_grammar_inputs(env: &KicadEnv, design: &Design) -> GrammarIn
     }
 
     // 2. Per-block grammar analysis.
-    let mut graphs: IndexMap<String, crate::grammar::BlockGraph> = IndexMap::new();
+    let mut graphs: IndexMap<String, sch_layout::grammar::BlockGraph> = IndexMap::new();
     for block_name in design.blocks.keys() {
         graphs.insert(
             block_name.clone(),
-            crate::grammar::analyze(design, block_name, &provider),
+            sch_layout::grammar::analyze(design, block_name, &provider),
         );
     }
 
@@ -513,7 +467,7 @@ pub(crate) fn build_grammar_inputs(env: &KicadEnv, design: &Design) -> GrammarIn
     }
     let pin_cb = |refdes: &str, pin: &str| -> Option<[f64; 2]> {
         let part = refdes_part.get(refdes)?;
-        crate::emit::pin_end0(env, part, pin)
+        sch_layout::emit::pin_end0(env, part, pin)
             .ok()
             .and_then(|ends| ends.into_iter().next())
     };
@@ -529,10 +483,10 @@ pub(crate) fn build_grammar_inputs(env: &KicadEnv, design: &Design) -> GrammarIn
     // 5. Per-cluster geometry. `labeled` = nets that must carry exactly one net
     //    label in this block: external, anchor-tapped, or multi-way (>2 chain
     //    pins) signal nets, minus power nets.
-    let mut geoms: IndexMap<String, Vec<crate::cluster_geom::ClusterGeom>> = IndexMap::new();
+    let mut geoms: IndexMap<String, Vec<sch_layout::cluster_geom::ClusterGeom>> = IndexMap::new();
     for (block_name, g) in &graphs {
         let block = &design.blocks[block_name.as_str()];
-        let uses = crate::grammar::net_uses(design, block_name, &provider);
+        let uses = sch_layout::grammar::net_uses(design, block_name, &provider);
         let mut labeled: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for (net, u) in &uses {
             if power_nets.contains(net) {
@@ -556,7 +510,7 @@ pub(crate) fn build_grammar_inputs(env: &KicadEnv, design: &Design) -> GrammarIn
             .clusters
             .iter()
             .map(|c| {
-                crate::cluster_geom::layout_cluster(
+                sch_layout::cluster_geom::layout_cluster(
                     c,
                     block,
                     &labeled,
@@ -582,7 +536,7 @@ pub(crate) fn build_grammar_inputs(env: &KicadEnv, design: &Design) -> GrammarIn
                 let Some(comp) = block.components.get(aref.as_str()) else {
                     continue;
                 };
-                let Ok(ends) = crate::emit::pin_end0(env, &comp.part, apin) else {
+                let Ok(ends) = sch_layout::emit::pin_end0(env, &comp.part, apin) else {
                     continue;
                 };
                 let Some(&off) = ends.first() else { continue };
@@ -596,7 +550,7 @@ pub(crate) fn build_grammar_inputs(env: &KicadEnv, design: &Design) -> GrammarIn
                     .find(|p| p.number == *apin)
                     .or_else(|| geom.pins.iter().find(|p| p.name == *apin));
                 let Some(pg) = pg else { continue };
-                let dir = crate::emit::quantize_dir(pg.angle, 0.0, false);
+                let dir = sch_layout::emit::quantize_dir(pg.angle, 0.0, false);
                 anchor_pin_ends.insert(key, (off, dir));
             }
         }
@@ -880,7 +834,7 @@ pub fn emit_design_reconciled(
         .joins
         .iter()
         .map(|(pin, _, _)| {
-            let p = crate::grid::snap_point(*pin);
+            let p = sch_layout::grid::snap_point(*pin);
             (p[0].to_bits(), p[1].to_bits())
         })
         .collect();
@@ -1073,7 +1027,7 @@ pub fn emit_design_reconciled(
                 .unwrap_or_default();
 
             // Terminals: signal pin endpoints (with outward dir) + cluster taps.
-            let mut terminals: Vec<([f64; 2], Option<crate::emit::Dir>)> = Vec::new();
+            let mut terminals: Vec<([f64; 2], Option<sch_layout::emit::Dir>)> = Vec::new();
             for (_, _, p, dir) in &sigs {
                 terminals.push((*p, Some(*dir)));
             }
@@ -1088,12 +1042,12 @@ pub fn emit_design_reconciled(
                 .unwrap_or(false);
             let routable = single_block && terminals.len() >= 2;
 
-            let mut routed_paths: Option<Vec<crate::route::Path>> = None;
+            let mut routed_paths: Option<Vec<sch_layout::Path>> = None;
             if routable {
                 let pts: Vec<[f64; 2]> = terminals.iter().map(|t| t.0).collect();
-                let mut paths: Vec<crate::route::Path> = Vec::new();
+                let mut paths: Vec<sch_layout::Path> = Vec::new();
                 let mut ok = true;
-                for (i, j) in crate::route::mst_edges(&pts) {
+                for (i, j) in sch_layout::mst_edges(&pts) {
                     // Prefer starting from a terminal with a known outward
                     // dir (a pin); synthesize a direction toward the target
                     // otherwise.
@@ -1105,19 +1059,19 @@ pub fn emit_design_reconciled(
                                 >= (pts[j][1] - pts[i][1]).abs()
                             {
                                 if pts[j][0] >= pts[i][0] {
-                                    crate::emit::Dir::East
+                                    sch_layout::emit::Dir::East
                                 } else {
-                                    crate::emit::Dir::West
+                                    sch_layout::emit::Dir::West
                                 }
                             } else if pts[j][1] >= pts[i][1] {
-                                crate::emit::Dir::South
+                                sch_layout::emit::Dir::South
                             } else {
-                                crate::emit::Dir::North
+                                sch_layout::emit::Dir::North
                             };
                             (pts[i], d, pts[j])
                         }
                     };
-                    match crate::route::route_edge(a, da, b, net, &scene) {
+                    match sch_layout::route_edge(a, da, b, net, &scene) {
                         Some(p) => paths.push(p),
                         None => {
                             ok = false;
@@ -1140,11 +1094,11 @@ pub fn emit_design_reconciled(
                     }
                     // Junction dots: 3-way meets among the routed paths plus
                     // the net's pre-existing wires (cluster wiring at taps).
-                    let mut all: Vec<crate::route::Path> = paths.clone();
+                    let mut all: Vec<sch_layout::Path> = paths.clone();
                     for (a, b) in w.wire_segments_on_net(net) {
                         all.push(vec![a, b]);
                     }
-                    for j in crate::route::junction_points(&all) {
+                    for j in sch_layout::junction_points(&all) {
                         w.add_junction(j);
                     }
                     // A route ending INSIDE an existing same-net wire is a T
@@ -1154,7 +1108,7 @@ pub fn emit_design_reconciled(
                             let ends = ((p[0] - a[0]).abs() < 1e-6
                                 && (p[1] - a[1]).abs() < 1e-6)
                                 || ((p[0] - b[0]).abs() < 1e-6 && (p[1] - b[1]).abs() < 1e-6);
-                            !ends && crate::emit::point_on_segment(*p, *a, *b)
+                            !ends && sch_layout::emit::point_on_segment(*p, *a, *b)
                         });
                         if interior {
                             w.add_junction(*p);
@@ -1362,11 +1316,11 @@ fn record_power_role(
 #[derive(Default)]
 struct PendingNets {
     /// net -> signal endpoints: (refdes, pin, snapped endpoint, outward dir).
-    signals: std::collections::BTreeMap<String, Vec<(String, String, [f64; 2], crate::emit::Dir)>>,
+    signals: std::collections::BTreeMap<String, Vec<(String, String, [f64; 2], sch_layout::emit::Dir)>>,
     /// net -> cluster label specs: (tap point on the cluster wiring, label
     /// position, label dir). The tap is the net's wire terminal; the label
     /// stub wire tap->pos is only drawn when the net falls back to labels.
-    cluster_labels: std::collections::BTreeMap<String, Vec<([f64; 2], [f64; 2], crate::emit::Dir)>>,
+    cluster_labels: std::collections::BTreeMap<String, Vec<([f64; 2], [f64; 2], sch_layout::emit::Dir)>>,
     /// net -> blocks touched (routing is intra-block only).
     blocks: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
 }
@@ -1398,7 +1352,7 @@ fn emit_pin(
                 emit_power_pin(w, env, provider, refdes, pin, net, power_attach)
             } else {
                 for (ep, dir) in w.pin_dirs(env, refdes, pin)? {
-                    let p = crate::grid::snap_point(ep);
+                    let p = sch_layout::grid::snap_point(ep);
                     // A pin already wired by a placement join needs neither
                     // label nor route: the join wire connects it to the
                     // cluster, whose single label names the net.

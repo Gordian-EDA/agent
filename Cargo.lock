@@ -1452,6 +1452,21 @@ dependencies = [
  "indexmap",
  "kicad-bridge",
  "kiutils_kicad",
+ "sch-layout",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "sch-layout"
+version = "0.1.0"
+dependencies = [
+ "circuit-lang",
+ "indexmap",
+ "kicad-bridge",
+ "kiutils_kicad",
  "serde",
  "serde_json",
  "tempfile",

@@ -12,15 +12,15 @@ use circuit_lang::Design;
 use circuit_lang::model::{Block, Edge, Origin, RefDes};
 use indexmap::IndexMap;
 
-use crate::cluster_geom::ClusterGeom;
-use crate::emit::Dir;
-use crate::grammar::BlockGraph;
-use crate::grid::snap_point;
+use sch_layout::cluster_geom::ClusterGeom;
+use sch_layout::emit::Dir;
+use sch_layout::grammar::BlockGraph;
+use sch_layout::grid::snap_point;
 
 /// Computed positions for every component, keyed by refdes.
 ///
 /// Coordinates are in KiCAD sheet millimetres (x grows right, y grows *down*)
-/// and every value lands on the 1.27 mm grid via [`crate::grid::snap_point`].
+/// and every value lands on the 1.27 mm grid via [`sch_layout::grid::snap_point`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Layout {
     pub positions: IndexMap<RefDes, [f64; 2]>,
@@ -264,7 +264,7 @@ fn layout_block_anchor_centric(
                 pin_ends,
                 &cluster_nets,
                 is_vplus,
-                &crate::grammar::is_ground,
+                &sch_layout::grammar::is_ground,
             )
         };
         // Primary tap: first tap with a known pin end on a placed anchor AND a
@@ -367,7 +367,7 @@ fn layout_block_anchor_centric(
                 Side::North => Side::North,
                 Side::South => Side::South,
                 // E/W cluster that couldn't slot: rail polarity decides.
-                _ => side_of_tapless(&cluster_nets, is_vplus, &crate::grammar::is_ground),
+                _ => side_of_tapless(&cluster_nets, is_vplus, &sch_layout::grammar::is_ground),
             };
             let (start_y, dir_y, cursor) = match ns {
                 Side::North => (
@@ -558,7 +558,7 @@ pub fn place_with_anchor_pins(
             .get(n)
             .map(|a| a.power)
             .unwrap_or(false)
-            && !crate::grammar::is_ground(n)
+            && !sch_layout::grammar::is_ground(n)
     };
 
     // Pre-compute each block's layout plan once; reuse below for both
@@ -836,7 +836,7 @@ pub fn place_with_anchor_pins(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grammar::BlockGraph;
+    use sch_layout::grammar::BlockGraph;
     use circuit_lang::PinType;
     use circuit_lang::model::Edge;
 
@@ -867,9 +867,9 @@ mod tests {
     /// given pin-end function (shared by cluster-placement tests).
     fn build_test_geoms(
         design: &Design,
-        graphs: &IndexMap<String, crate::grammar::BlockGraph>,
+        graphs: &IndexMap<String, sch_layout::grammar::BlockGraph>,
         pins: &dyn Fn(&str, &str) -> Option<[f64; 2]>,
-    ) -> IndexMap<String, Vec<crate::cluster_geom::ClusterGeom>> {
+    ) -> IndexMap<String, Vec<sch_layout::cluster_geom::ClusterGeom>> {
         graphs
             .iter()
             .map(|(n, g)| {
@@ -877,7 +877,7 @@ mod tests {
                     .clusters
                     .iter()
                     .map(|c| {
-                        crate::cluster_geom::layout_cluster(
+                        sch_layout::cluster_geom::layout_cluster(
                             c,
                             &design.blocks[n],
                             &std::collections::BTreeSet::new(),
@@ -998,7 +998,7 @@ blocks:
 
         // All positions sit on the 1.27 mm grid.
         for pos in layout.positions.values() {
-            assert_eq!(*pos, crate::grid::snap_point(*pos), "off-grid: {pos:?}");
+            assert_eq!(*pos, sch_layout::grid::snap_point(*pos), "off-grid: {pos:?}");
         }
 
         // No two components overlap (bbox check with margins).
@@ -1031,7 +1031,7 @@ blocks:
         let graphs: IndexMap<String, BlockGraph> = design
             .blocks
             .keys()
-            .map(|n| (n.clone(), crate::grammar::analyze(&design, n, &provider)))
+            .map(|n| (n.clone(), sch_layout::grammar::analyze(&design, n, &provider)))
             .collect();
         let mock_pins = |_: &str, pin: &str| match pin {
             "1" => Some([0.0, -3.81]),
@@ -1051,7 +1051,7 @@ blocks:
             .1;
         assert_eq!(
             layout.positions["C1"],
-            crate::grid::snap_point([origin[0] + local_c1[0], origin[1] + local_c1[1]])
+            sch_layout::grid::snap_point([origin[0] + local_c1[0], origin[1] + local_c1[1]])
         );
         assert!(layout.angles.contains_key("C1"));
     }
@@ -1083,7 +1083,7 @@ blocks:
         let graphs: IndexMap<String, BlockGraph> = design
             .blocks
             .keys()
-            .map(|n| (n.clone(), crate::grammar::analyze(&design, n, &place_test_provider())))
+            .map(|n| (n.clone(), sch_layout::grammar::analyze(&design, n, &place_test_provider())))
             .collect();
         let layout = place(&design, &sizes, &graphs, &IndexMap::new());
         let (u1, u2) = (layout.positions["U1"], layout.positions["U2"]);
@@ -1124,7 +1124,7 @@ blocks:
         let graphs: IndexMap<String, BlockGraph> = design
             .blocks
             .keys()
-            .map(|n| (n.clone(), crate::grammar::analyze(&design, n, &provider)))
+            .map(|n| (n.clone(), sch_layout::grammar::analyze(&design, n, &provider)))
             .collect();
         let mock_pins = |_: &str, pin: &str| match pin {
             "1" => Some([0.0, -3.81]),
@@ -1215,10 +1215,10 @@ blocks:
 ",
         );
         let provider = place_test_provider();
-        let graphs: IndexMap<String, crate::grammar::BlockGraph> = design
+        let graphs: IndexMap<String, sch_layout::grammar::BlockGraph> = design
             .blocks
             .keys()
-            .map(|n| (n.clone(), crate::grammar::analyze(&design, n, &provider)))
+            .map(|n| (n.clone(), sch_layout::grammar::analyze(&design, n, &provider)))
             .collect();
         assert_eq!(graphs["a"].clusters[0].anchor_taps.len(), 1);
 
@@ -1232,7 +1232,7 @@ blocks:
         let mut pin_ends = AnchorPinEnds::new();
         pin_ends.insert(
             ("U1".to_string(), "A".to_string()),
-            ([10.16, 0.0], crate::emit::Dir::East),
+            ([10.16, 0.0], sch_layout::emit::Dir::East),
         );
 
         let layout = place_with_anchor_pins(&design, &SizeMap::new(), &graphs, &geoms, &pin_ends);

@@ -8,26 +8,22 @@
 //!   `Design` yields byte-identical output (spec §5.1).
 //! - [`grid`] — snapping coordinates onto KiCAD's 1.27 mm schematic grid.
 
-pub mod cluster_geom;
-pub mod emit;
-pub mod floorplan;
-pub mod grammar;
-pub mod grid;
-pub mod ids;
-pub mod lift;
 pub mod place;
 pub mod reconcile;
-mod route;
-mod textplace;
 
 use std::io;
 
 use circuit_lang::Design;
 use kicad_bridge::env::KicadEnv;
 
+// The modern layout engine now lives in the `sch-layout` crate. Re-export its
+// modules and shared types so existing `sch_engine::{floorplan,emit,…}` and
+// `sch_engine::{EmitOutput,Relayout}` paths keep resolving for downstream code.
+pub use sch_layout::{
+    EmitOutput, Relayout, cluster_geom, emit, floorplan, grammar, grid, ids, lift,
+};
+
 pub use crate::reconcile::emit_design_reconciled;
-pub use crate::reconcile::EmitOutput;
-pub use crate::reconcile::Relayout;
 
 /// Test support: read/rewrite a symbol's `(at x y angle)` in emitted text by
 /// locating the `(property "Reference" "<refdes>"` block's parent symbol.
@@ -63,8 +59,8 @@ pub mod test_util {
         format!(
             "{}(at {} {} {}){}",
             &sch[..at_idx],
-            crate::emit::fmt_coord(new[0]),
-            crate::emit::fmt_coord(new[1]),
+            sch_layout::emit::fmt_coord(new[0]),
+            sch_layout::emit::fmt_coord(new[1]),
             angle,
             &sch[end..]
         )
