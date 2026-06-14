@@ -15,7 +15,7 @@
 //! All exact geometry is decided here; the LLM that emits the IR never sees a
 //! millimetre.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use circuit_lang::model::{Component, Design, PinTarget};
@@ -61,11 +61,37 @@ pub enum Side {
     Bottom,
 }
 
-/// A coarse, unitless placement cell. The engine maps columns/rows to mm.
+/// Orientation of a 2-pin part, stated as the direction its pins run — from its
+/// first connected net (pin 1) toward its second (pin 2). The engine works out
+/// the exact rotation from the symbol's own pin geometry, so the LLM never
+/// reasons about a symbol's native axis or KiCAD angles; it just says which way
+/// the part points. `down` (pin 1 on top, e.g. a divider leg from VCC down to
+/// GND) is the common default. ICs/connectors ignore this (they stay at 0°; use
+/// `mirror` to flip them left-to-right).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Orient {
+    /// Pin 1 at the bottom, pin 2 at the top.
+    Up,
+    /// Pin 1 at the top, pin 2 at the bottom (the usual passive orientation).
+    #[default]
+    Down,
+    /// Pin 1 on the right, pin 2 on the left.
+    Left,
+    /// Pin 1 on the left, pin 2 on the right (a series element along the flow).
+    Right,
+}
+
+/// A coarse, unitless placement cell + orientation. The engine maps the
+/// (col,row) grid to mm — each column sized to its widest part, each row to its
+/// tallest — and places the symbol at the cell centre. `col` grows right, `row`
+/// grows down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
     pub col: i32,
     pub row: i32,
+    #[serde(default)]
+    pub orient: Orient,
 }
 
 /// The geometry-free floorplan. Four keys; everything else is inferred from
@@ -128,8 +154,8 @@ fn is_ground(net: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Spacing constants (mm). All on the 1.27 grid.
-const DX: f64 = 17.78; // column pitch (14 grid) — compact but leaves routing room
-const DLAYER: f64 = 16.51; // vertical layer pitch (13 grid)
+const COL_GAP: f64 = 6.35; // 5 grid — column channel (room for side-mounted value text)
+const ROW_GAP: f64 = 5.08; // 4 grid — slightly tighter vertical stack
 const MARGIN: f64 = 12.7;
 
 /// One placed component plus the data the compiler needs about it.
@@ -140,7 +166,6 @@ struct Item {
     geom: SymbolGeometry,
     /// (pin number, pin name, net or None for NC).
     pins: Vec<(String, String, Option<String>)>,
-    is_anchor: bool,
     at: [f64; 2],
     angle: f64,
 }
@@ -172,43 +197,57 @@ fn resolve_pins(comp: &Component, geom: &SymbolGeometry) -> Vec<(String, String,
 pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOutput> {
     let mut items = gather(env, design)?;
     let inc = incidence(&items);
-    let layers = layer_nets(&items, ir, &inc);
-    let max_layer = layers.values().copied().max().unwrap_or(1).max(1);
 
-    // Phase 1 — place anchors (ICs) from the IR's coarse cells.
-    place_anchors(&mut items, ir, max_layer);
+    // Which power nets need an ERC PWR_FLAG: a power-INPUT pin (or a declared
+    // rail) with no power-OUTPUT pin driving it is "undriven". Computed up front
+    // so it can feed both the refinement scorer and the final emission.
+    let needs_flag = compute_needs_flag(env, &items, ir);
 
-    // Phase 2 — read each anchor pin's true sheet position/direction. A
-    // throwaway writer applies the same placement transform the final emit
-    // uses; passives are then placed relative to these (translation-invariant,
-    // so the later `normalize` shift stays consistent).
-    let apins = {
-        let mut probe = SchematicWriter::new();
-        for it in items.iter().filter(|i| i.is_anchor) {
-            probe.add_symbol(env, &it.part, &it.refdes, &it.value, it.at, it.angle)?;
-            if ir.mirror.contains(&it.refdes) {
-                probe.set_mirror_last();
-            }
-        }
-        anchor_pin_map(&probe, env, &items)?
-    };
-
-    // Phase 3 — place passives relative to anchor pins / rail regions.
-    place_passives(&mut items, ir, &layers, max_layer, &apins);
+    // Placement: start from the LLM's coarse (col,row,orient) grid, then let the
+    // refinement loop nudge the satellites (anchors stay put) to a tidier wiring
+    // — fewer label fallbacks, crossings, and junctions — judged on the ACTUAL
+    // routed result. Finally render the cells to mm as a sized table.
+    let mut cells = assign_cells(&items, ir);
+    if std::env::var("NO_REFINE").is_err() {
+        refine_cells(env, &mut items, &inc, ir, &needs_flag, &mut cells);
+    }
+    apply_cells(&mut items, &cells);
     normalize(&mut items);
+    // Slide satellites onto the axis of the pin they wire to (straight drops),
+    // which the column-centre table layout cannot express.
+    if std::env::var("NO_REFINE").is_err() {
+        align_to_pins(env, &mut items, &inc, ir, &needs_flag);
+    }
 
-    // Phase 4 — build the real schematic.
+    let w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag)?;
+    let warnings = w.layout_warnings();
+    let sch = w.finish();
+    Ok(EmitOutput { sch, layout_warnings: warnings, relayout_blocks: Default::default() })
+}
+
+/// Build the complete schematic writer for a placed `items`: symbols (+mirror),
+/// no-connects on unconnected pins, all wiring (rails + routed signals), and ERC
+/// flags. Shared by the final emission and the refinement scorer so both judge
+/// exactly the geometry that ships.
+fn build_writer(
+    env: &KicadEnv,
+    title: Option<&str>,
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+) -> io::Result<SchematicWriter> {
     let mut w = SchematicWriter::new();
-    if let Some(name) = &design.name {
+    if let Some(name) = title {
         w.set_title(name);
     }
-    for it in &items {
+    for it in items {
         w.add_symbol(env, &it.part, &it.refdes, &it.value, it.at, it.angle)?;
         if ir.mirror.contains(&it.refdes) {
             w.set_mirror_last();
         }
     }
-    for it in &items {
+    for it in items {
         for (num, _name, net) in &it.pins {
             if net.is_none() {
                 w.add_no_connect(env, &it.refdes, num)?;
@@ -216,13 +255,23 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
         }
     }
     let mut flag_points: BTreeMap<String, [f64; 2]> = BTreeMap::new();
-    wire(env, &mut w, &items, &inc, ir, &mut flag_points)?;
+    wire(env, &mut w, items, inc, ir, needs_flag, &mut flag_points)?;
+    for net in needs_flag {
+        if let Some(at) = flag_points.get(net) {
+            w.add_power_flag_at(env, &format!("#FLG_{net}"), *at)?;
+        }
+    }
+    Ok(w)
+}
 
-    // ERC power flags: a net carrying a power-INPUT pin (or a declared rail)
-    // with no power-OUTPUT pin driving it is "undriven" — supply one PWR_FLAG.
+/// Power nets needing a PWR_FLAG: every power-input pin's net and every declared
+/// rail, minus any net already driven by a power-output pin (a regulator output,
+/// say). KiCAD flags an undriven power-input pin as an error, so each such net
+/// gets exactly one flag.
+fn compute_needs_flag(env: &KicadEnv, items: &[Item], ir: &LayoutIr) -> BTreeSet<String> {
     let provider = RealSymbolProvider::new(env.clone());
     let (mut driven, mut power_input) = (BTreeSet::new(), BTreeSet::new());
-    for it in &items {
+    for it in items {
         let Some(meta) = provider.symbol(&it.part) else { continue };
         for (num, _name, net) in &it.pins {
             if let (Some(net), Some(pm)) = (net, find_pin(&meta.pins, num)) {
@@ -243,32 +292,7 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     for net in &driven {
         needs_flag.remove(net);
     }
-    for net in &needs_flag {
-        if let Some(at) = flag_points.get(net) {
-            w.add_power_flag_at(env, &format!("#FLG_{net}"), *at)?;
-        }
-    }
-
-    let warnings = w.layout_warnings();
-    let sch = w.finish();
-    Ok(EmitOutput { sch, layout_warnings: warnings, relayout_blocks: Default::default() })
-}
-
-/// net → anchor-pin occurrences: (anchor refdes, sheet endpoint, outward dir).
-type AnchorPins = BTreeMap<String, Vec<(String, [f64; 2], Dir)>>;
-
-fn anchor_pin_map(w: &SchematicWriter, env: &KicadEnv, items: &[Item]) -> io::Result<AnchorPins> {
-    let mut map: AnchorPins = BTreeMap::new();
-    for it in items.iter().filter(|i| i.is_anchor) {
-        for (num, _name, net) in &it.pins {
-            if let Some(net) = net {
-                for (pos, dir) in w.pin_dirs(env, &it.refdes, num)? {
-                    map.entry(net.clone()).or_default().push((it.refdes.clone(), pos, dir));
-                }
-            }
-        }
-    }
-    Ok(map)
+    needs_flag
 }
 
 // ---------------------------------------------------------------------------
@@ -284,15 +308,12 @@ fn gather(env: &KicadEnv, design: &Design) -> io::Result<Vec<Item>> {
             }
             let geom = SymbolGeometry::load(env, &comp.part)?;
             let pins = resolve_pins(comp, &geom);
-            let connected = pins.iter().filter(|(_, _, n)| n.is_some()).count();
-            let is_anchor = geom.pins.len() >= 3 || connected >= 3;
             items.push(Item {
                 refdes: refdes.clone(),
                 part: comp.part.clone(),
                 value: comp.value.clone().unwrap_or_default(),
                 geom,
                 pins,
-                is_anchor,
                 at: [0.0, 0.0],
                 angle: 0.0,
             });
@@ -317,590 +338,657 @@ fn incidence(items: &[Item]) -> Incidence {
 }
 
 // ---------------------------------------------------------------------------
-// Placement.
+// Placement — the coarse (col,row,orient) grid rendered as a table.
 // ---------------------------------------------------------------------------
 
-/// x spacing per anchor cell column (leaves room for flanking passives).
-const ANCHOR_PITCH: f64 = 50.8;
-
-/// Place anchors (ICs) from the IR's coarse cells: col → x, row → y offset from
-/// the mid band. Anchors without a cell are ordered left-to-right.
-fn place_anchors(items: &mut [Item], ir: &LayoutIr, max_layer: i32) {
-    let mid_y = (max_layer as f64) * DLAYER / 2.0;
-    let mut next = 0i32;
-    for it in items.iter_mut().filter(|i| i.is_anchor) {
-        let cell = ir.place.get(&it.refdes).copied();
-        let col = cell.map(|c| c.col).unwrap_or_else(|| {
-            let c = next;
-            next += 1;
-            c
-        });
-        let row = cell.map(|c| c.row).unwrap_or(0);
-        it.at = [col as f64 * ANCHOR_PITCH, mid_y + row as f64 * DLAYER];
-        it.angle = 0.0;
-    }
-}
-
-/// Per-rail region: the anchor-pin centroid x and the outward growth direction.
-/// Flanking passives pack AWAY from the IC body: a West VI pin grows left, an
-/// East VO pin grows right, and a top/bottom rail pin grows toward whichever
-/// side of the chip centre it sits on (so two supply rails split left/right
-/// instead of piling their decoupling caps on one side).
-fn rail_regions(
-    apins: &AnchorPins,
-    anchor_cx: &BTreeMap<String, f64>,
-) -> (BTreeMap<String, f64>, BTreeMap<String, f64>) {
-    let mut x = BTreeMap::new();
-    let mut dir = BTreeMap::new();
-    for (net, pins) in apins {
-        let cx = pins.iter().map(|(_, p, _)| p[0]).sum::<f64>() / pins.len() as f64;
-        x.insert(net.clone(), cx);
-        let mut d = 0.0;
-        for (rd, p, dd) in pins {
-            match dd {
-                Dir::East => d += 1.0,
-                Dir::West => d -= 1.0,
-                _ => {
-                    if let Some(c) = anchor_cx.get(rd) {
-                        d += if p[0] >= *c { 1.0 } else { -1.0 };
-                    }
-                }
+/// The coarse cell each item occupies. `assign_cells` reads the IR (unplaced
+/// parts flow into spare columns on the right); the refinement loop perturbs
+/// these; then `apply_cells` turns them into mm.
+fn assign_cells(items: &[Item], ir: &LayoutIr) -> Vec<Cell> {
+    let max_col = ir.place.values().map(|c| c.col).max().unwrap_or(-1);
+    let mut spare = max_col + 1;
+    items
+        .iter()
+        .map(|it| match ir.place.get(&it.refdes) {
+            Some(c) => *c,
+            None => {
+                let c = spare;
+                spare += 1;
+                Cell { col: c, row: 0, orient: Orient::Down }
             }
-        }
-        dir.insert(net.clone(), if d < 0.0 { -1.0 } else { 1.0 });
-    }
-    (x, dir)
+        })
+        .collect()
 }
 
-/// Place every passive: pack rail-flanking parts into their rail's region,
-/// continue node strands in the same column, and lay the rest in free columns.
-fn place_passives(
-    items: &mut [Item],
-    ir: &LayoutIr,
-    layers: &BTreeMap<String, i32>,
-    max_layer: i32,
-    apins: &AnchorPins,
-) {
-    let anchor_cx: BTreeMap<String, f64> =
-        items.iter().filter(|i| i.is_anchor).map(|i| (i.refdes.clone(), i.at[0])).collect();
-    let (region_x, region_dir) = rail_regions(apins, &anchor_cx);
-    let layer_of = |n: &str| layers.get(n).copied().unwrap_or(0);
-    let passives: Vec<usize> = items
+/// Render `cells` to mm: each column sized to its widest member and each row to
+/// its tallest, every part at its cell centre — aligned, overlap-free, and as
+/// tight as the parts allow.
+fn apply_cells(items: &mut [Item], cells: &[Cell]) {
+    let angles: Vec<f64> =
+        items.iter().zip(cells).map(|(it, c)| orient_angle(&it.geom, c.orient)).collect();
+
+    // Rotation-aware footprint (a quarter-turn swaps width and height).
+    let dims: Vec<(f64, f64)> = items
         .iter()
-        .enumerate()
-        .filter(|(_, it)| !it.is_anchor)
-        .map(|(i, _)| i)
-        .collect();
-
-    // Resolve nets-with-pin-numbers for a passive.
-    let nets_of = |it: &Item| -> Vec<(String, String)> {
-        it.pins
-            .iter()
-            .filter_map(|(num, _n, net)| net.clone().map(|nn| (num.clone(), nn)))
-            .collect()
-    };
-
-    let mut placed_x: BTreeMap<usize, f64> = BTreeMap::new();
-    let mut cursor: BTreeMap<String, i32> = BTreeMap::new();
-
-    // Anchor x-extents, for placing flanking columns just outside the body.
-    let anchor_half: BTreeMap<String, (f64, f64)> = items
-        .iter()
-        .filter(|i| i.is_anchor)
-        .map(|i| (i.refdes.clone(), (i.at[0], i.geom.approx_size()[0] / 2.0)))
-        .collect();
-
-    // A passive is vertical when its two nets sit in different power layers.
-    // (A single-element port→rail feed is made horizontal by giving the feed
-    // port the rail's layer in `layer_nets`, so it falls out of this test.)
-    let is_vert = |nets: &[(String, String)]| -> bool {
-        layer_of(&nets[0].1) != layer_of(&nets[1].1)
-    };
-
-    // Orient + position a 2-pin part at column `x`, accounting for the symbol's
-    // native pin axis (R/C are vertical at angle 0; LED/D are horizontal). To
-    // draw a part *vertical* we leave a vertical symbol at 0/180 but rotate a
-    // horizontal one 90°, and vice-versa for *horizontal*.
-    let orient_at = |it: &mut Item, nets: &[(String, String)], x: f64, vertical: bool| {
-        let l1 = layer_of(&nets[0].1);
-        let l2 = layer_of(&nets[1].1);
-        let nat_vert = native_vertical(&it.geom);
-        if vertical {
-            let y = (l1.min(l2) as f64 + l1.max(l2) as f64) / 2.0 * DLAYER;
-            it.at = [x, y];
-            it.angle = if !nat_vert {
-                90.0
-            } else if l1 <= l2 {
-                0.0
+        .zip(&angles)
+        .map(|(it, &angle)| {
+            let s = it.geom.approx_size();
+            if (angle / 90.0).round() as i64 % 2 == 1 {
+                (s[1], s[0])
             } else {
-                180.0
-            };
-        } else {
-            it.at = [x, l1.min(l2) as f64 * DLAYER];
-            it.angle = if nat_vert { 90.0 } else { 0.0 };
-        }
-    };
-
-    // Which anchored *top* rail (if any) this passive flanks. Only top rails
-    // attract flanking columns; the bottom (GND) rail spans the whole sheet, so
-    // a GND pin must never pull a part out of its signal strand.
-    let flank_rail = |nets: &[(String, String)]| -> Option<String> {
-        nets.iter()
-            .map(|(_, n)| n.clone())
-            .filter(|n| region_x.contains_key(n) && ir.rails.get(n) == Some(&Band::Top))
-            .min_by_key(|n| layer_of(n))
-    };
-
-    // Anchor pin counts: when a part taps two ICs, the bigger one (more pins) is
-    // the main chip — place the part beside IT, not the connector.
-    let pincount: BTreeMap<String, usize> =
-        items.iter().filter(|i| i.is_anchor).map(|i| (i.refdes.clone(), i.geom.pins.len())).collect();
-
-    // Pass 0: anchor taps — a passive on an IC signal pin sits beside that pin.
-    // A series element (same power layer at both ends, e.g. a termination R)
-    // lies in-line with the pin at the pin's own row, one slot out; anything
-    // else falls back to a side column. Pullups/decoupling (touch a top rail)
-    // are left to the rail-flank pass.
-    let mut side_cursor: BTreeMap<(String, bool), i32> = BTreeMap::new();
-    let mut inline_cursor: BTreeMap<(String, i64), i32> = BTreeMap::new();
-    for &i in &passives {
-        let nets = nets_of(&items[i]);
-        if nets.len() != 2 {
-            continue;
-        }
-        // A part with a SIGNAL pin on an IC is tapped beside that pin (a pullup
-        // hugs its signal, not the rail region). Only pure decoupling — both
-        // pins on rails, no signal anchor pin — falls through to rail-flank.
-        // Tap pin: a non-rail net on an anchor pin; prefer the anchor with most pins.
-        let tap = nets
-            .iter()
-            .filter(|(_, n)| !ir.rails.contains_key(n))
-            .filter_map(|(_, n)| apins.get(n))
-            .flatten()
-            .max_by_key(|(rd, _, _)| pincount.get(rd).copied().unwrap_or(0))
-            .cloned();
-        let Some((anchor, pos, dir)) = tap else { continue };
-        // A part between two non-rail signals is a SERIES element (in-line with
-        // the pin), even if a pull-up gave one end a different power layer.
-        let series = !nets.iter().any(|(_, n)| ir.rails.contains_key(n));
-        let vertical = is_vert(&nets);
-        if matches!(dir, Dir::East | Dir::West) && series {
-            // Series element in-line with the pin, at its row, one slot out
-            // (further out for a second part tapping the same pin).
-            let half = part_half_span(&items[i].geom);
-            let sign = if dir == Dir::East { 1.0 } else { -1.0 };
-            let k = inline_cursor.entry((anchor.clone(), (pos[1] * 100.0) as i64)).or_insert(0);
-            let reach = half + 3.81 + (*k as f64) * (2.0 * half + 5.08);
-            *k += 1;
-            items[i].at = [crate::grid::snap(pos[0] + sign * reach), pos[1]];
-            items[i].angle = if native_vertical(&items[i].geom) { 90.0 } else { 0.0 };
-            placed_x.insert(i, items[i].at[0]);
-        } else if matches!(dir, Dir::East | Dir::West) {
-            // Vertical tap on a side pin (a pull-up to a rail, or a bypass cap to
-            // GND): hug the pin's column just outside the body, spanning toward
-            // its other net's band. Keeps it next to its pin, not in a far column.
-            let sign = if dir == Dir::East { 1.0 } else { -1.0 };
-            let x = crate::grid::snap(pos[0] + sign * 6.35);
-            orient_at(&mut items[i], &nets, x, vertical);
-            placed_x.insert(i, x);
-        } else {
-            // North/South pin: stack in a side column on the pin's side.
-            let (ax, ahw) = anchor_half.get(&anchor).copied().unwrap_or((pos[0], 5.08));
-            let right = pos[0] >= ax;
-            let k = side_cursor.entry((anchor.clone(), right)).or_insert(0);
-            *k += 1;
-            let x = if right { ax + ahw + (*k as f64) * DX } else { ax - ahw - (*k as f64) * DX };
-            orient_at(&mut items[i], &nets, x, vertical);
-            placed_x.insert(i, x);
-        }
-    }
-
-    // Pass 1a: vertical passives flanking an anchored rail (decoupling, output
-    // strands), packed away from the IC. 1b: horizontal feeds on the same rail.
-    for vertical_pass in [true, false] {
-        for &i in &passives {
-            if placed_x.contains_key(&i) {
-                continue;
+                (s[0], s[1])
             }
-            let nets = nets_of(&items[i]);
-            if nets.len() != 2 {
-                continue;
-            }
-            if is_vert(&nets) != vertical_pass {
-                continue;
-            }
-            if let Some(rail) = flank_rail(&nets) {
-                let k = cursor.entry(rail.clone()).or_insert(0);
-                *k += 1;
-                let x = region_x[&rail] + region_dir[&rail] * (*k as f64) * DX;
-                orient_at(&mut items[i], &nets, x, vertical_pass);
-                placed_x.insert(i, x);
-            }
-        }
-    }
-
-    // Pass 2: node-continuation strands — a passive sharing a private node with
-    // an already-placed passive sits in the same column (e.g. R2 below the LED).
-    loop {
-        let mut progress = false;
-        for &i in &passives {
-            if placed_x.contains_key(&i) {
-                continue;
-            }
-            let nets = nets_of(&items[i]);
-            if nets.len() != 2 {
-                continue;
-            }
-            let mut found = None;
-            for (_, net) in &nets {
-                if ir.rails.contains_key(net) {
-                    continue; // rails span horizontally; not a column anchor
-                }
-                for &j in &passives {
-                    if j != i && placed_x.contains_key(&j) && nets_of(&items[j]).iter().any(|(_, n)| n == net) {
-                        found = Some(placed_x[&j]);
-                        break;
-                    }
-                }
-                if found.is_some() {
-                    break;
-                }
-            }
-            if let Some(x) = found {
-                let v = is_vert(&nets);
-                orient_at(&mut items[i], &nets, x, v);
-                let placed_idxs: Vec<usize> = anchor_half
-                    .keys()
-                    .filter_map(|r| items.iter().position(|it| &it.refdes == r))
-                    .chain(placed_x.keys().copied())
-                    .collect();
-                nudge_clear(items, i, &placed_idxs);
-                placed_x.insert(i, x);
-                progress = true;
-            }
-        }
-        if !progress {
-            break;
-        }
-    }
-
-    // Pass 3: everything left (e.g. an IC-less divider) via vertical strands in
-    // free columns to the right of all placed content.
-    let leftover: Vec<usize> = passives.iter().copied().filter(|i| !placed_x.contains_key(i)).collect();
-    if !leftover.is_empty() {
-        let free_base = placed_x
-            .values()
-            .copied()
-            .chain(items.iter().filter(|i| i.is_anchor).map(|i| i.at[0]))
-            .fold(f64::NEG_INFINITY, f64::max);
-        let free_base = if free_base.is_finite() { free_base + DX } else { 0.0 };
-        let cols = assign_columns(items, layers, 0);
-        let mut placed_idxs: Vec<usize> = anchor_half
-            .keys()
-            .filter_map(|r| items.iter().position(|it| &it.refdes == r))
-            .chain(placed_x.keys().copied())
-            .collect();
-        for &i in &leftover {
-            let nets = nets_of(&items[i]);
-            if nets.len() == 2 {
-                let col = cols.get(&i).copied().unwrap_or(0);
-                let v = is_vert(&nets);
-                orient_at(&mut items[i], &nets, free_base + col as f64 * DX, v);
-            } else {
-                items[i].at = [free_base, (max_layer as f64) * DLAYER / 2.0];
-                items[i].angle = 0.0;
-            }
-            nudge_clear(items, i, &placed_idxs);
-            placed_idxs.push(i);
-        }
-    }
-
-    // Global de-overlap: separate overlapping passives without shoving them into
-    // the IC. Move the more-movable part (a cap before a pin-aligned series R) to
-    // the nearest free column on whichever side has room.
-    deoverlap(items, &passives);
-}
-
-/// Separate overlapping passives by relocating the *movable* one (a cap / any
-/// vertical part — a horizontal pin-aligned series R must keep its row) to the
-/// nearest column, scanning both sides, that clears EVERY other part including
-/// the ICs. Scanning both directions and requiring a fully-clear spot avoids
-/// the cascade that shoving rightward caused.
-fn deoverlap(items: &mut [Item], passives: &[usize]) {
-    let overlaps_any = |items: &[Item], i: usize| -> bool {
-        let fi = footprint(&items[i]);
-        items.iter().enumerate().any(|(j, _)| j != i && rects_overlap(fi, footprint(&items[j])))
-    };
-    for _ in 0..10 {
-        let mut moved = false;
-        for &i in passives {
-            if !overlaps_any(items, i) {
-                continue;
-            }
-            // Only relocate vertical parts; a horizontal series R stays on its
-            // pin's row (the router will reach it).
-            let vertical = ((items[i].angle / 90.0).round() as i64).rem_euclid(2) == 0;
-            if !vertical {
-                continue;
-            }
-            let orig = items[i].at;
-            let mut best: Option<f64> = None;
-            'search: for step in 1..=16 {
-                for sign in [1.0_f64, -1.0] {
-                    let x = crate::grid::snap(orig[0] + sign * step as f64 * DX);
-                    items[i].at[0] = x;
-                    if !overlaps_any(items, i) {
-                        best = Some(x);
-                        break 'search;
-                    }
-                }
-            }
-            items[i].at = orig;
-            if let Some(x) = best {
-                items[i].at[0] = x;
-                moved = true;
-            }
-        }
-        if !moved {
-            break;
-        }
-    }
-}
-
-/// Two connected nets of a passive `idx`, as (net, layer), or None if not 2-pin.
-fn passive_nets(item: &Item) -> Option<Vec<String>> {
-    let nets: Vec<String> = item.pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
-    (nets.len() == 2).then_some(nets)
-}
-
-/// An item's axis-aligned footprint `[min_x,min_y,max_x,max_y]` (body extents,
-/// rotation-aware), padded so neighbours keep a little air.
-fn footprint(it: &Item) -> [f64; 4] {
-    let s = it.geom.approx_size();
-    let quarter_turn = ((it.angle / 90.0).round() as i64).rem_euclid(2) == 1;
-    let (hw, hh) = if quarter_turn { (s[1] / 2.0, s[0] / 2.0) } else { (s[0] / 2.0, s[1] / 2.0) };
-    [it.at[0] - hw, it.at[1] - hh, it.at[0] + hw, it.at[1] + hh]
-}
-
-fn rects_overlap(a: [f64; 4], b: [f64; 4]) -> bool {
-    a[0] < b[2] - 1e-6 && b[0] < a[2] - 1e-6 && a[1] < b[3] - 1e-6 && b[1] < a[3] - 1e-6
-}
-
-/// Bump item `i` downward (in `DLAYER` steps) until its footprint clears every
-/// already-placed item in `placed`, so the catch-all passes never stack parts
-/// (overlapping bodies block the router and force ugly label fallback).
-fn nudge_clear(items: &mut [Item], i: usize, placed: &[usize]) {
-    for _ in 0..24 {
-        let fi = footprint(&items[i]);
-        let hit = placed.iter().any(|&j| j != i && rects_overlap(fi, footprint(&items[j])));
-        if !hit {
-            return;
-        }
-        items[i].at[1] += DLAYER;
-    }
-}
-
-/// Half the pin-to-pin span of a 2-pin symbol (mm), for placing it one slot off
-/// a pin so its near lead lands just outside the IC.
-fn part_half_span(g: &SymbolGeometry) -> f64 {
-    let p: Vec<_> = g.pins.iter().collect();
-    if p.len() < 2 {
-        return 2.54;
-    }
-    let d = ((p[0].at[0] - p[1].at[0]).powi(2) + (p[0].at[1] - p[1].at[1]).powi(2)).sqrt();
-    (d / 2.0).max(2.54)
-}
-
-/// Whether a symbol's two pins are stacked vertically in its native (angle-0)
-/// orientation (true for Device:R/C; false for the horizontal Device:LED/D).
-fn native_vertical(g: &SymbolGeometry) -> bool {
-    let pins: Vec<_> = g.pins.iter().collect();
-    if pins.len() < 2 {
-        return true;
-    }
-    let dy = (pins[0].at[1] - pins[1].at[1]).abs();
-    let dx = (pins[0].at[0] - pins[1].at[0]).abs();
-    dy >= dx
-}
-
-/// Assign each passive a column index by walking vertical strands: series parts
-/// descending from a top rail share a column; leftover parts (shunts, isolated
-/// passives) get their own subsequent columns.
-fn assign_columns(
-    items: &[Item],
-    layers: &BTreeMap<String, i32>,
-    start_col: i32,
-) -> BTreeMap<usize, i32> {
-    // net -> passive indices on it.
-    let mut adj: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let passives: Vec<usize> = items
-        .iter()
-        .enumerate()
-        .filter(|(_, it)| !it.is_anchor)
-        .map(|(i, _)| i)
-        .collect();
-    for &i in &passives {
-        if let Some(nets) = passive_nets(&items[i]) {
-            for n in nets {
-                adj.entry(n).or_default().push(i);
-            }
-        }
-    }
-
-    let layer_of = |net: &str| layers.get(net).copied().unwrap_or(0);
-    let mut col: BTreeMap<usize, i32> = BTreeMap::new();
-    let mut next = start_col;
-
-    // Walk down a strand from `start`, assigning `column`.
-    let walk = |start: usize, column: i32, col: &mut BTreeMap<usize, i32>| {
-        let mut cur = start;
-        loop {
-            col.insert(cur, column);
-            let Some(nets) = passive_nets(&items[cur]) else { break };
-            // The lower (higher-layer) net is the one we descend through.
-            let lower = nets
-                .iter()
-                .max_by_key(|n| layer_of(n))
-                .cloned()
-                .unwrap_or_default();
-            let lower_layer = layer_of(&lower);
-            // Next unplaced passive on `lower` that continues strictly downward.
-            let nxt = adj.get(&lower).into_iter().flatten().copied().find(|&q| {
-                q != cur
-                    && !col.contains_key(&q)
-                    && passive_nets(&items[q])
-                        .map(|qn| qn.iter().any(|n| layer_of(n) > lower_layer))
-                        .unwrap_or(false)
-            });
-            match nxt {
-                Some(q) => cur = q,
-                None => break,
-            }
-        }
-    };
-
-    // Pass 1: strands rooted at a top rail (layer 0).
-    for &i in &passives {
-        if col.contains_key(&i) {
-            continue;
-        }
-        let on_top = passive_nets(&items[i])
-            .map(|nets| nets.iter().any(|n| layer_of(n) == 0))
-            .unwrap_or(false);
-        if on_top {
-            let c = next;
-            next += 1;
-            walk(i, c, &mut col);
-        }
-    }
-    // Pass 2: leftover passives (shunts, isolated) — each its own column.
-    for &i in &passives {
-        if !col.contains_key(&i) {
-            let c = next;
-            next += 1;
-            walk(i, c, &mut col);
-        }
-    }
-    col
-}
-
-/// Two-sided longest-path layering: power flows top (rails at 0) → bottom (rails
-/// at the max layer). A net's layer is its longest-path distance from a top
-/// rail; nets reachable only from the bottom (signal strands hanging to GND,
-/// e.g. an LED+resistor off an IC output) are layered up from the bottom so
-/// they spread into a vertical strand instead of collapsing onto one row.
-fn layer_nets(items: &[Item], ir: &LayoutIr, inc: &Incidence) -> BTreeMap<String, i32> {
-    let edges: Vec<(String, String)> = items
-        .iter()
-        .filter(|i| !i.is_anchor)
-        .filter_map(|it| {
-            let nets: Vec<String> = it.pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
-            (nets.len() == 2).then(|| (nets[0].clone(), nets[1].clone()))
         })
         .collect();
 
-    let top: Vec<String> = ir.rails.iter().filter(|(_, b)| **b == Band::Top).map(|(n, _)| n.clone()).collect();
-    let bottom: Vec<String> = ir.rails.iter().filter(|(_, b)| **b == Band::Bottom).map(|(n, _)| n.clone()).collect();
-    let rails_set: BTreeSet<&String> = ir.rails.keys().collect();
+    // Track sizes: a column is as wide as its widest part, a row as tall as its
+    // tallest.
+    let mut col_w: BTreeMap<i32, f64> = BTreeMap::new();
+    let mut row_h: BTreeMap<i32, f64> = BTreeMap::new();
+    for (c, &(w, h)) in cells.iter().zip(&dims) {
+        let e = col_w.entry(c.col).or_insert(0.0);
+        *e = e.max(w);
+        let e = row_h.entry(c.row).or_insert(0.0);
+        *e = e.max(h);
+    }
+    let col_x = track_centres(&col_w, COL_GAP);
+    let row_y = track_centres(&row_h, ROW_GAP);
 
-    // Shortest-path (BFS) distance from a seed set, NOT traversing *through* a
-    // rail (rails are barriers, so cycles via the GND/Vcc rails — decoupling
-    // caps, LED loops — don't inflate or diverge). A rail still receives a
-    // distance but its neighbours are not expanded from it.
-    let bfs = |seeds: &[String]| -> BTreeMap<String, i32> {
-        let mut d: BTreeMap<String, i32> = BTreeMap::new();
-        let mut q: VecDeque<String> = VecDeque::new();
-        for s in seeds {
-            d.insert(s.clone(), 0);
-            q.push_back(s.clone());
-        }
-        while let Some(u) = q.pop_front() {
-            let du = d[&u];
-            for (a, b) in &edges {
-                let v = if *a == u {
-                    b
-                } else if *b == u {
-                    a
-                } else {
-                    continue;
-                };
-                if d.contains_key(v) {
-                    continue;
-                }
-                d.insert(v.clone(), du + 1);
-                if !rails_set.contains(v) {
-                    q.push_back(v.clone());
-                }
-            }
-        }
-        d
+    for ((it, c), &angle) in items.iter_mut().zip(cells).zip(&angles) {
+        it.at = [crate::grid::snap(col_x[&c.col]), crate::grid::snap(row_y[&c.row])];
+        it.angle = angle;
+    }
+}
+
+/// Pack sized tracks (column widths or row heights) in ascending index order
+/// with `gap` between successive tracks, returning each index's centre. The
+/// grid is ordinal: a skipped index reserves no space (the LLM uses col/row for
+/// order and alignment, not metric spacing).
+fn track_centres(sizes: &BTreeMap<i32, f64>, gap: f64) -> BTreeMap<i32, f64> {
+    let mut out = BTreeMap::new();
+    let mut edge = 0.0;
+    for (&idx, &size) in sizes {
+        out.insert(idx, edge + size / 2.0);
+        edge += size + gap;
+    }
+    out
+}
+
+/// The KiCAD rotation (0/90/180/270) that makes a 2-pin part's pin1→pin2 axis
+/// point the way [`Orient`] asks, derived from the symbol's own pin geometry so
+/// it is correct whatever the part's native orientation. Multi-pin parts (ICs,
+/// connectors) are pre-oriented and stay at 0° (use `mirror` to flip them).
+///
+/// A local pin `(lx, ly)` maps to sheet offset `(rx, -ry)` after a CCW rotation
+/// by the instance angle (see `emit::transform_offset`), so increasing the angle
+/// turns the sheet-space axis clockwise. We test the four quarter-turns and pick
+/// the one whose resulting cardinal axis matches the request.
+fn orient_angle(geom: &SymbolGeometry, orient: Orient) -> f64 {
+    if geom.pins.len() != 2 {
+        return 0.0;
+    }
+    let pin = |n: &str| geom.pins.iter().find(|p| p.number == n);
+    let (p1, p2) = match (pin("1"), pin("2")) {
+        (Some(a), Some(b)) => (a, b),
+        _ => (&geom.pins[0], &geom.pins[1]),
     };
-
-    let d_top = bfs(&top);
-    let d_bot = bfs(&bottom);
-    // Max depth among non-bottom nets sets the bottom band one row deeper.
-    let max_top = d_top.iter().filter(|(n, _)| !bottom.contains(n)).map(|(_, &v)| v).max().unwrap_or(1).max(1);
-    let max_layer = max_top + 1;
-
-    let mut layer = BTreeMap::new();
-    for net in inc.keys() {
-        let l = if bottom.contains(net) {
-            max_layer
-        } else if let Some(&d) = d_top.get(net) {
-            d.min(max_layer - 1)
-        } else if let Some(&d) = d_bot.get(net) {
-            (max_layer - d).max(1)
-        } else {
-            max_layer / 2
-        };
-        layer.insert(net.clone(), l);
+    let (dx, dy) = (p2.at[0] - p1.at[0], p2.at[1] - p1.at[1]);
+    // Desired pin1→pin2 direction in sheet space (y grows downward).
+    let want = match orient {
+        Orient::Right => (1.0, 0.0),
+        Orient::Left => (-1.0, 0.0),
+        Orient::Down => (0.0, 1.0),
+        Orient::Up => (0.0, -1.0),
+    };
+    for deg in [0.0_f64, 90.0, 180.0, 270.0] {
+        let (s, c) = deg.to_radians().sin_cos();
+        let (sx, sy) = (dx * c - dy * s, -(dx * s + dy * c));
+        let card = if sx.abs() >= sy.abs() { (sx.signum(), 0.0) } else { (0.0, sy.signum()) };
+        if (card.0 - want.0).abs() < 0.5 && (card.1 - want.1).abs() < 0.5 {
+            return deg;
+        }
     }
+    0.0
+}
 
-    // A feed port — a port net joined to exactly one passive whose other end is
-    // a rail (e.g. 5V_BUS → F1 → 5V) — takes that rail's layer so its series
-    // element lays out horizontally as an edge feed, not a vertical span. A
-    // multi-connection port that is really an internal node (e.g. OUT) is left
-    // at its computed layer so its divider/strand stays vertical.
-    for port in ir.ports.keys() {
-        let touching: Vec<&String> = edges
-            .iter()
-            .filter_map(|(a, b)| {
-                if a == port {
-                    Some(b)
-                } else if b == port {
-                    Some(a)
+// ---------------------------------------------------------------------------
+// Refinement — nudge satellites for a tidier routed result (anchors fixed).
+// ---------------------------------------------------------------------------
+
+/// Hill-climb the satellite (2-pin) cells with the anchors held fixed, accepting
+/// only strict improvements to the routed-layout cost. Because every candidate
+/// is scored on the ACTUAL routing — not a placement proxy — the loop can never
+/// trade a clean wire for a hidden short or label fallback, and it can only
+/// improve on (or match) the starting placement. This is the "move and align
+/// until it looks good" step a human does after roughing in anchors + satellites.
+fn refine_cells(
+    env: &KicadEnv,
+    items: &mut [Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+    cells: &mut [Cell],
+) {
+    let satellites: Vec<usize> =
+        (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3).collect();
+    if satellites.is_empty() {
+        return;
+    }
+    // Anchor the search to the initial (LLM/human) placement: a satellite that
+    // strays far is penalised, so refinement makes LOCAL fixes (close a label
+    // fallback, uncross a pair) rather than globally relocating a part to a
+    // cheaper-but-nonsensical spot (a pull-up flung to the far corner).
+    let orig: Vec<Cell> = cells.to_vec();
+    let disp = |cs: &[Cell]| -> f64 {
+        // Gentle anti-thrash backstop only; the real positional anchor is the
+        // "stray" term in `layout_cost` (a satellite is pulled to the anchor pin
+        // it serves, which is far stronger and correctly placed).
+        const DISP_W: f64 = 1.0;
+        DISP_W
+            * satellites
+                .iter()
+                .map(|&i| {
+                    ((cs[i].col - orig[i].col).unsigned_abs()
+                        + (cs[i].row - orig[i].row).unsigned_abs()) as f64
+                })
+                .sum::<f64>()
+    };
+    let mut best = score_cells(env, items, inc, ir, needs_flag, cells) + disp(cells);
+    const MAX_ROUNDS: usize = 6;
+    for _ in 0..MAX_ROUNDS {
+        let mut improved = false;
+        // Single-part nudges: shift one satellite by one cell in any direction.
+        for &i in &satellites {
+            for cand in nudges(cells[i]) {
+                let prev = cells[i];
+                cells[i] = cand;
+                let c = score_cells(env, items, inc, ir, needs_flag, cells) + disp(cells);
+                if c + 0.5 < best {
+                    best = c;
+                    improved = true;
                 } else {
-                    None
+                    cells[i] = prev;
                 }
-            })
-            .collect();
-        if touching.len() == 1 && ir.rails.contains_key(touching[0]) {
-            if let Some(&rl) = layer.get(touching[0]) {
-                layer.insert(port.clone(), rl);
+            }
+        }
+        // Pairwise swaps: exchange two satellites' (col,row) to reorder them
+        // (keeps each part's own orientation).
+        for a in 0..satellites.len() {
+            for b in (a + 1)..satellites.len() {
+                let (i, j) = (satellites[a], satellites[b]);
+                let (ci, cj) = (cells[i], cells[j]);
+                cells[i] = Cell { col: cj.col, row: cj.row, orient: ci.orient };
+                cells[j] = Cell { col: ci.col, row: ci.row, orient: cj.orient };
+                let c = score_cells(env, items, inc, ir, needs_flag, cells) + disp(cells);
+                if c + 0.5 < best {
+                    best = c;
+                    improved = true;
+                } else {
+                    cells[i] = ci;
+                    cells[j] = cj;
+                }
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+}
+
+/// The four orthogonal one-cell shifts of `c`.
+fn nudges(c: Cell) -> [Cell; 4] {
+    [
+        Cell { col: c.col - 1, ..c },
+        Cell { col: c.col + 1, ..c },
+        Cell { row: c.row - 1, ..c },
+        Cell { row: c.row + 1, ..c },
+    ]
+}
+
+/// Apply `cells`, build the schematic, and return its routed-layout cost. Leaves
+/// `items` positioned per `cells` (the caller re-applies the chosen cells).
+fn score_cells(
+    env: &KicadEnv,
+    items: &mut [Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+    cells: &[Cell],
+) -> f64 {
+    // Two parts in one cell sit at the same point — an overlap, never wanted.
+    for i in 0..cells.len() {
+        for j in (i + 1)..cells.len() {
+            if cells[i].col == cells[j].col && cells[i].row == cells[j].row {
+                return f64::INFINITY;
             }
         }
     }
-    layer
+    apply_cells(items, cells);
+    // Match the real emit exactly (which normalizes before building): routing is
+    // not perfectly translation-invariant near the origin, so scoring the
+    // un-normalized layout would see phantom rail/lead touches.
+    normalize(items);
+    score_items(env, items, inc, ir, needs_flag)
+}
+
+/// Build and score the schematic for `items` exactly as placed (no cell layout).
+/// Used by the pin-alignment pass, which nudges raw positions.
+fn score_items(
+    env: &KicadEnv,
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+) -> f64 {
+    match build_writer(env, None, items, inc, ir, needs_flag) {
+        Ok(w) => layout_cost(env, &w, items, inc, ir),
+        Err(_) => f64::INFINITY,
+    }
+}
+
+/// Pin-alignment polish: slide each satellite onto the AXIS of the signal pin it
+/// wires to, so the connecting wire drops (or runs) straight instead of jogging
+/// out from a column centre — a vertical part aligns its x to the pin, a
+/// horizontal part its y. The coarse cell grid can only place a part at a column
+/// centre, so this sub-column offset is done here on raw positions, kept only
+/// when it lowers cost (a straighter, shorter wire) and overlaps nothing.
+fn align_to_pins(
+    env: &KicadEnv,
+    items: &mut [Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+) {
+    let Ok(w0) = build_writer(env, None, items, inc, ir, needs_flag) else { return };
+    // Per satellite: is it vertical, and where is its signal-pin target?
+    let mut plans: Vec<(usize, bool, [f64; 2])> = Vec::new();
+    for (si, s) in items.iter().enumerate() {
+        if s.geom.pins.len() != 2 {
+            continue;
+        }
+        let pos = |n: &str| w0.pin_dirs(env, &s.refdes, n).ok().and_then(|v| v.first().map(|x| x.0));
+        let (Some(p0), Some(p1)) = (pos(&s.geom.pins[0].number), pos(&s.geom.pins[1].number)) else {
+            continue;
+        };
+        let vertical = (p0[1] - p1[1]).abs() >= (p0[0] - p1[0]).abs();
+        // No rail fallback: only parts with a real signal pin are aligned, so a
+        // decoupling cap (rail-only) is left where the table layout spread it.
+        if let Some(t) = signal_anchor_centroid(env, &w0, items, inc, ir, s, false) {
+            plans.push((si, vertical, t));
+        }
+    }
+    drop(w0);
+
+    let mut best = score_items(env, items, inc, ir, needs_flag);
+    for (si, vertical, target) in plans {
+        // Walk one grid step at a time TOWARD the pin axis, keeping the cheapest
+        // clear position found. Walking (not jumping) means that when the exact
+        // axis is taken — two pull-ups for adjacent IC pins want the same x — the
+        // part still slides as close as it can instead of staying put.
+        let axis = if vertical { 0 } else { 1 };
+        let orig = items[si].at;
+        let goal = crate::grid::snap(target[axis]);
+        let dir = (goal - orig[axis]).signum();
+        if dir == 0.0 {
+            continue;
+        }
+        let (mut best_pos, mut best_cost) = (orig, best);
+        let mut p = orig;
+        for _ in 0..24 {
+            p[axis] += dir * 1.27;
+            if (p[axis] - goal) * dir > EPS || overlaps_any(items, si, p) {
+                break;
+            }
+            items[si].at = p;
+            let c = score_items(env, items, inc, ir, needs_flag);
+            if c + 0.5 < best_cost {
+                best_cost = c;
+                best_pos = p;
+            }
+        }
+        items[si].at = best_pos;
+        best = best_cost;
+    }
+}
+
+/// Whether placing item `si` at `at` would overlap any other item's body (the
+/// pin-extent rect — `approx_size` shrunk to the connection points, the same
+/// extent the router treats as solid).
+fn overlaps_any(items: &[Item], si: usize, at: [f64; 2]) -> bool {
+    let rect = |it: &Item, at: [f64; 2]| -> [f64; 4] {
+        let s = it.geom.approx_size();
+        let quarter = ((it.angle / 90.0).round() as i64).rem_euclid(2) == 1;
+        let (w, h) = if quarter { (s[1], s[0]) } else { (s[0], s[1]) };
+        let (hw, hh) = ((w / 2.0 - 2.54).max(1.27), (h / 2.0 - 2.54).max(1.27));
+        [at[0] - hw, at[1] - hh, at[0] + hw, at[1] + hh]
+    };
+    let a = rect(&items[si], at);
+    items.iter().enumerate().any(|(j, it)| {
+        j != si && {
+            let b = rect(it, it.at);
+            a[0] < b[2] - EPS && b[0] < a[2] - EPS && a[1] < b[3] - EPS && b[1] < a[3] - EPS
+        }
+    })
+}
+
+/// Weighted aesthetic cost of a built schematic. Label fallbacks and shorts
+/// dominate (they are correctness/quality failures); then visual wire crossings,
+/// then junction dots, with total wire length as a light tiebreaker.
+fn layout_cost(
+    env: &KicadEnv,
+    w: &SchematicWriter,
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+) -> f64 {
+    let fallbacks = w.signal_label_count();
+    let junctions = w.junction_count();
+    let wires = w.wires_with_nets();
+    let length: f64 =
+        wires.iter().map(|(a, b, _)| (a[0] - b[0]).abs() + (a[1] - b[1]).abs()).sum();
+    let crossings = count_crossings(&wires);
+    let merges = count_merges(&wires, &w.junction_positions()) + count_shorts(env, w, items, inc, &wires);
+    // Each 2-pin part's BODY AXIS (its pin-to-pin line) joins the closeness check
+    // as an obstacle, so "a foreign wire hugging a resistor's body" is the same
+    // parallel-proximity test as "a wire hugging a wire" — one rule, no rect math.
+    // A series part's own wire lies ON its axis (distance 0) and is ignored.
+    let bodies: Vec<([f64; 2], [f64; 2])> = items
+        .iter()
+        .filter(|i| i.geom.pins.len() == 2)
+        .filter_map(|it| {
+            let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
+            match (w.pin_dirs(env, &it.refdes, n0), w.pin_dirs(env, &it.refdes, n1)) {
+                (Ok(d0), Ok(d1)) => match (d0.first(), d1.first()) {
+                    (Some((a, _)), Some((b, _))) => Some((*a, *b)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        })
+        .collect();
+    let congestion = count_congestion(&w.junction_positions()) + count_close_wires(&wires, &bodies);
+    let stray = count_stray(env, w, items, inc, ir);
+    // Merges/shorts are hard correctness failures (a rail-to-rail short lowers
+    // length+junctions, so without this the hill-climb would happily create
+    // one); fallbacks degrade a wire to a label; then crossings; then CONGESTION
+    // (junction dots packed against each other — the "dot knot" / wires-collapse-
+    // into-a-resistor look, which length-minimisation otherwise rewards); then
+    // junctions and length. The big coefficients keep correctness off the table.
+    2000.0 * merges as f64
+        + 1000.0 * fallbacks as f64
+        + 5.0 * crossings as f64
+        + 7.0 * congestion as f64
+        + 1.0 * junctions as f64
+        + 0.4 * stray
+        + 0.15 * length
+}
+
+/// "Stay near your pin": total Manhattan distance from each satellite (2-pin
+/// part) to the centroid of the ANCHOR pins it wires to. A pull-up belongs by the
+/// SIGNAL pin it pulls, not the rail, so signal (non-rail) anchor pins are used
+/// when present; only a part that touches no signal anchor (a decoupling cap, two
+/// rails) falls back to its rail anchor pins (→ the IC power pin). This stops a
+/// satellite drifting across the chip to dodge a spacing penalty. A part with no
+/// anchor pin at all (e.g. an IC-less divider) contributes nothing.
+fn count_stray(
+    env: &KicadEnv,
+    w: &SchematicWriter,
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+) -> f64 {
+    items
+        .iter()
+        .filter(|s| s.geom.pins.len() < 3)
+        .filter_map(|s| {
+            signal_anchor_centroid(env, w, items, inc, ir, s, true)
+                .map(|c| (s.at[0] - c[0]).abs() + (s.at[1] - c[1]).abs())
+        })
+        .sum()
+}
+
+/// Centroid of the anchor pins a satellite `s` should sit by: its SIGNAL
+/// (non-rail) anchor pins if it has any (a pull-up belongs by the pin it pulls).
+/// With `rail_fallback`, a part touching no signal anchor (a decoupling cap, two
+/// rails) falls back to its rail anchor pins (→ the IC power pin) — wanted for
+/// the gentle stray pull, but NOT for hard pin-alignment (which would snap every
+/// decoupling cap onto one power pin and cram them). `None` if no anchor applies.
+fn signal_anchor_centroid(
+    env: &KicadEnv,
+    w: &SchematicWriter,
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    s: &Item,
+    rail_fallback: bool,
+) -> Option<[f64; 2]> {
+    let is_anchor = |i: usize| items[i].geom.pins.len() >= 3;
+    let collect = |rails: bool| -> ([f64; 2], f64) {
+        let (mut sum, mut cnt) = ([0.0f64, 0.0f64], 0.0f64);
+        for (_, _, net) in &s.pins {
+            let Some(net) = net else { continue };
+            if ir.rails.contains_key(net) != rails {
+                continue;
+            }
+            for (j, num) in inc.get(net).into_iter().flatten() {
+                if is_anchor(*j) {
+                    if let Ok(eps) = w.pin_dirs(env, &items[*j].refdes, num) {
+                        for (p, _) in &eps {
+                            sum[0] += p[0];
+                            sum[1] += p[1];
+                            cnt += 1.0;
+                        }
+                    }
+                }
+            }
+        }
+        (sum, cnt)
+    };
+    let (sum, cnt) = match collect(false) {
+        (_, 0.0) if rail_fallback => collect(true),
+        signal => signal,
+    };
+    (cnt > 0.0).then(|| [sum[0] / cnt, sum[1] / cnt])
+}
+
+/// Two parallel axis-aligned segments running too close for a sustained length —
+/// nearly on top of each other, which reads as cramped. Returns true past the
+/// per-call `near` cutoff: wire-vs-wire uses 1 grid (a 2-grid gap, e.g. risers
+/// off adjacent IC pins, is fine), but wire-vs-body uses a wider cutoff because a
+/// part's body has width, so a wire hugging the *edge* sits ~2 grid off the
+/// pin-to-pin *centre line*.
+fn parallel_too_close(a1: [f64; 2], a2: [f64; 2], b1: [f64; 2], b2: [f64; 2], near: f64) -> bool {
+    const MIN_OVERLAP: f64 = 6.35; // only a sustained parallel run reads as cramped
+    let horiz = |a: &[f64; 2], b: &[f64; 2]| (a[1] - b[1]).abs() < EPS;
+    let vert = |a: &[f64; 2], b: &[f64; 2]| (a[0] - b[0]).abs() < EPS;
+    let (perp, lo, hi) = if horiz(&a1, &a2) && horiz(&b1, &b2) {
+        (
+            (a1[1] - b1[1]).abs(),
+            a1[0].min(a2[0]).max(b1[0].min(b2[0])),
+            a1[0].max(a2[0]).min(b1[0].max(b2[0])),
+        )
+    } else if vert(&a1, &a2) && vert(&b1, &b2) {
+        (
+            (a1[0] - b1[0]).abs(),
+            a1[1].min(a2[1]).max(b1[1].min(b2[1])),
+            a1[1].max(a2[1]).min(b1[1].max(b2[1])),
+        )
+    } else {
+        return false;
+    };
+    perp > EPS && perp < near - EPS && hi - lo > MIN_OVERLAP
+}
+
+/// Cramped-spacing count: parallel wires hugging each other (1-grid cutoff) AND
+/// wires hugging a 2-pin part's body axis (wider 1.5-grid cutoff — see
+/// [`parallel_too_close`]). One rule covers wire-vs-wire and wire-vs-body.
+fn count_close_wires(
+    wires: &[([f64; 2], [f64; 2], Option<String>)],
+    bodies: &[([f64; 2], [f64; 2])],
+) -> usize {
+    const NEAR_WIRE: f64 = 2.54; // wires closer than 2 grid (i.e. 1 grid) are too close
+    const NEAR_BODY: f64 = 3.81; // a body's width pushes the hug ~1 grid further off centre
+    let mut n = 0;
+    for i in 0..wires.len() {
+        for j in (i + 1)..wires.len() {
+            let (a1, a2, _) = wires[i];
+            let (b1, b2, _) = wires[j];
+            if parallel_too_close(a1, a2, b1, b2, NEAR_WIRE) {
+                n += 1;
+            }
+        }
+    }
+    for (a1, a2, _) in wires {
+        for (b1, b2) in bodies {
+            if parallel_too_close(*a1, *a2, *b1, *b2, NEAR_BODY) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// Congestion: pairs of junction dots crammed within `TIGHT` mm of each other —
+/// the cramped node a human would spread out (e.g. a pull-up's tap landing right
+/// on a series resistor's pin). Unavoidable IC-pin-spacing pairs add a constant
+/// baseline that does not bias the search; only the avoidable cramming varies.
+fn count_congestion(junctions: &[[f64; 2]]) -> usize {
+    const TIGHT: f64 = 3.81;
+    let mut n = 0;
+    for i in 0..junctions.len() {
+        for j in (i + 1)..junctions.len() {
+            let (dx, dy) = (junctions[i][0] - junctions[j][0], junctions[i][1] - junctions[j][1]);
+            if dx.hypot(dy) < TIGHT - EPS {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// Net merges KiCAD would actually make: two DIFFERENT-net wires that (a)
+/// collinear-overlap, or (b) both pass through a junction dot. KiCAD does NOT
+/// fuse a wire end (or pin) landing on another wire's interior without a
+/// junction, so — unlike the router's stricter `segments_conflict` — those near
+/// misses are excluded here, else the scorer chases phantom shorts on a layout
+/// ERC calls clean.
+fn count_merges(
+    wires: &[([f64; 2], [f64; 2], Option<String>)],
+    junctions: &[[f64; 2]],
+) -> usize {
+    let mut n = 0;
+    // (a) Collinear overlaps.
+    for i in 0..wires.len() {
+        for j in (i + 1)..wires.len() {
+            let (a1, a2, an) = &wires[i];
+            let (b1, b2, bn) = &wires[j];
+            if an == bn {
+                continue;
+            }
+            if collinear_overlap(*a1, *a2, *b1, *b2) {
+                n += 1;
+            }
+        }
+    }
+    // (b) Junctions touching more than one net (a junction fuses every wire
+    // through it — if those carry different nets, that is a real short).
+    for &jp in junctions {
+        let mut nets: BTreeSet<&str> = BTreeSet::new();
+        for (a, b, wn) in wires {
+            if let Some(net) = wn {
+                if crate::emit::point_on_segment(jp, *a, *b) {
+                    nets.insert(net.as_str());
+                }
+            }
+        }
+        if nets.len() > 1 {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Two axis-aligned segments that lie on the same line and overlap (KiCAD fuses
+/// these). Endpoint-only touches of perpendicular segments are NOT included.
+fn collinear_overlap(a1: [f64; 2], a2: [f64; 2], b1: [f64; 2], b2: [f64; 2]) -> bool {
+    let a_h = (a1[1] - a2[1]).abs() < EPS;
+    let b_h = (b1[1] - b2[1]).abs() < EPS;
+    let a_v = (a1[0] - a2[0]).abs() < EPS;
+    let b_v = (b1[0] - b2[0]).abs() < EPS;
+    if a_h && b_h && (a1[1] - b1[1]).abs() < EPS {
+        let (alo, ahi) = (a1[0].min(a2[0]), a1[0].max(a2[0]));
+        let (blo, bhi) = (b1[0].min(b2[0]), b1[0].max(b2[0]));
+        alo < bhi - EPS && blo < ahi - EPS
+    } else if a_v && b_v && (a1[0] - b1[0]).abs() < EPS {
+        let (alo, ahi) = (a1[1].min(a2[1]), a1[1].max(a2[1]));
+        let (blo, bhi) = (b1[1].min(b2[1]), b1[1].max(b2[1]));
+        alo < bhi - EPS && blo < ahi - EPS
+    } else {
+        false
+    }
+}
+
+/// Visual wire crossings: pairs of different-net segments, one horizontal and
+/// one vertical, intersecting at a point interior to both (KiCAD draws no
+/// junction there — the wires just cross over).
+fn count_crossings(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
+    let horiz = |a: &[f64; 2], b: &[f64; 2]| (a[1] - b[1]).abs() < EPS;
+    let vert = |a: &[f64; 2], b: &[f64; 2]| (a[0] - b[0]).abs() < EPS;
+    let interior = |v: f64, lo: f64, hi: f64| v > lo + EPS && v < hi - EPS;
+    let mut n = 0;
+    for i in 0..wires.len() {
+        for j in (i + 1)..wires.len() {
+            let (a1, a2, an) = &wires[i];
+            let (b1, b2, bn) = &wires[j];
+            if an == bn {
+                continue; // same net: a deliberate join, not a crossing
+            }
+            let (h, v) = if horiz(a1, a2) && vert(b1, b2) {
+                ((a1, a2), (b1, b2))
+            } else if vert(a1, a2) && horiz(b1, b2) {
+                ((b1, b2), (a1, a2))
+            } else {
+                continue; // parallel (collinear overlap is a same/foreign issue, not a crossing)
+            };
+            let (hy, vx) = (h.0[1], v.0[0]);
+            let (hx_lo, hx_hi) = (h.0[0].min(h.1[0]), h.0[0].max(h.1[0]));
+            let (vy_lo, vy_hi) = (v.0[1].min(v.1[1]), v.0[1].max(v.1[1]));
+            if interior(vx, hx_lo, hx_hi) && interior(hy, vy_lo, vy_hi) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// Placement shorts: a pin whose connection point coincides exactly with the
+/// ENDPOINT of a different net's wire (two wire/pin terminals at one point fuse
+/// in KiCAD). A pin merely sitting on a wire's interior is NOT a connection
+/// without a junction, so — matching `count_merges` — those are excluded.
+fn count_shorts(
+    env: &KicadEnv,
+    w: &SchematicWriter,
+    items: &[Item],
+    inc: &Incidence,
+    wires: &[([f64; 2], [f64; 2], Option<String>)],
+) -> usize {
+    let mut n = 0;
+    for (net, pins) in inc {
+        for (i, num) in pins {
+            let Ok(eps) = w.pin_dirs(env, &items[*i].refdes, num) else { continue };
+            for (ep, _) in eps {
+                for (a, b, wn) in wires {
+                    if wn.as_deref() == Some(net.as_str()) {
+                        continue; // own net
+                    }
+                    if near(ep, *a) || near(ep, *b) {
+                        n += 1;
+                    }
+                }
+            }
+        }
+    }
+    n
 }
 
 fn normalize(items: &mut [Item]) {
@@ -929,6 +1017,7 @@ fn wire(
     items: &[Item],
     inc: &Incidence,
     ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
     flag_points: &mut BTreeMap<String, [f64; 2]>,
 ) -> io::Result<()> {
     let refdes_of = |i: usize| items[i].refdes.clone();
@@ -957,7 +1046,8 @@ fn wire(
     // in the writer before we build the routing scene.
     for (net, eps) in &net_eps {
         if let Some(band) = ir.rails.get(net) {
-            emit_rail(env, w, net, eps, *band, rail_y_map.get(net).copied(), flag_points)?;
+            let flag = needs_flag.contains(net).then_some(&mut *flag_points);
+            emit_rail(env, w, net, eps, *band, rail_y_map.get(net).copied(), flag)?;
         }
     }
 
@@ -1008,9 +1098,12 @@ fn route_signal(
     });
 
     if terms.len() < 2 {
-        // Lone pin (no port): a stubbed name label, not a floating pin.
+        // A lone pin with no port is an intentionally-unconnected signal (e.g. an
+        // unused connector RTS/CTS): mark it no-connect — the professional way to
+        // show "deliberately dangling" — rather than leaving a floating named
+        // label that ERC flags as an isolated pin.
         if let Some((i, num)) = inc.get(net).and_then(|p| p.first()) {
-            w.add_signal_label(env, &items[*i].refdes, num, net)?;
+            w.add_no_connect(env, &items[*i].refdes, num)?;
         }
         return Ok(());
     }
@@ -1020,7 +1113,7 @@ fn route_signal(
     // elbows whose overlapping collinear runs over-junction the node.
     if route_local_tee(w, net, &terms, scene) {
         if let (Some(side), Some(pi)) = (port, port_idx) {
-            w.add_cluster_label(net, terms[pi].0, side_dir(side));
+            w.add_cluster_label(net, terms[pi].0, side_dir(side), true);
         }
         return Ok(());
     }
@@ -1080,7 +1173,7 @@ fn route_signal(
     }
     // The port label sits at the virtual exit terminal, facing the edge.
     if let (Some(side), Some(pi)) = (port, port_idx) {
-        w.add_cluster_label(net, terms[pi].0, side_dir(side));
+        w.add_cluster_label(net, terms[pi].0, side_dir(side), true);
     }
     Ok(())
 }
@@ -1289,7 +1382,7 @@ fn emit_rail(
     eps: &[([f64; 2], Dir)],
     _band: Band,
     rail_y: Option<f64>,
-    flag_points: &mut BTreeMap<String, [f64; 2]>,
+    flag: Option<&mut BTreeMap<String, [f64; 2]>>,
 ) -> io::Result<()> {
     let lib = power_lib_id(net);
     let Some(rail_y) = rail_y.filter(|_| eps.len() >= 3) else {
@@ -1298,12 +1391,12 @@ fn emit_rail(
             let refdes = format!("#PWR_{net}_{idx}");
             w.add_power_symbol(env, &lib, &refdes, net, *ep, angle)?;
         }
-        // The ERC flag hangs off a short horizontal stub from the first pin, so
-        // it sits clear of the power symbol and the component body.
-        if let Some((ep, _)) = eps.first() {
+        // One ERC flag per net (KiCAD treats an undriven power-input pin as an
+        // error here). Hang it off a short horizontal stub into open space so the
+        // PWR_FLAG diamond never overlaps the power symbol or a component body.
+        if let (Some(flag_points), Some((ep, _))) = (flag, eps.first()) {
             let stub = [ep[0] - 5.08, ep[1]];
             w.add_wire_on_net(*ep, stub, net);
-            w.add_junction(*ep);
             flag_points.entry(net.to_string()).or_insert(stub);
         }
         return Ok(());
@@ -1332,9 +1425,14 @@ fn emit_rail(
     // rail's symbol sits above, a bottom rail's below — both at angle 0.
     let flag_at = [span_lo, rail_y];
     w.add_power_symbol(env, &lib, &format!("#PWR_{net}"), net, flag_at, 0.0)?;
-    // The ERC flag attaches to the far (right) end of the rail wire — on the
-    // net, clear of the power symbol at the left end.
-    flag_points.entry(net.to_string()).or_insert([span_hi, rail_y]);
+    // The ERC flag (only when this net needs one) tucks just left of the power
+    // symbol on a short rail extension — at the supply's entry, the way an
+    // engineer marks it. Driven rails get no extension, so nothing dangles.
+    if let Some(flag_points) = flag {
+        let flag_stub = [span_lo - 5.08, rail_y];
+        w.add_wire_on_net([span_lo, rail_y], flag_stub, net);
+        flag_points.entry(net.to_string()).or_insert(flag_stub);
+    }
     Ok(())
 }
 

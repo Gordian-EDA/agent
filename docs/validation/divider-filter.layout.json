@@ -1,5 +1,10 @@
 {
   "flow": "lr",
   "rails": { "VCC": "top", "GND": "bottom" },
+  "place": {
+    "R7": { "col": 0, "row": 0, "orient": "down" },
+    "R8": { "col": 0, "row": 1, "orient": "down" },
+    "C3": { "col": 1, "row": 1, "orient": "down" }
+  },
   "ports": { "OUT": "right" }
 }

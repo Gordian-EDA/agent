@@ -124,6 +124,10 @@ struct PinLabel {
     /// pin endpoint to retract onto if the stub end collides with a foreign net.
     /// `None` for legacy labels placed directly on the pin endpoint.
     stub: Option<Stub>,
+    /// Render as a KiCAD `global_label` (the off-sheet I/O pentagon) rather than
+    /// a plain local label. Set for ports — board-edge / cross-sheet signals —
+    /// so a single-pin port reads as intentional I/O and ERC does not flag it.
+    global: bool,
 }
 
 /// A retractable stub wire backing a signal label: the pin endpoint the stub
@@ -367,6 +371,7 @@ impl SchematicWriter {
                 // byte-identical to pre-stub label output.
                 dir: Dir::East,
                 stub: None,
+                global: false,
             });
         }
         Ok(())
@@ -404,6 +409,7 @@ impl SchematicWriter {
                 uuid_key: format!("{refdes}:{pin}:{net}:{idx}"),
                 dir,
                 stub: Some(Stub { pin_at: ep }),
+                global: false,
             });
         }
         Ok(())
@@ -480,7 +486,7 @@ impl SchematicWriter {
     /// joins to the rest of the sheet without per-pin label spam. The label is
     /// keyed on `cluster:{net}:{x}:{y}` (position-derived) and carries no stub —
     /// it sits directly on the cluster wire it labels.
-    pub fn add_cluster_label(&mut self, net: &str, at: [f64; 2], dir: Dir) {
+    pub fn add_cluster_label(&mut self, net: &str, at: [f64; 2], dir: Dir, global: bool) {
         let at = snap_point(at);
         self.labels.push(PinLabel {
             net: net.to_string(),
@@ -488,6 +494,7 @@ impl SchematicWriter {
             uuid_key: format!("cluster:{net}:{}:{}", at[0], at[1]),
             dir,
             stub: None,
+            global,
         });
     }
 
@@ -548,14 +555,22 @@ impl SchematicWriter {
                 )
             })?;
         let (inst_at, inst_angle, inst_mirror) = (inst.at, inst.angle, inst.mirror);
-        let geom = SymbolGeometry::load(env, &inst.lib_id)?;
+        // Pins are cached per lib_id when the symbol is first added, so this hot
+        // path (called once per net-pin during routing, and many times over while
+        // the refinement loop re-routes candidate placements) never re-reads the
+        // `.kicad_sym` from disk. Fall back to a load only if somehow uncached.
+        let cached = self.sym_pins.get(&inst.lib_id).cloned();
+        let pins: Vec<PinGeom> = match cached {
+            Some(p) => p,
+            None => SymbolGeometry::load(env, &inst.lib_id)?.pins,
+        };
 
         let matches: Vec<&PinGeom> = {
-            let by_number: Vec<&PinGeom> = geom.pins.iter().filter(|p| p.number == pin).collect();
+            let by_number: Vec<&PinGeom> = pins.iter().filter(|p| p.number == pin).collect();
             if !by_number.is_empty() {
                 by_number
             } else {
-                geom.pins.iter().filter(|p| p.name == pin).collect()
+                pins.iter().filter(|p| p.name == pin).collect()
             }
         };
         if matches.is_empty() {
@@ -1134,6 +1149,30 @@ impl SchematicWriter {
             .collect()
     }
 
+    /// Junction-dot count (a routing-quality signal for the refinement scorer).
+    pub(crate) fn junction_count(&self) -> usize {
+        self.junctions.len()
+    }
+
+    /// Junction-dot positions (for the scorer's merge check: a junction sitting
+    /// on wires of two different nets fuses them).
+    pub(crate) fn junction_positions(&self) -> Vec<[f64; 2]> {
+        self.junctions.iter().map(|j| j.at).collect()
+    }
+
+    /// Count of plain (non-global) labels — i.e. signal-label fallbacks where the
+    /// router could not wire a net. Port pentagons are `global` and excluded, so
+    /// this is a direct "how many nets degraded to labels" signal.
+    pub(crate) fn signal_label_count(&self) -> usize {
+        self.labels.iter().filter(|l| !l.global).count()
+    }
+
+    /// Every drawn wire segment with its net (`None` for unattributed power
+    /// stubs). For the refinement scorer's crossing / length / short metrics.
+    pub(crate) fn wires_with_nets(&self) -> Vec<([f64; 2], [f64; 2], Option<String>)> {
+        self.wires.iter().map(|w| (w.a, w.b, w.net.clone())).collect()
+    }
+
     /// Assemble the complete `.kicad_sch` document as a deterministic string.
     ///
     /// `lib_symbols` are emitted sorted by `lib_id` (via the backing
@@ -1487,6 +1526,18 @@ fn render_label(label: &PinLabel) -> String {
     };
 
     let mut s = String::new();
+    if label.global {
+        // A port: render the off-sheet I/O pentagon. `bidirectional` suits a
+        // generic board-edge signal and KiCAD does not flag a global label as an
+        // isolated single-pin net (it is, by definition, a cross-sheet link).
+        let _ = writeln!(s, "\t(global_label \"{net}\"");
+        let _ = writeln!(s, "\t\t(shape bidirectional)");
+        let _ = writeln!(s, "\t\t(at {x} {y} {angle})");
+        let _ = writeln!(s, "\t\t(effects (font (size 1.27 1.27)) (justify {justify}))");
+        let _ = writeln!(s, "\t\t(uuid \"{uuid}\")");
+        s.push_str("\t)\n");
+        return s;
+    }
     let _ = writeln!(s, "\t(label \"{net}\"");
     let _ = writeln!(s, "\t\t(at {x} {y} {angle})");
     let _ = writeln!(
@@ -1972,6 +2023,7 @@ mod tests {
             uuid_key: "k".into(),
             dir,
             stub: None,
+            global: false,
         };
         assert!(render_label(&mk(Dir::East)).contains("(at 0 0 0)"));
         assert!(render_label(&mk(Dir::East)).contains("justify left"));
@@ -2042,7 +2094,7 @@ mod tests {
         // (This is the legacy retracted-label shape the solver now avoids —
         // the lint must SEE it.)
         let (ep, _dir) = w.pin_dirs(&env, "U1", "2").unwrap()[0];
-        w.add_cluster_label("X", ep, Dir::East);
+        w.add_cluster_label("X", ep, Dir::East, false);
         let warnings = w.layout_warnings();
         assert!(
             warnings.iter().any(|s| s.contains("pin text") && s.contains("U1")),

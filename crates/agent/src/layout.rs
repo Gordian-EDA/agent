@@ -26,28 +26,49 @@ floorplan that a deterministic engine turns into a professional, human-style KiC
 You NEVER give millimetre coordinates — only the coarse "frame". The engine handles all exact
 geometry (placement, orthogonal wires, rail synthesis, label placement).
 
-Output ONLY by calling the `emit_layout` tool with these four keys:
+Output ONLY by calling the `emit_layout` tool with these keys:
 
 - flow: "lr" (signals left→right, the usual choice) or "tb".
-- rails: map each POWER/GROUND net to a band — "top" for positive supplies (VCC, +5V, +3V3,
-  9V, VBUS...), "bottom" for grounds (GND, GNDD, VSS...). List every power net.
-- place: map each multi-pin IC/connector refdes to a coarse [col,row] cell (small integers,
-  left→right along the flow; row 0 is the main row, negative is up). Put the central chip at
-  a middle column, input connectors at col 0, downstream parts to the right. You usually only
-  place ICs/connectors; the engine auto-places the 2-pin passives (decoupling caps hang under
-  their rail, dividers stack, series resistors sit beside the IC pin they tap).
+- rails: map EVERY power/ground net to a band — "top" for positive supplies (VCC, +5V, +3V3,
+  9V, VBUS...), "bottom" for grounds (GND, GNDD, VSS...). Include INTERMEDIATE supplies too
+  (e.g. a regulator's output 3V3 as well as its input 5V). The engine decides whether to draw
+  each as one spanning wire or as scattered power symbols.
+- place: map EVERY component refdes to a cell {col, row, orient}. col grows right (downstream
+  along the flow), row grows down; both are small integers and need not be contiguous. orient is
+  the direction the part's pins run, from its FIRST `between` net (pin 1) toward its SECOND
+  (pin 2) — one of "up", "down", "left", "right". Decide it from where the two nets sit in YOUR
+  layout:
+    * Bridges a top thing and a bottom thing (a supply rail down to ground, a signal down to
+      ground): vertical. "down" if pin 1 is the top net (the usual case, e.g. a divider leg or a
+      decoupling cap `between:[VCC, GND]`), "up" if pin 1 is the bottom net (e.g. a pull-down or
+      an LED-to-ground `between:[GND, NODE]`).
+    * Sits IN the left-to-right signal path (a series resistor, a fuse, an LED feeding a
+      downstream part): horizontal. "right" if pin 1 is the left (upstream) net, "left" if pin 1
+      is the right (downstream) net. Example: an indicator LED `between:[LED_K, 3V3]` fed from a
+      3V3 node on its left with its cathode going right to a resistor is "left".
+  Think like a draughtsman laying parts on a grid:
+    * The central IC sits in a middle column; input connectors at col 0; downstream parts right.
+    * A decoupling/bypass cap goes in the column next to the power pin it serves, same row band.
+    * A voltage divider stacks vertically: the two resistors share a column, consecutive rows.
+    * A pull-up/pull-down belongs in a row ABOVE/BELOW the signal line it taps, not in the line.
+    * Parts that share a node should be near each other so the wire is short — but two parts that
+      connect to EACH OTHER (e.g. an LED and its series resistor) need a clear path between them:
+      give them their own adjacent columns/rows with no third part dropped in the wire's way.
+  Give every refdes a cell — do not leave any unplaced.
 - ports: map each net that should EXIT the sheet as a labelled port to a side
   ("left"/"right"/"top"/"bottom"). Use this for true I/O: a board input on the left, an output
   on the right. Do NOT make internal power rails ports.
-- mirror: list ICs to flip left-right so the pins that face a neighbour point the right way
-  (e.g. a level translator whose B-side connects a connector on its left, but whose B pins are
-  drawn on its right by default — mirror it).
+- mirror: list any IC OR CONNECTOR to flip left-right so the pins that face a neighbour point
+  the right way. A connector feeding the circuit from the left (col 0) usually needs mirroring so
+  its pins face RIGHT into the circuit. A level translator whose B-side faces a connector on its
+  left but whose B pins draw on the right by default needs mirroring too. When in doubt, check
+  the pin sides in the summary: if the pins that must connect rightward are drawn "left", mirror.
 
 Aim for the layout a careful engineer would draw: clear left-to-right signal flow, power rails
-top and bottom, the IC as the centred anchor."#;
+top and bottom, the IC as the centred anchor, passives grouped tightly around the pins they serve."#;
 
 /// Compact tool-call payload (the LLM's view of the IR), converted to a real
-/// [`LayoutIr`]. `place` is `[col,row]` arrays here for token economy.
+/// [`LayoutIr`]. `place` maps every refdes to a `{col,row,orient}` cell.
 #[derive(Deserialize, Default)]
 struct ToolIn {
     #[serde(default)]
@@ -55,7 +76,7 @@ struct ToolIn {
     #[serde(default)]
     rails: BTreeMap<String, String>,
     #[serde(default)]
-    place: BTreeMap<String, [i32; 2]>,
+    place: BTreeMap<String, Cell>,
     #[serde(default)]
     ports: BTreeMap<String, String>,
     #[serde(default)]
@@ -71,7 +92,15 @@ fn tool_def() -> ToolDef {
             "properties": {
                 "flow": {"type": "string", "enum": ["lr", "tb"]},
                 "rails": {"type": "object", "additionalProperties": {"type": "string", "enum": ["top", "bottom"]}},
-                "place": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2}},
+                "place": {"type": "object", "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "col": {"type": "integer"},
+                        "row": {"type": "integer"},
+                        "orient": {"type": "string", "enum": ["up", "down", "left", "right"]}
+                    },
+                    "required": ["col", "row"]
+                }},
                 "ports": {"type": "object", "additionalProperties": {"type": "string", "enum": ["left", "right", "top", "bottom"]}},
                 "mirror": {"type": "array", "items": {"type": "string"}}
             },
@@ -125,11 +154,7 @@ fn to_ir(raw: ToolIn) -> LayoutIr {
         .into_iter()
         .map(|(n, b)| (n, if b == "bottom" { Band::Bottom } else { Band::Top }))
         .collect();
-    let place = raw
-        .place
-        .into_iter()
-        .map(|(r, c)| (r, Cell { col: c[0], row: c[1] }))
-        .collect();
+    let place = raw.place;
     let ports = raw
         .ports
         .into_iter()

@@ -1174,7 +1174,7 @@ pub fn emit_design_reconciled(
                     }
                     for (tap, lp, dir) in &clabels {
                         w.add_wire_on_net(*tap, *lp, net);
-                        w.add_cluster_label(net, *lp, *dir);
+                        w.add_cluster_label(net, *lp, *dir, false);
                     }
                     if routable {
                         let block = pending

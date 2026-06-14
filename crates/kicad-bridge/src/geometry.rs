@@ -85,10 +85,32 @@ pub struct SymbolGeometry {
     pub raw_definition: String,
 }
 
+thread_local! {
+    /// Per-thread memo of resolved symbol geometry, keyed by (symbol dir, lib_id).
+    /// The libraries are read-only at runtime, so caching is safe and turns the
+    /// refinement loop's thousands of re-routes (each re-reading the same handful
+    /// of `.kicad_sym` files) from disk-bound into in-memory.
+    static GEOM_CACHE: std::cell::RefCell<
+        std::collections::HashMap<(String, String), SymbolGeometry>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 impl SymbolGeometry {
     /// Load pin geometry and the embeddable definition for `lib_id`
-    /// (`"Lib:Name"`) from the detected KiCAD symbol libraries.
+    /// (`"Lib:Name"`) from the detected KiCAD symbol libraries. Memoized per
+    /// thread by (symbol dir, lib_id).
     pub fn load(env: &KicadEnv, lib_id: &str) -> io::Result<SymbolGeometry> {
+        let key = (env.symbol_dir.to_string_lossy().into_owned(), lib_id.to_string());
+        if let Some(g) = GEOM_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+            return Ok(g);
+        }
+        let g = Self::load_uncached(env, lib_id)?;
+        GEOM_CACHE.with(|c| c.borrow_mut().insert(key, g.clone()));
+        Ok(g)
+    }
+
+    /// The actual library read + resolve (uncached). See [`Self::load`].
+    fn load_uncached(env: &KicadEnv, lib_id: &str) -> io::Result<SymbolGeometry> {
         let (lib, name) = lib_id.split_once(':').ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,

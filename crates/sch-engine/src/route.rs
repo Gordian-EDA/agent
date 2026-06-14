@@ -100,8 +100,10 @@ fn seg_hits_rect(a: Pt, b: Pt, r: &[f64; 4]) -> bool {
     lo_x < r[2] - EPS && r[0] + EPS < hi_x && lo_y < r[3] - EPS && r[1] + EPS < hi_y
 }
 
-/// How two axis-aligned segments interact for routing purposes.
-fn segments_conflict(a1: Pt, a2: Pt, b1: Pt, b2: Pt) -> bool {
+/// How two axis-aligned segments interact for routing purposes. Public to the
+/// crate so the refinement scorer can reuse it to detect net merges (two
+/// different-net segments that touch in a connecting way).
+pub(crate) fn segments_conflict(a1: Pt, a2: Pt, b1: Pt, b2: Pt) -> bool {
     let a_horiz = (a1[1] - a2[1]).abs() < EPS;
     let b_horiz = (b1[1] - b2[1]).abs() < EPS;
     if a_horiz == b_horiz {
