@@ -1,0 +1,77 @@
+version: 1
+name: mixed_signal_adc_frontend
+rails: [3V3, GND]
+
+# AIN / AIN_B are off-sheet analog input ports: a single on-sheet pin each
+# (the sensor enters from another sheet), so the single-pin lint is expected.
+lint:
+  allow: [single-pin-net]
+
+blocks:
+  # ---- Analog front-end: dual op-amp (MCP6002, multi-UNIT symbol) ----
+  # Unit A: non-inverting gain stage for sensor input AIN.
+  # Unit B: unity-gain buffer for a second sensor input AIN_B.
+  # Single 3V3 supply (V+ = 3V3, V- = GND).
+  afe:
+    layout: {edge: left}
+    components:
+      U1:
+        part: Amplifier_Operational:MCP6002-xP
+        pins:
+          # power unit (pin numbers 8 / 4)
+          "V+": 3V3
+          "V-": GND
+          # --- unit A: non-inverting amp (pins 3 / 2 / 1) ---
+          "3": AIN          # + : sensor input port
+          "2": OPA_FB       # - : inverting input / feedback node
+          "1": OPA_OUT      # ~ : amp A output
+          # --- unit B: unity-gain follower (pins 5 / 6 / 7) ---
+          "5": AIN_B        # + : second sensor input port
+          "6": OPB_OUT      # - : tied to its own output (unity gain)
+          "7": OPB_OUT      # ~ : amp B output
+      # Unit A gain network: G = 1 + Rf/Rg  (1 + 10k/10k = 2x)
+      R3: {part: R, value: 10k, between: [OPA_OUT, OPA_FB]}
+      R4: {part: R, value: 10k, between: [OPA_FB, GND]}
+      # Op-amp analog decoupling (1uF + 100nF close to V+)
+      C1: {part: C, value: 1uF,   between: [3V3, GND]}
+      C2: {part: C, value: 100nF, between: [3V3, GND]}
+
+  # ---- Anti-alias RC filters into the ADC analog inputs ----
+  # fc = 1/(2*pi*R*C) ~ 1.6 kHz with 1k / 100nF
+  filter:
+    layout: {edge: bottom}
+    components:
+      R5: {part: R, value: 1k,    between: [OPA_OUT, ADC_AIN0]}
+      C5: {part: C, value: 100nF, between: [ADC_AIN0, GND]}
+      R6: {part: R, value: 1k,    between: [OPB_OUT, ADC_AIN1]}
+      C6: {part: C, value: 100nF, between: [ADC_AIN1, GND]}
+
+  # ---- 16-bit I2C ADC ----
+  adc:
+    layout: {edge: right}
+    components:
+      U2:
+        part: Analog_ADC:ADS1115IDGS
+        pins:
+          VDD: 3V3
+          GND: GND
+          AIN0: ADC_AIN0     # filtered gain-stage output
+          AIN1: ADC_AIN1     # filtered buffer output
+          AIN2: nc
+          AIN3: nc
+          SCL: SCL           # I2C clock (exits as port)
+          SDA: SDA           # I2C data  (exits as port)
+          ADDR: GND          # 0x48: ADDR tied to GND
+          "ALERT/RDY": nc
+      # ADC analog decoupling (1uF + 100nF close to VDD)
+      C3: {part: C, value: 1uF,   between: [3V3, GND]}
+      C4: {part: C, value: 100nF, between: [3V3, GND]}
+      # I2C pull-ups to 3V3
+      R1: {part: R, value: 4.7k, between: [SCL, 3V3]}
+      R2: {part: R, value: 4.7k, between: [SDA, 3V3]}
+
+nets:
+  AIN:   {class: analog}
+  AIN_B: {class: analog}
+  SDA:   {class: i2c}
+  SCL:   {class: i2c}

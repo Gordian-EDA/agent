@@ -1,0 +1,58 @@
+version: 1
+name: rf_lna_frontend
+rails: [5V, GND]
+
+# RF receive front-end built around an ADL5542 wideband RF gain block / LNA.
+# Signal path: SMA(in) -> DC-block -> amp RFin (pin 1) -> amp RFout (pin 8)
+#   -> DC-block -> SMA(out). 5V supply feeds V+ (pin 5) through a decoupled
+#   feed; the CB pin (4) is the internal bias-bypass node (cap to GND).
+# ADL5542 has no enable pin, so no bias/enable resistor is fitted.
+
+blocks:
+  rf_input:
+    layout: {edge: left}
+    components:
+      J1:
+        part: Connector:Conn_Coaxial
+        pins:
+          In: RF_IN
+          Ext: GND
+      # DC-block into the amplifier RF input (50ohm path).
+      C1: {part: C, value: 100nF, between: [RF_IN, RFIN_AMP]}
+
+  amplifier:
+    layout: {edge: top}
+    components:
+      U1:
+        part: RF_Amplifier:ADL5542
+        pins:
+          "1": RFIN_AMP    # RF input
+          "8": RFOUT_AMP   # RF output
+          "5": 5V          # V+ supply
+          "2": GND         # G (ground)
+          "4": CB_NODE     # CB internal bias-bypass node
+      # Supply decoupling on V+ (a few 100nF + a 10nF), written explicitly.
+      C5: {part: C, value: 100nF, between: [5V, GND]}
+      C6: {part: C, value: 100nF, between: [5V, GND]}
+      C7: {part: C, value: 10nF, between: [5V, GND]}
+      # Internal-bias bypass cap on the CB pin (datasheet-required).
+      C2: {part: C, value: 100nF, between: [CB_NODE, GND]}
+      # Supply feed bulk cap close to V+.
+      C3: {part: C, value: 10uF, between: [5V, GND]}
+
+  rf_output:
+    layout: {edge: right}
+    components:
+      # DC-block out of the amplifier to the output connector.
+      C4: {part: C, value: 100nF, between: [RFOUT_AMP, RF_OUT]}
+      J2:
+        part: Connector:Conn_Coaxial
+        pins:
+          In: RF_OUT
+          Ext: GND
+
+nets:
+  RF_IN: {class: rf}
+  RFIN_AMP: {class: rf}
+  RFOUT_AMP: {class: rf}
+  RF_OUT: {class: rf}

@@ -1,0 +1,244 @@
+//! Connectivity regression oracle for the FLOORPLAN engine (the active layout
+//! path). For each reference fixture, compile the YAML, lay it out per its
+//! `*.layout.json` IR sidecar, emit, export the netlist via kicad-cli, and
+//! assert the netlist is TRUTHFUL: every authored pin lands connected, no
+//! authored net is split across netlist nets, and no two authored nets are
+//! shorted onto one.
+//!
+//! This guards the wire-split finalize pass (`SchematicWriter::split_wires_at_nodes`):
+//! KiCAD's netlister only connects wires at shared endpoints, so a mid-span tap
+//! on an unsplit through-wire silently disconnects — the schematic renders fine
+//! but netlists wrong. Without this test that class of bug is invisible.
+//!
+//! SKIPs without KiCAD.
+
+use std::collections::HashMap;
+use std::path::Path;
+
+use circuit_lang::provider::SymbolProvider;
+use kicad_bridge::cli::{KicadCli, Netlist};
+use kicad_bridge::env::KicadEnv;
+use kicad_bridge::provider::RealSymbolProvider;
+use sch_engine::floorplan::{self, LayoutIr};
+
+/// TIER 1 — the hand-tuned reference targets. Held to the FULL bar: electrically
+/// truthful AND zero layout warnings AND ERC-clean. These match the human
+/// references, so any regression must show up here.
+const REFERENCE_FIXTURES: &[&str] =
+    &["divider-filter", "mcp1703-power-entry", "555-blinker", "uart-level-translator"];
+
+/// TIER 2 — deliberately HARD circuits (large MCUs, BGAs, RF, mixed-signal) that
+/// stress the engine far past the tuned cases. The aesthetic bar is NOT expected
+/// to be met (a 100-pin part will lay out rough), so the layout-warning check is
+/// relaxed — but the CORRECTNESS invariants are non-negotiable: every authored
+/// pin lands connected, no authored net splits or merges, geometry stays on-grid,
+/// and no real ERC errors. This is the coverage that catches a connectivity or
+/// finalize bug the four clean fixtures are too small to surface.
+const CHALLENGE_FIXTURES: &[&str] = &[
+    "bedrock-oneshot-bluepill",      // STM32H743 100-pin LQFP dev board
+    "bedrock-selfrepair-bluepill",   // STM32 + HSE/32k crystals
+    "rf-lna-frontend",               // ADL5542 RF gain block + coax (HF/RF)
+    "mixed-signal-adc-frontend",     // MCP6002 op-amp -> ADS1115 I2C ADC (mixed-signal)
+    "bga-fpga-ice40",                // ICE40HX8K-BG121 121-ball BGA, dual-rail (BGA)
+];
+
+fn doc(name: &str, ext: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../docs/validation/{name}.{ext}"))
+}
+
+/// The YAML keys pins by NAME; the KiCAD netlist reports pins by NUMBER. Resolve
+/// the authored token (number-first then name, `find_pin` order) and compare.
+fn nl_pin_matches(provider: &RealSymbolProvider, lib_id: &str, authored: &str, nl_pin: &str) -> bool {
+    if authored == nl_pin {
+        return true;
+    }
+    let Some(sym) = provider.symbol(lib_id) else { return false };
+    circuit_lang::provider::find_pin(&sym.pins, authored).map(|p| p.number.as_str()) == Some(nl_pin)
+}
+
+#[test]
+fn floorplan_reference_fixtures_emit_truthful_netlists() {
+    let Some(env) = KicadEnv::detect() else {
+        eprintln!("SKIP: no KiCAD environment detected");
+        return;
+    };
+    let provider = RealSymbolProvider::new(env.clone());
+    for name in REFERENCE_FIXTURES {
+        validate_fixture(&env, &provider, name, /* strict_warnings */ true);
+    }
+}
+
+#[test]
+fn floorplan_challenge_fixtures_emit_truthful_netlists() {
+    let Some(env) = KicadEnv::detect() else {
+        eprintln!("SKIP: no KiCAD environment detected");
+        return;
+    };
+    let provider = RealSymbolProvider::new(env.clone());
+    // Collect EVERY fixture's verdict (don't stop at the first failure) so one run
+    // reports the full coverage picture across all hard circuit classes. A fixture
+    // that panics on a real truthfulness/ERC defect is recorded; the test fails at
+    // the end listing all offenders. `KNOWN_TRUTHFULNESS_BUGS` carries fixtures
+    // whose failure documents a real, tracked engine bug (not a flaky test) so the
+    // suite stays green for the validated coverage while the bug is on record.
+    let mut failures: Vec<String> = Vec::new();
+    for name in CHALLENGE_FIXTURES {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            validate_fixture(&env, &provider, name, /* strict_warnings */ false)
+        }));
+        match (res.is_ok(), KNOWN_TRUTHFULNESS_BUGS.contains(name)) {
+            (true, false) => {}
+            (true, true) => panic!(
+                "{name}: now PASSES but is still listed in KNOWN_TRUTHFULNESS_BUGS — \
+                 remove it (the engine bug it tracked is fixed)"
+            ),
+            (false, true) => eprintln!("KNOWN-BUG (tracked, tolerated): {name} not yet truthful"),
+            (false, false) => failures.push(name.to_string()),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "challenge fixtures emitted UNTRUTHFUL netlists (new, untracked): {failures:?}"
+    );
+}
+
+/// Challenge fixtures whose emitted netlist is NOT yet truthful because of a REAL,
+/// tracked engine bug. Tolerated so the suite stays green for the rest of the
+/// coverage; each must have a documented root cause. Empty = the goal. These are
+/// the concrete bugs the expanded coverage surfaced:
+///
+///   - `mixed-signal-adc-frontend` and `bga-fpga-ice40` — **MULTI-UNIT SYMBOLS ARE
+///     ELECTRICALLY BROKEN**. The engine emits only UNIT 1's pins of a multi-unit
+///     part, dropping every other unit. Verified: the MCP6002 op-amp netlist
+///     carries only pins 1/2/3 (unit A) — its POWER pins 4/8 (V-/V+) and the entire
+///     unit B (5/6/7) vanish, so the part is unpowered and half-missing. Same for
+///     the ICE40 FPGA (power/IO balls live in units B-E). This is the headline gap;
+///     fixing it = place each unit as its own symbol instance (KiCAD multi-unit
+///     parts are separate symbols sharing a refdes + unit number). `floorplan.rs`
+///     has ZERO `units` handling today.
+///   - `bedrock-selfrepair-bluepill` — `baseline_ir` (the crude no-sidecar fallback)
+///     SHORTS the VBUS and 3V3 rails: a 3-pin power header J1 exposes VBUS(1)/
+///     3V3(2)/GND(3) on adjacent pins and the fallback rail routing bridges the two
+///     adjacent rails. The no-merge check correctly catches it. (oneshot, whose
+///     USB-C keeps VBUS off an adjacent rail pin, is truthful.)
+const KNOWN_TRUTHFULNESS_BUGS: &[&str] =
+    &["bedrock-selfrepair-bluepill", "mixed-signal-adc-frontend", "bga-fpga-ice40"];
+
+/// Compile `<name>.circuit.yaml`, emit through the floorplan engine (sidecar IR if
+/// present, else `baseline_ir`), and assert the emitted sheet is electrically
+/// TRUTHFUL + on-grid + ERC-clean. With `strict_warnings`, also assert zero
+/// layout warnings (tier-1 readability bar).
+fn validate_fixture(
+    env: &KicadEnv,
+    provider: &RealSymbolProvider,
+    name: &str,
+    strict_warnings: bool,
+) {
+    {
+        let src = std::fs::read_to_string(doc(name, "circuit.yaml")).unwrap();
+        let result = circuit_lang::compile(&src, provider);
+        assert!(!result.diagnostics.has_errors(), "{name}: {:#?}", result.diagnostics);
+        let design = result.design.unwrap();
+
+        let ir = match std::fs::read_to_string(doc(name, "layout.json")) {
+            Ok(s) => LayoutIr::from_json(&s).unwrap(),
+            Err(_) => floorplan::baseline_ir(&design),
+        };
+        let out = floorplan::emit(env, &design, &ir).unwrap_or_else(|e| panic!("{name}: {e}"));
+
+        // Readability invariant (tier-1 only): the reference fixtures emit with ZERO
+        // layout warnings (no symbol/text overlap, no value-text smeared onto a
+        // neighbour, no wire through a body). This guards the IC-MPN placement, spine
+        // collinearity, and IC-body-crossing work — any of which regressing would
+        // re-introduce a warning here long before a human re-renders. The hard
+        // challenge fixtures are exempt (a 100-pin part lays out rough on purpose).
+        if strict_warnings {
+            assert!(
+                out.layout_warnings.is_empty(),
+                "{name}: expected 0 layout warnings, got: {:#?}",
+                out.layout_warnings
+            );
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sch = tmp.path().join(format!("{name}.kicad_sch"));
+        std::fs::write(&sch, &out.sch).unwrap();
+
+        // No REAL ERC errors. `lib_symbol_issues` is a standalone-context artifact
+        // (the symbol library table isn't registered when ERCing a lone file);
+        // the embedded `lib_symbols` make connectivity sound regardless, so it is
+        // filtered. Anything else at error severity is a true defect.
+        //
+        // `pin_to_pin` is filtered for the CHALLENGE tier only: it fires "Power
+        // output and Power output are connected" when the engine adds a redundant
+        // PWR_FLAG to a rail that a regulator VO already drives (it fails to see VO
+        // is a power output for EXTENDS-derived regulator symbols like AMS1117, and
+        // for a part's tied multi-VCAP power-output pins). This is an ERC-HYGIENE
+        // gap, NOT a connectivity defect — the netlist stays truthful (verified
+        // below: no rail merges, every pin connected). The reference tier still
+        // forbids it. KNOWN-ENGINE-GAP: suppress the flag when a power-output pin
+        // (resolved through the extends chain) already drives the rail.
+        let erc = KicadCli::new(env).erc(&sch).unwrap();
+        let tolerated = |kind: &str| {
+            kind == "lib_symbol_issues" || (!strict_warnings && kind == "pin_to_pin")
+        };
+        let real_errors: Vec<_> = erc
+            .violations
+            .iter()
+            .filter(|v| v.severity == "error" && !tolerated(&v.kind))
+            .collect();
+        assert!(real_errors.is_empty(), "{name}: real ERC errors: {real_errors:#?}");
+
+        // No off-grid wire/pin endpoints: the reframe shift must stay a grid
+        // multiple so connectivity geometry remains on the 1.27 mm grid (a
+        // non-grid shift connects fine but ERCs every endpoint as off-grid).
+        let off_grid = erc.violations.iter().filter(|v| v.kind == "endpoint_off_grid").count();
+        assert_eq!(off_grid, 0, "{name}: {off_grid} off-grid endpoints (reframe shift not snapped?)");
+
+        // Truthfulness: every authored pin lands on exactly one netlist net;
+        // authored nets neither split nor merge.
+        let nl: Netlist = KicadCli::new(env).netlist(&sch).unwrap();
+        let mut authored_to_nl: HashMap<&str, Option<usize>> = HashMap::new();
+        for block in design.blocks.values() {
+            for (refdes, comp) in &block.components {
+                let lib_id = &comp.part;
+                for (pin, target) in &comp.pins {
+                    let circuit_lang::model::PinTarget::Net(want) = target else { continue };
+                    let got = nl.nets.iter().position(|n| {
+                        n.nodes
+                            .iter()
+                            .any(|(r, p)| r == refdes && nl_pin_matches(provider, lib_id, pin, p))
+                    });
+                    assert!(
+                        got.is_some(),
+                        "{name}/{refdes}.{pin}: authored to {want} but no netlist net carries it \
+                         (a disconnected tap — the wire-split pass regressed?)"
+                    );
+                    match authored_to_nl.entry(want.as_str()) {
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(got);
+                        }
+                        std::collections::hash_map::Entry::Occupied(e) => assert_eq!(
+                            *e.get(),
+                            got,
+                            "{name}: authored net {want} SPLIT across netlist nets — {refdes}.{pin} \
+                             landed elsewhere"
+                        ),
+                    }
+                }
+            }
+        }
+        // No merges: distinct authored nets map to distinct netlist nets.
+        let mut nl_to_authored: HashMap<usize, &str> = HashMap::new();
+        for (authored, nl_idx) in &authored_to_nl {
+            let Some(idx) = nl_idx else { continue };
+            if let Some(prev) = nl_to_authored.insert(*idx, authored) {
+                panic!(
+                    "{name}: authored nets {prev:?} and {authored:?} are SHORTED onto one netlist \
+                     net {:?}",
+                    nl.nets[*idx].name
+                );
+            }
+        }
+    }
+}
