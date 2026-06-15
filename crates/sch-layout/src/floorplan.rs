@@ -1047,12 +1047,21 @@ impl PlacementStrategy for Anneal {
         // warnings than greedy (the "SA regresses a tuned frame" trap).
         refine_items(env, items, inc, ir, needs_flag);
         let greedy_state: Vec<Item> = items.to_vec();
-        anneal_items(env, items, inc, ir, needs_flag, false, seed);
+        anneal_items(env, items, inc, ir, needs_flag, false, false, seed);
         let state_a: Vec<Item> = items.to_vec();
         // Path B: a broad anneal from the raw seed (a wider global search).
         items.clone_from_slice(&seed_state);
-        anneal_items(env, items, inc, ir, needs_flag, true, seed);
+        anneal_items(env, items, inc, ir, needs_flag, true, false, seed);
         let state_b: Vec<Item> = items.to_vec();
+        // Path C (PREMIUM): a seeded anneal from the greedy result optimising the
+        // richer straightness objective. Added as an EXTRA candidate — never
+        // replaces A/B — so the premium tier is strictly ≥ the base SA: it can only
+        // be picked when it is BOTH as clean AND tidier. (This is why a premium cost
+        // that perturbs the SA's trajectory can't lose us a warning-free find — the
+        // base runs still carry it.)
+        items.clone_from_slice(&greedy_state);
+        anneal_items(env, items, inc, ir, needs_flag, false, true, seed ^ 0x9E3779B97F4A7C15);
+        let state_c: Vec<Item> = items.to_vec();
         // Pick the candidate with the FEWEST layout warnings (the quality metric
         // the per-move cost can't afford — it needs the text solve), tie-broken by
         // routed cost. Each candidate is measured THROUGH the same `polish` +
@@ -1062,19 +1071,27 @@ impl PlacementStrategy for Anneal {
         // greedy. Cheap: a handful of passes at the END, never per-eval. Guarantees
         // the SA ≥ greedy on a tuned (sidecar) frame while still winning on a loose
         // (INFER) frame.
-        let candidates = [greedy_state, state_a, state_b];
+        let candidates = [greedy_state, state_a, state_b, state_c];
         let (mut best, mut best_w, mut best_c) = (0usize, usize::MAX, f64::INFINITY);
         for (k, cand) in candidates.iter().enumerate() {
             let mut shipped = cand.clone();
             polish(env, &mut shipped, inc, ir, needs_flag);
             decongest(&mut shipped);
             let w = warning_count(env, &shipped, inc, ir, needs_flag);
-            let c = score_items(env, &shipped, inc, ir, needs_flag);
+            // Tie-break by the PREMIUM cost: among equally-clean candidates the SA
+            // ships the tidier one (where its extra optimisation actually shows).
+            let c = premium_score_items(env, &shipped, inc, ir, needs_flag);
+            if std::env::var("DEBUG_SA").is_ok() {
+                eprintln!("SA cand k={k} warnings={w} premium_cost={c:.1}");
+            }
             if w < best_w || (w == best_w && c + 0.5 < best_c) {
                 best = k;
                 best_w = w;
                 best_c = c;
             }
+        }
+        if std::env::var("DEBUG_SA").is_ok() {
+            eprintln!("SA WINNER k={best} (0=greedy 1=seededA 2=broadB 3=PREMIUM)");
         }
         items.clone_from_slice(&candidates[best]);
     }
@@ -1276,8 +1293,19 @@ fn anneal_items(
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
     broad: bool,
+    premium: bool,
     seed: u64,
 ) {
+    // The objective: free tier minimises the base routed cost; the premium run
+    // optimises the richer (straighter) objective. Run as an EXTRA candidate so it
+    // never displaces the base run's warning-free find — see `Anneal::search`.
+    let cost = |env: &KicadEnv, items: &[Item], inc: &Incidence, ir: &LayoutIr, nf: &BTreeSet<String>| {
+        if premium {
+            premium_score_items(env, items, inc, ir, nf)
+        } else {
+            score_items(env, items, inc, ir, nf)
+        }
+    };
     let sats: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3).collect();
     let anchors: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() >= 3).collect();
     if sats.is_empty() {
@@ -1286,7 +1314,7 @@ fn anneal_items(
     let orients = [Orient::Up, Orient::Down, Orient::Left, Orient::Right];
     let mut rng = Rng(seed);
 
-    let mut cur = score_items(env, items, inc, ir, needs_flag);
+    let mut cur = cost(env, items, inc, ir, needs_flag);
     let mut best_items: Vec<Item> = items.to_vec();
     let mut best = cur;
 
@@ -1348,7 +1376,7 @@ fn anneal_items(
             continue;
         }
 
-        let c = score_items(env, items, inc, ir, needs_flag);
+        let c = cost(env, items, inc, ir, needs_flag);
         let d = c - cur;
         if d < 0.0 || rng.unit() < (-d / t).exp() {
             cur = c;
@@ -1376,7 +1404,27 @@ fn score_items(
     needs_flag: &BTreeSet<String>,
 ) -> f64 {
     match build_writer(env, None, items, inc, ir, needs_flag, false) {
-        Ok(w) => layout_cost(env, &w, items, inc, ir),
+        Ok(w) => layout_cost(env, &w, items, inc, ir, false),
+        Err(_) => f64::INFINITY,
+    }
+}
+
+/// PREMIUM-tier cost: identical correctness terms, but the AESTHETIC terms
+/// (crossings, corners, congestion, compactness, stray, length) weigh heavier, so
+/// the paid simulated-annealing search optimises for a tighter, straighter, more
+/// "designed" sheet than the free greedy tier settles for. Only the SA explores
+/// against this objective ([`anneal_items`] + the candidate pick); the shipped
+/// finalize passes still use the base cost, so the shipped warning count is the
+/// same metric for both tiers.
+fn premium_score_items(
+    env: &KicadEnv,
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+) -> f64 {
+    match build_writer(env, None, items, inc, ir, needs_flag, false) {
+        Ok(w) => layout_cost(env, &w, items, inc, ir, true),
         Err(_) => f64::INFINITY,
     }
 }
@@ -1834,6 +1882,7 @@ fn layout_cost(
     items: &[Item],
     inc: &Incidence,
     ir: &LayoutIr,
+    premium: bool,
 ) -> f64 {
     let fallbacks = w.signal_label_count();
     let junctions = w.junction_count();
@@ -2048,16 +2097,27 @@ fn layout_cost(
     // (junction dots packed against each other — the "dot knot" / wires-collapse-
     // into-a-resistor look, which length-minimisation otherwise rewards); then
     // junctions and length. The big coefficients keep correctness off the table.
-    2000.0 * merges as f64
+    // Correctness + convention terms (identical for both tiers): a layout that
+    // shorts, overlaps, drops a label to a fallback, breaks the authored grid, or
+    // runs a wire through a body is wrong regardless of price.
+    let correctness = 2000.0 * merges as f64
         + 1500.0 * overlaps as f64
         + 1000.0 * fallbacks as f64
         + 1200.0 * grid_order as f64
-        + 5.0 * crossings as f64
-        + 7.0 * congestion as f64
         + 30.0 * body_cross as f64
         + 12.0 * orient_viol as f64
-        + 10.0 * spine_viol as f64
-        + 7.0 * corners as f64
+        + 10.0 * spine_viol as f64;
+    // STRAIGHTNESS / neatness terms — the PREMIUM (paid SA) tier weighs these ~3x
+    // to push past the local minimum the free greedy tier accepts: straighter wires
+    // (fewer corners/crossings) and less dot-knot congestion. Crucially this does
+    // NOT scale the COMPACTNESS terms (spread/stray/length): packing tighter trades
+    // against text-collision warnings the routed cost is blind to (it has no text
+    // solve), so a premium that squeezed harder would ship a tidier-but-colliding
+    // sheet — observed as mixed-signal regressing 0→1. Neatness is safe; tightness
+    // is not, until the cost can see the lint's text collisions.
+    let neat = if premium { 3.0 } else { 1.0 };
+    correctness
+        + neat * (5.0 * crossings as f64 + 7.0 * congestion as f64 + 7.0 * corners as f64)
         + 1.0 * junctions as f64
         + 0.5 * stray
         + 0.15 * length
