@@ -67,8 +67,14 @@ Per the engine-redesign doc:
   local-geometry terms (corners, body crossings, foreign taps, overlap, orient,
   spine, supply-pin pull). The grid removed the global DOF that made one cost
   whack-a-mole across circuits.
-- **retire anneal**: delete `anneal_cells` + the `ANNEAL` flag (off by default,
-  never wins, and a rigid grid makes global search moot).
+- **KEEP the SA (`anneal_cells`)** — an earlier "retire anneal" recommendation
+  here was wrong and the removal was reverted. The "SA never wins" measurement
+  was on the hand-tuned references (no room to improve); on the INFER frames that
+  are now the production default, a global escape from local minima is exactly
+  what's needed. The real task (their #20): make a *properly built* SA win —
+  price the cost's blind spots (so ugly==expensive) and fold align/compact/
+  decongest into one cost-scored search — likely making SA the default. See the
+  `keep-the-sa-optimizer` memory.
 
 ### 1.3 Fixtures + gate
 - migrate all 8 fixtures to v2 (`rails:`→`power:`, polarity rewrites, drop

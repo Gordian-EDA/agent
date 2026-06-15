@@ -145,14 +145,18 @@ The litmus stays: when a layout is ugly-but-cheap, find the *local* term that
 distinguishes good from bad and price it — but now there is no global DOF for a
 mispriced term to exploit board-wide.
 
-### Anneal: retire it
+### Anneal: KEEP it (earlier "retire" recommendation reverted)
 
-`anneal_cells` (multi-start SA) is already OFF by default and, per
-[[floorplan-engine-state]], never wins once refine + a good cost place the
-targets. A rigid grid makes the global escape **moot** — global structure is the
-grid, authored or inferred. Recommendation: **delete `anneal_cells` and the
-`ANNEAL` flag** with this change (one fewer code path, one fewer "verify all four"
-axis). If a future free-form mode wants global search, it returns as its own thing.
+An earlier draft here recommended deleting `anneal_cells`; that was wrong and the
+removal was reverted (the user values a properly-built SA). The "SA never wins"
+data was on the hand-tuned references, which have no room for a global search to
+improve — uninformative about the INFER frames that are now the production
+default, where escaping local minima is exactly the point. Even under an authored
+grid, the *ungridded* satellites (the bulk of a real sheet) are a large free
+search space the greedy climb can get stuck in. The task is to make the SA
+properly win: price the cost's blind spots so a cheaper layout is never uglier,
+and fold align/compact/decongest into one cost-scored search (task #20). Keep the
+search; sharpen the cost.
 
 ## Block-cell expansion & float (the two new behaviours)
 
