@@ -1077,6 +1077,22 @@ impl SchematicWriter {
                 TextPos { at: [r2(maxx), r2(maxy + 4.78)], justify: Justify::Right },
                 [maxx - wmax, maxy + 0.64, maxx, maxy + 4.78],
             );
+            // Last-resort FAR bands (pushed ~5 mm further out): when a body is
+            // ringed by packed neighbours — a tight decoupling cluster on a dense
+            // board — every near spot is blocked and the solver would fall onto a
+            // sibling's label/field. A far band clears it (the text reads a touch
+            // detached but never overlaps). Appended LAST for both ICs and passives,
+            // so a part with any near free spot is unaffected.
+            let above_far = (
+                TextPos { at: [r2(cx), r2(miny - 8.18)], justify: Justify::Center },
+                TextPos { at: [r2(cx), r2(miny - 5.64)], justify: Justify::Center },
+                [cx - wmax / 2.0, miny - 9.78, cx + wmax / 2.0, miny - 5.64] as BBox,
+            );
+            let below_far = (
+                TextPos { at: [r2(cx), r2(maxy + 5.64)], justify: Justify::Center },
+                TextPos { at: [r2(cx), r2(maxy + 8.18)], justify: Justify::Center },
+                [cx - wmax / 2.0, maxy + 5.64, cx + wmax / 2.0, maxy + 9.78],
+            );
             // Multi-pin parts (ICs) carry refdes+value on a HORIZONTAL band
             // (above/below the body), the reference convention — a long MPN
             // ("SN74LVC2T45DCUR") on a band clears the horizontal series
@@ -1110,28 +1126,19 @@ impl SchematicWriter {
                 bands.sort_by_key(hits);
                 bands.push(right);
                 bands.push(left);
-                // Last-resort FAR bands: when the body is ringed by packed
-                // neighbours (a tight decoupling cluster) every near spot is
-                // blocked and the solver would fall onto a cap. A band pushed
-                // ~5 mm further out clears it — the MPN reads a touch detached but
-                // never overlaps. Tried only after every near candidate.
-                let above_far = (
-                    TextPos { at: [r2(cx), r2(miny - 8.18)], justify: Justify::Center },
-                    TextPos { at: [r2(cx), r2(miny - 5.64)], justify: Justify::Center },
-                    [cx - wmax / 2.0, miny - 9.78, cx + wmax / 2.0, miny - 5.64] as BBox,
-                );
-                let below_far = (
-                    TextPos { at: [r2(cx), r2(maxy + 5.64)], justify: Justify::Center },
-                    TextPos { at: [r2(cx), r2(maxy + 8.18)], justify: Justify::Center },
-                    [cx - wmax / 2.0, maxy + 5.64, cx + wmax / 2.0, maxy + 9.78],
-                );
                 bands.push(above_far);
                 bands.push(below_far);
                 bands
             } else if h[0] > h[1] {
-                vec![above, below, right, left, above_left, above_right, below_left, below_right]
+                vec![
+                    above, below, right, left, above_left, above_right, below_left, below_right,
+                    above_far, below_far,
+                ]
             } else {
-                vec![right, left, above, below, above_left, above_right, below_left, below_right]
+                vec![
+                    right, left, above, below, above_left, above_right, below_left, below_right,
+                    above_far, below_far,
+                ]
             };
             movables.push(Movable {
                 owner: Some(inst.refdes.clone()),
@@ -2150,6 +2157,54 @@ impl SchematicWriter {
             ));
         }
         let mut warnings = Vec::new();
+        // Wire through an IC body: a wire segment running strictly inside a chip's
+        // package box (the pin-tip bbox shrunk past the pin stubs onto the body
+        // rectangle — the same geometry the placement cost's `count_ic_body_crossings`
+        // prices). This reads as a connection straight through the chip — the defect
+        // the eye most often misses — and the soft cost term alone can be OVERRUN (a
+        // rigid `layout:` grid forcing a part to the far side of its anchor), so it
+        // must LINT too, not just nudge the search.
+        const BODY_EPS: f64 = 1e-6;
+        const BODY_INSET: f64 = 2.0; // shrink the pin-tip bbox onto the body rectangle
+        for inst in &self.instances {
+            if inst.refdes.starts_with('#') {
+                continue;
+            }
+            let Some(pins) = self.sym_pins.get(&inst.lib_id).filter(|p| p.len() >= 3) else {
+                continue; // power graphics + 2-pin parts have no package box
+            };
+            // Pin-tip bounding box in sheet coords, inset past the pin stubs onto the
+            // body rect — the EXACT geometry the cost's `count_ic_body_crossings` uses.
+            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+            for pg in pins {
+                let off = transform_offset(pg.at, inst.angle, inst.mirror);
+                let p = [inst.at[0] + off[0], inst.at[1] + off[1]];
+                lo[0] = lo[0].min(p[0]);
+                lo[1] = lo[1].min(p[1]);
+                hi[0] = hi[0].max(p[0]);
+                hi[1] = hi[1].max(p[1]);
+            }
+            let r = [lo[0] + BODY_INSET, lo[1] + BODY_INSET, hi[0] - BODY_INSET, hi[1] - BODY_INSET];
+            if r[2] - r[0] < BODY_EPS || r[3] - r[1] < BODY_EPS {
+                continue;
+            }
+            for wire in &self.wires {
+                let (w1, w2) = (wire.a, wire.b);
+                let cross = if (w1[0] - w2[0]).abs() < BODY_EPS {
+                    let x = w1[0];
+                    let (ylo, yhi) = (w1[1].min(w2[1]), w1[1].max(w2[1]));
+                    r[0] + BODY_EPS < x && x < r[2] - BODY_EPS && ylo.max(r[1]) < yhi.min(r[3]) - BODY_EPS
+                } else {
+                    let y = w1[1];
+                    let (xlo, xhi) = (w1[0].min(w2[0]), w1[0].max(w2[0]));
+                    r[1] + BODY_EPS < y && y < r[3] - BODY_EPS && xlo.max(r[0]) < xhi.min(r[2]) - BODY_EPS
+                };
+                if cross {
+                    warnings.push(format!("wire crosses body of {}", inst.refdes));
+                    break; // one warning per chip is enough
+                }
+            }
+        }
         for i in 0..items.len() {
             for j in (i + 1)..items.len() {
                 let same_owner = items[i].2 == items[j].2;
