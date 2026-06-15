@@ -1013,14 +1013,21 @@ impl PlacementStrategy for Anneal {
         let state_b: Vec<Item> = items.to_vec();
         // Pick the candidate with the FEWEST layout warnings (the quality metric
         // the per-move cost can't afford — it needs the text solve), tie-broken by
-        // routed cost. Cheap: a few prepare+count calls at the END, never per-eval.
-        // Guarantees the SA ≥ greedy on a tuned (sidecar) frame while still winning
-        // on a loose (INFER) frame.
+        // routed cost. Each candidate is measured THROUGH the same `polish` +
+        // `decongest` that `emit` runs after this search — those passes can add or
+        // clear a warning (e.g. decongest nudging a part into a neighbour's field
+        // text), so judging the raw pre-polish state would ship a worse layout than
+        // greedy. Cheap: a handful of passes at the END, never per-eval. Guarantees
+        // the SA ≥ greedy on a tuned (sidecar) frame while still winning on a loose
+        // (INFER) frame.
         let candidates = [greedy_state, state_a, state_b];
         let (mut best, mut best_w, mut best_c) = (0usize, usize::MAX, f64::INFINITY);
         for (k, cand) in candidates.iter().enumerate() {
-            let w = warning_count(env, cand, inc, ir, needs_flag);
-            let c = score_items(env, cand, inc, ir, needs_flag);
+            let mut shipped = cand.clone();
+            polish(env, &mut shipped, inc, ir, needs_flag);
+            decongest(&mut shipped);
+            let w = warning_count(env, &shipped, inc, ir, needs_flag);
+            let c = score_items(env, &shipped, inc, ir, needs_flag);
             if w < best_w || (w == best_w && c + 0.5 < best_c) {
                 best = k;
                 best_w = w;
