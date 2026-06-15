@@ -585,6 +585,10 @@ struct Item {
     /// multi-unit part (op-amp/FPGA) splits into one Item per used unit, all
     /// sharing `refdes` but emitted as distinct `(unit N)` instances.
     unit: u8,
+    /// Whether this symbol is flipped left↔right. Seeded from `ir.mirror`; lifted
+    /// onto the Item (was read off `ir.mirror` at emit) so the placement search
+    /// can flip it as a move and the cost sees exactly what ships.
+    mirror: bool,
 }
 
 /// Resolve a component's pins to (number, name, net) using geometry + the
@@ -613,6 +617,11 @@ fn resolve_pins(comp: &Component, geom: &SymbolGeometry) -> Vec<(String, String,
 /// Emit a complete `.kicad_sch` for `design` laid out per `ir`.
 pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOutput> {
     let mut items = gather(env, design)?;
+    // Seed each item's mirror flag from the IR (lifted onto Item so the search
+    // can flip it and the cost/emit read one source of truth).
+    for it in &mut items {
+        it.mirror = ir.mirror.contains(&it.refdes);
+    }
     let inc = incidence(&items);
 
     // Which power nets need an ERC PWR_FLAG: a power-INPUT pin (or a declared
@@ -705,7 +714,7 @@ fn build_writer(
         if it.unit != 1 {
             w.set_unit_last(it.unit);
         }
-        if ir.mirror.contains(&it.refdes) {
+        if it.mirror {
             w.set_mirror_last();
         }
     }
@@ -817,6 +826,7 @@ fn gather(env: &KicadEnv, design: &Design) -> io::Result<Vec<Item>> {
                     at: [0.0, 0.0],
                     angle: 0.0,
                     unit: u,
+                    mirror: false,
                 });
             }
         }

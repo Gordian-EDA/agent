@@ -166,14 +166,14 @@ snapshot + intentional re-baseline**:
 - **Re-baseline policy**: a subtle cost bug could pass (deterministic + oracle-clean)
   yet look worse — every re-baseline MUST pair with the visual review.
 
-## Owner decisions (open questions)
-1. **Re-baseline policy** — bless dropping byte-identical-to-references for the
-   snapshot + oracle + visual-review triad? (This is the gate change.)
-2. **Tier scope this PR** — ship env-only selection (`LAYOUT_SEARCH` + aliases) and
-   defer the real `Tier` enum from agent config to a follow-up?
-3. **Alignment scope** — `align_viol` on shared-x **columns only**, or also
-   shared-y rows? (Recommend columns-only first; let spine/orient carry rows.)
-4. **Anchor mobility** — keep anchors frozen (satellite-only, as today) or let the
-   mm search nudge anchors (grouped tap-drag; fiddly Undo)? (Recommend defer.)
-5. **SA multi-start** — keep the seeded-vs-broad best-of-two (seed XOR start), or
-   single-start? (Recommend keep for the paid tier.)
+## Owner decisions — RESOLVED (2026-06-15)
+1. **Re-baseline policy** → **YES**, drop byte-identical-to-references; gate on
+   deterministic snapshot + the netlist oracle + unbiased-subagent visual review.
+2. **Scope** → **the whole arc (steps 0–8)**.
+3. **Tier scope** → **env-only now** (`LAYOUT_SEARCH` + `ANNEAL`/`GREEDY` aliases);
+   the real `Tier` enum from agent config is a follow-up.
+4. **Anchor mobility** → **anchors are mobile** — add a grouped anchor-drag move
+   (anchor + its satellites move atomically; careful Undo). Authored-grid anchors
+   stay in the `frozen` set.
+5. **Alignment scope** → columns-only first (rows carried by spine/orient); revisit.
+6. **SA multi-start** → keep the seeded-vs-broad best-of-two for the paid tier.
