@@ -573,7 +573,7 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     w.prepare();
     let warnings = w.layout_warnings();
     let sch = w.finish();
-    Ok(EmitOutput { sch, layout_warnings: warnings, relayout_blocks: Default::default() })
+    Ok(EmitOutput { sch, layout_warnings: warnings })
 }
 
 /// Build the complete schematic writer for a placed `items`: symbols (+mirror),

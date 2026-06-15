@@ -7,7 +7,6 @@ edition.workspace = true
 agent = { path = "../agent" }
 circuit-lang = { path = "../circuit-lang" }
 kicad-bridge = { path = "../kicad-bridge" }
-sch-engine = { path = "../sch-engine" }
 
 anyhow.workspace = true
 tokio.workspace = true

@@ -1,7 +1,7 @@
 //! The eleven-tool registry the agent drives (spec §10).
 //!
 //! Each tool is a thin, deterministic wrapper over logic that already lives in
-//! `circuit-lang`, `kicad-bridge`, and `sch-engine`. The registry exposes:
+//! `circuit-lang`, `kicad-bridge`, and `sch-layout`. The registry exposes:
 //!
 //! - [`Tools::defs`] — the JSON-Schema [`ToolDef`]s handed to the LLM.
 //! - [`Tools::run`] — dispatch a tool by name with a JSON input, returning JSON
@@ -63,8 +63,8 @@ use kicad_bridge::search::SymbolIndex;
 use kicad_bridge::snapshot::SnapshotStore;
 use std::sync::Mutex;
 
-use sch_engine::floorplan::{infer_ir, LayoutIr};
-use sch_engine::lift::lift;
+use sch_layout::floorplan::{infer_ir, LayoutIr};
+use sch_layout::lift::lift;
 
 use crate::llm::ToolDef;
 
@@ -316,14 +316,7 @@ impl Tools {
                     "properties": {
                         "yaml": { "type": "string", "description": "The circuit-YAML source to apply. If omitted, the current draft is used." },
                         "commit": { "type": "boolean",
-                            "description": "Write the schematic (true) or dry-run and only return the diff (false, default)." },
-                        "relayout": {
-                            "description": "Discard preserved positions and re-place: \"all\", or a list of block names.",
-                            "anyOf": [
-                                { "type": "string", "enum": ["all"] },
-                                { "type": "array", "items": { "type": "string" } }
-                            ]
-                        }
+                            "description": "Write the schematic (true) or dry-run and only return the diff (false, default)." }
                     }
                 }),
             },
@@ -588,29 +581,6 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    // Parse the relayout escape hatch first, before any heavy compile/lift/emit
-    // work, so a mis-called hatch fails fast. An unrecognized STRING is an error
-    // (the LLM meant "all" or a block list and typo'd), not a silent no-op.
-    let relayout = match input.get("relayout") {
-        None | Some(Value::Null) => sch_engine::reconcile::Relayout::None,
-        Some(Value::String(s)) if s == "all" => sch_engine::reconcile::Relayout::All,
-        Some(Value::String(other)) => {
-            return Ok(json!({
-                "error": format!(
-                    "relayout string must be \"all\" or a list of block names, got {other:?}"
-                ),
-            }));
-        }
-        Some(Value::Array(items)) => sch_engine::reconcile::Relayout::Blocks(
-            items.iter().filter_map(Value::as_str).map(str::to_string).collect(),
-        ),
-        Some(other) => {
-            return Ok(json!({
-                "error": format!("relayout must be \"all\" or a list of block names, got {other}"),
-            }));
-        }
-    };
-
     // Compile first; never render or write a design with errors.
     let result = compile(&yaml, &ctx.provider);
     let Some(design) = result.design else {
@@ -630,11 +600,9 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
     };
 
     // The floorplan engine re-lays-out from scratch via the connectivity-driven
-    // inferred IR; `relayout` is accepted for API compatibility but the
-    // human-style layout always re-flows the whole sheet.
-    let _ = &relayout;
+    // inferred IR; the human-style layout always re-flows the whole sheet.
     let ir = ctx.layout_for(&design);
-    let emitted = sch_engine::floorplan::emit(&ctx.env, &design, &ir)
+    let emitted = sch_layout::floorplan::emit(&ctx.env, &design, &ir)
         .context("rendering schematic")?;
     let rendered = emitted.sch;
     let diff = design_diff(prior_design.as_ref(), &design);
@@ -647,7 +615,6 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
             "diff": diff,
             "rendered_len": rendered.len(),
             "layout_warnings": emitted.layout_warnings,
-            "relayout_blocks": emitted.relayout_blocks,
         }));
     }
 
@@ -680,7 +647,6 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         "diff": diff,
         "erc": { "errors": erc.error_count(), "warnings": erc.warning_count() },
         "layout_warnings": emitted.layout_warnings,
-        "relayout_blocks": emitted.relayout_blocks,
     }))
 }
 

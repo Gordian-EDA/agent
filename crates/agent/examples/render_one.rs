@@ -34,11 +34,11 @@ fn main() -> anyhow::Result<()> {
     let ir = match std::fs::read_to_string(&ir_path) {
         Ok(s) => {
             eprintln!("using layout IR {ir_path}");
-            sch_engine::floorplan::LayoutIr::from_json(&s)?
+            sch_layout::floorplan::LayoutIr::from_json(&s)?
         }
-        Err(_) => sch_engine::floorplan::baseline_ir(&design),
+        Err(_) => sch_layout::floorplan::baseline_ir(&design),
     };
-    let emit = sch_engine::floorplan::emit(&env, &design, &ir)
+    let emit = sch_layout::floorplan::emit(&env, &design, &ir)
         .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
     for w in &emit.layout_warnings {
         eprintln!("layout-warning: {w}");

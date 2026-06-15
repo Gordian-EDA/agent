@@ -19,7 +19,7 @@ fn main() -> anyhow::Result<()> {
     let result = circuit_lang::compile(&src, &provider as &dyn SymbolProvider);
     let design = result.design.ok_or_else(|| anyhow::anyhow!("compile produced no design"))?;
 
-    let ir = sch_engine::floorplan::infer_ir(&env, &design);
+    let ir = sch_layout::floorplan::infer_ir(&env, &design);
     eprintln!("--- inferred Layout IR ---\n{}\n", serde_json::to_string_pretty(&ir)?);
     // Persist the IR + emitted sch next to the PNG so the frame can be inspected
     // and re-emitted while iterating on the engine.
@@ -28,7 +28,7 @@ fn main() -> anyhow::Result<()> {
         serde_json::to_string_pretty(&ir)?,
     )?;
 
-    let emit = sch_engine::floorplan::emit(&env, &design, &ir)
+    let emit = sch_layout::floorplan::emit(&env, &design, &ir)
         .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
     std::fs::write(std::path::Path::new(&out).with_extension("kicad_sch"), emit.sch.as_bytes())?;
     for w in &emit.layout_warnings {

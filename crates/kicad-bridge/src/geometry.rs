@@ -1,6 +1,6 @@
 //! Pin geometry and `(lib_symbols)` definition extraction for a single symbol.
 //!
-//! `sch-engine` needs two things per used symbol that the geometry-free
+//! `sch-layout` needs two things per used symbol that the geometry-free
 //! `circuit_lang::PinMeta` deliberately omits:
 //!
 //! 1. **Pin geometry** — each pin's local position (`at`), `angle`, and
@@ -46,7 +46,7 @@ use crate::env::KicadEnv;
 ///
 /// `at` is the pin's connection-point root in millimetres (symbol Y grows
 /// upward); the pin line extends `length` mm from there along `angle`
-/// (degrees). The schematic-space endpoint is computed by `sch-engine` after
+/// (degrees). The schematic-space endpoint is computed by `sch-layout` after
 /// applying the instance's position/rotation/mirror.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PinGeom {

@@ -42,7 +42,7 @@ pub enum Edge {
 pub enum LayoutRole {
     /// A two-pin passive spanning at least one power net (e.g. rail↔ground, or
     /// rail↔rail). Drawn vertical; when one pin is ground it is flipped so the
-    /// ground-side pin sits at the bottom (orientation policy lives in sch-engine).
+    /// ground-side pin sits at the bottom (orientation policy lives in sch-layout).
     RailSpan,
 }
 

@@ -201,7 +201,7 @@ pub struct Agent {
 impl Agent {
     /// Build an agent over a project's [`ToolCtx`]. The conversation `client`
     /// drives the agent loop; `apply_design` derives its layout frame from the
-    /// netlist (`sch_engine::floorplan::infer_ir`), so no separate layout client
+    /// netlist (`sch_layout::floorplan::infer_ir`), so no separate layout client
     /// is involved.
     pub fn new(client: Box<dyn LlmClient>, ctx: ToolCtx) -> Self {
         Self {

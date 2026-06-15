@@ -21,7 +21,7 @@ dependencies = [
  "kicad-bridge",
  "reqwest",
  "resvg",
- "sch-engine",
+ "sch-layout",
  "serde",
  "serde_json",
  "tempfile",
@@ -94,7 +94,6 @@ dependencies = [
  "kicad-bridge",
  "pulldown-cmark",
  "ratatui",
- "sch-engine",
  "serde_json",
  "tokio",
 ]
@@ -1442,21 +1441,6 @@ checksum = "4fb771b59f6b1985d1406325ec28f97cfb14256abcec4fdfb37b36a1766d6af7"
 dependencies = [
  "arraydeque",
  "hashlink",
-]
-
-[[package]]
-name = "sch-engine"
-version = "0.1.0"
-dependencies = [
- "circuit-lang",
- "indexmap",
- "kicad-bridge",
- "kiutils_kicad",
- "sch-layout",
- "serde",
- "serde_json",
- "tempfile",
- "uuid",
 ]
 
 [[package]]
