@@ -13,8 +13,12 @@ think of as different *objects*, and hides the objects that matter:
   on a pin.
 - Board I/O ("ports") are inferred from single-pin nets (fragile — misses the
   divider's multi-pin `OUT`) or buried as a net attribute.
-- Layout hints used `layout: {edge: left|right|top|bottom}`, but the engine is a
-  left→right column flow, so `top`/`bottom` silently did nothing.
+- Layout hints **over-specified**. `layout: {edge: top|bottom}` silently did
+  nothing (the engine is a left→right flow), and worse, `near: {U1: [C1]}` asked
+  the human to hand-place things the optimizer **already knows from the netlist**:
+  a decoupling cap *is* the 2-pin part bridging U1's VCC↔GND; a crystal *is* the
+  part on the OSC pins. The graph says they're adjacent — making the author
+  restate it is noise. A hint should carry **only what the graph can't encode**.
 - `between: [a, b]` is fine for a resistor but **ambiguous for a polarized part**
   (which slot is the anode?), forcing an escape hatch (`pins: {A: …, K: …}`).
 
@@ -23,6 +27,14 @@ geometry (placements, wires, *and* the power-symbol / port-label glyphs).** A
 power symbol is a glyph the engine sprays from "this net is power" — exactly like
 wires are glyphs it draws from "these pins share a name."
 
+And the sharp line on hints: **the optimizer holds the full netlist + symbol
+library, so everything *local and geometric* is derivable** (adjacency,
+clustering, series spines, rail-tap orientation, mirroring, port sides). The one
+thing a graph fundamentally **cannot** encode is **global orientation** — a
+netlist has no intrinsic left or right, so "power enters on the left, signal
+flows right" is genuine human intent. That is the *only* thing a hint carries,
+and it is naturally **per-module**. See *What the optimizer infers* below.
+
 ## The model
 
 A design is:
@@ -30,7 +42,8 @@ A design is:
 - **Components** — physical parts (footprint, BOM line, one instance each).
 - **Power nets** — declared once; drawn as power-symbol glyphs at *every* tap.
 - **Ports** — board I/O; drawn as labels at a sheet edge.
-- **Layout hints** — where parts go.
+- **Layout hints** — *per module*: which side of the sheet the module anchors to.
+  Nothing finer (the optimizer arranges the parts inside a module itself).
 - **Signal wires** — *implicit*: pins that share a name are connected. No syntax.
 
 Power symbols and ports are **not** components — they have no footprint/BOM and
@@ -67,41 +80,74 @@ a port also *forces* port-ness, fixing the multi-pin inference gap (the divider'
 `OUT`). A single-pin signal net with no entry still auto-infers (input-ish name →
 left, else right).
 
-### `layout:` — part placement
+### `side:` — per-module placement (the *only* layout hint)
+
+A layout hint lives on a **block** and says which side of the sheet that module
+anchors to:
 
 ```yaml
-layout:
-  left:  [U2]                 # pin toward the LEFT of the left→right flow
-  right: [J2, J3]             # ... toward the RIGHT
-  near:  {U1: [C1, C2, Y1]}   # keep these ADJACENT to U1
+blocks:
+  power:
+    side: left           # this module hugs the LEFT edge of the left→right flow
+    components: { … }
+  mcu:
+    components: { … }     # no hint — the optimizer places it by connectivity
+  connectors:
+    side: right
+    components: { … }
 ```
 
-- `left` / `right`: a list of refdes or block names pinned toward that side. These
-  are the only two values the horizontal column flow can honor. (Internally:
-  biases the anchor column order.)
-- `near: {<anchor>: [<parts>…]}`: place the listed parts next to `<anchor>` — a
-  cap/crystal pinned into that chip's column area (overrides the default
-  "tap nearest pin", so it groups even across nets), another IC into the adjacent
-  column. `near` inherits the anchor's side. A part should appear in **one** of
-  `left`/`right`/`near`; `near` wins on conflict.
+- `side: left | right` — anchors the whole module toward that edge. These are the
+  only two values an honest left→right column flow can honor. (Internally: biases
+  the module's anchor column to the front/back of the order.)
+- A block with **no `side`** floats — the optimizer positions it from
+  connectivity (a stage wired between a `left` module and a `right` module lands
+  in the middle).
+- No per-part placement, and no `near`. **The granularity is the module**, because
+  the only thing the netlist can't tell the optimizer is where each *module* sits;
+  everything inside a module it arranges itself (next section).
+- **No `top`/`bottom`** — the flow is horizontal, so they would be no-ops today. A
+  true top/bottom band is deferred; when it lands, `side: top | bottom` extends
+  this same key honestly. (See *Deferred*.)
 
-Replaces the per-block `layout: {edge: …}`. **No `top`/`bottom` for parts** — they
-were never honored; deleted. (A true top/bottom band, `flow: tb`, and semantic
-block roles like "filter" are deferred — they are real `infer_ir` layout features,
-not syntax. See *Deferred*.)
+### What the optimizer infers — *never* hint these
+
+The optimizer holds the full netlist + symbol library. Anything it can derive,
+you must **not** restate — restating it is noise that can only go stale or
+conflict. It already infers, from incidence and pin geometry alone:
+
+- **Adjacency** (the old `near`). A 2-pin part that bridges an IC's pins is placed
+  next to it: a **decoupling cap** (between a supply pin and GND), a **crystal**
+  (on the OSC pins), a **series resistor** on a signal pin. The graph already says
+  "these share a pin" — adjacency falls out of it.
+- **Clustering.** Caps tapping one supply pin flank that pin; a block's parts stay
+  grouped.
+- **Series spines / collinearity.** Degree-2 chains (a divider's R7→R8) are laid
+  collinear.
+- **Orientation.** Series parts run horizontal, rail taps vertical — classified by
+  rail incidence.
+- **Mirror / flip.** Which way a symbol faces, from which side its nets exit.
+- **Port side** for an obvious single-pin signal (an input-ish net → left). An
+  explicit `ports:` entry overrides this.
+- **Intra-module arrangement** — the relative positions of parts *within* a block.
+
+Litmus test for any proposed hint: *could the optimizer compute this from the
+netlist + symbols?* If yes, it is **not** a hint — fix the inference instead.
 
 ### `blocks:` / `components:` — the parts
 
 ```yaml
 blocks:
   power:
+    side: left           # optional layout hint (see `side:` above)
     components:
       J1: {part: Connector_Generic:Conn_01x02, pins: {1: VIN, 2: GND}}
 ```
 
-Unchanged: blocks group parts; refdes are unique design-wide. A component is
-`{part, value?, footprint?, dnp?, props?, pins?|between?|positive/negative?,
-units?, decouple?}`.
+A block groups parts and optionally carries one `side:` hint; refdes are unique
+design-wide. A component is `{part, value?, footprint?, dnp?, props?,
+pins?|between?|positive/negative?, units?, decouple?}` — note components no longer
+carry any layout field (placement is the block's job).
 
 ### 2-pin connections: symmetric vs polarized
 
@@ -142,13 +188,10 @@ power: [+9V, GND]
 
 # ports: {}   # this board has no off-sheet I/O (9V enters via J1, LED is on-board)
 
-layout:
-  left: [power]          # the input module hugs the left edge
-  near: {U1: [C3]}       # keep the 555's decoupling cap beside it
-
 blocks:
 
   power:                 # 9 V input + reverse protection + bulk
+    side: left           # the input module hugs the left edge
     components:
       J1: {part: Connector_Generic:Conn_01x02, pins: {1: VIN, 2: GND}}
       D1: {part: Device:D,  value: 1N4007, positive: VIN, negative: +9V}  # reverse-polarity
@@ -170,7 +213,7 @@ blocks:
       R1: {part: R, value: 4k7,   between: [+9V,   N_DIS]}
       R2: {part: R, value: 10k,   between: [N_DIS, N_RC]}
       C2: {part: C, value: 10uF,  between: [N_RC,  GND]}              # timing
-      C3: {part: C, value: 100nF, between: [+9V,   GND]}              # decoupling
+      C3: {part: C, value: 100nF, between: [+9V,   GND]}  # decoupling → auto-placed by U1
       C4: {part: C, value: 10nF,  between: [N_CV,  GND]}              # CV bypass
       R3: {part: R, value: 1k,    between: [N_Q,   N_LED]}
       D2: {part: Device:LED, value: red, positive: N_LED, negative: GND}
@@ -180,8 +223,12 @@ blocks:
 
 - `rails: [...]` → `power: [...]`. Delete every `nets: {N: {power: true}}`.
 - Port nets → a `ports:` entry (`OUT: {port: right}` in v1 plans → `ports: {OUT: right}`).
-- Per-block / per-part `layout: {edge: …}` → the top-level `layout: {left,right,near}`;
-  drop any `edge: top|bottom` (auto-places).
+- Per-block `layout: {edge: left|right}` → `side: left|right` on the block; drop
+  `edge: top|bottom` (auto-places).
+- Per-**part** `layout: {edge: …}` and every `near:` hint → **deleted**, no
+  replacement. The optimizer infers adjacency/clustering/intra-module order; if a
+  part lands wrong, fix the inference (or move the part to a block with the right
+  `side`), don't add a hint.
 - Polarized parts using `between:` (or `pins: {A:…,K:…}`) → `positive:`/`negative:`.
 - The `nets:` section survives only for the rare `class:` attribute; drop it if unused.
 
@@ -193,10 +240,14 @@ diode/LED polarity rewrites must not change geometry).
 
 ## Deferred (explicitly not in v2)
 
-- A true **top/bottom band** for parts (place a block above/below the main row).
+- A true **top/bottom band** for modules (place a block above/below the main row).
+  When it lands it is `side: top | bottom` — the *same* per-module key, no new
+  syntax.
 - **`flow: tb`** — a vertical layout mode.
 - Semantic **block roles** ("treat this block as a filter") → idiom templates in
   `infer_ir`.
-- `near` between two *satellites* (only anchor-relative for now).
 
-These are `infer_ir` layout features, each its own pass — not syntax.
+These are `infer_ir` layout features, each its own pass — not syntax. Note `near`
+is **not** here: it is deliberately gone, subsumed by the optimizer's adjacency
+inference (*What the optimizer infers*). If adjacency comes out wrong, the fix is
+a better inference rule, never a hint.

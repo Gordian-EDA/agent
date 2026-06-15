@@ -28,16 +28,23 @@ Design: `docs/superpowers/specs/2026-06-15-circuit-lang-v2-design.md` (committed
   **byte-identical** (`rails:`→`power:` and diode/LED polarity rewrites must not
   move geometry).
 
-### 1.2 Layout hints still unwired in `infer_ir`
-`infer_ir` is a left→right column flow; these v2/earlier hints are parsed-or-
-designed but not honored yet:
-- **`layout.near`** — block/part adjacency (cap/crystal pinned into a chip's
-  column). The single highest-value unwired hint.
-- **true top/bottom band** — place a block above/below the main row (today
-  top/bottom approximate to middle columns; v2 drops them for parts entirely).
+### 1.2 Per-module `side` hint + dropped per-part/`near` hints
+v2 narrows layout hints to **one per-module key, `side: left|right`** (the only
+thing the netlist can't encode). When implementing:
+- wire **per-block `side`** into `infer_ir` (biases the module's anchor column);
+  **drop** the per-part `layout: {edge}` override added in `86d5bd4` and **drop**
+  `near` from the syntax entirely.
+- this makes **adjacency the optimizer's job** — see §2.x: decoupling caps,
+  crystals, and series passives must auto-cluster next to their anchor from
+  incidence (subsumes what `near` used to hand-place). That is INFER quality work
+  (Batch A3/A4), not a hint.
+
+### 1.3 Deferred layout *features* (not syntax)
+Real `infer_ir` passes, each deferred — not author-facing hints:
+- **true top/bottom band** — place a module above/below the main row; when it
+  lands it reuses the same `side: top|bottom` key (today top/bottom are no-ops).
 - **`flow: tb`** — a vertical layout mode.
 - **semantic block roles** — "treat this block as a filter" → idiom templates.
-- **`near` between two satellites** — anchor-relative only for now.
 
 ---
 
