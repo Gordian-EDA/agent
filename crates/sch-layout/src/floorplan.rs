@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
-use circuit_lang::model::{Component, Design, PinTarget};
+use circuit_lang::model::{Component, Design, Edge, PinTarget};
 use circuit_lang::{find_pin, PinType, SymbolProvider};
 use kicad_bridge::env::KicadEnv;
 use kicad_bridge::geometry::SymbolGeometry;
@@ -194,8 +194,18 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
     // pin knows the pin's side (which column) and rank (which row) on that side.
     const MID: i32 = 4;
     let mut place: BTreeMap<String, Cell> = BTreeMap::new();
-    // Anchor columns: connectors (inputs) leftmost, then ICs by net distance.
-    let order = order_anchors(&items, &inc, &anchors);
+    // Authored block-edge hints (`layout: {edge: …}`): refdes → left-to-right rank,
+    // so a block pinned to an edge biases its anchors' columns toward that edge.
+    let edge_rank: BTreeMap<String, u8> = design
+        .blocks
+        .values()
+        .flat_map(|b| {
+            let r = band_rank(b.layout.edge);
+            b.components.keys().map(move |rd| (rd.clone(), r))
+        })
+        .collect();
+    // Anchor columns: edge hint first, then connectors (inputs) leftmost, then refdes.
+    let order = order_anchors(&items, &inc, &anchors, &edge_rank);
     let mut anchor_col: BTreeMap<usize, i32> = BTreeMap::new();
     for (k, &ai) in order.iter().enumerate() {
         let col = k as i32 * 5; // wide gaps leave room for tap satellites either side
@@ -435,16 +445,40 @@ fn wants_mirror(
 
 /// Order anchors left→right: connectors first, then ICs by BFS distance from them
 /// over shared signal nets (a rough signal-flow order).
-fn order_anchors(items: &[Item], inc: &Incidence, anchors: &[usize]) -> Vec<usize> {
+fn order_anchors(
+    items: &[Item],
+    inc: &Incidence,
+    anchors: &[usize],
+    edge_rank: &BTreeMap<String, u8>,
+) -> Vec<usize> {
     let mut order: Vec<usize> = anchors.to_vec();
-    // Connectors (inputs) sort before ICs; within a group, by refdes for stability.
+    // PRIMARY key: the authored block-edge hint (`layout: {edge: left|right|…}`)
+    // mapped to a left→right rank (Left=0 … none=3 … Right=4), so a block pinned
+    // to an edge lands in that edge's columns. SECONDARY: connectors (inputs)
+    // before ICs; then refdes for stability. A sheet with no edge hints (the four
+    // references) is all rank 3 → identical to the old connector/refdes order.
     order.sort_by(|&a, &b| {
+        let ra = edge_rank.get(&items[a].refdes).copied().unwrap_or(3);
+        let rb = edge_rank.get(&items[b].refdes).copied().unwrap_or(3);
         let ca = !items[a].part.contains("Connector");
         let cb = !items[b].part.contains("Connector");
-        ca.cmp(&cb).then(items[a].refdes.cmp(&items[b].refdes))
+        ra.cmp(&rb).then(ca.cmp(&cb)).then(items[a].refdes.cmp(&items[b].refdes))
     });
     let _ = inc;
     order
+}
+
+/// An authored block-edge hint as a left→right column rank. Left-most edge first,
+/// no hint in the middle, Right last. (Top/Bottom sit between Left and Right in
+/// this column-flow layout — a horizontal sheet has no separate top band yet.)
+fn band_rank(edge: Option<Edge>) -> u8 {
+    match edge {
+        Some(Edge::Left) => 0,
+        Some(Edge::Top) => 1,
+        Some(Edge::Bottom) => 2,
+        None => 3,
+        Some(Edge::Right) => 4,
+    }
 }
 
 // ---------------------------------------------------------------------------
