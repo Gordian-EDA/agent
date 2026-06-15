@@ -116,11 +116,16 @@ of the work. The ranked plan from the gap-analysis workflow
 The oracle's challenge tier carries these as documented-failing; it auto-fails if
 one silently starts passing (remove it from the list when fixed).
 
-- **#21 / `bga-fpga-ice40`** — many/multi-unit power pins don't all reach their
-  single rail. The FPGA's GND balls span 5 units; rail routing leaves GND
-  fragmented into ~12 nets, one of which shorts onto `1V2`. **Fix:** rail routing
-  must connect *every* power-net pin across *all* units to its one rail. (Not a
-  positional merge — units render in a non-overlapping row.)
+- **#21 / `bga-fpga-ice40`** — SHARPENED DIAGNOSIS (2026-06-15): GND does NOT
+  fragment — it **merges/shorts into 1V2**. In the exported netlist there is *no*
+  GND net at all; `1V2` carries 48 nodes (GND's pins folded in). So a GND rail
+  wire/riser collides with a 1V2 element. (`emit_rail` + `split_wires_at_nodes`
+  are each correct in isolation; the "3 bare #PWR" are power lib-symbol DEFAULTS,
+  a false alarm.) The search's cost (`count_merges`/`count_shorts`/`foreign_taps`)
+  does NOT catch this multi-unit GND→1V2 collision — that's the blind spot to
+  fix: price it, OR make `emit_rail` route GND/1V2 risers so they can't touch.
+  Iterating needs the slow bga (use `NO_REFINE=1 layout_spike` to render it fast,
+  then export the netlist and check `1V2` node count vs a real GND net).
 - **`bedrock-selfrepair-bluepill`** — `baseline_ir` adjacent-rail short.
 
 ---
