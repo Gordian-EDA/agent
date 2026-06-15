@@ -243,3 +243,26 @@ iteration budget scaled down for big boards, or a cheaper per-eval cost, before
 **rf-lna 2/2** — the ADL5542-MPN-over-cap: fix in `solve_text_positions` (the IC
 value candidates sort by OWN pin-text overlap, not NEIGHBOR-symbol overlap, so a
 long MPN with no clear spot falls onto a cap), not the placement search.
+
+### 6.2 SA perfect on the fast fixtures (2026-06-15, `73c0f66`)
+
+After the warning-aware SA candidate pick + far-band IC MPN candidates:
+
+```
+fixture                  greedy  anneal
+divider / mcp1703 / 555     0       0
+uart / grid-demo            0       0
+rf-lna-frontend             0       0
+mixed-signal-adc-frontend   2       0
+0-warning (fast)           6/7     7/7
+```
+
+**SA is 7/7 perfect on the fast fixtures** and guaranteed ≥ greedy (the
+warning-aware pick). Remaining for "perfect on all 10":
+- **SA too slow on big boards** — bedrock (100-pin) / bga (121-ball) route the
+  whole sheet per move, so the SA runs many minutes; can't even scoreboard them.
+  Needs a per-board iteration budget or a cheaper per-eval cost.
+- **The 2 truthfulness bugs** (`#21`): bga multi-unit GND fragments → shorts onto
+  1V2; bedrock-selfrepair `baseline_ir` adjacent-rail short. These are RAIL-ROUTING
+  correctness (the `wire`/`emit_rail` path), independent of greedy/SA. Fixing them
+  + removing from `KNOWN_TRUTHFULNESS_BUGS` is the core remaining blocker.
