@@ -1409,13 +1409,14 @@ fn score_items(
     }
 }
 
-/// PREMIUM-tier cost: identical correctness terms, but the AESTHETIC terms
-/// (crossings, corners, congestion, compactness, stray, length) weigh heavier, so
-/// the paid simulated-annealing search optimises for a tighter, straighter, more
-/// "designed" sheet than the free greedy tier settles for. Only the SA explores
-/// against this objective ([`anneal_items`] + the candidate pick); the shipped
-/// finalize passes still use the base cost, so the shipped warning count is the
-/// same metric for both tiers.
+/// PREMIUM-tier cost. The paid SA pays for the ACCURATE objective the free tier
+/// can't afford: the REAL post-solve lint warning count (`warning_count` =
+/// build + text-solve + count), heavily weighted, so the SA directly minimises the
+/// shipped warnings — not a cheap pre-solve proxy, which diverges from the truth
+/// (the solver fixes much of the pre-solve crowding; minimising the proxy lands
+/// WORSE — measured). Then the straightness-weighted routed cost
+/// (`layout_cost(premium=true)`) breaks ties toward a tidier sheet. This is what
+/// the SA explores; the shipped finalize uses the base cost, same metric both tiers.
 fn premium_score_items(
     env: &KicadEnv,
     items: &[Item],
@@ -1423,10 +1424,12 @@ fn premium_score_items(
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
 ) -> f64 {
-    match build_writer(env, None, items, inc, ir, needs_flag, false) {
+    let warnings = warning_count(env, items, inc, ir, needs_flag);
+    let aes = match build_writer(env, None, items, inc, ir, needs_flag, false) {
         Ok(w) => layout_cost(env, &w, items, inc, ir, true),
-        Err(_) => f64::INFINITY,
-    }
+        Err(_) => return f64::INFINITY,
+    };
+    10_000.0 * warnings as f64 + aes
 }
 
 /// Pin-alignment polish: slide each satellite onto the AXIS of the signal pin it
