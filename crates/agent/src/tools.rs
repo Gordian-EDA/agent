@@ -61,7 +61,6 @@ use kicad_bridge::env::KicadEnv;
 use kicad_bridge::provider::RealSymbolProvider;
 use kicad_bridge::search::SymbolIndex;
 use kicad_bridge::snapshot::SnapshotStore;
-use std::sync::Mutex;
 
 use sch_layout::floorplan::{infer_ir, LayoutIr};
 use sch_layout::lift::lift;
@@ -93,9 +92,6 @@ pub struct ToolCtx {
     workspace: crate::workspace::Workspace,
     /// Keeps a test tempdir alive for the ctx's lifetime; `None` for real ctxs.
     _tempdir: Option<tempfile::TempDir>,
-    /// Cache of the last inferred layout, keyed by a design fingerprint, so the
-    /// dry-run, render and commit of one design share a single inference.
-    layout_cache: Mutex<Option<(u64, LayoutIr)>>,
 }
 
 /// Tool execution happens on blocking threads; the context must cross them.
@@ -124,7 +120,6 @@ impl ToolCtx {
             index: OnceLock::new(),
             workspace,
             _tempdir: None,
-            layout_cache: Mutex::new(None),
         })
     }
 
@@ -161,24 +156,15 @@ impl ToolCtx {
             index: OnceLock::new(),
             workspace,
             _tempdir: Some(tempdir),
-            layout_cache: Mutex::new(None),
         })
     }
 
     /// The Layout IR for `design`: the connectivity-driven frame inferred from
-    /// the netlist (rails, anchor order, satellite placement, ports, mirror),
-    /// cached per design fingerprint so the dry-run, render and commit of one
-    /// design share a single inference.
+    /// the netlist (rails, anchor order, satellite placement, ports, mirror).
+    /// Pure and cheap, so it is just recomputed each call (no cache — a stale
+    /// fingerprint would silently ignore `layout:`/`power:` edits).
     fn layout_for(&self, design: &Design) -> LayoutIr {
-        let fp = design_fingerprint(design);
-        if let Some((cached_fp, ir)) = self.layout_cache.lock().unwrap().as_ref() {
-            if *cached_fp == fp {
-                return ir.clone();
-            }
-        }
-        let ir = infer_ir(&self.env, design);
-        *self.layout_cache.lock().unwrap() = Some((fp, ir.clone()));
-        ir
+        infer_ir(&self.env, design)
     }
 
     /// The project's `.kicad_sch` path (may not exist).
@@ -694,23 +680,6 @@ fn component_signature(c: &Component) -> String {
 /// A stable fingerprint of a design's connectivity (refdes, part, pins→nets),
 /// used to cache the inferred layout across the dry-run/render/commit of one
 /// design.
-fn design_fingerprint(design: &Design) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    for block in design.blocks.values() {
-        for (refdes, comp) in &block.components {
-            refdes.hash(&mut h);
-            comp.part.hash(&mut h);
-            for (pin, target) in &comp.pins {
-                pin.hash(&mut h);
-                if let PinTarget::Net(n) = target {
-                    n.hash(&mut h);
-                }
-            }
-        }
-    }
-    h.finish()
-}
 
 /// Structured diff between a prior design (possibly `None` for a fresh project)
 /// and the new one: which refdes were added, removed, or changed, plus the net
