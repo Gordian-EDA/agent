@@ -1,0 +1,29 @@
+version: 1
+name: grid-demo
+power: [9V, GND]
+
+# Grid: input connector left, the 555 centre, output connector right.
+layout:
+  - [input, blinker, output]
+
+blocks:
+  input:
+    components:
+      J1: {part: Connector_Generic:Conn_01x02, pins: {1: 9V, 2: GND}}
+      C1: {part: Device:C, value: 100u, between: [9V, GND]}
+
+  blinker:
+    components:
+      U1:
+        part: Timer:NE555P
+        pins: {VCC: 9V, GND: GND, R: 9V, DIS: N_DIS, THR: N_RC, TR: N_RC, CV: N_CV, Q: N_Q}
+      R1: {part: Device:R, value: 4k7, between: [9V, N_DIS]}
+      R2: {part: Device:R, value: 10k, between: [N_DIS, N_RC]}
+      C2: {part: Device:C, value: 10u, between: [N_RC, GND]}
+      C3: {part: Device:C, value: 10n, between: [N_CV, GND]}
+
+  output:
+    components:
+      R3: {part: Device:R, value: 1k, between: [N_Q, N_LED]}
+      D1: {part: Device:LED, value: red, positive: N_LED, negative: GND}
+      J2: {part: Connector_Generic:Conn_01x02, pins: {1: N_Q, 2: GND}}

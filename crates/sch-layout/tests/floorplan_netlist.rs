@@ -40,6 +40,7 @@ const CHALLENGE_FIXTURES: &[&str] = &[
     "rf-lna-frontend",               // ADL5542 RF gain block + coax (HF/RF)
     "mixed-signal-adc-frontend",     // MCP6002 op-amp -> ADS1115 I2C ADC (mixed-signal)
     "bga-fpga-ice40",                // ICE40HX8K-BG121 121-ball BGA, dual-rail (BGA)
+    "grid-demo",                     // authored `layout:` 2D grid (NE555 blinker)
 ];
 
 fn doc(name: &str, ext: &str) -> std::path::PathBuf {
