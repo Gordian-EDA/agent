@@ -8,69 +8,89 @@ Validate any engine change with the harness (render `render_targets` →
 `docs/validation/references/*.png`, gate on the netlist oracle). See CLAUDE.md
 *Visual review* and the `floorplan-validation-harness` memory.
 
+Design docs:
+- `docs/superpowers/specs/2026-06-15-circuit-lang-v2-design.md` — v2 YAML
+  (`power`/`ports`/polarity/`layout:` grid).
+- `docs/superpowers/specs/2026-06-15-layout-engine-grid-redesign.md` — the engine
+  side of the grid (the contract, rigid refine, deletions).
+
 ---
 
-## 1. Features (designed, not built)
+## 1. The grid redesign — biggest item, do it as one arc
 
-### 1.1 circuit-lang v2 YAML — **biggest item**
-Design: `docs/superpowers/specs/2026-06-15-circuit-lang-v2-design.md` (committed
-`a26e943`). Implement:
+The author writes a coarse 2D `layout:` grid; the engine fills in fine geometry.
+The engine is **already** a grid placer (`LayoutIr.place: refdes → Cell{col,row}`,
+`assign_cells`/`apply_cells`), so this is mostly *exposure + deletion*, not new
+machinery. Implement as one coherent change (language + engine + fixtures):
+
+### 1.1 circuit-lang v2 YAML
+Per the v2 design doc:
 - **model + parser** for `power:` (power nets as first-class symbol glyphs,
-  replaces `rails:` + `nets:{power:true}`), `ports:` (`<net>: <edge>`),
-  `layout: {left, right, near}`.
-- **polarity terminals** `positive:` / `negative:` for 2-pin polarized parts,
-  mapped to the symbol's anode/cathode (or `+`/`−`) pins by the compiler.
-- **enforcement errors**: `between:` on a polarized part →
-  `"D2 is polarized — use positive/negative"`; `positive`/`negative` on a
-  symmetric part → `"R1 is not polarized — use between"`.
-- wire `power`/`ports`/`layout` into `infer_ir`.
-- **migrate all 8 fixtures** to v2; the four reference renders must stay
-  **byte-identical** (`rails:`→`power:` and diode/LED polarity rewrites must not
-  move geometry).
+  replaces `rails:` + `nets:{power:true}`), `ports:` (`<net>: <edge>`), and the
+  top-level **`layout:` 2D array** (`Vec<Vec<Option<String>>>` of block/refdes
+  names; `~` = hole).
+- **polarity terminals** `positive:` / `negative:` for 2-pin polarized parts →
+  mapped to the symbol's anode/cathode (or `+`/`−`) pins, with the
+  between-on-polarized / positive-on-symmetric **enforcement errors**.
+- **delete** the old hint surface: `Edge`, `LayoutHint`, `Block.layout`,
+  `Component.layout` (the per-block/part `edge` hint from `6b6e81d`/`86d5bd4`),
+  and `near`. No replacement — position is the grid or declaration order.
 
-### 1.2 Per-module `side` hint + dropped per-part/`near` hints
-v2 narrows layout hints to **one per-module key, `side: left|right`** (the only
-thing the netlist can't encode). When implementing:
-- wire **per-block `side`** into `infer_ir` (biases the module's anchor column);
-  **drop** the per-part `layout: {edge}` override added in `86d5bd4` and **drop**
-  `near` from the syntax entirely.
-- this makes **adjacency the optimizer's job** — see §2.x: decoupling caps,
-  crystals, and series passives must auto-cluster next to their anchor from
-  incidence (subsumes what `near` used to hand-place). That is INFER quality work
-  (Batch A3/A4), not a hint.
+### 1.2 Grid in the engine
+Per the engine-redesign doc:
+- **`grid_from_layout`** — parse `layout:` → `place` cells (col = index in row,
+  row = row index); a block cell expands to its parts; a cell appearing ≥2× →
+  add to a new `LayoutIr.float` set, anchor at the centroid.
+- **`infer_ir` → `infer_grid`** — same inference rules, but output understood as a
+  grid; **default order = block declaration order** (one left→right row), refined
+  by connectivity only where it helps. **Delete `order_anchors` + `band_rank`**
+  (they only existed to turn edge hints into a column order).
+- **compose** authored ∪ inferred: a partial `layout:` pins some anchors;
+  ungridded parts attach to their most-incident gridded anchor (adjacency rule,
+  now load-bearing) or take a spare column.
+- **`refine_cells` becomes grid-rigid**: gridded anchors freeze their `(col,row)`
+  (orient/mirror still free); float anchors move only within their cell-span;
+  ungridded satellites keep full freedom. Narrower search = faster + can't wander
+  a reference into an ugly-cheap basin.
+- **cost simplification**: drop `spread` + the anchor-ordering bias; keep the
+  local-geometry terms (corners, body crossings, foreign taps, overlap, orient,
+  spine, supply-pin pull). The grid removed the global DOF that made one cost
+  whack-a-mole across circuits.
+- **retire anneal**: delete `anneal_cells` + the `ANNEAL` flag (off by default,
+  never wins, and a rigid grid makes global search moot).
 
-### 1.3 Deferred layout *features* (not syntax)
-Real `infer_ir` passes, each deferred — not author-facing hints:
-- **true top/bottom band** — place a module above/below the main row; when it
-  lands it reuses the same `side: top|bottom` key (today top/bottom are no-ops).
-- **`flow: tb`** — a vertical layout mode.
-- **semantic block roles** — "treat this block as a filter" → idiom templates.
+### 1.3 Fixtures + gate
+- migrate all 8 fixtures to v2 (`rails:`→`power:`, polarity rewrites, drop
+  `nets.power`); the 4 references carry **no** `layout:` grid → they exercise
+  `infer_grid`'s declaration-order default and **must stay byte-identical**.
+- add a **grid fixture** (the J1/MCU/USB shape) asserting: gridded anchors land in
+  grid order; a repeated anchor floats between its rows; ungridded caps land
+  beside their anchor.
 
 ---
 
-## 2. INFER quality — retire the hand sidecar
+## 2. Inference quality — now load-bearing
 
-`infer_ir` is the production default (no LLM frame). To make INFER match the
-references and drop the `place`/`ports`/`mirror` sidecar, the ranked plan from
-the gap-analysis workflow (`tasks/wvtpl2fpe.output`, run `wf_6c827ceb-234`):
+The grid is sparse and the default is declaration-order, so `infer_grid` does more
+of the work. The ranked plan from the gap-analysis workflow
+(`tasks/wvtpl2fpe.output`, run `wf_6c827ceb-234`):
 
-**Batch A — INFER-only, zero sidecar risk** (the sidecar path never runs this
-code):
-- **A1** promote named multi-pin signal nets to ports — fixes INFER divider
-  **missing OUT label** and uart TXD1/RXD1 labels. Prefer the structural signal
-  (net reaches a downstream IC pin / incident only to passives) over the name
-  heuristic; skip `N$`/anonymous nets.
+- **Adjacency placement (was `near` + Batch A3/A4)** — ungridded parts must
+  auto-cluster next to the gridded anchor they wire to: decoupling caps flank the
+  IC supply pin (not `spare_col`), crystals sit on the OSC pins, series passives
+  along the flow. This *replaces* the `near` hint and is how block-cell expansion
+  places satellites. Loosen `anchor_tap` to resolve on a single distinct **anchor**
+  (kills 555 sprawl).
+- **A1 ports** — promote named multi-pin signal nets to ports (divider `OUT`, uart
+  `TXD1`/`RXD1`); prefer the structural signal over the name heuristic; skip
+  `N$`/anonymous. (Now partly handled by the explicit `ports:` section — keep the
+  inference for un-declared single-pin nets.)
 - **A2** geometry-driven port side (not the `net_is_input` substring).
-- **A3** loosen `anchor_tap` to resolve on a single distinct **anchor**, not a
-  single pin — kills 555 sprawl.
-- **A4** decoupling caps flank their IC supply pin, not `spare_col`
-  (mcp1703/uart).
-- **A5** decide mirror **before** satellite placement (uart A/B side).
-- Known INFER defect to clear alongside: mcp1703 warns `F1 overlaps field U1`.
-
-**Batch B — shared risk** (re-validate all 4 sidecar renders):
-- re-add IC field-text reservation in `item_rect` (reverted in round 4 because it
-  perturbed the anneal — anneal is OFF by default now, so it may be safe).
+- **A5** decide `mirror` before satellite placement (uart A/B side).
+- **F1-overlaps-field** — INFER mcp1703 warns `F1 overlaps field U1`; clear it.
+- **Batch B** — re-add IC field-text reservation in `item_rect` (reverted in round
+  4 for perturbing the anneal; anneal is going away, so re-validate all 4 and
+  keep it).
 
 ---
 
@@ -91,16 +111,14 @@ one silently starts passing (remove it from the list when fixed).
 ## 4. Cleanup / hygiene
 
 - **`lift` `ap_*` vestige** — `crates/sch-layout/src/lift.rs` still reads the
-  hidden `ap_block`/`ap_role`/`ap_parent`/`ap_index` reconciliation tags that the
+  hidden `ap_block`/`ap_role`/`ap_parent`/`ap_index` reconciliation tags the
   modern `emit` no longer writes. Dead on modern input, but `lift` is live
-  (`apply_design` diff), so it needs a focused follow-up (drop the tag reader or
-  re-emit the tags it depends on).
+  (`apply_design` diff) → focused follow-up (drop the reader or re-emit the tags).
 - **Challenge oracle is slow (~9 min)** — polish is bounded (3 iters / 2
-  free_nudge rounds) to keep it tractable; references still render in ~1.3 s.
-  Revisit if the challenge set grows.
+  free_nudge rounds); references still render in ~1.3 s. The grid's narrower refine
+  search should *help* here — re-measure after 1.2.
 - **uart clutter (review T1/T4)** — J1 `Conn_01x05` text overlaps the pin-3/4
   no-connect X markers (cheap win in `solve_text_positions`); the R13/R15
-  termination cluster is busier than the human reference (pull tighter to the IC).
-- **Pre-existing, NOT an engine bug** — `cli_netlist` test fails on this KiCAD
-  9.0.2 env (old-format `rc_pair.kicad_sch` won't load). Leave as-is or
-  regenerate the fixture.
+  termination cluster is busier than the human reference.
+- **Pre-existing, NOT an engine bug** — `cli_netlist` fails on this KiCAD 9.0.2 env
+  (old-format `rc_pair.kicad_sch` won't load). Leave as-is or regenerate.
