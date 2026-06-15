@@ -210,3 +210,36 @@ The SA is the quality tier and it works.
 - **Still to reach "perfect on all 10":** drive the remaining INFER label/text
   overlaps to 0 (bedrock/mixed via the SA + targeted `solve_text_positions`), and
   the 2 tracked truthfulness bugs (`#21` bga GND fragments, selfrepair rail short).
+
+### 6.1 Scoreboard (`sa_e2e`, fast fixtures, 2026-06-15)
+
+```
+fixture                  greedy  anneal
+divider-filter              0       0
+mcp1703-power-entry         0       0
+555-blinker                 0       0
+uart-level-translator       0       1   <- SA REGRESSED
+grid-demo                   0       0
+rf-lna-frontend             2       2
+mixed-signal-adc-frontend   2       0   <- SA fixed
+```
+
+**Key finding — the SA needs a WARNING-AWARE cost.** Greedy and SA share the same
+`layout_cost` today (PremiumCost not built). So the SA's global search *exploits
+the cost's blind spots*: it found a uart layout that's cost-cheaper but has a
+label overlap the cost doesn't price (0→1), while fixing mixed-signal (2→0). To
+make the SA strictly ≥ greedy and reach "perfect on all 10", the cost must price
+the layout-warning classes (label-over-symbol, value-over-symbol) the SA can
+currently exploit — the `PremiumCost` work (Step 7). NOT via `prepare()`-per-eval
+(too slow); via a cheap approximation of those overlap classes on the
+un-prepared writer.
+
+**SA-speed is now a real blocker**, not just deferred: the SA on a 100-pin
+(bedrock) / 121-ball (bga) board runs many minutes (thousands of build+route
+evals), so it can't even be scoreboarded on all 10 in reasonable time. Needs an
+iteration budget scaled down for big boards, or a cheaper per-eval cost, before
+"SA on all 10" is practical.
+
+**rf-lna 2/2** — the ADL5542-MPN-over-cap: fix in `solve_text_positions` (the IC
+value candidates sort by OWN pin-text overlap, not NEIGHBOR-symbol overlap, so a
+long MPN with no clear spot falls onto a cap), not the placement search.
