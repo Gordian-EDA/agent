@@ -14,6 +14,17 @@ Design docs:
 - `docs/superpowers/specs/2026-06-15-layout-engine-grid-redesign.md` — the engine
   side of the grid (the contract, rigid refine, deletions).
 
+## Status (2026-06-15)
+
+**Done this session:** `layout:` 2D grid (`941c9df`), `positive:`/`negative:`
+polarity + enforcement (`f956568`), `power:` list replacing `rails:`/`nets.power`
+(`415a755`), and an `anchor_tap` fix so a satellite whose rail leg also lands on
+its IC flanks the signal pin instead of scattering (mixed-signal blockers gone,
+grid skeleton honored). All gated byte-identical on the 4 references + oracle.
+
+**Still open:** the INFER-quality items below (§2 + §5), `ports:` author section,
+engine rigid-refine/anneal cleanup (§1.2), and the tracked bugs (§3).
+
 ---
 
 ## 1. The grid redesign — biggest item, do it as one arc
@@ -122,3 +133,33 @@ one silently starts passing (remove it from the list when fixed).
   termination cluster is busier than the human reference.
 - **Pre-existing, NOT an engine bug** — `cli_netlist` fails on this KiCAD 9.0.2 env
   (old-format `rc_pair.kicad_sch` won't load). Leave as-is or regenerate.
+
+---
+
+## 5. Fresh sub-agent critique findings (2026-06-15)
+
+Ranked from a parallel adversarial review of the 4 reference renders + the
+INFER-path renders (grid-demo, rf-lna, mixed-signal). The `anchor_tap` fix
+already cleared the worst INFER blockers (collapsed components, scattered
+timing parts). Remaining, by impact:
+
+- **Bypass-cap pile (INFER).** N caps on one non-rail node (rf-lna's 5 caps on
+  `CB_NODE`) all group into ONE column → a tall thin stack with the net label
+  running vertically *through* the cap bodies. Fix: in `infer_ir`'s star-leg
+  branch, fan CAPS out into their own columns (like decoupling) instead of
+  grouping same-signal legs; only resistor divider legs should share a column.
+- **Vertical net labels over symbols (INFER).** A long vertical net's label is
+  placed mid-span, overprinting the symbols it runs past (rf-lna `CB_NODE`).
+  Fix: keep net labels horizontal and collision-test the label bbox against
+  symbol bboxes in `solve_text_positions` before placing.
+- **Multi-unit op-amp + connector placement (INFER).** rf-lna's AD8542 units +
+  J1/J2 connectors pile at column 0. Multi-unit anchor units and 2-pin
+  connectors need real column assignment, not the satellite fallback.
+- **Compactness gap (BOTH paths).** Every reference reviewer flagged the render
+  as ~2–3× too sparse vs the human drawing (wide margins, large label-to-symbol
+  gaps, full-height indicator legs). A global compaction / auto-fit-to-content
+  pass would close most of the visible gap. (Sidecar references are byte-frozen,
+  so this is an INFER + emit-framing change, validated against the human refs.)
+- **mcp1703 / 555 series-spine alignment (reference gap).** Reviewers want the
+  main power/series spine on one Y aligned to the IC pins, rail taps as vertical
+  branches off it. This is the "match references / retire sidecar" track.

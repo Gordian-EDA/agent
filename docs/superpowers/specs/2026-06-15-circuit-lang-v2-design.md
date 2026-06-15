@@ -1,6 +1,10 @@
 # circuit-lang v2 — YAML redesign
 
-Status: **design** (not yet implemented). Pre-release; breaking changes are fine.
+Status: **largely implemented** (2026-06-15). Done: the `layout:` 2D grid
+(`941c9df`), `positive:`/`negative:` polarity + enforcement (`f956568`), and
+`power:` replacing `rails:`/`nets.power` (`415a755`). Still design-only: the
+author-facing `ports:` section (the sidecar/inference still supplies ports) and
+the engine-side rigid-refine cleanup. Pre-release; breaking changes are fine.
 
 ## Why
 

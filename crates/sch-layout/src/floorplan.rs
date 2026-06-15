@@ -252,18 +252,38 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         }
     }
 
-    // Spare columns for satellites that don't resolve to an anchor pin.
-    let mut spare_col = order.len() as i32 * 5 + 3;
+    // Spare columns for satellites that don't resolve to an anchor pin. Start
+    // past the last placed anchor column (`next_col` covers grid + inferred).
+    let mut spare_col = next_col * 5 + 3;
     // Track how many V+/GND-band parts already sit in each column, to spread them.
     let mut band_fill: BTreeMap<(i32, i32), i32> = BTreeMap::new();
+
+    // Grid cells that contain an anchor: a satellite the author gridded into such
+    // a cell still FLANKS the anchor (inference); one gridded into an anchor-less
+    // cell (a bare 2-pin connector, or an all-passive block) is stacked there.
+    let anchor_cells: BTreeSet<(i32, i32)> =
+        anchors.iter().filter_map(|&ai| authored.get(&items[ai].refdes).copied()).collect();
+    let mut stack_row: BTreeMap<(i32, i32), i32> = BTreeMap::new();
 
     for &si in &sats {
         let s = &items[si];
         let (n1, n2) = (s.pins[0].2.clone(), s.pins[1].2.clone());
         let (Some(n1), Some(n2)) = (n1, n2) else { continue };
 
+        // An explicitly-gridded satellite in an anchor-less cell: place it at its
+        // cell, stacking successive parts down the column so they don't collide.
+        if let Some(&(gc, gr)) = authored.get(&s.refdes)
+            && !anchor_cells.contains(&(gc, gr))
+        {
+            let k = stack_row.entry((gc, gr)).or_insert(0);
+            let row = MID + gr * ROW_BAND + *k;
+            *k += 1;
+            place.insert(s.refdes.clone(), Cell { col: gc * 5, row, orient: orient_for(&s.pins, &n1, true) });
+            continue;
+        }
+
         // The single anchor pin this satellite taps (if any), with its side/rank.
-        let tap = anchor_tap(&items, &inc, &anchors, si);
+        let tap = anchor_tap(&items, &inc, &anchors, si, &rails);
 
         let cell = if let Some((ai, ref pin_num, tap_net)) = tap {
             let acol = anchor_col[&ai];
@@ -396,6 +416,7 @@ fn anchor_tap(
     inc: &Incidence,
     anchors: &[usize],
     si: usize,
+    rails: &BTreeMap<String, Band>,
 ) -> Option<(usize, String, String)> {
     let mut hits = Vec::new();
     for (_, _, net) in &items[si].pins {
@@ -406,7 +427,18 @@ fn anchor_tap(
             }
         }
     }
-    (hits.len() == 1).then(|| hits.into_iter().next().unwrap())
+    // Resolve on a single distinct ANCHOR, not a single pin. A satellite whose
+    // rail leg ALSO lands on the same IC (its VCC/GND pins) used to be rejected
+    // as multi-hit, scattering it to a spare column. If every hit is on ONE
+    // anchor, prefer the tap on a NON-rail (signal) net — the meaningful pin — so
+    // the part flanks that pin. Only a tap spanning two DIFFERENT anchors is
+    // genuinely ambiguous.
+    let distinct: BTreeSet<usize> = hits.iter().map(|h| h.0).collect();
+    if distinct.len() != 1 {
+        return None;
+    }
+    hits.sort_by_key(|h| rails.contains_key(&h.2));
+    hits.into_iter().next()
 }
 
 /// Whether an IC should be flipped left↔right: its EAST-side signal pins reach a
