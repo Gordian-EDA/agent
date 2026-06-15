@@ -1,8 +1,10 @@
 //! The `agent` crate: a provider-agnostic LLM client for auto-pcb.
 //!
-//! The current backend is AWS Bedrock's Converse API (see [`llm::BedrockClient`]),
-//! authenticated with a bearer token. Everything is kept behind the
-//! [`llm::LlmClient`] trait so the provider can be swapped later.
+//! Two backends sit behind the [`llm::LlmClient`] trait: AWS Bedrock's Converse
+//! API ([`llm::BedrockClient`]) and any OpenAI-compatible chat endpoint
+//! ([`llm::OpenAiClient`]). [`llm::from_env`] picks one via
+//! [`config::selected_provider`] (OpenAI when `OPENAI_API_KEY` is set, else
+//! Bedrock), so callers stay provider-agnostic.
 
 pub mod agent;
 pub mod config;
@@ -14,7 +16,8 @@ pub mod workspace;
 pub use agent::{
     Agent, AgentEvent, Approvals, AutoApprove, StopReason, TurnOutcome, TurnOutcomeSummary,
 };
-pub use config::Config;
+pub use config::{Config, OpenAiConfig, Provider};
 pub use llm::{
-    BedrockClient, Completion, ContentBlock, LlmClient, Message, Role, ToolCall, ToolDef,
+    BedrockClient, Completion, ContentBlock, LlmClient, Message, OpenAiClient, Role, ToolCall,
+    ToolDef,
 };

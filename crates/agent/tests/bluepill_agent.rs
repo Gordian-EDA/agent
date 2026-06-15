@@ -31,11 +31,11 @@ async fn bluepill_founding_prompt_yields_erc_clean_schematic() {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
-    // SKIP gracefully if no Bedrock token is configured.
+    // SKIP gracefully if no LLM credentials are configured.
     let client = match agent::llm::from_env() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("SKIP: no Bedrock client ({e})");
+            eprintln!("SKIP: no LLM client ({e})");
             return;
         }
     };
@@ -47,7 +47,7 @@ async fn bluepill_founding_prompt_yields_erc_clean_schematic() {
     let sch_path = ctx.sch_path().to_path_buf();
     assert!(!sch_path.exists(), "the project starts with no schematic");
 
-    let mut agent = Agent::new(Box::new(client), ctx);
+    let mut agent = Agent::new(client, ctx);
     let mut approvals = AutoApprove::yes();
 
     let outcome = agent

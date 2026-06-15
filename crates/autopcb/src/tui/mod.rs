@@ -101,19 +101,13 @@ pub async fn run(project_dir: PathBuf) -> Result<()> {
 
     // 2. Build the agent if we have both KiCAD and credentials; otherwise launch
     //    a "degraded" UI that explains what's missing (so `tui` never panics).
-    let (provider, model) = match agent::config::Config::from_env() {
-        Ok(c) => ("bedrock".to_string(), c.model),
-        Err(_) => (
-            "bedrock".to_string(),
-            agent::config::DEFAULT_MODEL.to_string(),
-        ),
-    };
+    let (provider, model) = agent::config::provider_status();
 
     let agent_handle: Option<SharedAgent> = match (&env, agent::llm::from_env()) {
         (Some(env), Ok(client)) => {
             let ctx = ToolCtx::for_project(env.clone(), project_dir.clone())
                 .context("building the tool context for the project")?;
-            Some(Rc::new(Mutex::new(Agent::new(Box::new(client), ctx))))
+            Some(Rc::new(Mutex::new(Agent::new(client, ctx))))
         }
         _ => None,
     };
