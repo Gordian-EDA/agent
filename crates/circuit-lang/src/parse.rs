@@ -350,6 +350,7 @@ impl Parser<'_> {
                 "units",
                 "between",
                 "decouple",
+                "layout",
             ],
             "component",
         );
@@ -434,6 +435,9 @@ impl Parser<'_> {
                     ),
                 }
             }
+        }
+        if let Some(l) = Self::get(m, "layout") {
+            c.layout = self.layout(l);
         }
         Some(c)
     }

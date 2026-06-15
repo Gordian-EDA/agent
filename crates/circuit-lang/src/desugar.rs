@@ -70,6 +70,7 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
                 dnp: sc.dnp,
                 props: sc.props.clone(),
                 origin: Origin::Authored,
+                layout: sc.layout.clone(),
                 ..Default::default()
             };
             for (pin, (target, span)) in &sc.pins {

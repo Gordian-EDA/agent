@@ -49,6 +49,10 @@ pub struct Component {
     /// Multi-unit parts: unit letter -> pin map.
     pub units: IndexMap<String, IndexMap<String, PinTarget>>,
     pub origin: Origin,
+    /// Per-PART layout hint (`layout: {edge: left}` on the component). Overrides
+    /// the block's hint for this part — "pin U1 to the left edge". Empty = inherit
+    /// the block's, then connectivity inference.
+    pub layout: LayoutHint,
 }
 
 impl Default for Component {
@@ -62,6 +66,7 @@ impl Default for Component {
             pins: IndexMap::new(),
             units: IndexMap::new(),
             origin: Origin::Authored,
+            layout: LayoutHint::default(),
         }
     }
 }

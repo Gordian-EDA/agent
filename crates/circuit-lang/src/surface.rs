@@ -38,6 +38,8 @@ pub struct SurfaceComponent {
     pub between: Option<((String, Span), (String, Span))>,
     /// `decouple:` sugar — value -> count, e.g. {"100nF": 10}.
     pub decouple: IndexMap<String, u32>,
+    /// Per-part layout hint (`layout: {edge: left}` on the component).
+    pub layout: crate::model::LayoutHint,
     pub span: Option<Span>,
 }
 

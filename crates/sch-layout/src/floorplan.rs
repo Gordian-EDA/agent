@@ -194,14 +194,17 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
     // pin knows the pin's side (which column) and rank (which row) on that side.
     const MID: i32 = 4;
     let mut place: BTreeMap<String, Cell> = BTreeMap::new();
-    // Authored block-edge hints (`layout: {edge: …}`): refdes → left-to-right rank,
-    // so a block pinned to an edge biases its anchors' columns toward that edge.
+    // Authored edge hints (`layout: {edge: …}`): refdes → left-to-right rank, so a
+    // part/block pinned to an edge biases its anchors' columns toward that edge. A
+    // PART's own hint overrides its block's ("pin U1 left" inside a block-less or
+    // differently-hinted block).
     let edge_rank: BTreeMap<String, u8> = design
         .blocks
         .values()
         .flat_map(|b| {
-            let r = band_rank(b.layout.edge);
-            b.components.keys().map(move |rd| (rd.clone(), r))
+            b.components.iter().map(move |(rd, c)| {
+                (rd.clone(), band_rank(c.layout.edge.or(b.layout.edge)))
+            })
         })
         .collect();
     // Anchor columns: edge hint first, then connectors (inputs) leftmost, then refdes.
