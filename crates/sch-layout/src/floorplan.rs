@@ -655,7 +655,7 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     // overlaps apart. Cheap a frame may be, the shipped sheet never collides.
     decongest(&mut items);
 
-    let mut w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag)?;
+    let mut w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
     // Finalize geometry (text solve, wire split, reframe) BEFORE linting so the
     // reported warnings reflect the actual emitted sheet, not the pre-solve state.
     w.set_frame(true);
@@ -668,7 +668,10 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
 /// Build the complete schematic writer for a placed `items`: symbols (+mirror),
 /// no-connects on unconnected pins, all wiring (rails + routed signals), and ERC
 /// flags. Shared by the final emission and the refinement scorer so both judge
-/// exactly the geometry that ships.
+/// the same geometry — except `fan_risers`, a finalize-only correctness repair
+/// (like `prepare`'s wire-split): two rails whose risers are collinear short, so
+/// the shipped sheet fans them apart, but the per-move scorer skips it (the fan
+/// is a transient mid-search artifact that would churn the placement otherwise).
 fn build_writer(
     env: &KicadEnv,
     title: Option<&str>,
@@ -676,6 +679,7 @@ fn build_writer(
     inc: &Incidence,
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
+    fan_risers: bool,
 ) -> io::Result<SchematicWriter> {
     let mut w = SchematicWriter::new();
     if let Some(name) = title {
@@ -698,7 +702,7 @@ fn build_writer(
         }
     }
     let mut flag_points: BTreeMap<String, ([f64; 2], f64)> = BTreeMap::new();
-    wire(env, &mut w, items, inc, ir, needs_flag, &mut flag_points)?;
+    wire(env, &mut w, items, inc, ir, needs_flag, &mut flag_points, fan_risers)?;
     for net in needs_flag {
         if let Some((at, angle)) = flag_points.get(net) {
             w.add_power_flag_at(env, &format!("#FLG_{net}"), *at, *angle)?;
@@ -1038,7 +1042,7 @@ fn warning_count(
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
 ) -> usize {
-    match build_writer(env, None, items, inc, ir, needs_flag) {
+    match build_writer(env, None, items, inc, ir, needs_flag, true) {
         Ok(mut w) => {
             w.set_frame(true);
             w.prepare();
@@ -1309,7 +1313,7 @@ fn score_items(
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
 ) -> f64 {
-    match build_writer(env, None, items, inc, ir, needs_flag) {
+    match build_writer(env, None, items, inc, ir, needs_flag, false) {
         Ok(w) => layout_cost(env, &w, items, inc, ir),
         Err(_) => f64::INFINITY,
     }
@@ -1328,7 +1332,7 @@ fn align_to_pins(
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
 ) {
-    let Ok(w0) = build_writer(env, None, items, inc, ir, needs_flag) else { return };
+    let Ok(w0) = build_writer(env, None, items, inc, ir, needs_flag, false) else { return };
     // Per satellite: is it vertical, and where is its signal-pin target?
     let mut plans: Vec<(usize, bool, [f64; 2])> = Vec::new();
     for (si, s) in items.iter().enumerate() {
@@ -2327,6 +2331,7 @@ fn wire(
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
     flag_points: &mut BTreeMap<String, ([f64; 2], f64)>,
+    fan_risers: bool,
 ) -> io::Result<()> {
     let refdes_of = |i: usize| items[i].refdes.clone();
 
@@ -2350,12 +2355,28 @@ fn wire(
     // y-levels by greedy interval colouring.
     let rail_y_map = assign_rail_levels(&net_eps, ir);
 
+    // Fan colliding rail risers off shared columns so two rails never merge into
+    // one net (the stacked-BGA-balls GND/1V2 short). Finalize-only: the per-move
+    // scorer passes `fan_risers = false` so transient mid-search collisions never
+    // perturb the placement.
+    let riser_offsets =
+        if fan_risers { plan_riser_offsets(&net_eps, ir, &rail_y_map) } else { BTreeMap::new() };
+
     // Phase A — rails (shared wires + stubs + power symbols), so their wires are
     // in the writer before we build the routing scene.
     for (net, eps) in &net_eps {
         if let Some(band) = ir.rails.get(net) {
             let flag = needs_flag.contains(net).then_some(&mut *flag_points);
-            emit_rail(env, w, net, eps, *band, rail_y_map.get(net).copied(), flag)?;
+            emit_rail(
+                env,
+                w,
+                net,
+                eps,
+                *band,
+                rail_y_map.get(net).copied(),
+                flag,
+                &riser_offsets,
+            )?;
         }
     }
 
@@ -2712,6 +2733,89 @@ fn assign_rail_levels(
 
 const EPS: f64 = 1e-6;
 
+/// A side (E/W) pin leads OUTWARD this far before its riser climbs to the rail,
+/// so the riser never runs up the IC edge past the other pins on that side.
+const RAIL_LEAD: f64 = 2.54;
+
+/// Lane width used to fan colliding rail risers off a shared column. Half the
+/// 2.54 BGA pitch, so an offset riser sits in the gutter between two ball columns
+/// rather than landing on a neighbouring pin.
+const RAIL_LANE: f64 = 1.27;
+
+/// The x a pin's vertical riser sits at, before any anti-collision offset: side
+/// pins lead out, top/bottom pins climb straight up. Must match `emit_rail`.
+fn riser_base_x(ep: &[f64; 2], dir: Dir) -> f64 {
+    match dir {
+        Dir::East => ep[0] + RAIL_LEAD,
+        Dir::West => ep[0] - RAIL_LEAD,
+        _ => ep[0],
+    }
+}
+
+fn col_key(x: f64) -> i64 {
+    (x * 100.0).round() as i64
+}
+
+/// Plan per-net horizontal offsets so two rails whose vertical risers would share
+/// a column and overlap in y — a SHORT, e.g. stacked BGA balls GND below / 1V2
+/// above whose risers cross in the gap — get fanned into separate columns.
+/// Returns `(net, riser_base_column) -> dx`. Risers in an uncontested column get
+/// no entry (dx = 0), so simple boards (the references) are untouched.
+fn plan_riser_offsets(
+    net_eps: &BTreeMap<String, Vec<([f64; 2], Dir)>>,
+    ir: &LayoutIr,
+    rail_y_map: &BTreeMap<String, f64>,
+) -> BTreeMap<(String, i64), f64> {
+    // Every drawn riser as (net, riser_x, y_lo, y_hi).
+    let mut risers: Vec<(String, f64, f64, f64)> = Vec::new();
+    for (net, eps) in net_eps {
+        if !ir.rails.contains_key(net) || eps.len() < 3 {
+            continue;
+        }
+        let Some(&ry) = rail_y_map.get(net) else { continue };
+        for (p, dir) in eps {
+            let x = riser_base_x(p, *dir);
+            risers.push((net.clone(), x, p[1].min(ry), p[1].max(ry)));
+        }
+    }
+    // A column is contested only when two DIFFERENT rails' risers are EXACTLY
+    // collinear (same x to float tolerance — that's the one geometry KiCAD merges)
+    // and overlap in y by more than a point. The exactness matters: mid-search the
+    // geometry is continuous mm (pins not yet grid-snapped), so two risers can pass
+    // within microns without ever shorting — a coarse bucket would fan those and
+    // churn the placement (the references / grid-demo). column_key -> nets to fan.
+    let mut contested: BTreeMap<i64, BTreeSet<String>> = BTreeMap::new();
+    for i in 0..risers.len() {
+        for j in (i + 1)..risers.len() {
+            let (ref na, xa, loa, hia) = risers[i];
+            let (ref nb, xb, lob, hib) = risers[j];
+            if na == nb || (xa - xb).abs() > EPS {
+                continue;
+            }
+            if hia < lob + EPS || hib < loa + EPS {
+                continue; // no real y-overlap (separated or just touching)
+            }
+            let nets = contested.entry(col_key(xa)).or_default();
+            nets.insert(na.clone());
+            nets.insert(nb.clone());
+        }
+    }
+    let mut offsets = BTreeMap::new();
+    for (col, nets) in &contested {
+        // Fan the contested nets into distinct lanes, deterministic by name:
+        // 0 -> +lane, 1 -> -lane, 2 -> +2·lane, 3 -> -2·lane, …
+        for (rank, net) in nets.iter().enumerate() {
+            let step = (rank / 2 + 1) as f64 * RAIL_LANE;
+            let dx = if rank % 2 == 0 { step } else { -step };
+            if std::env::var("DEBUG_RAIL").is_ok() {
+                eprintln!("RISER-FAN col={col} net={net} dx={dx}");
+            }
+            offsets.insert((net.clone(), *col), dx);
+        }
+    }
+    offsets
+}
+
 /// Map a net name to its `power:` symbol lib_id (best-effort, KiCAD aliases).
 fn power_lib_id(net: &str) -> String {
     let alias = match net.to_ascii_uppercase().as_str() {
@@ -2742,6 +2846,7 @@ fn emit_rail(
     band: Band,
     rail_y: Option<f64>,
     flag: Option<&mut BTreeMap<String, ([f64; 2], f64)>>,
+    riser_offsets: &BTreeMap<(String, i64), f64>,
 ) -> io::Result<()> {
     let lib = power_lib_id(net);
     let Some(rail_y) = rail_y.filter(|_| eps.len() >= 3) else {
@@ -2762,12 +2867,15 @@ fn emit_rail(
     };
     // Each pin's attach point on the rail. A side (E/W) pin leads OUTWARD first
     // and attaches there, so its riser never runs up the IC edge past the other
-    // pins on that side (which would block their signals).
-    const LEAD: f64 = 2.54;
-    let attach_x = |ep: &[f64; 2], dir: &Dir| match dir {
-        Dir::East => ep[0] + LEAD,
-        Dir::West => ep[0] - LEAD,
-        _ => ep[0],
+    // pins on that side (which would block their signals). On top of that, a riser
+    // sharing a column with a different rail's overlapping riser gets fanned into
+    // a separate lane (`riser_offsets`) so the two rails never merge into a short.
+    let attach_x = |ep: &[f64; 2], dir: &Dir| {
+        let base = riser_base_x(ep, *dir);
+        base + riser_offsets
+            .get(&(net.to_string(), col_key(base)))
+            .copied()
+            .unwrap_or(0.0)
     };
     let span_lo = eps.iter().map(|(p, d)| attach_x(p, d)).fold(f64::MAX, f64::min);
     let span_hi = eps.iter().map(|(p, d)| attach_x(p, d)).fold(f64::MIN, f64::max);

@@ -82,8 +82,15 @@ fn floorplan_challenge_fixtures_emit_truthful_netlists() {
     // the end listing all offenders. `KNOWN_TRUTHFULNESS_BUGS` carries fixtures
     // whose failure documents a real, tracked engine bug (not a flaky test) so the
     // suite stays green for the validated coverage while the bug is on record.
+    // `FLOORPLAN_ONLY=bga-fpga-ice40,...` restricts the run to a subset, for fast
+    // iteration on one hard fixture (the full set is ~9 min). Empty = all.
+    let only = std::env::var("FLOORPLAN_ONLY").unwrap_or_default();
+    let only: Vec<&str> = only.split(',').filter(|s| !s.is_empty()).collect();
     let mut failures: Vec<String> = Vec::new();
     for name in CHALLENGE_FIXTURES {
+        if !only.is_empty() && !only.contains(name) {
+            continue;
+        }
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             validate_fixture(&env, &provider, name, /* strict_warnings */ false)
         }));
@@ -105,33 +112,24 @@ fn floorplan_challenge_fixtures_emit_truthful_netlists() {
 
 /// Challenge fixtures whose emitted netlist is NOT yet truthful because of a REAL,
 /// tracked engine bug. Tolerated so the suite stays green for the rest of the
-/// coverage; each must have a documented root cause. Empty = the goal. These are
-/// the concrete bugs the expanded coverage surfaced:
+/// coverage; each must have a documented root cause. **Empty = the goal, and we
+/// are there:** all six challenge fixtures now emit truthful netlists. The bugs
+/// the expanded coverage surfaced, and how each was closed:
 ///
-///   - `mixed-signal-adc-frontend` and `bga-fpga-ice40` — **MULTI-UNIT SYMBOLS ARE
-///     ELECTRICALLY BROKEN**. The engine emits only UNIT 1's pins of a multi-unit
-///     part, dropping every other unit. Verified: the MCP6002 op-amp netlist
-///     carries only pins 1/2/3 (unit A) — its POWER pins 4/8 (V-/V+) and the entire
-///     unit B (5/6/7) vanish, so the part is unpowered and half-missing. Same for
-///     the ICE40 FPGA (power/IO balls live in units B-E). This is the headline gap;
-///     fixing it = place each unit as its own symbol instance (KiCAD multi-unit
-///     parts are separate symbols sharing a refdes + unit number). `floorplan.rs`
-///     has ZERO `units` handling today.  [FIXED — `gather` now splits a multi-unit
-///     part into one Item per used unit and the writer emits each as a distinct
-///     `(unit N)` instance, so every unit's pins reach the netlist.
-///     `mixed-signal-adc-frontend` is now fully truthful and off this list.]
-///   - `bga-fpga-ice40` — multi-unit EMISSION is fixed (all 121 balls, 5 unit
-///     boxes placed), but the rail routing of the DENSE multi-unit power balls is
-///     not: the FPGA's many GND balls across units 1-5 don't all reach the GND
-///     rail, so GND FRAGMENTS into ~12 separate "GND" nets and one fragment gets
-///     bridged onto 1V2 (a short the no-merge check catches). This is a
-///     rail-routing-of-many-power-pins follow-up, separate from the unit split.
-///   - `bedrock-selfrepair-bluepill` — `baseline_ir` (the crude no-sidecar fallback)
-///     SHORTS the VBUS and 3V3 rails: a 3-pin power header J1 exposes VBUS(1)/
-///     3V3(2)/GND(3) on adjacent pins and the fallback rail routing bridges the two
-///     adjacent rails. The no-merge check correctly catches it. (oneshot, whose
-///     USB-C keeps VBUS off an adjacent rail pin, is truthful.)
-const KNOWN_TRUTHFULNESS_BUGS: &[&str] = &["bedrock-selfrepair-bluepill", "bga-fpga-ice40"];
+///   - `mixed-signal-adc-frontend` and `bga-fpga-ice40` — **multi-unit symbols
+///     were electrically broken**: the engine emitted only UNIT 1's pins, dropping
+///     every other unit (the MCP6002's V-/V+ on unit B, the ICE40's power/IO balls
+///     on units B-E). FIXED: `gather` splits a multi-unit part into one Item per
+///     used unit and the writer emits each as a distinct `(unit N)` instance, so
+///     every unit's pins reach the netlist.
+///   - `bga-fpga-ice40` (rail follow-up) and `bedrock-selfrepair-bluepill` — two
+///     rails whose vertical risers shared a column merged into one net: stacked
+///     BGA balls (GND below / 1V2 above) and a vertical 3-pin header J1
+///     (VBUS/3V3/GND on adjacent pins) both put two rails' risers in one column,
+///     overlapping in y. FIXED: `plan_riser_offsets` fans colliding risers into
+///     separate lanes so the verticals never become collinear. Both fixtures now
+///     emit a real, un-merged GND/VBUS/3V3.
+const KNOWN_TRUTHFULNESS_BUGS: &[&str] = &[];
 
 /// ERC violation kinds the CHALLENGE tier tolerates (the reference tier forbids
 /// ALL of them). These are HYGIENE lints that a rough-but-truthful layout of a
