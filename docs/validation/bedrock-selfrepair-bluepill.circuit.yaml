@@ -1,6 +1,6 @@
 version: 1
 name: stm32h7_bluepill
-rails: [3V3, GND, VBUS]
+power: [3V3, GND, VBUS]
 
 blocks:
   power:

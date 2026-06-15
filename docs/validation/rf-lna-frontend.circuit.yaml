@@ -1,6 +1,6 @@
 version: 1
 name: rf_lna_frontend
-rails: [5V, GND]
+power: [5V, GND]
 
 # RF receive front-end built around an ADL5542 wideband RF gain block / LNA.
 # Signal path: SMA(in) -> DC-block -> amp RFin (pin 1) -> amp RFout (pin 8)

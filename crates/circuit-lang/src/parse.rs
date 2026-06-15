@@ -111,7 +111,7 @@ impl Parser<'_> {
                 "version",
                 "name",
                 "description",
-                "rails",
+                "power",
                 "blocks",
                 "nets",
                 "lint",
@@ -137,17 +137,17 @@ impl Parser<'_> {
             ..Default::default()
         };
 
-        if let Some(Node::Seq(items, _)) = Self::get(map, "rails") {
+        if let Some(Node::Seq(items, _)) = Self::get(map, "power") {
             for it in items {
-                if let Some(s) = self.scalar(it, "rails entry") {
+                if let Some(s) = self.scalar(it, "power entry") {
                     self.check_net_name(&s, it.span());
-                    d.rails.push((s, it.span()));
+                    d.power.push((s, it.span()));
                 }
             }
-        } else if let Some(n) = Self::get(map, "rails") {
+        } else if let Some(n) = Self::get(map, "power") {
             self.err(
                 "expected-seq",
-                "`rails` must be a list of net names".into(),
+                "`power` must be a list of net names".into(),
                 n.span(),
             );
         }
@@ -280,10 +280,7 @@ impl Parser<'_> {
             ..Default::default()
         };
         if let Some(m) = self.map_node(n, "net attributes") {
-            self.check_keys(m, &["power", "class"], "net attributes");
-            if let Some(p) = Self::get(m, "power").and_then(|v| self.bool_field(v, "power")) {
-                out.power = p;
-            }
+            self.check_keys(m, &["class"], "net attributes");
             out.class = Self::get(m, "class").and_then(|v| self.scalar(v, "class"));
         }
         out
@@ -517,7 +514,7 @@ blocks:
         let src = "
 version: 1
 name: t
-rails: [3V3, GND]
+power: [3V3, GND]
 layout:
   - [U3, U1]
   - [C1]
@@ -539,7 +536,7 @@ nets:
         let (d, diags) = parse_str(src);
         assert!(!diags.has_errors(), "{:?}", diags);
         let d = d.unwrap();
-        assert_eq!(d.rails.len(), 2);
+        assert_eq!(d.power.len(), 2);
         // top-level layout grid: 2 rows, names preserved
         assert_eq!(d.layout.len(), 2);
         assert_eq!(d.layout[0][0].0.as_deref(), Some("U3"));

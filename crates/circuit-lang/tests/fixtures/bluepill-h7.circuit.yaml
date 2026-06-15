@@ -1,6 +1,6 @@
 version: 1
 name: bluepill-h7
-rails: [3V3, GND, VBUS]
+power: [3V3, GND, VBUS]
 
 # Placement grid: USB in on the left, MCU + power supply in the middle row,
 # headers out on the right.

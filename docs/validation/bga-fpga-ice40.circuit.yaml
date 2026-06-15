@@ -1,6 +1,6 @@
 version: 1
 name: ice40hx8k_bga_core
-rails: [3V3, 1V2, GND]
+power: [3V3, 1V2, GND]
 
 blocks:
   power:

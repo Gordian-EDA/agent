@@ -83,6 +83,16 @@ pub fn to_canonical_yaml(d: &Design) -> String {
     if let Some(desc) = &d.description {
         writeln!(o, "description: {}", q(desc)).unwrap();
     }
+    {
+        // `power:` — the declared power/ground nets (kernel `NetAttrs.power`),
+        // sorted for determinism. The single way power is expressed on emit.
+        let mut power: Vec<&String> = d.nets.iter().filter(|(_, a)| a.power).map(|(n, _)| n).collect();
+        power.sort();
+        if !power.is_empty() {
+            let list: Vec<String> = power.iter().map(|n| q(n)).collect();
+            writeln!(o, "power: [{}]", list.join(", ")).unwrap();
+        }
+    }
     if !d.lint_allow.is_empty() {
         // `lint_allow` is a BTreeSet, so iteration is already sorted/deterministic.
         let codes: Vec<String> = d.lint_allow.iter().map(|c| q(c)).collect();
@@ -185,9 +195,7 @@ pub fn to_canonical_yaml(d: &Design) -> String {
         let mut wrote_header = false;
         for (net, attrs) in nets {
             let mut fields = Vec::new();
-            if attrs.power {
-                fields.push("power: true".to_string());
-            }
+            // power-ness is emitted in the top-level `power:` list, not here.
             if let Some(c) = &attrs.class {
                 fields.push(format!("class: {}", q(c)));
             }
@@ -214,7 +222,7 @@ mod tests {
     const SRC: &str = "
 version: 1
 name: t
-rails: [3V3, GND]
+power: [3V3, GND]
 layout:
   - [U1, R7]
 blocks:
@@ -299,7 +307,7 @@ nets:
         );
         let src = "
 version: 1
-rails: [3V3, GND]
+power: [3V3, GND]
 blocks:
   mcu:
     components:

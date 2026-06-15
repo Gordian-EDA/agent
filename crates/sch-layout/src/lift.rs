@@ -156,9 +156,9 @@ fn design_from_netlist(netlist: &kicad_bridge::cli::Netlist) -> Design {
         }
     }
 
-    // Net attributes (`power:` from the author's `rails:`, `class:` from the
+    // Net attributes (`power:` the author's power-net list, `class:` from the
     // `nets:` block) and the design `name:` are author declarations the kernel
-    // does NOT encode into the schematic — emit writes neither a rails list nor
+    // does NOT encode into the schematic — emit writes neither a power list nor
     // net classes — so they cannot be recovered here and are intentionally
     // absent from the lifted YAML. Connectivity and component identity, which
     // ARE in the schematic, round-trip fully.

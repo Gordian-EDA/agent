@@ -1,6 +1,6 @@
 version: 1
 name: mcp1703-power-entry
-rails: [5V, 3V3, GND]
+power: [5V, 3V3, GND]
 blocks:
   power_entry:
     components:

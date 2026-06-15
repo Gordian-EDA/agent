@@ -1,6 +1,6 @@
 version: 1
 name: mixed_signal_adc_frontend
-rails: [3V3, GND]
+power: [3V3, GND]
 
 # AIN / AIN_B are off-sheet analog input ports: a single on-sheet pin each
 # (the sensor enters from another sheet), so the single-pin lint is expected.

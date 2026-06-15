@@ -1,6 +1,6 @@
 version: 1
 name: divider-filter
-rails: [VCC, GND]
+power: [VCC, GND]
 blocks:
   divider:
     components:

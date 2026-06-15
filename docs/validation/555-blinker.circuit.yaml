@@ -1,6 +1,6 @@
 version: 1
 name: 555-blinker
-rails: [9V, GND]
+power: [9V, GND]
 blocks:
   blinker:
     components:

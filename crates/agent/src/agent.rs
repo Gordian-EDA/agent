@@ -787,7 +787,7 @@ A design is ONE YAML document with this shape:
 
   version: 1                 # required, always 1
   name: my_board             # optional design name
-  rails: [3V3, GND, VBUS]    # optional: declare power/ground nets (see Sugar)
+  power: [3V3, GND, VBUS]    # optional: declare power/ground nets (see Sugar)
   layout:                    # optional 2D placement grid (see Layout)
     - [usb, mcu, headers]    #   row 0, left -> right
     - [~,   power]           #   row 1; ~ is an empty cell
@@ -856,7 +856,7 @@ layout. For a board with a real floorplan, the top-level `layout:` is a 2D grid:
 
 ## Sugar (shorthands the compiler expands)
 
-- `rails: [3V3, GND]` — declares these nets as power/ground rails. Use it so the
+- `power: [3V3, GND]` — declares these nets as power/ground rails. Use it so the
   schematic gets proper power symbols.
 - `between: [NET_A, NET_B]` — for a SYMMETRIC 2-pin part (R, C, L, fuse), wires
   its two pins to these nets in pin-number order. Replaces an explicit `pins:` map:
@@ -1053,7 +1053,7 @@ mod tests {
         assert!(p.contains("[A-Z]+[0-9]+"));
         assert!(p.contains("power-INPUT"));
         // Sugar forms.
-        assert!(p.contains("rails:"));
+        assert!(p.contains("power:"));
         assert!(p.contains("between:"));
         assert!(p.contains("decouple:"));
         // Workflow doctrine + real-lib guidance.

@@ -373,7 +373,7 @@ fn draft_lifecycle_create_edit_apply() {
     let yaml = "
 version: 1
 name: t
-rails: [GND]
+power: [GND]
 blocks:
   a:
     components:
@@ -421,7 +421,7 @@ fn get_design_seeds_draft_from_lift_and_flags_staleness() {
     let yaml = "
 version: 1
 name: t
-rails: [GND]
+power: [GND]
 blocks:
   a:
     components:
@@ -463,7 +463,7 @@ fn render_schematic_returns_png_and_image_path() {
     let yaml = "
 version: 1
 name: t
-rails: [GND]
+power: [GND]
 blocks:
   a:
     components:
@@ -497,7 +497,7 @@ fn apply_design_surfaces_layout_warnings() {
     let yaml = "
 version: 1
 name: t
-rails: [GND]
+power: [GND]
 blocks:
   a:
     components:

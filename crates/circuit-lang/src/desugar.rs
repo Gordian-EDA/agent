@@ -28,14 +28,12 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
         ..Default::default()
     };
 
-    // rails -> power net attrs
-    for (rail, _span) in &s.rails {
-        d.nets.entry(rail.clone()).or_default().power = true;
+    // power: declared power/ground nets -> kernel NetAttrs.power
+    for (net, _span) in &s.power {
+        d.nets.entry(net.clone()).or_default().power = true;
     }
     for (net, attrs) in &s.nets {
-        let e = d.nets.entry(net.clone()).or_default();
-        e.power |= attrs.power;
-        e.class = attrs.class.clone();
+        d.nets.entry(net.clone()).or_default().class = attrs.class.clone();
     }
 
     // surface components -> kernel components (pins still raw, resolved below)
@@ -748,7 +746,7 @@ mod tests {
     fn aliases_rails_and_nc() {
         let (d, diags) = run("
 version: 1
-rails: [3V3, GND]
+power: [3V3, GND]
 blocks:
   main:
     components:
@@ -937,7 +935,7 @@ blocks:
     fn decouple_synthesizes_tagged_caps() {
         let (d, diags) = run("
 version: 1
-rails: [3V3, GND]
+power: [3V3, GND]
 blocks:
   mcu:
     components:
@@ -1052,7 +1050,7 @@ blocks:
         let (s, _) = crate::parse::parse_str(
             "
 version: 1
-rails: [3V3, GND]
+power: [3V3, GND]
 blocks:
   mcu:
     components:
