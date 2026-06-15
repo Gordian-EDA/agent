@@ -625,6 +625,11 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     }
     let inc = incidence(&items);
 
+    if std::env::var("DEBUG_SIZE").is_ok() {
+        let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
+        eprintln!("SIZE items={} pins={} nets={}", items.len(), pins, inc.len());
+    }
+
     // Which power nets need an ERC PWR_FLAG: a power-INPUT pin (or a declared
     // rail) with no power-OUTPUT pin driving it is "undriven". Computed up front
     // so it can feed both the refinement scorer and the final emission.
@@ -1252,7 +1257,20 @@ fn anneal_items(
     // early move that adds a crossing/junction (cost ~5) is readily accepted, while
     // a correctness failure (cost ~1000+) never is.
     let (mult, t0) = if broad { (1400, 30.0) } else { (450, 12.0) };
-    let iters = (mult * sats.len()).clamp(800, if broad { 12000 } else { 4000 });
+    let mut iters = (mult * sats.len()).clamp(800, if broad { 12000 } else { 4000 });
+    // Large boards (100-pin / BGA): each `score_items` routes the WHOLE sheet, and
+    // routing cost scales with PIN count (a 100-pin MCU is one item but 186 pins),
+    // so the full iteration count runs into minutes. Cap total routing work so
+    // `iters * pin-count` stays under a fixed budget. Deterministic (seed-driven,
+    // never wall-clock-timed); the tuned fixtures (≤58 pins) are below the threshold
+    // and completely unchanged. The SA still ships ≥ greedy regardless of iteration
+    // count (greedy is always one of the picked candidates), so a smaller budget
+    // can never produce a worse layout — only a less-optimised SA path the candidate
+    // pick then discards.
+    let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
+    if pins > 70 {
+        iters = iters.min((420_000 / pins).max(800));
+    }
     // One grid cell-step in x/y for the relocation moves.
     let relocate = |rng: &mut Rng, at: [f64; 2], n: i32| -> [f64; 2] {
         [
