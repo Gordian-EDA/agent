@@ -858,10 +858,14 @@ layout. For a board with a real floorplan, the top-level `layout:` is a 2D grid:
 
 - `rails: [3V3, GND]` — declares these nets as power/ground rails. Use it so the
   schematic gets proper power symbols.
-- `between: [NET_A, NET_B]` — for a 2-pin part, wires its two pins to these nets
-  in pin-number order. Replaces an explicit `pins:` map:
+- `between: [NET_A, NET_B]` — for a SYMMETRIC 2-pin part (R, C, L, fuse), wires
+  its two pins to these nets in pin-number order. Replaces an explicit `pins:` map:
       R1: { part: R, value: 10k, between: [VBUS, GND] }
-  Note: on POLARIZED parts (D/LED/CP) `between` warns about orientation.
+- `positive: NET` / `negative: NET` — for a POLARIZED 2-pin part (D, LED, CP),
+  wires the anode and cathode. The compiler maps them to the right pins for you:
+      D1: { part: LED, positive: VBUS, negative: STATUS }   # anode VBUS, cathode STATUS
+  Using `between` on a polarized part (or `positive`/`negative` on a symmetric
+  one) is a hard error — pick the right one. Multi-pin parts use `pins:`.
 - `decouple: { 100nF: 10, 4.7uF: 2 }` — on an IC, synthesizes that many
   decoupling caps of each value across the IC's power/ground. The caps are
   generated for you; never list them individually.

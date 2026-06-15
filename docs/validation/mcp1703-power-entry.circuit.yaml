@@ -12,5 +12,5 @@ blocks:
         pins: {VI: 5V, VO: 3V3, GND: GND}
       C3: {part: Device:C, value: 1u, between: [3V3, GND]}
       C4: {part: Device:C, value: 10u, between: [3V3, GND]}
-      D1: {part: Device:LED, value: red, between: [LED_K, 3V3]}
+      D1: {part: Device:LED, value: red, positive: 3V3, negative: LED_K}
       R2: {part: Device:R, value: 330, between: [GND, LED_K]}

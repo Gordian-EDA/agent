@@ -361,6 +361,8 @@ impl Parser<'_> {
                 "pins",
                 "units",
                 "between",
+                "positive",
+                "negative",
                 "decouple",
             ],
             "component",
@@ -427,6 +429,16 @@ impl Parser<'_> {
                     bn.span(),
                 ),
             }
+        }
+        if let Some(v) = Self::get(m, "positive")
+            && let Some(s) = self.scalar(v, "positive")
+        {
+            c.positive = Some((s, v.span()));
+        }
+        if let Some(v) = Self::get(m, "negative")
+            && let Some(s) = self.scalar(v, "negative")
+        {
+            c.negative = Some((s, v.span()));
         }
         if let Some(dn) = Self::get(m, "decouple")
             && let Some(dm) = self.map_node(dn, "decouple")

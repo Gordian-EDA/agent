@@ -61,7 +61,7 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
                 continue;
             }
             let mut sc = sc.clone();
-            apply_between(refdes, &mut sc, provider, &mut diags); // Task 7
+            apply_two_pin(refdes, &mut sc, provider, &mut diags); // Task 7
             let comp = Component {
                 part: alias(&sc.part),
                 value: sc.value.clone(),
@@ -199,22 +199,41 @@ struct RawPin {
     span: crate::diag::Span,
 }
 
-fn apply_between(
+/// Lower the 2-pin connection sugars to a pin map:
+/// - `between: [a, b]` — SYMMETRIC parts; maps by numeric pin number.
+/// - `positive:`/`negative:` — POLARIZED parts; maps to the anode (`A`/`+`) and
+///   cathode (`K`/`-`) pins.
+///
+/// Enforces the symmetric/polarized split: `between` on a polarized part and
+/// `positive`/`negative` on a symmetric part are both hard errors (no silent
+/// wrong-way-round diodes).
+fn apply_two_pin(
     refdes: &str,
     sc: &mut SurfaceComponent,
     provider: &dyn SymbolProvider,
     diags: &mut Diagnostics,
 ) {
-    let Some(((a, aspan), (b, bspan))) = sc.between.take() else {
+    let has_between = sc.between.is_some();
+    let has_pol = sc.positive.is_some() || sc.negative.is_some();
+    if !has_between && !has_pol {
         return;
-    };
+    }
+    // A span pointing at whichever sugar is present, for diagnostics.
+    let span = sc
+        .between
+        .as_ref()
+        .map(|((_, s), _)| *s)
+        .or_else(|| sc.positive.as_ref().map(|(_, s)| *s))
+        .or_else(|| sc.negative.as_ref().map(|(_, s)| *s))
+        .expect("a 2-pin sugar is present");
+
     let part = alias(&sc.part);
     let Some(meta) = provider.symbol(&part) else {
         let mut d = Diagnostic::error(
             "between-unknown-symbol",
-            format!("{refdes}: cannot desugar `between` — unknown symbol `{part}`"),
+            format!("{refdes}: cannot desugar a 2-pin connection — unknown symbol `{part}`"),
         )
-        .with_span(aspan);
+        .with_span(span);
         if let Some(s) = provider.suggest(&part).into_iter().next() {
             d = d.with_suggestion(s);
         }
@@ -226,49 +245,107 @@ fn apply_between(
             Diagnostic::error(
                 "between-arity",
                 format!(
-                    "{refdes}: `between` needs a 2-pin symbol; `{part}` has {} pins",
+                    "{refdes}: a 2-pin connection needs a 2-pin symbol; `{part}` has {} pins",
                     meta.pins.len()
                 ),
             )
-            .with_span(aspan),
+            .with_span(span),
         );
         return;
     }
-    // Map `between` args by numeric pin NUMBER, not library order: first arg →
-    // lowest-numbered pin, second arg → highest (spec §5.5). Fall back to string
-    // order for non-numeric pin numbers.
-    let mut ordered: Vec<&crate::provider::PinMeta> = meta.pins.iter().collect();
-    ordered.sort_by(
-        |x, y| match (x.number.parse::<u64>(), y.number.parse::<u64>()) {
-            (Ok(nx), Ok(ny)) => nx.cmp(&ny),
-            _ => x.number.cmp(&y.number),
-        },
-    );
-    // Polarized-part lint (spec §5.5): warn, suggest named pins.
-    let polarized = matches!(part.as_str(), "Device:D" | "Device:LED" | "Device:CP")
-        || meta.pins.iter().any(|p| p.name == "A" || p.name == "K");
-    if polarized {
+    if has_between && has_pol {
         diags.push(
-            Diagnostic::warning(
-                "between-polarized",
-                format!(
-                    "{refdes}: `{part}` is polarized; `between` maps pin order ({}, {}) — \
-                     prefer named pins {{{}: …, {}: …}}",
-                    ordered[0].number, ordered[1].number, ordered[0].name, ordered[1].name
-                ),
+            Diagnostic::error(
+                "two-pin-conflict",
+                format!("{refdes}: use either `between` or `positive`/`negative`, not both"),
             )
-            .with_span(aspan),
+            .with_span(span),
         );
+        return;
     }
-    for (pin, target, span) in [
-        (ordered[0].number.clone(), a, aspan),
-        (ordered[1].number.clone(), b, bspan),
-    ] {
+
+    // Polarity from the symbol: anode `A`/`+`, cathode `K`/`-`.
+    let anode = meta.pins.iter().find(|p| p.name == "A" || p.name == "+");
+    let cathode = meta.pins.iter().find(|p| p.name == "K" || p.name == "-");
+    let polarized = matches!(part.as_str(), "Device:D" | "Device:LED" | "Device:CP")
+        || (anode.is_some() && cathode.is_some());
+
+    // The two (pin number, net, span) bindings to write.
+    let bindings: [(String, String, crate::diag::Span); 2] = if has_pol {
+        if !polarized {
+            diags.push(
+                Diagnostic::error(
+                    "polarity-on-symmetric",
+                    format!("{refdes}: `{part}` is not polarized — use `between`"),
+                )
+                .with_span(span),
+            );
+            return;
+        }
+        let (Some(a), Some(k)) = (anode, cathode) else {
+            diags.push(
+                Diagnostic::error(
+                    "polarity-unknown-pins",
+                    format!(
+                        "{refdes}: `{part}` is polarized but its anode/cathode pins \
+                         can't be identified — write explicit `pins:`"
+                    ),
+                )
+                .with_span(span),
+            );
+            return;
+        };
+        let (Some((pnet, pspan)), Some((nnet, nspan))) = (sc.positive.take(), sc.negative.take())
+        else {
+            diags.push(
+                Diagnostic::error(
+                    "polarity-incomplete",
+                    format!("{refdes}: a polarized part needs both `positive:` and `negative:`"),
+                )
+                .with_span(span),
+            );
+            return;
+        };
+        [
+            (a.number.clone(), pnet, pspan),
+            (k.number.clone(), nnet, nspan),
+        ]
+    } else {
+        if polarized {
+            diags.push(
+                Diagnostic::error(
+                    "between-on-polarized",
+                    format!(
+                        "{refdes}: `{part}` is polarized — use `positive`/`negative` (not `between`)"
+                    ),
+                )
+                .with_span(span),
+            );
+            return;
+        }
+        let ((a, aspan), (b, bspan)) = sc.between.take().unwrap();
+        // Map `between` args by numeric pin NUMBER, not library order: first arg →
+        // lowest-numbered pin, second arg → highest (spec §5.5). Fall back to
+        // string order for non-numeric pin numbers.
+        let mut ordered: Vec<&crate::provider::PinMeta> = meta.pins.iter().collect();
+        ordered.sort_by(
+            |x, y| match (x.number.parse::<u64>(), y.number.parse::<u64>()) {
+                (Ok(nx), Ok(ny)) => nx.cmp(&ny),
+                _ => x.number.cmp(&y.number),
+            },
+        );
+        [
+            (ordered[0].number.clone(), a, aspan),
+            (ordered[1].number.clone(), b, bspan),
+        ]
+    };
+
+    for (pin, target, span) in bindings {
         if sc.pins.insert(pin.clone(), (target, span)).is_some() {
             diags.push(
                 Diagnostic::error(
                     "pin-conflict",
-                    format!("{refdes}: pin `{pin}` set by both `between` and `pins`"),
+                    format!("{refdes}: pin `{pin}` set by both a 2-pin sugar and `pins`"),
                 )
                 .with_span(span),
             );
@@ -735,7 +812,7 @@ blocks:
     }
 
     #[test]
-    fn between_on_polarized_part_warns() {
+    fn between_on_polarized_part_errors() {
         let (_, diags) = run("
 version: 1
 blocks:
@@ -743,8 +820,35 @@ blocks:
     components:
       D1: {part: LED, between: [STATUS, GND]}
 ");
-        assert!(!diags.has_errors());
-        assert!(diags.0.iter().any(|d| d.code == "between-polarized"));
+        assert!(diags.0.iter().any(|d| d.code == "between-on-polarized"));
+    }
+
+    #[test]
+    fn positive_negative_maps_anode_cathode() {
+        // Device:LED has pin 1 = K (cathode), pin 2 = A (anode).
+        let (d, diags) = run("
+version: 1
+blocks:
+  main:
+    components:
+      D1: {part: LED, positive: VPLUS, negative: SIG}
+");
+        assert!(!diags.has_errors(), "{diags:?}");
+        let d1 = &d.blocks["main"].components["D1"];
+        assert_eq!(d1.pins["2"], PinTarget::Net("VPLUS".into())); // anode A = pin 2
+        assert_eq!(d1.pins["1"], PinTarget::Net("SIG".into())); // cathode K = pin 1
+    }
+
+    #[test]
+    fn positive_negative_on_symmetric_part_errors() {
+        let (_, diags) = run("
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: R, positive: A, negative: B}
+");
+        assert!(diags.0.iter().any(|d| d.code == "polarity-on-symmetric"));
     }
 
     #[test]

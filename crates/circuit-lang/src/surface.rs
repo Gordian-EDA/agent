@@ -36,8 +36,12 @@ pub struct SurfaceComponent {
     /// raw pin target strings: net name | pin-ref ("U1.PB6") | "nc"
     pub pins: IndexMap<String, (String, Span)>,
     pub units: IndexMap<String, IndexMap<String, (String, Span)>>,
-    /// `between:` sugar (exactly two raw targets).
+    /// `between:` sugar (exactly two raw targets) — SYMMETRIC 2-pin parts.
     pub between: Option<((String, Span), (String, Span))>,
+    /// `positive:`/`negative:` sugar — POLARIZED 2-pin parts. `positive` wires the
+    /// anode (`A`/`+`) pin, `negative` the cathode (`K`/`-`).
+    pub positive: Option<(String, Span)>,
+    pub negative: Option<(String, Span)>,
     /// `decouple:` sugar — value -> count, e.g. {"100nF": 10}.
     pub decouple: IndexMap<String, u32>,
     pub span: Option<Span>,
