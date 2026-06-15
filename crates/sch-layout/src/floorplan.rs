@@ -264,6 +264,9 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
     let anchor_cells: BTreeSet<(i32, i32)> =
         anchors.iter().filter_map(|&ai| authored.get(&items[ai].refdes).copied()).collect();
     let mut stack_row: BTreeMap<(i32, i32), i32> = BTreeMap::new();
+    // How many satellites have already tapped a given (anchor, pin), so the next
+    // one fans into the adjacent column instead of overlapping.
+    let mut same_pin: BTreeMap<(usize, String), i32> = BTreeMap::new();
 
     for &si in &sats {
         let s = &items[si];
@@ -291,10 +294,19 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
             let (side, rank) = *pin_meta.get(&(ai, pin_num.clone())).unwrap_or(&(PinSide::East, 0));
             // The OTHER net (not the tapped pin's) decides the satellite's role.
             let other = if tap_net == n1 { &n2 } else { &n1 };
+            // Multiple satellites tapping the SAME anchor pin (e.g. a bias node's
+            // bypass caps) fan out into adjacent columns instead of piling onto
+            // one cell. First tap → off 0 (unchanged); the rest step outward.
+            let off = {
+                let e = same_pin.entry((ai, pin_num.clone())).or_insert(0);
+                let o = *e;
+                *e += 1;
+                o
+            };
             let col_for_side = |s: PinSide| match s {
-                PinSide::East => acol + 1,
-                PinSide::West => acol - 1,
-                _ => acol,
+                PinSide::East => acol + 1 + off,
+                PinSide::West => acol - 1 - off,
+                _ => acol + off,
             };
             if is_vplus(other) {
                 // Pull-up / supply tap → vertical in the V+ band above its pin.
