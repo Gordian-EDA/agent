@@ -16,14 +16,35 @@ Design docs:
 
 ## Status (2026-06-15)
 
-**Done this session:** `layout:` 2D grid (`941c9df`), `positive:`/`negative:`
+**Done earlier this session:** `layout:` 2D grid (`941c9df`), `positive:`/`negative:`
 polarity + enforcement (`f956568`), `power:` list replacing `rails:`/`nets.power`
-(`415a755`), and an `anchor_tap` fix so a satellite whose rail leg also lands on
-its IC flanks the signal pin instead of scattering (mixed-signal blockers gone,
-grid skeleton honored). All gated byte-identical on the 4 references + oracle.
+(`415a755`), an `anchor_tap` fix, and the **placement-search refactor** (one seeded
+search over mm geometry; `PlacementStrategy` Greedy/Anneal; SA picks fewest-warnings
+candidate → anneal 7/7 on the fast fixtures).
 
-**Still open:** the INFER-quality items below (§2 + §5), `ports:` author section,
-engine rigid-refine/anneal cleanup (§1.2), and the tracked bugs (§3).
+**Done in the latest push:**
+- **ALL 10 FIXTURES ELECTRICALLY TRUTHFUL** (`3dc7ab1`) — `KNOWN_TRUTHFULNESS_BUGS`
+  is empty. The last two (bga GND/1V2, selfrepair VBUS/3V3) were collinear rail
+  risers merging; `plan_riser_offsets` fans them apart (finalize-only repair).
+- **OpenAI-compatible backend** (`18b76e7`) — `OpenAiClient`; default switched off
+  Bedrock to the respan.ai gateway (`anthropic/claude-opus-4-8`). Verified live.
+- **Polish-aware SA candidate pick** (`3da87a2`) — judge each candidate THROUGH
+  polish+decongest (was: raw state), so the SA never ships > greedy. oneshot 4→1.
+- **Pin-budget anneal cap** (`32a6a0f`) — bound `iters * pins` so big-board SA is
+  practical (oneshot 3m47s→2m21s); tuned fixtures (≤58 pins) untouched.
+- **Agent e2e validated** — 9 diverse OpenAI-driven scenarios (LDO, op-amp, I2C,
+  Sallen-Key, 555, BJT relay driver, buck, Pierce crystal, thermistor) ALL emit
+  **0 layout-warnings + 0 ERC errors** through the SA engine. The "diff scenarios"
+  bar is met for realistic circuits.
+
+**Remaining for literal "0-warnings on all 10":** only the 3 deliberately-extreme
+fixtures — `bedrock-oneshot` (anneal **1**), `bedrock-selfrepair` (265 pins),
+`bga-fpga-ice40` (671 pins). Dominant class: net-label vs pin-text collisions on
+dense connectors + multi-unit/decoupling clustering. The SA reduces these a lot
+(oneshot greedy 21 → anneal 1) but literal-0 on a 671-pin BGA needs deeper work
+(faster incremental cost for more SA iterations, and/or a dense-connector label
+strategy). Also open: the INFER-quality items below (§2 + §5), `ports:` author
+section, engine cleanup (§1.2).
 
 ---
 

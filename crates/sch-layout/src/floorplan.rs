@@ -113,6 +113,14 @@ pub struct LayoutIr {
     /// point the right way (e.g. a level translator's B-side toward a connector).
     #[serde(default)]
     pub mirror: BTreeSet<String>,
+    /// Refdes → authored grid bounding box `[col_min, row_min, col_max, row_max]`
+    /// in composed grid-ordinal coords (from the per-block `layout:`). The search
+    /// holds gridded parts in this RELATIVE order — left/right by column, top/bottom
+    /// by row — so the author's arrangement is "relatively rigid"; a part spanning a
+    /// column range floats within it. Empty on the sidecar/baseline paths (no
+    /// authored grid ⇒ no ordering constraint, so tuned references are unaffected).
+    #[serde(default)]
+    pub grid: BTreeMap<String, [i32; 4]>,
 }
 
 impl LayoutIr {
@@ -140,6 +148,7 @@ pub fn baseline_ir(design: &Design) -> LayoutIr {
         place: BTreeMap::new(),
         ports: BTreeMap::new(),
         mirror: BTreeSet::new(),
+        grid: BTreeMap::new(),
     }
 }
 
@@ -205,14 +214,14 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
     // exactly the old col=k*5 / row=MID behaviour.
     let authored = grid_from_layout(design);
     let order = order_anchors(&items, &inc, &anchors);
-    let max_gcol = authored.values().map(|(c, _)| *c).max().unwrap_or(-1);
+    let max_gcol = authored.values().map(|b| b[2]).max().unwrap_or(-1);
     let mut next_col = max_gcol + 1;
     let mut anchor_col: BTreeMap<usize, i32> = BTreeMap::new();
     let mut anchor_row: BTreeMap<usize, i32> = BTreeMap::new();
     for &ai in &order {
         let rd = &items[ai].refdes;
         let (gcol, grow) = match authored.get(rd) {
-            Some(&(c, r)) => (c, r),
+            Some(b) => (b[0], b[1]), // seed from the box's top-left cell
             None => {
                 let c = next_col;
                 next_col += 1;
@@ -261,8 +270,10 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
     // Grid cells that contain an anchor: a satellite the author gridded into such
     // a cell still FLANKS the anchor (inference); one gridded into an anchor-less
     // cell (a bare 2-pin connector, or an all-passive block) is stacked there.
-    let anchor_cells: BTreeSet<(i32, i32)> =
-        anchors.iter().filter_map(|&ai| authored.get(&items[ai].refdes).copied()).collect();
+    let anchor_cells: BTreeSet<(i32, i32)> = anchors
+        .iter()
+        .filter_map(|&ai| authored.get(&items[ai].refdes).map(|b| (b[0], b[1])))
+        .collect();
     let mut stack_row: BTreeMap<(i32, i32), i32> = BTreeMap::new();
     // How many satellites have already tapped a given (anchor, pin), so the next
     // one fans into the adjacent column instead of overlapping.
@@ -275,9 +286,10 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
 
         // An explicitly-gridded satellite in an anchor-less cell: place it at its
         // cell, stacking successive parts down the column so they don't collide.
-        if let Some(&(gc, gr)) = authored.get(&s.refdes)
-            && !anchor_cells.contains(&(gc, gr))
+        if let Some(b) = authored.get(&s.refdes).copied()
+            && !anchor_cells.contains(&(b[0], b[1]))
         {
+            let (gc, gr) = (b[0], b[1]);
             let k = stack_row.entry((gc, gr)).or_insert(0);
             let row = MID + gr * ROW_BAND + *k;
             *k += 1;
@@ -378,7 +390,19 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         }
     }
 
-    LayoutIr { flow: Flow::Lr, rails, place, ports, mirror }
+    // The author's per-block `layout:` grid OVERRIDES inferred placement for every
+    // gridded part — anchors AND satellites. A gridded satellite SEEDS where the
+    // grid's relative arrangement says, not where its tap would pull it (the grid
+    // is the author's explicit intent; inference only fills the rest). The search
+    // then holds that relative order via the `grid_order` cost (see `layout_cost`).
+    for (rd, b) in &authored {
+        if let Some(cell) = place.get_mut(rd) {
+            cell.col = b[0] * 5;
+            cell.row = MID + b[1] * ROW_BAND;
+        }
+    }
+
+    LayoutIr { flow: Flow::Lr, rails, place, ports, mirror, grid: authored }
 }
 
 /// Cheap stable column key for a net name (group same-node legs in one column).
@@ -532,25 +556,38 @@ fn order_anchors(items: &[Item], inc: &Incidence, anchors: &[usize]) -> Vec<usiz
     order
 }
 
-/// The author-facing `layout:` placement grid → refdes → (grid col, grid row). A
-/// block name expands to every component in that block; a bare refdes maps to
-/// itself; `None` (`~`) holes are skipped. A name appearing in several cells
-/// takes its FIRST occurrence (cross-row float is a deferred follow-up). Empty
-/// when the design carries no `layout:` — the engine then infers placement.
-fn grid_from_layout(design: &Design) -> BTreeMap<String, (i32, i32)> {
-    let mut out: BTreeMap<String, (i32, i32)> = BTreeMap::new();
-    for (r, row) in design.layout.iter().enumerate() {
-        for (c, cell) in row.iter().enumerate() {
-            let Some(name) = cell else { continue };
-            let pos = (c as i32, r as i32);
-            if let Some(block) = design.blocks.get(name) {
-                for rd in block.components.keys() {
-                    out.entry(rd.clone()).or_insert(pos);
-                }
-            } else {
-                out.entry(name.clone()).or_insert(pos);
+/// Compose every block's per-block `layout:` grid into one global relative seed:
+/// refdes → (grid col, grid row). Each gridded block occupies its own column band
+/// (declaration order, laid left→right); within a band a cell maps its refdes to
+/// `(band_base + local_col, local_row)`. `None` (`~`) holes are skipped; a refdes
+/// repeated in a column takes its FIRST occurrence (the seed — the search then
+/// floats/spans it, since the grid is RELATIVE positioning, never an absolute
+/// pin). Blocks with no grid contribute nothing here — the engine infers their
+/// internal arrangement. Empty when no block carries a `layout:`.
+fn grid_from_layout(design: &Design) -> BTreeMap<String, [i32; 4]> {
+    let mut out: BTreeMap<String, [i32; 4]> = BTreeMap::new();
+    let mut col_base = 0i32;
+    for block in design.blocks.values() {
+        if block.layout.is_empty() {
+            continue;
+        }
+        let mut width = 0i32;
+        for (r, row) in block.layout.iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                let Some(name) = cell else { continue };
+                let (gc, gr) = (col_base + c as i32, r as i32);
+                // Bounding box: a refdes in several cells (a column span) grows its
+                // box; the seed uses the top-left, the order constraint the whole box.
+                let e = out.entry(name.clone()).or_insert([gc, gr, gc, gr]);
+                e[0] = e[0].min(gc);
+                e[1] = e[1].min(gr);
+                e[2] = e[2].max(gc);
+                e[3] = e[3].max(gr);
+                width = width.max(c as i32 + 1);
             }
         }
+        // Next gridded block starts past this one's columns, so bands never overlap.
+        col_base += width.max(1);
     }
     out
 }
@@ -1997,6 +2034,14 @@ fn layout_cost(
         hi[1] = hi[1].max(r[3]);
     }
     let spread = if lo[0].is_finite() { (hi[0] - lo[0]) + (hi[1] - lo[1]) } else { 0.0 };
+    // The author's per-block `layout:` relative ordering. Weighted JUST BELOW the
+    // body-overlap wall (so it never forces a collision) but ABOVE every routing /
+    // aesthetic term, so the grid is "relatively rigid": the search holds gridded
+    // parts in their authored left/right + top/bottom order even when flipping one
+    // across its anchor would shave a long wire — exact positions stay free, only
+    // the order is held. Empty grid (sidecar / no `layout:`) ⇒ zero, so tuned
+    // references are untouched.
+    let grid_order = grid_order_viol(items, ir);
     // Merges/shorts are hard correctness failures (a rail-to-rail short lowers
     // length+junctions, so without this the hill-climb would happily create
     // one); fallbacks degrade a wire to a label; then crossings; then CONGESTION
@@ -2006,6 +2051,7 @@ fn layout_cost(
     2000.0 * merges as f64
         + 1500.0 * overlaps as f64
         + 1000.0 * fallbacks as f64
+        + 1200.0 * grid_order as f64
         + 5.0 * crossings as f64
         + 7.0 * congestion as f64
         + 30.0 * body_cross as f64
@@ -2016,6 +2062,44 @@ fn layout_cost(
         + 0.5 * stray
         + 0.15 * length
         + 0.45 * spread
+}
+
+/// Violations of the author's per-block `layout:` relative ordering (`ir.grid`).
+/// For each pair of gridded parts whose grid boxes are DISJOINT on an axis, the
+/// search must hold that order: A strictly left of B (`A.col_max < B.col_min`)
+/// requires A's body centre left of B's; A strictly above B (`A.row_max <
+/// B.row_min`) requires A above B (smaller y). Boxes that OVERLAP on an axis — a
+/// column-span float like a tall IC — impose no constraint on that axis, so the
+/// part floats within its span. Empty grid ⇒ 0 (no `layout:` / sidecar path).
+fn grid_order_viol(items: &[Item], ir: &LayoutIr) -> usize {
+    if ir.grid.is_empty() {
+        return 0;
+    }
+    let pos: BTreeMap<&str, [f64; 2]> = items.iter().map(|it| (it.refdes.as_str(), it.at)).collect();
+    let g: Vec<(&String, &[i32; 4])> = ir.grid.iter().collect();
+    let mut viol = 0;
+    for i in 0..g.len() {
+        for j in (i + 1)..g.len() {
+            let (ra, ba) = g[i];
+            let (rb, bb) = g[j];
+            let (Some(pa), Some(pb)) = (pos.get(ra.as_str()), pos.get(rb.as_str())) else {
+                continue;
+            };
+            // Columns → left/right, only when the two boxes share no column.
+            if (ba[2] < bb[0] && pa[0] >= pb[0] - EPS)
+                || (bb[2] < ba[0] && pb[0] >= pa[0] - EPS)
+            {
+                viol += 1;
+            }
+            // Rows → above/below (smaller y is higher), only when row-disjoint.
+            if (ba[3] < bb[1] && pa[1] >= pb[1] - EPS)
+                || (bb[3] < ba[1] && pb[1] >= pa[1] - EPS)
+            {
+                viol += 1;
+            }
+        }
+    }
+    viol
 }
 
 /// "Stay near your pin": total Manhattan distance from each satellite (2-pin
@@ -2955,46 +3039,53 @@ fn flag_angle(dir: Dir) -> f64 {
 #[cfg(test)]
 mod grid_tests {
     use super::*;
-    use circuit_lang::model::{Block, Component, Design};
+    use circuit_lang::model::{Block, Component, Design, LayoutGrid};
     use indexmap::IndexMap;
 
-    fn block(refs: &[&str]) -> Block {
+    fn cells(names: &[&str]) -> Vec<Option<String>> {
+        names
+            .iter()
+            .map(|n| if *n == "~" { None } else { Some((*n).to_string()) })
+            .collect()
+    }
+
+    fn block(refs: &[&str], layout: LayoutGrid) -> Block {
         let mut components = IndexMap::new();
         for r in refs {
             components.insert((*r).to_string(), Component::default());
         }
-        Block { note: None, components }
+        Block { note: None, components, layout }
     }
 
     #[test]
-    fn grid_expands_blocks_refdes_holes_and_dedups() {
+    fn per_block_grids_compose_into_column_bands_with_spans_and_holes() {
         let mut design = Design::default();
-        design.blocks.insert("usb".into(), block(&["J1", "R1"]));
-        design.blocks.insert("mcu".into(), block(&["U1"]));
-        // layout:
-        //   - [usb, mcu, J9]   row 0
-        //   - [~,   mcu]       row 1  (mcu repeated -> first occurrence wins)
-        design.layout = vec![
-            vec![Some("usb".into()), Some("mcu".into()), Some("J9".into())],
-            vec![None, Some("mcu".into())],
-        ];
+        // block `usb`: J1 | hole | R1  -> width 3
+        design.blocks.insert(
+            "usb".into(),
+            block(&["J1", "R1"], vec![cells(&["J1", "~", "R1"])]),
+        );
+        // block `mcu`: U1 spans its column across two rows (repeated) -> first occ.
+        design.blocks.insert(
+            "mcu".into(),
+            block(&["U1"], vec![cells(&["U1"]), cells(&["U1"])]),
+        );
 
         let g = grid_from_layout(&design);
-        // block `usb` expands to both its parts at col 0, row 0
-        assert_eq!(g["J1"], (0, 0));
-        assert_eq!(g["R1"], (0, 0));
-        // block `mcu` -> U1 at its FIRST occurrence (col 1, row 0), not (1, 1)
-        assert_eq!(g["U1"], (1, 0));
-        // a bare refdes cell
-        assert_eq!(g["J9"], (2, 0));
-        // the `~` hole reserves no entry
-        assert_eq!(g.len(), 4);
+        // usb band starts at col 0; the `~` hole reserves col 1. Boxes are
+        // [col_min, row_min, col_max, row_max].
+        assert_eq!(g["J1"], [0, 0, 0, 0]);
+        assert_eq!(g["R1"], [2, 0, 2, 0]);
+        // mcu band starts AFTER usb's 3 columns (no overlap); U1 SPANS rows 0..1 in
+        // its column (repeated down it), so its box grows in the row axis.
+        assert_eq!(g["U1"], [3, 0, 3, 1]);
+        assert_eq!(g.len(), 3);
     }
 
     #[test]
-    fn no_layout_is_empty_grid() {
+    fn block_without_layout_contributes_nothing() {
         let mut design = Design::default();
-        design.blocks.insert("main".into(), block(&["U1", "R1"]));
+        design.blocks.insert("main".into(), block(&["U1", "R1"], Vec::new()));
         assert!(grid_from_layout(&design).is_empty());
     }
 }

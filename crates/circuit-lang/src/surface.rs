@@ -15,15 +15,15 @@ pub struct SurfaceDesign {
     pub nets: IndexMap<String, SurfaceNet>,
     /// Lint codes suppressed via top-level `lint: {allow: [...]}`.
     pub lint_allow: Vec<String>,
-    /// Top-level `layout:` placement grid — rows of cells, each a block/refdes
-    /// name (with a span for diagnostics) or `None` for a `~` hole.
-    pub layout: Vec<Vec<(Option<String>, Span)>>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SurfaceBlock {
     pub note: Option<String>,
     pub components: IndexMap<String, SurfaceComponent>,
+    /// Per-block `layout:` placement grid — rows of cells, each one of THIS
+    /// block's refdes (with a span for diagnostics) or `None` for a `~` hole.
+    pub layout: Vec<Vec<(Option<String>, Span)>>,
     pub span: Option<Span>,
 }
 

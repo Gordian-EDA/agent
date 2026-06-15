@@ -2,10 +2,10 @@ version: 1
 name: grid-demo
 power: [9V, GND]
 
-# Grid: input connector left, the 555 centre, output connector right.
-layout:
-  - [input, blinker, output]
-
+# Inter-block order (input left, blinker centre, output right) is inferred.
+# The `blinker` block carries a per-block `layout:` grid: U1 spans column 1
+# (repeated down it → floats within that band), the timing R-chain orders down
+# column 0 to its left, the CV cap sits top-right.
 blocks:
   input:
     components:
@@ -13,6 +13,10 @@ blocks:
       C1: {part: Device:C, value: 100u, between: [9V, GND]}
 
   blinker:
+    layout:
+      - [R1, U1, C3]
+      - [R2, U1, ~ ]
+      - [C2, U1, ~ ]
     components:
       U1:
         part: Timer:NE555P

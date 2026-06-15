@@ -14,22 +14,25 @@ pub struct Design {
     pub nets: IndexMap<NetName, NetAttrs>,
     /// Lint codes suppressed via the top-level `lint: {allow: [...]}` section.
     pub lint_allow: std::collections::BTreeSet<String>,
-    /// Author-facing placement grid (the top-level `layout:` 2D array). Each row
-    /// is a left→right list of cells; a cell names a block or a refdes, or is
-    /// `None` for a `~` hole. Column index = x, row index = y (ordinal). Empty =
-    /// no grid → the engine infers placement (declaration-order default). A name
-    /// repeated across cells floats. See `LayoutGrid`.
-    pub layout: LayoutGrid,
 }
 
-/// The top-level `layout:` 2D array — rows of cells, each a block/refdes name or
-/// `None` (a `~` hole). Geometry-free: ordinal positions only.
+/// A module's author-facing placement grid (the per-block `layout:` 2D array).
+/// Each row is a left→right list of cells; a cell names one of THIS block's
+/// refdes, or is `None` for a `~` hole. Column index = x, row index = y
+/// (ordinal). Empty = no grid → the engine arranges the block's parts by
+/// inference. A refdes repeated down a column **spans** those rows and floats
+/// within that span (a tall IC). Inter-block placement is always inferred — the
+/// grid only controls a module's internal arrangement, the thing inference can't
+/// derive from connectivity.
 pub type LayoutGrid = Vec<Vec<Option<String>>>;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Block {
     pub note: Option<String>,
     pub components: IndexMap<RefDes, Component>,
+    /// This module's internal placement grid (per-block `layout:`). See
+    /// [`LayoutGrid`]. Empty = infer the block's internal arrangement.
+    pub layout: LayoutGrid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

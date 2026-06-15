@@ -98,30 +98,30 @@ pub fn to_canonical_yaml(d: &Design) -> String {
         let codes: Vec<String> = d.lint_allow.iter().map(|c| q(c)).collect();
         writeln!(o, "lint: {{allow: [{}]}}", codes.join(", ")).unwrap();
     }
-    if !d.layout.is_empty() {
-        // Top-level placement grid, flow-style so it round-trips: a `~` hole
-        // emits as the YAML null token, re-parsed back to `None`.
-        let rows: Vec<String> = d
-            .layout
-            .iter()
-            .map(|row| {
-                let cells: Vec<String> = row
-                    .iter()
-                    .map(|c| match c {
-                        Some(name) => q(name),
-                        None => "~".to_string(),
-                    })
-                    .collect();
-                format!("[{}]", cells.join(", "))
-            })
-            .collect();
-        writeln!(o, "layout: [{}]", rows.join(", ")).unwrap();
-    }
     o.push_str("blocks:\n");
     for (bname, block) in &d.blocks {
         writeln!(o, "  {}:", q(bname)).unwrap();
         if let Some(note) = &block.note {
             writeln!(o, "    note: {}", q(note)).unwrap();
+        }
+        if !block.layout.is_empty() {
+            // Per-block placement grid, flow-style so it round-trips: a `~` hole
+            // emits as the YAML null token, re-parsed back to `None`.
+            let rows: Vec<String> = block
+                .layout
+                .iter()
+                .map(|row| {
+                    let cells: Vec<String> = row
+                        .iter()
+                        .map(|c| match c {
+                            Some(name) => q(name),
+                            None => "~".to_string(),
+                        })
+                        .collect();
+                    format!("[{}]", cells.join(", "))
+                })
+                .collect();
+            writeln!(o, "    layout: [{}]", rows.join(", ")).unwrap();
         }
         o.push_str("    components:\n");
 
@@ -223,10 +223,10 @@ mod tests {
 version: 1
 name: t
 power: [3V3, GND]
-layout:
-  - [U1, R7]
 blocks:
   mcu:
+    layout:
+      - [U1, R7]
     components:
       U1: {part: M:CPU, decouple: {100nF: 2}, pins: {VDD: 3V3, VSS: GND, PB6: SCL}}
       R7: {part: R, value: 4.7k, between: [SCL, 3V3]}

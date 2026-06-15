@@ -2,12 +2,8 @@ version: 1
 name: bluepill-h7
 power: [3V3, GND, VBUS]
 
-# Placement grid: USB in on the left, MCU + power supply in the middle row,
-# headers out on the right.
-layout:
-  - [usb, mcu, headers]
-  - [~,   power]
-
+# Inter-block placement (usb left, mcu/power middle, headers right) is inferred
+# from connectivity; per-block `layout:` grids would arrange parts inside a block.
 blocks:
   power:
     components:

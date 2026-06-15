@@ -115,7 +115,6 @@ impl Parser<'_> {
                 "blocks",
                 "nets",
                 "lint",
-                "layout",
             ],
             "top level",
         );
@@ -214,14 +213,11 @@ impl Parser<'_> {
             }
         }
 
-        if let Some(n) = Self::get(map, "layout") {
-            d.layout = self.layout_grid(n);
-        }
         Some(d)
     }
 
-    /// Parse the top-level `layout:` 2D array — a sequence of rows, each a
-    /// sequence of cells. A cell is a block/refdes name, or `~`/null for a hole.
+    /// Parse a per-block `layout:` 2D array — a sequence of rows, each a sequence
+    /// of cells. A cell is a refdes (of this block), or `~`/null for a hole.
     fn layout_grid(&mut self, n: &Node) -> Vec<Vec<(Option<String>, Span)>> {
         let Node::Seq(rows, _) = n else {
             self.err(
@@ -288,12 +284,15 @@ impl Parser<'_> {
 
     fn block(&mut self, n: &Node) -> Option<SurfaceBlock> {
         let m = self.map_node(n, "block")?;
-        self.check_keys(m, &["note", "components"], "block");
+        self.check_keys(m, &["note", "components", "layout"], "block");
         let mut b = SurfaceBlock {
             span: Some(n.span()),
             ..Default::default()
         };
         b.note = Self::get(m, "note").and_then(|v| self.scalar(v, "note"));
+        if let Some(ln) = Self::get(m, "layout") {
+            b.layout = self.layout_grid(ln);
+        }
         if let Some(cn) = Self::get(m, "components")
             && let Some(cm) = self.map_node(cn, "components")
         {
@@ -515,12 +514,12 @@ blocks:
 version: 1
 name: t
 power: [3V3, GND]
-layout:
-  - [U3, U1]
-  - [C1]
 blocks:
   main:
     note: power section
+    layout:
+      - [U3, U1]
+      - [C1]
     components:
       C1: {part: C, value: 10uF, between: [VBUS, GND], dnp: true,
            footprint: Capacitor_SMD:C_0603_1608Metric, props: {MPN: GRM188}}
@@ -537,11 +536,11 @@ nets:
         assert!(!diags.has_errors(), "{:?}", diags);
         let d = d.unwrap();
         assert_eq!(d.power.len(), 2);
-        // top-level layout grid: 2 rows, names preserved
-        assert_eq!(d.layout.len(), 2);
-        assert_eq!(d.layout[0][0].0.as_deref(), Some("U3"));
-        assert_eq!(d.layout[1][0].0.as_deref(), Some("C1"));
         let b = &d.blocks["main"];
+        // per-block layout grid: 2 rows, names preserved
+        assert_eq!(b.layout.len(), 2);
+        assert_eq!(b.layout[0][0].0.as_deref(), Some("U3"));
+        assert_eq!(b.layout[1][0].0.as_deref(), Some("C1"));
         let c1 = &b.components["C1"];
         assert!(c1.dnp);
         assert_eq!(c1.between.as_ref().unwrap().0.0, "VBUS");

@@ -45,6 +45,7 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
         let mut block = Block {
             note: sb.note.clone(),
             components: IndexMap::new(),
+            layout: Vec::new(),
         };
         for (refdes, sc) in &sb.components {
             if !seen_refdes.insert(refdes.clone()) {
@@ -93,41 +94,39 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
             }
             block.components.insert(refdes.clone(), comp);
         }
+        // Per-block `layout:` grid → kernel, validating each cell names one of
+        // THIS block's refdes (a module's grid arranges only its own parts).
+        block.layout = lower_block_layout(sb, &mut diags);
         d.blocks.insert(bname.clone(), block);
     }
 
     resolve_pins(&mut d, raw_pins, &mut diags);
     synth_decouple(&mut d, s, provider, &mut diags); // Task 8
     materialize_auto_nc(&mut d, provider); // Task R6
-    lower_layout_grid(&mut d, s, &mut diags);
 
     (d, diags)
 }
 
-/// Strip spans off the surface `layout:` grid into the kernel model, validating
-/// that every named cell resolves to an authored block or refdes.
-fn lower_layout_grid(d: &mut Design, s: &SurfaceDesign, diags: &mut Diagnostics) {
-    let block_names: std::collections::HashSet<&str> = s.blocks.keys().map(String::as_str).collect();
-    let refdes: std::collections::HashSet<&str> = s
-        .blocks
-        .values()
-        .flat_map(|b| b.components.keys())
-        .map(String::as_str)
-        .collect();
-    d.layout = s
-        .layout
+/// Strip spans off one block's `layout:` grid into the kernel model, validating
+/// that every named cell is a refdes declared in THAT block. A refdes may repeat
+/// (a column span / float); `~` is a hole (`None`).
+fn lower_block_layout(sb: &SurfaceBlock, diags: &mut Diagnostics) -> LayoutGrid {
+    let refdes: std::collections::HashSet<&str> =
+        sb.components.keys().map(String::as_str).collect();
+    sb.layout
         .iter()
         .map(|row| {
             row.iter()
                 .map(|(cell, span)| {
                     if let Some(name) = cell
-                        && !block_names.contains(name.as_str())
                         && !refdes.contains(name.as_str())
                     {
                         diags.push(
                             Diagnostic::error(
                                 "unknown-layout-cell",
-                                format!("layout cell `{name}` is not a known block or refdes"),
+                                format!(
+                                    "layout cell `{name}` is not a refdes in this block"
+                                ),
                             )
                             .with_span(*span),
                         );
@@ -136,7 +135,7 @@ fn lower_layout_grid(d: &mut Design, s: &SurfaceDesign, diags: &mut Diagnostics)
                 })
                 .collect()
         })
-        .collect();
+        .collect()
 }
 
 /// Final desugar pass: for every component whose symbol is known, any physical
