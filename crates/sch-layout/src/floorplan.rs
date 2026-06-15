@@ -996,19 +996,55 @@ impl PlacementStrategy for Anneal {
         seed: u64,
     ) {
         let seed_state: Vec<Item> = items.to_vec();
-        // Path A: greedy refine, then a seeded anneal from there.
+        // Path A: greedy refine, then a seeded anneal from there. Keep the greedy
+        // result as its OWN candidate — the SA must never SHIP more layout
+        // warnings than greedy (the "SA regresses a tuned frame" trap).
         refine_items(env, items, inc, ir, needs_flag);
+        let greedy_state: Vec<Item> = items.to_vec();
         anneal_items(env, items, inc, ir, needs_flag, false, seed);
-        let cost_a = score_items(env, items, inc, ir, needs_flag);
         let state_a: Vec<Item> = items.to_vec();
         // Path B: a broad anneal from the raw seed (a wider global search).
         items.clone_from_slice(&seed_state);
         anneal_items(env, items, inc, ir, needs_flag, true, seed);
-        let cost_b = score_items(env, items, inc, ir, needs_flag);
-        // Keep B only if it strictly wins; else restore A (today's multi-start rule).
-        if !(cost_b + 0.5 < cost_a) {
-            items.clone_from_slice(&state_a);
+        let state_b: Vec<Item> = items.to_vec();
+        // Pick the candidate with the FEWEST layout warnings (the quality metric
+        // the per-move cost can't afford — it needs the text solve), tie-broken by
+        // routed cost. Cheap: a few prepare+count calls at the END, never per-eval.
+        // Guarantees the SA ≥ greedy on a tuned (sidecar) frame while still winning
+        // on a loose (INFER) frame.
+        let candidates = [greedy_state, state_a, state_b];
+        let (mut best, mut best_w, mut best_c) = (0usize, usize::MAX, f64::INFINITY);
+        for (k, cand) in candidates.iter().enumerate() {
+            let w = warning_count(env, cand, inc, ir, needs_flag);
+            let c = score_items(env, cand, inc, ir, needs_flag);
+            if w < best_w || (w == best_w && c + 0.5 < best_c) {
+                best = k;
+                best_w = w;
+                best_c = c;
+            }
         }
+        items.clone_from_slice(&candidates[best]);
+    }
+}
+
+/// Layout-warning count of `items` as they would SHIP — build the writer and run
+/// the same finalize (`prepare`: split wires, solve text, reframe) the real emit
+/// does, then count. Used only to pick among the SA's final candidates (a handful
+/// of calls), never per-move, so the text-solve cost is affordable here.
+fn warning_count(
+    env: &KicadEnv,
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+) -> usize {
+    match build_writer(env, None, items, inc, ir, needs_flag) {
+        Ok(mut w) => {
+            w.set_frame(true);
+            w.prepare();
+            w.layout_warnings().len()
+        }
+        Err(_) => usize::MAX,
     }
 }
 

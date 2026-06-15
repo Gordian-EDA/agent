@@ -1110,6 +1110,23 @@ impl SchematicWriter {
                 bands.sort_by_key(hits);
                 bands.push(right);
                 bands.push(left);
+                // Last-resort FAR bands: when the body is ringed by packed
+                // neighbours (a tight decoupling cluster) every near spot is
+                // blocked and the solver would fall onto a cap. A band pushed
+                // ~5 mm further out clears it — the MPN reads a touch detached but
+                // never overlaps. Tried only after every near candidate.
+                let above_far = (
+                    TextPos { at: [r2(cx), r2(miny - 8.18)], justify: Justify::Center },
+                    TextPos { at: [r2(cx), r2(miny - 5.64)], justify: Justify::Center },
+                    [cx - wmax / 2.0, miny - 9.78, cx + wmax / 2.0, miny - 5.64] as BBox,
+                );
+                let below_far = (
+                    TextPos { at: [r2(cx), r2(maxy + 5.64)], justify: Justify::Center },
+                    TextPos { at: [r2(cx), r2(maxy + 8.18)], justify: Justify::Center },
+                    [cx - wmax / 2.0, maxy + 5.64, cx + wmax / 2.0, maxy + 9.78],
+                );
+                bands.push(above_far);
+                bands.push(below_far);
                 bands
             } else if h[0] > h[1] {
                 vec![above, below, right, left, above_left, above_right, below_left, below_right]

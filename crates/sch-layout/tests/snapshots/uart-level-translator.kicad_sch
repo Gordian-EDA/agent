@@ -2173,11 +2173,11 @@
 		(dnp no)
 		(uuid "e03b58f6-dfcc-5f3c-8ac9-6b44699bec10")
 		(property "Reference" "U2"
-			(at 60.96 74.63 0)
+			(at 60.96 78.03 0)
 			(effects (font (size 1.27 1.27)))
 		)
 		(property "Value" "SN74LVC2T45DCUR"
-			(at 60.96 77.17 0)
+			(at 60.96 80.57 0)
 			(effects (font (size 1.27 1.27)))
 		)
 		(property "Footprint" ""
