@@ -150,11 +150,26 @@ chip only through GND is no longer flanked there). rf-lna went from a 1900px-tal
 broken column to a clean professional schematic (U1 centred, J1/J2 at the edges,
 bypass caps a bottom row). mixed-signal blockers cleared.
 
-Remaining, by impact:
+Remaining, by impact (follow-up review of the improved renders):
 
+- **Wires through 2-pin / connector bodies (INFER + refs — careful).** A rail
+  riser can pass straight through a connector or cap body (grid-demo: the J1
+  connector). `count_body_crossings` prices 2-pin axes and `count_ic_body_crossings`
+  prices IC bodies, but a connector with pins in one column has a near-zero-width
+  bbox that the `r[2]-r[0] < EPS` guard SKIPS — so its body isn't an obstacle.
+  Fix: give a degenerate (narrow) 2-pin/connector body a minimum obstacle width
+  so risers route around it. **Risk:** this changes refine/routing, which also
+  produces the byte-identical reference output — validate the 4 refs don't move
+  (and re-tune sidecars if they do). The single highest-value visual defect left.
 - **Multi-unit op-amp placement (INFER).** A multi-unit IC's units are separate
-  Items sharing a refdes; `anchor_tap` counts them as distinct anchors. Group
-  hits by REFDES so a part tapping one unit resolves (and flanks the right unit).
+  Items sharing a refdes; `anchor_tap` counts them as distinct anchors, and
+  `AIN_B` between two MCP6002 units becomes a label-teleport instead of a short
+  wire (mixed-signal). Group hits by REFDES so a part tapping one unit resolves;
+  keep units of one package clustered and wire pin-to-pin on the same sheet.
+- **I2C pull-up / decap rail pitch (INFER).** mixed-signal strings 6 parts along
+  the 3V3 rail with closely-spaced vertical taps (near-overlapping junctions).
+  Spread rail taps to ≥2-grid pitch; place pull-ups next to SCL/SDA, not
+  interleaved with decoupling.
 - **Vertical net labels over symbols (INFER, deferred — risky).** A long vertical
   net's label can still overprint symbols. The fix lives in `solve_text_positions`
   / `add_cluster_label` (label angle from stub `dir`), which ALSO produces the
