@@ -1652,7 +1652,7 @@ fn overlaps_any(items: &[Item], si: usize, at: [f64; 2]) -> bool {
 /// push. Only positions move, so connectivity is untouched and the router redraws
 /// around the new placement on the following pass.
 fn decongest(items: &mut [Item]) {
-    const MAX_ITERS: usize = 600;
+    const MAX_ITERS: usize = 3000;
     for _ in 0..MAX_ITERS {
         // First overlapping pair in a fixed order (determinism).
         let mut hit = None;
