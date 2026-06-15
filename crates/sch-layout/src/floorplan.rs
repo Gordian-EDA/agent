@@ -627,18 +627,38 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     let base = assign_cells(&items, ir);
     let mut cells = base.clone();
     if std::env::var("NO_REFINE").is_err() {
-        // Placement search: the greedy `refine_cells` hill-climb. It respects the
-        // frame's (col,row,orient) structure and makes LOCAL, strictly-cost-
-        // improving fixes (uncross a pair, straighten a leg, snap a divider spine
-        // collinear), judged on the ACTUAL routed result. On the reference targets
-        // this yields reference-quality layouts on its own.
+        // Placement search. The DEFAULT is the greedy `refine_cells` hill-climb:
+        // it respects the frame's (col,row,orient) structure and makes LOCAL,
+        // strictly-cost-improving fixes (uncross a pair, straighten a leg, snap a
+        // divider spine collinear). On the four reference targets that now yields
+        // reference-quality layouts on its own.
         //
-        // (A simulated-annealing global search was retired: once refine + the
-        // corner/body-cross/spine cost terms place the targets well, the broad SA
-        // never won and the seeded SA actively regressed them — a hotter search
-        // just exploits the cost's blind spots. See OPEN_ITEMS / the engine
-        // redesign doc. The grid makes a global escape moot anyway.)
-        refine_cells(env, &mut items, &inc, ir, &needs_flag, &mut cells);
+        // The simulated-annealing stages are OPT-IN via `ANNEAL=1`. They were the
+        // engine's optimiser while the cost lacked corner/body-cross/spine terms;
+        // now that refine + those terms place the targets well, the broad search
+        // never wins (the seeded cost beats the broad cost on all four) and the
+        // SEEDED anneal actively REGRESSES them — it takes refine's clean row and
+        // wanders into a cheaper-but-uglier basin the cost can't distinguish
+        // (mcp1703's cap row scatters, a cap drifts onto U1's MPN text). Kept
+        // behind the flag for a genuinely bad/loose frame (e.g. INFER mode) where
+        // a global escape still helps. `GREEDY=1` forces refine-only (tests).
+        let anneal = std::env::var("ANNEAL").is_ok() && std::env::var("GREEDY").is_err();
+
+        let mut a = base.clone();
+        refine_cells(env, &mut items, &inc, ir, &needs_flag, &mut a);
+        if anneal {
+            anneal_cells(env, &mut items, &inc, ir, &needs_flag, &mut a, false);
+        }
+        cells = a;
+        if anneal {
+            let cost_a = score_cells(env, &mut items, &inc, ir, &needs_flag, &cells);
+            let mut b = base.clone();
+            anneal_cells(env, &mut items, &inc, ir, &needs_flag, &mut b, true);
+            let cost_b = score_cells(env, &mut items, &inc, ir, &needs_flag, &b);
+            if cost_b + 0.5 < cost_a {
+                cells = b;
+            }
+        }
     }
     apply_cells(&mut items, &cells);
     normalize(&mut items);
@@ -1073,6 +1093,116 @@ fn anchor_col(items: &[Item], inc: &Incidence, ir: &LayoutIr, i: usize) -> Optio
         }
     }
     (cols.len() == 1).then(|| cols.into_iter().next().unwrap())
+}
+
+/// Deterministic-given-IR PRNG (SplitMix64-ish) so annealing reproduces.
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+    fn below(&mut self, n: usize) -> usize {
+        if n == 0 { 0 } else { (self.next() % n as u64) as usize }
+    }
+    /// Uniform in [0,1).
+    fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 53) as f64
+    }
+    /// A small symmetric integer step in [-r, r].
+    fn step(&mut self, r: i32) -> i32 {
+        self.below((2 * r + 1) as usize) as i32 - r
+    }
+}
+
+/// Simulated-annealing placement search over the coarse cells: like `refine_cells`
+/// but it accepts *worsening* moves with probability `exp(-Δ/T)` (T cooling to ~0),
+/// so it escapes the local minima the greedy climb is trapped in — a satellite
+/// stranded across the sheet can migrate, in stages, to hug the IC pin it serves.
+/// Moves: relocate a satellite to a random nearby cell, re-orient it, swap two,
+/// or nudge an anchor. Every candidate is scored on the REAL routed cost (incl.
+/// the spread/stray/overlap terms), and the best layout seen is kept — so SA can
+/// only match-or-beat the seed it started from.
+fn anneal_cells(
+    env: &KicadEnv,
+    items: &mut [Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+    cells: &mut [Cell],
+    broad: bool,
+) {
+    let sats: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3).collect();
+    let anchors: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() >= 3).collect();
+    if sats.is_empty() {
+        return;
+    }
+    let orients = [Orient::Up, Orient::Down, Orient::Left, Orient::Right];
+    let mut rng = Rng(0xD1B54A32D192ED03);
+
+    let mut cur = score_cells(env, items, inc, ir, needs_flag, cells);
+    let mut best_cells = cells.to_vec();
+    let mut best = cur;
+
+    // Iterations scale with part count; temperature cools linearly. T0 is set so an
+    // early move that adds a crossing/junction (cost ~5) is readily accepted, while
+    // a correctness failure (cost ~1000+) never is. `broad` (unseeded pure-SA from
+    // the raw frame) runs hotter and longer to explore a wider solution space.
+    let (mult, t0) = if broad { (1400, 30.0) } else { (450, 12.0) };
+    let iters = (mult * sats.len()).clamp(800, if broad { 12000 } else { 4000 });
+    for it in 0..iters {
+        let t = (t0 * (1.0 - it as f64 / iters as f64)).max(0.05);
+        // Snapshot the cell(s) a move touches so it can be rolled back.
+        let m = rng.below(10);
+        let undo: Vec<(usize, Cell)>;
+        if m < 6 {
+            // Relocate a satellite to a nearby cell (the big move greedy lacks).
+            let i = sats[rng.below(sats.len())];
+            undo = vec![(i, cells[i])];
+            cells[i].col += rng.step(2);
+            cells[i].row += rng.step(2);
+        } else if m < 8 {
+            // Re-orient a satellite.
+            let i = sats[rng.below(sats.len())];
+            undo = vec![(i, cells[i])];
+            cells[i].orient = orients[rng.below(4)];
+        } else if m < 9 && sats.len() >= 2 {
+            // Swap two satellites' positions (keep each orientation).
+            let a = sats[rng.below(sats.len())];
+            let b = sats[rng.below(sats.len())];
+            undo = vec![(a, cells[a]), (b, cells[b])];
+            let (ca, cb) = (cells[a], cells[b]);
+            cells[a] = Cell { orient: ca.orient, ..cb };
+            cells[b] = Cell { orient: cb.orient, ..ca };
+        } else if !anchors.is_empty() {
+            // Nudge an anchor (the frame's IC) by one cell — frees the whole block
+            // to slide, which a satellite-only search cannot do.
+            let i = anchors[rng.below(anchors.len())];
+            undo = vec![(i, cells[i])];
+            cells[i].col += rng.step(1);
+            cells[i].row += rng.step(1);
+        } else {
+            continue;
+        }
+
+        let c = score_cells(env, items, inc, ir, needs_flag, cells);
+        let d = c - cur;
+        if d < 0.0 || rng.unit() < (-d / t).exp() {
+            cur = c;
+            if c < best {
+                best = c;
+                best_cells.copy_from_slice(cells);
+            }
+        } else {
+            for (i, prev) in undo {
+                cells[i] = prev;
+            }
+        }
+    }
+    cells.copy_from_slice(&best_cells);
 }
 
 /// The four orthogonal one-cell shifts of `c`.
