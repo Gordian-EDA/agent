@@ -40,22 +40,41 @@ grid into the initial, fully-aligned, overlap-free mm start; the search then run
 in mm. `score_cells` is deleted (it was the apply+score wrapper); the search calls
 `score_items` directly.
 
-### The strategy interface (greedy + SA share everything but the accept rule)
+### The strategy interface (shared moves; **per-strategy cost**)
 ```rust
 struct SearchCtx<'a> { env, inc, ir, needs_flag, frozen: &'a [bool] }
-type Cost<'a> = dyn Fn(&[Item]) -> f64 + 'a;          // == build_writer + layout_cost
+
+/// The cost is a TRAIT, not a shared closure — greedy and SA need NOT use the
+/// same one (owner: SA is the paid tier and may carry a MORE CAPABLE cost).
+/// BaseCost = today's layout_cost terms (cheap; free tier). PremiumCost = BaseCost
+/// + extra aesthetic terms (more expensive to evaluate; the paid tier's edge).
+trait Cost { fn eval(&self, items:&[Item], cx:&SearchCtx) -> f64; } // each calls build_writer + its terms
+struct BaseCost;                       // free tier / greedy
+struct PremiumCost { base: BaseCost }  // paid tier / SA: composes Base + extras
+
 trait MoveGen { fn propose(&self, items:&mut [Item], cx:&SearchCtx, rng:&mut Rng) -> Option<Undo>; }
-trait PlacementStrategy {
-    fn search(&self, items:&mut Vec<Item>, cost:&Cost, moves:&dyn MoveGen, cx:&SearchCtx, seed:u64);
+
+trait PlacementStrategy {              // each impl OWNS its cost (a field)
+    fn search(&self, items:&mut Vec<Item>, moves:&dyn MoveGen, cx:&SearchCtx, seed:u64);
 }
+struct Greedy { cost: BaseCost }
+struct Anneal { cost: PremiumCost, t0: f64, mult: usize, broad: bool }
 ```
-`Greedy` (was `refine_cells`) and `Anneal` (was `anneal_cells`) are two impls over
-the **same** `Cost`, the **same** `MoveGen`, the **same** `Undo` rollback. The
-ONLY divergence is the accept rule (strict `c+0.5<best` vs Metropolis
-`rng.unit() < exp(-Δ/t)`) and the loop driver (fixpoint sweep vs cooled iteration
-keeping best-seen). Zero duplicated cost/move logic. Because SA seeds from the
-same projected start and keeps best-seen, **SA can only match-or-beat greedy** —
-shipping it as the paid tier is strictly an upgrade, never a regression.
+`Greedy` (was `refine_cells`) and `Anneal` (was `anneal_cells`) share the **same
+`MoveGen` + `Undo`** (a move added once is available to both) and differ in the
+accept rule (strict `c+0.5<best` vs Metropolis `rng.unit() < exp(-Δ/t)`), the loop
+driver (fixpoint sweep vs cooled iteration keeping best-seen), **and their cost**:
+greedy uses `BaseCost`, SA uses `PremiumCost`.
+
+This per-strategy cost is the right move for a paid tier, and it also *dissolves
+the old SA failure*: SA used to find "cheaper-but-uglier" basins because it
+optimized greedy's cost, whose blind spots it then exploited. Give SA a richer
+cost that **prices** that ugliness (the aesthetic terms greedy can't afford to
+evaluate every move) and its global search becomes pure upside. Trade-off to own:
+greedy and SA are no longer comparable by raw cost number (different objectives) —
+they're compared by the **snapshot + visual review**, which we already gate on.
+"SA ≥ greedy" now holds by *quality* (better objective + global search), not by a
+shared-cost monotonicity argument.
 
 Selection is one factory at the single point in `emit` (replacing floorplan.rs
 ~645–661): env `LAYOUT_SEARCH=greedy|anneal` (with `ANNEAL=1`/`GREEDY=1` aliases
@@ -99,9 +118,19 @@ is exactly why `decongest` had to exist procedurally. Keep `decongest()` unchang
 as a thin final `hard_separate()` **safety net**, run once post-search; it now
 fires only on a rare sub-grid touch instead of being the primary mechanism.
 
-### Cost summary (`layout_cost`)
-Add: `align_viol` (~4), `pin_axis_miss` (~0.5), `penetration` (~50). Keep at 1500:
-overlap wall. Keep unchanged (already judge shipped geometry):
+### Cost summary (`layout_cost`) — split Base vs Premium
+**BaseCost** (both tiers; greedy's whole cost) = correctness + structure: every
+term below. It must stand alone so the free-tier greedy layout is *valid and
+readable*. **PremiumCost** (SA only) = `BaseCost` + extra **aesthetic** terms
+greedy can't afford to evaluate per move or that need a global view — the paid
+tier's edge. Candidates for Premium-only: a fuller crossing/clutter model,
+decoupling-/pull-up-proximity, label-aesthetics (label-through-body, the
+connector-body obstacle), symmetry/balance, whitespace/compaction polish. Keep
+the structural terms (`align_viol`, `penetration`, overlap wall, `spine_viol`,
+`orient_viol`) in **Base** — they're correctness/structure, not taste.
+
+Add to Base: `align_viol` (~4), `pin_axis_miss` (~0.5), `penetration` (~50). Keep
+at 1500: overlap wall. Keep unchanged (already judge shipped geometry):
 merges/shorts/foreign_taps (2000), fallbacks (1000), body+ic_body_cross (30),
 orient_viol (12), spine_viol (10), corners (7), congestion (7), crossings (5),
 junctions (1), stray (0.5), length (0.15). Do **not** add an aspect/height term
@@ -144,8 +173,10 @@ snapshot + intentional re-baseline**:
    against all four + oracle until columns hold crisp. Re-baseline.
 6. **decongest → thin net**: reduce to a post-search `hard_separate()`; assert it
    moves <1 part on references, never reintroduces a short; oracle green.
-7. **Tier wiring + make SA win**: `pick_strategy` (env + Tier); verify SA beats
-   greedy on the **INFER frames** (#28) now that objective == geometry.
+7. **Tier wiring + make SA win**: `pick_strategy` (env). Introduce `PremiumCost`
+   (= `BaseCost` until here) and add the SA-only aesthetic terms; verify SA beats
+   greedy on the **INFER frames** (#28) now that objective == geometry *and* SA
+   optimizes a richer cost. (Greedy/free stays on `BaseCost`.)
 8. **Cleanup**: delete dead code (`score_cells`, the standalone polish wrappers,
    `nudges`, anti-thrash/same-cell guards). Keep `Rng`, `apply_cells`/`normalize`
    (seed), `decongest` (renamed net).
