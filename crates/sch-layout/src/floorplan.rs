@@ -636,38 +636,11 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     let base = assign_cells(&items, ir);
     let mut cells = base.clone();
     if std::env::var("NO_REFINE").is_err() {
-        // Placement search. The DEFAULT is the greedy `refine_cells` hill-climb:
-        // it respects the frame's (col,row,orient) structure and makes LOCAL,
-        // strictly-cost-improving fixes (uncross a pair, straighten a leg, snap a
-        // divider spine collinear). On the four reference targets that now yields
-        // reference-quality layouts on its own.
-        //
-        // The simulated-annealing stages are OPT-IN via `ANNEAL=1`. They were the
-        // engine's optimiser while the cost lacked corner/body-cross/spine terms;
-        // now that refine + those terms place the targets well, the broad search
-        // never wins (the seeded cost beats the broad cost on all four) and the
-        // SEEDED anneal actively REGRESSES them — it takes refine's clean row and
-        // wanders into a cheaper-but-uglier basin the cost can't distinguish
-        // (mcp1703's cap row scatters, a cap drifts onto U1's MPN text). Kept
-        // behind the flag for a genuinely bad/loose frame (e.g. INFER mode) where
-        // a global escape still helps. `GREEDY=1` forces refine-only (tests).
-        let anneal = std::env::var("ANNEAL").is_ok() && std::env::var("GREEDY").is_err();
-
-        let mut a = base.clone();
-        refine_cells(env, &mut items, &inc, ir, &needs_flag, &mut a);
-        if anneal {
-            anneal_cells(env, &mut items, &inc, ir, &needs_flag, &mut a, false);
-        }
-        cells = a;
-        if anneal {
-            let cost_a = score_cells(env, &mut items, &inc, ir, &needs_flag, &cells);
-            let mut b = base.clone();
-            anneal_cells(env, &mut items, &inc, ir, &needs_flag, &mut b, true);
-            let cost_b = score_cells(env, &mut items, &inc, ir, &needs_flag, &b);
-            if cost_b + 0.5 < cost_a {
-                cells = b;
-            }
-        }
+        // Placement search behind the strategy interface (`PlacementStrategy`):
+        // greedy `refine_cells` by default (free tier), simulated annealing
+        // opt-in (the paid tier). Both consume the seed frame `cells` and write
+        // back the chosen placement; selection is the one `pick_strategy` factory.
+        pick_strategy().search(env, &mut items, &inc, ir, &needs_flag, &mut cells, SEARCH_SEED);
     }
     apply_cells(&mut items, &cells);
     normalize(&mut items);
@@ -973,6 +946,82 @@ fn orient_angle(geom: &SymbolGeometry, orient: Orient) -> f64 {
 /// trade a clean wire for a hidden short or label fallback, and it can only
 /// improve on (or match) the starting placement. This is the "move and align
 /// until it looks good" step a human does after roughing in anchors + satellites.
+/// Default deterministic seed for the placement search (the SA's PRNG). Made a
+/// parameter so a search is reproducible by seed, not a hard-coded constant.
+const SEARCH_SEED: u64 = 0xD1B54A32D192ED03;
+
+/// One placement-search strategy over the coarse cells. `Greedy` and `Anneal` are
+/// swappable COUNTERPARTS (owner: SA is the paid tier, possibly with a richer
+/// cost). `cells` is IN = the seed frame (`assign_cells`), OUT = the chosen
+/// placement; `seed` drives any randomness so the result is reproducible.
+trait PlacementStrategy {
+    fn search(
+        &self,
+        env: &KicadEnv,
+        items: &mut [Item],
+        inc: &Incidence,
+        ir: &LayoutIr,
+        needs_flag: &BTreeSet<String>,
+        cells: &mut Vec<Cell>,
+        seed: u64,
+    );
+}
+
+/// Greedy hill-climb (free tier): local, strictly-cost-improving moves only.
+struct Greedy;
+impl PlacementStrategy for Greedy {
+    fn search(
+        &self,
+        env: &KicadEnv,
+        items: &mut [Item],
+        inc: &Incidence,
+        ir: &LayoutIr,
+        needs_flag: &BTreeSet<String>,
+        cells: &mut Vec<Cell>,
+        _seed: u64,
+    ) {
+        refine_cells(env, items, inc, ir, needs_flag, cells);
+    }
+}
+
+/// Simulated annealing (paid tier): a seeded refine→anneal AND a broad anneal from
+/// the raw frame, keeping whichever the cost prefers (today's multi-start best-of).
+struct Anneal;
+impl PlacementStrategy for Anneal {
+    fn search(
+        &self,
+        env: &KicadEnv,
+        items: &mut [Item],
+        inc: &Incidence,
+        ir: &LayoutIr,
+        needs_flag: &BTreeSet<String>,
+        cells: &mut Vec<Cell>,
+        seed: u64,
+    ) {
+        let base = cells.clone();
+        let mut a = base.clone();
+        refine_cells(env, items, inc, ir, needs_flag, &mut a);
+        anneal_cells(env, items, inc, ir, needs_flag, &mut a, false, seed);
+        let cost_a = score_cells(env, items, inc, ir, needs_flag, &a);
+        let mut b = base;
+        anneal_cells(env, items, inc, ir, needs_flag, &mut b, true, seed);
+        let cost_b = score_cells(env, items, inc, ir, needs_flag, &b);
+        *cells = if cost_b + 0.5 < cost_a { b } else { a };
+    }
+}
+
+/// Select the placement strategy. Free tier = `Greedy`; SA is opt-in (a later
+/// `Tier` enum from agent config wires the paid feature here). Honors
+/// `LAYOUT_SEARCH=greedy|anneal` and the `ANNEAL=1` / `GREEDY=1` aliases.
+fn pick_strategy() -> Box<dyn PlacementStrategy> {
+    let anneal = match std::env::var("LAYOUT_SEARCH").ok().as_deref() {
+        Some("anneal") => true,
+        Some("greedy") => false,
+        _ => std::env::var("ANNEAL").is_ok() && std::env::var("GREEDY").is_err(),
+    };
+    if anneal { Box::new(Anneal) } else { Box::new(Greedy) }
+}
+
 fn refine_cells(
     env: &KicadEnv,
     items: &mut [Item],
@@ -1144,6 +1193,7 @@ fn anneal_cells(
     needs_flag: &BTreeSet<String>,
     cells: &mut [Cell],
     broad: bool,
+    seed: u64,
 ) {
     let sats: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3).collect();
     let anchors: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() >= 3).collect();
@@ -1151,7 +1201,7 @@ fn anneal_cells(
         return;
     }
     let orients = [Orient::Up, Orient::Down, Orient::Left, Orient::Right];
-    let mut rng = Rng(0xD1B54A32D192ED03);
+    let mut rng = Rng(seed);
 
     let mut cur = score_cells(env, items, inc, ir, needs_flag, cells);
     let mut best_cells = cells.to_vec();
