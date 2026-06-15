@@ -13,7 +13,6 @@ blocks:
   # Unit B: unity-gain buffer for a second sensor input AIN_B.
   # Single 3V3 supply (V+ = 3V3, V- = GND).
   afe:
-    layout: {edge: left}
     components:
       U1:
         part: Amplifier_Operational:MCP6002-xP
@@ -39,7 +38,6 @@ blocks:
   # ---- Anti-alias RC filters into the ADC analog inputs ----
   # fc = 1/(2*pi*R*C) ~ 1.6 kHz with 1k / 100nF
   filter:
-    layout: {edge: bottom}
     components:
       R5: {part: R, value: 1k,    between: [OPA_OUT, ADC_AIN0]}
       C5: {part: C, value: 100nF, between: [ADC_AIN0, GND]}
@@ -48,7 +46,6 @@ blocks:
 
   # ---- 16-bit I2C ADC ----
   adc:
-    layout: {edge: right}
     components:
       U2:
         part: Analog_ADC:ADS1115IDGS

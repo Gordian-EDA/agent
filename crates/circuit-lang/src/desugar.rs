@@ -46,7 +46,6 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
     for (bname, sb) in &s.blocks {
         let mut block = Block {
             note: sb.note.clone(),
-            layout: sb.layout.clone(),
             components: IndexMap::new(),
         };
         for (refdes, sc) in &sb.components {
@@ -70,7 +69,6 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
                 dnp: sc.dnp,
                 props: sc.props.clone(),
                 origin: Origin::Authored,
-                layout: sc.layout.clone(),
                 ..Default::default()
             };
             for (pin, (target, span)) in &sc.pins {
@@ -103,8 +101,44 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
     resolve_pins(&mut d, raw_pins, &mut diags);
     synth_decouple(&mut d, s, provider, &mut diags); // Task 8
     materialize_auto_nc(&mut d, provider); // Task R6
+    lower_layout_grid(&mut d, s, &mut diags);
 
     (d, diags)
+}
+
+/// Strip spans off the surface `layout:` grid into the kernel model, validating
+/// that every named cell resolves to an authored block or refdes.
+fn lower_layout_grid(d: &mut Design, s: &SurfaceDesign, diags: &mut Diagnostics) {
+    let block_names: std::collections::HashSet<&str> = s.blocks.keys().map(String::as_str).collect();
+    let refdes: std::collections::HashSet<&str> = s
+        .blocks
+        .values()
+        .flat_map(|b| b.components.keys())
+        .map(String::as_str)
+        .collect();
+    d.layout = s
+        .layout
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|(cell, span)| {
+                    if let Some(name) = cell
+                        && !block_names.contains(name.as_str())
+                        && !refdes.contains(name.as_str())
+                    {
+                        diags.push(
+                            Diagnostic::error(
+                                "unknown-layout-cell",
+                                format!("layout cell `{name}` is not a known block or refdes"),
+                            )
+                            .with_span(*span),
+                        );
+                    }
+                    cell.clone()
+                })
+                .collect()
+        })
+        .collect();
 }
 
 /// Final desugar pass: for every component whose symbol is known, any physical

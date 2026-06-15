@@ -14,27 +14,22 @@ pub struct Design {
     pub nets: IndexMap<NetName, NetAttrs>,
     /// Lint codes suppressed via the top-level `lint: {allow: [...]}` section.
     pub lint_allow: std::collections::BTreeSet<String>,
+    /// Author-facing placement grid (the top-level `layout:` 2D array). Each row
+    /// is a left→right list of cells; a cell names a block or a refdes, or is
+    /// `None` for a `~` hole. Column index = x, row index = y (ordinal). Empty =
+    /// no grid → the engine infers placement (declaration-order default). A name
+    /// repeated across cells floats. See `LayoutGrid`.
+    pub layout: LayoutGrid,
 }
+
+/// The top-level `layout:` 2D array — rows of cells, each a block/refdes name or
+/// `None` (a `~` hole). Geometry-free: ordinal positions only.
+pub type LayoutGrid = Vec<Vec<Option<String>>>;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Block {
     pub note: Option<String>,
-    pub layout: LayoutHint,
     pub components: IndexMap<RefDes, Component>,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct LayoutHint {
-    pub edge: Option<Edge>,
-    pub near: Option<BlockName>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Edge {
-    Left,
-    Right,
-    Top,
-    Bottom,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,10 +44,6 @@ pub struct Component {
     /// Multi-unit parts: unit letter -> pin map.
     pub units: IndexMap<String, IndexMap<String, PinTarget>>,
     pub origin: Origin,
-    /// Per-PART layout hint (`layout: {edge: left}` on the component). Overrides
-    /// the block's hint for this part — "pin U1 to the left edge". Empty = inherit
-    /// the block's, then connectivity inference.
-    pub layout: LayoutHint,
 }
 
 impl Default for Component {
@@ -66,7 +57,6 @@ impl Default for Component {
             pins: IndexMap::new(),
             units: IndexMap::new(),
             origin: Origin::Authored,
-            layout: LayoutHint::default(),
         }
     }
 }

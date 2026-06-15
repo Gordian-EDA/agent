@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
-use circuit_lang::model::{Component, Design, Edge, PinTarget};
+use circuit_lang::model::{Component, Design, PinTarget};
 use circuit_lang::{find_pin, PinType, SymbolProvider};
 use kicad_bridge::env::KicadEnv;
 use kicad_bridge::geometry::SymbolGeometry;
@@ -193,27 +193,37 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
     // Per-anchor: its pins grouped by side, ordered, so a satellite tapping one
     // pin knows the pin's side (which column) and rank (which row) on that side.
     const MID: i32 = 4;
+    // Ordinal row separation between authored grid rows: large enough that a
+    // row's tap satellites (anchor row ± 2, ± rank) never collide with the next
+    // row's anchor. Rows are ordinal — the gap reserves no metric space, it only
+    // orders (apply_cells packs populated rows by ROW_GAP).
+    const ROW_BAND: i32 = 10;
     let mut place: BTreeMap<String, Cell> = BTreeMap::new();
-    // Authored edge hints (`layout: {edge: …}`): refdes → left-to-right rank, so a
-    // part/block pinned to an edge biases its anchors' columns toward that edge. A
-    // PART's own hint overrides its block's ("pin U1 left" inside a block-less or
-    // differently-hinted block).
-    let edge_rank: BTreeMap<String, u8> = design
-        .blocks
-        .values()
-        .flat_map(|b| {
-            b.components.iter().map(move |(rd, c)| {
-                (rd.clone(), band_rank(c.layout.edge.or(b.layout.edge)))
-            })
-        })
-        .collect();
-    // Anchor columns: edge hint first, then connectors (inputs) leftmost, then refdes.
-    let order = order_anchors(&items, &inc, &anchors, &edge_rank);
+    // Authored placement grid (`layout:` 2D array): refdes → (grid col, grid row).
+    // A gridded anchor takes its cell; the rest flow left→right in connectivity
+    // order after the last grid column. With no grid the map is empty and this is
+    // exactly the old col=k*5 / row=MID behaviour.
+    let authored = grid_from_layout(design);
+    let order = order_anchors(&items, &inc, &anchors);
+    let max_gcol = authored.values().map(|(c, _)| *c).max().unwrap_or(-1);
+    let mut next_col = max_gcol + 1;
     let mut anchor_col: BTreeMap<usize, i32> = BTreeMap::new();
-    for (k, &ai) in order.iter().enumerate() {
-        let col = k as i32 * 5; // wide gaps leave room for tap satellites either side
+    let mut anchor_row: BTreeMap<usize, i32> = BTreeMap::new();
+    for &ai in &order {
+        let rd = &items[ai].refdes;
+        let (gcol, grow) = match authored.get(rd) {
+            Some(&(c, r)) => (c, r),
+            None => {
+                let c = next_col;
+                next_col += 1;
+                (c, 0)
+            }
+        };
+        let col = gcol * 5; // wide gaps leave room for tap satellites either side
+        let row = MID + grow * ROW_BAND;
         anchor_col.insert(ai, col);
-        place.insert(items[ai].refdes.clone(), Cell { col, row: MID, orient: Orient::Down });
+        anchor_row.insert(ai, row);
+        place.insert(rd.clone(), Cell { col, row, orient: Orient::Down });
     }
 
     // For each anchor, map pin number -> (side, rank-on-side) for row offsets.
@@ -257,6 +267,7 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
 
         let cell = if let Some((ai, ref pin_num, tap_net)) = tap {
             let acol = anchor_col[&ai];
+            let arow = anchor_row[&ai]; // tap satellites sit in their anchor's grid row
             let (side, rank) = *pin_meta.get(&(ai, pin_num.clone())).unwrap_or(&(PinSide::East, 0));
             // The OTHER net (not the tapped pin's) decides the satellite's role.
             let other = if tap_net == n1 { &n2 } else { &n1 };
@@ -268,16 +279,16 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
             if is_vplus(other) {
                 // Pull-up / supply tap → vertical in the V+ band above its pin.
                 let c = col_for_side(side);
-                Cell { col: c, row: MID - 2, orient: orient_for(&s.pins, &n1, true) }
+                Cell { col: c, row: arow - 2, orient: orient_for(&s.pins, &n1, true) }
             } else if is_ground(other) && is_rail(other) {
                 // Pull-down / ground return → vertical in the GND band below.
                 let c = col_for_side(side);
-                Cell { col: c, row: MID + 2, orient: orient_for(&s.pins, &n1, true) }
+                Cell { col: c, row: arow + 2, orient: orient_for(&s.pins, &n1, true) }
             } else {
                 // Series element in the signal flow → horizontal beside the pin.
                 let c = col_for_side(side);
                 let horiz = if side == PinSide::West { Orient::Left } else { Orient::Right };
-                Cell { col: c, row: MID + rank, orient: series_orient(&s.pins, &tap_net, horiz) }
+                Cell { col: c, row: arow + rank, orient: series_orient(&s.pins, &tap_net, horiz) }
             }
         } else if is_vplus(&n1) && is_ground(&n2) || is_ground(&n1) && is_vplus(&n2) {
             // Pure decoupling cap (rail to rail, no anchor pin): hang vertical in a
@@ -446,42 +457,41 @@ fn wants_mirror(
     east > west
 }
 
-/// Order anchors left→right: connectors first, then ICs by BFS distance from them
-/// over shared signal nets (a rough signal-flow order).
-fn order_anchors(
-    items: &[Item],
-    inc: &Incidence,
-    anchors: &[usize],
-    edge_rank: &BTreeMap<String, u8>,
-) -> Vec<usize> {
+/// Order anchors left→right: connectors (inputs) first, then ICs, refdes for
+/// stability. This is the DEFAULT order for anchors the author did not place via
+/// the `layout:` grid; a gridded anchor overrides its column (see `infer_ir`).
+fn order_anchors(items: &[Item], inc: &Incidence, anchors: &[usize]) -> Vec<usize> {
     let mut order: Vec<usize> = anchors.to_vec();
-    // PRIMARY key: the authored block-edge hint (`layout: {edge: left|right|…}`)
-    // mapped to a left→right rank (Left=0 … none=3 … Right=4), so a block pinned
-    // to an edge lands in that edge's columns. SECONDARY: connectors (inputs)
-    // before ICs; then refdes for stability. A sheet with no edge hints (the four
-    // references) is all rank 3 → identical to the old connector/refdes order.
     order.sort_by(|&a, &b| {
-        let ra = edge_rank.get(&items[a].refdes).copied().unwrap_or(3);
-        let rb = edge_rank.get(&items[b].refdes).copied().unwrap_or(3);
         let ca = !items[a].part.contains("Connector");
         let cb = !items[b].part.contains("Connector");
-        ra.cmp(&rb).then(ca.cmp(&cb)).then(items[a].refdes.cmp(&items[b].refdes))
+        ca.cmp(&cb).then(items[a].refdes.cmp(&items[b].refdes))
     });
     let _ = inc;
     order
 }
 
-/// An authored block-edge hint as a left→right column rank. Left-most edge first,
-/// no hint in the middle, Right last. (Top/Bottom sit between Left and Right in
-/// this column-flow layout — a horizontal sheet has no separate top band yet.)
-fn band_rank(edge: Option<Edge>) -> u8 {
-    match edge {
-        Some(Edge::Left) => 0,
-        Some(Edge::Top) => 1,
-        Some(Edge::Bottom) => 2,
-        None => 3,
-        Some(Edge::Right) => 4,
+/// The author-facing `layout:` placement grid → refdes → (grid col, grid row). A
+/// block name expands to every component in that block; a bare refdes maps to
+/// itself; `None` (`~`) holes are skipped. A name appearing in several cells
+/// takes its FIRST occurrence (cross-row float is a deferred follow-up). Empty
+/// when the design carries no `layout:` — the engine then infers placement.
+fn grid_from_layout(design: &Design) -> BTreeMap<String, (i32, i32)> {
+    let mut out: BTreeMap<String, (i32, i32)> = BTreeMap::new();
+    for (r, row) in design.layout.iter().enumerate() {
+        for (c, cell) in row.iter().enumerate() {
+            let Some(name) = cell else { continue };
+            let pos = (c as i32, r as i32);
+            if let Some(block) = design.blocks.get(name) {
+                for rd in block.components.keys() {
+                    out.entry(rd.clone()).or_insert(pos);
+                }
+            } else {
+                out.entry(name.clone()).or_insert(pos);
+            }
+        }
     }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -2686,6 +2696,53 @@ fn flag_angle(dir: Dir) -> f64 {
         Dir::West => 90.0,
         Dir::South => 180.0,
         Dir::East => 270.0,
+    }
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::*;
+    use circuit_lang::model::{Block, Component, Design};
+    use indexmap::IndexMap;
+
+    fn block(refs: &[&str]) -> Block {
+        let mut components = IndexMap::new();
+        for r in refs {
+            components.insert((*r).to_string(), Component::default());
+        }
+        Block { note: None, components }
+    }
+
+    #[test]
+    fn grid_expands_blocks_refdes_holes_and_dedups() {
+        let mut design = Design::default();
+        design.blocks.insert("usb".into(), block(&["J1", "R1"]));
+        design.blocks.insert("mcu".into(), block(&["U1"]));
+        // layout:
+        //   - [usb, mcu, J9]   row 0
+        //   - [~,   mcu]       row 1  (mcu repeated -> first occurrence wins)
+        design.layout = vec![
+            vec![Some("usb".into()), Some("mcu".into()), Some("J9".into())],
+            vec![None, Some("mcu".into())],
+        ];
+
+        let g = grid_from_layout(&design);
+        // block `usb` expands to both its parts at col 0, row 0
+        assert_eq!(g["J1"], (0, 0));
+        assert_eq!(g["R1"], (0, 0));
+        // block `mcu` -> U1 at its FIRST occurrence (col 1, row 0), not (1, 1)
+        assert_eq!(g["U1"], (1, 0));
+        // a bare refdes cell
+        assert_eq!(g["J9"], (2, 0));
+        // the `~` hole reserves no entry
+        assert_eq!(g.len(), 4);
+    }
+
+    #[test]
+    fn no_layout_is_empty_grid() {
+        let mut design = Design::default();
+        design.blocks.insert("main".into(), block(&["U1", "R1"]));
+        assert!(grid_from_layout(&design).is_empty());
     }
 }
 

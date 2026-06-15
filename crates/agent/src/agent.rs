@@ -788,11 +788,13 @@ A design is ONE YAML document with this shape:
   version: 1                 # required, always 1
   name: my_board             # optional design name
   rails: [3V3, GND, VBUS]    # optional: declare power/ground nets (see Sugar)
+  layout:                    # optional 2D placement grid (see Layout)
+    - [usb, mcu, headers]    #   row 0, left -> right
+    - [~,   power]           #   row 1; ~ is an empty cell
   blocks:                    # required: a partition of all components
     main:                    # block name, lower_snake_case
       components:
         R1: { ... }          # refdes -> component
-      layout: { edge: top }  # optional placement hint (top/bottom/left/right)
   nets:                      # optional: per-net class hints (rarely needed)
     I2C1_SDA: { class: signal }
 
@@ -834,8 +836,23 @@ Each component is keyed by its refdes and has:
 - net names: UPPER_SNAKE, no spaces, `/` reserved. (A lowercase letter is only a
   warning, but prefer UPPER_SNAKE.)
 - block names: lower_snake_case.
-- Every refdes is globally unique across all blocks. Blocks are grouping +
-  placement only — no electrical meaning.
+- Every refdes is globally unique across all blocks. Blocks are grouping only —
+  no electrical meaning.
+
+## Layout (optional placement grid)
+
+The engine places parts automatically from connectivity — you usually need NO
+layout. For a board with a real floorplan, the top-level `layout:` is a 2D grid:
+
+  layout:
+    - [usb, mcu, headers]   # row 0: usb left, mcu centre, headers right
+    - [~,   power]          # row 1: power below mcu; ~ is an empty cell
+
+- Each cell names a BLOCK or a single refdes; column = left→right, row =
+  top→bottom (ordinal — spacing is computed for you). Rows may be ragged.
+- Only place the structural anchors (ICs, connectors, modules). Leave caps,
+  resistors, crystals OUT — the engine places them next to the part they wire to.
+- Omit `layout:` entirely and blocks flow left→right in declaration order.
 
 ## Sugar (shorthands the compiler expands)
 

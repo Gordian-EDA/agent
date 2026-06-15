@@ -4,7 +4,6 @@ rails: [3V3, GND, VBUS]
 
 blocks:
   power:
-    layout: {edge: top}
     components:
       J1:
         part: Connector:USB_C_Receptacle_USB2.0_16P
@@ -31,7 +30,6 @@ blocks:
       C3: {part: C, value: 100nF, between: [3V3, GND]}
 
   mcu:
-    layout: {edge: left}
     components:
       U2:
         part: MCU_ST_STM32H7:STM32H743VITx
@@ -69,7 +67,6 @@ blocks:
       R5: {part: R, value: 4.7k, between: [I2C1_SDA, 3V3]}
 
   headers:
-    layout: {edge: right}
     components:
       J2:
         part: Connector_Generic:Conn_01x10

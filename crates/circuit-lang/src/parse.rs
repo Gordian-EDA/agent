@@ -2,7 +2,6 @@
 //! with did-you-mean suggestions (spec §5.3.6).
 
 use crate::diag::{Diagnostic, Diagnostics, Span};
-use crate::model::{Edge, LayoutHint};
 use crate::surface::*;
 use crate::yaml::{self, Node};
 use indexmap::IndexMap;
@@ -116,6 +115,7 @@ impl Parser<'_> {
                 "blocks",
                 "nets",
                 "lint",
+                "layout",
             ],
             "top level",
         );
@@ -213,7 +213,49 @@ impl Parser<'_> {
                 }
             }
         }
+
+        if let Some(n) = Self::get(map, "layout") {
+            d.layout = self.layout_grid(n);
+        }
         Some(d)
+    }
+
+    /// Parse the top-level `layout:` 2D array — a sequence of rows, each a
+    /// sequence of cells. A cell is a block/refdes name, or `~`/null for a hole.
+    fn layout_grid(&mut self, n: &Node) -> Vec<Vec<(Option<String>, Span)>> {
+        let Node::Seq(rows, _) = n else {
+            self.err(
+                "expected-seq",
+                "`layout` must be a list of rows (a 2D array)".into(),
+                n.span(),
+            );
+            return Vec::new();
+        };
+        let mut grid = Vec::new();
+        for row in rows {
+            let Node::Seq(cells, _) = row else {
+                self.err(
+                    "expected-seq",
+                    "each `layout` row must be a list of cells".into(),
+                    row.span(),
+                );
+                continue;
+            };
+            let mut out_row = Vec::new();
+            for cell in cells {
+                match cell {
+                    Node::Null(span) => out_row.push((None, *span)),
+                    Node::Scalar(s, span) => out_row.push((Some(s.clone()), *span)),
+                    other => self.err(
+                        "expected-scalar",
+                        "a `layout` cell must be a block/refdes name or `~`".into(),
+                        other.span(),
+                    ),
+                }
+            }
+            grid.push(out_row);
+        }
+        grid
     }
 
     fn check_net_name(&mut self, name: &str, span: Span) {
@@ -249,15 +291,12 @@ impl Parser<'_> {
 
     fn block(&mut self, n: &Node) -> Option<SurfaceBlock> {
         let m = self.map_node(n, "block")?;
-        self.check_keys(m, &["note", "layout", "components"], "block");
+        self.check_keys(m, &["note", "components"], "block");
         let mut b = SurfaceBlock {
             span: Some(n.span()),
             ..Default::default()
         };
         b.note = Self::get(m, "note").and_then(|v| self.scalar(v, "note"));
-        if let Some(l) = Self::get(m, "layout") {
-            b.layout = self.layout(l);
-        }
         if let Some(cn) = Self::get(m, "components")
             && let Some(cm) = self.map_node(cn, "components")
         {
@@ -288,33 +327,6 @@ impl Parser<'_> {
             }
         }
         Some(b)
-    }
-
-    fn layout(&mut self, n: &Node) -> LayoutHint {
-        let mut h = LayoutHint::default();
-        if let Some(m) = self.map_node(n, "layout") {
-            self.check_keys(m, &["edge", "near"], "layout");
-            if let Some(ev) = Self::get(m, "edge")
-                && let Some(e) = self.scalar(ev, "edge")
-            {
-                h.edge = match e.as_str() {
-                    "left" => Some(Edge::Left),
-                    "right" => Some(Edge::Right),
-                    "top" => Some(Edge::Top),
-                    "bottom" => Some(Edge::Bottom),
-                    other => {
-                        self.err(
-                            "bad-edge",
-                            format!("`{other}` is not an edge (left|right|top|bottom)"),
-                            ev.span(),
-                        );
-                        None
-                    }
-                };
-            }
-            h.near = Self::get(m, "near").and_then(|v| self.scalar(v, "near"));
-        }
-        h
     }
 
     fn pin_map(&mut self, n: &Node, out: &mut IndexMap<String, (String, Span)>) {
@@ -350,7 +362,6 @@ impl Parser<'_> {
                 "units",
                 "between",
                 "decouple",
-                "layout",
             ],
             "component",
         );
@@ -436,9 +447,6 @@ impl Parser<'_> {
                 }
             }
         }
-        if let Some(l) = Self::get(m, "layout") {
-            c.layout = self.layout(l);
-        }
         Some(c)
     }
 }
@@ -498,10 +506,12 @@ blocks:
 version: 1
 name: t
 rails: [3V3, GND]
+layout:
+  - [U3, U1]
+  - [C1]
 blocks:
   main:
     note: power section
-    layout: {edge: top}
     components:
       C1: {part: C, value: 10uF, between: [VBUS, GND], dnp: true,
            footprint: Capacitor_SMD:C_0603_1608Metric, props: {MPN: GRM188}}
@@ -518,8 +528,11 @@ nets:
         assert!(!diags.has_errors(), "{:?}", diags);
         let d = d.unwrap();
         assert_eq!(d.rails.len(), 2);
+        // top-level layout grid: 2 rows, names preserved
+        assert_eq!(d.layout.len(), 2);
+        assert_eq!(d.layout[0][0].0.as_deref(), Some("U3"));
+        assert_eq!(d.layout[1][0].0.as_deref(), Some("C1"));
         let b = &d.blocks["main"];
-        assert_eq!(b.layout.edge, Some(crate::model::Edge::Top));
         let c1 = &b.components["C1"];
         assert!(c1.dnp);
         assert_eq!(c1.between.as_ref().unwrap().0.0, "VBUS");

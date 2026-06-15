@@ -14,12 +14,14 @@ pub struct SurfaceDesign {
     pub nets: IndexMap<String, SurfaceNet>,
     /// Lint codes suppressed via top-level `lint: {allow: [...]}`.
     pub lint_allow: Vec<String>,
+    /// Top-level `layout:` placement grid — rows of cells, each a block/refdes
+    /// name (with a span for diagnostics) or `None` for a `~` hole.
+    pub layout: Vec<Vec<(Option<String>, Span)>>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SurfaceBlock {
     pub note: Option<String>,
-    pub layout: crate::model::LayoutHint,
     pub components: IndexMap<String, SurfaceComponent>,
     pub span: Option<Span>,
 }
@@ -38,8 +40,6 @@ pub struct SurfaceComponent {
     pub between: Option<((String, Span), (String, Span))>,
     /// `decouple:` sugar — value -> count, e.g. {"100nF": 10}.
     pub decouple: IndexMap<String, u32>,
-    /// Per-part layout hint (`layout: {edge: left}` on the component).
-    pub layout: crate::model::LayoutHint,
     pub span: Option<Span>,
 }
 

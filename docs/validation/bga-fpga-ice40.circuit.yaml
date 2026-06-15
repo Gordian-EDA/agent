@@ -4,7 +4,6 @@ rails: [3V3, 1V2, GND]
 
 blocks:
   power:
-    layout: {edge: top}
     components:
       # 3V3 I/O rail from a 5V input
       U1:
@@ -23,7 +22,6 @@ blocks:
       C5: {part: C, value: 100nF, between: [1V2, GND]}
 
   fpga:
-    layout: {edge: left}
     components:
       U3:
         part: FPGA_Lattice:ICE40HX8K-BG121
@@ -90,7 +88,6 @@ blocks:
       C19: {part: C, value: 4.7uF, between: [3V3, GND]}
 
   config_flash:
-    layout: {edge: bottom}
     components:
       U4:
         part: Memory_Flash:W25Q32JVSS
@@ -107,7 +104,6 @@ blocks:
       R6: {part: R, value: 10k, between: [SPI_SS, 3V3]}
 
   headers:
-    layout: {edge: right}
     components:
       J1:
         part: Connector_Generic:Conn_01x08

@@ -2,16 +2,20 @@ version: 1
 name: bluepill-h7
 rails: [3V3, GND, VBUS]
 
+# Placement grid: USB in on the left, MCU + power supply in the middle row,
+# headers out on the right.
+layout:
+  - [usb, mcu, headers]
+  - [~,   power]
+
 blocks:
   power:
-    layout: {edge: top}
     components:
       U2: {part: Regulator_Linear:AMS1117-3.3, pins: {VI: VBUS, VO: 3V3, GND: GND}}
       C9: {part: C, value: 10uF, between: [VBUS, GND]}
       C10: {part: C, value: 22uF, between: [3V3, GND]}
 
   usb:
-    layout: {edge: left}
     components:
       J1:
         part: Connector:USB_C_Receptacle_USB2.0
@@ -37,7 +41,6 @@ blocks:
       R4: {part: R, value: 4.7k, between: [I2C1_SCL, 3V3]}
 
   headers:
-    layout: {edge: right}
     components:
       J2:
         part: Connector_Generic:Conn_01x10

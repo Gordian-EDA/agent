@@ -10,7 +10,6 @@ rails: [5V, GND]
 
 blocks:
   rf_input:
-    layout: {edge: left}
     components:
       J1:
         part: Connector:Conn_Coaxial
@@ -21,7 +20,6 @@ blocks:
       C1: {part: C, value: 100nF, between: [RF_IN, RFIN_AMP]}
 
   amplifier:
-    layout: {edge: top}
     components:
       U1:
         part: RF_Amplifier:ADL5542
@@ -41,7 +39,6 @@ blocks:
       C3: {part: C, value: 10uF, between: [5V, GND]}
 
   rf_output:
-    layout: {edge: right}
     components:
       # DC-block out of the amplifier to the output connector.
       C4: {part: C, value: 100nF, between: [RFOUT_AMP, RF_OUT]}
