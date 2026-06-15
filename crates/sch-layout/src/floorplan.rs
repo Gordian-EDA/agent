@@ -571,6 +571,7 @@ const ROW_GAP: f64 = 5.08; // 4 grid — vertical stack; tighter lets the rotati
 const MARGIN: f64 = 12.7;
 
 /// One placed component plus the data the compiler needs about it.
+#[derive(Clone)]
 struct Item {
     refdes: String,
     part: String,
@@ -629,21 +630,19 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     // so it can feed both the refinement scorer and the final emission.
     let needs_flag = compute_needs_flag(env, &items, ir);
 
-    // Placement: start from the LLM's coarse (col,row,orient) grid, then let the
-    // refinement loop nudge the satellites (anchors stay put) to a tidier wiring
-    // — fewer label fallbacks, crossings, and junctions — judged on the ACTUAL
-    // routed result. Finally render the cells to mm as a sized table.
-    let base = assign_cells(&items, ir);
-    let mut cells = base.clone();
-    if std::env::var("NO_REFINE").is_err() {
-        // Placement search behind the strategy interface (`PlacementStrategy`):
-        // greedy `refine_cells` by default (free tier), simulated annealing
-        // opt-in (the paid tier). Both consume the seed frame `cells` and write
-        // back the chosen placement; selection is the one `pick_strategy` factory.
-        pick_strategy().search(env, &mut items, &inc, ir, &needs_flag, &mut cells, SEARCH_SEED);
-    }
+    // Seed the placement from the IR grid: project the coarse (col,row,orient)
+    // cells to mm ONCE, then the search operates DIRECTLY on the items' mm
+    // coordinates so its objective IS the geometry that ships (not a pre-polish
+    // cell-table proxy that polish/decongest then mutated behind its back).
+    let cells = assign_cells(&items, ir);
     apply_cells(&mut items, &cells);
     normalize(&mut items);
+    if std::env::var("NO_REFINE").is_err() {
+        // Placement search behind the strategy interface (`PlacementStrategy`):
+        // greedy by default (free tier), simulated annealing opt-in (paid tier).
+        // Both mutate `items` in mm; selection is the one `pick_strategy` factory.
+        pick_strategy().search(env, &mut items, &inc, ir, &needs_flag, SEARCH_SEED);
+    }
     // Continuous-placement polish: iterate the directed slides (onto pin axes,
     // toward the centroid) AND a free per-axis nudge to convergence — giving the
     // continuous phase the freedom the column-centre cell table cannot express.
@@ -962,12 +961,12 @@ trait PlacementStrategy {
         inc: &Incidence,
         ir: &LayoutIr,
         needs_flag: &BTreeSet<String>,
-        cells: &mut Vec<Cell>,
         seed: u64,
     );
 }
 
-/// Greedy hill-climb (free tier): local, strictly-cost-improving moves only.
+/// Greedy hill-climb (free tier): local, strictly-cost-improving moves only over
+/// the seeded mm placement.
 struct Greedy;
 impl PlacementStrategy for Greedy {
     fn search(
@@ -977,15 +976,14 @@ impl PlacementStrategy for Greedy {
         inc: &Incidence,
         ir: &LayoutIr,
         needs_flag: &BTreeSet<String>,
-        cells: &mut Vec<Cell>,
         _seed: u64,
     ) {
-        refine_cells(env, items, inc, ir, needs_flag, cells);
+        refine_items(env, items, inc, ir, needs_flag);
     }
 }
 
 /// Simulated annealing (paid tier): a seeded refine→anneal AND a broad anneal from
-/// the raw frame, keeping whichever the cost prefers (today's multi-start best-of).
+/// the raw seed, keeping whichever the cost prefers (today's multi-start best-of).
 struct Anneal;
 impl PlacementStrategy for Anneal {
     fn search(
@@ -995,18 +993,22 @@ impl PlacementStrategy for Anneal {
         inc: &Incidence,
         ir: &LayoutIr,
         needs_flag: &BTreeSet<String>,
-        cells: &mut Vec<Cell>,
         seed: u64,
     ) {
-        let base = cells.clone();
-        let mut a = base.clone();
-        refine_cells(env, items, inc, ir, needs_flag, &mut a);
-        anneal_cells(env, items, inc, ir, needs_flag, &mut a, false, seed);
-        let cost_a = score_cells(env, items, inc, ir, needs_flag, &a);
-        let mut b = base;
-        anneal_cells(env, items, inc, ir, needs_flag, &mut b, true, seed);
-        let cost_b = score_cells(env, items, inc, ir, needs_flag, &b);
-        *cells = if cost_b + 0.5 < cost_a { b } else { a };
+        let seed_state: Vec<Item> = items.to_vec();
+        // Path A: greedy refine, then a seeded anneal from there.
+        refine_items(env, items, inc, ir, needs_flag);
+        anneal_items(env, items, inc, ir, needs_flag, false, seed);
+        let cost_a = score_items(env, items, inc, ir, needs_flag);
+        let state_a: Vec<Item> = items.to_vec();
+        // Path B: a broad anneal from the raw seed (a wider global search).
+        items.clone_from_slice(&seed_state);
+        anneal_items(env, items, inc, ir, needs_flag, true, seed);
+        let cost_b = score_items(env, items, inc, ir, needs_flag);
+        // Keep B only if it strictly wins; else restore A (today's multi-start rule).
+        if !(cost_b + 0.5 < cost_a) {
+            items.clone_from_slice(&state_a);
+        }
     }
 }
 
@@ -1022,111 +1024,92 @@ fn pick_strategy() -> Box<dyn PlacementStrategy> {
     if anneal { Box::new(Anneal) } else { Box::new(Greedy) }
 }
 
-fn refine_cells(
+/// Greedy hill-climb over the satellites' mm positions/orientation (the seed is
+/// the IR grid projected to mm). Local moves — nudge a cell-step, swap a pair,
+/// re-orient, side-flip across the served IC — each kept only on strict
+/// improvement of the REAL routed cost (`score_items`). Anchors hold. Operating
+/// directly on mm means the objective IS the geometry that ships.
+fn refine_items(
     env: &KicadEnv,
     items: &mut [Item],
     inc: &Incidence,
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
-    cells: &mut [Cell],
 ) {
+    let _ = ir;
     let satellites: Vec<usize> =
         (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3).collect();
     if satellites.is_empty() {
         return;
     }
-    // Anchor the search to the initial (LLM/human) placement: a satellite that
-    // strays far is penalised, so refinement makes LOCAL fixes (close a label
-    // fallback, uncross a pair) rather than globally relocating a part to a
-    // cheaper-but-nonsensical spot (a pull-up flung to the far corner).
-    let orig: Vec<Cell> = cells.to_vec();
-    let disp = |cs: &[Cell]| -> f64 {
-        // Gentle anti-thrash backstop only; the real positional anchor is the
-        // "stray" term in `layout_cost` (a satellite is pulled to the anchor pin
-        // it serves, which is far stronger and correctly placed).
-        const DISP_W: f64 = 1.0;
-        DISP_W
-            * satellites
-                .iter()
-                .map(|&i| {
-                    ((cs[i].col - orig[i].col).unsigned_abs()
-                        + (cs[i].row - orig[i].row).unsigned_abs()) as f64
-                })
-                .sum::<f64>()
-    };
-    let mut best = score_cells(env, items, inc, ir, needs_flag, cells) + disp(cells);
+    let mut best = score_items(env, items, inc, ir, needs_flag);
     const MAX_ROUNDS: usize = 6;
     for _ in 0..MAX_ROUNDS {
         let mut improved = false;
-        // Single-part nudges: shift one satellite by one cell in any direction.
+        // Single-part nudges: shift one satellite by one cell-step (grid-snapped).
         for &i in &satellites {
-            for cand in nudges(cells[i]) {
-                let prev = cells[i];
-                cells[i] = cand;
-                let c = score_cells(env, items, inc, ir, needs_flag, cells) + disp(cells);
+            for d in [[COL_GAP, 0.0], [-COL_GAP, 0.0], [0.0, ROW_GAP], [0.0, -ROW_GAP]] {
+                let prev = items[i].at;
+                items[i].at = [crate::grid::snap(prev[0] + d[0]), crate::grid::snap(prev[1] + d[1])];
+                let c = score_items(env, items, inc, ir, needs_flag);
                 if c + 0.5 < best {
                     best = c;
                     improved = true;
                 } else {
-                    cells[i] = prev;
+                    items[i].at = prev;
                 }
             }
         }
-        // Pairwise swaps: exchange two satellites' (col,row) to reorder them
-        // (keeps each part's own orientation).
+        // Pairwise swaps: exchange two satellites' positions (keep each orientation).
         for a in 0..satellites.len() {
             for b in (a + 1)..satellites.len() {
                 let (i, j) = (satellites[a], satellites[b]);
-                let (ci, cj) = (cells[i], cells[j]);
-                cells[i] = Cell { col: cj.col, row: cj.row, orient: ci.orient };
-                cells[j] = Cell { col: ci.col, row: ci.row, orient: cj.orient };
-                let c = score_cells(env, items, inc, ir, needs_flag, cells) + disp(cells);
+                let (pi, pj) = (items[i].at, items[j].at);
+                items[i].at = pj;
+                items[j].at = pi;
+                let c = score_items(env, items, inc, ir, needs_flag);
                 if c + 0.5 < best {
                     best = c;
                     improved = true;
                 } else {
-                    cells[i] = ci;
-                    cells[j] = cj;
+                    items[i].at = pi;
+                    items[j].at = pj;
                 }
             }
         }
-        // Rotation: re-orient one satellite. Orientation is free (not
-        // displacement-penalised), so a series resistor frozen vertical by the
-        // frame can turn to run along the flow, a cap can face the other way —
-        // whatever the real routed cost prefers. Each is kept only on strict
-        // improvement, so this never trades a clean wire for a worse one.
+        // Rotation: re-orient one satellite (free — not displacement-penalised).
         for &i in &satellites {
-            let mut best_o = cells[i].orient;
+            let mut best_a = items[i].angle;
             for o in [Orient::Up, Orient::Down, Orient::Left, Orient::Right] {
-                if o == best_o {
+                let a = orient_angle(&items[i].geom, o);
+                if (a - best_a).abs() < EPS {
                     continue;
                 }
-                cells[i].orient = o;
-                let c = score_cells(env, items, inc, ir, needs_flag, cells) + disp(cells);
+                items[i].angle = a;
+                let c = score_items(env, items, inc, ir, needs_flag);
                 if c + 0.5 < best {
                     best = c;
-                    best_o = o;
+                    best_a = a;
                     improved = true;
                 }
             }
-            cells[i].orient = best_o;
+            items[i].angle = best_a;
         }
-        // Side-flip: mirror a satellite's column across the single IC anchor it
-        // serves — the one big relocation a ±1 nudge cannot reach, so a part the
-        // frame put on the wrong side of its IC migrates to the correct side
-        // (the wire then drops straight instead of wrapping around the chip).
+        // Side-flip: mirror a satellite across the single IC anchor it serves (the
+        // big relocation a one-cell nudge cannot reach), so a part on the wrong
+        // side of its IC migrates over (the wire then drops straight).
         for &i in &satellites {
-            if let Some(acol) = anchor_col(items, inc, ir, i) {
-                let nc = 2 * acol - cells[i].col;
-                if nc != cells[i].col {
-                    let prev = cells[i];
-                    cells[i].col = nc;
-                    let c = score_cells(env, items, inc, ir, needs_flag, cells) + disp(cells);
+            if let Some(ax) = anchor_x(items, inc, i) {
+                let nx = crate::grid::snap(2.0 * ax - items[i].at[0]);
+                if (nx - items[i].at[0]).abs() > EPS {
+                    let prev = items[i].at;
+                    items[i].at = [nx, prev[1]];
+                    let c = score_items(env, items, inc, ir, needs_flag);
                     if c + 0.5 < best {
                         best = c;
                         improved = true;
                     } else {
-                        cells[i] = prev;
+                        items[i].at = prev;
                     }
                 }
             }
@@ -1137,22 +1120,26 @@ fn refine_cells(
     }
 }
 
-/// The column of the single IC anchor a satellite serves (None if it taps zero
-/// or several distinct anchor columns), for the side-flip move.
-fn anchor_col(items: &[Item], inc: &Incidence, ir: &LayoutIr, i: usize) -> Option<i32> {
-    let mut cols = BTreeSet::new();
+/// The mm x of the single IC anchor a satellite serves (None if it taps zero or
+/// several distinct anchor x's), for the side-flip move. Reads the anchors' live
+/// mm positions, so it tracks a moved anchor.
+fn anchor_x(items: &[Item], inc: &Incidence, i: usize) -> Option<f64> {
+    let mut xs: BTreeSet<i64> = BTreeSet::new();
+    let mut x = 0.0;
     for (_, _, net) in &items[i].pins {
         let Some(net) = net else { continue };
         for (j, _) in inc.get(net).into_iter().flatten() {
             if items[*j].geom.pins.len() >= 3 {
-                if let Some(c) = ir.place.get(&items[*j].refdes) {
-                    cols.insert(c.col);
-                }
+                xs.insert((items[*j].at[0] / GRID_KEY).round() as i64);
+                x = items[*j].at[0];
             }
         }
     }
-    (cols.len() == 1).then(|| cols.into_iter().next().unwrap())
+    (xs.len() == 1).then_some(x)
 }
+
+/// Quantization for comparing mm x's by grid cell (the 1.27 mm grid).
+const GRID_KEY: f64 = 1.27;
 
 /// Deterministic-given-IR PRNG (SplitMix64-ish) so annealing reproduces.
 struct Rng(u64);
@@ -1185,13 +1172,20 @@ impl Rng {
 /// or nudge an anchor. Every candidate is scored on the REAL routed cost (incl.
 /// the spread/stray/overlap terms), and the best layout seen is kept — so SA can
 /// only match-or-beat the seed it started from.
-fn anneal_cells(
+/// Simulated annealing over the items' mm positions. Same Metropolis loop as the
+/// greedy refine's neighbourhood but it accepts *worsening* moves with probability
+/// `exp(-Δ/T)` (T cooling to ~0), so it escapes the local minima greedy is trapped
+/// in — a satellite stranded across the sheet can migrate, in stages, to hug the
+/// IC pin it serves. Moves operate directly on `at`/`angle` (the shipped geometry),
+/// scored by `score_items`; the best layout seen is kept. `broad` runs hotter and
+/// longer (a wider global search from the raw seed). ANCHORS are mobile here: an
+/// anchor nudge frees a whole block to slide.
+fn anneal_items(
     env: &KicadEnv,
     items: &mut [Item],
     inc: &Incidence,
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
-    cells: &mut [Cell],
     broad: bool,
     seed: u64,
 ) {
@@ -1203,102 +1197,71 @@ fn anneal_cells(
     let orients = [Orient::Up, Orient::Down, Orient::Left, Orient::Right];
     let mut rng = Rng(seed);
 
-    let mut cur = score_cells(env, items, inc, ir, needs_flag, cells);
-    let mut best_cells = cells.to_vec();
+    let mut cur = score_items(env, items, inc, ir, needs_flag);
+    let mut best_items: Vec<Item> = items.to_vec();
     let mut best = cur;
 
     // Iterations scale with part count; temperature cools linearly. T0 is set so an
     // early move that adds a crossing/junction (cost ~5) is readily accepted, while
-    // a correctness failure (cost ~1000+) never is. `broad` (unseeded pure-SA from
-    // the raw frame) runs hotter and longer to explore a wider solution space.
+    // a correctness failure (cost ~1000+) never is.
     let (mult, t0) = if broad { (1400, 30.0) } else { (450, 12.0) };
     let iters = (mult * sats.len()).clamp(800, if broad { 12000 } else { 4000 });
+    // One grid cell-step in x/y for the relocation moves.
+    let relocate = |rng: &mut Rng, at: [f64; 2], n: i32| -> [f64; 2] {
+        [
+            crate::grid::snap(at[0] + rng.step(n) as f64 * COL_GAP),
+            crate::grid::snap(at[1] + rng.step(n) as f64 * ROW_GAP),
+        ]
+    };
     for it in 0..iters {
         let t = (t0 * (1.0 - it as f64 / iters as f64)).max(0.05);
-        // Snapshot the cell(s) a move touches so it can be rolled back.
+        // Snapshot the item(s) a move touches (at + angle) so it can be rolled back.
         let m = rng.below(10);
-        let undo: Vec<(usize, Cell)>;
+        let undo: Vec<(usize, [f64; 2], f64)>;
         if m < 6 {
             // Relocate a satellite to a nearby cell (the big move greedy lacks).
             let i = sats[rng.below(sats.len())];
-            undo = vec![(i, cells[i])];
-            cells[i].col += rng.step(2);
-            cells[i].row += rng.step(2);
+            undo = vec![(i, items[i].at, items[i].angle)];
+            items[i].at = relocate(&mut rng, items[i].at, 2);
         } else if m < 8 {
             // Re-orient a satellite.
             let i = sats[rng.below(sats.len())];
-            undo = vec![(i, cells[i])];
-            cells[i].orient = orients[rng.below(4)];
+            undo = vec![(i, items[i].at, items[i].angle)];
+            items[i].angle = orient_angle(&items[i].geom, orients[rng.below(4)]);
         } else if m < 9 && sats.len() >= 2 {
             // Swap two satellites' positions (keep each orientation).
             let a = sats[rng.below(sats.len())];
             let b = sats[rng.below(sats.len())];
-            undo = vec![(a, cells[a]), (b, cells[b])];
-            let (ca, cb) = (cells[a], cells[b]);
-            cells[a] = Cell { orient: ca.orient, ..cb };
-            cells[b] = Cell { orient: cb.orient, ..ca };
+            undo = vec![(a, items[a].at, items[a].angle), (b, items[b].at, items[b].angle)];
+            let (pa, pb) = (items[a].at, items[b].at);
+            items[a].at = pb;
+            items[b].at = pa;
         } else if !anchors.is_empty() {
-            // Nudge an anchor (the frame's IC) by one cell — frees the whole block
-            // to slide, which a satellite-only search cannot do.
+            // Nudge an anchor (an IC) by one cell — frees the whole block to slide,
+            // which a satellite-only search cannot do.
             let i = anchors[rng.below(anchors.len())];
-            undo = vec![(i, cells[i])];
-            cells[i].col += rng.step(1);
-            cells[i].row += rng.step(1);
+            undo = vec![(i, items[i].at, items[i].angle)];
+            items[i].at = relocate(&mut rng, items[i].at, 1);
         } else {
             continue;
         }
 
-        let c = score_cells(env, items, inc, ir, needs_flag, cells);
+        let c = score_items(env, items, inc, ir, needs_flag);
         let d = c - cur;
         if d < 0.0 || rng.unit() < (-d / t).exp() {
             cur = c;
             if c < best {
                 best = c;
-                best_cells.copy_from_slice(cells);
+                best_items.clone_from_slice(items);
             }
         } else {
-            for (i, prev) in undo {
-                cells[i] = prev;
+            for (i, at, angle) in undo {
+                items[i].at = at;
+                items[i].angle = angle;
             }
         }
     }
-    cells.copy_from_slice(&best_cells);
-}
-
-/// The four orthogonal one-cell shifts of `c`.
-fn nudges(c: Cell) -> [Cell; 4] {
-    [
-        Cell { col: c.col - 1, ..c },
-        Cell { col: c.col + 1, ..c },
-        Cell { row: c.row - 1, ..c },
-        Cell { row: c.row + 1, ..c },
-    ]
-}
-
-/// Apply `cells`, build the schematic, and return its routed-layout cost. Leaves
-/// `items` positioned per `cells` (the caller re-applies the chosen cells).
-fn score_cells(
-    env: &KicadEnv,
-    items: &mut [Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-    needs_flag: &BTreeSet<String>,
-    cells: &[Cell],
-) -> f64 {
-    // Two parts in one cell sit at the same point — an overlap, never wanted.
-    for i in 0..cells.len() {
-        for j in (i + 1)..cells.len() {
-            if cells[i].col == cells[j].col && cells[i].row == cells[j].row {
-                return f64::INFINITY;
-            }
-        }
-    }
-    apply_cells(items, cells);
-    // Match the real emit exactly (which normalizes before building): routing is
-    // not perfectly translation-invariant near the origin, so scoring the
-    // un-normalized layout would see phantom rail/lead touches.
-    normalize(items);
-    score_items(env, items, inc, ir, needs_flag)
+    items.clone_from_slice(&best_items);
 }
 
 /// Build and score the schematic for `items` exactly as placed (no cell layout).

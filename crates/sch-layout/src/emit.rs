@@ -2003,7 +2003,13 @@ type BBox = [f64; 4];
 /// Whether two axis-aligned boxes overlap (open intervals, so edge-touching is
 /// not a collision — symbols flush against a frame don't trip the lint).
 fn boxes_overlap(a: &BBox, b: &BBox) -> bool {
-    a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+    // Tolerance matches `floorplan::rects_overlap`: a shared edge (and the
+    // sub-micron float jitter around one) is a TOUCH between padded bboxes — real
+    // clearance, not a collision — so it must NOT be flagged. Without this, two
+    // collinear/adjacent parts whose padded boxes meet (a divider's R7/R8 spine,
+    // a pull-up just above a wide IC) trip a phantom overlap warning.
+    const EPS: f64 = 1e-6;
+    a[0] < b[2] - EPS && b[0] < a[2] - EPS && a[1] < b[3] - EPS && b[1] < a[3] - EPS
 }
 
 impl SchematicWriter {

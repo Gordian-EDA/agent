@@ -1,7 +1,19 @@
 # Placement-search refactor — one seeded search, greedy + SA as strategies
 
-Status: **design / proposal** (not implemented). Informed by a 3-lens design panel
-+ adversarial synthesis (run `wf_a680da5b-0ca`). Owner decisions pending (see end).
+Status: **in progress** (owner-approved whole arc). Informed by a 3-lens design
+panel + adversarial synthesis (run `wf_a680da5b-0ca`). Decisions resolved (see end).
+
+**Progress (2026-06-15):** Step 0 (lift `mirror` onto Item) ✓; Step 1
+(`PlacementStrategy` interface, `Greedy`/`Anneal`, seed param) ✓; snapshot gate
+(`placement_snapshot.rs` + bless + determinism) ✓; **mm-flip ✓** — the search now
+operates on `items.at`/`angle`/`mirror` in mm (`refine_items`/`anneal_items`,
+seeded once via `apply_cells`, scored by `score_items`; anchors mobile in the SA;
+`score_cells`/`nudges`/`anchor_col` gone). Plus a `boxes_overlap` EPS fix (a
+sub-micron float edge-touch between padded bboxes was a phantom overlap warning).
+Output re-baselined (snapshots blessed) — divider/mcp1703 excellent, 555/grid-demo
+good, uart clean; SA path good with anchor mobility. **Next:** fold polish into
+the search (Step 5: align/penetration cost), thin `decongest` (Step 6), premium
+cost + make SA win on INFER (Step 7), cleanup (Step 8).
 
 ## The problem
 
