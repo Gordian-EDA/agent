@@ -188,3 +188,25 @@ Remaining, by impact (follow-up review of the improved renders):
 - **mcp1703 / 555 series-spine alignment (reference gap).** Reviewers want the
   main power/series spine on one Y aligned to the IC pins, rail taps as vertical
   branches off it. This is the "match references / retire sidecar" track.
+
+---
+
+## 6. Placement-search refactor — findings (2026-06-15)
+
+The mm-flip (search optimises real geometry) made the **SA decisively beat greedy**
+on the hard fixtures: mixed-signal 2→0, bedrock-oneshot 21→0 layout warnings.
+The SA is the quality tier and it works.
+
+- **IC value/MPN text reservation in `item_rect` is net-negative — do NOT add it.**
+  Reserving the IC's MPN band fixes rf-lna (ADL5542-over-cap, greedy 2→0) but
+  perturbs GREEDY on multi-IC sheets into worse minima (mixed-signal 2→14,
+  bedrock 21→25). The SA handles the bigger ICs fine. The right home for IC field
+  text is a **cost term the SA optimises** or smarter MPN placement in
+  `solve_text_positions` — NOT the overlap rect that every greedy move is gated on.
+- **`boxes_overlap` needed an EPS** (fixed): a sub-micron float edge-touch between
+  padded bboxes was a phantom overlap warning (collinear R7/R8; pull-up above an IC).
+- **Snapshot baselines were `*.kicad_sch`-gitignored** (fixed): force-tracked under
+  `crates/sch-layout/tests/snapshots/` so the gate is durable.
+- **Still to reach "perfect on all 10":** drive the remaining INFER label/text
+  overlaps to 0 (bedrock/mixed via the SA + targeted `solve_text_positions`), and
+  the 2 tracked truthfulness bugs (`#21` bga GND fragments, selfrepair rail short).

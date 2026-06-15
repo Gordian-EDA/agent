@@ -9,5 +9,7 @@
 
 design.kicad_sch
 *.kicad_sch
+# ...but the placement-snapshot regression baselines ARE tracked (they ARE the gate).
+!crates/sch-layout/tests/snapshots/*.kicad_sch
 
 docs/validation/*.png
