@@ -139,22 +139,26 @@ one silently starts passing (remove it from the list when fixed).
 ## 5. Fresh sub-agent critique findings (2026-06-15)
 
 Ranked from a parallel adversarial review of the 4 reference renders + the
-INFER-path renders (grid-demo, rf-lna, mixed-signal). The `anchor_tap` fix
-already cleared the worst INFER blockers (collapsed components, scattered
-timing parts). Remaining, by impact:
+INFER-path renders (grid-demo, rf-lna, mixed-signal).
 
-- **Bypass-cap pile (INFER).** N caps on one non-rail node (rf-lna's 5 caps on
-  `CB_NODE`) all group into ONE column → a tall thin stack with the net label
-  running vertically *through* the cap bodies. Fix: in `infer_ir`'s star-leg
-  branch, fan CAPS out into their own columns (like decoupling) instead of
-  grouping same-signal legs; only resistor divider legs should share a column.
-- **Vertical net labels over symbols (INFER).** A long vertical net's label is
-  placed mid-span, overprinting the symbols it runs past (rf-lna `CB_NODE`).
-  Fix: keep net labels horizontal and collision-test the label bbox against
-  symbol bboxes in `solve_text_positions` before placing.
-- **Multi-unit op-amp + connector placement (INFER).** rf-lna's AD8542 units +
-  J1/J2 connectors pile at column 0. Multi-unit anchor units and 2-pin
-  connectors need real column assignment, not the satellite fallback.
+**RESOLVED this session** (3 commits): the worst INFER blockers — collapsed
+components, scattered timing parts (`anchor_tap` distinct-anchor, `42073c2`); the
+bypass-cap pile + its vertical label-through-bodies (`same_pin` fan-out,
+`fa90347`, caps fan into columns so no tall stack/mid-span label remains); and
+connectors tucked under an IC's GND pin (rail-only-tap guard — a coax touching the
+chip only through GND is no longer flanked there). rf-lna went from a 1900px-tall
+broken column to a clean professional schematic (U1 centred, J1/J2 at the edges,
+bypass caps a bottom row). mixed-signal blockers cleared.
+
+Remaining, by impact:
+
+- **Multi-unit op-amp placement (INFER).** A multi-unit IC's units are separate
+  Items sharing a refdes; `anchor_tap` counts them as distinct anchors. Group
+  hits by REFDES so a part tapping one unit resolves (and flanks the right unit).
+- **Vertical net labels over symbols (INFER, deferred — risky).** A long vertical
+  net's label can still overprint symbols. The fix lives in `solve_text_positions`
+  / `add_cluster_label` (label angle from stub `dir`), which ALSO produces the
+  byte-identical reference output — so it needs care to not move reference labels.
 - **Compactness gap (BOTH paths).** Every reference reviewer flagged the render
   as ~2–3× too sparse vs the human drawing (wide margins, large label-to-symbol
   gaps, full-height indicator legs). A global compaction / auto-fit-to-content

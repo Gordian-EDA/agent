@@ -450,7 +450,24 @@ fn anchor_tap(
         return None;
     }
     hits.sort_by_key(|h| rails.contains_key(&h.2));
-    hits.into_iter().next()
+    let chosen = hits.into_iter().next()?;
+    // A RAIL-ONLY tap doesn't make the part adjacent to the IC: a coax/connector
+    // that touches the chip only through GND (its signal goes elsewhere, via a
+    // DC-block cap) must NOT be tucked under the IC's GND pin. So if the chosen
+    // tap is a rail AND this satellite carries a non-rail signal net, it isn't a
+    // real tap — let it place elsewhere. A pure decoupler (both nets rails, no
+    // signal) keeps its rail tap and flanks the supply pin.
+    if rails.contains_key(&chosen.2) {
+        let has_signal = items[si]
+            .pins
+            .iter()
+            .filter_map(|(_, _, n)| n.as_deref())
+            .any(|n| !rails.contains_key(n));
+        if has_signal {
+            return None;
+        }
+    }
+    Some(chosen)
 }
 
 /// Whether an IC should be flipped left↔right: its EAST-side signal pins reach a
