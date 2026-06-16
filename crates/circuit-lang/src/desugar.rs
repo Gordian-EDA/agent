@@ -102,10 +102,44 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
 
     resolve_pins(&mut d, raw_pins, &mut diags);
     synth_decouple(&mut d, s, provider, &mut diags); // Task 8
+    reannotate_decouple_caps(&mut d);
     materialize_auto_nc(&mut d, provider); // Task R6
     mark_power_nets(&mut d);
 
     (d, diags)
+}
+
+/// Give synthesized decoupling caps a real `C<n>` refdes. They are keyed
+/// `__dec_<parent>_<n>` internally so the `decouple:` sugar can re-collapse them
+/// (canon keys off `Origin`, not the name) — but that key is exactly what
+/// `floorplan::emit` stamps as the KiCAD refdes, so a raw `__dec_U1_1` was leaking
+/// onto the rendered sheet. Renumber each synth cap to `C<n>` after the highest
+/// authored `C`, preserving its `Origin` so canon still re-sugars it. Deterministic
+/// (block then component order; global counter for cross-block uniqueness), so the
+/// canonical round-trip stays a fixpoint and `compile(canon(d)) == d` holds.
+fn reannotate_decouple_caps(d: &mut Design) {
+    let is_dec = |c: &Component| matches!(&c.origin, Origin::Synthesized { role, .. } if role == "decouple");
+    let mut next = 1 + d
+        .blocks
+        .values()
+        .flat_map(|b| b.components.keys())
+        .filter_map(|k| k.strip_prefix('C').and_then(|n| n.parse::<u32>().ok()))
+        .max()
+        .unwrap_or(0);
+    for block in d.blocks.values_mut() {
+        let synth: Vec<String> = block
+            .components
+            .iter()
+            .filter(|(_, c)| is_dec(c))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for old in synth {
+            if let Some(comp) = block.components.shift_remove(&old) {
+                block.components.insert(format!("C{next}"), comp);
+                next += 1;
+            }
+        }
+    }
 }
 
 /// Derive the power nets: every net a power-symbol component drives (a part in
@@ -975,7 +1009,9 @@ blocks:
             .collect();
         assert_eq!(caps.len(), 3);
         let (key, c) = &caps[0];
-        assert_eq!(*key, "__dec_U1_1");
+        // Synth decouple caps are re-annotated to a real C<n> refdes (no authored
+        // C here, so the first is C1) — the `__dec_` key never reaches the sheet.
+        assert_eq!(*key, "C1");
         assert_eq!(c.part, "Device:C");
         assert_eq!(c.value.as_deref(), Some("100nF"));
         assert_eq!(c.pins["1"], PinTarget::Net("3V3".into()));
