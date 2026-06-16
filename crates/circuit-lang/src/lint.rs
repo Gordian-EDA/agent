@@ -99,7 +99,11 @@ pub fn lint(d: &Design, provider: &dyn SymbolProvider) -> Diagnostics {
 
     if !allow("single-pin-net") {
         for (net, pins) in &net_pins {
-            if pins.len() == 1 && !d.nets.get(*net).map(|a| a.power).unwrap_or(false) {
+            // A power rail or an author-marked PORT legitimately has one pin (the
+            // symbol/label is the connection) — not a typo, so don't warn on it.
+            let attrs = d.nets.get(*net);
+            let exempt = attrs.map(|a| a.power || a.port).unwrap_or(false);
+            if pins.len() == 1 && !exempt {
                 diags.push(Diagnostic::warning(
                     "single-pin-net",
                     format!("net `{net}` has only one pin ({}) — typo?", pins[0]),
