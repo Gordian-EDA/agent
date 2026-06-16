@@ -26,4 +26,10 @@ pub struct EmitOutput {
     /// One human-readable warning per overlapping symbol/label pair (empty when
     /// the layout is clean). A side-channel only: it does not alter `sch`.
     pub layout_warnings: Vec<String>,
+    /// Ground-truth count of wires that run THROUGH a 2-pin part's body
+    /// (transverse or collinear pass-through). Authoritative for the "wire through
+    /// a component" question — a vision critic systematically over-reports it.
+    pub body_crossings: usize,
+    /// Ground-truth count of wires routed through an IC (3+ pin) package body.
+    pub ic_crossings: usize,
 }

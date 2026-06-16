@@ -601,6 +601,7 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
             "diff": diff,
             "rendered_len": rendered.len(),
             "layout_warnings": emitted.layout_warnings,
+            "wire_through_body": emitted.body_crossings + emitted.ic_crossings,
         }));
     }
 
@@ -633,6 +634,7 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         "diff": diff,
         "erc": { "errors": erc.error_count(), "warnings": erc.warning_count() },
         "layout_warnings": emitted.layout_warnings,
+        "wire_through_body": emitted.body_crossings + emitted.ic_crossings,
     }))
 }
 

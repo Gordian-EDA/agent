@@ -133,6 +133,9 @@ def main():
     ap.add_argument("--circuit", help="one-line description of the intended circuit")
     ap.add_argument("--model", default=os.environ.get("CRITIC_MODEL", "anthropic/claude-opus-4-8"))
     ap.add_argument("--json-only", action="store_true", help="print only the JSON")
+    ap.add_argument("--engine-clean", action="store_true",
+                    help="the engine's geometry analysis confirms 0 wires through any body; "
+                         "suppress wire-through-body reports (they would be false positives)")
     args = ap.parse_args()
 
     base = os.environ.get("OPENAI_BASE_URL", "").rstrip("/")
@@ -148,6 +151,12 @@ def main():
         ctx += (" A REFERENCE render of the SAME circuit (hand-drawn, good) is"
                 " attached SECOND — compare, but only report defects in the FIRST"
                 " (the one under review).")
+    if args.engine_clean:
+        ctx += (" AUTHORITATIVE ENGINE GROUND TRUTH: a geometric analysis of the actual"
+                " wire and body coordinates confirms ZERO wires pass through any component"
+                " body (resistor, cap, IC, op-amp triangle, or connector). Therefore do NOT"
+                " report any wire-through-body defect — any such claim is a false positive."
+                " Judge only the OTHER defect classes.")
     user_content.append({"type": "text", "text": ctx})
     user_content.append({"type": "image_url",
                          "image_url": {"url": f"data:image/png;base64,{b64_image(args.image)}"}})

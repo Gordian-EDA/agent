@@ -703,8 +703,9 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     w.set_frame(true);
     w.prepare();
     let warnings = w.layout_warnings();
+    let (body_crossings, ic_crossings) = crossing_counts(env, &items, &inc, ir, &needs_flag);
     let sch = w.finish();
-    Ok(EmitOutput { sch, layout_warnings: warnings })
+    Ok(EmitOutput { sch, layout_warnings: warnings, body_crossings, ic_crossings })
 }
 
 /// Build the complete schematic writer for a placed `items`: symbols (+mirror),
