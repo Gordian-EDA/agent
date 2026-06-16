@@ -1321,8 +1321,12 @@ fn anneal_items(
     // Iterations scale with part count; temperature cools linearly. T0 is set so an
     // early move that adds a crossing/junction (cost ~5) is readily accepted, while
     // a correctness failure (cost ~1000+) never is.
-    let (mult, t0) = if broad { (1400, 30.0) } else { (450, 12.0) };
-    let mut iters = (mult * sats.len()).clamp(800, if broad { 12000 } else { 4000 });
+    // Iterations scale with movable count. The old ceilings (4000 / 12000) did far
+    // more than a ≤~15-part search needs to converge — ~20k evals on a 12-sat board
+    // — so they're cut ~3x. SA on a handful of movables settles in hundreds, not
+    // thousands; the broad pass keeps a wider ceiling for its global restart.
+    let (mult, t0) = if broad { (700, 30.0) } else { (300, 12.0) };
+    let mut iters = (mult * sats.len()).clamp(500, if broad { 4000 } else { 1500 });
     // Large boards (100-pin / BGA): each `score_items` routes the WHOLE sheet, and
     // routing cost scales with PIN count (a 100-pin MCU is one item but 186 pins),
     // so the full iteration count runs into minutes. Cap total routing work so
@@ -1424,12 +1428,22 @@ fn premium_score_items(
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
 ) -> f64 {
-    let warnings = warning_count(env, items, inc, ir, needs_flag);
     let aes = match build_writer(env, None, items, inc, ir, needs_flag, false) {
         Ok(w) => layout_cost(env, &w, items, inc, ir, true),
         Err(_) => return f64::INFINITY,
     };
-    10_000.0 * warnings as f64 + aes
+    // The accurate objective costs a per-move text solve + reroute; on dense boards
+    // (selfrepair's 88 nets, bga's 671 pins) that runs into MANY minutes per emit, so
+    // there the premium falls back to the straightness cost alone — still additive,
+    // just without the warning-minimisation that drove oneshot (186 pins / 23 nets,
+    // affordable) to 0. The cheap base eval the free tier uses scales fine; only this
+    // accurate variant needs the guard.
+    let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
+    if pins <= 250 && inc.len() <= 40 {
+        10_000.0 * warning_count(env, items, inc, ir, needs_flag) as f64 + aes
+    } else {
+        aes
+    }
 }
 
 /// Pin-alignment polish: slide each satellite onto the AXIS of the signal pin it

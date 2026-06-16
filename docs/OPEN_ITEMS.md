@@ -34,17 +34,31 @@ candidate → anneal 7/7 on the fast fixtures).
   practical (oneshot 3m47s→2m21s); tuned fixtures (≤58 pins) untouched.
 - **Agent e2e validated** — 9 diverse OpenAI-driven scenarios (LDO, op-amp, I2C,
   Sallen-Key, 555, BJT relay driver, buck, Pierce crystal, thermistor) ALL emit
-  **0 layout-warnings + 0 ERC errors** through the SA engine. The "diff scenarios"
-  bar is met for realistic circuits.
+  **0 layout-warnings + 0 ERC errors** through the SA engine.
+- **Per-block `layout:` grid = relative ordering** (`700d47c`) — corrected from the
+  wrong top-level model: each block carries its own grid; a `grid_order` cost (1200)
+  holds gridded parts in authored left/right + top/bottom order ("relatively rigid").
+- **Wire-through-IC-body lint** (`3f52165`) — a reward-design gap (the defect passed
+  at 0 warnings because it was only a soft cost a rigid grid overran).
+- **decongest iteration cap 600→3000** (`73125b4`) — bga **186 → 54** (the dense
+  cluster's body overlaps were just iteration-limited; references untouched).
+- **Premium-tier SA** (`7eb4d1a`, `832b991`) — a 3rd, additive anneal candidate the
+  PAID tier runs. First straightness-weighted (wins 555); then optimising the REAL
+  `warning_count` (text-solve per move) ⇒ **bedrock-oneshot anneal 1 → 0**. Additive
+  ⇒ strictly ≥ base (fast scoreboard still 7/7, refs byte-identical). Reverted two
+  cheap-proxy attempts (compaction, pre-solve label-crowding) — they diverge from the
+  post-solve truth; see the `keep-the-sa-optimizer` memory.
 
-**Remaining for literal "0-warnings on all 10":** only the 3 deliberately-extreme
-fixtures — `bedrock-oneshot` (anneal **1**), `bedrock-selfrepair` (265 pins),
-`bga-fpga-ice40` (671 pins). Dominant class: net-label vs pin-text collisions on
-dense connectors + multi-unit/decoupling clustering. The SA reduces these a lot
-(oneshot greedy 21 → anneal 1) but literal-0 on a 671-pin BGA needs deeper work
-(faster incremental cost for more SA iterations, and/or a dense-connector label
-strategy). Also open: the INFER-quality items below (§2 + §5), `ports:` author
-section, engine cleanup (§1.2).
+**State of "0-warnings on all 10":** 7 normal fixtures + 9 agent scenarios at 0;
+**oneshot now 0** (anneal). Remaining: `bedrock-selfrepair` (265 pins) and
+`bga-fpga-ice40` (671 pins) — dense GPIO-breakout label collisions + multi-unit
+clustering. The user ACCEPTED the challenge-tier bar (truthful + on-grid + ERC-clean,
+which all 10 meet) as the goal for these two; the accurate-objective premium pushes
+them down too (under measurement), but literal-0 needs a STRUCTURAL label fix (bus /
+single-end labels) or much faster per-move warning eval. Also open: the INFER-quality
+items below (§2 + §5), `ports:` author section, engine cleanup (§1.2), and the
+premium SA's wall-clock (per-move text-solve — speed-optimise with a tighter premium
+iter cap).
 
 ---
 
