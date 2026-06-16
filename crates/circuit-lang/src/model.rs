@@ -86,6 +86,10 @@ pub enum Origin {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct NetAttrs {
     pub power: bool,
+    /// This net is a board I/O PORT — drawn with a global-label pennant at the sheet
+    /// edge. DERIVED (like `power`) from author-placed `label:global` components, not
+    /// stored in YAML; re-marked each desugar so the canonical round-trip is stable.
+    pub port: bool,
     pub class: Option<String>,
 }
 
@@ -104,6 +108,7 @@ mod tests {
             "GND".into(),
             NetAttrs {
                 power: true,
+                port: false,
                 class: None,
             },
         );

@@ -105,8 +105,33 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
     reannotate_decouple_caps(&mut d);
     materialize_auto_nc(&mut d, provider); // Task R6
     mark_power_nets(&mut d);
+    mark_label_nets(&mut d);
 
     (d, diags)
+}
+
+/// Derive board I/O PORTS: every net a `label:global` component drives is a port
+/// (drawn as a global-label pennant). Mirrors [`mark_power_nets`] — an author marks
+/// a net as an exposed I/O by placing a label component on it, exactly as they place
+/// a `power:GND` symbol to mark a ground. (`label:local` is NOT a port — it is a
+/// plain local net-name annotation, handled separately.)
+fn mark_label_nets(d: &mut Design) {
+    let mut port_nets: Vec<NetName> = Vec::new();
+    for block in d.blocks.values() {
+        for comp in block.components.values() {
+            if comp.part != "label:global" {
+                continue;
+            }
+            for target in comp.pins.values() {
+                if let PinTarget::Net(net) = target {
+                    port_nets.push(net.clone());
+                }
+            }
+        }
+    }
+    for net in port_nets {
+        d.nets.entry(net).or_default().port = true;
+    }
 }
 
 /// Give synthesized decoupling caps a real `C<n>` refdes. They are keyed
@@ -796,6 +821,34 @@ mod tests {
         );
         diags.extend(ds);
         (d, diags)
+    }
+
+    #[test]
+    fn label_global_component_marks_a_port_net() {
+        // A `label:global` component on a DEGREE-2 net (the divider tap OUT) marks it
+        // a board I/O port — the degree-1 heuristic alone could never see it.
+        let (d, diags) = run("
+version: 1
+blocks:
+  io:
+    components:
+      LBL1: {part: label:global, pins: {1: OUT}}
+  main:
+    components:
+      R1: {part: R, value: 10k, between: [VCC, OUT]}
+      R2: {part: R, value: 10k, between: [OUT, MID]}
+");
+        assert!(!diags.has_errors(), "{:?}", diags);
+        assert!(d.nets["OUT"].port, "label:global marks OUT a port");
+        // An unlabelled internal node (MID, degree-2) is NOT a port.
+        assert!(!d.nets.get("MID").map(|a| a.port).unwrap_or(false));
+        // The label component round-trips as an ordinary authored component.
+        assert_eq!(d.blocks["io"].components["LBL1"].part, "label:global");
+        // Re-derive on the canonical round-trip: port flag is recomputed, not stored.
+        let canon = crate::canon::to_canonical_yaml(&d);
+        assert!(canon.contains("label:global"), "label component survives canon");
+        let (d2, _) = run(&canon);
+        assert!(d2.nets["OUT"].port, "port re-derived after canon round-trip");
     }
 
     #[test]

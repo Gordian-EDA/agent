@@ -90,6 +90,9 @@ impl MockSymbolProvider {
         ] {
             p.add(id, vec![("1", net, PowerInput, 1)]);
         }
+        // Net-label marker (not a real KiCAD symbol — a synthetic single-pin part):
+        // `label:global` marks its net a board I/O port (drawn as a global-label).
+        p.add("label:global", vec![("1", "~", Passive, 1)]);
         p
     }
 }

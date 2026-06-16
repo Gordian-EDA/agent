@@ -875,11 +875,16 @@ layout. For a board with a real floorplan, the top-level `layout:` is a 2D grid:
 - `decouple: { 100nF: 10, 4.7uF: 2 }` — on an IC, synthesizes that many
   decoupling caps of each value across the IC's power/ground. The caps are
   generated for you; never list them individually.
-- Exposing a signal as an I/O PORT: just give the net a clear board-level NAME
-  (e.g. `VIN`, `VOUT`, `SDA`, `EN`); a net that taps out to the sheet edge is drawn
-  as a labelled port. Do NOT add a single-pin test-point or `Conn_01x01` connector
-  just to "bring a net out" — that only clutters the sheet. Add a connector ONLY
-  when the board has a REAL physical connector/header.
+- Exposing a signal as an I/O PORT: mark the net with a `label:global` component — a
+  single-pin label whose pin ties to the net, exactly like a `power:GND` symbol marks
+  a ground:
+      VOUT_PORT: { part: label:global, pins: { 1: VOUT } }
+  The engine draws that net with a global-label port pennant at the sheet edge. Use
+  this for any board I/O — especially an output that ALSO connects internally (e.g. a
+  gain stage's `VOUT`, a logic `OUT`), which a bare name can't auto-detect. (A signal
+  net that taps only to the edge is auto-labelled, so a simple VIN/VOUT often needs no
+  marker.) Do NOT add a single-pin test-point or `Conn_01x01` connector just to "bring
+  a net out" — that clutters the sheet. Reserve connectors for REAL physical headers.
 
 # Tools and workflow (follow this order)
 

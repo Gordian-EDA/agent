@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use circuit_lang::{SymbolMeta, SymbolProvider};
+use circuit_lang::{PinMeta, PinType, SymbolMeta, SymbolProvider};
 use elsa::sync::FrozenMap;
 
 use crate::env::KicadEnv;
@@ -62,6 +62,21 @@ impl SymbolProvider for RealSymbolProvider {
     fn symbol(&self, lib_id: &str) -> Option<&SymbolMeta> {
         if let Some(meta) = self.metas.get(lib_id) {
             return Some(meta);
+        }
+        // The `label:global` net-label marker is not a real KiCAD library symbol —
+        // synthesise a single-pin meta so the compiler validates/resolves it like any
+        // part. The floorplan engine skips it in `gather` (no geometry) and draws the
+        // net's global-label port pennant instead.
+        if lib_id == "label:global" {
+            let meta = SymbolMeta {
+                pins: vec![PinMeta {
+                    number: "1".into(),
+                    name: "~".into(),
+                    etype: PinType::Passive,
+                    unit: 1,
+                }],
+            };
+            return Some(self.metas.insert(lib_id.to_string(), Box::new(meta)));
         }
         let (lib, name) = lib_id.split_once(':')?;
         let meta = self.with_lib(lib, |l| l.symbol(name).cloned())??;

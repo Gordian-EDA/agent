@@ -361,15 +361,19 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         place.insert(s.refdes.clone(), cell);
     }
 
-    // Ports: a single-pin signal net (not power) exits the sheet. Heuristic side —
-    // an input-ish name on the left, else right.
+    // Ports: a net the author EXPLICITLY marked (a `label:global` component → the
+    // `port` flag) OR — as a convenience — a single-pin signal net that obviously
+    // exits the sheet. The explicit mark is what lets a degree-2+ output (a NOT-gate
+    // OUT touching the collector R and the transistor) be a port; the degree-1 rule
+    // alone can't see it. Heuristic side: input-ish name left, else right.
     let mut ports = BTreeMap::new();
     for (net, pins) in &inc {
-        let power = design.nets.get(net).map(|a| a.power).unwrap_or(false);
-        // A single-pin signal net is a board I/O port — UNLESS it reads like an
-        // intentional no-connect (NC_*), which stays a no-connect marker.
+        let attrs = design.nets.get(net);
+        let power = attrs.map(|a| a.power).unwrap_or(false);
+        let marked = attrs.map(|a| a.port).unwrap_or(false);
+        // Not a no-connect (NC_*) and not a power rail (rails draw their own symbols).
         let nc = net.to_ascii_uppercase().starts_with("NC");
-        if pins.len() == 1 && !power && !nc {
+        if !power && !nc && (marked || pins.len() == 1) {
             let side = if net_is_input(net) { Side::Left } else { Side::Right };
             ports.insert(net.clone(), side);
         }
@@ -800,7 +804,9 @@ fn gather(env: &KicadEnv, design: &Design) -> io::Result<Vec<Item>> {
             // DECLARATION, not a placed part: it tells the engine its net is a power
             // rail (via `NetAttrs.power`), and the rail/terminal drawing is emitted by
             // the power path (`emit_rail`), not as a gathered symbol. Skip it here.
-            if comp.part.starts_with("power:") {
+            // A `label:*` component is likewise a net-LABEL declaration (marks a net a
+            // port / draws its name), not a placed symbol — and has no geometry. Skip.
+            if comp.part.starts_with("power:") || comp.part.starts_with("label:") {
                 continue;
             }
             let geom = SymbolGeometry::load(env, &comp.part)?;
