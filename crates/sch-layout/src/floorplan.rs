@@ -1089,7 +1089,14 @@ impl PlacementStrategy for Anneal {
             // ships the tidier one (where its extra optimisation actually shows).
             let c = premium_score_items(env, &shipped, inc, ir, needs_flag);
             if std::env::var("DEBUG_SA").is_ok() {
-                eprintln!("SA cand k={k} warnings={w} premium_cost={c:.1}");
+                let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+                for it in &shipped {
+                    let r = item_rect(it, it.at);
+                    lo[0] = lo[0].min(r[0]); lo[1] = lo[1].min(r[1]);
+                    hi[0] = hi[0].max(r[2]); hi[1] = hi[1].max(r[3]);
+                }
+                let spread = (hi[0] - lo[0]) + (hi[1] - lo[1]);
+                eprintln!("SA cand k={k} warnings={w} premium_cost={c:.1} spread={spread:.0}");
             }
             if w < best_w || (w == best_w && c + 0.5 < best_c) {
                 best = k;
@@ -2143,13 +2150,39 @@ fn layout_cost(
     // sheet — observed as mixed-signal regressing 0→1. Neatness is safe; tightness
     // is not, until the cost can see the lint's text collisions.
     let neat = if premium { 3.0 } else { 1.0 };
-    correctness
+    let base = correctness
         + neat * (5.0 * crossings as f64 + 7.0 * congestion as f64 + 7.0 * corners as f64)
         + 1.0 * junctions as f64
         + 0.5 * stray
         + 0.15 * length
-        + 0.45 * spread
+        + 0.45 * spread;
+    // PREMIUM compaction boost. The neat terms above amplify STRAIGHTNESS ~3x; left
+    // unbalanced, the paid SA straightens a wire by flinging its part into open space
+    // — the "straight but sprawled" look EVERY visual review flagged as the #1 defect.
+    // ADD a matching compaction pull so premium packs as hard as it straightens. This
+    // is ADDED, never folded into the base sum: re-parenthesising the base shifts its
+    // last bits and flips the chaotic SA acceptances (a measured mixed-signal 0->1
+    // regression), so the free path (premium=false) must stay bit-identical. Safe to
+    // push hard: on affordable boards premium_score_items scores the REAL per-move
+    // warning_count, so an over-tight text/wire collision is rejected mid-search; on
+    // big boards the final candidate pick (fewest real warnings, greedy always a
+    // candidate) caps it — premium can never ship more warnings than greedy.
+    if premium {
+        base + COMPACT_BOOST * (0.15 * length + 0.45 * spread)
+    } else {
+        base
+    }
 }
+
+/// Extra weight the PREMIUM tier puts on compactness (length+spread), on TOP of the
+/// base 1x, so the paid SA's straightness pull (`neat`=3x) can't win by spreading
+/// parts into open space (the "straight but sprawled" defect every visual review
+/// flagged). 2.0 → premium compaction ~3x, matching the straightness amplification.
+/// Swept on the four reference fixtures: it tightens the two loosest (555 130→121,
+/// uart 165→157 shipped-bbox half-perimeter) with NO warning regression, and stays
+/// clear of the over-tight edge (boost 4 destabilises uart). Only the premium branch
+/// of `layout_cost` reads it, so the free path stays bit-identical.
+const COMPACT_BOOST: f64 = 2.0;
 
 /// Violations of the author's per-block `layout:` relative ordering (`ir.grid`).
 /// For each pair of gridded parts whose grid boxes are DISJOINT on an axis, the
