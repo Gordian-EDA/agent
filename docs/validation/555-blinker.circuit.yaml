@@ -1,7 +1,10 @@
 version: 1
 name: 555-blinker
-power: [9V, GND]
 blocks:
+  power:
+    components:
+      PWR1: {part: power:VCC, pins: {1: 9V}}
+      PWR2: {part: power:GND, pins: {1: GND}}
   blinker:
     components:
       U1:

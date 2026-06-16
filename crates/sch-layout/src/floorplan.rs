@@ -795,6 +795,13 @@ fn gather(env: &KicadEnv, design: &Design) -> io::Result<Vec<Item>> {
             if comp.dnp {
                 continue;
             }
+            // A power-symbol component (`power:GND`, `power:+5V`, …) is a power-net
+            // DECLARATION, not a placed part: it tells the engine its net is a power
+            // rail (via `NetAttrs.power`), and the rail/terminal drawing is emitted by
+            // the power path (`emit_rail`), not as a gathered symbol. Skip it here.
+            if comp.part.starts_with("power:") {
+                continue;
+            }
             let geom = SymbolGeometry::load(env, &comp.part)?;
             let pins = resolve_pins(comp, &geom); // same order/len as geom.pins
             // An IC/connector (>=3 pins) with no authored value shows its part

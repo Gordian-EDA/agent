@@ -1,7 +1,5 @@
 version: 1
 name: rf_lna_frontend
-power: [5V, GND]
-
 # RF receive front-end built around an ADL5542 wideband RF gain block / LNA.
 # Signal path: SMA(in) -> DC-block -> amp RFin (pin 1) -> amp RFout (pin 8)
 #   -> DC-block -> SMA(out). 5V supply feeds V+ (pin 5) through a decoupled
@@ -9,6 +7,10 @@ power: [5V, GND]
 # ADL5542 has no enable pin, so no bias/enable resistor is fitted.
 
 blocks:
+  power:
+    components:
+      PWR1: {part: power:VCC, pins: {1: 5V}}
+      PWR2: {part: power:GND, pins: {1: GND}}
   rf_input:
     components:
       J1:

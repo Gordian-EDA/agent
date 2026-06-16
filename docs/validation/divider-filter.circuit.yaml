@@ -1,7 +1,10 @@
 version: 1
 name: divider-filter
-power: [VCC, GND]
 blocks:
+  power:
+    components:
+      PWR1: {part: power:VCC, pins: {1: VCC}}
+      PWR2: {part: power:GND, pins: {1: GND}}
   divider:
     components:
       R7: {part: Device:R, value: 649k, between: [VCC, OUT]}

@@ -28,10 +28,10 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
         ..Default::default()
     };
 
-    // power: declared power/ground nets -> kernel NetAttrs.power
-    for (net, _span) in &s.power {
-        d.nets.entry(net.clone()).or_default().power = true;
-    }
+    // Power nets are no longer declared by a `power:` list — they are DERIVED from
+    // the power-symbol COMPONENTS the author places (a part in KiCAD's `power:`
+    // library, e.g. `power:GND`). The net each such symbol drives is a power net.
+    // Marked after `resolve_pins` below, once the symbols' pins resolve to nets.
     for (net, attrs) in &s.nets {
         d.nets.entry(net.clone()).or_default().class = attrs.class.clone();
     }
@@ -103,8 +103,31 @@ pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Dia
     resolve_pins(&mut d, raw_pins, &mut diags);
     synth_decouple(&mut d, s, provider, &mut diags); // Task 8
     materialize_auto_nc(&mut d, provider); // Task R6
+    mark_power_nets(&mut d);
 
     (d, diags)
+}
+
+/// Derive the power nets: every net a power-symbol component drives (a part in
+/// KiCAD's `power:` library) is a power net. Replaces the old top-level `power:`
+/// list — the symbol the author placed already says which net is power.
+fn mark_power_nets(d: &mut Design) {
+    let mut power_nets: Vec<NetName> = Vec::new();
+    for block in d.blocks.values() {
+        for comp in block.components.values() {
+            if !comp.part.starts_with("power:") {
+                continue;
+            }
+            for target in comp.pins.values() {
+                if let PinTarget::Net(net) = target {
+                    power_nets.push(net.clone());
+                }
+            }
+        }
+    }
+    for net in power_nets {
+        d.nets.entry(net).or_default().power = true;
+    }
 }
 
 /// Strip spans off one block's `layout:` grid into the kernel model, validating
@@ -745,8 +768,11 @@ mod tests {
     fn aliases_rails_and_nc() {
         let (d, diags) = run("
 version: 1
-power: [3V3, GND]
 blocks:
+  rails:
+    components:
+      PWR1: {part: power:VCC, pins: {1: 3V3}}
+      PWR2: {part: power:GND, pins: {1: GND}}
   main:
     components:
       R1: {part: R, pins: {1: 3V3, 2: OUT}}
@@ -934,7 +960,6 @@ blocks:
     fn decouple_synthesizes_tagged_caps() {
         let (d, diags) = run("
 version: 1
-power: [3V3, GND]
 blocks:
   mcu:
     components:
@@ -1049,7 +1074,6 @@ blocks:
         let (s, _) = crate::parse::parse_str(
             "
 version: 1
-power: [3V3, GND]
 blocks:
   mcu:
     components:

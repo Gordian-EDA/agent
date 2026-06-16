@@ -235,6 +235,12 @@ fn validate_fixture(
         for block in design.blocks.values() {
             for (refdes, comp) in &block.components {
                 let lib_id = &comp.part;
+                // power:* symbols are declarations of net-power (consumed by
+                // mark_power_nets); the engine synthesizes the actual rail/per-pin
+                // power graphics, so these refdes never appear in the netlist.
+                if comp.part.starts_with("power:") {
+                    continue;
+                }
                 for (pin, target) in &comp.pins {
                     let circuit_lang::model::PinTarget::Net(want) = target else { continue };
                     let got = nl.nets.iter().position(|n| {

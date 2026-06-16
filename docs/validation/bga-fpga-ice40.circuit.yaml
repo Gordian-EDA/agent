@@ -1,8 +1,11 @@
 version: 1
 name: ice40hx8k_bga_core
-power: [3V3, 1V2, GND]
-
 blocks:
+  supply:
+    components:
+      PWR1: {part: power:VCC, pins: {1: 3V3}}
+      PWR2: {part: power:VCC, pins: {1: 1V2}}
+      PWR3: {part: power:GND, pins: {1: GND}}
   power:
     components:
       # 3V3 I/O rail from a 5V input

@@ -1,8 +1,12 @@
 # Deliberate simplified SUBSET of the reference (omits some series resistors / components); used as a topology oracle, not a 1:1 reproduction.
 version: 1
 name: uart-level-translator
-power: [VCC3V3, VCCD, GNDD]
 blocks:
+  power:
+    components:
+      PWR1: {part: power:VCC, pins: {1: VCC3V3}}
+      PWR2: {part: power:VCC, pins: {1: VCCD}}
+      PWR3: {part: power:GND, pins: {1: GNDD}}
   uart:
     components:
       J1:

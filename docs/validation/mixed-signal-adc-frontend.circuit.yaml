@@ -1,13 +1,15 @@
 version: 1
 name: mixed_signal_adc_frontend
-power: [3V3, GND]
-
 # AIN / AIN_B are off-sheet analog input ports: a single on-sheet pin each
 # (the sensor enters from another sheet), so the single-pin lint is expected.
 lint:
   allow: [single-pin-net]
 
 blocks:
+  power:
+    components:
+      PWR1: {part: power:VCC, pins: {1: 3V3}}
+      PWR2: {part: power:GND, pins: {1: GND}}
   # ---- Analog front-end: dual op-amp (MCP6002, multi-UNIT symbol) ----
   # Unit A: non-inverting gain stage for sensor input AIN.
   # Unit B: unity-gain buffer for a second sensor input AIN_B.

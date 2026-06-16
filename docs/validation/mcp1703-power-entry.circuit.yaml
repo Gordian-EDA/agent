@@ -1,7 +1,11 @@
 version: 1
 name: mcp1703-power-entry
-power: [5V, 3V3, GND]
 blocks:
+  power:
+    components:
+      PWR1: {part: power:VCC, pins: {1: 5V}}
+      PWR2: {part: power:VCC, pins: {1: 3V3}}
+      PWR3: {part: power:GND, pins: {1: GND}}
   power_entry:
     components:
       F1: {part: Device:Polyfuse, value: Polyfuse, between: [5V_BUS, 5V]}

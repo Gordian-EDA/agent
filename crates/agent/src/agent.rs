@@ -787,7 +787,6 @@ A design is ONE YAML document with this shape:
 
   version: 1                 # required, always 1
   name: my_board             # optional design name
-  power: [3V3, GND, VBUS]    # optional: declare power/ground nets (see Sugar)
   layout:                    # optional 2D placement grid (see Layout)
     - [usb, mcu, headers]    #   row 0, left -> right
     - [~,   power]           #   row 1; ~ is an empty cell
@@ -856,8 +855,15 @@ layout. For a board with a real floorplan, the top-level `layout:` is a 2D grid:
 
 ## Sugar (shorthands the compiler expands)
 
-- `power: [3V3, GND]` — declares these nets as power/ground rails. Use it so the
-  schematic gets proper power symbols.
+- Power & ground symbols are ordinary COMPONENTS — give a `power:Lib` part a
+  single pin tied to the net it drives, and every net touched by such a symbol
+  becomes a power/ground rail (the engine draws the symbols and rail wiring):
+      GND1: { part: power:GND, pins: { 1: GND } }
+      VCC1: { part: power:VCC, pins: { 1: 3V3 } }
+  Declare as many as you like (GND1, GND2, … to keep wiring local). KiCAD's
+  `power:` library is rich — `power:GND`, `power:VCC`, `power:+3V3`, `power:+5V`,
+  `power:VBUS`, etc. A rail is implied by fan-out: if VCC1 feeds R1, R2, R3 the
+  engine runs a shared rail automatically — no explicit command needed.
 - `between: [NET_A, NET_B]` — for a SYMMETRIC 2-pin part (R, C, L, fuse), wires
   its two pins to these nets in pin-number order. Replaces an explicit `pins:` map:
       R1: { part: R, value: 10k, between: [VBUS, GND] }

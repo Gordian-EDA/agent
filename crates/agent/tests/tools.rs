@@ -373,11 +373,11 @@ fn draft_lifecycle_create_edit_apply() {
     let yaml = "
 version: 1
 name: t
-power: [GND]
 blocks:
   a:
     components:
       R1: {part: Device:R, value: 1k, between: [N1, GND]}
+      PWR1: {part: power:GND, pins: {1: GND}}
 ";
 
     // edit before create -> structured error.
@@ -421,11 +421,11 @@ fn get_design_seeds_draft_from_lift_and_flags_staleness() {
     let yaml = "
 version: 1
 name: t
-power: [GND]
 blocks:
   a:
     components:
       R1: {part: Device:R, value: 1k, between: [N1, GND]}
+      PWR1: {part: power:GND, pins: {1: GND}}
 ";
     // Write a schematic with explicit yaml (no draft involved).
     tools.run("apply_design",
@@ -463,11 +463,11 @@ fn render_schematic_returns_png_and_image_path() {
     let yaml = "
 version: 1
 name: t
-power: [GND]
 blocks:
   a:
     components:
       R1: {part: Device:R, value: 1k, between: [N1, GND]}
+      PWR1: {part: power:GND, pins: {1: GND}}
 ";
     let applied = tools
         .run(
@@ -497,11 +497,11 @@ fn apply_design_surfaces_layout_warnings() {
     let yaml = "
 version: 1
 name: t
-power: [GND]
 blocks:
   a:
     components:
       R1: {part: Device:R, value: 1k, between: [N1, GND]}
+      PWR1: {part: power:GND, pins: {1: GND}}
 ";
     // Commit so a prior schematic exists for the re-apply below.
     let out = tools.run("apply_design",

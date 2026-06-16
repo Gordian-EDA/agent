@@ -78,6 +78,18 @@ impl MockSymbolProvider {
             "Device:LED",
             vec![("1", "K", Passive, 1), ("2", "A", Passive, 1)],
         );
+        // Power & ground symbols are ordinary single-pin components; their lone
+        // power-input pin carries the rail name. Cover the common library names.
+        for (id, net) in [
+            ("power:GND", "GND"),
+            ("power:VCC", "VCC"),
+            ("power:+3V3", "+3V3"),
+            ("power:+5V", "+5V"),
+            ("power:+12V", "+12V"),
+            ("power:VBUS", "VBUS"),
+        ] {
+            p.add(id, vec![("1", net, PowerInput, 1)]);
+        }
         p
     }
 }

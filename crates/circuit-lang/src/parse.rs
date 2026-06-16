@@ -107,15 +107,7 @@ impl Parser<'_> {
         let map = self.map_node(root, "top level")?;
         self.check_keys(
             map,
-            &[
-                "version",
-                "name",
-                "description",
-                "power",
-                "blocks",
-                "nets",
-                "lint",
-            ],
+            &["version", "name", "description", "blocks", "nets", "lint"],
             "top level",
         );
         // version: required, == 1
@@ -136,20 +128,6 @@ impl Parser<'_> {
             ..Default::default()
         };
 
-        if let Some(Node::Seq(items, _)) = Self::get(map, "power") {
-            for it in items {
-                if let Some(s) = self.scalar(it, "power entry") {
-                    self.check_net_name(&s, it.span());
-                    d.power.push((s, it.span()));
-                }
-            }
-        } else if let Some(n) = Self::get(map, "power") {
-            self.err(
-                "expected-seq",
-                "`power` must be a list of net names".into(),
-                n.span(),
-            );
-        }
 
         match Self::get(map, "blocks") {
             Some(n) => {
@@ -513,8 +491,11 @@ blocks:
         let src = "
 version: 1
 name: t
-power: [3V3, GND]
 blocks:
+  rails:
+    components:
+      PWR1: {part: power:VCC, pins: {1: 3V3}}
+      PWR2: {part: power:GND, pins: {1: GND}}
   main:
     note: power section
     layout:
@@ -535,7 +516,9 @@ nets:
         let (d, diags) = parse_str(src);
         assert!(!diags.has_errors(), "{:?}", diags);
         let d = d.unwrap();
-        assert_eq!(d.power.len(), 2);
+        // power symbols parse as ordinary components in their block
+        assert_eq!(d.blocks["rails"].components["PWR1"].part, "power:VCC");
+        assert_eq!(d.blocks["rails"].components["PWR2"].part, "power:GND");
         let b = &d.blocks["main"];
         // per-block layout grid: 2 rows, names preserved
         assert_eq!(b.layout.len(), 2);

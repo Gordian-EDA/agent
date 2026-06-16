@@ -1,8 +1,11 @@
 version: 1
 name: stm32h7_bluepill
-power: [3V3, GND, VBUS]
-
 blocks:
+  supply:
+    components:
+      PWR1: {part: power:VCC, pins: {1: 3V3}}
+      PWR2: {part: power:GND, pins: {1: GND}}
+      PWR3: {part: power:VCC, pins: {1: VBUS}}
   power:
     components:
       J1:

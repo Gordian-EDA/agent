@@ -1,12 +1,14 @@
 version: 1
 name: grid-demo
-power: [9V, GND]
-
 # Inter-block order (input left, blinker centre, output right) is inferred.
 # The `blinker` block carries a per-block `layout:` grid: U1 spans column 1
 # (repeated down it → floats within that band), the timing R-chain orders down
 # column 0 to its left, the CV cap sits top-right.
 blocks:
+  power:
+    components:
+      PWR1: {part: power:VCC, pins: {1: 9V}}
+      PWR2: {part: power:GND, pins: {1: GND}}
   input:
     components:
       J1: {part: Connector_Generic:Conn_01x02, pins: {1: 9V, 2: GND}}

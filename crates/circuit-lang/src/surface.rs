@@ -8,9 +8,6 @@ use indexmap::IndexMap;
 pub struct SurfaceDesign {
     pub name: Option<String>,
     pub description: Option<String>,
-    /// `power:` — the power/ground nets, with spans for diagnostics. The single
-    /// way to declare power (there is no longer a per-net `power: true`).
-    pub power: Vec<(String, Span)>,
     pub blocks: IndexMap<String, SurfaceBlock>,
     pub nets: IndexMap<String, SurfaceNet>,
     /// Lint codes suppressed via top-level `lint: {allow: [...]}`.
