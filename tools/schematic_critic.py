@@ -63,8 +63,16 @@ Defect classes to hunt, hardest-to-see first:
    Test before reporting: does the green segment cross the body WITHOUT ending at
    either of that part's two pins? If it ends at a pin, it is NOT this defect.
 
-2. dangling-pin: a pin stub or wire end that stops in empty space with no junction
-   dot and no connection — a component terminal left hanging.
+2. dangling-pin: a pin stub or wire end that stops in EMPTY SPACE with no junction
+   dot, no wire, and no symbol — a terminal left truly hanging.
+   CRUCIAL — these are CONNECTED and must NEVER be reported as dangling/floating:
+   • A pin (or short stub) ending at a POWER/GROUND SYMBOL — the small arrow, bar,
+     or inverted-triangle glyph labeled GND / VCC / +5V / +3V3 / VIN etc. That glyph
+     IS the connection: the pin is tied to that global rail.
+   • Two parts that connect ONLY through a shared rail (each has its own GND or VCC
+     symbol, with no direct green wire between them) — a global power net needs no
+     drawn wire. A decoupling cap whose top goes to a +5V symbol and an IC whose
+     power pin goes to its own +5V symbol ARE connected. Do not call either floating.
 
 3. text-overlap: a refdes/value/label text colliding with a wire, a body, or
    another text so they overlap or read as one run (e.g. a net label "GND" abutting
