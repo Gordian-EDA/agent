@@ -2779,6 +2779,20 @@ fn route_signal(
     port: Option<Side>,
     scene: &mut crate::route::RouteScene,
 ) -> io::Result<()> {
+    // For a single-pin port net the exit MUST follow the pin's real outward
+    // direction, not a name-based guess: a MOSFET gate faces left but the name
+    // heuristic ("HA" is not input-ish) picks Right, planting the port pennant
+    // 7.62 mm to the *right* of the pin — on the symbol body. The router then
+    // can't reach the body-side exit, the net splits, and the pin AND the exit
+    // each get a label (a local one ON the body plus the global pennant). Letting
+    // geometry choose the side sends the stub away from the body, keeping the net
+    // one component with a single, clean pennant. Multi-pin marked ports keep the
+    // name heuristic (their geometry is ambiguous).
+    let port = match port {
+        Some(_) if eps.len() == 1 => Some(dir_to_side(eps[0].1)),
+        other => other,
+    };
+
     // Terminals: real pins (with outward dir) + an optional virtual port exit.
     let mut terms: Vec<([f64; 2], Option<Dir>)> = eps.iter().map(|(p, d)| (*p, Some(*d))).collect();
     let port_idx = port.map(|side| {
@@ -2982,7 +2996,12 @@ fn route_local_tee(
 
 /// A virtual port-exit point just past the net's pin extent on `side`.
 fn port_exit_point(eps: &[([f64; 2], Dir)], side: Side) -> [f64; 2] {
-    const REACH: f64 = 7.62;
+    // A single-pin port (a gate / divider tap) needs only a short stub to seat its
+    // pennant clear of its own body; a long one would push the pennant into the
+    // NEXT symbol in a packed row (an h-bridge's four FETs at minimum pitch). A
+    // multi-pin port exits past the whole net's extent, so it keeps the longer
+    // reach to clear the last pin.
+    let reach: f64 = if eps.len() == 1 { 2.54 } else { 7.62 };
     let xs: Vec<f64> = eps.iter().map(|(p, _)| p[0]).collect();
     let ys: Vec<f64> = eps.iter().map(|(p, _)| p[1]).collect();
     let (min_x, max_x) = (xs.iter().cloned().fold(f64::MAX, f64::min), xs.iter().cloned().fold(f64::MIN, f64::max));
@@ -2991,19 +3010,19 @@ fn port_exit_point(eps: &[([f64; 2], Dir)], side: Side) -> [f64; 2] {
     match side {
         Side::Right => {
             let y = eps.iter().max_by(|a, b| a.0[0].total_cmp(&b.0[0])).map(|t| t.0[1]).unwrap_or(min_y);
-            [crate::grid::snap(max_x + REACH), y]
+            [crate::grid::snap(max_x + reach), y]
         }
         Side::Left => {
             let y = eps.iter().min_by(|a, b| a.0[0].total_cmp(&b.0[0])).map(|t| t.0[1]).unwrap_or(min_y);
-            [crate::grid::snap(min_x - REACH), y]
+            [crate::grid::snap(min_x - reach), y]
         }
         Side::Top => {
             let x = eps.iter().min_by(|a, b| a.0[1].total_cmp(&b.0[1])).map(|t| t.0[0]).unwrap_or(min_x);
-            [x, crate::grid::snap(min_y - REACH)]
+            [x, crate::grid::snap(min_y - reach)]
         }
         Side::Bottom => {
             let x = eps.iter().max_by(|a, b| a.0[1].total_cmp(&b.0[1])).map(|t| t.0[0]).unwrap_or(max_x);
-            [x, crate::grid::snap(max_y + REACH)]
+            [x, crate::grid::snap(max_y + reach)]
         }
     }
 }
@@ -3014,6 +3033,17 @@ fn side_dir(side: Side) -> Dir {
         Side::Left => Dir::West,
         Side::Top => Dir::North,
         Side::Bottom => Dir::South,
+    }
+}
+
+/// The sheet edge a pin facing `dir` exits toward — the inverse of [`side_dir`].
+/// Used so a single-pin port's exit follows the pin's real orientation.
+fn dir_to_side(dir: Dir) -> Side {
+    match dir {
+        Dir::East => Side::Right,
+        Dir::West => Side::Left,
+        Dir::North => Side::Top,
+        Dir::South => Side::Bottom,
     }
 }
 
@@ -3360,6 +3390,27 @@ mod grid_tests {
         let mut design = Design::default();
         design.blocks.insert("main".into(), block(&["U1", "R1"], Vec::new()));
         assert!(grid_from_layout(&design).is_empty());
+    }
+
+    #[test]
+    fn dir_to_side_inverts_side_dir() {
+        for s in [Side::Left, Side::Right, Side::Top, Side::Bottom] {
+            assert_eq!(dir_to_side(side_dir(s)), s);
+        }
+    }
+
+    #[test]
+    fn single_pin_port_exit_follows_pin_with_short_reach() {
+        // The h-bridge regression: a lone WEST-facing gate pin must seat its port
+        // pennant on a SHORT stub to its own side (clear of its body and of the
+        // next symbol in a packed row), NOT the long multi-pin reach.
+        let west = [([20.0, 0.0], Dir::West)];
+        assert_eq!(port_exit_point(&west, Side::Left), [crate::grid::snap(20.0 - 2.54), 0.0]);
+        let east = [([20.0, 0.0], Dir::East)];
+        assert_eq!(port_exit_point(&east, Side::Right), [crate::grid::snap(20.0 + 2.54), 0.0]);
+        // A multi-pin port keeps the longer reach so it clears the last pin.
+        let two = [([20.0, 0.0], Dir::East), ([24.0, 0.0], Dir::East)];
+        assert_eq!(port_exit_point(&two, Side::Right), [crate::grid::snap(24.0 + 7.62), 0.0]);
     }
 }
 

@@ -22,6 +22,10 @@ const TARGETS: &[&str] = &[
     "555-blinker",
     "uart-level-translator",
     "grid-demo",
+    // Regression guard for single-pin ports whose pin direction DISAGREES with the
+    // name heuristic (MOSFET gates HA/LA/HB/LB face left but aren't input-named):
+    // the port pennant must follow the pin, not land on the transistor body.
+    "hbridge-nmos",
 ];
 
 fn doc(name: &str, ext: &str) -> PathBuf {
