@@ -10,8 +10,7 @@
 //! ## Why the structure is exactly this shape
 //!
 //! The S-expression layout below is the form proven (via `kicad-cli`) to load
-//! in KiCAD 10 by `crates/kicad-bridge/examples/emit_spike.rs`. The
-//! load-bearing details:
+//! in KiCAD. The load-bearing details:
 //!
 //! - **`(lib_symbols)` embedding.** Every distinct `lib_id` used contributes
 //!   one `(symbol "Lib:Name" …)` block, taken verbatim from
@@ -110,7 +109,7 @@ struct Instance {
 ///
 /// A label whose `(at …)` coincides with a pin endpoint binds that pin to the
 /// named net; two pins carrying labels with the same net name are joined by
-/// KiCAD with no wires (proven in `emit_spike.rs`). The label uuid is derived
+/// KiCAD with no wires. The label uuid is derived
 /// from `(refdes, pin, net)` so re-emitting the same design is byte-identical.
 struct PinLabel {
     /// Net name (free-form; escaped at render time).
@@ -360,7 +359,7 @@ impl SchematicWriter {
     /// This is the connectivity mechanism: a label whose position coincides with
     /// a pin's sheet-space connection point binds that pin to the named net, and
     /// two pins carrying labels with the *same* net name are joined by KiCAD with
-    /// no wires (proven in `crates/kicad-bridge/examples/emit_spike.rs`). Power
+    /// no wires. Power
     /// nets get plain labels too — they suffice for ERC connectivity; power
     /// symbols are an optional later enhancement.
     ///
@@ -1737,9 +1736,8 @@ pub(crate) fn transform_offset(local: [f64; 2], angle: f64, mirror: bool) -> [f6
 /// — the tip where wires/labels attach — and the pin line extends `length` mm
 /// *into the symbol body* along `angle`. So the connection point is exactly the
 /// pin's local `at`; no `length` projection is applied (projecting by `length`
-/// would land inside the body, off the connection). This matches the proven
-/// `emit_spike.rs`, where Device:R pin 1 at local `(0, 3.81)` maps to sheet
-/// `(inst_x, inst_y - 3.81)`.
+/// would land inside the body, off the connection). E.g. Device:R pin 1 at local
+/// `(0, 3.81)` maps to sheet `(inst_x, inst_y - 3.81)`.
 ///
 /// ## The transform (symbol space → sheet space)
 ///

@@ -1,7 +1,6 @@
 //! Floorplan engine — human-style schematic layout from a minimal Layout IR.
 //!
-//! Layer 2 of the two-layer design (see
-//! `docs/superpowers/specs/2026-06-13-floorplan-engine-design.md`). Given a
+//! Layer 2 of the two-layer design. Given a
 //! [`Design`] (connectivity only) plus a geometry-free [`LayoutIr`] (the
 //! *frame*: which nets are rails and their band, where the ICs go, which nets
 //! exit as ports, the global flow), it produces a complete `.kicad_sch` with:
@@ -666,11 +665,6 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     }
     let inc = incidence(&items);
 
-    if std::env::var("DEBUG_SIZE").is_ok() {
-        let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
-        eprintln!("SIZE items={} pins={} nets={}", items.len(), pins, inc.len());
-    }
-
     // Which power nets need an ERC PWR_FLAG: a power-INPUT pin (or a declared
     // rail) with no power-OUTPUT pin driving it is "undriven". Computed up front
     // so it can feed both the refinement scorer and the final emission.
@@ -683,18 +677,14 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     let cells = assign_cells(&items, ir);
     apply_cells(&mut items, &cells);
     normalize(&mut items);
-    if std::env::var("NO_REFINE").is_err() {
-        // Placement search behind the strategy interface (`PlacementStrategy`):
-        // greedy by default (free tier), simulated annealing opt-in (paid tier).
-        // Both mutate `items` in mm; selection is the one `pick_strategy` factory.
-        pick_strategy().search(env, &mut items, &inc, ir, &needs_flag, SEARCH_SEED);
-    }
-    // Continuous-placement polish: iterate the directed slides (onto pin axes,
-    // toward the centroid) AND a free per-axis nudge to convergence — giving the
-    // continuous phase the freedom the column-centre cell table cannot express.
-    if std::env::var("NO_REFINE").is_err() {
-        polish(env, &mut items, &inc, ir, &needs_flag);
-    }
+    // Placement search behind the strategy interface (`PlacementStrategy`): greedy by
+    // default (free tier), simulated annealing opt-in (paid tier, `LAYOUT_SEARCH` /
+    // `ANNEAL`). Both mutate `items` in mm; selection is the one `pick_strategy` factory.
+    pick_strategy().search(env, &mut items, &inc, ir, &needs_flag, SEARCH_SEED);
+    // Continuous-placement polish: iterate the directed slides (onto pin axes, toward
+    // the centroid) AND a free per-axis nudge to convergence — giving the continuous
+    // phase the freedom the column-centre cell table cannot express.
+    polish(env, &mut items, &inc, ir, &needs_flag);
     // Guarantee no body overlap: the cost-gated refine can leave two parts
     // touching when separating them would transiently raise routed cost (a local
     // minimum), so a final, unconditional relaxation pushes any remaining
@@ -1095,28 +1085,11 @@ impl PlacementStrategy for Anneal {
             // Tie-break by the PREMIUM cost: among equally-clean candidates the SA
             // ships the tidier one (where its extra optimisation actually shows).
             let c = premium_score_items(env, &shipped, inc, ir, needs_flag);
-            if std::env::var("DEBUG_SA").is_ok() {
-                let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-                for it in &shipped {
-                    let r = item_rect(it, it.at);
-                    lo[0] = lo[0].min(r[0]); lo[1] = lo[1].min(r[1]);
-                    hi[0] = hi[0].max(r[2]); hi[1] = hi[1].max(r[3]);
-                }
-                let spread = (hi[0] - lo[0]) + (hi[1] - lo[1]);
-                let (body_xing, ic_xing) = crossing_counts(env, &shipped, inc, ir, needs_flag);
-                eprintln!(
-                    "SA cand k={k} warnings={w} premium_cost={c:.1} spread={spread:.0} \
-                     body_xing={body_xing} ic_xing={ic_xing}"
-                );
-            }
             if w < best_w || (w == best_w && c + 0.5 < best_c) {
                 best = k;
                 best_w = w;
                 best_c = c;
             }
-        }
-        if std::env::var("DEBUG_SA").is_ok() {
-            eprintln!("SA WINNER k={best} (0=greedy 1=seededA 2=broadB 3=PREMIUM)");
         }
         items.clone_from_slice(&candidates[best]);
     }
@@ -1375,9 +1348,9 @@ fn anneal_items(
             crate::grid::snap(at[1] + rng.step(n) as f64 * ROW_GAP),
         ]
     };
-    // NB: no "exit early once `best` plateaus for N iters" rule. Measured (DEBUG_SA
-    // max_gap) the largest plateau that is still FOLLOWED by a real improvement: up
-    // to 1154 iters on the 2000-iter broad run, 685 on a 750-iter seeded run. Every
+    // NB: no "exit early once `best` plateaus for N iters" rule. Measured the largest
+    // plateau that is still FOLLOWED by a real improvement: up to 1154 iters on the
+    // 2000-iter broad run, 685 on a 750-iter seeded run. Every
     // run's last improvement lands at 94-99% of its budget — the ~6x iteration cut
     // already removed the dead tail, so the search genuinely uses its whole budget.
     // A patience small enough to save time would cut those late improvements (a
@@ -2285,11 +2258,12 @@ const ORIENT_BOOST: f64 = 50.0;
 /// of `layout_cost` reads it, so the free path stays bit-identical.
 const COMPACT_BOOST: f64 = 2.0;
 
-/// DEBUG-only ground truth behind the visual "a wire runs through a part" complaint:
-/// `(2-pin transverse body crossings, IC body crossings)` for a placed item set.
-/// Mirrors the obstacle extraction in [`layout_cost`] (kept separate so the hot cost
-/// path stays untouched / bit-identical). Used by the `DEBUG_SA` trace to tell a real
-/// crossing from a vision-model false positive on a correctly-drawn series part.
+/// Ground truth behind the visual "a wire runs through a part" complaint:
+/// `(2-pin transverse + collinear body crossings, IC body crossings)` for a placed
+/// item set. Mirrors the obstacle extraction in [`layout_cost`] (kept separate so the
+/// hot cost path stays untouched). Surfaced on [`EmitOutput`] (`body_crossings` /
+/// `ic_crossings`) — authoritative for grounding a vision critic, which over-reports
+/// wire-through-body on correctly-drawn series parts and op-amp triangles.
 fn crossing_counts(
     env: &KicadEnv,
     items: &[Item],
@@ -3193,9 +3167,6 @@ fn plan_riser_offsets(
         for (rank, net) in nets.iter().enumerate() {
             let step = (rank / 2 + 1) as f64 * RAIL_LANE;
             let dx = if rank % 2 == 0 { step } else { -step };
-            if std::env::var("DEBUG_RAIL").is_ok() {
-                eprintln!("RISER-FAN col={col} net={net} dx={dx}");
-            }
             offsets.insert((net.clone(), *col), dx);
         }
     }

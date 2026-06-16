@@ -58,11 +58,14 @@ agent_design -- OUT.png "<prompt>"` (needs the OpenAI backend).
 
 CAVEAT — VLMs (this critic AND Read-tool sub-agents) systematically **over-report
 "wire through a component body"** on a correctly-drawn series/divider part (a
-vertical resistor with wires above and below it is normal, NOT a crossing). Always
-confirm a wire-through-body claim against ENGINE GROUND TRUTH before acting on it:
-`ANNEAL=1 DEBUG_SA=1 … layout_spike …` prints `body_xing`/`ic_xing` (the real
-`count_body_crossings` + `count_collinear_body_crossings` + `count_ic_body_crossings`
-counts). If the engine says 0, it's a critic false positive.
+vertical resistor with wires above and below it is normal, NOT a crossing) and on
+op-amp triangles / connectors. Always confirm against ENGINE GROUND TRUTH: the engine
+counts the actual crossings (`count_body_crossings` + `count_collinear_body_crossings`
++ `count_ic_body_crossings`) and surfaces them on `EmitOutput.body_crossings` /
+`.ic_crossings`, also returned as `wire_through_body` in the `apply_design` tool
+result. When that count is 0, pass `--engine-clean` to the critic so it suppresses the
+false positives (it also asserts the verified-complete netlist, killing dangling-pin
+FPs on faint GND glyphs).
 
 Gate every change on the netlist oracle
 (`cargo test --release -p sch-layout --test floorplan_netlist`) — a prettier
