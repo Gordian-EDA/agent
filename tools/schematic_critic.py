@@ -152,11 +152,16 @@ def main():
                 " attached SECOND — compare, but only report defects in the FIRST"
                 " (the one under review).")
     if args.engine_clean:
-        ctx += (" AUTHORITATIVE ENGINE GROUND TRUTH: a geometric analysis of the actual"
-                " wire and body coordinates confirms ZERO wires pass through any component"
-                " body (resistor, cap, IC, op-amp triangle, or connector). Therefore do NOT"
-                " report any wire-through-body defect — any such claim is a false positive."
-                " Judge only the OTHER defect classes.")
+        ctx += (" AUTHORITATIVE ENGINE GROUND TRUTH (geometric + netlist analysis of the"
+                " actual coordinates): (1) ZERO wires pass through any component body"
+                " (resistor, cap, IC, op-amp triangle, or connector); (2) the netlist is"
+                " verified COMPLETE — every component pin is electrically connected (to a"
+                " wire, a power/ground-symbol glyph at the pin, or a labelled global net)."
+                " Therefore do NOT report any wire-through-body OR dangling-pin defect — a"
+                " pin that appears to end in space is in fact terminating at a small"
+                " power-symbol glyph or a global label you may not see clearly; any such"
+                " claim is a false positive. Judge only the OTHER defect classes (orientation,"
+                " off-spine dog-legs, avoidable crossings, congestion, spacing, text overlap).")
     user_content.append({"type": "text", "text": ctx})
     user_content.append({"type": "image_url",
                          "image_url": {"url": f"data:image/png;base64,{b64_image(args.image)}"}})
