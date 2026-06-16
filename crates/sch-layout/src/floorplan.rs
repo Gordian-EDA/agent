@@ -1321,12 +1321,15 @@ fn anneal_items(
     // Iterations scale with part count; temperature cools linearly. T0 is set so an
     // early move that adds a crossing/junction (cost ~5) is readily accepted, while
     // a correctness failure (cost ~1000+) never is.
-    // Iterations scale with movable count. The old ceilings (4000 / 12000) did far
-    // more than a ≤~15-part search needs to converge — ~20k evals on a 12-sat board
-    // — so they're cut ~3x. SA on a handful of movables settles in hundreds, not
-    // thousands; the broad pass keeps a wider ceiling for its global restart.
+    // Iterations scale with movable count. Swept down empirically: 0.5x of the
+    // previous budget holds (fast 7/7, oneshot 0) with margin, 0.4x is the fragile
+    // edge, 0.3x breaks — and because the cooling schedule `t = t0·(1−it/iters)`
+    // makes the trajectory chaotic-sensitive to the EXACT count, the safe choice is
+    // the margin (0.5x), not the edge. These ceilings (750 / 2000) are ~6x fewer
+    // evals than the original 4000 / 12000; the mults are unchanged so the
+    // binding-ceiling fixtures get exactly the validated 0.5x count.
     let (mult, t0) = if broad { (700, 30.0) } else { (300, 12.0) };
-    let mut iters = (mult * sats.len()).clamp(500, if broad { 4000 } else { 1500 });
+    let mut iters = (mult * sats.len()).clamp(250, if broad { 2000 } else { 750 });
     // Large boards (100-pin / BGA): each `score_items` routes the WHOLE sheet, and
     // routing cost scales with PIN count (a 100-pin MCU is one item but 186 pins),
     // so the full iteration count runs into minutes. Cap total routing work so
