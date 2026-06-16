@@ -1364,6 +1364,13 @@ fn anneal_items(
             crate::grid::snap(at[1] + rng.step(n) as f64 * ROW_GAP),
         ]
     };
+    // NB: no "exit early once `best` plateaus for N iters" rule. Measured (DEBUG_SA
+    // max_gap) the largest plateau that is still FOLLOWED by a real improvement: up
+    // to 1154 iters on the 2000-iter broad run, 685 on a 750-iter seeded run. Every
+    // run's last improvement lands at 94-99% of its budget — the ~6x iteration cut
+    // already removed the dead tail, so the search genuinely uses its whole budget.
+    // A patience small enough to save time would cut those late improvements (a
+    // measured 555/uart/mcp tidiness regression); a safe patience saves ~nothing.
     for it in 0..iters {
         let t = (t0 * (1.0 - it as f64 / iters as f64)).max(0.05);
         // Snapshot the item(s) a move touches (at + angle) so it can be rolled back.
