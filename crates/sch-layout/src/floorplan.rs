@@ -2046,6 +2046,7 @@ fn layout_cost(
     // resistor, an input fuse). Penalising the wrong axis stops the router's
     // length-minimisation from flopping a series resistor vertical into an L-jog.
     let mut orient_viol = 0usize;
+    let mut leg_viol = 0usize;
     for it in items.iter().filter(|i| i.geom.pins.len() == 2) {
         // Classify by how many of its nets are rails (NOT by port presence — a
         // divider leg like [OUT, GND] touches a port AND a rail yet is still a
@@ -2091,6 +2092,29 @@ fn layout_cost(
                 let horizontal = (a[0] - b[0]).abs() > (a[1] - b[1]).abs();
                 if prefer_vertical == horizontal {
                     orient_viol += 1;
+                    // A 1-rail LEG (pull-up/down: prefer vertical, degree≥2 node) is
+                    // the RELIABLE branch — track it apart so the premium boost can
+                    // bite it without touching the heuristic 0-rail "series→horizontal"
+                    // rule, which the uart's legitimately-vertical 62R terminators trip.
+                    if rail_count == 1 {
+                        leg_viol += 1;
+                    }
+                } else if rail_count == 1 && prefer_vertical {
+                    // Correctly-VERTICAL 1-rail leg: also enforce the up/down DIRECTION.
+                    // The rail pin must sit on its band side — V+ UP (smaller y), GND
+                    // DOWN — so the power symbol hangs the right way; a flipped leg (a
+                    // +3V3 pull-up with the rail symbol at the BOTTOM) reads upside down.
+                    let net_of =
+                        |pn: &str| it.pins.iter().find(|(p, _, _)| p == pn).and_then(|(_, _, n)| n.as_deref());
+                    let n0_rail = net_of(n0).is_some_and(|n| ir.rails.contains_key(n));
+                    let rail = if n0_rail { net_of(n0) } else { net_of(n1) };
+                    if let Some(rn) = rail {
+                        let (rail_pos, other_pos) = if n0_rail { (a, b) } else { (b, a) };
+                        let rail_up = rail_pos[1] < other_pos[1] - EPS;
+                        if !is_ground(rn) != rail_up {
+                            leg_viol += 1;
+                        }
+                    }
                 }
             }
         }
@@ -2220,6 +2244,7 @@ fn layout_cost(
     // candidate) caps it — premium can never ship more warnings than greedy.
     if premium {
         base + COMPACT_BOOST * (0.15 * length + 0.45 * spread)
+            + ORIENT_BOOST * leg_viol as f64
     } else {
         base
     }
@@ -2229,6 +2254,19 @@ fn layout_cost(
     // from the ROUTER drawing through a body, not from placement, so a heavier
     // placement penalty only inflates cost. A real fix belongs in route-around logic.
 }
+
+/// Extra PREMIUM-tier weight on orientation violations, on TOP of the shared base
+/// (12). A 1-rail leg (pull-up/down) or 2-rail decoupling tap wants to be VERTICAL;
+/// in an IC-LESS circuit the base 12 loses to length/spread and the SA ships a
+/// HORIZONTAL pull-up, which drags the rail's power-symbol label alongside the part's
+/// value text ("10k 3V3" — the collision the user flagged). The paid tier prices the
+/// violation hard enough to flip it. Premium-only so the free path stays bit-identical
+/// (snapshot unchanged). Bites ONLY rail_count=1 leg violations (`leg_viol`): the
+/// references ship 0 of those in their final layouts, and the uart's vertical 62R
+/// series terminators are rail_count=0 so they're untouched — verified the uart's
+/// premium winner is unchanged at boost 0..200, while a synthetic IC-less pull-up
+/// flips horizontal→vertical at 50.
+const ORIENT_BOOST: f64 = 50.0;
 
 /// Extra weight the PREMIUM tier puts on compactness (length+spread), on TOP of the
 /// base 1x, so the paid SA's straightness pull (`neat`=3x) can't win by spreading
