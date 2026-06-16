@@ -1096,7 +1096,11 @@ impl PlacementStrategy for Anneal {
                     hi[0] = hi[0].max(r[2]); hi[1] = hi[1].max(r[3]);
                 }
                 let spread = (hi[0] - lo[0]) + (hi[1] - lo[1]);
-                eprintln!("SA cand k={k} warnings={w} premium_cost={c:.1} spread={spread:.0}");
+                let (body_xing, ic_xing) = crossing_counts(env, &shipped, inc, ir, needs_flag);
+                eprintln!(
+                    "SA cand k={k} warnings={w} premium_cost={c:.1} spread={spread:.0} \
+                     body_xing={body_xing} ic_xing={ic_xing}"
+                );
             }
             if w < best_w || (w == best_w && c + 0.5 < best_c) {
                 best = k;
@@ -1832,6 +1836,45 @@ fn count_body_crossings(
     n
 }
 
+/// Wires that run straight THROUGH a 2-pin part COLLINEARLY — a segment on the
+/// part's own pin-to-pin axis that extends strictly BEYOND both pins, i.e. it
+/// enters one side, slices across the body (and the near pin, a foreign net), and
+/// exits the far side. The classic case [`count_body_crossings`] misses: a rail
+/// wire reaching a part's FAR pin by going straight through the part instead of
+/// approaching from that pin's side (the NE555's GND pin dropping through the LED to
+/// the ground rail). A series part's own leads STOP at a pin — never span beyond
+/// both — so this never fires on a correctly-drawn in-line resistor/cap.
+fn count_collinear_body_crossings(
+    bodies: &[([f64; 2], [f64; 2])],
+    wires: &[([f64; 2], [f64; 2], Option<String>)],
+) -> usize {
+    let mut n = 0;
+    for (a, b) in bodies {
+        if (a[0] - b[0]).abs() < EPS && (a[1] - b[1]).abs() < EPS {
+            continue;
+        }
+        let bh = (a[1] - b[1]).abs() < EPS; // horizontal part (pins differ in x)?
+        let axis = if bh { 0 } else { 1 };
+        let (plo, phi) = (a[axis].min(b[axis]), a[axis].max(b[axis]));
+        for (w1, w2, _) in wires {
+            let wh = (w1[1] - w2[1]).abs() < EPS;
+            if bh != wh {
+                continue; // need a PARALLEL wire (the collinear candidate)
+            }
+            // ...on the SAME line as the body axis (matching perpendicular coord).
+            let perp = if bh { 1 } else { 0 };
+            if (w1[perp] - a[perp]).abs() > EPS {
+                continue;
+            }
+            let (wlo, whi) = (w1[axis].min(w2[axis]), w1[axis].max(w2[axis]));
+            if wlo < plo - EPS && whi > phi + EPS {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 /// Wires routed straight THROUGH an IC (3+ pin) body rectangle — the package
 /// equivalent of [`count_body_crossings`] (which only handles a 2-pin part's
 /// pin-to-pin axis). A foreign net's segment drawn across the chip box, over its
@@ -1992,8 +2035,9 @@ fn layout_cost(
             any.then(|| [lo[0] + 2.0, lo[1] + 2.0, hi[0] - 2.0, hi[1] - 2.0])
         })
         .collect();
-    let body_cross =
-        count_body_crossings(&bodies, &wires) + count_ic_body_crossings(&ic_rects, &wires);
+    let body_cross = count_body_crossings(&bodies, &wires)
+        + count_collinear_body_crossings(&bodies, &wires)
+        + count_ic_body_crossings(&ic_rects, &wires);
     let stray = count_stray(env, w, items, inc, ir);
     // Orientation convention: a draughtsman runs a 2-pin part VERTICAL when it
     // bridges a rail and an internal node (a pull-up/down, a divider leg, a
@@ -2179,6 +2223,11 @@ fn layout_cost(
     } else {
         base
     }
+    // NB: a premium body-cross BOOST was tried and dropped — on the uart (the only
+    // reference that ships crossings) body_xing stayed at 2 from boost 0 to 1000:
+    // the SA's move set can't reach a crossing-free layout and the crossings come
+    // from the ROUTER drawing through a body, not from placement, so a heavier
+    // placement penalty only inflates cost. A real fix belongs in route-around logic.
 }
 
 /// Extra weight the PREMIUM tier puts on compactness (length+spread), on TOP of the
@@ -2190,6 +2239,62 @@ fn layout_cost(
 /// clear of the over-tight edge (boost 4 destabilises uart). Only the premium branch
 /// of `layout_cost` reads it, so the free path stays bit-identical.
 const COMPACT_BOOST: f64 = 2.0;
+
+/// DEBUG-only ground truth behind the visual "a wire runs through a part" complaint:
+/// `(2-pin transverse body crossings, IC body crossings)` for a placed item set.
+/// Mirrors the obstacle extraction in [`layout_cost`] (kept separate so the hot cost
+/// path stays untouched / bit-identical). Used by the `DEBUG_SA` trace to tell a real
+/// crossing from a vision-model false positive on a correctly-drawn series part.
+fn crossing_counts(
+    env: &KicadEnv,
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+) -> (usize, usize) {
+    let Ok(w) = build_writer(env, None, items, inc, ir, needs_flag, false) else {
+        return (0, 0);
+    };
+    let wires = w.wires_with_nets();
+    let bodies: Vec<([f64; 2], [f64; 2])> = items
+        .iter()
+        .filter(|i| i.geom.pins.len() == 2)
+        .filter_map(|it| {
+            let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
+            match (w.pin_dirs(env, &it.refdes, n0), w.pin_dirs(env, &it.refdes, n1)) {
+                (Ok(d0), Ok(d1)) => match (d0.first(), d1.first()) {
+                    (Some((a, _)), Some((b, _))) => Some((*a, *b)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        })
+        .collect();
+    let ic_rects: Vec<[f64; 4]> = items
+        .iter()
+        .filter(|it| it.geom.pins.len() >= 3)
+        .filter_map(|it| {
+            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+            let mut any = false;
+            for pg in &it.geom.pins {
+                if let Ok(d) = w.pin_dirs(env, &it.refdes, &pg.number) {
+                    if let Some((p, _)) = d.first() {
+                        lo[0] = lo[0].min(p[0]);
+                        lo[1] = lo[1].min(p[1]);
+                        hi[0] = hi[0].max(p[0]);
+                        hi[1] = hi[1].max(p[1]);
+                        any = true;
+                    }
+                }
+            }
+            any.then(|| [lo[0] + 2.0, lo[1] + 2.0, hi[0] - 2.0, hi[1] - 2.0])
+        })
+        .collect();
+    (
+        count_body_crossings(&bodies, &wires) + count_collinear_body_crossings(&bodies, &wires),
+        count_ic_body_crossings(&ic_rects, &wires),
+    )
+}
 
 /// Violations of the author's per-block `layout:` relative ordering (`ir.grid`).
 /// For each pair of gridded parts whose grid boxes are DISJOINT on an axis, the
@@ -3207,6 +3312,31 @@ mod grid_tests {
         // its column (repeated down it), so its box grows in the row axis.
         assert_eq!(g["U1"], [3, 0, 3, 1]);
         assert_eq!(g.len(), 3);
+    }
+
+    #[test]
+    fn collinear_body_crossing_fires_on_passthrough_not_on_series() {
+        // Vertical 2-pin part, pins at (10,0) (top) and (10,10) (bottom).
+        let body = vec![([10.0, 0.0], [10.0, 10.0])];
+        let w = |a: [f64; 2], b: [f64; 2]| (a, b, None);
+        // A wire on the SAME line (x=10) running from above the top pin to below the
+        // bottom pin slices straight THROUGH the part — 1 crossing.
+        assert_eq!(count_collinear_body_crossings(&body, &[w([10.0, -5.0], [10.0, 15.0])]), 1);
+        // A correctly-drawn series part: leads STOP at each pin (two segments, neither
+        // spanning beyond both pins) — 0.
+        assert_eq!(
+            count_collinear_body_crossings(
+                &body,
+                &[w([10.0, -5.0], [10.0, 0.0]), w([10.0, 10.0], [10.0, 15.0])],
+            ),
+            0
+        );
+        // A parallel wire on a DIFFERENT line (x=20) is not collinear — 0.
+        assert_eq!(count_collinear_body_crossings(&body, &[w([20.0, -5.0], [20.0, 15.0])]), 0);
+        // A PERPENDICULAR wire (handled by count_body_crossings, not this) — 0 here.
+        assert_eq!(count_collinear_body_crossings(&body, &[w([0.0, 5.0], [20.0, 5.0])]), 0);
+        // A wire reaching one pin from outside but stopping inside the body — 0.
+        assert_eq!(count_collinear_body_crossings(&body, &[w([10.0, -5.0], [10.0, 5.0])]), 0);
     }
 
     #[test]

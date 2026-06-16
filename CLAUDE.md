@@ -38,6 +38,32 @@ fresh, unbiased sub-agents instead:
    recurring high-impact ones, then **re-review**. Trust the review's defect
    **list** over your own eyeballing.
 
+### Automated VLM critic: `tools/schematic_critic.py`
+
+Prefer this over (or alongside) ad-hoc sub-agents for an OBJECTIVE, repeatable
+score. It sends a render to the OpenAI-gateway vision model with a tightly-scoped
+prompt and returns strict-JSON ranked defects + a 0-10 score; it exits nonzero on
+any critical/major so it can gate a loop.
+
+```
+set -a; . ./.env; set +a   # OPENAI_API_KEY / OPENAI_BASE_URL
+python3 tools/schematic_critic.py OURS.png [--reference REF.png] \
+        --circuit "one-line description of the intended circuit"
+```
+
+Use it to drive iteration: render (ANNEAL=1 for the premium path) → critic →
+fix the highest real defect → re-critic; aim for **consistently 9+** across varied
+circuits. Generate fresh circuits with `cargo run --release -p agent --example
+agent_design -- OUT.png "<prompt>"` (needs the OpenAI backend).
+
+CAVEAT — VLMs (this critic AND Read-tool sub-agents) systematically **over-report
+"wire through a component body"** on a correctly-drawn series/divider part (a
+vertical resistor with wires above and below it is normal, NOT a crossing). Always
+confirm a wire-through-body claim against ENGINE GROUND TRUTH before acting on it:
+`ANNEAL=1 DEBUG_SA=1 … layout_spike …` prints `body_xing`/`ic_xing` (the real
+`count_body_crossings` + `count_collinear_body_crossings` + `count_ic_body_crossings`
+counts). If the engine says 0, it's a critic false positive.
+
 Gate every change on the netlist oracle
 (`cargo test --release -p sch-layout --test floorplan_netlist`) — a prettier
 render that breaks connectivity is a regression.
