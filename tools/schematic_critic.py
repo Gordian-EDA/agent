@@ -58,6 +58,12 @@ Defect classes to hunt, hardest-to-see first:
      resistor — NOT a defect. A horizontal cap with wire on its left and right pins
      is NORMAL. The body bridging its own two collinear pins is how every series
      part is drawn.
+   • An OP-AMP / COMPARATOR / regulator drawn as a TRIANGLE: its V+ power pin exits
+     the TOP and its V- power pin exits the BOTTOM; vertical wires from those pins
+     going up (to a +V rail symbol) and down (to GND) are NORMAL power connections,
+     NOT wires through the body. The +/- input markers and the ">" inside the
+     triangle are symbol artwork, not wires. Only a wire crossing the triangle's
+     interior that is NOT one of its own pin connections counts.
    • A wire touching a pin at the body edge.
    • The dark-red artwork drawn INSIDE an IC rectangle.
    Test before reporting: does the green segment cross the body WITHOUT ending at
@@ -68,7 +74,11 @@ Defect classes to hunt, hardest-to-see first:
    CRUCIAL — these are CONNECTED and must NEVER be reported as dangling/floating:
    • A pin (or short stub) ending at a POWER/GROUND SYMBOL — the small arrow, bar,
      or inverted-triangle glyph labeled GND / VCC / +5V / +3V3 / VIN etc. That glyph
-     IS the connection: the pin is tied to that global rail.
+     IS the connection: the pin is tied to that global rail. These glyphs are SMALL
+     and easy to miss — before calling a pin dangling, look hard at its end for a tiny
+     triangle/bar/arrow; an LED cathode or cap pin ending in a small inverted-triangle
+     is GROUNDED, not floating. A nearby "GND"/"VCC" text label confirms the symbol
+     is there even if the glyph is faint.
    • Two parts that connect ONLY through a shared rail (each has its own GND or VCC
      symbol, with no direct green wire between them) — a global power net needs no
      drawn wire. A decoupling cap whose top goes to a +5V symbol and an IC whose
