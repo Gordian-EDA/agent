@@ -66,3 +66,33 @@ fn infer_ir_recognizes_crystal_and_decoupling_idioms() {
         "divider-filter has no idioms"
     );
 }
+
+/// Regression: the decoupling bank must still fire when the supply rail it sits on
+/// reaches a SECOND IC — the universal case of a regulator (U2, an AMS1117 LDO)
+/// feeding the MCU (U1) it decouples. A bypass cap's nets are BOTH rails (V+ and
+/// GND), and that V+ rail necessarily reaches the LDO too; an earlier guard dropped
+/// any cap whose net touched another IC, which collapsed the whole bank on every
+/// real LDO+MCU board and scattered the caps. Only a shared SIGNAL net should
+/// disqualify a cap, never a shared rail.
+#[test]
+fn decoupling_bank_survives_a_shared_rail_to_a_second_ic() {
+    let Some(env) = KicadEnv::detect() else {
+        eprintln!("no KiCAD environment; skipping idiom detection test");
+        return;
+    };
+    let provider = RealSymbolProvider::new(env.clone());
+    let design = compile_fixture(&provider, "idiom-stm32-ldo");
+    let ir = floorplan::infer_ir(&env, &design);
+
+    let deco = ir
+        .idioms
+        .iter()
+        .find(|i| i.kind == "decoupling")
+        .expect("decoupling bank still detected with an LDO on the same +3V3 rail");
+    assert_eq!(deco.anchor, "U1", "bank decouples the MCU, not the regulator");
+    assert!(
+        deco.parts.len() >= 3,
+        "the full bank survives the shared rail (>=3 caps): {:?}",
+        deco.parts
+    );
+}

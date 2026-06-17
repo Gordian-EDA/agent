@@ -646,7 +646,7 @@ fn detect_idioms(
                     .filter(|c| !claimed.contains(c))
                     .collect();
                 if let Some(cells) =
-                    place_decoupling(items, inc, anchors, anchor_col, anchor_row, ai, &caps, &out)
+                    place_decoupling(items, inc, anchors, rails, anchor_col, anchor_row, ai, &caps, &out)
                 {
                     claimed.extend(cells.iter().filter_map(|(rd, _)| get(rd)));
                     out.push(Idiom { kind: "decoupling", anchor: ai, cells, freeze: true });
@@ -691,6 +691,7 @@ fn place_decoupling(
     items: &[Item],
     inc: &Incidence,
     anchors: &[usize],
+    rails: &BTreeMap<String, Band>,
     anchor_col: &BTreeMap<usize, i32>,
     anchor_row: &BTreeMap<usize, i32>,
     ai: usize,
@@ -709,10 +710,17 @@ fn place_decoupling(
         if cn.len() != 2 {
             continue;
         }
+        // A shared POWER/GROUND RAIL reaching another IC is NORMAL — on any board with
+        // a regulator the V+ rail feeds both the LDO and the MCU it powers, and GND is
+        // universal — so a rail net must NOT disqualify a bypass cap (doing so dropped
+        // EVERY decoupling cap on a two-IC board, collapsing the bank below 3 and
+        // scattering it; the #1 defect on realistic LDO+MCU boards). Only a SIGNAL
+        // (non-rail) net reaching a different IC marks a cap as that IC's part.
         let touches_other_ic = cn.iter().any(|n| {
-            inc.get(*n).into_iter().flatten().any(|(j, _)| {
-                anchors.contains(j) && *j != ai && !items[*j].part.contains("Connector")
-            })
+            !rails.contains_key(*n)
+                && inc.get(*n).into_iter().flatten().any(|(j, _)| {
+                    anchors.contains(j) && *j != ai && !items[*j].part.contains("Connector")
+                })
         });
         if touches_other_ic {
             continue;
@@ -3313,7 +3321,10 @@ fn crossing_counts(
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
 ) -> (usize, usize) {
-    let Ok(w) = build_writer(env, None, items, inc, ir, needs_flag, false) else {
+    // Measure the SHIPPED geometry (`fan_risers = true`): the finalize riser jog
+    // clears trunk-through-body crossings, so the reported count must reflect the
+    // jogged sheet, not the raw per-move one.
+    let Ok(w) = build_writer(env, None, items, inc, ir, needs_flag, true) else {
         return (0, 0);
     };
     let wires = w.wires_with_nets();
@@ -3766,6 +3777,28 @@ fn wire(
     let riser_offsets =
         if fan_risers { plan_riser_offsets(&net_eps, ir, &rail_y_map) } else { BTreeMap::new() };
 
+    // 2-pin body segments (finalize-only, so the per-move scorer is untouched) so a
+    // rail riser can JOG around a part body it would otherwise be drawn straight
+    // through — the stacked same-rail cap column the SA can't always pull apart.
+    let bodies: Vec<([f64; 2], [f64; 2])> = if fan_risers {
+        items
+            .iter()
+            .filter(|it| it.geom.pins.len() == 2)
+            .filter_map(|it| {
+                let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
+                match (w.pin_dirs(env, &it.refdes, n0), w.pin_dirs(env, &it.refdes, n1)) {
+                    (Ok(d0), Ok(d1)) => match (d0.first(), d1.first()) {
+                        (Some((a, _)), Some((b, _))) => Some((*a, *b)),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // Phase A — rails (shared wires + stubs + power symbols), so their wires are
     // in the writer before we build the routing scene.
     for (net, eps) in &net_eps {
@@ -3774,7 +3807,7 @@ fn wire(
             // A net the author marked for DISTRIBUTED local grounds (≥2 power symbols)
             // suppresses its spanning rail (`rail_y = None` ⇒ one power symbol per pin).
             let rail_y = rail_y_map.get(net).copied().filter(|_| !ir.rail_locals.contains(net));
-            emit_rail(env, w, net, eps, *band, rail_y, flag, &riser_offsets)?;
+            emit_rail(env, w, net, eps, *band, rail_y, flag, &riser_offsets, &bodies)?;
         }
     }
 
@@ -4285,6 +4318,40 @@ fn power_lib_id(net: &str) -> String {
     format!("power:{alias}")
 }
 
+/// True if a vertical riser drawn at `x` spanning y∈[ylo,yhi] would pass through
+/// the CENTRAL body (past the pin stubs) of some 2-pin part — the case where a
+/// rail trunk's riser is drawn straight through a cap/resistor it does not connect
+/// to (a stacked same-rail cap column threads the upper cap's riser through the
+/// lower body; a mis-oriented cap threads its own). Mirrors the parallel/collinear/
+/// perpendicular body-crossing detectors so a jog that clears this also clears the
+/// counted crossing. Endpoint-only contact (the riser's own pin) is excluded by the
+/// PIN_STUB inset on the body span.
+fn riser_hits_body(x: f64, ylo: f64, yhi: f64, bodies: &[([f64; 2], [f64; 2])]) -> bool {
+    const PLATE_HALF: f64 = 1.4;
+    const PIN_STUB: f64 = 2.54;
+    for (a, b) in bodies {
+        if (a[0] - b[0]).abs() < EPS {
+            // Vertical part: a riser collinear/parallel within the plate width that
+            // spans the central body.
+            if (x - a[0]).abs() >= PLATE_HALF {
+                continue;
+            }
+            let (blo, bhi) = (a[1].min(b[1]) + PIN_STUB, a[1].max(b[1]) - PIN_STUB);
+            if bhi > blo + EPS && ylo < bhi - EPS && yhi > blo + EPS {
+                return true;
+            }
+        } else if (a[1] - b[1]).abs() < EPS {
+            // Horizontal part: a riser crossing it perpendicular, strictly inside
+            // the central span (its own connecting riser lands at a pin END → outside).
+            let (xlo, xhi) = (a[0].min(b[0]) + PIN_STUB, a[0].max(b[0]) - PIN_STUB);
+            if xhi > xlo + EPS && x > xlo + EPS && x < xhi - EPS && ylo < a[1] - EPS && yhi > a[1] + EPS {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// A rail: with ≥3 pins, draw a horizontal wire at `rail_y` spanning them, stub
 /// each pin to it, and put one power symbol at the left end. With fewer pins (or
 /// no common band), emit a per-pin power symbol instead (the clustered case,
@@ -4298,6 +4365,7 @@ fn emit_rail(
     rail_y: Option<f64>,
     flag: Option<&mut BTreeMap<String, ([f64; 2], f64)>>,
     riser_offsets: &BTreeMap<(String, i64), f64>,
+    bodies: &[([f64; 2], [f64; 2])],
 ) -> io::Result<()> {
     let lib = power_lib_id(net);
     let Some(rail_y) = rail_y.filter(|_| eps.len() >= 3) else {
@@ -4321,18 +4389,38 @@ fn emit_rail(
     // pins on that side (which would block their signals). On top of that, a riser
     // sharing a column with a different rail's overlapping riser gets fanned into
     // a separate lane (`riser_offsets`) so the two rails never merge into a short.
-    let attach_x = |ep: &[f64; 2], dir: &Dir| {
-        let base = riser_base_x(ep, *dir);
-        base + riser_offsets
-            .get(&(net.to_string(), col_key(base)))
-            .copied()
-            .unwrap_or(0.0)
-    };
-    let span_lo = eps.iter().map(|(p, d)| attach_x(p, d)).fold(f64::MAX, f64::min);
-    let span_hi = eps.iter().map(|(p, d)| attach_x(p, d)).fold(f64::MIN, f64::max);
+    // Final riser x per pin: the base column + any anti-short fan offset, THEN a
+    // finalize JOG one lane at a time off any part body the straight riser would be
+    // drawn through (a stacked same-rail cap column, or a mis-oriented cap whose own
+    // body sits between its pin and the rail). The riser then leads sideways out of
+    // the pin and descends in a clear lane — clearing both its own body and a
+    // neighbour's. `bodies` is empty on the per-move scorer (finalize-only), so the
+    // placement is never churned by this.
+    let attaches: Vec<f64> = eps
+        .iter()
+        .map(|(ep, dir)| {
+            let base = riser_base_x(ep, *dir);
+            let mut ax =
+                base + riser_offsets.get(&(net.to_string(), col_key(base))).copied().unwrap_or(0.0);
+            if !bodies.is_empty() {
+                let (rlo, rhi) = (ep[1].min(rail_y), ep[1].max(rail_y));
+                if riser_hits_body(ax, rlo, rhi, bodies) {
+                    if let Some(clear) = (1..=8)
+                        .flat_map(|k| [k as f64, -(k as f64)])
+                        .map(|m| ax + m * RAIL_LANE)
+                        .find(|&c| !riser_hits_body(c, rlo, rhi, bodies))
+                    {
+                        ax = clear;
+                    }
+                }
+            }
+            ax
+        })
+        .collect();
+    let span_lo = attaches.iter().copied().fold(f64::MAX, f64::min);
+    let span_hi = attaches.iter().copied().fold(f64::MIN, f64::max);
     w.add_wire_on_net([span_lo, rail_y], [span_hi, rail_y], net);
-    for (ep, dir) in eps {
-        let ax = attach_x(ep, dir);
+    for ((ep, _dir), &ax) in eps.iter().zip(&attaches) {
         if (ax - ep[0]).abs() > 1e-6 {
             w.add_wire_on_net(*ep, [ax, ep[1]], net); // lead out
         }
