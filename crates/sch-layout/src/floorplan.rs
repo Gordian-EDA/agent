@@ -733,11 +733,14 @@ fn place_decoupling(
     });
     // Past the right edge (crystal on the left) or past the left edge.
     let base = if crystal_l { 2 } else { -(n + 1) };
+    // One row above the IC's pin band (arow-1), not two: the IC renders tall, so an
+    // extra ordinal row leaves a wide empty gap between the bank and the power pins it
+    // serves; one row hugs it while still clearing the body.
     Some(
         bank.iter()
             .enumerate()
             .map(|(k, &ci)| {
-                let cell = Cell { col: acol + base + k as i32, row: arow - 2, orient: Orient::Down };
+                let cell = Cell { col: acol + base + k as i32, row: arow - 1, orient: Orient::Down };
                 (items[ci].refdes.clone(), cell)
             })
             .collect(),
