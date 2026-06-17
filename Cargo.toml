@@ -15,6 +15,7 @@ kiutils_kicad = "0.3"
 kiutils_sexpr = "0.1.1"
 strsim = "0.11"
 fuzzy-matcher = "0.3"
+rayon = "1"
 elsa = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

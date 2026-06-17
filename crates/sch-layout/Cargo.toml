@@ -10,6 +10,7 @@ kiutils_kicad.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
 indexmap.workspace = true
+rayon.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 

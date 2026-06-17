@@ -1045,50 +1045,67 @@ impl PlacementStrategy for Anneal {
         needs_flag: &BTreeSet<String>,
         seed: u64,
     ) {
+        use rayon::prelude::*;
         let seed_state: Vec<Item> = items.to_vec();
-        // Path A: greedy refine, then a seeded anneal from there. Keep the greedy
-        // result as its OWN candidate — the SA must never SHIP more layout
-        // warnings than greedy (the "SA regresses a tuned frame" trap).
-        refine_items(env, items, inc, ir, needs_flag);
-        let greedy_state: Vec<Item> = items.to_vec();
-        anneal_items(env, items, inc, ir, needs_flag, false, false, seed);
-        let state_a: Vec<Item> = items.to_vec();
-        // Path B: a broad anneal from the raw seed (a wider global search).
-        items.clone_from_slice(&seed_state);
-        anneal_items(env, items, inc, ir, needs_flag, true, false, seed);
-        let state_b: Vec<Item> = items.to_vec();
-        // Path C (PREMIUM): a seeded anneal from the greedy result optimising the
-        // richer straightness objective. Added as an EXTRA candidate — never
-        // replaces A/B — so the premium tier is strictly ≥ the base SA: it can only
-        // be picked when it is BOTH as clean AND tidier. (This is why a premium cost
-        // that perturbs the SA's trajectory can't lose us a warning-free find — the
-        // base runs still carry it.)
-        items.clone_from_slice(&greedy_state);
-        anneal_items(env, items, inc, ir, needs_flag, false, true, seed ^ 0x9E3779B97F4A7C15);
-        let state_c: Vec<Item> = items.to_vec();
-        // Pick the candidate with the FEWEST layout warnings (the quality metric
-        // the per-move cost can't afford — it needs the text solve), tie-broken by
-        // routed cost. Each candidate is measured THROUGH the same `polish` +
-        // `decongest` that `emit` runs after this search — those passes can add or
-        // clear a warning (e.g. decongest nudging a part into a neighbour's field
-        // text), so judging the raw pre-polish state would ship a worse layout than
-        // greedy. Cheap: a handful of passes at the END, never per-eval. Guarantees
-        // the SA ≥ greedy on a tuned (sidecar) frame while still winning on a loose
-        // (INFER) frame.
-        let candidates = [greedy_state, state_a, state_b, state_c];
+
+        // The greedy refine and all three anneals, scheduled to overlap on the
+        // critical path. Each anneal is fully seeded + independent, so the result is
+        // bit-for-bit identical to running them sequentially — only the wall time
+        // changes (this is the per-emit latency the paid tier pays). Dependency:
+        // Paths A (seeded) and C (premium) anneal FROM the greedy result, so they
+        // wait on the refine; Path B (a broad anneal from the raw seed) is
+        // independent, so it runs CONCURRENTLY with the refine instead of serializing
+        // the refine's ~1.5s ahead of the anneals. The candidate pick keeps greedy
+        // itself too, so the SA can never SHIP worse than greedy.
+        let mut state_a: Vec<Item> = Vec::new();
+        let mut state_b: Vec<Item> = seed_state;
+        let mut state_c: Vec<Item> = Vec::new();
+        let mut greedy_state: Vec<Item> = Vec::new();
+        rayon::scope(|s| {
+            // Path B: broad search from the raw seed — independent, start it now.
+            s.spawn(|_| anneal_items(env, &mut state_b, inc, ir, needs_flag, true, false, seed));
+            // Greedy refine on this thread, concurrently with B.
+            refine_items(env, items, inc, ir, needs_flag);
+            greedy_state = items.to_vec();
+            state_a = greedy_state.clone();
+            state_c = greedy_state.clone();
+            // Paths A and C anneal from the greedy result, in parallel with each
+            // other and with B (still on its spawned thread).
+            rayon::join(
+                || anneal_items(env, &mut state_a, inc, ir, needs_flag, false, false, seed),
+                || anneal_items(env, &mut state_c, inc, ir, needs_flag, false, true, seed ^ 0x9E3779B97F4A7C15),
+            );
+        });
+        let annealed = vec![state_a, state_b, state_c];
+
+        // Candidates: greedy + the three anneals (order fixed for a deterministic
+        // pick). Score each THROUGH the same `polish` + `decongest` that `emit` runs
+        // after this search (those passes can add/clear a warning, so judging the
+        // raw state would ship worse than greedy). The scoring is independent per
+        // candidate → parallel; the PICK is sequential + deterministic. The chosen
+        // RAW state is written back — emit re-polishes it (the loop's polish is
+        // throwaway, only to measure what would ship).
+        let mut candidates = vec![greedy_state];
+        candidates.extend(annealed);
+        let scored: Vec<(usize, f64)> = candidates
+            .par_iter()
+            .map(|cand| {
+                let mut shipped = cand.clone();
+                polish(env, &mut shipped, inc, ir, needs_flag);
+                decongest(&mut shipped);
+                let w = warning_count(env, &shipped, inc, ir, needs_flag);
+                let c = premium_score_with_w(env, &shipped, inc, ir, needs_flag, w);
+                (w, c)
+            })
+            .collect();
         let (mut best, mut best_w, mut best_c) = (0usize, usize::MAX, f64::INFINITY);
-        for (k, cand) in candidates.iter().enumerate() {
-            let mut shipped = cand.clone();
-            polish(env, &mut shipped, inc, ir, needs_flag);
-            decongest(&mut shipped);
-            let w = warning_count(env, &shipped, inc, ir, needs_flag);
+        for (k, (w, c)) in scored.iter().enumerate() {
             // Tie-break by the PREMIUM cost: among equally-clean candidates the SA
             // ships the tidier one (where its extra optimisation actually shows).
-            let c = premium_score_items(env, &shipped, inc, ir, needs_flag);
-            if w < best_w || (w == best_w && c + 0.5 < best_c) {
+            if *w < best_w || (*w == best_w && c + 0.5 < best_c) {
                 best = k;
-                best_w = w;
-                best_c = c;
+                best_w = *w;
+                best_c = *c;
             }
         }
         items.clone_from_slice(&candidates[best]);
@@ -1449,6 +1466,30 @@ fn premium_score_items(
     let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
     if pins <= 250 && inc.len() <= 40 {
         10_000.0 * warning_count(env, items, inc, ir, needs_flag) as f64 + aes
+    } else {
+        aes
+    }
+}
+
+/// `premium_score_items` when the caller ALREADY knows the shipped warning count
+/// `w` (the candidate pick computes it for the primary sort). Identical result,
+/// but skips the redundant second text-solving `warning_count` — the candidate
+/// evaluation was paying for two full text solves per candidate.
+fn premium_score_with_w(
+    env: &KicadEnv,
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+    w: usize,
+) -> f64 {
+    let aes = match build_writer(env, None, items, inc, ir, needs_flag, false) {
+        Ok(wr) => layout_cost(env, &wr, items, inc, ir, true),
+        Err(_) => return f64::INFINITY,
+    };
+    let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
+    if pins <= 250 && inc.len() <= 40 {
+        10_000.0 * w as f64 + aes
     } else {
         aes
     }
@@ -2752,6 +2793,13 @@ fn wire(
         for (p, _) in eps {
             scene.points.push((*p, net.clone()));
         }
+        // Reserve each port's pennant box up front so a LATER net's wire routes
+        // around it instead of straight through someone else's edge tag. The label
+        // is added during Phase C — too late to obstruct nets routed before it.
+        if let Some(side) = effective_port_side(ir.ports.get(net).copied(), eps) {
+            let at = port_exit_point(eps, side);
+            scene.label_solids.push((port_label_obstacle(at, side, net), net.clone()));
+        }
     }
 
     // Phase C — route every signal/port net with the direction-aware,
@@ -2779,19 +2827,10 @@ fn route_signal(
     port: Option<Side>,
     scene: &mut crate::route::RouteScene,
 ) -> io::Result<()> {
-    // For a single-pin port net the exit MUST follow the pin's real outward
-    // direction, not a name-based guess: a MOSFET gate faces left but the name
-    // heuristic ("HA" is not input-ish) picks Right, planting the port pennant
-    // 7.62 mm to the *right* of the pin — on the symbol body. The router then
-    // can't reach the body-side exit, the net splits, and the pin AND the exit
-    // each get a label (a local one ON the body plus the global pennant). Letting
-    // geometry choose the side sends the stub away from the body, keeping the net
-    // one component with a single, clean pennant. Multi-pin marked ports keep the
-    // name heuristic (their geometry is ambiguous).
-    let port = match port {
-        Some(_) if eps.len() == 1 => Some(dir_to_side(eps[0].1)),
-        other => other,
-    };
+    // A single-pin port follows its pin's real direction (see effective_port_side):
+    // a MOSFET gate faces left but the name heuristic would exit it right, onto the
+    // body. Multi-pin marked ports keep the name-inferred side.
+    let port = effective_port_side(port, eps);
 
     // Terminals: real pins (with outward dir) + an optional virtual port exit.
     let mut terms: Vec<([f64; 2], Option<Dir>)> = eps.iter().map(|(p, d)| (*p, Some(*d))).collect();
@@ -3044,6 +3083,34 @@ fn dir_to_side(dir: Dir) -> Side {
         Dir::West => Side::Left,
         Dir::North => Side::Top,
         Dir::South => Side::Bottom,
+    }
+}
+
+/// The sheet edge a port net actually exits toward. A SINGLE-pin port follows its
+/// pin's real direction (geometry beats the name heuristic that picks Left/Right
+/// from the net name); a multi-pin port keeps the name-inferred side from `ir.ports`.
+fn effective_port_side(port: Option<Side>, eps: &[([f64; 2], Dir)]) -> Option<Side> {
+    match port {
+        Some(_) if eps.len() == 1 => Some(dir_to_side(eps[0].1)),
+        other => other,
+    }
+}
+
+/// The box a port pennant occupies, for the router to keep FOREIGN wires out of it
+/// (a wire drawn across someone else's edge tag). Directional: the pennant + text
+/// extend OUTWARD from the exit anchor along `side`; `BACK` covers the connecting
+/// vertex that reaches slightly back toward the wire. `HALF` is the text half-height.
+fn port_label_obstacle(at: [f64; 2], side: Side, net: &str) -> [f64; 4] {
+    let w = crate::textplace::text_width(net) + 2.54;
+    const BACK: f64 = 1.27;
+    const HALF: f64 = 2.0;
+    match side {
+        Side::Left => [at[0] - w, at[1] - HALF, at[0] + BACK, at[1] + HALF],
+        Side::Right => [at[0] - BACK, at[1] - HALF, at[0] + w, at[1] + HALF],
+        // Top/Bottom pennants render rotated: text runs along y, so the long extent
+        // is vertical and the cross-extent is the text height.
+        Side::Top => [at[0] - HALF, at[1] - w, at[0] + HALF, at[1] + BACK],
+        Side::Bottom => [at[0] - HALF, at[1] - BACK, at[0] + HALF, at[1] + w],
     }
 }
 

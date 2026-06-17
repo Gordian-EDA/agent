@@ -1198,6 +1198,7 @@ impl SchematicWriter {
             solids: Vec::new(),
             points: Vec::new(),
             segments: Vec::new(),
+            label_solids: Vec::new(),
         };
         for inst in &self.instances {
             if inst.refdes.starts_with('#') {

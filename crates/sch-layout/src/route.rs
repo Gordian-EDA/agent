@@ -88,6 +88,12 @@ pub struct RouteScene {
     /// overlap, endpoint-on-segment — is forbidden; a strictly-interior
     /// perpendicular crossing is fine (KiCAD draws no connection there).
     pub segments: Vec<(Pt, Pt, String)>,
+    /// Port-label (global-tag pennant) boxes with their OWN net. A FOREIGN net's
+    /// wire may not pass through one — that draws a wire straight across someone
+    /// else's edge tag (the inverting-input net bisecting a VIN pennant). The
+    /// label's own net wire DOES reach it (the pennant connects there), so the
+    /// box is net-tagged rather than a solid.
+    pub label_solids: Vec<([f64; 4], String)>,
 }
 
 const EPS: f64 = 1e-6;
@@ -162,6 +168,13 @@ pub(crate) fn path_ok(path: &Path, net: &str, scene: &RouteScene) -> bool {
         {
             return false;
         }
+        if scene
+            .label_solids
+            .iter()
+            .any(|(r, n)| n != net && seg_hits_rect(a, b, r))
+        {
+            return false;
+        }
     }
     true
 }
@@ -198,6 +211,17 @@ pub fn route_edge(a: Pt, dir_a: Dir, b: Pt, net: &str, scene: &RouteScene) -> Op
     let mut xs: Vec<f64> = Vec::new();
     let mut ys: Vec<f64> = Vec::new();
     for r in &scene.solids {
+        xs.push(snap_dn(r[0] - CLEAR_MM));
+        xs.push(snap_up(r[2] + CLEAR_MM));
+        ys.push(snap_dn(r[1] - CLEAR_MM));
+        ys.push(snap_up(r[3] + CLEAR_MM));
+    }
+    // Detour lanes around foreign port-label boxes too, so a wire skirts a
+    // pennant instead of being rejected and falling back to a bare label.
+    for (r, n) in &scene.label_solids {
+        if n == net {
+            continue;
+        }
         xs.push(snap_dn(r[0] - CLEAR_MM));
         xs.push(snap_up(r[2] + CLEAR_MM));
         ys.push(snap_dn(r[1] - CLEAR_MM));
@@ -376,6 +400,7 @@ mod tests {
                 .into_iter()
                 .map(|(a, b, n)| (a, b, n.to_string()))
                 .collect(),
+            label_solids: Vec::new(),
         }
     }
 
@@ -430,6 +455,25 @@ mod tests {
         assert_eq!(p.last(), Some(&[12.7, 0.0]));
         // Deterministic.
         assert_eq!(p, route_edge([0.0, 0.0], Dir::East, [12.7, 0.0], "A", &s).unwrap());
+    }
+
+    #[test]
+    fn foreign_wire_detours_around_port_label_but_owner_passes() {
+        // A "VIN" port pennant box straddling a horizontal run at y=0.
+        let mut s = scene(vec![], vec![], vec![]);
+        s.label_solids = vec![([4.0, -3.0, 8.0, 3.0], "VIN".to_string())];
+        // A straight run THROUGH the box: rejected for a foreign net, fine for the owner.
+        let straight = vec![[0.0, 0.0], [12.0, 0.0]];
+        assert!(!path_ok(&straight, "FB", &s));
+        assert!(path_ok(&straight, "VIN", &s));
+        // route_edge: a foreign net detours and stays valid; the owner gets the
+        // straight elbow (its own pennant never blocks it).
+        let foreign = route_edge([0.0, 0.0], Dir::East, [12.0, 0.0], "FB", &s).unwrap();
+        assert!(path_ok(&foreign, "FB", &s));
+        assert_eq!(
+            route_edge([0.0, 0.0], Dir::East, [12.0, 0.0], "VIN", &s).unwrap(),
+            elbow([0.0, 0.0], Dir::East, [12.0, 0.0])
+        );
     }
 
     #[test]

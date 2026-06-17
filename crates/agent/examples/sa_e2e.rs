@@ -48,20 +48,25 @@ fn main() -> anyhow::Result<()> {
         args.iter().map(String::as_str).collect()
     };
 
-    println!("{:<30} {:>8} {:>8}", "fixture", "greedy", "anneal");
-    println!("{}", "-".repeat(48));
+    println!("{:<30} {:>8} {:>8} {:>10}", "fixture", "greedy", "anneal", "anneal_s");
+    println!("{}", "-".repeat(60));
     let (mut g_perfect, mut a_perfect) = (0, 0);
+    let mut slowest = 0.0_f64;
     for name in &names {
         // SAFETY: single-threaded example; pick_strategy reads this env in emit.
         unsafe { std::env::set_var("LAYOUT_SEARCH", "greedy") };
         let g = render(&env, &provider, name).map(|n| n.to_string()).unwrap_or_else(|e| format!("ERR:{e}"));
         unsafe { std::env::set_var("LAYOUT_SEARCH", "anneal") };
+        let t0 = std::time::Instant::now();
         let a = render(&env, &provider, name).map(|n| n.to_string()).unwrap_or_else(|e| format!("ERR:{e}"));
+        let secs = t0.elapsed().as_secs_f64();
+        slowest = slowest.max(secs);
         if g == "0" { g_perfect += 1; }
         if a == "0" { a_perfect += 1; }
-        println!("{name:<30} {g:>8} {a:>8}");
+        let flag = if secs > 5.0 { " !!>5s" } else { "" };
+        println!("{name:<30} {g:>8} {a:>8} {secs:>10.2}{flag}");
     }
-    println!("{}", "-".repeat(48));
-    println!("{:<30} {:>8} {:>8}", "0-warning fixtures", format!("{g_perfect}/{}", names.len()), format!("{a_perfect}/{}", names.len()));
+    println!("{}", "-".repeat(60));
+    println!("{:<30} {:>8} {:>8} {:>10.2}", "0-warn / slowest anneal_s", format!("{g_perfect}/{}", names.len()), format!("{a_perfect}/{}", names.len()), slowest);
     Ok(())
 }
