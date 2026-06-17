@@ -44,10 +44,18 @@ fn infer_ir_recognizes_crystal_and_decoupling_idioms() {
     assert_eq!(deco.anchor, "U1");
     assert!(deco.parts.len() >= 3, "decoupling bank >=3 caps: {:?}", deco.parts);
 
-    // Every idiom member is pinned (frozen) so the search ships the cluster intact.
+    // FROZEN idioms (crystal/decoupling) pin their members so the search ships the
+    // cluster intact; a REPORT-ONLY idiom (led_indicator) is recognized but flows
+    // through normal placement (tidied by an mm post-pass), so it is NOT frozen.
     for idiom in &ir.idioms {
+        let must_freeze = idiom.kind != "led_indicator";
         for p in &idiom.parts {
-            assert!(ir.frozen.contains(p), "idiom member {p} must be frozen");
+            assert_eq!(
+                ir.frozen.contains(p),
+                must_freeze,
+                "idiom {} member {p} frozen?",
+                idiom.kind
+            );
         }
     }
 

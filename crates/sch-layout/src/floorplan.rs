@@ -289,9 +289,11 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         if gridded {
             continue;
         }
-        for (rd, cell) in &idiom.cells {
-            place.insert(rd.clone(), *cell);
-            placed.insert(rd.clone());
+        if idiom.freeze {
+            for (rd, cell) in &idiom.cells {
+                place.insert(rd.clone(), *cell);
+                placed.insert(rd.clone());
+            }
         }
         idiom_reports.push(crate::output::IdiomReport {
             kind: idiom.kind.to_string(),
@@ -501,15 +503,19 @@ fn series_orient(
     }
 }
 
-/// A circuit idiom recognized purely from connectivity + symbol pin geometry, with
-/// its members' cells already assigned as a cohesive cluster. `infer_ir` writes the
-/// cells into `place` and marks the members placed (so the generic satellite loop
-/// skips them), and turns it into an [`crate::output::IdiomReport`] for the LLM.
+/// A circuit idiom recognized purely from connectivity + symbol pin geometry.
+/// `infer_ir` turns it into an [`crate::output::IdiomReport`] for the LLM. A FROZEN
+/// idiom also seeds its cells into `place` and pins its members; a REPORT-ONLY idiom
+/// (`!freeze`) lets the members flow through normal placement and is instead tidied by
+/// an mm post-pass in `emit` (e.g. a GPIO LED's resistor snapped below it).
 struct Idiom {
     kind: &'static str,
     anchor: usize,
-    /// (refdes, assigned cell) for every part in the cluster.
+    /// (refdes, assigned cell) for every member. Cells seed placement only when frozen;
+    /// the refdes list always feeds the report.
     cells: Vec<(String, Cell)>,
+    /// Pin the members and seed their cells (true), or just recognize them (false).
+    freeze: bool,
 }
 
 /// Project the placed parts into the pure [`circuit_graph::CircuitGraph`] the idiom
@@ -598,7 +604,7 @@ fn detect_idioms(
                 {
                     claimed.insert(yi);
                     claimed.extend(&caps);
-                    out.push(Idiom { kind: "crystal", anchor: ai, cells });
+                    out.push(Idiom { kind: "crystal", anchor: ai, cells, freeze: true });
                 }
             }
             "decoupling" => {
@@ -614,8 +620,27 @@ fn detect_idioms(
                     place_decoupling(items, inc, anchors, anchor_col, anchor_row, ai, &caps, &out)
                 {
                     claimed.extend(cells.iter().filter_map(|(rd, _)| get(rd)));
-                    out.push(Idiom { kind: "decoupling", anchor: ai, cells });
+                    out.push(Idiom { kind: "decoupling", anchor: ai, cells, freeze: true });
                 }
+            }
+            "led_indicator" => {
+                // Report-only: a GPIO LED taps its IC pin so normal placement seats it
+                // well; we just recognize the pair so the mm post-pass (`align_led_chain`)
+                // can snap the series resistor directly below the LED, clear of the body,
+                // rather than letting it drift to a spare column.
+                let Some(ri) = m.bindings.get("res").and_then(|v| v.first()).and_then(|r| get(r))
+                else {
+                    continue;
+                };
+                if claimed.contains(&ai) || claimed.contains(&ri) {
+                    continue;
+                }
+                out.push(Idiom {
+                    kind: "led_indicator",
+                    anchor: ai,
+                    cells: vec![(items[ri].refdes.clone(), Cell { col: 0, row: 0, orient: Orient::Down })],
+                    freeze: false,
+                });
             }
             _ => {}
         }
@@ -1110,6 +1135,14 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     if align_idiom_clusters(&mut items, ir) {
         decongest(&mut items);
     }
+    // Tidy each recognized (report-only) LED indicator: snap its series resistor into a
+    // clean vertical leg directly below the LED, so a GPIO indicator reads as one leg
+    // instead of the resistor drifting to a spare column. Runs on FINAL positions (the
+    // LED already seated by the search), so it never collides a frozen cluster; the
+    // follow-up decongest nudges anything the moved resistor now overlaps.
+    if align_led_chains(&mut items, ir) {
+        decongest(&mut items);
+    }
 
     let mut w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
     // Finalize geometry (text solve, wire split, reframe) BEFORE linting so the
@@ -1421,6 +1454,58 @@ fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
     }
     for (i, at) in moves {
         items[i].at = at;
+    }
+    moved
+}
+
+/// Snap each recognized LED indicator's series resistor into a clean vertical leg
+/// directly below the LED (a GPIO → LED → R → GND drop), instead of letting it sit in
+/// a spare column with a long node wire back to the LED. Runs on FINAL mm positions in
+/// `emit` (after the search has seated the LED), so it can't collide a frozen cluster;
+/// the caller re-runs `decongest` to nudge anything the moved resistor now overlaps.
+/// Returns true if it moved anything.
+fn align_led_chains(items: &mut [Item], ir: &LayoutIr) -> bool {
+    const DROP: f64 = 10.16; // LED half + gap + resistor half, on grid.
+    let snap = crate::grid::snap;
+    let mut moves: Vec<(usize, [f64; 2], f64)> = Vec::new();
+    for idiom in &ir.idioms {
+        if idiom.kind != "led_indicator" {
+            continue;
+        }
+        let Some(li) = items.iter().position(|it| it.refdes == idiom.anchor) else { continue };
+        let Some(res_rd) = idiom.parts.first() else { continue };
+        let Some(ri) = items.iter().position(|it| &it.refdes == res_rd) else { continue };
+        // The node the LED and resistor share (the LED cathode → resistor top).
+        let led_nets: Vec<String> = items[li].pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
+        let Some(shared) =
+            items[ri].pins.iter().filter_map(|(_, _, n)| n.clone()).find(|n| led_nets.contains(n))
+        else {
+            continue;
+        };
+        // Re-orient the LED VERTICAL too — cathode (the shared node) DOWN toward the
+        // resistor, anode UP toward the driving pin — so the LED and resistor read as one
+        // collinear series string rather than an L-bend (a horizontal LED over a vertical
+        // resistor). Keep the LED's position; only its angle changes.
+        let l_pin1 = items[li].pins.first().and_then(|p| p.2.clone());
+        let l_orient = if l_pin1.as_deref() == Some(shared.as_str()) { Orient::Up } else { Orient::Down };
+        let l_angle = orient_angle(&items[li].geom, l_orient);
+        moves.push((li, items[li].at, l_angle));
+        let at = [snap(items[li].at[0]), snap(items[li].at[1] + DROP)];
+        // Vertical, shared (cathode) pin UP toward the LED above, GND pin DOWN.
+        let r_pin1 = items[ri].pins.first().and_then(|p| p.2.clone());
+        let orient = if r_pin1.as_deref() == Some(shared.as_str()) { Orient::Down } else { Orient::Up };
+        let angle = orient_angle(&items[ri].geom, orient);
+        moves.push((ri, at, angle));
+    }
+    let moved = !moves.is_empty();
+    if std::env::var("IDIOM_DEBUG").is_ok() {
+        for (i, at, _) in &moves {
+            eprintln!("ALIGN-LED {} -> [{:.1},{:.1}]", items[*i].refdes, at[0], at[1]);
+        }
+    }
+    for (i, at, angle) in moves {
+        items[i].at = at;
+        items[i].angle = angle;
     }
     moved
 }

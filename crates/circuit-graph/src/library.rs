@@ -106,14 +106,15 @@ pub static LED_INDICATOR: Pattern = Pattern {
     min_score: 1.0,
 };
 
-/// The idioms the host **acts on** — freezes and co-places. Order matters only for
-/// cross-pattern claim tie-breaks (earlier wins).
+/// The idioms the host **acts on**. CRYSTAL/DECOUPLING freeze and co-place beside their
+/// IC; LED_INDICATOR is report-only — its resistor is snapped below the LED by an mm
+/// post-pass. Order matters only for cross-pattern claim tie-breaks (earlier wins).
 pub fn active_library() -> Vec<Pattern> {
-    vec![CRYSTAL.clone(), DECOUPLING.clone()]
+    vec![CRYSTAL.clone(), DECOUPLING.clone(), LED_INDICATOR.clone()]
 }
 
-/// Idioms defined and tested but not yet wired into placement. Adding one to the
-/// active set once it has a placement rule is a one-line change.
+/// Idioms defined and tested but not yet wired into the engine. Adding one to the
+/// active set is a one-line change.
 pub fn extended_library() -> Vec<Pattern> {
-    vec![RC_LOWPASS.clone(), LED_INDICATOR.clone()]
+    vec![RC_LOWPASS.clone()]
 }
