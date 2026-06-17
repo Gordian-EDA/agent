@@ -841,7 +841,12 @@ Each component is keyed by its refdes and has:
 ## Layout (optional placement grid)
 
 The engine places parts automatically from connectivity — you usually need NO
-layout. For a board with a real floorplan, the top-level `layout:` is a 2D grid:
+layout. It also AUTO-RECOGNIZES common idioms from your pin connections and
+co-places each as a tidy cluster — a crystal with its two load caps next to the
+oscillator pins, a decoupling-cap bank along the IC's power rail. You do nothing
+special: just wire the netlist normally (crystal between two osc nets, caps between
+V+ and GND). `apply_design` returns `detected_idioms` so you can confirm what was
+recognized. For a board with a real floorplan, the top-level `layout:` is a 2D grid:
 
   layout:
     - [usb, mcu, headers]   # row 0: usb left, mcu centre, headers right

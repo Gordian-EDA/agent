@@ -21,7 +21,9 @@ mod output;
 mod route;
 mod textplace;
 
-pub use output::{AP_BLOCK, AP_INDEX, AP_LAYOUT_REV, AP_PARENT, AP_ROLE, EmitOutput, ROLE_AUTHORED};
+pub use output::{
+    AP_BLOCK, AP_INDEX, AP_LAYOUT_REV, AP_PARENT, AP_ROLE, EmitOutput, IdiomReport, ROLE_AUTHORED,
+};
 
 /// Test support: read/rewrite a symbol's `(at x y angle)` in emitted text by
 /// locating the `(property "Reference" "<refdes>"` block's parent symbol.

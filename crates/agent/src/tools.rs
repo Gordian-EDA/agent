@@ -593,6 +593,11 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let rendered = emitted.sch;
     let diff = design_diff(prior_design.as_ref(), &design);
 
+    // Idioms the engine recognized + co-placed (crystal, decoupling, …), surfaced so
+    // the LLM can confirm the layout matched its intent — detection is automatic from
+    // the netlist, no new authoring syntax.
+    let detected_idioms = serde_json::to_value(&emitted.detected_idioms).unwrap_or(json!([]));
+
     if !commit {
         return Ok(json!({
             "ok": true,
@@ -602,6 +607,7 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
             "rendered_len": rendered.len(),
             "layout_warnings": emitted.layout_warnings,
             "wire_through_body": emitted.body_crossings + emitted.ic_crossings,
+            "detected_idioms": detected_idioms,
         }));
     }
 
@@ -635,6 +641,7 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         "erc": { "errors": erc.error_count(), "warnings": erc.warning_count() },
         "layout_warnings": emitted.layout_warnings,
         "wire_through_body": emitted.body_crossings + emitted.ic_crossings,
+        "detected_idioms": detected_idioms,
     }))
 }
 

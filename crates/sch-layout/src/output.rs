@@ -19,6 +19,20 @@ pub const AP_LAYOUT_REV: &str = "ap_layout_rev";
 /// The `ap_role` value written for authored components.
 pub const ROLE_AUTHORED: &str = "authored";
 
+/// A circuit idiom the engine RECOGNIZED purely from connectivity and co-placed as
+/// one cohesive cluster (a crystal+its load caps, a decoupling bank, an op-amp
+/// feedback resistor). Reported back so the LLM can confirm the layout matched its
+/// intent — detection needs NO new YAML syntax, only the netlist.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct IdiomReport {
+    /// `"crystal"` | `"decoupling"` | `"feedback"`.
+    pub kind: String,
+    /// The IC (anchor) refdes the cluster serves.
+    pub anchor: String,
+    /// The refdes of every part placed as part of this idiom.
+    pub parts: Vec<String>,
+}
+
 /// The rendered schematic plus deterministic readability findings.
 pub struct EmitOutput {
     /// The assembled `.kicad_sch` document text.
@@ -32,4 +46,7 @@ pub struct EmitOutput {
     pub body_crossings: usize,
     /// Ground-truth count of wires routed through an IC (3+ pin) package body.
     pub ic_crossings: usize,
+    /// Idioms the engine recognized + co-placed (crystal, decoupling, feedback),
+    /// surfaced to the agent loop via `apply_design`.
+    pub detected_idioms: Vec<IdiomReport>,
 }
