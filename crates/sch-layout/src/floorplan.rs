@@ -130,6 +130,14 @@ pub struct LayoutIr {
     /// pinned so their recognized arrangement ships intact.
     #[serde(default)]
     pub frozen: BTreeSet<String>,
+    /// Power nets the author wants drawn as DISTRIBUTED LOCAL grounds/supplies — one
+    /// power symbol per pin (the professional "drop a GND triangle at each pin" style)
+    /// — instead of one sheet-spanning rail. The signal is the author declaring ≥2
+    /// power symbols for the net (`GND1`, `GND2`, …); a board with one keeps the rail.
+    /// Tames the long-rail sprawl of a dense MCU. `#[serde(default)]` so sidecars (one
+    /// symbol per rail) deserialize empty and the tuned references stay rails.
+    #[serde(default)]
+    pub rail_locals: BTreeSet<String>,
 }
 
 impl LayoutIr {
@@ -160,7 +168,27 @@ pub fn baseline_ir(design: &Design) -> LayoutIr {
         grid: BTreeMap::new(),
         idioms: Vec::new(),
         frozen: BTreeSet::new(),
+        rail_locals: local_rail_nets(design),
     }
+}
+
+/// Power nets the author requested as DISTRIBUTED local grounds/supplies: those with
+/// ≥2 declared `power:` symbols (`GND1`, `GND2`, …). Counting the symbols across all
+/// blocks lets a designer opt a dense board out of one huge spanning rail.
+fn local_rail_nets(design: &Design) -> BTreeSet<String> {
+    let mut count: BTreeMap<String, usize> = BTreeMap::new();
+    for block in design.blocks.values() {
+        for comp in block.components.values() {
+            if comp.part.starts_with("power:") {
+                for target in comp.pins.values() {
+                    if let circuit_lang::model::PinTarget::Net(net) = target {
+                        *count.entry(net.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+    }
+    count.into_iter().filter(|(_, n)| *n >= 2).map(|(net, _)| net).collect()
 }
 
 /// Ground-like net name heuristic.
@@ -460,6 +488,7 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         grid: authored,
         idioms: idiom_reports,
         frozen: placed,
+        rail_locals: local_rail_nets(design),
     }
 }
 
@@ -3420,16 +3449,10 @@ fn wire(
     for (net, eps) in &net_eps {
         if let Some(band) = ir.rails.get(net) {
             let flag = needs_flag.contains(net).then_some(&mut *flag_points);
-            emit_rail(
-                env,
-                w,
-                net,
-                eps,
-                *band,
-                rail_y_map.get(net).copied(),
-                flag,
-                &riser_offsets,
-            )?;
+            // A net the author marked for DISTRIBUTED local grounds (≥2 power symbols)
+            // suppresses its spanning rail (`rail_y = None` ⇒ one power symbol per pin).
+            let rail_y = rail_y_map.get(net).copied().filter(|_| !ir.rail_locals.contains(net));
+            emit_rail(env, w, net, eps, *band, rail_y, flag, &riser_offsets)?;
         }
     }
 

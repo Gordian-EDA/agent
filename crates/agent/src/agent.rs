@@ -865,10 +865,16 @@ recognized. For a board with a real floorplan, the top-level `layout:` is a 2D g
   becomes a power/ground rail (the engine draws the symbols and rail wiring):
       GND1: { part: power:GND, pins: { 1: GND } }
       VCC1: { part: power:VCC, pins: { 1: 3V3 } }
-  Declare as many as you like (GND1, GND2, … to keep wiring local). KiCAD's
-  `power:` library is rich — `power:GND`, `power:VCC`, `power:+3V3`, `power:+5V`,
-  `power:VBUS`, etc. A rail is implied by fan-out: if VCC1 feeds R1, R2, R3 the
-  engine runs a shared rail automatically — no explicit command needed.
+  ONE symbol for a net draws a single shared rail. TWO OR MORE symbols for the SAME
+  net (GND1, GND2, GND3 …) tell the engine to DISTRIBUTE that net as LOCAL ground/
+  supply symbols — one little triangle dropped right at each pin — instead of one
+  sheet-spanning rail. This is how professionals draw a dense board: a long GND rail
+  with a dozen risers across the page reads as a tangle, so on any board with many
+  ground/supply pins (an MCU, an FPGA, a multi-IC board) declare SEVERAL GND (and V+)
+  symbols so the grounds stay local and the sheet stays legible. Small boards (a
+  divider, a single regulator) want just one symbol per rail. KiCAD's `power:` library
+  is rich — `power:GND`, `power:VCC`, `power:+3V3`, `power:+5V`, `power:VBUS`, etc. A
+  shared rail is implied by fan-out from a single symbol; several symbols distribute it.
 - `between: [NET_A, NET_B]` — for a SYMMETRIC 2-pin part (R, C, L, fuse), wires
   its two pins to these nets in pin-number order. Replaces an explicit `pins:` map:
       R1: { part: R, value: 10k, between: [VBUS, GND] }
