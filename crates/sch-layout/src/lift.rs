@@ -133,6 +133,10 @@ fn design_from_netlist(netlist: &kicad_bridge::cli::Netlist) -> Design {
 
     // Phase 2: connectivity. Each kept net contributes `pin -> Net(name)` to
     // every component it touches.
+    // Disambiguate any two distinct nets that fold to the SAME kernel name (only
+    // possible among auto-generated names whose sanitisation collides) so the net
+    // partition is preserved exactly — a merge would silently short two nets.
+    let mut used_names: std::collections::BTreeSet<String> = Default::default();
     for net in &netlist.nets {
         // Skip KiCAD's synthetic unconnected nets — they are this schematic's
         // no-connect markers, which `compile` re-derives. Keeping the YAML
@@ -140,7 +144,13 @@ fn design_from_netlist(netlist: &kicad_bridge::cli::Netlist) -> Design {
         if is_unconnected_net(&net.name) {
             continue;
         }
-        let net_name = kernel_net_name(&net.name);
+        let base = kernel_net_name(&net.name);
+        let mut net_name = base.clone();
+        let mut k = 2;
+        while !used_names.insert(net_name.clone()) {
+            net_name = format!("{base}_{k}");
+            k += 1;
+        }
         for (refdes, pin) in &net.nodes {
             let Some(bname) = locate.get(refdes) else {
                 continue; // node on a component we skipped (e.g. a flag)
@@ -198,13 +208,45 @@ fn is_unconnected_net(name: &str) -> bool {
     name.starts_with("unconnected-")
 }
 
-/// Strip KiCAD's sheet-path prefix from a net name (`/3V3` -> `3V3`).
+/// Strip KiCAD's sheet-path prefix from a net name (`/3V3` -> `3V3`) and fold
+/// any auto-generated name the kernel grammar would REJECT into a valid one.
 ///
-/// Top-sheet nets are reported as `/<label>`; the kernel uses the bare label.
-/// Auto-generated `Net-(..)` names are passed through unchanged (the kernel had
-/// no name for them either).
+/// Top-sheet nets are reported as `/<label>`; the kernel uses the bare label. A
+/// clean author label (`+5V`, `GND`, `RXD`) round-trips verbatim. But KiCAD
+/// auto-names an UNLABELED net after a pin function — `Net-(U1-XTAL1/PB6)`,
+/// `Net-(U1-~{RESET}/PC6)` — and those carry `/`, `~{}`, parens, which the kernel's
+/// net-name grammar rejects (`/` is reserved for hierarchy, spaces forbidden), so
+/// the lifted YAML would fail to recompile. Fold such names to a valid UPPER_SNAKE
+/// identifier: the exact spelling is irrelevant (the kernel never named this net
+/// either), only the PARTITION — caller dedups to keep distinct nets distinct.
 fn kernel_net_name(name: &str) -> String {
-    name.strip_prefix('/').unwrap_or(name).to_string()
+    let s = name.strip_prefix('/').unwrap_or(name);
+    let rejected =
+        |c: char| matches!(c, '/' | ' ' | '(' | ')' | '~' | '{' | '}') || c == '\t';
+    if s.starts_with("Net-(") || s.chars().any(rejected) {
+        let mut out = String::new();
+        let mut gap = false;
+        for c in s.chars() {
+            if c.is_ascii_alphanumeric() {
+                if gap && !out.is_empty() {
+                    out.push('_');
+                }
+                out.push(c.to_ascii_uppercase());
+                gap = false;
+            } else {
+                gap = true;
+            }
+        }
+        let out = out.trim_matches('_').to_string();
+        // Net names must start with a letter (UPPER_SNAKE).
+        if out.chars().next().map_or(true, |c| !c.is_ascii_alphabetic()) {
+            format!("N_{out}")
+        } else {
+            out
+        }
+    } else {
+        s.to_string()
+    }
 }
 
 /// A component's kernel value, or `None` when it has none.
@@ -242,10 +284,12 @@ mod tests {
     fn net_name_strips_only_leading_sheet_slash() {
         assert_eq!(kernel_net_name("/3V3"), "3V3");
         assert_eq!(kernel_net_name("USB_CC1"), "USB_CC1");
-        // A `Net-(..)` auto-name has no leading slash and is passed through.
-        assert_eq!(kernel_net_name("Net-(C1-Pad2)"), "Net-(C1-Pad2)");
-        // Only the first slash is stripped (sheet path), not interior ones.
-        assert_eq!(kernel_net_name("/sub/NET"), "sub/NET");
+        // A `Net-(..)` auto-name is folded to a valid UPPER_SNAKE identifier so the
+        // lifted YAML recompiles (see kernel_net_name_preserves_valid_and_folds...).
+        assert_eq!(kernel_net_name("Net-(C1-Pad2)"), "NET_C1_PAD2");
+        // The leading sheet slash is stripped; an interior slash is reserved by the
+        // grammar, so a sub-sheet path is folded rather than left to break recompile.
+        assert_eq!(kernel_net_name("/sub/NET"), "SUB_NET");
     }
 
     #[test]
@@ -260,6 +304,26 @@ mod tests {
         assert!(is_unconnected_net("unconnected-(J1-SBU1-PadA8)"));
         assert!(!is_unconnected_net("/GND"));
         assert!(!is_unconnected_net("Net-(C1-Pad2)"));
+    }
+
+    #[test]
+    fn kernel_net_name_preserves_valid_and_folds_auto_names() {
+        // Clean author labels round-trip verbatim (the sheet-path `/` is stripped).
+        assert_eq!(kernel_net_name("/GND"), "GND");
+        assert_eq!(kernel_net_name("+5V"), "+5V");
+        assert_eq!(kernel_net_name("RXD"), "RXD");
+        assert_eq!(kernel_net_name("I2C_SDA"), "I2C_SDA");
+        // KiCAD auto-names carry `/`, `~{}`, parens — the kernel grammar rejects
+        // those (the lifted YAML would fail to recompile). Fold to UPPER_SNAKE.
+        assert_eq!(kernel_net_name("Net-(U1-XTAL1/PB6)"), "NET_U1_XTAL1_PB6");
+        assert_eq!(kernel_net_name("Net-(U1-~{RESET}/PC6)"), "NET_U1_RESET_PC6");
+        assert_eq!(kernel_net_name("Net-(D1-A)"), "NET_D1_A");
+        // The folded names carry none of the grammar's hard-error characters.
+        for raw in ["Net-(U1-XTAL1/PB6)", "Net-(U1-~{RESET}/PC6)", "Net-(D1-A)"] {
+            let k = kernel_net_name(raw);
+            assert!(!k.contains('/') && !k.contains(' ') && !k.contains('('));
+            assert!(k.chars().next().unwrap().is_ascii_alphabetic());
+        }
     }
 
     #[test]
