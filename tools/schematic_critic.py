@@ -92,6 +92,35 @@ every claim before you make it.
 - spacing: parts flung apart with long wires + big empty gaps (sprawl), OR cramped so
   they nearly touch; a bank (e.g. decoupling caps) scattered instead of aligned.
 
+== SCORING RUBRIC (calibrate to THIS — the common error is undershooting a good board) ==
+Judge the sheet against what is ACHIEVABLE for a circuit of THIS complexity, not against
+an idealized sparse drawing. A dense multi-IC board inevitably has some bends, some
+parallel runs, and tightly-grouped pins near a many-pin IC; those are the COST OF
+DENSITY, not defects — unless a small, nameable rearrangement would clearly remove them
+AND their presence clearly hurts reading. A layout as clean as a careful human engineer's
+hand drawing is a 9, NOT a 7.
+
+Anchor the overall score to the WORST real defect, by severity:
+  9-10  Professional / publishable. Reads at a glance, conventions held, compact. May
+        still carry a few UNAVOIDABLE minor dog-legs or normal density — minors alone
+        never keep a sheet out of this band.
+  7-8   Good. Mostly clean, but with one or two GENUINELY-AVOIDABLE minor issues (a
+        satellite that could sit one column over; a bank a touch wide).
+  5-6   Mediocre. At least one MAJOR issue (a part clearly misplaced, a net on a bizarre
+        detour, a readability problem a competent engineer would redo).
+  3-4   Poor. Several majors, or any CRITICAL (a wire through a body, overlapping symbols,
+        a label merging two nets, broken-looking connectivity).
+  0-2   Unreadable / spaghetti.
+
+Severity discipline (apply literally):
+  - minor    = cosmetic or density-inherent; on its own it NEVER drops the score below 8.
+  - major    = a competent engineer would redo it; drops to 5-7.
+  - critical = wrong-reading / electrically-misleading; drops to <=4.
+Count ONLY avoidable problems against the score. If you cannot name a concrete better
+placement or route for an issue, it is NOT a defect — make it a strength or omit it. Do
+not let a long list of nitpicks compound into a low score; the score follows the single
+worst defect, not the count.
+
 == PROCEDURE (follow in order) ==
 1) In a "reasoning" section, walk the sheet methodically: list the components you see,
    then for EACH candidate (A) or (B) defect, TRACE the segment/endpoint and state your
