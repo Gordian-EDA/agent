@@ -1376,7 +1376,7 @@ fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
         }
         let (dl, dr, dt, db) = (mid[0] - lo[0], hi[0] - mid[0], mid[1] - lo[1], hi[1] - mid[1]);
         let m = dl.min(dr).min(dt).min(db);
-        let dir = if m == dl {
+        let dir: [f64; 2] = if m == dl {
             [-1.0, 0.0]
         } else if m == dr {
             [1.0, 0.0]
@@ -1385,14 +1385,31 @@ fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
         } else {
             [0.0, 1.0]
         };
+        // Unit vector perpendicular to `dir` (the edge the cluster runs ALONG).
+        let perp = [dir[1].abs(), dir[0].abs()];
+        // The crystal sits one gap out, centred between the two oscillator pins.
         moves.push((yi, [snap(mid[0] + dir[0] * GAP), snap(mid[1] + dir[1] * GAP)]));
+        // Each load cap sits two gaps out and a FULL gap to its osc pin's side of the
+        // midpoint, NOT at the osc-pin row itself: the pins are one 2.54 mm pitch apart
+        // but a cap is ~7.6 mm tall, so placing the caps at the pin rows overlaps them
+        // and the de-congest pass then jogs the whole cluster into a knot. Pushing each
+        // cap a gap off-centre gives 2·GAP of clearance — the textbook tidy block.
         for (net, w) in [(&onets[0], wa), (&onets[1], wb)] {
             if let Some(ci) = items.iter().position(|it| {
                 in_idiom(it)
                     && it.refdes != y_refdes
                     && it.pins.iter().any(|(_, _, n)| n.as_deref() == Some(net.as_str()))
             }) {
-                moves.push((ci, [snap(w[0] + dir[0] * GAP * 2.0), snap(w[1] + dir[1] * GAP * 2.0)]));
+                // Which side of the midpoint this osc pin lies on, along the edge.
+                let side = if dir[0] != 0.0 { (w[1] - mid[1]).signum() } else { (w[0] - mid[0]).signum() };
+                let side = if side == 0.0 { 1.0 } else { side };
+                moves.push((
+                    ci,
+                    [
+                        snap(mid[0] + dir[0] * GAP * 2.0 + perp[0] * side * GAP),
+                        snap(mid[1] + dir[1] * GAP * 2.0 + perp[1] * side * GAP),
+                    ],
+                ));
             }
         }
     }
@@ -1837,6 +1854,33 @@ fn anneal_items(
     if sats.is_empty() {
         return;
     }
+    // Cluster locality: each anchor's "block" is the satellites that tap it plus any
+    // idiom members it anchors. The block move (below) slides a whole functional unit
+    // (an IC and its decoupling/crystal/tap parts) as one rigid group — the GLOBAL
+    // structural move a per-part LOCAL search can't reach: nudging an anchor alone
+    // strands its satellites and is always rejected, so the search could never
+    // relocate a block. With the block following, the relative wiring is preserved
+    // and the move competes. Built once; includes frozen members so a recognized
+    // cluster travels intact.
+    let mut blocks: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for &si in &sats {
+        if let Some((ai, _, _)) = anchor_tap(items, inc, &anchors, si, &ir.rails) {
+            blocks.entry(ai).or_default().push(si);
+        }
+    }
+    for idiom in &ir.idioms {
+        if let Some(ai) = items.iter().position(|it| it.refdes == idiom.anchor) {
+            for part in &idiom.parts {
+                if let Some(mi) = items.iter().position(|it| &it.refdes == part) {
+                    blocks.entry(ai).or_default().push(mi);
+                }
+            }
+        }
+    }
+    for v in blocks.values_mut() {
+        v.sort_unstable();
+        v.dedup();
+    }
     let orients = [Orient::Up, Orient::Down, Orient::Left, Orient::Right];
     let mut rng = Rng(seed);
 
@@ -1907,11 +1951,23 @@ fn anneal_items(
             items[a].at = pb;
             items[b].at = pa;
         } else if !anchors.is_empty() {
-            // Nudge an anchor (an IC) by one cell — frees the whole block to slide,
-            // which a satellite-only search cannot do.
+            // Nudge an anchor (an IC) by one cell, carrying its whole BLOCK (the
+            // satellites that tap it + the idiom clusters it anchors) by the same
+            // delta — a coherent global slide of a functional unit. The rng draws
+            // match the old anchor-only nudge (anchor pick + relocate); only the
+            // block now follows, so the move is no longer self-defeating.
             let i = anchors[rng.below(anchors.len())];
-            undo = vec![(i, items[i].at, items[i].angle)];
-            items[i].at = relocate(&mut rng, items[i].at, 1);
+            let new = relocate(&mut rng, items[i].at, 1);
+            let d = [new[0] - items[i].at[0], new[1] - items[i].at[1]];
+            let mut group = vec![i];
+            if let Some(b) = blocks.get(&i) {
+                group.extend(b.iter().copied());
+            }
+            undo = group.iter().map(|&k| (k, items[k].at, items[k].angle)).collect();
+            for &k in &group {
+                items[k].at =
+                    [crate::grid::snap(items[k].at[0] + d[0]), crate::grid::snap(items[k].at[1] + d[1])];
+            }
         } else {
             continue;
         }
