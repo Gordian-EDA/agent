@@ -2615,6 +2615,49 @@ fn count_ic_body_crossings(
     n
 }
 
+/// Wires running PARALLEL to a 2-pin part, OFFSET inside its body but off the
+/// pin-to-pin centerline — the case [`count_body_crossings`] (perpendicular only)
+/// and [`count_collinear_body_crossings`] (on the centerline, beyond both pins) both
+/// miss. A 2-pin symbol body (a cap's plates, a resistor's rectangle) is ~3 mm wide,
+/// so a riser one 1.27 mm grid step off the part's axis still slices through the
+/// drawn body — exactly what a dense vertical-cap column produces. The part's OWN
+/// leads attach at the pin ENDS (outside the central body span), so a correctly
+/// drawn in-line part never fires.
+fn count_parallel_body_crossings(
+    bodies: &[([f64; 2], [f64; 2])],
+    wires: &[([f64; 2], [f64; 2], Option<String>)],
+) -> usize {
+    const PLATE_HALF: f64 = 1.4; // half the drawn 2-pin body width (catches a 1.27 mm offset)
+    const PIN_STUB: f64 = 2.54; // exclude the pin stubs at each end
+    let mut n = 0;
+    for (a, b) in bodies {
+        if (a[0] - b[0]).abs() < EPS && (a[1] - b[1]).abs() < EPS {
+            continue;
+        }
+        let bh = (a[1] - b[1]).abs() < EPS; // horizontal part?
+        let (axis, perp) = if bh { (0, 1) } else { (1, 0) };
+        let (plo, phi) = (a[axis].min(b[axis]), a[axis].max(b[axis]));
+        let (blo, bhi) = (plo + PIN_STUB, phi - PIN_STUB); // central body, past the stubs
+        if bhi <= blo + EPS {
+            continue;
+        }
+        for (w1, w2, _) in wires {
+            let wh = (w1[1] - w2[1]).abs() < EPS;
+            if bh != wh {
+                continue; // need a PARALLEL wire (perpendicular is count_body_crossings)
+            }
+            if (w1[perp] - a[perp]).abs() > PLATE_HALF - EPS {
+                continue; // outside the drawn body width
+            }
+            let (wlo, whi) = (w1[axis].min(w2[axis]), w1[axis].max(w2[axis]));
+            if wlo < bhi - EPS && whi > blo + EPS {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 /// Wire corners (L-bends): points where exactly two perpendicular same-net
 /// segments meet. Length alone treats a jiggly L-jog path and a straight run as
 /// equal; this penalises the BENDS, so the optimiser prefers straight drops and
@@ -2739,6 +2782,7 @@ fn layout_cost(
         .collect();
     let body_cross = count_body_crossings(&bodies, &wires)
         + count_collinear_body_crossings(&bodies, &wires)
+        + count_parallel_body_crossings(&bodies, &wires)
         + count_ic_body_crossings(&ic_rects, &wires);
     let stray = count_stray(env, w, items, inc, ir);
     // Orientation convention: a draughtsman runs a 2-pin part VERTICAL when it
@@ -3032,7 +3076,9 @@ fn crossing_counts(
         })
         .collect();
     (
-        count_body_crossings(&bodies, &wires) + count_collinear_body_crossings(&bodies, &wires),
+        count_body_crossings(&bodies, &wires)
+            + count_collinear_body_crossings(&bodies, &wires)
+            + count_parallel_body_crossings(&bodies, &wires),
         count_ic_body_crossings(&ic_rects, &wires),
     )
 }

@@ -1242,10 +1242,10 @@
 	)
 	(wire
 		(pts
-			(xy 110.49 76.2) (xy 110.49 71.12)
+			(xy 110.49 77.47) (xy 110.49 71.12)
 		)
 		(stroke (width 0) (type default))
-		(uuid "595160df-4c4a-5ef0-832c-a5ad0930df8e")
+		(uuid "5dbd1be0-2da5-587d-9273-14938a5aa60d")
 	)
 	(wire
 		(pts
@@ -1522,10 +1522,10 @@
 	)
 	(wire
 		(pts
-			(xy 102.87 59.690000000000005) (xy 102.87 76.2)
+			(xy 102.87 59.690000000000005) (xy 102.87 77.47)
 		)
 		(stroke (width 0) (type default))
-		(uuid "0ff221b4-fc4f-59e6-84ce-aa17e5d11b14")
+		(uuid "fa848fb7-86f8-5011-924c-52c0e6956f0a")
 	)
 	(junction
 		(at 109.22 20.32)
@@ -1947,7 +1947,7 @@
 	)
 	(symbol
 		(lib_id "Device:R")
-		(at 106.67999999999999 76.2 90)
+		(at 106.67999999999999 77.47 90)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -1955,15 +1955,15 @@
 		(dnp no)
 		(uuid "a4e7fa57-886c-5044-bcd8-8ae151f86590")
 		(property "Reference" "R13"
-			(at 106.68 67.94 270)
+			(at 106.68 69.21 270)
 			(effects (font (size 1.27 1.27)))
 		)
 		(property "Value" "62R"
-			(at 106.68 70.48 270)
+			(at 106.68 71.75 270)
 			(effects (font (size 1.27 1.27)))
 		)
 		(property "Footprint" ""
-			(at 106.67999999999999 76.2 0)
+			(at 106.67999999999999 77.47 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(instances
