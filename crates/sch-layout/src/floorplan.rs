@@ -2146,16 +2146,65 @@ fn build_anchor_blocks(
     blocks
 }
 
+/// For each satellite, the anchor PINS it should hug: its SIGNAL-net anchor pins
+/// (a pull-up belongs by the pin it pulls, not by the rail), falling back to its
+/// rail-net anchor pins only when it touches no signal anchor (a decoupling cap on
+/// two rails → the IC supply pin). Returned as `(sat_idx, [(anchor_idx, pin_geom_idx)])`
+/// so [`proxy_cost`] can recompute the live pin world position each move WITHOUT the
+/// router. This is the cheap mirror of [`count_stray`]: the true cost knows a satellite
+/// belongs by its pin, but the proxy did not — so the locality anneal never proposed
+/// pulling a far-flung pull-up (R1 on NRST + a wide V+ rail, whose net bbox dilutes the
+/// HPWL gradient) back to its pin. Precomputed once: which pins a part taps is fixed;
+/// only positions move.
+fn cohesion_targets(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> Vec<(usize, Vec<(usize, usize)>)> {
+    let is_anchor = |i: usize| items[i].geom.pins.len() >= 3;
+    let mut out = Vec::new();
+    for si in 0..items.len() {
+        if items[si].geom.pins.len() >= 3 || items[si].frozen {
+            continue;
+        }
+        let (mut sig, mut rail): (Vec<(usize, usize)>, Vec<(usize, usize)>) = (Vec::new(), Vec::new());
+        for (_, _, net) in &items[si].pins {
+            let Some(net) = net else { continue };
+            let is_rail = ir.rails.contains_key(net);
+            for (j, num) in inc.get(net).into_iter().flatten() {
+                if !is_anchor(*j) {
+                    continue;
+                }
+                if let Some(pgi) = items[*j].geom.pins.iter().position(|p| &p.number == num) {
+                    if is_rail {
+                        rail.push((*j, pgi));
+                    } else {
+                        sig.push((*j, pgi));
+                    }
+                }
+            }
+        }
+        let tgt = if !sig.is_empty() { sig } else { rail };
+        if !tgt.is_empty() {
+            out.push((si, tgt));
+        }
+    }
+    out
+}
+
 /// A cheap, routing-FREE geometric proxy for [`layout_cost`] — the per-move objective
 /// of the locality-aware anneal. The correctness wall (body overlaps, authored-grid
 /// order) stays EXACT, never approximated; wirelength is the per-net bounding-box
 /// half-perimeter (HPWL) over incident item centres — the standard placement-SA inner
-/// loop — and `spread` is the whole-board bbox. It omits the ROUTED neatness terms
-/// (crossings/corners/congestion/body-cross, which need the router); the
-/// `Anneal::search` candidate pick re-asserts the true routed cost + warnings on the
-/// result, so a proxy that ranks geometry can never SHIP a worse or untruthful sheet —
-/// it only proposes candidates the true cost then judges.
-fn proxy_cost(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> f64 {
+/// loop — `spread` is the whole-board bbox, and `cohere` is the per-satellite Manhattan
+/// distance to the anchor PIN it taps (the cheap mirror of [`count_stray`], so the inner
+/// loop pulls a far-flung pull-up back to its pin instead of leaving it stranded on a
+/// wide rail). It omits the ROUTED neatness terms (crossings/corners/congestion/
+/// body-cross, which need the router); the `Anneal::search` candidate pick re-asserts the
+/// true routed cost + warnings on the result, so a proxy that ranks geometry can never
+/// SHIP a worse or untruthful sheet — it only proposes candidates the true cost then judges.
+fn proxy_cost(
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    cohesion: &[(usize, Vec<(usize, usize)>)],
+) -> f64 {
     let overlaps = body_overlap_count(items);
     let grid_order = grid_order_viol(items, ir);
     let mut hpwl = 0.0;
@@ -2180,7 +2229,28 @@ fn proxy_cost(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> f64 {
         hi[1] = hi[1].max(it.at[1]);
     }
     let spread = if hi[0] >= lo[0] { (hi[0] - lo[0]) + (hi[1] - lo[1]) } else { 0.0 };
-    1500.0 * overlaps as f64 + 1200.0 * grid_order as f64 + 0.15 * hpwl + 0.45 * spread
+    let mut cohere = 0.0;
+    for (si, tgts) in cohesion {
+        let (mut cx, mut cy) = (0.0f64, 0.0f64);
+        for (j, pgi) in tgts {
+            let p = crate::emit::pin_endpoint(
+                &items[*j].geom.pins[*pgi],
+                items[*j].at,
+                items[*j].angle,
+                items[*j].mirror,
+            );
+            cx += p[0];
+            cy += p[1];
+        }
+        let n = tgts.len() as f64;
+        let at = items[*si].at;
+        cohere += (at[0] - cx / n).abs() + (at[1] - cy / n).abs();
+    }
+    1500.0 * overlaps as f64
+        + 1200.0 * grid_order as f64
+        + 0.15 * hpwl
+        + 0.45 * spread
+        + 0.5 * cohere
 }
 
 /// Locality-aware anneal (see `docs/specs/locality-aware-placement-search.md`). Two
@@ -2207,6 +2277,7 @@ fn anneal_locality(
         return;
     }
     let blocks = build_anchor_blocks(items, inc, &anchors, &sats, ir);
+    let cohesion = cohesion_targets(items, inc, ir);
     let orients = [Orient::Up, Orient::Down, Orient::Left, Orient::Right];
     let mut rng = Rng(seed);
     let relocate = |rng: &mut Rng, at: [f64; 2], n: i32| -> [f64; 2] {
@@ -2231,7 +2302,7 @@ fn anneal_locality(
     let verify_period = (iters / 256).max(1);
     let mut last_verify = 0usize;
 
-    let mut cur = proxy_cost(items, inc, ir);
+    let mut cur = proxy_cost(items, inc, ir, &cohesion);
     let mut proxy_best = cur;
     let mut proxy_best_items: Vec<Item> = items.to_vec();
     let mut best_true = premium_score_items(env, items, inc, ir, needs_flag);
@@ -2277,7 +2348,7 @@ fn anneal_locality(
             continue;
         }
 
-        let c = proxy_cost(items, inc, ir);
+        let c = proxy_cost(items, inc, ir, &cohesion);
         let d = c - cur;
         if d < 0.0 || rng.unit() < (-d / t).exp() {
             cur = c;
