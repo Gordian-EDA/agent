@@ -171,6 +171,22 @@ mod tests {
     }
 
     #[test]
+    fn led_indicator_pairs_the_series_resistor_not_a_supply_sharing_one() {
+        // A GPIO LED: anode on +3V3, cathode → series R2 → GND. A reset pull-up R1
+        // (3V3 → NRST) merely SHARES the +3V3 rail with the LED. The idiom must bind
+        // the resistor on the LED's junction (signal) net, not the rail-sharing one.
+        let nodes = vec![
+            node("D1", "Device:LED", "", &[("1", "D1K"), ("2", "+3V3")]),
+            node("R1", "Device:R", "10k", &[("1", "+3V3"), ("2", "NRST")]),
+            node("R2", "Device:R", "1k", &[("1", "D1K"), ("2", "GND")]),
+        ];
+        let g = CircuitGraph::new(nodes, kind_of);
+        let ms = find(&g, &library::LED_INDICATOR);
+        assert_eq!(ms.len(), 1, "one LED indicator");
+        assert_eq!(ms[0].bindings["res"], vec!["R2".to_string()], "pairs the SERIES resistor R2");
+    }
+
+    #[test]
     fn derive_from_example_reproduces_a_matchable_sketch() {
         let g = stm32_graph();
         let d = derive::derive(&g, "U1", 1).expect("derive around U1");

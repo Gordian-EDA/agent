@@ -90,13 +90,15 @@ pub static RC_LOWPASS: Pattern = Pattern {
     min_score: 1.0,
 };
 
-/// **LED indicator**: an LED in series with a current-limiting resistor. Defined &
-/// tested; not yet active.
+/// **LED indicator**: an LED in series with a current-limiting resistor. They join at
+/// the LED's junction node — a SIGNAL net — NOT at a shared power rail; requiring a
+/// signal-net join stops the LED from pairing with an unrelated resistor that merely
+/// shares the same supply (a reset pull-up on the same V+).
 static LED_ROLES: &[Role] = &[
     Role::one("led", NodePred::LibAny(LED_LIBS)),
     Role::one("res", NodePred::And(&[NodePred::LibAny(RES_LIBS), NodePred::Pins(2)])),
 ];
-static LED_EDGES: &[Edge] = &[Edge::shared("led", "res", NetMatch::Any)];
+static LED_EDGES: &[Edge] = &[Edge::shared("led", "res", NetMatch::Kind(NetKind::Signal))];
 pub static LED_INDICATOR: Pattern = Pattern {
     name: "led_indicator",
     anchor_role: "led",
