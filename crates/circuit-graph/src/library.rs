@@ -49,7 +49,14 @@ pub static CRYSTAL: Pattern = Pattern {
 /// that reaches the anchor IC. Each cap bridges a power rail and ground and is not
 /// itself an anchor pin's series element.
 static DECOUPLE_ROLES: &[Role] = &[
-    Role::one("anchor", NodePred::PinsAtLeast(3)),
+    // The anchor is the IC being decoupled — a multi-pin part that is NOT a connector
+    // (a power/SWD header is a multi-pin part on the same rail+ground as the bypass caps,
+    // but it is the supply ENTRY, not the decoupling target; without this exclusion the
+    // matcher binds the bank to the connector and the placement then drops it).
+    Role::one(
+        "anchor",
+        NodePred::And(&[NodePred::PinsAtLeast(3), NodePred::Not(&NodePred::LibAny(&["Connector"]))]),
+    ),
     Role::many("cap", NodePred::And(&[NodePred::LibAny(CAP_LIBS), NodePred::Pins(2)]), 3, 64),
 ];
 static DECOUPLE_EDGES: &[Edge] = &[

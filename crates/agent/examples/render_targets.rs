@@ -75,5 +75,8 @@ fn render_fixture(env: &KicadEnv, yaml_path: &std::path::Path, out: &std::path::
         eprintln!("  WARN: {wmsg}");
     }
     eprintln!("  body_crossings={} ic_crossings={}", emit.body_crossings, emit.ic_crossings);
+    for d in &emit.detected_idioms {
+        eprintln!("  idiom {}: anchor={} parts={:?}", d.kind, d.anchor, d.parts);
+    }
     Ok(())
 }

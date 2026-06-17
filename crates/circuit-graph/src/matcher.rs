@@ -51,6 +51,7 @@ fn node_matches(pred: &NodePred, node: &Node) -> bool {
             crate::value::parse_eng(&node.value).is_some_and(|v| v >= *lo && v <= *hi)
         }
         NodePred::And(ps) => ps.iter().all(|p| node_matches(p, node)),
+        NodePred::Not(p) => !node_matches(p, node),
         NodePred::Any => true,
     }
 }

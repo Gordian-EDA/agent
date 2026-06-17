@@ -114,6 +114,25 @@ mod tests {
     }
 
     #[test]
+    fn decoupling_anchors_to_the_ic_not_a_power_connector() {
+        // U1 (IC) + J1 (a power/SWD connector, ≥3 pins) both sit on +3V3 and GND with
+        // the bypass caps. The bank must bind to the IC it decouples, NOT the connector
+        // (which is a supply entry) — else the connector steals the anchor and placement
+        // drops the whole bank, scattering it.
+        let nodes = vec![
+            node("U1", "MCU:X", "", &[("1", "+3V3"), ("2", "GND"), ("3", "SIG")]),
+            node("J1", "Connector_Generic:Conn_01x04", "", &[("1", "+3V3"), ("2", "GND"), ("3", "SWDIO"), ("4", "SWCLK")]),
+            node("C1", "Device:C", "100nF", &[("1", "+3V3"), ("2", "GND")]),
+            node("C2", "Device:C", "100nF", &[("1", "+3V3"), ("2", "GND")]),
+            node("C3", "Device:C", "100nF", &[("1", "+3V3"), ("2", "GND")]),
+        ];
+        let g = CircuitGraph::new(nodes, kind_of);
+        let ms = find(&g, &library::DECOUPLING);
+        assert_eq!(ms.len(), 1, "exactly one bank (not one per multi-pin part)");
+        assert_eq!(ms[0].anchor, "U1", "anchored to the IC, not the connector");
+    }
+
+    #[test]
     fn find_all_resolves_contention_no_double_claim() {
         let g = stm32_graph();
         let ms = find_all(&g, &library::active_library());

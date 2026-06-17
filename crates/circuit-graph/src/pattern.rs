@@ -23,6 +23,8 @@ pub enum NodePred {
     Value { lo: f64, hi: f64 },
     /// All of the sub-predicates hold.
     And(&'static [NodePred]),
+    /// The sub-predicate does NOT hold (e.g. an anchor that is NOT a connector).
+    Not(&'static NodePred),
     /// Matches anything (placeholder / wildcard role).
     Any,
 }

@@ -698,19 +698,23 @@ fn place_decoupling(
     out: &[Idiom],
 ) -> Option<Vec<(String, Cell)>> {
     // Group qualifying caps by their V+ rail; a cap whose own nets reach a *different*
-    // anchor is not unambiguously this IC's bypass, so drop it (GND reaches every
-    // anchor, so this also confines the bank to single-anchor-on-ground boards — the
-    // historical behaviour the layout oracle is blessed against).
+    // IC is not unambiguously this IC's bypass, so drop it. EXCLUDE connectors: a power
+    // CONNECTOR (J*, a power source / entry) sits on the same rail+ground as the bypass
+    // caps on essentially every real board, so counting it here would drop the whole
+    // bank (a dense MCU with a power/SWD header scatters its decoupling) — the bank
+    // still decouples THIS IC regardless of where the rail enters the sheet.
     let mut by_rail: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for &ci in caps {
         let cn: Vec<&str> = items[ci].pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
         if cn.len() != 2 {
             continue;
         }
-        let touches_other = cn
-            .iter()
-            .any(|n| inc.get(*n).into_iter().flatten().any(|(j, _)| anchors.contains(j) && *j != ai));
-        if touches_other {
+        let touches_other_ic = cn.iter().any(|n| {
+            inc.get(*n).into_iter().flatten().any(|(j, _)| {
+                anchors.contains(j) && *j != ai && !items[*j].part.contains("Connector")
+            })
+        });
+        if touches_other_ic {
             continue;
         }
         let vp = if is_ground(cn[0]) { cn[1] } else { cn[0] };
