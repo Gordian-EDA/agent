@@ -1702,6 +1702,7 @@ impl PlacementStrategy for Anneal {
         let mut state_a: Vec<Item> = Vec::new();
         let mut state_b: Vec<Item> = seed_state;
         let mut state_c: Vec<Item> = Vec::new();
+        let mut state_d: Vec<Item> = Vec::new();
         let mut greedy_state: Vec<Item> = Vec::new();
         rayon::scope(|s| {
             // Path B: broad search from the raw seed — independent, start it now.
@@ -1711,14 +1712,21 @@ impl PlacementStrategy for Anneal {
             greedy_state = items.to_vec();
             state_a = greedy_state.clone();
             state_c = greedy_state.clone();
-            // Paths A and C anneal from the greedy result, in parallel with each
-            // other and with B (still on its spawned thread).
+            state_d = greedy_state.clone();
+            // Paths A (seeded), C (premium), and D (locality-aware: cheap geometric
+            // proxy + range-limited cluster jump) anneal from the greedy result, all in
+            // parallel with each other and with B.
             rayon::join(
                 || anneal_items(env, &mut state_a, inc, ir, needs_flag, false, false, seed),
-                || anneal_items(env, &mut state_c, inc, ir, needs_flag, false, true, seed ^ 0x9E3779B97F4A7C15),
+                || {
+                    rayon::join(
+                        || anneal_items(env, &mut state_c, inc, ir, needs_flag, false, true, seed ^ 0x9E3779B97F4A7C15),
+                        || anneal_locality(env, &mut state_d, inc, ir, needs_flag, seed ^ 0x517CC1B727220A95),
+                    )
+                },
             );
         });
-        let annealed = vec![state_a, state_b, state_c];
+        let annealed = vec![state_a, state_b, state_c, state_d];
 
         // Candidates: greedy + the three anneals (order fixed for a deterministic
         // pick). Score each THROUGH the same `polish` + `decongest` that `emit` runs
@@ -1971,30 +1979,8 @@ fn anneal_items(
     // Cluster locality: each anchor's "block" is the satellites that tap it plus any
     // idiom members it anchors. The block move (below) slides a whole functional unit
     // (an IC and its decoupling/crystal/tap parts) as one rigid group — the GLOBAL
-    // structural move a per-part LOCAL search can't reach: nudging an anchor alone
-    // strands its satellites and is always rejected, so the search could never
-    // relocate a block. With the block following, the relative wiring is preserved
-    // and the move competes. Built once; includes frozen members so a recognized
-    // cluster travels intact.
-    let mut blocks: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for &si in &sats {
-        if let Some((ai, _, _)) = anchor_tap(items, inc, &anchors, si, &ir.rails) {
-            blocks.entry(ai).or_default().push(si);
-        }
-    }
-    for idiom in &ir.idioms {
-        if let Some(ai) = items.iter().position(|it| it.refdes == idiom.anchor) {
-            for part in &idiom.parts {
-                if let Some(mi) = items.iter().position(|it| &it.refdes == part) {
-                    blocks.entry(ai).or_default().push(mi);
-                }
-            }
-        }
-    }
-    for v in blocks.values_mut() {
-        v.sort_unstable();
-        v.dedup();
-    }
+    // structural move a per-part LOCAL search can't reach.
+    let blocks = build_anchor_blocks(items, inc, &anchors, &sats, ir);
     let orients = [Orient::Up, Orient::Down, Orient::Left, Orient::Right];
     let mut rng = Rng(seed);
 
@@ -2100,6 +2086,201 @@ fn anneal_items(
                 items[i].angle = angle;
             }
         }
+    }
+    items.clone_from_slice(&best_items);
+}
+
+/// Each anchor's cluster: the satellites that tap it + the idiom members it anchors,
+/// the rigid group the block move slides. Built once; includes frozen members so a
+/// recognized cluster travels intact.
+fn build_anchor_blocks(
+    items: &[Item],
+    inc: &Incidence,
+    anchors: &[usize],
+    sats: &[usize],
+    ir: &LayoutIr,
+) -> BTreeMap<usize, Vec<usize>> {
+    let mut blocks: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for &si in sats {
+        if let Some((ai, _, _)) = anchor_tap(items, inc, anchors, si, &ir.rails) {
+            blocks.entry(ai).or_default().push(si);
+        }
+    }
+    for idiom in &ir.idioms {
+        if let Some(ai) = items.iter().position(|it| it.refdes == idiom.anchor) {
+            for part in &idiom.parts {
+                if let Some(mi) = items.iter().position(|it| &it.refdes == part) {
+                    blocks.entry(ai).or_default().push(mi);
+                }
+            }
+        }
+    }
+    for v in blocks.values_mut() {
+        v.sort_unstable();
+        v.dedup();
+    }
+    blocks
+}
+
+/// A cheap, routing-FREE geometric proxy for [`layout_cost`] — the per-move objective
+/// of the locality-aware anneal. The correctness wall (body overlaps, authored-grid
+/// order) stays EXACT, never approximated; wirelength is the per-net bounding-box
+/// half-perimeter (HPWL) over incident item centres — the standard placement-SA inner
+/// loop — and `spread` is the whole-board bbox. It omits the ROUTED neatness terms
+/// (crossings/corners/congestion/body-cross, which need the router); the
+/// `Anneal::search` candidate pick re-asserts the true routed cost + warnings on the
+/// result, so a proxy that ranks geometry can never SHIP a worse or untruthful sheet —
+/// it only proposes candidates the true cost then judges.
+fn proxy_cost(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> f64 {
+    let overlaps = body_overlap_count(items);
+    let grid_order = grid_order_viol(items, ir);
+    let mut hpwl = 0.0;
+    for pins in inc.values() {
+        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+        for (i, _) in pins {
+            let at = items[*i].at;
+            lo[0] = lo[0].min(at[0]);
+            lo[1] = lo[1].min(at[1]);
+            hi[0] = hi[0].max(at[0]);
+            hi[1] = hi[1].max(at[1]);
+        }
+        if hi[0] >= lo[0] {
+            hpwl += (hi[0] - lo[0]) + (hi[1] - lo[1]);
+        }
+    }
+    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+    for it in items {
+        lo[0] = lo[0].min(it.at[0]);
+        lo[1] = lo[1].min(it.at[1]);
+        hi[0] = hi[0].max(it.at[0]);
+        hi[1] = hi[1].max(it.at[1]);
+    }
+    let spread = if hi[0] >= lo[0] { (hi[0] - lo[0]) + (hi[1] - lo[1]) } else { 0.0 };
+    1500.0 * overlaps as f64 + 1200.0 * grid_order as f64 + 0.15 * hpwl + 0.45 * spread
+}
+
+/// Locality-aware anneal (see `docs/specs/locality-aware-placement-search.md`). Two
+/// things the tuned full-route paths can't afford: (1) a cheap geometric `proxy_cost`
+/// per move (no whole-sheet reroute), so it runs a far larger iteration budget and
+/// only pays the true routed cost on a new proxy-best; (2) a RANGE-LIMITED CLUSTER
+/// JUMP — slide a whole block by a large displacement when hot, decaying to a nudge
+/// when cold — the GLOBAL move that lets a coherent idiom migrate across a congested
+/// region in one step (the crystal/reset-cluster gap). Run as an EXTRA candidate in
+/// `Anneal::search`: the pick ships it only if it beats the tuned paths on the true
+/// cost, so it is purely additive and never regresses a tuned fixture.
+fn anneal_locality(
+    env: &KicadEnv,
+    items: &mut [Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+    seed: u64,
+) {
+    let sats: Vec<usize> =
+        (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen).collect();
+    let anchors: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() >= 3).collect();
+    if sats.is_empty() {
+        return;
+    }
+    let blocks = build_anchor_blocks(items, inc, &anchors, &sats, ir);
+    let orients = [Orient::Up, Orient::Down, Orient::Left, Orient::Right];
+    let mut rng = Rng(seed);
+    let relocate = |rng: &mut Rng, at: [f64; 2], n: i32| -> [f64; 2] {
+        [
+            crate::grid::snap(at[0] + rng.step(n) as f64 * COL_GAP),
+            crate::grid::snap(at[1] + rng.step(n) as f64 * ROW_GAP),
+        ]
+    };
+    // Board extent in cells — the hot cluster-jump radius.
+    let (mut blo, mut bhi) = ([f64::MAX; 2], [f64::MIN; 2]);
+    for it in items.iter() {
+        blo[0] = blo[0].min(it.at[0]);
+        blo[1] = blo[1].min(it.at[1]);
+        bhi[0] = bhi[0].max(it.at[0]);
+        bhi[1] = bhi[1].max(it.at[1]);
+    }
+    let span_cells = (((bhi[0] - blo[0]).max(bhi[1] - blo[1])) / COL_GAP).ceil().max(2.0) as i32;
+
+    // Cheap proxy ⇒ afford a big budget; no per-move routing, so no pin-count cap.
+    let iters = (40 * sats.len()).clamp(800, 8000);
+    let t0 = 24.0;
+    let verify_period = (iters / 256).max(1);
+    let mut last_verify = 0usize;
+
+    let mut cur = proxy_cost(items, inc, ir);
+    let mut proxy_best = cur;
+    let mut proxy_best_items: Vec<Item> = items.to_vec();
+    let mut best_true = premium_score_items(env, items, inc, ir, needs_flag);
+    let mut best_items: Vec<Item> = items.to_vec();
+
+    for it in 0..iters {
+        let p = it as f64 / iters as f64;
+        let t = (t0 * (1.0 - p)).max(0.05);
+        let m = rng.below(10);
+        let undo: Vec<(usize, [f64; 2], f64)>;
+        if m < 6 {
+            let i = sats[rng.below(sats.len())];
+            undo = vec![(i, items[i].at, items[i].angle)];
+            items[i].at = relocate(&mut rng, items[i].at, 2);
+        } else if m < 8 {
+            let i = sats[rng.below(sats.len())];
+            undo = vec![(i, items[i].at, items[i].angle)];
+            items[i].angle = orient_angle(&items[i].geom, orients[rng.below(4)]);
+        } else if m < 9 && sats.len() >= 2 {
+            let a = sats[rng.below(sats.len())];
+            let b = sats[rng.below(sats.len())];
+            undo = vec![(a, items[a].at, items[a].angle), (b, items[b].at, items[b].angle)];
+            let (pa, pb) = (items[a].at, items[b].at);
+            items[a].at = pb;
+            items[b].at = pa;
+        } else if !anchors.is_empty() {
+            // RANGE-LIMITED CLUSTER JUMP: large displacement when hot, decaying to a
+            // 1-cell nudge when cold — carries the anchor's whole block rigidly.
+            let radius = (((1.0 - p) * span_cells as f64).round() as i32).max(1);
+            let i = anchors[rng.below(anchors.len())];
+            let new = relocate(&mut rng, items[i].at, radius);
+            let d = [new[0] - items[i].at[0], new[1] - items[i].at[1]];
+            let mut group = vec![i];
+            if let Some(b) = blocks.get(&i) {
+                group.extend(b.iter().copied());
+            }
+            undo = group.iter().map(|&k| (k, items[k].at, items[k].angle)).collect();
+            for &k in &group {
+                items[k].at =
+                    [crate::grid::snap(items[k].at[0] + d[0]), crate::grid::snap(items[k].at[1] + d[1])];
+            }
+        } else {
+            continue;
+        }
+
+        let c = proxy_cost(items, inc, ir);
+        let d = c - cur;
+        if d < 0.0 || rng.unit() < (-d / t).exp() {
+            cur = c;
+            if c < proxy_best {
+                proxy_best = c;
+                proxy_best_items.clone_from_slice(items);
+                // Pay the true routed cost only on a new proxy-best, throttled.
+                if it - last_verify >= verify_period {
+                    last_verify = it;
+                    let tc = premium_score_items(env, items, inc, ir, needs_flag);
+                    if tc < best_true {
+                        best_true = tc;
+                        best_items.clone_from_slice(items);
+                    }
+                }
+            }
+        } else {
+            for (i, at, angle) in undo {
+                items[i].at = at;
+                items[i].angle = angle;
+            }
+        }
+    }
+    // Always verify the final proxy-best against the true cost.
+    let tc = premium_score_items(env, &proxy_best_items, inc, ir, needs_flag);
+    if tc < best_true {
+        best_items.clone_from_slice(&proxy_best_items);
     }
     items.clone_from_slice(&best_items);
 }
