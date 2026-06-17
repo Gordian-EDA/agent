@@ -1,0 +1,10 @@
+[package]
+name = "circuit-graph"
+version.workspace = true
+edition.workspace = true
+
+# Pure, dependency-light: the attributed circuit graph + idiom matcher must stay
+# free of KiCAD/geometry concerns so it is fast to test and reusable. Only serde
+# (idioms cross the wire to the agent) and nothing else.
+[dependencies]
+serde = { workspace = true }

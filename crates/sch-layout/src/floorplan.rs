@@ -512,12 +512,48 @@ struct Idiom {
     cells: Vec<(String, Cell)>,
 }
 
-/// Recognize and co-place circuit idioms BEFORE the generic satellite loop. Each
-/// detector fires only on an unambiguous signature and returns the cluster's cells;
-/// a board with no idiom is untouched (the generic rules place everything as before).
-/// Currently: the crystal network (an oscillator + its two load caps) — placed as a
-/// tight vertical cluster beside the IC's oscillator pins instead of the crystal
-/// drifting beside one pin while its caps fall into the GND band below the IC.
+/// Project the placed parts into the pure [`circuit_graph::CircuitGraph`] the idiom
+/// matcher consumes. Net kinds come from the rail table, with a name-based ground
+/// fallback so a lifted netlist that dropped the power-net marks still classifies
+/// `GND`/`VSS` correctly (the crystal load caps return to ground by name).
+fn build_circuit_graph(items: &[Item], rails: &BTreeMap<String, Band>) -> circuit_graph::CircuitGraph {
+    let nodes: Vec<circuit_graph::Node> = items
+        .iter()
+        .map(|it| circuit_graph::Node {
+            refdes: it.refdes.clone(),
+            lib_id: it.part.clone(),
+            value: it.value.clone(),
+            pins: it
+                .pins
+                .iter()
+                .map(|(num, name, net)| circuit_graph::Pin {
+                    number: num.clone(),
+                    name: name.clone(),
+                    net: net.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+    let rails = rails.clone();
+    circuit_graph::CircuitGraph::new(nodes, move |net| {
+        if rails.contains_key(net) {
+            if is_ground(net) { circuit_graph::NetKind::Ground } else { circuit_graph::NetKind::Power }
+        } else if is_ground(net) {
+            circuit_graph::NetKind::Ground
+        } else {
+            circuit_graph::NetKind::Signal
+        }
+    })
+}
+
+/// Recognize circuit idioms with the graph-similarity matcher (`circuit-graph`)
+/// and co-place each as a cohesive cluster BEFORE the generic satellite loop. The
+/// matcher decides *what* is an idiom (declarative, extensible); the per-kind
+/// placement helpers decide *where* the cluster lands using grid/pin geometry the
+/// pure crate cannot see. A board with no idiom is untouched. A match whose
+/// geometry can't be realized (e.g. an osc pin not on the IC) is silently dropped,
+/// so the generic rules place it instead — the engine never reports an idiom it
+/// did not actually freeze.
 fn detect_idioms(
     items: &[Item],
     inc: &Incidence,
@@ -528,126 +564,146 @@ fn detect_idioms(
     anchor_col: &BTreeMap<usize, i32>,
     anchor_row: &BTreeMap<usize, i32>,
 ) -> Vec<Idiom> {
-    let mut out = Vec::new();
+    let _ = (sats, pin_meta);
+    let graph = build_circuit_graph(items, rails);
+    let matches = circuit_graph::find_all(&graph, &circuit_graph::library::active_library());
+    let idx: BTreeMap<&str, usize> =
+        items.iter().enumerate().map(|(i, it)| (it.refdes.as_str(), i)).collect();
+    let get = |rd: &str| idx.get(rd).copied();
+
+    let mut out: Vec<Idiom> = Vec::new();
     let mut claimed: BTreeSet<usize> = BTreeSet::new();
-    let _ = pin_meta;
-    detect_crystal_idioms(
-        items, inc, anchors, sats, rails, anchor_col, anchor_row, &mut out, &mut claimed,
-    );
-    detect_decoupling_idioms(
-        items, inc, anchors, sats, rails, anchor_col, anchor_row, &mut out, &mut claimed,
-    );
+    for m in &matches {
+        let Some(ai) = get(&m.anchor) else { continue };
+        match m.pattern {
+            "crystal" => {
+                let (Some(yi), Some(caps)) = (
+                    m.bindings.get("crystal").and_then(|v| v.first()).and_then(|r| get(r)),
+                    Some(
+                        ["cap_a", "cap_b"]
+                            .iter()
+                            .filter_map(|k| m.bindings.get(*k))
+                            .flatten()
+                            .filter_map(|r| get(r))
+                            .collect::<Vec<_>>(),
+                    ),
+                ) else {
+                    continue;
+                };
+                if caps.len() != 2 || caps.iter().chain(std::iter::once(&yi)).any(|c| claimed.contains(c)) {
+                    continue;
+                }
+                if let Some(cells) =
+                    place_crystal(items, inc, anchors, anchor_col, anchor_row, ai, yi, &caps)
+                {
+                    claimed.insert(yi);
+                    claimed.extend(&caps);
+                    out.push(Idiom { kind: "crystal", anchor: ai, cells });
+                }
+            }
+            "decoupling" => {
+                let caps: Vec<usize> = m
+                    .bindings
+                    .get("cap")
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| get(r))
+                    .filter(|c| !claimed.contains(c))
+                    .collect();
+                if let Some(cells) =
+                    place_decoupling(items, inc, anchors, anchor_col, anchor_row, ai, &caps, &out)
+                {
+                    claimed.extend(cells.iter().filter_map(|(rd, _)| get(rd)));
+                    out.push(Idiom { kind: "decoupling", anchor: ai, cells });
+                }
+            }
+            _ => {}
+        }
+    }
     out
 }
 
-/// Decoupling-bank idiom: ≥3 rail-to-rail caps (a V+ rail ↔ ground) whose V+ rail
-/// also lands on the IC. Instead of scattering each into a spare column — which
-/// knots their risers near the IC power pins — lay them in one evenly-spaced ROW
-/// just off the IC's power-pin edge, each cap vertical (V+ up, GND down).
-#[allow(clippy::too_many_arguments)]
-fn detect_decoupling_idioms(
+/// Place a matched **decoupling bank**: lay its caps in one evenly-spaced ROW just
+/// off the IC's power-pin edge (each cap vertical, V+ up / GND down) rather than
+/// scattering them into spare columns where their risers knot near the power pins.
+///
+/// `caps` are the matcher's V+↔GND caps that reach `ai`; this re-applies the
+/// geometric preconditions the pure matcher cannot express — a cap whose nets reach
+/// *another* anchor is ambiguous and dropped, and a V+ rail needs ≥3 caps to form a
+/// bank — then shifts the whole row PAST one vertical edge (the side the crystal
+/// idiom did not claim) so every GND riser drops clear of the package. Returns
+/// `None` if nothing qualifies (the caps fall back to the generic loop).
+fn place_decoupling(
     items: &[Item],
     inc: &Incidence,
     anchors: &[usize],
-    sats: &[usize],
-    rails: &BTreeMap<String, Band>,
     anchor_col: &BTreeMap<usize, i32>,
     anchor_row: &BTreeMap<usize, i32>,
-    out: &mut Vec<Idiom>,
-    claimed: &mut BTreeSet<usize>,
-) {
-    let dbg = std::env::var("IDIOM_DEBUG").is_ok();
-    let is_rail = |n: &str| rails.contains_key(n);
-    let is_vplus = |n: &str| is_rail(n) && !is_ground(n);
-    for &ai in anchors {
-        // Group this IC's decoupling caps by their V+ rail. A cap qualifies if it is
-        // V+↔GND, touches NO anchor pin itself (it taps the rail, not a signal pin),
-        // and its V+ rail reaches this IC.
-        let mut by_rail: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for &ci in sats {
-            if claimed.contains(&ci) {
-                continue;
-            }
-            let cn: Vec<&str> = items[ci].pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
-            if cn.len() != 2 {
-                continue;
-            }
-            let (vp, gnd) = if is_vplus(cn[0]) && is_ground(cn[1]) {
-                (cn[0], cn[1])
-            } else if is_vplus(cn[1]) && is_ground(cn[0]) {
-                (cn[1], cn[0])
-            } else {
-                continue;
-            };
-            let _ = gnd;
-            // The cap must not itself land on an anchor signal pin (a series part).
-            let touches_anchor = cn.iter().any(|n| {
-                inc.get(*n).into_iter().flatten().any(|(j, _)| anchors.contains(j) && *j != ai)
-            });
-            if touches_anchor {
-                continue;
-            }
-            // The V+ rail must reach THIS IC.
-            let reaches = inc.get(vp).into_iter().flatten().any(|(j, _)| *j == ai);
-            if reaches {
-                by_rail.entry(vp.to_string()).or_default().push(ci);
-            }
+    ai: usize,
+    caps: &[usize],
+    out: &[Idiom],
+) -> Option<Vec<(String, Cell)>> {
+    // Group qualifying caps by their V+ rail; a cap whose own nets reach a *different*
+    // anchor is not unambiguously this IC's bypass, so drop it (GND reaches every
+    // anchor, so this also confines the bank to single-anchor-on-ground boards — the
+    // historical behaviour the layout oracle is blessed against).
+    let mut by_rail: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for &ci in caps {
+        let cn: Vec<&str> = items[ci].pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+        if cn.len() != 2 {
+            continue;
         }
-        for (vp, mut caps) in by_rail {
-            if caps.len() < 3 {
-                continue;
-            }
-            caps.sort();
-            let (acol, arow) = (anchor_col[&ai], anchor_row[&ai]);
-            let n = caps.len() as i32;
-            if dbg {
-                eprintln!("IDIOM decoupling {} on {vp}: {n} caps", items[ai].refdes);
-            }
-            // Lay the bank as a horizontal ROW of caps along the V+ rail, shifted
-            // entirely PAST one vertical edge of the IC so every cap's GND riser drops
-            // clear of the package (a centred row above the body sends GND risers down
-            // THROUGH it). The row goes on the side the crystal idiom did NOT claim, so
-            // the two clusters never collide. Two columns of clearance puts the nearest
-            // cap just off the IC edge.
-            let crystal_l = out.iter().any(|id| {
-                id.kind == "crystal" && id.anchor == ai && id.cells.iter().any(|(_, c)| c.col < acol)
-            });
-            // Past the right edge (crystal on the left) or past the left edge.
-            let base = if crystal_l { 2 } else { -(n + 1) };
-            let cells: Vec<(String, Cell)> = caps
-                .iter()
-                .enumerate()
-                .map(|(k, &ci)| {
-                    let cell = Cell { col: acol + base + k as i32, row: arow - 2, orient: Orient::Down };
-                    (items[ci].refdes.clone(), cell)
-                })
-                .collect();
-            for &ci in &caps {
-                claimed.insert(ci);
-            }
-            out.push(Idiom { kind: "decoupling", anchor: ai, cells });
+        let touches_other = cn
+            .iter()
+            .any(|n| inc.get(*n).into_iter().flatten().any(|(j, _)| anchors.contains(j) && *j != ai));
+        if touches_other {
+            continue;
         }
+        let vp = if is_ground(cn[0]) { cn[1] } else { cn[0] };
+        by_rail.entry(vp.to_string()).or_default().push(ci);
     }
+    let mut bank: Vec<usize> =
+        by_rail.into_values().filter(|v| v.len() >= 3).flatten().collect();
+    bank.sort_unstable();
+    if bank.len() < 3 {
+        return None;
+    }
+    let (acol, arow) = (anchor_col[&ai], anchor_row[&ai]);
+    let n = bank.len() as i32;
+    let crystal_l = out.iter().any(|id| {
+        id.kind == "crystal" && id.anchor == ai && id.cells.iter().any(|(_, c)| c.col < acol)
+    });
+    // Past the right edge (crystal on the left) or past the left edge.
+    let base = if crystal_l { 2 } else { -(n + 1) };
+    Some(
+        bank.iter()
+            .enumerate()
+            .map(|(k, &ci)| {
+                let cell = Cell { col: acol + base + k as i32, row: arow - 2, orient: Orient::Down };
+                (items[ci].refdes.clone(), cell)
+            })
+            .collect(),
+    )
 }
 
-/// Crystal network idiom: a `Device:Crystal`/Resonator `Y` between two NON-rail
-/// oscillator nets, each tapping the SAME IC on ADJACENT pins, plus exactly two load
-/// caps (each osc net → a ground rail). Place the crystal one column out from the
-/// osc pins (vertical, between them) and the two caps one column further out, each at
-/// its osc pin's row — the textbook compact oscillator block hugging the IC.
-#[allow(clippy::too_many_arguments)]
-fn detect_crystal_idioms(
+/// Place a matched **crystal network**: the crystal one column out from the IC's
+/// oscillator pins (vertical, between them) and each load cap one column further out
+/// at its osc pin's row — the textbook compact oscillator block hugging the IC.
+///
+/// `yi` is the crystal, `caps` its two load caps (in any order). This re-derives the
+/// geometry the pure matcher cannot: both osc nets must tap exactly this IC, on a
+/// close pin pair; each cap is bound to the osc net it shares with the crystal.
+/// Returns `None` if that geometry does not hold (the parts fall back to the loop).
+fn place_crystal(
     items: &[Item],
     inc: &Incidence,
     anchors: &[usize],
-    sats: &[usize],
-    rails: &BTreeMap<String, Band>,
     anchor_col: &BTreeMap<usize, i32>,
     anchor_row: &BTreeMap<usize, i32>,
-    out: &mut Vec<Idiom>,
-    claimed: &mut BTreeSet<usize>,
-) {
-    let is_rail = |n: &str| rails.contains_key(n);
+    ai: usize,
+    yi: usize,
+    caps: &[usize],
+) -> Option<Vec<(String, Cell)>> {
     // The single anchor a net taps (None if it reaches zero or several anchors).
     let anchor_pin = |net: &str| -> Option<(usize, String)> {
         let hits: Vec<(usize, String)> = inc
@@ -659,31 +715,29 @@ fn detect_crystal_idioms(
             .collect();
         (hits.len() == 1).then(|| hits[0].clone())
     };
-    for &yi in sats {
-        if claimed.contains(&yi) {
-            continue;
-        }
-        let part = &items[yi].part;
-        if !(part.contains("Crystal") || part.contains("Resonator")) {
-            continue;
-        }
+    {
         let nets: Vec<String> = items[yi].pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
         if nets.len() != 2 || nets[0] == nets[1] {
-            continue;
+            return None;
         }
         let (xa, xb) = (nets[0].clone(), nets[1].clone());
-        // Oscillator nets are signal nets — never a power rail or ground.
-        if is_rail(&xa) || is_rail(&xb) || is_ground(&xa) || is_ground(&xb) {
-            continue;
-        }
-        let (oaa, oab) = (anchor_pin(&xa), anchor_pin(&xb));
-        let (Some((aa, pa)), Some((ab, pb))) = (oaa.clone(), oab.clone()) else {
-            continue;
+        // Both oscillator nets must tap exactly THIS IC (one anchor pin each).
+        let (Some((aa, pa)), Some((ab, pb))) = (anchor_pin(&xa), anchor_pin(&xb)) else {
+            return None;
         };
-        if aa != ab {
-            continue;
+        if aa != ai || ab != ai {
+            return None;
         }
-        let ai = aa;
+        // Bind each load cap to the osc net it shares with the crystal.
+        let cap_on = |osc: &str| -> Option<usize> {
+            caps.iter().copied().find(|&ci| items[ci].pins.iter().any(|(_, _, n)| n.as_deref() == Some(osc)))
+        };
+        let (Some(ca), Some(cb)) = (cap_on(&xa), cap_on(&xb)) else {
+            return None;
+        };
+        if ca == cb {
+            return None;
+        }
         let dbg = std::env::var("IDIOM_DEBUG").is_ok();
         // Raw pin geometry. `pin_side` (|x| vs |y|) mis-buckets a TALL IC's corner
         // pins — a left-edge pin high on the body has |y|>|x| and reads "North" — so
@@ -691,11 +745,11 @@ fn detect_crystal_idioms(
         let pin_at =
             |num: &str| items[ai].geom.pins.iter().find(|p| p.number == num).map(|p| p.at);
         let (Some(paa), Some(pba)) = (pin_at(&pa), pin_at(&pb)) else {
-            continue;
+            return None;
         };
         // The two osc pins must be a close pair (consecutive pins of one port).
         if (paa[0] - pba[0]).hypot(paa[1] - pba[1]) > 12.7 {
-            continue;
+            return None;
         }
         let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
         for p in &items[ai].geom.pins {
@@ -751,25 +805,6 @@ fn detect_crystal_idioms(
                 .map(|i| i as i32 - (n_edge - 1) / 2)
                 .unwrap_or(0)
         };
-        // A load cap for an osc net: a DIFFERENT 2-pin part on (osc, ground-rail).
-        let load_cap = |osc: &str| -> Option<usize> {
-            sats.iter().copied().find(|&ci| {
-                if ci == yi || claimed.contains(&ci) {
-                    return false;
-                }
-                let cn: Vec<&str> = items[ci].pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
-                // A load cap: this osc net + ground (name-based, so it fires whether
-                // or not GND was marked a power rail — lifted netlists drop the mark).
-                cn.len() == 2 && cn.contains(&osc) && cn.iter().any(|n| is_ground(n))
-            })
-        };
-        let (oca, ocb) = (load_cap(&xa), load_cap(&xb));
-        let (Some(ca), Some(cb)) = (oca, ocb) else {
-            continue;
-        };
-        if ca == cb {
-            continue;
-        }
         if dbg {
             eprintln!(
                 "IDIOM crystal {} FIRES (ai={}, caps {}@{} {}@{}, dcol={dcol} drow={drow})",
@@ -816,10 +851,7 @@ fn detect_crystal_idioms(
                 cell_at(2, cb_off, orient_for(&items[cb].pins, &xb, true)),
             ),
         ];
-        claimed.insert(yi);
-        claimed.insert(ca);
-        claimed.insert(cb);
-        out.push(Idiom { kind: "crystal", anchor: ai, cells });
+        Some(cells)
     }
 }
 
@@ -1070,6 +1102,14 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     // minimum), so a final, unconditional relaxation pushes any remaining
     // overlaps apart. Cheap a frame may be, the shipped sheet never collides.
     decongest(&mut items);
+    // Snap each frozen idiom cluster to its IC's ACTUAL pin positions in mm. The
+    // coarse grid (IC = one cell, but renders tall) packs a cluster's cells OUTSIDE
+    // the body, leaving long dog-legs to the pins; this aligns the crystal beside its
+    // real oscillator pins. Then one more decongest pushes any non-frozen part the
+    // re-positioned cluster now overlaps out of the way (frozen members don't move).
+    if align_idiom_clusters(&mut items, ir) {
+        decongest(&mut items);
+    }
 
     let mut w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
     // Finalize geometry (text solve, wire split, reframe) BEFORE linting so the
@@ -1284,6 +1324,90 @@ fn assign_cells(items: &[Item], ir: &LayoutIr) -> Vec<Cell> {
 /// Render `cells` to mm: each column sized to its widest member and each row to
 /// its tallest, every part at its cell centre — aligned, overlap-free, and as
 /// tight as the parts allow.
+/// Snap each frozen CRYSTAL cluster to its IC's actual oscillator-pin positions in
+/// mm — the coarse grid can only place a cluster's cells, which on a tall IC pack
+/// outside the body. The crystal lands one gap out from the osc pins' midpoint and
+/// each load cap two gaps out, level with its osc pin. Returns true if it moved
+/// anything (so the caller re-runs `decongest`). The cluster members are frozen, so
+/// the placement search has already finished around them and won't undo this.
+fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
+    const GAP: f64 = 7.62;
+    let snap = crate::grid::snap;
+    let mut moves: Vec<(usize, [f64; 2])> = Vec::new();
+    for idiom in &ir.idioms {
+        if idiom.kind != "crystal" {
+            continue;
+        }
+        let in_idiom = |it: &Item| idiom.parts.contains(&it.refdes);
+        let Some(ai) = items.iter().position(|it| it.refdes == idiom.anchor) else {
+            continue;
+        };
+        let Some(yi) = items
+            .iter()
+            .position(|it| in_idiom(it) && (it.part.contains("Crystal") || it.part.contains("Resonator")))
+        else {
+            continue;
+        };
+        let y_refdes = items[yi].refdes.clone();
+        let onets: Vec<String> = items[yi].pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
+        if onets.len() != 2 {
+            continue;
+        }
+        // The IC's pin-tip world position for an osc net.
+        let osc_world = |net: &str| -> Option<[f64; 2]> {
+            let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net))?.0.clone();
+            let pg = items[ai].geom.pins.iter().find(|p| p.number == num)?;
+            Some(crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
+        };
+        let (Some(wa), Some(wb)) = (osc_world(&onets[0]), osc_world(&onets[1])) else {
+            continue;
+        };
+        let mid = [(wa[0] + wb[0]) / 2.0, (wa[1] + wb[1]) / 2.0];
+        // Outward direction = the IC EDGE the osc pins hug (NOT the dominant axis of
+        // mid−centre: a corner osc pin is more vertically than horizontally offset yet
+        // still sticks out the SIDE). Classify by nearest edge of the IC's pin bbox.
+        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+        for pg in &items[ai].geom.pins {
+            let w = crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
+            lo[0] = lo[0].min(w[0]);
+            lo[1] = lo[1].min(w[1]);
+            hi[0] = hi[0].max(w[0]);
+            hi[1] = hi[1].max(w[1]);
+        }
+        let (dl, dr, dt, db) = (mid[0] - lo[0], hi[0] - mid[0], mid[1] - lo[1], hi[1] - mid[1]);
+        let m = dl.min(dr).min(dt).min(db);
+        let dir = if m == dl {
+            [-1.0, 0.0]
+        } else if m == dr {
+            [1.0, 0.0]
+        } else if m == dt {
+            [0.0, -1.0]
+        } else {
+            [0.0, 1.0]
+        };
+        moves.push((yi, [snap(mid[0] + dir[0] * GAP), snap(mid[1] + dir[1] * GAP)]));
+        for (net, w) in [(&onets[0], wa), (&onets[1], wb)] {
+            if let Some(ci) = items.iter().position(|it| {
+                in_idiom(it)
+                    && it.refdes != y_refdes
+                    && it.pins.iter().any(|(_, _, n)| n.as_deref() == Some(net.as_str()))
+            }) {
+                moves.push((ci, [snap(w[0] + dir[0] * GAP * 2.0), snap(w[1] + dir[1] * GAP * 2.0)]));
+            }
+        }
+    }
+    let moved = !moves.is_empty();
+    if std::env::var("IDIOM_DEBUG").is_ok() {
+        for (i, at) in &moves {
+            eprintln!("ALIGN {} -> [{:.1},{:.1}]", items[*i].refdes, at[0], at[1]);
+        }
+    }
+    for (i, at) in moves {
+        items[i].at = at;
+    }
+    moved
+}
+
 fn apply_cells(items: &mut [Item], cells: &[Cell]) {
     let angles: Vec<f64> =
         items.iter().zip(cells).map(|(it, c)| orient_angle(&it.geom, c.orient)).collect();

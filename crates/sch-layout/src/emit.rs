@@ -1215,8 +1215,18 @@ impl SchematicWriter {
                 inst.at[1] + hy,
             ]);
         }
+        // A no-connect X is a glyph with real extent, owned by no net. Register it
+        // both as a foreign anchor point (a wire may not pass exactly through it) AND
+        // as a net-tagged keepout box, so the router DETOURS foreign wires around the
+        // glyph instead of grazing it — the X never lands on top of a wire. The
+        // sentinel net matches no real net, so every wire is foreign and detours.
+        const NC_KEEPOUT: f64 = 1.27; // ≈ the X half-extent (~0.7 mm) plus margin.
         for nc in &self.no_connects {
             scene.points.push((nc.at, NC.to_string()));
+            scene.label_solids.push((
+                [nc.at[0] - NC_KEEPOUT, nc.at[1] - NC_KEEPOUT, nc.at[0] + NC_KEEPOUT, nc.at[1] + NC_KEEPOUT],
+                NC.to_string(),
+            ));
         }
         for l in &self.labels {
             scene.points.push((l.at, l.net.clone()));
@@ -1756,7 +1766,7 @@ pub(crate) fn transform_offset(local: [f64; 2], angle: f64, mirror: bool) -> [f6
 /// spike's proven form. Angles are restricted to 0/90/180/270 in practice, so
 /// the sin/cos are exact (±1, 0) and the result stays on the grid; we still snap
 /// to absorb floating-point dust.
-fn pin_endpoint(pin: &PinGeom, inst_at: [f64; 2], inst_angle: f64, mirror: bool) -> [f64; 2] {
+pub(crate) fn pin_endpoint(pin: &PinGeom, inst_at: [f64; 2], inst_angle: f64, mirror: bool) -> [f64; 2] {
     let off = transform_offset(pin.at, inst_angle, mirror);
     snap_point([inst_at[0] + off[0], inst_at[1] + off[1]])
 }

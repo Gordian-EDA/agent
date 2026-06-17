@@ -1,0 +1,190 @@
+//! `circuit-graph` — an attributed circuit graph plus a generic, extensible idiom
+//! matcher.
+//!
+//! A schematic is a hypergraph: components (nodes) joined by nets (hyperedges over
+//! pins). Recurring sub-circuits — a crystal with its load caps, a decoupling bank,
+//! an RC filter — are small **idioms** worth recognising so a layout engine can
+//! co-place them. This crate models the graph ([`CircuitGraph`]) and matches it
+//! against a **library of declarative patterns** ([`library`]) with an attributed
+//! subgraph-similarity algorithm ([`matcher`]). Idioms can also be **derived** from
+//! an existing design ([`derive`]).
+//!
+//! Design goals:
+//! - **Pure & testable.** No KiCAD, geometry, or I/O — just data in, matches out.
+//!   The host (`sch-layout`) adapts its own structures into [`CircuitGraph`].
+//! - **Extensible.** A new idiom is one [`pattern::Pattern`] value; the matcher is
+//!   generic and never changes.
+//! - **Robust.** Optional roles/edges yield a graph-similarity *score* so a
+//!   near-miss degrades gracefully instead of vanishing.
+
+pub mod derive;
+pub mod graph;
+pub mod library;
+pub mod matcher;
+pub mod pattern;
+pub mod value;
+
+pub use graph::{CircuitGraph, NetKind, Node, Pin};
+pub use matcher::{find, find_all, Match};
+pub use pattern::{Edge, Mult, NetMatch, NodePred, Pattern, PlacementHint, Role, Target};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A node helper for tests.
+    fn node(refdes: &str, lib: &str, value: &str, pins: &[(&str, &str)]) -> Node {
+        Node {
+            refdes: refdes.into(),
+            lib_id: lib.into(),
+            value: value.into(),
+            pins: pins
+                .iter()
+                .enumerate()
+                .map(|(i, (name, net))| Pin {
+                    number: (i + 1).to_string(),
+                    name: (*name).into(),
+                    net: (!net.is_empty()).then(|| net.to_string()),
+                })
+                .collect(),
+        }
+    }
+
+    fn kind_of(net: &str) -> NetKind {
+        match net {
+            "GND" | "VSS" => NetKind::Ground,
+            "+3V3" | "VCC" | "5V" => NetKind::Power,
+            _ => NetKind::Signal,
+        }
+    }
+
+    /// A minimal STM32-like graph: MCU with a crystal + 2 load caps and a 3-cap
+    /// decoupling bank on +3V3.
+    fn stm32_graph() -> CircuitGraph {
+        let nodes = vec![
+            node(
+                "U1",
+                "MCU_ST_STM32F1:STM32F103C8Tx",
+                "",
+                &[
+                    ("VDD", "+3V3"),
+                    ("VSS", "GND"),
+                    ("OSC_IN", "XTAL1"),
+                    ("OSC_OUT", "XTAL2"),
+                    ("PA0", "SIG"),
+                ],
+            ),
+            node("Y1", "Device:Crystal", "8MHz", &[("1", "XTAL1"), ("2", "XTAL2")]),
+            node("C1", "Device:C", "22pF", &[("1", "XTAL1"), ("2", "GND")]),
+            node("C2", "Device:C", "22pF", &[("1", "XTAL2"), ("2", "GND")]),
+            node("C3", "Device:C", "100nF", &[("1", "+3V3"), ("2", "GND")]),
+            node("C4", "Device:C", "100nF", &[("1", "+3V3"), ("2", "GND")]),
+            node("C5", "Device:C", "100nF", &[("1", "+3V3"), ("2", "GND")]),
+        ];
+        CircuitGraph::new(nodes, kind_of)
+    }
+
+    #[test]
+    fn matches_crystal_cluster() {
+        let g = stm32_graph();
+        let ms = find(&g, &library::CRYSTAL);
+        assert_eq!(ms.len(), 1, "exactly one crystal cluster");
+        let m = &ms[0];
+        assert_eq!(m.anchor, "U1");
+        assert_eq!((m.score - 1.0).abs() < 1e-9, true, "full crystal scores 1.0");
+        let mut caps: Vec<String> = m.bindings["cap_a"].clone();
+        caps.extend(m.bindings["cap_b"].clone());
+        caps.sort();
+        assert_eq!(caps, vec!["C1".to_string(), "C2".to_string()]);
+        assert_eq!(m.bindings["crystal"], vec!["Y1".to_string()]);
+    }
+
+    #[test]
+    fn matches_decoupling_bank() {
+        let g = stm32_graph();
+        let ms = find(&g, &library::DECOUPLING);
+        assert_eq!(ms.len(), 1, "one decoupling bank");
+        let m = &ms[0];
+        assert_eq!(m.anchor, "U1");
+        let mut caps = m.bindings["cap"].clone();
+        caps.sort();
+        // C3/C4/C5 are the rail-to-rail caps; the crystal load caps (to a signal
+        // net, not power) must NOT be swept in.
+        assert_eq!(caps, vec!["C3".to_string(), "C4".to_string(), "C5".to_string()]);
+    }
+
+    #[test]
+    fn find_all_resolves_contention_no_double_claim() {
+        let g = stm32_graph();
+        let ms = find_all(&g, &library::active_library());
+        // crystal + decoupling, disjoint member sets.
+        let crystal = ms.iter().find(|m| m.pattern == "crystal").unwrap();
+        let deco = ms.iter().find(|m| m.pattern == "decoupling").unwrap();
+        let cm: std::collections::BTreeSet<_> = crystal.members("anchor").into_iter().collect();
+        let dm: std::collections::BTreeSet<_> = deco.members("anchor").into_iter().collect();
+        assert!(cm.is_disjoint(&dm), "no component claimed by two idioms");
+    }
+
+    #[test]
+    fn no_idiom_on_plain_divider() {
+        // R-R-C divider/filter: no crystal, fewer than 3 rail caps.
+        let nodes = vec![
+            node("R1", "Device:R", "10k", &[("1", "VIN"), ("2", "MID")]),
+            node("R2", "Device:R", "10k", &[("1", "MID"), ("2", "GND")]),
+            node("C1", "Device:C", "100nF", &[("1", "MID"), ("2", "GND")]),
+        ];
+        let g = CircuitGraph::new(nodes, kind_of);
+        assert!(find(&g, &library::CRYSTAL).is_empty());
+        assert!(find(&g, &library::DECOUPLING).is_empty());
+    }
+
+    #[test]
+    fn single_cap_crystal_rejected_at_full_min_score() {
+        // Drop C2: only one load cap. With min_score 1.0 (both caps required) the
+        // crystal pattern must not match.
+        let nodes = vec![
+            node("U1", "MCU:X", "", &[("1", "+3V3"), ("2", "GND"), ("3", "XTAL1"), ("4", "XTAL2")]),
+            node("Y1", "Device:Crystal", "8MHz", &[("1", "XTAL1"), ("2", "XTAL2")]),
+            node("C1", "Device:C", "22pF", &[("1", "XTAL1"), ("2", "GND")]),
+        ];
+        let g = CircuitGraph::new(nodes, kind_of);
+        assert!(find(&g, &library::CRYSTAL).is_empty(), "one-cap crystal fails full match");
+    }
+
+    #[test]
+    fn extended_library_patterns_match_their_shapes() {
+        // RC low-pass: R in series to a node shunted by C to GND.
+        let rc = vec![
+            node("R1", "Device:R", "1k", &[("1", "IN"), ("2", "OUT")]),
+            node("C1", "Device:C", "100nF", &[("1", "OUT"), ("2", "GND")]),
+        ];
+        let g = CircuitGraph::new(rc, kind_of);
+        assert_eq!(find(&g, &library::RC_LOWPASS).len(), 1, "rc_lowpass matches");
+
+        // LED indicator: LED in series with a resistor.
+        let led = vec![
+            node("D1", "Device:LED", "", &[("1", "NODE"), ("2", "GND")]),
+            node("R1", "Device:R", "330", &[("1", "+3V3"), ("2", "NODE")]),
+        ];
+        let g = CircuitGraph::new(led, kind_of);
+        assert_eq!(find(&g, &library::LED_INDICATOR).len(), 1, "led_indicator matches");
+    }
+
+    #[test]
+    fn derive_from_example_reproduces_a_matchable_sketch() {
+        let g = stm32_graph();
+        let d = derive::derive(&g, "U1", 1).expect("derive around U1");
+        // The seed is the anchor; the crystal and load caps appear as roles.
+        assert!(d.roles.contains_key("anchor"));
+        let families: std::collections::BTreeSet<_> =
+            d.roles.values().map(|r| r.lib_family.clone()).collect();
+        assert!(families.contains("Device:Crystal"), "derived roles include the crystal: {families:?}");
+        assert!(families.contains("Device:C"), "derived roles include a load cap");
+        // At least one ground rail edge was extracted.
+        assert!(
+            d.edges.iter().any(|(_, b, k)| b == "GND" && *k == NetKind::Ground),
+            "derived a ground rail edge: {:?}",
+            d.edges
+        );
+    }
+}

@@ -477,6 +477,24 @@ mod tests {
     }
 
     #[test]
+    fn every_wire_detours_around_a_no_connect_keepout() {
+        // A no-connect X glyph is owned by the sentinel net `\0no_connect`, which no
+        // real wire ever carries — so UNLIKE a port pennant there is no owner that may
+        // pass through; every net detours, keeping the X off all wires.
+        const NC: &str = "\0no_connect";
+        let mut s = scene(vec![], vec![], vec![]);
+        s.label_solids = vec![([4.0, -1.27, 6.54, 1.27], NC.to_string())];
+        let straight = vec![[0.0, 0.0], [12.0, 0.0]];
+        // Every real net is foreign to the sentinel, so the straight run is rejected.
+        assert!(!path_ok(&straight, "FB", &s));
+        assert!(!path_ok(&straight, "GND", &s));
+        // A foreign run detours and stays valid (the glyph never sits on the wire).
+        let routed = route_edge([0.0, 0.0], Dir::East, [12.0, 0.0], "FB", &s).unwrap();
+        assert!(path_ok(&routed, "FB", &s));
+        assert_ne!(routed, elbow([0.0, 0.0], Dir::East, [12.0, 0.0]));
+    }
+
+    #[test]
     fn route_edge_walled_in_returns_none() {
         // b is enclosed by a ring of solids covering all detour candidates.
         let s = scene(
