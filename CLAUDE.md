@@ -4,6 +4,31 @@ A Rust workspace for an LLM agent that designs KiCAD schematics.
 
 ## Conventions
 
+### When stuck: refresh, reframe, realign
+
+When you've iterated a few times on a hard problem and the metric isn't moving (and
+especially before you start *tuning constants* or reaching for ever-more-speculative
+local fixes), **stop and think high-level about the problem's structure** — the
+property you can exploit — rather than grinding the same approach:
+
+- **Refresh** — re-derive the problem from first principles; what is *actually* being
+  optimized, and what structure does the input have?
+- **Reframe** — find the structural lever. E.g. schematic placement is a **mix of local
+  and global** (clusters of tightly-coupled parts joined by a few global nets), so the
+  search and the cost should be **locality-aware / two-level**, not a flat whole-board
+  re-route per move. See `docs/specs/locality-aware-placement-search.md`. Other examples
+  this session: idiom detection → a *graph-similarity* problem (own crate, declarative
+  patterns); "wires too close to body" → the engine's *detector* had a blind spot, not
+  the renderer; long ground rails → *distributed local power symbols* (a netlist property
+  the agent controls), not a placement tweak.
+- **Realign** — re-check the goal: are you optimizing the right thing? Is the metric a
+  faithful proxy (the VLM critic over-reports *and* the engine under-reported
+  wire-through-body — cross-check both)? Has the user reframed the goal?
+
+Prefer a workflow/research pass (survey how the field solves the structural version of
+the problem) over another round of speculative local edits. Capture the strategy you
+land on as a spec under `docs/specs/`.
+
 ### Fuzzy / approximate string matching
 
 Use `fuzzy-matcher`'s `SkimMatcherV2` (fzf-style subsequence scoring) for any
