@@ -2,122 +2,128 @@
 """
 schematic_critic.py — an automated VLM critic for rendered KiCAD schematics.
 
-Why this exists: Claude sub-agents reviewing schematic PNGs both (a) over-report
-"wire through a component body" on clean references and (b) MISS real instances on
-generated circuits. This is a dedicated, stateless evaluator with a tightly-scoped
-system prompt that forces the model to localize each defect concretely, so its
-output can gate engine iteration objectively instead of by eyeballing.
+Why this exists: VLMs reviewing schematic PNGs both (a) OVER-report "wire through a
+component body" / "dangling pin" on clean drawings and (b) MISS real instances. This
+is a dedicated, stateless evaluator that forces the model to REASON THROUGH each
+false-positive-prone defect before committing, returns a richly-STRUCTURED verdict
+(per-dimension scores + per-defect confidence + a verification trace), and gates a
+loop on high-confidence majors only.
 
-It talks to the OpenAI-compatible gateway configured in the environment
-(OPENAI_API_KEY / OPENAI_BASE_URL) and asks a vision model for a STRICT-JSON ranked
-defect list. Exits non-zero (>0) when any critical/major defect is found, so it can
-be used as a pass/fail gate in scripts.
+Model notes (gateway = OPENAI_BASE_URL, OpenAI-compatible):
+- Default `anthropic/claude-opus-4-8` — the strongest vision model that actually works
+  on the gateway. Native extended-thinking can't be enabled through this gateway (the
+  `thinking`/`reasoning_effort` passthrough 400s), so "thinking" is obtained IN-PROMPT:
+  the model writes a step-by-step analysis (tracing every FP-prone defect to its wire
+  endpoints) BEFORE the JSON, which is what kills the wire-through-body / dangling-pin
+  false positives.
+- `--temperature` is NOT sent (deprecated on opus-4-8 / gpt-5.x → 400).
+- Checked as of writing: Gemini 3 Pro is not hosted on this gateway, and `azure/gpt-5.4`
+  returns "no model was able to generate a response" — so Opus is the working choice.
+  `--model X` still lets you point at any future model.
 
 Usage:
   python3 tools/schematic_critic.py OURS.png [--reference REF.png]
-                                    [--circuit "one-line description of the intended circuit"]
-                                    [--model anthropic/claude-opus-4-8] [--json-only]
+                                    [--circuit "one-line description"]
+                                    [--model anthropic/claude-opus-4-8]
+                                    [--engine-clean] [--json-only] [--show-reasoning]
 """
 import argparse
 import base64
 import json
 import os
+import re
 import sys
 import urllib.request
 
 SYSTEM_PROMPT = """\
-You are a ruthless, senior schematic-layout reviewer auditing a single rendered
-KiCAD schematic for VISUAL/LAYOUT defects. The netlist is already known to be
-electrically correct — your ONLY job is to judge how the drawing READS. Award no
-credit for effort. But every defect you report MUST be one you can point to
-concretely; do NOT invent defects to seem thorough, and do NOT pad the list.
+You are the most exacting schematic-layout reviewer alive, auditing ONE rendered
+KiCAD schematic for VISUAL/LAYOUT quality — how the drawing READS, not whether it is
+electrically correct (the netlist is already verified correct). Award no credit for
+effort. Two failure modes are equally bad: inventing a defect that isn't there
+(FALSE POSITIVE), and missing a real one. You avoid both by TRACING the evidence for
+every claim before you make it.
 
-How to read the image precisely:
-- Wires are thin GREEN line segments (always horizontal or vertical).
-- Component BODIES are the dark-red shapes: a resistor is a tall/wide hollow
-  rectangle (or zigzag); a capacitor is two short parallel plates; a diode/LED is a
-  triangle+bar; an IC/connector is a filled (often yellow) rectangle; a transistor
-  is a circle with internal lines; a power symbol is a small arrow/bar/pennant.
-- Pins are short stubs on a body's edge where a green wire attaches. The DARK-RED
-  lines/triangles drawn INSIDE an IC rectangle are the symbol's own artwork, NOT
-  wires — never report those as wires.
+== HOW TO READ THE IMAGE PRECISELY ==
+- Wires are thin GREEN axis-aligned segments (horizontal or vertical only).
+- Component BODIES are dark-red shapes: resistor = hollow rectangle (or zigzag);
+  capacitor = two short parallel plates; diode/LED = triangle + bar; IC/connector =
+  filled (usually yellow) rectangle; transistor = circle with internal lines; power
+  symbol = a small arrow / bar / inverted-triangle / pennant, usually with a tiny
+  "GND"/"VCC"/"+3V3" text beside it.
+- PINS are short stubs on a body edge where a green wire attaches.
+- The dark-red lines/arcs/triangles drawn INSIDE an IC or op-amp body are the
+  symbol's OWN ARTWORK, never wires. Never report symbol artwork as a wire.
 
-Defect classes to hunt, hardest-to-see first:
+== THE TWO FALSE-POSITIVE-PRONE CLASSES — TRACE BEFORE YOU REPORT ==
 
-1. wire-through-body (HIGH PRIORITY, but DEFINED NARROWLY — read carefully to avoid
-   false positives): a defect ONLY when a green wire crosses a component body
-   TRANSVERSELY (perpendicular to the part), or when a wire that does NOT terminate
-   on either of the part's pins overlaps the body. Concretely, a defect looks like:
-   a HORIZONTAL rail passing straight across a VERTICAL resistor's rectangle, or a
-   vertical wire slicing across a horizontal part.
-   CRUCIAL — the following are CORRECT and must NEVER be reported as wire-through-body:
-   • A 2-pin part placed IN-LINE / IN SERIES on a straight wire: the wire enters one
-     pin and leaves the opposite pin along the SAME straight line, with the body
-     sitting between the two pins. A vertical resistor with a green wire above it
-     (to its top pin) and below it (from its bottom pin) is a NORMAL series/divider
-     resistor — NOT a defect. A horizontal cap with wire on its left and right pins
-     is NORMAL. The body bridging its own two collinear pins is how every series
-     part is drawn.
-   • An OP-AMP / COMPARATOR / regulator drawn as a TRIANGLE: its V+ power pin exits
-     the TOP and its V- power pin exits the BOTTOM; vertical wires from those pins
-     going up (to a +V rail symbol) and down (to GND) are NORMAL power connections,
-     NOT wires through the body. The +/- input markers and the ">" inside the
-     triangle are symbol artwork, not wires. Only a wire crossing the triangle's
-     interior that is NOT one of its own pin connections counts.
-   • A wire touching a pin at the body edge.
-   • The dark-red artwork drawn INSIDE an IC rectangle.
-   Test before reporting: does the green segment cross the body WITHOUT ending at
-   either of that part's two pins? If it ends at a pin, it is NOT this defect.
+(A) wire-through-body. A real defect is a green wire that crosses a part's body
+    WITHOUT terminating on either of that part's two pins — e.g. a horizontal rail
+    sliced straight across a vertical resistor it does not connect to, or a wire
+    running parallel to a cap, offset into its plates, passing by rather than landing
+    on a pin. To decide, TRACE the offending segment to BOTH its endpoints:
+      • If it enters one pin of the part and leaves the OPPOSITE pin along the same
+        line (the body sits between its own two collinear pins) → NORMAL in-line /
+        series / divider part. NOT a defect. (A vertical resistor or cap with a wire
+        above it and a wire below it is the textbook way to draw a series element.)
+      • If both ends terminate on pins / junctions / symbols and it merely passes
+        NEAR a body → not through it. NOT a defect.
+      • Op-amp/regulator TRIANGLE: vertical wires from its top (V+) and bottom (V-/GND)
+        pins going up to a rail and down to ground are NORMAL power pins, not crossings.
+    Only report it if you can name the segment AND state which part's body it crosses
+    AND confirm it lands on NEITHER of that part's pins.
 
-2. dangling-pin: a pin stub or wire end that stops in EMPTY SPACE with no junction
-   dot, no wire, and no symbol — a terminal left truly hanging.
-   CRUCIAL — these are CONNECTED and must NEVER be reported as dangling/floating:
-   • A pin (or short stub) ending at a POWER/GROUND SYMBOL — the small arrow, bar,
-     or inverted-triangle glyph labeled GND / VCC / +5V / +3V3 / VIN etc. That glyph
-     IS the connection: the pin is tied to that global rail. These glyphs are SMALL
-     and easy to miss — before calling a pin dangling, look hard at its end for a tiny
-     triangle/bar/arrow; an LED cathode or cap pin ending in a small inverted-triangle
-     is GROUNDED, not floating. A nearby "GND"/"VCC" text label confirms the symbol
-     is there even if the glyph is faint.
-   • Two parts that connect ONLY through a shared rail (each has its own GND or VCC
-     symbol, with no direct green wire between them) — a global power net needs no
-     drawn wire. A decoupling cap whose top goes to a +5V symbol and an IC whose
-     power pin goes to its own +5V symbol ARE connected. Do not call either floating.
+(B) dangling-pin. A real defect is a pin/wire-end stopping in EMPTY space with no
+    junction dot, no wire, and no symbol. Before reporting, LOOK HARD at the endpoint:
+      • A pin ending in a small arrow / bar / inverted-triangle (often faint), or with
+        a nearby "GND"/"VCC"/"+3V3"/"VIN" label, is tied to that global rail — CONNECTED.
+      • Two parts sharing only a global rail (each with its own GND/VCC symbol, no wire
+        between them) ARE connected; a global net needs no drawn wire.
+    Only report it if the endpoint is genuinely bare.
 
-3. text-overlap: a refdes/value/label text colliding with a wire, a body, or
-   another text so they overlap or read as one run (e.g. a net label "GND" abutting
-   a value "10k" so it reads "GND10k").
+== THE OTHER DEFECT CLASSES (report freely, these are not FP-prone) ==
+- text-overlap: refdes/value/label text colliding with a wire, body, or other text
+  (e.g. "GND" abutting "10k" so it reads "GND10k"; a duplicated net label).
+- orientation: a series element drawn vertical (should be horizontal) or a
+  rail/decoupling tap at an odd angle; inconsistent orientation within one group.
+- off-spine-leg / dog-leg: an avoidable jog (extra bends) where a straight run fits;
+  a part offset from the wire it taps so its lead zig-zags.
+- wire-crossing / congestion: avoidable crossings of unrelated nets, or a knot of
+  wires/junctions a small rearrangement would untangle.
+- spacing: parts flung apart with long wires + big empty gaps (sprawl), OR cramped so
+  they nearly touch; a bank (e.g. decoupling caps) scattered instead of aligned.
 
-4. orientation: a part in series with the signal path drawn vertical when it should
-   be horizontal, or a rail/decoupling tap to a power/ground symbol drawn at an odd
-   angle. Resistor dividers / pull-ups should be clean vertical taps; series
-   elements horizontal.
+== PROCEDURE (follow in order) ==
+1) In a "reasoning" section, walk the sheet methodically: list the components you see,
+   then for EACH candidate (A) or (B) defect, TRACE the segment/endpoint and state your
+   verdict (real / false-positive) with the reason. Be skeptical of your own first
+   impression on (A) and (B).
+2) Then output the final verdict as STRICT JSON, on its own, after the exact marker
+   line `FINAL_JSON:`. No markdown fences. Shape:
 
-5. off-spine-leg / dog-leg: a connection that makes an unnecessary jog (extra
-   bends) instead of a straight run; a part offset from the wire it taps so its lead
-   zig-zags to reach it.
-
-6. wire-crossing / congestion: avoidable crossings of unrelated nets, or a dense
-   knot of wires/junctions that a small rearrangement would untangle.
-
-7. spacing: parts flung far apart with long wires and big empty gaps (sprawl), OR
-   parts/text cramped so they nearly touch.
-
-Output STRICT JSON ONLY (no prose, no markdown fences), exactly this shape:
+FINAL_JSON:
 {
+  "dimension_scores": {
+    "readability": 0-10,        // can a person trace every net at a glance
+    "routing_neatness": 0-10,   // straight runs, few bends/crossings/junctions
+    "compactness": 0-10,        // tight but not cramped; no sprawl, no empty gaps
+    "convention": 0-10          // series horizontal, taps vertical, banks aligned
+  },
+  "score": 0-10,                // overall; 10 = publishable textbook quality
+  "summary": "one-sentence verdict",
+  "strengths": ["what reads well, concrete"],
   "defects": [
-    {"severity": "critical|major|minor",
-     "category": "wire-through-body|dangling-pin|text-overlap|orientation|off-spine-leg|wire-crossing|congestion|spacing|other",
-     "location": "which refdes / region of the sheet",
-     "description": "one concrete sentence a person could verify"}
-  ],
-  "score": 0-10,            // 10 = publishable textbook quality, 0 = unreadable
-  "summary": "one sentence overall verdict"
+    {
+      "severity": "critical|major|minor",   // critical=wrong-reading; major=clearly worse than a human; minor=cosmetic
+      "category": "wire-through-body|dangling-pin|text-overlap|orientation|off-spine-leg|wire-crossing|congestion|spacing|other",
+      "location": "refdes(es) / region",
+      "description": "one concrete, verifiable sentence",
+      "confidence": "high|medium|low",       // how sure it is real (not a FP); be honest
+      "verification": "the specific observation that rules out a false positive (for A/B classes, the traced endpoints)"
+    }
+  ]
 }
-Order defects worst-first. If the sheet is genuinely clean, return an empty defects
-list with a high score. severity guide: critical = wrong-reading/unreadable
-(wire-through-body, dangling pin, text merged); major = clearly worse than a human
-would draw; minor = cosmetic.
+Order defects worst-first. A genuinely clean sheet gets an empty defects list and a
+high score. Do NOT pad. Only `high`-confidence majors/criticals should ever gate a build.
 """
 
 
@@ -126,16 +132,46 @@ def b64_image(path):
         return base64.b64encode(f.read()).decode()
 
 
+def extract_json(text):
+    """Pull the JSON verdict out of a reasoning+JSON response: prefer the block after
+    the FINAL_JSON: marker, else the last balanced {...} object."""
+    if "FINAL_JSON:" in text:
+        text = text.split("FINAL_JSON:", 1)[1]
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("```", 2)[1]
+        text = re.sub(r"^json\s*", "", text).strip().rstrip("`").strip()
+    # Try direct parse, else scan for the last balanced object.
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    depth, start, last = 0, None, None
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                last = text[start:i + 1]
+    if last:
+        return json.loads(last)
+    raise json.JSONDecodeError("no JSON object found", text, 0)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("image")
     ap.add_argument("--reference", help="optional reference PNG of the same circuit")
     ap.add_argument("--circuit", help="one-line description of the intended circuit")
     ap.add_argument("--model", default=os.environ.get("CRITIC_MODEL", "anthropic/claude-opus-4-8"))
-    ap.add_argument("--json-only", action="store_true", help="print only the JSON")
+    ap.add_argument("--json-only", action="store_true", help="print only the JSON verdict")
+    ap.add_argument("--show-reasoning", action="store_true", help="also print the model's reasoning trace")
     ap.add_argument("--engine-clean", action="store_true",
-                    help="the engine's geometry analysis confirms 0 wires through any body; "
-                         "suppress wire-through-body reports (they would be false positives)")
+                    help="engine geometry analysis confirms 0 wires through any body AND a "
+                         "complete netlist; suppress wire-through-body + dangling-pin (FPs)")
     args = ap.parse_args()
 
     base = os.environ.get("OPENAI_BASE_URL", "").rstrip("/")
@@ -143,28 +179,27 @@ def main():
     if not base or not key:
         sys.exit("OPENAI_BASE_URL / OPENAI_API_KEY not set in environment")
 
-    user_content = []
-    ctx = "Audit this rendered schematic for layout defects."
+    ctx = ("Audit this rendered schematic for layout quality. Reason first (trace every"
+           " wire-through-body and dangling-pin candidate to its endpoints), then emit"
+           " the FINAL_JSON verdict.")
     if args.circuit:
         ctx += f" Intended circuit: {args.circuit}."
     if args.reference:
-        ctx += (" A REFERENCE render of the SAME circuit (hand-drawn, good) is"
-                " attached SECOND — compare, but only report defects in the FIRST"
-                " (the one under review).")
+        ctx += (" A REFERENCE render of the SAME circuit (hand-drawn, good) is attached"
+                " SECOND — compare, but only report defects in the FIRST (under review).")
     if args.engine_clean:
-        ctx += (" AUTHORITATIVE ENGINE GROUND TRUTH (geometric + netlist analysis of the"
-                " actual coordinates): (1) ZERO wires pass through any component body"
-                " (resistor, cap, IC, op-amp triangle, or connector); (2) the netlist is"
-                " verified COMPLETE — every component pin is electrically connected (to a"
-                " wire, a power/ground-symbol glyph at the pin, or a labelled global net)."
-                " Therefore do NOT report any wire-through-body OR dangling-pin defect — a"
-                " pin that appears to end in space is in fact terminating at a small"
-                " power-symbol glyph or a global label you may not see clearly; any such"
-                " claim is a false positive. Judge only the OTHER defect classes (orientation,"
-                " off-spine dog-legs, avoidable crossings, congestion, spacing, text overlap).")
-    user_content.append({"type": "text", "text": ctx})
-    user_content.append({"type": "image_url",
-                         "image_url": {"url": f"data:image/png;base64,{b64_image(args.image)}"}})
+        ctx += (" AUTHORITATIVE ENGINE GROUND TRUTH (exact geometric + netlist analysis of the"
+                " real coordinates): (1) ZERO wires pass through any component body — the"
+                " engine checks the perpendicular, collinear, AND parallel-offset-through-plate"
+                " cases, so a wire that merely looks close is NOT crossing; (2) the netlist is"
+                " COMPLETE — every pin is connected (to a wire, a power-symbol glyph at the pin,"
+                " or a labelled global net). Therefore report NO wire-through-body and NO"
+                " dangling-pin defect; any such claim is a confirmed false positive. Judge only"
+                " orientation, dog-legs, crossings, congestion, spacing, and text overlap.")
+
+    user_content = [{"type": "text", "text": ctx},
+                    {"type": "image_url",
+                     "image_url": {"url": f"data:image/png;base64,{b64_image(args.image)}"}}]
     if args.reference:
         user_content.append({"type": "image_url",
                              "image_url": {"url": f"data:image/png;base64,{b64_image(args.reference)}"}})
@@ -175,36 +210,64 @@ def main():
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
-        "max_tokens": 2000,
+        # Headroom for the in-prompt reasoning trace + the JSON. (No `temperature`:
+        # it is deprecated on opus-4-8 / gpt-5.x and 400s the request.)
+        "max_tokens": 6000,
     }
     req = urllib.request.Request(
         f"{base}/chat/completions",
         data=json.dumps(body).encode(),
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        out = json.loads(resp.read())
-    text = out["choices"][0]["message"]["content"].strip()
-    # Strip accidental code fences.
-    if text.startswith("```"):
-        text = text.split("```", 2)[1].lstrip("json").strip().rstrip("`").strip()
     try:
-        result = json.loads(text)
+        with urllib.request.urlopen(req, timeout=240) as resp:
+            out = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        msg = e.read().decode(errors="replace")
+        try:
+            msg = json.loads(msg).get("error", {}).get("message", msg)
+        except Exception:
+            pass
+        sys.exit(f"critic: model `{args.model}` request failed (HTTP {e.code}): {msg[:300]}")
+    text = out["choices"][0]["message"]["content"].strip()
+    try:
+        result = extract_json(text)
     except json.JSONDecodeError:
         print(text)
         sys.exit(2)
 
+    # The engine-clean contract is enforced in code too, in case the model slips.
+    if args.engine_clean:
+        result["defects"] = [d for d in result.get("defects", [])
+                             if d.get("category") not in ("wire-through-body", "dangling-pin")]
+
+    if args.show_reasoning and "FINAL_JSON:" in text:
+        print("--- reasoning ---")
+        print(text.split("FINAL_JSON:", 1)[0].strip())
+        print("--- verdict ---")
+
     if args.json_only:
         print(json.dumps(result, indent=2))
     else:
+        ds = result.get("dimension_scores", {}) or {}
+        dims = " ".join(f"{k[:4]}={v}" for k, v in ds.items())
         print(f"=== critic: {os.path.basename(args.image)} ===")
         print(f"score: {result.get('score')}/10 — {result.get('summary','')}")
+        if dims:
+            print(f"  dims: {dims}")
+        for s in result.get("strengths", []):
+            print(f"  + {s}")
         for d in result.get("defects", []):
-            print(f"  [{d.get('severity','?'):8}] {d.get('category','?'):16} "
-                  f"{d.get('location','?')}: {d.get('description','')}")
+            print(f"  [{d.get('severity','?'):8} {d.get('confidence','?'):6}] "
+                  f"{d.get('category','?'):16} {d.get('location','?')}: {d.get('description','')}")
+            if args.show_reasoning and d.get("verification"):
+                print(f"        ↳ {d['verification']}")
 
-    sev = {d.get("severity") for d in result.get("defects", [])}
-    sys.exit(1 if ("critical" in sev or "major" in sev) else 0)
+    # Gate on HIGH-confidence majors/criticals only — low/medium-confidence claims are
+    # the FP-prone ones and must not fail a build.
+    gating = [d for d in result.get("defects", [])
+              if d.get("severity") in ("critical", "major") and d.get("confidence") == "high"]
+    sys.exit(1 if gating else 0)
 
 
 if __name__ == "__main__":

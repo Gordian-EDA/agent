@@ -66,14 +66,17 @@ fresh, unbiased sub-agents instead:
 ### Automated VLM critic: `tools/schematic_critic.py`
 
 Prefer this over (or alongside) ad-hoc sub-agents for an OBJECTIVE, repeatable
-score. It sends a render to the OpenAI-gateway vision model with a tightly-scoped
-prompt and returns strict-JSON ranked defects + a 0-10 score; it exits nonzero on
-any critical/major so it can gate a loop.
+score. It sends a render to the OpenAI-gateway vision model (default
+`anthropic/claude-opus-4-8` — the strongest that works on the gateway) and returns a
+RICHLY-STRUCTURED verdict: per-dimension scores (readability / routing / compactness /
+convention), `strengths`, and ranked `defects` each with a `confidence` and a
+`verification` trace. It exits nonzero only on a **high-confidence** major/critical, so
+low-confidence (FP-prone) claims never gate a loop.
 
 ```
 set -a; . ./.env; set +a   # OPENAI_API_KEY / OPENAI_BASE_URL
 python3 tools/schematic_critic.py OURS.png [--reference REF.png] \
-        --circuit "one-line description of the intended circuit"
+        --circuit "one-line description of the intended circuit" [--show-reasoning]
 ```
 
 Use it to drive iteration: render (ANNEAL=1 for the premium path) → critic →
@@ -81,16 +84,19 @@ fix the highest real defect → re-critic; aim for **consistently 9+** across va
 circuits. Generate fresh circuits with `cargo run --release -p agent --example
 agent_design -- OUT.png "<prompt>"` (needs the OpenAI backend).
 
-CAVEAT — VLMs (this critic AND Read-tool sub-agents) systematically **over-report
-"wire through a component body"** on a correctly-drawn series/divider part (a
-vertical resistor with wires above and below it is normal, NOT a crossing) and on
-op-amp triangles / connectors. Always confirm against ENGINE GROUND TRUTH: the engine
-counts the actual crossings (`count_body_crossings` + `count_collinear_body_crossings`
-+ `count_ic_body_crossings`) and surfaces them on `EmitOutput.body_crossings` /
-`.ic_crossings`, also returned as `wire_through_body` in the `apply_design` tool
-result. When that count is 0, pass `--engine-clean` to the critic so it suppresses the
-false positives (it also asserts the verified-complete netlist, killing dangling-pin
-FPs on faint GND glyphs).
+FALSE POSITIVES — mostly handled now, but know the failure mode. The prompt forces the
+model to REASON FIRST and TRACE every `wire-through-body` / `dangling-pin` candidate to
+its wire endpoints before reporting (`--show-reasoning` prints the trace), which kills
+the classic over-reports — a vertical series/divider resistor with wires above+below is
+normal (NOT a crossing); a pin ending in a faint GND glyph is grounded (NOT dangling).
+This brought the divider from an FP magnet to 9/10 with zero FPs. The `--engine-clean`
+flag still hard-suppresses those two classes when the engine's geometry analysis
+(`count_body_crossings` + `..collinear..` + `..parallel..` + `count_ic_body_crossings`,
+surfaced as `EmitOutput.body_crossings` / `wire_through_body`) confirms 0 — but note the
+engine itself under-reported until the **parallel-offset-through-plate** detector was
+added, so a critic flag with `body_crossings=0` is worth a manual look, not an automatic
+dismissal. (Native extended-thinking can't be enabled via the gateway, and
+`--temperature` 400s on opus/gpt-5; Gemini 3 Pro / gpt-5.4 aren't usable here.)
 
 Gate every change on the netlist oracle
 (`cargo test --release -p sch-layout --test floorplan_netlist`) — a prettier
