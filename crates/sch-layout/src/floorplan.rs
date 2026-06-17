@@ -254,18 +254,52 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
     let authored = grid_from_layout(design);
     let order = order_anchors(&items, &inc, &anchors);
     let max_gcol = authored.values().map(|b| b[2]).max().unwrap_or(-1);
-    let mut next_col = max_gcol + 1;
     let mut anchor_col: BTreeMap<usize, i32> = BTreeMap::new();
     let mut anchor_row: BTreeMap<usize, i32> = BTreeMap::new();
+
+    // The anchors the author did NOT grid are 2-D SHELF-PACKED into a page-shaped block
+    // (≈√n per shelf) toward the TOP-LEFT, instead of laid out in one ever-widening row.
+    // One flat row is the #1 sprawl source on a multi-module board (4-5 ICs + connectors
+    // unroll into a wide strip with an empty vertical middle and long cross-sheet rails —
+    // the 20-circuit sweep's dominant defect); shelving folds that strip into a compact
+    // block and leaves the bottom-right corner clearer for the title block. Grid rows/cols
+    // are ORDINAL — `apply_cells` packs each populated track by its real content size — so
+    // a module only needs the right SHELF and order, not a metric footprint; a satellite-
+    // heavy anchor still reserves extra columns so its tap fan does not collide a neighbour.
+    let inferred: Vec<usize> =
+        order.iter().copied().filter(|ai| !authored.contains_key(&items[*ai].refdes)).collect();
+    let fwidth = |ai: usize| -> i32 {
+        let nsat = sats
+            .iter()
+            .filter(|&&si| {
+                anchor_tap(&items, &inc, &anchors, si, &rails).map(|(a, _, _)| a == ai).unwrap_or(false)
+            })
+            .count() as i32;
+        (1 + nsat / 6).max(1)
+    };
+    let per_row = (inferred.len() as f64).sqrt().ceil().max(1.0) as i32;
+    let x0 = max_gcol + 1;
+    let (mut gx, mut shelf, mut in_row, mut max_used) = (x0, 0i32, 0i32, max_gcol);
+    let mut packed: BTreeMap<usize, (i32, i32)> = BTreeMap::new();
+    for &ai in &inferred {
+        if in_row >= per_row {
+            shelf += 1;
+            gx = x0;
+            in_row = 0;
+        }
+        packed.insert(ai, (gx, shelf));
+        let w = fwidth(ai);
+        max_used = max_used.max(gx + w - 1);
+        gx += w;
+        in_row += 1;
+    }
+    let next_col = max_used + 1;
+
     for &ai in &order {
         let rd = &items[ai].refdes;
         let (gcol, grow) = match authored.get(rd) {
             Some(b) => (b[0], b[1]), // seed from the box's top-left cell
-            None => {
-                let c = next_col;
-                next_col += 1;
-                (c, 0)
-            }
+            None => packed[&ai],
         };
         let col = gcol * 5; // wide gaps leave room for tap satellites either side
         let row = MID + grow * ROW_BAND;
