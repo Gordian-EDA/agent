@@ -7,6 +7,11 @@ use crate::provider::{PinType, SymbolProvider};
 pub fn lint(d: &Design, provider: &dyn SymbolProvider) -> Diagnostics {
     let mut diags = Diagnostics::default();
     let mut net_pins: indexmap::IndexMap<&str, Vec<String>> = indexmap::IndexMap::new();
+    // Net-sanity: nets carrying a crystal/oscillator pin, and nets carrying a
+    // reset/boot control pin. A net with BOTH shorts the oscillator to reset —
+    // almost always a mis-wire (an OSC_OUT net the model named after a reset pin).
+    let mut osc_nets: std::collections::BTreeSet<String> = Default::default();
+    let mut ctrl_pins: indexmap::IndexMap<String, Vec<String>> = Default::default();
 
     for (_bname, block) in &d.blocks {
         for (refdes, comp) in block.components.iter() {
@@ -91,6 +96,44 @@ pub fn lint(d: &Design, provider: &dyn SymbolProvider) -> Diagnostics {
                         ),
                     ));
                 }
+            }
+
+            // Record oscillator nets (any pin of a crystal/resonator) and reset/boot
+            // control pins (by resolved pin NAME) for the net-sanity check below.
+            let is_osc = comp.part.contains("Crystal") || comp.part.contains("Resonator");
+            for (key, target) in all_pins.clone() {
+                let PinTarget::Net(n) = target else { continue };
+                if is_osc {
+                    osc_nets.insert(n.clone());
+                }
+                let pin_name = meta
+                    .pins
+                    .iter()
+                    .find(|p| p.number == *key || p.name == *key)
+                    .map(|p| p.name.as_str())
+                    .unwrap_or(key.as_str());
+                let u = pin_name.to_ascii_uppercase();
+                if matches!(u.as_str(), "NRST" | "RESET" | "RST" | "NMI") || u.starts_with("BOOT") {
+                    ctrl_pins.entry(n.clone()).or_default().push(format!("{refdes}.{pin_name}"));
+                }
+            }
+        }
+    }
+
+    // A crystal/oscillator net that also carries a reset/boot pin is almost certainly
+    // a mis-wire — the oscillator output shorted to reset. Surface it so the design is
+    // corrected rather than shipping a non-oscillating board.
+    if !d.lint_allow.contains("osc-reset-short") {
+        for net in &osc_nets {
+            if let Some(rpins) = ctrl_pins.get(net) {
+                diags.push(Diagnostic::warning(
+                    "osc-reset-short",
+                    format!(
+                        "net `{net}` joins a crystal/oscillator pin and a reset/boot pin ({}) — \
+                         likely a mis-wire shorting the oscillator to a control pin",
+                        rpins.join(", ")
+                    ),
+                ));
             }
         }
     }
@@ -177,8 +220,10 @@ mod tests {
                 ("3", "VSS", PowerInput, 1),
                 ("4", "PB6", Other, 1),
                 ("5", "PB7", Other, 1),
+                ("6", "NRST", Other, 1),
             ],
         );
+        p.add("Device:Crystal", vec![("1", "1", Other, 1), ("2", "2", Other, 1)]);
         p
     }
 
@@ -205,6 +250,42 @@ blocks:
         assert_eq!(pin.suggestion.as_deref(), Some("PB6"));
         let part = diags.0.iter().find(|d| d.code == "unknown-part").unwrap();
         assert_eq!(part.suggestion.as_deref(), Some("M:CPU"));
+    }
+
+    #[test]
+    fn crystal_pin_shorted_to_reset_warns() {
+        // U1.NRST and the crystal Y1 are both on net OSC — the OSC_OUT-shorted-to-reset
+        // mis-wire. The other crystal pin (OSC2) is clean.
+        let diags = run("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: M:CPU, pins: {VDD: 3V3, VSS: GND, NRST: OSC, PB7: X}}
+      Y1: {part: Device:Crystal, pins: {1: OSC, 2: OSC2}}
+");
+        let w = diags
+            .0
+            .iter()
+            .find(|d| d.code == "osc-reset-short")
+            .expect("osc-reset-short warning");
+        assert!(w.message.contains("OSC"));
+    }
+
+    #[test]
+    fn correctly_wired_crystal_does_not_warn() {
+        let diags = run("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: M:CPU, pins: {VDD: 3V3, VSS: GND, NRST: RESET, PB6: OSCIN, PB7: OSCOUT}}
+      Y1: {part: Device:Crystal, pins: {1: OSCIN, 2: OSCOUT}}
+");
+        assert!(
+            !diags.0.iter().any(|d| d.code == "osc-reset-short"),
+            "clean crystal must not warn: {diags:?}"
+        );
     }
 
     #[test]
