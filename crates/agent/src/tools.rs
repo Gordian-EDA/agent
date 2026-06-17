@@ -588,7 +588,10 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // The floorplan engine re-lays-out from scratch via the connectivity-driven
     // inferred IR; the human-style layout always re-flows the whole sheet.
     let ir = ctx.layout_for(&design);
-    let emitted = sch_layout::floorplan::emit(&ctx.env, &design, &ir)
+    // Production uses the locality-aware ANNEAL search (strictly ≥ greedy via the
+    // candidate pick) so generated boards get the premium placement, not the
+    // env-defaulted greedy free tier.
+    let emitted = sch_layout::floorplan::emit_anneal(&ctx.env, &design, &ir)
         .context("rendering schematic")?;
     let rendered = emitted.sch;
     let diff = design_diff(prior_design.as_ref(), &design);

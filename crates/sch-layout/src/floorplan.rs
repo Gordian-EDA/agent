@@ -1121,7 +1121,25 @@ fn resolve_pins(comp: &Component, geom: &SymbolGeometry) -> Vec<(String, String,
 // ---------------------------------------------------------------------------
 
 /// Emit a complete `.kicad_sch` for `design` laid out per `ir`.
+/// Emit the schematic with the env-defaulted placement strategy (greedy unless
+/// `ANNEAL`/`LAYOUT_SEARCH=anneal`). The engine/test default.
 pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOutput> {
+    emit_strategy(env, design, ir, pick_strategy())
+}
+
+/// Emit forcing the simulated-annealing (premium) search regardless of env. The
+/// production agent uses this so its boards get the locality-aware anneal — which the
+/// candidate pick makes strictly ≥ greedy — instead of the env-defaulted greedy.
+pub fn emit_anneal(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOutput> {
+    emit_strategy(env, design, ir, Box::new(Anneal))
+}
+
+fn emit_strategy(
+    env: &KicadEnv,
+    design: &Design,
+    ir: &LayoutIr,
+    strategy: Box<dyn PlacementStrategy>,
+) -> io::Result<EmitOutput> {
     let mut items = gather(env, design)?;
     // Seed each item's mirror flag from the IR (lifted onto Item so the search
     // can flip it and the cost/emit read one source of truth).
@@ -1143,10 +1161,9 @@ pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOu
     let cells = assign_cells(&items, ir);
     apply_cells(&mut items, &cells);
     normalize(&mut items);
-    // Placement search behind the strategy interface (`PlacementStrategy`): greedy by
-    // default (free tier), simulated annealing opt-in (paid tier, `LAYOUT_SEARCH` /
-    // `ANNEAL`). Both mutate `items` in mm; selection is the one `pick_strategy` factory.
-    pick_strategy().search(env, &mut items, &inc, ir, &needs_flag, SEARCH_SEED);
+    // Placement search behind the strategy interface (`PlacementStrategy`): greedy
+    // (free tier) or simulated annealing (premium); both mutate `items` in mm.
+    strategy.search(env, &mut items, &inc, ir, &needs_flag, SEARCH_SEED);
     // Continuous-placement polish: iterate the directed slides (onto pin axes, toward
     // the centroid) AND a free per-axis nudge to convergence — giving the continuous
     // phase the freedom the column-centre cell table cannot express.
