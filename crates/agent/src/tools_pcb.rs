@@ -1378,11 +1378,12 @@ fn synth_parts_from_draft(
 const BOARD_EDGE_MARGIN_MM: f64 = 1.0;
 
 /// A board outline that snugly fits all copper (pads, traces, vias) plus
-/// `margin`, clamped so it never exceeds the requested `budget`. Returns `budget`
-/// unchanged when there is no copper to bound. The result always contains every
-/// piece of copper (content ± margin ⊇ content, and the budget clamp only ever
-/// substitutes an edge that also contains the copper), so tightening the outline
-/// to this can never clip copper or create a board-edge DRC violation.
+/// `margin` of edge clearance on every side. Returns `budget` unchanged when
+/// there is no copper to bound. The outline is `content ± margin` *without*
+/// clamping to `budget`: every piece of copper is inside by exactly `margin`, so
+/// the board can never clip copper or trip a copper-to-edge clearance rule. The
+/// requested `budget` is only a routing area; the finished outline may extend up
+/// to `margin` beyond it so a part routed to the budget edge still clears it.
 fn content_bounds(
     problem: &RouteProblem,
     solution: &RouteSolution,
@@ -1419,10 +1420,10 @@ fn content_bounds(
         return budget.clone();
     }
     Bounds {
-        min_x: (min_x - margin).max(budget.min_x),
-        max_x: (max_x + margin).min(budget.max_x),
-        min_y: (min_y - margin).max(budget.min_y),
-        max_y: (max_y + margin).min(budget.max_y),
+        min_x: min_x - margin,
+        max_x: max_x + margin,
+        min_y: min_y - margin,
+        max_y: max_y + margin,
     }
 }
 

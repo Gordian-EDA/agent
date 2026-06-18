@@ -1,0 +1,12 @@
+{
+  "description": "Low-side BJT LED driver: control input switches an LED through a SOT-23 transistor",
+  "bounds": { "min_x": 0.0, "max_x": 36.0, "min_y": 0.0, "max_y": 24.0 },
+  "parts": [
+    { "reference": "J1", "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical", "pad_nets": { "1": "CTRL", "2": "GND" } },
+    { "reference": "R1", "footprint": "Resistor_SMD:R_0805_2012Metric", "pad_nets": { "1": "CTRL", "2": "BASE" } },
+    { "reference": "Q1", "footprint": "Package_TO_SOT_SMD:SOT-23", "pad_nets": { "1": "BASE", "2": "GND", "3": "COL" } },
+    { "reference": "R2", "footprint": "Resistor_SMD:R_0805_2012Metric", "pad_nets": { "1": "ANODE", "2": "COL" } },
+    { "reference": "D1", "footprint": "LED_SMD:LED_0805_2012Metric", "pad_nets": { "1": "VCC", "2": "ANODE" } },
+    { "reference": "J2", "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical", "pad_nets": { "1": "VCC", "2": "GND" } }
+  ]
+}
