@@ -516,14 +516,37 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
                 Cell { col: c, row: arow + rank, orient: series_orient(&s.pins, &tap_net, horiz) }
             }
         } else if is_vplus(&n1) && is_ground(&n2) || is_ground(&n1) && is_vplus(&n2) {
-            // Pure decoupling cap (rail to rail, no anchor pin): hang vertical in a
-            // spare column, spread along the rail.
-            let key = (spare_col, MID);
-            let f = band_fill.entry(key).or_insert(0);
-            let c = spare_col;
-            *f += 1;
-            spare_col += 1;
-            Cell { col: c, row: MID, orient: orient_for(&s.pins, &n1, true) }
+            // Pure decoupling/bulk cap (V+↔GND, no signal pin). Seed it in the V+ band of
+            // the supply IC it bypasses — the anchor with the most pins on that V+ rail,
+            // preferring a real IC — fanning successive caps into adjacent columns. With
+            // DISTRIBUTED local power symbols the cap has NO wire pulling it toward the
+            // rail, so the old spare-column seed STRANDED it far from the circuit (the #1
+            // "stranded decoupling cap" critic defect on agent boards); seating it beside
+            // its IC fixes that. Falls back to a spare column if no anchor uses the rail.
+            let vp = if is_vplus(&n1) { &n1 } else { &n2 };
+            let sup = anchors
+                .iter()
+                .copied()
+                .filter(|&ai| items[ai].pins.iter().any(|(_, _, n)| n.as_deref() == Some(vp.as_str())))
+                .max_by_key(|&ai| {
+                    let on = items[ai].pins.iter().filter(|(_, _, n)| n.as_deref() == Some(vp.as_str())).count();
+                    (!is_connector_like(&items[ai].part), on)
+                });
+            if let Some(ai) = sup {
+                let acol = anchor_col[&ai];
+                let arow = anchor_row[&ai];
+                let off = {
+                    let e = same_pin.entry((ai, vp.clone())).or_insert(0);
+                    let o = *e;
+                    *e += 1;
+                    o
+                };
+                Cell { col: acol + 1 + off, row: arow - 2, orient: orient_for(&s.pins, &n1, true) }
+            } else {
+                let c = spare_col;
+                spare_col += 1;
+                Cell { col: c, row: MID, orient: orient_for(&s.pins, &n1, true) }
+            }
         } else {
             // Rail-to-rail / star leg with a signal midpoint (e.g. a divider): a
             // V+→signal leg sits high, a signal→GND leg low, sharing a column.
