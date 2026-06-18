@@ -209,30 +209,30 @@ fn score(problem: &RouteProblem, r: &router::RouteResult) -> (usize, usize) {
     key(r.failed.len(), geometry_violations(problem, &r.solution))
 }
 
-/// Make a routed result HONEST: the connectivity oracle is the authority on what
-/// is actually connected, not the router's own bookkeeping. Any net the oracle
-/// flags as unconnected (a half-route the router miscounted as done) or shorted
-/// to another net (a cross-net merge) has ITS COPPER DROPPED (via
-/// [`crate::lint::drop_unconnected_copper`]) and is reported as a failed net.
-/// After this, `failed` is faithful and the surviving copper carries no
-/// connectivity defect — so `route_auto`'s comparison ranks a silent short or
-/// phantom-route below an engine that genuinely connected fewer nets, and the
-/// engine never ships copper that lies about connectivity.
+/// Make a routed result DRC-HONEST: the lint is the authority, not the router's
+/// own bookkeeping. First drop any net whose copper violates GEOMETRY (clearance
+/// / width / via / bounds) — the engine must never emit copper that fails DRC —
+/// then drop any net left unconnected or shorted (a cross-net merge). Every
+/// dropped net is reported failed. After this `failed` is faithful and the
+/// surviving copper is fully DRC-clean, so `route_auto`'s comparison ranks a
+/// silent violation or phantom-route below an engine that cleanly connected
+/// fewer nets, and the engine never ships copper that fails DRC.
 fn reconcile_connectivity(
     problem: &RouteProblem,
     solution: &mut RouteSolution,
     failed: &mut Vec<FailedNet>,
 ) {
-    let broken = crate::lint::drop_unconnected_copper(problem, solution);
+    let mut broken = crate::lint::drop_violating_copper(problem, solution);
+    broken.extend(crate::lint::drop_unconnected_copper(problem, solution));
     let known: std::collections::BTreeSet<&str> =
         failed.iter().map(|f| f.connection.as_str()).collect();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let new: Vec<FailedNet> = broken
-        .iter()
-        .filter(|name| !known.contains(name.as_str()))
+        .into_iter()
+        .filter(|name| !known.contains(name.as_str()) && seen.insert(name.clone()))
         .map(|name| FailedNet {
-            connection: name.clone(),
-            reason: "connectivity oracle: net not fully joined by the emitted copper \
-                     (copper dropped to keep the board honest)"
+            connection: name,
+            reason: "DRC oracle: net dropped — could not be routed cleanly (clearance/connectivity)"
                 .to_string(),
         })
         .collect();

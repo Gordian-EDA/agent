@@ -92,19 +92,24 @@ pub fn route_lenient(problem: &RouteProblem) -> RouteResult {
     result
 }
 
-/// Make a slice-1 result connectivity-honest: the oracle is the authority on what
-/// actually connected, so drop any net's copper it finds unconnected or shorted
-/// and report that net failed. `failed` then never undercounts.
+/// Make a slice-1 result DRC-honest: the lint is the authority. First drop any
+/// net's copper that violates GEOMETRY (clearance / width / via / bounds) — the
+/// engine must never emit copper that fails DRC — then drop any net left
+/// unconnected or shorted. Every dropped net is reported failed, so `failed`
+/// never undercounts and the surviving copper is DRC-clean.
 fn reconcile(problem: &RouteProblem, result: &mut RouteResult) {
-    let broken = crate::lint::drop_unconnected_copper(problem, &mut result.solution);
+    let mut dropped = crate::lint::drop_violating_copper(problem, &mut result.solution);
+    dropped.extend(crate::lint::drop_unconnected_copper(problem, &mut result.solution));
     let known: std::collections::BTreeSet<&str> =
         result.failed.iter().map(|f| f.connection.as_str()).collect();
-    let added: Vec<FailedNet> = broken
-        .iter()
-        .filter(|n| !known.contains(n.as_str()))
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let added: Vec<FailedNet> = dropped
+        .into_iter()
+        .filter(|n| !known.contains(n.as_str()) && seen.insert(n.clone()))
         .map(|n| FailedNet {
-            connection: n.clone(),
-            reason: "connectivity oracle: net not fully joined by the emitted copper".to_string(),
+            connection: n,
+            reason: "DRC oracle: net dropped — could not be routed cleanly (clearance/connectivity)"
+                .to_string(),
         })
         .collect();
     result.failed.extend(added);

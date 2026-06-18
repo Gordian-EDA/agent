@@ -180,6 +180,57 @@ pub fn drop_unconnected_copper(problem: &RouteProblem, solution: &mut RouteSolut
     broken.into_iter().collect()
 }
 
+/// Make `solution` GEOMETRY-clean: while the lint reports any geometry violation
+/// (clearance / trace-width / via-clearance / out-of-bounds / invalid-layer),
+/// drop the copper of the net involved in the most violations and retry. Returns
+/// the dropped net names. The engine must never EMIT copper that fails DRC — on a
+/// board too dense to route a net cleanly, dropping it (and reporting it failed)
+/// is correct; a silent clearance violation that looks routed is not. Bounded by
+/// the net count so it always terminates. Connectivity is handled separately by
+/// [`drop_unconnected_copper`]; callers typically run both.
+pub fn drop_violating_copper(problem: &RouteProblem, solution: &mut RouteSolution) -> Vec<String> {
+    let mut dropped: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // One net can be dropped per pass; at most one pass per net plus a margin.
+    let max_passes = problem.connections.len() + 1;
+    for _ in 0..max_passes {
+        let mut tally: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for v in lint(problem, solution) {
+            for net in violation_nets(&v) {
+                *tally.entry(net).or_default() += 1;
+            }
+        }
+        if tally.is_empty() {
+            break;
+        }
+        // Drop the worst offender (most violations); ties broken by name (BTreeMap
+        // iteration order) for determinism.
+        let worst = tally
+            .iter()
+            .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+            .map(|(n, _)| n.clone())
+            .unwrap();
+        solution.traces.retain(|t| t.connection != worst);
+        solution.vias.retain(|v| v.connection != worst);
+        dropped.insert(worst);
+    }
+    dropped.into_iter().collect()
+}
+
+/// The net name(s) a GEOMETRY violation implicates (empty for connectivity, which
+/// this never returns since callers pre-filter). For a trace/trace clearance both
+/// nets are implicated; dropping the one in more violations resolves the most.
+fn violation_nets(v: &DrcViolation) -> Vec<String> {
+    match v {
+        DrcViolation::ClearanceTraceTrace { a, b, .. } => vec![a.clone(), b.clone()],
+        DrcViolation::ClearanceTraceObstacle { connection, .. }
+        | DrcViolation::ClearanceViaAny { connection, .. }
+        | DrcViolation::TraceWidthBelowMin { connection, .. }
+        | DrcViolation::OutOfBounds { connection, .. }
+        | DrcViolation::InvalidLayer { connection, .. } => vec![connection.clone()],
+        DrcViolation::Connectivity { .. } => Vec::new(),
+    }
+}
+
 pub fn lint(problem: &RouteProblem, solution: &RouteSolution) -> Vec<DrcViolation> {
     let items = collect_items(problem, solution);
     let clearance = problem.clearance;
