@@ -1180,14 +1180,98 @@ fn wants_mirror(
 /// stability. This is the DEFAULT order for anchors the author did not place via
 /// the `layout:` grid; a gridded anchor overrides its column (see `infer_ir`).
 fn order_anchors(items: &[Item], inc: &Incidence, anchors: &[usize]) -> Vec<usize> {
-    let mut order: Vec<usize> = anchors.to_vec();
-    order.sort_by(|&a, &b| {
+    // Base order (the historical convention): connectors vs non-connectors, then
+    // refdes. Used as the chain seed + the deterministic tie-break.
+    let mut base: Vec<usize> = anchors.to_vec();
+    base.sort_by(|&a, &b| {
         let ca = !items[a].part.contains("Connector");
         let cb = !items[b].part.contains("Connector");
         ca.cmp(&cb).then(items[a].refdes.cmp(&items[b].refdes))
     });
-    let _ = inc;
-    order
+    if base.len() <= 2 {
+        return base;
+    }
+    // CONNECTIVITY-AWARE ordering: place strongly-connected anchors CONSECUTIVELY so the
+    // shelf-pack lands them in adjacent cells — connected modules sit together instead of
+    // scattering across the sheet with long bridging wires (the dominant sprawl defect).
+    // Adjacency = number of shared SIGNAL (non-rail) nets, counting a one-hop link through
+    // a shared 2-pin satellite (a series R between two ICs). Rails are excluded (they
+    // touch everything). Greedy chain from the base seed: repeatedly append the unplaced
+    // anchor most-connected to the already-placed set, tie-broken by base order.
+    let is_anchor = |i: usize| items[i].geom.pins.len() >= 3;
+    let idx_in_anchors: BTreeMap<usize, usize> = base.iter().enumerate().map(|(k, &a)| (a, k)).collect();
+    let mut adj: BTreeMap<(usize, usize), i32> = BTreeMap::new();
+    let mut bump = |x: usize, y: usize, w: i32| {
+        if x != y {
+            *adj.entry((x.min(y), x.max(y))).or_insert(0) += w;
+        }
+    };
+    // Direct: anchors sharing a net. A SIGNAL (non-rail) net is a strong link (weight 3);
+    // a non-ground SUPPLY rail (3V3/5V/VBUS) is a WEAK link (weight 1) — it captures the
+    // power-delivery relationship (an LDO feeding an MCU on 3V3) so those modules still
+    // cluster, without it dominating signal flow. GROUND is excluded entirely (it touches
+    // every part, so it carries no locality information).
+    for (net, pins) in inc {
+        if is_ground(net) {
+            continue;
+        }
+        let w = if is_power_net(net) { 1 } else { 3 };
+        let ancs: Vec<usize> = pins.iter().map(|(j, _)| *j).filter(|&j| is_anchor(j)).collect();
+        for a in 0..ancs.len() {
+            for b in (a + 1)..ancs.len() {
+                bump(ancs[a], ancs[b], w);
+            }
+        }
+    }
+    // One hop: a 2-pin satellite bridging two anchors through its SIGNAL nets (a series R
+    // between two ICs). Rail-only bridges (a decoupling cap) are skipped — they'd link
+    // every anchor through the shared supply.
+    for si in 0..items.len() {
+        if items[si].geom.pins.len() != 2 {
+            continue;
+        }
+        let mut ancs: Vec<usize> = Vec::new();
+        for (_, _, net) in &items[si].pins {
+            if let Some(net) = net {
+                if is_power_net(net) {
+                    continue;
+                }
+                for (j, _) in inc.get(net).into_iter().flatten() {
+                    if is_anchor(*j) {
+                        ancs.push(*j);
+                    }
+                }
+            }
+        }
+        ancs.sort_unstable();
+        ancs.dedup();
+        for a in 0..ancs.len() {
+            for b in (a + 1)..ancs.len() {
+                bump(ancs[a], ancs[b], 3);
+            }
+        }
+    }
+    let weight = |x: usize, y: usize| -> i32 {
+        *adj.get(&(x.min(y), x.max(y))).unwrap_or(&0)
+    };
+    let mut placed: Vec<usize> = vec![base[0]];
+    let mut remaining: Vec<usize> = base[1..].to_vec();
+    while !remaining.is_empty() {
+        let pick = remaining
+            .iter()
+            .enumerate()
+            .max_by(|&(_, &x), &(_, &y)| {
+                let wx: i32 = placed.iter().map(|&p| weight(p, x)).sum();
+                let wy: i32 = placed.iter().map(|&p| weight(p, y)).sum();
+                // Higher connectivity first; tie-break by EARLIER base order.
+                wx.cmp(&wy)
+                    .then_with(|| idx_in_anchors[&y].cmp(&idx_in_anchors[&x]))
+            })
+            .map(|(k, _)| k)
+            .unwrap();
+        placed.push(remaining.remove(pick));
+    }
+    placed
 }
 
 /// Compose every block's per-block `layout:` grid into one global relative seed:
