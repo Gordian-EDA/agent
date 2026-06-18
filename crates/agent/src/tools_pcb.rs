@@ -76,6 +76,11 @@ pub struct BoardDraft {
     /// The last placement produced by `place_board`, if any (set in Task 2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_placement: Option<Vec<Placement>>,
+    /// Whether the last placement was geometrically ILLEGAL (courtyard overlap or
+    /// out-of-bounds — the board is too tight for the parts). Export refuses an
+    /// illegal placement so the engine never ships a board that fails DRC.
+    #[serde(default)]
+    pub last_place_illegal: bool,
 }
 
 /// Board-level design rules. Defaults are the engine's own
@@ -484,6 +489,7 @@ pub fn create_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
         keepouts: Vec::new(),
         hints: PlacementHints::default(),
         last_placement: None,
+        last_place_illegal: false,
     };
     draft.save(ctx)?;
 
@@ -661,6 +667,7 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     // Persist the placement into the draft so route_board / render_board / a
     // later get_board can read it without re-running the placer.
     draft.last_placement = Some(result.placements.clone());
+    draft.last_place_illegal = !result.legal;
     draft.save(ctx)?;
 
     let positions: Vec<Value> = result.placements.iter().map(placement_json).collect();
@@ -1747,6 +1754,16 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
             "error": "the board is not placed — run place_board (then route_board) before export",
         }));
     };
+    // Never export an ILLEGAL placement — it would ship a board with overlapping
+    // courtyards / out-of-bounds parts that fails DRC. The engine's contract is to
+    // emit only DRC-clean copper or fail honestly: refuse with an actionable fix.
+    if draft.last_place_illegal {
+        return Ok(json!({
+            "error": "the last placement is NOT legal (courtyard overlap / out of bounds) — \
+                      the board is too tight for these parts. Enlarge `bounds` or remove parts, \
+                      then re-run place_board and route_board before export.",
+        }));
+    }
     let Some(raw_route) = ctx.workspace().read_route() else {
         return Ok(json!({
             "error": "the board is not routed — run route_board before export \
