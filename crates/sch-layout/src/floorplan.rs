@@ -743,6 +743,14 @@ fn detect_idioms(
                     .filter_map(|r| get(r))
                     .filter(|c| !claimed.contains(c))
                     .collect();
+                // The graph matcher's anchor is ANY part bridging V+ and GND — often a
+                // jumper or power connector that merely touches the rails, not the IC
+                // the caps actually bypass. Re-select the real load: the anchor with the
+                // most pins on the bank's V+ rail, preferring a true IC over a
+                // connector/jumper. Without this the whole bank freezes beside a stray
+                // 3-pin part and floats far from the MCU (the #1 "decoupling bank in the
+                // far corner" critic defect).
+                let ai = best_decoupling_anchor(items, anchors, rails, &caps).unwrap_or(ai);
                 if let Some(cells) =
                     place_decoupling(items, inc, anchors, rails, anchor_col, anchor_row, ai, &caps, &out)
                 {
@@ -773,6 +781,55 @@ fn detect_idioms(
         }
     }
     out
+}
+
+/// A part that sits on power rails but is NOT the IC a decoupling bank serves — a
+/// connector, jumper, mounting hole, or test point. These trip the graph matcher's
+/// "anything bridging V+/GND" anchor pick, so the bank must skip them.
+fn is_connector_like(part: &str) -> bool {
+    part.contains("Connector")
+        || part.contains("Conn_")
+        || part.contains("Jumper")
+        || part.contains("Mounting")
+        || part.contains("TestPoint")
+}
+
+/// The IC a decoupling bank actually bypasses: among anchors with a pin on the bank's
+/// V+ rail, the real IC (not a connector/jumper) with the most pins on that rail, then
+/// the most pins overall. `None` if the caps share no non-ground rail with any anchor.
+fn best_decoupling_anchor(
+    items: &[Item],
+    anchors: &[usize],
+    rails: &BTreeMap<String, Band>,
+    caps: &[usize],
+) -> Option<usize> {
+    // The V+ rail the bank bypasses: the most common non-ground rail among the caps.
+    let mut vp_count: BTreeMap<String, usize> = BTreeMap::new();
+    for &ci in caps {
+        for (_, _, n) in &items[ci].pins {
+            if let Some(n) = n.as_deref() {
+                if rails.contains_key(n) && !is_ground(n) {
+                    *vp_count.entry(n.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    let vp = vp_count.into_iter().max_by_key(|(_, c)| *c).map(|(n, _)| n)?;
+    anchors
+        .iter()
+        .copied()
+        .filter_map(|ai| {
+            let on_rail = items[ai]
+                .pins
+                .iter()
+                .filter(|(_, _, n)| n.as_deref() == Some(vp.as_str()))
+                .count();
+            (on_rail > 0).then(|| {
+                (ai, !is_connector_like(&items[ai].part), on_rail, items[ai].geom.pins.len())
+            })
+        })
+        .max_by(|a, b| (a.1, a.2, a.3).cmp(&(b.1, b.2, b.3)))
+        .map(|(ai, _, _, _)| ai)
 }
 
 /// Place a matched **decoupling bank**: lay its caps in one evenly-spaced ROW just
@@ -2276,6 +2333,14 @@ fn build_anchor_blocks(
 /// pulling a far-flung pull-up (R1 on NRST + a wide V+ rail, whose net bbox dilutes the
 /// HPWL gradient) back to its pin. Precomputed once: which pins a part taps is fixed;
 /// only positions move.
+/// Manhattan distance from `from` to anchor `j`'s pin `pgi` in world coords (the
+/// pin's live position under the anchor's placement). Used to pick the nearest
+/// supply pin for a decoupling cap's cohesion target.
+fn pin_world_dist(items: &[Item], j: usize, pgi: usize, from: [f64; 2]) -> f64 {
+    let p = crate::emit::pin_endpoint(&items[j].geom.pins[pgi], items[j].at, items[j].angle, items[j].mirror);
+    (p[0] - from[0]).abs() + (p[1] - from[1]).abs()
+}
+
 fn cohesion_targets(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> Vec<(usize, Vec<(usize, usize)>)> {
     let is_anchor = |i: usize| items[i].geom.pins.len() >= 3;
     let mut out = Vec::new();
@@ -2283,7 +2348,11 @@ fn cohesion_targets(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> Vec<(usiz
         if items[si].geom.pins.len() >= 3 || items[si].frozen {
             continue;
         }
-        let (mut sig, mut rail): (Vec<(usize, usize)>, Vec<(usize, usize)>) = (Vec::new(), Vec::new());
+        let (mut sig, mut supply, mut gnd): (
+            Vec<(usize, usize)>,
+            Vec<(usize, usize)>,
+            Vec<(usize, usize)>,
+        ) = (Vec::new(), Vec::new(), Vec::new());
         for (_, _, net) in &items[si].pins {
             let Some(net) = net else { continue };
             let is_rail = ir.rails.contains_key(net);
@@ -2292,15 +2361,40 @@ fn cohesion_targets(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> Vec<(usiz
                     continue;
                 }
                 if let Some(pgi) = items[*j].geom.pins.iter().position(|p| &p.number == num) {
-                    if is_rail {
-                        rail.push((*j, pgi));
-                    } else {
+                    if !is_rail {
                         sig.push((*j, pgi));
+                    } else if is_ground(net) {
+                        gnd.push((*j, pgi));
+                    } else {
+                        supply.push((*j, pgi));
                     }
                 }
             }
         }
-        let tgt = if !sig.is_empty() { sig } else { rail };
+        let tgt = if !sig.is_empty() {
+            // Has a signal-pin home: hug those pins (a pull-up over the pin it pulls).
+            sig
+        } else {
+            // A pure decoupling/bypass cap (both pins on rails) belongs at ONE IC
+            // SUPPLY pin — the nearest pin on its non-ground (V+) rail, falling back
+            // to the nearest ground pin. The OLD behaviour averaged EVERY rail pin
+            // (all GND + all V+ pins on the board), whose centroid sits in the middle
+            // of the sheet, so the proxy stranded the whole decoupling bank there —
+            // the #1 critic complaint ("scattered decoupling caps"). One nearest
+            // supply pin banks each cap tight to the IC it bypasses (mirrors
+            // `supply_pin_target`, but router-free for the proxy).
+            let pool = if !supply.is_empty() { &supply } else { &gnd };
+            let at = items[si].at;
+            let nearest = pool.iter().copied().min_by(|&(ja, pa), &(jb, pb)| {
+                let da = pin_world_dist(items, ja, pa, at);
+                let db = pin_world_dist(items, jb, pb, at);
+                da.total_cmp(&db)
+            });
+            match nearest {
+                Some(p) => vec![p],
+                None => Vec::new(),
+            }
+        };
         if !tgt.is_empty() {
             out.push((si, tgt));
         }
