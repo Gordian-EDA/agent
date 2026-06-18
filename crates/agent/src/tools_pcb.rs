@@ -1383,13 +1383,21 @@ fn route_with_planes(
     let via_r = rules.via_diameter / 2.0;
     let min_via2 = (2.0 * via_r + rules.clearance).powi(2);
     let dist2 = |a: &Point2, b: &Point2| (a.x - b.x).powi(2) + (a.y - b.y).powi(2);
+    // Accurate point-to-RECT clearance: a long pad (a QFP lead) reaches far on its
+    // long axis but is narrow across — measuring to the rect, not a max-dimension
+    // circle, avoids over-skipping vias that actually clear a neighbour's lead.
+    let clears_rect = |at: &Point2, ob: &Obstacle| -> bool {
+        let dx = (at.x - ob.center.x).abs() - ob.width / 2.0;
+        let dy = (at.y - ob.center.y).abs() - ob.height / 2.0;
+        let d2 = dx.max(0.0).powi(2) + dy.max(0.0).powi(2);
+        d2 >= (via_r + rules.clearance).powi(2)
+    };
     let mut skipped = 0usize;
     for (net, at) in stitches {
-        let clears_pads = rp.obstacles.iter().all(|ob| {
-            ob.connected_to.contains(&net)
-                || dist2(&at, &ob.center)
-                    >= (via_r + ob.width.max(ob.height) / 2.0 + rules.clearance).powi(2)
-        });
+        let clears_pads = rp
+            .obstacles
+            .iter()
+            .all(|ob| ob.connected_to.contains(&net) || clears_rect(&at, ob));
         let clears_vias = result
             .solution
             .vias
