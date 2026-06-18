@@ -261,6 +261,18 @@ fn graphic_points(g: &kiutils_kicad::FpGraphic) -> Vec<[f64; 2]> {
             pts.push([mid[0] + r, mid[1] + r]);
         }
     }
+    // An `fp_circle` ((center) + an `(end)` point on the circumference) bounds a
+    // disc of that radius — but only the two stored points would be read, missing
+    // the ±radius extent on the other quadrants. A radial cap / round footprint's
+    // circular courtyard would then be badly under-sized (the D8 electrolytic's
+    // 8mm courtyard read as a sliver). Add the disc's bounding box.
+    if g.token == "fp_circle" {
+        if let (Some(c), Some(e)) = (g.center.or(g.start), g.end) {
+            let r = ((c[0] - e[0]).powi(2) + (c[1] - e[1]).powi(2)).sqrt();
+            pts.push([c[0] - r, c[1] - r]);
+            pts.push([c[0] + r, c[1] + r]);
+        }
+    }
     pts
 }
 

@@ -1,0 +1,6 @@
+(footprint "CircleCourtyard"
+	(version 20240108) (generator "test") (layer "F.Cu") (attr through_hole)
+	(fp_circle (center 1.25 0) (end 5.25 0) (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd"))
+	(pad "1" thru_hole circle (at 0 0) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask"))
+	(pad "2" thru_hole circle (at 2.5 0) (size 1.6 1.6) (drill 0.8) (layers "*.Cu" "*.Mask"))
+)
