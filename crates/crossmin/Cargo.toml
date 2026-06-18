@@ -1,0 +1,10 @@
+[package]
+name = "crossmin"
+version.workspace = true
+edition.workspace = true
+
+# Pure, dependency-FREE: a layered crossing-minimisation graph layout (the Sugiyama
+# pipeline). No KiCAD/geometry/serde concerns — the caller adapts its parts+nets into
+# a `Graph` and maps the `Placement` back to cells, exactly as `circuit-graph` does for
+# idioms. Keeping it pure makes it fast to unit-test in isolation on synthetic graphs.
+[dependencies]
