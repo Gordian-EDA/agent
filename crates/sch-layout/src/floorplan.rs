@@ -5174,10 +5174,28 @@ fn emit_rail(
 ) -> io::Result<()> {
     let lib = power_lib_id(net);
     let Some(rail_y) = rail_y.filter(|_| eps.len() >= 3) else {
-        for (idx, (ep, dir)) in eps.iter().enumerate() {
+        // One power symbol per pin — but MERGE a pin into a nearby, COLLINEAR
+        // already-placed symbol (≤2 grid, same x or y) via a short connecting wire
+        // instead of stamping a second symbol. Two adjacent same-net pins (e.g. the
+        // 3V3 tops of two I2C pull-ups) otherwise render duplicate side-by-side "3V3"
+        // labels (the recurring text-overlap defect). The ≤2-grid limit only fuses an
+        // immediate neighbour, never the whole spread (which would recreate the long
+        // trunk distribution exists to avoid).
+        const MERGE: f64 = 5.08;
+        let mut syms: Vec<[f64; 2]> = Vec::new();
+        let mut idx = 0usize;
+        for (ep, dir) in eps.iter() {
+            if let Some(&near) = syms.iter().find(|&&p| {
+                let d = (p[0] - ep[0]).abs() + (p[1] - ep[1]).abs();
+                d > EPS && d <= MERGE && ((p[0] - ep[0]).abs() < EPS || (p[1] - ep[1]).abs() < EPS)
+            }) {
+                w.add_wire_on_net(*ep, near, net);
+                continue;
+            }
             let angle = power_angle(*dir);
-            let refdes = format!("#PWR_{net}_{idx}");
-            w.add_power_symbol(env, &lib, &refdes, net, *ep, angle)?;
+            w.add_power_symbol(env, &lib, &format!("#PWR_{net}_{idx}"), net, *ep, angle)?;
+            syms.push(*ep);
+            idx += 1;
         }
         // One ERC flag per net (KiCAD treats an undriven power-input pin as an
         // error here). Place it COINCIDENT with the first power symbol, rotated
