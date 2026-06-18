@@ -1,0 +1,9 @@
+{
+  "description": "Resistive voltage divider with a 2-pin power/ground header",
+  "bounds": { "min_x": 0.0, "max_x": 24.0, "min_y": 0.0, "max_y": 16.0 },
+  "parts": [
+    { "reference": "J1", "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical", "pad_nets": { "1": "VIN", "2": "GND" } },
+    { "reference": "R1", "footprint": "Resistor_SMD:R_0805_2012Metric", "pad_nets": { "1": "VIN", "2": "MID" } },
+    { "reference": "R2", "footprint": "Resistor_SMD:R_0805_2012Metric", "pad_nets": { "1": "MID", "2": "GND" } }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "description": "SOIC-8 op-amp/MCU with two decoupling caps and a 1x04 IO header",
+  "bounds": { "min_x": 0.0, "max_x": 40.0, "min_y": 0.0, "max_y": 30.0 },
+  "parts": [
+    { "reference": "U1", "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "pad_nets": { "1": "IN1", "2": "IN2", "3": "IN3", "4": "GND", "5": "OUT3", "6": "OUT2", "7": "OUT1", "8": "VCC" } },
+    { "reference": "C1", "footprint": "Capacitor_SMD:C_0805_2012Metric", "pad_nets": { "1": "VCC", "2": "GND" } },
+    { "reference": "C2", "footprint": "Capacitor_SMD:C_0603_1608Metric", "pad_nets": { "1": "VCC", "2": "GND" } },
+    { "reference": "J1", "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
+      "pad_nets": { "1": "VCC", "2": "GND", "3": "IN1", "4": "OUT1" } }
+  ]
+}
