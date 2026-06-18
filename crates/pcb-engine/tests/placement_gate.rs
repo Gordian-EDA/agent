@@ -180,18 +180,21 @@ fn hints_help_and_never_hurt() {
                 members: vec!["U1".to_owned(), "C1".to_owned(), "C2".to_owned()],
                 region: None,
                 edge: None,
+                grid: false,
             },
             GroupHint {
                 name: "u2-decouplers".to_owned(),
                 members: vec!["U2".to_owned(), "C3".to_owned(), "C4".to_owned()],
                 region: None,
                 edge: None,
+                grid: false,
             },
             GroupHint {
                 name: "connector".to_owned(),
                 members: vec!["J1".to_owned()],
                 region: None,
                 edge: Some(Edge::W),
+                grid: false,
             },
         ],
         ..Default::default()

@@ -681,7 +681,7 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         }));
     };
 
-    let problem = match place_problem_from_draft(&draft, ctx) {
+    let mut problem = match place_problem_from_draft(&draft, ctx) {
         Ok(p) => p,
         Err(msg) => return Ok(json!({ "error": msg })),
     };
@@ -718,6 +718,10 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
             hints.edge_seek.push(p.reference.clone());
         }
     }
+
+    // Tile any `grid` group (repetitive array) by locking its members at grid cells
+    // before the annealer runs, so it lays out the rest around the tidy array.
+    pcb_engine::placement::apply_grid_hints(&mut problem, &hints);
 
     let result = place_best(&problem, &hints);
 
@@ -820,11 +824,16 @@ fn parse_group_hint(v: &Value, known_refs: &[&str]) -> std::result::Result<Group
         None | Some(Value::Null) => None,
         Some(e) => Some(parse_edge(e).map_err(|err| format!("group `{name}`: {err}"))?),
     };
+    let grid = v.get("grid").and_then(Value::as_bool).unwrap_or(false);
+    if grid && region.is_none() {
+        return Err(format!("group `{name}`: `grid` requires a `region` to tile into"));
+    }
     Ok(GroupHint {
         name,
         members,
         region,
         edge,
+        grid,
     })
 }
 

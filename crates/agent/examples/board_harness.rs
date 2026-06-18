@@ -61,6 +61,10 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
     if let Some(kos) = spec.get("keepouts") {
         let _ = tools.run("set_constraints", json!({ "keepouts": kos.clone() }), &ctx);
     }
+    // Optional placement hints (groups: regions / edges / grid arrays) from the spec.
+    if let Some(groups) = spec.get("hints").and_then(|h| h.get("groups")) {
+        let _ = tools.run("set_placement_hints", json!({ "groups": groups.clone() }), &ctx);
+    }
     let placed = tools.run("place_board", json!({}), &ctx).unwrap();
     let routed = tools.run("route_board", json!({}), &ctx).unwrap();
     let exported = tools.run("export_board", json!({}), &ctx).unwrap();

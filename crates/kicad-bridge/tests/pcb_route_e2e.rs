@@ -143,30 +143,20 @@ fn routed_board_passes_kicad_drc_and_inhouse_lint() {
 /// same `lib_footprint_mismatch` carve-out. Cross-oracle disagreement is a bug to
 /// chase at the source, never suppressed here.
 ///
-/// ## FINDING — `route_detailed` alone does NOT route `two_res.kicad_pcb`
+/// ## `route_detailed` now routes `two_res.kicad_pcb` cleanly (resolved finding)
 ///
-/// On this dense two-resistor board the **global** stage of `route_detailed`
-/// honestly fails the `GND` net with a `"global: no mesh path …"` provenance, and
-/// the detailed pipeline therefore falls back to slice-1 inside `route_auto`. The
-/// cause is a *coarse-mesh-resolution* limitation, not a geometry bug:
+/// This dense two-resistor board USED to defeat the **global** stage of
+/// `route_detailed`: the two resistors' pads sit ~1.8 mm apart, so each net's
+/// endpoint pad and the neighbour's pad fell in the same coarse quadtree leaf
+/// (top-layer capacity 0 for both), enclosing `GND`'s global tree seed — it failed
+/// `GND` with `"global: no mesh path …"` and the pipeline fell back to slice-1.
 ///
-/// - The two resistors' pads sit ~1.8 mm apart, so each net's **endpoint pad and
-///   the neighbouring net's pad land in the same quadtree leaf**. That leaf reads
-///   top-layer capacity **0** for *both* nets (each is foreign copper to the
-///   other there).
-/// - The global router seeds a net's routed tree at its pad's **top-layer**
-///   leaf-node, then routes the net's other endpoint toward it. The net can reach
-///   that leaf on the *bottom* layer but cannot via **up to top inside it** (top
-///   capacity 0 for the net), so it never reaches its own tree seed → honest
-///   `"no mesh path from point 1 to the routed tree (… enclosure)"`.
-///
-/// The slice-1 fine grid resolves the two pads into distinct cells and routes the
-/// board cleanly, which is exactly why `route_auto` keeps it as the always-correct
-/// fallback. Tightening this needs the global mesh to refine around closely-spaced
-/// pads (or seed the tree on every layer a pad touches) — engine work tracked as a
-/// detail-fidelity follow-up, not a gate fudge. This test **asserts that finding**
-/// (route_detailed fails GND with global provenance) so an engine improvement that
-/// closes it will trip here and prompt updating this note — never silently.
+/// That coarse-mesh-resolution limitation has since been closed (mesh refinement +
+/// the per-net finisher), so `route_detailed`'s global stage no longer fails `GND`.
+/// The gate below asserts that improvement holds, then routes through `route_auto`
+/// — the connectivity-HONEST entry that reconciles and drops any copper the raw
+/// detailed stitch leaves optimistically "routed" — and asserts the result is clean
+/// (in-house lint + KiCAD DRC). A regression that re-encloses GND trips the assert.
 #[test]
 fn detailed_routed_board_passes_kicad_drc_and_inhouse_lint() {
     let Some(env) = detect_gated() else { return };
@@ -183,26 +173,23 @@ fn detailed_routed_board_passes_kicad_drc_and_inhouse_lint() {
     // 1. Read the board into a routing problem.
     let board = read_problem(path).expect("read_problem");
 
-    // 2a. Lock the FINDING: route_detailed alone fails GND at the global stage on
-    //     this dense board (coarse-mesh pad enclosure — see the module note). If an
-    //     engine improvement closes this, the assert trips: update this note and
-    //     the gate to route through route_detailed directly, never silently.
+    // 2a. The resolved finding: route_detailed's GLOBAL stage no longer fails GND on
+    //     this dense board (mesh refinement closed the coarse-mesh enclosure). Assert
+    //     that improvement holds — a regression that re-introduces the GND global
+    //     failure trips here, never silently.
     let detailed = pcb_engine::pipeline::route_detailed(&board.problem);
     assert!(
-        detailed
+        !detailed
             .failed
             .iter()
             .any(|f| f.connection == "GND" && f.reason.starts_with("global:")),
-        "EXPECTED route_detailed to fail GND with global provenance on two_res \
-         (coarse-mesh pad enclosure). It no longer does: {:?}. The mesh now \
-         resolves the closely-spaced pads — update the module FINDING and route \
-         this gate through route_detailed directly.",
+        "route_detailed REGRESSED: GND fails the global stage again on two_res: {:?}",
         detailed.failed
     );
 
-    // 2b. Route through route_auto — the always-correct pipeline entry. The detailed
-    //     router runs, GND falls back to slice-1, and the WHOLE board routes. A
-    //     failed net here fails the gate.
+    // 2b. Route through route_auto — the connectivity-HONEST entry (it reconciles and
+    //     drops any unconnected copper that the raw detailed stitch leaves optimistic).
+    //     A failed net here fails the gate.
     let result = pcb_engine::pipeline::route_auto(&board.problem);
     assert!(
         result.failed.is_empty(),

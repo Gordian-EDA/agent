@@ -1,5 +1,5 @@
 {
-  "description": "HIGH PART COUNT: 30 LED+resistor series strings (60 passives) + connector, 4-layer with VLED/GND planes \u2014 stresses placement scaling and many-small-net routing",
+  "description": "HIGH PART COUNT: 30 LED+resistor series strings (60 passives) + connector, 4-layer with VLED/GND planes \u2014 stresses placement scaling and many-small-net routing (agent supplies a grid array hint so the 60 passives tile)",
   "rules": {
     "layers": 4
   },
@@ -498,5 +498,81 @@
         "2": "GND"
       }
     }
-  ]
+  ],
+  "hints": {
+    "groups": [
+      {
+        "name": "led_array",
+        "members": [
+          "R1",
+          "D1",
+          "R2",
+          "D2",
+          "R3",
+          "D3",
+          "R4",
+          "D4",
+          "R5",
+          "D5",
+          "R6",
+          "D6",
+          "R7",
+          "D7",
+          "R8",
+          "D8",
+          "R9",
+          "D9",
+          "R10",
+          "D10",
+          "R11",
+          "D11",
+          "R12",
+          "D12",
+          "R13",
+          "D13",
+          "R14",
+          "D14",
+          "R15",
+          "D15",
+          "R16",
+          "D16",
+          "R17",
+          "D17",
+          "R18",
+          "D18",
+          "R19",
+          "D19",
+          "R20",
+          "D20",
+          "R21",
+          "D21",
+          "R22",
+          "D22",
+          "R23",
+          "D23",
+          "R24",
+          "D24",
+          "R25",
+          "D25",
+          "R26",
+          "D26",
+          "R27",
+          "D27",
+          "R28",
+          "D28",
+          "R29",
+          "D29",
+          "R30",
+          "D30"
+        ],
+        "region": {
+          "min_x": 2.0,
+          "max_x": 44.0,
+          "min_y": 2.0,
+          "max_y": 33.0
+        },
+        "grid": true
+      }
+    ]
+  }
 }

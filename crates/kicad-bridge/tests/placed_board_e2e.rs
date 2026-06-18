@@ -123,6 +123,7 @@ fn place_problem() -> PlaceProblem {
         layer_count: 2,
         min_trace_width: 0.25,
         parts,
+        keepouts: vec![],
     }
 }
 

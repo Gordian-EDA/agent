@@ -225,6 +225,50 @@ pub struct GroupHint {
     /// Optional board edge the group should hug.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge: Option<Edge>,
+    /// Tile the members in a regular GRID filling [`Self::region`] (row-major, in
+    /// member order), locking each at its cell. For repetitive arrays the agent
+    /// wants laid out tidily (LED matrices, resistor networks) rather than the
+    /// general annealer's scatter. Requires `region`; ignored without it.
+    #[serde(default)]
+    pub grid: bool,
+}
+
+/// Lock each member of a `grid` group at a computed cell of a regular grid filling
+/// the group's region (row-major, member order). The grid's column count is sized
+/// from the region aspect and member count. Locked members are then fixed for the
+/// rest of placement, so the annealer lays out the remaining parts around the tidy
+/// array instead of scattering it. A no-op for groups without `grid`/`region`, or
+/// whose members aren't found.
+pub fn apply_grid_hints(problem: &mut PlaceProblem, hints: &PlacementHints) {
+    for g in &hints.groups {
+        if !g.grid {
+            continue;
+        }
+        let Some(region) = &g.region else { continue };
+        let idxs: Vec<usize> = g
+            .members
+            .iter()
+            .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
+            .collect();
+        if idxs.is_empty() {
+            continue;
+        }
+        let n = idxs.len();
+        let (rw, rh) = (region.max_x - region.min_x, region.max_y - region.min_y);
+        let cols = (((n as f64) * rw / rh).sqrt().round() as usize).clamp(1, n);
+        let rows = n.div_ceil(cols);
+        let (px, py) = (rw / cols as f64, rh / rows as f64);
+        for (k, &i) in idxs.iter().enumerate() {
+            let (c, r) = (k % cols, k / cols);
+            problem.parts[i].locked = Some(LockedAt {
+                at: Point2 {
+                    x: region.min_x + (c as f64 + 0.5) * px,
+                    y: region.min_y + (r as f64 + 0.5) * py,
+                },
+                rotation: 0,
+            });
+        }
+    }
 }
 
 /// An axis-aligned region rectangle (mm).
@@ -1643,6 +1687,7 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![
                 r0603("R1", Some("A"), Some("B")),
                 r0603("R2", Some("B"), Some("C")),
@@ -1671,6 +1716,7 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![
                 locked,
                 r0603("R2", Some("B"), Some("C")),
@@ -1699,6 +1745,7 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![
                 r0603("R1", Some("L"), Some("P1")),
                 r0603("R2", None, None),
@@ -1745,6 +1792,7 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![
                 r0603("R1", Some("A"), Some("B")),
                 r0603("R2", Some("B"), Some("C")),
@@ -1757,6 +1805,7 @@ mod tests {
                 members: vec!["R1".to_owned(), "R2".to_owned()],
                 region: Some(region.clone()),
                 edge: None,
+                grid: false,
             }],
             ..Default::default()
         };
@@ -1781,6 +1830,7 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![
                 // A connector-ish 2-pin part.
                 Part {
@@ -1817,6 +1867,7 @@ mod tests {
                 members: vec!["J1".to_owned()],
                 region: None,
                 edge: Some(Edge::W),
+                grid: false,
             }],
             ..Default::default()
         };
@@ -1848,6 +1899,7 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts,
         };
         let res = place(&problem, &PlacementHints::default());
@@ -1875,6 +1927,7 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.25,
+            keepouts: vec![],
             parts: vec![
                 r0603("R1", Some("SIG"), Some("GND")),
                 r0603("R2", Some("SIG"), Some("GND")),
@@ -1921,6 +1974,7 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.25,
+            keepouts: vec![],
             parts: vec![
                 r0603("R1", Some("SIG"), Some("GND")),
                 r0603("R2", Some("SIG"), Some("GND")),
@@ -1951,6 +2005,7 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![
                 r0603("R1", Some("A"), Some("B")),
                 r0603("R2", Some("B"), Some("C")),
@@ -1975,6 +2030,7 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![
                 r0603("R1", Some("A"), Some("B")),
                 r0603("R2", Some("B"), Some("C")),
@@ -2009,6 +2065,7 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![],
         };
         let res = place(&problem, &PlacementHints::default());

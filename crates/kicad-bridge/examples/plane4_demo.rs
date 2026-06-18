@@ -24,9 +24,9 @@ fn main(){
     let vcc_vias=[(15.0,5.0),(15.0,15.0)];
     let sig_via=(10.0,10.0); let sig_via2=(10.0,17.0);
     // In1 GND plane: anti-pad around foreign vias (VCC + SIG), NOT GND.
-    let in1_ko:Vec<(Point2,f64)>=vcc_vias.iter().chain([sig_via,sig_via2].iter()).map(|&(x,y)|(Point2{x,y},h)).collect();
+    let in1_ko:Vec<(Point2,f64,f64)>=vcc_vias.iter().chain([sig_via,sig_via2].iter()).map(|&(x,y)|(Point2{x,y},h,h)).collect();
     // In2 VCC plane: anti-pad around foreign vias (GND + SIG), NOT VCC.
-    let in2_ko:Vec<(Point2,f64)>=gnd_vias.iter().chain([sig_via,sig_via2].iter()).map(|&(x,y)|(Point2{x,y},h)).collect();
+    let in2_ko:Vec<(Point2,f64,f64)>=gnd_vias.iter().chain([sig_via,sig_via2].iter()).map(|&(x,y)|(Point2{x,y},h,h)).collect();
     let in1=plane_fill_rects(&b,0.5,&in1_ko);
     let in2=plane_fill_rects(&b,0.5,&in2_ko);
     let mut o=String::new();
