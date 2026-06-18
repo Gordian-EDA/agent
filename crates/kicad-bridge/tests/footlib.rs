@@ -27,6 +27,25 @@ fn close(a: f64, b: f64) -> bool {
 // ── fixture parse correctness (no KiCAD needed) ──────────────────────────────
 
 #[test]
+fn arc_courtyard_bulge_is_captured() {
+    // kiutils 0.3 drops an fp_arc's (mid) apex; the courtyard parser must still
+    // bound the bulge from start/end. This footprint's right-end arc bulges to
+    // x=8.47 and the left to x=-3.59 → courtyard x must span [-3.59, 8.47].
+    let fp = load("ArcCourtyard");
+    assert_eq!(fp.courtyard_source, CourtyardSource::Crtyd);
+    assert!(
+        fp.courtyard.max_x >= 8.46,
+        "right arc bulge missed: max_x={}",
+        fp.courtyard.max_x
+    );
+    assert!(
+        fp.courtyard.min_x <= -3.58,
+        "left arc bulge missed: min_x={}",
+        fp.courtyard.min_x
+    );
+}
+
+#[test]
 fn r0603_two_smd_pads_and_rect_courtyard() {
     let fp = load("R_0603_1608Metric");
     assert_eq!(fp.pad_count(), 2);

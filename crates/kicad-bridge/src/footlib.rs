@@ -245,7 +245,23 @@ fn rotated_aabb_half(w: f64, h: f64, deg: f64) -> (f64, f64) {
 
 /// All defined geometry points of a graphic (`start`/`end`/`center`/`at`).
 fn graphic_points(g: &kiutils_kicad::FpGraphic) -> Vec<[f64; 2]> {
-    [g.start, g.end, g.center, g.at].into_iter().flatten().collect()
+    let mut pts: Vec<[f64; 2]> = [g.start, g.end, g.center, g.at].into_iter().flatten().collect();
+    // An `fp_arc` bulges BEYOND its endpoints, but kiutils 0.3 drops the `(mid)`
+    // apex — so a rounded courtyard (a crystal's curved end, a round connector)
+    // would be read only to its chord and the bbox under-sized, seating parts too
+    // close (a courtyard-overlap DRC fault KiCAD catches). Bound the arc
+    // conservatively by a square of side = the chord length centred on the chord
+    // midpoint; this contains any arc up to a semicircle, which every courtyard
+    // arc is. (Recovers the HC49 crystal's true 8.47mm extent from start/end.)
+    if g.token == "fp_arc" {
+        if let (Some(s), Some(e)) = (g.start, g.end) {
+            let mid = [(s[0] + e[0]) / 2.0, (s[1] + e[1]) / 2.0];
+            let r = ((s[0] - e[0]).powi(2) + (s[1] - e[1]).powi(2)).sqrt() / 2.0;
+            pts.push([mid[0] - r, mid[1] - r]);
+            pts.push([mid[0] + r, mid[1] + r]);
+        }
+    }
+    pts
 }
 
 /// Courtyard bounding box. Primary source is the bbox of every `F.CrtYd` /
