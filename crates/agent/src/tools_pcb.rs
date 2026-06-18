@@ -296,14 +296,45 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
     if !matches!(layer_count, 2 | 4) {
         return Err(format!("rules.layers must be 2 or 4, got {layer_count}"));
     }
+    let via_diameter = num("via_diameter", d.via_diameter);
+    let via_drill = num("via_drill", d.via_drill);
+    // Vias must be fabricable to KiCAD's built-in standard-fab minimums (verified
+    // against kicad-cli DRC): via ≥ 0.5 mm, drill ≥ 0.3 mm, annular ring ≥ 0.1 mm
+    // (i.e. via ≥ drill + 0.2). Below these the board would route but fail KiCAD
+    // DRC (via_diameter / drill_out_of_range / annular_width) — reject up front
+    // with the floor, rather than silently emit copper that lies about fab.
+    if via_diameter < KICAD_MIN_VIA_DIAMETER {
+        return Err(format!(
+            "rules.via_diameter {via_diameter} is below KiCAD's standard-fab minimum \
+             {KICAD_MIN_VIA_DIAMETER}mm — raise it (microvias need custom board rules / a finer fab class)"
+        ));
+    }
+    if via_drill < KICAD_MIN_VIA_DRILL {
+        return Err(format!(
+            "rules.via_drill {via_drill} is below KiCAD's standard-fab minimum {KICAD_MIN_VIA_DRILL}mm — raise it"
+        ));
+    }
+    if via_diameter - via_drill < 2.0 * KICAD_MIN_ANNULAR {
+        return Err(format!(
+            "rules via annular ring {:.3}mm (= (via_diameter {via_diameter} − via_drill {via_drill})/2) is below \
+             KiCAD's {KICAD_MIN_ANNULAR}mm minimum — widen the via or shrink the drill",
+            (via_diameter - via_drill) / 2.0
+        ));
+    }
     Ok(DraftRules {
         clearance: num("clearance", d.clearance),
         min_trace_width: num("min_trace_width", d.min_trace_width),
-        via_diameter: num("via_diameter", d.via_diameter),
-        via_drill: num("via_drill", d.via_drill),
+        via_diameter,
+        via_drill,
         layer_count,
     })
 }
+
+/// KiCAD 9 built-in (standard-fab) minimums, verified against `kicad-cli pcb drc`:
+/// a via below these trips `via_diameter` / `drill_out_of_range` / `annular_width`.
+const KICAD_MIN_VIA_DIAMETER: f64 = 0.5;
+const KICAD_MIN_VIA_DRILL: f64 = 0.3;
+const KICAD_MIN_ANNULAR: f64 = 0.1;
 
 pub fn create_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let overwrite = input.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
