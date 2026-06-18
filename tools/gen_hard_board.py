@@ -80,6 +80,8 @@ def gen(kind):
         "description": f"STRESS: {kind} fine-pitch IC + {n_caps} decoupling caps + "
                        f"{len(routed_sigs)} series resistors + {jn-1} break-out headers "
                        f"({len(parts)} parts total)",
+        # Fine-pitch ICs need a 4-layer stackup to fan out inner pins.
+        "rules": {"layers": 4},
         "bounds": bounds,
         "parts": parts,
     }

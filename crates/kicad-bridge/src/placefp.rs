@@ -56,10 +56,24 @@ pub fn part_from_footprint(
     reference: &str,
     net_map: &BTreeMap<String, String>,
 ) -> Part {
+    part_from_footprint_layers(footprint, reference, net_map, 2)
+}
+
+/// [`part_from_footprint`] for a board of `layer_count` copper layers. A
+/// through-hole pad spans EVERY copper layer (its plated barrel passes through
+/// all of them), so on a 4-layer board its inner layers are correctly occupied —
+/// otherwise the router would run an inner-layer trace straight through a header
+/// pin and short it (a defect KiCAD's DRC catches but the 2-layer pad model hid).
+pub fn part_from_footprint_layers(
+    footprint: &Footprint,
+    reference: &str,
+    net_map: &BTreeMap<String, String>,
+    layer_count: u32,
+) -> Part {
     let pads: Vec<PartPad> = footprint
         .pads
         .iter()
-        .map(|p| part_pad(p, net_map))
+        .map(|p| part_pad(p, net_map, layer_count))
         .collect();
 
     let (courtyard_w, courtyard_h) = enclosing_courtyard(footprint);
@@ -74,7 +88,7 @@ pub fn part_from_footprint(
 }
 
 /// Translate one library [`FootprintPad`] into a placement [`PartPad`].
-fn part_pad(pad: &FootprintPad, net_map: &BTreeMap<String, String>) -> PartPad {
+fn part_pad(pad: &FootprintPad, net_map: &BTreeMap<String, String>, layer_count: u32) -> PartPad {
     PartPad {
         number: pad.number.clone(),
         offset: Point2 {
@@ -83,25 +97,37 @@ fn part_pad(pad: &FootprintPad, net_map: &BTreeMap<String, String>) -> PartPad {
         },
         width: pad.size[0],
         height: pad.size[1],
-        layers: pad_layers(pad),
+        layers: pad_layers(pad, layer_count),
         net: net_map.get(&pad.number).cloned(),
     }
 }
 
+/// Every copper layer of a `layer_count`-layer board as a [`LayerRef`]:
+/// `top, inner1, …, inner(layer_count-2), bottom`.
+fn all_copper_layers(layer_count: u32) -> Vec<LayerRef> {
+    let n = layer_count.max(2);
+    let mut v = vec![LayerRef::top()];
+    for i in 1..=(n.saturating_sub(2)) {
+        v.push(LayerRef(format!("inner{i}")));
+    }
+    v.push(LayerRef::bottom());
+    v
+}
+
 /// The engine [`LayerRef`]s a pad sits on. A surface-mount pad on a single face
-/// maps to that face; a through-hole / `*.Cu` pad spans both copper faces (the
-/// same top+bottom convention `to_route_problem` and `pcb.rs` use for a
-/// full-stack pad on a 2-layer board).
-fn pad_layers(pad: &FootprintPad) -> Vec<LayerRef> {
+/// maps to that face; a through-hole / `*.Cu` pad spans EVERY copper layer of the
+/// board (its barrel is through-plated), so the router treats the inner layers
+/// under it as occupied too.
+fn pad_layers(pad: &FootprintPad, layer_count: u32) -> Vec<LayerRef> {
     let spans_all = matches!(pad.technology, PadTechnology::ThruHole | PadTechnology::NpThruHole)
         || pad.layers.iter().any(|l| l == "*.Cu");
     if spans_all {
-        return vec![LayerRef::top(), LayerRef::bottom()];
+        return all_copper_layers(layer_count);
     }
     let on_front = pad.layers.iter().any(|l| l == "F.Cu");
     let on_back = pad.layers.iter().any(|l| l == "B.Cu");
     match (on_front, on_back) {
-        (true, true) => vec![LayerRef::top(), LayerRef::bottom()],
+        (true, true) => all_copper_layers(layer_count),
         (false, true) => vec![LayerRef::bottom()],
         // Default (front-only, or no copper layer named) to the top face.
         _ => vec![LayerRef::top()],

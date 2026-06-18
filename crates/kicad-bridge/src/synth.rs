@@ -71,14 +71,25 @@ pub struct SynthPart {
     pub placement: Placement,
 }
 
-/// Synthesize a complete `.kicad_pcb` from `parts` on a board of `bounds`.
+/// Synthesize a complete 2-layer `.kicad_pcb` from `parts` on a board of
+/// `bounds`. Convenience wrapper over [`synthesize_board_layers`].
+pub fn synthesize_board(parts: &[SynthPart], bounds: &Bounds) -> io::Result<String> {
+    synthesize_board_layers(parts, bounds, 2)
+}
+
+/// Synthesize a complete `.kicad_pcb` from `parts` on a board of `bounds` with
+/// `layer_count` copper layers (2 or 4 — the engine's supported stackups).
 ///
 /// The result parses with [`crate::pcb::read_problem`] and is structurally a
 /// KiCAD-9 board (see the module docs). Net codes are 1-based over the sorted
 /// union of every part's pad nets. Returns an [`io::Error`] if a part's source
 /// has no parseable footprint block, a placement is missing for a part, or a
 /// non-axis-aligned rotation is requested.
-pub fn synthesize_board(parts: &[SynthPart], bounds: &Bounds) -> io::Result<String> {
+pub fn synthesize_board_layers(
+    parts: &[SynthPart],
+    bounds: &Bounds,
+    layer_count: u32,
+) -> io::Result<String> {
     // Net code table: 1-based over the sorted union of every bound pad's net.
     let net_codes = net_codes(parts);
 
@@ -89,7 +100,7 @@ pub fn synthesize_board(parts: &[SynthPart], bounds: &Bounds) -> io::Result<Stri
     out.push_str("\t(generator_version \"9.0\")\n");
     out.push_str("\t(general\n\t\t(thickness 1.6)\n\t\t(legacy_teardrops no)\n\t)\n");
     out.push_str("\t(paper \"A4\")\n");
-    push_layers(&mut out);
+    push_layers(&mut out, layer_count);
     out.push_str(
         "\t(setup\n\t\t(pad_to_mask_clearance 0)\n\
          \t\t(allow_soldermask_bridges_in_footprints no)\n\
@@ -126,10 +137,21 @@ fn net_codes(parts: &[SynthPart]) -> BTreeMap<String, i32> {
 
 /// Emit the `(layers …)` declaration: a 2-layer board with the silk/mask/edge
 /// technical layers KiCAD 9 expects (matches `placed_template.kicad_pcb`).
-fn push_layers(out: &mut String) {
+fn push_layers(out: &mut String, layer_count: u32) {
     out.push_str("\t(layers\n");
     out.push_str("\t\t(0 \"F.Cu\" signal)\n");
-    out.push_str("\t\t(2 \"B.Cu\" signal)\n");
+    // Inner copper layers (4-layer stackup): In1.Cu=1, In2.Cu=2, … sequential,
+    // with B.Cu following. KiCAD 9 accepts this sequential numbering (verified by
+    // load + DRC); the 2-layer board keeps the canonical (0 F.Cu)(2 B.Cu).
+    if layer_count >= 4 {
+        for i in 1..=(layer_count - 2) {
+            let _ = write!(out, "\t\t({i} \"In{i}.Cu\" signal)\n");
+        }
+        let b = layer_count - 1;
+        let _ = write!(out, "\t\t({b} \"B.Cu\" signal)\n");
+    } else {
+        out.push_str("\t\t(2 \"B.Cu\" signal)\n");
+    }
     out.push_str("\t\t(36 \"B.SilkS\" user \"B.Silkscreen\")\n");
     out.push_str("\t\t(37 \"F.SilkS\" user \"F.Silkscreen\")\n");
     out.push_str("\t\t(38 \"B.Mask\" user)\n");

@@ -1,5 +1,8 @@
 {
   "description": "STRESS: bga64 fine-pitch IC + 32 decoupling caps + 32 series resistors + 5 break-out headers (70 parts total)",
+  "rules": {
+    "layers": 4
+  },
   "bounds": {
     "min_x": 0.0,
     "max_x": 80.0,

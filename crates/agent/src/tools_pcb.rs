@@ -28,8 +28,8 @@ use serde_json::{Value, json};
 
 use kicad_bridge::cli::{KicadCli, Violation};
 use kicad_bridge::pcb::{read_problem, write_solution};
-use kicad_bridge::placefp::part_from_footprint;
-use kicad_bridge::synth::{synthesize_board, SynthPart};
+use kicad_bridge::placefp::{part_from_footprint, part_from_footprint_layers};
+use kicad_bridge::synth::{synthesize_board_layers, SynthPart};
 use pcb_engine::connectivity::Violation as ConnViolation;
 use pcb_engine::lint::{DrcViolation, lint};
 use pcb_engine::pathing::global_route;
@@ -89,6 +89,14 @@ pub struct DraftRules {
     pub via_diameter: f64,
     /// Via drill diameter (mm).
     pub via_drill: f64,
+    /// Copper layer count (2 or 4). 4 lets dense / fine-pitch parts (BGAs) fan
+    /// out their inner pins onto inner layers; 2 is the default for simple boards.
+    #[serde(default = "default_layers")]
+    pub layer_count: u32,
+}
+
+fn default_layers() -> u32 {
+    2
 }
 
 impl Default for DraftRules {
@@ -98,6 +106,7 @@ impl Default for DraftRules {
             min_trace_width: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
+            layer_count: 2,
         }
     }
 }
@@ -266,15 +275,29 @@ fn parse_bounds(v: Option<&Value>) -> std::result::Result<Bounds, String> {
 /// Parse optional `rules` from snake_case model input; an absent/null `rules`
 /// yields the engine defaults ([`DraftRules::default`]).
 fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
+    let d = DraftRules::default();
     let obj = match v {
-        None | Some(Value::Null) => return Ok(DraftRules::default()),
+        None | Some(Value::Null) => return Ok(d),
         Some(obj) => obj,
     };
+    // Partial rules are allowed: any omitted field falls back to the engine
+    // default, so a caller can pass just `{ "layers": 4 }` or `{ "clearance": 0.15 }`.
+    let num = |k: &str, fallback: f64| obj.get(k).and_then(Value::as_f64).unwrap_or(fallback);
+    let layer_count = obj
+        .get("layers")
+        .or_else(|| obj.get("layer_count"))
+        .and_then(Value::as_u64)
+        .map(|n| n as u32)
+        .unwrap_or(d.layer_count);
+    if !matches!(layer_count, 2 | 4) {
+        return Err(format!("rules.layers must be 2 or 4, got {layer_count}"));
+    }
     Ok(DraftRules {
-        clearance: req_num(obj, "clearance", "rules")?,
-        min_trace_width: req_num(obj, "min_trace_width", "rules")?,
-        via_diameter: req_num(obj, "via_diameter", "rules")?,
-        via_drill: req_num(obj, "via_drill", "rules")?,
+        clearance: num("clearance", d.clearance),
+        min_trace_width: num("min_trace_width", d.min_trace_width),
+        via_diameter: num("via_diameter", d.via_diameter),
+        via_drill: num("via_drill", d.via_drill),
+        layer_count,
     })
 }
 
@@ -484,7 +507,8 @@ fn place_problem_from_draft(
                 dp.reference, dp.footprint
             ));
         };
-        let mut part = part_from_footprint(&fp, &dp.reference, &dp.pad_nets);
+        let mut part =
+            part_from_footprint_layers(&fp, &dp.reference, &dp.pad_nets, draft.rules.layer_count);
         // The triage lever: a `move_part`-set lock pins the part for the placer.
         part.locked = dp.locked.clone();
         parts.push(part);
@@ -492,7 +516,7 @@ fn place_problem_from_draft(
     Ok(PlaceProblem {
         bounds: draft.bounds.clone(),
         clearance: draft.rules.clearance,
-        layer_count: 2,
+        layer_count: draft.rules.layer_count,
         min_trace_width: draft.rules.min_trace_width,
         parts,
     })
@@ -1462,7 +1486,7 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
         Ok(p) => p,
         Err(msg) => return Ok(json!({ "error": msg })),
     };
-    let board_text = match synthesize_board(&parts, &draft.bounds) {
+    let board_text = match synthesize_board_layers(&parts, &draft.bounds, draft.rules.layer_count) {
         Ok(t) => t,
         Err(e) => {
             return Ok(json!({
@@ -1498,7 +1522,7 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // never clips it). Re-synthesize the outline at the tight bounds.
     let tight = content_bounds(&board.problem, &stored.solution, &draft.bounds, BOARD_EDGE_MARGIN_MM);
     let board = if tight != draft.bounds {
-        if let Ok(t) = synthesize_board(&parts, &tight) {
+        if let Ok(t) = synthesize_board_layers(&parts, &tight, draft.rules.layer_count) {
             std::fs::write(&path, t.as_bytes())
                 .with_context(|| format!("writing tight-outline board to {}", path.display()))?;
             read_problem(&path)

@@ -48,7 +48,11 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
     };
     let tools = Tools::new();
 
-    let board = json!({ "bounds": spec["bounds"], "parts": spec["parts"] });
+    // Forward an optional `rules` block (e.g. {"layers": 4}) from the spec.
+    let mut board = json!({ "bounds": spec["bounds"], "parts": spec["parts"] });
+    if let Some(rules) = spec.get("rules") {
+        board["rules"] = rules.clone();
+    }
     let created = tools.run("create_board", board, &ctx).unwrap();
     if created["ok"] != json!(true) {
         return json!({ "name": name, "stage": "create", "result": created });
