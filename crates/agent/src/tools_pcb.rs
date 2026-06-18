@@ -1541,6 +1541,7 @@ pub fn render_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
                     overlaps_resolved: 0,
                     out_of_bounds_clamps: 0,
                     hpwl: 0.0,
+                    layout_cost: 0.0,
                 },
             };
             pcb_engine::svg::render_placement(&problem, &draft.hints, &result)

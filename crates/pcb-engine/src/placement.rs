@@ -284,6 +284,11 @@ pub struct PlaceReport {
     /// Half-perimeter wirelength over net bounding boxes (mm) — the cheap
     /// placement-quality number (lower is tighter).
     pub hpwl: f64,
+    /// The full [`place_cost`] of the final placement (overlap + wirelength +
+    /// compaction + decoupling cohesion + silk gap). [`place_best`] selects the
+    /// variant with the lowest layout_cost among those that route as cleanly, so
+    /// the annealer's layout-quality gains are actually chosen.
+    pub layout_cost: f64,
 }
 
 // ── derived nets ─────────────────────────────────────────────────────────────
@@ -357,6 +362,244 @@ fn decoupling_pairs(problem: &PlaceProblem) -> Vec<(usize, usize)> {
     pairs
 }
 
+// ── simulated-annealing placement refinement ─────────────────────────────────
+//
+// A direct analog of the schematic floorplan SA (`sch-layout::floorplan`): from
+// the force-directed seed, anneal part positions to minimize an explicit cost,
+// escaping the local minima the springs settle into. Crucially the SA OWNS its
+// cost (overlap included), so — unlike the reverted spring/halo heuristics — the
+// legalizer never has to fight it: the annealed state is already near-legal and
+// the final `legalize` only nudges. The cost carries a SILK-GAP term so parts
+// keep room for their reference designators (the recurring critic complaint).
+
+/// SA cost weights (mm units), scaled like the schematic floorplan cost.
+const SA_OVERLAP_W: f64 = 1000.0; // hard: courtyard collision
+const SA_BOUNDS_W: f64 = 1000.0; // hard: out of board bounds
+const SA_SILK_W: f64 = 6.0; // soft: parts crowding each other's refdes
+const SA_WL_W: f64 = 0.4; // half-perimeter wirelength (over part centres)
+const SA_SPREAD_W: f64 = 0.25; // mild whole-board compaction
+const SA_COHERE_W: f64 = 5.0; // decoupling cap → nearest anchor power pad (hug the IC)
+const SA_EDGE_W: f64 = 0.5; // connector → nearest board edge
+/// Breathing room (mm) a refdes needs around a part before it crowds a neighbour.
+const SA_SILK_GAP: f64 = 1.0;
+/// Fixed seed — placement is deterministic (same board → same layout).
+const SA_SEED: u64 = 0xB5AD_C0DE_1234_5678;
+
+/// Deterministic SplitMix64 (no `rand`, no clock — reproducible placement).
+struct SaRng(u64);
+impl SaRng {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    fn below(&mut self, n: usize) -> usize {
+        if n == 0 { 0 } else { (self.next_u64() % n as u64) as usize }
+    }
+    fn unit(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64)
+    }
+    fn range(&mut self, lo: f64, hi: f64) -> f64 {
+        lo + self.unit() * (hi - lo)
+    }
+}
+
+/// Distance from a decoupling cap's origin to the NEAREST power pad of its anchor
+/// (the proximity a bypass cap should minimize). 0 if the anchor shares no pad net.
+fn cap_anchor_dist(
+    problem: &PlaceProblem,
+    pos: &[Point2],
+    rotations: &[i32],
+    cap: usize,
+    ic: usize,
+) -> f64 {
+    let cap_nets: Vec<&str> =
+        problem.parts[cap].pads.iter().filter_map(|p| p.net.as_deref()).collect();
+    let mut best = f64::MAX;
+    for pad in &problem.parts[ic].pads {
+        if pad.net.as_deref().is_some_and(|nn| cap_nets.contains(&nn)) {
+            let off = rotate_offset(&pad.offset, rotations[ic]);
+            let (px, py) = (pos[ic].x + off.x, pos[ic].y + off.y);
+            best = best.min(((pos[cap].x - px).powi(2) + (pos[cap].y - py).powi(2)).sqrt());
+        }
+    }
+    if best.is_finite() { best } else { 0.0 }
+}
+
+/// The placement cost the SA minimizes (also the [`place_best`] selection key, so
+/// the variant that genuinely lays out best is the one chosen). Lower is better.
+fn place_cost(
+    problem: &PlaceProblem,
+    nets: &[LogicalNet],
+    half: &[(f64, f64)],
+    margin: f64,
+    rotations: &[i32],
+    pairs: &[(usize, usize)],
+    edge_idx: &[usize],
+    pos: &[Point2],
+) -> f64 {
+    let n = problem.parts.len();
+    let mut cost = 0.0;
+
+    // Pairwise courtyard overlap (hard) + a soft silk gap so refdes don't crowd.
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (ox, oy) = courtyard_overlap(pos, half, margin, i, j);
+            if ox > 0.0 && oy > 0.0 {
+                cost += SA_OVERLAP_W * ox.min(oy);
+            } else {
+                let (sx, sy) = courtyard_overlap(pos, half, margin + 2.0 * SA_SILK_GAP, i, j);
+                if sx > 0.0 && sy > 0.0 {
+                    cost += SA_SILK_W * sx.min(sy);
+                }
+            }
+        }
+    }
+
+    // Out-of-bounds (hard).
+    let b = &problem.bounds;
+    for i in 0..n {
+        let h = half[i];
+        let dx = (b.min_x - (pos[i].x - h.0)).max(0.0) + ((pos[i].x + h.0) - b.max_x).max(0.0);
+        let dy = (b.min_y - (pos[i].y - h.1)).max(0.0) + ((pos[i].y + h.1) - b.max_y).max(0.0);
+        cost += SA_BOUNDS_W * (dx + dy);
+    }
+
+    // Half-perimeter wirelength over part centres + whole-board spread.
+    let (mut gx0, mut gy0, mut gx1, mut gy1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for p in pos {
+        gx0 = gx0.min(p.x);
+        gy0 = gy0.min(p.y);
+        gx1 = gx1.max(p.x);
+        gy1 = gy1.max(p.y);
+    }
+    if gx1 >= gx0 {
+        cost += SA_SPREAD_W * ((gx1 - gx0) + (gy1 - gy0));
+    }
+    for net in nets {
+        if net.pins.len() < 2 {
+            continue;
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for pin in &net.pins {
+            let p = &pos[pin.part];
+            x0 = x0.min(p.x);
+            y0 = y0.min(p.y);
+            x1 = x1.max(p.x);
+            y1 = y1.max(p.y);
+        }
+        cost += SA_WL_W * ((x1 - x0) + (y1 - y0));
+    }
+
+    // Decoupling cohesion + connector edge-seek.
+    for &(cap, ic) in pairs {
+        cost += SA_COHERE_W * cap_anchor_dist(problem, pos, rotations, cap, ic);
+    }
+    for &i in edge_idx {
+        let h = half[i];
+        let dl = (pos[i].x - h.0) - b.min_x;
+        let dr = b.max_x - (pos[i].x + h.0);
+        let dt = (pos[i].y - h.1) - b.min_y;
+        let db = b.max_y - (pos[i].y + h.1);
+        cost += SA_EDGE_W * dl.min(dr).min(dt).min(db).max(0.0);
+    }
+    cost
+}
+
+/// Anneal `pos` (the force-directed seed) to a lower [`place_cost`]. Metropolis
+/// acceptance with a linearly-cooled temperature; move set = relocate a part,
+/// swap two parts, or shift a whole decoupling cluster (anchor + its caps).
+/// Locked parts never move. Deterministic.
+fn anneal_placement(
+    problem: &PlaceProblem,
+    hints: &PlacementHints,
+    nets: &[LogicalNet],
+    half: &[(f64, f64)],
+    margin: f64,
+    rotations: &[i32],
+    pos: &mut [Point2],
+) {
+    let n = problem.parts.len();
+    let movable: Vec<usize> =
+        (0..n).filter(|&i| problem.parts[i].locked.is_none()).collect();
+    if movable.len() < 2 {
+        return;
+    }
+    let pairs = decoupling_pairs(problem);
+    let edge_idx: Vec<usize> = hints
+        .edge_seek
+        .iter()
+        .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
+        .collect();
+    // Clusters for the block move: anchor → its caps.
+    let mut clusters: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for &(cap, ic) in &pairs {
+        if problem.parts[cap].locked.is_none() {
+            clusters.entry(ic).or_default().push(cap);
+        }
+    }
+    let anchors: Vec<usize> = clusters.keys().copied().collect();
+
+    let mut rng = SaRng(SA_SEED);
+    let iters = (250 * movable.len()).clamp(1000, 8000);
+    let t0 = 8.0;
+    let cost_of = |p: &[Point2]| place_cost(problem, nets, half, margin, rotations, &pairs, &edge_idx, p);
+    let mut cost = cost_of(pos);
+
+    let mut restore: Vec<(usize, Point2)> = Vec::with_capacity(8);
+    for it in 0..iters {
+        let t = (t0 * (1.0 - it as f64 / iters as f64)).max(0.05);
+        restore.clear();
+        let kind = rng.below(10);
+        if kind < 7 {
+            // Relocate one part; amplitude shrinks as the board cools.
+            let k = movable[rng.below(movable.len())];
+            restore.push((k, pos[k].clone()));
+            let amp = 0.5 + 5.0 * (t / t0);
+            pos[k].x = snap(pos[k].x + rng.range(-amp, amp));
+            pos[k].y = snap(pos[k].y + rng.range(-amp, amp));
+            clamp_into_bounds(&mut pos[k], &problem.bounds, half[k]);
+        } else if kind < 9 || anchors.is_empty() {
+            // Swap two parts.
+            let a = movable[rng.below(movable.len())];
+            let b = movable[rng.below(movable.len())];
+            if a == b {
+                continue;
+            }
+            restore.push((a, pos[a].clone()));
+            restore.push((b, pos[b].clone()));
+            pos.swap(a, b);
+            clamp_into_bounds(&mut pos[a], &problem.bounds, half[a]);
+            clamp_into_bounds(&mut pos[b], &problem.bounds, half[b]);
+        } else {
+            // Shift a whole decoupling cluster (anchor + caps) rigidly.
+            let ic = anchors[rng.below(anchors.len())];
+            let amp = 0.5 + 3.0 * (t / t0);
+            let (dx, dy) = (rng.range(-amp, amp), rng.range(-amp, amp));
+            let mut members = vec![ic];
+            members.extend(clusters.get(&ic).into_iter().flatten().copied());
+            for &m in &members {
+                restore.push((m, pos[m].clone()));
+                pos[m].x = snap(pos[m].x + dx);
+                pos[m].y = snap(pos[m].y + dy);
+                clamp_into_bounds(&mut pos[m], &problem.bounds, half[m]);
+            }
+        }
+        let new_cost = cost_of(pos);
+        let d = new_cost - cost;
+        if d < 0.0 || rng.unit() < (-d / t).exp() {
+            cost = new_cost;
+        } else {
+            for (i, p) in restore.drain(..) {
+                pos[i] = p;
+            }
+        }
+    }
+}
+
 /// Place `problem` and return the variant that ROUTES cleanest — the placement
 /// analog of [`crate::pipeline::route_auto`]. It runs the baseline placement plus
 /// idiom variants (decoupling co-placement, aspect-aware connector edges, both),
@@ -371,15 +614,16 @@ pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult
     let has_edge = !hints.edge_seek.is_empty();
 
     // The variants worth trying for THIS board (always include the baseline).
+    // The SA refinement subsumes the decouple/edge springs (its cost does
+    // cohesion + edge-seek directly), so the annealed variant is the main
+    // alternative; the spring variants stay as cheap extra candidates.
     let mut opts = vec![PlaceOpts::default()];
+    opts.push(PlaceOpts { anneal: true, aspect_edge: has_edge, decouple: false });
     if has_decouple {
-        opts.push(PlaceOpts { decouple: true, aspect_edge: false });
+        opts.push(PlaceOpts { decouple: true, aspect_edge: false, anneal: false });
     }
     if has_edge {
-        opts.push(PlaceOpts { decouple: false, aspect_edge: true });
-    }
-    if has_decouple && has_edge {
-        opts.push(PlaceOpts { decouple: true, aspect_edge: true });
+        opts.push(PlaceOpts { decouple: false, aspect_edge: true, anneal: false });
     }
 
     let cost = |r: &PlaceResult| -> (usize, u64, u64) {
@@ -387,14 +631,23 @@ pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult
             return (usize::MAX, u64::MAX, u64::MAX);
         }
         let rp = to_route_problem(problem, &r.placements);
-        let routed = crate::pipeline::route_auto(&rp);
+        // Rank variants with the FAST naive router — only relative routability
+        // matters here, and the slow capacity-mesh router on every variant of a
+        // 70-part board is needlessly expensive (export re-routes with route_auto).
+        let routed = crate::router::route(&rp);
         let geom = crate::lint::lint(&rp, &routed.solution)
             .iter()
             .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
             .count();
-        let wl = crate::pipeline::metrics(&routed.solution).wirelength;
-        // Scale f64 metrics to sortable u64 (all non-negative finite).
-        (routed.failed.len() + geom, (wl * 1000.0) as u64, (r.report.hpwl * 1000.0) as u64)
+        // PRIMARY: routing faults (an honest unrouted net + geometry violations) —
+        // a worse-routed layout is never chosen. SECONDARY: the layout cost (so the
+        // annealer's compaction / cohesion / silk-gap gains decide among equally-
+        // routable layouts). hpwl breaks final ties.
+        (
+            routed.failed.len() + geom,
+            (r.report.layout_cost * 1000.0) as u64,
+            (r.report.hpwl * 1000.0) as u64,
+        )
     };
 
     // Baseline first so it wins exact ties (battle-tested), then keep the best.
@@ -457,6 +710,13 @@ fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts: PlaceOpts
     // 2. Force-directed relaxation (skips locked parts).
     force_layout(problem, hints, &nets, &half, margin, opts, &mut pos);
 
+    // 2b. SA refinement (variant-gated): escape the springs' local minima and
+    //     optimize the explicit cost (overlap + wirelength + compaction +
+    //     decoupling cohesion + a silk gap so refdes don't collide).
+    if opts.anneal {
+        anneal_placement(problem, hints, &nets, &half, margin, &rotations, &mut pos);
+    }
+
     // 3. Legalize: snap + spiral-resolve overlaps + clamp. Locked immovable.
     let leg = legalize(problem, &half, margin, &mut pos);
 
@@ -473,6 +733,13 @@ fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts: PlaceOpts
     let legal = is_legal(problem, &half, margin, &pos);
 
     let hpwl = compute_hpwl(problem, &nets, &pos, &rotations);
+    let pairs = decoupling_pairs(problem);
+    let edge_idx: Vec<usize> = hints
+        .edge_seek
+        .iter()
+        .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
+        .collect();
+    let layout_cost = place_cost(problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos);
 
     PlaceResult {
         placements,
@@ -481,6 +748,7 @@ fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts: PlaceOpts
             overlaps_resolved: leg.overlaps_resolved,
             out_of_bounds_clamps: leg.out_of_bounds_clamps,
             hpwl,
+            layout_cost,
         },
     }
 }
@@ -955,6 +1223,11 @@ struct PlaceOpts {
     /// Bias edge-seeking by part aspect: a tall connector goes to a side edge so
     /// its pad column lies along it, not the top where it pokes inward.
     aspect_edge: bool,
+    /// Refine the force-directed seed with simulated annealing ([`anneal_placement`]):
+    /// escapes local minima the springs settle into, and optimizes an explicit
+    /// cost (overlap + wirelength + compactness + decoupling cohesion + a SILK GAP
+    /// so reference designators don't collide). Mirrors the schematic floorplan SA.
+    anneal: bool,
 }
 
 /// The board edge a part should hug given its aspect: a part taller than wide
