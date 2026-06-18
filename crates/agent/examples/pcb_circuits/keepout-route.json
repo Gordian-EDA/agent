@@ -1,0 +1,52 @@
+{
+  "description": "KEEPOUT ROUTING: two edge-seeking 1x06 headers wired straight-through, with a central keepout blocking the direct path \u2014 the router must detour around it",
+  "rules": {
+    "layers": 2
+  },
+  "bounds": {
+    "min_x": 0.0,
+    "max_x": 64.0,
+    "min_y": 0.0,
+    "max_y": 40.0
+  },
+  "keepouts": [
+    {
+      "rect": {
+        "min_x": 24.0,
+        "max_x": 40.0,
+        "min_y": 6.0,
+        "max_y": 34.0
+      },
+      "layers": [
+        "top",
+        "bottom"
+      ]
+    }
+  ],
+  "parts": [
+    {
+      "reference": "J1",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "S1",
+        "2": "S2",
+        "3": "S3",
+        "4": "S4",
+        "5": "S5",
+        "6": "S6"
+      }
+    },
+    {
+      "reference": "J2",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "S1",
+        "2": "S2",
+        "3": "S3",
+        "4": "S4",
+        "5": "S5",
+        "6": "S6"
+      }
+    }
+  ]
+}

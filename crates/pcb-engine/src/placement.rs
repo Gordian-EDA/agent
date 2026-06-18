@@ -115,6 +115,12 @@ pub struct PlaceProblem {
     pub min_trace_width: f64,
     /// The parts to place.
     pub parts: Vec<Part>,
+    /// Rectangular keep-out regions on the SIGNAL layers (top/bottom) the placer
+    /// must keep parts OUT of — a part dropped inside one would have its pads
+    /// trapped (no track can leave without crossing the keep-out). Inner-only
+    /// (plane) keep-outs are not included here. Empty for most boards.
+    #[serde(default)]
+    pub keepouts: Vec<Rect>,
 }
 
 fn default_clearance() -> f64 {
@@ -382,6 +388,7 @@ fn decoupling_pairs(problem: &PlaceProblem) -> Vec<(usize, usize)> {
 /// SA cost weights (mm units), scaled like the schematic floorplan cost.
 const SA_OVERLAP_W: f64 = 1000.0; // hard: courtyard collision
 const SA_BOUNDS_W: f64 = 1000.0; // hard: out of board bounds
+const SA_KEEPOUT_W: f64 = 1000.0; // hard: part overlapping a signal-layer keep-out
 const SA_SILK_W: f64 = 6.0; // soft: parts crowding each other's refdes
 const SA_WL_W: f64 = 0.4; // half-perimeter wirelength (over part centres)
 const SA_SPREAD_W: f64 = 0.25; // mild whole-board compaction
@@ -472,6 +479,17 @@ fn place_cost(
         let dx = (b.min_x - (pos[i].x - h.0)).max(0.0) + ((pos[i].x + h.0) - b.max_x).max(0.0);
         let dy = (b.min_y - (pos[i].y - h.1)).max(0.0) + ((pos[i].y + h.1) - b.max_y).max(0.0);
         cost += SA_BOUNDS_W * (dx + dy);
+    }
+
+    // Keep-out overlap (hard): a part inside a signal-layer keep-out has trapped
+    // pads. Penalize the penetration depth so the SA pushes parts clear.
+    for i in 0..n {
+        for k in &problem.keepouts {
+            let (ox, oy) = part_keepout_overlap(&pos[i], half[i], k);
+            if ox > 0.0 && oy > 0.0 {
+                cost += SA_KEEPOUT_W * ox.min(oy);
+            }
+        }
     }
 
     // Half-perimeter wirelength over part centres + whole-board spread.
@@ -1364,6 +1382,13 @@ fn is_legal(problem: &PlaceProblem, half: &[(f64, f64)], margin: f64, pos: &[Poi
         if !fits_in_bounds(&pos[i], &problem.bounds, half[i]) {
             return false;
         }
+        // A part overlapping a signal-layer keep-out is illegal (its pads can't route).
+        for k in &problem.keepouts {
+            let (ox, oy) = part_keepout_overlap(&pos[i], half[i], k);
+            if ox > 1e-9 && oy > 1e-9 {
+                return false;
+            }
+        }
         for j in (i + 1)..n {
             let (ox, oy) = courtyard_overlap(pos, half, margin, i, j);
             // Strictly-positive overlap on BOTH axes is a real courtyard
@@ -1374,6 +1399,14 @@ fn is_legal(problem: &PlaceProblem, half: &[(f64, f64)], margin: f64, pos: &[Poi
         }
     }
     true
+}
+
+/// Overlap `(ox, oy)` of a part's courtyard (centre `p`, half-extents `h`) with a
+/// keep-out rect; both strictly positive means the part intrudes into the keep-out.
+fn part_keepout_overlap(p: &Point2, h: (f64, f64), k: &Rect) -> (f64, f64) {
+    let ox = (p.x + h.0).min(k.max_x) - (p.x - h.0).max(k.min_x);
+    let oy = (p.y + h.1).min(k.max_y) - (p.y - h.1).max(k.min_y);
+    (ox, oy)
 }
 
 // ── HPWL ─────────────────────────────────────────────────────────────────────

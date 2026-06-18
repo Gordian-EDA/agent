@@ -592,12 +592,26 @@ fn place_problem_from_draft(
         part.locked = dp.locked.clone();
         parts.push(part);
     }
+    // Keep-outs that block a SIGNAL layer (top/bottom) are placement obstacles too:
+    // a part dropped inside one has its pads trapped (no track can leave). Inner-only
+    // (plane) keep-outs don't constrain placement, so they're excluded here.
+    let keepouts: Vec<pcb_engine::placement::Rect> = draft
+        .keepouts
+        .iter()
+        .filter(|k| {
+            k.layers
+                .iter()
+                .any(|l| *l == LayerRef::top() || *l == LayerRef::bottom())
+        })
+        .map(|k| k.rect.clone())
+        .collect();
     Ok(PlaceProblem {
         bounds: draft.bounds.clone(),
         clearance: draft.rules.clearance,
         layer_count: draft.rules.layer_count,
         min_trace_width: draft.rules.min_trace_width,
         parts,
+        keepouts,
     })
 }
 
