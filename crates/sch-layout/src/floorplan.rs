@@ -1333,11 +1333,13 @@ fn emit_strategy(
     normalize(&mut items);
     // Placement search behind the strategy interface (`PlacementStrategy`): greedy
     // (free tier) or simulated annealing (premium); both mutate `items` in mm.
+    // The placement search now OWNS the continuous polish (small boards: the routed
+    // `polish`; large boards: the router-free `polish_proxy`, picked per-board among
+    // seat/pack variants), so it returns the FINAL placement — emit no longer
+    // re-polishes (which would re-add a seating pass the large-board pick had
+    // deliberately rejected). Greedy keeps the exact refine→polish order, so the
+    // reference snapshots stay byte-identical.
     strategy.search(env, &mut items, &inc, ir, &needs_flag, SEARCH_SEED);
-    // Continuous-placement polish: iterate the directed slides (onto pin axes, toward
-    // the centroid) AND a free per-axis nudge to convergence — giving the continuous
-    // phase the freedom the column-centre cell table cannot express.
-    polish(env, &mut items, &inc, ir, &needs_flag);
     // Guarantee no body overlap: the cost-gated refine can leave two parts
     // touching when separating them would transiently raise routed cost (a local
     // minimum), so a final, unconditional relaxation pushes any remaining
@@ -1356,7 +1358,7 @@ fn emit_strategy(
     // instead of the resistor drifting to a spare column. Runs on FINAL positions (the
     // LED already seated by the search), so it never collides a frozen cluster; the
     // follow-up decongest nudges anything the moved resistor now overlaps.
-    if align_led_chains(&mut items, ir) {
+    if align_led_chains(&mut items, &inc, ir) {
         decongest(&mut items);
     }
 
@@ -1680,7 +1682,7 @@ fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
 /// `emit` (after the search has seated the LED), so it can't collide a frozen cluster;
 /// the caller re-runs `decongest` to nudge anything the moved resistor now overlaps.
 /// Returns true if it moved anything.
-fn align_led_chains(items: &mut [Item], ir: &LayoutIr) -> bool {
+fn align_led_chains(items: &mut [Item], _inc: &Incidence, ir: &LayoutIr) -> bool {
     const DROP: f64 = 10.16; // LED half + gap + resistor half, on grid.
     let snap = crate::grid::snap;
     let mut moves: Vec<(usize, [f64; 2], f64)> = Vec::new();
@@ -1872,6 +1874,13 @@ impl PlacementStrategy for Greedy {
         _seed: u64,
     ) {
         refine_items(env, items, inc, ir, needs_flag);
+        // Own the continuous polish (moved out of emit), returning the FINAL placement.
+        // The free tier uses the ROUTED polish at EVERY size: it is the truthfulness-
+        // safe path (each move re-routes, so the cost sees a net merge / short — the
+        // router-free proxy polish does NOT, and greedy has no candidate pick to reject
+        // a mis-wire). Slow on a dense board, but only the premium anneal (fast lane) is
+        // latency-bound. References keep the exact refine→polish order → byte-identical.
+        polish(env, items, inc, ir, needs_flag);
     }
 }
 
@@ -1889,6 +1898,93 @@ impl PlacementStrategy for Anneal {
         seed: u64,
     ) {
         use rayon::prelude::*;
+        let timed_top = std::env::var("DEBUG_SA_TIME").is_ok();
+
+        // FAST LANE (large boards): the tuned routed paths below route the whole sheet
+        // per move and cost minutes past ~60 pins. Here the search is router-free —
+        // multi-start `anneal_locality` (proxy cost + range-limited cluster jump) from
+        // the raw cell seed — and the only routes paid are the bounded candidate
+        // selection + the one final emit. Strictly additive safety is preserved: the
+        // RAW seed is always a candidate (a floor), and the pick takes fewest real
+        // warnings then true cost, so the fast lane never ships worse than the seed.
+        let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
+        if pins > FAST_PINS {
+            let raw: Vec<Item> = items.to_vec();
+            // Diverse proxy-anneal starts; fewer for very large boards (each candidate
+            // costs two real routes at selection, ~1 s each on a 671-pin BGA).
+            let n_starts = if pins > 250 { 1 } else { 3 };
+            let seeds: Vec<u64> = (0..n_starts)
+                .map(|k| seed ^ (0x9E3779B97F4A7C15u64.wrapping_mul(k as u64 + 1)))
+                .collect();
+            let t_search = std::time::Instant::now();
+            let mut starts: Vec<Vec<Item>> = seeds
+                .par_iter()
+                .map(|&s| {
+                    let mut st = raw.clone();
+                    anneal_locality(env, &mut st, inc, ir, needs_flag, s);
+                    st
+                })
+                .collect();
+            if timed_top {
+                eprintln!("  [SA-fast] {n_starts} proxy starts: {:.2}s", t_search.elapsed().as_secs_f64());
+            }
+            let mut bases = vec![raw];
+            bases.append(&mut starts);
+            // From each base placement, produce three FULLY-POLISHED candidates with
+            // different post-passes: (a) nudge only — the conservative floor; (b) +magnet
+            // — seat each satellite tight to the pin it taps (kills the stranded-cap
+            // long-route labels); (c) +magnet +gravity — also pack whole modules toward
+            // the centre (kills inter-module sprawl). Seating and packing can collide
+            // module power-symbols / net-labels (text the proxy can't see), so all three
+            // are offered to the pick, which judges on REAL post-solve warnings then true
+            // cost — so neither pass can ever ship a worse/colliding sheet than the floor.
+            let variants: [(bool, bool); 3] = [(false, false), (true, false), (true, true)];
+            let candidates: Vec<Vec<Item>> = bases
+                .par_iter()
+                .flat_map_iter(|b| {
+                    variants.iter().map(move |&(m, g)| {
+                        let mut p = b.clone();
+                        polish_proxy(&mut p, inc, ir, m, g);
+                        decongest(&mut p);
+                        p
+                    })
+                })
+                .collect();
+            let t_score = std::time::Instant::now();
+            let scored: Vec<(usize, usize, f64)> = candidates
+                .par_iter()
+                .map(|cand| {
+                    // TRUTHFULNESS first: a magnet/gravity move can strand two nets onto
+                    // one wire (a merge), which warnings DON'T see — reject those here.
+                    let b = truthfulness_breaks(env, cand, inc, ir, needs_flag);
+                    let w = warning_count(env, cand, inc, ir, needs_flag);
+                    let c = premium_score_with_w(env, cand, inc, ir, needs_flag, w);
+                    (b, w, c)
+                })
+                .collect();
+            if timed_top {
+                eprintln!("  [SA-fast] score {} candidates: {:.2}s", candidates.len(), t_score.elapsed().as_secs_f64());
+            }
+            let (mut best, mut best_b, mut best_w, mut best_c) =
+                (0usize, usize::MAX, usize::MAX, f64::INFINITY);
+            for (k, (b, w, c)) in scored.iter().enumerate() {
+                let better = (*b, *w).cmp(&(best_b, best_w)) == std::cmp::Ordering::Less
+                    || (*b == best_b && *w == best_w && c + 0.5 < best_c);
+                if better {
+                    best = k;
+                    best_b = *b;
+                    best_w = *w;
+                    best_c = *c;
+                }
+            }
+            if timed_top {
+                eprintln!("  [SA-fast] pick cand#{best} scored={scored:?}");
+            }
+            // The chosen candidate is already fully polished + decongested; emit ships it.
+            items.clone_from_slice(&candidates[best]);
+            return;
+        }
+
         let seed_state: Vec<Item> = items.to_vec();
 
         // The greedy refine and all three anneals, scheduled to overlap on the
@@ -1900,6 +1996,14 @@ impl PlacementStrategy for Anneal {
         // independent, so it runs CONCURRENTLY with the refine instead of serializing
         // the refine's ~1.5s ahead of the anneals. The candidate pick keeps greedy
         // itself too, so the SA can never SHIP worse than greedy.
+        let timed = std::env::var("DEBUG_SA_TIME").is_ok();
+        let tic = |label: &str, f: &mut dyn FnMut()| {
+            let t0 = std::time::Instant::now();
+            f();
+            if timed {
+                eprintln!("  [SA] {label}: {:.2}s", t0.elapsed().as_secs_f64());
+            }
+        };
         let mut state_a: Vec<Item> = Vec::new();
         let mut state_b: Vec<Item> = seed_state;
         let mut state_c: Vec<Item> = Vec::new();
@@ -1907,9 +2011,9 @@ impl PlacementStrategy for Anneal {
         let mut greedy_state: Vec<Item> = Vec::new();
         rayon::scope(|s| {
             // Path B: broad search from the raw seed — independent, start it now.
-            s.spawn(|_| anneal_items(env, &mut state_b, inc, ir, needs_flag, true, false, seed));
+            s.spawn(|_| { let mut f = || anneal_items(env, &mut state_b, inc, ir, needs_flag, true, false, seed); tic("B broad", &mut f); });
             // Greedy refine on this thread, concurrently with B.
-            refine_items(env, items, inc, ir, needs_flag);
+            { let mut f = || refine_items(env, items, inc, ir, needs_flag); tic("greedy", &mut f); }
             greedy_state = items.to_vec();
             state_a = greedy_state.clone();
             state_c = greedy_state.clone();
@@ -1918,11 +2022,11 @@ impl PlacementStrategy for Anneal {
             // proxy + range-limited cluster jump) anneal from the greedy result, all in
             // parallel with each other and with B.
             rayon::join(
-                || anneal_items(env, &mut state_a, inc, ir, needs_flag, false, false, seed),
+                || { let mut f = || anneal_items(env, &mut state_a, inc, ir, needs_flag, false, false, seed); tic("A seeded", &mut f); },
                 || {
                     rayon::join(
-                        || anneal_items(env, &mut state_c, inc, ir, needs_flag, false, true, seed ^ 0x9E3779B97F4A7C15),
-                        || anneal_locality(env, &mut state_d, inc, ir, needs_flag, seed ^ 0x517CC1B727220A95),
+                        || { let mut f = || anneal_items(env, &mut state_c, inc, ir, needs_flag, false, true, seed ^ 0x9E3779B97F4A7C15); tic("C premium", &mut f); },
+                        || { let mut f = || anneal_locality(env, &mut state_d, inc, ir, needs_flag, seed ^ 0x517CC1B727220A95); tic("D locality", &mut f); },
                     )
                 },
             );
@@ -1938,28 +2042,40 @@ impl PlacementStrategy for Anneal {
         // throwaway, only to measure what would ship).
         let mut candidates = vec![greedy_state];
         candidates.extend(annealed);
-        let scored: Vec<(usize, f64)> = candidates
+        // Score each candidate THROUGH the same routed `polish` + `decongest` the
+        // winner will get below, so the pick judges what actually ships.
+        let t_score = std::time::Instant::now();
+        let scored: Vec<(usize, usize, f64, Vec<Item>)> = candidates
             .par_iter()
             .map(|cand| {
                 let mut shipped = cand.clone();
                 polish(env, &mut shipped, inc, ir, needs_flag);
                 decongest(&mut shipped);
+                let b = truthfulness_breaks(env, &shipped, inc, ir, needs_flag);
                 let w = warning_count(env, &shipped, inc, ir, needs_flag);
                 let c = premium_score_with_w(env, &shipped, inc, ir, needs_flag, w);
-                (w, c)
+                (b, w, c, shipped)
             })
             .collect();
-        let (mut best, mut best_w, mut best_c) = (0usize, usize::MAX, f64::INFINITY);
-        for (k, (w, c)) in scored.iter().enumerate() {
-            // Tie-break by the PREMIUM cost: among equally-clean candidates the SA
-            // ships the tidier one (where its extra optimisation actually shows).
-            if *w < best_w || (*w == best_w && c + 0.5 < best_c) {
+        if timed {
+            eprintln!("  [SA] candidate-scoring: {:.2}s", t_score.elapsed().as_secs_f64());
+        }
+        // Truthfulness (merges/shorts) first, then fewest warnings, then premium cost.
+        let (mut best, mut best_b, mut best_w, mut best_c) =
+            (0usize, usize::MAX, usize::MAX, f64::INFINITY);
+        for (k, (b, w, c, _)) in scored.iter().enumerate() {
+            let better = (*b, *w).cmp(&(best_b, best_w)) == std::cmp::Ordering::Less
+                || (*b == best_b && *w == best_w && c + 0.5 < best_c);
+            if better {
                 best = k;
+                best_b = *b;
                 best_w = *w;
                 best_c = *c;
             }
         }
-        items.clone_from_slice(&candidates[best]);
+        // Write back the POLISHED winner — emit no longer re-polishes. (The polished
+        // states were computed during scoring, so this adds no extra work.)
+        items.clone_from_slice(&scored[best].3);
     }
 }
 
@@ -1979,6 +2095,33 @@ fn warning_count(
             w.set_frame(true);
             w.prepare();
             w.layout_warnings().len()
+        }
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Geometric TRUTHFULNESS breaks (net merges / shorts / foreign taps) of a placement
+/// as it would SHIP — the same checks `layout_cost` prices, returned as a hard count
+/// so the candidate pick can REJECT any layout that mis-wires. Critical: the
+/// readability `warning_count` does NOT detect a merge (a rail-to-rail short actually
+/// LOWERS length+junctions), so a placement move (the proxy magnet/gravity) that
+/// strands two nets onto one wire would otherwise be shipped as a fewest-warning
+/// candidate — the documented dense-board truthfulness failure. Gating the pick on
+/// this makes the router-free fast lane truthfulness-safe without a full netlist
+/// extraction.
+fn truthfulness_breaks(
+    env: &KicadEnv,
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+) -> usize {
+    match build_writer(env, None, items, inc, ir, needs_flag, true) {
+        Ok(w) => {
+            let wires = w.wires_with_nets();
+            count_merges(&wires, &w.junction_positions())
+                + count_shorts(env, &w, items, inc, &wires)
+                + count_foreign_taps(&wires)
         }
         Err(_) => usize::MAX,
     }
@@ -2513,7 +2656,16 @@ fn anneal_locality(
     // Cheap proxy ⇒ afford a big budget; no per-move routing, so no pin-count cap.
     let iters = (40 * sats.len()).clamp(800, 8000);
     let t0 = 24.0;
-    let verify_period = (iters / 256).max(1);
+    // The proxy loop is router-free, but each true-cost VERIFY routes (+ text-solves)
+    // the whole sheet. On small boards that's cheap, so keep the historical ~256-cap
+    // (the tuned fixtures' path-D result is unchanged). On a large board one route is
+    // expensive (a 671-pin BGA ~1 s), so cap verifies pin-aware to stay inside the 5 s
+    // budget — the final proxy-best is always verified once below regardless, and the
+    // candidate pick re-routes the result, so fewer mid-search verifies never ships
+    // worse, only tracks a slightly-staler true-best.
+    let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
+    let max_verifies = if pins > FAST_PINS { (4000 / pins.max(1)).clamp(6, 128) } else { 256 };
+    let verify_period = (iters / max_verifies).max(1);
     let mut last_verify = 0usize;
 
     let mut cur = proxy_cost(items, inc, ir, &cohesion);
@@ -2913,6 +3065,217 @@ fn free_nudge(
             if best_pos != orig {
                 best = best_cost;
                 improved = true;
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+}
+
+/// Router-free sub-grid polish for LARGE boards (`pins > FAST_PINS`). The routed
+/// `polish` (align/compact/free_nudge, each routing the whole sheet per candidate
+/// move) is the engine's hot loop and costs tens of seconds past ~60 pins. This
+/// does the same essential job — pull each satellite onto the anchor pin it taps and
+/// close sub-grid whitespace — but scores moves with `proxy_cost` (overlap wall +
+/// HPWL + spread + cohesion-to-pin, no router), so its cost is independent of pin
+/// count. The clearance-padded overlap guard matches `free_nudge` so it never packs
+/// two parts into a readability-lint touch. The SHIPPED warnings are still measured
+/// by the one real route emit runs afterwards; this only positions.
+fn polish_proxy(items: &mut [Item], inc: &Incidence, ir: &LayoutIr, magnet: bool, gravity: bool) {
+    let sats: Vec<usize> =
+        (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen).collect();
+    if sats.is_empty() {
+        return;
+    }
+    let cohesion = cohesion_targets(items, inc, ir);
+    // Seat each free satellite next to the pin it taps FIRST (a teleport the ±1-cell
+    // nudge below can't reach), so a satellite the SA stranded across the sheet (a
+    // reset cap far from NRST → a long blocked route the router gives up on and
+    // labels) snaps tight to its pin. Then the nudge settles sub-grid offsets.
+    if magnet {
+        magnet_proxy(items, &cohesion, ir, inc);
+    }
+    let mut best = proxy_cost(items, inc, ir, &cohesion);
+    for _ in 0..6 {
+        let mut improved = false;
+        for &i in &sats {
+            let orig = items[i].at;
+            let (mut best_pos, mut best_cost) = (orig, best);
+            for (axis, dir) in [(0usize, 1.0), (0, -1.0), (1, 1.0), (1, -1.0)] {
+                let mut p = orig;
+                p[axis] += dir * 1.27;
+                let r = item_rect(&items[i], p);
+                let pad = [r[0] - 1.27, r[1] - 1.27, r[2] + 1.27, r[3] + 1.27];
+                if items
+                    .iter()
+                    .enumerate()
+                    .any(|(j, it)| j != i && rects_overlap(pad, item_rect(it, it.at)))
+                {
+                    continue;
+                }
+                items[i].at = p;
+                let c = proxy_cost(items, inc, ir, &cohesion);
+                if c + 0.25 < best_cost {
+                    best_cost = c;
+                    best_pos = p;
+                }
+            }
+            items[i].at = best_pos;
+            if best_pos != orig {
+                best = best_cost;
+                improved = true;
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    // Optionally close inter-module whitespace (the dominant sprawl) by packing whole
+    // blocks toward the centroid — offered as a pick-protected variant by the caller,
+    // since over-packing can collide module labels the proxy can't see.
+    if gravity {
+        block_gravity_proxy(items, inc, ir, &cohesion);
+    }
+}
+
+/// Router-free satellite SEATING: teleport each free satellite to the best
+/// overlap-free cell within ±2 grid of the pin it taps (its cohesion-target
+/// centroid), kept only when it lowers `proxy_cost`. The ±1-cell nudge can only walk
+/// locally, so a satellite the anneal stranded far from its pin never migrates back;
+/// this jumps it home in one move. Greedy + proxy-gated, so it only ever tightens.
+fn magnet_proxy(
+    items: &mut [Item],
+    cohesion: &[(usize, Vec<(usize, usize)>)],
+    ir: &LayoutIr,
+    inc: &Incidence,
+) {
+    let mut best = proxy_cost(items, inc, ir, cohesion);
+    for (si, tgts) in cohesion {
+        let si = *si;
+        // Live centroid of the target pins.
+        let (mut tx, mut ty) = (0.0f64, 0.0f64);
+        for &(j, pgi) in tgts {
+            let p = crate::emit::pin_endpoint(
+                &items[j].geom.pins[pgi],
+                items[j].at,
+                items[j].angle,
+                items[j].mirror,
+            );
+            tx += p[0];
+            ty += p[1];
+        }
+        let n = tgts.len() as f64;
+        let t = [tx / n, ty / n];
+        let orig = items[si].at;
+        let (mut best_pos, mut best_c) = (orig, best);
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                let p = [
+                    crate::grid::snap(t[0] + dx as f64 * COL_GAP),
+                    crate::grid::snap(t[1] + dy as f64 * ROW_GAP),
+                ];
+                let r = item_rect(&items[si], p);
+                let pad = [r[0] - 1.27, r[1] - 1.27, r[2] + 1.27, r[3] + 1.27];
+                if items
+                    .iter()
+                    .enumerate()
+                    .any(|(j, it)| j != si && rects_overlap(pad, item_rect(it, it.at)))
+                {
+                    continue;
+                }
+                items[si].at = p;
+                let c = proxy_cost(items, inc, ir, cohesion);
+                if c + 0.25 < best_c {
+                    best_c = c;
+                    best_pos = p;
+                }
+            }
+        }
+        items[si].at = best_pos;
+        best = best_c;
+    }
+}
+
+/// Router-free MODULE compaction: slide each anchor's whole BLOCK (the IC + its tap
+/// satellites + frozen idiom members) one grid step at a time toward the layout
+/// centroid, kept only when it lowers `proxy_cost` and the moved block overlaps no
+/// other part. This is the deterministic counterpart to the anneal's random cluster
+/// jump — it directly removes the inter-module whitespace (the "modules flung apart /
+/// long detour rails" sprawl the per-satellite nudge can't reach) without ever
+/// routing. Blocks are rigid, so each block's internal layout (a banked decoupling
+/// row, a crystal cluster) travels intact.
+fn block_gravity_proxy(
+    items: &mut [Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    cohesion: &[(usize, Vec<(usize, usize)>)],
+) {
+    let anchors: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() >= 3).collect();
+    let sats: Vec<usize> =
+        (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen).collect();
+    if anchors.is_empty() {
+        return;
+    }
+    let blocks = build_anchor_blocks(items, inc, &anchors, &sats, ir);
+    let mut best = proxy_cost(items, inc, ir, cohesion);
+    for _ in 0..12 {
+        // Layout centroid (recomputed each sweep as modules pack inward).
+        let (mut cx, mut cy) = (0.0f64, 0.0f64);
+        for it in items.iter() {
+            cx += it.at[0];
+            cy += it.at[1];
+        }
+        let c = [cx / items.len() as f64, cy / items.len() as f64];
+        let mut improved = false;
+        for &ai in &anchors {
+            let mut group = vec![ai];
+            if let Some(b) = blocks.get(&ai) {
+                group.extend(b.iter().copied());
+            }
+            let in_group: BTreeSet<usize> = group.iter().copied().collect();
+            for axis in 0..2 {
+                let dir = (c[axis] - items[ai].at[axis]).signum();
+                if dir == 0.0 {
+                    continue;
+                }
+                let mut delta = [0.0; 2];
+                delta[axis] = dir * 1.27;
+                // Tentatively slide the whole group; reject if any moved member's
+                // padded rect now overlaps a NON-group part.
+                // Keep a generous inter-module GUTTER (not just the body-clearance
+                // `compact`/`free_nudge` use): packed modules carry power symbols and
+                // net-label pennants in the gutter between them, and those text boxes
+                // collide well before the bodies do — the "compaction trades against
+                // text collisions the cost can't see" trap. A wider margin stops the
+                // gravity short of label crowding.
+                const G: f64 = 5.08;
+                let collide = group.iter().any(|&k| {
+                    let np = [items[k].at[0] + delta[0], items[k].at[1] + delta[1]];
+                    let r = item_rect(&items[k], np);
+                    let pad = [r[0] - G, r[1] - G, r[2] + G, r[3] + G];
+                    items
+                        .iter()
+                        .enumerate()
+                        .any(|(j, it)| !in_group.contains(&j) && rects_overlap(pad, item_rect(it, it.at)))
+                });
+                if collide {
+                    continue;
+                }
+                for &k in &group {
+                    items[k].at[0] += delta[0];
+                    items[k].at[1] += delta[1];
+                }
+                let nc = proxy_cost(items, inc, ir, cohesion);
+                if nc + 0.25 < best {
+                    best = nc;
+                    improved = true;
+                } else {
+                    for &k in &group {
+                        items[k].at[0] -= delta[0];
+                        items[k].at[1] -= delta[1];
+                    }
+                }
             }
         }
         if !improved {
