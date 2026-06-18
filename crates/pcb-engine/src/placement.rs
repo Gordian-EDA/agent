@@ -195,6 +195,13 @@ pub struct PlacementHints {
     /// interior with copper wrapping around them.
     #[serde(default)]
     pub edge_seek: Vec<String>,
+    /// References pulled to their NEAREST board CORNER (mounting holes — mechanical
+    /// fixings belong at the corners, where screws clear the components). Stronger
+    /// and more specific than [`Self::edge_seek`] (a corner, not anywhere along an
+    /// edge), so a board's 2–4 mounting holes settle one per corner instead of
+    /// stranding in the interior or bunching mid-edge.
+    #[serde(default)]
+    pub corner_seek: Vec<String>,
 }
 
 /// A group of parts that should cohere, optionally pulled into a region and/or
@@ -661,7 +668,74 @@ pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult
             best_cost = c;
         }
     }
+    // Post-pass: seat mounting holes (corner_seek) at the board corners on the
+    // WINNING placement. They carry no signal nets (GND-plane only), so moving
+    // them never changes routing — which is why this must run AFTER the faults-
+    // ranked variant selection rather than inside a routing-affecting variant.
+    seat_corner_seek_parts(problem, hints, &mut best);
     best
+}
+
+/// Move each `corner_seek` part to its nearest board CORNER that leaves the
+/// placement legal (greedy, nearest-first; a corner already taken by another
+/// such part or overlapping a component is skipped). A no-op when there are no
+/// corner-seek parts. Safe on any placement: corner-seek parts (mounting holes)
+/// have no nets, so this cannot change connectivity or routing.
+fn seat_corner_seek_parts(problem: &PlaceProblem, hints: &PlacementHints, best: &mut PlaceResult) {
+    if !best.legal {
+        return;
+    }
+    let corner_idx: Vec<usize> = hints
+        .corner_seek
+        .iter()
+        .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
+        .collect();
+    if corner_idx.is_empty() {
+        return;
+    }
+    let margin = courtyard_margin(problem.clearance);
+    let rots: Vec<i32> = best.placements.iter().map(|p| p.rotation).collect();
+    let half: Vec<(f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(&rots)
+        .map(|(p, &r)| rotated_courtyard_half(p, r))
+        .collect();
+    let mut pos: Vec<Point2> = best.placements.iter().map(|p| p.at.clone()).collect();
+    let b = &problem.bounds;
+    let corners = [
+        (b.min_x, b.min_y),
+        (b.max_x, b.min_y),
+        (b.min_x, b.max_y),
+        (b.max_x, b.max_y),
+    ];
+    let mut used = [false; 4];
+    for &i in &corner_idx {
+        let h = half[i];
+        // Inset each corner by this part's half so it sits fully on-board.
+        let inset = |c: (f64, f64)| Point2 {
+            x: if c.0 == b.min_x { b.min_x + h.0 } else { b.max_x - h.0 },
+            y: if c.1 == b.min_y { b.min_y + h.1 } else { b.max_y - h.1 },
+        };
+        let mut order: Vec<usize> = (0..4).collect();
+        let d = |c: (f64, f64)| (pos[i].x - c.0).powi(2) + (pos[i].y - c.1).powi(2);
+        order.sort_by(|&a, &c| d(corners[a]).partial_cmp(&d(corners[c])).unwrap());
+        let saved = pos[i].clone();
+        for &ci in &order {
+            if used[ci] {
+                continue;
+            }
+            pos[i] = inset(corners[ci]);
+            if is_legal(problem, &half, margin, &pos) {
+                used[ci] = true;
+                break;
+            }
+            pos[i] = saved.clone();
+        }
+    }
+    for (p, np) in best.placements.iter_mut().zip(&pos) {
+        p.at = np.clone();
+    }
 }
 
 /// Place `problem`'s parts under `hints`, deterministically.

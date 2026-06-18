@@ -630,6 +630,13 @@ fn is_connector(footprint: &str, reference: &str) -> bool {
         || reference.starts_with('J')
 }
 
+/// A mounting hole / mechanical fixing: pulled to a board CORNER (not just an
+/// edge), where a screw clears the components. Checked before [`is_connector`]
+/// (which also matches mounting holes) so these corner-seek rather than edge-seek.
+fn is_mounting_hole(footprint: &str) -> bool {
+    footprint.to_ascii_lowercase().contains("mountinghole")
+}
+
 pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
@@ -654,8 +661,21 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         .flat_map(|g| g.members.iter().map(String::as_str))
         .collect();
     for p in &draft.parts {
-        if is_connector(&p.footprint, &p.reference)
-            && !explicitly_edged.contains(p.reference.as_str())
+        if explicitly_edged.contains(p.reference.as_str()) {
+            continue;
+        }
+        // Mounting holes corner-seek (mechanical fixings at the board corners) AND
+        // edge-seek (so any hole the corner post-pass can't seat — a corner taken
+        // or blocked by a part — falls back to the perimeter, not the interior).
+        // Other connectors/headers edge-seek (a cable/enclosure reaches the edge).
+        if is_mounting_hole(&p.footprint) {
+            if !hints.corner_seek.contains(&p.reference) {
+                hints.corner_seek.push(p.reference.clone());
+            }
+            if !hints.edge_seek.contains(&p.reference) {
+                hints.edge_seek.push(p.reference.clone());
+            }
+        } else if is_connector(&p.footprint, &p.reference)
             && !hints.edge_seek.contains(&p.reference)
         {
             hints.edge_seek.push(p.reference.clone());

@@ -5,9 +5,9 @@
   },
   "bounds": {
     "min_x": 0.0,
-    "max_x": 42.0,
+    "max_x": 50.0,
     "min_y": 0.0,
-    "max_y": 36.0
+    "max_y": 44.0
   },
   "parts": [
     {
