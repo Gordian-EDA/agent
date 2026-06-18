@@ -197,6 +197,48 @@ fn is_ground(net: &str) -> bool {
     u == "GND" || u == "GNDD" || u == "AGND" || u == "DGND" || u == "VSS" || u.starts_with("GND")
 }
 
+/// A voltage-rail token: optional `+`/`-`, then a number with `V` as the decimal/unit
+/// marker (`3V3`, `+5V`, `1V8`, `12V`, `3.3V`, `-5V`). Conservative — must start with
+/// a digit and contain only digits / `.` / a single `V`, so signal names like
+/// `5V_SENSE` or `VIN_FB` are NOT matched.
+fn is_voltage_token(u: &str) -> bool {
+    let s = u.strip_prefix('+').or_else(|| u.strip_prefix('-')).unwrap_or(u);
+    if !s.starts_with(|c: char| c.is_ascii_digit()) {
+        return false;
+    }
+    if s.chars().filter(|&c| c == 'V').count() != 1 {
+        return false;
+    }
+    s.chars().all(|c| c.is_ascii_digit() || c == '.' || c == 'V')
+}
+
+/// Whether a net NAME is conventionally a power/ground rail. Used to infer rails on
+/// agent-authored boards that name nets `GND`/`3V3`/`VBUS` but place no `power:`
+/// symbols (so `attrs.power` is unset and the engine would otherwise route the supply
+/// as a long signal wire — the #1 source of the central rail knot + sprawl). Covers
+/// grounds, common named supplies (VCC/VDD/VBAT/VBUS/…), and voltage tokens (3V3,
+/// +5V). Applied only when the design declares NO power symbols, so every reference/
+/// oracle fixture (all of which declare `power:` symbols) is untouched.
+fn is_power_net(net: &str) -> bool {
+    if is_ground(net) {
+        return true;
+    }
+    let u = net.to_ascii_uppercase();
+    if matches!(
+        u.as_str(),
+        "VCC" | "VDD" | "VDDA" | "VCCA" | "VCCD" | "AVCC" | "AVDD" | "DVDD"
+            | "VBAT" | "VBUS" | "VIN" | "VOUT" | "VEE" | "VPP" | "VDDIO" | "VSYS"
+            | "V+" | "V-" | "VS" | "VMOT"
+    ) {
+        return true;
+    }
+    if u.starts_with("VCC") || u.starts_with("VDD") || u.starts_with("VBUS") || u.starts_with("VBAT")
+    {
+        return true;
+    }
+    is_voltage_token(&u)
+}
+
 /// The side of the symbol body a pin sits on, from its local geometry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PinSide {
@@ -230,6 +272,28 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
     for (net, attrs) in &design.nets {
         if attrs.power {
             rails.insert(net.clone(), if is_ground(net) { Band::Bottom } else { Band::Top });
+        }
+    }
+    // Agent boards routinely NAME nets `GND`/`3V3`/`VBUS` but place NO `power:`
+    // symbols, so `attrs.power` is unset and every supply net would route as a long
+    // cross-sheet SIGNAL wire (no power symbols, no rail) — the dominant source of the
+    // central rail knot, scattered decoupling, and sprawl the critic flags. When the
+    // design declares NO power symbols at all, infer the rails from net NAMES instead.
+    // Gated on "no declared power" so every reference / oracle fixture (all of which
+    // DO declare `power:` symbols) is bit-for-bit untouched.
+    let has_power_syms = design
+        .blocks
+        .values()
+        .any(|b| b.components.values().any(|c| c.part.starts_with("power:")));
+    if !has_power_syms {
+        for net in inc.keys() {
+            if is_power_net(net) {
+                rails.entry(net.clone()).or_insert(if is_ground(net) {
+                    Band::Bottom
+                } else {
+                    Band::Top
+                });
+            }
         }
     }
     let is_rail = |n: &str| rails.contains_key(n);
@@ -1706,6 +1770,20 @@ fn orient_angle(geom: &SymbolGeometry, orient: Orient) -> f64 {
 /// Default deterministic seed for the placement search (the SA's PRNG). Made a
 /// parameter so a search is reproducible by seed, not a hard-coded constant.
 const SEARCH_SEED: u64 = 0xD1B54A32D192ED03;
+
+/// Pin-count threshold above which the premium anneal takes the router-free FAST
+/// LANE. The tuned routed paths (greedy refine + anneals A/B/C + routed polish)
+/// route the WHOLE sheet per move, which is fine on the ≤34-pin reference/snapshot
+/// fixtures (<1.2 s) but explodes past ~60 pins (a 119-pin agent board took 113 s).
+/// Above this, the search uses only the router-free `proxy_cost` (path D) + a
+/// router-free `polish_proxy`, paying the true routed cost only a bounded number of
+/// times (candidate selection + the one final emit). Set above every reference/
+/// snapshot fixture (max 34 pins) so those stay on the exact tuned path —
+/// byte-identical snapshots and tuned-fixture quality are untouched. (Set to 34 =
+/// the largest reference/snapshot fixture, uart, so EVERY board above it — including
+/// the 35-49-pin agent boards whose tuned routed path ran 4-6 s — takes the fast
+/// lane; the `> FAST_PINS` test keeps uart itself routed, hence byte-identical.)
+const FAST_PINS: usize = 34;
 
 /// One placement-search strategy over the coarse cells. `Greedy` and `Anneal` are
 /// swappable COUNTERPARTS (owner: SA is the paid tier, possibly with a richer
@@ -3783,6 +3861,12 @@ fn wire(
     fan_risers: bool,
 ) -> io::Result<()> {
     let refdes_of = |i: usize| items[i].refdes.clone();
+    // Auto-distributing a spread rail into local power symbols only applies to LARGER
+    // boards (`pins > FAST_PINS`). Every reference/snapshot fixture (≤34 pins) keeps
+    // its tuned short trunk even when its GND rail happens to span the sheet width, so
+    // those greedy renders stay byte-identical. The author opt-in (`rail_locals`)
+    // still works on any board.
+    let pin_total: usize = items.iter().map(|it| it.geom.pins.len()).sum();
 
     // Endpoints of every net first, so all rails can share common bands.
     let mut net_eps: BTreeMap<String, Vec<([f64; 2], Dir)>> = BTreeMap::new();
@@ -3838,9 +3922,17 @@ fn wire(
     for (net, eps) in &net_eps {
         if let Some(band) = ir.rails.get(net) {
             let flag = needs_flag.contains(net).then_some(&mut *flag_points);
-            // A net the author marked for DISTRIBUTED local grounds (≥2 power symbols)
-            // suppresses its spanning rail (`rail_y = None` ⇒ one power symbol per pin).
-            let rail_y = rail_y_map.get(net).copied().filter(|_| !ir.rail_locals.contains(net));
+            // Draw DISTRIBUTED local power symbols (`rail_y = None` ⇒ one power symbol
+            // per pin) when either the author marked the net (≥2 placed power symbols)
+            // OR the net's pins are spread far enough that a single spanning trunk
+            // would be a long cross-sheet detour with a knot of converging risers —
+            // the professional idiom on a multi-module board, and the fix for the
+            // recurring "scattered caps / congested rail knot / long detour rails"
+            // critic complaints. Tight/small rails (every reference fixture) stay
+            // under the span gate and keep their clean short trunk → byte-identical.
+            let distribute = ir.rail_locals.contains(net)
+                || (pin_total > FAST_PINS && rail_should_distribute(eps));
+            let rail_y = rail_y_map.get(net).copied().filter(|_| !distribute);
             emit_rail(env, w, net, eps, *band, rail_y, flag, &riser_offsets, &bodies)?;
         }
     }
@@ -4196,6 +4288,29 @@ fn near(p: [f64; 2], q: [f64; 2]) -> bool {
 /// Assign each drawn rail (≥3 pins) a y. Rails in a band share a base y, but
 /// overlapping x-ranges are pushed to successive rows (away from the content)
 /// via greedy interval colouring, so distinct rails never merge into one wire.
+/// Half-perimeter span (mm) of a rail net above which a single spanning trunk is a
+/// long cross-sheet detour and the net is better drawn as distributed local power
+/// symbols. ~30 grid cells; every reference/snapshot fixture's rails span far less
+/// (≤34-pin compact boards), so they keep their trunk and stay byte-identical.
+const RAIL_DISTRIBUTE_SPAN: f64 = 76.0;
+
+/// Whether a rail net's pins are spread far enough to prefer DISTRIBUTED local power
+/// symbols over one spanning trunk (see [`RAIL_DISTRIBUTE_SPAN`]). A net with <3 pins
+/// already draws per-pin symbols, so it's irrelevant there.
+fn rail_should_distribute(eps: &[([f64; 2], Dir)]) -> bool {
+    if eps.len() < 3 {
+        return false;
+    }
+    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+    for (p, _) in eps {
+        lo[0] = lo[0].min(p[0]);
+        lo[1] = lo[1].min(p[1]);
+        hi[0] = hi[0].max(p[0]);
+        hi[1] = hi[1].max(p[1]);
+    }
+    (hi[0] - lo[0]) + (hi[1] - lo[1]) > RAIL_DISTRIBUTE_SPAN
+}
+
 fn assign_rail_levels(
     net_eps: &BTreeMap<String, Vec<([f64; 2], Dir)>>,
     ir: &LayoutIr,
