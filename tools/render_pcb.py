@@ -26,6 +26,25 @@ FRONT_LAYERS = "F.Cu,B.Cu,F.SilkS,Edge.Cuts"
 BACK_LAYERS = "B.Cu,F.Cu,B.SilkS,Edge.Cuts"
 
 
+def render_3d(board: str, out: str, side: str, width: int, height: int) -> None:
+    """Photorealistic 3D 'beauty' render via KiCAD's raytracer — green soldermask,
+    ENIG pads, white silk. No SVG/cairosvg step (kicad-cli writes the PNG)."""
+    cmd = [
+        "kicad-cli", "pcb", "render",
+        "--side", side,
+        "--quality", "high",
+        "--background", "opaque",
+        "-w", str(width), "-h", str(height),
+        "--output", out,
+        board,
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if not os.path.exists(out):
+        sys.stderr.write(res.stdout + res.stderr)
+        raise SystemExit(f"kicad-cli failed to 3D-render {board}")
+    print(out)
+
+
 def render(board: str, out: str, scale: float, layers: str, side: str) -> None:
     if side == "back":
         layers = layers or BACK_LAYERS
@@ -64,9 +83,16 @@ def main() -> None:
     ap.add_argument("--scale", type=float, default=12.0)
     ap.add_argument("--layers", default="")
     ap.add_argument("--side", choices=["front", "back"], default="front")
+    ap.add_argument("--3d", dest="threed", action="store_true",
+                    help="photorealistic 3D raytrace render instead of the 2D plot")
+    ap.add_argument("--width", type=int, default=1400)
+    ap.add_argument("--height", type=int, default=1000)
     a = ap.parse_args()
-    out = a.output or os.path.splitext(a.board)[0] + ".png"
-    render(a.board, out, a.scale, a.layers, a.side)
+    out = a.output or os.path.splitext(a.board)[0] + (".3d.png" if a.threed else ".png")
+    if a.threed:
+        render_3d(a.board, out, "top" if a.side == "front" else "bottom", a.width, a.height)
+    else:
+        render(a.board, out, a.scale, a.layers, a.side)
 
 
 if __name__ == "__main__":
