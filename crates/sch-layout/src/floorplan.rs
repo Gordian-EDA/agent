@@ -1452,13 +1452,15 @@ fn emit_strategy(
     w.set_frame(true);
     w.prepare();
     let warnings = w.layout_warnings();
-    let (body_crossings, ic_crossings) = crossing_counts(env, &items, &inc, ir, &needs_flag);
+    let (body_crossings, ic_crossings, wire_crossings) =
+        crossing_counts(env, &items, &inc, ir, &needs_flag);
     let sch = w.finish();
     Ok(EmitOutput {
         sch,
         layout_warnings: warnings,
         body_crossings,
         ic_crossings,
+        wire_crossings,
         detected_idioms: ir.idioms.clone(),
     })
 }
@@ -3973,12 +3975,12 @@ fn crossing_counts(
     inc: &Incidence,
     ir: &LayoutIr,
     needs_flag: &BTreeSet<String>,
-) -> (usize, usize) {
+) -> (usize, usize, usize) {
     // Measure the SHIPPED geometry (`fan_risers = true`): the finalize riser jog
     // clears trunk-through-body crossings, so the reported count must reflect the
     // jogged sheet, not the raw per-move one.
     let Ok(w) = build_writer(env, None, items, inc, ir, needs_flag, true) else {
-        return (0, 0);
+        return (0, 0, 0);
     };
     let wires = w.wires_with_nets();
     let bodies: Vec<([f64; 2], [f64; 2])> = items
@@ -4020,6 +4022,7 @@ fn crossing_counts(
             + count_collinear_body_crossings(&bodies, &wires)
             + count_parallel_body_crossings(&bodies, &wires),
         count_ic_body_crossings(&ic_rects, &wires),
+        count_crossings(&wires),
     )
 }
 

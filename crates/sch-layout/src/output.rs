@@ -46,6 +46,10 @@ pub struct EmitOutput {
     pub body_crossings: usize,
     /// Ground-truth count of wires routed through an IC (3+ pin) package body.
     pub ic_crossings: usize,
+    /// Count of wire-wire CROSSINGS on the shipped sheet (two different-net segments
+    /// crossing). The objective signal behind the critic's "congested knot of crossings"
+    /// complaint — measurable where the VLM is noisy.
+    pub wire_crossings: usize,
     /// Idioms the engine recognized + co-placed (crystal, decoupling, feedback),
     /// surfaced to the agent loop via `apply_design`.
     pub detected_idioms: Vec<IdiomReport>,

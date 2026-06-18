@@ -24,8 +24,8 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&out_dir)?;
 
     println!(
-        "{:<22} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>7}",
-        "circuit", "parts", "pins", "nets", "warn", "body", "ic", "anneal_s"
+        "{:<22} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>7}",
+        "circuit", "parts", "pins", "nets", "warn", "body", "ic", "xing", "anneal_s"
     );
     println!("{}", "-".repeat(70));
     let mut slowest = 0.0_f64;
@@ -35,13 +35,13 @@ fn main() -> anyhow::Result<()> {
         let p = Path::new(path);
         let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("out").to_string();
         match bench_one(&env, &provider, p, &out_dir, &stem) {
-            Ok((parts, pins, nets, warn, body, ic, secs)) => {
+            Ok((parts, pins, nets, warn, body, ic, xing, secs)) => {
                 slowest = slowest.max(secs);
                 total_warn += warn;
                 total_body += body;
                 let flag = if secs > 5.0 { " !!>5s" } else { "" };
                 println!(
-                    "{stem:<22} {parts:>5} {pins:>5} {nets:>5} {warn:>5} {body:>5} {ic:>5} {secs:>7.2}{flag}"
+                    "{stem:<22} {parts:>5} {pins:>5} {nets:>5} {warn:>5} {body:>5} {ic:>5} {xing:>5} {secs:>7.2}{flag}"
                 );
             }
             Err(e) => println!("{stem:<22} ERR: {e}"),
@@ -58,7 +58,7 @@ fn bench_one(
     yaml_path: &Path,
     out_dir: &Path,
     stem: &str,
-) -> anyhow::Result<(usize, usize, usize, usize, usize, usize, f64)> {
+) -> anyhow::Result<(usize, usize, usize, usize, usize, usize, usize, f64)> {
     let src = std::fs::read_to_string(yaml_path)?;
     let result = circuit_lang::compile(&src, provider as &dyn SymbolProvider);
     let design = result.design.ok_or_else(|| {
@@ -107,6 +107,7 @@ fn bench_one(
         emit.layout_warnings.len(),
         emit.body_crossings,
         emit.ic_crossings,
+        emit.wire_crossings,
         secs,
     ))
 }
