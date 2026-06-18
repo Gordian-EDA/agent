@@ -1324,6 +1324,60 @@ fn synth_parts_from_draft(
     Ok(parts)
 }
 
+/// Edge-of-board margin (mm) left around the copper when the export tightens the
+/// board outline to the parts. Comfortably clears the default copper-to-edge
+/// clearance and leaves a clean visual border.
+const BOARD_EDGE_MARGIN_MM: f64 = 1.0;
+
+/// A board outline that snugly fits all copper (pads, traces, vias) plus
+/// `margin`, clamped so it never exceeds the requested `budget`. Returns `budget`
+/// unchanged when there is no copper to bound. The result always contains every
+/// piece of copper (content ± margin ⊇ content, and the budget clamp only ever
+/// substitutes an edge that also contains the copper), so tightening the outline
+/// to this can never clip copper or create a board-edge DRC violation.
+fn content_bounds(
+    problem: &RouteProblem,
+    solution: &RouteSolution,
+    budget: &Bounds,
+    margin: f64,
+) -> Bounds {
+    let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut acc = |x0: f64, y0: f64, x1: f64, y1: f64| {
+        min_x = min_x.min(x0);
+        max_x = max_x.max(x1);
+        min_y = min_y.min(y0);
+        max_y = max_y.max(y1);
+    };
+    for o in &problem.obstacles {
+        acc(
+            o.center.x - o.width / 2.0,
+            o.center.y - o.height / 2.0,
+            o.center.x + o.width / 2.0,
+            o.center.y + o.height / 2.0,
+        );
+    }
+    for t in &solution.traces {
+        let hw = t.width / 2.0;
+        for p in &t.path {
+            acc(p.x - hw, p.y - hw, p.x + hw, p.y + hw);
+        }
+    }
+    for v in &solution.vias {
+        let r = v.diameter / 2.0;
+        acc(v.at.x - r, v.at.y - r, v.at.x + r, v.at.y + r);
+    }
+    if !min_x.is_finite() {
+        return budget.clone();
+    }
+    Bounds {
+        min_x: (min_x - margin).max(budget.min_x),
+        max_x: (max_x + margin).min(budget.max_x),
+        min_y: (min_y - margin).max(budget.min_y),
+        max_y: (max_y + margin).min(budget.max_y),
+    }
+}
+
 /// Synthesize the routed board into a `.kicad_pcb`: requires a placed + routed
 /// draft, writes the board (footprints from the engine placement + the stored
 /// copper) and, when a recent enough KiCAD is available, runs `kicad-cli pcb
@@ -1385,6 +1439,27 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // promotes the file, so a malformed splice never lands.)
     let board = read_problem(&path)
         .with_context(|| format!("re-reading synthesized board {}", path.display()))?;
+
+    // Tighten the board outline to fit the actual copper. The requested bounds
+    // are a routing *budget*; a finished board should be cropped to the parts +
+    // copper (+ an edge margin) so it reads as professional instead of a small
+    // cluster stranded on an oversized blank. This is a pure edge-cuts change
+    // computed AFTER routing — the copper geometry is untouched, so it cannot
+    // create a DRC regression (the outline only ever shrinks toward the copper,
+    // never clips it). Re-synthesize the outline at the tight bounds.
+    let tight = content_bounds(&board.problem, &stored.solution, &draft.bounds, BOARD_EDGE_MARGIN_MM);
+    let board = if tight != draft.bounds {
+        if let Ok(t) = synthesize_board(&parts, &tight) {
+            std::fs::write(&path, t.as_bytes())
+                .with_context(|| format!("writing tight-outline board to {}", path.display()))?;
+            read_problem(&path)
+                .with_context(|| format!("re-reading tight-outline board {}", path.display()))?
+        } else {
+            board
+        }
+    } else {
+        board
+    };
     write_solution(&path, &stored.solution, &board)
         .with_context(|| format!("writing routed copper onto {}", path.display()))?;
 

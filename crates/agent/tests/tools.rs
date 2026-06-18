@@ -866,11 +866,17 @@ fn export_board_requires_place_and_route_then_writes_parseable_board() {
     let copper = extract_copper(&path).expect("extract_copper");
     assert!(!copper.traces.is_empty(), "exported board carries routed copper");
 
-    // No silkscreen graphics leaked into the synthesized board.
+    // Silkscreen is kept so the board renders like a real PCB: reference
+    // designators on F.SilkS and component outline graphics. (The Value property
+    // is hidden, not rendered, so the long footprint name never clutters.)
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(
-        !text.contains("(layer \"F.SilkS\")") && !text.contains("(layer \"B.SilkS\")"),
-        "exported board must be silk-graphic-free"
+        text.contains("(layer \"F.SilkS\")"),
+        "exported board must keep silkscreen (refs + outlines) for a real-board render"
+    );
+    assert!(
+        text.contains("(property \"Value\"") && text.contains("(hide yes)"),
+        "the Value property must be hidden, not rendered at full size"
     );
 
     // DRC is reported as run-or-skipped depending on the environment.
