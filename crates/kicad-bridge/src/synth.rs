@@ -258,6 +258,14 @@ fn transform_node(
         // Library cruft that does not belong on a board footprint instance.
         "version" | "generator" | "generator_version" | "embedded_fonts" | "model"
         | "tags" | "descr" => Ok(None),
+        // Version-specific footprint-authoring hints that postdate the minimum
+        // KiCAD we target: KiCAD 9.0.2's board loader rejects the whole file on
+        // an unknown footprint token (silent "Failed to load board"). These carry
+        // no copper/courtyard/routing meaning, so drop them rather than gate the
+        // board on the writer's KiCAD version. `duplicate_pad_numbers_are_jumpers`
+        // appears in library footprints saved by KiCAD ≥ 9.0.3; none of the
+        // 9.0.2-era system libraries emit it.
+        "duplicate_pad_numbers_are_jumpers" => Ok(None),
         // The Reference property: set its value to the real designator and put it
         // on F.Fab. The Value property and others are kept but forced to F.Fab.
         "property" => Ok(Some(transform_property(node, &part.reference))),
@@ -627,6 +635,12 @@ mod tests {
         }
         // Courtyards survive (kept from the library).
         assert!(board.contains("F.CrtYd"));
+        // Version-specific authoring tokens that KiCAD 9.0.2's loader rejects must
+        // not leak through from the source library (silent "Failed to load board").
+        assert!(
+            !board.contains("duplicate_pad_numbers_are_jumpers"),
+            "loader-breaking footprint token leaked into the board:\n{board}"
+        );
     }
 
     /// The synthesized board parses with `read_problem`, pads land at
