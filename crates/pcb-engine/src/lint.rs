@@ -146,6 +146,40 @@ pub enum DrcViolation {
 /// Returns every violation in deterministic order: geometry violations first
 /// (collection order — traces, then vias, then bounds), then the connectivity
 /// oracle's violations folded in last.
+/// Make `solution` connectivity-honest: drop the copper of every net the
+/// connectivity oracle reports as unconnected (a half-route a router miscounted
+/// as done) or cross-net-shorted, and return those net names (sorted, unique).
+///
+/// The connectivity oracle — not a router's own bookkeeping — is the authority on
+/// what is actually joined. After this call the surviving copper carries no
+/// connectivity defect; callers should mark the returned names as failed nets so
+/// the reported result is faithful (an honest unrouted net, never silent copper
+/// that lies about connectivity). Dropping a net's copper only removes obstacles,
+/// so it can never break another net or introduce a geometry violation.
+pub fn drop_unconnected_copper(problem: &RouteProblem, solution: &mut RouteSolution) -> Vec<String> {
+    use crate::connectivity::Violation as ConnViolation;
+    let mut broken: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for v in lint(problem, solution) {
+        if let DrcViolation::Connectivity { violation } = v {
+            match violation {
+                ConnViolation::Unconnected { connection, .. } => {
+                    broken.insert(connection);
+                }
+                ConnViolation::CrossNetMerge { a, b } => {
+                    broken.insert(a);
+                    broken.insert(b);
+                }
+            }
+        }
+    }
+    if broken.is_empty() {
+        return Vec::new();
+    }
+    solution.traces.retain(|t| !broken.contains(&t.connection));
+    solution.vias.retain(|v| !broken.contains(&v.connection));
+    broken.into_iter().collect()
+}
+
 pub fn lint(problem: &RouteProblem, solution: &RouteSolution) -> Vec<DrcViolation> {
     let items = collect_items(problem, solution);
     let clearance = problem.clearance;

@@ -162,13 +162,17 @@ pub fn route_detailed(problem: &RouteProblem) -> RouteResult {
 /// router wins ties as the battle-tested fallback. The returned result's
 /// [`RouteResult::router`] records which engine won.
 pub fn route_auto(problem: &RouteProblem) -> RouteResult {
-    let detailed = route_detailed(problem);
+    let mut detailed = route_detailed(problem);
+    reconcile_connectivity(problem, &mut detailed.solution, &mut detailed.failed);
     // A clean detailed result (every net routed AND zero geometry violations) is
     // ideal — return immediately.
     if detailed.failed.is_empty() && geometry_violations(problem, &detailed.solution) == 0 {
         return detailed;
     }
+    // `router::route` is already connectivity-honest (it reconciles internally).
     let naive = router::route(problem);
+    let naive_solution = naive.solution;
+    let naive_failed = naive.failed;
     // Score each candidate by (failed nets, geometry DRC violations). Lower is
     // better; the naive router wins exact ties as the battle-tested fallback.
     // Counting violations — not just failed nets — is what stops `route_auto`
@@ -178,16 +182,46 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
     // count because they already correlate with `failed`; we count only the
     // geometry faults — clearance / width / via / out-of-bounds.)
     let detailed_score = (detailed.failed.len(), geometry_violations(problem, &detailed.solution));
-    let naive_score = (naive.failed.len(), geometry_violations(problem, &naive.solution));
+    let naive_score = (naive_failed.len(), geometry_violations(problem, &naive_solution));
     if naive_score <= detailed_score {
         RouteResult {
-            solution: naive.solution,
-            failed: naive.failed,
+            solution: naive_solution,
+            failed: naive_failed,
             router: RouterKind::Naive,
         }
     } else {
         detailed
     }
+}
+
+/// Make a routed result HONEST: the connectivity oracle is the authority on what
+/// is actually connected, not the router's own bookkeeping. Any net the oracle
+/// flags as unconnected (a half-route the router miscounted as done) or shorted
+/// to another net (a cross-net merge) has ITS COPPER DROPPED (via
+/// [`crate::lint::drop_unconnected_copper`]) and is reported as a failed net.
+/// After this, `failed` is faithful and the surviving copper carries no
+/// connectivity defect — so `route_auto`'s comparison ranks a silent short or
+/// phantom-route below an engine that genuinely connected fewer nets, and the
+/// engine never ships copper that lies about connectivity.
+fn reconcile_connectivity(
+    problem: &RouteProblem,
+    solution: &mut RouteSolution,
+    failed: &mut Vec<FailedNet>,
+) {
+    let broken = crate::lint::drop_unconnected_copper(problem, solution);
+    let known: std::collections::BTreeSet<&str> =
+        failed.iter().map(|f| f.connection.as_str()).collect();
+    let new: Vec<FailedNet> = broken
+        .iter()
+        .filter(|name| !known.contains(name.as_str()))
+        .map(|name| FailedNet {
+            connection: name.clone(),
+            reason: "connectivity oracle: net not fully joined by the emitted copper \
+                     (copper dropped to keep the board honest)"
+                .to_string(),
+        })
+        .collect();
+    failed.extend(new);
 }
 
 /// Count the *geometry* DRC violations of a solution — clearance, trace width,

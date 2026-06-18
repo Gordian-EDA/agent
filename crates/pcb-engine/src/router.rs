@@ -49,14 +49,49 @@ pub struct RouteResult {
     pub failed: Vec<FailedNet>,
 }
 
-/// Route `problem` with the default design constants. The slice-1 router stays
-/// deliberately simple (the always-correct, battle-tested fallback). It may
-/// emit via-to-copper clearance violations on congested boards; the
-/// [`crate::pipeline::route_auto`] selector lints both engines and prefers the
-/// DRC-clean one (the detailed router, which models via-barrel clearance), so a
-/// naive via violation never ships when a clean detailed solution exists.
+/// The Chebyshev radius (in grid cells) a via barrel must keep clear of foreign
+/// copper on every layer before the slice-1 search may place a via there. A via
+/// is wider than a trace, so the trace-sized clearance halo is not enough: a via
+/// dropped one trace-halo from a foreign pad still overhangs its clearance zone
+/// (the via-to-pad clearance errors KiCAD's DRC catches). Radius = via barrel
+/// radius + clearance + the foreign trace's half-width. The slice-1 router places
+/// vias exactly at cell centres (grid-aligned), so — unlike the detailed router's
+/// sub-cell placement — no snap-displacement slack is needed; the A* applies the
+/// halo as a EUCLIDEAN disc, so it does not over-block on the diagonal.
+pub fn via_clear_radius_cells(problem: &RouteProblem) -> usize {
+    let pitch = grid::grid_pitch(problem);
+    let via_halo = problem.via_diameter / 2.0 + problem.clearance + problem.min_trace_width / 2.0;
+    (via_halo / pitch).ceil() as usize
+}
+
+/// Route `problem` with the default design constants, but with the via-barrel
+/// clearance radius derived from the design rules so the slice-1 router does not
+/// drop a via that overhangs a foreign pad/trace. It can still produce other
+/// congestion artifacts; [`crate::pipeline::route_auto`] reconciles connectivity
+/// and lints both engines, so a violating or phantom route never ships when a
+/// cleaner one exists.
 pub fn route(problem: &RouteProblem) -> RouteResult {
-    route_with(problem, DesignConstants::default())
+    let costs = AStarCosts {
+        via_clear_radius_cells: via_clear_radius_cells(problem),
+        ..AStarCosts::default()
+    };
+    let mut result = route_with(problem, DesignConstants { costs });
+    // The connectivity oracle is the authority on what actually connected — make
+    // the result honest: drop any net's copper the oracle finds unconnected or
+    // shorted and report it failed, so `route()`'s `failed` never undercounts.
+    let broken = crate::lint::drop_unconnected_copper(problem, &mut result.solution);
+    let known: std::collections::BTreeSet<&str> =
+        result.failed.iter().map(|f| f.connection.as_str()).collect();
+    let added: Vec<FailedNet> = broken
+        .iter()
+        .filter(|n| !known.contains(n.as_str()))
+        .map(|n| FailedNet {
+            connection: n.clone(),
+            reason: "connectivity oracle: net not fully joined by the emitted copper".to_string(),
+        })
+        .collect();
+    result.failed.extend(added);
+    result
 }
 
 /// Route `problem` with explicit design constants.
