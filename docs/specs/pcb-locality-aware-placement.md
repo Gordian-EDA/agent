@@ -94,3 +94,24 @@ boards (it scores 8/10 on realistic boards already — don't regress them).
 2. Add the cluster anneal (step 3) only if the seed alone doesn't reach a clean halo.
 3. Incremental cost (the O(cluster)/O(boundary) deltas) only if the whole-board re-route
    per move is too slow at scale.
+
+## Stage-1 seed: TRIED TWICE, INSUFFICIENT (Jun 18 loop — reverted)
+
+Implemented the cluster seed (caps inner rings + series elements outer rings, anchor
+centred to fit). Two blockers, both pointing past a mere seed:
+
+1. **The generic legalizer spreads the rings.** Even with the ring pitch set clear of
+   the legalizer's overlap threshold (`2·part_r + 2·margin + 0.25`), the inner ring
+   tightened (cap min 6.5 mm — it CAN hug) but the mean stayed ~11 mm: `legalize`'s
+   spiral-resolve nudges the dense rings and cascades them outward. **The anneal must
+   OWN legalization for cluster parts** (exempt them from the generic spread, or
+   resolve overlaps by rotating/rescaling the ring, not by shoving parts to free space).
+2. **A large rigid cluster regresses routing.** Ringing all 64 cluster parts around the
+   BGA raised unconnected 11→14 — the tight cluster blocks signal escape. So the seed
+   must be **co-designed with escape**: leave radial channels in the ring aligned to the
+   escape corridors (the step-2 "series on escape azimuth" idea, not concentric rings),
+   and the cost must include `channel_occupancy` from the start, not as a later refinement.
+
+Net: a deterministic seed is not enough; this genuinely needs the cluster anneal with
+cluster-aware legalization + an escape-aware cost. Don't re-attempt seed-only. Engine
+left at known-good (bga 11 unconn, 5/10; realistic boards 8/10; 17 boards 0 faults).
