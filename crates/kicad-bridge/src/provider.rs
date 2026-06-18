@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use circuit_lang::{PinMeta, PinType, SymbolMeta, SymbolProvider};
+use circuit_lang::{PinDir, PinMeta, PinType, SymbolMeta, SymbolProvider};
 use elsa::sync::FrozenMap;
 
 use crate::env::KicadEnv;
@@ -73,6 +73,7 @@ impl SymbolProvider for RealSymbolProvider {
                     number: "1".into(),
                     name: "~".into(),
                     etype: PinType::Passive,
+                    dir: PinDir::Passive,
                     unit: 1,
                 }],
             };

@@ -11,11 +11,29 @@ pub enum PinType {
     Other,
 }
 
+/// Signal DIRECTION of a pin, preserved from KiCAD's electrical type (which
+/// [`PinType`] collapses). Drives dataflow-aware layout (`crossmin`): a net flows from
+/// its `Out` pin to its `In` pins, which lets the layered placer order parts
+/// left→right by signal flow. Orthogonal to [`PinType`] — kept as a separate field so
+/// existing `PinType` matches are untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PinDir {
+    In,
+    Out,
+    Bidir,
+    Passive,
+    Power,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone)]
 pub struct PinMeta {
     pub number: String,
     pub name: String,
     pub etype: PinType,
+    /// Signal direction (KiCAD electrical type), for dataflow layout.
+    pub dir: PinDir,
     pub unit: u8, // 1-based; 1 for single-unit symbols
 }
 
@@ -56,6 +74,11 @@ impl MockSymbolProvider {
                 number: number.into(),
                 name: name.into(),
                 etype,
+                dir: match etype {
+                    PinType::PowerInput | PinType::PowerOutput => PinDir::Power,
+                    PinType::Passive => PinDir::Passive,
+                    PinType::Other => PinDir::Unknown,
+                },
                 unit,
             })
             .collect();

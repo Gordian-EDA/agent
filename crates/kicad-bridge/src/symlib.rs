@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
 
-use circuit_lang::{PinMeta, PinType, SymbolMeta};
+use circuit_lang::{PinDir, PinMeta, PinType, SymbolMeta};
 use kiutils_kicad::{SymPin, Symbol, SymbolLibFile};
 
 /// A loaded `.kicad_sym` library: symbol name → merged, extends-resolved
@@ -96,10 +96,22 @@ fn pin_meta(pin: &SymPin, unit: u8) -> Option<PinMeta> {
         Some("passive") => PinType::Passive,
         _ => PinType::Other,
     };
+    // Preserve the full signal DIRECTION (PinType collapses input/output → Other).
+    let dir = match pin.electrical_type.as_deref() {
+        Some("input") => PinDir::In,
+        Some("output") => PinDir::Out,
+        Some("bidirectional") | Some("tri_state") => PinDir::Bidir,
+        // Open-collector/emitter drive the net low — treat as a driver (Out).
+        Some("open_collector") | Some("open_emitter") => PinDir::Out,
+        Some("power_in") | Some("power_out") => PinDir::Power,
+        Some("passive") => PinDir::Passive,
+        _ => PinDir::Unknown,
+    };
     Some(PinMeta {
         number: pin.number.clone()?,
         name: pin.name.clone()?,
         etype,
+        dir,
         unit,
     })
 }
