@@ -439,6 +439,25 @@ fn transform_node(
 
 /// Rewrite a `(property …)` node: when it is the `Reference`, replace the value
 /// with `reference`; force the property's `(layer …)` to `F.Fab` either way.
+/// Reference-designator text height cap (mm). KiCAD library defaults are 1.0mm,
+/// which crowd dense boards; 0.8mm stays legible and reduces silk collisions.
+const REF_TEXT_SIZE_MM: f64 = 0.8;
+
+/// Cap the first `(size W H)` in `body` to `max` mm on each axis (shrink only —
+/// a smaller library value is left alone). Used to keep refdes text compact.
+fn cap_font_size(body: &str, max: f64) -> String {
+    let Some(start) = body.find("(size ") else { return body.to_owned() };
+    let open = start + "(size ".len();
+    let Some(rel_close) = body[open..].find(')') else { return body.to_owned() };
+    let inner = &body[open..open + rel_close];
+    let nums: Vec<f64> = inner.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+    if nums.len() != 2 {
+        return body.to_owned();
+    }
+    let (w, h) = (nums[0].min(max), nums[1].min(max));
+    format!("{}(size {} {}){}", &body[..start], fmt_num(w), fmt_num(h), &body[open + rel_close + 1..])
+}
+
 fn transform_property(node: &str, reference: &str) -> String {
     // Reference: set the designator and keep it on its library layer (F.SilkS,
     // positioned above the part) — that is where it belongs on a fabricated
@@ -446,7 +465,11 @@ fn transform_property(node: &str, reference: &str) -> String {
     if let Some(rest) = node.strip_prefix("(property \"Reference\" \"")
         && let Some(close) = rest.find('"')
     {
-        return format!("(property \"Reference\" \"{reference}\"{}", &rest[close + 1..]);
+        // Cap the refdes text height: a 1.0mm library default crowds a dense
+        // board, and a smaller refdes only ever REDUCES silk overlap (it never
+        // moves a ref into a collision), so this is a safe legibility win.
+        let body = cap_font_size(&rest[close + 1..], REF_TEXT_SIZE_MM);
+        return format!("(property \"Reference\" \"{reference}\"{body}");
     }
     // Value: keep the property (KiCAD expects it to exist) but hide it. Its text
     // is the full footprint library name, which on a small board dominates the
