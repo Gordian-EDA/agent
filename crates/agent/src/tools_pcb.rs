@@ -692,7 +692,39 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
 
     let positions: Vec<Value> = result.placements.iter().map(placement_json).collect();
 
-    Ok(json!({
+    // On a failed placement, give the agent a CONCRETE minimum board size so it can
+    // retry deterministically instead of guessing. Estimate from the parts' total
+    // courtyard area (with packing + routing overhead) and the largest single part.
+    let mut extra = json!({});
+    if !result.legal {
+        let total_area: f64 = problem
+            .parts
+            .iter()
+            .map(|p| p.courtyard_w * p.courtyard_h)
+            .sum();
+        let max_w = problem.parts.iter().map(|p| p.courtyard_w).fold(0.0, f64::max);
+        let max_h = problem.parts.iter().map(|p| p.courtyard_h).fold(0.0, f64::max);
+        let cw = (problem.bounds.max_x - problem.bounds.min_x).max(0.1);
+        let ch = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
+        // ~2x the courtyard area leaves room for spacing, refdes gaps, and routing;
+        // but ALSO grow 1.3x past the current bounds, so if the caller already gave
+        // generous-but-still-failing bounds (large parts the legalizer can't
+        // separate) each retry with the suggestion converges instead of looping.
+        // Keep the caller's aspect ratio; never below the biggest part + a margin.
+        let min_area = (total_area * 2.0).max(cw * ch * 1.3);
+        let aspect = cw / ch;
+        let mut sh = (min_area / aspect).sqrt();
+        let mut sw = aspect * sh;
+        sw = sw.max(max_w + 2.0);
+        sh = sh.max(max_h + 2.0);
+        extra = json!({
+            "parts_courtyard_area_mm2": (total_area * 10.0).round() / 10.0,
+            "current_bounds_mm": { "w": (cw * 10.0).round() / 10.0, "h": (ch * 10.0).round() / 10.0 },
+            "suggested_min_bounds_mm": { "w": sw.ceil(), "h": sh.ceil() },
+        });
+    }
+
+    let mut out = json!({
         "legal": result.legal,
         "hpwl": result.report.hpwl,
         "overlaps_resolved": result.report.overlaps_resolved,
@@ -702,11 +734,15 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
             "placement is legal (no courtyard overlap, all parts in bounds). \
              Call route_board next, or render_board to see it."
         } else {
-            "placement is NOT legal — the board is too tight for these parts \
-             (courtyard overlap or out of bounds). Enlarge bounds, relax rules, \
-             or move/unlock parts, then place_board again."
+            "placement is NOT legal — the board is too tight for these parts. \
+             See suggested_min_bounds_mm: re-run create_board with at least that \
+             bounds (it keeps your aspect ratio), or relax rules / move-unlock parts."
         },
-    }))
+    });
+    if let (Value::Object(o), Value::Object(e)) = (&mut out, extra) {
+        o.extend(e);
+    }
+    Ok(out)
 }
 
 // ── set_placement_hints ──────────────────────────────────────────────────────

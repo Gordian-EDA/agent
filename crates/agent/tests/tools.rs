@@ -771,6 +771,35 @@ fn placed_board_ctx() -> (ToolCtx, tempfile::TempDir, Tools) {
 }
 
 #[test]
+fn place_board_failure_suggests_a_larger_bounds() {
+    // Three parts crammed into a 3x3 mm board cannot fit; the failure must hand the
+    // agent a CONCRETE, larger min-bounds suggestion so it can retry deterministically.
+    let (ctx, _g) = fixture_ctx();
+    let tools = Tools::new();
+    let board = serde_json::json!({
+        "bounds": { "min_x": 0.0, "max_x": 3.0, "min_y": 0.0, "max_y": 3.0 },
+        "parts": [
+            { "reference": "J1", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
+              "pad_nets": { "1": "A", "2": "B" } },
+            { "reference": "J2", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
+              "pad_nets": { "1": "A", "2": "B" } },
+            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
+              "pad_nets": { "1": "A", "2": "B" } }
+        ]
+    });
+    tools.run("create_board", board, &ctx).unwrap();
+    let out = tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["legal"], serde_json::json!(false), "should not fit in 3x3: {out}");
+    let s = &out["suggested_min_bounds_mm"];
+    let (w, h) = (s["w"].as_f64().unwrap(), s["h"].as_f64().unwrap());
+    assert!(w > 3.0 && h > 3.0, "suggestion must exceed the failing bounds: {out}");
+    assert!(
+        out["parts_courtyard_area_mm2"].as_f64().unwrap() > 0.0,
+        "must report the parts' courtyard area: {out}"
+    );
+}
+
+#[test]
 fn full_flow_create_place_route_is_clean() {
     let (ctx, _g, tools) = placed_board_ctx();
 
