@@ -1,0 +1,23 @@
+{
+  "description": "PROBE: 4-layer board with GND/VCC planes AND a copper keepout region (e.g. under an antenna / mounting zone). The planes must CARVE OUT the keepout instead of filling over it.",
+  "rules": { "layers": 4 },
+  "bounds": { "min_x": 0.0, "max_x": 48.0, "min_y": 0.0, "max_y": 40.0 },
+  "keepouts": [
+    { "rect": { "min_x": 34.0, "max_x": 46.0, "min_y": 26.0, "max_y": 38.0 },
+      "layers": ["top", "inner1", "inner2", "bottom"] }
+  ],
+  "parts": [
+    { "reference": "U1", "footprint": "Package_QFP:TQFP-32_7x7mm_P0.8mm",
+      "pad_nets": {
+        "1": "VCC", "2": "GND", "3": "S1", "4": "S2", "5": "S3", "6": "S4", "7": "S5", "8": "S6",
+        "9": "VCC", "10": "GND", "11": "S7", "12": "S8", "13": "S9", "14": "S10", "15": "S11", "16": "S12",
+        "17": "VCC", "18": "GND", "19": "S13", "20": "S14", "21": "S15", "22": "S16", "23": "S17", "24": "S18",
+        "25": "VCC", "26": "GND", "27": "S19", "28": "S20", "29": "S21", "30": "S22", "31": "S23", "32": "GND" } },
+    { "reference": "C1", "footprint": "Capacitor_SMD:C_0402_1005Metric", "pad_nets": { "1": "VCC", "2": "GND" } },
+    { "reference": "C2", "footprint": "Capacitor_SMD:C_0402_1005Metric", "pad_nets": { "1": "VCC", "2": "GND" } },
+    { "reference": "C3", "footprint": "Capacitor_SMD:C_0402_1005Metric", "pad_nets": { "1": "VCC", "2": "GND" } },
+    { "reference": "C4", "footprint": "Capacitor_SMD:C_0603_1608Metric", "pad_nets": { "1": "VCC", "2": "GND" } },
+    { "reference": "J1", "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+      "pad_nets": { "1": "VCC", "2": "GND", "3": "S1", "4": "S2", "5": "S3", "6": "S4" } }
+  ]
+}

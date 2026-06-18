@@ -771,7 +771,12 @@ pub fn set_placement_hints(input: Value, ctx: &ToolCtx) -> Result<Value> {
 
 /// Validate a keepout rectangle lies within the board bounds and lists only
 /// known copper layers, then return the engine [`Keepout`].
-fn parse_keepout(v: &Value, bounds: &Bounds, idx: usize) -> std::result::Result<Keepout, String> {
+fn parse_keepout(
+    v: &Value,
+    bounds: &Bounds,
+    layer_count: u32,
+    idx: usize,
+) -> std::result::Result<Keepout, String> {
     let ctxstr = format!("keepouts[{idx}]");
     let rect_v = v
         .get("rect")
@@ -805,10 +810,19 @@ fn parse_keepout(v: &Value, bounds: &Bounds, idx: usize) -> std::result::Result<
             .as_str()
             .ok_or_else(|| format!("{ctxstr}: layer names must be strings"))?;
         let layer = LayerRef(name.to_string());
-        // A 2-layer board (v1) resolves only "top"/"bottom"; reject unknowns now.
-        if layer.index(2).is_none() {
+        // Resolve against THIS board's stackup: "top"/"bottom" always, plus
+        // "inner1".."inner{layer_count-2}" on a multilayer board.
+        if layer.index(layer_count).is_none() {
+            let inners = if layer_count >= 4 {
+                format!(
+                    ", \"inner1\"..\"inner{}\"",
+                    layer_count - 2
+                )
+            } else {
+                String::new()
+            };
             return Err(format!(
-                "{ctxstr}: unknown layer `{name}` — v1 boards have \"top\" and \"bottom\""
+                "{ctxstr}: unknown layer `{name}` — this board has \"top\", \"bottom\"{inners}"
             ));
         }
         layers.push(layer);
@@ -864,7 +878,7 @@ pub fn set_constraints(input: Value, ctx: &ToolCtx) -> Result<Value> {
         };
         let mut keepouts = Vec::with_capacity(arr.len());
         for (i, k) in arr.iter().enumerate() {
-            match parse_keepout(k, &draft.bounds, i) {
+            match parse_keepout(k, &draft.bounds, draft.rules.layer_count, i) {
                 Ok(keepout) => keepouts.push(keepout),
                 Err(msg) => return Ok(json!({ "error": msg })),
             }
@@ -1350,16 +1364,17 @@ fn plane_zones(
     solution: &RouteSolution,
     bounds: &Bounds,
     rules: &DraftRules,
+    user_keepouts: &[Keepout],
 ) -> Vec<ZoneSpec> {
     let layer_count = rules.layer_count;
     let via_half = rules.via_diameter / 2.0 + rules.clearance + PLANE_ANTIPAD_MARGIN_MM;
     planes
         .iter()
         .map(|(net, layer_idx)| {
-            let mut keepouts: Vec<(Point2, f64)> = Vec::new();
+            let mut keepouts: Vec<(Point2, f64, f64)> = Vec::new();
             for v in &solution.vias {
                 if &v.connection != net {
-                    keepouts.push((v.at.clone(), via_half));
+                    keepouts.push((v.at.clone(), via_half, via_half));
                 }
             }
             for ob in &board.obstacles {
@@ -1368,7 +1383,20 @@ fn plane_zones(
                 if on_layer && foreign {
                     let half =
                         ob.width.max(ob.height) / 2.0 + rules.clearance + PLANE_ANTIPAD_MARGIN_MM;
-                    keepouts.push((ob.center.clone(), half));
+                    keepouts.push((ob.center.clone(), half, half));
+                }
+            }
+            // A user keepout on this plane's layer is a NO-COPPER region — the
+            // plane must carve it out (it was previously filled over: planes don't
+            // route, so the routing-only keepout never reached the pour).
+            for ko in user_keepouts {
+                let on_layer = ko.layers.iter().any(|lr| lr.index(layer_count) == Some(*layer_idx));
+                if on_layer {
+                    let cx = (ko.rect.min_x + ko.rect.max_x) / 2.0;
+                    let cy = (ko.rect.min_y + ko.rect.max_y) / 2.0;
+                    let hx = (ko.rect.max_x - ko.rect.min_x) / 2.0 + rules.clearance;
+                    let hy = (ko.rect.max_y - ko.rect.min_y) / 2.0 + rules.clearance;
+                    keepouts.push((Point2 { x: cx, y: cy }, hx, hy));
                 }
             }
             let fill = plane_fill_rects(bounds, BOARD_EDGE_MARGIN_MM, &keepouts);
@@ -1704,7 +1732,14 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // Copper-plane zones (power pours) for a multilayer board, computed from the
     // foreign copper reaching each inner layer, at the final (tight) bounds. The
     // obstacle positions are absolute, so the first board's read is reusable here.
-    let zones = plane_zones(&stored.planes, &board.problem, &stored.solution, &tight, &draft.rules);
+    let zones = plane_zones(
+        &stored.planes,
+        &board.problem,
+        &stored.solution,
+        &tight,
+        &draft.rules,
+        &draft.keepouts,
+    );
     let board = if tight != draft.bounds || !zones.is_empty() {
         match synthesize_board_full(&parts, &tight, draft.rules.layer_count, &zones) {
             Ok(t) => {

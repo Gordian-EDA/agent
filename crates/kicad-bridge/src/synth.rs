@@ -187,9 +187,10 @@ fn push_zone(out: &mut String, net_code: i32, z: &ZoneSpec, idx: usize) {
 
 /// 1-based net codes over the sorted union of every part's pad net names.
 /// A copper-plane (power-pour) fill as axis-aligned rectangles tiling `bounds`
-/// inset by `edge_margin`, MINUS a square keep-out around each foreign-copper
-/// item in `keepouts` (`(center, half_extent)` — the half already includes the
-/// required clearance). Returns rects as `[min_x, min_y, max_x, max_y]`.
+/// inset by `edge_margin`, MINUS a rectangular keep-out around each item in
+/// `keepouts` (`(center, half_x, half_y)` — the halves already include the
+/// required clearance; a via/pad passes equal halves, a keep-out region its rect
+/// halves). Returns rects as `[min_x, min_y, max_x, max_y]`.
 ///
 /// KiCAD treats edge-sharing `filled_polygon` islands as one connected plane
 /// (verified against kicad-cli), so a horizontal-band sweep produces a valid,
@@ -200,7 +201,7 @@ fn push_zone(out: &mut String, net_code: i32, z: &ZoneSpec, idx: usize) {
 pub fn plane_fill_rects(
     bounds: &Bounds,
     edge_margin: f64,
-    keepouts: &[(Point2, f64)],
+    keepouts: &[(Point2, f64, f64)],
 ) -> Vec<[f64; 4]> {
     let (bx0, bx1) = (bounds.min_x + edge_margin, bounds.max_x - edge_margin);
     let (by0, by1) = (bounds.min_y + edge_margin, bounds.max_y - edge_margin);
@@ -209,9 +210,9 @@ pub fn plane_fill_rects(
     }
     // y-band boundaries: the board edges plus each keep-out's top/bottom (clamped).
     let mut ycuts: Vec<f64> = vec![by0, by1];
-    for (c, h) in keepouts {
-        ycuts.push((c.y - h).clamp(by0, by1));
-        ycuts.push((c.y + h).clamp(by0, by1));
+    for (c, _hx, hy) in keepouts {
+        ycuts.push((c.y - hy).clamp(by0, by1));
+        ycuts.push((c.y + hy).clamp(by0, by1));
     }
     ycuts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     ycuts.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
@@ -226,8 +227,8 @@ pub fn plane_fill_rects(
         // x-intervals blocked by keep-outs straddling this band, merged.
         let mut blocked: Vec<(f64, f64)> = keepouts
             .iter()
-            .filter(|(c, h)| c.y - h < ymid && ymid < c.y + h)
-            .map(|(c, h)| ((c.x - h).max(bx0), (c.x + h).min(bx1)))
+            .filter(|(c, _hx, hy)| c.y - hy < ymid && ymid < c.y + hy)
+            .map(|(c, hx, _hy)| ((c.x - hx).max(bx0), (c.x + hx).min(bx1)))
             .filter(|(a, b)| b > a)
             .collect();
         blocked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -714,7 +715,7 @@ mod tests {
     #[test]
     fn plane_fill_carves_keepouts_and_stays_in_bounds() {
         let b = Bounds { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 20.0 };
-        let ko = (Point2 { x: 10.0, y: 10.0 }, 0.65);
+        let ko = (Point2 { x: 10.0, y: 10.0 }, 0.65, 0.65);
         let rects = plane_fill_rects(&b, 0.5, &[ko]);
         assert!(rects.len() > 1, "a central keep-out must split the fill");
         // The keep-out square [9.35,10.65]^2 must contain NO fill rect interior.

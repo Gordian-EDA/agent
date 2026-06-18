@@ -57,6 +57,10 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
     if created["ok"] != json!(true) {
         return json!({ "name": name, "stage": "create", "result": created });
     }
+    // Optional keepouts (rule areas) from the spec, applied via set_constraints.
+    if let Some(kos) = spec.get("keepouts") {
+        let _ = tools.run("set_constraints", json!({ "keepouts": kos.clone() }), &ctx);
+    }
     let placed = tools.run("place_board", json!({}), &ctx).unwrap();
     let routed = tools.run("route_board", json!({}), &ctx).unwrap();
     let exported = tools.run("export_board", json!({}), &ctx).unwrap();
