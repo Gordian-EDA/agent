@@ -36,7 +36,7 @@ use pcb_engine::pathing::global_route;
 use pcb_engine::pipeline::{RouterKind, metrics, route_auto};
 use pcb_engine::placement::{
     GroupHint, LockedAt, Part, PlaceProblem, PlaceReport, PlaceResult, Placement, PlacementHints,
-    Rect, place, to_route_problem,
+    Rect, place_best, to_route_problem,
 };
 use pcb_engine::problem::{Bounds, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteSolution};
 
@@ -559,7 +559,7 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         }
     }
 
-    let result = place(&problem, &hints);
+    let result = place_best(&problem, &hints);
 
     // Persist the placement into the draft so route_board / render_board / a
     // later get_board can read it without re-running the placer.

@@ -73,6 +73,12 @@ const EDGE_PULL_K: f64 = 0.10;
 /// wired to several nets, which would otherwise strand it in the interior.
 const EDGE_SEEK_K: f64 = 0.30;
 
+/// Direct pull of a decoupling cap toward its IC ([`decoupling_pairs`]), in the
+/// decoupling placement variant only. Strong enough that the cap hugs the IC
+/// (shortening the supply loop); [`place_best`] keeps the variant only when it
+/// routes at least as cleanly, so this never regresses a board it does not help.
+const DECOUPLE_K: f64 = 0.35;
+
 /// Short-range repulsion gain on margin-inflated courtyard overlap.
 const REPULSION_K: f64 = 0.5;
 
@@ -321,13 +327,86 @@ pub fn derive_nets(problem: &PlaceProblem) -> Vec<LogicalNet> {
 
 // ── public entry: place ──────────────────────────────────────────────────────
 
+/// Detect decoupling co-placement pairs `(cap_idx, ic_idx)`: a 2-pad part whose
+/// BOTH pad nets also appear on a larger (≥3-pad) part is its decoupling cap and
+/// should hug that IC/regulator. The smaller-index qualifying anchor wins
+/// (deterministic). A part wired to two unrelated nets (e.g. a divider resistor)
+/// finds no single anchor with both nets, so this fires only for real bypass caps.
+fn decoupling_pairs(problem: &PlaceProblem) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::new();
+    for (si, small) in problem.parts.iter().enumerate() {
+        if small.pads.len() != 2 {
+            continue;
+        }
+        let nets: Vec<&str> = small.pads.iter().filter_map(|p| p.net.as_deref()).collect();
+        if nets.len() != 2 || nets[0] == nets[1] {
+            continue;
+        }
+        for (ai, anc) in problem.parts.iter().enumerate() {
+            if ai == si || anc.pads.len() < 3 {
+                continue;
+            }
+            let anc_nets: std::collections::BTreeSet<&str> =
+                anc.pads.iter().filter_map(|p| p.net.as_deref()).collect();
+            if anc_nets.contains(nets[0]) && anc_nets.contains(nets[1]) {
+                pairs.push((si, ai));
+                break;
+            }
+        }
+    }
+    pairs
+}
+
+/// Place `problem` and return the variant that ROUTES cleanest — the placement
+/// analog of [`crate::pipeline::route_auto`]. It runs the baseline placement and
+/// a decoupling-co-placement variant, routes each, and keeps whichever yields
+/// fewer routing faults (unrouted nets + geometry DRC violations), breaking ties
+/// by lower routed wirelength then lower HPWL. The baseline is always a
+/// candidate, so an idiom variant that does not actually help (e.g. one that
+/// scatters a board's power net) is automatically discarded — the oracle decides
+/// per board, so aggressive idioms can never regress a board they do not improve.
+pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
+    let baseline = place_variant(problem, hints, false);
+    // Only bother with the decoupling variant when there is a pair to co-place.
+    if decoupling_pairs(problem).is_empty() {
+        return baseline;
+    }
+    let decoupled = place_variant(problem, hints, true);
+
+    let cost = |r: &PlaceResult| -> (usize, u64, u64) {
+        if !r.legal {
+            return (usize::MAX, u64::MAX, u64::MAX);
+        }
+        let rp = to_route_problem(problem, &r.placements);
+        let routed = crate::pipeline::route_auto(&rp);
+        let geom = crate::lint::lint(&rp, &routed.solution)
+            .iter()
+            .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
+            .count();
+        let wl = crate::pipeline::metrics(&routed.solution).wirelength;
+        // Bit-cast f64 metrics to sortable u64 (all are non-negative finite).
+        (routed.failed.len() + geom, (wl * 1000.0) as u64, (r.report.hpwl * 1000.0) as u64)
+    };
+    if cost(&decoupled) < cost(&baseline) {
+        decoupled
+    } else {
+        baseline
+    }
+}
+
 /// Place `problem`'s parts under `hints`, deterministically.
 ///
 /// Runs the force-directed seed then the legalizer; locked parts never move;
 /// empty hints are fully supported. The returned `legal` flag is verified by
 /// exact geometry. Never panics: an impossible board returns `legal: false`
-/// with a report rather than overlapping silently or aborting.
+/// with a report rather than overlapping silently or aborting. This is the
+/// baseline (no decoupling co-placement); [`place_best`] selects among variants.
 pub fn place(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
+    place_variant(problem, hints, false)
+}
+
+/// [`place`] with the decoupling-co-placement force optionally enabled.
+fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, decouple: bool) -> PlaceResult {
     let n = problem.parts.len();
     let nets = derive_nets(problem);
     let margin = courtyard_margin(problem.clearance);
@@ -359,7 +438,7 @@ pub fn place(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
     }
 
     // 2. Force-directed relaxation (skips locked parts).
-    force_layout(problem, hints, &nets, &half, margin, &mut pos);
+    force_layout(problem, hints, &nets, &half, margin, decouple, &mut pos);
 
     // 3. Legalize: snap + spiral-resolve overlaps + clamp. Locked immovable.
     let leg = legalize(problem, &half, margin, &mut pos);
@@ -400,10 +479,29 @@ fn force_layout(
     nets: &[LogicalNet],
     half: &[(f64, f64)],
     margin: f64,
+    decouple: bool,
     pos: &mut [Point2],
 ) {
     let n = problem.parts.len();
     let locked: Vec<bool> = problem.parts.iter().map(|p| p.locked.is_some()).collect();
+    // Decoupling co-placement pairs (cap → IC), only when this variant enables it.
+    let decoupling: Vec<(usize, usize)> = if decouple {
+        let grouped: std::collections::BTreeSet<usize> = hints
+            .groups
+            .iter()
+            .flat_map(|g| {
+                g.members
+                    .iter()
+                    .filter_map(|m| problem.parts.iter().position(|p| &p.reference == m))
+            })
+            .collect();
+        decoupling_pairs(problem)
+            .into_iter()
+            .filter(|(cap, _)| !grouped.contains(cap))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Per-part group hints (a part may be in several groups).
     // We precompute, for each group, the member indices that exist.
@@ -513,6 +611,15 @@ fn force_layout(
             let (dx, dy) = edge_delta(edge, &pos[m], target);
             force[m].0 += EDGE_SEEK_K * dx;
             force[m].1 += EDGE_SEEK_K * dy;
+        }
+
+        // (d3) Decoupling co-placement (variant-gated): pull each bypass cap
+        //      toward its IC so it seats beside it — one-directional (the IC is
+        //      not dragged around by its caps). Only active in the decoupling
+        //      variant; place_best keeps it only when it routes at least as clean.
+        for &(cap, ic) in &decoupling {
+            force[cap].0 += DECOUPLE_K * (pos[ic].x - pos[cap].x);
+            force[cap].1 += DECOUPLE_K * (pos[ic].y - pos[cap].y);
         }
 
         // (e) Short-range courtyard repulsion: only on margin-inflated overlap.
