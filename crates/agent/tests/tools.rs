@@ -915,14 +915,12 @@ fn export_board_e2e_kicad_drc_clean() {
 
     let drc = &out["drc"];
     assert_eq!(drc["ran"], serde_json::json!(true), "DRC should have run: {out}");
-    // The fidelity contract is "never ship a copper FAULT" (error-severity), which
-    // the harness gate also uses. copper_violations counts warning-severity items
-    // too (e.g. via_dangling from the detailed router, silk warnings); those are
-    // tolerated, so assert the fault metric here. (via_dangling is a tracked
-    // detailed-router quality follow-up — a stray via, not a connectivity fault.)
+    // Strict: zero copper-layer violations of ANY severity (the detailed router's
+    // spurious via_dangling vias are dropped at the stitch source, so this stays
+    // clean — and now guards against that regression).
     assert_eq!(
-        drc["copper_errors"], serde_json::json!(0),
-        "exported board must have zero copper FAULTS: {out}"
+        drc["copper_violations"], serde_json::json!(0),
+        "exported board must be copper-DRC-clean: {out}"
     );
     assert_eq!(
         drc["unconnected_items"], serde_json::json!(0),

@@ -319,13 +319,41 @@ fn stitch(
                 });
             }
         }
-        // Vias: dedup by exact position.
+        // Vias: dedup by exact position, and DROP spurious ones. A via is real
+        // only if this net actually changes layer there — i.e. it has copper (a
+        // trace endpoint or a pad) on ≥2 distinct layers at the via's position.
+        // The cell stitch can emit a via where the net only has copper on one
+        // layer (a layer transition that simplified away), which KiCAD flags as
+        // `via_dangling`. Dropping it cannot break connectivity: by definition the
+        // net is already connected without it, and the connectivity oracle +
+        // naive fallback in `route_auto` catch any over-drop.
         for at in nc.vias {
             if vias
                 .iter()
                 .any(|v| v.connection == connection && same_point(&v.at, &at))
             {
                 continue;
+            }
+            let mut layers: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+            for t in &traces {
+                if t.connection == connection
+                    && t.path.iter().any(|p| same_point(p, &at))
+                {
+                    layers.insert(t.layer.0.as_str());
+                }
+            }
+            for ob in &problem.obstacles {
+                if ob.connected_to.contains(&connection)
+                    && (at.x - ob.center.x).abs() <= ob.width / 2.0 + 0.01
+                    && (at.y - ob.center.y).abs() <= ob.height / 2.0 + 0.01
+                {
+                    for lr in &ob.layers {
+                        layers.insert(lr.0.as_str());
+                    }
+                }
+            }
+            if layers.len() < 2 {
+                continue; // spurious / dangling — drop
             }
             vias.push(Via {
                 connection: connection.clone(),
