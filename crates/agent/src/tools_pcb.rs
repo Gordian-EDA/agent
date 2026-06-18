@@ -511,6 +511,22 @@ fn placement_json(p: &Placement) -> Value {
 
 // ── place_board ──────────────────────────────────────────────────────────────
 
+/// Whether a part is a board-edge part (connector / header / terminal block /
+/// mounting hole) that should hug the perimeter. Detected from the footprint
+/// library id, with the conventional `J` reference prefix as a fallback.
+fn is_connector(footprint: &str, reference: &str) -> bool {
+    let fp = footprint.to_ascii_lowercase();
+    fp.contains("connector")
+        || fp.contains("pinheader")
+        || fp.contains("pinsocket")
+        || fp.contains("terminalblock")
+        || fp.contains("screwterminal")
+        || fp.contains("mountinghole")
+        || fp.contains("usb")
+        || fp.contains("barreljack")
+        || reference.starts_with('J')
+}
+
 pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
@@ -523,7 +539,27 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         Err(msg) => return Ok(json!({ "error": msg })),
     };
 
-    let result = place(&problem, &draft.hints);
+    // Auto edge-affinity: pull connectors/headers to their nearest board edge so
+    // they land at the perimeter (where a cable or the enclosure reaches them),
+    // not stranded in the interior with copper wrapping around them. Skip any
+    // part the model already steered with an explicit group `edge` hint.
+    let mut hints = draft.hints.clone();
+    let explicitly_edged: std::collections::BTreeSet<&str> = hints
+        .groups
+        .iter()
+        .filter(|g| g.edge.is_some())
+        .flat_map(|g| g.members.iter().map(String::as_str))
+        .collect();
+    for p in &draft.parts {
+        if is_connector(&p.footprint, &p.reference)
+            && !explicitly_edged.contains(p.reference.as_str())
+            && !hints.edge_seek.contains(&p.reference)
+        {
+            hints.edge_seek.push(p.reference.clone());
+        }
+    }
+
+    let result = place(&problem, &hints);
 
     // Persist the placement into the draft so route_board / render_board / a
     // later get_board can read it without re-running the placer.
@@ -654,7 +690,7 @@ pub fn set_placement_hints(input: Value, ctx: &ToolCtx) -> Result<Value> {
         })
         .collect();
 
-    draft.hints = PlacementHints { groups };
+    draft.hints = PlacementHints { groups, ..Default::default() };
     draft.save(ctx)?;
 
     Ok(json!({
@@ -1269,7 +1305,19 @@ pub fn render_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
 /// inline footprint bodies do not byte-match the installed library copies. This
 /// is the same inert library-bookkeeping warning the e2e tests carve out (see
 /// `placed_board_e2e.rs`); it never reflects a copper or connectivity fault.
-const NON_COPPER_WARNINGS: &[&str] = &["lib_footprint_mismatch", "lib_footprint_issues"];
+const NON_COPPER_WARNINGS: &[&str] = &[
+    // Inert library-bookkeeping diff between the board footprint and its library.
+    "lib_footprint_mismatch",
+    "lib_footprint_issues",
+    // Silkscreen warnings — these are silk-layer aesthetics, never a copper or
+    // connectivity fault. Keeping silkscreen on a dense board (so it reads like a
+    // real PCB) inevitably produces some silk-over-copper / silk overlap; that is
+    // a fab note, not a copper violation, so it must not gate the copper count.
+    "silk_over_copper",
+    "silk_overlap",
+    "silk_edge_clearance",
+    "silk_over_silk",
+];
 
 fn is_non_copper(v: &Violation) -> bool {
     v.severity == "warning" && NON_COPPER_WARNINGS.contains(&v.kind.as_str())

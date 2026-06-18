@@ -194,6 +194,7 @@ fn hints_help_and_never_hurt() {
                 edge: Some(Edge::W),
             },
         ],
+        ..Default::default()
     };
     let hinted = place(&problem, &hints);
     assert!(hinted.legal, "hinted placement legal: {hinted:?}");

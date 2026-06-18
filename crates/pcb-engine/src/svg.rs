@@ -1052,6 +1052,7 @@ mod tests {
                 region: Some(Rect { min_x: 4.0, max_x: 16.0, min_y: 4.0, max_y: 16.0 }),
                 edge: None,
             }],
+            ..Default::default()
         };
         let res = place(&pp, &hints);
         let svg = render_placement(&pp, &hints, &res);

@@ -68,6 +68,11 @@ const GROUP_SPRING_K: f64 = 0.05;
 const REGION_PULL_K: f64 = 0.10;
 const EDGE_PULL_K: f64 = 0.10;
 
+/// Pull strength for auto edge-affinity (connectors → nearest edge). Stronger
+/// than [`EDGE_PULL_K`] so it overcomes the inward net springs of a connector
+/// wired to several nets, which would otherwise strand it in the interior.
+const EDGE_SEEK_K: f64 = 0.30;
+
 /// Short-range repulsion gain on margin-inflated courtyard overlap.
 const REPULSION_K: f64 = 0.5;
 
@@ -176,6 +181,14 @@ pub struct PlacementHints {
     /// Grouping/region/edge hints.
     #[serde(default)]
     pub groups: Vec<GroupHint>,
+    /// References that should be pulled to their NEAREST board edge (connectors,
+    /// headers, mounting holes — parts a cable or the enclosure reaches from
+    /// outside). Unlike a group `edge` hint, the engine picks each part's nearest
+    /// edge automatically, so the caller need not know the final layout. A
+    /// professional board puts these at the perimeter, not stranded in the
+    /// interior with copper wrapping around them.
+    #[serde(default)]
+    pub edge_seek: Vec<String>,
 }
 
 /// A group of parts that should cohere, optionally pulled into a region and/or
@@ -405,6 +418,13 @@ fn force_layout(
         })
         .collect();
 
+    // Parts that should hug their nearest board edge (connectors/headers).
+    let edge_seek: Vec<usize> = hints
+        .edge_seek
+        .iter()
+        .filter_map(|m| problem.parts.iter().position(|p| &p.reference == m))
+        .collect();
+
     let mut scale = 1.0_f64;
 
     for iter in 0..FORCE_ITERS {
@@ -480,6 +500,19 @@ fn force_layout(
                     force[m].1 += EDGE_PULL_K * dy;
                 }
             }
+        }
+
+        // (d2) Auto edge-affinity: pull each edge-seeking part (connector/header)
+        //      toward its NEAREST board edge, recomputed each iteration so it
+        //      tracks the part as the net springs move it. Connectors belong at
+        //      the perimeter; this stops the router from having to wrap copper
+        //      around a centrally-stranded header.
+        for &m in &edge_seek {
+            let edge = nearest_edge(&pos[m], &problem.bounds);
+            let target = edge_target(edge, &problem.bounds, half[m]);
+            let (dx, dy) = edge_delta(edge, &pos[m], target);
+            force[m].0 += EDGE_SEEK_K * dx;
+            force[m].1 += EDGE_SEEK_K * dy;
         }
 
         // (e) Short-range courtyard repulsion: only on margin-inflated overlap.
@@ -777,6 +810,23 @@ fn pad_world(problem: &PlaceProblem, pos: &[Point2], pin: &Pin) -> Point2 {
 
 /// The pull target for an edge hint: a point on the edge band line, keeping the
 /// part's other coordinate where it is (only the edge-normal coordinate matters).
+/// The board edge nearest to `p`. Ties break in N, S, W, E order (deterministic).
+fn nearest_edge(p: &Point2, b: &Bounds) -> Edge {
+    let d_n = p.y - b.min_y;
+    let d_s = b.max_y - p.y;
+    let d_w = p.x - b.min_x;
+    let d_e = b.max_x - p.x;
+    let mut best = Edge::N;
+    let mut best_d = d_n;
+    for (d, e) in [(d_s, Edge::S), (d_w, Edge::W), (d_e, Edge::E)] {
+        if d < best_d {
+            best_d = d;
+            best = e;
+        }
+    }
+    best
+}
+
 fn edge_target(edge: Edge, b: &Bounds, h: (f64, f64)) -> f64 {
     match edge {
         Edge::N => b.min_y + h.1 + EDGE_BAND.min((b.max_y - b.min_y) / 2.0),
@@ -1167,6 +1217,7 @@ mod tests {
                 region: Some(region.clone()),
                 edge: None,
             }],
+            ..Default::default()
         };
         let res = place(&problem, &hints);
         assert!(res.legal, "{res:?}");
@@ -1226,6 +1277,7 @@ mod tests {
                 region: None,
                 edge: Some(Edge::W),
             }],
+            ..Default::default()
         };
         let res = place(&problem, &hints);
         assert!(res.legal, "{res:?}");
