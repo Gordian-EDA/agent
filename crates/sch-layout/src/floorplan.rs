@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use circuit_lang::model::{Component, Design, PinTarget};
-use circuit_lang::{find_pin, PinType, SymbolProvider};
+use circuit_lang::{find_pin, PinDir, PinType, SymbolProvider};
 use kicad_bridge::env::KicadEnv;
 use kicad_bridge::geometry::SymbolGeometry;
 use kicad_bridge::provider::RealSymbolProvider;
@@ -358,6 +358,16 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         in_row += 1;
     }
     let next_col = max_used + 1;
+
+    // GLOBAL OPTIMISER (opt-in `GLOBAL_OPT`): replace the connectivity-blind shelf-pack
+    // with a dataflow-LAYERED, crossing-minimised placement of the inferred anchors. The
+    // shelf-pack still ran above (cheap) so `packed` is a safe fallback if crossmin
+    // declines (≤1 anchor).
+    if std::env::var("GLOBAL_OPT").is_ok() {
+        if let Some(cm) = crossmin_anchor_cells(env, &items, &inc, &inferred, &rails) {
+            packed = cm;
+        }
+    }
 
     for &ai in &order {
         let rd = &items[ai].refdes;
@@ -1272,6 +1282,85 @@ fn order_anchors(items: &[Item], inc: &Incidence, anchors: &[usize]) -> Vec<usiz
         placed.push(remaining.remove(pick));
     }
     placed
+}
+
+/// GLOBAL layered placement of the inferred anchors via `crossmin` (Sugiyama): build a
+/// DATAFLOW graph (a net flows from its driving OUTPUT pin to the INPUT pins it feeds,
+/// using the preserved KiCAD pin direction), layer it left→right by signal flow, and
+/// barycenter-order each layer to minimise crossings. Returns `(layer, order)` per
+/// inferred-anchor index — a drop-in replacement for the shelf-pack's `packed` map (the
+/// downstream loop maps layer→column, order→row band). Rails are excluded (they touch
+/// everything, carrying no flow). `None` if there's nothing to lay out.
+fn crossmin_anchor_cells(
+    env: &KicadEnv,
+    items: &[Item],
+    inc: &Incidence,
+    anchors: &[usize],
+    rails: &BTreeMap<String, Band>,
+) -> Option<BTreeMap<usize, (i32, i32)>> {
+    if anchors.len() < 2 {
+        return None;
+    }
+    let provider = RealSymbolProvider::new(env.clone());
+    let node_of: BTreeMap<usize, usize> = anchors.iter().enumerate().map(|(k, &ai)| (ai, k)).collect();
+    // Direction of anchor `ai`'s pin on `net` (matched by pin number via the provider).
+    let pin_dir = |ai: usize, net: &str| -> PinDir {
+        let Some(meta) = provider.symbol(&items[ai].part) else { return PinDir::Unknown };
+        let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net)).map(|(p, _, _)| p);
+        match num.and_then(|num| find_pin(&meta.pins, num)) {
+            Some(pm) => pm.dir,
+            None => PinDir::Unknown,
+        }
+    };
+    let mut g = crossmin::Graph::new(anchors.len());
+    for (net, pins) in inc {
+        if rails.contains_key(net) {
+            continue; // power/ground touch everything — no flow information
+        }
+        // The subset-anchors on this net, with their pin direction.
+        let on: Vec<(usize, PinDir)> = pins
+            .iter()
+            .filter_map(|(j, _)| node_of.get(j).map(|&nd| (nd, pin_dir(*j, net))))
+            .collect();
+        if on.len() < 2 {
+            continue;
+        }
+        let drivers: Vec<usize> = on
+            .iter()
+            .filter(|(_, d)| *d == PinDir::Out)
+            .map(|(n, _)| *n)
+            .collect();
+        let bidir: Vec<usize> = on
+            .iter()
+            .filter(|(_, d)| *d == PinDir::Bidir)
+            .map(|(n, _)| *n)
+            .collect();
+        let src = if !drivers.is_empty() { Some(drivers) } else if !bidir.is_empty() { Some(bidir) } else { None };
+        // Star (not clique) to bound edge count on a wide bus.
+        match src {
+            Some(srcs) => {
+                for &s in &srcs {
+                    for &(d, _) in &on {
+                        if d != s {
+                            g.flow(s, d, 1.0);
+                        }
+                    }
+                }
+            }
+            None => {
+                // No driver: link every anchor to the lowest-indexed one (a star), so
+                // they cluster without imposing a (wrong) flow direction.
+                let hub = on.iter().map(|(n, _)| *n).min().unwrap();
+                for &(d, _) in &on {
+                    if d != hub {
+                        g.link(hub, d, 1.0);
+                    }
+                }
+            }
+        }
+    }
+    let placed = crossmin::layout(&g, &crossmin::Opts::default());
+    Some(anchors.iter().enumerate().map(|(k, &ai)| (ai, (placed.layer[k], placed.order[k]))).collect())
 }
 
 /// Compose every block's per-block `layout:` grid into one global relative seed:
