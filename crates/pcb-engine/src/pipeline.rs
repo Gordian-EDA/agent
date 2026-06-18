@@ -169,13 +169,12 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
     let mut detailed = route_detailed(problem);
     reconcile_connectivity(problem, &mut detailed.solution, &mut detailed.failed);
 
-    // Always also run the slice-1 router and keep the BETTER of the two — judged
-    // not only on completeness (fewest faults) but on NEATNESS. On a simple board
-    // the detailed router can route everything yet wander with more vias than the
-    // direct grid router needs; on a congested board the detailed router's
-    // capacity-aware routing wins on faults. The quality key
-    // `(faults, via_count, wirelength)` lets each board pick the cleaner result —
-    // faults stay primary (never trade routability), then fewer vias, then shorter.
+    // Always also run the slice-1 router and keep the BETTER of the two. FAULTS
+    // are primary (never trade routability). At equal faults, prefer the slice-1
+    // router: its orthogonal copper reads cleaner than the detailed router's
+    // octilinear style on a board both can route — UNLESS the grid router pays a
+    // big DETOUR for it (much longer copper, e.g. it lacks the via the detailed
+    // router used to go direct), in which case the detailed result is cleaner.
     let strict = router::route(problem);
     let lenient = router::route_lenient(problem);
     let naive = if score(problem, &lenient) < score(problem, &strict) {
@@ -183,11 +182,17 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
     } else {
         strict
     };
-    let nq = quality(problem, &naive.solution, naive.failed.len());
-    let dq = quality(problem, &detailed.solution, detailed.failed.len());
-    // Naive wins exact ties (the battle-tested path) and is preferred when it is
-    // no worse on faults and no busier (fewer/equal vias + shorter/equal copper).
-    if nq <= dq {
+    let n_faults = naive.failed.len() + geometry_violations(problem, &naive.solution);
+    let d_faults = detailed.failed.len() + geometry_violations(problem, &detailed.solution);
+    let use_naive = if n_faults != d_faults {
+        n_faults < d_faults
+    } else {
+        let nwl = metrics(&naive.solution).wirelength;
+        let dwl = metrics(&detailed.solution).wirelength;
+        // Tidy orthogonal naive wins unless it detours > the tolerance longer.
+        nwl <= dwl * NAIVE_DETOUR_TOLERANCE
+    };
+    if use_naive {
         RouteResult {
             solution: naive.solution,
             failed: naive.failed,
@@ -198,18 +203,10 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
     }
 }
 
-/// A routed candidate's quality key, lower is better:
-/// `(total DRC faults, via count, wirelength×100)`.
-/// - **faults** (`unrouted + geometry violations`) is PRIMARY — never trade
-///   routability/DRC-cleanliness for looks; an honest unrouted net beats a silent
-///   geometry violation (geometry folded into the count).
-/// - **via count** then **wirelength** are the neatness tiebreakers, so when two
-///   routers both route a board cleanly the engine keeps the tidier copper.
-fn quality(problem: &RouteProblem, solution: &RouteSolution, failed: usize) -> (usize, usize, u64) {
-    let geom = geometry_violations(problem, solution);
-    let wl = metrics(solution).wirelength;
-    (failed + geom, solution.vias.len(), (wl * 100.0) as u64)
-}
+/// At equal faults, keep the tidy orthogonal naive route unless its copper is more
+/// than this factor longer than the detailed route (then the detailed router's
+/// via-enabled direct routing is the cleaner result).
+const NAIVE_DETOUR_TOLERANCE: f64 = 1.15;
 
 /// `(total DRC faults, geometry faults)` for choosing between slice-1 variants.
 fn key(failed: usize, geom: usize) -> (usize, usize) {
