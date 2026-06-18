@@ -358,20 +358,29 @@ fn decoupling_pairs(problem: &PlaceProblem) -> Vec<(usize, usize)> {
 }
 
 /// Place `problem` and return the variant that ROUTES cleanest — the placement
-/// analog of [`crate::pipeline::route_auto`]. It runs the baseline placement and
-/// a decoupling-co-placement variant, routes each, and keeps whichever yields
-/// fewer routing faults (unrouted nets + geometry DRC violations), breaking ties
-/// by lower routed wirelength then lower HPWL. The baseline is always a
-/// candidate, so an idiom variant that does not actually help (e.g. one that
-/// scatters a board's power net) is automatically discarded — the oracle decides
-/// per board, so aggressive idioms can never regress a board they do not improve.
+/// analog of [`crate::pipeline::route_auto`]. It runs the baseline placement plus
+/// idiom variants (decoupling co-placement, aspect-aware connector edges, both),
+/// routes each, and keeps whichever yields fewer routing faults (unrouted nets +
+/// geometry DRC violations), breaking ties by lower routed wirelength then HPWL.
+/// The baseline is always a candidate, so an idiom variant that does not actually
+/// help (e.g. one that scatters a board's power net) is automatically discarded —
+/// the oracle decides per board, so aggressive idioms can never regress a board
+/// they do not improve.
 pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
-    let baseline = place_variant(problem, hints, false);
-    // Only bother with the decoupling variant when there is a pair to co-place.
-    if decoupling_pairs(problem).is_empty() {
-        return baseline;
+    let has_decouple = !decoupling_pairs(problem).is_empty();
+    let has_edge = !hints.edge_seek.is_empty();
+
+    // The variants worth trying for THIS board (always include the baseline).
+    let mut opts = vec![PlaceOpts::default()];
+    if has_decouple {
+        opts.push(PlaceOpts { decouple: true, aspect_edge: false });
     }
-    let decoupled = place_variant(problem, hints, true);
+    if has_edge {
+        opts.push(PlaceOpts { decouple: false, aspect_edge: true });
+    }
+    if has_decouple && has_edge {
+        opts.push(PlaceOpts { decouple: true, aspect_edge: true });
+    }
 
     let cost = |r: &PlaceResult| -> (usize, u64, u64) {
         if !r.legal {
@@ -384,14 +393,22 @@ pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult
             .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
             .count();
         let wl = crate::pipeline::metrics(&routed.solution).wirelength;
-        // Bit-cast f64 metrics to sortable u64 (all are non-negative finite).
+        // Scale f64 metrics to sortable u64 (all non-negative finite).
         (routed.failed.len() + geom, (wl * 1000.0) as u64, (r.report.hpwl * 1000.0) as u64)
     };
-    if cost(&decoupled) < cost(&baseline) {
-        decoupled
-    } else {
-        baseline
+
+    // Baseline first so it wins exact ties (battle-tested), then keep the best.
+    let mut best = place_variant(problem, hints, PlaceOpts::default());
+    let mut best_cost = cost(&best);
+    for &o in opts.iter().skip(1) {
+        let cand = place_variant(problem, hints, o);
+        let c = cost(&cand);
+        if c < best_cost {
+            best = cand;
+            best_cost = c;
+        }
     }
+    best
 }
 
 /// Place `problem`'s parts under `hints`, deterministically.
@@ -400,13 +417,13 @@ pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult
 /// empty hints are fully supported. The returned `legal` flag is verified by
 /// exact geometry. Never panics: an impossible board returns `legal: false`
 /// with a report rather than overlapping silently or aborting. This is the
-/// baseline (no decoupling co-placement); [`place_best`] selects among variants.
+/// baseline (no idiom variants); [`place_best`] selects among variants.
 pub fn place(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
-    place_variant(problem, hints, false)
+    place_variant(problem, hints, PlaceOpts::default())
 }
 
-/// [`place`] with the decoupling-co-placement force optionally enabled.
-fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, decouple: bool) -> PlaceResult {
+/// [`place`] with a specific set of idiom variant toggles.
+fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts: PlaceOpts) -> PlaceResult {
     let n = problem.parts.len();
     let nets = derive_nets(problem);
     let margin = courtyard_margin(problem.clearance);
@@ -438,7 +455,7 @@ fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, decouple: bool)
     }
 
     // 2. Force-directed relaxation (skips locked parts).
-    force_layout(problem, hints, &nets, &half, margin, decouple, &mut pos);
+    force_layout(problem, hints, &nets, &half, margin, opts, &mut pos);
 
     // 3. Legalize: snap + spiral-resolve overlaps + clamp. Locked immovable.
     let leg = legalize(problem, &half, margin, &mut pos);
@@ -479,13 +496,13 @@ fn force_layout(
     nets: &[LogicalNet],
     half: &[(f64, f64)],
     margin: f64,
-    decouple: bool,
+    opts: PlaceOpts,
     pos: &mut [Point2],
 ) {
     let n = problem.parts.len();
     let locked: Vec<bool> = problem.parts.iter().map(|p| p.locked.is_some()).collect();
     // Decoupling co-placement pairs (cap → IC), only when this variant enables it.
-    let decoupling: Vec<(usize, usize)> = if decouple {
+    let decoupling: Vec<(usize, usize)> = if opts.decouple {
         let grouped: std::collections::BTreeSet<usize> = hints
             .groups
             .iter()
@@ -606,7 +623,15 @@ fn force_layout(
         //      the perimeter; this stops the router from having to wrap copper
         //      around a centrally-stranded header.
         for &m in &edge_seek {
-            let edge = nearest_edge(&pos[m], &problem.bounds);
+            // Aspect-aware variant: a tall part (a vertical multi-pin header) is
+            // pulled to the nearest SIDE edge so its pad column lies ALONG that
+            // edge, instead of the nearest edge overall (often the top) where the
+            // column pokes into the interior. Wide parts prefer a top/bottom edge.
+            let edge = if opts.aspect_edge {
+                aspect_edge(&pos[m], &problem.bounds, problem.parts[m].courtyard_w, problem.parts[m].courtyard_h)
+            } else {
+                nearest_edge(&pos[m], &problem.bounds)
+            };
             let target = edge_target(edge, &problem.bounds, half[m]);
             let (dx, dy) = edge_delta(edge, &pos[m], target);
             force[m].0 += EDGE_SEEK_K * dx;
@@ -917,6 +942,30 @@ fn pad_world(problem: &PlaceProblem, pos: &[Point2], pin: &Pin) -> Point2 {
 
 /// The pull target for an edge hint: a point on the edge band line, keeping the
 /// part's other coordinate where it is (only the edge-normal coordinate matters).
+/// Per-variant placement toggles, tried and selected by [`place_best`].
+#[derive(Debug, Clone, Copy, Default)]
+struct PlaceOpts {
+    /// Pull each decoupling cap to hug its IC ([`decoupling_pairs`]).
+    decouple: bool,
+    /// Bias edge-seeking by part aspect: a tall connector goes to a side edge so
+    /// its pad column lies along it, not the top where it pokes inward.
+    aspect_edge: bool,
+}
+
+/// The board edge a part should hug given its aspect: a part taller than wide
+/// prefers the nearer SIDE edge (E/W) — its long axis then runs along the edge;
+/// a wider part prefers the nearer top/bottom (N/S). Square parts fall back to
+/// the overall nearest edge.
+fn aspect_edge(p: &Point2, b: &Bounds, w: f64, h: f64) -> Edge {
+    if h > w {
+        if p.x - b.min_x <= b.max_x - p.x { Edge::W } else { Edge::E }
+    } else if w > h {
+        if p.y - b.min_y <= b.max_y - p.y { Edge::N } else { Edge::S }
+    } else {
+        nearest_edge(p, b)
+    }
+}
+
 /// The board edge nearest to `p`. Ties break in N, S, W, E order (deterministic).
 fn nearest_edge(p: &Point2, b: &Bounds) -> Edge {
     let d_n = p.y - b.min_y;
