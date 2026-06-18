@@ -1,13 +1,13 @@
 {
-  "description": "KITCHEN-SINK: BGA-100 MCU (0.8mm) + SOT-23-5 reg + crystal + 14 decoupling + 2 connectors + 4 corner mounting holes, 4-layer GND/VCC planes \u2014 exercises planes + corner-seek + edge-seek + decoupling together",
+  "description": "KITCHEN-SINK: BGA-100 MCU (0.8mm) + SOT-23-5 reg + crystal + 14 decoupling + 2 connectors + 4 corner mounting holes, 4-layer GND/VCC planes \u2014 agent locks the BGA + rings its decoupling (surround hint)",
   "rules": {
     "layers": 4
   },
   "bounds": {
     "min_x": 0.0,
-    "max_x": 46.0,
+    "max_x": 38.0,
     "min_y": 0.0,
-    "max_y": 42.0
+    "max_y": 34.0
   },
   "parts": [
     {
@@ -114,6 +114,11 @@
         "K7": "VCC",
         "K8": "VCC",
         "K9": "NET37"
+      },
+      "locked": {
+        "x": 19.0,
+        "y": 17.0,
+        "rotation": 0
       }
     },
     {
@@ -328,5 +333,29 @@
         "1": "GND"
       }
     }
-  ]
+  ],
+  "hints": {
+    "groups": [
+      {
+        "name": "decoup",
+        "members": [
+          "C1",
+          "C2",
+          "C3",
+          "C4",
+          "C5",
+          "C6",
+          "C7",
+          "C8",
+          "C9",
+          "C10",
+          "C11",
+          "C12",
+          "C13",
+          "C14"
+        ],
+        "surround": "U1"
+      }
+    ]
+  }
 }
