@@ -1360,23 +1360,32 @@ fn route_with_planes(
     rules: &DraftRules,
 ) -> pcb_engine::pipeline::RouteResult {
     rp.layer_count = 2;
-    for ob in &mut rp.obstacles {
-        if ob.connected_to.iter().any(|n| plane_names.contains(n)) {
-            ob.layers = vec![LayerRef::top(), LayerRef::bottom()];
-        }
-    }
-    // Stitch points: one through-via per plane pad (collected before the plane
-    // connections are dropped). A pad belongs to exactly one net.
-    let stitches: Vec<(String, Point2)> = rp
+    // Stitch points: one through-via per SMD plane pad, dropping it to its inner
+    // plane. Collected BEFORE retagging layers so we can still tell a THROUGH-HOLE
+    // plane pad — which already spans the inner planes and needs NO via (adding one
+    // drills a hole co-located with the pad's own barrel: a KiCAD holes_co_located
+    // defect) — from an SMD pad on one face, which does need the via. A pad belongs
+    // to exactly one plane net.
+    let stitches: Vec<(String, Point2, bool)> = rp
         .obstacles
         .iter()
         .filter_map(|ob| {
             ob.connected_to
                 .iter()
                 .find(|n| plane_names.contains(*n))
-                .map(|n| (n.clone(), ob.center.clone()))
+                .map(|n| {
+                    let thru = ob.layers.contains(&LayerRef::top())
+                        && ob.layers.contains(&LayerRef::bottom());
+                    (n.clone(), ob.center.clone(), thru)
+                })
         })
         .collect();
+    // Retag plane-net pads onto both signal faces so signals route around them.
+    for ob in &mut rp.obstacles {
+        if ob.connected_to.iter().any(|n| plane_names.contains(n)) {
+            ob.layers = vec![LayerRef::top(), LayerRef::bottom()];
+        }
+    }
     rp.connections.retain(|c| !plane_names.contains(&c.name));
 
     let mut result = route_auto(&rp);
@@ -1400,7 +1409,13 @@ fn route_with_planes(
         d2 >= (via_r + rules.clearance).powi(2)
     };
     let mut skipped = 0usize;
-    for (net, at) in stitches {
+    for (net, at, thru) in stitches {
+        // A through-hole plane pad already connects to its inner plane (its barrel
+        // spans every copper layer); a stitching via here would only co-locate a
+        // second drill with the pad's own hole.
+        if thru {
+            continue;
+        }
         let clears_pads = rp
             .obstacles
             .iter()

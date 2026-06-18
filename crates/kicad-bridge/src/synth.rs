@@ -151,8 +151,14 @@ fn push_zone(out: &mut String, net_code: i32, z: &ZoneSpec, idx: usize) {
     let _ = idx;
     let _ = writeln!(
         out,
+        // SOLID pad connection (`connect_pads yes`): a power/ground plane should
+        // tie to its same-net pads with full copper, not thermal-relief spokes —
+        // the spokes starve on large through-hole pads (mounting holes, TH power),
+        // which KiCAD flags as `starved_thermal`. Solid is the standard plane
+        // connection and is low-impedance. Foreign pads are still carved out by the
+        // anti-pad keepouts baked into `fill_rects`, so this only ties same-net copper.
         "\t(zone\n\t\t(net {net_code})\n\t\t(net_name \"{}\")\n\t\t(layer \"{}\")\n\
-         \t\t(uuid \"{uuid}\")\n\t\t(hatch edge 0.5)\n\t\t(connect_pads (clearance 0.2))\n\
+         \t\t(uuid \"{uuid}\")\n\t\t(hatch edge 0.5)\n\t\t(connect_pads yes (clearance 0.2))\n\
          \t\t(min_thickness 0.2)\n\t\t(fill yes (thermal_gap 0.3) (thermal_bridge_width 0.5))",
         z.net_name, z.layer_name
     );
