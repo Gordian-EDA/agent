@@ -1374,6 +1374,19 @@ fn assign_planes(draft: &BoardDraft) -> Vec<(String, u32)> {
 /// on the real board and the inner layers stay clear for planes); reserve each
 /// plane pad's through-via column (block it on both outer layers); and stitch
 /// every plane pad up to its plane with a through-via on the plane net.
+/// Distance from point `p` to segment `a`–`b` (mm) — used to keep a plane
+/// stitching via clear of routed signal tracks.
+fn seg_point_dist(a: &Point2, b: &Point2, p: &Point2) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    if len2 < 1e-12 {
+        return ((p.x - a.x).powi(2) + (p.y - a.y).powi(2)).sqrt();
+    }
+    let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0);
+    let (cx, cy) = (a.x + t * dx, a.y + t * dy);
+    ((p.x - cx).powi(2) + (p.y - cy).powi(2)).sqrt()
+}
+
 fn route_with_planes(
     mut rp: RouteProblem,
     plane_names: &std::collections::BTreeSet<String>,
@@ -1445,7 +1458,19 @@ fn route_with_planes(
             .vias
             .iter()
             .all(|v| v.connection == net || dist2(&at, &v.at) >= min_via2);
-        if clears_pads && clears_vias {
+        // The stitching via is added AFTER the signals route, so it must also clear
+        // the routed TRACKS of other nets — otherwise on a congested board a power
+        // via lands within clearance of a signal trace (a KiCAD clearance fault).
+        // A via that can't clear is skipped (honest unrouted), never shipped.
+        let clears_tracks = result.solution.traces.iter().all(|t| {
+            t.connection == net || {
+                let need = via_r + t.width / 2.0 + rules.clearance;
+                !t.path
+                    .windows(2)
+                    .any(|w| seg_point_dist(&w[0], &w[1], &at) < need)
+            }
+        });
+        if clears_pads && clears_vias && clears_tracks {
             result.solution.vias.push(Via {
                 connection: net,
                 at,
