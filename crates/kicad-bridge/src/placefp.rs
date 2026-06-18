@@ -87,6 +87,42 @@ pub fn part_from_footprint_layers(
     }
 }
 
+/// Different-net pad pairs within `footprint` whose copper edge-to-edge gap is
+/// below `clearance` (given the pad→net assignment), as `(pad_a, pad_b, gap_mm)`.
+///
+/// A footprint whose own two pads sit closer than the board clearance (a fine
+/// 0201 at a coarse clearance, say) produces an inherent clearance DRC fault that
+/// NO placement or routing can fix — the part simply cannot meet the rules. The
+/// agent checks this at `create_board` and rejects it with a clear message, so
+/// the engine never ships a board with a built-in clearance violation. Only
+/// pads with two DIFFERENT assigned nets are compared (KiCAD checks different-net
+/// copper; same-net or unconnected pads do not conflict here).
+pub fn pad_clearance_violations(
+    footprint: &Footprint,
+    pad_nets: &BTreeMap<String, String>,
+    clearance: f64,
+) -> Vec<(String, String, f64)> {
+    const EPS: f64 = 1e-6;
+    let pads = &footprint.pads;
+    let mut out = Vec::new();
+    for i in 0..pads.len() {
+        for j in (i + 1)..pads.len() {
+            let (a, b) = (&pads[i], &pads[j]);
+            match (pad_nets.get(&a.number), pad_nets.get(&b.number)) {
+                (Some(x), Some(y)) if x != y => {}
+                _ => continue,
+            }
+            let gx = ((a.at[0] - b.at[0]).abs() - (a.size[0] + b.size[0]) / 2.0).max(0.0);
+            let gy = ((a.at[1] - b.at[1]).abs() - (a.size[1] + b.size[1]) / 2.0).max(0.0);
+            let gap = (gx * gx + gy * gy).sqrt();
+            if gap + EPS < clearance {
+                out.push((a.number.clone(), b.number.clone(), gap));
+            }
+        }
+    }
+    out
+}
+
 /// Translate one library [`FootprintPad`] into a placement [`PartPad`].
 fn part_pad(pad: &FootprintPad, net_map: &BTreeMap<String, String>, layer_count: u32) -> PartPad {
     PartPad {
@@ -429,5 +465,18 @@ mod tests {
             part_from_footprint(&fp, "U1", &net(&[("1", "VIN"), ("2", "GND"), ("3", "VOUT")]));
         assert_eq!(part.pads.len(), 3);
         assert_courtyard_encloses_pads(&part);
+    }
+
+    #[test]
+    fn pad_clearance_violations_fire_on_too_tight_clearance() {
+        let fp = Footprint::load(&fixture("SOT-23.kicad_mod")).unwrap();
+        let nets = net(&[("1", "VIN"), ("2", "GND"), ("3", "VOUT")]);
+        // SOT-23 different-net pads sit well over 0.2mm apart → no violation.
+        assert!(pad_clearance_violations(&fp, &nets, 0.2).is_empty());
+        // At an absurd 1.0mm clearance the adjacent pads violate.
+        assert!(!pad_clearance_violations(&fp, &nets, 1.0).is_empty());
+        // Same-net pads never conflict, even at a huge clearance.
+        let same = net(&[("1", "N"), ("2", "N"), ("3", "N")]);
+        assert!(pad_clearance_violations(&fp, &same, 5.0).is_empty());
     }
 }

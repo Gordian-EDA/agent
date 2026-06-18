@@ -351,7 +351,7 @@ pub fn create_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
             }
         };
         // Resolve the footprint so a typo'd lib_id fails now, with suggestions.
-        if index.footprint(&footprint).is_none() {
+        let Some(resolved_fp) = index.footprint(&footprint) else {
             return Ok(json!({
                 "error": format!(
                     "part {reference}: unknown footprint `{footprint}` — \
@@ -359,7 +359,7 @@ pub fn create_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
                 ),
                 "suggestions": index.suggest(&footprint),
             }));
-        }
+        };
         let pad_nets: BTreeMap<String, String> = match pj.get("pad_nets") {
             None | Some(Value::Null) => BTreeMap::new(),
             Some(v) => match serde_json::from_value(v.clone()) {
@@ -373,6 +373,25 @@ pub fn create_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
                 }
             },
         };
+        // Reject a footprint whose own different-net pads sit closer than the
+        // board clearance — an inherent clearance DRC fault no routing can fix.
+        let viol = kicad_bridge::placefp::pad_clearance_violations(
+            &resolved_fp,
+            &pad_nets,
+            rules.clearance,
+        );
+        if let Some((a, b, gap)) = viol.first() {
+            return Ok(json!({
+                "error": format!(
+                    "part {reference}: footprint `{footprint}` pads {a} and {b} are only \
+                     {gap:.3}mm apart (< the {:.3}mm rules.clearance) — they are on \
+                     different nets, so this is a built-in clearance violation. Lower \
+                     rules.clearance (e.g. to {:.2}) or use a coarser-pitch footprint.",
+                    rules.clearance,
+                    (gap - 0.01_f64).max(0.05),
+                ),
+            }));
+        }
         parts.push(DraftPart { reference, footprint, pad_nets, locked: None });
     }
 
