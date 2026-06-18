@@ -1053,6 +1053,7 @@ mod tests {
                 region: Some(Rect { min_x: 4.0, max_x: 16.0, min_y: 4.0, max_y: 16.0 }),
                 edge: None,
                 grid: false,
+                surround: None,
             }],
             ..Default::default()
         };

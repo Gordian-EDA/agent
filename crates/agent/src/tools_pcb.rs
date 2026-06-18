@@ -828,12 +828,27 @@ fn parse_group_hint(v: &Value, known_refs: &[&str]) -> std::result::Result<Group
     if grid && region.is_none() {
         return Err(format!("group `{name}`: `grid` requires a `region` to tile into"));
     }
+    let surround = match v.get("surround") {
+        None | Some(Value::Null) => None,
+        Some(s) => {
+            let r = s
+                .as_str()
+                .ok_or_else(|| format!("group `{name}`: `surround` must be a part-reference string"))?;
+            if !known_refs.contains(&r) {
+                return Err(format!(
+                    "group `{name}`: surround target `{r}` is not a part on this board"
+                ));
+            }
+            Some(r.to_string())
+        }
+    };
     Ok(GroupHint {
         name,
         members,
         region,
         edge,
         grid,
+        surround,
     })
 }
 

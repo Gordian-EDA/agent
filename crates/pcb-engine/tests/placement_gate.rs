@@ -181,6 +181,7 @@ fn hints_help_and_never_hurt() {
                 region: None,
                 edge: None,
                 grid: false,
+                surround: None,
             },
             GroupHint {
                 name: "u2-decouplers".to_owned(),
@@ -188,6 +189,7 @@ fn hints_help_and_never_hurt() {
                 region: None,
                 edge: None,
                 grid: false,
+                surround: None,
             },
             GroupHint {
                 name: "connector".to_owned(),
@@ -195,6 +197,7 @@ fn hints_help_and_never_hurt() {
                 region: None,
                 edge: Some(Edge::W),
                 grid: false,
+                surround: None,
             },
         ],
         ..Default::default()

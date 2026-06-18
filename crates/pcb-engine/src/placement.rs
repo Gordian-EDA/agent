@@ -231,6 +231,12 @@ pub struct GroupHint {
     /// general annealer's scatter. Requires `region`; ignored without it.
     #[serde(default)]
     pub grid: bool,
+    /// Ring the members tightly around the perimeter of this target part (by
+    /// reference) — the decoupling-cap pattern: caps hug their IC instead of
+    /// scattering. The target must be LOCKED (the agent fixes the IC first) so its
+    /// position is known when the ring is laid out. Ignored otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surround: Option<String>,
 }
 
 /// Lock each member of a `grid` group at a computed cell of a regular grid filling
@@ -241,6 +247,12 @@ pub struct GroupHint {
 /// whose members aren't found.
 pub fn apply_grid_hints(problem: &mut PlaceProblem, hints: &PlacementHints) {
     for g in &hints.groups {
+        // `surround`: ring the members tightly around a locked target part's edges
+        // (the decoupling pattern). Handled first; falls through to `grid` otherwise.
+        if let Some(target) = &g.surround {
+            apply_surround(problem, &g.members, target);
+            continue;
+        }
         if !g.grid {
             continue;
         }
@@ -268,6 +280,39 @@ pub fn apply_grid_hints(problem: &mut PlaceProblem, hints: &PlacementHints) {
                 rotation: 0,
             });
         }
+    }
+}
+
+/// Ring `members` tightly around the perimeter of the LOCKED `target` part (the
+/// decoupling-cap pattern): distribute them evenly across the target's four edges,
+/// just outside each edge, and lock each there. The target must already be locked
+/// (the agent fixes the IC first) so its centre is known. A no-op otherwise.
+fn apply_surround(problem: &mut PlaceProblem, members: &[String], target: &str) {
+    let Some(ti) = problem.parts.iter().position(|p| p.reference == target) else { return };
+    let Some(loc) = problem.parts[ti].locked.clone() else { return };
+    let (cx, cy) = (loc.at.x, loc.at.y);
+    let (hw, hh) = (problem.parts[ti].courtyard_w / 2.0, problem.parts[ti].courtyard_h / 2.0);
+    let idxs: Vec<usize> = members
+        .iter()
+        .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
+        .collect();
+    let n = idxs.len();
+    if n == 0 {
+        return;
+    }
+    let gap = 0.6; // mm clear of the IC courtyard edge
+    let per = n.div_ceil(4); // caps per edge
+    for (k, &i) in idxs.iter().enumerate() {
+        let (chw, chh) = (problem.parts[i].courtyard_w / 2.0, problem.parts[i].courtyard_h / 2.0);
+        let edge = k / per; // 0=top 1=right 2=bottom 3=left
+        let frac = ((k % per) as f64 + 0.5) / per as f64; // inset from the corners
+        let at = match edge {
+            0 => Point2 { x: cx - hw + frac * 2.0 * hw, y: cy - hh - gap - chh },
+            1 => Point2 { x: cx + hw + gap + chw, y: cy - hh + frac * 2.0 * hh },
+            2 => Point2 { x: cx - hw + frac * 2.0 * hw, y: cy + hh + gap + chh },
+            _ => Point2 { x: cx - hw - gap - chw, y: cy - hh + frac * 2.0 * hh },
+        };
+        problem.parts[i].locked = Some(LockedAt { at, rotation: 0 });
     }
 }
 
@@ -1806,6 +1851,7 @@ mod tests {
                 region: Some(region.clone()),
                 edge: None,
                 grid: false,
+                surround: None,
             }],
             ..Default::default()
         };
@@ -1868,6 +1914,7 @@ mod tests {
                 region: None,
                 edge: Some(Edge::W),
                 grid: false,
+                surround: None,
             }],
             ..Default::default()
         };
