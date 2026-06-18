@@ -182,7 +182,27 @@ impl Footprint {
             .unwrap_or_default()
             .to_string();
 
-        let pads: Vec<FootprintPad> = ast.pads.iter().map(pad_detail).collect();
+        let mut pads: Vec<FootprintPad> = ast.pads.iter().map(pad_detail).collect();
+        // kiutils 0.3 exposes only a COUNT of a custom pad's primitives, not their
+        // geometry — so a custom pad (e.g. an FFC connector's polygon mounting tab)
+        // would be modelled by its tiny base anchor, under-sizing the real copper.
+        // The placer/router/outline would then seat parts too close or crop the
+        // board outline inside the actual pad (a copper_edge_clearance fault KiCAD
+        // catches). Re-parse each custom pad's primitive bounding box from the raw
+        // source and grow the pad to it. (Same kiutils-drops-geometry class as the
+        // fp_arc/fp_circle courtyard fixes.)
+        if pads.iter().any(|p| p.shape == "custom") {
+            if let Ok(raw) = std::fs::read_to_string(path) {
+                let bboxes = custom_pad_bboxes(&raw);
+                let mut bi = 0;
+                for pad in pads.iter_mut().filter(|p| p.shape == "custom") {
+                    if let Some(&(hx, hy)) = bboxes.get(bi) {
+                        pad.size = [pad.size[0].max(2.0 * hx), pad.size[1].max(2.0 * hy)];
+                    }
+                    bi += 1;
+                }
+            }
+        }
         let (courtyard, courtyard_source) = courtyard_bbox(ast, &pads);
         let bbox = overall_bbox(ast, &pads).unwrap_or_else(BBox::zero);
 
@@ -200,6 +220,61 @@ impl Footprint {
     pub fn pad_count(&self) -> usize {
         self.pads.len()
     }
+}
+
+/// Per custom pad (in file order), the half-extents `(hx, hy)` of its primitive
+/// polygon, parsed from the raw `.kicad_mod` source (kiutils 0.3 drops these).
+/// Primitive points are relative to the pad origin, so the centred-rect model's
+/// half-extent on each axis is the max absolute coordinate. Covers `(xy …)`
+/// points (gr_poly / gr_line) — the shape FFC/FPC and similar custom pads use.
+pub(crate) fn custom_pad_bboxes(raw: &str) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    let mut search = 0;
+    while let Some(rel) = raw[search..].find("(pad ") {
+        let start = search + rel;
+        let Some(end) = matching_paren(raw, start) else { break };
+        let block = &raw[start..end];
+        search = end;
+        if !block.contains(" custom") {
+            continue;
+        }
+        let (mut hx, mut hy) = (0.0_f64, 0.0_f64);
+        let mut p = 0;
+        while let Some(r) = block[p..].find("(xy ") {
+            let s = p + r + "(xy ".len();
+            let mut it = block[s..].split_whitespace();
+            if let (Some(xs), Some(ys)) = (it.next(), it.next()) {
+                if let (Ok(x), Ok(y)) =
+                    (xs.parse::<f64>(), ys.trim_end_matches(')').parse::<f64>())
+                {
+                    hx = hx.max(x.abs());
+                    hy = hy.max(y.abs());
+                }
+            }
+            p = s;
+        }
+        out.push((hx, hy));
+    }
+    out
+}
+
+/// Byte index just past the `)` that closes the `(` at `open`.
+pub(crate) fn matching_paren(s: &str, open: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut depth = 0i32;
+    for i in open..b.len() {
+        match b[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Translate one [`kiutils_kicad::FpPad`] into a [`FootprintPad`], defaulting

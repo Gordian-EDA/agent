@@ -76,7 +76,14 @@ pub fn read_problem(path: &Path) -> io::Result<BoardProblem> {
 
     let net_codes = net_codes(ast);
     let connections = connections(ast, &layer_names);
-    let obstacles = obstacles(ast, &layer_names);
+    // kiutils 0.3 drops custom-pad primitive geometry, so a custom pad would be
+    // modelled by its tiny base anchor (under-sizing real copper → the placer /
+    // outline crop seats it too close to the edge, a copper_edge_clearance fault).
+    // Re-parse each custom pad's primitive bbox from the raw source so its obstacle
+    // reflects the true copper. (Same fix as footlib::Footprint::load.)
+    let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let custom_bboxes = crate::footlib::custom_pad_bboxes(&raw);
+    let obstacles = obstacles(ast, &layer_names, &custom_bboxes);
     let bounds = board_bounds(ast);
 
     let problem = RouteProblem {
@@ -248,14 +255,24 @@ fn rotated_aabb_half(w: f64, h: f64, deg: f64) -> (f64, f64) {
 
 // ── obstacles ────────────────────────────────────────────────────────────────
 
-fn obstacles(ast: &PcbAst, layer_names: &[String]) -> Vec<Obstacle> {
+fn obstacles(ast: &PcbAst, layer_names: &[String], custom_bboxes: &[(f64, f64)]) -> Vec<Obstacle> {
     let mut out = Vec::new();
 
     // Every pad becomes a rect obstacle on the copper layers it occupies,
-    // tagged with its net name (empty for a no-net pad).
+    // tagged with its net name (empty for a no-net pad). A custom pad is grown to
+    // its primitive bbox (kiutils gives only the base anchor) — `custom_bboxes`
+    // lists those half-extents in pad order.
+    let mut ci = 0;
     for fp in &ast.footprints {
         for pad in &fp.pads {
-            out.push(pad_obstacle(fp, pad, layer_names));
+            let custom_half = if pad.shape.as_deref() == Some("custom") {
+                let b = custom_bboxes.get(ci).copied();
+                ci += 1;
+                b
+            } else {
+                None
+            };
+            out.push(pad_obstacle(fp, pad, layer_names, custom_half));
         }
     }
 
@@ -324,9 +341,19 @@ fn obstacles(ast: &PcbAst, layer_names: &[String]) -> Vec<Obstacle> {
 }
 
 /// A single pad as a rect obstacle (rotated-rect AABB, v1 conservatism).
-fn pad_obstacle(fp: &PcbFootprint, pad: &PcbPad, layer_names: &[String]) -> Obstacle {
+fn pad_obstacle(
+    fp: &PcbFootprint,
+    pad: &PcbPad,
+    layer_names: &[String],
+    custom_half: Option<(f64, f64)>,
+) -> Obstacle {
     let center = pad_center(fp, pad);
-    let [w, h] = pad.size.unwrap_or([0.0, 0.0]);
+    let [mut w, mut h] = pad.size.unwrap_or([0.0, 0.0]);
+    // Grow a custom pad to its primitive bbox (the base anchor under-sizes it).
+    if let Some((hx, hy)) = custom_half {
+        w = w.max(2.0 * hx);
+        h = h.max(2.0 * hy);
+    }
     // The pad's stored rotation is its total rotation in board space.
     let rot = pad.rotation.unwrap_or_else(|| fp.rotation.unwrap_or(0.0));
     let (hw, hh) = rotated_aabb_half(w, h, rot);
