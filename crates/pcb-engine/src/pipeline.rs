@@ -39,7 +39,7 @@
 use crate::crossing::assign_crossings;
 use crate::detail::{self, CellRoute, CellRouteResult};
 use crate::pathing::{global_route, GlobalRouteResult};
-use crate::problem::{FailedNet, Point2, RouteProblem, RouteSolution, Trace, Via};
+use crate::problem::{FailedNet, LayerRef, Point2, RouteProblem, RouteSolution, Trace, Via};
 use crate::router;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -192,7 +192,7 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
         // Tidy orthogonal naive wins unless it detours > the tolerance longer.
         nwl <= dwl * NAIVE_DETOUR_TOLERANCE
     };
-    if use_naive {
+    let mut result = if use_naive {
         RouteResult {
             solution: naive.solution,
             failed: naive.failed,
@@ -200,7 +200,28 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
         }
     } else {
         detailed
-    }
+    };
+    drop_redundant_thruhole_vias(problem, &mut result.solution);
+    result
+}
+
+/// Drop a via that sits inside a SAME-NET through-hole pad: the pad's barrel
+/// already spans every copper layer, so a via on it is a redundant layer change —
+/// and its drill collides with the pad's (a KiCAD `hole_to_hole` defect). The
+/// trace stays connected THROUGH the pad (both trace ends land inside it, and the
+/// pad bridges the layers). A pad is through-hole when its obstacle reaches both
+/// the top and bottom copper layers.
+fn drop_redundant_thruhole_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
+    let (top, bottom) = (LayerRef::top(), LayerRef::bottom());
+    solution.vias.retain(|v| {
+        !problem.obstacles.iter().any(|ob| {
+            ob.connected_to.contains(&v.connection)
+                && ob.layers.contains(&top)
+                && ob.layers.contains(&bottom)
+                && (v.at.x - ob.center.x).abs() <= ob.width / 2.0
+                && (v.at.y - ob.center.y).abs() <= ob.height / 2.0
+        })
+    });
 }
 
 /// At equal faults, keep the tidy orthogonal naive route unless its copper is more
