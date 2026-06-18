@@ -249,12 +249,13 @@ fn transform_node(
         // drop any the source carried so they are not duplicated. (`.kicad_mod`
         // has none, but be robust to sources that do.)
         "at" | "uuid" | "layer" => Ok(None),
-        // Silkscreen graphics are dropped (slice-4 silk_over_copper pitfall).
-        "fp_line" | "fp_rect" | "fp_circle" | "fp_arc" | "fp_poly" | "fp_text" | "fp_curve"
-            if on_silk(node) =>
-        {
-            Ok(None)
-        }
+        // Silkscreen *text* is dropped — the only library silk text is a value/
+        // ref placeholder that would duplicate the reference designator (which we
+        // keep, see `property` below) and clutter the board. Silk *graphics* (the
+        // component outline lines/arcs) are KEPT: they are what makes the render
+        // read as a real board, they sit outside the part's own pads, and any
+        // silk-over-neighbour-copper is a tolerated DRC warning, not an error.
+        "fp_text" if on_silk(node) => Ok(None),
         // Library cruft that does not belong on a board footprint instance.
         "version" | "generator" | "generator_version" | "embedded_fonts" | "model"
         | "tags" | "descr" => Ok(None),
@@ -266,8 +267,9 @@ fn transform_node(
         // appears in library footprints saved by KiCAD ≥ 9.0.3; none of the
         // 9.0.2-era system libraries emit it.
         "duplicate_pad_numbers_are_jumpers" => Ok(None),
-        // The Reference property: set its value to the real designator and put it
-        // on F.Fab. The Value property and others are kept but forced to F.Fab.
+        // Reference property: set the designator, leave it on its library layer
+        // (F.SilkS, positioned above the part). Value property: hide it so the
+        // long footprint-name string never clutters the board render.
         "property" => Ok(Some(transform_property(node, &part.reference))),
         // Pads: inject the (net …) binding for bound pads, and bump pad rotation
         // by the footprint angle when the footprint is rotated.
@@ -281,18 +283,23 @@ fn transform_node(
 /// Rewrite a `(property …)` node: when it is the `Reference`, replace the value
 /// with `reference`; force the property's `(layer …)` to `F.Fab` either way.
 fn transform_property(node: &str, reference: &str) -> String {
-    let mut out = node.to_owned();
-    // `(property "Reference" "REF**"` → `(property "Reference" "<ref>"`.
-    if let Some(rest) = out.strip_prefix("(property \"Reference\" \"")
+    // Reference: set the designator and keep it on its library layer (F.SilkS,
+    // positioned above the part) — that is where it belongs on a fabricated
+    // board and what a professional render shows.
+    if let Some(rest) = node.strip_prefix("(property \"Reference\" \"")
         && let Some(close) = rest.find('"')
     {
-        out = format!(
-            "(property \"Reference\" \"{reference}\"{}",
-            &rest[close + 1..]
-        );
+        return format!("(property \"Reference\" \"{reference}\"{}", &rest[close + 1..]);
     }
-    // Force the property onto F.Fab (libraries put Reference on F.SilkS).
-    out.replace("(layer \"F.SilkS\")", "(layer \"F.Fab\")")
+    // Value: keep the property (KiCAD expects it to exist) but hide it. Its text
+    // is the full footprint library name, which on a small board dominates the
+    // render and overlaps neighbouring parts; a hidden value is conventional.
+    if node.starts_with("(property \"Value\"") && !node.contains("(hide yes)") {
+        if let Some(hidden) = inject_before_close(node, "(hide yes)") {
+            return hidden;
+        }
+    }
+    node.to_owned()
 }
 
 /// Inject `(net N "name")` into a pad node for a bound pad, and add the
@@ -596,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn synthesize_two_part_board_has_no_silk() {
+    fn synthesize_two_part_board_is_render_ready() {
         let parts = vec![
             SynthPart {
                 reference: "R1".into(),
@@ -616,14 +623,18 @@ mod tests {
         let bounds = Bounds { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
         let board = synthesize_board(&parts, &bounds).unwrap();
 
-        // No silkscreen *graphics* leaked through. (The layer table still
-        // declares F.SilkS/B.SilkS — that is the layer definition, not a graphic;
-        // we assert no graphic node sits on a silk layer.)
+        // Silkscreen survives so the board renders like a real PCB: the layer
+        // table declares F.SilkS and the footprint outline graphics sit on it.
         assert!(
-            !board.contains("(layer \"F.SilkS\")"),
-            "silk graphics must be dropped:\n{board}"
+            board.contains("(layer \"F.SilkS\")"),
+            "silk graphics (component outline + reference) must be kept:\n{board}"
         );
-        assert!(!board.contains("(layer \"B.SilkS\")"));
+        // The reference designator is kept on silk; the long Value name is hidden.
+        assert!(board.contains("(property \"Reference\" \"R1\""), "ref on board: {board}");
+        assert!(
+            board.contains("(property \"Value\"") && board.contains("(hide yes)"),
+            "Value property must be present but hidden:\n{board}"
+        );
         // Reference value was set; REF** placeholder is gone.
         assert!(board.contains("\"R1\""));
         assert!(board.contains("\"U1\""));
