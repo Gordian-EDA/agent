@@ -164,16 +164,14 @@ pub fn route_detailed(problem: &RouteProblem) -> RouteResult {
 pub fn route_auto(problem: &RouteProblem) -> RouteResult {
     let mut detailed = route_detailed(problem);
     reconcile_connectivity(problem, &mut detailed.solution, &mut detailed.failed);
-    // A clean detailed result (every net routed AND zero geometry violations) is
-    // ideal — return immediately.
-    if detailed.failed.is_empty() && geometry_violations(problem, &detailed.solution) == 0 {
-        return detailed;
-    }
-    // Two slice-1 variants — the conservative via-clearance scan and the lenient
-    // original — are both connectivity-honest (they reconcile internally). A board
-    // with room routes more cleanly lenient (it does not refuse DRC-clean vias);
-    // a congested board needs the strict scan to avoid via-to-copper clearance
-    // faults. Let the lint pick: keep whichever naive variant scores cleaner.
+
+    // Always also run the slice-1 router and keep the BETTER of the two — judged
+    // not only on completeness (fewest faults) but on NEATNESS. On a simple board
+    // the detailed router can route everything yet wander with more vias than the
+    // direct grid router needs; on a congested board the detailed router's
+    // capacity-aware routing wins on faults. The quality key
+    // `(faults, via_count, wirelength)` lets each board pick the cleaner result —
+    // faults stay primary (never trade routability), then fewer vias, then shorter.
     let strict = router::route(problem);
     let lenient = router::route_lenient(problem);
     let naive = if score(problem, &lenient) < score(problem, &strict) {
@@ -181,9 +179,11 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
     } else {
         strict
     };
-    // Keep the naive variant unless the detailed router is strictly cleaner; the
-    // naive router wins exact ties as the battle-tested fallback.
-    if score(problem, &naive) <= key(detailed.failed.len(), geometry_violations(problem, &detailed.solution)) {
+    let nq = quality(problem, &naive.solution, naive.failed.len());
+    let dq = quality(problem, &detailed.solution, detailed.failed.len());
+    // Naive wins exact ties (the battle-tested path) and is preferred when it is
+    // no worse on faults and no busier (fewer/equal vias + shorter/equal copper).
+    if nq <= dq {
         RouteResult {
             solution: naive.solution,
             failed: naive.failed,
@@ -194,12 +194,20 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
     }
 }
 
-/// A routed candidate's quality key: `(total DRC faults, geometry faults)`, lower
-/// is better. `total = unrouted nets + geometry violations` (clearance / width /
-/// via / out-of-bounds; connectivity lints are excluded as they track `failed`).
-/// The geometry tiebreaker means that, at equal total, a candidate with an HONEST
-/// unrouted net beats one that routes everything but carries a silent geometry
-/// DRC violation — the engine never ships copper that looks done but fails DRC.
+/// A routed candidate's quality key, lower is better:
+/// `(total DRC faults, via count, wirelength×100)`.
+/// - **faults** (`unrouted + geometry violations`) is PRIMARY — never trade
+///   routability/DRC-cleanliness for looks; an honest unrouted net beats a silent
+///   geometry violation (geometry folded into the count).
+/// - **via count** then **wirelength** are the neatness tiebreakers, so when two
+///   routers both route a board cleanly the engine keeps the tidier copper.
+fn quality(problem: &RouteProblem, solution: &RouteSolution, failed: usize) -> (usize, usize, u64) {
+    let geom = geometry_violations(problem, solution);
+    let wl = metrics(solution).wirelength;
+    (failed + geom, solution.vias.len(), (wl * 100.0) as u64)
+}
+
+/// `(total DRC faults, geometry faults)` for choosing between slice-1 variants.
 fn key(failed: usize, geom: usize) -> (usize, usize) {
     (failed + geom, geom)
 }
@@ -334,10 +342,16 @@ fn stitch(
             {
                 continue;
             }
+            // A via connects a layer if a same-net trace TOUCHES it there — and
+            // that touch can be at a trace endpoint OR a point the trace passes
+            // straight through (a collinear interior point `simplify` removed). So
+            // test distance to each trace SEGMENT, not just to its vertices, or a
+            // genuinely-connecting via is mistaken for dangling and dropped.
+            const TOUCH: f64 = 0.02;
             let mut layers: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
             for t in &traces {
                 if t.connection == connection
-                    && t.path.iter().any(|p| same_point(p, &at))
+                    && t.path.windows(2).any(|w| seg_point_dist(&w[0], &w[1], &at) < TOUCH)
                 {
                     layers.insert(t.layer.0.as_str());
                 }
@@ -494,6 +508,19 @@ fn same_point(a: &Point2, b: &Point2) -> bool {
     (a.x - b.x).abs() < JOIN_EPS && (a.y - b.y).abs() < JOIN_EPS
 }
 
+/// Distance from point `p` to segment `a`–`b` (mm). Used to test whether a via
+/// lies on a trace (endpoint or pass-through) when filtering dangling vias.
+fn seg_point_dist(a: &Point2, b: &Point2, p: &Point2) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    if len2 < 1e-12 {
+        return ((p.x - a.x).powi(2) + (p.y - a.y).powi(2)).sqrt();
+    }
+    let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0);
+    let (cx, cy) = (a.x + t * dx, a.y + t * dy);
+    ((p.x - cx).powi(2) + (p.y - cy).powi(2)).sqrt()
+}
+
 /// Quantise a point to an integer key so byte-exact-equal points collide in a
 /// `BTreeMap`. The detailed stage emits identical bytes for shared endpoints, so
 /// a fine quantum (1e9 ⇒ ~1 nm) keeps distinct points distinct while collapsing
@@ -607,13 +634,14 @@ mod tests {
     }
 
     #[test]
-    fn quad_auto_returns_detailed_and_is_clean() {
-        // With route_detailed now clean on quad, route_auto returns the Detailed
-        // result (no fallback) — the provenance flips from Naive (pre-3.5) to
-        // Detailed.
+    fn quad_auto_is_clean() {
+        // route_auto now picks the NEATER of detailed/naive (quality key: faults,
+        // then vias, then wirelength), so for quad it keeps the tidier naive
+        // result — equally clean, fewer vias. The invariant guarded here is that
+        // route_auto's chosen result is fully routed and lints CLEAN, whichever
+        // router wins (the provenance is a quality outcome, not a fixed promise).
         let p = load("quad.json");
         let r = route_auto(&p);
-        assert_eq!(r.router, RouterKind::Detailed, "quad: the detailed router now wins");
         assert!(r.failed.is_empty(), "route_auto routes quad cleanly: {:?}", r.failed);
         let vs = lint(&p, &r.solution);
         assert!(vs.is_empty(), "quad route_auto solution must lint CLEAN, got {vs:?}");
