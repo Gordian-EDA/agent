@@ -439,10 +439,16 @@ pub fn create_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
             Some(l) => {
                 let at = l.get("at").unwrap_or(l);
                 match (at.get("x").and_then(Value::as_f64), at.get("y").and_then(Value::as_f64)) {
-                    (Some(x), Some(y)) => Some(LockedAt {
-                        at: Point2 { x, y },
-                        rotation: l.get("rotation").and_then(Value::as_i64).unwrap_or(0) as i32,
-                    }),
+                    (Some(x), Some(y)) => {
+                        let raw = l.get("rotation").and_then(Value::as_i64).unwrap_or(0) as i32;
+                        let rotation = match axis_aligned_rotation(raw) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                return Ok(json!({ "error": format!("part {reference}: {e}") }));
+                            }
+                        };
+                        Some(LockedAt { at: Point2 { x, y }, rotation })
+                    }
                     _ => {
                         return Ok(json!({
                             "error": format!("part {reference}: `locked` needs numeric x and y"),
@@ -649,6 +655,23 @@ fn is_connector(footprint: &str, reference: &str) -> bool {
 /// (which also matches mounting holes) so these corner-seek rather than edge-seek.
 fn is_mounting_hole(footprint: &str) -> bool {
     footprint.to_ascii_lowercase().contains("mountinghole")
+}
+
+/// Validate a part rotation is axis-aligned (0/90/180/270), normalizing to
+/// `[0,360)`. The placer + synth support only these; rejecting others HERE (at the
+/// agent surface) fails fast with a clear message, instead of routing to wrong pad
+/// positions (`rotate_offset` is identity for non-axis angles) and failing late at
+/// export.
+fn axis_aligned_rotation(rot: i32) -> std::result::Result<i32, String> {
+    let r = rot.rem_euclid(360);
+    if matches!(r, 0 | 90 | 180 | 270) {
+        Ok(r)
+    } else {
+        Err(format!(
+            "rotation {rot}° is not supported — use 0, 90, 180, or 270 \
+             (the engine places axis-aligned parts only)"
+        ))
+    }
 }
 
 pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
@@ -1052,11 +1075,12 @@ pub fn move_part(input: Value, ctx: &ToolCtx) -> Result<Value> {
         Some(v) => v,
         None => return Ok(json!({ "error": "missing or non-numeric `y`" })),
     };
-    let rotation = input
-        .get("rotation")
-        .and_then(Value::as_i64)
-        .map(|r| r as i32)
-        .unwrap_or(0);
+    let rotation = match axis_aligned_rotation(
+        input.get("rotation").and_then(Value::as_i64).map(|r| r as i32).unwrap_or(0),
+    ) {
+        Ok(r) => r,
+        Err(e) => return Ok(json!({ "error": e })),
+    };
 
     // A part origin must sit within the board (an out-of-bounds nudge is a model
     // mistake; the engine would clamp it silently, hiding the error). We check

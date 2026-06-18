@@ -800,6 +800,47 @@ fn place_board_failure_suggests_a_larger_bounds() {
 }
 
 #[test]
+fn locked_part_rejects_non_axis_aligned_rotation() {
+    // A 45° lock must be rejected at the surface (the placer/synth are axis-aligned
+    // only) with a clear message — not silently routed to wrong pads then failed at
+    // export. 0/90/180/270 are accepted.
+    let (ctx, _g) = fixture_ctx();
+    let tools = Tools::new();
+    let bad = tools.run(
+        "create_board",
+        serde_json::json!({
+            "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
+            "parts": [
+                { "reference": "U1", "footprint": "Fixtures:R_0603_1608Metric",
+                  "pad_nets": { "1": "A", "2": "B" },
+                  "locked": { "x": 15.0, "y": 10.0, "rotation": 45 } }
+            ]
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert!(
+        bad["error"].as_str().is_some_and(|e| e.contains("not supported")),
+        "45° lock must be rejected: {bad}"
+    );
+    let ok = tools.run(
+        "create_board",
+        serde_json::json!({
+            "overwrite": true,
+            "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
+            "parts": [
+                { "reference": "U1", "footprint": "Fixtures:R_0603_1608Metric",
+                  "pad_nets": { "1": "A", "2": "B" },
+                  "locked": { "x": 15.0, "y": 10.0, "rotation": 90 } }
+            ]
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(ok["ok"], serde_json::json!(true), "90° lock must be accepted: {ok}");
+}
+
+#[test]
 fn full_flow_create_place_route_is_clean() {
     let (ctx, _g, tools) = placed_board_ctx();
 
