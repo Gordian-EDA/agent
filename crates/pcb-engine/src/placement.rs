@@ -439,7 +439,8 @@ pub fn derive_nets(problem: &PlaceProblem) -> Vec<LogicalNet> {
 /// should hug that IC/regulator. The smaller-index qualifying anchor wins
 /// (deterministic). A part wired to two unrelated nets (e.g. a divider resistor)
 /// finds no single anchor with both nets, so this fires only for real bypass caps.
-fn decoupling_pairs(problem: &PlaceProblem) -> Vec<(usize, usize)> {
+/// Public so the agent surface can suggest a `surround` hint for a decoupling-heavy IC.
+pub fn decoupling_pairs(problem: &PlaceProblem) -> Vec<(usize, usize)> {
     let mut pairs = Vec::new();
     for (si, small) in problem.parts.iter().enumerate() {
         if small.pads.len() != 2 {

@@ -733,6 +733,37 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
 
     let positions: Vec<Value> = result.placements.iter().map(placement_json).collect();
 
+    // Discoverability: if a legal placement has a decoupling-heavy IC whose caps the
+    // annealer scattered (>=4 bypass caps, none locked/pinned), suggest the `surround`
+    // hint so the agent can ring them into a tidy decoupling cluster.
+    let mut hint_suggestions: Vec<Value> = Vec::new();
+    if result.legal {
+        let pairs = pcb_engine::placement::decoupling_pairs(&problem);
+        let mut by_ic: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (cap, ic) in pairs {
+            by_ic.entry(ic).or_default().push(cap);
+        }
+        for (ic, caps) in by_ic {
+            if caps.len() >= 4 && caps.iter().all(|&c| problem.parts[c].locked.is_none()) {
+                let ic_ref = problem.parts[ic].reference.clone();
+                let cap_refs: Vec<String> =
+                    caps.iter().map(|&c| problem.parts[c].reference.clone()).collect();
+                hint_suggestions.push(json!({
+                    "type": "surround",
+                    "target": ic_ref,
+                    "members": cap_refs,
+                    "note": format!(
+                        "{ic_ref} has {} decoupling caps the placer scattered. For a tidy \
+                         ring: move_part to lock {ic_ref} at a position, then set_placement_hints \
+                         with a group {{\"members\":[<the caps>],\"surround\":\"{ic_ref}\"}}, then \
+                         place_board again.",
+                        caps.len()
+                    ),
+                }));
+            }
+        }
+    }
+
     // On a failed placement, give the agent a CONCRETE minimum board size so it can
     // retry deterministically instead of guessing. Estimate from the parts' total
     // courtyard area (with packing + routing overhead) and the largest single part.
@@ -782,6 +813,9 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     });
     if let (Value::Object(o), Value::Object(e)) = (&mut out, extra) {
         o.extend(e);
+    }
+    if !hint_suggestions.is_empty() {
+        out["hint_suggestions"] = Value::Array(hint_suggestions);
     }
     Ok(out)
 }
