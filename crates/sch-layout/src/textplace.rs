@@ -49,6 +49,11 @@ pub(crate) struct Movable {
 /// decides the degradation (lint-flagged for fields/labels, hidden for
 /// optional text like repeated power-rail names).
 pub(crate) fn choose(obstacles: &[Obstacle], movables: &[Movable]) -> Vec<(usize, bool)> {
+    // Two text boxes that merely ABUT (share an edge, 0 gap) pass the strict-inequality
+    // overlap test yet render as one run ("10kGND", "3V3GND"). Keep a small gap between
+    // movable text boxes by testing a slightly GROWN candidate against already-placed text.
+    const TEXT_GAP: f64 = 0.6;
+    let grow = |b: &BBox| -> BBox { [b[0] - TEXT_GAP, b[1] - TEXT_GAP, b[2] + TEXT_GAP, b[3] + TEXT_GAP] };
     let mut placed: Vec<BBox> = Vec::new();
     let mut out = Vec::with_capacity(movables.len());
     for m in movables {
@@ -56,7 +61,7 @@ pub(crate) fn choose(obstacles: &[Obstacle], movables: &[Movable]) -> Vec<(usize
             obstacles.iter().all(|o| match &o.kind {
                 ObKind::OwnExempt(r) if Some(r) == m.owner.as_ref() => true,
                 _ => !boxes_overlap(b, &o.bbox),
-            }) && placed.iter().all(|p| !boxes_overlap(b, p))
+            }) && placed.iter().all(|p| !boxes_overlap(&grow(b), p))
         };
         let pick = m.candidates.iter().position(|c| free(c));
         let idx = pick.unwrap_or(0);
