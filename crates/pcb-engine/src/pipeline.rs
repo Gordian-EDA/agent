@@ -11,10 +11,14 @@
 //! [`route_detailed`] folds every stage's failures into one [`RouteResult`] with
 //! provenance in the reason string (`"global: …"`, `"assign: …"`, `"cell N: …"`),
 //! and stitches only the *fully successful* nets into copper. [`route_auto`] runs
-//! the detailed pipeline and, if anything failed, also runs the always-correct
-//! slice-1 router ([`crate::router::route`]) and returns whichever has fewer
-//! failed nets (naive wins ties — it is the battle-tested path). A [`RouterKind`]
-//! tag records which engine produced the returned result.
+//! BOTH the detailed pipeline and the always-correct slice-1 router
+//! ([`crate::router::route`]) and keeps the better by a quality key
+//! (`faults, via_count, wirelength`): faults are primary (never trade
+//! routability), then the tidier copper wins — so the detailed router's
+//! capacity-aware routing is kept where it reduces faults, and the direct grid
+//! router is kept where it is neater on a board both can route. The naive router
+//! wins exact ties as the battle-tested path. A [`RouterKind`] tag records which
+//! engine produced the returned result.
 //!
 //! ## Stitching (the connectivity contract)
 //!
