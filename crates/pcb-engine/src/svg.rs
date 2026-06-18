@@ -598,10 +598,11 @@ pub fn render_placement(
 /// Rotate a pad offset by a quadrant rotation (degrees, y-down) — the same
 /// convention [`crate::placement`] uses for pad world positions.
 fn rotate_offset(off: &Point2, rot: i32) -> Point2 {
+    // KiCAD footprint-rotation convention (matches placement::rotate_offset).
     match rot.rem_euclid(360) {
-        90 => Point2 { x: -off.y, y: off.x },
+        90 => Point2 { x: off.y, y: -off.x },
         180 => Point2 { x: -off.x, y: -off.y },
-        270 => Point2 { x: off.y, y: -off.x },
+        270 => Point2 { x: -off.y, y: off.x },
         _ => Point2 { x: off.x, y: off.y },
     }
 }

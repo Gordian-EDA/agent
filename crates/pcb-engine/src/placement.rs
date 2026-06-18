@@ -921,10 +921,15 @@ fn rotated_courtyard_half(part: &Part, rot: i32) -> (f64, f64) {
 
 /// A pad offset rotated by a quadrant (degrees), y-down.
 fn rotate_offset(off: &Point2, rot: i32) -> Point2 {
+    // KiCAD footprint-rotation convention (y-down board coords): a pad's local
+    // offset under a footprint rotated by `rot` lands at these world offsets.
+    // Verified against kicad-cli: a 270° footprint maps local (x,y) → (-y, x).
+    // (The 90 and 270 cases were previously swapped, which placed the engine's
+    // routing targets on the WRONG physical pad for any rotated part → shorts.)
     match rot.rem_euclid(360) {
-        90 => Point2 { x: -off.y, y: off.x },
+        90 => Point2 { x: off.y, y: -off.x },
         180 => Point2 { x: -off.x, y: -off.y },
-        270 => Point2 { x: off.y, y: -off.x },
+        270 => Point2 { x: -off.y, y: off.x },
         _ => off.clone(),
     }
 }
@@ -1602,6 +1607,20 @@ mod tests {
     }
 
     // ── empty problem is trivially legal ────────────────────────────────────
+
+    #[test]
+    fn rotate_offset_matches_kicad_convention() {
+        // Verified against kicad-cli: a SOIC-8 pad at local (-2.475, 1.905) under a
+        // footprint rotated 270° lands at world offset (-1.905, -2.475). The two
+        // 90/270 directions must not be swapped, or routing targets the wrong pad.
+        let p = rotate_offset(&Point2 { x: -2.475, y: 1.905 }, 270);
+        assert!((p.x - -1.905).abs() < 1e-9 && (p.y - -2.475).abs() < 1e-9, "{p:?}");
+        // 90 is the inverse; 180 negates; 0 is identity.
+        let q = rotate_offset(&Point2 { x: -2.475, y: 1.905 }, 90);
+        assert!((q.x - 1.905).abs() < 1e-9 && (q.y - 2.475).abs() < 1e-9, "{q:?}");
+        let r = rotate_offset(&Point2 { x: 1.0, y: 2.0 }, 180);
+        assert!((r.x - -1.0).abs() < 1e-9 && (r.y - -2.0).abs() < 1e-9, "{r:?}");
+    }
 
     #[test]
     fn empty_problem_is_legal() {

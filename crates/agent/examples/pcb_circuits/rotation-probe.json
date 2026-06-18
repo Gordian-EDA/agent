@@ -1,0 +1,18 @@
+{
+  "description": "PROBE: parts locked at 90/180/270 rotations to test rotated pad+courtyard geometry fidelity (SOT-23, SOIC-8, headers, passives)",
+  "bounds": { "min_x": 0.0, "max_x": 60.0, "min_y": 0.0, "max_y": 50.0 },
+  "parts": [
+    { "reference": "U1", "footprint": "Package_TO_SOT_SMD:SOT-23", "pad_nets": { "1": "VIN", "2": "GND", "3": "VOUT" },
+      "locked": { "x": 30, "y": 25, "rotation": 90 } },
+    { "reference": "U2", "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "pad_nets": { "1": "VOUT", "2": "A", "3": "B", "4": "GND", "5": "C", "6": "D", "7": "E", "8": "VIN" },
+      "locked": { "x": 45, "y": 25, "rotation": 270 } },
+    { "reference": "C1", "footprint": "Capacitor_SMD:C_0805_2012Metric", "pad_nets": { "1": "VIN", "2": "GND" },
+      "locked": { "x": 30, "y": 12, "rotation": 180 } },
+    { "reference": "R1", "footprint": "Resistor_SMD:R_0805_2012Metric", "pad_nets": { "1": "VOUT", "2": "A" },
+      "locked": { "x": 45, "y": 12, "rotation": 90 } },
+    { "reference": "J1", "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
+      "pad_nets": { "1": "VIN", "2": "GND", "3": "VOUT", "4": "A" },
+      "locked": { "x": 10, "y": 25, "rotation": 90 } }
+  ]
+}

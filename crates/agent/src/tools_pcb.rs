@@ -392,7 +392,26 @@ pub fn create_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
                 ),
             }));
         }
-        parts.push(DraftPart { reference, footprint, pad_nets, locked: None });
+        // Optional lock: pin a part at a position/rotation (a mechanically-fixed
+        // connector, a rotated part). Accepts {x, y, rotation?} or {at:{x,y}, rotation?}.
+        let locked = match pj.get("locked") {
+            None | Some(Value::Null) => None,
+            Some(l) => {
+                let at = l.get("at").unwrap_or(l);
+                match (at.get("x").and_then(Value::as_f64), at.get("y").and_then(Value::as_f64)) {
+                    (Some(x), Some(y)) => Some(LockedAt {
+                        at: Point2 { x, y },
+                        rotation: l.get("rotation").and_then(Value::as_i64).unwrap_or(0) as i32,
+                    }),
+                    _ => {
+                        return Ok(json!({
+                            "error": format!("part {reference}: `locked` needs numeric x and y"),
+                        }));
+                    }
+                }
+            }
+        };
+        parts.push(DraftPart { reference, footprint, pad_nets, locked });
     }
 
     // Validate references are unique (the engine sorts/dedups by reference).
