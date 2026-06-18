@@ -163,12 +163,23 @@ pub fn route_detailed(problem: &RouteProblem) -> RouteResult {
 /// [`RouteResult::router`] records which engine won.
 pub fn route_auto(problem: &RouteProblem) -> RouteResult {
     let detailed = route_detailed(problem);
-    if detailed.failed.is_empty() {
+    // A clean detailed result (every net routed AND zero geometry violations) is
+    // ideal — return immediately.
+    if detailed.failed.is_empty() && geometry_violations(problem, &detailed.solution) == 0 {
         return detailed;
     }
     let naive = router::route(problem);
-    // Fewer failed nets wins; naive wins ties.
-    if naive.failed.len() <= detailed.failed.len() {
+    // Score each candidate by (failed nets, geometry DRC violations). Lower is
+    // better; the naive router wins exact ties as the battle-tested fallback.
+    // Counting violations — not just failed nets — is what stops `route_auto`
+    // from shipping a solution that routes every net but shorts two of them
+    // through a via barrel or violates clearance: an honest unrouted net must
+    // beat a silent short. (Connectivity lints are excluded from the violation
+    // count because they already correlate with `failed`; we count only the
+    // geometry faults — clearance / width / via / out-of-bounds.)
+    let detailed_score = (detailed.failed.len(), geometry_violations(problem, &detailed.solution));
+    let naive_score = (naive.failed.len(), geometry_violations(problem, &naive.solution));
+    if naive_score <= detailed_score {
         RouteResult {
             solution: naive.solution,
             failed: naive.failed,
@@ -177,6 +188,18 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
     } else {
         detailed
     }
+}
+
+/// Count the *geometry* DRC violations of a solution — clearance, trace width,
+/// via clearance, out-of-bounds, invalid layer — excluding the connectivity
+/// lints, which already correlate with the failed-net count. This is the
+/// tiebreaker [`route_auto`] uses so a fully-routed-but-violating solution never
+/// beats a DRC-clean one.
+fn geometry_violations(problem: &RouteProblem, solution: &RouteSolution) -> usize {
+    crate::lint::lint(problem, solution)
+        .iter()
+        .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
+        .count()
 }
 
 /// The outcome of a pipeline route: copper, failures, and which engine produced

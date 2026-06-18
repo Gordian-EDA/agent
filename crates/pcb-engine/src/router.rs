@@ -49,7 +49,12 @@ pub struct RouteResult {
     pub failed: Vec<FailedNet>,
 }
 
-/// Route `problem` with the default design constants.
+/// Route `problem` with the default design constants. The slice-1 router stays
+/// deliberately simple (the always-correct, battle-tested fallback). It may
+/// emit via-to-copper clearance violations on congested boards; the
+/// [`crate::pipeline::route_auto`] selector lints both engines and prefers the
+/// DRC-clean one (the detailed router, which models via-barrel clearance), so a
+/// naive via violation never ships when a clean detailed solution exists.
 pub fn route(problem: &RouteProblem) -> RouteResult {
     route_with(problem, DesignConstants::default())
 }
