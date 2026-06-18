@@ -169,29 +169,44 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
     if detailed.failed.is_empty() && geometry_violations(problem, &detailed.solution) == 0 {
         return detailed;
     }
-    // `router::route` is already connectivity-honest (it reconciles internally).
-    let naive = router::route(problem);
-    let naive_solution = naive.solution;
-    let naive_failed = naive.failed;
-    // Score each candidate by (failed nets, geometry DRC violations). Lower is
-    // better; the naive router wins exact ties as the battle-tested fallback.
-    // Counting violations — not just failed nets — is what stops `route_auto`
-    // from shipping a solution that routes every net but shorts two of them
-    // through a via barrel or violates clearance: an honest unrouted net must
-    // beat a silent short. (Connectivity lints are excluded from the violation
-    // count because they already correlate with `failed`; we count only the
-    // geometry faults — clearance / width / via / out-of-bounds.)
-    let detailed_score = (detailed.failed.len(), geometry_violations(problem, &detailed.solution));
-    let naive_score = (naive_failed.len(), geometry_violations(problem, &naive_solution));
-    if naive_score <= detailed_score {
+    // Two slice-1 variants — the conservative via-clearance scan and the lenient
+    // original — are both connectivity-honest (they reconcile internally). A board
+    // with room routes more cleanly lenient (it does not refuse DRC-clean vias);
+    // a congested board needs the strict scan to avoid via-to-copper clearance
+    // faults. Let the lint pick: keep whichever naive variant scores cleaner.
+    let strict = router::route(problem);
+    let lenient = router::route_lenient(problem);
+    let naive = if score(problem, &lenient) < score(problem, &strict) {
+        lenient
+    } else {
+        strict
+    };
+    // Keep the naive variant unless the detailed router is strictly cleaner; the
+    // naive router wins exact ties as the battle-tested fallback.
+    if score(problem, &naive) <= key(detailed.failed.len(), geometry_violations(problem, &detailed.solution)) {
         RouteResult {
-            solution: naive_solution,
-            failed: naive_failed,
+            solution: naive.solution,
+            failed: naive.failed,
             router: RouterKind::Naive,
         }
     } else {
         detailed
     }
+}
+
+/// A routed candidate's quality key: `(total DRC faults, geometry faults)`, lower
+/// is better. `total = unrouted nets + geometry violations` (clearance / width /
+/// via / out-of-bounds; connectivity lints are excluded as they track `failed`).
+/// The geometry tiebreaker means that, at equal total, a candidate with an HONEST
+/// unrouted net beats one that routes everything but carries a silent geometry
+/// DRC violation — the engine never ships copper that looks done but fails DRC.
+fn key(failed: usize, geom: usize) -> (usize, usize) {
+    (failed + geom, geom)
+}
+
+/// [`key`] for a slice-1 candidate.
+fn score(problem: &RouteProblem, r: &router::RouteResult) -> (usize, usize) {
+    key(r.failed.len(), geometry_violations(problem, &r.solution))
 }
 
 /// Make a routed result HONEST: the connectivity oracle is the authority on what

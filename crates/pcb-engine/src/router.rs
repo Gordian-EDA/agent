@@ -76,9 +76,26 @@ pub fn route(problem: &RouteProblem) -> RouteResult {
         ..AStarCosts::default()
     };
     let mut result = route_with(problem, DesignConstants { costs });
-    // The connectivity oracle is the authority on what actually connected — make
-    // the result honest: drop any net's copper the oracle finds unconnected or
-    // shorted and report it failed, so `route()`'s `failed` never undercounts.
+    reconcile(problem, &mut result);
+    result
+}
+
+/// The slice-1 router WITHOUT the via-barrel clearance scan (the original slice-1
+/// behaviour). On a board with room it routes more nets — including vias that are
+/// in fact DRC-clean — that the conservative scan would refuse. It may also drop a
+/// via too close to foreign copper, so it is NOT used alone: [`crate::pipeline::route_auto`]
+/// runs it alongside the strict [`route`] and the detailed router and keeps
+/// whichever the lint scores cleanest. The board picks the strictness it needs.
+pub fn route_lenient(problem: &RouteProblem) -> RouteResult {
+    let mut result = route_with(problem, DesignConstants::default());
+    reconcile(problem, &mut result);
+    result
+}
+
+/// Make a slice-1 result connectivity-honest: the oracle is the authority on what
+/// actually connected, so drop any net's copper it finds unconnected or shorted
+/// and report that net failed. `failed` then never undercounts.
+fn reconcile(problem: &RouteProblem, result: &mut RouteResult) {
     let broken = crate::lint::drop_unconnected_copper(problem, &mut result.solution);
     let known: std::collections::BTreeSet<&str> =
         result.failed.iter().map(|f| f.connection.as_str()).collect();
@@ -91,7 +108,6 @@ pub fn route(problem: &RouteProblem) -> RouteResult {
         })
         .collect();
     result.failed.extend(added);
-    result
 }
 
 /// Route `problem` with explicit design constants.
