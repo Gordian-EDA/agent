@@ -1,0 +1,110 @@
+{
+  "layerCount": 2,
+  "minTraceWidth": 0.25,
+  "bounds": {
+    "minX": 0.0,
+    "maxX": 60.0,
+    "minY": 0.0,
+    "maxY": 60.0
+  },
+  "connections": [
+    {
+      "name": "N0",
+      "pointsToConnect": [
+        { "x": 2.0, "y": 3.0, "layer": "top" },
+        { "x": 58.0, "y": 55.0, "layer": "top" }
+      ]
+    },
+    {
+      "name": "N1",
+      "pointsToConnect": [
+        { "x": 2.0, "y": 11.0, "layer": "top" },
+        { "x": 58.0, "y": 49.0, "layer": "top" }
+      ]
+    },
+    {
+      "name": "N2",
+      "pointsToConnect": [
+        { "x": 2.0, "y": 19.0, "layer": "top" },
+        { "x": 58.0, "y": 41.0, "layer": "top" }
+      ]
+    },
+    {
+      "name": "N3",
+      "pointsToConnect": [
+        { "x": 2.0, "y": 27.0, "layer": "top" },
+        { "x": 58.0, "y": 33.0, "layer": "top" }
+      ]
+    },
+    {
+      "name": "N4",
+      "pointsToConnect": [
+        { "x": 2.0, "y": 33.0, "layer": "top" },
+        { "x": 58.0, "y": 27.0, "layer": "top" }
+      ]
+    },
+    {
+      "name": "N5",
+      "pointsToConnect": [
+        { "x": 2.0, "y": 41.0, "layer": "top" },
+        { "x": 58.0, "y": 19.0, "layer": "top" }
+      ]
+    },
+    {
+      "name": "N6",
+      "pointsToConnect": [
+        { "x": 2.0, "y": 49.0, "layer": "top" },
+        { "x": 58.0, "y": 11.0, "layer": "top" }
+      ]
+    },
+    {
+      "name": "N7",
+      "pointsToConnect": [
+        { "x": 2.0, "y": 57.0, "layer": "top" },
+        { "x": 58.0, "y": 3.0, "layer": "top" }
+      ]
+    }
+  ],
+  "obstacles": [
+    {
+      "type": "rect",
+      "layers": ["bottom"],
+      "center": { "x": 30.0, "y": 30.0 },
+      "width": 3.0,
+      "height": 60.0,
+      "connectedTo": []
+    },
+    {
+      "type": "rect",
+      "layers": ["top"],
+      "center": { "x": 30.0, "y": 1.35 },
+      "width": 3.0,
+      "height": 2.7,
+      "connectedTo": []
+    },
+    {
+      "type": "rect",
+      "layers": ["top"],
+      "center": { "x": 30.0, "y": 17.2 },
+      "width": 3.0,
+      "height": 23.8,
+      "connectedTo": []
+    },
+    {
+      "type": "rect",
+      "layers": ["top"],
+      "center": { "x": 30.0, "y": 42.8 },
+      "width": 3.0,
+      "height": 23.8,
+      "connectedTo": []
+    },
+    {
+      "type": "rect",
+      "layers": ["top"],
+      "center": { "x": 30.0, "y": 58.65 },
+      "width": 3.0,
+      "height": 2.7,
+      "connectedTo": []
+    }
+  ]
+}

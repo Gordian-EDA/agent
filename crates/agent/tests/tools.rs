@@ -198,10 +198,37 @@ fn defs_lists_all_tools() {
         "render_schematic",
         "create_design",
         "edit_design",
+        "search_footprints",
+        "get_footprint_info",
+        "create_board",
+        "get_board",
+        "place_board",
+        "set_placement_hints",
+        "set_constraints",
+        "move_part",
+        "unlock_part",
+        "route_board",
+        "render_board",
+        "export_board",
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
-    assert_eq!(names.len(), 11, "expected exactly 11 tools, got {}: {:?}", names.len(), names);
+    assert_eq!(names.len(), 23, "expected exactly 23 tools, got {}: {:?}", names.len(), names);
+
+    // Names are unique.
+    let mut sorted = names.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), names.len(), "tool names must be unique: {names:?}");
+
+    // Every def's input_schema is a JSON object with a "type":"object" root —
+    // schema sanity for the model-facing definitions.
+    for def in Tools::new().defs() {
+        assert_eq!(
+            def.input_schema["type"], serde_json::json!("object"),
+            "{} schema root must be an object", def.name
+        );
+    }
 }
 
 #[test]
@@ -515,4 +542,669 @@ blocks:
     // Dry-run path also carries them.
     let dry = tools.run("apply_design", serde_json::json!({ "yaml": yaml }), &ctx).unwrap();
     assert!(dry["layout_warnings"].is_array(), "dry-run layout_warnings: {dry}");
+}
+
+// ── PCB tools (slice 5, Task 1) ──────────────────────────────────────────────
+//
+// These tests source the footprint index from the THREE vendored kicad-bridge
+// fixtures via the `with_footprint_dir_for_test` override, so they run without an
+// installed KiCAD footprint library. The override expects a directory of
+// `.pretty` libraries, so we stage the loose `.kicad_mod` fixtures into a
+// temporary `Fixtures.pretty/` first.
+
+/// Stage the three vendored `.kicad_mod` fixtures into a fresh temp dir laid out
+/// as `<tmp>/Fixtures.pretty/<name>.kicad_mod`, and return the temp dir (kept
+/// alive by the caller) plus its path. The lib nickname is therefore `Fixtures`.
+fn staged_footprint_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../kicad-bridge/tests/fixtures/footprints");
+    let tmp = tempfile::tempdir().unwrap();
+    let pretty = tmp.path().join("Fixtures.pretty");
+    std::fs::create_dir_all(&pretty).unwrap();
+    for name in [
+        "R_0603_1608Metric.kicad_mod",
+        "SOT-23.kicad_mod",
+        "PinHeader_1x02_P2.54mm_Vertical.kicad_mod",
+    ] {
+        std::fs::copy(src.join(name), pretty.join(name)).unwrap();
+    }
+    let path = tmp.path().to_path_buf();
+    (tmp, path)
+}
+
+/// A ctx whose footprint index is the staged vendored fixtures. The returned
+/// TempDir guard must outlive the ctx (it holds the staged `.pretty` dir).
+fn fixture_ctx() -> (ToolCtx, tempfile::TempDir) {
+    let (guard, dir) = staged_footprint_dir();
+    let ctx = ToolCtx::with_footprint_dir_for_test(dir).expect("fixture ctx");
+    (ctx, guard)
+}
+
+#[test]
+fn search_footprints_finds_vendored_fixture() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+    let out = tools
+        .run("search_footprints", serde_json::json!({ "query": "R_0603" }), &ctx)
+        .unwrap();
+    let hits = out["hits"].as_array().expect("hits array");
+    assert!(
+        hits.iter().any(|h| h["lib_id"] == "Fixtures:R_0603_1608Metric"),
+        "expected the R_0603 fixture in hits, got: {out}"
+    );
+    // The R_0603 footprint has 2 pads.
+    let r0603 = hits
+        .iter()
+        .find(|h| h["lib_id"] == "Fixtures:R_0603_1608Metric")
+        .unwrap();
+    assert_eq!(r0603["pad_count"], serde_json::json!(2), "got: {out}");
+}
+
+#[test]
+fn get_footprint_info_returns_pads_courtyard_bbox() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+    let out = tools
+        .run(
+            "get_footprint_info",
+            serde_json::json!({ "lib_id": "Fixtures:SOT-23" }),
+            &ctx,
+        )
+        .unwrap();
+    let pads = out["pads"].as_array().expect("pads array");
+    assert_eq!(pads.len(), 3, "SOT-23 has 3 pads: {out}");
+    let p0 = &pads[0];
+    assert!(p0.get("number").is_some());
+    assert!(p0.get("offset").is_some());
+    assert!(p0.get("size").is_some());
+    assert!(p0.get("technology").is_some());
+    assert!(p0.get("layers").is_some());
+    assert!(out.get("courtyard").is_some(), "courtyard present: {out}");
+    assert!(out["courtyard"].get("width").is_some());
+    assert!(out.get("bbox").is_some(), "bbox present: {out}");
+}
+
+#[test]
+fn get_footprint_info_suggests_for_unknown_lib_id() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+    let out = tools
+        .run(
+            "get_footprint_info",
+            serde_json::json!({ "lib_id": "Fixtures:SOT-32" }),
+            &ctx,
+        )
+        .unwrap();
+    assert!(out.get("error").is_some(), "expected an error: {out}");
+    let suggestions = out["suggestions"].as_array().expect("suggestions");
+    assert!(
+        suggestions.iter().any(|s| s == "Fixtures:SOT-23"),
+        "expected SOT-23 suggested for the SOT-32 typo: {out}"
+    );
+}
+
+#[test]
+fn create_board_resolves_vendored_footprints_and_persists_draft() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+
+    // get_board before any board -> recoverable error.
+    let out = tools.run("get_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(out["error"].as_str().is_some_and(|e| e.contains("no board")), "got: {out}");
+
+    let board = serde_json::json!({
+        "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
+        "parts": [
+            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
+              "pad_nets": { "1": "VIN", "2": "MID" } },
+            { "reference": "U1", "footprint": "Fixtures:SOT-23",
+              "pad_nets": { "1": "MID", "2": "GND", "3": "VOUT" } },
+            { "reference": "J1", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
+              "pad_nets": { "1": "VIN", "2": "GND" } }
+        ]
+    });
+    let out = tools.run("create_board", board.clone(), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "got: {out}");
+    assert_eq!(out["part_count"], serde_json::json!(3), "got: {out}");
+    // VIN(2), MID(2), GND(2), VOUT(1) -> 4 nets; VOUT is a single-pin warning.
+    assert_eq!(out["net_count"], serde_json::json!(4), "got: {out}");
+    let warnings = out["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings.iter().any(|w| w.as_str().unwrap().contains("VOUT")),
+        "VOUT single-pin net should warn: {out}"
+    );
+
+    // The draft persisted; get_board returns it with a derived summary.
+    let out = tools.run("get_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["summary"]["part_count"], serde_json::json!(3), "got: {out}");
+    assert_eq!(out["summary"]["net_count"], serde_json::json!(4), "got: {out}");
+    assert_eq!(out["summary"]["placed"], serde_json::json!(false));
+    assert_eq!(out["summary"]["routed"], serde_json::json!(false));
+    // Rules defaulted to the engine values.
+    assert_eq!(out["draft"]["rules"]["clearance"], serde_json::json!(0.2), "got: {out}");
+    assert_eq!(out["draft"]["rules"]["viaDiameter"], serde_json::json!(0.6), "got: {out}");
+
+    // A second create_board without overwrite is rejected.
+    let out = tools.run("create_board", board, &ctx).unwrap();
+    assert!(out["error"].as_str().is_some_and(|e| e.contains("already exists")), "got: {out}");
+}
+
+#[test]
+fn create_board_unknown_footprint_errors_with_suggestions() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+    let out = tools
+        .run(
+            "create_board",
+            serde_json::json!({
+                "bounds": { "min_x": 0.0, "max_x": 10.0, "min_y": 0.0, "max_y": 10.0 },
+                "parts": [
+                    { "reference": "R1", "footprint": "Fixtures:R_0603_WRONG",
+                      "pad_nets": { "1": "A", "2": "B" } }
+                ]
+            }),
+            &ctx,
+        )
+        .unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("R1") && e.contains("unknown footprint")),
+        "got: {out}"
+    );
+    assert!(out.get("suggestions").is_some(), "expected suggestions: {out}");
+}
+
+#[test]
+fn board_draft_round_trips_through_the_workspace() {
+    use agent::tools_pcb::{BoardDraft, DraftPart, DraftRules};
+    use pcb_engine::placement::PlacementHints;
+    use pcb_engine::problem::Bounds;
+
+    let (ctx, _guard) = fixture_ctx();
+    let mut pad_nets = std::collections::BTreeMap::new();
+    pad_nets.insert("1".to_string(), "VIN".to_string());
+    pad_nets.insert("2".to_string(), "GND".to_string());
+
+    let draft = BoardDraft {
+        bounds: Bounds { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 },
+        rules: DraftRules::default(),
+        parts: vec![DraftPart {
+            reference: "R1".into(),
+            footprint: "Fixtures:R_0603_1608Metric".into(),
+            pad_nets,
+            locked: None,
+        }],
+        keepouts: vec![],
+        hints: PlacementHints::default(),
+        last_placement: None,
+    };
+    draft.save(&ctx).unwrap();
+    let loaded = BoardDraft::load(&ctx).expect("draft loads back");
+    assert_eq!(draft, loaded, "board draft must round-trip byte-equivalent");
+}
+
+// ── PCB tools (slice 5, Task 2): place / route / constraints / triage ─────────
+//
+// These use the same vendored-fixture footprint index as the Task 1 tests (no
+// KiCAD install needed). The standard board is a small 3-part divider-ish board
+// whose nets each have ≥2 pins, so it places legal and routes with zero failures.
+
+/// Create the standard small board (R1 + U1 + J1, three 2-pin nets) on a fresh
+/// fixture ctx. Returns the ctx, its tempdir guard, and the Tools registry.
+fn placed_board_ctx() -> (ToolCtx, tempfile::TempDir, Tools) {
+    let (ctx, guard) = fixture_ctx();
+    let tools = Tools::new();
+    let board = serde_json::json!({
+        "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
+        "parts": [
+            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
+              "pad_nets": { "1": "VIN", "2": "MID" } },
+            { "reference": "R2", "footprint": "Fixtures:R_0603_1608Metric",
+              "pad_nets": { "1": "MID", "2": "GND" } },
+            { "reference": "J1", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
+              "pad_nets": { "1": "VIN", "2": "GND" } }
+        ]
+    });
+    let out = tools.run("create_board", board, &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "create_board: {out}");
+    (ctx, guard, tools)
+}
+
+#[test]
+fn full_flow_create_place_route_is_clean() {
+    let (ctx, _g, tools) = placed_board_ctx();
+
+    // route_board before any placement -> recoverable error.
+    let out = tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("place_board")),
+        "route before place must tell the model to place first: {out}"
+    );
+
+    // place_board -> legal, positions for every part.
+    let out = tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["legal"], serde_json::json!(true), "place_board: {out}");
+    let positions = out["positions"].as_array().expect("positions");
+    assert_eq!(positions.len(), 3, "one position per part: {out}");
+    for p in positions {
+        assert!(p.get("reference").is_some() && p.get("x").is_some()
+            && p.get("y").is_some() && p.get("rotation").is_some(), "position shape: {p}");
+    }
+    assert!(out["hpwl"].as_f64().unwrap() >= 0.0);
+
+    // get_board now reports placed=true.
+    let out = tools.run("get_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["summary"]["placed"], serde_json::json!(true), "{out}");
+
+    // route_board -> zero failed, lint clean (no engine_bug), real metrics.
+    let out = tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(out["failed"].as_array().unwrap().is_empty(),
+        "the small board must route with zero failed nets: {out}");
+    assert!(out.get("engine_bug").is_none(),
+        "a clean route must NOT flag an engine bug: {out}");
+    // lint_summary is an object with no counts (all zero).
+    assert!(out["lint_summary"].as_object().unwrap().is_empty(),
+        "lint_summary must be empty (zero violations): {out}");
+    assert!(out["metrics"]["wirelength"].as_f64().unwrap() > 0.0, "{out}");
+    assert!(out["metrics"]["traces"].as_u64().unwrap() > 0, "{out}");
+    // Either engine may win (route_auto picks the fewer-failed result); just
+    // assert the provenance tag is one of the two honest values.
+    assert!(
+        matches!(out["router"].as_str(), Some("naive") | Some("detailed")),
+        "router must be naive or detailed: {out}"
+    );
+
+    // The solution persisted; get_board reports routed=true.
+    let out = tools.run("get_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["summary"]["routed"], serde_json::json!(true), "{out}");
+}
+
+#[test]
+fn export_board_requires_place_and_route_then_writes_parseable_board() {
+    use kicad_bridge::pcb::{extract_copper, read_problem};
+
+    let (ctx, _g, tools) = placed_board_ctx();
+
+    // export before placement -> recoverable error pointing at place_board.
+    let out = tools.run("export_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("place")),
+        "export before place must tell the model to place first: {out}"
+    );
+
+    // place, but not yet routed -> recoverable error pointing at route_board.
+    tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    let out = tools.run("export_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("rout")),
+        "export before route must tell the model to route first: {out}"
+    );
+
+    // route, then export to an explicit path.
+    let routed = tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(routed["failed"].as_array().unwrap().is_empty(), "route: {routed}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("exported.kicad_pcb");
+    let out = tools
+        .run(
+            "export_board",
+            serde_json::json!({ "path": path.display().to_string() }),
+            &ctx,
+        )
+        .unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "export_board: {out}");
+    assert_eq!(out["part_count"], serde_json::json!(3), "{out}");
+    assert_eq!(out["failed_nets"], serde_json::json!(0), "{out}");
+    assert!(path.exists(), "export must write the board file");
+
+    // The written board parses with read_problem: three parts' pads, the nets,
+    // and the routed copper all round-trip.
+    let board = read_problem(&path).expect("read_problem on exported board");
+    for n in ["VIN", "MID", "GND"] {
+        assert!(board.net_codes.contains_key(n), "net {n} missing: {:?}", board.net_codes);
+    }
+    let copper = extract_copper(&path).expect("extract_copper");
+    assert!(!copper.traces.is_empty(), "exported board carries routed copper");
+
+    // No silkscreen graphics leaked into the synthesized board.
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !text.contains("(layer \"F.SilkS\")") && !text.contains("(layer \"B.SilkS\")"),
+        "exported board must be silk-graphic-free"
+    );
+
+    // DRC is reported as run-or-skipped depending on the environment.
+    assert!(out["drc"].get("ran").is_some(), "drc status present: {out}");
+}
+
+/// Slice-5 export gate (KiCAD-gated): the agent-tools flow
+/// create_board → place_board → route_board → export_board on a small vendored
+/// circuit must yield a board KiCAD's DRC finds zero copper-violation /
+/// unconnected (only the inert `lib_footprint_mismatch` warning is tolerated).
+/// Skips visibly when no KiCAD >= 8 is installed.
+#[test]
+fn export_board_e2e_kicad_drc_clean() {
+    // Build the fixture-footprint ctx; it carries a real KiCAD env when one is
+    // installed (with_footprint_dir_for_test falls back to KicadEnv::detect).
+    let (ctx, _g, tools) = placed_board_ctx();
+    let major: u32 = ctx
+        .env()
+        .cli_version
+        .split('.')
+        .next()
+        .and_then(|m| m.parse().ok())
+        .unwrap_or(0);
+    if major < 8 {
+        eprintln!("SKIP: no KiCAD >= 8 for export_board DRC e2e");
+        return;
+    }
+
+    tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    let routed = tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(routed["failed"].as_array().unwrap().is_empty(), "route: {routed}");
+
+    let out = tools.run("export_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "export_board: {out}");
+
+    let drc = &out["drc"];
+    assert_eq!(drc["ran"], serde_json::json!(true), "DRC should have run: {out}");
+    assert_eq!(
+        drc["copper_violations"], serde_json::json!(0),
+        "exported board must be copper-DRC-clean: {out}"
+    );
+    assert_eq!(
+        drc["unconnected_items"], serde_json::json!(0),
+        "exported board must have zero unconnected items: {out}"
+    );
+    assert_eq!(
+        drc["errors"], serde_json::json!(0),
+        "exported board must have zero error-severity DRC findings: {out}"
+    );
+
+    eprintln!(
+        "export_board e2e OK (KiCAD {}): synthesized board DRC copper-clean, \
+         0 unconnected, {} tolerated footprint warning(s)",
+        ctx.env().cli_version,
+        drc["tolerated_footprint_warnings"]
+    );
+}
+
+#[test]
+fn keepout_wall_changes_routing_outcome() {
+    use agent::tools_pcb::BoardDraft;
+
+    // A board whose two connected parts are LOCKED on opposite sides, forced to
+    // route across the middle, then a keepout WALL on both layers spanning the
+    // whole height down the centre. With the wall, the only corridor is gone, so
+    // routing must differ — fail honestly or take a longer path — vs without it.
+    let (ctx, _g) = fixture_ctx();
+    let tools = Tools::new();
+    let board = serde_json::json!({
+        "bounds": { "min_x": 0.0, "max_x": 40.0, "min_y": 0.0, "max_y": 20.0 },
+        "parts": [
+            { "reference": "J1", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
+              "pad_nets": { "1": "A", "2": "B" } },
+            { "reference": "J2", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
+              "pad_nets": { "1": "A", "2": "B" } }
+        ]
+    });
+    assert_eq!(tools.run("create_board", board, &ctx).unwrap()["ok"], serde_json::json!(true));
+
+    // Lock J1 on the far west, J2 on the far east — connected by nets A and B.
+    tools.run("move_part",
+        serde_json::json!({ "reference": "J1", "x": 3.0, "y": 10.0 }), &ctx).unwrap();
+    tools.run("move_part",
+        serde_json::json!({ "reference": "J2", "x": 37.0, "y": 10.0 }), &ctx).unwrap();
+
+    // Baseline: place + route with NO keepout.
+    assert_eq!(tools.run("place_board", serde_json::json!({}), &ctx).unwrap()["legal"],
+        serde_json::json!(true));
+    let base = tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
+    let base_failed = base["failed"].as_array().unwrap().len();
+    let base_wirelength = base["metrics"]["wirelength"].as_f64().unwrap();
+
+    // Now add a full-height wall keepout on BOTH layers down the middle.
+    let out = tools.run("set_constraints", serde_json::json!({
+        "keepouts": [
+            { "rect": { "min_x": 19.0, "max_x": 21.0, "min_y": 0.0, "max_y": 20.0 },
+              "layers": ["top", "bottom"] }
+        ]
+    }), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "set_constraints: {out}");
+    assert_eq!(out["keepout_count"], serde_json::json!(1), "{out}");
+    // Placement stands (rules/keepouts don't move parts).
+    assert_eq!(out["placement_kept"], serde_json::json!(true), "{out}");
+    // The route was invalidated and cleared.
+    assert_eq!(out["route_cleared"], serde_json::json!(true), "{out}");
+    let draft = BoardDraft::load(&ctx).expect("draft");
+    assert!(draft.last_placement.is_some(), "set_constraints keeps the placement");
+    assert!(ctx.workspace().read_route().is_none(), "route.json cleared");
+
+    // Re-route WITH the wall: the outcome must be observably different.
+    let walled = tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
+    let walled_failed = walled["failed"].as_array().unwrap().len();
+    let walled_wirelength = walled["metrics"]["wirelength"].as_f64().unwrap();
+
+    let differs = walled_failed != base_failed
+        || (walled_wirelength - base_wirelength).abs() > 1e-6;
+    assert!(
+        differs,
+        "a full-height wall keepout on both layers must change the route \
+         (failed: {base_failed} -> {walled_failed}, wirelength: {base_wirelength} -> {walled_wirelength})"
+    );
+}
+
+#[test]
+fn move_part_lock_is_honored_by_place_board() {
+    let (ctx, _g, tools) = placed_board_ctx();
+
+    // Pin U1... actually our standard board has R1/R2/J1; pin R2 at a corner.
+    let out = tools.run("move_part",
+        serde_json::json!({ "reference": "R2", "x": 25.0, "y": 5.0, "rotation": 90 }), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "move_part: {out}");
+
+    let out = tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["legal"], serde_json::json!(true), "{out}");
+    let r2 = out["positions"].as_array().unwrap().iter()
+        .find(|p| p["reference"] == "R2").expect("R2 placed");
+    assert_eq!(r2["x"], serde_json::json!(25.0), "locked R2 keeps its x: {out}");
+    assert_eq!(r2["y"], serde_json::json!(5.0), "locked R2 keeps its y: {out}");
+    assert_eq!(r2["rotation"], serde_json::json!(90), "locked R2 keeps its rotation: {out}");
+
+    // Out-of-bounds move is a recoverable error.
+    let out = tools.run("move_part",
+        serde_json::json!({ "reference": "R2", "x": 999.0, "y": 5.0 }), &ctx).unwrap();
+    assert!(out["error"].as_str().is_some_and(|e| e.contains("outside the board")), "{out}");
+
+    // Unknown reference is a recoverable error.
+    let out = tools.run("move_part",
+        serde_json::json!({ "reference": "ZZ", "x": 5.0, "y": 5.0 }), &ctx).unwrap();
+    assert!(out["error"].as_str().is_some_and(|e| e.contains("unknown reference")), "{out}");
+
+    // unlock_part releases the lock.
+    let out = tools.run("unlock_part", serde_json::json!({ "reference": "R2" }), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "{out}");
+    assert_eq!(out["was_locked"], serde_json::json!(true), "{out}");
+}
+
+#[test]
+fn set_constraints_rejects_net_classes() {
+    let (ctx, _g, tools) = placed_board_ctx();
+    let out = tools.run("set_constraints", serde_json::json!({
+        "net_classes": [ { "name": "power", "clearance": 0.5 } ]
+    }), &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("net classes")
+            && e.contains("not yet supported")),
+        "net_classes must be honestly rejected: {out}"
+    );
+}
+
+#[test]
+fn set_constraints_partial_rules_merge_and_clear_route() {
+    let (ctx, _g, tools) = placed_board_ctx();
+    // Place + route so there's a route.json to invalidate.
+    tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(ctx.workspace().read_route().is_some(), "routed");
+
+    // Partial rules update: only clearance changes.
+    let out = tools.run("set_constraints", serde_json::json!({
+        "rules": { "clearance": 0.3 }
+    }), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "{out}");
+    assert_eq!(out["rules"]["clearance"], serde_json::json!(0.3), "{out}");
+    // The other rules kept their defaults (partial update).
+    assert_eq!(out["rules"]["min_trace_width"], serde_json::json!(0.2), "{out}");
+    assert_eq!(out["route_cleared"], serde_json::json!(true), "{out}");
+    assert!(ctx.workspace().read_route().is_none(), "route cleared by rule change");
+}
+
+#[test]
+fn set_placement_hints_validates_members() {
+    let (ctx, _g, tools) = placed_board_ctx();
+
+    // Valid: a group over known references.
+    let out = tools.run("set_placement_hints", serde_json::json!({
+        "groups": [ { "name": "resistors", "members": ["R1", "R2"], "edge": "w" } ]
+    }), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "{out}");
+    assert_eq!(out["group_count"], serde_json::json!(1), "{out}");
+    assert_eq!(out["groups"][0]["edge"], serde_json::json!(true), "edge recorded: {out}");
+
+    // Invalid member -> recoverable error listing known refs.
+    let out = tools.run("set_placement_hints", serde_json::json!({
+        "groups": [ { "name": "bad", "members": ["R1", "NOPE"] } ]
+    }), &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("NOPE") && e.contains("R1")),
+        "unknown member must error listing known refs: {out}"
+    );
+}
+
+// ── PCB tools (slice 5, Task 3): render_board ─────────────────────────────────
+
+/// PNG magic bytes — the 8-byte header all valid PNG files start with.
+const PNG_MAGIC: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+#[test]
+fn render_board_before_create_is_recoverable_error() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+    let out = tools.run("render_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("no board")),
+        "render_board before create_board must be a recoverable error: {out}"
+    );
+}
+
+#[test]
+fn render_board_before_place_is_recoverable_error() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+    // Create board but do NOT place.
+    let board = serde_json::json!({
+        "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
+        "parts": [
+            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
+              "pad_nets": { "1": "VIN", "2": "GND" } }
+        ]
+    });
+    assert_eq!(tools.run("create_board", board, &ctx).unwrap()["ok"], serde_json::json!(true));
+
+    // No placement yet: both explicit "placed" and auto (no route) must error.
+    let out = tools.run("render_board", serde_json::json!({"view": "placed"}), &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("place_board")),
+        "render placed before place must error: {out}"
+    );
+    let out = tools.run("render_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("place_board")),
+        "render auto (no route) before place must error: {out}"
+    );
+
+    // Explicit "routed" view before route.json is a distinct error.
+    let out = tools.run("render_board", serde_json::json!({"view": "routed"}), &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("route_board")),
+        "render routed before route must error: {out}"
+    );
+}
+
+#[test]
+fn render_board_placed_returns_ok_and_png_magic() {
+    let (ctx, _g, tools) = placed_board_ctx();
+
+    // Place the board.
+    let out = tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["legal"], serde_json::json!(true), "place: {out}");
+
+    // Render the placed view.
+    let out = tools
+        .run("render_board", serde_json::json!({"view": "placed"}), &ctx)
+        .unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "render_board placed: {out}");
+    assert_eq!(out["view"], serde_json::json!("placed"), "view field: {out}");
+
+    let png_path = out["png_path"].as_str().expect("png_path present");
+    assert!(png_path.contains(".autopcb/renders/"), "path under renders/: {out}");
+    let png_bytes = std::fs::read(png_path).expect("PNG file written");
+    assert_eq!(&png_bytes[..8], PNG_MAGIC, "must be a valid PNG");
+    assert!(png_bytes.len() > 100, "PNG suspiciously small: {} bytes", png_bytes.len());
+
+    // IMAGE_PATH_KEY must be set to the same path (so the agent loop attaches it).
+    assert_eq!(
+        out[agent::tools::IMAGE_PATH_KEY].as_str(),
+        Some(png_path),
+        "IMAGE_PATH_KEY must equal png_path"
+    );
+}
+
+#[test]
+fn render_board_routed_returns_ok_and_png_magic() {
+    let (ctx, _g, tools) = placed_board_ctx();
+
+    // Full flow: place then route.
+    tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    let route_out = tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(
+        route_out["failed"].as_array().unwrap().is_empty(),
+        "small board must route cleanly: {route_out}"
+    );
+
+    // Render the routed view explicitly.
+    let out = tools
+        .run("render_board", serde_json::json!({"view": "routed"}), &ctx)
+        .unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "render_board routed: {out}");
+    assert_eq!(out["view"], serde_json::json!("routed"), "view field: {out}");
+
+    let png_path = out["png_path"].as_str().expect("png_path present");
+    let png_bytes = std::fs::read(png_path).expect("PNG file written");
+    assert_eq!(&png_bytes[..8], PNG_MAGIC, "must be a valid PNG");
+
+    // IMAGE_PATH_KEY set.
+    assert_eq!(
+        out[agent::tools::IMAGE_PATH_KEY].as_str(),
+        Some(png_path),
+        "IMAGE_PATH_KEY must equal png_path"
+    );
+}
+
+#[test]
+fn render_board_default_view_logic() {
+    let (ctx, _g, tools) = placed_board_ctx();
+
+    // After place but before route: auto should pick "placed".
+    tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    let out = tools.run("render_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "auto before route: {out}");
+    assert_eq!(out["view"], serde_json::json!("placed"), "default before route must be placed: {out}");
+
+    // After route: auto should pick "routed".
+    tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
+    let out = tools.run("render_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "auto after route: {out}");
+    assert_eq!(out["view"], serde_json::json!("routed"), "default after route must be routed: {out}");
 }

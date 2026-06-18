@@ -1,0 +1,711 @@
+//! Board **synthesis**: BUILD a `.kicad_pcb` from scratch out of footprint
+//! `.kicad_mod` bodies, an engine placement, and a board outline — the
+//! agent-flow companion to [`crate::placefp::move_footprints`].
+//!
+//! `move_footprints` re-seats a hand-authored *template* board; synthesis has no
+//! template — the agent declares parts (footprint + pad→net) and the engine
+//! places them, so we assemble the board text directly. The output is structured
+//! to match the checked-in `tests/fixtures/placed_template.kicad_pcb` (the
+//! reference KiCAD-9 board): the same version header, `general`/`paper`/`layers`/
+//! `setup` skeleton, a `(net …)` table, an `Edge.Cuts` rectangle, and one
+//! `(footprint …)` block per part with `(at …)` and per-pad `(net …)` bindings.
+//!
+//! ## Why text-splice the `.kicad_mod` body (not re-emit from the parsed AST)
+//!
+//! The slice-4 coherence invariant is that the PlaceProblem and the board derive
+//! from ONE description: the pads the router targets MUST be byte-for-byte the
+//! pads KiCAD sees, or `move`/synthesis lands copper a pad does not reach and DRC
+//! reports it unconnected. The `.kicad_mod` *is* that one description (the same
+//! file [`crate::footlib::Footprint::load`] and `part_from_footprint` read), so we
+//! transform its raw text rather than round-tripping through a lossy parsed form
+//! (kiutils' footprint `ast_mut` does not round-trip through `write()`, the same
+//! limitation [`crate::pcb::write_solution`] documents). The transforms are:
+//!
+//! 1. Rewrite the `(footprint "NAME" …)` header token to the board `lib_id`.
+//! 2. Inject `(at x y [rot])` + a deterministic board-instance `(uuid …)` right
+//!    after the footprint header (a `.kicad_mod` has neither).
+//! 3. Set the `Reference` property value (`REF**` → the real designator) and put
+//!    every property on `F.Fab`.
+//! 4. **Drop silkscreen graphics** (`fp_line`/`fp_text`/… on `*.SilkS`) — the
+//!    slice-4 `silk_over_copper` pitfall on compact boards. Courtyards
+//!    (`*.CrtYd`) and fab (`*.Fab`) graphics are kept as the library drew them.
+//! 5. Inject `(net N "name")` into each *bound* pad's s-expression (before the
+//!    pad's closing paren, minding the nested parens of `(drill …)`/`(options …)`).
+//!
+//! Net codes are assigned 1-based over the sorted union of every part's pad nets
+//! (net 0 is the reserved no-net), so the board's net table and the pad bindings
+//! agree by construction — the same coherence guarantee, now writer-enforced.
+//!
+//! ## Rotation
+//!
+//! Engine v1 placements are rotation-0 unless a hint/lock set one. KiCAD encodes
+//! footprint rotation on the footprint-level `(at x y rot)`; each pad's own
+//! stored rotation is *absolute* (footprint angle folded in), so a rotated
+//! footprint needs every pad's `(at … rot)` bumped by the footprint angle — the
+//! convention [`crate::pcb::pad_center`] reads back. v1 supports 0/90/180/270
+//! (the only values the placer emits) by adding the footprint angle to each pad's
+//! `(at)` rotation; any other angle is rejected with a clear error rather than
+//! emitting wrong geometry (honest rejection beats a silent short).
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::io;
+
+use pcb_engine::placement::Placement;
+use pcb_engine::problem::Bounds;
+
+/// One part to synthesize onto the board: its board identity, the source
+/// `.kicad_mod` text, its pad→net wiring, and where the engine placed it.
+#[derive(Debug, Clone)]
+pub struct SynthPart {
+    /// Schematic reference designator ("R1", "U1", "J1").
+    pub reference: String,
+    /// Fully-qualified footprint id for the board header
+    /// (`"Resistor_SMD:R_0603_1608Metric"`).
+    pub lib_id: String,
+    /// The raw `.kicad_mod` source text whose footprint body we transform.
+    pub source: String,
+    /// Pad number → net name. A pad absent from the map is left unconnected.
+    pub pad_nets: BTreeMap<String, String>,
+    /// Where the engine placed this part (origin + rotation).
+    pub placement: Placement,
+}
+
+/// Synthesize a complete `.kicad_pcb` from `parts` on a board of `bounds`.
+///
+/// The result parses with [`crate::pcb::read_problem`] and is structurally a
+/// KiCAD-9 board (see the module docs). Net codes are 1-based over the sorted
+/// union of every part's pad nets. Returns an [`io::Error`] if a part's source
+/// has no parseable footprint block, a placement is missing for a part, or a
+/// non-axis-aligned rotation is requested.
+pub fn synthesize_board(parts: &[SynthPart], bounds: &Bounds) -> io::Result<String> {
+    // Net code table: 1-based over the sorted union of every bound pad's net.
+    let net_codes = net_codes(parts);
+
+    let mut out = String::with_capacity(4096 + parts.len() * 1024);
+    out.push_str("(kicad_pcb\n");
+    out.push_str("\t(version 20241229)\n");
+    out.push_str("\t(generator \"autopcb\")\n");
+    out.push_str("\t(generator_version \"9.0\")\n");
+    out.push_str("\t(general\n\t\t(thickness 1.6)\n\t\t(legacy_teardrops no)\n\t)\n");
+    out.push_str("\t(paper \"A4\")\n");
+    push_layers(&mut out);
+    out.push_str(
+        "\t(setup\n\t\t(pad_to_mask_clearance 0)\n\
+         \t\t(allow_soldermask_bridges_in_footprints no)\n\
+         \t\t(aux_axis_origin 0 0)\n\t\t(grid_origin 0 0)\n\t)\n",
+    );
+    push_nets(&mut out, &net_codes);
+    push_edge_cuts(&mut out, bounds);
+
+    for part in parts {
+        let block = synth_footprint(part, &net_codes)?;
+        out.push_str(&block);
+    }
+
+    out.push_str(")\n");
+    Ok(out)
+}
+
+/// 1-based net codes over the sorted union of every part's pad net names.
+fn net_codes(parts: &[SynthPart]) -> BTreeMap<String, i32> {
+    let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for p in parts {
+        for net in p.pad_nets.values() {
+            if !net.is_empty() {
+                names.insert(net.clone());
+            }
+        }
+    }
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| (name, i as i32 + 1))
+        .collect()
+}
+
+/// Emit the `(layers …)` declaration: a 2-layer board with the silk/mask/edge
+/// technical layers KiCAD 9 expects (matches `placed_template.kicad_pcb`).
+fn push_layers(out: &mut String) {
+    out.push_str("\t(layers\n");
+    out.push_str("\t\t(0 \"F.Cu\" signal)\n");
+    out.push_str("\t\t(2 \"B.Cu\" signal)\n");
+    out.push_str("\t\t(36 \"B.SilkS\" user \"B.Silkscreen\")\n");
+    out.push_str("\t\t(37 \"F.SilkS\" user \"F.Silkscreen\")\n");
+    out.push_str("\t\t(38 \"B.Mask\" user)\n");
+    out.push_str("\t\t(39 \"F.Mask\" user)\n");
+    out.push_str("\t\t(44 \"Edge.Cuts\" user)\n");
+    out.push_str("\t)\n");
+}
+
+/// Emit the `(net 0 "")` reserved no-net plus one `(net code "name")` per named
+/// net, in code order.
+fn push_nets(out: &mut String, net_codes: &BTreeMap<String, i32>) {
+    out.push_str("\t(net 0 \"\")\n");
+    let mut by_code: Vec<(&i32, &String)> = net_codes.iter().map(|(n, c)| (c, n)).collect();
+    by_code.sort();
+    for (code, name) in by_code {
+        let _ = writeln!(out, "\t(net {code} \"{name}\")");
+    }
+}
+
+/// Emit the board outline as an `Edge.Cuts` rectangle from `bounds`.
+fn push_edge_cuts(out: &mut String, bounds: &Bounds) {
+    let (x0, y0) = (fmt_num(bounds.min_x), fmt_num(bounds.min_y));
+    let (x1, y1) = (fmt_num(bounds.max_x), fmt_num(bounds.max_y));
+    let uuid = synth_uuid(&format!("edge:{x0}:{y0}:{x1}:{y1}"));
+    let _ = write!(
+        out,
+        "\t(gr_rect\n\t\t(start {x0} {y0})\n\t\t(end {x1} {y1})\n\
+         \t\t(stroke\n\t\t\t(width 0.1)\n\t\t\t(type default)\n\t\t)\n\
+         \t\t(fill no)\n\t\t(layer \"Edge.Cuts\")\n\t\t(uuid \"{uuid}\")\n\t)\n"
+    );
+}
+
+// ── per-footprint synthesis ──────────────────────────────────────────────────
+
+/// Transform one part's `.kicad_mod` source into a board `(footprint …)` block,
+/// indented one tab to sit at the board's top level.
+fn synth_footprint(part: &SynthPart, net_codes: &BTreeMap<String, i32>) -> io::Result<String> {
+    let body = footprint_body(&part.source).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("part {}: source has no (footprint …) block", part.reference),
+        )
+    })?;
+
+    // Footprint rotation: KiCAD CCW degrees, normalized to [0,360). v1 placer
+    // emits only axis-aligned angles; reject anything else rather than emit
+    // wrong pad geometry.
+    let rot = part.placement.rotation.rem_euclid(360);
+    if !matches!(rot, 0 | 90 | 180 | 270) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "part {}: rotation {rot}° is not supported — synthesis handles \
+                 0/90/180/270 only (the engine emits axis-aligned placements)",
+                part.reference
+            ),
+        ));
+    }
+
+    // Strip the `(footprint "NAME"` opener and the body's final closing paren so
+    // we can re-wrap the inner children with our injected header + per-pad nets.
+    let inner = footprint_inner(body).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("part {}: malformed (footprint …) block", part.reference),
+        )
+    })?;
+
+    let mut out = String::with_capacity(body.len() + 256);
+    let _ = writeln!(out, "\t(footprint \"{}\"", part.lib_id);
+    // Injected header: layer, board-instance uuid, position+rotation.
+    out.push_str("\t\t(layer \"F.Cu\")\n");
+    let fp_uuid = synth_uuid(&format!("fp:{}:{}", part.reference, part.lib_id));
+    let _ = writeln!(out, "\t\t(uuid \"{fp_uuid}\")");
+    if rot == 0 {
+        let _ = writeln!(
+            out,
+            "\t\t(at {} {})",
+            fmt_num(part.placement.at.x),
+            fmt_num(part.placement.at.y)
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "\t\t(at {} {} {})",
+            fmt_num(part.placement.at.x),
+            fmt_num(part.placement.at.y),
+            rot
+        );
+    }
+
+    // Re-indent and transform every top-level child node of the footprint body.
+    for node in top_level_nodes(inner) {
+        if let Some(transformed) = transform_node(node, part, net_codes, rot)? {
+            // The node text is at `.kicad_mod` indentation (one tab); board
+            // footprints sit one level deeper, so add one tab to every line.
+            push_reindented(&mut out, &transformed);
+        }
+    }
+
+    out.push_str("\t)\n");
+    Ok(out)
+}
+
+/// Decide what to do with one top-level child node of a footprint body. Returns
+/// `Ok(None)` to drop the node (silkscreen graphics), `Ok(Some(text))` with the
+/// (possibly rewritten) node otherwise.
+fn transform_node(
+    node: &str,
+    part: &SynthPart,
+    net_codes: &BTreeMap<String, i32>,
+    fp_rot: i32,
+) -> io::Result<Option<String>> {
+    let head = node_head(node);
+    match head {
+        // Footprint-level position/uuid/layer are injected fresh in the header;
+        // drop any the source carried so they are not duplicated. (`.kicad_mod`
+        // has none, but be robust to sources that do.)
+        "at" | "uuid" | "layer" => Ok(None),
+        // Silkscreen graphics are dropped (slice-4 silk_over_copper pitfall).
+        "fp_line" | "fp_rect" | "fp_circle" | "fp_arc" | "fp_poly" | "fp_text" | "fp_curve"
+            if on_silk(node) =>
+        {
+            Ok(None)
+        }
+        // Library cruft that does not belong on a board footprint instance.
+        "version" | "generator" | "generator_version" | "embedded_fonts" | "model"
+        | "tags" | "descr" => Ok(None),
+        // The Reference property: set its value to the real designator and put it
+        // on F.Fab. The Value property and others are kept but forced to F.Fab.
+        "property" => Ok(Some(transform_property(node, &part.reference))),
+        // Pads: inject the (net …) binding for bound pads, and bump pad rotation
+        // by the footprint angle when the footprint is rotated.
+        "pad" => Ok(Some(transform_pad(node, part, net_codes, fp_rot)?)),
+        // Everything else (fp_rect/fp_line on F.CrtYd or F.Fab, attr, …) passes
+        // through unchanged.
+        _ => Ok(Some(node.to_owned())),
+    }
+}
+
+/// Rewrite a `(property …)` node: when it is the `Reference`, replace the value
+/// with `reference`; force the property's `(layer …)` to `F.Fab` either way.
+fn transform_property(node: &str, reference: &str) -> String {
+    let mut out = node.to_owned();
+    // `(property "Reference" "REF**"` → `(property "Reference" "<ref>"`.
+    if let Some(rest) = out.strip_prefix("(property \"Reference\" \"")
+        && let Some(close) = rest.find('"')
+    {
+        out = format!(
+            "(property \"Reference\" \"{reference}\"{}",
+            &rest[close + 1..]
+        );
+    }
+    // Force the property onto F.Fab (libraries put Reference on F.SilkS).
+    out.replace("(layer \"F.SilkS\")", "(layer \"F.Fab\")")
+}
+
+/// Inject `(net N "name")` into a pad node for a bound pad, and add the
+/// footprint rotation to the pad's own `(at … rot)` when the footprint is
+/// rotated. An unbound pad (no entry in `pad_nets`) is returned with only its
+/// rotation adjusted.
+fn transform_pad(
+    node: &str,
+    part: &SynthPart,
+    net_codes: &BTreeMap<String, i32>,
+    fp_rot: i32,
+) -> io::Result<String> {
+    let number = pad_number(node);
+    let rotated = if fp_rot != 0 {
+        bump_pad_rotation(node, fp_rot)
+    } else {
+        node.to_owned()
+    };
+
+    let Some(number) = number else {
+        return Ok(rotated);
+    };
+    let Some(net) = part.pad_nets.get(&number).filter(|n| !n.is_empty()) else {
+        return Ok(rotated);
+    };
+    let code = net_codes.get(net).copied().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "part {}: pad {number} net {net:?} has no code (internal: net table out of sync)",
+                part.reference
+            ),
+        )
+    })?;
+
+    // Inject `(net N "name")` immediately before the pad's final closing paren,
+    // on its own indented line. The pad body is a balanced s-expr; the last
+    // top-level `)` closes it.
+    inject_before_close(&rotated, &format!("(net {code} \"{net}\")")).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("part {}: pad {number} has no closing paren", part.reference),
+        )
+    })
+}
+
+/// Add `fp_rot` (CCW degrees) to a pad's stored `(at x y [rot])` rotation. KiCAD
+/// pad rotation is absolute (footprint angle folded in), so a rotated footprint
+/// needs each pad's angle bumped. The pad `(at …)` is the first `(at ` on its
+/// own line inside the pad node.
+fn bump_pad_rotation(node: &str, fp_rot: i32) -> String {
+    const AT: &str = "(at ";
+    // Find the pad-level `(at …)` — the first one inside the node.
+    let Some(at_pos) = node.find(AT) else {
+        return node.to_owned();
+    };
+    let after = &node[at_pos + AT.len()..];
+    let Some(line_end) = after.find(')') else {
+        return node.to_owned();
+    };
+    let inside = &after[..line_end]; // "x y" or "x y rot"
+    let nums: Vec<&str> = inside.split_whitespace().collect();
+    let (x, y) = match (nums.first(), nums.get(1)) {
+        (Some(x), Some(y)) => (*x, *y),
+        _ => return node.to_owned(),
+    };
+    let pad_rot: f64 = nums.get(2).and_then(|r| r.parse().ok()).unwrap_or(0.0);
+    let new_rot = (pad_rot + fp_rot as f64).rem_euclid(360.0);
+    let replacement = if new_rot == 0.0 {
+        format!("(at {x} {y}")
+    } else {
+        format!("(at {x} {y} {})", fmt_num(new_rot))
+    };
+    // Rebuild: prefix + new "(at …" + the rest after the original "(at …" up to
+    // and including its ')'. We replace the substring `(at <inside>)`.
+    let mut out = String::with_capacity(node.len() + 8);
+    out.push_str(&node[..at_pos]);
+    out.push_str(&replacement);
+    out.push_str(&node[at_pos + AT.len() + line_end + 1..]); // after the ')'
+    out
+}
+
+// ── s-expression helpers (paren-aware, no full parse) ─────────────────────────
+
+/// The whole `(footprint …)` block in `source` (from its opening paren to its
+/// matching closing paren), or `None` if absent/unbalanced.
+fn footprint_body(source: &str) -> Option<&str> {
+    let start = source.find("(footprint ")?;
+    let end = matching_close(source, start)?;
+    Some(&source[start..=end])
+}
+
+/// The inner text of a `(footprint "NAME" … )` block: everything after the
+/// `(footprint "NAME"` opener up to (not including) the block's final `)`.
+fn footprint_inner(body: &str) -> Option<&str> {
+    // Skip `(footprint ` then the quoted name token.
+    let after_kw = body.strip_prefix("(footprint ")?;
+    let rest = after_kw.strip_prefix('"')?;
+    let name_close = rest.find('"')?;
+    let inner_start = "(footprint ".len() + 1 + name_close + 1;
+    // The body ends with its matching ')'; inner is everything between.
+    let inner = &body[inner_start..body.len() - 1];
+    Some(inner)
+}
+
+/// Split a footprint body's inner text into its top-level child nodes (each a
+/// balanced `( … )` s-expression), trimming the whitespace between them.
+fn top_level_nodes(inner: &str) -> Vec<&str> {
+    let bytes = inner.as_bytes();
+    let mut nodes = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'('
+            && let Some(end) = matching_close(inner, i)
+        {
+            nodes.push(&inner[i..=end]);
+            i = end + 1;
+            continue;
+        }
+        i += 1;
+    }
+    nodes
+}
+
+/// Index of the `)` matching the `(` at `open` in `s`, honoring string literals
+/// (parens inside `"…"` do not count). `None` if unbalanced.
+fn matching_close(s: &str, open: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    debug_assert_eq!(bytes[open], b'(');
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => in_str = !in_str,
+            b'(' if !in_str => depth += 1,
+            b')' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The head symbol of an s-expression node `(<head> …)`, e.g. `"pad"`,
+/// `"fp_line"`, `"property"`. Empty string if the node is malformed.
+fn node_head(node: &str) -> &str {
+    let rest = node.strip_prefix('(').unwrap_or(node);
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// Whether a graphic node sits on a silkscreen layer (`*.SilkS`).
+fn on_silk(node: &str) -> bool {
+    // A graphic's layer appears as `(layer "F.SilkS")` / `"B.SilkS"`.
+    node.contains("(layer \"F.SilkS\")") || node.contains("(layer \"B.SilkS\")")
+}
+
+/// The pad number token of a `(pad "N" …)` node, if present.
+fn pad_number(node: &str) -> Option<String> {
+    let rest = node.strip_prefix("(pad ")?;
+    let rest = rest.strip_prefix('"')?;
+    let close = rest.find('"')?;
+    Some(rest[..close].to_owned())
+}
+
+/// Insert `insertion` on its own line immediately before the final closing paren
+/// of the balanced s-expression `node`. The inserted line is indented to match
+/// the node's children (the indentation of the first child line). `None` if the
+/// node has no closing paren.
+fn inject_before_close(node: &str, insertion: &str) -> Option<String> {
+    let close = node.rfind(')')?;
+    // Child indentation: the whitespace run after the first newline.
+    let indent = child_indent(node);
+    let mut out = String::with_capacity(node.len() + insertion.len() + indent.len() + 2);
+    out.push_str(&node[..close]);
+    // Ensure we start the inserted line cleanly (node[..close] ends with the
+    // child block's trailing newline+indent before the ')').
+    out.push_str(insertion);
+    out.push('\n');
+    out.push_str(&indent);
+    out.push_str(&node[close..]);
+    Some(out)
+}
+
+/// The indentation (leading whitespace) of the first child line of a multi-line
+/// node — i.e. the run of tabs/spaces after the node's first `\n`. Empty for a
+/// single-line node.
+fn child_indent(node: &str) -> String {
+    let Some(nl) = node.find('\n') else {
+        return String::new();
+    };
+    node[nl + 1..]
+        .chars()
+        .take_while(|c| *c == '\t' || *c == ' ')
+        .collect()
+}
+
+/// Append `node` to `out` with one extra leading tab on every non-empty line, so
+/// a `.kicad_mod` child (indented one level) sits at the board-footprint depth.
+fn push_reindented(out: &mut String, node: &str) {
+    for (i, line) in node.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if !line.is_empty() {
+            out.push('\t');
+        }
+        out.push_str(line);
+    }
+    out.push('\n');
+}
+
+// ── formatting / ids ─────────────────────────────────────────────────────────
+
+/// Fixed namespace UUID for synthesized board identifiers (distinct from the
+/// copper namespace in [`crate::pcb`]). Content-derived so a given board re-emits
+/// byte-identically.
+const SYNTH_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x7b2e_91c0_4d3a_5e6f_8a9b_0c1d_2e3f_4a5b);
+
+/// Content-derived UUID for a synthesized board element.
+fn synth_uuid(key: &str) -> String {
+    uuid::Uuid::new_v5(&SYNTH_NAMESPACE, key.as_bytes())
+        .as_hyphenated()
+        .to_string()
+}
+
+/// Format an `f64` the way KiCAD writes coordinates (shortest round-tripping
+/// decimal, `-0.0` collapsed to `0`). Mirrors `pcb::fmt_num`/`placefp::fmt_num`.
+fn fmt_num(v: f64) -> String {
+    let v = if v == 0.0 { 0.0 } else { v };
+    format!("{v}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pcb_engine::problem::Point2;
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> String {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/footprints")
+            .join(name);
+        std::fs::read_to_string(p).unwrap()
+    }
+
+    fn place(reference: &str, x: f64, y: f64, rot: i32) -> Placement {
+        Placement {
+            reference: reference.to_owned(),
+            at: Point2 { x, y },
+            rotation: rot,
+        }
+    }
+
+    fn nets(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn matching_close_handles_nested_and_strings() {
+        let s = "(a (b \"x)y\") c)";
+        assert_eq!(matching_close(s, 0), Some(s.len() - 1));
+    }
+
+    #[test]
+    fn node_head_and_silk() {
+        assert_eq!(node_head("(pad \"1\" smd)"), "pad");
+        assert_eq!(node_head("(fp_line\n\t(layer \"F.SilkS\")\n)"), "fp_line");
+        assert!(on_silk("(fp_line\n\t(layer \"F.SilkS\")\n)"));
+        assert!(!on_silk("(fp_rect\n\t(layer \"F.CrtYd\")\n)"));
+    }
+
+    #[test]
+    fn inject_net_into_thru_hole_pad_with_drill() {
+        let pad = "(pad \"1\" thru_hole rect\n\t(at 0 0)\n\t(size 1.7 1.7)\n\t(drill 1)\n\t(layers \"*.Cu\" \"*.Mask\")\n)";
+        let out = inject_before_close(pad, "(net 2 \"VIN\")").unwrap();
+        assert!(out.contains("(net 2 \"VIN\")"));
+        // The (drill 1) child is untouched and the net lands before the close.
+        let net_at = out.find("(net 2").unwrap();
+        let close = out.rfind(')').unwrap();
+        assert!(net_at < close);
+        assert!(out.contains("(drill 1)"));
+    }
+
+    #[test]
+    fn bump_pad_rotation_adds_footprint_angle() {
+        let pad = "(pad \"1\" smd roundrect\n\t(at -0.9375 -0.95)\n\t(size 1.475 0.6)\n)";
+        let out = bump_pad_rotation(pad, 90);
+        assert!(out.contains("(at -0.9375 -0.95 90)"), "{out}");
+        // A pad already at 90 + footprint 90 → 180.
+        let pad2 = "(pad \"1\" smd\n\t(at 0 0 90)\n)";
+        assert!(bump_pad_rotation(pad2, 90).contains("(at 0 0 180)"));
+    }
+
+    #[test]
+    fn synthesize_two_part_board_has_no_silk() {
+        let parts = vec![
+            SynthPart {
+                reference: "R1".into(),
+                lib_id: "Resistor_SMD:R_0603_1608Metric".into(),
+                source: fixture("R_0603_1608Metric.kicad_mod"),
+                pad_nets: nets(&[("1", "VOUT"), ("2", "GND")]),
+                placement: place("R1", 10.0, 10.0, 0),
+            },
+            SynthPart {
+                reference: "U1".into(),
+                lib_id: "Package_TO_SOT_SMD:SOT-23".into(),
+                source: fixture("SOT-23.kicad_mod"),
+                pad_nets: nets(&[("1", "VIN"), ("2", "GND"), ("3", "VOUT")]),
+                placement: place("U1", 20.0, 10.0, 0),
+            },
+        ];
+        let bounds = Bounds { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
+        let board = synthesize_board(&parts, &bounds).unwrap();
+
+        // No silkscreen *graphics* leaked through. (The layer table still
+        // declares F.SilkS/B.SilkS — that is the layer definition, not a graphic;
+        // we assert no graphic node sits on a silk layer.)
+        assert!(
+            !board.contains("(layer \"F.SilkS\")"),
+            "silk graphics must be dropped:\n{board}"
+        );
+        assert!(!board.contains("(layer \"B.SilkS\")"));
+        // Reference value was set; REF** placeholder is gone.
+        assert!(board.contains("\"R1\""));
+        assert!(board.contains("\"U1\""));
+        assert!(!board.contains("REF**"));
+        // Net table carries the three nets.
+        assert!(board.contains("(net 0 \"\")"));
+        for n in ["GND", "VIN", "VOUT"] {
+            assert!(board.contains(&format!("\"{n}\"")), "missing net {n}");
+        }
+        // Courtyards survive (kept from the library).
+        assert!(board.contains("F.CrtYd"));
+    }
+
+    /// The synthesized board parses with `read_problem`, pads land at
+    /// placement+offset, nets bind, and `write_solution` then round-trips copper.
+    #[test]
+    fn synthesized_board_round_trips_through_read_problem_and_write_solution() {
+        use crate::pcb::{extract_copper, read_problem, write_solution};
+        use pcb_engine::problem::{LayerRef, RouteSolution, Trace};
+
+        let parts = vec![
+            SynthPart {
+                reference: "R1".into(),
+                lib_id: "Resistor_SMD:R_0603_1608Metric".into(),
+                source: fixture("R_0603_1608Metric.kicad_mod"),
+                pad_nets: nets(&[("1", "VOUT"), ("2", "GND")]),
+                placement: place("R1", 10.0, 10.0, 0),
+            },
+            SynthPart {
+                reference: "U1".into(),
+                lib_id: "Package_TO_SOT_SMD:SOT-23".into(),
+                source: fixture("SOT-23.kicad_mod"),
+                pad_nets: nets(&[("1", "VIN"), ("2", "GND"), ("3", "VOUT")]),
+                placement: place("U1", 20.0, 10.0, 0),
+            },
+        ];
+        let bounds = Bounds { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
+        let board = synthesize_board(&parts, &bounds).unwrap();
+
+        // Write the synthesized board to a temp file and parse it back.
+        let tmp = tempfile::Builder::new()
+            .prefix("autopcb-synth-")
+            .suffix(".kicad_pcb")
+            .tempfile()
+            .unwrap();
+        std::fs::write(tmp.path(), board.as_bytes()).unwrap();
+        let bp = read_problem(tmp.path()).expect("read_problem on synthesized board");
+
+        // Bounds came through.
+        assert_eq!(bp.problem.bounds, bounds);
+        // Net codes exist for every named net.
+        for n in ["GND", "VIN", "VOUT"] {
+            assert!(bp.net_codes.contains_key(n), "net {n} missing: {:?}", bp.net_codes);
+        }
+
+        // R1 pad "1" world center = placement (10,10) + offset (-0.825,0).
+        let vout = bp
+            .problem
+            .connections
+            .iter()
+            .find(|c| c.name == "VOUT")
+            .expect("VOUT connection");
+        // VOUT binds R1.1 (10-0.825,10) and U1.3 (20+0.9375,10).
+        let has_r1_pad1 = vout
+            .points_to_connect
+            .iter()
+            .any(|p| (p.x - 9.175).abs() < 1e-6 && (p.y - 10.0).abs() < 1e-6);
+        assert!(has_r1_pad1, "R1.1 not at (9.175,10): {:?}", vout.points_to_connect);
+        let has_u1_pad3 = vout
+            .points_to_connect
+            .iter()
+            .any(|p| (p.x - 20.9375).abs() < 1e-6 && (p.y - 10.0).abs() < 1e-6);
+        assert!(has_u1_pad3, "U1.3 not at (20.9375,10): {:?}", vout.points_to_connect);
+
+        // Now splice a trace onto VOUT and round-trip it back out.
+        let solution = RouteSolution {
+            traces: vec![Trace {
+                connection: "VOUT".into(),
+                layer: LayerRef::top(),
+                width: 0.25,
+                path: vec![
+                    pcb_engine::problem::Point2 { x: 9.175, y: 10.0 },
+                    pcb_engine::problem::Point2 { x: 20.9375, y: 10.0 },
+                ],
+            }],
+            vias: Vec::new(),
+        };
+        write_solution(tmp.path(), &solution, &bp).expect("write_solution onto synthesized board");
+        let back = extract_copper(tmp.path()).expect("extract_copper");
+        assert_eq!(back.traces.len(), 1, "one trace round-tripped: {back:?}");
+        assert_eq!(back.traces[0].connection, "VOUT");
+    }
+}

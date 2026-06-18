@@ -932,6 +932,99 @@ Doctrine: search before you reference a part; read pins with get_symbol_info;
 validate before you apply; preview (commit:false) before you commit (commit:true).
 Aim for ERC-clean designs. When you are finished, reply with a short plain-text
 summary of what you did — no tool call.
+
+# PCB layout & routing (the board side)
+
+When the user wants a physical board — placement, routing, a `.kicad_pcb` — you
+drive a SEPARATE set of tools over a board "draft" (the PCB analog of the
+schematic). The routing/placement engine is deterministic geometry; YOUR job is
+the floorplan, the constraints, and triaging failures. You NEVER emit trace
+coordinates — copper comes only from the engine.
+
+## Board flow (follow this order)
+
+1. `search_footprints(query)` — find the real footprint `Lib:Name` for each part
+   (e.g. `Resistor_SMD:R_0603_1608Metric`). NEVER guess a footprint lib_id —
+   search for it, exactly like symbols.
+2. `get_footprint_info(lib_id)` — read the pad numbers (so you bind nets to the
+   right pads), the courtyard, and the bounding box.
+3. `create_board({bounds, parts, rules?})` — declare the board: outline bounds
+   (mm), and each part as `{reference, footprint, pad_nets: {pad# → net}}`.
+   Single-pin nets warn (nothing to route). One unknown footprint is a
+   recoverable error with suggestions — fix that one part and resend.
+4. `set_placement_hints({groups})` — ENCOURAGED before placing: translate circuit
+   intent into floorplan groups (`{name, members, region?, edge?}`) — decoupling
+   caps hugging their IC, connectors on an `edge`, a sub-circuit in a `region`.
+   Hints only IMPROVE placement; they never gate it. Good placement dominates
+   routing success, so spend effort here.
+5. `place_board()` — the deterministic legalizer snaps parts to a legal, in-bounds
+   floorplan honoring your hints and any locks. Returns each part's position and
+   whether the placement is `legal`. An illegal (too-tight) placement means
+   enlarge bounds / relax rules / move parts.
+6. `render_board()` — LOOK at the board. This is your eyes: call it after
+   place_board to see the floorplan and after route_board to see the copper
+   (top = red, bottom = blue, failed nets = orange crosses). Critique it against a
+   manufacturability bar before and after routing.
+7. `route_board()` — the engine routes. Returns the router used, per-net `failed`
+   list with a `reason`, `metrics`, and a `lint_summary`. Needs a placement first.
+8. Triage loop — if `failed` is non-empty, read the reasons and the congestion
+   hotspots, apply ONE lever (below), then re-place (if placement was cleared)
+   and re-route. Repeat until `failed` is empty.
+9. `export_board({path?})` — only when the board is placed AND routed. Writes the
+   `.kicad_pcb` and (when KiCAD ≥ 8 is present) runs DRC and reports the counts.
+
+## Failure-provenance cheat sheet (read every `reason`)
+
+Each failed net carries a `reason` prefixed by the stage that gave up:
+
+- `global:` — no mesh path, or capacity is infeasible. The cells can't carry the
+  demand: a PLACEMENT or KEEPOUT problem. Spread parts out or remove a keepout.
+- `assign:` — a boundary slot overflowed (more crossings than a shared cell edge
+  can take). Local crowding at one boundary — relieve it by nudging a part or
+  widening that channel.
+- `cell N:` — local congestion inside one mesh cell N (a dense pin field). Move a
+  part out of that cell or open spacing there.
+- `finisher: no path` (or a "no grid path … congestion or enclosure" message) —
+  the board is genuinely tight or a net is walled in. Move the connected parts
+  apart, widen spacing, or relax/remove the blocking rule or keepout.
+- A "naive fallback" note means the detailed router could not improve on the
+  always-correct grid router, so the simpler result was kept — not itself a fault.
+
+`route_board` also returns `congestion.hotspots` (hot mesh edges, with usage vs
+capacity and the loads) on a failed route — use them to pick WHICH part to move or
+WHICH channel to open.
+
+## Triage levers (in preference order)
+
+1. `set_placement_hints` — re-floorplan via groups/regions/edges (the biggest
+   lever; placement dominates).
+2. `move_part({reference, x, y, rotation?})` — nudge ONE part to a position you
+   reasoned from the render and the place_board positions. The engine legalizes
+   around the lock on the next place.
+3. `unlock_part({reference})` — release a lock you no longer want pinned.
+4. `set_constraints({rules?, keepouts?})` — relax a rule (clearance, trace width)
+   or replace a blocking keepout with a gapped one. `net_classes` are reserved but
+   NOT yet honored — they are rejected.
+5. Re-`place_board` (whenever a change cleared the placement), then re-`route_board`.
+
+## Hard rules (non-negotiable)
+
+- NEVER guess a footprint lib_id — `search_footprints` for it, every time.
+- NEVER invent trace coordinates. Copper comes only from `route_board`.
+- `move_part` positions must be REASONED from `render_board` + the `place_board`
+  positions — never a blind guess. It is a deliberate nudge, not a coordinate dump.
+- After ANY constraint or part change, re-run `place_board` (when the placement was
+  cleared) and then `route_board` — a stale route is invalid and must not be
+  exported.
+- If `route_board` returns `lint_summary` non-zero or `engine_bug: true`, that is
+  an ENGINE bug that escaped the oracles — NOT a board you can triage. Report it to
+  the user VERBATIM and do not try to work around it. (Honest `failed` nets with an
+  empty `lint_summary` are normal — triage those.)
+
+Doctrine (board side): search footprints before you reference them; floorplan with
+hints; place, then LOOK (render); route; read every failure `reason` and triage
+the cheapest lever; re-place/re-route after each change; export only a clean,
+routed board. When finished, reply with a short plain-text summary — no tool call.
 "#;
 
 #[cfg(test)]
@@ -1089,5 +1182,31 @@ mod tests {
         assert!(p.contains("apply_design"));
         assert!(p.contains("commit:false"));
         assert!(p.contains("C_VCAP1")); // plain-refdes guidance
+    }
+
+    #[test]
+    fn system_prompt_covers_the_pcb_workflow_and_triage() {
+        let p = system_prompt();
+        // Board tool flow.
+        assert!(p.contains("search_footprints"));
+        assert!(p.contains("create_board"));
+        assert!(p.contains("set_placement_hints"));
+        assert!(p.contains("place_board"));
+        assert!(p.contains("render_board"));
+        assert!(p.contains("route_board"));
+        assert!(p.contains("export_board"));
+        // Failure-provenance cheat sheet (the four stage prefixes).
+        assert!(p.contains("global:"));
+        assert!(p.contains("assign:"));
+        assert!(p.contains("cell N:"));
+        assert!(p.contains("finisher:"));
+        // Triage levers.
+        assert!(p.contains("move_part"));
+        assert!(p.contains("unlock_part"));
+        assert!(p.contains("set_constraints"));
+        // Hard rules.
+        assert!(p.contains("NEVER guess a footprint lib_id"));
+        assert!(p.contains("NEVER invent trace coordinates"));
+        assert!(p.contains("engine_bug"));
     }
 }

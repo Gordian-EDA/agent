@@ -58,6 +58,7 @@ use circuit_lang::model::{Component, Design, PinTarget};
 use circuit_lang::{SymbolProvider, compile};
 use kicad_bridge::cli::KicadCli;
 use kicad_bridge::env::KicadEnv;
+use kicad_bridge::footlib::FootprintIndex;
 use kicad_bridge::provider::RealSymbolProvider;
 use kicad_bridge::search::SymbolIndex;
 use kicad_bridge::snapshot::SnapshotStore;
@@ -88,6 +89,14 @@ pub struct ToolCtx {
     snapshots: SnapshotStore,
     /// Cross-library name index, built on first `search_symbols` and reused.
     index: OnceLock<SymbolIndex>,
+    /// Cross-library footprint index, built on first `search_footprints` /
+    /// `get_footprint_info` / `create_board` and reused. Scanning every
+    /// `.pretty` library is expensive, so (like `index`) it is built once.
+    footprint_index: OnceLock<FootprintIndex>,
+    /// Test override: when set, the footprint index is built from this directory
+    /// of `.pretty` libraries (the vendored fixtures) instead of the installed
+    /// KiCAD footprint share dir, so footprint tests run without KiCAD libs.
+    footprint_dir_override: Option<PathBuf>,
     /// Project-local persistent state directory `.autopcb/`.
     workspace: crate::workspace::Workspace,
     /// Keeps a test tempdir alive for the ctx's lifetime; `None` for real ctxs.
@@ -118,6 +127,8 @@ impl ToolCtx {
             provider,
             snapshots,
             index: OnceLock::new(),
+            footprint_index: OnceLock::new(),
+            footprint_dir_override: None,
             workspace,
             _tempdir: None,
         })
@@ -154,6 +165,43 @@ impl ToolCtx {
             provider,
             snapshots,
             index: OnceLock::new(),
+            footprint_index: OnceLock::new(),
+            footprint_dir_override: None,
+            workspace,
+            _tempdir: Some(tempdir),
+        })
+    }
+
+    /// Build a context over a fresh temporary project whose **footprint index**
+    /// is sourced from `footprint_dir` (a directory of `.pretty` libraries)
+    /// instead of an installed KiCAD share dir. This is the footprint-tool test
+    /// entry point: it needs no KiCAD installation, so the PCB tools can be
+    /// exercised against the vendored fixtures on any machine.
+    ///
+    /// The symbol-side fields still point at a (possibly absent) real KiCAD env
+    /// via [`KicadEnv::detect`]; tests that only touch footprint tools never
+    /// reach them. Returns `None` only if a tempdir or the workspace cannot be
+    /// created.
+    pub fn with_footprint_dir_for_test(footprint_dir: PathBuf) -> Option<Self> {
+        // Symbol-side env is a placeholder (footprint tests never touch it);
+        // the footprint index is built from `footprint_dir`, not from `env`.
+        let env = KicadEnv::detect()
+            .unwrap_or_else(|| KicadEnv::with_symbol_dir(PathBuf::from("/nonexistent")));
+        let tempdir = tempfile::tempdir().ok()?;
+        let project_dir = tempdir.path().to_path_buf();
+        let sch_path = project_dir.join("project.kicad_sch");
+        let snapshots = SnapshotStore::for_project(&project_dir).ok()?;
+        let workspace = crate::workspace::Workspace::for_project(&project_dir).ok()?;
+        let provider = RealSymbolProvider::new(env.clone());
+        Some(Self {
+            env,
+            project_dir,
+            sch_path,
+            provider,
+            snapshots,
+            index: OnceLock::new(),
+            footprint_index: OnceLock::new(),
+            footprint_dir_override: Some(footprint_dir),
             workspace,
             _tempdir: Some(tempdir),
         })
@@ -170,6 +218,13 @@ impl ToolCtx {
     /// The project's `.kicad_sch` path (may not exist).
     pub fn sch_path(&self) -> &Path {
         &self.sch_path
+    }
+
+    /// The project's `.kicad_pcb` path: the schematic path with a `.kicad_pcb`
+    /// extension (`design.kicad_sch` → `design.kicad_pcb`), the board the PCB
+    /// tools export to. May not exist yet.
+    pub fn pcb_path(&self) -> PathBuf {
+        self.sch_path.with_extension("kicad_pcb")
     }
 
     /// The project directory.
@@ -209,6 +264,26 @@ impl ToolCtx {
         // `set` only fails if another thread raced us; dispatch is single-threaded.
         let _ = self.index.set(idx);
         Ok(self.index.get().expect("index just set"))
+    }
+
+    /// The cross-library footprint index, built once and cached.
+    ///
+    /// Building scans every installed `.pretty` library (155 of them) — far
+    /// dearer than the symbol scan — so the result is memoized like
+    /// [`Self::index`]. When a footprint-dir override is set (the test
+    /// constructor), the index is built from that directory of `.pretty`
+    /// libraries instead of the installed KiCAD footprint share dir.
+    pub(crate) fn footprint_index(&self) -> Result<&FootprintIndex> {
+        if let Some(idx) = self.footprint_index.get() {
+            return Ok(idx);
+        }
+        let idx = match &self.footprint_dir_override {
+            Some(dir) => FootprintIndex::build_from_dir(dir)
+                .with_context(|| format!("building footprint index from {}", dir.display()))?,
+            None => FootprintIndex::build(&self.env).context("building footprint index")?,
+        };
+        let _ = self.footprint_index.set(idx);
+        Ok(self.footprint_index.get().expect("footprint index just set"))
     }
 }
 
@@ -388,6 +463,352 @@ impl Tools {
                     "required": ["old_string", "new_string"]
                 }),
             },
+            // ── PCB tools (slice 5) ─────────────────────────────────────────
+            ToolDef {
+                name: "search_footprints".into(),
+                description: "Search every installed KiCAD footprint library by \
+                    name and return the best matches as fully-qualified \
+                    `Lib:Name` ids with their pad counts. Use this to find the \
+                    real footprint lib_id for a part before putting it on a board \
+                    — NEVER guess a footprint lib_id. The pad count is the number \
+                    of pads you must assign nets to in create_board."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string",
+                            "description": "Footprint name or fragment, e.g. \"R_0603\", \"SOT-23\", \"PinHeader 1x02 2.54\"." },
+                        "limit": { "type": "integer",
+                            "description": "Max hits to return (default 8).", "minimum": 1 }
+                    },
+                    "required": ["query"]
+                }),
+            },
+            ToolDef {
+                name: "get_footprint_info".into(),
+                description: "Return the full pad table (number, offset, size, \
+                    technology, copper layers), the courtyard rectangle, and the \
+                    overall bounding box for a fully-qualified `Lib:Name` \
+                    footprint. Use the pad NUMBERS to build the pad_nets map for \
+                    create_board. If the lib_id is unknown, returns an error with \
+                    the closest known suggestions — never guess the id."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "lib_id": { "type": "string",
+                            "description": "Fully-qualified footprint id, e.g. \"Resistor_SMD:R_0603_1608Metric\" or \"Package_TO_SOT_SMD:SOT-23\"." }
+                    },
+                    "required": ["lib_id"]
+                }),
+            },
+            ToolDef {
+                name: "create_board".into(),
+                description: "Create the working board draft from a board outline \
+                    plus a list of parts. Each part names a footprint lib_id \
+                    (resolve it with search_footprints first — never guess) and a \
+                    pad_nets map (pad number → net name; pads sharing a net name \
+                    ARE the net). Footprints are resolved up front: an unknown \
+                    lib_id is a recoverable error with suggestions. Nets with \
+                    fewer than 2 pins are reported as warnings (nothing to route), \
+                    not errors. Fails if a board draft already exists unless \
+                    overwrite=true. The draft persists to .autopcb/board.json; \
+                    place_board / route_board (later) read it. You never give \
+                    coordinates here — placement decides positions."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "bounds": {
+                            "type": "object",
+                            "description": "Board outline in mm (y-down).",
+                            "properties": {
+                                "min_x": { "type": "number" },
+                                "max_x": { "type": "number" },
+                                "min_y": { "type": "number" },
+                                "max_y": { "type": "number" }
+                            },
+                            "required": ["min_x", "max_x", "min_y", "max_y"]
+                        },
+                        "parts": {
+                            "type": "array",
+                            "description": "The parts on the board.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "reference": { "type": "string",
+                                        "description": "Unique reference designator, e.g. \"R1\", \"U2\"." },
+                                    "footprint": { "type": "string",
+                                        "description": "Footprint lib_id from search_footprints, e.g. \"Resistor_SMD:R_0603_1608Metric\"." },
+                                    "pad_nets": {
+                                        "type": "object",
+                                        "description": "Pad number → net name. A pad absent from this map is left unconnected.",
+                                        "additionalProperties": { "type": "string" }
+                                    }
+                                },
+                                "required": ["reference", "footprint"]
+                            }
+                        },
+                        "rules": {
+                            "type": "object",
+                            "description": "Board design rules (mm). Omit for engine defaults (clearance 0.2, min_trace_width 0.2, via_diameter 0.6, via_drill 0.3).",
+                            "properties": {
+                                "clearance": { "type": "number" },
+                                "min_trace_width": { "type": "number" },
+                                "via_diameter": { "type": "number" },
+                                "via_drill": { "type": "number" }
+                            },
+                            "required": ["clearance", "min_trace_width", "via_diameter", "via_drill"]
+                        },
+                        "overwrite": { "type": "boolean",
+                            "description": "Replace an existing board draft (default false)." }
+                    },
+                    "required": ["bounds", "parts"]
+                }),
+            },
+            ToolDef {
+                name: "get_board".into(),
+                description: "Return the current board draft plus a derived \
+                    summary: part count, net count, the per-net pin counts, the \
+                    keepout count, and whether the board has been placed / routed \
+                    yet. Use this to inspect board state before placing or routing, \
+                    or to confirm a create_board / triage edit took effect."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            ToolDef {
+                name: "place_board".into(),
+                description: "Place the current board: turn every part's footprint \
+                    + design rules + any locked positions into a placement problem, \
+                    apply the stored placement hints, and run the deterministic \
+                    placer. The placement is persisted to the board draft (route_board \
+                    and render_board read it). Returns legal (true iff no courtyard \
+                    overlap and all parts in bounds), the HPWL wirelength metric, how \
+                    many overlaps the legalizer resolved / parts it clamped, and the \
+                    per-part positions [{reference, x, y, rotation}]. NOTE: keepouts do \
+                    NOT affect placement in v1 — they only block ROUTING (route_board). \
+                    Run create_board first; an unplaceable (too-tight) board returns \
+                    legal=false with a note on how to relax it."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            ToolDef {
+                name: "set_placement_hints".into(),
+                description: "Replace the board's placement hints: a list of groups, \
+                    each with a name, the member references that should cohere, and an \
+                    optional region rectangle to land inside and/or a board edge to \
+                    hug. Members must be parts on the board (an unknown reference is a \
+                    recoverable error listing the known references). Hints only IMPROVE \
+                    placement — they never gate it — and steer the NEXT place_board. \
+                    Use them to express intent (\"keep the decoupling caps near the \
+                    MCU\", \"connectors on the west edge\") instead of coordinates."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "groups": {
+                            "type": "array",
+                            "description": "The placement-hint groups (replaces any prior hints).",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string",
+                                        "description": "Human label for the group, e.g. \"mcu_decoupling\"." },
+                                    "members": {
+                                        "type": "array",
+                                        "items": { "type": "string" },
+                                        "description": "References of the parts in this group."
+                                    },
+                                    "region": {
+                                        "type": "object",
+                                        "description": "Optional rectangle (mm) the members should land inside.",
+                                        "properties": {
+                                            "min_x": { "type": "number" },
+                                            "max_x": { "type": "number" },
+                                            "min_y": { "type": "number" },
+                                            "max_y": { "type": "number" }
+                                        },
+                                        "required": ["min_x", "max_x", "min_y", "max_y"]
+                                    },
+                                    "edge": { "type": "string", "enum": ["n", "s", "e", "w"],
+                                        "description": "Optional board edge the group should hug." }
+                                },
+                                "required": ["name", "members"]
+                            }
+                        }
+                    },
+                    "required": ["groups"]
+                }),
+            },
+            ToolDef {
+                name: "set_constraints".into(),
+                description: "Update the board's constraints in place: `rules` \
+                    (partial — only the fields you name are changed: clearance, \
+                    min_trace_width, via_diameter, via_drill) and/or `keepouts` \
+                    (replaced wholesale; each {rect, layers} must lie within the board \
+                    bounds and name only \"top\"/\"bottom\"). Keepouts block ROUTING on \
+                    their layers (they do NOT affect placement in v1). Changing rules \
+                    or keepouts does NOT move parts, so the placement stands — but it \
+                    invalidates any routed solution, so the stored route is cleared and \
+                    you must run route_board again. `net_classes` is reserved but NOT \
+                    yet supported by the router: passing it is rejected (use rules / \
+                    keepouts instead)."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "rules": {
+                            "type": "object",
+                            "description": "Partial design-rule update (only named fields change).",
+                            "properties": {
+                                "clearance": { "type": "number" },
+                                "min_trace_width": { "type": "number" },
+                                "via_diameter": { "type": "number" },
+                                "via_drill": { "type": "number" }
+                            }
+                        },
+                        "keepouts": {
+                            "type": "array",
+                            "description": "Rectangular routing keepouts (replaces all prior keepouts).",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "rect": {
+                                        "type": "object",
+                                        "properties": {
+                                            "min_x": { "type": "number" },
+                                            "max_x": { "type": "number" },
+                                            "min_y": { "type": "number" },
+                                            "max_y": { "type": "number" }
+                                        },
+                                        "required": ["min_x", "max_x", "min_y", "max_y"]
+                                    },
+                                    "layers": {
+                                        "type": "array",
+                                        "items": { "type": "string", "enum": ["top", "bottom"] },
+                                        "description": "Copper layers this keepout blocks."
+                                    }
+                                },
+                                "required": ["rect", "layers"]
+                            }
+                        },
+                        "net_classes": {
+                            "description": "RESERVED — not yet supported by the router; passing this is rejected."
+                        }
+                    }
+                }),
+            },
+            ToolDef {
+                name: "move_part".into(),
+                description: "Pin a part at a position (the triage lever): lock its \
+                    origin to (x, y) with an optional rotation (0/90/180/270). The \
+                    next place_board legalizes the rest of the board around the lock; \
+                    the part itself never moves. The (x, y) must be a point on the \
+                    board (out of bounds is a recoverable error); an unknown reference \
+                    is a recoverable error. This clears the stored placement and route \
+                    (state changed), so re-run place_board then route_board. Use this \
+                    AFTER looking at render_board and the place_board positions to nudge \
+                    a part — never to author a full layout."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "reference": { "type": "string",
+                            "description": "The part to pin, e.g. \"U1\"." },
+                        "x": { "type": "number", "description": "Part-origin x (mm, on the board)." },
+                        "y": { "type": "number", "description": "Part-origin y (mm, on the board)." },
+                        "rotation": { "type": "integer",
+                            "description": "Rotation in degrees (0/90/180/270; default 0)." }
+                    },
+                    "required": ["reference", "x", "y"]
+                }),
+            },
+            ToolDef {
+                name: "unlock_part".into(),
+                description: "Release a part previously pinned with move_part so the \
+                    placer can move it freely again. Unknown reference is a recoverable \
+                    error. Clears the stored placement and route (state changed) — \
+                    re-run place_board then route_board."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "reference": { "type": "string",
+                            "description": "The part to unlock, e.g. \"U1\"." }
+                    },
+                    "required": ["reference"]
+                }),
+            },
+            ToolDef {
+                name: "route_board".into(),
+                description: "Route the placed board: build the routing problem from \
+                    the placement, add the keepouts as blocking obstacles, and run the \
+                    auto-router (detailed pipeline with a naive fallback). Requires a \
+                    placement — run place_board first (else a recoverable error). The \
+                    full solution is persisted for export; the result returns: router \
+                    (\"detailed\"/\"naive\"), failed nets [{connection, reason}] with \
+                    stage provenance (global:/assign:/cell:/finisher:), metrics \
+                    (wirelength, vias, traces), and lint_summary (DRC violation counts \
+                    by kind — EXPECTED ZERO; a non-zero count sets engine_bug=true and \
+                    is an engine fault, not a board you can fix). When nets fail, a \
+                    congestion report (iterations + edge hotspots) is included to guide \
+                    triage (move_part, relax rules, or remove a keepout)."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            ToolDef {
+                name: "render_board".into(),
+                description: "Render the board to a PNG image and attach it so you can \
+                    SEE the board. Call this AFTER place_board to inspect part positions \
+                    and AFTER route_board to inspect the copper. Two views: \
+                    view=\"placed\" shows part courtyards + pads coloured by net + region \
+                    hints (dashed blue) + keepout/obstacle rectangles in dark grey; \
+                    view=\"routed\" shows the full copper + vias + failed-net highlights. \
+                    Colour key (routed view): red = top-layer trace, blue = bottom-layer \
+                    trace, orange cross = failed net endpoint (route that net differently). \
+                    When view is omitted the default is \"routed\" if route.json exists, \
+                    \"placed\" otherwise. Requires place_board (placed view) or route_board \
+                    (routed view); missing state returns a recoverable error. The PNG is \
+                    also saved under .autopcb/renders/."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "view": {
+                            "type": "string",
+                            "enum": ["placed", "routed"],
+                            "description": "Which view to render: \"placed\" (part positions, \
+                                courtyards, pads, region hints) or \"routed\" (full copper, \
+                                vias, failed-net highlights). Omit for auto (routed if routed, \
+                                else placed)."
+                        }
+                    }
+                }),
+            },
+            ToolDef {
+                name: "export_board".into(),
+                description: "Export the placed + routed board to a .kicad_pcb file. \
+                    Synthesizes the board from the engine placement (footprints + \
+                    per-pad nets + a board outline) and splices the routed copper onto \
+                    it. Requires a placed AND routed board — run place_board then \
+                    route_board first (else a recoverable error). When a KiCAD 8+ CLI \
+                    is available it runs `kicad-cli pcb drc` and returns the counts \
+                    (copper_violations, unconnected_items; lib_footprint_mismatch \
+                    warnings are a tolerated library-bookkeeping carve-out, not a copper \
+                    fault); otherwise DRC is skipped with a note. Default output path is \
+                    the project's <stem>.kicad_pcb next to the schematic."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Output .kicad_pcb path. Omit to write the \
+                                project's default <stem>.kicad_pcb next to the schematic."
+                        }
+                    }
+                }),
+            },
         ]
     }
 
@@ -406,13 +827,25 @@ impl Tools {
             "render_schematic" => render_schematic(ctx),
             "create_design" => create_design(input, ctx),
             "edit_design" => edit_design(input, ctx),
+            "search_footprints" => crate::tools_pcb::search_footprints(input, ctx),
+            "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
+            "create_board" => crate::tools_pcb::create_board(input, ctx),
+            "get_board" => crate::tools_pcb::get_board(ctx),
+            "place_board" => crate::tools_pcb::place_board(input, ctx),
+            "set_placement_hints" => crate::tools_pcb::set_placement_hints(input, ctx),
+            "set_constraints" => crate::tools_pcb::set_constraints(input, ctx),
+            "move_part" => crate::tools_pcb::move_part(input, ctx),
+            "unlock_part" => crate::tools_pcb::unlock_part(input, ctx),
+            "route_board" => crate::tools_pcb::route_board(input, ctx),
+            "render_board" => crate::tools_pcb::render_board(input, ctx),
+            "export_board" => crate::tools_pcb::export_board(input, ctx),
             other => bail!("unknown tool: {other}"),
         }
     }
 }
 
 /// Pull a required string field out of the input, with a clear error.
-fn require_str(input: &Value, key: &str) -> Result<String> {
+pub(crate) fn require_str(input: &Value, key: &str) -> Result<String> {
     input
         .get(key)
         .and_then(Value::as_str)
@@ -898,9 +1331,9 @@ fn edit_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
         }));
     }
     let edited = if replace_all {
-        draft.replace(&*old, &*new)
+        draft.replace(&*old, &new)
     } else {
-        draft.replacen(&*old, &*new, 1)
+        draft.replacen(&*old, &new, 1)
     };
     ctx.workspace()
         .write_draft(&edited, current_sch_text(ctx).as_deref())?;
@@ -916,8 +1349,8 @@ fn edit_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
 /// block (and strip from the JSON the model sees as text).
 pub const IMAGE_PATH_KEY: &str = "_image_path";
 
-/// Long-edge pixel cap for rendered schematics (Claude vision sweet spot).
-const RENDER_MAX_PX: u32 = 1600;
+/// Long-edge pixel cap for rendered schematics / board renders (Claude vision sweet spot).
+pub(crate) const RENDER_MAX_PX: u32 = 1600;
 
 fn render_schematic(ctx: &ToolCtx) -> Result<Value> {
     if !ctx.sch_path.exists() {
