@@ -120,18 +120,33 @@ fn main() {
 
     // Summary.
     println!("\n===== SUMMARY =====");
+    let mut fault_boards: Vec<String> = Vec::new();
     for r in &all {
         let drc = &r["drc"];
+        // The hard correctness metric: error-severity COPPER faults must be 0 on
+        // EVERY board (unconnected nets are honest failures, allowed). copper_errors
+        // is absent when DRC didn't run (no KiCAD) — treat that as 0 (skipped).
+        let copper_errors = drc["copper_errors"].as_u64().unwrap_or(0);
+        if copper_errors > 0 {
+            fault_boards.push(r["name"].as_str().unwrap_or("?").to_string());
+        }
         println!(
-            "{:<18} place={:<5} route={:<10} failed={} drc_ran={} copper_viol={} unconn={} errors={}",
+            "{:<20} place={:<5} route={:<9} failed={:<3} copper_err={} unconn={:<4} copper_warn={}",
             r["name"].as_str().unwrap_or("?"),
             r["place_legal"],
             r["router"].as_str().unwrap_or("-"),
             r["failed_nets"],
-            drc["ran"],
-            drc["copper_violations"],
+            copper_errors,
             drc["unconnected_items"],
-            drc["errors"],
+            drc["copper_violations"],
         );
+    }
+    // Fidelity gate: the engine must never EMIT a copper DRC fault.
+    println!("\n===== FIDELITY GATE =====");
+    if fault_boards.is_empty() {
+        println!("PASS — 0 copper DRC faults across {} boards (unrouted nets are honest).", all.len());
+    } else {
+        println!("FAIL — copper DRC faults emitted on: {}", fault_boards.join(", "));
+        std::process::exit(1);
     }
 }

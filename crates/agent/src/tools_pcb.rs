@@ -1559,6 +1559,9 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
                     "ran": true,
                     "kicad_version": ctx.env().cli_version,
                     "copper_violations": copper.len(),
+                    // Error-severity copper faults (shorts/clearance/width) only —
+                    // the hard "never ship a DRC fault" metric; must be 0.
+                    "copper_errors": report.copper_error_count(),
                     "unconnected_items": report.unconnected_items.len(),
                     "tolerated_footprint_warnings": tolerated,
                     "errors": report.error_count(),
