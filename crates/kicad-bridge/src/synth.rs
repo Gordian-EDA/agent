@@ -52,7 +52,7 @@ use std::fmt::Write as _;
 use std::io;
 
 use pcb_engine::placement::Placement;
-use pcb_engine::problem::Bounds;
+use pcb_engine::problem::{Bounds, Point2};
 
 /// One part to synthesize onto the board: its board identity, the source
 /// `.kicad_mod` text, its pad→net wiring, and where the engine placed it.
@@ -119,6 +119,73 @@ pub fn synthesize_board_layers(
 }
 
 /// 1-based net codes over the sorted union of every part's pad net names.
+/// A copper-plane (power-pour) fill as axis-aligned rectangles tiling `bounds`
+/// inset by `edge_margin`, MINUS a square keep-out around each foreign-copper
+/// item in `keepouts` (`(center, half_extent)` — the half already includes the
+/// required clearance). Returns rects as `[min_x, min_y, max_x, max_y]`.
+///
+/// KiCAD treats edge-sharing `filled_polygon` islands as one connected plane
+/// (verified against kicad-cli), so a horizontal-band sweep produces a valid,
+/// DRC-clean fill with NO clipping / keyhole geometry: cut the board into y-bands
+/// at every keep-out edge, and in each band emit the x-segments left free by the
+/// keep-outs active there. This is how a power net's many pins are joined without
+/// routing each one — the lever a BGA's power balls need.
+pub fn plane_fill_rects(
+    bounds: &Bounds,
+    edge_margin: f64,
+    keepouts: &[(Point2, f64)],
+) -> Vec<[f64; 4]> {
+    let (bx0, bx1) = (bounds.min_x + edge_margin, bounds.max_x - edge_margin);
+    let (by0, by1) = (bounds.min_y + edge_margin, bounds.max_y - edge_margin);
+    if bx1 <= bx0 || by1 <= by0 {
+        return Vec::new();
+    }
+    // y-band boundaries: the board edges plus each keep-out's top/bottom (clamped).
+    let mut ycuts: Vec<f64> = vec![by0, by1];
+    for (c, h) in keepouts {
+        ycuts.push((c.y - h).clamp(by0, by1));
+        ycuts.push((c.y + h).clamp(by0, by1));
+    }
+    ycuts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ycuts.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+
+    let mut rects = Vec::new();
+    for w in ycuts.windows(2) {
+        let (y0, y1) = (w[0], w[1]);
+        if y1 - y0 < 1e-6 {
+            continue;
+        }
+        let ymid = (y0 + y1) / 2.0;
+        // x-intervals blocked by keep-outs straddling this band, merged.
+        let mut blocked: Vec<(f64, f64)> = keepouts
+            .iter()
+            .filter(|(c, h)| c.y - h < ymid && ymid < c.y + h)
+            .map(|(c, h)| ((c.x - h).max(bx0), (c.x + h).min(bx1)))
+            .filter(|(a, b)| b > a)
+            .collect();
+        blocked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut merged: Vec<(f64, f64)> = Vec::new();
+        for (a, b) in blocked {
+            match merged.last_mut() {
+                Some(last) if a <= last.1 + 1e-9 => last.1 = last.1.max(b),
+                _ => merged.push((a, b)),
+            }
+        }
+        // Free x-segments = [bx0, bx1] minus the merged blocked intervals.
+        let mut x = bx0;
+        for (a, b) in &merged {
+            if a - x > 1e-6 {
+                rects.push([x, y0, *a, y1]);
+            }
+            x = x.max(*b);
+        }
+        if bx1 - x > 1e-6 {
+            rects.push([x, y0, bx1, y1]);
+        }
+    }
+    rects
+}
+
 fn net_codes(parts: &[SynthPart]) -> BTreeMap<String, i32> {
     let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for p in parts {
@@ -568,6 +635,32 @@ mod tests {
     use super::*;
     use pcb_engine::problem::Point2;
     use std::path::PathBuf;
+
+    #[test]
+    fn plane_fill_empty_is_single_inset_rect() {
+        let b = Bounds { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 10.0 };
+        let rects = plane_fill_rects(&b, 0.5, &[]);
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0], [0.5, 0.5, 19.5, 9.5]);
+    }
+
+    #[test]
+    fn plane_fill_carves_keepouts_and_stays_in_bounds() {
+        let b = Bounds { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 20.0 };
+        let ko = (Point2 { x: 10.0, y: 10.0 }, 0.65);
+        let rects = plane_fill_rects(&b, 0.5, &[ko]);
+        assert!(rects.len() > 1, "a central keep-out must split the fill");
+        // The keep-out square [9.35,10.65]^2 must contain NO fill rect interior.
+        let (kx0, kx1, ky0, ky1) = (9.35, 10.65, 9.35, 10.65);
+        for r in &rects {
+            // every rect within the inset board
+            assert!(r[0] >= 0.5 - 1e-9 && r[2] <= 19.5 + 1e-9);
+            assert!(r[1] >= 0.5 - 1e-9 && r[3] <= 19.5 + 1e-9);
+            // and not overlapping the keep-out interior
+            let overlap = r[0] < kx1 - 1e-6 && r[2] > kx0 + 1e-6 && r[1] < ky1 - 1e-6 && r[3] > ky0 + 1e-6;
+            assert!(!overlap, "rect {r:?} overlaps the keep-out");
+        }
+    }
 
     fn fixture(name: &str) -> String {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
