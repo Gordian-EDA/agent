@@ -1,0 +1,184 @@
+{
+  "description": "STRESS: 0.5mm-pitch BGA-100 (pad 0.25mm) on 4-layer \u2014 fine pitch stresses stitching-via clearance vs adjacent balls + plane anti-pads",
+  "rules": {
+    "layers": 4
+  },
+  "bounds": {
+    "min_x": 0.0,
+    "max_x": 40.0,
+    "min_y": 0.0,
+    "max_y": 40.0
+  },
+  "parts": [
+    {
+      "reference": "U1",
+      "footprint": "Package_BGA:BGA-100_6.0x6.0mm_Layout11x11_P0.5mm_Ball0.3mm_Pad0.25mm_NSMD",
+      "pad_nets": {
+        "A1": "GND",
+        "A10": "VCC",
+        "A11": "S1",
+        "A2": "S2",
+        "A3": "GND",
+        "A4": "VCC",
+        "A5": "S3",
+        "A6": "S4",
+        "A7": "GND",
+        "A8": "VCC",
+        "A9": "S5",
+        "B1": "S6",
+        "B10": "GND",
+        "B11": "VCC",
+        "B2": "S7",
+        "B3": "S8",
+        "B4": "GND",
+        "B5": "VCC",
+        "B6": "S9",
+        "B7": "S10",
+        "B8": "GND",
+        "B9": "VCC",
+        "C1": "S11",
+        "C10": "S12",
+        "C11": "GND",
+        "C2": "VCC",
+        "C4": "S13",
+        "C5": "S14",
+        "C6": "GND",
+        "C7": "VCC",
+        "C8": "S15",
+        "D1": "S16",
+        "D10": "GND",
+        "D11": "VCC",
+        "D2": "S17",
+        "D3": "S18",
+        "D5": "GND",
+        "D7": "VCC",
+        "D9": "S19",
+        "E1": "S20",
+        "E10": "GND",
+        "E11": "VCC",
+        "E2": "S21",
+        "E3": "S22",
+        "E4": "GND",
+        "E8": "VCC",
+        "E9": "S23",
+        "F1": "S24",
+        "F10": "GND",
+        "F11": "VCC",
+        "F2": "S25",
+        "F3": "S26",
+        "F9": "GND",
+        "G1": "VCC",
+        "G10": "S27",
+        "G11": "S28",
+        "G2": "GND",
+        "G3": "VCC",
+        "G4": "S29",
+        "G8": "S30",
+        "G9": "GND",
+        "H1": "VCC",
+        "H10": "S31",
+        "H11": "S32",
+        "H2": "GND",
+        "H3": "VCC",
+        "H5": "S33",
+        "H7": "S34",
+        "H9": "GND",
+        "J1": "VCC",
+        "J10": "S35",
+        "J11": "S36",
+        "J2": "GND",
+        "J4": "VCC",
+        "J5": "S37",
+        "J6": "S38",
+        "J7": "GND",
+        "J8": "VCC",
+        "K1": "S39",
+        "K10": "S40",
+        "K11": "GND",
+        "K2": "VCC",
+        "K3": "S41",
+        "K4": "S42",
+        "K5": "GND",
+        "K6": "VCC",
+        "K7": "S43",
+        "K8": "S44",
+        "K9": "GND",
+        "L1": "VCC",
+        "L10": "S45",
+        "L11": "S46",
+        "L2": "GND",
+        "L3": "VCC",
+        "L4": "S47",
+        "L5": "S48",
+        "L6": "GND",
+        "L7": "VCC",
+        "L8": "S49",
+        "L9": "S50"
+      }
+    },
+    {
+      "reference": "C1",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C2",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C3",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C4",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C5",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C6",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C7",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C8",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    }
+  ]
+}

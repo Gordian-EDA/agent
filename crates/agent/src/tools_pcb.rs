@@ -1342,12 +1342,45 @@ fn route_with_planes(
     rp.connections.retain(|c| !plane_names.contains(&c.name));
 
     let mut result = route_auto(&rp);
+    // Add a through-via per plane pad, but ONLY where it clears its foreign
+    // neighbours — a fine-pitch part (0.5mm BGA) has no room for a standard
+    // through-via between balls, and an overhanging via would short adjacent nets.
+    // A via that doesn't fit is SKIPPED (that pad's power stays honestly unrouted,
+    // surfaced as a KiCAD unconnected), never shipped as a DRC fault: the plane
+    // path must be as connectivity-honest as the router. (Fine-pitch parts need
+    // via-in-pad / microvias, a documented v1 limitation.)
+    let via_r = rules.via_diameter / 2.0;
+    let min_via2 = (2.0 * via_r + rules.clearance).powi(2);
+    let dist2 = |a: &Point2, b: &Point2| (a.x - b.x).powi(2) + (a.y - b.y).powi(2);
+    let mut skipped = 0usize;
     for (net, at) in stitches {
-        result.solution.vias.push(Via {
-            connection: net,
-            at,
-            diameter: rules.via_diameter,
-            drill: rules.via_drill,
+        let clears_pads = rp.obstacles.iter().all(|ob| {
+            ob.connected_to.contains(&net)
+                || dist2(&at, &ob.center)
+                    >= (via_r + ob.width.max(ob.height) / 2.0 + rules.clearance).powi(2)
+        });
+        let clears_vias = result
+            .solution
+            .vias
+            .iter()
+            .all(|v| v.connection == net || dist2(&at, &v.at) >= min_via2);
+        if clears_pads && clears_vias {
+            result.solution.vias.push(Via {
+                connection: net,
+                at,
+                diameter: rules.via_diameter,
+                drill: rules.via_drill,
+            });
+        } else {
+            skipped += 1;
+        }
+    }
+    if skipped > 0 {
+        result.failed.push(FailedNet {
+            connection: format!("<{skipped} plane stitching vias>"),
+            reason: "no room for a through-via between fine-pitch pads — that power \
+                     pin stays on the plane unrouted (needs via-in-pad / microvias)"
+                .to_owned(),
         });
     }
     result
