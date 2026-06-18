@@ -90,6 +90,26 @@ pub fn synthesize_board_layers(
     bounds: &Bounds,
     layer_count: u32,
 ) -> io::Result<String> {
+    synthesize_board_full(parts, bounds, layer_count, &[])
+}
+
+/// A copper-plane zone to emit: the net it belongs to, the copper layer name
+/// (e.g. `"In1.Cu"`), and the precomputed fill rectangles ([`plane_fill_rects`]).
+#[derive(Debug, Clone)]
+pub struct ZoneSpec {
+    pub net_name: String,
+    pub layer_name: String,
+    pub fill_rects: Vec<[f64; 4]>,
+}
+
+/// [`synthesize_board_layers`] plus copper-plane `zones` (power pours) emitted
+/// before the board close. Each zone's net must be one of the parts' nets.
+pub fn synthesize_board_full(
+    parts: &[SynthPart],
+    bounds: &Bounds,
+    layer_count: u32,
+    zones: &[ZoneSpec],
+) -> io::Result<String> {
     // Net code table: 1-based over the sorted union of every bound pad's net.
     let net_codes = net_codes(parts);
 
@@ -114,8 +134,55 @@ pub fn synthesize_board_layers(
         out.push_str(&block);
     }
 
+    for (i, z) in zones.iter().enumerate() {
+        let code = net_codes.get(&z.net_name).copied().unwrap_or(0);
+        push_zone(&mut out, code, z, i);
+    }
+
     out.push_str(")\n");
     Ok(out)
+}
+
+/// Emit one copper-plane `(zone …)` with the precomputed fill rectangles as
+/// edge-sharing `filled_polygon` islands (KiCAD treats them as one connected
+/// pour — see [`plane_fill_rects`]).
+fn push_zone(out: &mut String, net_code: i32, z: &ZoneSpec, idx: usize) {
+    let uuid = synth_uuid(&format!("zone:{}:{}", z.net_name, z.layer_name));
+    let _ = idx;
+    let _ = writeln!(
+        out,
+        "\t(zone\n\t\t(net {net_code})\n\t\t(net_name \"{}\")\n\t\t(layer \"{}\")\n\
+         \t\t(uuid \"{uuid}\")\n\t\t(hatch edge 0.5)\n\t\t(connect_pads (clearance 0.2))\n\
+         \t\t(min_thickness 0.2)\n\t\t(fill yes (thermal_gap 0.3) (thermal_bridge_width 0.5))",
+        z.net_name, z.layer_name
+    );
+    // Zone outline = the board's fill bounding box (KiCAD requires a polygon; the
+    // filled_polygon islands below are the authoritative copper).
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for r in &z.fill_rects {
+        x0 = x0.min(r[0]);
+        y0 = y0.min(r[1]);
+        x1 = x1.max(r[2]);
+        y1 = y1.max(r[3]);
+    }
+    if x0 <= x1 {
+        let _ = writeln!(
+            out,
+            "\t\t(polygon (pts (xy {} {}) (xy {} {}) (xy {} {}) (xy {} {})))",
+            fmt_num(x0), fmt_num(y0), fmt_num(x1), fmt_num(y0),
+            fmt_num(x1), fmt_num(y1), fmt_num(x0), fmt_num(y1)
+        );
+    }
+    for r in &z.fill_rects {
+        let _ = writeln!(
+            out,
+            "\t\t(filled_polygon (layer \"{}\") (pts (xy {} {}) (xy {} {}) (xy {} {}) (xy {} {})))",
+            z.layer_name,
+            fmt_num(r[0]), fmt_num(r[1]), fmt_num(r[2]), fmt_num(r[1]),
+            fmt_num(r[2]), fmt_num(r[3]), fmt_num(r[0]), fmt_num(r[3])
+        );
+    }
+    out.push_str("\t)\n");
 }
 
 /// 1-based net codes over the sorted union of every part's pad net names.

@@ -29,7 +29,9 @@ use serde_json::{Value, json};
 use kicad_bridge::cli::{KicadCli, Violation};
 use kicad_bridge::pcb::{read_problem, write_solution};
 use kicad_bridge::placefp::{part_from_footprint, part_from_footprint_layers};
-use kicad_bridge::synth::{synthesize_board_layers, SynthPart};
+use kicad_bridge::synth::{
+    plane_fill_rects, synthesize_board_full, synthesize_board_layers, SynthPart, ZoneSpec,
+};
 use pcb_engine::connectivity::Violation as ConnViolation;
 use pcb_engine::lint::{DrcViolation, lint};
 use pcb_engine::pathing::global_route;
@@ -38,7 +40,9 @@ use pcb_engine::placement::{
     GroupHint, LockedAt, Part, PlaceProblem, PlaceReport, PlaceResult, Placement, PlacementHints,
     Rect, place_best, to_route_problem,
 };
-use pcb_engine::problem::{Bounds, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteSolution};
+use pcb_engine::problem::{
+    Bounds, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteSolution, Via,
+};
 
 use crate::tools::{ToolCtx, require_str};
 
@@ -1157,7 +1161,18 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     let mut rp = to_route_problem(&problem, &placements);
     inject_keepouts(&mut rp, &draft.keepouts);
 
-    let result = route_auto(&rp);
+    // On a multilayer board the highest-fanout power/ground nets become copper
+    // PLANES (emitted as zones at export) instead of point-to-point traces — the
+    // only way a dense part's many power pins connect. Signals route on the outer
+    // pair; each plane pad is stitched up to its plane with a through-via.
+    let planes = assign_planes(&draft);
+    let result = if planes.is_empty() {
+        route_auto(&rp)
+    } else {
+        let plane_names: std::collections::BTreeSet<String> =
+            planes.iter().map(|(n, _)| n.clone()).collect();
+        route_with_planes(rp.clone(), &plane_names, &draft.rules)
+    };
 
     // Persist the full solution + failures + router for export (Task 4) and the
     // routed flag (get_board). The solution lives in the workspace; only a small
@@ -1166,6 +1181,7 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         "solution": result.solution,
         "failed": result.failed,
         "router": result.router,
+        "planes": planes,
     });
     ctx.workspace().write_route(&serde_json::to_string_pretty(&stored)?)?;
 
@@ -1241,7 +1257,133 @@ struct StoredRoute {
     // its value is a RouterKind enum that serde handles fine.
     #[allow(dead_code)]
     router: serde_json::Value,
+    /// Power-plane assignment chosen at route time: (net name, copper layer index).
+    /// Empty for ordinary (2-layer / no-plane) boards. Export emits these as zones.
+    #[serde(default)]
+    planes: Vec<(String, u32)>,
 }
+
+/// Minimum pin count for a net to become a copper plane (a power/ground rail) on
+/// a multilayer board, rather than being routed as point-to-point traces.
+const PLANE_MIN_PINS: usize = 5;
+
+/// Choose copper-plane nets for a multilayer board: the highest-fanout nets
+/// (>= [`PLANE_MIN_PINS`] pins) get the inner copper layers (In1, In2, …), so a
+/// dense part's many power/ground pins connect through a plane instead of traces
+/// the grid router cannot fan out. Returns `(net, layer_index)`; empty unless the
+/// board has >= 4 copper layers (2-layer boards keep the all-traces flow).
+fn assign_planes(draft: &BoardDraft) -> Vec<(String, u32)> {
+    if draft.rules.layer_count < 4 {
+        return Vec::new();
+    }
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for p in &draft.parts {
+        for net in p.pad_nets.values() {
+            if !net.is_empty() {
+                *counts.entry(net.clone()).or_default() += 1;
+            }
+        }
+    }
+    let mut nets: Vec<(String, usize)> =
+        counts.into_iter().filter(|(_, c)| *c >= PLANE_MIN_PINS).collect();
+    // Highest fanout first; ties by name for determinism.
+    nets.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let inner = (draft.rules.layer_count - 2) as usize;
+    nets.into_iter()
+        .take(inner)
+        .enumerate()
+        .map(|(i, (net, _))| (net, (i + 1) as u32))
+        .collect()
+}
+
+/// Route a plane board's SIGNAL nets only. Power/ground go to inner-layer copper
+/// planes (emitted as zones at export), so here we: route everything else on the
+/// OUTER pair (`layer_count = 2`, so the router's `top`/`bottom` map to F.Cu/B.Cu
+/// on the real board and the inner layers stay clear for planes); reserve each
+/// plane pad's through-via column (block it on both outer layers); and stitch
+/// every plane pad up to its plane with a through-via on the plane net.
+fn route_with_planes(
+    mut rp: RouteProblem,
+    plane_names: &std::collections::BTreeSet<String>,
+    rules: &DraftRules,
+) -> pcb_engine::pipeline::RouteResult {
+    rp.layer_count = 2;
+    for ob in &mut rp.obstacles {
+        if ob.connected_to.iter().any(|n| plane_names.contains(n)) {
+            ob.layers = vec![LayerRef::top(), LayerRef::bottom()];
+        }
+    }
+    // Stitch points: one through-via per plane pad (collected before the plane
+    // connections are dropped). A pad belongs to exactly one net.
+    let stitches: Vec<(String, Point2)> = rp
+        .obstacles
+        .iter()
+        .filter_map(|ob| {
+            ob.connected_to
+                .iter()
+                .find(|n| plane_names.contains(*n))
+                .map(|n| (n.clone(), ob.center.clone()))
+        })
+        .collect();
+    rp.connections.retain(|c| !plane_names.contains(&c.name));
+
+    let mut result = route_auto(&rp);
+    for (net, at) in stitches {
+        result.solution.vias.push(Via {
+            connection: net,
+            at,
+            diameter: rules.via_diameter,
+            drill: rules.via_drill,
+        });
+    }
+    result
+}
+
+/// Build the copper-plane zones for export: one pour per plane net, filling the
+/// board minus an anti-pad keep-out around every FOREIGN copper item that reaches
+/// that inner layer — every via on another net (which passes through the plane)
+/// and every foreign through-hole pad (whose barrel sits on the inner layer).
+/// Same-net vias/pads are NOT carved, so the plane's own stitching vias connect.
+fn plane_zones(
+    planes: &[(String, u32)],
+    board: &RouteProblem,
+    solution: &RouteSolution,
+    bounds: &Bounds,
+    rules: &DraftRules,
+) -> Vec<ZoneSpec> {
+    let layer_count = rules.layer_count;
+    let via_half = rules.via_diameter / 2.0 + rules.clearance + PLANE_ANTIPAD_MARGIN_MM;
+    planes
+        .iter()
+        .map(|(net, layer_idx)| {
+            let mut keepouts: Vec<(Point2, f64)> = Vec::new();
+            for v in &solution.vias {
+                if &v.connection != net {
+                    keepouts.push((v.at.clone(), via_half));
+                }
+            }
+            for ob in &board.obstacles {
+                let on_layer = ob.layers.iter().any(|lr| lr.index(layer_count) == Some(*layer_idx));
+                let foreign = !ob.connected_to.iter().any(|n| n == net);
+                if on_layer && foreign {
+                    let half =
+                        ob.width.max(ob.height) / 2.0 + rules.clearance + PLANE_ANTIPAD_MARGIN_MM;
+                    keepouts.push((ob.center.clone(), half));
+                }
+            }
+            let fill = plane_fill_rects(bounds, BOARD_EDGE_MARGIN_MM, &keepouts);
+            ZoneSpec {
+                net_name: net.clone(),
+                layer_name: format!("In{layer_idx}.Cu"),
+                fill_rects: fill,
+            }
+        })
+        .collect()
+}
+
+/// Safety margin added to a plane anti-pad beyond bare (radius + clearance) — a
+/// bare keep-out lands exactly on the clearance limit and KiCAD flags it.
+const PLANE_ANTIPAD_MARGIN_MM: f64 = 0.15;
 
 /// Render the board to a PNG using the placement or routed SVG, save under
 /// `.autopcb/renders/`, and attach via `IMAGE_PATH_KEY`.
@@ -1559,14 +1701,19 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // create a DRC regression (the outline only ever shrinks toward the copper,
     // never clips it). Re-synthesize the outline at the tight bounds.
     let tight = content_bounds(&board.problem, &stored.solution, &draft.bounds, BOARD_EDGE_MARGIN_MM);
-    let board = if tight != draft.bounds {
-        if let Ok(t) = synthesize_board_layers(&parts, &tight, draft.rules.layer_count) {
-            std::fs::write(&path, t.as_bytes())
-                .with_context(|| format!("writing tight-outline board to {}", path.display()))?;
-            read_problem(&path)
-                .with_context(|| format!("re-reading tight-outline board {}", path.display()))?
-        } else {
-            board
+    // Copper-plane zones (power pours) for a multilayer board, computed from the
+    // foreign copper reaching each inner layer, at the final (tight) bounds. The
+    // obstacle positions are absolute, so the first board's read is reusable here.
+    let zones = plane_zones(&stored.planes, &board.problem, &stored.solution, &tight, &draft.rules);
+    let board = if tight != draft.bounds || !zones.is_empty() {
+        match synthesize_board_full(&parts, &tight, draft.rules.layer_count, &zones) {
+            Ok(t) => {
+                std::fs::write(&path, t.as_bytes())
+                    .with_context(|| format!("writing tight-outline board to {}", path.display()))?;
+                read_problem(&path)
+                    .with_context(|| format!("re-reading tight-outline board {}", path.display()))?
+            }
+            Err(_) => board,
         }
     } else {
         board
