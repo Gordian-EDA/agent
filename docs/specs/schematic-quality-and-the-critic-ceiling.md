@@ -4,6 +4,39 @@ A map of what moves the VLM critic score on agent-generated schematics, what doe
 why — so the dead-ends below are not re-explored, and a future investment targets the one
 direction with real headroom. Distilled from an exhaustive exploration sweep.
 
+## ★★★ END-OF-ARC SUMMARY (2026-06-19) — read this first
+
+After the scorecards below, a long fix arc shipped (20 commits). Two were STRUCTURAL, high-frequency
+breakthroughs that reopened "capped" territory:
+1. **4-pin crystal idiom** (`586dae7`): the crystal idiom silently failed for `Device:Crystal_GND24`
+   (the grounded-case 4-pin crystal the agent actually emits) — three coupled causes (it matched the
+   `anchor` role; place_crystal required exactly 2 nets; it landed in the floorplan `anchors` list).
+   It only ever worked on the 2-pin reference part. Fixed ⇒ MCU/crystal sheets stop sprawling.
+   LESSON: validate idioms with the parts the AGENT emits, not the clean reference part.
+2. **io/header partition** (`62d9a52`): the crammed io sheet (SWD+GPIO+LEDs, ~15 overlapping port
+   labels) was a PARTITION problem, not a layout limit — the prompt said "fold a lone header in." Fix:
+   breakout headers get their own pinout sheet + the merge keeps port-rich blocks. io 5→8, gpio→9-10.
+   LESSON: several "inherent/soft-wall" gates are partition problems, fixable by better blocking.
+
+Plus: over-split merge, value-text far-bands, single-pin-port stub, port-label keepout, block-split,
+IDIOM_AUDIT trace; the idiom layer is now AUDITED-SOLID (crystal/decoupling/led all fire on MCU+BGA).
+
+**Result: fleet floor MIN 5-7 → 6-8 across ~12 topics (MCU/BGA/dense/ESP/analog/power/CAN/charger/
+USB-PD/RS232/stepper/sensor-hub); most SHEETS 7-10, many 9-10. But 0 boards reach uniform MIN-9** —
+the worst sheet (a power/complex sheet) drags every board to 6-8.
+
+**THE ONE REMAINING LEVER (exhaustively isolated):** the worst sheets are POWER / multi-IC / complex
+sheets where rail-parallel elements + bypass caps scatter and dog-leg. FOUR targeted fixes were tried
+and ALL ruled out: (a) rail-cap-row post-hoc pass — undone by decongest; (b) place_decoupling per-rail
+relax — moot, the circuit-graph matcher rejects multi-rail first; (c) proxy cap-cohesion — caps ALREADY
+cohere to their nearest IC pin (the scatter is the ANCHORS spreading, caps follow); (d) finer partition
+— separated power/bridge sheets still score 6-7. ⇒ The clean "cap bank ROW" needs a **row-reward IN the
+SA placement objective** (cohesion gives a blob/spread, not a row; alignment passes get undone). That's
+a deep core-SA change: high regression risk to the many already-clean sheets, snapshot-safe only on the
+fast lane (>34 pins; refs use the small path), partial/uncertain gain against critic noise ±1-2.
+**Reaching uniform 9+ requires that core-SA rework — a deliberate, greenlit, sweep+oracle-gated project,
+NOT autonomous-loop churn.** The cheap/general/targeted levers are EXHAUSTED.
+
 ## The goal and the honest ceiling
 
 Goal: reach a 9+ critic score (`tools/schematic_critic.py`) on 20+ e2e agent-generated
