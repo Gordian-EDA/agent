@@ -197,7 +197,17 @@ fn local_rail_nets(design: &Design) -> BTreeSet<String> {
             }
         }
     }
-    count.into_iter().filter(|(_, n)| *n >= 2).map(|(net, _)| net).collect()
+    // Distribute only GROUND nets (the original intent: the many ground RETURNS are what
+    // tangle a dense board into long rails). Keep POSITIVE supplies as a single rail so their
+    // decoupling caps hang off it in a tidy ROW (as on the 9-scoring idiom-stm32) instead of
+    // every cap getting its own local symbol and SCATTERING (the #1 critic defect —
+    // "decoupling caps parked in empty space"). Env-gated to restore the old all-rails behaviour.
+    let all = std::env::var("DISTRIBUTE_ALL_RAILS").is_ok();
+    count
+        .into_iter()
+        .filter(|(net, n)| *n >= 2 && (all || is_ground(net)))
+        .map(|(net, _)| net)
+        .collect()
 }
 
 /// Ground-like net name heuristic.
