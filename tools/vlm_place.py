@@ -68,7 +68,7 @@ def cells_to_fractions(cells, cols, rows):
             for rd, (c, r) in cells.items()}
 
 
-def plan(image, cols, rows, model, context):
+def plan(image, cols, rows, model, context, summary):
     base = os.environ.get("OPENAI_BASE_URL", "").rstrip("/")
     key = os.environ.get("OPENAI_API_KEY", "")
     if not base or not key:
@@ -76,6 +76,12 @@ def plan(image, cols, rows, model, context):
     grid_png = image + ".grid.png"
     overlay(image, grid_png, cols, rows)
     user_text = f"Coarse grid is {cols} columns x {rows} rows. Give each major part its zone."
+    if summary:
+        # The MODULE GRAPH — trust this over the cluttered render for connectivity/roles.
+        user_text = ("The circuit's module graph (use it for roles + what connects to what; the "
+                     f"render is cluttered):\n{summary}\n\n" + user_text +
+                     " Put connected parts in the same or neighbouring zones; keep same-role parts "
+                     "(e.g. all inputs, all outputs) together.")
     if context:
         user_text += (f"\n\nThis is a REFINEMENT pass. The previous layout's critic feedback:\n{context}\n"
                       "Adjust the zones to address it (e.g. move a part nearer what it connects to).")
@@ -111,10 +117,11 @@ def main():
     ap.add_argument("--model", default=os.environ.get("CRITIC_MODEL", "anthropic/claude-opus-4-8"))
     ap.add_argument("--out", help="write the zone JSON {refdes:[fx,fy]} here ($ZONE_FILE)")
     ap.add_argument("--context", help="previous critic feedback, for a refinement pass")
+    ap.add_argument("--summary", help="circuit module-graph text (see circuit_summary.py)")
     ap.add_argument("--show", action="store_true")
     args = ap.parse_args()
     cols, rows = (int(x) for x in args.grid.lower().split("x"))
-    zones, text = plan(args.image, cols, rows, args.model, args.context)
+    zones, text = plan(args.image, cols, rows, args.model, args.context, args.summary)
     if args.show:
         print(text, file=sys.stderr)
     js = json.dumps(zones)

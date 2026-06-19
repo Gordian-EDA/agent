@@ -51,10 +51,18 @@ def critic(png, circuit, samples):
     return (int(m.group(1)), m.group(2).strip()) if m else (None, "")
 
 
-def vlm_zones(image, grid, zone_file, context):
+def circuit_summary(in_yaml):
+    return subprocess.run(
+        ["python3", os.path.join(HERE, "circuit_summary.py"), in_yaml],
+        cwd=ROOT, capture_output=True, text=True).stdout.strip()
+
+
+def vlm_zones(image, grid, zone_file, context, summary):
     cmd = ["python3", os.path.join(HERE, "vlm_place.py"), image, "--grid", grid, "--out", zone_file]
     if context:
         cmd += ["--context", context]
+    if summary:
+        cmd += ["--summary", summary]
     subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=True)
 
 
@@ -74,10 +82,11 @@ def main():
     best = {"label": "auto", "score": s_auto if s_auto is not None else -1, "zones": None}
     print(f"auto={s_auto}")
 
+    summary = circuit_summary(args.in_yaml)
     prev_png, context = auto_png, None
     for i in range(args.iters):
         zf = os.path.join(work, f"zone{i}.json")
-        vlm_zones(prev_png, args.grid, zf, context)
+        vlm_zones(prev_png, args.grid, zf, context, summary)
         png = render(args.in_yaml, os.path.join(work, f"z{i}"), zone_file=zf)
         s, summary = critic(png, args.circuit, args.samples)
         zones = json.load(open(zf))
