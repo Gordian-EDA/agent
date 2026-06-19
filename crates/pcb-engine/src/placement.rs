@@ -494,7 +494,12 @@ const SA_KEEPOUT_W: f64 = 1000.0; // hard: part overlapping a signal-layer keep-
 const SA_SILK_W: f64 = 6.0; // soft: parts crowding each other's refdes
 const SA_WL_W: f64 = 0.4; // half-perimeter wirelength (over part centres)
 const SA_SPREAD_W: f64 = 0.25; // mild whole-board compaction
-const SA_COHERE_W: f64 = 5.0; // decoupling cap → nearest anchor power pad (hug the IC)
+const SA_COHERE_W: f64 = 8.0; // decoupling cap → nearest anchor power pad (hug the IC).
+// Deliberately ABOVE SA_SILK_W (refdes-crowding): a bypass cap hugging its IC is an
+// electrical necessity that must outrank silk aesthetics, else a big cap (1210) next to a
+// small IC (SOIC-8) gets pushed away by the crowding penalty and strands (critic-caught on
+// power-buck). Targeted to detected decoupling PAIRS only, so it does not perturb parts
+// with normal net springs.
 const SA_EDGE_W: f64 = 2.5; // connector → nearest board edge
 /// Breathing room (mm) a refdes needs around a part before it crowds a neighbour.
 const SA_SILK_GAP: f64 = 1.0;
