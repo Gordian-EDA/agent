@@ -49,16 +49,22 @@ pub struct RouteResult {
     pub failed: Vec<FailedNet>,
 }
 
-/// Plane-layer bitmask for the engine's stackup convention. A 4-layer board is
-/// F / In1(plane) / In2(plane) / B → the inner two layers (1, 2) are solid planes
-/// and are not routable for signals. 2-layer (and the fixture default) has none. A
-/// future 6-layer stack with inner *signal* layers would need its own map.
-fn plane_mask_for(layer_count: usize) -> u32 {
-    if layer_count == 4 {
-        0b0110
-    } else {
-        0
+/// The inner copper layers that carry a solid GND/VCC plane, CENTRED in the stack:
+/// 4-layer → In1,In2 (`{1,2}`); 6-layer → In2,In3 (`{2,3}`, leaving In1/In4 as signal);
+/// else none. Centring keeps the stack symmetric and, crucially, leaves the other inner
+/// layers as SIGNAL layers — the routing-capacity lever for dense BGA corridors. The
+/// router never routes ON these (a signal would short the plane); a via tunnels through.
+pub fn plane_layers(layer_count: usize) -> Vec<u32> {
+    match layer_count {
+        4 => vec![1, 2],
+        6 => vec![2, 3],
+        _ => Vec::new(),
     }
+}
+
+/// Bitmask form of [`plane_layers`] for [`crate::astar::AStarCosts::plane_mask`].
+pub fn plane_mask_for(layer_count: usize) -> u32 {
+    plane_layers(layer_count).iter().fold(0u32, |m, &l| m | (1u32 << l))
 }
 
 /// The Chebyshev radius (in grid cells) a via barrel must keep clear of foreign

@@ -323,8 +323,8 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
         .and_then(Value::as_u64)
         .map(|n| n as u32)
         .unwrap_or(d.layer_count);
-    if !matches!(layer_count, 2 | 4) {
-        return Err(format!("rules.layers must be 2 or 4, got {layer_count}"));
+    if !matches!(layer_count, 2 | 4 | 6) {
+        return Err(format!("rules.layers must be 2, 4, or 6, got {layer_count}"));
     }
     let via_diameter = num("via_diameter", d.via_diameter);
     let via_drill = num("via_drill", d.via_drill);
@@ -1602,11 +1602,14 @@ fn assign_planes(draft: &BoardDraft) -> Vec<(String, u32)> {
         counts.into_iter().filter(|(_, c)| *c >= PLANE_MIN_PINS).collect();
     // Highest fanout first; ties by name for determinism.
     nets.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    let inner = (draft.rules.layer_count - 2) as usize;
+    // Up to 2 planes (GND/VCC), placed on the CENTRED plane layers for this stackup
+    // (4-layer → In1,In2; 6-layer → In2,In3) so the other inner layers stay signal.
+    // Must match pcb_engine's `plane_mask_for`, or the router would route on a plane.
+    let plane_idx = pcb_engine::router::plane_layers(draft.rules.layer_count as usize);
     nets.into_iter()
-        .take(inner)
+        .take(plane_idx.len())
         .enumerate()
-        .map(|(i, (net, _))| (net, (i + 1) as u32))
+        .map(|(i, (net, _))| (net, plane_idx[i]))
         .collect()
 }
 
