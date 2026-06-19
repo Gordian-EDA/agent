@@ -1807,9 +1807,15 @@ fn route_with_planes(
         if thru {
             continue;
         }
-        // 1) In place: drop the stitch via on the pad if it clears.
+        // 1) In place: drop the stitch via on the pad if it clears. Uses the
+        //    hole-clearance-aware clr_via (not bare clr) — the via's drill must clear a
+        //    neighbour's drill by KiCAD's 0.25mm, same as a fanout via; at a fine
+        //    clearance (e.g. 0.1mm) bare clr left only a clr+via_annular hole gap < 0.25
+        //    (a latent fault the 0.13mm boards passed only by luck). For the default
+        //    0.2mm clearance clr_via == clr, so those boards are unchanged.
         if stitch_via_clears(
-            &at, &net, &rp.obstacles, &result.solution.vias, &result.solution.traces, via_r, clr,
+            &at, &net, &rp.obstacles, &result.solution.vias, &result.solution.traces, via_r,
+            clr_via,
         ) {
             result.solution.vias.push(Via {
                 connection: net,

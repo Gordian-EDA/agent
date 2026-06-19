@@ -1,7 +1,11 @@
 {
-  "description": "STRESS: 0.5mm-pitch BGA-100 (pad 0.25mm) on 4-layer \u2014 fine pitch stresses stitching-via clearance vs adjacent balls + plane anti-pads",
+  "description": "STRESS: 0.5mm-pitch BGA-100 (pad 0.25mm) on 4-layer \u2014 fine pitch stresses stitching-via clearance vs adjacent balls + plane anti-pads (fine-pitch rules: 0.1mm clearance/trace, 0.5/0.3 via)",
   "rules": {
-    "layers": 4
+    "layers": 4,
+    "clearance": 0.1,
+    "min_trace_width": 0.1,
+    "via_diameter": 0.5,
+    "via_drill": 0.3
   },
   "bounds": {
     "min_x": 0.0,
