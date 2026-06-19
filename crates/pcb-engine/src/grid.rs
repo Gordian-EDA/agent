@@ -486,11 +486,13 @@ pub fn grid_pitch(problem: &RouteProblem) -> f64 {
     ((problem.min_trace_width + problem.clearance) / 2.0).max(MIN_PITCH_MM)
 }
 
-/// Obstacle inflation for `problem`: `clearance + max_route_width/2` — sized to the
-/// widest net so even a fat power trace clears every pad. With no per-net widths this
-/// is `clearance + min_trace_width/2` (unchanged).
+/// Obstacle inflation for `problem`: `clearance + min_trace_width/2` — a free cell
+/// guarantees a MIN-width trace centre there clears every obstacle by `clearance`. A
+/// wider net adds its extra half-width `(w - min)/2` as a per-net A* scan
+/// (`AStarCosts.trace_clear_radius_cells`), so it clears exactly without over-spacing
+/// every other net (the old `max_route_width` approach did, costing routability).
 pub fn obstacle_inflation(problem: &RouteProblem) -> f64 {
-    problem.clearance + problem.max_route_width() / 2.0
+    problem.clearance + problem.min_trace_width / 2.0
 }
 
 /// Number of cells needed to cover `[min, max]` at `pitch` (at least 1).

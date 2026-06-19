@@ -215,8 +215,7 @@ pub fn route_with(
     // old min_trace_width + clearance). Marked as a Chebyshev radius around each routed
     // cell so later nets keep their distance while the owning net routes freely through.
     let pitch = grid::grid_pitch(problem);
-    let halo =
-        (((problem.max_route_width() + problem.clearance) / pitch).ceil() as usize).max(1);
+    let min_w = problem.min_trace_width;
 
     let mut traces: Vec<Trace> = Vec::new();
     let mut vias: Vec<Via> = Vec::new();
@@ -234,6 +233,16 @@ pub fn route_with(
             continue;
         }
 
+        // Per-net width: fatter copper marks a wider keep-out halo and scans its extra
+        // half-width as it routes (min-width nets => radius 0 => unchanged behaviour).
+        let nw = problem.net_width(&conn.name);
+        let halo =
+            (((nw / 2.0 + problem.clearance + min_w / 2.0) / pitch).ceil() as usize).max(1);
+        let costs = AStarCosts {
+            trace_clear_radius_cells: (((nw - min_w) / 2.0 / pitch).ceil() as usize),
+            ..design.costs
+        };
+
         // The routed tree starts as point 0's cell; each further point is
         // routed to the nearest cell already in the tree.
         let mut tree_cells: Vec<State> =
@@ -247,7 +256,7 @@ pub fn route_with(
         for (pi, pt) in conn.points_to_connect.iter().enumerate().skip(1) {
             let start = point_cell(&grid, pt, layer_count);
             // A* from the new point's cell to the nearest cell of the tree.
-            let path = astar::search(&grid, conn_idx, &[start], &tree_cells, design.costs);
+            let path = astar::search(&grid, conn_idx, &[start], &tree_cells, costs);
             let Some(path) = path else {
                 net_failed = Some(format!(
                     "no grid path from point {pi} to the routed tree (congestion or enclosure)"
