@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-"""VLM floorplanner: read a gridded schematic render, return a compact floorplan.
+"""VLM coarse-ZONE planner for the HYBRID placement loop (LLM steers, engine places).
 
-The engine's placement algorithm is sprawl-capped (it can't de-sprawl without colliding
-satellite fans). A vision LLM CAN do the global, semantic spatial reasoning that de-sprawls
-a board ("the LDO is marooned bottom-right; move it next to the MCU"). This is the VLM step
-of the placement loop:
+A vision LLM is good at rough DIRECTION ("power left, MCU centre, outputs right") but NOT at
+millimetre positions — forcing its exact cells wrecks the engine's good local placement
+(decoupling banks, spines). So this returns a COARSE zone per major part as a board-bbox
+FRACTION {refdes:[fx,fy]} (fx 0=left..1=right, fy 0=top..1=bottom). The engine consumes it as
+a SOFT bias (LayoutIr.zone / proxy_cost zbias), doing the precise placement itself.
 
-    render -> coord_overlay -> [THIS: vlm_place -> {refdes:[col,row]}] -> vlm_apply -> re-render
-
-It overlays a coordinate grid on the render, sends it to the OpenAI-gateway vision model
-(same transport as tools/schematic_critic.py), and returns the floorplan as JSON. Apply the
-result with vlm_apply.py, re-render, and A/B it against the auto layout via schematic_critic
-(VLM-placement HELPS sprawled boards but can HURT already-tidy ones, so keep the better).
+    render -> coord_overlay (coarse grid) -> [THIS -> {refdes:[fx,fy]}] -> $ZONE_FILE -> re-render
 
     set -a; . ./.env; set +a
-    python3 tools/vlm_place.py RENDER.png --grid 8x6 [--out FLOORPLAN.json] [--show]
+    python3 tools/vlm_place.py RENDER.png [--grid 4x3] [--out ZONE.json] [--context "..."] [--show]
+
+--context feeds the previous critic's defects back in for the feedback loop (iterate: place ->
+critic -> adjust zones -> repeat).
 """
 import argparse
 import json
@@ -34,23 +33,26 @@ def b64_image(path):
         return base64.b64encode(f.read()).decode()
 
 
-SYSTEM = """You are an expert schematic FLOORPLANNER. You are shown a rendered schematic with a
-labelled coordinate grid (each cell tagged "col,row" in red; col increases left→right, row top→bottom).
-Produce a COMPACT, signal-flow floorplan for the MAJOR parts (ICs and connectors — refdes like U1, J2):
-power-input parts LEFT, the main IC(s) CENTRE, peripherals/outputs RIGHT.
+SYSTEM = """You are an expert schematic FLOORPLANNER giving ROUGH DIRECTION to a placement engine.
+You see a rendered schematic with a COARSE zone grid overlaid (each cell tagged "col,row" in red;
+col increases left→right, row top→bottom). The grid is intentionally coarse — you choose which broad
+ZONE each major part belongs in, and the engine does the precise millimetre placement itself.
 
-PACK TIGHTLY — this is the most important rule. Use ADJACENT cells in the SMALLEST possible region:
-connected parts go in NEIGHBOURING cells (differ by 1 in col or row), and the whole floorplan must fit
-in roughly a 3-4 cell wide by 2-3 cell tall block. Do NOT spread parts across the grid with gaps
-between them. GOOD: cols 2,3,4,5 next to each other. BAD: cols 0,2,4,6 with empty cells between.
-Leave small passives (R, C, crystals, LEDs) OUT — the engine clusters those next to the pin they wire to.
+Assign each MAJOR part (ICs and connectors — refdes like U1, J2; ignore small R/C/crystal/LED passives)
+to ONE coarse zone for clean left→right signal flow:
+- power-INPUT connectors/regulators on the LEFT (low col),
+- the main IC(s) in the CENTRE,
+- peripheral/output connectors on the RIGHT (high col),
+- put parts that talk to each other in the same or neighbouring rows.
 
-Reason briefly first (where parts currently sit and how spread out they are), then emit the floorplan as a
-fenced JSON code block of {refdes: [col,row]} and nothing else in the block. Distinct, ADJACENT cells."""
+You are giving rough direction, NOT exact positions — pick the zone that captures each part's ROLE in
+the signal flow. It is fine for several parts to share a zone.
+
+Reason briefly first (what's currently mis-placed / sprawled), then emit ONLY a fenced JSON code block
+of {refdes: [col,row]} (the coarse cell per major part) and nothing else in the block."""
 
 
 def extract_json(text):
-    # Prefer a fenced ```json block; else the last {...} object.
     m = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if m:
         return json.loads(m[-1])
@@ -60,19 +62,29 @@ def extract_json(text):
     raise json.JSONDecodeError("no JSON object found", text, 0)
 
 
-def place(image, cols, rows, model):
+def cells_to_fractions(cells, cols, rows):
+    """Coarse cell (col,row) -> board-bbox fraction [fx,fy], matching coord_overlay's mapping."""
+    return {rd: [round((c + 0.5) / cols, 3), round((r + 0.5) / rows, 3)]
+            for rd, (c, r) in cells.items()}
+
+
+def plan(image, cols, rows, model, context):
     base = os.environ.get("OPENAI_BASE_URL", "").rstrip("/")
     key = os.environ.get("OPENAI_API_KEY", "")
     if not base or not key:
         sys.exit("OPENAI_BASE_URL / OPENAI_API_KEY not set")
     grid_png = image + ".grid.png"
     overlay(image, grid_png, cols, rows)
+    user_text = f"Coarse grid is {cols} columns x {rows} rows. Give each major part its zone."
+    if context:
+        user_text += (f"\n\nThis is a REFINEMENT pass. The previous layout's critic feedback:\n{context}\n"
+                      "Adjust the zones to address it (e.g. move a part nearer what it connects to).")
     body = {
         "model": model,
         "messages": [
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": [
-                {"type": "text", "text": f"Grid is {cols} columns x {rows} rows. Floorplan the major parts."},
+                {"type": "text", "text": user_text},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_image(grid_png)}"}},
             ]},
         ],
@@ -89,22 +101,23 @@ def place(image, cols, rows, model):
     except urllib.error.HTTPError as e:
         sys.exit(f"vlm_place: request failed (HTTP {e.code}): {e.read().decode(errors='replace')[:300]}")
     text = out["choices"][0]["message"]["content"].strip()
-    return extract_json(text), text
+    return cells_to_fractions(extract_json(text), cols, rows), text
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("image")
-    ap.add_argument("--grid", default="8x6", help="COLSxROWS, e.g. 8x6")
+    ap.add_argument("--grid", default="4x3", help="coarse COLSxROWS, e.g. 4x3")
     ap.add_argument("--model", default=os.environ.get("CRITIC_MODEL", "anthropic/claude-opus-4-8"))
-    ap.add_argument("--out", help="write the floorplan JSON here")
-    ap.add_argument("--show", action="store_true", help="also print the model's reasoning")
+    ap.add_argument("--out", help="write the zone JSON {refdes:[fx,fy]} here ($ZONE_FILE)")
+    ap.add_argument("--context", help="previous critic feedback, for a refinement pass")
+    ap.add_argument("--show", action="store_true")
     args = ap.parse_args()
     cols, rows = (int(x) for x in args.grid.lower().split("x"))
-    fp, text = place(args.image, cols, rows, args.model)
+    zones, text = plan(args.image, cols, rows, args.model, args.context)
     if args.show:
         print(text, file=sys.stderr)
-    js = json.dumps(fp)
+    js = json.dumps(zones)
     if args.out:
         open(args.out, "w").write(js)
     print(js)
