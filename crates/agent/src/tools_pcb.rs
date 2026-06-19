@@ -1738,6 +1738,54 @@ fn route_with_planes(
 }
 
 /// Build the copper-plane zones for export: one pour per plane net, filling the
+/// Drop floating copper ISLANDS from a precomputed plane/pour fill: keep only the
+/// rectangles reachable (by shared-edge adjacency) from one that covers a same-net
+/// ANCHOR (a pad, via, or this net's own trace point). KiCAD treats edge-sharing
+/// `filled_polygon`s as one connected pour, so an island with no anchor is copper that
+/// connects to nothing — KiCAD would delete it on fill and DRC reports `isolated_copper`.
+/// Pruning it up front keeps the pour professional (no floating fills) and cannot affect
+/// connectivity: a removed island, by definition, carried no net connection. Empty
+/// `anchors` ⇒ no-op (never drop a pour we cannot anchor).
+fn prune_islands(rects: Vec<[f64; 4]>, anchors: &[Point2]) -> Vec<[f64; 4]> {
+    const EPS: f64 = 1e-6;
+    let n = rects.len();
+    if n == 0 || anchors.is_empty() {
+        return rects;
+    }
+    let covers = |r: &[f64; 4], a: &Point2| {
+        a.x >= r[0] - EPS && a.x <= r[2] + EPS && a.y >= r[1] - EPS && a.y <= r[3] + EPS
+    };
+    // Two tiling rects connect iff they share a positive-length edge (abut on one axis,
+    // overlap on the other).
+    let touch = |a: &[f64; 4], b: &[f64; 4]| {
+        let xov = a[2].min(b[2]) - a[0].max(b[0]);
+        let yov = a[3].min(b[3]) - a[1].max(b[1]);
+        (yov.abs() < EPS && xov > EPS) || (xov.abs() < EPS && yov > EPS)
+    };
+    let mut keep = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    for (i, r) in rects.iter().enumerate() {
+        if anchors.iter().any(|a| covers(r, a)) {
+            keep[i] = true;
+            stack.push(i);
+        }
+    }
+    while let Some(i) = stack.pop() {
+        for j in 0..n {
+            if !keep[j] && touch(&rects[i], &rects[j]) {
+                keep[j] = true;
+                stack.push(j);
+            }
+        }
+    }
+    rects
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| keep[*i])
+        .map(|(_, r)| r)
+        .collect()
+}
+
 /// board minus an anti-pad keep-out around every FOREIGN copper item that reaches
 /// that inner layer — every via on another net (which passes through the plane)
 /// and every foreign through-hole pad (whose barrel sits on the inner layer).
@@ -1783,7 +1831,24 @@ fn plane_zones(
                     keepouts.push((Point2 { x: cx, y: cy }, hx, hy));
                 }
             }
-            let fill = plane_fill_rects(bounds, BOARD_EDGE_MARGIN_MM, &keepouts);
+            // Same-net anchors (this plane's stitching vias + its own pads on the layer):
+            // fill islands not reachable from one are floating copper — prune them.
+            let mut anchors: Vec<Point2> = Vec::new();
+            for v in &solution.vias {
+                if &v.connection == net {
+                    anchors.push(v.at.clone());
+                }
+            }
+            for ob in &board.obstacles {
+                let on_layer = ob.layers.iter().any(|lr| lr.index(layer_count) == Some(*layer_idx));
+                if on_layer && ob.connected_to.iter().any(|n| n == net) {
+                    anchors.push(ob.center.clone());
+                }
+            }
+            let fill = prune_islands(
+                plane_fill_rects(bounds, BOARD_EDGE_MARGIN_MM, &keepouts),
+                &anchors,
+            );
             ZoneSpec {
                 net_name: net.clone(),
                 layer_name: format!("In{layer_idx}.Cu"),
@@ -1864,7 +1929,26 @@ fn pour_zones(
                     ));
                 }
             }
-            let fill = plane_fill_rects(bounds, BOARD_EDGE_MARGIN_MM, &ko);
+            // Same-net anchors on this layer (pads + vias + this net's own traces):
+            // any fill island not reachable from one is floating copper — prune it.
+            let mut anchors: Vec<Point2> = Vec::new();
+            for v in &solution.vias {
+                if &v.connection == net {
+                    anchors.push(v.at.clone());
+                }
+            }
+            for ob in &board.obstacles {
+                let on = ob.layers.iter().any(|l| l.index(lc) == Some(idx));
+                if on && ob.connected_to.iter().any(|n| n == net) {
+                    anchors.push(ob.center.clone());
+                }
+            }
+            for t in &solution.traces {
+                if t.layer.index(lc) == Some(idx) && &t.connection == net {
+                    anchors.extend(t.path.iter().cloned());
+                }
+            }
+            let fill = prune_islands(plane_fill_rects(bounds, BOARD_EDGE_MARGIN_MM, &ko), &anchors);
             Some(ZoneSpec { net_name: net.clone(), layer_name: kname, fill_rects: fill })
         })
         .collect()
