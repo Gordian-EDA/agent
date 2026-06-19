@@ -2024,7 +2024,7 @@ fn plane_zones(
                 layer_name: format!("In{layer_idx}.Cu"),
                 fill_rects: fill,
                 clearance: rules.clearance,
-                min_thickness: rules.min_trace_width,
+                min_thickness: rules.min_trace_width.min(ZONE_MIN_THICKNESS_CAP_MM),
             }
         })
         .collect()
@@ -2033,6 +2033,16 @@ fn plane_zones(
 /// Safety margin added to a plane anti-pad beyond bare (radius + clearance) — a
 /// bare keep-out lands exactly on the clearance limit and KiCAD flags it.
 const PLANE_ANTIPAD_MARGIN_MM: f64 = 0.15;
+
+/// Cap on a copper zone's `min_thickness`. KiCAD's zone fill removes slivers thinner than
+/// `min_thickness` by a deflate/inflate (≈ min_thickness/2 each), and that inflate can grow
+/// the fill back INTO a via's anti-pad, eating its clearance. Tying min_thickness to a large
+/// `min_trace_width` (e.g. all-0.4mm traces) made the inflate (0.2) exceed the anti-pad margin
+/// (0.15) → KiCAD's re-fill produced via-to-plane clearance faults the in-house lint never sees
+/// (it doesn't model plane copper). Capping min_thickness keeps the inflate < the anti-pad
+/// margin so the pour stays clearance-correct at any trace width; 0.25mm is KiCAD's own default
+/// zone minimum, so normal boards (min_trace ≤ 0.25) are unchanged.
+const ZONE_MIN_THICKNESS_CAP_MM: f64 = 0.25;
 
 /// Map a pour layer string to its (copper-layer index, KiCAD layer name) on an
 /// `lc`-layer board: `top`/`F.Cu` → 0, `bottom`/`B.Cu` → lc-1, `innerN`/`InN.Cu` → N.
@@ -2151,7 +2161,7 @@ fn pour_zones(
                 layer_name: kname,
                 fill_rects: fill,
                 clearance: rules.clearance,
-                min_thickness: rules.min_trace_width,
+                min_thickness: rules.min_trace_width.min(ZONE_MIN_THICKNESS_CAP_MM),
             })
         })
         .collect()
