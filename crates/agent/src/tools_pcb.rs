@@ -377,8 +377,25 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
             let net = p.get("net").and_then(Value::as_str)
                 .ok_or_else(|| "rules.pours[].net must be a string".to_string())?;
             let layer = p.get("layer").and_then(Value::as_str).unwrap_or("bottom");
-            if !matches!(layer, "top" | "bottom" | "F.Cu" | "B.Cu") {
-                return Err(format!("rules.pours[].layer must be top/bottom (got {layer})"));
+            // A pour floods a SIGNAL layer (top/bottom, or an inner signal layer on a
+            // 6-layer board) — never a GND/VCC PLANE (already a full copper layer) or a
+            // non-existent layer. Resolve + reject up front rather than silently drop it.
+            match resolve_pour_layer(layer, layer_count) {
+                None => {
+                    return Err(format!(
+                        "rules.pours[].layer '{layer}' is not a valid copper layer on a \
+                         {layer_count}-layer board — use top/bottom, or innerN on a 6-layer board"
+                    ));
+                }
+                Some((idx, _))
+                    if pcb_engine::router::plane_layers(layer_count as usize).contains(&idx) =>
+                {
+                    return Err(format!(
+                        "rules.pours[].layer '{layer}' is a GND/VCC PLANE on a {layer_count}-layer \
+                         board — a plane is already full copper; pour on a signal layer instead"
+                    ));
+                }
+                Some(_) => {}
             }
             pours.push(PourSpec { net: net.to_string(), layer: layer.to_string() });
         }
@@ -1866,6 +1883,34 @@ fn plane_zones(
 /// bare keep-out lands exactly on the clearance limit and KiCAD flags it.
 const PLANE_ANTIPAD_MARGIN_MM: f64 = 0.15;
 
+/// Map a pour layer string to its (copper-layer index, KiCAD layer name) on an
+/// `lc`-layer board: `top`/`F.Cu` → 0, `bottom`/`B.Cu` → lc-1, `innerN`/`InN.Cu` → N.
+/// Returns `None` for an out-of-range or unparseable layer. (A pour on a GND/VCC PLANE
+/// layer is resolvable here but rejected at `create_board` — a plane is already full
+/// copper.) This is what lets a GND fill sit on an inner SIGNAL layer (In1/In4 on a
+/// 6-layer board) for shielding / impedance reference, not just top/bottom.
+fn resolve_pour_layer(layer: &str, lc: u32) -> Option<(u32, String)> {
+    let idx = match layer {
+        "top" | "F.Cu" => 0,
+        "bottom" | "B.Cu" => lc.saturating_sub(1),
+        other => other
+            .strip_prefix("inner")
+            .or_else(|| other.strip_prefix("In").and_then(|s| s.strip_suffix(".Cu")))
+            .and_then(|n| n.parse::<u32>().ok())?,
+    };
+    if idx >= lc {
+        return None;
+    }
+    let kname = if idx == 0 {
+        "F.Cu".to_string()
+    } else if idx == lc - 1 {
+        "B.Cu".to_string()
+    } else {
+        format!("In{idx}.Cu")
+    };
+    Some((idx, kname))
+}
+
 /// Build copper-POUR zones on SIGNAL layers (top/bottom) for the requested nets — a
 /// GND flood for HF return paths / shielding, or a 2-layer ground plane. Unlike an
 /// inner PLANE, a signal layer carries traces, so the anti-pad keep-out is carved
@@ -1887,11 +1932,7 @@ fn pour_zones(
     pours
         .iter()
         .filter_map(|p| {
-            let (idx, kname) = match p.layer.as_str() {
-                "top" | "F.Cu" => (0u32, "F.Cu".to_string()),
-                "bottom" | "B.Cu" => (lc.saturating_sub(1), "B.Cu".to_string()),
-                _ => return None,
-            };
+            let (idx, kname) = resolve_pour_layer(&p.layer, lc)?;
             let net = &p.net;
             let mut ko: Vec<(Point2, f64, f64)> = Vec::new();
             // Foreign vias (a through via reaches every layer).
