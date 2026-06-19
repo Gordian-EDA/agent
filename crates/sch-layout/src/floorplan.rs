@@ -524,14 +524,24 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
             // "stranded decoupling cap" critic defect on agent boards); seating it beside
             // its IC fixes that. Falls back to a spare column if no anchor uses the rail.
             let vp = if is_vplus(&n1) { &n1 } else { &n2 };
+            // The supply load is found by REFDES across all its units, not just the anchor
+            // item's own pins: a multi-unit IC (op-amp, FPGA) carries its V+/V- on a separate
+            // 2-pin POWER UNIT that isn't itself an anchor, so a per-item pin check finds no
+            // anchor and the dual-supply decoupling scatters. Counting vp pins over every
+            // unit sharing the refdes seats the bypass beside the IC's signal-unit anchor.
+            let refdes_vp = |rd: &str| -> usize {
+                items
+                    .iter()
+                    .filter(|it| it.refdes == rd)
+                    .flat_map(|it| &it.pins)
+                    .filter(|(_, _, n)| n.as_deref() == Some(vp.as_str()))
+                    .count()
+            };
             let sup = anchors
                 .iter()
                 .copied()
-                .filter(|&ai| items[ai].pins.iter().any(|(_, _, n)| n.as_deref() == Some(vp.as_str())))
-                .max_by_key(|&ai| {
-                    let on = items[ai].pins.iter().filter(|(_, _, n)| n.as_deref() == Some(vp.as_str())).count();
-                    (!is_connector_like(&items[ai].part), on)
-                });
+                .filter(|&ai| refdes_vp(&items[ai].refdes) > 0)
+                .max_by_key(|&ai| (!is_connector_like(&items[ai].part), refdes_vp(&items[ai].refdes)));
             if let Some(ai) = sup {
                 let acol = anchor_col[&ai];
                 let arow = anchor_row[&ai];
@@ -4093,6 +4103,20 @@ fn layout_cost(
         + 0.5 * stray
         + 0.15 * length
         + 0.45 * spread;
+    // MULTI-UNIT COHESION. A multi-unit part's units (op-amp A/B + its V+/V- power unit)
+    // share a refdes but NO net, so length-min lets them drift apart — scattering the part
+    // and its decoupling across the sheet. Penalise the bounding-box spread of same-refdes
+    // items so the units cluster as one IC. ZERO for single-unit parts (every refdes is one
+    // item), so `base + 0.0 == base` keeps the free path bit-identical and references
+    // unchanged; added OUTSIDE `base` (never re-parenthesising it) per the note above.
+    let mut by_refdes: BTreeMap<&str, [f64; 4]> = BTreeMap::new();
+    for it in items {
+        let e = by_refdes.entry(&it.refdes).or_insert([f64::MAX, f64::MAX, f64::MIN, f64::MIN]);
+        e[0] = e[0].min(it.at[0]); e[1] = e[1].min(it.at[1]);
+        e[2] = e[2].max(it.at[0]); e[3] = e[3].max(it.at[1]);
+    }
+    let sib_spread: f64 = by_refdes.values().map(|e| (e[2] - e[0]) + (e[3] - e[1])).sum();
+    let multiunit = SIB_COHESION * sib_spread;
     // PREMIUM compaction boost. The neat terms above amplify STRAIGHTNESS ~3x; left
     // unbalanced, the paid SA straightens a wire by flinging its part into open space
     // — the "straight but sprawled" look EVERY visual review flagged as the #1 defect.
@@ -4105,10 +4129,10 @@ fn layout_cost(
     // big boards the final candidate pick (fewest real warnings, greedy always a
     // candidate) caps it — premium can never ship more warnings than greedy.
     if premium {
-        base + COMPACT_BOOST * (0.15 * length + 0.45 * spread)
+        base + multiunit + COMPACT_BOOST * (0.15 * length + 0.45 * spread)
             + ORIENT_BOOST * leg_viol as f64
     } else {
-        base
+        base + multiunit
     }
     // NB: a premium body-cross BOOST was tried and dropped — on the uart (the only
     // reference that ships crossings) body_xing stayed at 2 from boost 0 to 1000:
@@ -4139,6 +4163,14 @@ const ORIENT_BOOST: f64 = 50.0;
 /// clear of the over-tight edge (boost 4 destabilises uart). Only the premium branch
 /// of `layout_cost` reads it, so the free path stays bit-identical.
 const COMPACT_BOOST: f64 = 2.0;
+
+/// Cohesion pull on a multi-unit part's units (same refdes, no shared net): penalises
+/// their bounding-box spread so an op-amp's A/B/power units cluster as one IC instead of
+/// drifting apart and scattering the part's decoupling. ZERO on single-unit boards (one
+/// item per refdes → zero spread), so the free path + all single-unit references stay
+/// bit-identical. Both cost tiers read it (clustering is a correctness-of-organisation
+/// pull, not a premium nicety).
+const SIB_COHESION: f64 = 3.0;
 
 /// Ground truth behind the visual "a wire runs through a part" complaint:
 /// `(2-pin transverse + collinear body crossings, IC body crossings)` for a placed
