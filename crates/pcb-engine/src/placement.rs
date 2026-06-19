@@ -833,6 +833,12 @@ fn seat_corner_seek_parts(problem: &PlaceProblem, hints: &PlacementHints, best: 
         .zip(&rots)
         .map(|(p, &r)| rotated_courtyard_half(p, r))
         .collect();
+    let copper_half: Vec<(f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(&rots)
+        .map(|(p, &r)| rotated_copper_half(p, r))
+        .collect();
     let mut pos: Vec<Point2> = best.placements.iter().map(|p| p.at.clone()).collect();
     let b = &problem.bounds;
     let corners = [
@@ -858,7 +864,7 @@ fn seat_corner_seek_parts(problem: &PlaceProblem, hints: &PlacementHints, best: 
                 continue;
             }
             pos[i] = inset(corners[ci]);
-            if is_legal(problem, &half, margin, &pos) {
+            if is_legal(problem, &half, &copper_half, margin, &pos) {
                 used[ci] = true;
                 break;
             }
@@ -903,6 +909,12 @@ fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts: PlaceOpts
         .zip(&rotations)
         .map(|(p, &rot)| rotated_courtyard_half(p, rot))
         .collect();
+    let copper_half: Vec<(f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &rot)| rotated_copper_half(p, rot))
+        .collect();
 
     // 1. Deterministic initial grid (sorted by reference), seeding positions.
     let mut pos = initial_grid(problem, &half);
@@ -936,7 +948,7 @@ fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts: PlaceOpts
         .collect();
 
     // 5. Verify legality by EXACT geometry — never trust the algorithm.
-    let legal = is_legal(problem, &half, margin, &pos);
+    let legal = is_legal(problem, &half, &copper_half, margin, &pos);
 
     let hpwl = compute_hpwl(problem, &nets, &pos, &rotations);
     let pairs = decoupling_pairs(problem);
@@ -1393,6 +1405,28 @@ fn rotated_courtyard_half(part: &Part, rot: i32) -> (f64, f64) {
     }
 }
 
+/// KiCAD's copper-to-board-edge clearance (its default). A part's PADS must clear the board
+/// outline by this — otherwise an edge-seeking connector lands a pad on the Edge.Cuts and trips
+/// `copper_edge_clearance`. (The COURTYARD may still overhang — only copper is constrained.)
+const EDGE_CLEAR_PLACE_MM: f64 = 0.5;
+
+/// Half-extents of the part's PAD (copper) bounding box after a quadrant rotation. Bounds ONLY
+/// the copper — so the outline check can keep pads inside the board while a part's courtyard
+/// (its non-copper margin) is still free to overhang a notch (the mounting-hole allowance).
+fn rotated_copper_half(part: &Part, rot: i32) -> (f64, f64) {
+    let (mut hx, mut hy): (f64, f64) = (0.0, 0.0);
+    for pad in &part.pads {
+        let off = rotate_offset(&pad.offset, rot);
+        let (pw, ph) = match rot.rem_euclid(360) {
+            90 | 270 => (pad.height / 2.0, pad.width / 2.0),
+            _ => (pad.width / 2.0, pad.height / 2.0),
+        };
+        hx = hx.max(off.x.abs() + pw);
+        hy = hy.max(off.y.abs() + ph);
+    }
+    (hx, hy)
+}
+
 /// A pad offset rotated by a quadrant (degrees), y-down.
 fn rotate_offset(off: &Point2, rot: i32) -> Point2 {
     // KiCAD footprint-rotation convention (y-down board coords): a pad's local
@@ -1490,21 +1524,37 @@ fn edge_delta(edge: Edge, p: &Point2, target: f64) -> (f64, f64) {
 /// The placement analog of the lint: re-verify in exact geometry that no two
 /// courtyards overlap (with margin) and every part is in bounds. Never trusts
 /// the legalizer.
-fn is_legal(problem: &PlaceProblem, half: &[(f64, f64)], margin: f64, pos: &[Point2]) -> bool {
+fn is_legal(
+    problem: &PlaceProblem,
+    half: &[(f64, f64)],
+    copper_half: &[(f64, f64)],
+    margin: f64,
+    pos: &[Point2],
+) -> bool {
     let n = problem.parts.len();
     for i in 0..n {
         if !fits_in_bounds(&pos[i], &problem.bounds, half[i]) {
             return false;
         }
-        // On a custom outline, a part whose CENTRE falls outside the true polygon is
-        // illegal — this keeps parts out of a star's concave notches, which the bounding
-        // box alone would allow. (The centre, not the courtyard: a mounting hole's
-        // courtyard legitimately overhangs a notch while its copper stays inside; the
-        // routing grid block is what actually holds copper to the outline.)
-        if let Some(poly) = &problem.outline
-            && !crate::problem::point_in_polygon(&pos[i], poly) {
+        // On a custom outline, a part's CENTRE must be inside the true polygon (keeps parts out
+        // of a star's concave notches the bbox alone allows), AND its PAD (copper) bounding box,
+        // grown by the edge clearance, must be inside too — a part's placed pads are copper the
+        // router never relocates, so an edge-seeking connector whose centre is inside but whose
+        // far pad overhangs the edge would otherwise ship a copper_edge_clearance fault. The
+        // COURTYARD may still overhang (only copper is constrained), preserving the mounting-hole
+        // -in-a-notch allowance.
+        if let Some(poly) = &problem.outline {
+            if !crate::problem::point_in_polygon(&pos[i], poly) {
                 return false;
             }
+            let (ex, ey) = (copper_half[i].0 + EDGE_CLEAR_PLACE_MM, copper_half[i].1 + EDGE_CLEAR_PLACE_MM);
+            for (dx, dy) in [(-ex, -ey), (ex, -ey), (ex, ey), (-ex, ey)] {
+                let c = Point2 { x: pos[i].x + dx, y: pos[i].y + dy };
+                if !crate::problem::point_in_polygon(&c, poly) {
+                    return false;
+                }
+            }
+        }
         // A part overlapping a signal-layer keep-out is illegal (its pads can't route).
         for k in &problem.keepouts {
             let (ox, oy) = part_keepout_overlap(&pos[i], half[i], k);
@@ -2075,8 +2125,40 @@ mod tests {
             .iter()
             .map(|p| (p.courtyard_w / 2.0, p.courtyard_h / 2.0))
             .collect();
+        let copper_half: Vec<(f64, f64)> =
+            problem.parts.iter().map(|p| rotated_copper_half(p, 0)).collect();
         let pos: Vec<Point2> = res.placements.iter().map(|p| p.at.clone()).collect();
-        assert!(is_legal(&problem, &half, courtyard_margin(0.2), &pos));
+        assert!(is_legal(&problem, &half, &copper_half, courtyard_margin(0.2), &pos));
+    }
+
+    #[test]
+    fn is_legal_rejects_pad_overhang_on_custom_outline() {
+        // The connector-pad-overhang fidelity guard: a part whose CENTRE is inside the outline
+        // but whose PAD copper overhangs the edge is illegal (it would ship copper_edge_clearance),
+        // even though the old centre-only check passed it. r0603 copper reaches ~1.225mm in x.
+        let problem = PlaceProblem {
+            bounds: board(20.0, 20.0),
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts: vec![r0603("R1", Some("A"), Some("B"))],
+            // A 5..15 square outline.
+            outline: Some(vec![
+                Point2 { x: 5.0, y: 5.0 },
+                Point2 { x: 15.0, y: 5.0 },
+                Point2 { x: 15.0, y: 15.0 },
+                Point2 { x: 5.0, y: 15.0 },
+            ]),
+        };
+        let half = vec![rotated_courtyard_half(&problem.parts[0], 0)];
+        let copper_half = vec![rotated_copper_half(&problem.parts[0], 0)];
+        let margin = courtyard_margin(0.2);
+        // Centred: copper (±1.225) + 0.5 clearance sits well inside the square → legal.
+        assert!(is_legal(&problem, &half, &copper_half, margin, &[Point2 { x: 10.0, y: 10.0 }]));
+        // Near the right edge: centre x=14.4 is inside the polygon, but copper reaches
+        // 14.4 + 1.225 = 15.6 > 15 → overhangs → illegal (the centre-only check missed this).
+        assert!(!is_legal(&problem, &half, &copper_half, margin, &[Point2 { x: 14.4, y: 10.0 }]));
     }
 
     // ── to_route_problem: parseable + connectivity oracle accepts pads/points ─

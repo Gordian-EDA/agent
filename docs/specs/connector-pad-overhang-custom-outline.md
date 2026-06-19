@@ -32,7 +32,19 @@ keep-out / plane / scale features each passed alone. This needs *custom non-rect
 and a single-feature test doesn't. (The committed custom-outline boards are sparse or use small
 parts, so none manifests it.)
 
-## The fix (deliberate — fragile placement engine, deferred)
+## FIDELITY HALF FIXED (commit pending) — is_legal now checks the copper extent
+
+DONE: `is_legal` now requires each part's ROTATED PAD (copper) bounding box, grown by the 0.5mm
+edge clearance, to be inside the outline — not just its centre (a new `rotated_copper_half` is
+precomputed alongside the courtyard half). A connector whose pad overhangs is now an ILLEGAL
+placement, so the engine reports place=false (honest) instead of shipping a copper_edge_clearance
+fault. The COURTYARD may still overhang (only copper is checked), preserving the mounting-hole
+allowance. Verified: full harness 0 copper faults / 68 boards, NO regression (every existing
+custom-outline board stays place=true — their copper was already clear); unit test
+`is_legal_rejects_pad_overhang_on_custom_outline` guards the check. The contract now holds for
+this class: place-illegal, never a shipped fault.
+
+## QUALITY HALF REMAINING (deferred) — seat the connector INSIDE so it routes
 
 Check the part's **rotated pad (copper) bounding box**, not its centre, against the outline:
 - Thread the part rotation into `is_legal` (currently only the rotated courtyard half-extent
