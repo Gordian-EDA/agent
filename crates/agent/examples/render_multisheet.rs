@@ -20,6 +20,12 @@ fn main() -> anyhow::Result<()> {
     let out_dir = args.next().expect("usage: render_multisheet <draft.yaml> <out_dir>");
     std::fs::create_dir_all(&out_dir)?;
 
+    // These ARE multi-sheet sub-sheets, so opt them into the route-aware crossing refinement
+    // on the small path (a peripheral/bus sub-sheet tangles its port fanout; the refinement
+    // takes e.g. an I2C sheet 16→13 xings and a power sheet 8→9). Single-sheet emit paths
+    // (bench_corpus, agent_design) don't set this, so references stay byte-identical.
+    unsafe { std::env::set_var("MULTISHEET_REFINE", "1") };
+
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
     let provider = RealSymbolProvider::new(env.clone());
     let src = std::fs::read_to_string(&yaml)?;

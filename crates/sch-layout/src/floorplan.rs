@@ -2159,7 +2159,32 @@ impl PlacementStrategy for Anneal {
         // RAW seed is always a candidate (a floor), and the pick takes fewest real
         // warnings then true cost, so the fast lane never ships worse than the seed.
         let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
-        if pins > FAST_PINS {
+        // PORT-HEAVY sheet = a multi-sheet sub-sheet: its inter-block nets each touch only one
+        // pin here, so they become single-pin signal PORTS (labels). Such a sheet is small but
+        // its bus/port fanout tangles, and the small path leaves the crossings uncorrected (a
+        // 6-part I2C sheet sat at 5 crossings though the topology allows ~1). Route it through the
+        // fast lane so it gets the route-aware crossing REFINEMENT (validated: io 7→8,
+        // power_entry 8→9). Self-contained reference boards have <6 single-pin signal nets, so
+        // they stay on the small path ⇒ snapshots byte-identical.
+        let port_heavy = {
+            let mut npins: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            for it in items.iter() {
+                for (_, _, net) in &it.pins {
+                    if let Some(net) = net {
+                        *npins.entry(net.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+            let mut signal_ports = 0usize;
+            for (net, c) in &npins {
+                if *c == 1 && !ir.rails.contains_key(net.as_str()) && !is_power_net(net) {
+                    signal_ports += 1;
+                }
+            }
+            signal_ports >= 6
+        };
+        let force_fast = port_heavy || std::env::var("MULTISHEET_REFINE").is_ok();
+        if pins > FAST_PINS || force_fast {
             let raw: Vec<Item> = items.to_vec();
             // Diverse proxy-anneal starts; fewer for very large boards (each candidate
             // costs two real routes at selection, ~1 s each on a 671-pin BGA).
@@ -2265,7 +2290,10 @@ impl PlacementStrategy for Anneal {
             // few crossings): such boards can't meaningfully improve, so the routed budget
             // would be pure wasted wall-time. Every refinement win this far had a best with
             // ≥7 crossings or a warning, so a ≤6/0-warning gate keeps all wins.
-            if bb == 0 && bw == 0 && bx <= 6 {
+            // Tighter skip on small forced-fast sheets: a 6-part bus sheet with 5 crossings should
+            // still be refined (the critic dings them), whereas a big board's ≤6 is acceptable.
+            let skip_xings = if force_fast && pins <= FAST_PINS { 1 } else { 6 };
+            if bb == 0 && bw == 0 && bx <= skip_xings {
                 items.clone_from_slice(&candidates[best]);
                 return;
             }
