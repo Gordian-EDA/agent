@@ -178,9 +178,22 @@ fn main() -> anyhow::Result<()> {
     let bnets: std::collections::HashMap<String, std::collections::HashSet<String>> =
         bnames.iter().map(|n| (n.clone(), block_nets(&eff[n]))).collect();
     let bsize = |n: &str| eff[n].components.len();
+    // A net shared by ≥2 blocks is a cross-block PORT. A small block that's nonetheless PORT-RICH (≥5
+    // ports) is a meaningful breakout — a connector pinout sheet (SWD/GPIO header) that reads cleanly
+    // on its own — NOT a sparse fragment. Don't fold it into a neighbour (that re-crams two breakout
+    // headers onto one sheet = the io-sheet collision); keep it as its own pinout sheet.
+    let mut net_blocks: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for n in &bnames {
+        for net in &bnets[n] {
+            *net_blocks.entry(net.clone()).or_default() += 1;
+        }
+    }
+    let port_rich = |n: &str| {
+        bnets[n].iter().filter(|net| net_blocks.get(*net).copied().unwrap_or(0) >= 2).count() >= 5
+    };
     let mut merge_into: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for n in &bnames {
-        if bsize(n) >= MERGE_MIN {
+        if bsize(n) >= MERGE_MIN || port_rich(n) {
             continue;
         }
         if let Some(t) = bnames

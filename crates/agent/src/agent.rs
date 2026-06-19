@@ -863,7 +863,11 @@ Each component is keyed by its refdes and has:
     block, or keep decoupling with the MCU and put the crystal/reset elsewhere).
   • Group small peripherals into I/O blocks — but on a dense board with many peripherals,
     use a FEW I/O blocks (e.g. one per bus or per 2-3 peripherals), not one giant `io` block.
-  • A lone crystal/jumper/header/LED is never its own block; fold it into a neighbour.
+  • A lone crystal/jumper/LED, or a 2-pin power/signal connector, folds into a neighbour.
+  • BUT a MULTI-SIGNAL BREAKOUT HEADER (SWD, JTAG, GPIO, debug — a connector breaking out many
+    distinct signals) gets its OWN block. A connector's pinout reads cleanly alone, but two breakout
+    headers (or a header + status LEDs) crammed on one sheet collide — overlapping port labels, the #1
+    io-sheet defect. One breakout header per block; don't lump SWD + GPIO + LEDs into a single `io`.
 
 ## Layout (placement is automatic — blocks are your floorplan)
 
