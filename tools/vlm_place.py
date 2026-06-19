@@ -84,7 +84,10 @@ def plan(image, cols, rows, model, context, summary):
                      "(e.g. all inputs, all outputs) together.")
     if context:
         user_text += (f"\n\nThis is a REFINEMENT pass. The previous layout's critic feedback:\n{context}\n"
-                      "Adjust the zones to address it (e.g. move a part nearer what it connects to).")
+                      "Adjust the zones to address it (e.g. move a part nearer what it connects to). "
+                      "Keep the SAME set of MAJOR parts (ICs/connectors only) — do NOT introduce any "
+                      "passives (R/C/D/LED/crystal/switch); the engine places those. Re-zoning more "
+                      "parts over-constrains the engine and makes it worse.")
     body = {
         "model": model,
         "messages": [
@@ -107,7 +110,12 @@ def plan(image, cols, rows, model, context, summary):
     except urllib.error.HTTPError as e:
         sys.exit(f"vlm_place: request failed (HTTP {e.code}): {e.read().decode(errors='replace')[:300]}")
     text = out["choices"][0]["message"]["content"].strip()
-    return cells_to_fractions(extract_json(text), cols, rows), text
+    cells = extract_json(text)
+    # Guard: only MAJOR parts get a zone. Drop passives/satellites (R/C/D/L/Y/SW/FB/TP) even if
+    # the model zones them — forcing satellites over-constrains the engine (c01 iter1 5<6).
+    cells = {r: c for r, c in cells.items()
+             if r[:2] not in ("SW", "FB", "TP") and (not r or r[0] not in "RCDLY")}
+    return cells_to_fractions(cells, cols, rows), text
 
 
 def main():
