@@ -486,12 +486,13 @@ impl Tools {
             },
             ToolDef {
                 name: "get_footprint_info".into(),
-                description: "Return the full pad table (number, offset, size, \
-                    technology, copper layers), the courtyard rectangle, and the \
-                    overall bounding box for a fully-qualified `Lib:Name` \
-                    footprint. Use the pad NUMBERS to build the pad_nets map for \
-                    create_board. If the lib_id is unknown, returns an error with \
-                    the closest known suggestions — never guess the id."
+                description: "Return the pad NUMBER list (use these to build the pad_nets \
+                    map for create_board) plus a compact shape summary — pad_count, \
+                    min_pitch_mm, pad dimensions, pad technologies, the courtyard rectangle, \
+                    and the bounding box — for a fully-qualified `Lib:Name` footprint. \
+                    (Per-pad coordinates are summarized, not listed: the engine places pads, \
+                    not you.) If the lib_id is unknown, returns an error with the closest \
+                    known suggestions — never guess the id."
                     .into(),
                 input_schema: json!({
                     "type": "object",

@@ -220,24 +220,40 @@ pub fn get_footprint_info(input: Value, ctx: &ToolCtx) -> Result<Value> {
 
     match index.footprint(&lib_id) {
         Some(fp) => {
-            let pads: Vec<Value> = fp
-                .pads
-                .iter()
-                .map(|p| {
-                    json!({
-                        "number": p.number,
-                        "offset": p.at,
-                        "size": p.size,
-                        "technology": technology_str(p.technology),
-                        "layers": p.layers,
-                    })
-                })
-                .collect();
+            // The model binds nets by pad NUMBER and never needs each pad's coordinates (it
+            // doesn't place pads), so return the number list + a compact shape SUMMARY rather
+            // than the full per-pad table — for a 256-ball BGA the old table was ~20k chars
+            // re-sent every turn. min_pitch + pad_size let the model judge fine-pitch (pick a
+            // clearance/via); technologies/layers tell it SMD vs thru-hole.
+            let pad_numbers: Vec<&str> =
+                fp.pads.iter().map(|p| p.number.as_str()).filter(|n| !n.is_empty()).collect();
+            let mut min_pitch = f64::INFINITY;
+            for (i, a) in fp.pads.iter().enumerate() {
+                for b in &fp.pads[i + 1..] {
+                    let d = ((a.at[0] - b.at[0]).powi(2) + (a.at[1] - b.at[1]).powi(2)).sqrt();
+                    if d > 1e-6 && d < min_pitch {
+                        min_pitch = d;
+                    }
+                }
+            }
+            let (mut wmin, mut wmax) = (f64::INFINITY, 0.0_f64);
+            for p in &fp.pads {
+                let s = p.size[0].min(p.size[1]);
+                wmin = wmin.min(s);
+                wmax = wmax.max(p.size[0].max(p.size[1]));
+            }
+            let techs: std::collections::BTreeSet<&str> =
+                fp.pads.iter().map(|p| technology_str(p.technology)).collect();
             Ok(json!({
                 "lib_id": lib_id,
                 "name": fp.name,
                 "descr": fp.descr,
-                "pads": pads,
+                "pad_count": fp.pads.len(),
+                "pad_numbers": pad_numbers,
+                "min_pitch_mm": if min_pitch.is_finite() { (min_pitch * 1000.0).round() / 1000.0 } else { 0.0 },
+                "pad_min_dim_mm": if wmin.is_finite() { (wmin * 1000.0).round() / 1000.0 } else { 0.0 },
+                "pad_max_dim_mm": (wmax * 1000.0).round() / 1000.0,
+                "technologies": techs,
                 "courtyard": bbox_json(&fp.courtyard),
                 "courtyard_source": courtyard_source_str(fp.courtyard_source),
                 "bbox": bbox_json(&fp.bbox),

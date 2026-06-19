@@ -611,17 +611,19 @@ fn get_footprint_info_returns_pads_courtyard_bbox() {
             &ctx,
         )
         .unwrap();
-    let pads = out["pads"].as_array().expect("pads array");
-    assert_eq!(pads.len(), 3, "SOT-23 has 3 pads: {out}");
-    let p0 = &pads[0];
-    assert!(p0.get("number").is_some());
-    assert!(p0.get("offset").is_some());
-    assert!(p0.get("size").is_some());
-    assert!(p0.get("technology").is_some());
-    assert!(p0.get("layers").is_some());
+    // Lean shape: pad NUMBER list + a compact geometry summary (no per-pad coordinate dump).
+    let nums = out["pad_numbers"].as_array().expect("pad_numbers array");
+    assert_eq!(nums.len(), 3, "SOT-23 has 3 pads: {out}");
+    assert!(nums.iter().all(|n| n.is_string()), "pad numbers are strings: {out}");
+    assert_eq!(out["pad_count"], 3);
+    assert!(out["min_pitch_mm"].as_f64().is_some_and(|p| p > 0.0), "min_pitch present: {out}");
+    assert!(out.get("pad_min_dim_mm").is_some(), "pad dims present: {out}");
+    assert!(out.get("technologies").is_some(), "technologies present: {out}");
     assert!(out.get("courtyard").is_some(), "courtyard present: {out}");
     assert!(out["courtyard"].get("width").is_some());
     assert!(out.get("bbox").is_some(), "bbox present: {out}");
+    // Per-pad coordinate table is intentionally summarized away (model places nothing by coord).
+    assert!(out.get("pads").is_none(), "per-pad table should be gone: {out}");
 }
 
 #[test]
