@@ -69,6 +69,9 @@ fn main() -> anyhow::Result<()> {
             emit.layout_warnings.len(),
             emit.wire_crossings
         );
+        for w in &emit.layout_warnings {
+            println!("    WARN[{name}]: {w}");
+        }
     }
     Ok(())
 }

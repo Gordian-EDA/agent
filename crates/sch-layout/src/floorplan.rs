@@ -2290,10 +2290,13 @@ impl PlacementStrategy for Anneal {
             // few crossings): such boards can't meaningfully improve, so the routed budget
             // would be pure wasted wall-time. Every refinement win this far had a best with
             // ≥7 crossings or a warning, so a ≤6/0-warning gate keeps all wins.
-            // Tighter skip on small forced-fast sheets: a 6-part bus sheet with 5 crossings should
-            // still be refined (the critic dings them), whereas a big board's ≤6 is acceptable.
-            let skip_xings = if force_fast && pins <= FAST_PINS { 1 } else { 6 };
-            if bb == 0 && bw == 0 && bx <= skip_xings {
+            // NEVER skip the refinement on a forced-fast (multi-sheet) sub-sheet: even at 0-1
+            // crossings it often has CAP-SCATTER / long satellite runs (a 3V3 bulk cap marooned
+            // far from the regulator output) — an HPWL/straightness defect the crossing-based skip
+            // misses but the refinement's true routed-cost objective fixes (it's kept only if the
+            // premium score improves). Cheap on a small sheet. A big board still skips when clean.
+            let small_forced = force_fast && pins <= FAST_PINS;
+            if !small_forced && bb == 0 && bw == 0 && bx <= 6 {
                 items.clone_from_slice(&candidates[best]);
                 return;
             }

@@ -849,6 +849,11 @@ Each component is keyed by its refdes and has:
   SPARSE little sheet that reads WORSE (label-on-body clutter, no signal flow) — merge it.
   So neither extreme: not one flat `main` block (grid-packs everything, sprawls), nor a
   swarm of 2-4-part fragments. Aim for the 6-10-part sweet spot and add blocks as the design grows.
+- SET A CONCISE `value` ON EVERY COMPONENT (≤ ~12 chars: e.g. `USB-C`, `BOOT`, `SWD`, `STM32F103`,
+  `24LC256`). With no value the engine renders the full part NAME (`USB_C_Receptacle_USB2.0_16P`,
+  `Conn_01x03`) as the label — a long string that OVERLAPS the symbol's pins/body and reads as
+  clutter (a recurring per-sheet readability defect). Passives already use values (`10k`, `100nF`);
+  give connectors, jumpers, headers, sockets, and ICs a short value too.
   HOW to keep blocks ~6-10 parts:
   • A small MCU's crystal + decoupling + reset + boot all fold INTO the MCU block. But on a
     DENSE board where that would exceed ~12 parts, split support out (e.g. a `clock_reset`
