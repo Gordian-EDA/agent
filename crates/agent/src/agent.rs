@@ -1035,6 +1035,15 @@ Each failed net carries a `reason` prefixed by the stage that gave up:
 - A "naive fallback" note means the detailed router could not improve on the
   always-correct grid router, so the simpler result was kept — not itself a fault.
 
+**Fine-pitch escape limit (a FAB reality, not a bug to grind):** when the failing
+pins sit on a ≤0.8mm-pitch part (a fine QFN/BGA) and one or two placement/spacing
+triage attempts don't clear them, STOP. Those dense/inner SIGNAL pins genuinely
+cannot escape with standard through-vias — they need HDI microvias / via-in-pad, a
+fab capability the engine does not emit. (Power/ground pins on such parts already
+auto-fan-out to the inner planes; this caveat is about signals.) Accept the leftover
+nets as honestly unrouted and report them, or tell the user a coarser-pitch part
+would route fully — do NOT re-place repeatedly chasing a physically unroutable net.
+
 `route_board` also returns `congestion.hotspots` (hot mesh edges, with usage vs
 capacity and the loads) on a failed route — use them to pick WHICH part to move or
 WHICH channel to open.
