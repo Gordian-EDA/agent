@@ -2178,8 +2178,56 @@ impl PlacementStrategy for Anneal {
             if timed_top {
                 eprintln!("  [SA-fast] pick cand#{best} scored={scored:?}");
             }
-            // The chosen candidate is already fully polished + decongested; emit ships it.
-            items.clone_from_slice(&candidates[best]);
+            // ROUTE-AWARE REFINEMENT (large boards). The proxy is crossing-BLIND, so the
+            // fast-lane winner is sprawl-optimal but not crossing-optimal. Refine it with a
+            // bounded `anneal_items` whose objective is the TRUE routed cost (premium) — the
+            // only faithful crossing signal — which no cheap proxy could capture. Seeded
+            // from the already-good winner, so its capped budget (≤750 routed iters, the
+            // 420k/pins ceiling) is spent polishing, not exploring. Kept ONLY if it wins the
+            // SAME (breaks, warnings, true-cost) pick, so it can never ship worse. This
+            // trades the ≤5s budget for fewer dense-board crossings, per the user's call.
+            let mut refined = candidates[best].clone();
+            let t_ref = std::time::Instant::now();
+            // Tight routed budget from an already-good seed; keeps even a 173-pin board
+            // bounded while still finding crossing-reducing moves.
+            let ref_cap = (30_000 / pins).clamp(80, 300);
+            anneal_items(env, &mut refined, inc, ir, needs_flag, false, true, seed ^ 0x5EF1, Some(ref_cap));
+            decongest(&mut refined);
+            // Pick on the ACTUAL crossing count (body+ic+wire), NOT premium_score — the
+            // refinement optimises straightness, which DIVERGES from crossings (it can
+            // straighten while adding a crossing, as c08/oneshot showed). CRUCIAL: measure
+            // on the FINALISED geometry — the emit runs decongest + align_idiom_clusters +
+            // align_led_chains (which e.g. snaps each LED's resistor into a clean leg, and
+            // can tidy a tangled candidate dramatically: c08 best 53→19 pre/post) BEFORE
+            // counting. Measuring pre-finalise ranks candidates the emit then re-orders, so
+            // each candidate is finalised on a clone here first. The picked candidate ships
+            // RAW (the emit re-finalises it identically). Order: truthfulness, warnings,
+            // total crossings, then straightness tiebreak.
+            let score = |c: &[Item]| -> (usize, usize, usize, f64) {
+                let mut m = c.to_vec();
+                decongest(&mut m);
+                if align_idiom_clusters(&mut m, ir) {
+                    decongest(&mut m);
+                }
+                if align_led_chains(&mut m, inc, ir) {
+                    decongest(&mut m);
+                }
+                let b = truthfulness_breaks(env, &m, inc, ir, needs_flag);
+                let w = warning_count(env, &m, inc, ir, needs_flag);
+                let (bx, ix, wx) = crossing_counts(env, &m, inc, ir, needs_flag);
+                (b, w, bx + ix + wx, premium_score_with_w(env, &m, inc, ir, needs_flag, w))
+            };
+            let (rb, rw, rx, rc) = score(&refined);
+            let (bb, bw, bx, bc) = score(&candidates[best]);
+            let refined_wins = (rb, rw, rx).cmp(&(bb, bw, bx)) == std::cmp::Ordering::Less
+                || (rb == bb && rw == bw && rx == bx && rc + 0.5 < bc);
+            if timed_top {
+                eprintln!(
+                    "  [SA-fast] route-refine {:.2}s cap={ref_cap}: ({bb},{bw},{bx},{bc:.0})->({rb},{rw},{rx},{rc:.0}) win={refined_wins}",
+                    t_ref.elapsed().as_secs_f64()
+                );
+            }
+            items.clone_from_slice(if refined_wins { &refined } else { &candidates[best] });
             return;
         }
 
@@ -2209,7 +2257,7 @@ impl PlacementStrategy for Anneal {
         let mut greedy_state: Vec<Item> = Vec::new();
         rayon::scope(|s| {
             // Path B: broad search from the raw seed — independent, start it now.
-            s.spawn(|_| { let mut f = || anneal_items(env, &mut state_b, inc, ir, needs_flag, true, false, seed); tic("B broad", &mut f); });
+            s.spawn(|_| { let mut f = || anneal_items(env, &mut state_b, inc, ir, needs_flag, true, false, seed, None); tic("B broad", &mut f); });
             // Greedy refine on this thread, concurrently with B.
             { let mut f = || refine_items(env, items, inc, ir, needs_flag); tic("greedy", &mut f); }
             greedy_state = items.to_vec();
@@ -2220,10 +2268,10 @@ impl PlacementStrategy for Anneal {
             // proxy + range-limited cluster jump) anneal from the greedy result, all in
             // parallel with each other and with B.
             rayon::join(
-                || { let mut f = || anneal_items(env, &mut state_a, inc, ir, needs_flag, false, false, seed); tic("A seeded", &mut f); },
+                || { let mut f = || anneal_items(env, &mut state_a, inc, ir, needs_flag, false, false, seed, None); tic("A seeded", &mut f); },
                 || {
                     rayon::join(
-                        || { let mut f = || anneal_items(env, &mut state_c, inc, ir, needs_flag, false, true, seed ^ 0x9E3779B97F4A7C15); tic("C premium", &mut f); },
+                        || { let mut f = || anneal_items(env, &mut state_c, inc, ir, needs_flag, false, true, seed ^ 0x9E3779B97F4A7C15, None); tic("C premium", &mut f); },
                         || { let mut f = || anneal_locality(env, &mut state_d, inc, ir, needs_flag, seed ^ 0x517CC1B727220A95); tic("D locality", &mut f); },
                     )
                 },
@@ -2502,6 +2550,7 @@ fn anneal_items(
     broad: bool,
     premium: bool,
     seed: u64,
+    iter_cap: Option<usize>,
 ) {
     // The objective: free tier minimises the base routed cost; the premium run
     // optimises the richer (straighter) objective. Run as an EXTRA candidate so it
@@ -2554,6 +2603,11 @@ fn anneal_items(
     let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
     if pins > 70 {
         iters = iters.min((420_000 / pins).max(800));
+    }
+    // A route-aware refinement from an already-good seed caps its routed budget tighter
+    // (keeps the >5s large-board path bounded — see the fast-lane call site).
+    if let Some(cap) = iter_cap {
+        iters = iters.min(cap);
     }
     // One grid cell-step in x/y for the relocation moves.
     let relocate = |rng: &mut Rng, at: [f64; 2], n: i32| -> [f64; 2] {
