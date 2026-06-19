@@ -34,12 +34,20 @@ boards; a smaller via + tighter routing surfaces it. NOTE: the in-house lint
 (`ClearanceViaAny`) DOES catch the resulting violation, but `route_auto` ships it anyway —
 `drop_unconnected_copper` drops unconnected/shorted copper, NOT clearance-violating copper.
 
-**Deliberate fix (deferred, not a cron-tick change):** either (a) stamp each via into the
-grid with the VIA halo (`via_radius + clearance`) rather than the trace halo so foreign vias
-self-block correctly, or (b) extend the connectivity-honest drop to also drop
-lint-flagged clearance-violating copper (turn a DRC violation into an honest unrouted net).
-(a) is the principled fix — the router should never place two vias too close in the first
-place. Both are general (help at any via size), but need careful re-gating on all 57 boards.
+**FIXED (Jun 19) via the final fidelity pass — option (b), done safely.** The root cause was
+structural: the stitch/fanout vias are added in `route_with_planes` (the AGENT layer) AFTER
+the engine's `route_auto` reconcile, so they NEVER saw the DRC oracle — their clearance rested
+entirely on hand-rolled `stitch_via_clears`/`fanout_seg_clears`, which slip at an unusual
+via/clearance. The fix routes the COMPLETE copper (engine route + plane stitches) back through
+`pcb_engine::lint::drop_violating_copper` at the end of `route_with_planes`; any net whose
+copper still violates clearance/via/width/bounds is dropped and reported honestly unrouted.
+Result: via0.5 boards copper_err 4/8 → 0; the 57 default boards are byte-identical (a clean
+board lints to zero, so nothing is dropped). The via-size lever is now DRC-safe at ANY config.
+The engine now validates ALL its copper — including agent-added stitches — through one oracle.
+
+Option (a) (stamp vias with the via halo so the router never places two too close) remains a
+possible *quality* refinement — it would avoid the drop and keep more copper routed — but is
+no longer a *fidelity* requirement now that the final pass guarantees DRC-clean output.
 
 ## Lever 2 — finer CLEARANCE (0.2 → 0.1mm): NOT a general win; often WORSE
 

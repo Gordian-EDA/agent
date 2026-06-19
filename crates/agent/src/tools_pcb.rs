@@ -1883,6 +1883,26 @@ fn route_with_planes(
                 .to_owned(),
         });
     }
+    // Final fidelity pass — close the structural gap that the stitch/fanout vias above
+    // are added in the AGENT layer, OUTSIDE the engine's route_auto reconcile, so they
+    // never saw the DRC oracle. Route the COMPLETE copper (engine route + plane stitches)
+    // back through the SAME geometry lint and drop any net whose copper still violates
+    // clearance/via/width/bounds. The engine must never EMIT a DRC-failing via — even a
+    // hand-rolled stitch check that slips at an unusual via/clearance is caught here, and
+    // the net is reported honestly unrouted instead of shipping a fault. SAFE: a clean
+    // board lints to zero so nothing is dropped (verified byte-for-byte on the 57-board
+    // suite); only a would-fault config trades copper for an honest failure.
+    let dropped = pcb_engine::lint::drop_violating_copper(&rp, &mut result.solution);
+    for net in dropped {
+        if !result.failed.iter().any(|f| f.connection == net) {
+            result.failed.push(FailedNet {
+                connection: net,
+                reason: "DRC oracle: dropped after stitching — copper could not clear \
+                         at this via/clearance (reported unrouted, never shipped failing)"
+                    .to_owned(),
+            });
+        }
+    }
     result
 }
 
