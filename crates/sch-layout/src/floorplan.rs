@@ -138,6 +138,14 @@ pub struct LayoutIr {
     /// symbol per rail) deserialize empty and the tuned references stay rails.
     #[serde(default)]
     pub rail_locals: BTreeSet<String>,
+    /// HYBRID VLM placement: refdes → a COARSE target position as a fraction of the
+    /// board bbox, `[fx, fy]` in 0..1 (fx: 0=left,1=right; fy: 0=top,1=bottom). A vision
+    /// LLM is good at rough DIRECTION ("power left, MCU centre") but not millimetre
+    /// positions, so this is applied as a SOFT bias in the placement cost (`zone_bias`),
+    /// NOT a forced cell — the engine still does the precise placement, just nudged
+    /// toward the LLM's zones. Empty on every existing path ⇒ no bias ⇒ unchanged.
+    #[serde(default)]
+    pub zone: BTreeMap<String, [f64; 2]>,
 }
 
 impl LayoutIr {
@@ -169,6 +177,7 @@ pub fn baseline_ir(design: &Design) -> LayoutIr {
         idioms: Vec::new(),
         frozen: BTreeSet::new(),
         rail_locals: local_rail_nets(design),
+        zone: BTreeMap::new(),
     }
 }
 
@@ -620,6 +629,15 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         }
     }
 
+    // HYBRID VLM placement: a coarse zone map {refdes:[fx,fy]} from the LLM, applied as a
+    // SOFT bias (zone_bias in proxy_cost). Loaded from $ZONE_FILE for the A/B loop / tests;
+    // absent ⇒ empty ⇒ no bias. (The agent pipeline will pass it directly in future.)
+    let zone = std::env::var("ZONE_FILE")
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<BTreeMap<String, [f64; 2]>>(&s).ok())
+        .unwrap_or_default();
+
     LayoutIr {
         flow: Flow::Lr,
         rails,
@@ -630,6 +648,7 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         idioms: idiom_reports,
         frozen: placed,
         rail_locals: local_rail_nets(design),
+        zone,
     }
 }
 
@@ -2890,11 +2909,28 @@ fn proxy_cost(
         let at = items[*si].at;
         cohere += (at[0] - cx / n).abs() + (at[1] - cy / n).abs();
     }
+    // HYBRID VLM zone bias: a SOFT pull of each zoned anchor toward the coarse target
+    // fraction the LLM chose (left/centre/right, top/bottom), scaled to mm by the board
+    // size. Soft so the engine still does the precise placement and can override the
+    // LLM where local geometry demands — the LLM only steers the rough arrangement.
+    // Empty `ir.zone` (every existing path) ⇒ 0 ⇒ this is a no-op.
+    let mut zbias = 0.0;
+    if !ir.zone.is_empty() && hi[0] > lo[0] && hi[1] > lo[1] {
+        let (bw, bh) = (hi[0] - lo[0], hi[1] - lo[1]);
+        for it in items {
+            if let Some([tx, ty]) = ir.zone.get(&it.refdes) {
+                let fx = (it.at[0] - lo[0]) / bw;
+                let fy = (it.at[1] - lo[1]) / bh;
+                zbias += (fx - tx).abs() * bw + (fy - ty).abs() * bh;
+            }
+        }
+    }
     1500.0 * overlaps as f64
         + 1200.0 * grid_order as f64
         + 0.15 * hpwl
         + 0.45 * spread
         + 0.5 * cohere
+        + 0.8 * zbias
 }
 
 /// Locality-aware anneal (see `docs/specs/locality-aware-placement-search.md`). Two
