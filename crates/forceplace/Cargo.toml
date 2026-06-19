@@ -1,0 +1,13 @@
+[package]
+name = "forceplace"
+version.workspace = true
+edition.workspace = true
+
+# Pure, dependency-FREE force-directed 2-D placement (Fruchterman-Reingold with
+# rectangle-aware repulsion). The caller adapts its anchors+nets into a `Graph` and maps
+# the returned positions back to a seed, exactly as `crossmin`/`circuit-graph` do. Kept
+# pure so it unit-tests in isolation on synthetic graphs. The schematic-placement lever
+# is COMPACTNESS (the critic penalises sprawl more than crossings — measured), and a
+# sprawled seed can't be compacted by the incremental search; a force-directed seed is
+# compact + connectivity-aware from the start.
+[dependencies]
