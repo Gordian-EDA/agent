@@ -833,11 +833,11 @@ fn seat_corner_seek_parts(problem: &PlaceProblem, hints: &PlacementHints, best: 
         .zip(&rots)
         .map(|(p, &r)| rotated_courtyard_half(p, r))
         .collect();
-    let copper_half: Vec<(f64, f64)> = problem
+    let copper_bbox: Vec<(f64, f64, f64, f64)> = problem
         .parts
         .iter()
         .zip(&rots)
-        .map(|(p, &r)| rotated_copper_half(p, r))
+        .map(|(p, &r)| rotated_copper_bbox(p, r))
         .collect();
     let mut pos: Vec<Point2> = best.placements.iter().map(|p| p.at.clone()).collect();
     let b = &problem.bounds;
@@ -864,7 +864,7 @@ fn seat_corner_seek_parts(problem: &PlaceProblem, hints: &PlacementHints, best: 
                 continue;
             }
             pos[i] = inset(corners[ci]);
-            if is_legal(problem, &half, &copper_half, margin, &pos) {
+            if is_legal(problem, &half, &copper_bbox, margin, &pos) {
                 used[ci] = true;
                 break;
             }
@@ -909,11 +909,11 @@ fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts: PlaceOpts
         .zip(&rotations)
         .map(|(p, &rot)| rotated_courtyard_half(p, rot))
         .collect();
-    let copper_half: Vec<(f64, f64)> = problem
+    let copper_bbox: Vec<(f64, f64, f64, f64)> = problem
         .parts
         .iter()
         .zip(&rotations)
-        .map(|(p, &rot)| rotated_copper_half(p, rot))
+        .map(|(p, &rot)| rotated_copper_bbox(p, rot))
         .collect();
 
     // 1. Deterministic initial grid (sorted by reference), seeding positions.
@@ -948,7 +948,7 @@ fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts: PlaceOpts
         .collect();
 
     // 5. Verify legality by EXACT geometry — never trust the algorithm.
-    let legal = is_legal(problem, &half, &copper_half, margin, &pos);
+    let legal = is_legal(problem, &half, &copper_bbox, margin, &pos);
 
     let hpwl = compute_hpwl(problem, &nets, &pos, &rotations);
     let pairs = decoupling_pairs(problem);
@@ -1413,18 +1413,29 @@ const EDGE_CLEAR_PLACE_MM: f64 = 0.5;
 /// Half-extents of the part's PAD (copper) bounding box after a quadrant rotation. Bounds ONLY
 /// the copper — so the outline check can keep pads inside the board while a part's courtyard
 /// (its non-copper margin) is still free to overhang a notch (the mounting-hole allowance).
-fn rotated_copper_half(part: &Part, rot: i32) -> (f64, f64) {
-    let (mut hx, mut hy): (f64, f64) = (0.0, 0.0);
+fn rotated_copper_bbox(part: &Part, rot: i32) -> (f64, f64, f64, f64) {
+    let (mut xmin, mut ymin, mut xmax, mut ymax) =
+        (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
     for pad in &part.pads {
         let off = rotate_offset(&pad.offset, rot);
         let (pw, ph) = match rot.rem_euclid(360) {
             90 | 270 => (pad.height / 2.0, pad.width / 2.0),
             _ => (pad.width / 2.0, pad.height / 2.0),
         };
-        hx = hx.max(off.x.abs() + pw);
-        hy = hy.max(off.y.abs() + ph);
+        // TRUE (asymmetric) bbox relative to the part origin — a connector's pads are OFF-CENTRE
+        // (origin at pin 1, not the courtyard centre), so a symmetric centre±max|offset| box would
+        // be ~2× too large on the empty side and FALSE-REJECT a connector that actually clears the
+        // edge. Track real min/max so the outline check is exact.
+        xmin = xmin.min(off.x - pw);
+        xmax = xmax.max(off.x + pw);
+        ymin = ymin.min(off.y - ph);
+        ymax = ymax.max(off.y + ph);
     }
-    (hx, hy)
+    if xmin > xmax {
+        (0.0, 0.0, 0.0, 0.0) // no pads
+    } else {
+        (xmin, ymin, xmax, ymax)
+    }
 }
 
 /// A pad offset rotated by a quadrant (degrees), y-down.
@@ -1527,7 +1538,7 @@ fn edge_delta(edge: Edge, p: &Point2, target: f64) -> (f64, f64) {
 fn is_legal(
     problem: &PlaceProblem,
     half: &[(f64, f64)],
-    copper_half: &[(f64, f64)],
+    copper_bbox: &[(f64, f64, f64, f64)],
     margin: f64,
     pos: &[Point2],
 ) -> bool {
@@ -1547,8 +1558,14 @@ fn is_legal(
             if !crate::problem::point_in_polygon(&pos[i], poly) {
                 return false;
             }
-            let (ex, ey) = (copper_half[i].0 + EDGE_CLEAR_PLACE_MM, copper_half[i].1 + EDGE_CLEAR_PLACE_MM);
-            for (dx, dy) in [(-ex, -ey), (ex, -ey), (ex, ey), (-ex, ey)] {
+            let (xmin, ymin, xmax, ymax) = copper_bbox[i];
+            let ec = EDGE_CLEAR_PLACE_MM;
+            for (dx, dy) in [
+                (xmin - ec, ymin - ec),
+                (xmax + ec, ymin - ec),
+                (xmax + ec, ymax + ec),
+                (xmin - ec, ymax + ec),
+            ] {
                 let c = Point2 { x: pos[i].x + dx, y: pos[i].y + dy };
                 if !crate::problem::point_in_polygon(&c, poly) {
                     return false;
@@ -2125,10 +2142,10 @@ mod tests {
             .iter()
             .map(|p| (p.courtyard_w / 2.0, p.courtyard_h / 2.0))
             .collect();
-        let copper_half: Vec<(f64, f64)> =
-            problem.parts.iter().map(|p| rotated_copper_half(p, 0)).collect();
+        let copper_bbox: Vec<(f64, f64, f64, f64)> =
+            problem.parts.iter().map(|p| rotated_copper_bbox(p, 0)).collect();
         let pos: Vec<Point2> = res.placements.iter().map(|p| p.at.clone()).collect();
-        assert!(is_legal(&problem, &half, &copper_half, courtyard_margin(0.2), &pos));
+        assert!(is_legal(&problem, &half, &copper_bbox, courtyard_margin(0.2), &pos));
     }
 
     #[test]
@@ -2152,13 +2169,54 @@ mod tests {
             ]),
         };
         let half = vec![rotated_courtyard_half(&problem.parts[0], 0)];
-        let copper_half = vec![rotated_copper_half(&problem.parts[0], 0)];
+        let copper_bbox = vec![rotated_copper_bbox(&problem.parts[0], 0)];
         let margin = courtyard_margin(0.2);
         // Centred: copper (±1.225) + 0.5 clearance sits well inside the square → legal.
-        assert!(is_legal(&problem, &half, &copper_half, margin, &[Point2 { x: 10.0, y: 10.0 }]));
+        assert!(is_legal(&problem, &half, &copper_bbox, margin, &[Point2 { x: 10.0, y: 10.0 }]));
         // Near the right edge: centre x=14.4 is inside the polygon, but copper reaches
         // 14.4 + 1.225 = 15.6 > 15 → overhangs → illegal (the centre-only check missed this).
-        assert!(!is_legal(&problem, &half, &copper_half, margin, &[Point2 { x: 14.4, y: 10.0 }]));
+        assert!(!is_legal(&problem, &half, &copper_bbox, margin, &[Point2 { x: 14.4, y: 10.0 }]));
+    }
+
+    #[test]
+    fn is_legal_uses_asymmetric_copper_bbox_for_off_centre_pads() {
+        // A connector's pads are OFF-CENTRE from the origin (origin at pin 1). A symmetric
+        // centre±max|offset| box would be ~2× too large on the empty side and FALSE-REJECT a part
+        // whose copper actually clears the edge — this guards the true-bbox fix. Two pads both at
+        // +x (offsets 2.0 and 4.0, 1×1mm): real copper bbox x = 1.5..4.5 (no copper on the −x side).
+        let off_centre = Part {
+            reference: "J1".to_owned(),
+            courtyard_w: 6.0,
+            courtyard_h: 2.0,
+            pads: vec![
+                PartPad { number: "1".to_owned(), offset: Point2 { x: 2.0, y: 0.0 }, width: 1.0, height: 1.0, layers: top(), net: Some("A".to_owned()) },
+                PartPad { number: "2".to_owned(), offset: Point2 { x: 4.0, y: 0.0 }, width: 1.0, height: 1.0, layers: top(), net: Some("B".to_owned()) },
+            ],
+            locked: None,
+        };
+        // Asymmetric bbox: +x only, nothing on −x.
+        let bb = rotated_copper_bbox(&off_centre, 0);
+        assert!((bb.0 - 1.5).abs() < 1e-9 && (bb.2 - 4.5).abs() < 1e-9, "x bbox 1.5..4.5, got {bb:?}");
+        let problem = PlaceProblem {
+            bounds: board(20.0, 20.0),
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts: vec![off_centre],
+            outline: Some(vec![
+                Point2 { x: 5.0, y: 5.0 },
+                Point2 { x: 15.0, y: 5.0 },
+                Point2 { x: 15.0, y: 15.0 },
+                Point2 { x: 5.0, y: 15.0 },
+            ]),
+        };
+        let half = vec![rotated_courtyard_half(&problem.parts[0], 0)];
+        let copper_bbox = vec![bb];
+        let margin = courtyard_margin(0.2);
+        // At x=8 the real copper is 9.5..12.5 (+0.5 → 9..13, inside the 5..15 square) → LEGAL.
+        // A symmetric ±4.5 box would reach x=3 (<5) and wrongly reject. This is the regression guard.
+        assert!(is_legal(&problem, &half, &copper_bbox, margin, &[Point2 { x: 8.0, y: 10.0 }]));
     }
 
     // ── to_route_problem: parseable + connectivity oracle accepts pads/points ─
