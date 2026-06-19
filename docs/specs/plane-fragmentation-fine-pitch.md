@@ -50,3 +50,10 @@ SINGLE connected component and report the off-main-island pins as honestly unrou
 
 Guard: `bga-checkerboard-plane-frag.json` keeps this case in the harness — it must stay
 `copper_err=0` (the fragmentation is honest-unconnected, never a copper fault).
+
+
+## Also affects copper POURS (Jun 19)
+
+A GND copper POUR on a fine-pitch / custom-outline board fragments the same way (verified: a hex
+board with a GND pour split into 3 anchored islands → 3 honest unconnected). Same root (anti-pad
+overlap) and same fix options — the contiguity check should cover pour zones as well as planes.

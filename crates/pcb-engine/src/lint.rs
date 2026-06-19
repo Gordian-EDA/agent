@@ -282,6 +282,31 @@ pub fn lint(problem: &RouteProblem, solution: &RouteSolution) -> Vec<DrcViolatio
         }
     }
 
+    // (2b) Copper-to-board-EDGE clearance for a CUSTOM outline. (2) only checks the rectangular
+    //      bounds; KiCAD checks copper against the actual Edge.Cuts POLYGON, so routed copper near
+    //      a non-rect outline's diagonal edge (invisible to the bbox check) would ship a
+    //      copper_edge_clearance fault. Mirror KiCAD: a routed trace/via's copper edge must clear
+    //      every outline segment by EDGE_CLEAR. Pads are placed copper (kept inside by the placer's
+    //      copper-extent legality check), so only the router's traces/vias are checked here.
+    const EDGE_CLEAR: f64 = 0.5;
+    if let Some(poly) = &problem.outline {
+        let pts: Vec<[f64; 2]> = poly.iter().map(|p| [p.x, p.y]).collect();
+        for item in &items {
+            let (gap, half, at) = match &item.geom {
+                Geom::Via { at, radius } => (poly_edge_gap(*at, *at, &pts), *radius, *at),
+                Geom::Segment { a, b, half_w, .. } => (poly_edge_gap(*a, *b, &pts), *half_w, *a),
+                Geom::Rect { .. } => continue,
+            };
+            if gap < EDGE_CLEAR + half - EPS {
+                out.push(DrcViolation::OutOfBounds {
+                    connection: item.owners.first().cloned().unwrap_or_default(),
+                    overshoot: (EDGE_CLEAR + half - gap).max(0.0),
+                    at,
+                });
+            }
+        }
+    }
+
     // (3) Pairwise clearance — brute force O(n²) over the flat item vec.
     for i in 0..items.len() {
         for j in (i + 1)..items.len() {
@@ -703,6 +728,23 @@ fn point_seg_dist(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     dist(p, proj)
 }
 
+/// Minimum distance from segment `pq` (a via passes p == q) to the boundary of polygon `poly` —
+/// i.e. to its nearest edge. Used to verify routed copper clears a custom board outline.
+fn poly_edge_gap(p: [f64; 2], q: [f64; 2], poly: &[[f64; 2]]) -> f64 {
+    let n = poly.len();
+    if n < 2 {
+        return f64::INFINITY;
+    }
+    let mut best = f64::INFINITY;
+    for i in 0..n {
+        let g = seg_seg_dist(p, q, poly[i], poly[(i + 1) % n]);
+        if g < best {
+            best = g;
+        }
+    }
+    best
+}
+
 /// Minimum distance between segments `ab` and `cd`. Zero when they intersect.
 fn seg_seg_dist(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> f64 {
     if segments_intersect(a, b, c, d) {
@@ -1048,6 +1090,32 @@ mod tests {
             DrcViolation::ClearanceViaAny { required, .. } if (*required - 0.25).abs() < 1e-9
         ));
         assert_eq!(hole2, 0, "same-net pad (via-in-pad) must NOT fire hole clearance");
+    }
+
+    #[test]
+    fn copper_edge_clearance_fires_for_via_near_custom_outline() {
+        // A routed via inside a CUSTOM square outline but <0.5mm from an edge. The bbox check (2)
+        // can't see the polygon (bounds are 0..100), so only the new (2b) polygon-edge check
+        // catches it — mirroring KiCAD's copper-to-edge rule. via at (5.3,10) is 0.3mm from the
+        // x=5 edge; with the 0.3mm via radius the copper touches the edge → violation.
+        let mut p = problem(vec![conn("NET", &[(5.3, 10.0, "top")])], vec![]);
+        p.outline = Some(vec![
+            Point2 { x: 5.0, y: 5.0 },
+            Point2 { x: 15.0, y: 5.0 },
+            Point2 { x: 15.0, y: 15.0 },
+            Point2 { x: 5.0, y: 15.0 },
+        ]);
+        let near = RouteSolution { traces: vec![], vias: vec![via("NET", (5.3, 10.0))] };
+        assert!(
+            lint(&p, &near).iter().any(|v| matches!(v, DrcViolation::OutOfBounds { .. })),
+            "via <0.5mm from a custom outline edge must fire copper-edge clearance"
+        );
+        // A via centred in the outline is well clear → no edge violation.
+        let mid = RouteSolution { traces: vec![], vias: vec![via("NET", (10.0, 10.0))] };
+        assert!(
+            !lint(&p, &mid).iter().any(|v| matches!(v, DrcViolation::OutOfBounds { .. })),
+            "a centred via must NOT fire copper-edge clearance"
+        );
     }
 
     #[test]
