@@ -55,13 +55,24 @@ vs the original marooned-LDO sprawl (independent reviewers 3-5). KEY: a NAIVE au
 HURT (c01_banded=5) — the VLM's *intelligent* floorplan is what makes the authored-grid path
 win. On an already-tidy board (c11) it's neutral; the lever helps most where sprawl is worst.
 
+VALIDATION (blind sub-agent A/B, since the gateway critic was 401): VLM-placement HELPS
+sprawled boards but HURTS already-good ones — c01 (sprawled) auto 4 → VLM **6**; c03 (already
+tidy) auto **8** → VLM 4. Why c03 regressed: the VLM re-floorplans the ANCHORS, but moving them
+SCATTERS the satellites (decoupling/reset/crystal auto-place around the new anchor positions and
+the move breaks the existing good clustering). So VLM-placement is NOT universally safe.
+
+PRODUCTIZATION = A/B WITH THE CRITIC AS SAFETY NET: render the auto layout AND the VLM-placed
+layout, critic both, ship the higher. That captures c01's +2 and keeps c03's good auto layout —
+never ships worse. (The sub-agent critic works when the OpenAI-gateway critic is down.)
+
 This is the genuine path through the ceiling. REMAINING WORK:
 - **Automate the loop** inside the agent (or a dedicated sub-agent): after `apply_design`,
   render+overlay, call the VLM placer, re-apply the `layout:` grid, optionally iterate against
   the critic. This is the "sub-agent handles the complicated scenarios" pattern.
-- **Satellites**: the VLM places ANCHORS; decoupling/indicator satellites still auto-place and
-  can still scatter. Extend the floorplan to satellite GROUPS, or improve their clustering once
-  the anchor frame is fixed.
+- **Satellites (THE key limit)**: the VLM places ANCHORS; moving them scatters the satellites
+  (this is exactly why c03 regressed). Either extend the VLM floorplan to satellite GROUPS, or
+  make the engine re-cluster each satellite onto its (re-positioned) anchor after a VLM move.
+  Until then the A/B safety net is essential.
 - **Validate scores**: the critic gateway was 401 (credits) during the proof, so c01 was judged
   visually + on objective crossings/warnings; re-run `schematic_critic.py --samples 3` to confirm
   the expected 5→7-8 lift when the gateway is back.
