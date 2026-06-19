@@ -841,19 +841,21 @@ Each component is keyed by its refdes and has:
   FEW COARSE functional modules — typically just: power-entry (input connector +
   regulator + their bulk/bypass caps), the MAIN IC + ALL its local support, and one or
   two I/O groups. Declare them in signal-flow order (input/power first, processing next,
-  outputs/peripherals last). AIM FOR 3-5 BLOCKS on a typical board; each block should be
-  a SUBSTANTIAL module of roughly 6-15 parts.
-  CRITICAL — keep blocks COARSE, do NOT over-split:
-  • The main IC's crystal, ALL its decoupling caps, reset network, boot/config jumper,
-    and pull-ups ALL belong IN the MCU block — they are its support, not separate modules.
-  • A lone crystal, a single jumper, one header, or one indicator LED is NOT its own
-    block — fold it into the module it serves (the IC or an I/O group).
-  • Group small peripherals/connectors/indicators into ONE "io" block, not one block each.
-  Over-splitting into many tiny blocks renders each as a SPARSE little sheet that reads
-  WORSE (label-on-body clutter, no signal flow), not better — a 4-part block is a smell.
-  Conversely do NOT dump everything into one flat block: that grid-packs every part and
-  SPRAWLS (the #1 dense-board defect). The sweet spot is a handful of medium modules; a
-  single `main` block — or a swarm of 2-4-part blocks — are both smells.
+  outputs/peripherals last).
+  SIZE each block at roughly 6-10 parts, and SCALE THE BLOCK COUNT with the design's size:
+  a ~15-part board → 2-3 blocks; a ~30-part board → 4-5 blocks; a dense ~50-part board →
+  6-8 blocks. Each block becomes its OWN sheet, so a block much over ~12 parts SPRAWLS on
+  its sheet (the #1 dense-board defect) — split it further. And a block under ~5 parts is a
+  SPARSE little sheet that reads WORSE (label-on-body clutter, no signal flow) — merge it.
+  So neither extreme: not one flat `main` block (grid-packs everything, sprawls), nor a
+  swarm of 2-4-part fragments. Aim for the 6-10-part sweet spot and add blocks as the design grows.
+  HOW to keep blocks ~6-10 parts:
+  • A small MCU's crystal + decoupling + reset + boot all fold INTO the MCU block. But on a
+    DENSE board where that would exceed ~12 parts, split support out (e.g. a `clock_reset`
+    block, or keep decoupling with the MCU and put the crystal/reset elsewhere).
+  • Group small peripherals into I/O blocks — but on a dense board with many peripherals,
+    use a FEW I/O blocks (e.g. one per bus or per 2-3 peripherals), not one giant `io` block.
+  • A lone crystal/jumper/header/LED is never its own block; fold it into a neighbour.
 
 ## Layout (placement is automatic — blocks are your floorplan)
 
