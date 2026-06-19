@@ -590,11 +590,13 @@ impl Tools {
             },
             ToolDef {
                 name: "get_board".into(),
-                description: "Return the current board draft plus a derived \
-                    summary: part count, net count, the per-net pin counts, the \
-                    keepout count, and whether the board has been placed / routed \
-                    yet. Use this to inspect board state before placing or routing, \
-                    or to confirm a create_board / triage edit took effect."
+                description: "Return the current board draft (parts as \
+                    reference/footprint/lock + a pad_count — the full per-pad net map you \
+                    passed to create_board is summarized, not echoed) plus a derived \
+                    summary: part count, net count, the per-net pin counts, the keepout \
+                    count, and whether the board has been placed / routed yet. Use this to \
+                    inspect board state before placing or routing, or to confirm a \
+                    create_board / triage edit took effect."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },

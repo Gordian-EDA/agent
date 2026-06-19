@@ -658,8 +658,26 @@ pub fn get_board(ctx: &ToolCtx) -> Result<Value> {
     // for now report routed=false unless that file exists.
     let routed = ctx.workspace().read_route().is_some();
 
+    // Lean draft view: each part's pad→net map is exactly what the model itself passed to
+    // create_board, so echoing it back on every get_board call only re-bloats the context
+    // (43–64% of a dense BGA board's draft, re-sent each turn). Replace it with a pad_count;
+    // the per-net pin SUMMARY below carries the connectivity view the model actually inspects.
+    let mut draft_json = serde_json::to_value(&draft)?;
+    if let Some(parts) = draft_json.get_mut("parts").and_then(Value::as_array_mut) {
+        for part in parts {
+            if let Some(obj) = part.as_object_mut() {
+                let n = obj
+                    .get("pad_nets")
+                    .and_then(Value::as_object)
+                    .map_or(0, serde_json::Map::len);
+                obj.remove("pad_nets");
+                obj.insert("pad_count".into(), json!(n));
+            }
+        }
+    }
+
     Ok(json!({
-        "draft": draft,
+        "draft": draft_json,
         "summary": {
             "part_count": draft.parts.len(),
             "net_count": net_pins.len(),
