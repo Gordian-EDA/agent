@@ -432,6 +432,10 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
 const KICAD_MIN_VIA_DIAMETER: f64 = 0.5;
 const KICAD_MIN_VIA_DRILL: f64 = 0.3;
 const KICAD_MIN_ANNULAR: f64 = 0.1;
+/// KiCAD's hole-to-hole (drill edge to drill edge) minimum. Applies between ANY two drilled
+/// holes regardless of net — two barrels cannot overlap mechanically — so via placement must
+/// honour it even for SAME-NET vias (which may share copper but never a hole).
+const KICAD_HOLE_CLEAR_MM: f64 = 0.25;
 
 /// Parse one part JSON into a validated [`DraftPart`]. Shared by `create_board` and
 /// `add_parts` so both apply identical footprint resolution, intrinsic pad-clearance
@@ -1752,6 +1756,7 @@ fn stitch_via_clears(
     vias: &[pcb_engine::problem::Via],
     traces: &[pcb_engine::problem::Trace],
     via_r: f64,
+    via_drill: f64,
     clearance: f64,
 ) -> bool {
     let min_via2 = (2.0 * via_r + clearance).powi(2);
@@ -1761,10 +1766,17 @@ fn stitch_via_clears(
             let dy = (at.y - ob.center.y).abs() - ob.height / 2.0;
             dx.max(0.0).powi(2) + dy.max(0.0).powi(2) >= (via_r + clearance).powi(2)
         }
-    }) && vias
-        .iter()
-        .all(|v| v.connection == net || (at.x - v.at.x).powi(2) + (at.y - v.at.y).powi(2) >= min_via2)
-        && traces.iter().all(|t| {
+    }) && vias.iter().all(|v| {
+        let c2 = (at.x - v.at.x).powi(2) + (at.y - v.at.y).powi(2);
+        // Drill-to-drill (hole) clearance applies to EVERY via pair — two barrels cannot
+        // overlap, same net or not (else a KiCAD hole-to-hole / holes_co_located fault, which
+        // the net-independent lint catches and then drops the WHOLE plane net, disconnecting
+        // all its power). A FOREIGN via additionally needs full copper clearance (min_via2,
+        // already hole-aware via clr_via); a same-net via may share copper but never a hole.
+        let hole2 = (via_drill / 2.0 + v.drill / 2.0 + KICAD_HOLE_CLEAR_MM).powi(2);
+        let need2 = if v.connection == net { hole2 } else { min_via2.max(hole2) };
+        c2 >= need2
+    }) && traces.iter().all(|t| {
             t.connection == net || {
                 let need = via_r + t.width / 2.0 + clearance;
                 !t.path.windows(2).any(|w| seg_point_dist(&w[0], &w[1], at) < need)
@@ -1874,9 +1886,8 @@ fn route_with_planes(
     // the neighbour has ~0 annular. Bump the fanout via's clearance so the hole gap
     // clears 0.25 with margin — this is what makes the fanout DRC-clean WITHOUT a
     // drill-aware obstacle model (the deficit was always just this arithmetic).
-    const KICAD_HOLE_CLEAR: f64 = 0.25;
     let via_annular = (rules.via_diameter - rules.via_drill) / 2.0;
-    let clr_via = clr.max(KICAD_HOLE_CLEAR - via_annular + 0.05);
+    let clr_via = clr.max(KICAD_HOLE_CLEAR_MM - via_annular + 0.05);
     const DIRS: [(f64, f64); 8] = [
         (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0),
         (0.707, 0.707), (-0.707, 0.707), (0.707, -0.707), (-0.707, -0.707),
@@ -1898,7 +1909,7 @@ fn route_with_planes(
         //    0.2mm clearance clr_via == clr, so those boards are unchanged.
         if stitch_via_clears(
             &at, &net, &rp.obstacles, &result.solution.vias, &result.solution.traces, via_r,
-            clr_via,
+            rules.via_drill, clr_via,
         ) {
             result.solution.vias.push(Via {
                 connection: net,
@@ -1930,7 +1941,7 @@ fn route_with_planes(
                 if in_board
                     && stitch_via_clears(
                         &cand, &net, &rp.obstacles, &result.solution.vias,
-                        &result.solution.traces, via_r, clr_via,
+                        &result.solution.traces, via_r, rules.via_drill, clr_via,
                     )
                     && fanout_seg_clears(
                         &at, &cand, &net, &rp.obstacles, &result.solution.vias,
