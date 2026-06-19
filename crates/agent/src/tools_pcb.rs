@@ -1443,6 +1443,22 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
              relieve a hot region, relax rules via set_constraints, or remove a blocking \
              keepout. Re-place and re-route after each change."
         );
+        // Layer escalation: on a 2-layer board with unrouted nets, more copper layers
+        // are usually the highest-leverage fix — a 4-layer stack adds GND/VCC PLANES
+        // (so every power pin connects through a via instead of competing for surface
+        // copper) and keeps F/B clear for signals. The engine supports 2 or 4 layers;
+        // the agent chooses via create_board rules.layers (it is not auto-escalated, so
+        // routing stays deterministic and the board's layer count is an explicit design
+        // choice). Surface the option here so the model knows to reach for it.
+        if rp.layer_count <= 2 {
+            out["layer_suggestion"] = json!(format!(
+                "{} net(s) failed on a 2-layer board. Re-create_board with rules.layers=4: \
+                 it adds GND+VCC power planes (power pins drop straight to a plane via a \
+                 drilled via) and frees F.Cu/B.Cu for signals — usually the biggest win on \
+                 dense or multi-power-net boards. Then re-place and re-route.",
+                result.failed.len()
+            ));
+        }
     }
 
     Ok(out)
