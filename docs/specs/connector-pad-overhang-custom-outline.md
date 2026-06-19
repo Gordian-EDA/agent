@@ -46,20 +46,18 @@ this class: place-illegal, never a shipped fault.
 
 ## QUALITY HALF REMAINING (deferred) — seat the connector INSIDE so it routes
 
-Check the part's **rotated pad (copper) bounding box**, not its centre, against the outline:
-- Thread the part rotation into `is_legal` (currently only the rotated courtyard half-extent
-  `half[i]` is available; the raw pad offsets need the angle to rotate).
-- For each part, require its rotated pad-bbox corners inside the outline (copper inside), while
-  STILL allowing the courtyard to overhang (preserve the mounting-hole-in-notch allowance the
-  current centre-check protects). A rotation-INVARIANT circular `copper_radius` is too
-  conservative — it false-rejects an edge-PARALLEL connector whose copper is actually clear.
-- The placer/legalizer must then actually place connectors copper-inside (edge-seek toward the
-  inset outline, legalizer clamp to it) so the stricter `is_legal` is satisfiable rather than
-  just turning the board `place=false`.
+With the fidelity half done, an edge-seeking connector whose copper would overhang now makes the
+board `place=false` (honest) rather than shipping a fault. The remaining work is to let the placer
+actually SEAT such a connector copper-inside so the board routes instead of failing:
+
+- The connector edge-seek targets the nearest **bbox** edge; on a custom outline it should target
+  the outline edge inset by the edge clearance (and the legalizer clamp to it), so the placer
+  produces a copper-inside placement the (already-stricter) `is_legal` accepts.
 
 This touches the force-layout + legalizer, which the project memory + CLAUDE.md flag as fragile (a
 global change rebalances every board), so it is a deliberate change gated on the full harness — not
-a rushed edit. Until then the engine stays honest: the fault surfaces in the export DRC
-(`copper_edge_clearance`), so the agent sees it and can give more edge margin or move the
-connector. NOTE: no committed board manifests it, so no guard is added (a guard would have to ship
-the fault, which the harness forbids).
+a rushed edit. Until then the engine stays honest in BOTH ways: it rejects the placement
+(`place=false`), and were a fault ever to slip through, the export DRC still reports
+`copper_edge_clearance`. No committed board manifests it, so no harness guard is added (a guard
+would have to ship the fault or place-fail); the unit test
+`is_legal_rejects_pad_overhang_on_custom_outline` guards the check.
