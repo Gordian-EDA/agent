@@ -182,8 +182,9 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
     } else {
         strict
     };
-    let n_faults = naive.failed.len() + geometry_violations(problem, &naive.solution);
-    let d_faults = detailed.failed.len() + geometry_violations(problem, &detailed.solution);
+    let n_faults = failed_pad_weight(problem, &naive.failed) + geometry_violations(problem, &naive.solution);
+    let d_faults =
+        failed_pad_weight(problem, &detailed.failed) + geometry_violations(problem, &detailed.solution);
     let use_naive = if n_faults != d_faults {
         n_faults < d_faults
     } else {
@@ -234,9 +235,27 @@ fn key(failed: usize, geom: usize) -> (usize, usize) {
     (failed + geom, geom)
 }
 
-/// [`key`] for a slice-1 candidate.
+/// Connectivity cost: PADS left unconnected (sum over failed nets of pin count), not the
+/// net count — failing one 8-pin power net is worse than two 2-pin signals. Keeps the
+/// variant choice consistent with the naive's pad-weighted rip-up retry so they never
+/// disagree (which previously let a fewer-nets-but-more-pads result win).
+fn failed_pad_weight(problem: &RouteProblem, failed: &[crate::problem::FailedNet]) -> usize {
+    failed
+        .iter()
+        .map(|f| {
+            problem
+                .connections
+                .iter()
+                .find(|c| c.name == f.connection)
+                .map(|c| c.points_to_connect.len().max(1))
+                .unwrap_or(1)
+        })
+        .sum()
+}
+
+/// [`key`] for a slice-1 candidate, weighted by unconnected pads.
 fn score(problem: &RouteProblem, r: &router::RouteResult) -> (usize, usize) {
-    key(r.failed.len(), geometry_violations(problem, &r.solution))
+    key(failed_pad_weight(problem, &r.failed), geometry_violations(problem, &r.solution))
 }
 
 /// Make a routed result DRC-HONEST: the lint is the authority, not the router's

@@ -95,9 +95,58 @@ pub fn route(problem: &RouteProblem) -> RouteResult {
         via_clear_radius_cells: via_clear_radius_cells(problem),
         ..AStarCosts::default()
     };
-    let mut result = route_with(problem, DesignConstants { costs });
-    reconcile(problem, &mut result);
+    route_iterated(problem, DesignConstants { costs })
+}
+
+/// Route, then RIP-UP RETRY: if any nets failed, re-route from a fresh grid with those
+/// nets prioritised (they claim corridors before their neighbours), keeping the pass
+/// that routes more. Iterated a few times while it keeps improving. Purely additive —
+/// the first pass is the old behaviour and a worse retry is discarded — so a board can
+/// only gain routed nets, never lose them. This relieves the greedy router's corridor
+/// contention (e.g. a few more inner BGA balls escape) without a full rip-up engine.
+fn route_iterated(problem: &RouteProblem, design: DesignConstants) -> RouteResult {
+    let empty = std::collections::BTreeSet::new();
+    let mut best = route_with(problem, design, &empty);
+    reconcile(problem, &mut best);
+    let mut best_w = failed_pad_weight(problem, &best);
+    for _ in 0..3 {
+        if best.failed.is_empty() {
+            break;
+        }
+        let pri: std::collections::BTreeSet<String> =
+            best.failed.iter().map(|f| f.connection.clone()).collect();
+        let mut cand = route_with(problem, design, &pri);
+        reconcile(problem, &mut cand);
+        let cand_w = failed_pad_weight(problem, &cand);
+        // Compare by UNCONNECTED-PAD weight, not failed-net count, so the retry never
+        // trades a few small signals for a fewer-but-larger failed net (worse
+        // connectivity). Stop once a pass stops reducing it.
+        if cand_w < best_w {
+            best = cand;
+            best_w = cand_w;
+        } else {
+            break;
+        }
+    }
+    best
+}
+
+/// Connectivity cost of a result: the number of PADS left unconnected (sum over failed
+/// nets of their pin count), not the net count — failing one 8-pin power net is worse
+/// than failing two 2-pin signals.
+fn failed_pad_weight(problem: &RouteProblem, result: &RouteResult) -> usize {
     result
+        .failed
+        .iter()
+        .map(|f| {
+            problem
+                .connections
+                .iter()
+                .find(|c| c.name == f.connection)
+                .map(|c| c.points_to_connect.len().max(1))
+                .unwrap_or(1)
+        })
+        .sum()
 }
 
 /// The slice-1 router WITHOUT the via-barrel clearance scan (the original slice-1
@@ -107,9 +156,7 @@ pub fn route(problem: &RouteProblem) -> RouteResult {
 /// runs it alongside the strict [`route`] and the detailed router and keeps
 /// whichever the lint scores cleanest. The board picks the strictness it needs.
 pub fn route_lenient(problem: &RouteProblem) -> RouteResult {
-    let mut result = route_with(problem, DesignConstants::default());
-    reconcile(problem, &mut result);
-    result
+    route_iterated(problem, DesignConstants::default())
 }
 
 /// Make a slice-1 result DRC-honest: the lint is the authority. First drop any
@@ -135,8 +182,13 @@ fn reconcile(problem: &RouteProblem, result: &mut RouteResult) {
     result.failed.extend(added);
 }
 
-/// Route `problem` with explicit design constants.
-pub fn route_with(problem: &RouteProblem, design: DesignConstants) -> RouteResult {
+/// Route `problem` with explicit design constants and an optional `priority` set of
+/// net names to route first (empty = the default shortest-first order).
+pub fn route_with(
+    problem: &RouteProblem,
+    design: DesignConstants,
+    priority: &std::collections::BTreeSet<String>,
+) -> RouteResult {
     let mut grid = RouteGrid::build(problem);
     let layer_count = problem.layer_count.max(1) as usize;
 
@@ -164,7 +216,7 @@ pub fn route_with(problem: &RouteProblem, design: DesignConstants) -> RouteResul
     let mut vias: Vec<Via> = Vec::new();
     let mut failed: Vec<FailedNet> = Vec::new();
 
-    for ci in net_order(problem) {
+    for ci in net_order(problem, priority) {
         let conn = &problem.connections[ci];
         let conn_idx = match grid.connection_index(&conn.name) {
             Some(i) => i,
@@ -231,15 +283,21 @@ pub fn route_with(problem: &RouteProblem, design: DesignConstants) -> RouteResul
     }
 }
 
-/// Connection indices in routing order: ascending bounding-box half-perimeter
-/// of `points_to_connect`, ties broken by connection name. Deterministic.
-fn net_order(problem: &RouteProblem) -> Vec<usize> {
+/// Connection indices in routing order: any net in `priority` first (so a rip-up retry
+/// can give the previously-failed nets the empty grid), then ascending bounding-box
+/// half-perimeter, ties by name. Deterministic. With an empty `priority` this is exactly
+/// the shortest-half-perimeter-first order.
+fn net_order(problem: &RouteProblem, priority: &std::collections::BTreeSet<String>) -> Vec<usize> {
     let mut order: Vec<usize> = (0..problem.connections.len()).collect();
     order.sort_by(|&a, &b| {
-        let ka = half_perimeter(&problem.connections[a]);
-        let kb = half_perimeter(&problem.connections[b]);
-        ka.partial_cmp(&kb)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        let pa = priority.contains(&problem.connections[a].name);
+        let pb = priority.contains(&problem.connections[b].name);
+        pb.cmp(&pa) // priority nets first
+            .then_with(|| {
+                let ka = half_perimeter(&problem.connections[a]);
+                let kb = half_perimeter(&problem.connections[b]);
+                ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| problem.connections[a].name.cmp(&problem.connections[b].name))
     });
     order
@@ -444,7 +502,7 @@ mod tests {
     #[test]
     fn net_order_is_shortest_half_perimeter_first_then_name() {
         let p = load("quad.json");
-        let order = net_order(&p);
+        let order = net_order(&p, &std::collections::BTreeSet::new());
         // Order indices must be a permutation of all connections.
         let mut sorted = order.clone();
         sorted.sort();
