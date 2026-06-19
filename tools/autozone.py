@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""FREE automatic zone lift: deterministic coarse zones + an OBJECTIVE (no-gateway) A/B.
+"""Automatic zone lift: DETERMINISTIC coarse zones (free) gated by a CRITIC A/B.
 
 The VLM's contribution to the hybrid is just rough DIRECTION, which circuit_summary.auto_zones
-derives deterministically from the module graph + connector role-names — for free, no gateway.
-The soft bias helps simple boards (c19 5→7) but can introduce a body crossing on complex
-satellite-heavy ones (c01), so this keeps the zoned layout ONLY if it's objectively better
-(fewer wire crossings, and no new body crossings or warnings). Objective metrics are a free,
-fast proxy for the critic that aligned with it on the validated boards (keeps c19, rejects c01).
+derives deterministically from the module graph + connector role-names — for free, no VLM call.
+The soft bias helps some boards (c19 5→7) but hurts others (c14 7→6), and crossings/body/warnings
+are NOT a faithful critic proxy (an objective A/B wrongly kept c14: fewer crossings, worse critic).
+So this gates on the CRITIC: keep the zoned layout only if it scores HIGHER. Cheaper than the VLM
+loop (the zones are free; only the A/B critic calls cost) but not free.
 
-    python3 tools/autozone.py IN.yaml [OUT_ZONE.json]
+    set -a; . ./.env; set +a
+    python3 tools/autozone.py IN.yaml [OUT_ZONE.json] [--circuit "desc"] [--samples 3]
         -> prints the A/B decision; if zones win, writes them to OUT_ZONE.json ($ZONE_FILE)
 """
+import argparse
 import json
 import os
 import re
@@ -23,34 +25,36 @@ sys.path.insert(0, HERE)
 from circuit_summary import auto_zones  # noqa: E402
 
 
-def metrics(yaml_path, out_dir, zone_file=None):
+def render(yaml_path, out_dir, zone_file=None):
     os.makedirs(out_dir, exist_ok=True)
     env = os.environ.copy()
     if zone_file:
         env["ZONE_FILE"] = zone_file
-    out = subprocess.run(
+    subprocess.run(
         ["cargo", "run", "--release", "-p", "agent", "--example", "bench_corpus",
          "--", "--out", out_dir, yaml_path],
-        cwd=ROOT, capture_output=True, text=True, env=env).stdout
-    stem = os.path.basename(yaml_path).replace(".yaml", "")
-    for ln in out.splitlines():
-        f = ln.split()
-        if f and f[0] == stem:
-            # stem parts pins nets warn body ic xing anneal
-            return {"warn": int(f[4]), "body": int(f[5]), "xing": int(f[7])}
-    raise RuntimeError(f"no metrics for {stem} in:\n{out}")
+        cwd=ROOT, capture_output=True, text=True, env=env)
+    return os.path.join(out_dir, os.path.basename(yaml_path).replace(".yaml", "") + ".png")
 
 
-def decide(in_yaml, out_zone=None):
+def critic(png, circuit, samples):
+    out = subprocess.run(
+        ["python3", os.path.join(HERE, "schematic_critic.py"), png, "--circuit", circuit,
+         "--samples", str(samples)], cwd=ROOT, capture_output=True, text=True).stdout
+    m = re.search(r"^score:\s*([0-9]+)", out, re.MULTILINE)
+    return int(m.group(1)) if m else None
+
+
+def decide(in_yaml, out_zone=None, circuit="schematic", samples=3):
     zones = auto_zones(in_yaml)
     if not zones:
         print("no major parts -> no zones")
         return False
     zf = "/tmp/autozone.json"
     json.dump(zones, open(zf, "w"))
-    a = metrics(in_yaml, "/tmp/autozone/auto")
-    z = metrics(in_yaml, "/tmp/autozone/zone", zf)
-    win = z["body"] <= a["body"] and z["warn"] <= a["warn"] and z["xing"] < a["xing"]
+    a = critic(render(in_yaml, "/tmp/autozone/auto"), circuit, samples)
+    z = critic(render(in_yaml, "/tmp/autozone/zone", zf), circuit, samples)
+    win = (z or -1) > (a or -1)
     print(f"auto={a}  zoned={z}  -> {'KEEP ZONES' if win else 'keep auto'}")
     if win and out_zone:
         json.dump(zones, open(out_zone, "w"))
@@ -59,6 +63,10 @@ def decide(in_yaml, out_zone=None):
 
 
 if __name__ == "__main__":
-    if not 2 <= len(sys.argv) <= 3:
-        sys.exit("usage: autozone.py IN.yaml [OUT_ZONE.json]")
-    decide(sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else None)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("in_yaml")
+    ap.add_argument("out_zone", nargs="?")
+    ap.add_argument("--circuit", default="schematic")
+    ap.add_argument("--samples", type=int, default=3)
+    args = ap.parse_args()
+    decide(args.in_yaml, args.out_zone, args.circuit, args.samples)
