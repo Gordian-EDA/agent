@@ -44,6 +44,17 @@ fragile (it rebalances every board). Concretely:
   connects to (fall back to nearest edge only when it has no directional net), so a power
   connector lands on the IC's side, not a random edge.
 
+  **UPDATE (Jun 19) — net-aware edge-seek ALONE is insufficient; tried and reverted.** Added a
+  net-aware edge term to `place_cost` (pull each edge-seek connector to the edge nearest its
+  <PLANE_MIN_PINS-pin net centroid). Verified offline it picks the right edges (multi-ic J1/J2:
+  bottom→top toward the ICs). But it changed NOTHING in practice (multi-ic J1/J2 stayed on the
+  bottom; mcu J1↔U1 stayed 44mm) — because the IC+cap cluster already OCCUPIES the target edge,
+  so the connector hits the overlap penalty and can't move there. No DRC regression (59 boards
+  clean), but zero benefit, so reverted (no dead complexity in the fragile SA cost). LESSON: the
+  connectors are stranded as a SYMPTOM of the clusters hogging one region — fixing the edge of a
+  symptom doesn't help. The two-level CLUSTER placement (above) is the load-bearing change and
+  must come FIRST; net-aware edge-seek is only a finishing touch once clusters leave edge room.
+
 ## Why deferred (not a cron-tick change)
 
 Both touch the force-layout / SA, which the memory explicitly flags as fragile (a global tweak
