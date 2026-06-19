@@ -963,6 +963,11 @@ when one already exists or the user explicitly asks for the schematic too.)
    bounds (mm), and each part as `{reference, footprint, pad_nets: {pad# → net}}`.
    Single-pin nets warn (nothing to route). One unknown footprint is a
    recoverable error with suggestions — fix that one part and resend.
+   START WITH GENEROUS BOUNDS (roughly 2× the summed part area, square-ish). The
+   export tightens the final outline to the copper + 1mm, so a roomy routing area is
+   FREE in the finished board but gives the placer/router the slack they need — a
+   hand-packed tight board is the #1 cause of an illegal placement you then waste the
+   turn fighting. You can always shrink later; starting tight only hurts.
    USE THE ENGINE'S FEATURES — they are deterministic and DRC-checked, so reach for
    them instead of hand-workarounds or telling the user to finish in KiCAD:
    - `rules.pours: [{net, layer}]` — a copper POUR the engine fills + anti-pads for
@@ -980,8 +985,15 @@ when one already exists or the user explicitly asks for the schematic too.)
    routing success, so spend effort here.
 5. `place_board()` — the deterministic legalizer snaps parts to a legal, in-bounds
    floorplan honoring your hints and any locks. Returns each part's position and
-   whether the placement is `legal`. An illegal (too-tight) placement means
-   enlarge bounds / relax rules / move parts.
+   whether the placement is `legal`. For an illegal (too-tight) placement, the
+   FIRST and cheapest fix is to ENLARGE BOUNDS (re-create_board with a bigger
+   `bounds`) — the export auto-tightens the outline to the copper + 1mm anyway, so
+   roomy bounds cost nothing in the finished board and give the legalizer slack.
+   Do NOT try to resolve overlaps by hand-`move_part`ing parts around: each
+   move_part LOCKS that part, and a pile of locks over-constrains the legalizer so
+   it can't separate them (you'll fight your own locks forever). Trust the
+   legalizer — give it room + good hints and let it place; reserve move_part/locks
+   for the few parts whose exact spot truly matters (a connector on an edge).
 6. `render_board()` — LOOK at the board. This is your eyes: call it after
    place_board to see the floorplan and after route_board to see the copper
    (top = red, bottom = blue, failed nets = orange crosses). Critique it against a
@@ -990,9 +1002,18 @@ when one already exists or the user explicitly asks for the schematic too.)
    list with a `reason`, `metrics`, and a `lint_summary`. Needs a placement first.
 8. Triage loop — if `failed` is non-empty, read the reasons and the congestion
    hotspots, apply ONE lever (below), then re-place (if placement was cleared)
-   and re-route. Repeat until `failed` is empty.
-9. `export_board({path?})` — only when the board is placed AND routed. Writes the
-   `.kicad_pcb` and (when KiCAD ≥ 8 is present) runs DRC and reports the counts.
+   and re-route. BOUND IT: give a stubborn net about 3 triage attempts, and prefer
+   a `set_placement_hints` re-floorplan over many one-at-a-time `move_part` nudges
+   (re-clustering beats hand-walking a part across the board). If a few nets stay
+   walled-in on a genuinely tight/enclosed board after that, STOP — an honestly
+   unrouted net is an ACCEPTABLE result, not something to keep grinding. Do NOT
+   spend the whole turn (or your iteration budget) chasing the last net.
+9. `export_board({path?})` — once the board is placed and routed AS FAR AS IT GOES.
+   A board with a FEW honest unrouted nets (listed in `failed`) is a useful,
+   shippable deliverable: EXPORT it and report those nets to the user — an
+   UNEXPORTED board helps no one, so never let perfectionism on one net cost you the
+   whole board. The only hard requirement is never export a STALE route (re-route
+   after any change). Writes the `.kicad_pcb` and runs DRC (KiCAD ≥ 8).
 
 ## Failure-provenance cheat sheet (read every `reason`)
 
