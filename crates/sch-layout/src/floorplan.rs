@@ -1767,14 +1767,28 @@ fn incidence(items: &[Item]) -> Incidence {
 fn assign_cells(items: &[Item], ir: &LayoutIr) -> Vec<Cell> {
     let max_col = ir.place.values().map(|c| c.col).max().unwrap_or(-1);
     let mut spare = max_col + 1;
+    // `place` is keyed by refdes, so a MULTI-UNIT part's units (op-amp A/B + power unit)
+    // all resolve to ONE cell — they'd seed coincident, then decongest scatters them in
+    // arbitrary directions. Offset each successive same-refdes unit by one ordinal row so
+    // they seed ADJACENT (a vertical stack); the sibling-cohesion term then holds them
+    // clustered. Single-unit parts (one item/refdes) get offset 0 → byte-identical seed.
+    let mut unit_seen: BTreeMap<&str, i32> = BTreeMap::new();
     items
         .iter()
-        .map(|it| match ir.place.get(&it.refdes) {
-            Some(c) => *c,
-            None => {
-                let c = spare;
-                spare += 1;
-                Cell { col: c, row: 0, orient: Orient::Down }
+        .map(|it| {
+            let k = {
+                let e = unit_seen.entry(it.refdes.as_str()).or_insert(0);
+                let v = *e;
+                *e += 1;
+                v
+            };
+            match ir.place.get(&it.refdes) {
+                Some(c) => Cell { col: c.col, row: c.row + k, orient: c.orient },
+                None => {
+                    let c = spare;
+                    spare += 1;
+                    Cell { col: c, row: k, orient: Orient::Down }
+                }
             }
         })
         .collect()
