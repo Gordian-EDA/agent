@@ -8,10 +8,22 @@ direction with real headroom. Distilled from an exhaustive exploration sweep.
 
 Goal: reach a 9+ critic score (`tools/schematic_critic.py`) on 20+ e2e agent-generated
 circuits across topics (MCU, BGA, dense, analog). **Current state: corpus critic mean
-~6.5–7; ~1 board reaches 9. Uniform 9+ including dense boards is unreachable by engine
-means.** This is not a metric artefact — two independent blind reviewers scored a board
-spread *harsher* than the critic on sprawled boards (c01 3 vs critic 5; c03 5 vs 8), so the
-critic is **accurate-to-generous**, and the layouts are genuinely the limit.
+~6.5–7; ~1 board reaches 9.** The engine's *own* placement is sprawl-capped (see dead-ends
+below), BUT this is no longer the last word:
+
+> ★★★ **THE LEVER (validated): the HYBRID soft zone-bias loop.** A vision LLM gives a COARSE
+> zone per major part (rough direction — "power left, MCU centre, outputs right"); the engine
+> does the precise placement, SOFTLY biased toward those zones (`LayoutIr.zone` → proxy_cost
+> `zbias`), never forced. This lifts sprawled boards toward 9 *without* harming good ones, because
+> the soft bias keeps the engine's good local work (decoupling banks, spines). Validated on the
+> gateway critic: c19 (sprawled audio amp) auto 5 → **8** (hand zones) / **7** (full VLM loop,
+> improving 5→6→7 with critic feedback); c03 (already tidy) auto 8 → **8** (no harm). See the
+> hybrid section below. The earlier FORCED-cell VLM placement is superseded (the LLM is good at
+> rough direction, bad at mm positions — forcing wrecked good boards: c03 8→4).
+
+Note the engine-only limit is real (not a metric artefact) — two independent blind reviewers
+scored sprawled boards *harsher* than the critic (c01 3 vs critic 5; c03 5 vs 8), so the critic
+is **accurate-to-generous**. The hybrid wins by adding LLM direction the engine algorithm lacks.
 
 The single dominant defect across **every** topic is **SPRAWL** (modules far apart, large
 empty regions, long interconnects). The critic penalises sprawl more than the extra wire
