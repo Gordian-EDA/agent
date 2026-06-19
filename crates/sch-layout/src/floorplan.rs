@@ -4995,6 +4995,23 @@ fn route_signal(
         }
     }
 
+    // SINGLE-PIN PORT whose short pin→exit hop the router couldn't place (dense FPGA GPIO banks at
+    // 2.54mm pitch block each other's stubs): force the direct stub so the pin and its exit unify
+    // into ONE component. Otherwise the bridge below emits a signal label on the pin (over the IC
+    // body) AND the port label at the exit — the net renders twice (the BGA GPIO-bank defect). The
+    // hop is short + axis-aligned (single-pin ports follow the pin's own dir) so it's safe, and it
+    // only fires when the route genuinely failed, so cleanly-routed references stay byte-identical.
+    if eps.len() == 1 {
+        if let Some(pi) = port_idx {
+            let (rp, re) = (find(&mut parent, 0), find(&mut parent, pi));
+            if rp != re {
+                w.add_wire_on_net(pts[0], pts[pi], net);
+                scene.segments.push((pts[0], pts[pi], net.to_string()));
+                parent[rp] = re;
+            }
+        }
+    }
+
     // Bridge connected components by net name: every component must carry the net
     // somewhere. A component holding the port exit is named by the port label; any
     // other component gets one net label on a real pin. With one component the net
