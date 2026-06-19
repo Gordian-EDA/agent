@@ -106,6 +106,19 @@ pub struct DraftRules {
     /// nets, thin for signals. A net not listed uses `min_trace_width`.
     #[serde(default)]
     pub net_widths: std::collections::BTreeMap<String, f64>,
+    /// Copper POURS on signal layers: a flood of a net (usually GND) on "top"/"bottom",
+    /// carved around foreign copper. The HF return-path / shielding case (distinct from
+    /// the inner 4-layer power planes). Empty = no signal-layer pours.
+    #[serde(default)]
+    pub pours: Vec<PourSpec>,
+}
+
+/// A copper pour request: flood `net` on signal layer `layer` ("top" or "bottom").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PourSpec {
+    pub net: String,
+    pub layer: String,
 }
 
 fn default_layers() -> u32 {
@@ -121,6 +134,7 @@ impl Default for DraftRules {
             via_drill: 0.3,
             layer_count: 2,
             net_widths: std::collections::BTreeMap::new(),
+            pours: Vec::new(),
         }
     }
 }
@@ -347,6 +361,22 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
             net_widths.insert(net.clone(), w);
         }
     }
+    // Copper pours: [{"net":"GND","layer":"bottom"}] — flood a net on a signal layer.
+    let mut pours = Vec::new();
+    if let Some(pv) = obj.get("pours") {
+        let arr = pv
+            .as_array()
+            .ok_or_else(|| "rules.pours must be an array of {net, layer}".to_string())?;
+        for p in arr {
+            let net = p.get("net").and_then(Value::as_str)
+                .ok_or_else(|| "rules.pours[].net must be a string".to_string())?;
+            let layer = p.get("layer").and_then(Value::as_str).unwrap_or("bottom");
+            if !matches!(layer, "top" | "bottom" | "F.Cu" | "B.Cu") {
+                return Err(format!("rules.pours[].layer must be top/bottom (got {layer})"));
+            }
+            pours.push(PourSpec { net: net.to_string(), layer: layer.to_string() });
+        }
+    }
     Ok(DraftRules {
         clearance: num("clearance", d.clearance),
         min_trace_width: num("min_trace_width", d.min_trace_width),
@@ -354,6 +384,7 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
         via_drill,
         layer_count,
         net_widths,
+        pours,
     })
 }
 
@@ -1725,6 +1756,79 @@ fn plane_zones(
 /// bare keep-out lands exactly on the clearance limit and KiCAD flags it.
 const PLANE_ANTIPAD_MARGIN_MM: f64 = 0.15;
 
+/// Build copper-POUR zones on SIGNAL layers (top/bottom) for the requested nets — a
+/// GND flood for HF return paths / shielding, or a 2-layer ground plane. Unlike an
+/// inner PLANE, a signal layer carries traces, so the anti-pad keep-out is carved
+/// around foreign VIAS, foreign PADS, foreign TRACES (per segment), and user keepouts
+/// on that layer. Same-net copper is NOT carved, so the pour ties the net's own pads/
+/// traces/vias together (and, on a 4-layer board, to the inner plane through the net's
+/// existing stitching vias).
+fn pour_zones(
+    pours: &[PourSpec],
+    board: &RouteProblem,
+    solution: &RouteSolution,
+    bounds: &Bounds,
+    rules: &DraftRules,
+    user_keepouts: &[Keepout],
+) -> Vec<ZoneSpec> {
+    let lc = rules.layer_count;
+    let via_half = rules.via_diameter / 2.0 + rules.clearance + PLANE_ANTIPAD_MARGIN_MM;
+    pours
+        .iter()
+        .filter_map(|p| {
+            let (idx, kname) = match p.layer.as_str() {
+                "top" | "F.Cu" => (0u32, "F.Cu".to_string()),
+                "bottom" | "B.Cu" => (lc.saturating_sub(1), "B.Cu".to_string()),
+                _ => return None,
+            };
+            let net = &p.net;
+            let mut ko: Vec<(Point2, f64, f64)> = Vec::new();
+            // Foreign vias (a through via reaches every layer).
+            for v in &solution.vias {
+                if &v.connection != net {
+                    ko.push((v.at.clone(), via_half, via_half));
+                }
+            }
+            // Foreign pads on this layer.
+            for ob in &board.obstacles {
+                let on = ob.layers.iter().any(|l| l.index(lc) == Some(idx));
+                if on && !ob.connected_to.iter().any(|n| n == net) {
+                    let h = ob.width.max(ob.height) / 2.0 + rules.clearance + PLANE_ANTIPAD_MARGIN_MM;
+                    ko.push((ob.center.clone(), h, h));
+                }
+            }
+            // Foreign traces on this layer — carve each segment's bbox + half-width.
+            for t in &solution.traces {
+                if t.layer.index(lc) == Some(idx) && &t.connection != net {
+                    let inf = t.width / 2.0 + rules.clearance + PLANE_ANTIPAD_MARGIN_MM;
+                    for w in t.path.windows(2) {
+                        let (a, b) = (&w[0], &w[1]);
+                        ko.push((
+                            Point2 { x: (a.x + b.x) / 2.0, y: (a.y + b.y) / 2.0 },
+                            (a.x - b.x).abs() / 2.0 + inf,
+                            (a.y - b.y).abs() / 2.0 + inf,
+                        ));
+                    }
+                }
+            }
+            // User keepouts on this layer.
+            for k in user_keepouts {
+                if k.layers.iter().any(|l| l.index(lc) == Some(idx)) {
+                    let cx = (k.rect.min_x + k.rect.max_x) / 2.0;
+                    let cy = (k.rect.min_y + k.rect.max_y) / 2.0;
+                    ko.push((
+                        Point2 { x: cx, y: cy },
+                        (k.rect.max_x - k.rect.min_x) / 2.0 + rules.clearance,
+                        (k.rect.max_y - k.rect.min_y) / 2.0 + rules.clearance,
+                    ));
+                }
+            }
+            let fill = plane_fill_rects(bounds, BOARD_EDGE_MARGIN_MM, &ko);
+            Some(ZoneSpec { net_name: net.clone(), layer_name: kname, fill_rects: fill })
+        })
+        .collect()
+}
+
 /// Render the board to a PNG using the placement or routed SVG, save under
 /// `.autopcb/renders/`, and attach via `IMAGE_PATH_KEY`.
 ///
@@ -2055,7 +2159,7 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // Copper-plane zones (power pours) for a multilayer board, computed from the
     // foreign copper reaching each inner layer, at the final (tight) bounds. The
     // obstacle positions are absolute, so the first board's read is reusable here.
-    let zones = plane_zones(
+    let mut zones = plane_zones(
         &stored.planes,
         &board.problem,
         &stored.solution,
@@ -2063,6 +2167,15 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
         &draft.rules,
         &draft.keepouts,
     );
+    // Signal-layer copper pours (GND flood for HF return / 2-layer ground plane).
+    zones.extend(pour_zones(
+        &draft.rules.pours,
+        &board.problem,
+        &stored.solution,
+        &tight,
+        &draft.rules,
+        &draft.keepouts,
+    ));
     let board = if tight != draft.bounds || !zones.is_empty() {
         match synthesize_board_full(&parts, &tight, draft.rules.layer_count, &zones) {
             Ok(t) => {

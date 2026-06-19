@@ -15,7 +15,13 @@
       "OUT3": 0.25,
       "OUT4": 0.25,
       "OUT5": 0.25
-    }
+    },
+    "pours": [
+      {
+        "net": "GND",
+        "layer": "bottom"
+      }
+    ]
   },
   "bounds": {
     "min_x": 0.0,
