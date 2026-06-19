@@ -160,9 +160,18 @@ schematics) and `forceplace` (force-directed — right model, but compaction col
 
 ## If a future session wants 9+ (all options are multi-session, payoff uncertain)
 
-1. **Co-placement** of anchors AND their satellites/labels as one compact unit (not anchors
-   then satellite-tapping) — the only thing that could compact without colliding fans. Even
-   then, satellite room caps the tightness; may not reach 9 on dense boards.
+1. **Co-placement** — ALREADY IMPLEMENTED, do NOT list as untried (verified 2026-06-19). The SA
+   builds rigid anchor+satellite clusters (`build_anchor_blocks`), has a BLOCK MOVE that slides a
+   cluster intact (incl. frozen members), a satellite-MAGNET pass (seat each satellite tight to its
+   pin) and a module-GRAVITY pass (pack whole modules toward centre), and `proxy_cost` carries a
+   board-SPREAD compaction penalty. Each placement emits 3 candidates (nudge / +magnet / +magnet
+   +gravity) and the pick keeps the most compact one that doesn't raise real post-solve warnings.
+   So compaction is tried EVERY time; on big/dense boards the compact candidate COLLIDES the satellite
+   fans (power-symbols/labels) → the pick keeps the sprawled one. This is the deepest confirmation that
+   the sprawl is the NECESSARY minimum given fan room — there is no untried placement lever. Beating it
+   would need a fundamentally different paradigm (e.g. analytical/quadratic placement + a new legaliser,
+   or hierarchical multi-SHEET output) — large rewrites, and even then dense-board fan room likely caps
+   below 9.
 2. **Multi-unit support** (analog): key `place` by `(refdes, unit)` so per-unit seeds are
    independent + correct; add a dual-supply (VPLUS/VMINUS) decoupling matcher in
    `circuit-graph`. NOTE: confirmed this would NOT move the analog *critic* (sprawl-capped),
