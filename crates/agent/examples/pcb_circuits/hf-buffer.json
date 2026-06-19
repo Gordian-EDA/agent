@@ -1,0 +1,147 @@
+{
+  "description": "HF line buffer: 12 controlled-impedance (0.25mm) lines through a SOIC-16, routed over solid GND/VCC PLANES (4-layer microstrip), ringed decoupling",
+  "rules": {
+    "layers": 4,
+    "net_widths": {
+      "IN0": 0.25,
+      "IN1": 0.25,
+      "IN2": 0.25,
+      "IN3": 0.25,
+      "IN4": 0.25,
+      "IN5": 0.25,
+      "OUT0": 0.25,
+      "OUT1": 0.25,
+      "OUT2": 0.25,
+      "OUT3": 0.25,
+      "OUT4": 0.25,
+      "OUT5": 0.25
+    }
+  },
+  "bounds": {
+    "min_x": 0.0,
+    "max_x": 70.0,
+    "min_y": 0.0,
+    "max_y": 54.0
+  },
+  "parts": [
+    {
+      "reference": "U1",
+      "footprint": "Package_SO:SOIC-16_3.9x9.9mm_P1.27mm",
+      "pad_nets": {
+        "1": "IN0",
+        "11": "OUT0",
+        "2": "IN1",
+        "12": "OUT1",
+        "3": "IN2",
+        "13": "OUT2",
+        "4": "IN3",
+        "14": "OUT3",
+        "5": "IN4",
+        "15": "OUT4",
+        "6": "IN5",
+        "16": "OUT5",
+        "7": "GND",
+        "8": "VCC",
+        "9": "VCC",
+        "10": "GND"
+      },
+      "locked": {
+        "x": 35.0,
+        "y": 27.0,
+        "rotation": 0
+      }
+    },
+    {
+      "reference": "J1",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "IN0",
+        "2": "IN1",
+        "3": "IN2",
+        "4": "IN3",
+        "5": "IN4",
+        "6": "IN5",
+        "7": "GND",
+        "8": "VCC"
+      }
+    },
+    {
+      "reference": "J2",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "OUT0",
+        "2": "OUT1",
+        "3": "OUT2",
+        "4": "OUT3",
+        "5": "OUT4",
+        "6": "OUT5",
+        "7": "GND",
+        "8": "VCC"
+      }
+    },
+    {
+      "reference": "C1",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C2",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C3",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C4",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C5",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C6",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    }
+  ],
+  "hints": {
+    "groups": [
+      {
+        "name": "dec",
+        "members": [
+          "C1",
+          "C2",
+          "C3",
+          "C4",
+          "C5",
+          "C6"
+        ],
+        "surround": "U1"
+      }
+    ]
+  }
+}
