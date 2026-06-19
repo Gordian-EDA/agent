@@ -1776,6 +1776,74 @@ mod tests {
         assert!(res.legal, "board with a locked part still legal: {res:?}");
     }
 
+    #[test]
+    fn locked_anchor_with_unlocked_caps_does_not_move() {
+        // A LOCKED IC (≥3-pad decoupling anchor) carrying UNLOCKED bypass caps must
+        // not be dragged by the annealer's block-move (which rigidly shifts an anchor
+        // + its caps). The cap-anchor cohesion still clusters the caps around the
+        // fixed IC; only unlocked anchors may be block-shifted.
+        let mut ic = Part {
+            reference: "U1".to_owned(),
+            courtyard_w: 3.0,
+            courtyard_h: 3.0,
+            pads: vec![
+                PartPad {
+                    number: "1".to_owned(),
+                    offset: Point2 { x: -1.0, y: 0.0 },
+                    width: 0.6,
+                    height: 0.6,
+                    layers: top(),
+                    net: Some("VCC".to_owned()),
+                },
+                PartPad {
+                    number: "2".to_owned(),
+                    offset: Point2 { x: 1.0, y: 0.0 },
+                    width: 0.6,
+                    height: 0.6,
+                    layers: top(),
+                    net: Some("GND".to_owned()),
+                },
+                PartPad {
+                    number: "3".to_owned(),
+                    offset: Point2 { x: 0.0, y: 1.0 },
+                    width: 0.6,
+                    height: 0.6,
+                    layers: top(),
+                    net: Some("OUT".to_owned()),
+                },
+            ],
+            locked: None,
+        };
+        place_at(&mut ic, 4.0, 10.0, 0);
+        // A LOCKED sink on U1's OUT net, pinned far to the right: the only way the
+        // annealer can shorten the OUT net is to block-shift the (locked) U1 cluster
+        // rightward — which it must NOT do. (Both ends locked → the net length is
+        // fixed and the lock wins.)
+        let mut sink = r0603("R3", Some("OUT"), Some("GND"));
+        place_at(&mut sink, 26.0, 10.0, 0);
+        let problem = PlaceProblem {
+            bounds: board(30.0, 20.0),
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts: vec![
+                ic,
+                r0603("C1", Some("VCC"), Some("GND")),
+                r0603("C2", Some("VCC"), Some("GND")),
+                sink,
+            ],
+        };
+        let res = place(&problem, &PlacementHints::default());
+        let u1 = res.placements.iter().find(|p| p.reference == "U1").unwrap();
+        assert_eq!(
+            u1.at,
+            Point2 { x: 4.0, y: 10.0 },
+            "locked anchor U1 must stay put despite carrying unlocked caps + a far net sink: {res:?}"
+        );
+        assert!(res.legal, "{res:?}");
+    }
+
     // ── connected parts end closer than unconnected ─────────────────────────
 
     #[test]
