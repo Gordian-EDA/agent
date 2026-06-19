@@ -1930,11 +1930,13 @@ fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
         };
         let cry_angle = orient_angle(&items[yi].geom, dir_orient);
         moves.push((yi, [snap(mid[0] + dir[0] * GAP), snap(mid[1] + dir[1] * GAP)], Some(cry_angle)));
-        // Each load cap sits two gaps out and a FULL gap to its osc pin's side of the
-        // midpoint, NOT at the osc-pin row itself: the pins are one 2.54 mm pitch apart
-        // but a cap is ~7.6 mm tall, so placing the caps at the pin rows overlaps them
-        // and the de-congest pass then jogs the whole cluster into a knot. Pushing each
-        // cap a gap off-centre gives 2·GAP of clearance — the textbook tidy block.
+        // Each load cap sits two gaps out and TWO gaps to its osc pin's side of the midpoint
+        // (perp axis). The pins are one 2.54 mm pitch apart but a cap is ~7.6 mm tall, so the
+        // caps must clear both the pin rows AND each other; one gap off-centre left them packed
+        // tight against Y1, so the crystal's own ref/value text ("Y1"/"25 MHz") collided with the
+        // caps' GND symbols (the critic's "garbled stacked GND/25 MHz" — a MAJOR text-overlap).
+        // Two gaps off-centre (perp only, so the dir-aligned OSC routing is unaffected) gives the
+        // cluster room for its labels while keeping the load-cap leads short.
         for (net, w) in [(&onets[0], wa), (&onets[1], wb)] {
             if let Some(ci) = items.iter().position(|it| {
                 in_idiom(it)
@@ -1947,8 +1949,8 @@ fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
                 moves.push((
                     ci,
                     [
-                        snap(mid[0] + dir[0] * GAP * 2.0 + perp[0] * side * GAP),
-                        snap(mid[1] + dir[1] * GAP * 2.0 + perp[1] * side * GAP),
+                        snap(mid[0] + dir[0] * GAP * 2.0 + perp[0] * side * GAP * 2.0),
+                        snap(mid[1] + dir[1] * GAP * 2.0 + perp[1] * side * GAP * 2.0),
                     ],
                     None,
                 ));
