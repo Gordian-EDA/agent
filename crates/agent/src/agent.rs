@@ -45,10 +45,13 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::llm::{ContentBlock, ImageData, LlmClient, Message, Role};
 use crate::tools::{ToolCtx, Tools};
 
-/// Safety cap on LLM round-trips per turn. Generous enough for
-/// search → info → validate → apply self-repair, bounded so a misbehaving model
-/// can't loop forever.
-const MAX_ITERATIONS: usize = 12;
+/// Safety cap on LLM round-trips per turn. Sized for the longest legitimate flow:
+/// the board path (search footprints → get_footprint_info per part → create_board →
+/// set_placement_hints → place_board → render_board → route_board → export_board,
+/// plus placement/routing-failure iteration) runs longer than the schematic
+/// self-repair flow (search → info → validate → apply), and was being truncated at
+/// 12. Bounded so a misbehaving model still can't loop forever.
+const MAX_ITERATIONS: usize = 24;
 
 /// The human apply-gate. The loop calls [`Approvals::approve`] with the dry-run
 /// diff before any `apply_design` write; returning `false` cancels the write.
@@ -940,6 +943,14 @@ drive a SEPARATE set of tools over a board "draft" (the PCB analog of the
 schematic). The routing/placement engine is deterministic geometry; YOUR job is
 the floorplan, the constraints, and triaging failures. You NEVER emit trace
 coordinates — copper comes only from the engine.
+
+**Go STRAIGHT to the board flow — do NOT draw a schematic first.** `create_board`
+takes the parts directly (`{reference, footprint, pad_nets}`); when the request is
+a board (the user names the parts/footprints, or asks you to "lay out / route a
+PCB"), skip `create_design`/`apply_design` entirely and start at step 1 below.
+Building a schematic first for a board-only task wastes your turn and can run you
+out of steps before the board is routed and exported. (Only derive from a schematic
+when one already exists or the user explicitly asks for the schematic too.)
 
 ## Board flow (follow this order)
 
