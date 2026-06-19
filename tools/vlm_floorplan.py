@@ -34,13 +34,14 @@ def render(yaml_path, out_dir="/tmp/vlm_fp"):
          "--", "--out", out_dir, yaml_path],
         cwd=ROOT, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    stem = os.path.basename(yaml_path).replace(".yaml", "").replace(".circuit", "")
-    # bench_corpus names outputs <stem>.circuit.png
-    for cand in (f"{stem}.circuit.png", f"{stem}.png"):
-        p = os.path.join(out_dir, cand)
-        if os.path.exists(p):
-            return p
-    raise FileNotFoundError(f"render of {yaml_path} not found in {out_dir}")
+    # bench_corpus names the output <basename-minus-.yaml>.png (e.g. c01.circuit.yaml ->
+    # c01.circuit.png; c01.circuit.vlm.yaml -> c01.circuit.vlm.png).
+    base = os.path.basename(yaml_path)
+    stem = base[:-5] if base.endswith(".yaml") else base
+    p = os.path.join(out_dir, stem + ".png")
+    if os.path.exists(p):
+        return p
+    raise FileNotFoundError(f"render of {yaml_path} not found at {p}")
 
 
 def critic(png, circuit, samples):

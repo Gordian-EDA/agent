@@ -37,12 +37,16 @@ def b64_image(path):
 SYSTEM = """You are an expert schematic FLOORPLANNER. You are shown a rendered schematic with a
 labelled coordinate grid (each cell tagged "col,row" in red; col increases left→right, row top→bottom).
 Produce a COMPACT, signal-flow floorplan for the MAJOR parts (ICs and connectors — refdes like U1, J2):
-power-input parts on the LEFT, the main IC(s) CENTRE, peripherals/outputs RIGHT, and parts that connect
-ADJACENT to each other, packed in a tight span with no large empty gaps. Leave small passives (R, C,
-crystals, LEDs) OUT — the engine clusters those next to the pin they wire to.
+power-input parts LEFT, the main IC(s) CENTRE, peripherals/outputs RIGHT.
 
-Reason briefly first (where parts currently sit, what sprawls), then emit the floorplan as a fenced
-JSON code block of {refdes: [col,row]} and nothing else in the block. Use distinct small-integer cells."""
+PACK TIGHTLY — this is the most important rule. Use ADJACENT cells in the SMALLEST possible region:
+connected parts go in NEIGHBOURING cells (differ by 1 in col or row), and the whole floorplan must fit
+in roughly a 3-4 cell wide by 2-3 cell tall block. Do NOT spread parts across the grid with gaps
+between them. GOOD: cols 2,3,4,5 next to each other. BAD: cols 0,2,4,6 with empty cells between.
+Leave small passives (R, C, crystals, LEDs) OUT — the engine clusters those next to the pin they wire to.
+
+Reason briefly first (where parts currently sit and how spread out they are), then emit the floorplan as a
+fenced JSON code block of {refdes: [col,row]} and nothing else in the block. Distinct, ADJACENT cells."""
 
 
 def extract_json(text):

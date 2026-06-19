@@ -38,7 +38,9 @@ def overlay(in_path, out_path, cols=16, rows=12):
         for r in range(rows):
             d.text((c * cw + 2, r * ch + 1), f"{c},{r}", fill=lab, font=font)
     img.save(out_path)
-    print(f"overlaid {cols}x{rows} grid -> {out_path} ({w}x{h})")
+    # Status to stderr so stdout stays clean for callers that import overlay() and emit
+    # machine-readable output on stdout (e.g. vlm_place.py's floorplan JSON).
+    print(f"overlaid {cols}x{rows} grid -> {out_path} ({w}x{h})", file=sys.stderr)
 
 
 if __name__ == "__main__":
