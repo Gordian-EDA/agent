@@ -31,6 +31,10 @@ async fn main() -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;
     let ctx = agent::tools::ToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
     let sch_path = ctx.sch_path().to_path_buf();
+    // The agent's own MULTI-BLOCK source (what it wrote via create_design) — preserved so the
+    // multi-sheet path (tools/multisheet.py) can render one clean sheet per block. The lifted
+    // YAML below is FLAT; this draft keeps the block structure.
+    let draft_path = tmp.path().join(".autopcb/draft.circuit.yaml");
 
     let client = agent::llm::from_env()?;
     let mut agent = Agent::new(client, ctx);
@@ -83,6 +87,9 @@ async fn main() -> anyhow::Result<()> {
     std::fs::copy(&sch_path, std::path::Path::new(&out).with_extension("kicad_sch")).ok();
     if let Ok(yaml) = sch_layout::lift::lift(&env, &sch_path) {
         std::fs::write(std::path::Path::new(&out).with_extension("circuit.yaml"), yaml).ok();
+    }
+    if draft_path.exists() {
+        std::fs::copy(&draft_path, std::path::Path::new(&out).with_extension("draft.yaml")).ok();
     }
 
     match KicadCli::new(&env).erc(&sch_path) {
