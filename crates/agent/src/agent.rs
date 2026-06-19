@@ -835,8 +835,16 @@ Each component is keyed by its refdes and has:
 - net names: UPPER_SNAKE, no spaces, `/` reserved. (A lowercase letter is only a
   warning, but prefer UPPER_SNAKE.)
 - block names: lower_snake_case.
-- Every refdes is globally unique across all blocks. Blocks are grouping only —
-  no electrical meaning.
+- Every refdes is globally unique across all blocks. Blocks carry no electrical
+  meaning, but they ARE the floorplan: the engine lays each block out as one MODULE
+  and flows the blocks left→right in declaration order. So PARTITION the design into
+  functional modules — power-entry, the main IC + its support, each peripheral / each
+  connector group — as SEPARATE blocks, declared in signal-flow order (input/power
+  first, processing next, outputs/peripherals last). This keeps each module's parts
+  clustered and the sheet organised. Do NOT dump the whole design into one block: a
+  single flat block forces the engine to grid-pack every part together and SPRAWLS
+  (the #1 readability defect on dense boards). A handful of focused blocks is right;
+  a single `main` block is a smell on anything bigger than a few parts.
 
 ## Layout (optional placement grid)
 
