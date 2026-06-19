@@ -1660,6 +1660,86 @@ fn seg_point_dist(a: &Point2, b: &Point2, p: &Point2) -> f64 {
     ((p.x - cx).powi(2) + (p.y - cy).powi(2)).sqrt()
 }
 
+/// Would a stitch via at `at` (radius `via_r`) on net `net` clear every FOREIGN pad,
+/// via, and routed track? (Same-net copper is fine to touch.)
+fn stitch_via_clears(
+    at: &Point2,
+    net: &str,
+    obstacles: &[Obstacle],
+    vias: &[pcb_engine::problem::Via],
+    traces: &[pcb_engine::problem::Trace],
+    via_r: f64,
+    clearance: f64,
+) -> bool {
+    let min_via2 = (2.0 * via_r + clearance).powi(2);
+    obstacles.iter().all(|ob| {
+        ob.connected_to.iter().any(|n| n == net) || {
+            let dx = (at.x - ob.center.x).abs() - ob.width / 2.0;
+            let dy = (at.y - ob.center.y).abs() - ob.height / 2.0;
+            dx.max(0.0).powi(2) + dy.max(0.0).powi(2) >= (via_r + clearance).powi(2)
+        }
+    }) && vias
+        .iter()
+        .all(|v| v.connection == net || (at.x - v.at.x).powi(2) + (at.y - v.at.y).powi(2) >= min_via2)
+        && traces.iter().all(|t| {
+            t.connection == net || {
+                let need = via_r + t.width / 2.0 + clearance;
+                !t.path.windows(2).any(|w| seg_point_dist(&w[0], &w[1], at) < need)
+            }
+        })
+}
+
+/// Would a straight fanout trace `a`→`b` (half-width `hw`) on net `net` clear every
+/// FOREIGN pad, VIA, and routed track? Sampled densely along the (short) segment.
+/// Checking foreign vias here is what the first fanout attempt missed (the bga100
+/// clearance faults were the trace grazing a via).
+fn fanout_seg_clears(
+    a: &Point2,
+    b: &Point2,
+    net: &str,
+    obstacles: &[Obstacle],
+    vias: &[pcb_engine::problem::Via],
+    traces: &[pcb_engine::problem::Trace],
+    hw: f64,
+    clearance: f64,
+) -> bool {
+    let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+    let n = ((len / 0.1).ceil() as usize).max(8);
+    for i in 0..=n {
+        let t = i as f64 / n as f64;
+        let p = Point2 { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) };
+        let pad_ok = obstacles.iter().all(|ob| {
+            ob.connected_to.iter().any(|nn| nn == net) || {
+                let dx = (p.x - ob.center.x).abs() - ob.width / 2.0;
+                let dy = (p.y - ob.center.y).abs() - ob.height / 2.0;
+                dx.max(0.0).powi(2) + dy.max(0.0).powi(2) >= (hw + clearance).powi(2)
+            }
+        });
+        if !pad_ok {
+            return false;
+        }
+        let via_ok = vias.iter().all(|v| {
+            v.connection == net || {
+                let need = hw + v.diameter / 2.0 + clearance;
+                (p.x - v.at.x).powi(2) + (p.y - v.at.y).powi(2) >= need * need
+            }
+        });
+        if !via_ok {
+            return false;
+        }
+        let trk_ok = traces.iter().all(|tr| {
+            tr.connection == net || {
+                let need = hw + tr.width / 2.0 + clearance;
+                !tr.path.windows(2).any(|w| seg_point_dist(&w[0], &w[1], &p) < need)
+            }
+        });
+        if !trk_ok {
+            return false;
+        }
+    }
+    true
+}
+
 fn route_with_planes(
     mut rp: RouteProblem,
     plane_names: &std::collections::BTreeSet<String>,
@@ -1703,17 +1783,22 @@ fn route_with_planes(
     // path must be as connectivity-honest as the router. (Fine-pitch parts need
     // via-in-pad / microvias, a documented v1 limitation.)
     let via_r = rules.via_diameter / 2.0;
-    let min_via2 = (2.0 * via_r + rules.clearance).powi(2);
-    let dist2 = |a: &Point2, b: &Point2| (a.x - b.x).powi(2) + (a.y - b.y).powi(2);
-    // Accurate point-to-RECT clearance: a long pad (a QFP lead) reaches far on its
-    // long axis but is narrow across — measuring to the rect, not a max-dimension
-    // circle, avoids over-skipping vias that actually clear a neighbour's lead.
-    let clears_rect = |at: &Point2, ob: &Obstacle| -> bool {
-        let dx = (at.x - ob.center.x).abs() - ob.width / 2.0;
-        let dy = (at.y - ob.center.y).abs() - ob.height / 2.0;
-        let d2 = dx.max(0.0).powi(2) + dy.max(0.0).powi(2);
-        d2 >= (via_r + rules.clearance).powi(2)
-    };
+    let clr = rules.clearance;
+    // A FANOUT via lands in fresh board, so unlike the in-place stitch it can sit near
+    // another drilled hole. KiCAD's hole-to-hole rule (0.25mm) is on DRILL edges, but
+    // our clearance is on COPPER edges; the via's drill is `via_annular` inside its
+    // copper, so a copper gap of `clr` only buys a hole gap of `clr + via_annular` when
+    // the neighbour has ~0 annular. Bump the fanout via's clearance so the hole gap
+    // clears 0.25 with margin — this is what makes the fanout DRC-clean WITHOUT a
+    // drill-aware obstacle model (the deficit was always just this arithmetic).
+    const KICAD_HOLE_CLEAR: f64 = 0.25;
+    let via_annular = (rules.via_diameter - rules.via_drill) / 2.0;
+    let clr_via = clr.max(KICAD_HOLE_CLEAR - via_annular + 0.05);
+    const DIRS: [(f64, f64); 8] = [
+        (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0),
+        (0.707, 0.707), (-0.707, 0.707), (0.707, -0.707), (-0.707, -0.707),
+    ];
+    let step = rules.via_diameter + clr;
     let mut skipped = 0usize;
     for (net, at, thru) in stitches {
         // A through-hole plane pad already connects to its inner plane (its barrel
@@ -1722,35 +1807,65 @@ fn route_with_planes(
         if thru {
             continue;
         }
-        let clears_pads = rp
-            .obstacles
-            .iter()
-            .all(|ob| ob.connected_to.contains(&net) || clears_rect(&at, ob));
-        let clears_vias = result
-            .solution
-            .vias
-            .iter()
-            .all(|v| v.connection == net || dist2(&at, &v.at) >= min_via2);
-        // The stitching via is added AFTER the signals route, so it must also clear
-        // the routed TRACKS of other nets — otherwise on a congested board a power
-        // via lands within clearance of a signal trace (a KiCAD clearance fault).
-        // A via that can't clear is skipped (honest unrouted), never shipped.
-        let clears_tracks = result.solution.traces.iter().all(|t| {
-            t.connection == net || {
-                let need = via_r + t.width / 2.0 + rules.clearance;
-                !t.path
-                    .windows(2)
-                    .any(|w| seg_point_dist(&w[0], &w[1], &at) < need)
-            }
-        });
-        if clears_pads && clears_vias && clears_tracks {
+        // 1) In place: drop the stitch via on the pad if it clears.
+        if stitch_via_clears(
+            &at, &net, &rp.obstacles, &result.solution.vias, &result.solution.traces, via_r, clr,
+        ) {
             result.solution.vias.push(Via {
                 connection: net,
                 at,
                 diameter: rules.via_diameter,
                 drill: rules.via_drill,
             });
-        } else {
+            continue;
+        }
+        // 2) FANOUT: a fine-pitch pad has no room for a via between neighbours, but
+        //    open board nearby does. Route a short outward trace to the first open
+        //    point where the via AND the trace clear, then stitch there — the dog-bone
+        //    escape that routes a perimeter power pin an in-place via can't. Stays
+        //    inside the board/outline; conservative so it never ships a DRC fault.
+        let tw = rp.net_width(&net);
+        let mut placed = false;
+        'search: for k in 1..=4 {
+            let r = k as f64 * step;
+            for (dx, dy) in DIRS {
+                let cand = Point2 { x: at.x + dx * r, y: at.y + dy * r };
+                let in_board = cand.x - via_r >= rp.bounds.min_x + clr
+                    && cand.x + via_r <= rp.bounds.max_x - clr
+                    && cand.y - via_r >= rp.bounds.min_y + clr
+                    && cand.y + via_r <= rp.bounds.max_y - clr
+                    && rp
+                        .outline
+                        .as_ref()
+                        .is_none_or(|poly| pcb_engine::problem::point_in_polygon(&cand, poly));
+                if in_board
+                    && stitch_via_clears(
+                        &cand, &net, &rp.obstacles, &result.solution.vias,
+                        &result.solution.traces, via_r, clr_via,
+                    )
+                    && fanout_seg_clears(
+                        &at, &cand, &net, &rp.obstacles, &result.solution.vias,
+                        &result.solution.traces, tw / 2.0, clr,
+                    )
+                {
+                    result.solution.traces.push(pcb_engine::problem::Trace {
+                        connection: net.clone(),
+                        layer: LayerRef::top(),
+                        width: tw,
+                        path: vec![at.clone(), cand.clone()],
+                    });
+                    result.solution.vias.push(Via {
+                        connection: net.clone(),
+                        at: cand,
+                        diameter: rules.via_diameter,
+                        drill: rules.via_drill,
+                    });
+                    placed = true;
+                    break 'search;
+                }
+            }
+        }
+        if !placed {
             skipped += 1;
         }
     }

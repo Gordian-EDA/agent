@@ -1,4 +1,28 @@
-# Plane-stitch via fanout — promising lever, blocked on a drill-aware obstacle model
+# Plane-stitch via fanout — SHIPPED (Jun 19), no drill-aware model needed
+
+## RESOLVED
+
+The fanout is implemented and DRC-clean across all 57 boards. The earlier blocker
+("needs a drill-aware obstacle model") was a MIS-DIAGNOSIS — verifying the exact DRC
+faults showed they were just two arithmetic clearance gaps, both fixable in the agent:
+
+1. `fanout_seg_clears` now checks the fanout trace against foreign VIAS (the original
+   omission — that was the `bga100-fine` clearance faults).
+2. The fanout VIA uses a hole-clearance-aware clearance `max(clr, 0.25 − via_annular +
+   0.05)`. KiCAD's 0.25mm hole-to-hole is on DRILL edges; our clearance is on COPPER
+   edges, and the via drill sits `via_annular` inside its copper, so a copper gap of
+   `clr` only bought a `clr + via_annular` hole gap (0.23 < 0.25 with a zero-annular
+   neighbour). Bumping the via's clearance closes it — no per-obstacle drill needed.
+
+Results: tssop20-4layer fully routed (was 1 failed); bga100-fine 49→30 unconnected;
+bga-system50 6→4; bga256-system 5→1; multi-ic-system 18→17. 57 boards, 0 copper faults.
+
+LESSON: verify the exact fault before committing to a big refactor — a ~22-edit
+drill-aware obstacle-model rewrite was avoided by a 2-line clearance fix.
+
+---
+
+## (Historical) Original framing: blocked on a drill-aware obstacle model
 
 ## The recurring failure it targets
 
