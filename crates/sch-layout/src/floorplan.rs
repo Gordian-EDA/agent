@@ -1855,7 +1855,11 @@ fn assign_cells(items: &[Item], ir: &LayoutIr) -> Vec<Cell> {
 fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
     const GAP: f64 = 7.62;
     let snap = crate::grid::snap;
-    let mut moves: Vec<(usize, [f64; 2])> = Vec::new();
+    // (item, position, optional forced angle). The crystal gets a forced angle so its pins
+    // run TOWARD the IC (along `dir`); the anneal otherwise leaves it on the perpendicular
+    // axis, which forces both 3-pin OSC nets to wrap around the body → route-fail → a bridging
+    // net-label overlapping the crystal (the recurring MCU-sheet defect). caps keep their angle.
+    let mut moves: Vec<(usize, [f64; 2], Option<f64>)> = Vec::new();
     for idiom in &ir.idioms {
         if idiom.kind != "crystal" {
             continue;
@@ -1909,8 +1913,23 @@ fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
         };
         // Unit vector perpendicular to `dir` (the edge the cluster runs ALONG).
         let perp = [dir[1].abs(), dir[0].abs()];
-        // The crystal sits one gap out, centred between the two oscillator pins.
-        moves.push((yi, [snap(mid[0] + dir[0] * GAP), snap(mid[1] + dir[1] * GAP)]));
+        // The crystal sits one gap out, centred between the two oscillator pins, oriented so its
+        // pin1→pin2 axis runs along `dir` (toward/away the IC). With pins along dir, each OSC node
+        // {IC pin, Y1 pin, cap} is a small local cluster with Y1's BODY outside it, so route_local_tee
+        // wires it cleanly — vs the anneal's perpendicular angle, where the body sits inside each
+        // node's bbox and the route wraps + fails. (Empirically: dir-aligned → 0 warnings/crossings;
+        // perpendicular → 3 warnings incl. the OSC bridge label.)
+        let dir_orient = if dir[0] < 0.0 {
+            Orient::Left
+        } else if dir[0] > 0.0 {
+            Orient::Right
+        } else if dir[1] < 0.0 {
+            Orient::Up
+        } else {
+            Orient::Down
+        };
+        let cry_angle = orient_angle(&items[yi].geom, dir_orient);
+        moves.push((yi, [snap(mid[0] + dir[0] * GAP), snap(mid[1] + dir[1] * GAP)], Some(cry_angle)));
         // Each load cap sits two gaps out and a FULL gap to its osc pin's side of the
         // midpoint, NOT at the osc-pin row itself: the pins are one 2.54 mm pitch apart
         // but a cap is ~7.6 mm tall, so placing the caps at the pin rows overlaps them
@@ -1931,18 +1950,22 @@ fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
                         snap(mid[0] + dir[0] * GAP * 2.0 + perp[0] * side * GAP),
                         snap(mid[1] + dir[1] * GAP * 2.0 + perp[1] * side * GAP),
                     ],
+                    None,
                 ));
             }
         }
     }
     let moved = !moves.is_empty();
     if std::env::var("IDIOM_DEBUG").is_ok() {
-        for (i, at) in &moves {
-            eprintln!("ALIGN {} -> [{:.1},{:.1}]", items[*i].refdes, at[0], at[1]);
+        for (i, at, ang) in &moves {
+            eprintln!("ALIGN {} -> [{:.1},{:.1}] ang={ang:?}", items[*i].refdes, at[0], at[1]);
         }
     }
-    for (i, at) in moves {
+    for (i, at, ang) in moves {
         items[i].at = at;
+        if let Some(a) = ang {
+            items[i].angle = a;
+        }
     }
     moved
 }
