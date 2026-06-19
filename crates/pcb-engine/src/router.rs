@@ -108,6 +108,7 @@ fn route_iterated(problem: &RouteProblem, design: DesignConstants) -> RouteResul
     let empty = std::collections::BTreeSet::new();
     let mut best = route_with(problem, design, &empty);
     reconcile(problem, &mut best);
+    let mut best_n = best.failed.len();
     let mut best_w = failed_pad_weight(problem, &best);
     for _ in 0..3 {
         if best.failed.is_empty() {
@@ -117,13 +118,17 @@ fn route_iterated(problem: &RouteProblem, design: DesignConstants) -> RouteResul
             best.failed.iter().map(|f| f.connection.clone()).collect();
         let mut cand = route_with(problem, design, &pri);
         reconcile(problem, &mut cand);
-        let cand_w = failed_pad_weight(problem, &cand);
-        // Compare by UNCONNECTED-PAD weight, not failed-net count, so the retry never
-        // trades a few small signals for a fewer-but-larger failed net (worse
-        // connectivity). Stop once a pass stops reducing it.
-        if cand_w < best_w {
+        let cn = cand.failed.len();
+        let cw = failed_pad_weight(problem, &cand);
+        // PARETO improvement only: never worse on EITHER failed-net count or
+        // unconnected-pad weight, and strictly better on at least one. The pad-weight
+        // proxy is not exactly KiCAD's unconnected count, so requiring both metrics to
+        // hold stops a retry that reduces one while worsening the other (which had
+        // regressed a couple of stress boards). Stop once no Pareto gain remains.
+        if cn <= best_n && cw <= best_w && (cn < best_n || cw < best_w) {
             best = cand;
-            best_w = cand_w;
+            best_n = cn;
+            best_w = cw;
         } else {
             break;
         }

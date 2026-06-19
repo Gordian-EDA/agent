@@ -284,9 +284,12 @@ pub fn apply_grid_hints(problem: &mut PlaceProblem, hints: &PlacementHints) {
 }
 
 /// Ring `members` tightly around the perimeter of the LOCKED `target` part (the
-/// decoupling-cap pattern): distribute them evenly across the target's four edges,
-/// just outside each edge, and lock each there. The target must already be locked
-/// (the agent fixes the IC first) so its centre is known. A no-op otherwise.
+/// decoupling-cap pattern): space them evenly by ARC LENGTH around the target's
+/// courtyard, just outside each edge, and lock each there. Arc-length spacing makes
+/// the per-edge count proportional to edge length, so a long edge gets more caps than
+/// a short one — a tall IC no longer overflows (and overlaps) its short edges. The
+/// target must already be locked (the agent fixes the IC first) so its centre is known.
+/// A no-op otherwise.
 fn apply_surround(problem: &mut PlaceProblem, members: &[String], target: &str) {
     let Some(ti) = problem.parts.iter().position(|p| p.reference == target) else { return };
     let Some(loc) = problem.parts[ti].locked.clone() else { return };
@@ -301,16 +304,20 @@ fn apply_surround(problem: &mut PlaceProblem, members: &[String], target: &str) 
         return;
     }
     let gap = 0.6; // mm clear of the IC courtyard edge
-    let per = n.div_ceil(4); // caps per edge
+    // Walk the courtyard perimeter clockwise: top (len 2hw) → right (2hh) → bottom
+    // (2hw) → left (2hh). Place member k at arc position (k+0.5)/n of the perimeter.
+    let perim = 4.0 * (hw + hh);
     for (k, &i) in idxs.iter().enumerate() {
         let (chw, chh) = (problem.parts[i].courtyard_w / 2.0, problem.parts[i].courtyard_h / 2.0);
-        let edge = k / per; // 0=top 1=right 2=bottom 3=left
-        let frac = ((k % per) as f64 + 0.5) / per as f64; // inset from the corners
-        let at = match edge {
-            0 => Point2 { x: cx - hw + frac * 2.0 * hw, y: cy - hh - gap - chh },
-            1 => Point2 { x: cx + hw + gap + chw, y: cy - hh + frac * 2.0 * hh },
-            2 => Point2 { x: cx - hw + frac * 2.0 * hw, y: cy + hh + gap + chh },
-            _ => Point2 { x: cx - hw - gap - chw, y: cy - hh + frac * 2.0 * hh },
+        let pos = (k as f64 + 0.5) / n as f64 * perim;
+        let at = if pos < 2.0 * hw {
+            Point2 { x: cx - hw + pos, y: cy - hh - gap - chh } // top, L→R
+        } else if pos < 2.0 * hw + 2.0 * hh {
+            Point2 { x: cx + hw + gap + chw, y: cy - hh + (pos - 2.0 * hw) } // right, T→B
+        } else if pos < 4.0 * hw + 2.0 * hh {
+            Point2 { x: cx + hw - (pos - 2.0 * hw - 2.0 * hh), y: cy + hh + gap + chh } // bottom, R→L
+        } else {
+            Point2 { x: cx - hw - gap - chw, y: cy + hh - (pos - 4.0 * hw - 2.0 * hh) } // left, B→T
         };
         problem.parts[i].locked = Some(LockedAt { at, rotation: 0 });
     }
