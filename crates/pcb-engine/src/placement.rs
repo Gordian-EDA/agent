@@ -121,6 +121,11 @@ pub struct PlaceProblem {
     /// (plane) keep-outs are not included here. Empty for most boards.
     #[serde(default)]
     pub keepouts: Vec<Rect>,
+    /// Optional custom board OUTLINE (closed polygon, mm). When set, a part is illegal if
+    /// its courtyard falls outside the polygon — so concave shapes (a star) keep parts
+    /// inside the TRUE outline, not just its bounding box. Carried into the [`RouteProblem`].
+    #[serde(default)]
+    pub outline: Option<Vec<Point2>>,
 }
 
 fn default_clearance() -> f64 {
@@ -1479,6 +1484,16 @@ fn is_legal(problem: &PlaceProblem, half: &[(f64, f64)], margin: f64, pos: &[Poi
         if !fits_in_bounds(&pos[i], &problem.bounds, half[i]) {
             return false;
         }
+        // On a custom outline, a part whose CENTRE falls outside the true polygon is
+        // illegal — this keeps parts out of a star's concave notches, which the bounding
+        // box alone would allow. (The centre, not the courtyard: a mounting hole's
+        // courtyard legitimately overhangs a notch while its copper stays inside; the
+        // routing grid block is what actually holds copper to the outline.)
+        if let Some(poly) = &problem.outline {
+            if !crate::problem::point_in_polygon(&pos[i], poly) {
+                return false;
+            }
+        }
         // A part overlapping a signal-layer keep-out is illegal (its pads can't route).
         for k in &problem.keepouts {
             let (ox, oy) = part_keepout_overlap(&pos[i], half[i], k);
@@ -1663,6 +1678,8 @@ pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> Rou
         // Per-net widths are applied by the agent layer (route_board) after this, from
         // the board's design rules; placement itself is width-agnostic.
         net_widths: std::collections::BTreeMap::new(),
+        // Carry the custom outline so the router keeps copper inside the true shape.
+        outline: problem.outline.clone(),
     }
 }
 

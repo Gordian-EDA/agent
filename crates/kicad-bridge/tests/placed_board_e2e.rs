@@ -124,6 +124,7 @@ fn place_problem() -> PlaceProblem {
         min_trace_width: 0.25,
         parts,
         keepouts: vec![],
+        outline: None,
     }
 }
 

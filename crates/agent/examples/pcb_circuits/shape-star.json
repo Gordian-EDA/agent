@@ -120,7 +120,7 @@
       "pad_nets": {},
       "locked": {
         "x": 34.0,
-        "y": 56.0,
+        "y": 58.0,
         "rotation": 0
       }
     },
@@ -129,8 +129,8 @@
       "footprint": "MountingHole:MountingHole_3.2mm_M3_DIN965",
       "pad_nets": {},
       "locked": {
-        "x": 14.95,
-        "y": 23.0,
+        "x": 19.89,
+        "y": 14.58,
         "rotation": 0
       }
     },
@@ -139,8 +139,8 @@
       "footprint": "MountingHole:MountingHole_3.2mm_M3_DIN965",
       "pad_nets": {},
       "locked": {
-        "x": 53.05,
-        "y": 23.0,
+        "x": 48.11,
+        "y": 14.58,
         "rotation": 0
       }
     }

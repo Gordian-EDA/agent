@@ -116,6 +116,60 @@ pub struct RouteProblem {
     /// uniform-width behaviour.
     #[serde(default)]
     pub net_widths: std::collections::BTreeMap<String, f64>,
+    /// Optional custom board OUTLINE (closed polygon, mm). When set, copper must stay
+    /// inside it (the grid blocks cells outside the polygon or within clearance of an
+    /// edge) — so concave shapes (a star) route inside the TRUE outline, not just its
+    /// bounding box. None = the rectangular `bounds`.
+    #[serde(default)]
+    pub outline: Option<Vec<Point2>>,
+}
+
+/// Is `pt` inside the closed polygon `poly` (ray-casting, even-odd rule)? A polygon of
+/// fewer than 3 points is treated as "no outline" → always inside.
+pub fn point_in_polygon(pt: &Point2, poly: &[Point2]) -> bool {
+    let n = poly.len();
+    if n < 3 {
+        return true;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (pi, pj) = (&poly[i], &poly[j]);
+        if (pi.y > pt.y) != (pj.y > pt.y) {
+            let x_int = pi.x + (pt.y - pi.y) / (pj.y - pi.y) * (pj.x - pi.x);
+            if pt.x < x_int {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Minimum distance from `pt` to the boundary of polygon `poly` (any edge). Used with
+/// [`point_in_polygon`] to enforce copper-to-edge clearance on a custom outline.
+pub fn dist_to_polygon_edge(pt: &Point2, poly: &[Point2]) -> f64 {
+    let n = poly.len();
+    if n < 2 {
+        return f64::INFINITY;
+    }
+    let mut best = f64::INFINITY;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (a, b) = (&poly[j], &poly[i]);
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 > 0.0 {
+            (((pt.x - a.x) * dx + (pt.y - a.y) * dy) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (cx, cy) = (a.x + t * dx, a.y + t * dy);
+        let d = ((pt.x - cx).powi(2) + (pt.y - cy).powi(2)).sqrt();
+        best = best.min(d);
+        j = i;
+    }
+    best
 }
 
 impl RouteProblem {

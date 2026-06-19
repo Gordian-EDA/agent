@@ -709,6 +709,7 @@ fn place_problem_from_draft(
         min_trace_width: draft.rules.min_trace_width,
         parts,
         keepouts,
+        outline: draft.outline.clone(),
     })
 }
 

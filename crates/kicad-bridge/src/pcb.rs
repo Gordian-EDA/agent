@@ -99,6 +99,7 @@ pub fn read_problem(path: &Path) -> io::Result<BoardProblem> {
         via_diameter: 0.6,
         via_drill: 0.3,
         net_widths: Default::default(),
+        outline: None,
     };
 
     Ok(BoardProblem {
