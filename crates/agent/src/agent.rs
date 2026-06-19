@@ -47,8 +47,11 @@ use crate::tools::{ToolCtx, Tools};
 
 /// Safety cap on LLM round-trips per turn. Generous enough for
 /// search → info → validate → apply self-repair, bounded so a misbehaving model
-/// can't loop forever.
-const MAX_ITERATIONS: usize = 12;
+/// can't loop forever. 12 was too low for DENSE boards (~50 parts): the model spends
+/// iterations on per-part search_symbols + create + validate + edit and hits the cap
+/// BEFORE apply_design → "no schematic written" (a dense data-logger failed exactly this
+/// way). 24 gives a complex design room to commit while still bounding a runaway model.
+const MAX_ITERATIONS: usize = 24;
 
 /// The human apply-gate. The loop calls [`Approvals::approve`] with the dry-run
 /// diff before any `apply_design` write; returning `false` cancels the write.

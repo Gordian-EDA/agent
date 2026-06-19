@@ -14,15 +14,20 @@ below), BUT this is no longer the last word:
 > ★★ **DEFINITIVE MULTI-SHEET SCORECARD (2026-06-19, all shipped fixes cumulative — the SHIPPED
 > ACHIEVABLE).** Fresh agent boards → `render_multisheet` (per-block sheets) → critic each sheet:
 > MCU/ESP32 = io 8 / mcu 8 / power 8; analog op-amp = power_entry 8 / stage1 8 / stage2 9;
-> buck power = power_in 6 / power_out 9 / regulator 8. **So with all fixes (multi-sheet + coarse/
-> size-scaled blocks + route-aware refinement + always-refine + concise values), boards score MOSTLY
-> 8-9 PER SHEET** — a big revision UP from the pre-fix 4-7 lows. Residual low sheets are minor (the
-> buck power_in=6 is a small input-cap routing jog on a 3-part sheet), not the old wall. Caveat: the
-> DENSE data-logger board failed to *generate* — the agent did NOT commit the design (an AGENT-
-> RELIABILITY gap on ~50-part boards: it validates but doesn't apply, likely tool-loop limit), a
-> separate issue from layout. Net achievable: clean/medium boards land 8-9 per sheet across MCU/
-> analog/power topics; literal uniform-9 still wants the residual minor-jog/label fixes + agent
-> reliability on the densest boards.
+> buck power = power_in 6 / power_out 9 / regulator 8; **DENSE STM32F4 data-logger = i2c_io 8 / mcu 8
+> / power 6 / sd_card 9** (now that it generates — see below). **So with all fixes (multi-sheet +
+> coarse/size-scaled blocks + route-aware refinement + always-refine + concise values), boards score
+> MOSTLY 8-9 PER SHEET across MCU/analog/power/DENSE topics** — a big revision UP from the pre-fix 4-7
+> lows.
+>
+> The DENSE board first FAILED TO GENERATE ("no schematic written" — the agent validated but hit the
+> tool-loop cap before apply_design). FIXED: `MAX_ITERATIONS` 12→24 in agent.rs (a ~50-part design
+> spends >12 iterations on per-part search + create + validate + edit). It now commits reliably and
+> renders 4 clean sheets. So the dense topic was an AGENT-RELIABILITY gap, not a layout one.
+>
+> RECURRING RESIDUAL GATE = the POWER / POWER-ENTRY sheet (buck power_in=6, dense power=6): a small
+> cap-scatter / polarized-input-cap routing jog on the input section. It's the consistent low across
+> boards; everything else lands 8-9 — so it's the next real lever (not the placement wall).
 
 > ★ **CEILING TEST (2026-06-19, `--samples 5` to beat the ±2 critic noise) — 9+ IS achievable,
 > and the gap is a board-specific LONG TAIL, not one wall.** The engine's curated boards:
