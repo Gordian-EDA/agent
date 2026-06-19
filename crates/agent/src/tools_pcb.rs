@@ -1484,6 +1484,15 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     // Per-net trace widths from the board rules: fat power copper, thin signals. (Plane
     // nets on a 4-layer board are pours, not traces, so a width on them is simply moot.)
     rp.net_widths = draft.rules.net_widths.clone();
+    // Via size from the board rules. `to_route_problem` inherits it from the PlaceProblem,
+    // which has no via field, so it defaults to 0.6/0.3 — meaning the router's SIGNAL vias
+    // ignored rules.via_diameter entirely (only the stitch vias + the .kicad_pro min-via
+    // honoured it). On a board with a non-default via that mismatch shipped DRC faults
+    // (e.g. a 1.0mm rule sets min-via 0.95 but the router emitted 0.6 vias → via_diameter
+    // violations the in-house lint never sees), and made the via-size lever a no-op for
+    // signal escape. Propagate it so EVERY via — signal, stitch, fanout — is one size.
+    rp.via_diameter = draft.rules.via_diameter;
+    rp.via_drill = draft.rules.via_drill;
 
     // On a multilayer board the highest-fanout power/ground nets become copper
     // PLANES (emitted as zones at export) instead of point-to-point traces — the

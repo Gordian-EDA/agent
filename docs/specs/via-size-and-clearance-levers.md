@@ -49,6 +49,28 @@ Option (a) (stamp vias with the via halo so the router never places two too clos
 possible *quality* refinement — it would avoid the drop and keep more copper routed — but is
 no longer a *fidelity* requirement now that the final pass guarantees DRC-clean output.
 
+## Via size was not propagated to signal vias (FIXED Jun 19) + the router-hole-aware gap it exposed
+
+Adversarial stress (via 1.0/0.6 on a dense BGA) caught the engine shipping 68 `via_diameter`
+faults: `to_route_problem` builds the RouteProblem from the PlaceProblem, which has no via field,
+so `rp.via_diameter` defaulted to 0.6 — the router's SIGNAL vias ignored `rules.via_diameter`
+entirely (only the stitch/fanout vias and the .kicad_pro min-via honoured it). So a 1.0mm rule
+set min-via 0.95 while the router emitted 0.6 vias → mismatch, and the via-size lever was a no-op
+for signal escape. FIX: propagate `rp.via_diameter`/`rp.via_drill` from rules in route_board, so
+every via is one size. The in-house lint never caught it — it doesn't check via SIZE either.
+
+**The deeper gap this exposed (DEFERRED, router change):** with the via size now real, a SMALL
+via (0.5mm → annular 0.1) at a FINE clearance (0.13) exposed that the router's trace-near-via
+routing is NOT hole-clearance-aware — a foreign track clears a via's COPPER by `clearance` but
+its DRILL (annular inside the copper) only by `clearance + annular` = 0.23 < the 0.25 hole-to-
+hole rule (lqfp144 regressed exactly here). The 0.6 default via (annular 0.15 → 0.28) masked it.
+Fix direction: the grid's via keep-out / via_clear must inflate by `max(clearance, 0.25 −
+annular)` so trace-to-via-DRILL clearance holds for any via size (same arithmetic as the fanout
+`clr_via`). Until then, lqfp144 uses via 0.6 (it never actually used the 0.5 it declared — a
+latent no-op), and bga-decoupled keeps via 0.5 (its config doesn't trip the trace-near-via case).
+bga64-bigvia (via 1.0) added as a guard for the propagation fix. NOTE the lint is also blind to
+`hole_clearance` (drill-to-drill) — closing that needs the deferred drill-aware obstacle model.
+
 ## Lever 2 — finer CLEARANCE (0.2 → 0.1mm): NOT a general win; often WORSE
 
 Counter-intuitively, less clearance (more room) routed FEWER nets on most boards. Isolated
