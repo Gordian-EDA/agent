@@ -2342,102 +2342,110 @@ impl PlacementStrategy for Anneal {
                     t_ref.elapsed().as_secs_f64()
                 );
             }
-            items.clone_from_slice(if refined_wins { &refined } else { &candidates[best] });
+            let fast_final: Vec<Item> = if refined_wins { refined } else { candidates[best].clone() };
+            // force_fast SMALL sub-sheets: the fast lane's locality proxy can be crossing-worse
+            // than the small-board path on SIMPLE sheets (split-supply power: 4 here vs 2). Run the
+            // small path too and keep whichever has fewer (breaks, warnings, crossings) via the same
+            // `score` — so a congested sheet still gets the fast lane's refinement (io 16→13) while a
+            // simple sheet gets the small path's cleaner routing. Cheap: only for force_fast smalls.
+            if small_forced {
+                let sp = small_path_search(env, &bases[0], inc, ir, needs_flag, seed);
+                let (fb, fw, fx, fc) = score(&fast_final);
+                let (sb, sw, sx, sc) = score(&sp);
+                let sp_wins = (sb, sw, sx).cmp(&(fb, fw, fx)) == std::cmp::Ordering::Less
+                    || (sb == fb && sw == fw && sx == fx && sc + 0.5 < fc);
+                items.clone_from_slice(if sp_wins { &sp } else { &fast_final });
+            } else {
+                items.clone_from_slice(&fast_final);
+            }
             return;
         }
 
-        let seed_state: Vec<Item> = items.to_vec();
-
-        // The greedy refine and all three anneals, scheduled to overlap on the
-        // critical path. Each anneal is fully seeded + independent, so the result is
-        // bit-for-bit identical to running them sequentially — only the wall time
-        // changes (this is the per-emit latency the paid tier pays). Dependency:
-        // Paths A (seeded) and C (premium) anneal FROM the greedy result, so they
-        // wait on the refine; Path B (a broad anneal from the raw seed) is
-        // independent, so it runs CONCURRENTLY with the refine instead of serializing
-        // the refine's ~1.5s ahead of the anneals. The candidate pick keeps greedy
-        // itself too, so the SA can never SHIP worse than greedy.
-        let timed = std::env::var("DEBUG_SA_TIME").is_ok();
-        let tic = |label: &str, f: &mut dyn FnMut()| {
-            let t0 = std::time::Instant::now();
-            f();
-            if timed {
-                eprintln!("  [SA] {label}: {:.2}s", t0.elapsed().as_secs_f64());
-            }
-        };
-        let mut state_a: Vec<Item> = Vec::new();
-        let mut state_b: Vec<Item> = seed_state;
-        let mut state_c: Vec<Item> = Vec::new();
-        let mut state_d: Vec<Item> = Vec::new();
-        let mut greedy_state: Vec<Item> = Vec::new();
-        rayon::scope(|s| {
-            // Path B: broad search from the raw seed — independent, start it now.
-            s.spawn(|_| { let mut f = || anneal_items(env, &mut state_b, inc, ir, needs_flag, true, false, seed, None); tic("B broad", &mut f); });
-            // Greedy refine on this thread, concurrently with B.
-            { let mut f = || refine_items(env, items, inc, ir, needs_flag); tic("greedy", &mut f); }
-            greedy_state = items.to_vec();
-            state_a = greedy_state.clone();
-            state_c = greedy_state.clone();
-            state_d = greedy_state.clone();
-            // Paths A (seeded), C (premium), and D (locality-aware: cheap geometric
-            // proxy + range-limited cluster jump) anneal from the greedy result, all in
-            // parallel with each other and with B.
-            rayon::join(
-                || { let mut f = || anneal_items(env, &mut state_a, inc, ir, needs_flag, false, false, seed, None); tic("A seeded", &mut f); },
-                || {
-                    rayon::join(
-                        || { let mut f = || anneal_items(env, &mut state_c, inc, ir, needs_flag, false, true, seed ^ 0x9E3779B97F4A7C15, None); tic("C premium", &mut f); },
-                        || { let mut f = || anneal_locality(env, &mut state_d, inc, ir, needs_flag, seed ^ 0x517CC1B727220A95); tic("D locality", &mut f); },
-                    )
-                },
-            );
-        });
-        let annealed = vec![state_a, state_b, state_c, state_d];
-
-        // Candidates: greedy + the three anneals (order fixed for a deterministic
-        // pick). Score each THROUGH the same `polish` + `decongest` that `emit` runs
-        // after this search (those passes can add/clear a warning, so judging the
-        // raw state would ship worse than greedy). The scoring is independent per
-        // candidate → parallel; the PICK is sequential + deterministic. The chosen
-        // RAW state is written back — emit re-polishes it (the loop's polish is
-        // throwaway, only to measure what would ship).
-        let mut candidates = vec![greedy_state];
-        candidates.extend(annealed);
-        // Score each candidate THROUGH the same routed `polish` + `decongest` the
-        // winner will get below, so the pick judges what actually ships.
-        let t_score = std::time::Instant::now();
-        let scored: Vec<(usize, usize, f64, Vec<Item>)> = candidates
-            .par_iter()
-            .map(|cand| {
-                let mut shipped = cand.clone();
-                polish(env, &mut shipped, inc, ir, needs_flag);
-                decongest(&mut shipped);
-                let b = truthfulness_breaks(env, &shipped, inc, ir, needs_flag);
-                let w = warning_count(env, &shipped, inc, ir, needs_flag);
-                let c = premium_score_with_w(env, &shipped, inc, ir, needs_flag, w);
-                (b, w, c, shipped)
-            })
-            .collect();
-        if timed {
-            eprintln!("  [SA] candidate-scoring: {:.2}s", t_score.elapsed().as_secs_f64());
-        }
-        // Truthfulness (merges/shorts) first, then fewest warnings, then premium cost.
-        let (mut best, mut best_b, mut best_w, mut best_c) =
-            (0usize, usize::MAX, usize::MAX, f64::INFINITY);
-        for (k, (b, w, c, _)) in scored.iter().enumerate() {
-            let better = (*b, *w).cmp(&(best_b, best_w)) == std::cmp::Ordering::Less
-                || (*b == best_b && *w == best_w && c + 0.5 < best_c);
-            if better {
-                best = k;
-                best_b = *b;
-                best_w = *w;
-                best_c = *c;
-            }
-        }
-        // Write back the POLISHED winner — emit no longer re-polishes. (The polished
-        // states were computed during scoring, so this adds no extra work.)
-        items.clone_from_slice(&scored[best].3);
+        // Small board: greedy + four parallel anneals, pick the polished winner.
+        // Extracted to small_path_search so the force_fast fast lane can run it as a
+        // rival candidate; this call reproduces the old inline behaviour exactly.
+        let r = small_path_search(env, items, inc, ir, needs_flag, seed);
+        items.clone_from_slice(&r);
     }
+}
+
+/// The small-board placement search, extracted so the fast lane can run it as a RIVAL
+/// candidate for force_fast SMALL sub-sheets (the fast lane's locality proxy is
+/// crossing-worse than this on simple sheets — a split-supply power sheet sat at 4
+/// crossings via the fast lane vs 2 here). Greedy refine + four parallel anneals (A
+/// seeded, B broad, C premium, D locality), then pick the polished winner by
+/// (truthfulness, warnings, premium cost). Operates on a COPY of `seed`, returns the
+/// POLISHED winner. Behaviour is byte-identical to the old inline else-branch (the
+/// placement_snapshot verifies it for the references that take the small path).
+fn small_path_search(
+    env: &KicadEnv,
+    seed: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+    rng_seed: u64,
+) -> Vec<Item> {
+    use rayon::prelude::*;
+    let mut work: Vec<Item> = seed.to_vec();
+    let seed_state: Vec<Item> = work.clone();
+    let timed = std::env::var("DEBUG_SA_TIME").is_ok();
+    let tic = |label: &str, f: &mut dyn FnMut()| {
+        let t0 = std::time::Instant::now();
+        f();
+        if timed {
+            eprintln!("  [SA] {label}: {:.2}s", t0.elapsed().as_secs_f64());
+        }
+    };
+    let mut state_a: Vec<Item> = Vec::new();
+    let mut state_b: Vec<Item> = seed_state;
+    let mut state_c: Vec<Item> = Vec::new();
+    let mut state_d: Vec<Item> = Vec::new();
+    let mut greedy_state: Vec<Item> = Vec::new();
+    rayon::scope(|s| {
+        s.spawn(|_| { let mut f = || anneal_items(env, &mut state_b, inc, ir, needs_flag, true, false, rng_seed, None); tic("B broad", &mut f); });
+        { let mut f = || refine_items(env, &mut work, inc, ir, needs_flag); tic("greedy", &mut f); }
+        greedy_state = work.to_vec();
+        state_a = greedy_state.clone();
+        state_c = greedy_state.clone();
+        state_d = greedy_state.clone();
+        rayon::join(
+            || { let mut f = || anneal_items(env, &mut state_a, inc, ir, needs_flag, false, false, rng_seed, None); tic("A seeded", &mut f); },
+            || {
+                rayon::join(
+                    || { let mut f = || anneal_items(env, &mut state_c, inc, ir, needs_flag, false, true, rng_seed ^ 0x9E3779B97F4A7C15, None); tic("C premium", &mut f); },
+                    || { let mut f = || anneal_locality(env, &mut state_d, inc, ir, needs_flag, rng_seed ^ 0x517CC1B727220A95); tic("D locality", &mut f); },
+                )
+            },
+        );
+    });
+    let annealed = vec![state_a, state_b, state_c, state_d];
+    let mut candidates = vec![greedy_state];
+    candidates.extend(annealed);
+    let scored: Vec<(usize, usize, f64, Vec<Item>)> = candidates
+        .par_iter()
+        .map(|cand| {
+            let mut shipped = cand.clone();
+            polish(env, &mut shipped, inc, ir, needs_flag);
+            decongest(&mut shipped);
+            let b = truthfulness_breaks(env, &shipped, inc, ir, needs_flag);
+            let w = warning_count(env, &shipped, inc, ir, needs_flag);
+            let c = premium_score_with_w(env, &shipped, inc, ir, needs_flag, w);
+            (b, w, c, shipped)
+        })
+        .collect();
+    let (mut best, mut best_b, mut best_w, mut best_c) =
+        (0usize, usize::MAX, usize::MAX, f64::INFINITY);
+    for (k, (b, w, c, _)) in scored.iter().enumerate() {
+        let better = (*b, *w).cmp(&(best_b, best_w)) == std::cmp::Ordering::Less
+            || (*b == best_b && *w == best_w && c + 0.5 < best_c);
+        if better {
+            best = k;
+            best_b = *b;
+            best_w = *w;
+            best_c = *c;
+        }
+    }
+    scored[best].3.clone()
 }
 
 /// Layout-warning count of `items` as they would SHIP — build the writer and run
