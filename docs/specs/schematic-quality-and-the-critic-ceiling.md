@@ -66,15 +66,17 @@ layout, critic both, ship the higher — never ships worse. Built + runs end-to-
 `tools/vlm_floorplan.py IN OUT` (= render → vlm_place → vlm_apply → render → schematic_critic ×2,
 keep better). (The sub-agent critic works when the OpenAI-gateway critic is down.)
 
-GATEWAY-CRITIC REALITY CHECK (important): the +2 above was the SUB-AGENT critic, which rated c01
-auto a harsh 4. On the GATEWAY critic (the goal metric) c01 auto is ~5-6 and the VLM-placed version
-~5 — i.e. NEUTRAL within the ±1 critic noise. The visual signal-flow win does NOT clearly move the
-goal metric on c01, because the gateway critic already credits c01's aligned decoupling bank (less
-room), and re-floorplanning the anchors disturbs the satellites enough to wash out the gain. So:
-anchor-only VLM-placement is a visual/organisational win but ~critic-neutral; a DEMONSTRABLE
-gateway-critic gain needs (a) boards the gateway rates genuinely low AND anchor-sprawl-dominated
-(not satellite-dominated like c08/c13), and/or (b) the satellite handling below. A/B keeps it safe
-meanwhile.
+GATEWAY-CRITIC RESULTS (the goal metric, --samples 3, A/B keep-better): SELECTIVELY net-positive.
+- c19 (PAM8403 audio amp, 1 IC + 4 connectors flung apart): auto 5 → VLM **7** (+2), crossings 6→3.
+  Clean input(J1/J4)→amp(U1)→outputs(J2/J3) signal flow. CLEAR WIN.
+- c01 (STM32, 5 anchors): auto ~5-6 → VLM ~5. NEUTRAL (gateway already credits its decoupling bank).
+- c20 (multi-IC): auto 7 → VLM 5 (−2). c03 (already tidy): auto 8 → VLM 4 (−4). VLM HURTS.
+So VLM-placement WINS on sprawled multi-anchor boards the gateway rates LOW (c19), and HURTS already-
+good boards (c03/c20) by disturbing the engine's free placement — exactly what the A/B safety net
+handles: keep VLM on c19, keep auto on c03/c20/c01. NET across the four: +2 on c19, zero regressions.
+(NB: the SUB-AGENT critic was over-optimistic — it rated c01 auto a harsh 4; trust the GATEWAY critic,
+the goal metric, and always A/B.) A demonstrable corpus lift = run the A/B over the sprawled low-rated
+boards; the satellite handling below would widen which boards win.
 
 This is the genuine path through the ceiling. REMAINING WORK:
 - **Automate the loop** inside the agent (or a dedicated sub-agent): after `apply_design`,
