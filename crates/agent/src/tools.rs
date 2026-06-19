@@ -551,14 +551,36 @@ impl Tools {
                         },
                         "rules": {
                             "type": "object",
-                            "description": "Board design rules (mm). Omit for engine defaults (clearance 0.2, min_trace_width 0.2, via_diameter 0.6, via_drill 0.3).",
+                            "description": "Board design rules — ALL FIELDS OPTIONAL; omit for engine defaults (clearance 0.2mm, min_trace_width 0.2mm, via_diameter 0.6mm, via_drill 0.3mm, 2 layers, no pours).",
                             "properties": {
-                                "clearance": { "type": "number" },
-                                "min_trace_width": { "type": "number" },
-                                "via_diameter": { "type": "number" },
-                                "via_drill": { "type": "number" }
-                            },
-                            "required": ["clearance", "min_trace_width", "via_diameter", "via_drill"]
+                                "clearance": { "type": "number", "description": "Min copper-copper clearance (mm)." },
+                                "min_trace_width": { "type": "number", "description": "Default trace width (mm)." },
+                                "via_diameter": { "type": "number", "description": "Via pad diameter (mm); standard-fab min 0.5." },
+                                "via_drill": { "type": "number", "description": "Via drill (mm); standard-fab min 0.3." },
+                                "layers": { "type": "integer", "enum": [2, 4, 6],
+                                    "description": "Copper layer count. 4 or 6 AUTOMATICALLY add inner GND/VCC PLANES (the highest-fanout power nets) — the way a dense part's many power pins connect without per-pin traces. Default 2." },
+                                "net_widths": {
+                                    "type": "object",
+                                    "additionalProperties": { "type": "number" },
+                                    "description": "Per-net trace width override {net: width_mm} — fat power, thin signal, e.g. {\"VCC\": 0.6, \"VIN\": 0.8}." },
+                                "pours": {
+                                    "type": "array",
+                                    "description": "Copper POURS the engine fills FOR YOU — a flood of a net over a signal layer (a GND plane on a 2-layer board, an RF/HF return, shielding). The engine fills the board outline, carves anti-pads around foreign copper, and clips to a custom outline. Use this when the user wants a ground plane/pour — do NOT route top-only and tell the user to draw a zone in KiCAD by hand.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "net": { "type": "string", "description": "Net to flood, e.g. \"GND\"." },
+                                            "layer": { "type": "string", "description": "Signal layer: \"top\", \"bottom\", or \"innerN\" (NOT a plane layer — a plane is already full copper)." }
+                                        },
+                                        "required": ["net", "layer"]
+                                    }
+                                }
+                            }
+                        },
+                        "outline": {
+                            "type": "array",
+                            "description": "Optional CUSTOM board outline as polygon points [[x,y],...] (>= 3, mm) — a circle (sample many points), hexagon, or any shape. Omit for a rectangular board (just `bounds`). `bounds` must still be the polygon's bounding box. Placement, routing, and pours all respect the polygon.",
+                            "items": { "type": "array", "items": { "type": "number" } }
                         },
                         "overwrite": { "type": "boolean",
                             "description": "Replace an existing board draft (default false)." }

@@ -959,10 +959,20 @@ when one already exists or the user explicitly asks for the schematic too.)
    search for it, exactly like symbols.
 2. `get_footprint_info(lib_id)` — read the pad numbers (so you bind nets to the
    right pads), the courtyard, and the bounding box.
-3. `create_board({bounds, parts, rules?})` — declare the board: outline bounds
-   (mm), and each part as `{reference, footprint, pad_nets: {pad# → net}}`.
+3. `create_board({bounds, parts, rules?, outline?})` — declare the board: outline
+   bounds (mm), and each part as `{reference, footprint, pad_nets: {pad# → net}}`.
    Single-pin nets warn (nothing to route). One unknown footprint is a
    recoverable error with suggestions — fix that one part and resend.
+   USE THE ENGINE'S FEATURES — they are deterministic and DRC-checked, so reach for
+   them instead of hand-workarounds or telling the user to finish in KiCAD:
+   - `rules.pours: [{net, layer}]` — a copper POUR the engine fills + anti-pads for
+     you (a 2-layer ground plane, an RF/HF return, shielding). When the user asks for
+     a ground plane/pour, DECLARE IT HERE; never route top-only and punt the zone to
+     the user.
+   - `rules.layers: 4|6` — adds inner GND/VCC PLANES automatically (dense power pins).
+   - `rules.net_widths: {net: mm}` — fat power / thin signal.
+   - `outline: [[x,y],...]` — a custom board shape (circle/hex/any); bounds still
+     bounds it. Placement, routing, and pours all respect the polygon.
 4. `set_placement_hints({groups})` — ENCOURAGED before placing: translate circuit
    intent into floorplan groups (`{name, members, region?, edge?}`) — decoupling
    caps hugging their IC, connectors on an `edge`, a sub-circuit in a `region`.
