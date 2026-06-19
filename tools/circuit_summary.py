@@ -94,7 +94,55 @@ def summarize(path):
     return "\n".join(lines)
 
 
+IN_KW = ("IN", "RX", "MISO", "SDI", "SENSE", "LINE", "AIN", "ADC", "MIC", "CLKIN", "USB")
+OUT_KW = ("OUT", "TX", "MOSI", "SDO", "SPK", "SPEAK", "LED", "DISP", "MOT", "PWM", "DAC", "BUZ")
+PWR_KW = ("PWR", "VIN", "VCC", "BATT", "SUPPLY", "5V", "3V3", "12V", "VBUS")
+
+
+def auto_zones(path):
+    """DETERMINISTIC coarse zones {refdes:[fx,fy]} from the module graph + connector role-names —
+    no VLM. Power/inputs LEFT, IC(s) CENTRE, outputs RIGHT, bidir/bus near the IC; same-column
+    parts spread over rows. Captures the LLM's 'rough direction' for free, so every board (incl.
+    agent-generated) can get the soft-bias lift automatically."""
+    import json as _json
+    parts = parse(path)
+    major = {r: d for r, d in parts.items() if r[0] in "UJ" or len(d["nets"]) >= 3}
+    pow_only = {r for r in major if all(is_power(n) for n in major[r]["nets"])}
+
+    def role_fx(r, d):
+        if r[0] == "U":                                # ICs -> centre (connectors never count as ICs)
+            return 0.5
+        if r in pow_only:                              # power input -> far left
+            return 0.12
+        v = (d["value"] + " " + r).upper()
+        if any(k in v for k in PWR_KW):
+            return 0.12
+        if any(k in v for k in IN_KW):
+            return 0.18
+        if any(k in v for k in OUT_KW):
+            return 0.85
+        return 0.6                                     # bus/bidir header -> just right of IC
+
+    fx = {r: role_fx(r, d) for r, d in major.items()}
+    zones = {}
+    # spread parts sharing a column over rows so they don't stack
+    from collections import defaultdict
+    col = defaultdict(list)
+    for r in sorted(major):
+        col[round(fx[r], 2)].append(r)
+    for c, refs in col.items():
+        n = len(refs)
+        for i, r in enumerate(refs):
+            fy = 0.5 if n == 1 else 0.25 + 0.5 * i / (n - 1)
+            zones[r] = [c, round(fy, 3)]
+    return zones
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("usage: circuit_summary.py IN.yaml")
-    print(summarize(sys.argv[1]))
+    if len(sys.argv) == 3 and sys.argv[1] == "--zones":
+        import json as _json
+        print(_json.dumps(auto_zones(sys.argv[2])))
+    elif len(sys.argv) == 2:
+        print(summarize(sys.argv[1]))
+    else:
+        sys.exit("usage: circuit_summary.py IN.yaml  |  circuit_summary.py --zones IN.yaml")
