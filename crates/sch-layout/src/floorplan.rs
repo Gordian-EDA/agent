@@ -2917,6 +2917,33 @@ fn cohesion_targets(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> Vec<(usiz
             out.push((si, tgt));
         }
     }
+    // MULTI-UNIT COHESION: the units of one chip (op-amp, FPGA — same refdes, ≥3 pins
+    // each, so the satellite loop above skipped them as anchors) share no direct nets
+    // beyond the power rails, so each unit follows its OWN signals and the symbol sprawls
+    // across the sheet (an FPGA's U1A..U1E scattered with huge gaps — the BGA defect). Pull
+    // every unit toward its siblings (one representative pin each) so a multi-unit symbol
+    // places as ONE coherent cluster. Reuses the `cohere` term, so no new weight; only
+    // fires when a refdes has ≥2 anchor units (single-unit boards/references untouched).
+    let mut by_refdes: std::collections::BTreeMap<&str, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for i in 0..items.len() {
+        if items[i].geom.pins.len() >= 3 {
+            by_refdes.entry(items[i].refdes.as_str()).or_default().push(i);
+        }
+    }
+    for group in by_refdes.values() {
+        if group.len() < 2 {
+            continue;
+        }
+        for &i in group {
+            if items[i].frozen {
+                continue;
+            }
+            let tgts: Vec<(usize, usize)> =
+                group.iter().copied().filter(|&j| j != i).map(|j| (j, 0usize)).collect();
+            out.push((i, tgts));
+        }
+    }
     out
 }
 
