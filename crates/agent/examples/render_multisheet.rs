@@ -46,14 +46,40 @@ fn main() -> anyhow::Result<()> {
         sub.blocks = IndexMap::new();
         sub.blocks.insert(name.clone(), block.clone());
 
-        let ir = sch_layout::floorplan::infer_ir(&env, &sub);
-        let emit = match sch_layout::floorplan::emit_anneal(&env, &sub, &ir) {
-            Ok(e) => e,
-            Err(e) => {
+        // ADDITIVE ROUTED A/B (the documented crossmin path to a default win): emit with the
+        // shelf-pack seed AND the crossmin (GLOBAL_OPT) seed, keep whichever ROUTES with fewer
+        // (warnings, wire-crossings). The graph crossing count isn't faithful and the anneal
+        // washes out a pure seed, so the choice must be at the routed level. min-of-two ⇒ never
+        // regresses; captures crossmin's ~9% crossing wins on dense multi-anchor sub-sheets.
+        let emit_with = |go: bool| {
+            if go {
+                unsafe { std::env::set_var("GLOBAL_OPT", "1") };
+            } else {
+                unsafe { std::env::remove_var("GLOBAL_OPT") };
+            }
+            let ir = sch_layout::floorplan::infer_ir(&env, &sub);
+            sch_layout::floorplan::emit_anneal(&env, &sub, &ir)
+        };
+        let emit = match (emit_with(false), emit_with(true)) {
+            (Ok(a), Ok(b)) => {
+                let pick_b = (b.layout_warnings.len(), b.wire_crossings)
+                    < (a.layout_warnings.len(), a.wire_crossings);
+                println!(
+                    "  [crossmin A/B {name}] shelf=({},{}) crossmin=({},{}) -> {}",
+                    a.layout_warnings.len(), a.wire_crossings,
+                    b.layout_warnings.len(), b.wire_crossings,
+                    if pick_b { "crossmin" } else { "shelf" }
+                );
+                if pick_b { b } else { a }
+            }
+            (Ok(a), Err(_)) => a,
+            (Err(_), Ok(b)) => b,
+            (Err(e), Err(_)) => {
                 eprintln!("{name}: emit failed: {e}");
                 continue;
             }
         };
+        unsafe { std::env::remove_var("GLOBAL_OPT") };
         let tmp = tempfile::tempdir()?;
         let sch = tmp.path().join("s.kicad_sch");
         std::fs::write(&sch, emit.sch.as_bytes())?;
