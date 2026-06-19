@@ -1616,6 +1616,11 @@ fn emit_strategy(
     if align_led_chains(&mut items, &inc, ir) {
         decongest(&mut items);
     }
+    // Row stray BULK rail caps on an IC-less (power-only) sheet so a connector's two bulk caps don't
+    // sprawl vertically; IC-bypass / distributed-decoupling caps are left alone (see fn doc).
+    if align_rail_cap_rows(&mut items, ir) {
+        decongest(&mut items);
+    }
 
     let mut w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
     // PORT-LABEL KEEPOUT (multi-sheet sub-sheets only): an indicator satellite (LED-chain resistor)
@@ -2032,6 +2037,71 @@ fn align_led_chains(items: &mut [Item], _inc: &Incidence, ir: &LayoutIr) -> bool
     for (i, at, angle) in moves {
         items[i].at = at;
         items[i].angle = angle;
+    }
+    moved
+}
+
+/// Align stray BULK rail caps into a tidy row. A power-only sheet (a connector + a couple of bulk
+/// caps, the load IC being a cross-sheet port) has no IC for the decoupling-bank idiom to align the
+/// caps against, so the search drops one cap far from the other — vertical sprawl the critic flags
+/// ("place C2 beside C1 at the same height"). This rows any group of 2+ non-frozen caps whose BOTH
+/// pins are power/ground (a bulk cap has no signal pin to hug, so rowing can't strand it).
+///
+/// SAFETY: caps on a rail that an actual IC (refdes U*, ≥3 pins) also sits on are LEFT ALONE — those
+/// are (often distributed) IC-bypass caps, and the critic PRAISES distributed decoupling; centralising
+/// them into a row would regress it. Frozen idiom-bank caps are skipped too. Multi-sheet only (gated).
+fn align_rail_cap_rows(items: &mut [Item], ir: &LayoutIr) -> bool {
+    if std::env::var("MULTISHEET_REFINE").is_err() {
+        return false;
+    }
+    // A net is a "rail" if it's a recognized power token OR the engine treats it as a rail (covers
+    // board-specific names like VM/VSW that is_power_net's token list misses).
+    let is_rail = |n: &str| is_power_net(n) || ir.rails.contains_key(n);
+    let snap = crate::grid::snap;
+    const PITCH: f64 = 7.62; // cap body + gap, on grid
+    // Nets a real IC sits on — caps there are IC-bypass; never row them.
+    let ic_nets: std::collections::HashSet<String> = items
+        .iter()
+        .filter(|it| it.refdes.starts_with('U') && it.geom.pins.len() >= 3)
+        .flat_map(|it| it.pins.iter().filter_map(|(_, _, n)| n.clone()))
+        .collect();
+    let mut groups: std::collections::BTreeMap<(String, String), Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (i, it) in items.iter().enumerate() {
+        if it.frozen || !it.refdes.starts_with('C') || it.geom.pins.len() != 2 {
+            continue;
+        }
+        let nets: Vec<String> = it.pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
+        if nets.len() != 2
+            || !nets.iter().all(|n| is_rail(n))
+            || nets.iter().any(|n| ic_nets.contains(n))
+        {
+            continue;
+        }
+        let mut np = [nets[0].clone(), nets[1].clone()];
+        np.sort();
+        groups.entry((np[0].clone(), np[1].clone())).or_default().push(i);
+    }
+    let mut moves: Vec<(usize, [f64; 2])> = Vec::new();
+    for idxs in groups.values() {
+        if idxs.len() < 2 {
+            continue;
+        }
+        // Compact UP to the topmost cap's row (toward the input); any common y reads aligned.
+        let row_y = idxs.iter().map(|&i| items[i].at[1]).fold(f64::MAX, f64::min);
+        if idxs.iter().all(|&i| (items[i].at[1] - row_y).abs() < 1.27) {
+            continue; // already a row
+        }
+        let mut sorted = idxs.clone();
+        sorted.sort_by(|&a, &b| items[a].at[0].total_cmp(&items[b].at[0]));
+        let x0 = items[sorted[0]].at[0];
+        for (k, &i) in sorted.iter().enumerate() {
+            moves.push((i, [snap(x0 + k as f64 * PITCH), snap(row_y)]));
+        }
+    }
+    let moved = !moves.is_empty();
+    for (i, at) in moves {
+        items[i].at = at;
     }
     moved
 }
