@@ -108,9 +108,20 @@ pub fn pad_clearance_violations(
     for i in 0..pads.len() {
         for j in (i + 1)..pads.len() {
             let (a, b) = (&pads[i], &pads[j]);
+            // A numberless pad (empty `number`) is a NON-electrical feature — a paste/thermal
+            // sub-pad or mechanical pad — which KiCAD does not net-clearance-check; skip it
+            // (else an EP's thermal sub-pads false-trip on their own neighbours).
+            if a.number.is_empty() || b.number.is_empty() {
+                continue;
+            }
+            // Two ELECTRICAL pads need clearance UNLESS they share the same non-empty net
+            // (then they're intentionally connected). Different nets OR either pad un-netted (a
+            // no-net / NC ball) conflict — KiCAD enforces clearance between no-net pads too, so
+            // the old `(Some, Some) if x != y` (which skipped any un-netted pad) let a too-large
+            // clearance ship a built-in pad-to-pad fault on a footprint's own NC pads.
             match (pad_nets.get(&a.number), pad_nets.get(&b.number)) {
-                (Some(x), Some(y)) if x != y => {}
-                _ => continue,
+                (Some(x), Some(y)) if x == y => continue,
+                _ => {}
             }
             let gx = ((a.at[0] - b.at[0]).abs() - (a.size[0] + b.size[0]) / 2.0).max(0.0);
             let gy = ((a.at[1] - b.at[1]).abs() - (a.size[1] + b.size[1]) / 2.0).max(0.0);
@@ -478,5 +489,10 @@ mod tests {
         // Same-net pads never conflict, even at a huge clearance.
         let same = net(&[("1", "N"), ("2", "N"), ("3", "N")]);
         assert!(pad_clearance_violations(&fp, &same, 5.0).is_empty());
+        // NO-NET pads still need clearance (KiCAD enforces it): an un-netted pad conflicts
+        // with a netted neighbour, and at an absurd clearance it must fire — the old check
+        // skipped any un-netted pad and let such a config ship a built-in DRC fault.
+        let partial = net(&[("1", "VIN"), ("3", "VOUT")]); // pad 2 left un-netted
+        assert!(!pad_clearance_violations(&fp, &partial, 1.0).is_empty());
     }
 }

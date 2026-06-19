@@ -520,8 +520,8 @@ pub fn create_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
                 }
             },
         };
-        // Reject a footprint whose own different-net pads sit closer than the
-        // board clearance — an inherent clearance DRC fault no routing can fix.
+        // Reject a footprint whose own pads (different-net OR un-netted/NC) sit closer than
+        // the board clearance — an inherent clearance DRC fault no routing can fix.
         let viol = kicad_bridge::placefp::pad_clearance_violations(
             &resolved_fp,
             &pad_nets,
