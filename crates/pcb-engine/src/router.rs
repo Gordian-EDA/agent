@@ -49,6 +49,18 @@ pub struct RouteResult {
     pub failed: Vec<FailedNet>,
 }
 
+/// Plane-layer bitmask for the engine's stackup convention. A 4-layer board is
+/// F / In1(plane) / In2(plane) / B → the inner two layers (1, 2) are solid planes
+/// and are not routable for signals. 2-layer (and the fixture default) has none. A
+/// future 6-layer stack with inner *signal* layers would need its own map.
+fn plane_mask_for(layer_count: usize) -> u32 {
+    if layer_count == 4 {
+        0b0110
+    } else {
+        0
+    }
+}
+
 /// The Chebyshev radius (in grid cells) a via barrel must keep clear of foreign
 /// copper on every layer before the slice-1 search may place a via there. A via
 /// is wider than a trace, so the trace-sized clearance halo is not enough: a via
@@ -119,6 +131,18 @@ fn reconcile(problem: &RouteProblem, result: &mut RouteResult) {
 pub fn route_with(problem: &RouteProblem, design: DesignConstants) -> RouteResult {
     let mut grid = RouteGrid::build(problem);
     let layer_count = problem.layer_count.max(1) as usize;
+
+    // Mark plane layers so the A* never routes signals onto a power plane (it would
+    // short). Engine stackup convention: a 4-layer board is F / In1(plane) /
+    // In2(plane) / B, so the inner two layers are planes; 2-layer has none. Without
+    // this, an inner BGA ball escapes via the cheapest F→In1 hop onto the GND plane
+    // and gets dropped as a short — no signal escapes at all.
+    let design = DesignConstants {
+        costs: AStarCosts {
+            plane_mask: plane_mask_for(layer_count),
+            ..design.costs
+        },
+    };
 
     // Clearance halo: when a net claims a cell, foreign nets must stay a full
     // (min_trace_width + clearance) centre-to-centre away. In grid cells that

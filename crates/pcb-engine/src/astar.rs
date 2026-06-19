@@ -85,6 +85,14 @@ pub struct AStarCosts {
     /// for the common single-layer net; only if that fails does it retry with vias
     /// allowed. Correct either way (a net that needs a via just falls to the retry).
     pub allow_via: bool,
+    /// Bitmask of PLANE layers (bit `l` set ⇒ layer `l` carries a solid GND/VCC
+    /// plane). The search never *routes* on a plane layer — signal copper there would
+    /// short to the plane — so the via step skips these layers as destinations; a via
+    /// still passes THROUGH them (a through-via, anti-padded at synth). `0` (default)
+    /// = every layer is a signal layer (2-layer / fixture default). This is what lets
+    /// an inner BGA ball escape F→B instead of taking the cheaper F→In1 hop onto the
+    /// plane and being dropped as a short.
+    pub plane_mask: u32,
 }
 
 impl Default for AStarCosts {
@@ -98,6 +106,7 @@ impl Default for AStarCosts {
             moves: MoveSet::Orthogonal,
             via_clear_radius_cells: 0,
             allow_via: true,
+            plane_mask: 0,
         }
     }
 }
@@ -333,6 +342,11 @@ pub fn search_bounded(
         {
             for layer in 0..grid.layer_count {
                 if layer == cur.layer {
+                    continue;
+                }
+                // Never route ON a plane layer (a signal there shorts to the plane);
+                // a via still tunnels through it to reach the far signal layer.
+                if costs.plane_mask & (1u32 << layer) != 0 {
                     continue;
                 }
                 let next = State {

@@ -28,6 +28,28 @@ layer with no via; each inner ring needs a via to a layer with a clear radial pa
 the cost/search should be **per-ball-local** (which channel, which layer) feeding a
 **radial global** route out of the ball field — not a flat whole-board maze per net.
 
+## Root cause, refined (Jun 18 — measured)
+
+Two stacked blockers, found by instrumenting `bga25-route` (`reason = "no grid path
+from point 1 … (enclosure)"`):
+
+1. **DONE — signals routed onto planes.** The A* searched `0..layer_count` and took
+   the cheapest hop F→In1 onto the GND plane; that copper shorted and was dropped, so
+   no signal escaped. Fixed: `AStarCosts.plane_mask` + `plane_mask_for(layer_count)`
+   (4-layer ⇒ inner layers are planes); the via step skips plane layers, so escape goes
+   F→B (through-via). Safe: 32 boards stay 0-fault.
+
+2. **OPEN — B.Cu enclosure by the power-via ring.** With (1), an inner ball must escape
+   to B.Cu, but `route_auto` routes the outer power balls first (16 stitching vias), and
+   their B-side pads + clearance halos form a ring that **encloses** the inner balls'
+   B-escape. Even the lenient (no via-scan) variant fails: the via seats but the radial
+   B route can't thread out past the via ring. This is a **fanout/ordering** problem.
+
+   Levers to try next (gated on the 32-board fidelity): route signal escapes BEFORE
+   power stitching (or co-plan them); a dedicated radial escape pass that assigns each
+   ring an outward corridor; thinner escape traces in the pad field; and verify the
+   through-via anti-pads in In1/In2 once a signal actually reaches B.
+
 ## Design (incremental — one verified step per loop)
 
 1. **Plane-aware routable layers.** Signal routing must use only signal layers
