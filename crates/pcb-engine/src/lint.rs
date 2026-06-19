@@ -291,6 +291,50 @@ pub fn lint(problem: &RouteProblem, solution: &RouteSolution) -> Vec<DrcViolatio
         }
     }
 
+    // (3b) Hole-to-hole / track-to-hole clearance (KiCAD's drill-EDGE rule, 0.25mm).
+    //      The copper-clearance checks above don't cover it: a via's drill sits its annular
+    //      INSIDE its copper, so for a small via copper clearance can still leave the DRILL
+    //      too close to a foreign track or another drill (adversarial fat/small-via configs
+    //      shipped exactly this — the oracle was blind to it). Surfaced as ClearanceViaAny so
+    //      the existing drop_violating_copper path turns it into an honest unrouted net rather
+    //      than a shipped fault. (via↔PAD-hole needs a drill-aware obstacle model — deferred.)
+    const HOLE_CLEAR: f64 = 0.25;
+    for (vi, a) in solution.vias.iter().enumerate() {
+        let ar = a.drill / 2.0;
+        let aat = [a.at.x, a.at.y];
+        // drill ↔ drill: a mechanical (drill-bit) rule, independent of net.
+        for b in &solution.vias[vi + 1..] {
+            let gap = dist(aat, [b.at.x, b.at.y]) - ar - b.drill / 2.0;
+            if gap + EPS < HOLE_CLEAR {
+                out.push(DrcViolation::ClearanceViaAny {
+                    connection: a.connection.clone(),
+                    other_owners: vec![b.connection.clone()],
+                    gap,
+                    required: HOLE_CLEAR,
+                    at: aat,
+                });
+            }
+        }
+        // FOREIGN track copper ↔ this via's drill edge (same-net track connects to it).
+        for t in &solution.traces {
+            if t.connection == a.connection {
+                continue;
+            }
+            let hw = t.width / 2.0;
+            if t.path.windows(2).any(|w| {
+                point_seg_dist(aat, [w[0].x, w[0].y], [w[1].x, w[1].y]) - hw - ar + EPS < HOLE_CLEAR
+            }) {
+                out.push(DrcViolation::ClearanceViaAny {
+                    connection: a.connection.clone(),
+                    other_owners: vec![t.connection.clone()],
+                    gap: 0.0,
+                    required: HOLE_CLEAR,
+                    at: aat,
+                });
+            }
+        }
+    }
+
     // (4) Fold in the connectivity oracle — the single one-stop report.
     for v in connectivity::check(problem, solution) {
         out.push(DrcViolation::Connectivity { violation: v });
@@ -918,11 +962,39 @@ mod tests {
             vias: vec![via("NET_B", (20.0, 10.0))],
         };
         let vs = lint(&p, &s);
+        // The COPPER via-clearance (required == the board clearance 0.2) fires exactly once.
+        // The fixture is close enough that the drill-edge HOLE-clearance check (required 0.25)
+        // also fires — a second, legitimate violation — so filter to the copper one here.
         assert_eq!(
-            count(&vs, |v| matches!(v, DrcViolation::ClearanceViaAny { .. })),
+            count(&vs, |v| matches!(
+                v,
+                DrcViolation::ClearanceViaAny { required, .. } if *required < 0.24
+            )),
             1,
-            "exactly one via/any clearance violation, got {vs:?}"
+            "exactly one COPPER via/any clearance violation, got {vs:?}"
         );
+    }
+
+    #[test]
+    fn hole_clearance_fires_for_close_drills() {
+        // Two SAME-NET vias 0.4mm apart (drill 0.3 → edge-to-edge 0.4 − 0.15 − 0.15 = 0.10 <
+        // KiCAD's 0.25mm hole-to-hole). Same net, so the COPPER via-clearance check skips them
+        // (their copper may legally overlap) — only the new drill-edge hole check should fire.
+        // Guards the fidelity hole that let small/fat-via configs ship hole_clearance faults.
+        let p = problem(
+            vec![conn("NET_A", &[(20.0, 10.0, "top"), (20.0, 10.4, "top")])],
+            vec![],
+        );
+        let s = RouteSolution {
+            traces: vec![],
+            vias: vec![via("NET_A", (20.0, 10.0)), via("NET_A", (20.0, 10.4))],
+        };
+        let vs = lint(&p, &s);
+        let hole = count(&vs, |v| matches!(
+            v,
+            DrcViolation::ClearanceViaAny { required, .. } if (*required - 0.25).abs() < 1e-9
+        ));
+        assert_eq!(hole, 1, "drill-to-drill hole clearance must fire once, got {vs:?}");
     }
 
     #[test]
