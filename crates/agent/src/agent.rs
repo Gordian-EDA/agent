@@ -976,6 +976,12 @@ when one already exists or the user explicitly asks for the schematic too.)
      the user.
    - `rules.layers: 4|6` — adds inner GND/VCC PLANES automatically (dense power pins).
    - `rules.net_widths: {net: mm}` — fat power / thin signal.
+   - `rules.via_diameter`/`rules.via_drill` — for a dense BGA/QFP that leaves balls
+     unrouted, a SMALLER standard via (`0.5`/`0.3`, vs the `0.6`/`0.3` default) is the
+     reliable lever: it drops between fine-pitch balls a 0.6 via can't, routing more.
+     Do NOT instead reach for a finer `rules.clearance` — verified non-monotonic, it
+     often routes FEWER (finer grid → worse greedy contention); reserve sub-0.15mm
+     clearance for genuinely sub-0.5mm pitch where a trace can't otherwise fit at all.
    - `outline: [[x,y],...]` — a custom board shape (circle/hex/any); bounds still
      bounds it. Placement, routing, and pours all respect the polygon.
 4. `set_placement_hints({groups})` — ENCOURAGED before placing: translate circuit

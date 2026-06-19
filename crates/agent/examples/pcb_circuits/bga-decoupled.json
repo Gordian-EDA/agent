@@ -1,7 +1,9 @@
 {
-  "description": "BGA with decoupling caps SURROUNDING it (surround hint = the cap-distribution ring): agent locks the BGA centre and rings its 16 caps around the perimeter",
+  "description": "BGA with decoupling caps SURROUNDING it (surround hint = the cap-distribution ring): agent locks the BGA centre and rings its 16 caps around the perimeter (via 0.5/0.3: smaller standard via routes fully between 0.8mm balls)",
   "rules": {
-    "layers": 4
+    "layers": 4,
+    "via_diameter": 0.5,
+    "via_drill": 0.3
   },
   "bounds": {
     "min_x": 0.0,
