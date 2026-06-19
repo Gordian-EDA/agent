@@ -48,11 +48,16 @@ pub struct Opts {
     pub iters: usize,
     /// Minimum clear gap to keep between node rectangles.
     pub gap: f64,
+    /// Weight on the all-pairs repulsion. 1.0 = classic FR (SPREADS nodes for a legible
+    /// graph drawing); near 0 = COMPACTION (springs pull connected nodes together and only
+    /// the overlap-separation keeps them clear → minimal bounding box). For seeding a
+    /// schematic placement, use a small value (~0.1): tight, but not collapsed to a line.
+    pub repulsion: f64,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Self { iters: 400, gap: 2.54 }
+        Self { iters: 400, gap: 2.54, repulsion: 1.0 }
     }
 }
 
@@ -105,7 +110,7 @@ pub fn layout(g: &Graph, opts: &Opts) -> Vec<[f64; 2]> {
                     d2 = dx * dx + dy * dy;
                 }
                 let d = d2.sqrt();
-                let mut f = k * k / d;
+                let mut f = opts.repulsion * k * k / d;
 
                 // Rectangle overlap (gap-inflated): add a separation force ∝ penetration.
                 let ox = (g.nodes[i].w + g.nodes[j].w) * 0.5 + opts.gap - dx.abs();
