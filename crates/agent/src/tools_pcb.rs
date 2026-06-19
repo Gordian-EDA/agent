@@ -1381,6 +1381,7 @@ fn lint_summary(
     rp: &RouteProblem,
     solution: &pcb_engine::problem::RouteSolution,
     failed: &[FailedNet],
+    plane_nets: &std::collections::BTreeSet<String>,
 ) -> LintSplit {
     let failed_nets: std::collections::BTreeSet<&str> =
         failed.iter().map(|f| f.connection.as_str()).collect();
@@ -1390,12 +1391,19 @@ fn lint_summary(
     let mut expected_gaps = 0usize;
 
     for v in lint(rp, solution) {
-        // An Unconnected on a net the router already reported as failed is the
-        // expected gap, not a bug.
+        // An Unconnected is an EXPECTED gap (not an engine bug) when:
+        //  - the net was already reported failed (an honest finisher/global drop), OR
+        //  - the net is a copper PLANE net. A plane net is NOT trace-routed — it was
+        //    removed from the routed connections and its pins connect through the inner
+        //    plane (emitted at export) plus a per-pad stitching via; any pad whose via
+        //    couldn't be placed is already reported as a failed stitch. So the trace-
+        //    connectivity oracle, which sees the stitch vias but not the plane copper,
+        //    reads every stitched plane pad as "unconnected" — a false signal. KiCAD DRC
+        //    (which has the plane) is the authority on real plane connectivity.
         if let DrcViolation::Connectivity {
             violation: ConnViolation::Unconnected { connection, .. },
         } = &v
-            && failed_nets.contains(connection.as_str())
+            && (failed_nets.contains(connection.as_str()) || plane_nets.contains(connection))
         {
             expected_gaps += 1;
             continue;
@@ -1508,7 +1516,9 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         .collect();
 
     let m = metrics(&result.solution);
-    let split = lint_summary(&rp, &result.solution, &result.failed);
+    let plane_net_set: std::collections::BTreeSet<String> =
+        planes.iter().map(|(n, _)| n.clone()).collect();
+    let split = lint_summary(&rp, &result.solution, &result.failed, &plane_net_set);
 
     let router = match result.router {
         RouterKind::Naive => "naive",
