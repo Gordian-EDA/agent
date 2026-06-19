@@ -992,8 +992,11 @@ when one already exists or the user explicitly asks for the schematic too.)
    Do NOT try to resolve overlaps by hand-`move_part`ing parts around: each
    move_part LOCKS that part, and a pile of locks over-constrains the legalizer so
    it can't separate them (you'll fight your own locks forever). Trust the
-   legalizer — give it room + good hints and let it place; reserve move_part/locks
-   for the few parts whose exact spot truly matters (a connector on an edge).
+   legalizer — give it room + good hints and let it place. In particular do NOT lock
+   connectors/headers: they AUTO-seek their nearest board edge, and locking one (e.g.
+   via move_part) pins it wherever you put it — usually the interior — DEFEATING the
+   edge-seek and stranding it mid-board. Reserve move_part/locks for the rare part
+   whose exact interior spot truly matters, not for connectors or routine placement.
 6. `render_board()` — LOOK at the board. This is your eyes: call it after
    place_board to see the floorplan and after route_board to see the copper
    (top = red, bottom = blue, failed nets = orange crosses). Critique it against a
