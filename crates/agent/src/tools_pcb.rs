@@ -2173,6 +2173,7 @@ fn content_bounds(
     problem: &RouteProblem,
     solution: &RouteSolution,
     budget: &Bounds,
+    keepouts: &[Keepout],
     margin: f64,
 ) -> Bounds {
     let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
@@ -2200,6 +2201,12 @@ fn content_bounds(
     for v in &solution.vias {
         let r = v.diameter / 2.0;
         acc(v.at.x - r, v.at.y - r, v.at.x + r, v.at.y + r);
+    }
+    // Keepouts are DELIBERATE empty board regions (antenna / mounting / connector
+    // clear-outs) — the finished board must INCLUDE them, so the content-tightening must
+    // not shrink the outline inward past a keepout and drop it off the board.
+    for k in keepouts {
+        acc(k.rect.min_x, k.rect.min_y, k.rect.max_x, k.rect.max_y);
     }
     if !min_x.is_finite() {
         return budget.clone();
@@ -2319,7 +2326,7 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // computed AFTER routing — the copper geometry is untouched, so it cannot
     // create a DRC regression (the outline only ever shrinks toward the copper,
     // never clips it). Re-synthesize the outline at the tight bounds.
-    let tight = content_bounds(&board.problem, &stored.solution, &draft.bounds, BOARD_EDGE_MARGIN_MM);
+    let tight = content_bounds(&board.problem, &stored.solution, &draft.bounds, &draft.keepouts, BOARD_EDGE_MARGIN_MM);
     // Copper-plane zones (power pours) for a multilayer board, computed from the
     // foreign copper reaching each inner layer, at the final (tight) bounds. The
     // obstacle positions are absolute, so the first board's read is reusable here.
