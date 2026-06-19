@@ -483,7 +483,7 @@ const SA_SILK_W: f64 = 6.0; // soft: parts crowding each other's refdes
 const SA_WL_W: f64 = 0.4; // half-perimeter wirelength (over part centres)
 const SA_SPREAD_W: f64 = 0.25; // mild whole-board compaction
 const SA_COHERE_W: f64 = 5.0; // decoupling cap → nearest anchor power pad (hug the IC)
-const SA_EDGE_W: f64 = 0.5; // connector → nearest board edge
+const SA_EDGE_W: f64 = 2.5; // connector → nearest board edge
 /// Breathing room (mm) a refdes needs around a part before it crowds a neighbour.
 const SA_SILK_GAP: f64 = 1.0;
 /// Fixed seed — placement is deterministic (same board → same layout).
