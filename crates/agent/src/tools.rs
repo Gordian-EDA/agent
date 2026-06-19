@@ -602,6 +602,45 @@ impl Tools {
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             ToolDef {
+                name: "add_parts".into(),
+                description: "Append parts to the existing board draft WITHOUT re-sending the \
+                    whole board. Build a big board incrementally: create_board with the bounds, \
+                    rules, and a FIRST batch of parts, then call add_parts repeatedly for the \
+                    rest. This is the reliable way to assemble a 50+ part board or a large BGA \
+                    pad map — cramming every part (and a 100-ball pad→net map) into one \
+                    create_board call is error-prone. Same per-part validation as create_board \
+                    (footprint resolved up front with suggestions; a footprint whose own pads \
+                    violate rules.clearance is rejected); a reference already on the board is an \
+                    error. Returns the references added and the new part/net counts. Adding parts \
+                    clears any prior placement — run place_board again afterwards."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "parts": {
+                            "type": "array",
+                            "description": "More parts to append (same shape as create_board.parts).",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "reference": { "type": "string",
+                                        "description": "Unique reference designator not already on the board." },
+                                    "footprint": { "type": "string",
+                                        "description": "Footprint lib_id from search_footprints." },
+                                    "pad_nets": {
+                                        "type": "object",
+                                        "description": "Pad number → net name. A pad absent from this map is left unconnected.",
+                                        "additionalProperties": { "type": "string" }
+                                    }
+                                },
+                                "required": ["reference", "footprint"]
+                            }
+                        }
+                    },
+                    "required": ["parts"]
+                }),
+            },
+            ToolDef {
                 name: "place_board".into(),
                 description: "Place the current board: turn every part's footprint \
                     + design rules + any locked positions into a placement problem, \
@@ -855,6 +894,7 @@ impl Tools {
             "search_footprints" => crate::tools_pcb::search_footprints(input, ctx),
             "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
             "create_board" => crate::tools_pcb::create_board(input, ctx),
+            "add_parts" => crate::tools_pcb::add_parts(input, ctx),
             "get_board" => crate::tools_pcb::get_board(ctx),
             "place_board" => crate::tools_pcb::place_board(input, ctx),
             "set_placement_hints" => crate::tools_pcb::set_placement_hints(input, ctx),

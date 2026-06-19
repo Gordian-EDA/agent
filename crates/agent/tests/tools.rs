@@ -201,6 +201,7 @@ fn defs_lists_all_tools() {
         "search_footprints",
         "get_footprint_info",
         "create_board",
+        "add_parts",
         "get_board",
         "place_board",
         "set_placement_hints",
@@ -213,7 +214,7 @@ fn defs_lists_all_tools() {
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
-    assert_eq!(names.len(), 23, "expected exactly 23 tools, got {}: {:?}", names.len(), names);
+    assert_eq!(names.len(), 24, "expected exactly 24 tools, got {}: {:?}", names.len(), names);
 
     // Names are unique.
     let mut sorted = names.clone();
@@ -689,6 +690,63 @@ fn create_board_resolves_vendored_footprints_and_persists_draft() {
     // A second create_board without overwrite is rejected.
     let out = tools.run("create_board", board, &ctx).unwrap();
     assert!(out["error"].as_str().is_some_and(|e| e.contains("already exists")), "got: {out}");
+}
+
+#[test]
+fn add_parts_appends_incrementally_and_rejects_duplicate() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+
+    // add_parts before any board -> recoverable error.
+    let pre = tools
+        .run(
+            "add_parts",
+            serde_json::json!({ "parts": [] }),
+            &ctx,
+        )
+        .unwrap();
+    assert!(pre["error"].as_str().is_some_and(|e| e.contains("no board draft")), "got: {pre}");
+
+    // Base board with two parts.
+    let board = serde_json::json!({
+        "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
+        "parts": [
+            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
+              "pad_nets": { "1": "VIN", "2": "MID" } },
+            { "reference": "U1", "footprint": "Fixtures:SOT-23",
+              "pad_nets": { "1": "MID", "2": "GND", "3": "VOUT" } }
+        ]
+    });
+    let out = tools.run("create_board", board, &ctx).unwrap();
+    assert!(out.get("error").is_none(), "create_board ok: {out}");
+
+    // Append a third part WITHOUT re-sending the first two.
+    let add = serde_json::json!({
+        "parts": [
+            { "reference": "J1", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
+              "pad_nets": { "1": "VIN", "2": "GND" } }
+        ]
+    });
+    let out = tools.run("add_parts", add, &ctx).unwrap();
+    assert_eq!(out["part_count"], serde_json::json!(3), "appended to 3 parts: {out}");
+    assert!(out["added"].as_array().unwrap().iter().any(|r| r == "J1"), "J1 reported added: {out}");
+
+    // get_board reflects all three (the first two were NOT re-sent).
+    let gb = tools.run("get_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(gb["summary"]["part_count"], serde_json::json!(3), "draft has 3 parts: {gb}");
+
+    // A reference already on the board is rejected.
+    let dup = serde_json::json!({
+        "parts": [
+            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
+              "pad_nets": { "1": "A", "2": "B" } }
+        ]
+    });
+    let out = tools.run("add_parts", dup, &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("already on the board")),
+        "duplicate reference rejected: {out}"
+    );
 }
 
 #[test]

@@ -433,6 +433,126 @@ const KICAD_MIN_VIA_DIAMETER: f64 = 0.5;
 const KICAD_MIN_VIA_DRILL: f64 = 0.3;
 const KICAD_MIN_ANNULAR: f64 = 0.1;
 
+/// Parse one part JSON into a validated [`DraftPart`]. Shared by `create_board` and
+/// `add_parts` so both apply identical footprint resolution, intrinsic pad-clearance
+/// rejection, and lock parsing. Returns the error-shaped `Value` on any problem so the
+/// caller can return it directly (the model then fixes just that part).
+fn parse_draft_part(
+    pj: &Value,
+    index: &kicad_bridge::footlib::FootprintIndex,
+    clearance: f64,
+) -> std::result::Result<DraftPart, Value> {
+    let reference = pj
+        .get("reference")
+        .and_then(Value::as_str)
+        .ok_or_else(|| json!({ "error": "a part is missing its string `reference`" }))?
+        .to_string();
+    let footprint = pj
+        .get("footprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| json!({ "error": format!("part {reference}: missing string `footprint` lib_id") }))?
+        .to_string();
+    let Some(resolved_fp) = index.footprint(&footprint) else {
+        return Err(json!({
+            "error": format!(
+                "part {reference}: unknown footprint `{footprint}` — \
+                 search_footprints for the real lib_id, never guess it"
+            ),
+            "suggestions": index.suggest(&footprint),
+        }));
+    };
+    let pad_nets: BTreeMap<String, String> = match pj.get("pad_nets") {
+        None | Some(Value::Null) => BTreeMap::new(),
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+            json!({ "error": format!("part {reference}: pad_nets must map pad number → net name: {e}") })
+        })?,
+    };
+    // Reject a footprint whose own pads (different-net OR un-netted/NC) sit closer than the
+    // board clearance — an inherent clearance DRC fault no routing can fix.
+    if let Some((a, b, gap)) =
+        kicad_bridge::placefp::pad_clearance_violations(&resolved_fp, &pad_nets, clearance).first()
+    {
+        return Err(json!({
+            "error": format!(
+                "part {reference}: footprint `{footprint}` pads {a} and {b} are only {gap:.3}mm \
+                 apart (< the {clearance:.3}mm rules.clearance) — they are on different nets, so \
+                 this is a built-in clearance violation. Lower rules.clearance (e.g. to {:.2}) or \
+                 use a coarser-pitch footprint.",
+                (gap - 0.01_f64).max(0.05),
+            ),
+        }));
+    }
+    // Optional lock: pin a part at a position/rotation. Accepts {x,y,rotation?} or {at:{x,y},…}.
+    let locked = match pj.get("locked") {
+        None | Some(Value::Null) => None,
+        Some(l) => {
+            let at = l.get("at").unwrap_or(l);
+            match (at.get("x").and_then(Value::as_f64), at.get("y").and_then(Value::as_f64)) {
+                (Some(x), Some(y)) => {
+                    let raw = l.get("rotation").and_then(Value::as_i64).unwrap_or(0) as i32;
+                    let rotation = axis_aligned_rotation(raw)
+                        .map_err(|e| json!({ "error": format!("part {reference}: {e}") }))?;
+                    Some(LockedAt { at: Point2 { x, y }, rotation })
+                }
+                _ => {
+                    return Err(json!({ "error": format!("part {reference}: `locked` needs numeric x and y") }));
+                }
+            }
+        }
+    };
+    Ok(DraftPart { reference, footprint, pad_nets, locked })
+}
+
+/// Append parts to the existing draft WITHOUT re-sending the whole board — the lever for big
+/// boards (50+ parts, or a 100-ball BGA's pad map) where re-emitting every part in one
+/// create_board call is unreliable for the model. Same per-part validation as create_board;
+/// a reference that already exists is rejected. Build incrementally: create_board (bounds +
+/// rules + the first parts), then add_parts(more) as many times as needed.
+pub fn add_parts(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let Some(mut draft) = BoardDraft::load(ctx) else {
+        return Ok(json!({
+            "error": "no board draft yet — call create_board first (bounds + rules + some parts), then add_parts",
+        }));
+    };
+    let Some(parts_json) = input.get("parts").and_then(Value::as_array) else {
+        return Ok(json!({
+            "error": "missing required `parts` array (each {reference, footprint, pad_nets})",
+        }));
+    };
+    let index = ctx.footprint_index()?;
+    let mut seen: std::collections::BTreeSet<String> =
+        draft.parts.iter().map(|p| p.reference.clone()).collect();
+    let mut added: Vec<String> = Vec::new();
+    for pj in parts_json {
+        let part = match parse_draft_part(pj, index, draft.rules.clearance) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
+        if !seen.insert(part.reference.clone()) {
+            return Ok(json!({
+                "error": format!(
+                    "part `{}` is already on the board — references must be unique \
+                     (pick a new reference, or rebuild via create_board with overwrite)",
+                    part.reference
+                ),
+            }));
+        }
+        added.push(part.reference.clone());
+        draft.parts.push(part);
+    }
+    // New parts aren't placed, so any prior placement is now stale.
+    draft.last_placement = None;
+    draft.last_place_illegal = false;
+    draft.save(ctx)?;
+    let net_pins = net_pin_counts(&draft.parts, ctx);
+    Ok(json!({
+        "ok": true,
+        "added": added,
+        "part_count": draft.parts.len(),
+        "net_count": net_pins.len(),
+    }))
+}
+
 pub fn create_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let overwrite = input.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
     if BoardDraft::load(ctx).is_some() && !overwrite {
@@ -496,91 +616,11 @@ pub fn create_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // Resolve every footprint up front; a single unknown lib_id is a recoverable
     // error with suggestions (mirrors get_footprint_info), so the model can fix
     // exactly that part rather than re-sending the whole board.
-    for (i, pj) in parts_json.iter().enumerate() {
-        let reference = match pj.get("reference").and_then(Value::as_str) {
-            Some(r) => r.to_string(),
-            None => {
-                return Ok(json!({
-                    "error": format!("parts[{i}] missing string `reference`"),
-                }));
-            }
-        };
-        let footprint = match pj.get("footprint").and_then(Value::as_str) {
-            Some(f) => f.to_string(),
-            None => {
-                return Ok(json!({
-                    "error": format!("part {reference}: missing string `footprint` lib_id"),
-                }));
-            }
-        };
-        // Resolve the footprint so a typo'd lib_id fails now, with suggestions.
-        let Some(resolved_fp) = index.footprint(&footprint) else {
-            return Ok(json!({
-                "error": format!(
-                    "part {reference}: unknown footprint `{footprint}` — \
-                     search_footprints for the real lib_id, never guess it"
-                ),
-                "suggestions": index.suggest(&footprint),
-            }));
-        };
-        let pad_nets: BTreeMap<String, String> = match pj.get("pad_nets") {
-            None | Some(Value::Null) => BTreeMap::new(),
-            Some(v) => match serde_json::from_value(v.clone()) {
-                Ok(m) => m,
-                Err(e) => {
-                    return Ok(json!({
-                        "error": format!(
-                            "part {reference}: pad_nets must map pad number → net name: {e}"
-                        ),
-                    }));
-                }
-            },
-        };
-        // Reject a footprint whose own pads (different-net OR un-netted/NC) sit closer than
-        // the board clearance — an inherent clearance DRC fault no routing can fix.
-        let viol = kicad_bridge::placefp::pad_clearance_violations(
-            &resolved_fp,
-            &pad_nets,
-            rules.clearance,
-        );
-        if let Some((a, b, gap)) = viol.first() {
-            return Ok(json!({
-                "error": format!(
-                    "part {reference}: footprint `{footprint}` pads {a} and {b} are only \
-                     {gap:.3}mm apart (< the {:.3}mm rules.clearance) — they are on \
-                     different nets, so this is a built-in clearance violation. Lower \
-                     rules.clearance (e.g. to {:.2}) or use a coarser-pitch footprint.",
-                    rules.clearance,
-                    (gap - 0.01_f64).max(0.05),
-                ),
-            }));
+    for pj in parts_json {
+        match parse_draft_part(pj, index, rules.clearance) {
+            Ok(p) => parts.push(p),
+            Err(e) => return Ok(e),
         }
-        // Optional lock: pin a part at a position/rotation (a mechanically-fixed
-        // connector, a rotated part). Accepts {x, y, rotation?} or {at:{x,y}, rotation?}.
-        let locked = match pj.get("locked") {
-            None | Some(Value::Null) => None,
-            Some(l) => {
-                let at = l.get("at").unwrap_or(l);
-                match (at.get("x").and_then(Value::as_f64), at.get("y").and_then(Value::as_f64)) {
-                    (Some(x), Some(y)) => {
-                        let raw = l.get("rotation").and_then(Value::as_i64).unwrap_or(0) as i32;
-                        let rotation = match axis_aligned_rotation(raw) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                return Ok(json!({ "error": format!("part {reference}: {e}") }));
-                            }
-                        };
-                        Some(LockedAt { at: Point2 { x, y }, rotation })
-                    }
-                    _ => {
-                        return Ok(json!({
-                            "error": format!("part {reference}: `locked` needs numeric x and y"),
-                        }));
-                    }
-                }
-            }
-        };
-        parts.push(DraftPart { reference, footprint, pad_nets, locked });
     }
 
     // Validate references are unique (the engine sorts/dedups by reference).

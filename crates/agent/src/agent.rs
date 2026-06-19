@@ -968,6 +968,11 @@ when one already exists or the user explicitly asks for the schematic too.)
    FREE in the finished board but gives the placer/router the slack they need — a
    hand-packed tight board is the #1 cause of an illegal placement you then waste the
    turn fighting. You can always shrink later; starting tight only hurts.
+   BIG BOARDS (50+ parts, or a large BGA whose pad→net map is long): do NOT cram every
+   part into one create_board call — a giant parts argument is unreliable to emit and you
+   will waste the turn re-sending it. Instead `create_board` with the bounds, rules, and a
+   FIRST batch, then `add_parts({parts})` repeatedly for the rest (same part shape; a
+   reference already on the board errors). Then place_board once everything is added.
    USE THE ENGINE'S FEATURES — they are deterministic and DRC-checked, so reach for
    them instead of hand-workarounds or telling the user to finish in KiCAD:
    - `rules.pours: [{net, layer}]` — a copper POUR the engine fills + anti-pads for
