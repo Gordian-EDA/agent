@@ -837,14 +837,23 @@ Each component is keyed by its refdes and has:
 - block names: lower_snake_case.
 - Every refdes is globally unique across all blocks. Blocks carry no electrical
   meaning, but they ARE the floorplan: the engine lays each block out as one MODULE
-  and flows the blocks left→right in declaration order. So PARTITION the design into
-  functional modules — power-entry, the main IC + its support, each peripheral / each
-  connector group — as SEPARATE blocks, declared in signal-flow order (input/power
-  first, processing next, outputs/peripherals last). This keeps each module's parts
-  clustered and the sheet organised. Do NOT dump the whole design into one block: a
-  single flat block forces the engine to grid-pack every part together and SPRAWLS
-  (the #1 readability defect on dense boards). A handful of focused blocks is right;
-  a single `main` block is a smell on anything bigger than a few parts.
+  and flows the blocks left→right in declaration order. So PARTITION the design into a
+  FEW COARSE functional modules — typically just: power-entry (input connector +
+  regulator + their bulk/bypass caps), the MAIN IC + ALL its local support, and one or
+  two I/O groups. Declare them in signal-flow order (input/power first, processing next,
+  outputs/peripherals last). AIM FOR 3-5 BLOCKS on a typical board; each block should be
+  a SUBSTANTIAL module of roughly 6-15 parts.
+  CRITICAL — keep blocks COARSE, do NOT over-split:
+  • The main IC's crystal, ALL its decoupling caps, reset network, boot/config jumper,
+    and pull-ups ALL belong IN the MCU block — they are its support, not separate modules.
+  • A lone crystal, a single jumper, one header, or one indicator LED is NOT its own
+    block — fold it into the module it serves (the IC or an I/O group).
+  • Group small peripherals/connectors/indicators into ONE "io" block, not one block each.
+  Over-splitting into many tiny blocks renders each as a SPARSE little sheet that reads
+  WORSE (label-on-body clutter, no signal flow), not better — a 4-part block is a smell.
+  Conversely do NOT dump everything into one flat block: that grid-packs every part and
+  SPRAWLS (the #1 dense-board defect). The sweet spot is a handful of medium modules; a
+  single `main` block — or a swarm of 2-4-part blocks — are both smells.
 
 ## Layout (placement is automatic — blocks are your floorplan)
 
