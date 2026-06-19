@@ -34,6 +34,38 @@ into signal-flow blocks (power-entry / main IC + support / each peripheral).
 This is the one real upward lever found. It is shipped (agent prompt) and is the right place
 to keep pushing for MCU/digital boards.
 
+## ★ The ceiling-breaker: let the LLM do the GEOMETRY (VLM floorplan via coordinate overlay)
+
+The "unreachable" conclusion is about the ENGINE's placement ALGORITHM (sprawl-capped). It
+does NOT apply to a vision LLM doing the placement. A VLM can do the global, semantic spatial
+reasoning the algorithm lacks — "the LDO is marooned bottom-right, move it next to the MCU" —
+which is exactly what de-sprawls a board. The enabler is a COORDINATE OVERLAY so the model can
+reference and specify positions.
+
+Working flow (proven):
+1. Render the board; overlay a labelled (col,row) grid — `tools/coord_overlay.py IN OUT C R`.
+2. A sub-agent (vision) reads the gridded render and returns a compact signal-flow floorplan
+   as `{refdes: [col,row]}` for the major parts (power-in left → IC(s) centre → peripherals
+   right, connected parts adjacent, tight span).
+3. Apply it as the per-block `layout:` grid (cells map directly) and re-compile.
+
+Proof: sprawled c01 (STM32 board) → VLM floorplan `{U1:[3,2],J1:[1,2],U2:[2,2],J2:[4,2],
+JP1:[4,1]}` → re-renders as a clean J1→U2→U1→J2 left-to-right chain (2 crossings, 0 warnings)
+vs the original marooned-LDO sprawl (independent reviewers 3-5). KEY: a NAIVE authored grid had
+HURT (c01_banded=5) — the VLM's *intelligent* floorplan is what makes the authored-grid path
+win. On an already-tidy board (c11) it's neutral; the lever helps most where sprawl is worst.
+
+This is the genuine path through the ceiling. REMAINING WORK:
+- **Automate the loop** inside the agent (or a dedicated sub-agent): after `apply_design`,
+  render+overlay, call the VLM placer, re-apply the `layout:` grid, optionally iterate against
+  the critic. This is the "sub-agent handles the complicated scenarios" pattern.
+- **Satellites**: the VLM places ANCHORS; decoupling/indicator satellites still auto-place and
+  can still scatter. Extend the floorplan to satellite GROUPS, or improve their clustering once
+  the anchor frame is fixed.
+- **Validate scores**: the critic gateway was 401 (credits) during the proof, so c01 was judged
+  visually + on objective crossings/warnings; re-run `schematic_critic.py --samples 3` to confirm
+  the expected 5→7-8 lift when the gateway is back.
+
 ## What does NOT move the critic (do not re-explore)
 
 - **Compaction at the engine level** — the only thing that would move the sprawl cap, but
