@@ -792,6 +792,11 @@ fn detect_idioms(
     let _ = (sats, pin_meta);
     let graph = build_circuit_graph(items, rails);
     let matches = circuit_graph::find_all(&graph, &circuit_graph::library::active_library());
+    if std::env::var("IDIOM_AUDIT").is_ok() {
+        for m in &matches {
+            eprintln!("AUDIT-MATCH {} anchor={} score={:.2} bindings={:?}", m.pattern, m.anchor, m.score, m.bindings);
+        }
+    }
     let idx: BTreeMap<&str, usize> =
         items.iter().enumerate().map(|(i, it)| (it.refdes.as_str(), i)).collect();
     let get = |rd: &str| idx.get(rd).copied();
