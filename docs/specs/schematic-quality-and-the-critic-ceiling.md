@@ -62,8 +62,19 @@ SCATTERS the satellites (decoupling/reset/crystal auto-place around the new anch
 the move breaks the existing good clustering). So VLM-placement is NOT universally safe.
 
 PRODUCTIZATION = A/B WITH THE CRITIC AS SAFETY NET: render the auto layout AND the VLM-placed
-layout, critic both, ship the higher. That captures c01's +2 and keeps c03's good auto layout —
-never ships worse. (The sub-agent critic works when the OpenAI-gateway critic is down.)
+layout, critic both, ship the higher — never ships worse. Built + runs end-to-end:
+`tools/vlm_floorplan.py IN OUT` (= render → vlm_place → vlm_apply → render → schematic_critic ×2,
+keep better). (The sub-agent critic works when the OpenAI-gateway critic is down.)
+
+GATEWAY-CRITIC REALITY CHECK (important): the +2 above was the SUB-AGENT critic, which rated c01
+auto a harsh 4. On the GATEWAY critic (the goal metric) c01 auto is ~5-6 and the VLM-placed version
+~5 — i.e. NEUTRAL within the ±1 critic noise. The visual signal-flow win does NOT clearly move the
+goal metric on c01, because the gateway critic already credits c01's aligned decoupling bank (less
+room), and re-floorplanning the anchors disturbs the satellites enough to wash out the gain. So:
+anchor-only VLM-placement is a visual/organisational win but ~critic-neutral; a DEMONSTRABLE
+gateway-critic gain needs (a) boards the gateway rates genuinely low AND anchor-sprawl-dominated
+(not satellite-dominated like c08/c13), and/or (b) the satellite handling below. A/B keeps it safe
+meanwhile.
 
 This is the genuine path through the ceiling. REMAINING WORK:
 - **Automate the loop** inside the agent (or a dedicated sub-agent): after `apply_design`,
