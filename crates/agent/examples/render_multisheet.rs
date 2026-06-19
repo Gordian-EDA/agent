@@ -14,6 +14,21 @@ use kicad_bridge::cli::KicadCli;
 use kicad_bridge::env::KicadEnv;
 use kicad_bridge::provider::RealSymbolProvider;
 
+/// Union-find root with path-halving.
+fn uf_find(parent: &mut [usize], x: usize) -> usize {
+    let mut r = x;
+    while parent[r] != r {
+        r = parent[r];
+    }
+    let mut c = x;
+    while parent[c] != r {
+        let n = parent[c];
+        parent[c] = r;
+        c = n;
+    }
+    r
+}
+
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let yaml = args.next().expect("usage: render_multisheet <draft.yaml> <out_dir>");
@@ -37,6 +52,99 @@ fn main() -> anyhow::Result<()> {
 
     if design.blocks.len() < 2 {
         eprintln!("only {} block(s) — multi-sheet needs a multi-block design", design.blocks.len());
+    }
+
+    // SPLIT large blocks: the agent over-crams (a 17-part MCU sheet, a 21-part relay sheet), and
+    // per-sheet DENSITY is the dominant critic gate (dense boards floor at 5-7). Bisect any block with
+    // > SPLIT_MAX parts along its CONNECTED COMPONENTS — where the graph excludes high-degree rail/bus
+    // nets (deg > RAIL_DEG ⇒ VCC/GND/VM/etc.), so two parts are "coupled" only by a point-to-point
+    // signal. Independent sub-circuits (relay channels, a loosely-coupled indicator block) thus fall
+    // into separate components and split at a near-ZERO signal cut (the only cut is shared rails, which
+    // are ports/power symbols anyway) — never trading density for port-crowding. A single tightly-
+    // coupled component (everything hangs off one MCU) is left intact. Pairs with the merge below so
+    // sheets converge to a uniform ~TARGET parts. render_multisheet-only ⇒ engine/snapshots untouched.
+    const SPLIT_MAX: usize = 16;
+    const TARGET: usize = 11;
+    const RAIL_DEG: usize = 4;
+    let mut eff: IndexMap<String, circuit_lang::model::Block> = IndexMap::new();
+    for (bname, block) in &design.blocks {
+        if block.components.len() <= SPLIT_MAX {
+            eff.insert(bname.clone(), block.clone());
+            continue;
+        }
+        let refs: Vec<String> = block.components.keys().cloned().collect();
+        // net -> indices of parts on it (any net, rail or signal).
+        let mut net_refs: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+        for (i, rd) in refs.iter().enumerate() {
+            let c = &block.components[rd];
+            let mut nets = std::collections::HashSet::new();
+            for t in c.pins.values() {
+                if let circuit_lang::model::PinTarget::Net(n) = t {
+                    nets.insert(n.clone());
+                }
+            }
+            for u in c.units.values() {
+                for t in u.values() {
+                    if let circuit_lang::model::PinTarget::Net(n) = t {
+                        nets.insert(n.clone());
+                    }
+                }
+            }
+            for n in nets {
+                net_refs.entry(n).or_default().push(i);
+            }
+        }
+        // Union parts that share a LOW-degree (point-to-point signal) net; skip rails/buses.
+        let mut parent: Vec<usize> = (0..refs.len()).collect();
+        for ids in net_refs.values() {
+            if ids.len() > RAIL_DEG {
+                continue;
+            }
+            for w in ids.windows(2) {
+                let (a, b) = (uf_find(&mut parent, w[0]), uf_find(&mut parent, w[1]));
+                parent[a] = b;
+            }
+        }
+        let mut comps: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+        for i in 0..refs.len() {
+            let r = uf_find(&mut parent, i);
+            comps.entry(r).or_default().push(i);
+        }
+        let comp_list: Vec<Vec<usize>> = comps.into_values().collect();
+        if comp_list.len() < 2 {
+            eff.insert(bname.clone(), block.clone()); // one tightly-coupled component — don't split
+            continue;
+        }
+        // Bin-pack components into ceil(parts/TARGET) groups, largest component to the smallest group.
+        let ngroups = block.components.len().div_ceil(TARGET).clamp(2, comp_list.len());
+        let mut order: Vec<usize> = (0..comp_list.len()).collect();
+        order.sort_by_key(|&ci| std::cmp::Reverse(comp_list[ci].len()));
+        let mut groups_idx: Vec<Vec<usize>> = vec![Vec::new(); ngroups];
+        let mut sizes = vec![0usize; ngroups];
+        for &ci in &order {
+            let g = (0..ngroups).min_by_key(|&g| sizes[g]).unwrap();
+            groups_idx[g].extend(&comp_list[ci]);
+            sizes[g] += comp_list[ci].len();
+        }
+        println!(
+            "  [split] block '{bname}' ({} parts, {} signal-components) -> {ngroups} sheets",
+            block.components.len(),
+            comp_list.len()
+        );
+        let mut g = 0;
+        for ris in &groups_idx {
+            if ris.is_empty() {
+                continue;
+            }
+            g += 1;
+            let mut sub = block.clone();
+            sub.components = IndexMap::new();
+            for &ri in ris {
+                let rd = &refs[ri];
+                sub.components.insert(rd.clone(), block.components[rd].clone());
+            }
+            eff.insert(format!("{bname}_{g}"), sub);
+        }
     }
 
     // Merge tiny blocks (< MERGE_MIN parts) into the bigger block they share the most (non-GND)
@@ -66,10 +174,10 @@ fn main() -> anyhow::Result<()> {
         }
         s
     };
-    let bnames: Vec<String> = design.blocks.keys().cloned().collect();
+    let bnames: Vec<String> = eff.keys().cloned().collect();
     let bnets: std::collections::HashMap<String, std::collections::HashSet<String>> =
-        bnames.iter().map(|n| (n.clone(), block_nets(&design.blocks[n]))).collect();
-    let bsize = |n: &str| design.blocks[n].components.len();
+        bnames.iter().map(|n| (n.clone(), block_nets(&eff[n]))).collect();
+    let bsize = |n: &str| eff[n].components.len();
     let mut merge_into: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for n in &bnames {
         if bsize(n) >= MERGE_MIN {
@@ -100,9 +208,9 @@ fn main() -> anyhow::Result<()> {
         let mut sub = design.clone();
         sub.blocks = IndexMap::new();
         for bn in gblocks {
-            sub.blocks.insert(bn.clone(), design.blocks[bn].clone());
+            sub.blocks.insert(bn.clone(), eff[bn].clone());
         }
-        let nparts: usize = gblocks.iter().map(|bn| design.blocks[bn].components.len()).sum();
+        let nparts: usize = gblocks.iter().map(|bn| eff[bn].components.len()).sum();
 
         // ADDITIVE ROUTED A/B (the documented crossmin path to a default win): emit with the
         // shelf-pack seed AND the crossmin (GLOBAL_OPT) seed, keep whichever ROUTES with fewer
