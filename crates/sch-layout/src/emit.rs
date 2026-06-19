@@ -1123,10 +1123,24 @@ impl SchematicWriter {
                 let mut bands =
                     vec![below, above, below_left, below_right, above_left, above_right];
                 bands.sort_by_key(hits);
-                bands.push(right);
-                bands.push(left);
-                bands.push(above_far);
-                bands.push(below_far);
+                // Far bands (detached but clear of the body's OWN pins) BEFORE right/left: on a crowded
+                // IC whose every near band is blocked by a decoupling cap, right/left sit at the body
+                // edge ON the side pins, so the refdes/value smears across the pin stubs (the
+                // TPA3116 / driver-IC "value over pins 16/17" defect). A slightly-detached far band
+                // reads far better than text over the pins; right/left stay the genuine last resort.
+                // Multi-sheet sub-sheets only (where the dense power-IC sheets live) so the single-sheet
+                // reference snapshots stay byte-identical.
+                if std::env::var("MULTISHEET_REFINE").is_ok() {
+                    bands.push(above_far);
+                    bands.push(below_far);
+                    bands.push(right);
+                    bands.push(left);
+                } else {
+                    bands.push(right);
+                    bands.push(left);
+                    bands.push(above_far);
+                    bands.push(below_far);
+                }
                 bands
             } else if h[0] > h[1] {
                 vec![
