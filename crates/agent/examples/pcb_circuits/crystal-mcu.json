@@ -1,14 +1,67 @@
 {
   "description": "SOIC-8 MCU with a crystal + two load caps, supply decoupling, and an IO header",
-  "bounds": { "min_x": 0.0, "max_x": 44.0, "min_y": 0.0, "max_y": 32.0 },
+  "bounds": {
+    "min_x": 0.0,
+    "max_x": 26.0,
+    "min_y": 0.0,
+    "max_y": 28.0
+  },
   "parts": [
-    { "reference": "U1", "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
-      "pad_nets": { "1": "VCC", "2": "XIN", "3": "XOUT", "4": "GND", "5": "IO1", "6": "IO2", "7": "RST", "8": "VCC" } },
-    { "reference": "Y1", "footprint": "Crystal:Crystal_HC49-4H_Vertical", "pad_nets": { "1": "XIN", "2": "XOUT" } },
-    { "reference": "C1", "footprint": "Capacitor_SMD:C_0603_1608Metric", "pad_nets": { "1": "XIN", "2": "GND" } },
-    { "reference": "C2", "footprint": "Capacitor_SMD:C_0603_1608Metric", "pad_nets": { "1": "XOUT", "2": "GND" } },
-    { "reference": "C3", "footprint": "Capacitor_SMD:C_0805_2012Metric", "pad_nets": { "1": "VCC", "2": "GND" } },
-    { "reference": "J1", "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
-      "pad_nets": { "1": "VCC", "2": "GND", "3": "IO1", "4": "RST" } }
+    {
+      "reference": "U1",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "XIN",
+        "3": "XOUT",
+        "4": "GND",
+        "5": "IO1",
+        "6": "IO2",
+        "7": "RST",
+        "8": "VCC"
+      }
+    },
+    {
+      "reference": "Y1",
+      "footprint": "Crystal:Crystal_HC49-4H_Vertical",
+      "pad_nets": {
+        "1": "XIN",
+        "2": "XOUT"
+      }
+    },
+    {
+      "reference": "C1",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pad_nets": {
+        "1": "XIN",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C2",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "pad_nets": {
+        "1": "XOUT",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C3",
+      "footprint": "Capacitor_SMD:C_0805_2012Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "J1",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND",
+        "3": "IO1",
+        "4": "RST"
+      }
+    }
   ]
 }
