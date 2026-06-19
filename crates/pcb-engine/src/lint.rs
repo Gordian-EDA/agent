@@ -297,7 +297,10 @@ pub fn lint(problem: &RouteProblem, solution: &RouteSolution) -> Vec<DrcViolatio
     //      too close to a foreign track or another drill (adversarial fat/small-via configs
     //      shipped exactly this — the oracle was blind to it). Surfaced as ClearanceViaAny so
     //      the existing drop_violating_copper path turns it into an honest unrouted net rather
-    //      than a shipped fault. (via↔PAD-hole needs a drill-aware obstacle model — deferred.)
+    //      than a shipped fault. Covers via↔via, via↔track, AND via↔foreign-PAD copper (KiCAD's
+    //      hole-to-copper rule: a via's drill must clear foreign pad copper by 0.25 too — a
+    //      dense fine-clearance escape shipped exactly this, the drill edge 0.245mm from a
+    //      foreign pad while the via COPPER cleared at 0.1).
     const HOLE_CLEAR: f64 = 0.25;
     for (vi, a) in solution.vias.iter().enumerate() {
         let ar = a.drill / 2.0;
@@ -328,6 +331,25 @@ pub fn lint(problem: &RouteProblem, solution: &RouteSolution) -> Vec<DrcViolatio
                     connection: a.connection.clone(),
                     other_owners: vec![t.connection.clone()],
                     gap: 0.0,
+                    required: HOLE_CLEAR,
+                    at: aat,
+                });
+            }
+        }
+        // FOREIGN pad copper ↔ this via's drill edge (hole-to-copper). A same-net pad is
+        // via-in-pad (intentional), so skip it; any other pad must clear the drill by 0.25.
+        for ob in &problem.obstacles {
+            if ob.connected_to.iter().any(|n| *n == a.connection) {
+                continue;
+            }
+            let dx = (a.at.x - ob.center.x).abs() - ob.width / 2.0;
+            let dy = (a.at.y - ob.center.y).abs() - ob.height / 2.0;
+            let gap = (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt() - ar;
+            if gap + EPS < HOLE_CLEAR {
+                out.push(DrcViolation::ClearanceViaAny {
+                    connection: a.connection.clone(),
+                    other_owners: ob.connected_to.clone(),
+                    gap,
                     required: HOLE_CLEAR,
                     at: aat,
                 });
@@ -995,6 +1017,37 @@ mod tests {
             DrcViolation::ClearanceViaAny { required, .. } if (*required - 0.25).abs() < 1e-9
         ));
         assert_eq!(hole, 1, "drill-to-drill hole clearance must fire once, got {vs:?}");
+    }
+
+    #[test]
+    fn hole_clearance_fires_for_via_near_foreign_pad() {
+        // A via (NET_A) whose DRILL edge sits < 0.25mm from a FOREIGN pad's copper. KiCAD's
+        // hole-to-copper rule fires here even though the via COPPER could clear — this is the
+        // via↔PAD case the oracle used to skip (a dense fine-clearance escape shipped it).
+        // via at (10,10) drill 0.3 (r 0.15); pad NET_B at (10.5,10) is 0.4×0.4 (hw 0.2) →
+        // rect-edge gap 0.3, drill-edge gap 0.15 < 0.25.
+        let p = problem(
+            vec![conn("NET_A", &[(10.0, 10.0, "top")])],
+            vec![pad(&["NET_B"], (10.5, 10.0), 0.4, 0.4, &["top"])],
+        );
+        let s = RouteSolution { traces: vec![], vias: vec![via("NET_A", (10.0, 10.0))] };
+        let hole = count(&lint(&p, &s), |v| matches!(
+            v,
+            DrcViolation::ClearanceViaAny { required, .. } if (*required - 0.25).abs() < 1e-9
+        ));
+        assert_eq!(hole, 1, "via↔foreign-pad hole clearance must fire once");
+
+        // SAME-NET pad is via-in-pad (intentional) — no hole violation.
+        let p2 = problem(
+            vec![conn("NET_A", &[(10.0, 10.0, "top")])],
+            vec![pad(&["NET_A"], (10.5, 10.0), 0.4, 0.4, &["top"])],
+        );
+        let s2 = RouteSolution { traces: vec![], vias: vec![via("NET_A", (10.0, 10.0))] };
+        let hole2 = count(&lint(&p2, &s2), |v| matches!(
+            v,
+            DrcViolation::ClearanceViaAny { required, .. } if (*required - 0.25).abs() < 1e-9
+        ));
+        assert_eq!(hole2, 0, "same-net pad (via-in-pad) must NOT fire hole clearance");
     }
 
     #[test]
