@@ -178,5 +178,18 @@ schematics) and `forceplace` (force-directed — right model, but compaction col
    only the objective ic/organisation — pursue only for objective quality, not the score.
 3. **Critic-driven agent refine loop** — generate→critic→revise block structure→re-render.
    Limited leverage: the agent controls netlist/blocks/ports, NOT placement (the cap).
-4. **Accept the validated state.** The engine is at its critic-ceiling; the agent-modular
-   path is the shipped win for MCU/digital boards.
+4. **★ MULTI-SHEET (hierarchical) output — the validated path through the wall for COMPLEX boards
+   (demonstrated 2026-06-19).** The single-sheet sprawl ceiling is escapable by NOT cramming a
+   complete board onto one sheet: split it into one CLEAN sheet per block (the professional practice),
+   each small enough to dodge the fan-room wall. DEMONSTRATED by splitting c01 (composed = 5) into
+   three block sub-circuits, shared nets auto-becoming labeled ports: power (USB-C+LDO) = **9**, mcu
+   (STM32 core, decoupling row + labeled ports) = **8**, io (SWD+LEDs) = 4 (a fixable R3-on-J2 overlap,
+   not the wall). Matches the scorecard: clean SUB-blocks already score 9 (idiom-stm32 9, mcp1703 9).
+   So a complex board, emitted multi-sheet, hits ~8-9 PER SHEET. THE BUILD: the agent already
+   partitions into blocks; emit each block as its own .kicad_sch with inter-block nets as ports
+   (the single-pin auto-port + power symbols already do this), critic per sheet. Open question for the
+   user: does "9+ on a circuit" accept a multi-sheet design scored per sheet? If yes, this is the
+   path to 9+ on complex/MCU/dense boards. Small per-sheet bugs remain (the io overlap) but those are
+   ordinary fixes, not the wall.
+5. **Accept the validated state.** The engine is at its single-sheet critic-ceiling; the agent-modular
+   path is the shipped win for MCU/digital boards; multi-sheet (#4) is the untried-until-now escape.
