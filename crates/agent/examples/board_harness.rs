@@ -69,6 +69,13 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
         let _ = tools.run("set_placement_hints", json!({ "groups": groups.clone() }), &ctx);
     }
     let placed = tools.run("place_board", json!({}), &ctx).unwrap();
+    if placed["legal"] != json!(true) {
+        eprintln!(
+            "[place {name}] legal=false overlaps_resolved={} clamps={} suggested={:?} current={:?}",
+            placed["overlaps_resolved"], placed["out_of_bounds_clamps"],
+            placed.get("suggested_min_bounds_mm"), placed.get("current_bounds_mm")
+        );
+    }
     let routed = tools.run("route_board", json!({}), &ctx).unwrap();
     let exported = tools.run("export_board", json!({}), &ctx).unwrap();
 
