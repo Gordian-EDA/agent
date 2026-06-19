@@ -974,7 +974,11 @@ when one already exists or the user explicitly asks for the schematic too.)
      you (a 2-layer ground plane, an RF/HF return, shielding). When the user asks for
      a ground plane/pour, DECLARE IT HERE; never route top-only and punt the zone to
      the user.
-   - `rules.layers: 4|6` — adds inner GND/VCC PLANES automatically (dense power pins).
+   - `rules.layers: 4|6|8` — adds the two CENTRED inner GND/VCC PLANES automatically
+     (dense power pins), leaving the other inner layers as signal (8-layer → 6 signal).
+     NOTE: more layers add capacity but the greedy router does not yet aggressively
+     exploit inner SIGNAL layers, so going 4→6→8 may not route strictly more on a given
+     board — pick the layer count your fab/impedance needs, not as a routing-density dial.
    - `rules.net_widths: {net: mm}` — fat power / thin signal.
    - `rules.via_diameter`/`rules.via_drill` — for a dense BGA/QFP that leaves balls
      unrouted, a SMALLER standard via (`0.5`/`0.3`, vs the `0.6`/`0.3` default) is the

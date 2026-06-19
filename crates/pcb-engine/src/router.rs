@@ -55,10 +55,15 @@ pub struct RouteResult {
 /// layers as SIGNAL layers — the routing-capacity lever for dense BGA corridors. The
 /// router never routes ON these (a signal would short the plane); a via tunnels through.
 pub fn plane_layers(layer_count: usize) -> Vec<u32> {
-    match layer_count {
-        4 => vec![1, 2],
-        6 => vec![2, 3],
-        _ => Vec::new(),
+    // Inner copper layers are 1..=(L-2); the symmetric centred pair is the two middle
+    // ones: {L/2-1, L/2}. 4→{1,2}, 6→{2,3}, 8→{3,4}, 10→{4,5}, … — generalizing the
+    // original 4/6 cases so high-end stackups (8/10/12-layer) get proper GND/VCC planes
+    // AND the extra inner SIGNAL layers a dense BGA needs (8-layer → 6 signal layers vs
+    // 4 on a 6-layer board). Odd or <4 counts carry no plane (2-layer, or malformed).
+    if layer_count >= 4 && layer_count % 2 == 0 {
+        vec![layer_count as u32 / 2 - 1, layer_count as u32 / 2]
+    } else {
+        Vec::new()
     }
 }
 
@@ -470,6 +475,19 @@ mod tests {
     use super::*;
     use crate::connectivity;
     use std::path::Path;
+
+    #[test]
+    fn plane_layers_are_the_centred_pair_for_every_even_stackup() {
+        // 2-layer carries no plane; even ≥4 gets the two CENTRED inner layers, leaving
+        // the rest as signal. Regression guard for the generalized formula.
+        assert_eq!(plane_layers(2), Vec::<u32>::new());
+        assert_eq!(plane_layers(4), vec![1, 2]);
+        assert_eq!(plane_layers(6), vec![2, 3]);
+        assert_eq!(plane_layers(8), vec![3, 4]);
+        assert_eq!(plane_layers(10), vec![4, 5]);
+        // Odd counts are malformed → no plane (never artificially place one).
+        assert_eq!(plane_layers(5), Vec::<u32>::new());
+    }
 
     fn load(name: &str) -> RouteProblem {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -323,8 +323,8 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
         .and_then(Value::as_u64)
         .map(|n| n as u32)
         .unwrap_or(d.layer_count);
-    if !matches!(layer_count, 2 | 4 | 6) {
-        return Err(format!("rules.layers must be 2, 4, or 6, got {layer_count}"));
+    if !matches!(layer_count, 2 | 4 | 6 | 8) {
+        return Err(format!("rules.layers must be 2, 4, 6, or 8, got {layer_count}"));
     }
     let via_diameter = num("via_diameter", d.via_diameter);
     let via_drill = num("via_drill", d.via_drill);
