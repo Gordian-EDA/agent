@@ -846,25 +846,34 @@ Each component is keyed by its refdes and has:
   (the #1 readability defect on dense boards). A handful of focused blocks is right;
   a single `main` block is a smell on anything bigger than a few parts.
 
-## Layout (optional placement grid)
+## Layout (placement is automatic — blocks are your floorplan)
 
-The engine places parts automatically from connectivity — you usually need NO
-layout. It also AUTO-RECOGNIZES common idioms from your pin connections and
-co-places each as a tidy cluster — a crystal with its two load caps next to the
+The engine places parts automatically from connectivity, and AUTO-RECOGNIZES common
+idioms from your pin connections — a crystal with its two load caps next to the
 oscillator pins, a decoupling-cap bank along the IC's power rail. You do nothing
-special: just wire the netlist normally (crystal between two osc nets, caps between
-V+ and GND). `apply_design` returns `detected_idioms` so you can confirm what was
-recognized. For a board with a real floorplan, the top-level `layout:` is a 2D grid:
+special: wire the netlist normally (crystal between two osc nets, caps between V+ and
+GND). `apply_design` returns `detected_idioms` so you can confirm what was recognized.
 
-  layout:
-    - [usb, mcu, headers]   # row 0: usb left, mcu centre, headers right
-    - [~,   power]          # row 1: power below mcu; ~ is an empty cell
+Your main floorplan control is the BLOCK partition itself: the engine lays each block
+out as a module and flows the blocks LEFT→RIGHT in declaration order. So declaring your
+blocks in signal-flow order (power/input → processing → outputs) IS the floorplan — no
+explicit grid needed. Keep TIGHTLY-COUPLED blocks adjacent in the declaration order so
+their interconnect stays short (e.g. put an MCU between the sensor it reads and the LED
+it drives, not with another block in between).
 
-- Each cell names a BLOCK or a single refdes; column = left→right, row =
-  top→bottom (ordinal — spacing is computed for you). Rows may be ragged.
-- Only place the structural anchors (ICs, connectors, modules). Leave caps,
-  resistors, crystals OUT — the engine places them next to the part they wire to.
-- Omit `layout:` entirely and blocks flow left→right in declaration order.
+For fine control WITHIN a block, that block may carry its own 2-D `layout:` grid (a
+`layout:` key INSIDE the block, NOT at the top level — top-level `layout:` is rejected):
+
+  blocks:
+    mcu:
+      layout:               # rows of cells; each cell is a refdes or ~ (empty)
+        - [U1, J1]
+        - [U1, C1]
+      components: { ... }
+
+- Cells name a refdes; column = left→right, row = top→bottom (ordinal). Place only the
+  structural anchors (ICs, connectors); leave caps/resistors/crystals OUT — the engine
+  clusters them next to the part they wire to. Most blocks need no grid at all.
 
 ## Sugar (shorthands the compiler expands)
 
