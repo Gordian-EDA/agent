@@ -258,6 +258,17 @@ fn is_power_net(net: &str) -> bool {
     is_voltage_token(&u)
 }
 
+/// A NEGATIVE supply rail (`VEE`, `V-`, `-12V`, `-5V`). A decoupling/bulk cap with one
+/// pin on a negative supply is a VERTICAL rail tap (like a V+ or GND tap), NOT a
+/// horizontal series element. Without this, the satellite role classifier sees the cap's
+/// other net (e.g. VEE) as neither V+ nor ground and mis-orients it horizontal — the
+/// recurring defect on split-supply audio/analog power-entry sheets (e.g. a VEE↔GND bulk
+/// cap drawn sideways while its VCC↔GND twin is correctly vertical).
+fn is_neg_supply(net: &str) -> bool {
+    let u = net.to_ascii_uppercase();
+    matches!(u.as_str(), "VEE" | "V-") || (u.starts_with('-') && is_voltage_token(&u))
+}
+
 /// The side of the symbol body a pin sits on, from its local geometry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PinSide {
@@ -524,8 +535,13 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
                 // Pull-up / supply tap → vertical in the V+ band above its pin.
                 let c = col_for_side(side);
                 Cell { col: c, row: arow - 2, orient: orient_for(&s.pins, &n1, true) }
-            } else if is_ground(other) && is_rail(other) {
-                // Pull-down / ground return → vertical in the GND band below.
+            } else if is_ground(other) || is_neg_supply(other) {
+                // Pull-down / ground return OR negative-supply tap → vertical in the band
+                // below. A cap/part whose OTHER pin is GND (or VEE/V-) is a rail tap, not a
+                // series element — drop the old `is_rail(other)` qualifier on ground, which
+                // wrongly fell through to horizontal when GND wasn't flagged a rail in a
+                // multi-sheet sub-design (the split-supply VEE↔GND cap drawn sideways). The
+                // references declare power symbols so is_rail(GND) held there → inert for them.
                 let c = col_for_side(side);
                 Cell { col: c, row: arow + 2, orient: orient_for(&s.pins, &n1, true) }
             } else {
@@ -534,15 +550,19 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
                 let horiz = if side == PinSide::West { Orient::Left } else { Orient::Right };
                 Cell { col: c, row: arow + rank, orient: series_orient(&s.pins, &tap_net, horiz) }
             }
-        } else if is_vplus(&n1) && is_ground(&n2) || is_ground(&n1) && is_vplus(&n2) {
-            // Pure decoupling/bulk cap (V+↔GND, no signal pin). Seed it in the V+ band of
+        } else if (is_vplus(&n1) || is_neg_supply(&n1)) && is_ground(&n2)
+            || is_ground(&n1) && (is_vplus(&n2) || is_neg_supply(&n2))
+        {
+            // Pure decoupling/bulk cap (supply↔GND, no signal pin — V+ OR a negative rail
+            // like VEE/V-, so split-supply analog bypass caps are handled too). Seed it in
+            // the supply band of
             // the supply IC it bypasses — the anchor with the most pins on that V+ rail,
             // preferring a real IC — fanning successive caps into adjacent columns. With
             // DISTRIBUTED local power symbols the cap has NO wire pulling it toward the
             // rail, so the old spare-column seed STRANDED it far from the circuit (the #1
             // "stranded decoupling cap" critic defect on agent boards); seating it beside
             // its IC fixes that. Falls back to a spare column if no anchor uses the rail.
-            let vp = if is_vplus(&n1) { &n1 } else { &n2 };
+            let vp = if is_ground(&n1) { &n2 } else { &n1 };
             // The supply load is found by REFDES across all its units, not just the anchor
             // item's own pins: a multi-unit IC (op-amp, FPGA) carries its V+/V- on a separate
             // 2-pin POWER UNIT that isn't itself an anchor, so a per-item pin check finds no
