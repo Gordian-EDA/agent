@@ -1041,6 +1041,14 @@ WHICH channel to open.
 
 ## Triage levers (in preference order)
 
+0. **Wide power nets failing / signals crowding one layer → go 4-layer FIRST.**
+   When `route_board` fails a high-fanout power net (VCC/VIN/VOUT) or its output
+   says signals are crowding a single layer (e.g. a bottom GND pour leaves only the
+   top for signals), the decisive lever is `create_board(..., rules:{layers:4})` and
+   re-place — the high-fanout power nets become inner PLANES (connected by vias),
+   freeing both outer layers for signals. ACT on this immediately; do NOT spend
+   several re-place/re-hint rounds fighting wide traces on 2 layers first. If
+   route_board itself recommends more layers, that recommendation is the move.
 1. `set_placement_hints` — re-floorplan via groups/regions/edges (the biggest
    lever; placement dominates).
 2. `move_part({reference, x, y, rotation?})` — nudge ONE part to a position you
