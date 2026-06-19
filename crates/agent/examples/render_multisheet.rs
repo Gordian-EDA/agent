@@ -39,12 +39,70 @@ fn main() -> anyhow::Result<()> {
         eprintln!("only {} block(s) — multi-sheet needs a multi-block design", design.blocks.len());
     }
 
-    for (name, block) in &design.blocks {
-        // A single-block sub-design: cross-block nets now touch only this block's pins, so the
+    // Merge tiny blocks (< MERGE_MIN parts) into the bigger block they share the most (non-GND)
+    // nets with, so the agent's occasional over-split — e.g. a 3-part "power_out" that's just the
+    // output cap + terminal — doesn't render as a near-empty sheet the critic dings (buck
+    // power_out=6). Connectivity-based + deterministic; only the smallest blocks move.
+    const MERGE_MIN: usize = 4;
+    let block_nets = |b: &circuit_lang::model::Block| -> std::collections::HashSet<String> {
+        let mut s = std::collections::HashSet::new();
+        let mut add = |t: &circuit_lang::model::PinTarget| {
+            if let circuit_lang::model::PinTarget::Net(n) = t {
+                let u = n.to_ascii_uppercase();
+                if u != "GND" && !u.starts_with("GND") && u != "VSS" {
+                    s.insert(n.clone());
+                }
+            }
+        };
+        for c in b.components.values() {
+            for t in c.pins.values() {
+                add(t);
+            }
+            for unit in c.units.values() {
+                for t in unit.values() {
+                    add(t);
+                }
+            }
+        }
+        s
+    };
+    let bnames: Vec<String> = design.blocks.keys().cloned().collect();
+    let bnets: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        bnames.iter().map(|n| (n.clone(), block_nets(&design.blocks[n]))).collect();
+    let bsize = |n: &str| design.blocks[n].components.len();
+    let mut merge_into: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for n in &bnames {
+        if bsize(n) >= MERGE_MIN {
+            continue;
+        }
+        if let Some(t) = bnames
+            .iter()
+            .filter(|m| m.as_str() != n.as_str() && bsize(m) >= MERGE_MIN)
+            .max_by_key(|m| (bnets[n].intersection(&bnets[*m]).count(), bsize(m)))
+        {
+            println!("  [merge] tiny block '{n}' ({} parts) -> '{t}'", bsize(n));
+            merge_into.insert(n.clone(), t.clone());
+        }
+    }
+    let mut groups: IndexMap<String, Vec<String>> = IndexMap::new();
+    for n in &bnames {
+        if !merge_into.contains_key(n) {
+            groups.entry(n.clone()).or_default().push(n.clone());
+        }
+    }
+    for (n, t) in &merge_into {
+        groups.entry(t.clone()).or_default().push(n.clone());
+    }
+
+    for (name, gblocks) in &groups {
+        // A sub-design holding this group's block(s): cross-group nets touch only these pins, so the
         // engine auto-labels the single-pin ones as ports and keeps multi-pin ones internal.
         let mut sub = design.clone();
         sub.blocks = IndexMap::new();
-        sub.blocks.insert(name.clone(), block.clone());
+        for bn in gblocks {
+            sub.blocks.insert(bn.clone(), design.blocks[bn].clone());
+        }
+        let nparts: usize = gblocks.iter().map(|bn| design.blocks[bn].components.len()).sum();
 
         // ADDITIVE ROUTED A/B (the documented crossmin path to a default win): emit with the
         // shelf-pack seed AND the crossmin (GLOBAL_OPT) seed, keep whichever ROUTES with fewer
@@ -90,8 +148,7 @@ fn main() -> anyhow::Result<()> {
         let out_png = format!("{out_dir}/{name}.png");
         std::fs::write(&out_png, png)?;
         println!(
-            "{name}: {} parts, {} warnings, {} wire-xings -> {out_png}",
-            block.components.len(),
+            "{name}: {nparts} parts, {} warnings, {} wire-xings -> {out_png}",
             emit.layout_warnings.len(),
             emit.wire_crossings
         );
