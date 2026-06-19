@@ -1026,24 +1026,31 @@ fn place_crystal(
             .get(net)
             .into_iter()
             .flatten()
-            .filter(|(j, _)| anchors.contains(j))
+            // Exclude the crystal itself: a 4-pin Crystal_GND24 has ≥3 pins so it lands in `anchors`,
+            // and an OSC net taps BOTH the IC and the crystal — without this the net reads as tapping
+            // two anchors and is rejected (the crystal idiom then never fires for grounded-case parts).
+            .filter(|(j, _)| anchors.contains(j) && *j != yi)
             .map(|(j, num)| (*j, num.clone()))
             .collect();
         (hits.len() == 1).then(|| hits[0].clone())
     };
     {
-        let nets: Vec<String> = items[yi].pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
-        if nets.len() != 2 || nets[0] == nets[1] {
+        // The crystal's OSC nets = its nets that tap exactly THIS anchor. A 4-pin Crystal_GND24 also
+        // carries 2 case-GROUND (or NC) nets that do NOT tap the IC — ignore those. Requiring the
+        // crystal to have EXACTLY 2 nets total wrongly rejected every grounded-case crystal (the COMMON
+        // real variant the agent emits), so the idiom silently never fired and the crystal sprawled far
+        // from the OSC pins with long dog-leg routes (the recurring MCU-sheet defect).
+        let osc: Vec<(String, String)> = items[yi]
+            .pins
+            .iter()
+            .filter_map(|(_, _, n)| n.clone())
+            .filter_map(|n| anchor_pin(&n).filter(|(j, _)| *j == ai).map(|(_, num)| (n, num)))
+            .collect();
+        if osc.len() != 2 || osc[0].0 == osc[1].0 {
             return None;
         }
-        let (xa, xb) = (nets[0].clone(), nets[1].clone());
-        // Both oscillator nets must tap exactly THIS IC (one anchor pin each).
-        let (Some((aa, pa)), Some((ab, pb))) = (anchor_pin(&xa), anchor_pin(&xb)) else {
-            return None;
-        };
-        if aa != ai || ab != ai {
-            return None;
-        }
+        let (xa, pa) = (osc[0].0.clone(), osc[0].1.clone());
+        let (xb, pb) = (osc[1].0.clone(), osc[1].1.clone());
         // Bind each load cap to the osc net it shares with the crystal.
         let cap_on = |osc: &str| -> Option<usize> {
             caps.iter().copied().find(|&ci| items[ci].pins.iter().any(|(_, _, n)| n.as_deref() == Some(osc)))

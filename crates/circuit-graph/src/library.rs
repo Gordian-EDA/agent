@@ -18,7 +18,15 @@ const LED_LIBS: &[&str] = &["LED", "Device:D"];
 /// is the crystal *between two distinct signal nets that both tap the same anchor*,
 /// with one ground-referenced load cap on each net.
 static CRYSTAL_ROLES: &[Role] = &[
-    Role::one("anchor", NodePred::PinsAtLeast(3)),
+    // The anchor is the IC the crystal hangs off — NOT the crystal itself. A 4-pin crystal (the
+    // grounded-case Crystal_GND24 variant the agent actually uses) has ≥3 pins, so without this
+    // exclusion it ALSO matches the anchor role; the resulting role ambiguity breaks the match and the
+    // crystal idiom silently fails to fire (crystal then sprawls far from the OSC pins). Mirrors the
+    // decoupling pattern's `Not(Connector)` anchor guard.
+    Role::one(
+        "anchor",
+        NodePred::And(&[NodePred::PinsAtLeast(3), NodePred::Not(&NodePred::LibAny(CRYSTAL_LIBS))]),
+    ),
     Role::one("crystal", NodePred::LibAny(CRYSTAL_LIBS)),
     Role::one("cap_a", NodePred::And(&[NodePred::LibAny(CAP_LIBS), NodePred::Pins(2)])),
     Role::one("cap_b", NodePred::And(&[NodePred::LibAny(CAP_LIBS), NodePred::Pins(2)])),
