@@ -98,6 +98,7 @@ pub fn read_problem(path: &Path) -> io::Result<BoardProblem> {
         clearance: 0.2,
         via_diameter: 0.6,
         via_drill: 0.3,
+        net_widths: Default::default(),
     };
 
     Ok(BoardProblem {

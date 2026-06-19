@@ -102,6 +102,10 @@ pub struct DraftRules {
     /// out their inner pins onto inner layers; 2 is the default for simple boards.
     #[serde(default = "default_layers")]
     pub layer_count: u32,
+    /// Per-net trace-width overrides (net name → mm) — fat copper for power/high-current
+    /// nets, thin for signals. A net not listed uses `min_trace_width`.
+    #[serde(default)]
+    pub net_widths: std::collections::BTreeMap<String, f64>,
 }
 
 fn default_layers() -> u32 {
@@ -116,6 +120,7 @@ impl Default for DraftRules {
             via_diameter: 0.6,
             via_drill: 0.3,
             layer_count: 2,
+            net_widths: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -326,12 +331,29 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
             (via_diameter - via_drill) / 2.0
         ));
     }
+    // Per-net trace widths: {"VCC": 0.8, "GND": 0.8} — fat power, thin signals.
+    let mut net_widths = std::collections::BTreeMap::new();
+    if let Some(nw) = obj.get("net_widths") {
+        let map = nw
+            .as_object()
+            .ok_or_else(|| "rules.net_widths must be an object {net: width_mm}".to_string())?;
+        for (net, w) in map {
+            let w = w
+                .as_f64()
+                .ok_or_else(|| format!("rules.net_widths[{net}] must be a number (mm)"))?;
+            if w <= 0.0 {
+                return Err(format!("rules.net_widths[{net}] must be > 0, got {w}"));
+            }
+            net_widths.insert(net.clone(), w);
+        }
+    }
     Ok(DraftRules {
         clearance: num("clearance", d.clearance),
         min_trace_width: num("min_trace_width", d.min_trace_width),
         via_diameter,
         via_drill,
         layer_count,
+        net_widths,
     })
 }
 
@@ -1364,6 +1386,9 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     // (the one place v1 keepouts bite: routing, not placement).
     let mut rp = to_route_problem(&problem, &placements);
     inject_keepouts(&mut rp, &draft.keepouts);
+    // Per-net trace widths from the board rules: fat power copper, thin signals. (Plane
+    // nets on a 4-layer board are pours, not traces, so a width on them is simply moot.)
+    rp.net_widths = draft.rules.net_widths.clone();
 
     // On a multilayer board the highest-fanout power/ground nets become copper
     // PLANES (emitted as zones at export) instead of point-to-point traces — the

@@ -331,8 +331,6 @@ fn stitch(
     cell_routes: &[CellRoute],
     skip: &std::collections::BTreeSet<String>,
 ) -> RouteSolution {
-    let width = problem.min_trace_width;
-
     // Group cell copper by net, preserving deterministic (net, then layer) order.
     // Per net: per-layer list of polylines, plus the net's via sites.
     let mut by_net: BTreeMap<String, NetCopper> = BTreeMap::new();
@@ -363,7 +361,7 @@ fn stitch(
                 traces.push(Trace {
                     connection: connection.clone(),
                     layer: crate::problem::LayerRef(layer.clone()),
-                    width,
+                    width: problem.net_width(&connection), // per-net: fat power, thin signals
                     path: simplified,
                 });
             }

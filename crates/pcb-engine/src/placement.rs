@@ -1660,6 +1660,9 @@ pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> Rou
         // model via sizing, so it carries these constants.
         via_diameter: DEFAULT_VIA_DIAMETER,
         via_drill: DEFAULT_VIA_DRILL,
+        // Per-net widths are applied by the agent layer (route_board) after this, from
+        // the board's design rules; placement itself is width-agnostic.
+        net_widths: std::collections::BTreeMap::new(),
     }
 }
 

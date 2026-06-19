@@ -77,6 +77,7 @@ fn round_trip_problem() {
         clearance: 0.2,
         via_diameter: 0.6,
         via_drill: 0.3,
+        net_widths: Default::default(),
         obstacles: vec![Obstacle {
             kind: "oval".to_owned(),
             layers: vec![LayerRef::bottom()],

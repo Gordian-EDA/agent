@@ -109,6 +109,25 @@ pub struct RouteProblem {
     pub via_diameter: f64,
     #[serde(default = "default_via_drill")]
     pub via_drill: f64,
+    /// Per-net trace width overrides (net name → mm). A net not listed uses
+    /// `min_trace_width`. This is how power/high-current nets get fat copper while
+    /// signals stay thin — the router emits each net at its width and (conservatively)
+    /// spaces every net for the widest so the board stays DRC-clean. Empty = the old
+    /// uniform-width behaviour.
+    #[serde(default)]
+    pub net_widths: std::collections::BTreeMap<String, f64>,
+}
+
+impl RouteProblem {
+    /// Trace width to emit for `net`: its per-net override, else the board minimum.
+    pub fn net_width(&self, net: &str) -> f64 {
+        self.net_widths.get(net).copied().unwrap_or(self.min_trace_width)
+    }
+    /// The widest trace any net may use — clearance/inflation are sized to this so a fat
+    /// power trace never violates spacing. Defaults to `min_trace_width`.
+    pub fn max_route_width(&self) -> f64 {
+        self.net_widths.values().copied().fold(self.min_trace_width, f64::max)
+    }
 }
 
 /// A rectangular (or oval, treated as rect in v1) copper obstacle.

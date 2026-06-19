@@ -763,6 +763,7 @@ mod tests {
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
+            net_widths: Default::default(),
         };
         let s = RouteSolution {
             traces: vec![],
@@ -870,6 +871,7 @@ mod tests {
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
+            net_widths: Default::default(),
         };
         let mesh = CapacityMesh::build(&p);
         let result = global_route_with_mesh(&p, &mesh);

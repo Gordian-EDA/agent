@@ -210,12 +210,13 @@ pub fn route_with(
     };
 
     // Clearance halo: when a net claims a cell, foreign nets must stay a full
-    // (min_trace_width + clearance) centre-to-centre away. In grid cells that
-    // is `ceil((min_trace_width + clearance) / pitch)`; we mark that Chebyshev
-    // radius around each routed cell as the net's copper so later nets keep
-    // their distance while the owning net still routes freely through it.
+    // (width + clearance) centre-to-centre away. Sized to the WIDEST net so even a fat
+    // power trace is spaced correctly (conservative — with no per-net widths it is the
+    // old min_trace_width + clearance). Marked as a Chebyshev radius around each routed
+    // cell so later nets keep their distance while the owning net routes freely through.
     let pitch = grid::grid_pitch(problem);
-    let halo = (((problem.min_trace_width + problem.clearance) / pitch).ceil() as usize).max(1);
+    let halo =
+        (((problem.max_route_width() + problem.clearance) / pitch).ceil() as usize).max(1);
 
     let mut traces: Vec<Trace> = Vec::new();
     let mut vias: Vec<Via> = Vec::new();
@@ -349,7 +350,7 @@ fn emit_path(
     if path.is_empty() {
         return;
     }
-    let width = problem.min_trace_width;
+    let width = problem.net_width(connection); // per-net: fat power, thin signals
     let layer_count = problem.layer_count.max(1) as usize;
 
     // Walk the path, accumulating same-layer runs; a layer change closes the
