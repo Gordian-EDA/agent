@@ -50,6 +50,24 @@ from point 1 … (enclosure)"`):
    ring an outward corridor; thinner escape traces in the pad field; and verify the
    through-via anti-pads in In1/In2 once a signal actually reaches B.
 
+3. **REFINED with `escape-min` (Jun 18).** A *minimal* case — ONE center ball as the
+   only signal, surrounded by no-connect obstacle balls, 2-layer (no planes, no
+   congestion) — STILL fails. So escape is not congestion/ordering; it's the maze
+   router itself on an enclosed pad. Instrumented chain:
+   - The A* *does* find a path (`path=true`) but reconcile drops it → `Unconnected`.
+   - `emit_path` emits the via at layer changes; the connectivity oracle treats a via
+     on a pad as connected — so neither of those is the gap.
+   - A smaller via (0.45/0.25) does **not** help → not via clearance.
+   - **Leading hypothesis:** the A* takes the *cheaper* F-only path that threads the
+     sub-clearance channel between balls (1.27 mm pitch − 0.75 mm pad = 0.52 mm gap vs
+     ~0.65 mm needed for trace+2×clearance) instead of paying the via cost (25); that
+     illegal squeeze then gets dropped by the geometry lint as unconnected, and the
+     via-escape alternative is never explored because a "path" already succeeded.
+   - **Fix direction:** the grid's obstacle halo must mark sub-clearance channels as
+     blocked (so the only legal path is the via-escape), via `grid::obstacle_inflation`
+     — but that is global and must be gated on all 32 boards; OR a dedicated escape pass
+     that bypasses the maze router for enclosed pads. `escape-min` is the minimal metric.
+
 ## Design (incremental — one verified step per loop)
 
 1. **Plane-aware routable layers.** Signal routing must use only signal layers

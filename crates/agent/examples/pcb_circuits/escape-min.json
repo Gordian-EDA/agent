@@ -1,0 +1,28 @@
+{
+  "description": "minimal BGA escape: center ball C3 is the only signal, surrounded by NC obstacle balls; must via to B and escape to J1",
+  "rules": {
+    "layers": 2
+  },
+  "bounds": {
+    "min_x": 0.0,
+    "max_x": 24.0,
+    "min_y": 0.0,
+    "max_y": 18.0
+  },
+  "parts": [
+    {
+      "reference": "U1",
+      "footprint": "Package_BGA:BGA-25_6.35x6.35mm_Layout5x5_P1.27mm",
+      "pad_nets": {
+        "C3": "SIG"
+      }
+    },
+    {
+      "reference": "J1",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "SIG"
+      }
+    }
+  ]
+}
