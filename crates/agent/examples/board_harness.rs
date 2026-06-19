@@ -83,6 +83,10 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
     std::fs::create_dir_all(&out_dir).unwrap();
     if let Some(p) = exported["path"].as_str() {
         let _ = std::fs::copy(p, out_dir.join("board.kicad_pcb"));
+        // The sibling .kicad_pro carries the design rules (net class) — copy it so a
+        // re-run of kicad-cli DRC on the /tmp board checks against the engine's rules.
+        let pro = PathBuf::from(p).with_extension("kicad_pro");
+        let _ = std::fs::copy(&pro, out_dir.join("board.kicad_pro"));
     }
     // Engine debug render (routed view).
     if let Ok(render) = tools.run("render_board", json!({ "view": "routed" }), &ctx) {

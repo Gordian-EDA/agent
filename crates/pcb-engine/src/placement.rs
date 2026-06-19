@@ -1766,6 +1766,7 @@ mod tests {
                 r0603("R2", Some("B"), Some("C")),
                 r0603("R3", Some("C"), Some("A")),
             ],
+            outline: None,
         };
         let hints = PlacementHints::default();
         let a = place(&problem, &hints);
@@ -1795,6 +1796,7 @@ mod tests {
                 r0603("R2", Some("B"), Some("C")),
                 r0603("R3", Some("C"), Some("A")),
             ],
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         let r1 = res.placements.iter().find(|p| p.reference == "R1").unwrap();
@@ -1860,6 +1862,7 @@ mod tests {
                 r0603("C2", Some("VCC"), Some("GND")),
                 sink,
             ],
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         let u1 = res.placements.iter().find(|p| p.reference == "U1").unwrap();
@@ -1898,6 +1901,7 @@ mod tests {
                 r0603("R8", None, None),
                 r0603("R9", Some("L"), Some("P2")),
             ],
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         assert!(res.legal, "{res:?}");
@@ -1939,6 +1943,7 @@ mod tests {
                 r0603("R2", Some("B"), Some("C")),
                 r0603("R3", None, None),
             ],
+            outline: None,
         };
         let hints = PlacementHints {
             groups: vec![GroupHint {
@@ -2002,6 +2007,7 @@ mod tests {
                 r0603("R1", Some("NET1"), Some("X")),
                 r0603("R2", Some("NET2"), Some("Y")),
             ],
+            outline: None,
         };
         let hints = PlacementHints {
             groups: vec![GroupHint {
@@ -2044,6 +2050,7 @@ mod tests {
             min_trace_width: 0.2,
             keepouts: vec![],
             parts,
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         assert!(
@@ -2075,6 +2082,7 @@ mod tests {
                 r0603("R1", Some("SIG"), Some("GND")),
                 r0603("R2", Some("SIG"), Some("GND")),
             ],
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         assert!(res.legal);
@@ -2122,6 +2130,7 @@ mod tests {
                 r0603("R1", Some("SIG"), Some("GND")),
                 r0603("R2", Some("SIG"), Some("GND")),
             ],
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         assert!(res.legal, "placement legal: {res:?}");
@@ -2153,6 +2162,7 @@ mod tests {
                 r0603("R1", Some("A"), Some("B")),
                 r0603("R2", Some("B"), Some("C")),
             ],
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         assert!(res.report.hpwl >= 0.0, "HPWL must be non-negative");
@@ -2179,6 +2189,7 @@ mod tests {
                 r0603("R2", Some("B"), Some("C")),
                 r0603("R3", Some("C"), Some("A")),
             ],
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         assert!(!res.legal, "an impossible board must report legal:false");
@@ -2210,6 +2221,7 @@ mod tests {
             min_trace_width: 0.2,
             keepouts: vec![],
             parts: vec![],
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         assert!(res.legal);

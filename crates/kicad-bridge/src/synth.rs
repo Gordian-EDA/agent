@@ -100,6 +100,12 @@ pub struct ZoneSpec {
     pub net_name: String,
     pub layer_name: String,
     pub fill_rects: Vec<[f64; 4]>,
+    /// Zone copper-to-foreign clearance (mm) — the board's design clearance, so the
+    /// zone is checked against the SAME rule the router used (not KiCAD's 0.2 default,
+    /// which false-flags a finer-pitch board's plane).
+    pub clearance: f64,
+    /// Minimum zone copper width (mm) — the board's min trace width.
+    pub min_thickness: f64,
 }
 
 /// [`synthesize_board_layers`] plus copper-plane `zones` (power pours) emitted
@@ -159,9 +165,9 @@ fn push_zone(out: &mut String, net_code: i32, z: &ZoneSpec, idx: usize) {
         // connection and is low-impedance. Foreign pads are still carved out by the
         // anti-pad keepouts baked into `fill_rects`, so this only ties same-net copper.
         "\t(zone\n\t\t(net {net_code})\n\t\t(net_name \"{}\")\n\t\t(layer \"{}\")\n\
-         \t\t(uuid \"{uuid}\")\n\t\t(hatch edge 0.5)\n\t\t(connect_pads yes (clearance 0.2))\n\
-         \t\t(min_thickness 0.2)\n\t\t(fill yes (thermal_gap 0.3) (thermal_bridge_width 0.5))",
-        z.net_name, z.layer_name
+         \t\t(uuid \"{uuid}\")\n\t\t(hatch edge 0.5)\n\t\t(connect_pads yes (clearance {clr}))\n\
+         \t\t(min_thickness {mt})\n\t\t(fill yes (thermal_gap 0.3) (thermal_bridge_width 0.5))",
+        z.net_name, z.layer_name, clr = fmt_num(z.clearance), mt = fmt_num(z.min_thickness)
     );
     // Zone outline = the board's fill bounding box (KiCAD requires a polygon; the
     // filled_polygon islands below are the authoritative copper).

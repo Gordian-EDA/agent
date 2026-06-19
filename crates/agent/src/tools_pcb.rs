@@ -1854,6 +1854,8 @@ fn plane_zones(
                 net_name: net.clone(),
                 layer_name: format!("In{layer_idx}.Cu"),
                 fill_rects: fill,
+                clearance: rules.clearance,
+                min_thickness: rules.min_trace_width,
             }
         })
         .collect()
@@ -1950,7 +1952,13 @@ fn pour_zones(
                 }
             }
             let fill = prune_islands(plane_fill_rects(bounds, BOARD_EDGE_MARGIN_MM, &ko), &anchors);
-            Some(ZoneSpec { net_name: net.clone(), layer_name: kname, fill_rects: fill })
+            Some(ZoneSpec {
+                net_name: net.clone(),
+                layer_name: kname,
+                fill_rects: fill,
+                clearance: rules.clearance,
+                min_thickness: rules.min_trace_width,
+            })
         })
         .collect()
 }
@@ -2205,6 +2213,34 @@ fn content_bounds(
 /// Synthesize the routed board into a `.kicad_pcb`: requires a placed + routed
 /// draft, writes the board (footprints from the engine placement + the stored
 /// copper) and, when a recent enough KiCAD is available, runs `kicad-cli pcb
+/// Write a sibling `.kicad_pro` for `board_path` declaring the board's design rules as
+/// the "Default" net class, so KiCAD DRC (and any downstream tool that opens the board)
+/// checks copper against the engine's clearance / trace width / via — NOT KiCAD's
+/// built-in 0.2 mm netclass default, which false-flags a finer-pitch board whose
+/// footprint pads are inherently closer than 0.2 mm. KiCAD loads the same-stem project.
+fn write_kicad_project(board_path: &std::path::Path, rules: &DraftRules) -> std::io::Result<()> {
+    let stem = board_path.file_stem().and_then(|s| s.to_str()).unwrap_or("board");
+    let pro = board_path.with_extension("kicad_pro");
+    let vmin = (rules.via_diameter - 0.05).max(0.1);
+    let doc = json!({
+        "board": {"design_settings": {"rules": {
+            "min_clearance": 0.0, "min_track_width": 0.0,
+            "min_via_diameter": vmin, "min_through_hole_diameter": 0.1
+        }}},
+        "meta": {"filename": format!("{stem}.kicad_pro"), "version": 1},
+        "net_settings": {"classes": [{
+            "name": "Default",
+            "clearance": rules.clearance, "track_width": rules.min_trace_width,
+            "via_diameter": rules.via_diameter, "via_drill": rules.via_drill,
+            "microvia_diameter": 0.3, "microvia_drill": 0.1,
+            "diff_pair_gap": 0.25, "diff_pair_width": 0.2,
+            "bus_width": 12.0, "line_style": 0, "wire_width": 6.0,
+            "pcb_color": "rgba(0, 0, 0, 0.000)", "schematic_color": "rgba(0, 0, 0, 0.000)"
+        }], "meta": {"version": 3}}
+    });
+    std::fs::write(pro, serde_json::to_string_pretty(&doc).unwrap_or_default())
+}
+
 /// drc` and reports the counts.
 pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(draft) = BoardDraft::load(ctx) else {
@@ -2323,6 +2359,11 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     };
     write_solution(&path, &stored.solution, &board)
         .with_context(|| format!("writing routed copper onto {}", path.display()))?;
+    // Sibling .kicad_pro declaring the board's design rules, so kicad-cli DRC (and any
+    // downstream tool) checks against the SAME clearance/width/via the router used — not
+    // KiCAD's 0.2 mm netclass default, which false-flags a finer-pitch board. KiCAD loads
+    // the same-stem project when opening the board.
+    let _ = write_kicad_project(&path, &draft.rules);
 
     let mut out = json!({
         "ok": true,
