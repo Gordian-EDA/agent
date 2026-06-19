@@ -798,7 +798,7 @@ fn place_problem_from_draft(
         .map(|k| k.rect.clone())
         .collect();
     Ok(PlaceProblem {
-        bounds: draft.bounds.clone(),
+        bounds: routing_bounds(draft),
         clearance: draft.rules.clearance,
         layer_count: draft.rules.layer_count,
         min_trace_width: draft.rules.min_trace_width,
@@ -806,6 +806,33 @@ fn place_problem_from_draft(
         keepouts,
         outline: draft.outline.clone(),
     })
+}
+
+/// KiCAD's copper-to-board-edge clearance (its default). Copper closer than this to the
+/// Edge.Cuts is a `copper_edge_clearance` fault.
+const EDGE_CLEAR_MM: f64 = 0.5;
+
+/// The bounds the placer + router actually work inside. For a board with NO custom outline the
+/// export auto-tightens the edge to copper + 1 mm, so any copper is already ≥ 1 mm from the
+/// finished edge — no inset needed. But a CUSTOM outline is exported verbatim, so copper routed
+/// to the raw `bounds` lands right on that edge and trips KiCAD's 0.5 mm copper-to-edge rule
+/// (a dense custom-outline board shipped 42 such faults). Inset the working bounds by the edge
+/// clearance so place + route keep copper off the edge; the exported Edge.Cuts stays the user's
+/// real outline. (Inset the bbox; the lint also checks distance to the outline POLYGON edges,
+/// catching the non-bbox edges of a non-rectangular outline.)
+fn routing_bounds(draft: &BoardDraft) -> Bounds {
+    if draft.outline.is_none() {
+        return draft.bounds.clone();
+    }
+    let b = &draft.bounds;
+    // Never invert a small board: clamp the inset so min stays < max.
+    let inset = EDGE_CLEAR_MM.min((b.max_x - b.min_x) / 2.0 - 0.1).min((b.max_y - b.min_y) / 2.0 - 0.1);
+    Bounds {
+        min_x: b.min_x + inset,
+        max_x: b.max_x - inset,
+        min_y: b.min_y + inset,
+        max_y: b.max_y - inset,
+    }
 }
 
 /// JSON shape for one placed part, returned by `place_board` (and reused as the
