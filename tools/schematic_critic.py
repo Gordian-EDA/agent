@@ -201,6 +201,10 @@ def main():
     ap.add_argument("--engine-clean", action="store_true",
                     help="engine geometry analysis confirms 0 wires through any body AND a "
                          "complete netlist; suppress wire-through-body + dangling-pin (FPs)")
+    ap.add_argument("--samples", type=int, default=1,
+                    help="grade N times and report the MEDIAN-score run — a noise-robust "
+                         "verdict (the model has ~±1-2 run-to-run variance, so a single "
+                         "sample is unreliable for gating or comparison)")
     args = ap.parse_args()
 
     base = os.environ.get("OPENAI_BASE_URL", "").rstrip("/")
@@ -243,27 +247,47 @@ def main():
         # it is deprecated on opus-4-8 / gpt-5.x and 400s the request.)
         "max_tokens": 6000,
     }
-    req = urllib.request.Request(
-        f"{base}/chat/completions",
-        data=json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=240) as resp:
-            out = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        msg = e.read().decode(errors="replace")
+    def grade_once():
+        """One API call → (result, text). Returns None on a request/parse failure."""
+        req = urllib.request.Request(
+            f"{base}/chat/completions",
+            data=json.dumps(body).encode(),
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        )
         try:
-            msg = json.loads(msg).get("error", {}).get("message", msg)
-        except Exception:
-            pass
-        sys.exit(f"critic: model `{args.model}` request failed (HTTP {e.code}): {msg[:300]}")
-    text = out["choices"][0]["message"]["content"].strip()
-    try:
-        result = extract_json(text)
-    except json.JSONDecodeError:
-        print(text)
+            with urllib.request.urlopen(req, timeout=240) as resp:
+                out = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            msg = e.read().decode(errors="replace")
+            try:
+                msg = json.loads(msg).get("error", {}).get("message", msg)
+            except Exception:
+                pass
+            sys.exit(f"critic: model `{args.model}` request failed (HTTP {e.code}): {msg[:300]}")
+        text = out["choices"][0]["message"]["content"].strip()
+        try:
+            return extract_json(text), text
+        except json.JSONDecodeError:
+            return None, text
+
+    n = max(1, args.samples)
+    runs = []  # (score, result, text)
+    last_text = ""
+    for _ in range(n):
+        r, t = grade_once()
+        last_text = t
+        if r is not None and isinstance(r.get("score"), (int, float)):
+            runs.append((float(r["score"]), r, t))
+    if not runs:
+        print(last_text)
         sys.exit(2)
+    # Representative = the MEDIAN-score run (its score IS the median for odd n, and its
+    # defects/dimensions stay self-consistent — better than averaging incoherent verdicts).
+    runs.sort(key=lambda x: x[0])
+    score_list = [s for s, _, _ in runs]
+    result, text = runs[len(runs) // 2][1], runs[len(runs) // 2][2]
+    if n > 1:
+        print(f"# {len(runs)}/{n} samples; scores {score_list}; median run shown")
 
     # The engine-clean contract is enforced in code too, in case the model slips.
     if args.engine_clean:
