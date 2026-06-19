@@ -191,8 +191,8 @@ impl Footprint {
         // catches). Re-parse each custom pad's primitive bounding box from the raw
         // source and grow the pad to it. (Same kiutils-drops-geometry class as the
         // fp_arc/fp_circle courtyard fixes.)
-        if pads.iter().any(|p| p.shape == "custom") {
-            if let Ok(raw) = std::fs::read_to_string(path) {
+        if pads.iter().any(|p| p.shape == "custom")
+            && let Ok(raw) = std::fs::read_to_string(path) {
                 let bboxes = custom_pad_bboxes(&raw);
                 let mut bi = 0;
                 for pad in pads.iter_mut().filter(|p| p.shape == "custom") {
@@ -202,7 +202,6 @@ impl Footprint {
                     bi += 1;
                 }
             }
-        }
         let (courtyard, courtyard_source) = courtyard_bbox(ast, &pads);
         let bbox = overall_bbox(ast, &pads).unwrap_or_else(BBox::zero);
 
@@ -243,14 +242,13 @@ pub(crate) fn custom_pad_bboxes(raw: &str) -> Vec<(f64, f64)> {
         while let Some(r) = block[p..].find("(xy ") {
             let s = p + r + "(xy ".len();
             let mut it = block[s..].split_whitespace();
-            if let (Some(xs), Some(ys)) = (it.next(), it.next()) {
-                if let (Ok(x), Ok(y)) =
+            if let (Some(xs), Some(ys)) = (it.next(), it.next())
+                && let (Ok(x), Ok(y)) =
                     (xs.parse::<f64>(), ys.trim_end_matches(')').parse::<f64>())
                 {
                     hx = hx.max(x.abs());
                     hy = hy.max(y.abs());
                 }
-            }
             p = s;
         }
         out.push((hx, hy));
@@ -328,26 +326,24 @@ fn graphic_points(g: &kiutils_kicad::FpGraphic) -> Vec<[f64; 2]> {
     // conservatively by a square of side = the chord length centred on the chord
     // midpoint; this contains any arc up to a semicircle, which every courtyard
     // arc is. (Recovers the HC49 crystal's true 8.47mm extent from start/end.)
-    if g.token == "fp_arc" {
-        if let (Some(s), Some(e)) = (g.start, g.end) {
+    if g.token == "fp_arc"
+        && let (Some(s), Some(e)) = (g.start, g.end) {
             let mid = [(s[0] + e[0]) / 2.0, (s[1] + e[1]) / 2.0];
             let r = ((s[0] - e[0]).powi(2) + (s[1] - e[1]).powi(2)).sqrt() / 2.0;
             pts.push([mid[0] - r, mid[1] - r]);
             pts.push([mid[0] + r, mid[1] + r]);
         }
-    }
     // An `fp_circle` ((center) + an `(end)` point on the circumference) bounds a
     // disc of that radius — but only the two stored points would be read, missing
     // the ±radius extent on the other quadrants. A radial cap / round footprint's
     // circular courtyard would then be badly under-sized (the D8 electrolytic's
     // 8mm courtyard read as a sliver). Add the disc's bounding box.
-    if g.token == "fp_circle" {
-        if let (Some(c), Some(e)) = (g.center.or(g.start), g.end) {
+    if g.token == "fp_circle"
+        && let (Some(c), Some(e)) = (g.center.or(g.start), g.end) {
             let r = ((c[0] - e[0]).powi(2) + (c[1] - e[1]).powi(2)).sqrt();
             pts.push([c[0] - r, c[1] - r]);
             pts.push([c[0] + r, c[1] + r]);
         }
-    }
     pts
 }
 

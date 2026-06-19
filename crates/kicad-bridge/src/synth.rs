@@ -348,10 +348,10 @@ fn push_layers(out: &mut String, layer_count: u32) {
     // load + DRC); the 2-layer board keeps the canonical (0 F.Cu)(2 B.Cu).
     if layer_count >= 4 {
         for i in 1..=(layer_count - 2) {
-            let _ = write!(out, "\t\t({i} \"In{i}.Cu\" signal)\n");
+            let _ = writeln!(out, "\t\t({i} \"In{i}.Cu\" signal)");
         }
         let b = layer_count - 1;
-        let _ = write!(out, "\t\t({b} \"B.Cu\" signal)\n");
+        let _ = writeln!(out, "\t\t({b} \"B.Cu\" signal)");
     } else {
         out.push_str("\t\t(2 \"B.Cu\" signal)\n");
     }
@@ -378,8 +378,8 @@ fn push_nets(out: &mut String, net_codes: &BTreeMap<String, i32>) {
 /// outline is that closed polygon (one `gr_line` per edge) — circle (many points),
 /// square, star, any custom shape. Otherwise the `bounds` rectangle (the default).
 fn push_edge_cuts(out: &mut String, bounds: &Bounds, outline: Option<&[Point2]>) {
-    if let Some(pts) = outline {
-        if pts.len() >= 3 {
+    if let Some(pts) = outline
+        && pts.len() >= 3 {
             for i in 0..pts.len() {
                 let a = &pts[i];
                 let b = &pts[(i + 1) % pts.len()];
@@ -395,7 +395,6 @@ fn push_edge_cuts(out: &mut String, bounds: &Bounds, outline: Option<&[Point2]>)
             }
             return;
         }
-    }
     let (x0, y0) = (fmt_num(bounds.min_x), fmt_num(bounds.min_y));
     let (x1, y1) = (fmt_num(bounds.max_x), fmt_num(bounds.max_y));
     let uuid = synth_uuid(&format!("edge:{x0}:{y0}:{x1}:{y1}"));
@@ -562,11 +561,10 @@ fn transform_property(node: &str, reference: &str) -> String {
     // Value: keep the property (KiCAD expects it to exist) but hide it. Its text
     // is the full footprint library name, which on a small board dominates the
     // render and overlaps neighbouring parts; a hidden value is conventional.
-    if node.starts_with("(property \"Value\"") && !node.contains("(hide yes)") {
-        if let Some(hidden) = inject_before_close(node, "(hide yes)") {
+    if node.starts_with("(property \"Value\"") && !node.contains("(hide yes)")
+        && let Some(hidden) = inject_before_close(node, "(hide yes)") {
             return hidden;
         }
-    }
     node.to_owned()
 }
 

@@ -1496,11 +1496,10 @@ fn is_legal(problem: &PlaceProblem, half: &[(f64, f64)], margin: f64, pos: &[Poi
         // box alone would allow. (The centre, not the courtyard: a mounting hole's
         // courtyard legitimately overhangs a notch while its copper stays inside; the
         // routing grid block is what actually holds copper to the outline.)
-        if let Some(poly) = &problem.outline {
-            if !crate::problem::point_in_polygon(&pos[i], poly) {
+        if let Some(poly) = &problem.outline
+            && !crate::problem::point_in_polygon(&pos[i], poly) {
                 return false;
             }
-        }
         // A part overlapping a signal-layer keep-out is illegal (its pads can't route).
         for k in &problem.keepouts {
             let (ox, oy) = part_keepout_overlap(&pos[i], half[i], k);
