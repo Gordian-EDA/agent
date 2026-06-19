@@ -1,0 +1,341 @@
+{
+  "description": "MULTI-IC SYSTEM: BGA-77 + QFN-32 + TSSOP-20 with two inter-IC buses, per-IC decoupling, 2 connectors, GND pour, 4-layer planes \u2014 dense multi-part inter-IC routing stress",
+  "rules": {
+    "layers": 4,
+    "clearance": 0.13,
+    "min_trace_width": 0.13,
+    "via_diameter": 0.5,
+    "via_drill": 0.3,
+    "pours": [
+      {
+        "net": "GND",
+        "layer": "bottom"
+      }
+    ]
+  },
+  "bounds": {
+    "min_x": 0.0,
+    "max_x": 130.0,
+    "min_y": 0.0,
+    "max_y": 80.0
+  },
+  "parts": [
+    {
+      "reference": "U1",
+      "footprint": "Package_BGA:Analog_BGA-77_9x15mm_Layout7x11_P1.27mm",
+      "pad_nets": {
+        "A1": "BUS_A0",
+        "A2": "BUS_A1",
+        "A3": "BUS_A2",
+        "A4": "BUS_A3",
+        "A5": "BUS_A4",
+        "A6": "BUS_A5",
+        "A7": "BUS_A6",
+        "B1": "BUS_A7",
+        "B2": "VCC",
+        "B3": "GND",
+        "B4": "VCC",
+        "B5": "GND",
+        "B6": "VCC",
+        "B7": "BUS_B0",
+        "C1": "BUS_B1",
+        "C2": "GND",
+        "C3": "VCC",
+        "C4": "GND",
+        "C5": "VCC",
+        "C6": "GND",
+        "C7": "BUS_B2",
+        "D1": "BUS_B3",
+        "D2": "VCC",
+        "D3": "GND",
+        "D4": "VCC",
+        "D5": "GND",
+        "D6": "VCC",
+        "D7": "BUS_B4",
+        "E1": "BUS_B5",
+        "E2": "GND",
+        "E3": "VCC",
+        "E4": "GND",
+        "E5": "VCC",
+        "E6": "GND",
+        "E7": "BUS_B6",
+        "F1": "BUS_B7",
+        "F2": "VCC",
+        "F3": "GND",
+        "F4": "VCC",
+        "F5": "GND",
+        "F6": "VCC",
+        "F7": "S17",
+        "G1": "S18",
+        "G2": "GND",
+        "G3": "VCC",
+        "G4": "GND",
+        "G5": "VCC",
+        "G6": "GND",
+        "G7": "S19",
+        "H1": "S20",
+        "H2": "VCC",
+        "H3": "GND",
+        "H4": "VCC",
+        "H5": "GND",
+        "H6": "VCC",
+        "H7": "S21",
+        "J1": "S22",
+        "J2": "GND",
+        "J3": "VCC",
+        "J4": "GND",
+        "J5": "VCC",
+        "J6": "GND",
+        "J7": "S23",
+        "K1": "S24",
+        "K2": "VCC",
+        "K3": "GND",
+        "K4": "VCC",
+        "K5": "GND",
+        "K6": "VCC",
+        "K7": "S25",
+        "L1": "S26",
+        "L2": "S27",
+        "L3": "S28",
+        "L4": "S29",
+        "L5": "S30",
+        "L6": "S31",
+        "L7": "S32"
+      },
+      "locked": {
+        "x": 28,
+        "y": 40,
+        "rotation": 0
+      }
+    },
+    {
+      "reference": "U2",
+      "footprint": "Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm_EP3.6x3.6mm",
+      "pad_nets": {
+        "33": "GND",
+        "1": "BUS_A0",
+        "2": "BUS_A1",
+        "3": "BUS_A2",
+        "4": "BUS_A3",
+        "5": "BUS_A4",
+        "6": "BUS_A5",
+        "7": "BUS_A6",
+        "8": "VCC",
+        "9": "BUS_A0",
+        "10": "BUS_A1",
+        "11": "BUS_A2",
+        "12": "BUS_A3",
+        "13": "BUS_A4",
+        "14": "BUS_A5",
+        "15": "BUS_A6",
+        "16": "GND",
+        "17": "Q17",
+        "18": "Q18",
+        "19": "Q19",
+        "20": "Q20",
+        "21": "Q21",
+        "22": "Q22",
+        "23": "Q23",
+        "24": "VCC",
+        "25": "Q25",
+        "26": "Q26",
+        "27": "Q27",
+        "28": "Q28",
+        "29": "Q29",
+        "30": "Q30",
+        "31": "Q31",
+        "32": "GND"
+      },
+      "locked": {
+        "x": 70,
+        "y": 40,
+        "rotation": 0
+      }
+    },
+    {
+      "reference": "U3",
+      "footprint": "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "BUS_B1",
+        "3": "BUS_B2",
+        "4": "BUS_B3",
+        "5": "BUS_B4",
+        "6": "BUS_B5",
+        "7": "BUS_B6",
+        "8": "BUS_B7",
+        "9": "BUS_B8",
+        "10": "GND",
+        "11": "VCC",
+        "12": "T12",
+        "13": "T13",
+        "14": "T14",
+        "15": "T15",
+        "16": "T16",
+        "17": "T17",
+        "18": "T18",
+        "19": "T19",
+        "20": "GND"
+      },
+      "locked": {
+        "x": 104,
+        "y": 40,
+        "rotation": 0
+      }
+    },
+    {
+      "reference": "Ca0",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "Ca1",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "Ca2",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "Ca3",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "Cb0",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "Cb1",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "Cb2",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "Cb3",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "Cc0",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "Cc1",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "Cc2",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "Cc3",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "J1",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND",
+        "3": "BUS_A0",
+        "4": "BUS_A1",
+        "5": "BUS_B0",
+        "6": "BUS_B1"
+      }
+    },
+    {
+      "reference": "J2",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND",
+        "3": "Q17",
+        "4": "Q18",
+        "5": "T12",
+        "6": "T13"
+      }
+    }
+  ],
+  "hints": {
+    "groups": [
+      {
+        "name": "da",
+        "members": [
+          "Ca0",
+          "Ca1",
+          "Ca2",
+          "Ca3"
+        ],
+        "surround": "U1"
+      },
+      {
+        "name": "db",
+        "members": [
+          "Cb0",
+          "Cb1",
+          "Cb2",
+          "Cb3"
+        ],
+        "surround": "U2"
+      },
+      {
+        "name": "dc",
+        "members": [
+          "Cc0",
+          "Cc1",
+          "Cc2",
+          "Cc3"
+        ],
+        "surround": "U3"
+      }
+    ]
+  }
+}
