@@ -2677,12 +2677,38 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
         &draft.keepouts,
         outline,
     ));
-    let board = if tight != draft.bounds || !zones.is_empty() || draft.outline.is_some() {
+    // Export each routing keep-out as a KiCAD rule area so the finished board carries the
+    // design intent the placer/router worked around — and KiCAD independently confirms no
+    // track/via landed inside it. Resolve each keep-out's layers to KiCAD names; drop a
+    // keep-out whose layers don't resolve rather than emit a malformed zone.
+    let keepout_zones: Vec<kicad_bridge::synth::KeepoutZone> = draft
+        .keepouts
+        .iter()
+        .map(|k| {
+            let layers: Vec<String> = k
+                .layers
+                .iter()
+                .filter_map(|l| resolve_pour_layer(&l.0, draft.rules.layer_count).map(|(_, n)| n))
+                .collect();
+            kicad_bridge::synth::KeepoutZone {
+                layers,
+                min: [k.rect.min_x, k.rect.min_y],
+                max: [k.rect.max_x, k.rect.max_y],
+            }
+        })
+        .filter(|k| !k.layers.is_empty())
+        .collect();
+    let board = if tight != draft.bounds
+        || !zones.is_empty()
+        || !keepout_zones.is_empty()
+        || draft.outline.is_some()
+    {
         match synthesize_board_full(
             &parts,
             &tight,
             draft.rules.layer_count,
             &zones,
+            &keepout_zones,
             draft.outline.as_deref(),
         ) {
             Ok(t) => {

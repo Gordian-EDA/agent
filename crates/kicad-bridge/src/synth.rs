@@ -90,7 +90,7 @@ pub fn synthesize_board_layers(
     bounds: &Bounds,
     layer_count: u32,
 ) -> io::Result<String> {
-    synthesize_board_full(parts, bounds, layer_count, &[], None)
+    synthesize_board_full(parts, bounds, layer_count, &[], &[], None)
 }
 
 /// A copper-plane zone to emit: the net it belongs to, the copper layer name
@@ -108,13 +108,24 @@ pub struct ZoneSpec {
     pub min_thickness: f64,
 }
 
-/// [`synthesize_board_layers`] plus copper-plane `zones` (power pours) emitted
-/// before the board close. Each zone's net must be one of the parts' nets.
+/// A routing keep-out exported as a KiCAD rule area: tracks + vias are not allowed inside
+/// `[min, max]` on the listed copper `layers`. Lets the finished board carry the design
+/// intent the engine routed around, and gives KiCAD an independent check that it did.
+pub struct KeepoutZone {
+    pub layers: Vec<String>,
+    pub min: [f64; 2],
+    pub max: [f64; 2],
+}
+
+/// [`synthesize_board_layers`] plus copper-plane `zones` (power pours) and routing
+/// `keepouts` (rule areas), all emitted before the board close. Each zone's net must be
+/// one of the parts' nets.
 pub fn synthesize_board_full(
     parts: &[SynthPart],
     bounds: &Bounds,
     layer_count: u32,
     zones: &[ZoneSpec],
+    keepouts: &[KeepoutZone],
     outline: Option<&[Point2]>,
 ) -> io::Result<String> {
     // Net code table: 1-based over the sorted union of every bound pad's net.
@@ -146,8 +157,35 @@ pub fn synthesize_board_full(
         push_zone(&mut out, code, z, i);
     }
 
+    for (i, k) in keepouts.iter().enumerate() {
+        push_keepout_zone(&mut out, k, i);
+    }
+
     out.push_str(")\n");
     Ok(out)
+}
+
+/// Emit one routing keep-out as a KiCAD rule area: `(tracks not_allowed) (vias not_allowed)`
+/// over the keep-out rectangle. Pads/copperpour are left ALLOWED so this never false-flags a
+/// pad the placer legitimately kept clear or a plane already carved around the keep-out — it
+/// only enforces (and documents) the track/via routing keep-out the engine honoured.
+fn push_keepout_zone(out: &mut String, k: &KeepoutZone, idx: usize) {
+    let uuid = synth_uuid(&format!("keepout:{idx}:{}:{}", k.min[0], k.min[1]));
+    let layers = k
+        .layers
+        .iter()
+        .map(|l| format!("\"{l}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let _ = writeln!(
+        out,
+        "\t(zone\n\t\t(net 0)\n\t\t(net_name \"\")\n\t\t(layers {layers})\n\t\t(uuid \"{uuid}\")\n\
+         \t\t(name \"keepout\")\n\t\t(hatch edge 0.5)\n\
+         \t\t(keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (copperpour allowed) (footprints allowed))\n\
+         \t\t(polygon (pts (xy {} {}) (xy {} {}) (xy {} {}) (xy {} {})))\n\t)",
+        fmt_num(k.min[0]), fmt_num(k.min[1]), fmt_num(k.max[0]), fmt_num(k.min[1]),
+        fmt_num(k.max[0]), fmt_num(k.max[1]), fmt_num(k.min[0]), fmt_num(k.max[1])
+    );
 }
 
 /// Emit one copper-plane `(zone …)` with the precomputed fill rectangles as
