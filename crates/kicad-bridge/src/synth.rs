@@ -90,7 +90,7 @@ pub fn synthesize_board_layers(
     bounds: &Bounds,
     layer_count: u32,
 ) -> io::Result<String> {
-    synthesize_board_full(parts, bounds, layer_count, &[])
+    synthesize_board_full(parts, bounds, layer_count, &[], None)
 }
 
 /// A copper-plane zone to emit: the net it belongs to, the copper layer name
@@ -109,6 +109,7 @@ pub fn synthesize_board_full(
     bounds: &Bounds,
     layer_count: u32,
     zones: &[ZoneSpec],
+    outline: Option<&[Point2]>,
 ) -> io::Result<String> {
     // Net code table: 1-based over the sorted union of every bound pad's net.
     let net_codes = net_codes(parts);
@@ -127,7 +128,7 @@ pub fn synthesize_board_full(
          \t\t(aux_axis_origin 0 0)\n\t\t(grid_origin 0 0)\n\t)\n",
     );
     push_nets(&mut out, &net_codes);
-    push_edge_cuts(&mut out, bounds);
+    push_edge_cuts(&mut out, bounds, outline);
 
     for part in parts {
         let block = synth_footprint(part, &net_codes)?;
@@ -312,8 +313,28 @@ fn push_nets(out: &mut String, net_codes: &BTreeMap<String, i32>) {
     }
 }
 
-/// Emit the board outline as an `Edge.Cuts` rectangle from `bounds`.
-fn push_edge_cuts(out: &mut String, bounds: &Bounds) {
+/// Emit the board outline on `Edge.Cuts`. With `outline = Some(pts)` (≥3 points) the
+/// outline is that closed polygon (one `gr_line` per edge) — circle (many points),
+/// square, star, any custom shape. Otherwise the `bounds` rectangle (the default).
+fn push_edge_cuts(out: &mut String, bounds: &Bounds, outline: Option<&[Point2]>) {
+    if let Some(pts) = outline {
+        if pts.len() >= 3 {
+            for i in 0..pts.len() {
+                let a = &pts[i];
+                let b = &pts[(i + 1) % pts.len()];
+                let (x0, y0) = (fmt_num(a.x), fmt_num(a.y));
+                let (x1, y1) = (fmt_num(b.x), fmt_num(b.y));
+                let uuid = synth_uuid(&format!("edge:{x0}:{y0}:{x1}:{y1}"));
+                let _ = write!(
+                    out,
+                    "\t(gr_line\n\t\t(start {x0} {y0})\n\t\t(end {x1} {y1})\n\
+                     \t\t(stroke\n\t\t\t(width 0.1)\n\t\t\t(type default)\n\t\t)\n\
+                     \t\t(layer \"Edge.Cuts\")\n\t\t(uuid \"{uuid}\")\n\t)\n"
+                );
+            }
+            return;
+        }
+    }
     let (x0, y0) = (fmt_num(bounds.min_x), fmt_num(bounds.min_y));
     let (x1, y1) = (fmt_num(bounds.max_x), fmt_num(bounds.max_y));
     let uuid = synth_uuid(&format!("edge:{x0}:{y0}:{x1}:{y1}"));

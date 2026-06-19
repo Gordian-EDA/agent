@@ -53,6 +53,9 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
     if let Some(rules) = spec.get("rules") {
         board["rules"] = rules.clone();
     }
+    if let Some(outline) = spec.get("outline") {
+        board["outline"] = outline.clone();
+    }
     let created = tools.run("create_board", board, &ctx).unwrap();
     if created["ok"] != json!(true) {
         return json!({ "name": name, "stage": "create", "result": created });

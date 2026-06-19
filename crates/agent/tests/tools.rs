@@ -737,6 +737,7 @@ fn board_draft_round_trips_through_the_workspace() {
         hints: PlacementHints::default(),
         last_placement: None,
         last_place_illegal: false,
+        outline: None,
     };
     draft.save(&ctx).unwrap();
     let loaded = BoardDraft::load(&ctx).expect("draft loads back");

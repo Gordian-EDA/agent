@@ -81,6 +81,12 @@ pub struct BoardDraft {
     /// illegal placement so the engine never ships a board that fails DRC.
     #[serde(default)]
     pub last_place_illegal: bool,
+    /// Optional custom board OUTLINE (closed polygon, mm) — circle, square, star, any
+    /// shape. When set it becomes the Edge.Cuts at export (so the render shows the real
+    /// shape and the agent can iterate); `bounds` stays the polygon's bounding box for
+    /// placement/routing. None = the default rectangular outline from `bounds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<Vec<Point2>>,
 }
 
 /// Board-level design rules. Defaults are the engine's own
@@ -404,9 +410,40 @@ pub fn create_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
         }));
     }
 
-    let bounds = match parse_bounds(input.get("bounds")) {
-        Ok(b) => b,
-        Err(msg) => return Ok(json!({ "error": msg })),
+    // Optional custom OUTLINE (polygon points, mm) — circle/square/star/any shape. When
+    // given, `bounds` is its bounding box (placement/routing extent) and the polygon
+    // becomes the Edge.Cuts at export (the render then shows the true shape).
+    let outline: Option<Vec<Point2>> = match input.get("outline") {
+        None | Some(Value::Null) => None,
+        Some(o) => {
+            let arr = match o.as_array() {
+                Some(a) if a.len() >= 3 => a,
+                _ => return Ok(json!({ "error": "outline must be an array of >= 3 [x,y] points" })),
+            };
+            let mut pts = Vec::with_capacity(arr.len());
+            for p in arr {
+                match p.as_array().map(|xy| (xy.len(), xy)) {
+                    Some((2, xy)) => match (xy[0].as_f64(), xy[1].as_f64()) {
+                        (Some(x), Some(y)) => pts.push(Point2 { x, y }),
+                        _ => return Ok(json!({ "error": "outline point must be [x, y] numbers" })),
+                    },
+                    _ => return Ok(json!({ "error": "outline point must be a [x, y] pair" })),
+                }
+            }
+            Some(pts)
+        }
+    };
+    let bounds = match &outline {
+        Some(o) => Bounds {
+            min_x: o.iter().map(|p| p.x).fold(f64::INFINITY, f64::min),
+            max_x: o.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max),
+            min_y: o.iter().map(|p| p.y).fold(f64::INFINITY, f64::min),
+            max_y: o.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max),
+        },
+        None => match parse_bounds(input.get("bounds")) {
+            Ok(b) => b,
+            Err(msg) => return Ok(json!({ "error": msg })),
+        },
     };
 
     let rules = match parse_rules(input.get("rules")) {
@@ -549,6 +586,7 @@ pub fn create_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
         hints: PlacementHints::default(),
         last_placement: None,
         last_place_illegal: false,
+        outline,
     };
     draft.save(ctx)?;
 
@@ -2176,8 +2214,14 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
         &draft.rules,
         &draft.keepouts,
     ));
-    let board = if tight != draft.bounds || !zones.is_empty() {
-        match synthesize_board_full(&parts, &tight, draft.rules.layer_count, &zones) {
+    let board = if tight != draft.bounds || !zones.is_empty() || draft.outline.is_some() {
+        match synthesize_board_full(
+            &parts,
+            &tight,
+            draft.rules.layer_count,
+            &zones,
+            draft.outline.as_deref(),
+        ) {
             Ok(t) => {
                 std::fs::write(&path, t.as_bytes())
                     .with_context(|| format!("writing tight-outline board to {}", path.display()))?;
