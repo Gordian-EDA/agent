@@ -27,8 +27,8 @@ fn main(){
     let in1_ko:Vec<(Point2,f64,f64)>=vcc_vias.iter().chain([sig_via,sig_via2].iter()).map(|&(x,y)|(Point2{x,y},h,h)).collect();
     // In2 VCC plane: anti-pad around foreign vias (GND + SIG), NOT VCC.
     let in2_ko:Vec<(Point2,f64,f64)>=gnd_vias.iter().chain([sig_via,sig_via2].iter()).map(|&(x,y)|(Point2{x,y},h,h)).collect();
-    let in1=plane_fill_rects(&b,0.5,&in1_ko);
-    let in2=plane_fill_rects(&b,0.5,&in2_ko);
+    let in1=plane_fill_rects(&b,0.5,&in1_ko, None);
+    let in2=plane_fill_rects(&b,0.5,&in2_ko, None);
     let mut o=String::new();
     o.push_str("(kicad_pcb (version 20241229) (generator \"autopcb\") (generator_version \"9.0\")\n (general (thickness 1.6) (legacy_teardrops no)) (paper \"A4\")\n (layers (0 \"F.Cu\" signal) (1 \"In1.Cu\" signal) (2 \"In2.Cu\" signal) (3 \"B.Cu\" signal) (44 \"Edge.Cuts\" user))\n (setup (pad_to_mask_clearance 0))\n (net 0 \"\") (net 1 \"GND\") (net 2 \"VCC\") (net 3 \"SIG\")\n");
     o.push_str(" (gr_rect (start 0 0) (end 20 20) (stroke (width 0.1) (type default)) (fill no) (layer \"Edge.Cuts\") (uuid \"10000000-0000-0000-0000-000000000099\"))\n");

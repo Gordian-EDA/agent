@@ -5,7 +5,7 @@ fn main(){
     let b = Bounds{min_x:0.0,max_x:20.0,min_y:0.0,max_y:20.0};
     // one foreign VCC via at (10,10), keepout half = via_radius(0.3)+clearance(0.2)=0.5
     let keepouts = vec![(Point2{x:10.0,y:10.0}, 0.65, 0.65)];
-    let rects = plane_fill_rects(&b, 0.5, &keepouts);
+    let rects = plane_fill_rects(&b, 0.5, &keepouts, None);
     let mut o = String::new();
     o.push_str("(kicad_pcb (version 20241229) (generator \"autopcb\") (generator_version \"9.0\")\n");
     o.push_str(" (general (thickness 1.6) (legacy_teardrops no)) (paper \"A4\")\n");

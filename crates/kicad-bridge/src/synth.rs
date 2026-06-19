@@ -215,6 +215,7 @@ pub fn plane_fill_rects(
     bounds: &Bounds,
     edge_margin: f64,
     keepouts: &[(Point2, f64, f64)],
+    outline: Option<&[Point2]>,
 ) -> Vec<[f64; 4]> {
     let (bx0, bx1) = (bounds.min_x + edge_margin, bounds.max_x - edge_margin);
     let (by0, by1) = (bounds.min_y + edge_margin, bounds.max_y - edge_margin);
@@ -226,6 +227,15 @@ pub fn plane_fill_rects(
     for (c, _hx, hy) in keepouts {
         ycuts.push((c.y - hy).clamp(by0, by1));
         ycuts.push((c.y + hy).clamp(by0, by1));
+    }
+    // For a custom OUTLINE, add fine y-bands so the per-band polygon scanline clip
+    // (taken at the band mid-y) follows the true edge smoothly instead of overhanging.
+    if outline.is_some() {
+        let mut y = by0;
+        while y < by1 {
+            ycuts.push(y);
+            y += 0.5;
+        }
     }
     ycuts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     ycuts.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
@@ -253,18 +263,63 @@ pub fn plane_fill_rects(
             }
         }
         // Free x-segments = [bx0, bx1] minus the merged blocked intervals.
+        let mut free: Vec<(f64, f64)> = Vec::new();
         let mut x = bx0;
         for (a, b) in &merged {
             if a - x > 1e-6 {
-                rects.push([x, y0, *a, y1]);
+                free.push((x, *a));
             }
             x = x.max(*b);
         }
         if bx1 - x > 1e-6 {
-            rects.push([x, y0, bx1, y1]);
+            free.push((x, bx1));
+        }
+        // Custom outline: clip each free segment to the polygon's interior at this band
+        // (scanline x-spans at mid-y, inset by the edge margin), so copper never reaches
+        // past the true edge — a pour/plane on a non-rectangular board.
+        if let Some(poly) = outline {
+            let spans: Vec<(f64, f64)> = polygon_x_spans(poly, ymid)
+                .into_iter()
+                .map(|(a, b)| (a + edge_margin, b - edge_margin))
+                .filter(|(a, b)| b - a > 1e-6)
+                .collect();
+            let mut clipped = Vec::new();
+            for (fa, fb) in &free {
+                for (pa, pb) in &spans {
+                    let (lo, hi) = (fa.max(*pa), fb.min(*pb));
+                    if hi - lo > 1e-6 {
+                        clipped.push((lo, hi));
+                    }
+                }
+            }
+            free = clipped;
+        }
+        for (a, b) in free {
+            rects.push([a, y0, b, y1]);
         }
     }
     rects
+}
+
+/// The x-intervals where the horizontal line `y` is INSIDE polygon `poly` (scanline,
+/// even-odd): the sorted edge crossings paired up. A convex shape gives one interval; a
+/// concave one (a star) gives several. Used to clip a plane/pour fill to a custom outline.
+fn polygon_x_spans(poly: &[Point2], y: f64) -> Vec<(f64, f64)> {
+    let n = poly.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    let mut xs: Vec<f64> = Vec::new();
+    let mut j = n - 1;
+    for i in 0..n {
+        let (a, b) = (&poly[j], &poly[i]);
+        if (a.y > y) != (b.y > y) {
+            xs.push(a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x));
+        }
+        j = i;
+    }
+    xs.sort_by(|p, q| p.partial_cmp(q).unwrap_or(std::cmp::Ordering::Equal));
+    xs.chunks(2).filter(|c| c.len() == 2).map(|c| (c[0], c[1])).collect()
 }
 
 fn net_codes(parts: &[SynthPart]) -> BTreeMap<String, i32> {
@@ -763,7 +818,7 @@ mod tests {
     #[test]
     fn plane_fill_empty_is_single_inset_rect() {
         let b = Bounds { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 10.0 };
-        let rects = plane_fill_rects(&b, 0.5, &[]);
+        let rects = plane_fill_rects(&b, 0.5, &[], None);
         assert_eq!(rects.len(), 1);
         assert_eq!(rects[0], [0.5, 0.5, 19.5, 9.5]);
     }
@@ -772,7 +827,7 @@ mod tests {
     fn plane_fill_carves_keepouts_and_stays_in_bounds() {
         let b = Bounds { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 20.0 };
         let ko = (Point2 { x: 10.0, y: 10.0 }, 0.65, 0.65);
-        let rects = plane_fill_rects(&b, 0.5, &[ko]);
+        let rects = plane_fill_rects(&b, 0.5, &[ko], None);
         assert!(rects.len() > 1, "a central keep-out must split the fill");
         // The keep-out square [9.35,10.65]^2 must contain NO fill rect interior.
         let (kx0, kx1, ky0, ky1) = (9.35, 10.65, 9.35, 10.65);

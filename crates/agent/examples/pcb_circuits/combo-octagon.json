@@ -1,0 +1,134 @@
+{
+  "description": "COMBO: octagon outline + GND pour (bottom) + per-net widths (VIN/VOUT 0.8mm) + 4-layer planes \u2014 feature-integration stress",
+  "rules": {
+    "layers": 4,
+    "net_widths": {
+      "VIN": 0.8,
+      "VOUT": 0.8
+    },
+    "pours": [
+      {
+        "net": "GND",
+        "layer": "bottom"
+      }
+    ]
+  },
+  "outline": [
+    [
+      59.72,
+      43.48
+    ],
+    [
+      43.48,
+      59.72
+    ],
+    [
+      20.52,
+      59.72
+    ],
+    [
+      4.28,
+      43.48
+    ],
+    [
+      4.28,
+      20.52
+    ],
+    [
+      20.52,
+      4.28
+    ],
+    [
+      43.48,
+      4.28
+    ],
+    [
+      59.72,
+      20.52
+    ]
+  ],
+  "parts": [
+    {
+      "reference": "U1",
+      "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+      "pad_nets": {
+        "1": "VIN",
+        "2": "S1",
+        "3": "S2",
+        "4": "GND",
+        "5": "S3",
+        "6": "VOUT",
+        "7": "GND",
+        "8": "VIN"
+      },
+      "locked": {
+        "x": 32,
+        "y": 32,
+        "rotation": 0
+      }
+    },
+    {
+      "reference": "J1",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "VIN",
+        "2": "S1",
+        "3": "S2",
+        "4": "S3",
+        "5": "VOUT",
+        "6": "GND"
+      },
+      "locked": {
+        "x": 19,
+        "y": 32,
+        "rotation": 0
+      }
+    },
+    {
+      "reference": "C1",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VIN",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C2",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VIN",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C3",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VIN",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C4",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VIN",
+        "2": "GND"
+      }
+    }
+  ],
+  "hints": {
+    "groups": [
+      {
+        "name": "dec",
+        "members": [
+          "C1",
+          "C2",
+          "C3",
+          "C4"
+        ],
+        "surround": "U1"
+      }
+    ]
+  }
+}

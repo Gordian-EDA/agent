@@ -1798,6 +1798,7 @@ fn plane_zones(
     bounds: &Bounds,
     rules: &DraftRules,
     user_keepouts: &[Keepout],
+    outline: Option<&[Point2]>,
 ) -> Vec<ZoneSpec> {
     let layer_count = rules.layer_count;
     let via_half = rules.via_diameter / 2.0 + rules.clearance + PLANE_ANTIPAD_MARGIN_MM;
@@ -1847,7 +1848,7 @@ fn plane_zones(
                 }
             }
             let fill = prune_islands(
-                plane_fill_rects(bounds, BOARD_EDGE_MARGIN_MM, &keepouts),
+                plane_fill_rects(bounds, BOARD_EDGE_MARGIN_MM, &keepouts, outline),
                 &anchors,
             );
             ZoneSpec {
@@ -1879,6 +1880,7 @@ fn pour_zones(
     bounds: &Bounds,
     rules: &DraftRules,
     user_keepouts: &[Keepout],
+    outline: Option<&[Point2]>,
 ) -> Vec<ZoneSpec> {
     let lc = rules.layer_count;
     let via_half = rules.via_diameter / 2.0 + rules.clearance + PLANE_ANTIPAD_MARGIN_MM;
@@ -1951,7 +1953,7 @@ fn pour_zones(
                     anchors.extend(t.path.iter().cloned());
                 }
             }
-            let fill = prune_islands(plane_fill_rects(bounds, BOARD_EDGE_MARGIN_MM, &ko), &anchors);
+            let fill = prune_islands(plane_fill_rects(bounds, BOARD_EDGE_MARGIN_MM, &ko, outline), &anchors);
             Some(ZoneSpec {
                 net_name: net.clone(),
                 layer_name: kname,
@@ -2321,22 +2323,29 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // Copper-plane zones (power pours) for a multilayer board, computed from the
     // foreign copper reaching each inner layer, at the final (tight) bounds. The
     // obstacle positions are absolute, so the first board's read is reusable here.
+    // Planes/pours fill the BOARD: for a custom outline that's the outline's bbox (the
+    // fill is then clipped to the polygon), not the content-tight bbox — otherwise a pour
+    // shrinks to a square around the parts instead of flooding the shaped board.
+    let fill_bounds = if draft.outline.is_some() { &draft.bounds } else { &tight };
+    let outline = draft.outline.as_deref();
     let mut zones = plane_zones(
         &stored.planes,
         &board.problem,
         &stored.solution,
-        &tight,
+        fill_bounds,
         &draft.rules,
         &draft.keepouts,
+        outline,
     );
     // Signal-layer copper pours (GND flood for HF return / 2-layer ground plane).
     zones.extend(pour_zones(
         &draft.rules.pours,
         &board.problem,
         &stored.solution,
-        &tight,
+        fill_bounds,
         &draft.rules,
         &draft.keepouts,
+        outline,
     ));
     let board = if tight != draft.bounds || !zones.is_empty() || draft.outline.is_some() {
         match synthesize_board_full(
