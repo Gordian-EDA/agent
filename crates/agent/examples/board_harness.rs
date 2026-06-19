@@ -132,12 +132,18 @@ fn main() {
     specs.sort_by(|a, b| a.0.cmp(&b.0));
 
     println!("footprint library: {}", fp_dir.display());
-    let mut all = Vec::new();
-    for (name, spec) in &specs {
-        let r = run_circuit(name, spec, &fp_dir);
-        println!("\n=== {name} ===");
-        println!("{}", serde_json::to_string_pretty(&r).unwrap());
-        all.push(r);
+    // Route/export/DRC every circuit IN PARALLEL — each runs in its own isolated
+    // ToolCtx (a per-board tempdir) and writes to its own /tmp/pcb-harness/<name>/
+    // dir, so the boards are independent. rayon's indexed collect preserves spec
+    // order, so the printed report is identical to the sequential run, just faster.
+    use rayon::prelude::*;
+    let all: Vec<Value> = specs
+        .par_iter()
+        .map(|(name, spec)| run_circuit(name, spec, &fp_dir))
+        .collect();
+    for r in &all {
+        println!("\n=== {} ===", r["name"].as_str().unwrap_or("?"));
+        println!("{}", serde_json::to_string_pretty(r).unwrap());
     }
 
     // Summary.

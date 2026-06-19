@@ -777,17 +777,24 @@ pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult
         )
     };
 
-    // Baseline first so it wins exact ties (battle-tested), then keep the best.
-    let mut best = place_variant(problem, hints, PlaceOpts::default());
-    let mut best_cost = cost(&best);
-    for &o in opts.iter().skip(1) {
-        let cand = place_variant(problem, hints, o);
-        let c = cost(&cand);
-        if c < best_cost {
-            best = cand;
-            best_cost = c;
-        }
-    }
+    // Evaluate every variant IN PARALLEL — each is an independent, pure place+route
+    // (the SA seed is fixed, so a variant's result is deterministic regardless of
+    // thread/order). We then pick the lowest-cost; opts[0] is the baseline and wins
+    // exact ties via the index tie-break, preserving the previous baseline-first
+    // selection bit-for-bit. The slow part of a big board is these N variant
+    // place+rank-route passes, so fanning them across cores is the main speed lever.
+    use rayon::prelude::*;
+    let mut scored: Vec<(usize, (usize, u64, u64), PlaceResult)> = opts
+        .par_iter()
+        .enumerate()
+        .map(|(i, &o)| {
+            let r = place_variant(problem, hints, o);
+            let c = cost(&r);
+            (i, c, r)
+        })
+        .collect();
+    scored.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let mut best = scored.swap_remove(0).2;
     // Post-pass: seat mounting holes (corner_seek) at the board corners on the
     // WINNING placement. They carry no signal nets (GND-plane only), so moving
     // them never changes routing — which is why this must run AFTER the faults-
