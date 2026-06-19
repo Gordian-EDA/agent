@@ -72,8 +72,16 @@ fn plane_mask_for(layer_count: usize) -> u32 {
 /// halo as a EUCLIDEAN disc, so it does not over-block on the diagonal.
 pub fn via_clear_radius_cells(problem: &RouteProblem) -> usize {
     let pitch = grid::grid_pitch(problem);
-    let via_halo = problem.via_diameter / 2.0 + problem.clearance + problem.min_trace_width / 2.0;
-    (via_halo / pitch).ceil() as usize
+    // The grid is ALREADY inflated by (clearance + trace_half) around every obstacle,
+    // so a trace-free cell already guarantees a *trace's* clearance. A via is wider
+    // than a trace by exactly (via_radius - trace_half); only THAT extra radius must be
+    // re-scanned. The old formula added the full (via_radius + clearance + trace_half),
+    // double-counting the clearance+trace_half already baked into the grid and
+    // over-blocking vias by ~2 cells — which made an inner BGA ball's escape via
+    // impossible (its neighbours' inflation halos fell inside the bloated radius) even
+    // though the via geometrically clears. Scan only the genuine via overhang.
+    let via_extra = (problem.via_diameter / 2.0 - problem.min_trace_width / 2.0).max(0.0);
+    (via_extra / pitch).ceil() as usize
 }
 
 /// Route `problem` with the default design constants, but with the via-barrel
