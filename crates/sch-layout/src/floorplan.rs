@@ -2186,23 +2186,13 @@ impl PlacementStrategy for Anneal {
             // 420k/pins ceiling) is spent polishing, not exploring. Kept ONLY if it wins the
             // SAME (breaks, warnings, true-cost) pick, so it can never ship worse. This
             // trades the ≤5s budget for fewer dense-board crossings, per the user's call.
-            let mut refined = candidates[best].clone();
-            let t_ref = std::time::Instant::now();
-            // Tight routed budget from an already-good seed; keeps even a 173-pin board
-            // bounded while still finding crossing-reducing moves.
-            let ref_cap = (30_000 / pins).clamp(80, 300);
-            anneal_items(env, &mut refined, inc, ir, needs_flag, false, true, seed ^ 0x5EF1, Some(ref_cap));
-            decongest(&mut refined);
-            // Pick on the ACTUAL crossing count (body+ic+wire), NOT premium_score — the
-            // refinement optimises straightness, which DIVERGES from crossings (it can
-            // straighten while adding a crossing, as c08/oneshot showed). CRUCIAL: measure
-            // on the FINALISED geometry — the emit runs decongest + align_idiom_clusters +
-            // align_led_chains (which e.g. snaps each LED's resistor into a clean leg, and
-            // can tidy a tangled candidate dramatically: c08 best 53→19 pre/post) BEFORE
-            // counting. Measuring pre-finalise ranks candidates the emit then re-orders, so
-            // each candidate is finalised on a clone here first. The picked candidate ships
-            // RAW (the emit re-finalises it identically). Order: truthfulness, warnings,
-            // total crossings, then straightness tiebreak.
+            // Score a candidate on its FINALISED geometry. CRUCIAL: the emit runs decongest
+            // + align_idiom_clusters + align_led_chains (which e.g. snaps each LED's resistor
+            // into a clean leg, tidying a tangled candidate dramatically — c08 53→19) BEFORE
+            // counting crossings. Measuring pre-finalise ranks candidates the emit then
+            // re-orders, so we finalise a clone here first. The picked candidate ships RAW
+            // (the emit re-finalises it identically). Order: truthfulness, warnings, total
+            // crossings (body+ic+wire), then straightness.
             let score = |c: &[Item]| -> (usize, usize, usize, f64) {
                 let mut m = c.to_vec();
                 decongest(&mut m);
@@ -2217,8 +2207,29 @@ impl PlacementStrategy for Anneal {
                 let (bx, ix, wx) = crossing_counts(env, &m, inc, ir, needs_flag);
                 (b, w, bx + ix + wx, premium_score_with_w(env, &m, inc, ir, needs_flag, w))
             };
-            let (rb, rw, rx, rc) = score(&refined);
             let (bb, bw, bx, bc) = score(&candidates[best]);
+            // SKIP the refinement when the winner is already clean (no breaks/warnings and
+            // few crossings): such boards can't meaningfully improve, so the routed budget
+            // would be pure wasted wall-time. Every refinement win this far had a best with
+            // ≥7 crossings or a warning, so a ≤6/0-warning gate keeps all wins.
+            if bb == 0 && bw == 0 && bx <= 6 {
+                items.clone_from_slice(&candidates[best]);
+                return;
+            }
+            // ROUTE-AWARE REFINEMENT. The proxy is crossing-BLIND, so the fast-lane winner is
+            // sprawl-optimal but not crossing-optimal — and no cheap router-free crossing
+            // proxy proved faithful (bbox/trunk-segment all failed). So refine the winner with
+            // the TRUE router: a bounded `anneal_items` (premium routed cost; iter-capped
+            // 80..300 = 30k/pins so even a 173-pin board stays seconds) seeded from it. Kept
+            // ONLY if it wins on real (finalised) crossings, so it is strictly additive — a
+            // straighter-but-more-crossing result is rejected. Trades the ≤5s budget for fewer
+            // dense-board crossings (user-authorised).
+            let mut refined = candidates[best].clone();
+            let t_ref = std::time::Instant::now();
+            let ref_cap = (30_000 / pins).clamp(80, 300);
+            anneal_items(env, &mut refined, inc, ir, needs_flag, false, true, seed ^ 0x5EF1, Some(ref_cap));
+            decongest(&mut refined);
+            let (rb, rw, rx, rc) = score(&refined);
             let refined_wins = (rb, rw, rx).cmp(&(bb, bw, bx)) == std::cmp::Ordering::Less
                 || (rb == bb && rw == bw && rx == bx && rc + 0.5 < bc);
             if timed_top {
