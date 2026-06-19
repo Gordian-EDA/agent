@@ -1618,6 +1618,18 @@ fn emit_strategy(
     }
 
     let mut w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
+    // PORT-LABEL KEEPOUT (multi-sheet sub-sheets only): an indicator satellite (LED-chain resistor)
+    // often lands in the swath where a header's OTHER pins' port labels extend, overprinting them
+    // (usb io / FPGA io = 5). Push such satellites toward their own connections, off the foreign
+    // labels, then rebuild the routed writer on the corrected placement. Gated on MULTISHEET_REFINE so
+    // single-sheet references never reach it ⇒ snapshots stay byte-identical.
+    if std::env::var("MULTISHEET_REFINE").is_ok() {
+        let keepouts = port_label_keepouts(env, &mut w, &items, &inc, ir)?;
+        if nudge_satellites_off_labels(&mut items, &inc, &keepouts) {
+            decongest(&mut items);
+            w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
+        }
+    }
     // Finalize geometry (text solve, wire split, reframe) BEFORE linting so the
     // reported warnings reflect the actual emitted sheet, not the pre-solve state.
     w.set_frame(true);
@@ -3777,6 +3789,107 @@ fn decongest(items: &mut [Item]) {
             }
         }
     }
+}
+
+/// Port-label keepout boxes: for each port net, the pennant box at its exit (the same box the router
+/// already reserves at emit, but computed here so PLACEMENT can keep satellites off it). Built from
+/// the writer's pin geometry; the port-owning part is an anchor that won't move, so these stay valid
+/// across the satellite nudge below.
+fn port_label_keepouts(
+    env: &KicadEnv,
+    w: &mut SchematicWriter,
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+) -> io::Result<Vec<([f64; 4], String)>> {
+    let mut ks = Vec::new();
+    for (net, side) in &ir.ports {
+        let Some(pins) = inc.get(net) else { continue };
+        let mut eps: Vec<([f64; 2], Dir)> = Vec::new();
+        for (i, num) in pins {
+            for (ep, dir) in w.pin_dirs(env, &items[*i].refdes, num)? {
+                eps.push((ep, dir));
+            }
+        }
+        if eps.is_empty() {
+            continue;
+        }
+        if let Some(s) = effective_port_side(Some(*side), &eps) {
+            ks.push((port_label_obstacle(port_exit_point(&eps, s), s, net), net.clone()));
+        }
+    }
+    Ok(ks)
+}
+
+/// Push every free satellite that landed inside a FOREIGN port-label box (a port net it isn't on)
+/// toward the centroid of its OWN connected parts, off the label. Stepping toward its home leaves the
+/// foreign label monotonically, so a satellite sitting amid a header's stacked edge labels (usb io /
+/// FPGA io = 5: an LED-chain resistor over UART_TXD/GPIO0…) exits cleanly without the ping-pong a
+/// least-penetration push would cause between adjacent labels. A satellite that can't clear in the cap
+/// is left where it was (never worse). Returns whether anything moved.
+fn nudge_satellites_off_labels(
+    items: &mut [Item],
+    inc: &Incidence,
+    keepouts: &[([f64; 4], String)],
+) -> bool {
+    if keepouts.is_empty() {
+        return false;
+    }
+    let item_nets: Vec<Vec<String>> = (0..items.len())
+        .map(|i| {
+            inc.iter()
+                .filter(|(_, pins)| pins.iter().any(|(j, _)| *j == i))
+                .map(|(net, _)| net.clone())
+                .collect()
+        })
+        .collect();
+    let foreign_hit = |items: &[Item], i: usize| -> bool {
+        let a = item_rect(&items[i], items[i].at);
+        keepouts.iter().any(|(b, net)| !item_nets[i].contains(net) && rects_overlap(a, *b))
+    };
+    let mut moved = false;
+    for i in 0..items.len() {
+        if items[i].geom.pins.len() >= 3 || items[i].frozen || !foreign_hit(items, i) {
+            continue;
+        }
+        let (mut cx, mut cy, mut n) = (0.0, 0.0, 0usize);
+        for net in &item_nets[i] {
+            if let Some(pins) = inc.get(net) {
+                for (j, _) in pins {
+                    if *j != i {
+                        cx += items[*j].at[0];
+                        cy += items[*j].at[1];
+                        n += 1;
+                    }
+                }
+            }
+        }
+        if n == 0 {
+            continue;
+        }
+        let d = [cx / n as f64 - items[i].at[0], cy / n as f64 - items[i].at[1]];
+        let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
+        if len < EPS {
+            continue;
+        }
+        let step = [d[0] / len * 1.27, d[1] / len * 1.27];
+        let orig = items[i].at;
+        let mut cleared = false;
+        for _ in 0..40 {
+            items[i].at[0] = crate::grid::snap(items[i].at[0] + step[0]);
+            items[i].at[1] = crate::grid::snap(items[i].at[1] + step[1]);
+            if !foreign_hit(items, i) {
+                cleared = true;
+                break;
+            }
+        }
+        if cleared {
+            moved = true;
+        } else {
+            items[i].at = orig;
+        }
+    }
+    moved
 }
 
 /// Count pairs of items whose bodies overlap — the hard "never let two symbols
