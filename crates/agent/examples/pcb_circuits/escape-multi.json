@@ -1,0 +1,44 @@
+{
+  "description": "multi-signal BGA escape (no power ring): inner 3x3 all signals to a header, outer ring NC obstacles, 2-layer",
+  "rules": {
+    "layers": 2
+  },
+  "bounds": {
+    "min_x": 0.0,
+    "max_x": 30.0,
+    "min_y": 0.0,
+    "max_y": 24.0
+  },
+  "parts": [
+    {
+      "reference": "U1",
+      "footprint": "Package_BGA:BGA-25_6.35x6.35mm_Layout5x5_P1.27mm",
+      "pad_nets": {
+        "B2": "S1",
+        "B3": "S2",
+        "B4": "S3",
+        "C2": "S4",
+        "C3": "S5",
+        "C4": "S6",
+        "D2": "S7",
+        "D3": "S8",
+        "D4": "S9"
+      }
+    },
+    {
+      "reference": "J1",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_2x05_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "S1",
+        "2": "S2",
+        "3": "S3",
+        "4": "S4",
+        "5": "S5",
+        "6": "S6",
+        "7": "S7",
+        "8": "S8",
+        "9": "S9"
+      }
+    }
+  ]
+}
