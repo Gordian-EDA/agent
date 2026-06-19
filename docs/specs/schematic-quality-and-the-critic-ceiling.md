@@ -11,6 +11,18 @@ circuits across topics (MCU, BGA, dense, analog). **Current state: corpus critic
 ~6.5–7; ~1 board reaches 9.** The engine's *own* placement is sprawl-capped (see dead-ends
 below), BUT this is no longer the last word:
 
+> ★ **CEILING TEST (2026-06-19, `--samples 5` to beat the ±2 critic noise) — 9+ IS achievable,
+> and the gap is a board-specific LONG TAIL, not one wall.** The engine's curated boards:
+> divider-filter **10**, mcp1703-power-entry **9**, uart-level-translator 8, bga-fpga-ice40 **7**,
+> 555-blinker **6**. So clean boards already hit 9-10; the shortfall is per-board and of TWO
+> distinct kinds: (a) SPRAWL on big/satellite-heavy boards (the exhausted placement wall), and
+> (b) TOPOLOGY-SPECIFIC routing knots on small boards — e.g. the 555's TRIG(2) and THR(6) must be
+> tied (astable) but sit on OPPOSITE sides of the IC, so the RC timing wires cross the package.
+> No single lever closes both; reaching uniform 9+ means grinding a long tail of board-specific
+> fixes (diminishing returns; per-topic engine fixes were already found mostly critic-neutral).
+> Note the BGA at 7 is the engine's honest dense-board ceiling. **Net: the goal is partially met
+> (clean boards) and bounded by a long tail (everything else), not a single crackable wall.**
+
 > ★★★ **THE LEVER (validated): the HYBRID soft zone-bias loop.** A vision LLM gives a COARSE
 > zone per major part (rough direction — "power left, MCU centre, outputs right"); the engine
 > does the precise placement, SOFTLY biased toward those zones (`LayoutIr.zone` → proxy_cost
