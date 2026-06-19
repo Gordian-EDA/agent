@@ -22,6 +22,17 @@ below), BUT this is no longer the last word:
 > fixes (diminishing returns; per-topic engine fixes were already found mostly critic-neutral).
 > Note the BGA at 7 is the engine's honest dense-board ceiling. **Net: the goal is partially met
 > (clean boards) and bounded by a long tail (everything else), not a single crackable wall.**
+>
+> FULL 10-BOARD SCORECARD across topics (curated/idiom boards): divider-filter 10, mcp1703 9,
+> idiom-stm32 9 (MCU!), uart 8, rf-lna 8, idiom-rp2040 8 (MCU), hbridge-nmos 8 (power),
+> mixed-signal-adc 7, bga-fpga-ice40 7, 555-blinker 6. MEAN ≈ 8; 3 at 9+, 7 at 8+. Takeaways:
+> (1) the ENGINE is genuinely good — mean ~8 on clean netlists, and MCU boards DO reach 9
+> (idiom-stm32); (2) the binding variable is SIZE/completeness — small/clean boards hit 9-10, big
+> COMPLETE boards (the agent's mcu=5 with USB-C+LDO+headers, 21 parts) sprawl to 5-7; (3) most
+> boards sit at 7-8, just 1-2 points (≈ the critic noise) below 9 — close, but each needs its own
+> board-specific polish, and the big/dense end is the exhausted placement wall. So "9+ on 20+ incl
+> dense/BGA" requires the BIG boards at 9 = the placement wall (capped ~7), i.e. not achievable
+> without the (tested, unhelpful) co-placement rewrite; "9+ on clean/small boards incl MCU" IS met.
 
 > ★★★ **THE LEVER (validated): the HYBRID soft zone-bias loop.** A vision LLM gives a COARSE
 > zone per major part (rough direction — "power left, MCU centre, outputs right"); the engine
