@@ -1571,6 +1571,36 @@ fn congestion_json(rp: &RouteProblem) -> Value {
     })
 }
 
+/// When routing leaves nets unrouted, decide whether they CONCENTRATE on one part (a fine-pitch
+/// pin-escape bottleneck — not fixable by moving OTHER parts) or are scattered (movable congestion).
+/// Returns `(reference, footprint, pins_on_this_part, total_failed_pins)` for the dominant part when
+/// it owns a clear majority (≥60%) of the failed-net pad incidences across ≥3 pins; else `None`.
+/// Plane-stitch pseudo-failures ("<N plane stitching vias>") are not net names, so they don't match
+/// any pad and are naturally excluded.
+fn escape_bottleneck(
+    parts: &[DraftPart],
+    failed: &[FailedNet],
+) -> Option<(String, String, usize, usize)> {
+    let failed_nets: std::collections::BTreeSet<&str> =
+        failed.iter().map(|f| f.connection.as_str()).collect();
+    let mut per_part: Vec<(String, String, usize)> = Vec::new();
+    let mut total = 0usize;
+    for p in parts {
+        let c = p
+            .pad_nets
+            .values()
+            .filter(|n| failed_nets.contains(n.as_str()))
+            .count();
+        if c > 0 {
+            per_part.push((p.reference.clone(), p.footprint.clone(), c));
+            total += c;
+        }
+    }
+    per_part.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+    let (r, fp, c) = per_part.into_iter().next()?;
+    (total >= 3 && c * 100 >= total * 60).then_some((r, fp, c, total))
+}
+
 pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
@@ -1701,12 +1731,31 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         // Honest failures: enrich with congestion hotspots so the model can triage
         // (move a part off a hot edge, relax a rule, or drop a keepout).
         out["congestion"] = congestion_json(&rp);
-        out["note"] = json!(
-            "some nets did not route — read each failure `reason` (global:/assign:/cell:/\
-             finisher: provenance) and the congestion hotspots, then triage: move_part to \
-             relieve a hot region, relax rules via set_constraints, or remove a blocking \
-             keepout. Re-place and re-route after each change."
-        );
+        // First distinguish a fine-pitch ESCAPE bottleneck (failures concentrated on ONE part) from
+        // scattered congestion — they call for opposite triage, and steering the model to move OTHER
+        // parts on an escape limit just burns iterations on an unfixable failure.
+        if let Some((r, fp, c, total)) = escape_bottleneck(&draft.parts, &result.failed) {
+            out["escape_bottleneck"] =
+                json!({ "ref": r, "footprint": fp, "failed_pins": c, "total_failed_pins": total });
+            out["note"] = json!(format!(
+                "{c} of {total} unrouted pins belong to ONE part — {r} ({fp}). This is a fine-pitch \
+                 PIN-ESCAPE bottleneck, not movable congestion: those inner pins have no room to \
+                 escape the field, so moving OTHER parts or relaxing clearance will NOT help. \
+                 Options, best first: (1) give {r} more open margin (no parts/keepouts hugging it) \
+                 and re-place; (2) route fewer of its signals, or split them across more connectors; \
+                 (3) choose a coarser-pitch footprint; (4) ACCEPT these as a density limit — the \
+                 board is fidelity-clean (0 DRC faults) and these nets are honestly unrouted, so it \
+                 is safe to export as-is. NOTE: adding copper layers does not currently relieve a \
+                 fine-pitch signal escape (only power/ground pins benefit, via planes)."
+            ));
+        } else {
+            out["note"] = json!(
+                "some nets did not route — read each failure `reason` (global:/assign:/cell:/\
+                 finisher: provenance) and the congestion hotspots, then triage: move_part to \
+                 relieve a hot region, relax rules via set_constraints, or remove a blocking \
+                 keepout. Re-place and re-route after each change."
+            );
+        }
         // Layer escalation: on a 2-layer board with unrouted nets, more copper layers
         // are usually the highest-leverage fix — a 4-layer stack adds GND/VCC PLANES
         // (so every power pin connects through a via instead of competing for surface
@@ -2867,4 +2916,52 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod escape_bottleneck_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn part(reference: &str, footprint: &str, nets: &[(&str, &str)]) -> DraftPart {
+        DraftPart {
+            reference: reference.to_owned(),
+            footprint: footprint.to_owned(),
+            pad_nets: nets.iter().map(|(p, n)| (p.to_string(), n.to_string())).collect::<BTreeMap<_, _>>(),
+            locked: None,
+        }
+    }
+    fn failed(nets: &[&str]) -> Vec<FailedNet> {
+        nets.iter().map(|n| FailedNet { connection: n.to_string(), reason: String::new() }).collect()
+    }
+
+    #[test]
+    fn concentrated_failures_on_one_part_are_an_escape_bottleneck() {
+        // A BGA whose 4 inner pins fail + a cap with 1 unrelated fail → 4/5 on U1 (≥60%) → flagged.
+        let parts = vec![
+            part("U1", "Package_BGA:BGA-100", &[("A1", "S1"), ("A2", "S2"), ("A3", "S3"), ("A4", "S4")]),
+            part("C1", "Capacitor_SMD:C_0402", &[("1", "VCC"), ("2", "GNDX")]),
+        ];
+        let f = failed(&["S1", "S2", "S3", "S4", "GNDX"]);
+        let got = escape_bottleneck(&parts, &f).expect("should flag a bottleneck");
+        assert_eq!((got.0.as_str(), got.2, got.3), ("U1", 4, 5));
+    }
+
+    #[test]
+    fn scattered_failures_are_not_a_bottleneck() {
+        // 1 fail each on three different parts → no single part ≥60% → None (movable congestion).
+        let parts = vec![
+            part("U1", "fp", &[("1", "A")]),
+            part("U2", "fp", &[("1", "B")]),
+            part("U3", "fp", &[("1", "C")]),
+        ];
+        assert!(escape_bottleneck(&parts, &failed(&["A", "B", "C"])).is_none());
+    }
+
+    #[test]
+    fn plane_stitch_pseudo_failures_are_ignored() {
+        // "<N plane stitching vias>" is not a net name → matches no pad → no bottleneck.
+        let parts = vec![part("U1", "fp", &[("1", "GND")])];
+        assert!(escape_bottleneck(&parts, &failed(&["<7 plane stitching vias>"]) ).is_none());
+    }
 }
