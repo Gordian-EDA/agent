@@ -980,10 +980,21 @@ fn place_decoupling(
         let vp = if is_ground(cn[0]) { cn[1] } else { cn[0] };
         by_rail.entry(vp.to_string()).or_default().push(ci);
     }
-    let mut bank: Vec<usize> =
-        by_rail.into_values().filter(|v| v.len() >= 3).flatten().collect();
+    // Single-sheet references keep the strict per-rail≥3 bank (snapshot-locked, e.g. mcp1703). On
+    // MULTI-SHEET sub-sheets, bank ALL of the IC's bypass caps even when split thin ACROSS rails: a
+    // multi-rail regulator/DDR3/FPGA has only 1-2 caps on ANY single rail (V_in + V_out, or VDD+VDDQ+
+    // VREF), so the per-rail gate dropped the whole bank → the caps scattered (DDR3 sdram=6, "5 caps
+    // scattered not in a tidy bank"; multi-rail LDO power sheets). The circuit-graph matcher already
+    // accepts caps across rails (per-cap power-net binding), so the only blocker was THIS filter.
+    // Banking them into one aligned row above the IC reads far cleaner than the scatter.
+    let multisheet = std::env::var("MULTISHEET_REFINE").is_ok();
+    let mut bank: Vec<usize> = if multisheet {
+        by_rail.into_values().flatten().collect()
+    } else {
+        by_rail.into_values().filter(|v| v.len() >= 3).flatten().collect()
+    };
     bank.sort_unstable();
-    if bank.len() < 3 {
+    if bank.len() < if multisheet { 2 } else { 3 } {
         return None;
     }
     let (acol, arow) = (anchor_col[&ai], anchor_row[&ai]);
