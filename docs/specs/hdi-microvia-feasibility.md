@@ -36,13 +36,15 @@ A `(uuid …)` is also required or kicad-cli rejects the via outright (rc=3).
 
 1. ~~**Via span on the engine `Via`** — done (commit 11e19b3): `ViaSpan` enum {Through, Partial{from,to,micro}}, `#[serde(default)]`, all 8 construction sites default to Through.~~
 2. ~~**Export the bare-keyword form** — done (commit 11e19b3): `render_via` emits `(via micro|blind …)` for a Partial span (byte-identical for Through); 3 unit tests guard it.~~
-3. **Use it in routing** — a fine-pitch inner ball that can't fit a through-via between neighbours
-   drops to the nearest inner signal/plane layer via a microvia ON its pad (via-in-pad). This is
-   the actual escape win; the stitch/route logic in `route_with_planes` chooses micro when the
-   through-via `stitch_via_clears` fails for room.
-4. **Microvia DRC sizing** — microvias have their own min size/drill; mirror kicad-cli's defaults
-   in a create_board pre-check + the in-house lint (same pattern as the through-via minimums; note
-   kicad-cli ignores the .kicad_pro rules block, so the in-house values are the gate).
+3. ~~**Use it in routing** — done (commit 7a889eb): `route_with_planes` places a 0.4/0.2 micro
+   via-in-pad after the through-via in-place+fanout fail, for a pad whose plane is the ADJACENT
+   layer (F→In1). soc-system: 7 inner GND balls escape, 0 faults.~~ KEY LIMIT FOUND: KiCAD holds
+   blind/buried vias to the full netclass via min (only MICRO gets the relaxed floor), so a blind
+   via is never smaller than the through that already failed — deeper planes (In2…) need STACKED
+   microvias with isolated landing pads (future increment), not a single blind via.
+4. ~~**Microvia DRC sizing** — done (commit 7a889eb): DrcViolation::ViaDiameterBelowMin; lint
+   checks each via vs netclass via_diameter (through/blind) or the 0.3 micro floor (micro). This
+   closed a real gap that shipped 56 via_diameter faults from an undersized blind via.~~
 
 The validation path (the scary unknown) is proven to work. The remaining work is a contained,
 deliberate engine build — worth a focused effort, not a single tick.
