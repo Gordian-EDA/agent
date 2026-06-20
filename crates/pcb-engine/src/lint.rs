@@ -46,6 +46,10 @@ use serde::Serialize;
 /// Geometric slop, mm. A gap is only a violation when it falls short of the
 /// required clearance by more than this.
 const EPS: f64 = 1e-6;
+/// KiCAD's relaxed minimum diameter for a true MICRO via (laser, adjacent-layer). Matches the
+/// netclass `microvia_diameter` the board export writes (kicad-bridge synth / tools_pcb
+/// write_kicad_project = 0.3 mm). Through/blind vias instead use `problem.via_diameter`.
+const MICRO_VIA_MIN_DIAMETER: f64 = 0.3;
 
 /// A design-rule violation in a [`RouteSolution`] relative to its problem.
 ///
@@ -131,6 +135,21 @@ pub enum DrcViolation {
         layer: String,
         /// The board's layer count (provided for context when debugging).
         layer_count: u32,
+    },
+    /// A via's diameter is below KiCAD's minimum for its type. Through/blind/buried vias
+    /// must meet the netclass via diameter (`problem.via_diameter`); only true micro vias
+    /// get the relaxed microvia floor. kicad-cli flags this as `via_diameter`; the in-house
+    /// lint must too, or the engine would ship a fault (it once shipped 56 — an HDI blind
+    /// via emitted below the netclass min before this check existed).
+    ViaDiameterBelowMin {
+        /// The via's connection name.
+        connection: String,
+        /// The via's diameter, mm.
+        diameter: f64,
+        /// Required minimum diameter for this via type, mm.
+        required: f64,
+        /// The via position, for debugging.
+        at: [f64; 2],
     },
     /// A connectivity defect from the slice-0 oracle, folded in.
     Connectivity {
@@ -226,6 +245,7 @@ fn violation_nets(v: &DrcViolation) -> Vec<String> {
         | DrcViolation::ClearanceViaAny { connection, .. }
         | DrcViolation::TraceWidthBelowMin { connection, .. }
         | DrcViolation::OutOfBounds { connection, .. }
+        | DrcViolation::ViaDiameterBelowMin { connection, .. }
         | DrcViolation::InvalidLayer { connection, .. } => vec![connection.clone()],
         DrcViolation::Connectivity { .. } => Vec::new(),
     }
@@ -379,6 +399,26 @@ pub fn lint(problem: &RouteProblem, solution: &RouteSolution) -> Vec<DrcViolatio
                     at: aat,
                 });
             }
+        }
+    }
+
+    // (3c) Via diameter below KiCAD's minimum. Through/blind/buried vias must meet the netclass
+    //      via diameter (problem.via_diameter — what kicad-cli enforces); only true micro vias get
+    //      the relaxed microvia floor. Iterates solution.vias directly (the Geom model drops the
+    //      span/type), so it's the one place that knows micro-vs-through. Without this the engine
+    //      shipped 56 via_diameter faults when an HDI blind via was emitted below the netclass min.
+    for v in &solution.vias {
+        let required = match v.span {
+            crate::problem::ViaSpan::Partial { micro: true, .. } => MICRO_VIA_MIN_DIAMETER,
+            _ => problem.via_diameter,
+        };
+        if v.diameter + EPS < required {
+            out.push(DrcViolation::ViaDiameterBelowMin {
+                connection: v.connection.clone(),
+                diameter: v.diameter,
+                required,
+                at: [v.at.x, v.at.y],
+            });
         }
     }
 
@@ -894,6 +934,56 @@ mod tests {
             drill: 0.3,
             span: ViaSpan::Through,
         }
+    }
+
+    #[test]
+    fn via_diameter_below_min_flags_undersized_through_but_allows_micro() {
+        // Board netclass via diameter = 0.6 (problem()); micro floor = 0.3.
+        let p = problem(vec![], vec![]);
+        let mk = |dia: f64, span: ViaSpan| RouteSolution {
+            traces: vec![],
+            vias: vec![Via {
+                connection: "GND".to_owned(),
+                at: Point2 { x: 50.0, y: 50.0 },
+                diameter: dia,
+                drill: 0.3,
+                span,
+            }],
+        };
+        let flagged = |s: &RouteSolution| {
+            lint(&p, s)
+                .iter()
+                .any(|v| matches!(v, DrcViolation::ViaDiameterBelowMin { .. }))
+        };
+        let micro = ViaSpan::Partial { from: 0, to: 1, micro: true };
+        // A 0.5 THROUGH via is below the 0.6 netclass min → flagged (the exact class that shipped
+        // 56 via_diameter faults from an undersized HDI blind via before this check existed).
+        assert!(flagged(&mk(0.5, ViaSpan::Through)), "undersized through via must flag");
+        // A full-size through via is fine.
+        assert!(!flagged(&mk(0.6, ViaSpan::Through)), "full through via must pass");
+        // A 0.4 MICRO via clears the relaxed 0.3 micro floor → NOT flagged (the HDI escape size).
+        assert!(!flagged(&mk(0.4, micro.clone())), "0.4 micro via must pass the micro floor");
+        // A 0.2 MICRO via is below even the micro floor → flagged.
+        assert!(flagged(&mk(0.2, micro)), "sub-floor micro via must flag");
+    }
+
+    #[test]
+    fn drop_violating_copper_drops_undersized_via_net() {
+        // The oracle must DROP a net whose via is undersized, not ship it (honest unrouted).
+        let p = problem(vec![], vec![]);
+        let mut sol = RouteSolution {
+            traces: vec![],
+            vias: vec![Via {
+                connection: "VCC".to_owned(),
+                at: Point2 { x: 50.0, y: 50.0 },
+                diameter: 0.5, // < 0.6 netclass min, span Through
+                drill: 0.3,
+                span: ViaSpan::Through,
+            }],
+        };
+        let dropped = drop_violating_copper(&p, &mut sol);
+        assert_eq!(dropped, vec!["VCC".to_owned()]);
+        assert!(sol.vias.is_empty(), "undersized via dropped, not shipped");
     }
 
     fn load(name: &str) -> RouteProblem {

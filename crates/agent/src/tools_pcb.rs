@@ -436,6 +436,12 @@ const KICAD_MIN_ANNULAR: f64 = 0.1;
 /// holes regardless of net — two barrels cannot overlap mechanically — so via placement must
 /// honour it even for SAME-NET vias (which may share copper but never a hole).
 const KICAD_HOLE_CLEAR_MM: f64 = 0.25;
+/// HDI blind/micro via-in-pad size for the fine-pitch plane-stitch fallback (increment 3). Smaller
+/// than a through via so it fits IN the pad where a 0.5–0.6 through-via has no room between
+/// fine-pitch balls, while keeping KiCAD's standard 0.1 mm annular so `kicad-cli pcb drc` accepts
+/// it (proven in the feasibility spike). See docs/specs/hdi-microvia-feasibility.md.
+const HDI_VIA_DIAMETER: f64 = 0.4;
+const HDI_VIA_DRILL: f64 = 0.2;
 
 /// Parse one part JSON into a validated [`DraftPart`]. Shared by `create_board` and
 /// `add_parts` so both apply identical footprint resolution, intrinsic pad-clearance
@@ -1607,9 +1613,7 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     let result = if planes.is_empty() {
         route_auto(&rp)
     } else {
-        let plane_names: std::collections::BTreeSet<String> =
-            planes.iter().map(|(n, _)| n.clone()).collect();
-        route_with_planes(rp.clone(), &plane_names, &draft.rules)
+        route_with_planes(rp.clone(), &planes, &draft.rules)
     };
 
     // Persist the full solution + failures + router for export (Task 4) and the
@@ -1864,10 +1868,15 @@ fn fanout_seg_clears(
 
 fn route_with_planes(
     mut rp: RouteProblem,
-    plane_names: &std::collections::BTreeSet<String>,
+    planes: &[(String, u32)],
     rules: &DraftRules,
 ) -> pcb_engine::pipeline::RouteResult {
     rp.layer_count = 2;
+    let plane_names: std::collections::BTreeSet<String> =
+        planes.iter().map(|(n, _)| n.clone()).collect();
+    // net → its copper-plane layer index (1 = In1 …) for the HDI via-in-pad fallback below.
+    let plane_layer: std::collections::BTreeMap<&str, u32> =
+        planes.iter().map(|(n, l)| (n.as_str(), *l)).collect();
     // Stitch points: one through-via per SMD plane pad, dropping it to its inner
     // plane. Collected BEFORE retagging layers so we can still tell a THROUGH-HOLE
     // plane pad — which already spans the inner planes and needs NO via (adding one
@@ -1992,6 +2001,39 @@ fn route_with_planes(
                     placed = true;
                     break 'search;
                 }
+            }
+        }
+        // 3) HDI VIA-IN-PAD fallback: a smaller blind/micro via reaches this pad's own plane
+        //    where a full through-via has no room between fine-pitch balls. `micro` when the
+        //    plane is the layer directly below the top (adjacent, F→In1), `blind` for a deeper
+        //    inner plane (F→In2…). It sits IN the pad (same net), so KiCAD's zone fill connects
+        //    it in its own plane and carves an anti-pad in any foreign plane it pierces — no
+        //    short. The DRC oracle (drop_violating_copper + kicad-cli) still gates it: a via that
+        //    can't clear is dropped and reported unrouted, never shipped failing.
+        if !placed {
+            // Only a true laser MICROVIA helps the room problem: KiCAD relaxes the size rule for
+            // micro vias (down to the netclass microvia min) but holds blind/buried vias to the
+            // FULL through-via minimum — so a blind via is never smaller than the through-via that
+            // already failed to fit here, and would only re-trip the size/room limit. We therefore
+            // emit a micro via only when the pad's plane is the layer DIRECTLY below the top
+            // (adjacent F→In1): the via-in-pad drops straight onto its own plane (same net → KiCAD's
+            // zone fill connects it; nothing foreign is pierced → no anti-pad, no short). A deeper
+            // inner plane (In2…) would need stacked microvias with isolated landing pads — a future
+            // increment. The DRC oracle still gates it; a via that can't clear is reported unrouted.
+            if plane_layer.get(net.as_str()) == Some(&1)
+                && stitch_via_clears(
+                    &at, &net, &rp.obstacles, &result.solution.vias,
+                    &result.solution.traces, HDI_VIA_DIAMETER / 2.0, HDI_VIA_DRILL, clr_via,
+                )
+            {
+                result.solution.vias.push(Via {
+                    connection: net.clone(),
+                    at: at.clone(),
+                    diameter: HDI_VIA_DIAMETER,
+                    drill: HDI_VIA_DRILL,
+                    span: ViaSpan::Partial { from: 0, to: 1, micro: true },
+                });
+                placed = true;
             }
         }
         if !placed {
