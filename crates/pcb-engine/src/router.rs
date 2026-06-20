@@ -24,7 +24,7 @@
 
 use crate::astar::{self, AStarCosts, State};
 use crate::grid::{self, RouteGrid};
-use crate::problem::{LayerRef, Point2, RouteProblem, RouteSolution, Trace, Via};
+use crate::problem::{LayerRef, Point2, RouteProblem, RouteSolution, Trace, Via, ViaSpan};
 
 #[doc(inline)]
 pub use crate::problem::FailedNet;
@@ -398,6 +398,7 @@ fn emit_path(
                 at: Point2 { x: at.x, y: at.y },
                 diameter: problem.via_diameter,
                 drill: problem.via_drill,
+                span: ViaSpan::Through,
             });
             // Start the next run on the new layer at the same point.
             run = vec![Point2 { x: at.x, y: at.y }];

@@ -48,7 +48,7 @@ use std::path::Path;
 use kiutils_kicad::{PcbAst, PcbFile, PcbFootprint, PcbPad};
 use pcb_engine::problem::{
     Bounds, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace,
-    Via,
+    Via, ViaSpan,
 };
 
 /// A board parsed into a routing problem plus the mappings write-back needs.
@@ -554,26 +554,48 @@ fn render_trace(out: &mut String, trace: &Trace, board: &BoardProblem) -> io::Re
     Ok(count)
 }
 
-/// Render one via into a `(via …)` line appended to `out`.
+/// Render one via into a `(via …)` line appended to `out`. A `Through` via spans the
+/// full copper stack and emits no type keyword (byte-identical to the historical output);
+/// a `Partial` span is an HDI via and emits KiCAD's BARE `micro`/`blind` keyword right
+/// after `via` — NOT a `(type …)` sub-node, which would silently break the JSON DRC report
+/// writer (see docs/specs/hdi-microvia-feasibility.md).
 fn render_via(out: &mut String, via: &Via, board: &BoardProblem) -> io::Result<()> {
     let net = net_code_for(&via.connection, board)?;
     let (x, y) = (fmt_num(via.at.x), fmt_num(via.at.y));
     let (size, drill) = (fmt_num(via.diameter), fmt_num(via.drill));
-    // Vias span the full copper stack (top → bottom).
-    let top = board
-        .layer_names
-        .first()
-        .map(String::as_str)
-        .unwrap_or("F.Cu");
-    let bottom = board
+    let layer_at = |idx: usize, fallback: &str| -> String {
+        board
+            .layer_names
+            .get(idx)
+            .map(String::as_str)
+            .unwrap_or(fallback)
+            .to_owned()
+    };
+    let last = board
         .layer_names
         .last()
         .map(String::as_str)
-        .unwrap_or("B.Cu");
-    let uuid = copper_uuid(&format!("via:{net}:{x}:{y}:{size}:{drill}"));
+        .unwrap_or("B.Cu")
+        .to_owned();
+    let (kind, top, bottom) = match &via.span {
+        ViaSpan::Through => ("", layer_at(0, "F.Cu"), last),
+        ViaSpan::Partial { from, to, micro } => (
+            if *micro { "micro " } else { "blind " },
+            layer_at(*from as usize, "F.Cu"),
+            layer_at(*to as usize, "B.Cu"),
+        ),
+    };
+    // Keep the Through uuid seed exactly as before so existing boards stay byte-identical;
+    // a Partial via folds its span into the seed (two spans at one xy must not collide).
+    let uuid = match &via.span {
+        ViaSpan::Through => copper_uuid(&format!("via:{net}:{x}:{y}:{size}:{drill}")),
+        ViaSpan::Partial { .. } => {
+            copper_uuid(&format!("via:{net}:{x}:{y}:{size}:{drill}:{top}:{bottom}"))
+        }
+    };
     let _ = writeln!(
         out,
-        "\t(via (at {x} {y}) (size {size}) (drill {drill}) (layers \"{top}\" \"{bottom}\") (net {net}) (uuid \"{uuid}\"))"
+        "\t(via {kind}(at {x} {y}) (size {size}) (drill {drill}) (layers \"{top}\" \"{bottom}\") (net {net}) (uuid \"{uuid}\"))"
     );
     Ok(())
 }
@@ -750,6 +772,7 @@ pub fn extract_copper(path: &Path) -> io::Result<RouteSolution> {
             at: Point2 { x: vx, y: vy },
             diameter: via.size.unwrap_or(0.0),
             drill: via.drill.unwrap_or(0.0),
+            span: ViaSpan::Through,
         });
     }
 
@@ -762,5 +785,71 @@ fn map_kiutils_err(e: kiutils_kicad::Error) -> io::Error {
     match e {
         kiutils_kicad::Error::Io(io) => io,
         other => io::Error::new(io::ErrorKind::InvalidData, other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod via_render_tests {
+    use super::*;
+    use pcb_engine::problem::{Bounds, Point2, RouteProblem, Via, ViaSpan};
+    use std::collections::BTreeMap;
+
+    fn board_4layer() -> BoardProblem {
+        let problem = RouteProblem {
+            layer_count: 4,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![],
+            bounds: Bounds { min_x: 0.0, max_x: 10.0, min_y: 0.0, max_y: 10.0 },
+            clearance: 0.15,
+            via_diameter: 0.5,
+            via_drill: 0.3,
+            net_widths: BTreeMap::new(),
+            outline: None,
+        };
+        let mut net_codes = BTreeMap::new();
+        net_codes.insert("GND".to_owned(), 1);
+        BoardProblem {
+            problem,
+            net_codes,
+            layer_names: vec!["F.Cu".into(), "In1.Cu".into(), "In2.Cu".into(), "B.Cu".into()],
+        }
+    }
+
+    fn render(span: ViaSpan) -> String {
+        let via = Via {
+            connection: "GND".to_owned(),
+            at: Point2 { x: 8.4, y: 8.4 },
+            diameter: 0.5,
+            drill: 0.3,
+            span,
+        };
+        let mut out = String::new();
+        render_via(&mut out, &via, &board_4layer()).unwrap();
+        out
+    }
+
+    #[test]
+    fn through_via_emits_no_keyword_full_stack() {
+        let s = render(ViaSpan::Through);
+        assert!(s.contains("(via (at 8.4 8.4)"), "through via has no type keyword: {s}");
+        assert!(s.contains("(layers \"F.Cu\" \"B.Cu\")"), "through spans the full stack: {s}");
+    }
+
+    #[test]
+    fn micro_via_emits_bare_micro_keyword_and_span() {
+        // F.Cu -> In1.Cu microvia (the de-risked HDI inner-ball escape form).
+        let s = render(ViaSpan::Partial { from: 0, to: 1, micro: true });
+        assert!(s.contains("(via micro (at 8.4 8.4)"), "micro keyword must be BARE after via: {s}");
+        assert!(s.contains("(layers \"F.Cu\" \"In1.Cu\")"), "micro spans its own layers: {s}");
+        // The wrong `(type micro)` form silently breaks the json DRC writer — must never appear.
+        assert!(!s.contains("(type"), "no (type ...) sub-node allowed: {s}");
+    }
+
+    #[test]
+    fn blind_via_emits_bare_blind_keyword_and_span() {
+        let s = render(ViaSpan::Partial { from: 0, to: 2, micro: false });
+        assert!(s.contains("(via blind (at 8.4 8.4)"), "blind keyword must be BARE after via: {s}");
+        assert!(s.contains("(layers \"F.Cu\" \"In2.Cu\")"), "blind spans its own layers: {s}");
     }
 }

@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use kicad_bridge::pcb::{extract_copper, read_problem, write_solution};
-use pcb_engine::problem::{LayerRef, Point2, RouteSolution, Trace, Via};
+use pcb_engine::problem::{LayerRef, Point2, RouteSolution, Trace, Via, ViaSpan};
 
 fn fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/two_res.kicad_pcb")
@@ -81,6 +81,7 @@ fn hand_solution() -> RouteSolution {
             at: p(22.0, 9.0875),
             diameter: 0.6,
             drill: 0.3,
+            span: ViaSpan::Through,
         }],
     }
 }

@@ -266,7 +266,24 @@ pub struct Trace {
     pub path: Vec<Point2>,
 }
 
-/// A via joining all copper layers at a board position.
+/// The copper-layer span of a via. `Through` (the default) pierces the full stack
+/// (F.Cu → B.Cu); `Partial` is an HDI blind/buried or micro via spanning a sub-range
+/// of copper layers. See `docs/specs/hdi-microvia-feasibility.md`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ViaSpan {
+    /// Full-stack through via (every existing via is this).
+    #[default]
+    Through,
+    /// A via spanning copper layers `[from, to]` (0-based indices into the layer stack,
+    /// 0 = top). `micro` emits KiCAD's `micro` keyword (a laser microvia, used for an
+    /// adjacent-layer span / via-in-pad escape) vs `blind` (a mechanically-drilled
+    /// blind/buried via). KiCAD encodes the type as a BARE keyword after `via`.
+    Partial { from: u32, to: u32, micro: bool },
+}
+
+/// A via joining copper layers at a board position. `span` defaults to `Through`
+/// (the full stack); a `Partial` span is an HDI blind/micro via.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Via {
@@ -274,4 +291,7 @@ pub struct Via {
     pub at: Point2,
     pub diameter: f64,
     pub drill: f64,
+    /// The via's copper-layer span. Omitted in older route JSON → defaults to `Through`.
+    #[serde(default)]
+    pub span: ViaSpan,
 }

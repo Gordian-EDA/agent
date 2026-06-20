@@ -39,7 +39,7 @@
 use crate::crossing::assign_crossings;
 use crate::detail::{self, CellRoute, CellRouteResult};
 use crate::pathing::{global_route, GlobalRouteResult};
-use crate::problem::{FailedNet, LayerRef, Point2, RouteProblem, RouteSolution, Trace, Via};
+use crate::problem::{FailedNet, LayerRef, Point2, RouteProblem, RouteSolution, Trace, Via, ViaSpan};
 use crate::router;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -413,6 +413,7 @@ fn stitch(
                 at,
                 diameter: problem.via_diameter,
                 drill: problem.via_drill,
+                span: ViaSpan::Through,
             });
         }
     }
@@ -848,6 +849,7 @@ mod tests {
                 at: pt(3.0, 0.0),
                 diameter: 0.6,
                 drill: 0.3,
+                span: ViaSpan::Through,
             }],
         };
         let m = metrics(&s);

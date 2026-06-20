@@ -41,7 +41,7 @@ use pcb_engine::placement::{
     Rect, place_best, to_route_problem,
 };
 use pcb_engine::problem::{
-    Bounds, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteSolution, Via,
+    Bounds, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteSolution, Via, ViaSpan,
 };
 
 use crate::tools::{ToolCtx, require_str};
@@ -1943,6 +1943,7 @@ fn route_with_planes(
                 at,
                 diameter: rules.via_diameter,
                 drill: rules.via_drill,
+                span: ViaSpan::Through,
             });
             continue;
         }
@@ -1986,6 +1987,7 @@ fn route_with_planes(
                         at: cand,
                         diameter: rules.via_diameter,
                         drill: rules.via_drill,
+                        span: ViaSpan::Through,
                     });
                     placed = true;
                     break 'search;

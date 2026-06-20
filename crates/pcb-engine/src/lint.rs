@@ -820,7 +820,7 @@ fn seg_rect_dist(a: [f64; 2], b: [f64; 2], min: [f64; 2], max: [f64; 2]) -> f64 
 mod tests {
     use super::*;
     use crate::problem::{
-        Bounds, Connection, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace, Via,
+        Bounds, Connection, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace, Via, ViaSpan,
     };
     use crate::router;
     use std::path::Path;
@@ -892,6 +892,7 @@ mod tests {
             at: Point2 { x: at.0, y: at.1 },
             diameter: 0.6,
             drill: 0.3,
+            span: ViaSpan::Through,
         }
     }
 
