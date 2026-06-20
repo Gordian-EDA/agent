@@ -50,8 +50,12 @@ use crate::tools::{ToolCtx, Tools};
 /// set_placement_hints → place_board → render_board → route_board → export_board,
 /// plus placement/routing-failure iteration) runs longer than the schematic
 /// self-repair flow (search → info → validate → apply), and was being truncated at
-/// 12. Bounded so a misbehaving model still can't loop forever.
-const MAX_ITERATIONS: usize = 24;
+/// 12. Raised to 40: a DENSE board (a 100-ball BGA + decoupling + connectors, ~28
+/// parts) legitimately spends ~9 round-trips on footprint search/info, several on
+/// build, then multiple place/route/triage cycles — a real e2e on such a board hit
+/// the old cap of 24 mid-placement-refinement, before it could export. Still bounded
+/// so a misbehaving model can't loop forever.
+const MAX_ITERATIONS: usize = 40;
 
 /// The human apply-gate. The loop calls [`Approvals::approve`] with the dry-run
 /// diff before any `apply_design` write; returning `false` cancels the write.
