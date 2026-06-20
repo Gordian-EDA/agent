@@ -2042,8 +2042,11 @@ fn route_with_planes(
             // emit a micro via only when the pad's plane is the layer DIRECTLY below the top
             // (adjacent F→In1): the via-in-pad drops straight onto its own plane (same net → KiCAD's
             // zone fill connects it; nothing foreign is pierced → no anti-pad, no short). A deeper
-            // inner plane (In2…) would need stacked microvias with isolated landing pads — a future
-            // increment. The DRC oracle still gates it; a via that can't clear is reported unrouted.
+            // inner plane (In2…) would need STACKED micro vias; those are kicad-cli-DRC-valid
+            // (verified) but their co-located holes trip the in-house lint's hole-clearance check,
+            // which then drops the whole net — so the stack needs a span-aware hole exemption first
+            // (see docs/specs/hdi-microvia-feasibility.md). The DRC oracle still gates this; a via
+            // that can't clear is reported unrouted, never shipped failing.
             if plane_layer.get(net.as_str()) == Some(&1)
                 && stitch_via_clears(
                     &at, &net, &rp.obstacles, &result.solution.vias,

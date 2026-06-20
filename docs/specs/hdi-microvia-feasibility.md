@@ -48,3 +48,36 @@ A `(uuid …)` is also required or kicad-cli rejects the via outright (rc=3).
 
 The validation path (the scary unknown) is proven to work. The remaining work is a contained,
 deliberate engine build — worth a focused effort, not a single tick.
+
+## Stacked-microvia spike + the signal-congestion finding (Jun 19, increment-5 research)
+
+Investigated the next lever — reaching the DEEPER plane (In2 on a 4-layer; the planes on 6-layer+).
+
+**Stacked microvias are kicad-cli-DRC-valid.** A spike injecting two micro vias at one point
+(`F→In1` + `In1→In2`) produced NO stacked/microvia/hole-co-located violation — kicad-cli does not
+require staggering. So the deeper plane is reachable in principle by a stack of adjacent micro vias.
+
+**But the in-house lint kills it (verify-by-implementing).** Implementing the stack made soc-system
+catastrophically WORSE (unconnected 74→277, VCC 420): the stack's CO-LOCATED holes trip the in-house
+lint's hole-clearance check (which is span-blind — every via is modelled as a full through-hole), and
+`drop_violating_copper` then drops the WHOLE net. So a stacked-microvia escape needs a **span-aware
+hole exemption first**: two SAME-NET micro vias at the same point with adjacent, chained spans are a
+legal stack, not a hole violation. Reverted the stack; kept the single-micro (adjacent-plane) escape.
+
+**The bigger finding — the remaining unconnected is SIGNAL congestion, not plane-ball HDI.** On
+4-layer soc-system the 74 residual unconnected are only 14 plane balls (stack-able) + ~60 SIGNALS
+(A0–A11…). Signals don't go to a plane, so HDI can't help them — they're unrouted because
+`route_with_planes` hardcodes `rp.layer_count = 2` (signals on F/B only). At 6-layer that WASTES the
+two inner SIGNAL layers (In1/In4; only In2/In3 are planes), so 6-layer soc-system is WORSE (130 vs
+74), not better. The router already avoids plane layers via `plane_mask` (astar.rs:367), so the fix
+is to route signals on ALL non-plane layers instead of forcing 2 — but the stitch/retag logic
+(`ob.layers = [top, bottom]`) assumes exactly two signal faces, so this is a substantial, careful
+build, not a one-liner.
+
+### Next-lever priority (both deliberate builds, scoped here)
+1. **Inner-signal-layer routing at 6-layer+** (the big one): let a dense board actually use its inner
+   signal layers so 6-layer beats 4-layer. Restructure `route_with_planes` to route on
+   `layer_count − |planes|` signal layers (rely on `plane_mask`), retag plane pads onto all signal
+   faces, and keep the micro escape (single for In1; stacked for deeper, after #2).
+2. **Span-aware via hole exemption** in the lint, then re-enable stacked micro vias for deeper planes
+   (rescues the ~14 same-as-deeper-plane balls on 4-layer + every deeper-plane ball at 6-layer+).
