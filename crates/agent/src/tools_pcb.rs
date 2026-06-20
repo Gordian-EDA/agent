@@ -2554,6 +2554,16 @@ fn write_kicad_project(board_path: &std::path::Path, rules: &DraftRules) -> std:
     let stem = board_path.file_stem().and_then(|s| s.to_str()).unwrap_or("board");
     let pro = board_path.with_extension("kicad_pro");
     let vmin = (rules.via_diameter - 0.05).max(0.1);
+    // IMPORTANT (verified empirically Jun 19): `kicad-cli pcb drc` reads the NET_SETTINGS classes
+    // below — so the netclass clearance / track width / via size DO gate DRC against the engine's
+    // rules — but it does NOT enforce this `design_settings.rules` MINIMUMS block: setting
+    // min_via_diameter to 2.0 here did not flag 0.6 mm vias. These minimums are therefore for the
+    // KiCAD GUI only; kicad-cli falls back to its built-in constraint defaults (via ≥ 0.5, drill ≥
+    // 0.3, annular ≥ 0.1, hole-to-hole ≥ 0.25, copper-to-edge ≥ 0.5). That is SAFE because
+    // create_board's via pre-checks (KICAD_MIN_VIA_*) and the in-house lint (HOLE_CLEAR / EDGE_CLEAR
+    // = 0.25 / 0.5) are set to MATCH those same defaults — the DRC gate is meaningful via the
+    // netclass + matching pre-checks, NOT this block. Don't add a rule here expecting kicad-cli to
+    // honour it (it won't); enforce new minimums in the in-house lint + a create_board pre-check.
     let doc = json!({
         "board": {"design_settings": {"rules": {
             "min_clearance": 0.0, "min_track_width": 0.0,
