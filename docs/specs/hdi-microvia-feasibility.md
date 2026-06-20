@@ -34,10 +34,8 @@ A `(uuid …)` is also required or kicad-cli rejects the via outright (rc=3).
 
 ## What the HDI build still needs (now de-risked, deliberate, multi-turn)
 
-1. **Via span on the engine `Via`** — `from_layer`/`to_layer` (default through = F↔B). Today every
-   via is through; this is the data model change.
-2. **Export the bare-keyword form** in `synth.rs` — `micro` for an adjacent-layer span, `blind`
-   for a non-adjacent inner span, nothing for through. Plus a `(uuid …)` per via.
+1. ~~**Via span on the engine `Via`** — done (commit 11e19b3): `ViaSpan` enum {Through, Partial{from,to,micro}}, `#[serde(default)]`, all 8 construction sites default to Through.~~
+2. ~~**Export the bare-keyword form** — done (commit 11e19b3): `render_via` emits `(via micro|blind …)` for a Partial span (byte-identical for Through); 3 unit tests guard it.~~
 3. **Use it in routing** — a fine-pitch inner ball that can't fit a through-via between neighbours
    drops to the nearest inner signal/plane layer via a microvia ON its pad (via-in-pad). This is
    the actual escape win; the stitch/route logic in `route_with_planes` chooses micro when the
