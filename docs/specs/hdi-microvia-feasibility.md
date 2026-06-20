@@ -81,3 +81,28 @@ build, not a one-liner.
    faces, and keep the micro escape (single for In1; stacked for deeper, after #2).
 2. **Span-aware via hole exemption** in the lint, then re-enable stacked micro vias for deeper planes
    (rescues the ~14 same-as-deeper-plane balls on 4-layer + every deeper-plane ball at 6-layer+).
+
+## The signal-congestion bottleneck is PIN ESCAPE, not layer count (Jun 19)
+
+Tried the scoped "inner-signal-layer routing" lever: keep `route_with_planes`'s full layer_count
+(rely on plane_mask to keep planes clear) + retag plane pads onto all signal faces. Verify-by-
+implementing: 4-layer UNCHANGED (soc-system 74, 0 faults — additive, good), but 6-layer was NOT
+helped (135 vs 130, only 7 inner-layer traces). REVERTED (net-negative).
+
+Why it didn't help: ALL 74 of soc-system's unconnected items touch a U-ref — they are BGA/IC PIN
+ESCAPES, not scattered mid-board routing. The router already CAN route on inner signal layers
+(plane_mask leaves In1/In4 as signal, by design — router.rs:53), but a standard via (≥ netclass via
+min) has no room to drop a fine-pitch signal pin to an inner layer, so the pin never reaches the
+extra copper. More layers don't help if the pin can't escape the ball field.
+
+**The real lever: microvia-aware SIGNAL escape (a big build, deferred).** Same idea as the plane
+micro escape (increment 3) but for a signal pin → drop it to an inner SIGNAL layer via a microvia
+(via-in-pad), then let the router route it there. Needs: (a) the layer-count foundation (this
+reverted change, re-applied); (b) the router's via step to use a microvia where a standard via won't
+fit at fine pitch; (c) 6-layer+ so an inner signal layer exists (a 4-layer board has none — its two
+inner layers are planes, so an over-dense 4-layer board like soc-system is at its HONEST density
+limit and the engine correctly reports the pins unrouted, 0 faults).
+
+Note: soc-system at 4-layer is an over-dense STRESS case; realistic dense BGAs that fit their layer
+budget route cleanly (bga256/bga121 fully; mcu-bga 30→15 with the plane micro escape). The engine is
+honest, not broken, on the over-dense case.
