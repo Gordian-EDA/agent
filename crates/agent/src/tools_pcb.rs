@@ -1610,10 +1610,34 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     // only way a dense part's many power pins connect. Signals route on the outer
     // pair; each plane pad is stitched up to its plane with a through-via.
     let planes = assign_planes(&draft);
-    let result = if planes.is_empty() {
-        route_auto(&rp)
+    let (result, planes) = if planes.is_empty() {
+        (route_auto(&rp), planes)
     } else {
-        route_with_planes(rp.clone(), &planes, &draft.rules)
+        let r0 = route_with_planes(rp.clone(), &planes, &draft.rules);
+        // Only the ADJACENT inner plane (In1) is reachable by a micro via-in-pad escape, so which
+        // power net sits there decides how many fine-pitch balls route (HDI increment 3). If the
+        // default assignment STRANDED plane pads and there are exactly two planes, try the other
+        // layer assignment and keep whichever lands more plane copper — the DRC oracle gates both,
+        // so this only ever trades honest-unrouted for routed, never correctness. The 2× route cost
+        // is paid only when the first pass actually left strands (a fully-routed board skips it).
+        let stranded = r0
+            .failed
+            .iter()
+            .any(|f| f.connection.contains("plane stitching"));
+        if stranded && planes.len() == 2 {
+            let swapped = vec![
+                (planes[0].0.clone(), planes[1].1),
+                (planes[1].0.clone(), planes[0].1),
+            ];
+            let r1 = route_with_planes(rp.clone(), &swapped, &draft.rules);
+            if r1.solution.vias.len() > r0.solution.vias.len() {
+                (r1, swapped)
+            } else {
+                (r0, planes)
+            }
+        } else {
+            (r0, planes)
+        }
     };
 
     // Persist the full solution + failures + router for export (Task 4) and the
