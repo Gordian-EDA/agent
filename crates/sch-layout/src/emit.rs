@@ -1514,6 +1514,23 @@ impl SchematicWriter {
     /// then [`Self::finish`] (which re-runs it harmlessly) is safe and is how the
     /// floorplan engine reports truthful, post-solve warnings.
     pub fn prepare(&mut self) {
+        // Dedup labels that are IDENTICAL (same net) AND COINCIDENT (same point): a multi-unit BGA
+        // stacks its many same-rail power balls onto ONE schematic point, so each pin's signal label
+        // lands exactly on top of the previous one — 686 overlapping "P1V1"/"P2V5" labels tanked an
+        // ECP5 core sheet. The coincident pins are already electrically joined, so one label per
+        // (net, point) suffices. Keyed to 1µm, so DISTINCT grid pins keep their own labels ⇒ the
+        // single-sheet reference fixtures (no coincident pins) are byte-identical.
+        {
+            let mut seen: std::collections::HashSet<(String, i64, i64)> =
+                std::collections::HashSet::new();
+            self.labels.retain(|l| {
+                seen.insert((
+                    l.net.clone(),
+                    (l.at[0] * 1000.0).round() as i64,
+                    (l.at[1] * 1000.0).round() as i64,
+                ))
+            });
+        }
         // Resolve signal-stub collisions and materialize the surviving stub wires
         // before any rendering, so labels/wires below render the reconciled state.
         self.retract_colliding_stubs();
