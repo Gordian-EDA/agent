@@ -30,6 +30,9 @@ pub mod event;
 pub mod md;
 pub mod ui;
 
+#[cfg(test)]
+mod screenshot;
+
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::rc::Rc;

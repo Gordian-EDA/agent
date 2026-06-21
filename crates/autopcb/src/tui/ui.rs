@@ -26,7 +26,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
 use super::app::{App, Entry, NoticeLevel, PendingDiff, Speaker};
 use super::md::{self, MdLine, WrapMode};
@@ -71,7 +71,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             Constraint::Min(3),            // transcript
             Constraint::Length(diff_h),    // proposed-changes pane
             Constraint::Length(running_h), // running indicator
-            Constraint::Length(1),         // input line
+            Constraint::Length(3),         // input composer (rounded box)
             Constraint::Length(1),         // status bar
         ])
         .split(area);
@@ -174,31 +174,29 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     } else {
         "○"
     };
-    let auto = if app.auto { "auto ON" } else { "auto OFF" };
+    let dim = Style::default().fg(Color::DarkGray);
+    let sep = || Span::styled("  ·  ", dim);
     let spans = vec![
-        Span::styled(" auto-pcb ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw("── "),
+        // The brand carries the accent; everything else is metadata, so it dims.
         Span::styled(
-            file_name(&app.status.sch_path),
-            Style::default().fg(Color::Cyan),
+            " auto-pcb",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  "),
+        sep(),
+        Span::styled(file_name(&app.status.sch_path), Style::default().fg(Color::Gray)),
+        sep(),
         Span::styled(
-            format!("[KiCAD {dot}]"),
+            format!("KiCAD {dot}"),
             Style::default().fg(if app.status.kicad_connected {
                 Color::Green
             } else {
                 Color::Red
             }),
         ),
-        Span::raw(" "),
+        sep(),
         Span::styled(
-            format!("[{auto}]"),
-            Style::default().fg(if app.auto {
-                Color::Yellow
-            } else {
-                Color::DarkGray
-            }),
+            if app.auto { "auto on" } else { "auto off" },
+            if app.auto { Style::default().fg(Color::Yellow) } else { dim },
         ),
     ];
     f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -245,23 +243,44 @@ fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(para, inner);
 }
 
-/// Style one transcript entry into wrapped `Line`s. Each speaker gets a marker
-/// repeated on every wrapped row instead of a label: the user a colored accent
-/// bar, everyone else a plain indent. Assistant text is rendered as markdown.
+/// Style one transcript entry into wrapped `Line`s, in the Codex idiom: a blank
+/// line opens each turn (user / assistant), the speaker's marker sits on the
+/// first row with a hanging continuation indent under it, assistant prose is
+/// markdown, and tool / system lines recede (dim, italic) so they read as
+/// sub-steps of the turn above them.
+///
+/// `first` is the row-0 marker, `cont` the indent repeated on wrapped rows.
 fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
-    // (marker, marker_style, body_style, render_as_markdown)
-    let (marker, marker_style, body_style, markdown) = match e.speaker {
+    // (first_marker, cont_marker, marker_style, body_style, markdown, gap_above)
+    let (first, cont, marker_style, body_style, markdown, gap) = match e.speaker {
+        // The user's turn: a cyan caret and bold text — the one thing the eye
+        // should land on when scanning back through the transcript.
         Speaker::User => (
-            "▌ ",
-            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
-            Style::default(),
-            false,
-        ),
-        Speaker::Assistant => ("  ", Style::default(), Style::default(), true),
-        Speaker::Tool => (
+            "› ",
             "  ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default().add_modifier(Modifier::BOLD),
+            false,
+            true,
+        ),
+        // Assistant prose: a dim bullet, markdown body, hanging 2-col indent.
+        Speaker::Assistant => (
+            "• ",
+            "  ",
+            Style::default().fg(Color::Cyan),
             Style::default(),
-            Style::default().fg(Color::Magenta),
+            true,
+            true,
+        ),
+        // Tool calls cluster under the assistant turn (no gap) and recede.
+        Speaker::Tool => (
+            "  ▸ ",
+            "    ",
+            Style::default().fg(Color::DarkGray),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+            false,
             false,
         ),
         Speaker::System => {
@@ -273,10 +292,14 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
                 NoticeLevel::Warn => Color::Yellow,
                 NoticeLevel::Error => Color::Red,
             };
-            ("  ", Style::default(), Style::default().fg(color), false)
+            let body = match e.level {
+                NoticeLevel::Plain => Style::default().fg(color).add_modifier(Modifier::ITALIC),
+                _ => Style::default().fg(color),
+            };
+            ("  ", "  ", Style::default().fg(color), body, false, false)
         }
     };
-    let body_w = width.saturating_sub(marker.chars().count()).max(1);
+    let body_w = width.saturating_sub(first.chars().count()).max(1);
     let logical: Vec<MdLine> = if markdown {
         md::render_markdown(&e.text, body_style)
     } else {
@@ -289,18 +312,25 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
             .collect()
     };
 
+    // A blank opener separates turns; clustered sub-steps (tool/system) omit it.
     let mut lines = Vec::new();
+    if gap {
+        lines.push(Line::from(""));
+    }
+    let mut first_row = true;
     for ml in &logical {
         for row in wrap_segments(&ml.segments, body_w, ml.wrap == WrapMode::Preserve) {
+            let marker = if first_row { first } else { cont };
             let mut spans = vec![Span::styled(marker, marker_style)];
             spans.extend(row);
             lines.push(Line::from(spans));
+            first_row = false;
         }
     }
-    if lines.is_empty() {
+    if first_row {
         // e.g. an entry that was nothing but fence markers — still take a row
         // so the scroll math stays exact per entry.
-        lines.push(Line::from(Span::styled(marker, marker_style)));
+        lines.push(Line::from(Span::styled(first, marker_style)));
     }
     lines
 }
@@ -508,8 +538,18 @@ fn draw_diff(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
-    let inner = body(area);
-    let avail = (inner.width as usize).saturating_sub(2).max(1); // minus the "> " prompt
+    // A rounded composer box (Codex idiom). The border brightens to the accent
+    // while typing is live and dims otherwise, so the eye knows where focus is.
+    let focused = app.input_active() && app.pending.is_none();
+    let border = if focused { Color::Cyan } else { Color::DarkGray };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border));
+    let inner = block.inner(body(area));
+    f.render_widget(block, body(area));
+
+    let avail = (inner.width as usize).saturating_sub(2).max(1); // minus the "› " prompt
 
     let line = if app.pending.is_some() {
         Line::from(Span::styled(
@@ -528,8 +568,13 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
             "type a prompt — /help for commands, Tab completes"
         };
         Line::from(vec![
-            Span::styled("› ", Style::default().fg(Color::Blue)),
-            Span::styled(placeholder, Style::default().fg(Color::DarkGray)),
+            Span::styled("› ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                placeholder,
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ),
         ])
     } else {
         // Window the input horizontally so the cursor stays visible.
@@ -537,7 +582,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         let start = app.cursor.saturating_sub(avail.saturating_sub(1));
         let visible: String = chars.iter().skip(start).take(avail).collect();
         Line::from(vec![
-            Span::styled("› ", Style::default().fg(Color::Blue)),
+            Span::styled("› ", Style::default().fg(Color::Cyan)),
             Span::raw(visible),
         ])
     };
@@ -661,9 +706,11 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
         let pad = avail.saturating_sub(left.chars().count());
         format!("{left}{}{right}", " ".repeat(pad))
     };
+    // A recessed footer (dim, no bar) rather than a heavy inverted band — it
+    // carries context and hints without competing with the transcript.
     let para = Paragraph::new(Line::from(Span::styled(
         text,
-        Style::default().bg(Color::DarkGray).fg(Color::White),
+        Style::default().fg(Color::DarkGray),
     )));
     f.render_widget(para, area);
 }
@@ -1059,14 +1106,14 @@ mod tests {
     }
 
     #[test]
-    fn user_message_has_an_accent_bar_and_no_speaker_labels() {
+    fn user_message_has_an_accent_caret_and_no_speaker_labels() {
         let mut a = app();
         for c in "hello there".chars() {
             a.update(Msg::Char(c));
         }
         a.update(Msg::Submit);
         let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("▌"), "user accent bar:\n{text}");
+        assert!(text.contains("›"), "user accent caret:\n{text}");
         assert!(text.contains("hello there"), "user text:\n{text}");
         assert!(!text.contains("you  "), "no `you` gutter label:\n{text}");
         assert!(!text.contains("ai   "), "no `ai` gutter label:\n{text}");
