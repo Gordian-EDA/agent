@@ -21,6 +21,16 @@ def critic_defects(yaml_path, intent, focus=""):
            "--samples", "1", "--json-only"]
     if focus:
         cmd += ["--focus", focus]
+    return _critic_run(cmd)
+
+
+def run_erc(yaml_path, erc_bin):
+    """Deterministic ERC findings for one design (lowercased stdout) — the exact-math layer."""
+    out = subprocess.run([erc_bin, yaml_path], capture_output=True, text=True)
+    return out.stdout.lower()
+
+
+def _critic_run(cmd):
     out = subprocess.run(cmd, capture_output=True, text=True)
     try:
         v = json.loads(out.stdout.strip().splitlines()[-1])
@@ -42,6 +52,8 @@ def main():
     ap.add_argument("--focuses", nargs="+", default=[],
                     help="diverse-lens ensemble: each 'run' uses one of these focus emphases instead "
                     "of N identical runs (proves whether DIVERSE lenses beat repeated same-prompt runs)")
+    ap.add_argument("--erc-bin", help="path to the erc_check binary; if set, union the DETERMINISTIC "
+                    "ERC findings and report combined recall (LLM ensemble ∪ exact-math ERC)")
     args = ap.parse_args()
     lenses = args.focuses if args.focuses else None
     nruns = len(lenses) if lenses else args.runs
@@ -74,10 +86,12 @@ def main():
                     runs = [critic_defects(mut, f"{name} circuit", f) for f in lenses]
                 else:
                     runs = [critic_defects(mut, f"{name} circuit") for _ in range(args.runs)]
+                erc_out = run_erc(mut, args.erc_bin) if args.erc_bin else ""
                 os.unlink(mut)
-                cases.append((name, dtype, gt_ref, gt["detail"], runs))
+                cases.append((name, dtype, gt_ref, gt["detail"], runs, erc_out))
                 caught_each = ["Y" if (h is not None and gt_ref in h) else "." for h in runs]
-                print(f"  {name:26} {dtype:10} {gt_ref:6} runs[{''.join(caught_each)}]  {gt['detail'][:58]}")
+                erc_mark = " erc:E" if (args.erc_bin and gt_ref in erc_out) else ""
+                print(f"  {name:24} {dtype:10} {gt_ref:6} runs[{''.join(caught_each)}]{erc_mark}  {gt['detail'][:50]}")
 
     # Recall at ensemble size k = union of the first k runs catches the injected refdes.
     label = "diverse lenses" if lenses else "repeated runs"
@@ -85,7 +99,7 @@ def main():
     total = len(cases)
     for k in range(1, nruns + 1):
         caught = 0
-        for _, _, gt_ref, _, runs in cases:
+        for _, _, gt_ref, _, runs, _erc in cases:
             union = set()
             for h in runs[:k]:
                 if h:
@@ -97,7 +111,7 @@ def main():
     # Per-type breakdown at the max ensemble size.
     print("\n=== per-defect-type recall (N=%d) ===" % nruns)
     by_type = collections.defaultdict(lambda: [0, 0])
-    for _, dtype, gt_ref, _, runs in cases:
+    for _, dtype, gt_ref, _, runs, _erc in cases:
         union = set()
         for h in runs:
             if h:
@@ -106,6 +120,20 @@ def main():
         by_type[dtype][0] += 1 if gt_ref in union else 0
     for dtype, (c, t) in by_type.items():
         print(f"  {dtype:11}: {c}/{t}")
+
+    # Combined recall: the diverse-lens LLM ensemble UNIONED with the deterministic exact-math ERC.
+    if args.erc_bin and total:
+        print("\n=== combined recall: LLM ensemble ∪ deterministic ERC ===")
+        caught, erc_only = 0, 0
+        for _, _, gt_ref, _, runs, erc_out in cases:
+            llm = any(h and gt_ref in h for h in runs)
+            erc = gt_ref in erc_out
+            if llm or erc:
+                caught += 1
+            if erc and not llm:
+                erc_only += 1
+        print(f"  combined: {caught}/{total} = {caught/total*100:.0f}%  "
+              f"(deterministic ERC recovered {erc_only} that the LLM ensemble missed)")
 
 
 if __name__ == "__main__":
