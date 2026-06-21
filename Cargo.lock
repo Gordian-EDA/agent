@@ -184,6 +184,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cola"
+version = "0.1.0"
+
+[[package]]
 name = "compact_str"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
