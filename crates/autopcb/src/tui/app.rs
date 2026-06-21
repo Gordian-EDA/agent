@@ -405,9 +405,8 @@ impl App {
             status,
             should_quit: false,
         };
-        app.transcript.push(Entry::system(
-            "auto-pcb copilot. Type a prompt and Enter. :help for commands.",
-        ));
+        // The empty transcript renders a welcome splash (see `ui::draw_welcome`),
+        // so no seed entry is needed.
         app
     }
 

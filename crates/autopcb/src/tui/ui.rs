@@ -225,6 +225,17 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
     let inner = body(area);
+    // Before the first real exchange, fill the pane with a welcome splash rather
+    // than leaving it blank (the Codex first-launch idiom).
+    let started = app
+        .transcript
+        .iter()
+        .any(|e| matches!(e.speaker, Speaker::User | Speaker::Assistant));
+    if !started {
+        draw_welcome(f, inner);
+        return;
+    }
+
     let body_w = inner.width.max(1) as usize;
     let lines: Vec<Line> = app
         .transcript
@@ -241,6 +252,46 @@ fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
 
     let para = Paragraph::new(lines).scroll((top, 0));
     f.render_widget(para, inner);
+}
+
+/// The first-launch splash, shown in the transcript pane until the first turn:
+/// the brand, a tagline, a few example prompts, and the key hints — vertically
+/// centred so an empty cockpit feels intentional rather than blank.
+fn draw_welcome(f: &mut Frame, area: Rect) {
+    let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+    let caret = Style::default().fg(Color::Cyan);
+    let example = |s: &'static str| {
+        Line::from(vec![Span::styled("    › ", caret), Span::styled(s, Style::default())])
+    };
+    let lines = vec![
+        Line::from(Span::styled("auto-pcb", accent)),
+        Line::from(Span::styled(
+            "the schematic & PCB design copilot",
+            dim,
+        )),
+        Line::from(""),
+        Line::from(Span::styled("  Try:", dim)),
+        example("design a 3.3V LDO regulator with input and output caps"),
+        example("add a USB-C connector with CC pull-down resistors"),
+        example("lay out and route the PCB for this schematic"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  /help for commands  ·  Tab completes  ·  :auto toggles auto-apply",
+            dim,
+        )),
+    ];
+
+    // Centre the block vertically; indent it from the left margin.
+    let h = lines.len() as u16;
+    let top = area.y + area.height.saturating_sub(h) / 2;
+    let block = Rect {
+        x: area.x + 2,
+        y: top,
+        width: area.width.saturating_sub(2),
+        height: h.min(area.height),
+    };
+    f.render_widget(Paragraph::new(lines), block);
 }
 
 /// Style one transcript entry into wrapped `Line`s, in the Codex idiom: a blank
