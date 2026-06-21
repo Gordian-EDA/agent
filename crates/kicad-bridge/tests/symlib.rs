@@ -52,10 +52,50 @@ fn deep_extends_chain_resolves() {
         eprintln!("SKIP");
         return;
     };
-    // Depth-4 chain in the real KiCAD library:
+    // Depth-4 chain in the real KiCAD library (the exact symbol set varies by KiCAD version):
     // MAX7409xUA -> MAX7408xUA -> MAX7408xPA -> MAX7400xPA -> MAX7400xSA
-    let s = l.symbol("MAX7409xUA").unwrap();
+    let Some(s) = l.symbol("MAX7409xUA") else {
+        eprintln!("SKIP: MAX7409xUA absent in this KiCAD version's Filter library");
+        return;
+    };
     assert_eq!(s.pins.len(), 8);
+}
+
+#[test]
+fn deep_extends_chain_resolves_inline() {
+    // Deterministic, version-independent companion to `deep_extends_chain_resolves`: a depth-4
+    // extends chain A -> B -> C -> D -> E where only the base E declares pins. Resolving A must
+    // walk the whole chain and surface E's pins.
+    let lib_text = r#"(kicad_symbol_lib
+	(version 20231120)
+	(generator "test")
+	(symbol "E"
+		(symbol "E_1_1"
+			(pin power_in line (at 0 0 0) (length 2.54)
+				(name "VI" (effects (font (size 1.27 1.27))))
+				(number "1" (effects (font (size 1.27 1.27)))))
+			(pin power_out line (at 0 0 0) (length 2.54)
+				(name "VO" (effects (font (size 1.27 1.27))))
+				(number "2" (effects (font (size 1.27 1.27)))))
+			(pin power_in line (at 0 0 0) (length 2.54)
+				(name "GND" (effects (font (size 1.27 1.27))))
+				(number "3" (effects (font (size 1.27 1.27)))))
+		)
+	)
+	(symbol "D" (extends "E"))
+	(symbol "C" (extends "D"))
+	(symbol "B" (extends "C"))
+	(symbol "A" (extends "B"))
+)
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("deep.kicad_sym");
+    std::fs::write(&path, lib_text).unwrap();
+    let l = SymbolLib::load(&path).unwrap();
+    let a = l.symbol("A").unwrap();
+    assert_eq!(a.pins.len(), 3, "A inherits E's 3 pins through the depth-4 extends chain");
+    let names: std::collections::BTreeSet<_> = a.pins.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["GND", "VI", "VO"].into_iter().collect());
 }
 
 #[test]
