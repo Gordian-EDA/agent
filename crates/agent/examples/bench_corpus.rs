@@ -52,6 +52,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::type_complexity)] // example harness: a flat metrics tuple is clearer than a one-off struct
 fn bench_one(
     env: &KicadEnv,
     provider: &RealSymbolProvider,

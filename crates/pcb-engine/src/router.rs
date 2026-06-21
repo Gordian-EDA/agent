@@ -60,7 +60,7 @@ pub fn plane_layers(layer_count: usize) -> Vec<u32> {
     // original 4/6 cases so high-end stackups (8/10/12-layer) get proper GND/VCC planes
     // AND the extra inner SIGNAL layers a dense BGA needs (8-layer → 6 signal layers vs
     // 4 on a 6-layer board). Odd or <4 counts carry no plane (2-layer, or malformed).
-    if layer_count >= 4 && layer_count % 2 == 0 {
+    if layer_count >= 4 && layer_count.is_multiple_of(2) {
         vec![layer_count as u32 / 2 - 1, layer_count as u32 / 2]
     } else {
         Vec::new()

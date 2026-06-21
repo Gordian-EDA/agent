@@ -194,12 +194,10 @@ impl Footprint {
         if pads.iter().any(|p| p.shape == "custom")
             && let Ok(raw) = std::fs::read_to_string(path) {
                 let bboxes = custom_pad_bboxes(&raw);
-                let mut bi = 0;
-                for pad in pads.iter_mut().filter(|p| p.shape == "custom") {
+                for (bi, pad) in pads.iter_mut().filter(|p| p.shape == "custom").enumerate() {
                     if let Some(&(hx, hy)) = bboxes.get(bi) {
                         pad.size = [pad.size[0].max(2.0 * hx), pad.size[1].max(2.0 * hy)];
                     }
-                    bi += 1;
                 }
             }
         let (courtyard, courtyard_source) = courtyard_bbox(ast, &pads);
@@ -260,8 +258,8 @@ pub(crate) fn custom_pad_bboxes(raw: &str) -> Vec<(f64, f64)> {
 pub(crate) fn matching_paren(s: &str, open: usize) -> Option<usize> {
     let b = s.as_bytes();
     let mut depth = 0i32;
-    for i in open..b.len() {
-        match b[i] {
+    for (i, &byte) in b.iter().enumerate().skip(open) {
+        match byte {
             b'(' => depth += 1,
             b')' => {
                 depth -= 1;

@@ -89,11 +89,10 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
         let _ = std::fs::copy(&pro, out_dir.join("board.kicad_pro"));
     }
     // Engine debug render (routed view).
-    if let Ok(render) = tools.run("render_board", json!({ "view": "routed" }), &ctx) {
-        if let Some(p) = render["png_path"].as_str() {
+    if let Ok(render) = tools.run("render_board", json!({ "view": "routed" }), &ctx)
+        && let Some(p) = render["png_path"].as_str() {
             let _ = std::fs::copy(p, out_dir.join("engine.png"));
         }
-    }
     let _ = rasterize; // (kept for ad-hoc SVG rasterization)
 
     json!({
@@ -121,11 +120,10 @@ fn main() {
             continue;
         }
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
-        if let Some(only) = &only {
-            if !stem.contains(only.as_str()) {
+        if let Some(only) = &only
+            && !stem.contains(only.as_str()) {
                 continue;
             }
-        }
         let spec: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         specs.push((stem, spec));
     }

@@ -6,16 +6,16 @@ use pcb_engine::problem::{Bounds, Point2};
 use std::fmt::Write;
 
 fn zone(o:&mut String, net:i32, name:&str, layer:&str, uuid:&str, rects:&[[f64;4]]){
-    let _=write!(o," (zone (net {net}) (net_name \"{name}\") (layer \"{layer}\") (uuid \"{uuid}\") (hatch edge 0.5) (connect_pads (clearance 0.2)) (min_thickness 0.2) (fill yes)\n");
+    let _=writeln!(o," (zone (net {net}) (net_name \"{name}\") (layer \"{layer}\") (uuid \"{uuid}\") (hatch edge 0.5) (connect_pads (clearance 0.2)) (min_thickness 0.2) (fill yes)");
     o.push_str("  (polygon (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))\n");
-    for r in rects { let _=write!(o,"  (filled_polygon (layer \"{layer}\") (pts (xy {} {}) (xy {} {}) (xy {} {}) (xy {} {})))\n",r[0],r[1],r[2],r[1],r[2],r[3],r[0],r[3]); }
+    for r in rects { let _=writeln!(o,"  (filled_polygon (layer \"{layer}\") (pts (xy {} {}) (xy {} {}) (xy {} {}) (xy {} {})))",r[0],r[1],r[2],r[1],r[2],r[3],r[0],r[3]); }
     o.push_str(" )\n");
 }
 fn smd(o:&mut String, uuid:&str, x:f64,y:f64,net:i32,name:&str){
-    let _=write!(o," (footprint \"t:p\" (layer \"F.Cu\") (uuid \"{uuid}\") (at {x} {y}) (attr smd) (pad \"1\" smd rect (at 0 0) (size 1 1) (layers \"F.Cu\") (net {net} \"{name}\")))\n");
+    let _=writeln!(o," (footprint \"t:p\" (layer \"F.Cu\") (uuid \"{uuid}\") (at {x} {y}) (attr smd) (pad \"1\" smd rect (at 0 0) (size 1 1) (layers \"F.Cu\") (net {net} \"{name}\")))");
 }
 fn via(o:&mut String, uuid:&str, x:f64,y:f64,net:i32){
-    let _=write!(o," (via (at {x} {y}) (size 0.6) (drill 0.3) (layers \"F.Cu\" \"B.Cu\") (net {net}) (uuid \"{uuid}\"))\n");
+    let _=writeln!(o," (via (at {x} {y}) (size 0.6) (drill 0.3) (layers \"F.Cu\" \"B.Cu\") (net {net}) (uuid \"{uuid}\"))");
 }
 fn main(){
     let b=Bounds{min_x:0.0,max_x:20.0,min_y:0.0,max_y:20.0};

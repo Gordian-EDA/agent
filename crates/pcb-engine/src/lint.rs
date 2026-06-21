@@ -384,7 +384,7 @@ pub fn lint(problem: &RouteProblem, solution: &RouteSolution) -> Vec<DrcViolatio
         // FOREIGN pad copper ↔ this via's drill edge (hole-to-copper). A same-net pad is
         // via-in-pad (intentional), so skip it; any other pad must clear the drill by 0.25.
         for ob in &problem.obstacles {
-            if ob.connected_to.iter().any(|n| *n == a.connection) {
+            if ob.connected_to.contains(&a.connection) {
                 continue;
             }
             let dx = (a.at.x - ob.center.x).abs() - ob.width / 2.0;

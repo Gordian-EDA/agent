@@ -551,6 +551,7 @@ fn cap_anchor_dist(
 
 /// The placement cost the SA minimizes (also the [`place_best`] selection key, so
 /// the variant that genuinely lays out best is the one chosen). Lower is better.
+#[allow(clippy::too_many_arguments)] // internal SA cost kernel; arg-struct adds indirection without value
 fn place_cost(
     problem: &PlaceProblem,
     nets: &[LogicalNet],

@@ -114,15 +114,14 @@ fn layer_assignment(g: &Graph) -> Vec<i32> {
         nbr.entry(b).or_default().push(a);
     }
     for v in 0..g.n {
-        if !touched.contains(&v) {
-            if let Some(ns) = nbr.get(&v) {
+        if !touched.contains(&v)
+            && let Some(ns) = nbr.get(&v) {
                 let mut ls: Vec<i32> = ns.iter().map(|&u| layer[u]).collect();
                 if !ls.is_empty() {
                     ls.sort_unstable();
                     layer[v] = ls[ls.len() / 2];
                 }
             }
-        }
     }
     let min = *layer.iter().min().unwrap_or(&0);
     for l in &mut layer {
@@ -233,10 +232,10 @@ fn count_crossings_cols(
         }
     }
     let mut total = 0usize;
-    for li in 0..cols.len().saturating_sub(1) {
+    for (li, col) in cols.iter().enumerate().take(cols.len().saturating_sub(1)) {
         // Edges from column li to li+1 as (rank_in_li, rank_in_li+1), dedup’d.
         let mut es: Vec<(i32, i32)> = Vec::new();
-        for &u in &cols[li] {
+        for &u in col {
             if let Some(ns) = adj.get(&u) {
                 for &(w, _) in ns {
                     if layer[w] == li as i32 + 1 {
@@ -314,7 +313,7 @@ mod tests {
         g.flow(2, 0, 1.0);
         let p = layout(&g, &Opts::default());
         assert_eq!(p.layer.len(), 3);
-        assert!(p.layer.iter().all(|&l| l >= 0 && l < 3));
+        assert!(p.layer.iter().all(|&l| (0..3).contains(&l)));
     }
 
     #[test]

@@ -91,7 +91,7 @@ mod tests {
         assert_eq!(ms.len(), 1, "exactly one crystal cluster");
         let m = &ms[0];
         assert_eq!(m.anchor, "U1");
-        assert_eq!((m.score - 1.0).abs() < 1e-9, true, "full crystal scores 1.0");
+        assert!((m.score - 1.0).abs() < 1e-9, "full crystal scores 1.0");
         let mut caps: Vec<String> = m.bindings["cap_a"].clone();
         caps.extend(m.bindings["cap_b"].clone());
         caps.sort();

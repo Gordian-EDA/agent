@@ -18,7 +18,7 @@ fn main(){
     o.push_str(" (zone (net 1) (net_name \"GND\") (layer \"F.Cu\") (uuid \"30000000-0000-0000-0000-000000000001\") (hatch edge 0.5) (connect_pads (clearance 0.2)) (min_thickness 0.2) (fill yes)\n");
     o.push_str("  (polygon (pts (xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)))\n");
     for r in &rects {
-        let _ = write!(o, "  (filled_polygon (layer \"F.Cu\") (pts (xy {} {}) (xy {} {}) (xy {} {}) (xy {} {})))\n",
+        let _ = writeln!(o, "  (filled_polygon (layer \"F.Cu\") (pts (xy {} {}) (xy {} {}) (xy {} {}) (xy {} {})))",
             r[0],r[1], r[2],r[1], r[2],r[3], r[0],r[3]);
     }
     o.push_str(" )\n)\n");

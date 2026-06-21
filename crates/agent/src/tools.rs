@@ -1218,10 +1218,6 @@ fn component_signature(c: &Component) -> String {
     )
 }
 
-/// A stable fingerprint of a design's connectivity (refdes, part, pins→nets),
-/// used to cache the inferred layout across the dry-run/render/commit of one
-/// design.
-
 /// Structured diff between a prior design (possibly `None` for a fresh project)
 /// and the new one: which refdes were added, removed, or changed, plus the net
 /// count before/after. Refdes are gathered across all blocks.

@@ -1903,6 +1903,7 @@ fn seg_point_dist(a: &Point2, b: &Point2, p: &Point2) -> f64 {
 
 /// Would a stitch via at `at` (radius `via_r`) on net `net` clear every FOREIGN pad,
 /// via, and routed track? (Same-net copper is fine to touch.)
+#[allow(clippy::too_many_arguments)] // internal clearance helper; flat args keep the hot loop readable
 fn stitch_via_clears(
     at: &Point2,
     net: &str,
@@ -1942,6 +1943,7 @@ fn stitch_via_clears(
 /// FOREIGN pad, VIA, and routed track? Sampled densely along the (short) segment.
 /// Checking foreign vias here is what the first fanout attempt missed (the bga100
 /// clearance faults were the trace grazing a via).
+#[allow(clippy::too_many_arguments)] // internal clearance helper; flat args keep the hot loop readable
 fn fanout_seg_clears(
     a: &Point2,
     b: &Point2,

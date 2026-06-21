@@ -57,6 +57,7 @@ use crate::tools::{ToolCtx, Tools};
 ///   - PCB: a dense board (100-ball BGA + decoupling + connectors, ~29 parts) spends ~9
 ///     round-trips on footprint search/info, several on build, then multiple
 ///     place/route/triage cycles, and hit 24 mid-placement-refinement with NO board exported.
+///
 /// 40 lets the largest boards commit/export incrementally; simple boards still finish in a
 /// handful of round-trips, so the extra ceiling only costs tokens on boards that need it.
 const MAX_ITERATIONS: usize = 40;

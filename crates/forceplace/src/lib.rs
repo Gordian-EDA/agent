@@ -187,9 +187,9 @@ pub fn layout(g: &Graph, opts: &Opts) -> Vec<[f64; 2]> {
 
     // Normalise so the minimum rectangle corner is at the origin.
     let (mut minx, mut miny) = (f64::MAX, f64::MAX);
-    for i in 0..n {
-        minx = minx.min(pos[i][0] - g.nodes[i].w / 2.0);
-        miny = miny.min(pos[i][1] - g.nodes[i].h / 2.0);
+    for (i, p) in pos.iter().enumerate().take(n) {
+        minx = minx.min(p[0] - g.nodes[i].w / 2.0);
+        miny = miny.min(p[1] - g.nodes[i].h / 2.0);
     }
     for p in &mut pos {
         p[0] -= minx;
