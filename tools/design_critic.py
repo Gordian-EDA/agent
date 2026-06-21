@@ -67,6 +67,8 @@ def main():
     ap.add_argument("--intent", help="one-line description of the intended circuit", default="")
     ap.add_argument("--model", default=os.environ.get("CRITIC_MODEL", "anthropic/claude-opus-4-8"))
     ap.add_argument("--samples", type=int, default=1, help="grade N times, report median score")
+    ap.add_argument("--focus", default="", help="extra emphasis for this pass (a diverse-lens "
+                    "ensemble member, e.g. power/feedback or digital-interface faults)")
     ap.add_argument("--show-reasoning", action="store_true")
     ap.add_argument("--json-only", action="store_true")
     args = ap.parse_args()
@@ -78,10 +80,14 @@ def main():
 
     netlist = open(args.design).read()
     user = (f"Intended circuit: {args.intent}\n\n" if args.intent else "") + f"Netlist:\n{netlist}"
+    system = SYSTEM_PROMPT
+    if args.focus:
+        system += (f"\n\nEXTRA EMPHASIS THIS PASS — scrutinise especially: {args.focus}. "
+                   "(Still report any other clear electrical fault you notice.)")
     body = {
         "model": args.model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         "max_tokens": 6000,

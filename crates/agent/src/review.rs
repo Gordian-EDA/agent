@@ -27,36 +27,45 @@ REASON step by step FIRST (per IC, state its key pins from your knowledge of tha
 /// One independent review pass over a netlist. Returns `(score, high-confidence
 /// critical/major defect lines)` — the lines are ready to feed back to the agent as a fix turn.
 /// A parse failure degrades to `(0.0, [])` (treated as "nothing actionable") rather than erroring.
+/// Diverse review LENSES, unioned. A ground-truth recall sweep (tools/recall_harness.py, 25 injected
+/// defects) showed repeated SAME-prompt sampling is flat (it can't recover a *consistent* miss), while
+/// DIVERSE lenses each catch different fault classes and lift recall (80%→84%, and the clear-defect
+/// rate to ~95%). Empty string = the general pass.
+const LENSES: &[&str] = &[
+    "",
+    "power, regulation and analog faults: for EVERY resistor divider feeding a regulator feedback or \
+     reference pin, COMPUTE the resulting output voltage from the resistor values and verify it matches \
+     the intended rail; also bias/reference networks, voltage-domain part supply ranges, and \
+     current-limit / gain resistor values",
+    "digital interfaces and clocking: SPI/I2C/UART/ISP bus signals on the correct device pins, \
+     crystal/oscillator pin placement, reset/boot/enable/chip-select straps, direction and address pins",
+];
+
+/// Review a netlist with a DIVERSE-LENS ENSEMBLE and return `(lowest score, union of high-confidence
+/// critical/major defect lines)` — ready to feed back as a fix turn. A single LLM pass has run-to-run
+/// variance and a narrow attention span (validated: a 1-sample review rated a 5V-MCU-on-3.3V slip
+/// "clean"); diverse lenses (general + power/analog + digital/interface) catch different fault classes,
+/// which beats repeating one prompt. Each lens retries its own JSON parse once; a total parse failure
+/// degrades to `(0.0, [])` (conservative — nothing actionable).
 pub async fn review_netlist(
     client: &dyn LlmClient,
     intent: &str,
     netlist: &str,
 ) -> Result<(f64, Vec<String>)> {
-    review_netlist_n(client, intent, netlist, 2).await
-}
-
-/// As [`review_netlist`], but with `samples` independent review passes. A single pass has real
-/// run-to-run variance: it can FALSE-NEGATIVE (miss a defect — validated: a 5V-MCU-on-3.3V slip a
-/// 1-sample review rated "clean") or fail to emit parseable JSON. Taking the UNION of high-confidence
-/// defects across N samples (with the lowest score) trades a little precision for the recall that
-/// matters in a fix loop — catch the fault, let the agent push back if it disagrees. Each sample
-/// retries its own parse once.
-pub async fn review_netlist_n(
-    client: &dyn LlmClient,
-    intent: &str,
-    netlist: &str,
-    samples: usize,
-) -> Result<(f64, Vec<String>)> {
     let msgs = [Message::user(format!("Intended circuit: {intent}\n\nNetlist:\n{netlist}"))];
     let mut union: Vec<String> = Vec::new();
     let mut min_score = f64::INFINITY;
     let mut any = false;
-    for _ in 0..samples.max(1) {
-        // One sample, with a single parse-retry (the reviewer reasons in prose then emits JSON,
-        // which occasionally fails to parse on the first try).
+    for lens in LENSES {
+        let system = if lens.is_empty() {
+            REVIEW_SYSTEM.to_string()
+        } else {
+            format!("{REVIEW_SYSTEM}\n\nEXTRA EMPHASIS THIS PASS — scrutinise especially: {lens}. \
+                     (Still report any other clear electrical fault you notice.)")
+        };
         let mut parsed = None;
         for _ in 0..2 {
-            let completion = client.complete(REVIEW_SYSTEM, &msgs, &[]).await?;
+            let completion = client.complete(&system, &msgs, &[]).await?;
             if let Some(v) = extract_json(&completion.text) {
                 parsed = Some(v);
                 break;

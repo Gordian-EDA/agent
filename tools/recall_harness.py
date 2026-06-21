@@ -14,12 +14,14 @@ beats a single run, so the production ensemble size is chosen by data.
 import argparse, json, subprocess, sys, tempfile, os, collections
 
 
-def critic_defects(yaml_path, intent):
-    """One reviewer run → list of high-confidence critical/major defect refdeses (lowercased)."""
-    out = subprocess.run(
-        [sys.executable, "tools/design_critic.py", yaml_path, "--intent", intent,
-         "--samples", "1", "--json-only"],
-        capture_output=True, text=True)
+def critic_defects(yaml_path, intent, focus=""):
+    """One reviewer run → list of high-confidence critical/major defect refdeses (lowercased).
+    `focus` makes this run a diverse-lens ensemble member (extra emphasis on a fault class)."""
+    cmd = [sys.executable, "tools/design_critic.py", yaml_path, "--intent", intent,
+           "--samples", "1", "--json-only"]
+    if focus:
+        cmd += ["--focus", focus]
+    out = subprocess.run(cmd, capture_output=True, text=True)
     try:
         v = json.loads(out.stdout.strip().splitlines()[-1])
     except Exception:
@@ -37,7 +39,12 @@ def main():
     ap.add_argument("--types", nargs="+", default=["pinswap", "value", "disconnect"])
     ap.add_argument("--seeds", nargs="+", type=int, default=[1])
     ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument("--focuses", nargs="+", default=[],
+                    help="diverse-lens ensemble: each 'run' uses one of these focus emphases instead "
+                    "of N identical runs (proves whether DIVERSE lenses beat repeated same-prompt runs)")
     args = ap.parse_args()
+    lenses = args.focuses if args.focuses else None
+    nruns = len(lenses) if lenses else args.runs
 
     cases = []  # (base, type, gt_refdes, detail, [hits_run0, hits_run1, ...])
     for base in args.bases:
@@ -63,16 +70,20 @@ def main():
                     os.unlink(mut)
                     continue
                 seen.add((dtype, gt_ref))
-                runs = [critic_defects(mut, f"{name} circuit") for _ in range(args.runs)]
+                if lenses:
+                    runs = [critic_defects(mut, f"{name} circuit", f) for f in lenses]
+                else:
+                    runs = [critic_defects(mut, f"{name} circuit") for _ in range(args.runs)]
                 os.unlink(mut)
                 cases.append((name, dtype, gt_ref, gt["detail"], runs))
                 caught_each = ["Y" if (h is not None and gt_ref in h) else "." for h in runs]
                 print(f"  {name:26} {dtype:10} {gt_ref:6} runs[{''.join(caught_each)}]  {gt['detail'][:58]}")
 
     # Recall at ensemble size k = union of the first k runs catches the injected refdes.
-    print("\n=== ensemble recall (union of first k runs) ===")
+    label = "diverse lenses" if lenses else "repeated runs"
+    print(f"\n=== ensemble recall (union of first k {label}) ===")
     total = len(cases)
-    for k in range(1, args.runs + 1):
+    for k in range(1, nruns + 1):
         caught = 0
         for _, _, gt_ref, _, runs in cases:
             union = set()
@@ -84,7 +95,7 @@ def main():
         print(f"  N={k}: recall {caught}/{total} = {caught/total*100:.0f}%" if total else "  (no cases)")
 
     # Per-type breakdown at the max ensemble size.
-    print("\n=== per-defect-type recall (N=%d) ===" % args.runs)
+    print("\n=== per-defect-type recall (N=%d) ===" % nruns)
     by_type = collections.defaultdict(lambda: [0, 0])
     for _, dtype, gt_ref, _, runs in cases:
         union = set()
