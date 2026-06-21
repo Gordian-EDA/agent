@@ -1594,45 +1594,13 @@ fn cola_place(env: &KicadEnv, items: &mut [Item], inc: &Incidence, ir: &LayoutIr
         return;
     }
     let pins_len = |i: usize| items[i].geom.pins.len();
-    // Stress edges. SIGNAL nets clique-expand (real placement coupling). On a non-ground V+
-    // RAIL, add cohesion edges from each bypass cap to the anchor(s) it bypasses (a star, not
-    // a clique) so the cap clusters by its IC; ground is skipped (it couples everything).
-    let mut edges: Vec<(usize, usize)> = Vec::new();
-    for (net, pins) in inc {
-        let is_rail = ir.rails.contains_key(net) || is_power_net(net);
-        if is_rail {
-            if is_ground(net) {
-                continue;
-            }
-            let anchors: Vec<usize> =
-                pins.iter().map(|p| p.0).filter(|&i| pins_len(i) >= 3).collect();
-            for p in pins {
-                if pins_len(p.0) == 2 {
-                    for &a in &anchors {
-                        if a != p.0 {
-                            edges.push((p.0, a));
-                        }
-                    }
-                }
-            }
-        } else if pins.len() <= 5 {
-            for a in 0..pins.len() {
-                for b in (a + 1)..pins.len() {
-                    if pins[a].0 != pins[b].0 {
-                        edges.push((pins[a].0, pins[b].0));
-                    }
-                }
-            }
-        }
-    }
-    if edges.is_empty() {
-        return;
-    }
-
-    // Structural constraints: align each V+ rail's bypass caps into ONE row (equal y) spread
-    // left-to-right (min x gap) — the decoupling-bank structure the SA could only get by
-    // freezing an idiom. Here it falls out of the global constrained solve.
-    let mut by_rail: std::collections::BTreeMap<String, Vec<usize>> =
+    // Assign each bypass cap to the IC it bypasses: the nearest ≥3-pin anchor on its V+ rail
+    // (the IR seed places a decoupling cap by its IC, so nearest-at-seed is reliable). This
+    // drives BOTH the cohesion edge and the bank grouping, so a MULTI-IC sheet gets one aligned
+    // cap row PER IC beside that IC — not all of a rail's caps in one far-away row (the only
+    // defect on the large-sheet win). -1 = no anchor on the rail (a power-only sheet); those
+    // caps still bank per-rail, just without a cohesion target.
+    let mut cap_ic: std::collections::BTreeMap<usize, (String, i64)> =
         std::collections::BTreeMap::new();
     for (i, it) in items.iter().enumerate() {
         if it.geom.pins.len() != 2 {
@@ -1647,19 +1615,65 @@ fn cola_place(env: &KicadEnv, items: &mut [Item], inc: &Incidence, ir: &LayoutIr
             (false, true) => nets[0],
             _ => continue,
         };
-        if ir.rails.contains_key(vp) || is_power_net(vp) {
-            by_rail.entry(vp.to_string()).or_default().push(i);
+        if !(ir.rails.contains_key(vp) || is_power_net(vp)) {
+            continue;
         }
+        let ic = inc
+            .get(vp)
+            .into_iter()
+            .flatten()
+            .map(|p| p.0)
+            .filter(|&a| a != i && pins_len(a) >= 3)
+            .min_by(|&a, &b| {
+                let da = (items[a].at[0] - items[i].at[0]).hypot(items[a].at[1] - items[i].at[1]);
+                let db = (items[b].at[0] - items[i].at[0]).hypot(items[b].at[1] - items[i].at[1]);
+                da.total_cmp(&db)
+            })
+            .map(|a| a as i64)
+            .unwrap_or(-1);
+        cap_ic.insert(i, (vp.to_string(), ic));
+    }
+
+    // Stress edges: SIGNAL nets clique-expand (real placement coupling); rails are skipped (they
+    // couple everything). Each bypass cap gets one cohesion edge to ITS IC (above).
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for (net, pins) in inc {
+        if ir.rails.contains_key(net) || is_power_net(net) {
+            continue;
+        }
+        if pins.len() <= 5 {
+            for a in 0..pins.len() {
+                for b in (a + 1)..pins.len() {
+                    if pins[a].0 != pins[b].0 {
+                        edges.push((pins[a].0, pins[b].0));
+                    }
+                }
+            }
+        }
+    }
+    for (&cap, &(_, ic)) in &cap_ic {
+        if ic >= 0 {
+            edges.push((cap, ic as usize));
+        }
+    }
+    if edges.is_empty() {
+        return;
+    }
+
+    // Structural constraints: align each (rail, IC) cap group into ONE row (equal y) spread
+    // left-to-right — the decoupling-bank, now PER IC so it sits beside its IC.
+    let mut by_group: std::collections::BTreeMap<(String, i64), Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (&cap, key) in &cap_ic {
+        by_group.entry(key.clone()).or_default().push(cap);
     }
     let mut cons_x: Vec<cola::Constraint> = Vec::new();
     let mut cons_y: Vec<cola::Constraint> = Vec::new();
-    for caps in by_rail.values() {
+    for caps in by_group.values() {
         if caps.len() < 2 {
             continue;
         }
-        // Wide enough that each cap's "C## / value" text clears the next cap (tight COL_GAP
-        // packs labels on top of one another — the text-overlap warnings).
-        const CAP_GAP: f64 = 12.7;
+        const CAP_GAP: f64 = 12.7; // each cap's "C## / value" text clears the next
         let mut row = caps.clone();
         row.sort_by(|&a, &b| items[a].at[0].total_cmp(&items[b].at[0]));
         for w in row.windows(2) {
