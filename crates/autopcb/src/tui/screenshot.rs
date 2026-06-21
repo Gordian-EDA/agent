@@ -89,6 +89,37 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
+/// SVG path data for a box-drawing glyph occupying the cell at `(x0, y0)`. Strokes
+/// reach the cell edges so neighbours connect seamlessly; corners use a quadratic
+/// turn of radius `R` for a smooth round. Returns `None` for non-box glyphs.
+fn box_path(ch: &str, x0: f64, y0: f64) -> Option<String> {
+    const R: f64 = 4.0; // corner radius
+    let (x1, y1) = (x0 + CW, y0 + CH);
+    let (cx, cy) = (x0 + CW / 2.0, y0 + CH / 2.0);
+    let d = match ch {
+        "─" | "━" => format!("M{x0:.1} {cy:.1}L{x1:.1} {cy:.1}"),
+        "│" | "┃" => format!("M{cx:.1} {y0:.1}L{cx:.1} {y1:.1}"),
+        // Rounded corners: a stub to one edge, a quadratic turn, a stub to the other.
+        "╭" => format!("M{x1:.1} {cy:.1}L{:.1} {cy:.1}Q{cx:.1} {cy:.1} {cx:.1} {:.1}L{cx:.1} {y1:.1}", cx + R, cy + R),
+        "╮" => format!("M{x0:.1} {cy:.1}L{:.1} {cy:.1}Q{cx:.1} {cy:.1} {cx:.1} {:.1}L{cx:.1} {y1:.1}", cx - R, cy + R),
+        "╰" => format!("M{x1:.1} {cy:.1}L{:.1} {cy:.1}Q{cx:.1} {cy:.1} {cx:.1} {:.1}L{cx:.1} {y0:.1}", cx + R, cy - R),
+        "╯" => format!("M{x0:.1} {cy:.1}L{:.1} {cy:.1}Q{cx:.1} {cy:.1} {cx:.1} {:.1}L{cx:.1} {y0:.1}", cx - R, cy - R),
+        // Square corners.
+        "┌" => format!("M{x1:.1} {cy:.1}L{cx:.1} {cy:.1}L{cx:.1} {y1:.1}"),
+        "┐" => format!("M{x0:.1} {cy:.1}L{cx:.1} {cy:.1}L{cx:.1} {y1:.1}"),
+        "└" => format!("M{x1:.1} {cy:.1}L{cx:.1} {cy:.1}L{cx:.1} {y0:.1}"),
+        "┘" => format!("M{x0:.1} {cy:.1}L{cx:.1} {cy:.1}L{cx:.1} {y0:.1}"),
+        // Tees and cross.
+        "├" => format!("M{cx:.1} {y0:.1}L{cx:.1} {y1:.1}M{cx:.1} {cy:.1}L{x1:.1} {cy:.1}"),
+        "┤" => format!("M{cx:.1} {y0:.1}L{cx:.1} {y1:.1}M{cx:.1} {cy:.1}L{x0:.1} {cy:.1}"),
+        "┬" => format!("M{x0:.1} {cy:.1}L{x1:.1} {cy:.1}M{cx:.1} {cy:.1}L{cx:.1} {y1:.1}"),
+        "┴" => format!("M{x0:.1} {cy:.1}L{x1:.1} {cy:.1}M{cx:.1} {cy:.1}L{cx:.1} {y0:.1}"),
+        "┼" => format!("M{x0:.1} {cy:.1}L{x1:.1} {cy:.1}M{cx:.1} {y0:.1}L{cx:.1} {y1:.1}"),
+        _ => return None,
+    };
+    Some(d)
+}
+
 /// Serialise a rendered cell buffer to an SVG string.
 fn buffer_to_svg(buf: &Buffer) -> String {
     let (w, h) = (buf.area.width, buf.area.height);
@@ -125,6 +156,18 @@ fn buffer_to_svg(buf: &Buffer) -> String {
             }
             let fg = hex(cell.fg, true).unwrap_or_else(|| FG.into());
             let m = cell.modifier;
+            // Box-drawing glyphs render as stroked paths spanning the full cell, so
+            // adjacent border cells join into smooth continuous lines with rounded
+            // corners — centred text glyphs would leave gaps at every cell seam.
+            if let Some(d) = box_path(sym, x as f64 * CW, y as f64 * CH) {
+                let opacity = if m.contains(Modifier::DIM) { 0.55 } else { 1.0 };
+                let _ = writeln!(
+                    s,
+                    "<path d=\"{d}\" fill=\"none\" stroke=\"{fg}\" stroke-width=\"1.4\" \
+                     stroke-linecap=\"round\" stroke-linejoin=\"round\" opacity=\"{opacity}\"/>",
+                );
+                continue;
+            }
             let bold = if m.contains(Modifier::BOLD) { " font-weight=\"bold\"" } else { "" };
             let italic = if m.contains(Modifier::ITALIC) { " font-style=\"italic\"" } else { "" };
             let dim = if m.contains(Modifier::DIM) { " opacity=\"0.55\"" } else { "" };
