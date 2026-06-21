@@ -1,5 +1,8 @@
 # auto-pcb
 
+[![CI](https://github.com/Gordian-EDA/agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Gordian-EDA/agent/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 An LLM agent that designs **KiCAD schematics and PCBs** from a natural-language prompt.
 
 You describe a circuit — *"a USB-C powered temperature logger with an ESP32-S3, a 3.3 V LDO,
