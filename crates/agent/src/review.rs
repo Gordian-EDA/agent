@@ -88,9 +88,10 @@ pub async fn review_netlist(
     Ok((min_score, union))
 }
 
-/// Two defect lines are "the same" if they target the same refdes (the `- U2:` prefix) — so the
-/// union across samples doesn't feed the agent two phrasings of one fault.
-fn same_defect(a: &str, b: &str) -> bool {
+/// Two defect lines are "the same" if they target the same refdes (the `- U2:` prefix) — so a union
+/// (across lenses, or with the deterministic ERC layer) doesn't feed the agent two phrasings of one
+/// fault. Public so [`crate::Agent::run_turn_reviewed`] can union in the deterministic ERC findings.
+pub fn same_defect(a: &str, b: &str) -> bool {
     let refdes = |s: &str| s.trim_start_matches("- ").split(':').next().unwrap_or("").trim().to_string();
     let (ra, rb) = (refdes(a), refdes(b));
     !ra.is_empty() && ra == rb

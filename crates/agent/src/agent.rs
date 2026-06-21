@@ -512,11 +512,21 @@ impl Agent {
             let Ok(netlist) = sch_layout::lift::lift(self.ctx.env(), sch) else {
                 break;
             };
-            let (score, defects) =
+            let (score, mut defects) =
                 match crate::review::review_netlist(self.client.as_ref(), intent, &netlist).await {
                     Ok(r) => r,
                     Err(_) => break,
                 };
+            // Deterministic quantitative ERC (feedback-divider ratios, LED current) — the exact-math
+            // layer UNDER the LLM ensemble, where the netlist makes the numbers unambiguous and the
+            // reviewer is weakest. Unioned by refdes so a fault both layers find isn't reported twice.
+            if let Some(design) = circuit_lang::compile(&netlist, self.ctx.provider()).design {
+                for d in circuit_lang::erc::erc_checks(&design) {
+                    if !defects.iter().any(|e| crate::review::same_defect(e, &d)) {
+                        defects.push(d);
+                    }
+                }
+            }
             emit(events, AgentEvent::Reviewed { round, score, defects: defects.clone() });
             if defects.is_empty() || round == max_fix {
                 break;
