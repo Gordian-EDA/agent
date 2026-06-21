@@ -1,0 +1,66 @@
+//! Agent design with an INDEPENDENT review→fix loop, via [`agent::Agent::run_turn_reviewed`]:
+//! turn 1 drafts the design, then a FRESH LLM reviewer (see `agent::review`) audits the committed
+//! netlist for electrical-CORRECTNESS faults (pin-function mis-wires, voltage-domain part-selection,
+//! topology errors — the class ERC and the layout critic both miss) and feeds any high-confidence
+//! defects back as fix turns. This example just drives the method and renders the result.
+//!
+//! Usage: cargo run --release -p agent --example design_review -- <out.png> "<prompt>"
+
+use agent::{Agent, AgentEvent, AutoApprove};
+use kicad_bridge::cli::KicadCli;
+use kicad_bridge::env::KicadEnv;
+use tokio::sync::mpsc;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut args = std::env::args().skip(1);
+    let out = args.next().expect("usage: design_review <out.png> <prompt>");
+    let prompt = args.next().expect("usage: design_review <out.png> <prompt>");
+
+    let env = KicadEnv::detect().expect("no KiCAD environment detected");
+    let tmp = tempfile::tempdir()?;
+    let ctx = agent::tools::ToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
+    let sch_path = ctx.sch_path().to_path_buf();
+    let mut agent = Agent::new(agent::llm::from_env()?, ctx);
+    let mut approvals = AutoApprove::yes();
+
+    // Show the per-round review verdicts (and apply commits) as they happen.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let printer = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                AgentEvent::Reviewed { round, score, defects } => {
+                    eprintln!("[review {round}] score={score} high-conf critical/major defects={}", defects.len());
+                    for d in &defects {
+                        eprintln!("    {d}");
+                    }
+                }
+                AgentEvent::Applied { errors, warnings } => {
+                    eprintln!("  applied (ERC: {errors} errors, {warnings} warnings)");
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Turn 1 designs; up to 2 review→fix rounds follow.
+    agent.run_turn_reviewed(&prompt, &prompt, &mut approvals, Some(&tx), 2).await?;
+    drop(tx);
+    printer.await.ok();
+
+    if !sch_path.exists() {
+        eprintln!("no schematic written");
+        return Ok(());
+    }
+    let svg_dir = tempfile::tempdir()?;
+    let svg_path = KicadCli::new(&env).export_svg_opts(&sch_path, svg_dir.path(), true)?;
+    let svg = std::fs::read_to_string(&svg_path)?;
+    let png = agent::render::svg_to_png(&svg, 1600)?;
+    std::fs::write(&out, png)?;
+    std::fs::copy(&sch_path, std::path::Path::new(&out).with_extension("kicad_sch")).ok();
+    if let Ok(y) = sch_layout::lift::lift(&env, &sch_path) {
+        std::fs::write(std::path::Path::new(&out).with_extension("circuit.yaml"), y).ok();
+    }
+    println!("done: {out}");
+    Ok(())
+}

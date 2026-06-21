@@ -137,6 +137,13 @@ pub enum AgentEvent {
     },
     /// The turn finished.
     TurnDone(TurnOutcomeSummary),
+    /// An independent design-review pass over the committed netlist completed (from
+    /// [`Agent::run_turn_reviewed`]). `round` 0 is the first review; later rounds follow fix turns.
+    Reviewed {
+        round: usize,
+        score: f64,
+        defects: Vec<String>,
+    },
 }
 
 /// Counters describing the live conversation context, for a `/context` view.
@@ -480,6 +487,62 @@ impl Agent {
             tool_calls_made,
             stop_reason: StopReason::IterationCap,
         })
+    }
+
+    /// Run a turn, then INDEPENDENTLY review the committed netlist for electrical-correctness
+    /// faults (pin-function mis-wires, voltage-domain part errors, missing-essential parts,
+    /// topology errors — the class ERC and the layout critic both miss) and feed any
+    /// HIGH-confidence critical/major defects back as a fix turn, re-reviewing up to `max_fix`
+    /// rounds. The reviewer is a fresh, history-free [`crate::review::review_netlist`] call
+    /// (unbiased — the generating model rationalises its own slips). `intent` is the design goal,
+    /// for the reviewer's context. Emits [`AgentEvent::Reviewed`] per round; returns the final
+    /// turn's outcome. A lift/review failure ends the loop gracefully (the design stands).
+    pub async fn run_turn_reviewed(
+        &mut self,
+        user_msg: &str,
+        intent: &str,
+        approvals: &mut dyn Approvals,
+        events: Events<'_>,
+        max_fix: usize,
+    ) -> Result<TurnOutcome> {
+        let mut outcome = self.run_turn(user_msg, approvals, events).await?;
+        for round in 0..=max_fix {
+            let sch = self.ctx.sch_path();
+            if !sch.exists() {
+                break;
+            }
+            let Ok(netlist) = sch_layout::lift::lift(self.ctx.env(), sch) else {
+                break;
+            };
+            let (score, mut defects) =
+                match crate::review::review_netlist(self.client.as_ref(), intent, &netlist).await {
+                    Ok(r) => r,
+                    Err(_) => break,
+                };
+            // Deterministic quantitative ERC (feedback-divider ratios, LED current) — the exact-math
+            // layer UNDER the LLM ensemble, where the netlist makes the numbers unambiguous and the
+            // reviewer is weakest. Unioned by refdes so a fault both layers find isn't reported twice.
+            if let Some(design) = circuit_lang::compile(&netlist, self.ctx.provider()).design {
+                for d in circuit_lang::erc::erc_checks(&design) {
+                    if !defects.iter().any(|e| crate::review::same_defect(e, &d)) {
+                        defects.push(d);
+                    }
+                }
+            }
+            emit(events, AgentEvent::Reviewed { round, score, defects: defects.clone() });
+            if defects.is_empty() || round == max_fix {
+                break;
+            }
+            let fix = format!(
+                "An INDEPENDENT design review of the netlist you just committed found these \
+                 high-confidence functional defects (they pass ERC but are electrically wrong):\n{}\n\n\
+                 Fix each one — search for a correct part or value if needed (e.g. a 3.3V-capable \
+                 transceiver, the right MCU function pin) — and re-commit the corrected design.",
+                defects.join("\n")
+            );
+            outcome = self.run_turn(&fix, approvals, events).await?;
+        }
+        Ok(outcome)
     }
 
     /// Execute one tool call, returning the JSON-stringified result and any

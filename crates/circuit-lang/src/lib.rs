@@ -4,6 +4,7 @@
 pub mod canon;
 pub mod desugar;
 pub mod diag;
+pub mod erc;
 pub mod lint;
 pub mod model;
 pub mod parse;
