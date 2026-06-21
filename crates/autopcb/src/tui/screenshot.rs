@@ -123,12 +123,23 @@ fn box_path(ch: &str, x0: f64, y0: f64) -> Option<String> {
 /// Serialise a rendered cell buffer to an SVG string.
 fn buffer_to_svg(buf: &Buffer) -> String {
     let (w, h) = (buf.area.width, buf.area.height);
-    let (pw, ph) = (CW * w as f64, CH * h as f64);
+    let (cwpx, chpx) = (CW * w as f64, CH * h as f64);
+    // Pad the terminal content and float it as a rounded panel on a backdrop, so
+    // the PNG reads like a windowed capture rather than edge-to-edge text.
+    const PAD: f64 = 20.0;
+    let (pw, ph) = (cwpx + 2.0 * PAD, chpx + 2.0 * PAD);
     let mut s = String::new();
     let _ = writeln!(
         s,
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{pw:.0}\" height=\"{ph:.0}\" \
-         viewBox=\"0 0 {pw:.0} {ph:.0}\">\n<rect width=\"{pw:.0}\" height=\"{ph:.0}\" fill=\"{BG}\"/>"
+         viewBox=\"0 0 {pw:.0} {ph:.0}\">\n\
+         <rect width=\"{pw:.0}\" height=\"{ph:.0}\" fill=\"#12131c\"/>\n\
+         <rect x=\"{:.0}\" y=\"{:.0}\" width=\"{:.0}\" height=\"{:.0}\" rx=\"10\" fill=\"{BG}\"/>\n\
+         <g transform=\"translate({PAD:.0} {PAD:.0})\">",
+        PAD - 8.0,
+        PAD - 8.0,
+        cwpx + 16.0,
+        chpx + 16.0,
     );
     // Background-rect layer (drawn first, under the glyphs).
     for y in 0..h {
@@ -181,7 +192,7 @@ fn buffer_to_svg(buf: &Buffer) -> String {
             );
         }
     }
-    s.push_str("</svg>\n");
+    s.push_str("</g></svg>\n");
     s
 }
 

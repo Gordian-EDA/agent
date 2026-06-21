@@ -47,9 +47,10 @@ fn fmt_tokens(n: u64) -> String {
     }
 }
 
-/// Left margin (in columns) before transcript/diff/input content, so prose
-/// doesn't hug the terminal edge now that the border boxes are gone.
-const MARGIN: u16 = 1;
+/// Symmetric horizontal margin (in columns) applied to every pane via [`body`],
+/// so the header, transcript, composer, diff card, and footer all share one left
+/// edge and none of them hugs the terminal edge (the Codex layout discipline).
+const MARGIN: u16 = 2;
 
 /// Draw the whole cockpit.
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -94,12 +95,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// Inset a pane by [`MARGIN`] columns on the left (full height).
+/// Inset a pane by [`MARGIN`] columns on *both* sides (full height), so content
+/// shares one left edge and never touches either terminal edge.
 fn body(area: Rect) -> Rect {
     Rect {
         x: area.x + MARGIN,
         y: area.y,
-        width: area.width.saturating_sub(MARGIN),
+        width: area.width.saturating_sub(2 * MARGIN),
         height: area.height,
     }
 }
@@ -174,12 +176,13 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     } else {
         "○"
     };
+    let area = body(area);
     let dim = Style::default().fg(Color::DarkGray);
     let sep = || Span::styled("  ·  ", dim);
     let spans = vec![
         // The brand carries the accent; everything else is metadata, so it dims.
         Span::styled(
-            " auto-pcb",
+            "auto-pcb",
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
         sep(),
@@ -201,8 +204,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     ];
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 
-    // The `↑n` scrolled-back indicator used to live in the transcript border
-    // title; with the border gone it sits at the header's right edge, overlaid
+    // The `↑n` scrolled-back indicator sits at the header's right edge, overlaid
     // so it stays visible even when the title overflows a narrow terminal.
     if app.scroll > 0 {
         let ind = format!(" ↑{} ", app.scroll);
@@ -721,9 +723,10 @@ fn draw_unwind(f: &mut Frame, input_area: Rect, app: &App) {
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
+    let area = body(area);
     let s = &app.status;
     let mut left = format!(
-        " {} · {} · turns {} · applied {}",
+        "{} · {} · turns {} · applied {}",
         s.provider,
         short_model(&s.model),
         s.turn_count,
@@ -1146,7 +1149,9 @@ mod tests {
             input_tokens: 23_000,
             output_tokens: 400,
         }));
-        let text = render_to_string(&mut a, 100, 24);
+        // Wide enough that the footer's two halves don't collide (the left side
+        // ellipsizes gracefully on narrow terminals; here we want the full ctx).
+        let text = render_to_string(&mut a, 110, 24);
         assert!(text.contains("ctx 23.4k"), "token display:\n{text}");
         assert!(text.contains("(12%)"), "window percentage:\n{text}");
     }
