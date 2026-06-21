@@ -850,6 +850,18 @@ impl App {
                     "context compacted: {messages_before} → {messages_after} messages"
                 )));
             }
+            AgentEvent::Reviewed { round, score, defects } => {
+                let msg = if defects.is_empty() {
+                    format!("design review (round {round}): score {score}/10 — no functional defects")
+                } else {
+                    format!(
+                        "design review (round {round}): score {score}/10 — {} defect(s) to fix:\n  {}",
+                        defects.len(),
+                        defects.join("\n  ")
+                    )
+                };
+                self.transcript.push(Entry::system(msg));
+            }
             AgentEvent::TurnDone(_) => {
                 // Stop the spinner promptly, but leave `turn_started` for the
                 // upcoming `TurnEnded` to read the elapsed time from. `TurnEnded`
