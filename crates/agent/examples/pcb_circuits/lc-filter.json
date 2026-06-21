@@ -1,0 +1,67 @@
+{
+  "description": "Two-stage LC pi filter with electrolytic bulk caps and in/out headers",
+  "bounds": {
+    "min_x": 0.0,
+    "max_x": 30.0,
+    "min_y": 0.0,
+    "max_y": 24.0
+  },
+  "parts": [
+    {
+      "reference": "J1",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "VIN",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C1",
+      "footprint": "Capacitor_SMD:CP_Elec_5x5.3",
+      "pad_nets": {
+        "1": "VIN",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "L1",
+      "footprint": "Inductor_SMD:L_0805_2012Metric",
+      "pad_nets": {
+        "1": "VIN",
+        "2": "VMID"
+      }
+    },
+    {
+      "reference": "C2",
+      "footprint": "Capacitor_SMD:CP_Elec_5x5.3",
+      "pad_nets": {
+        "1": "VMID",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "L2",
+      "footprint": "Inductor_SMD:L_0805_2012Metric",
+      "pad_nets": {
+        "1": "VMID",
+        "2": "VOUT"
+      }
+    },
+    {
+      "reference": "C3",
+      "footprint": "Capacitor_SMD:CP_Elec_5x5.3",
+      "pad_nets": {
+        "1": "VOUT",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "J2",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "VOUT",
+        "2": "GND"
+      }
+    }
+  ]
+}

@@ -101,3 +101,54 @@ dismissal. (Native extended-thinking can't be enabled via the gateway, and
 Gate every change on the netlist oracle
 (`cargo test --release -p sch-layout --test floorplan_netlist`) — a prettier
 render that breaks connectivity is a regression.
+
+### PCB side: engine, DRC oracle, render, and VLM critic
+
+The board flow is `create_board → place_board → route_board → export_board`
+(`crates/agent/src/tools_pcb.rs`), over the deterministic `pcb-engine`
+(placement force-layout + `route_auto` = naive slice-1 ∨ detailed capacity-mesh)
+and `kicad-bridge` synth/IO. The LLM sits *around* the engine, never emits
+coordinates.
+
+**Oracles (gate every change on both):**
+- In-house DRC lint (`pcb_engine::lint`) — clearance / width / via / bounds /
+  **connectivity**. `route_auto` is connectivity-honest: `lint::drop_unconnected_copper`
+  drops any net the oracle finds unconnected or shorted and reports it failed, so
+  the engine never ships copper that lies about connectivity, and it ranks
+  candidates by `(failed nets, geometry violations)` — an honest unrouted net
+  beats a silent short.
+- `kicad-cli pcb drc` (external authority, KiCAD ≥ 8). **Silkscreen warnings
+  (`silk_over_copper`/`silk_overlap`/…) are NOT copper faults** — they're carved
+  out of the copper-violation count (see `NON_COPPER_WARNINGS`).
+
+**Deterministic e2e harness (no LLM):** `cargo run --release -p agent --example
+board_harness` routes/exports every circuit in `crates/agent/examples/pcb_circuits/*.json`
+against the real installed KiCAD footprint library and prints per-board
+place/route/DRC. Add a circuit = drop a `{bounds, parts:[{reference, footprint,
+pad_nets}]}` JSON there. This is how you check "fully working" across varied
+boards — all current circuits are KiCAD-DRC-clean except a known dense-SOIC case.
+
+**Professional render + VLM critic** (the board analog of `schematic_critic.py`):
+
+```
+set -a; . ./.env; set +a
+. .venv-pcb/bin/activate                       # cairosvg + requests
+python3 tools/render_pcb.py BOARD.kicad_pcb -o OUT.png   # KiCAD plotter render
+python3 tools/pcb_critic.py OUT.png --circuit "one-line desc" --drc-clean
+tools/pcb_eval.sh                              # route+render+critique ALL circuits
+```
+
+`pcb_critic.py` scores placement / routing / board_use / silkscreen with ranked,
+confidence-tagged defects, gating only on high-confidence majors. **Pass
+`--drc-clean` when KiCAD DRC is clean** (0 error violations AND 0 unconnected) —
+DRC owns clearance/shorts/connectivity; the critic owns layout *quality* it can't
+relitigate from a flat copper plot. The artifact's professionalism comes from:
+silkscreen kept (refs on `F.SilkS`, `Value` hidden), the board outline tightened
+to the copper + a 1 mm edge margin (`content_bounds`), and connectors pulled to
+their nearest edge (`PlacementHints.edge_seek`, auto-set for `J*`/connector
+footprints). Known next levers (critic-flagged): auto-rotate tall headers to lie
+along an edge, and pin-level decoupling/series co-placement (cap↔IC, R↔LED).
+
+Gate PCB changes on `cargo test --release -p pcb-engine -p kicad-bridge -p agent`
+(all gates green) AND `board_harness` (DRC stays clean) — a prettier board that
+regresses DRC or connectivity is a regression.

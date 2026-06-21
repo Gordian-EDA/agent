@@ -38,7 +38,40 @@ use std::fmt::Write as _;
 use crate::mesh::CapacityMesh;
 use crate::pathing::GlobalRouteResult;
 use crate::placement::{PlaceProblem, PlaceResult, PlacementHints};
-use crate::problem::{LayerRef, Point2, RouteProblem, RouteSolution};
+use crate::problem::{Bounds, LayerRef, Point2, RouteProblem, RouteSolution};
+
+/// Emit the board boundary: the custom polygon `outline` when present (>= 3 pts),
+/// else the `bounds` rectangle. So a circle / hexagon / any custom-shaped board
+/// shows its TRUE shape in the render — the agent's eyes for iterating on a custom
+/// outline — instead of a misleading bounding-box square.
+fn push_board_outline(w: &mut String, bounds: &Bounds, outline: Option<&[Point2]>) {
+    w.push_str("  <!-- board outline -->\n");
+    if let Some(poly) = outline
+        && poly.len() >= 3
+    {
+        let pts: String = poly
+            .iter()
+            .map(|p| format!("{:.4},{:.4}", p.x, p.y))
+            .collect::<Vec<_>>()
+            .join(" ");
+        writeln!(
+            w,
+            "  <polygon points=\"{pts}\" fill=\"none\" stroke=\"#444\" stroke-width=\"0.1\"/>"
+        )
+        .unwrap();
+        return;
+    }
+    writeln!(
+        w,
+        "  <rect x=\"{x:.6}\" y=\"{y:.6}\" width=\"{bw:.6}\" height=\"{bh:.6}\" \
+         fill=\"none\" stroke=\"#444\" stroke-width=\"0.1\"/>",
+        x = bounds.min_x,
+        y = bounds.min_y,
+        bw = bounds.max_x - bounds.min_x,
+        bh = bounds.max_y - bounds.min_y
+    )
+    .unwrap();
+}
 use crate::router::FailedNet;
 
 // ── public API ───────────────────────────────────────────────────────────────
@@ -81,17 +114,7 @@ pub fn render_svg(
     .unwrap();
 
     // Board outline -----------------------------------------------------------
-    w.push_str("  <!-- board outline -->\n");
-    writeln!(
-        w,
-        "  <rect x=\"{x:.6}\" y=\"{y:.6}\" width=\"{bw:.6}\" height=\"{bh:.6}\" \
-         fill=\"none\" stroke=\"#444\" stroke-width=\"0.1\"/>",
-        x = b.min_x,
-        y = b.min_y,
-        bw = board_w,
-        bh = board_h
-    )
-    .unwrap();
+    push_board_outline(w, b, problem.outline.as_deref());
 
     // Obstacles / pads --------------------------------------------------------
     w.push_str("  <!-- obstacles / pads -->\n");
@@ -264,17 +287,7 @@ pub fn render_global_svg(
     .unwrap();
 
     // Board outline -----------------------------------------------------------
-    w.push_str("  <!-- board outline -->\n");
-    writeln!(
-        w,
-        "  <rect x=\"{x:.6}\" y=\"{y:.6}\" width=\"{bw:.6}\" height=\"{bh:.6}\" \
-         fill=\"none\" stroke=\"#444\" stroke-width=\"0.1\"/>",
-        x = b.min_x,
-        y = b.min_y,
-        bw = board_w,
-        bh = board_h
-    )
-    .unwrap();
+    push_board_outline(w, b, problem.outline.as_deref());
 
     // Obstacles / pads --------------------------------------------------------
     w.push_str("  <!-- obstacles / pads -->\n");
@@ -492,17 +505,7 @@ pub fn render_placement(
     .unwrap();
 
     // Board outline -----------------------------------------------------------
-    w.push_str("  <!-- board outline -->\n");
-    writeln!(
-        w,
-        "  <rect x=\"{x:.6}\" y=\"{y:.6}\" width=\"{bw:.6}\" height=\"{bh:.6}\" \
-         fill=\"none\" stroke=\"#444\" stroke-width=\"0.1\"/>",
-        x = b.min_x,
-        y = b.min_y,
-        bw = board_w,
-        bh = board_h
-    )
-    .unwrap();
+    push_board_outline(w, b, problem.outline.as_deref());
 
     // Region-hint rectangles (dashed) -----------------------------------------
     w.push_str("  <!-- region hints -->\n");
@@ -598,10 +601,11 @@ pub fn render_placement(
 /// Rotate a pad offset by a quadrant rotation (degrees, y-down) — the same
 /// convention [`crate::placement`] uses for pad world positions.
 fn rotate_offset(off: &Point2, rot: i32) -> Point2 {
+    // KiCAD footprint-rotation convention (matches placement::rotate_offset).
     match rot.rem_euclid(360) {
-        90 => Point2 { x: -off.y, y: off.x },
+        90 => Point2 { x: off.y, y: -off.x },
         180 => Point2 { x: -off.x, y: -off.y },
-        270 => Point2 { x: off.y, y: -off.x },
+        270 => Point2 { x: -off.y, y: off.x },
         _ => Point2 { x: off.x, y: off.y },
     }
 }
@@ -762,6 +766,8 @@ mod tests {
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
         };
         let s = RouteSolution {
             traces: vec![],
@@ -869,6 +875,8 @@ mod tests {
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
         };
         let mesh = CapacityMesh::build(&p);
         let result = global_route_with_mesh(&p, &mesh);
@@ -1051,7 +1059,10 @@ mod tests {
                 members: vec!["U1".to_owned(), "C1".to_owned()],
                 region: Some(Rect { min_x: 4.0, max_x: 16.0, min_y: 4.0, max_y: 16.0 }),
                 edge: None,
+                grid: false,
+                surround: None,
             }],
+            ..Default::default()
         };
         let res = place(&pp, &hints);
         let svg = render_placement(&pp, &hints, &res);

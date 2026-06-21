@@ -486,12 +486,13 @@ impl Tools {
             },
             ToolDef {
                 name: "get_footprint_info".into(),
-                description: "Return the full pad table (number, offset, size, \
-                    technology, copper layers), the courtyard rectangle, and the \
-                    overall bounding box for a fully-qualified `Lib:Name` \
-                    footprint. Use the pad NUMBERS to build the pad_nets map for \
-                    create_board. If the lib_id is unknown, returns an error with \
-                    the closest known suggestions — never guess the id."
+                description: "Return the pad NUMBER list (use these to build the pad_nets \
+                    map for create_board) plus a compact shape summary — pad_count, \
+                    min_pitch_mm, pad dimensions, pad technologies, the courtyard rectangle, \
+                    and the bounding box — for a fully-qualified `Lib:Name` footprint. \
+                    (Per-pad coordinates are summarized, not listed: the engine places pads, \
+                    not you.) If the lib_id is unknown, returns an error with the closest \
+                    known suggestions — never guess the id."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -551,14 +552,36 @@ impl Tools {
                         },
                         "rules": {
                             "type": "object",
-                            "description": "Board design rules (mm). Omit for engine defaults (clearance 0.2, min_trace_width 0.2, via_diameter 0.6, via_drill 0.3).",
+                            "description": "Board design rules — ALL FIELDS OPTIONAL; omit for engine defaults (clearance 0.2mm, min_trace_width 0.2mm, via_diameter 0.6mm, via_drill 0.3mm, 2 layers, no pours).",
                             "properties": {
-                                "clearance": { "type": "number" },
-                                "min_trace_width": { "type": "number" },
-                                "via_diameter": { "type": "number" },
-                                "via_drill": { "type": "number" }
-                            },
-                            "required": ["clearance", "min_trace_width", "via_diameter", "via_drill"]
+                                "clearance": { "type": "number", "description": "Min copper-copper clearance (mm)." },
+                                "min_trace_width": { "type": "number", "description": "Default trace width (mm)." },
+                                "via_diameter": { "type": "number", "description": "Via pad diameter (mm); standard-fab min 0.5." },
+                                "via_drill": { "type": "number", "description": "Via drill (mm); standard-fab min 0.3." },
+                                "layers": { "type": "integer", "enum": [2, 4, 6],
+                                    "description": "Copper layer count. 4 or 6 AUTOMATICALLY add inner GND/VCC PLANES (the highest-fanout power nets) — the way a dense part's many power pins connect without per-pin traces. Default 2." },
+                                "net_widths": {
+                                    "type": "object",
+                                    "additionalProperties": { "type": "number" },
+                                    "description": "Per-net trace width override {net: width_mm} — fat power, thin signal, e.g. {\"VCC\": 0.6, \"VIN\": 0.8}." },
+                                "pours": {
+                                    "type": "array",
+                                    "description": "Copper POURS the engine fills FOR YOU — a flood of a net over a signal layer (a GND plane on a 2-layer board, an RF/HF return, shielding). The engine fills the board outline, carves anti-pads around foreign copper, and clips to a custom outline. Use this when the user wants a ground plane/pour — do NOT route top-only and tell the user to draw a zone in KiCAD by hand.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "net": { "type": "string", "description": "Net to flood, e.g. \"GND\"." },
+                                            "layer": { "type": "string", "description": "Signal layer: \"top\", \"bottom\", or \"innerN\" (NOT a plane layer — a plane is already full copper)." }
+                                        },
+                                        "required": ["net", "layer"]
+                                    }
+                                }
+                            }
+                        },
+                        "outline": {
+                            "type": "array",
+                            "description": "Optional CUSTOM board outline as polygon points [[x,y],...] (>= 3, mm) — a circle (sample many points), hexagon, or any shape. Omit for a rectangular board (just `bounds`). `bounds` must still be the polygon's bounding box. Placement, routing, and pours all respect the polygon.",
+                            "items": { "type": "array", "items": { "type": "number" } }
                         },
                         "overwrite": { "type": "boolean",
                             "description": "Replace an existing board draft (default false)." }
@@ -568,13 +591,54 @@ impl Tools {
             },
             ToolDef {
                 name: "get_board".into(),
-                description: "Return the current board draft plus a derived \
-                    summary: part count, net count, the per-net pin counts, the \
-                    keepout count, and whether the board has been placed / routed \
-                    yet. Use this to inspect board state before placing or routing, \
-                    or to confirm a create_board / triage edit took effect."
+                description: "Return the current board draft (parts as \
+                    reference/footprint/lock + a pad_count — the full per-pad net map you \
+                    passed to create_board is summarized, not echoed) plus a derived \
+                    summary: part count, net count, the per-net pin counts, the keepout \
+                    count, and whether the board has been placed / routed yet. Use this to \
+                    inspect board state before placing or routing, or to confirm a \
+                    create_board / triage edit took effect."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            ToolDef {
+                name: "add_parts".into(),
+                description: "Append parts to the existing board draft WITHOUT re-sending the \
+                    whole board. Build a big board incrementally: create_board with the bounds, \
+                    rules, and a FIRST batch of parts, then call add_parts repeatedly for the \
+                    rest. This is the reliable way to assemble a 50+ part board or a large BGA \
+                    pad map — cramming every part (and a 100-ball pad→net map) into one \
+                    create_board call is error-prone. Same per-part validation as create_board \
+                    (footprint resolved up front with suggestions; a footprint whose own pads \
+                    violate rules.clearance is rejected); a reference already on the board is an \
+                    error. Returns the references added and the new part/net counts. Adding parts \
+                    clears any prior placement — run place_board again afterwards."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "parts": {
+                            "type": "array",
+                            "description": "More parts to append (same shape as create_board.parts).",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "reference": { "type": "string",
+                                        "description": "Unique reference designator not already on the board." },
+                                    "footprint": { "type": "string",
+                                        "description": "Footprint lib_id from search_footprints." },
+                                    "pad_nets": {
+                                        "type": "object",
+                                        "description": "Pad number → net name. A pad absent from this map is left unconnected.",
+                                        "additionalProperties": { "type": "string" }
+                                    }
+                                },
+                                "required": ["reference", "footprint"]
+                            }
+                        }
+                    },
+                    "required": ["parts"]
+                }),
             },
             ToolDef {
                 name: "place_board".into(),
@@ -830,6 +894,7 @@ impl Tools {
             "search_footprints" => crate::tools_pcb::search_footprints(input, ctx),
             "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
             "create_board" => crate::tools_pcb::create_board(input, ctx),
+            "add_parts" => crate::tools_pcb::add_parts(input, ctx),
             "get_board" => crate::tools_pcb::get_board(ctx),
             "place_board" => crate::tools_pcb::place_board(input, ctx),
             "set_placement_hints" => crate::tools_pcb::set_placement_hints(input, ctx),

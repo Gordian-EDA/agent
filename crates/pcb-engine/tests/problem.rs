@@ -1,6 +1,6 @@
 use pcb_engine::problem::{
     Bounds, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace,
-    Via,
+    Via, ViaSpan,
 };
 
 // ── (a) parse upstream-shaped JSON (no extension fields) ─────────────────────
@@ -77,6 +77,8 @@ fn round_trip_problem() {
         clearance: 0.2,
         via_diameter: 0.6,
         via_drill: 0.3,
+        net_widths: Default::default(),
+        outline: None,
         obstacles: vec![Obstacle {
             kind: "oval".to_owned(),
             layers: vec![LayerRef::bottom()],
@@ -127,6 +129,7 @@ fn round_trip_solution() {
             at: Point2 { x: 5.0, y: 0.0 },
             diameter: 0.6,
             drill: 0.3,
+            span: ViaSpan::Through,
         }],
     };
 

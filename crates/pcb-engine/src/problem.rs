@@ -109,6 +109,79 @@ pub struct RouteProblem {
     pub via_diameter: f64,
     #[serde(default = "default_via_drill")]
     pub via_drill: f64,
+    /// Per-net trace width overrides (net name → mm). A net not listed uses
+    /// `min_trace_width`. This is how power/high-current nets get fat copper while
+    /// signals stay thin — the router emits each net at its width and (conservatively)
+    /// spaces every net for the widest so the board stays DRC-clean. Empty = the old
+    /// uniform-width behaviour.
+    #[serde(default)]
+    pub net_widths: std::collections::BTreeMap<String, f64>,
+    /// Optional custom board OUTLINE (closed polygon, mm). When set, copper must stay
+    /// inside it (the grid blocks cells outside the polygon or within clearance of an
+    /// edge) — so concave shapes (a star) route inside the TRUE outline, not just its
+    /// bounding box. None = the rectangular `bounds`.
+    #[serde(default)]
+    pub outline: Option<Vec<Point2>>,
+}
+
+/// Is `pt` inside the closed polygon `poly` (ray-casting, even-odd rule)? A polygon of
+/// fewer than 3 points is treated as "no outline" → always inside.
+pub fn point_in_polygon(pt: &Point2, poly: &[Point2]) -> bool {
+    let n = poly.len();
+    if n < 3 {
+        return true;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (pi, pj) = (&poly[i], &poly[j]);
+        if (pi.y > pt.y) != (pj.y > pt.y) {
+            let x_int = pi.x + (pt.y - pi.y) / (pj.y - pi.y) * (pj.x - pi.x);
+            if pt.x < x_int {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Minimum distance from `pt` to the boundary of polygon `poly` (any edge). Used with
+/// [`point_in_polygon`] to enforce copper-to-edge clearance on a custom outline.
+pub fn dist_to_polygon_edge(pt: &Point2, poly: &[Point2]) -> f64 {
+    let n = poly.len();
+    if n < 2 {
+        return f64::INFINITY;
+    }
+    let mut best = f64::INFINITY;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (a, b) = (&poly[j], &poly[i]);
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 > 0.0 {
+            (((pt.x - a.x) * dx + (pt.y - a.y) * dy) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (cx, cy) = (a.x + t * dx, a.y + t * dy);
+        let d = ((pt.x - cx).powi(2) + (pt.y - cy).powi(2)).sqrt();
+        best = best.min(d);
+        j = i;
+    }
+    best
+}
+
+impl RouteProblem {
+    /// Trace width to emit for `net`: its per-net override, else the board minimum.
+    pub fn net_width(&self, net: &str) -> f64 {
+        self.net_widths.get(net).copied().unwrap_or(self.min_trace_width)
+    }
+    /// The widest trace any net may use — clearance/inflation are sized to this so a fat
+    /// power trace never violates spacing. Defaults to `min_trace_width`.
+    pub fn max_route_width(&self) -> f64 {
+        self.net_widths.values().copied().fold(self.min_trace_width, f64::max)
+    }
 }
 
 /// A rectangular (or oval, treated as rect in v1) copper obstacle.
@@ -193,7 +266,24 @@ pub struct Trace {
     pub path: Vec<Point2>,
 }
 
-/// A via joining all copper layers at a board position.
+/// The copper-layer span of a via. `Through` (the default) pierces the full stack
+/// (F.Cu → B.Cu); `Partial` is an HDI blind/buried or micro via spanning a sub-range
+/// of copper layers. See `docs/specs/hdi-microvia-feasibility.md`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ViaSpan {
+    /// Full-stack through via (every existing via is this).
+    #[default]
+    Through,
+    /// A via spanning copper layers `[from, to]` (0-based indices into the layer stack,
+    /// 0 = top). `micro` emits KiCAD's `micro` keyword (a laser microvia, used for an
+    /// adjacent-layer span / via-in-pad escape) vs `blind` (a mechanically-drilled
+    /// blind/buried via). KiCAD encodes the type as a BARE keyword after `via`.
+    Partial { from: u32, to: u32, micro: bool },
+}
+
+/// A via joining copper layers at a board position. `span` defaults to `Through`
+/// (the full stack); a `Partial` span is an HDI blind/micro via.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Via {
@@ -201,4 +291,7 @@ pub struct Via {
     pub at: Point2,
     pub diameter: f64,
     pub drill: f64,
+    /// The via's copper-layer span. Omitted in older route JSON → defaults to `Through`.
+    #[serde(default)]
+    pub span: ViaSpan,
 }

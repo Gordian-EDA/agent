@@ -1,0 +1,14 @@
+{
+  "description": "Three-stage RC low-pass ladder between an input and output header",
+  "bounds": { "min_x": 0.0, "max_x": 40.0, "min_y": 0.0, "max_y": 18.0 },
+  "parts": [
+    { "reference": "J1", "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical", "pad_nets": { "1": "IN", "2": "GND" } },
+    { "reference": "R1", "footprint": "Resistor_SMD:R_0805_2012Metric", "pad_nets": { "1": "IN", "2": "N1" } },
+    { "reference": "C1", "footprint": "Capacitor_SMD:C_0603_1608Metric", "pad_nets": { "1": "N1", "2": "GND" } },
+    { "reference": "R2", "footprint": "Resistor_SMD:R_0805_2012Metric", "pad_nets": { "1": "N1", "2": "N2" } },
+    { "reference": "C2", "footprint": "Capacitor_SMD:C_0603_1608Metric", "pad_nets": { "1": "N2", "2": "GND" } },
+    { "reference": "R3", "footprint": "Resistor_SMD:R_0805_2012Metric", "pad_nets": { "1": "N2", "2": "OUT" } },
+    { "reference": "C3", "footprint": "Capacitor_SMD:C_0603_1608Metric", "pad_nets": { "1": "OUT", "2": "GND" } },
+    { "reference": "J2", "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical", "pad_nets": { "1": "OUT", "2": "GND" } }
+  ]
+}

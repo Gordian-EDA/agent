@@ -29,7 +29,7 @@
 //! single-owner pads, so this is exact for them; the DRC lint (a later task) is
 //! the precision authority regardless.
 
-use crate::problem::RouteProblem;
+use crate::problem::{dist_to_polygon_edge, point_in_polygon, Point2, RouteProblem};
 use std::collections::BTreeMap;
 
 /// Minimum grid pitch, mm. Keeps the grid from exploding on tiny design rules.
@@ -119,6 +119,12 @@ impl RouteGrid {
         // board edge cannot host a trace centre without the copper leaving the
         // board. Block those cells on every layer.
         grid.block_board_edge(inflation, b.max_x, b.max_y);
+
+        // Custom outline: block every cell outside the polygon (or within `inflation` of
+        // an edge), so copper stays inside the true shape, not just its bounding box.
+        if let Some(poly) = &problem.outline {
+            grid.block_outside_polygon(poly, inflation);
+        }
 
         // Rasterize obstacles.
         for ob in &problem.obstacles {
@@ -391,6 +397,23 @@ impl RouteGrid {
     /// Block cells whose centre is within `inflation` of any board edge, on
     /// every layer. A trace centre placed in such a cell would push copper
     /// (half a trace width) outside the board.
+    /// Block every cell whose centre is OUTSIDE `poly`, or within `inflation` of a
+    /// polygon edge (copper-to-edge clearance), on every layer. This is the board-edge
+    /// keep-out for a custom (possibly concave) outline.
+    fn block_outside_polygon(&mut self, poly: &[Point2], inflation: f64) {
+        for ix in 0..self.nx {
+            for iy in 0..self.ny {
+                let pt = Point2 { x: self.cell_center_x(ix), y: self.cell_center_y(iy) };
+                if !point_in_polygon(&pt, poly) || dist_to_polygon_edge(&pt, poly) < inflation {
+                    for layer in 0..self.layer_count {
+                        let i = self.idx(layer, ix, iy);
+                        self.cells[i] = Cell::BlockedAll;
+                    }
+                }
+            }
+        }
+    }
+
     fn block_board_edge(&mut self, inflation: f64, max_x: f64, max_y: f64) {
         for ix in 0..self.nx {
             for iy in 0..self.ny {
@@ -486,7 +509,11 @@ pub fn grid_pitch(problem: &RouteProblem) -> f64 {
     ((problem.min_trace_width + problem.clearance) / 2.0).max(MIN_PITCH_MM)
 }
 
-/// Obstacle inflation for `problem`: `clearance + min_trace_width/2`.
+/// Obstacle inflation for `problem`: `clearance + min_trace_width/2` — a free cell
+/// guarantees a MIN-width trace centre there clears every obstacle by `clearance`. A
+/// wider net adds its extra half-width `(w - min)/2` as a per-net A* scan
+/// (`AStarCosts.trace_clear_radius_cells`), so it clears exactly without over-spacing
+/// every other net (the old `max_route_width` approach did, costing routability).
 pub fn obstacle_inflation(problem: &RouteProblem) -> f64 {
     problem.clearance + problem.min_trace_width / 2.0
 }
@@ -539,6 +566,8 @@ mod tests {
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
         }
     }
 

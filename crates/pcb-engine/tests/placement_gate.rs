@@ -180,20 +180,27 @@ fn hints_help_and_never_hurt() {
                 members: vec!["U1".to_owned(), "C1".to_owned(), "C2".to_owned()],
                 region: None,
                 edge: None,
+                grid: false,
+                surround: None,
             },
             GroupHint {
                 name: "u2-decouplers".to_owned(),
                 members: vec!["U2".to_owned(), "C3".to_owned(), "C4".to_owned()],
                 region: None,
                 edge: None,
+                grid: false,
+                surround: None,
             },
             GroupHint {
                 name: "connector".to_owned(),
                 members: vec!["J1".to_owned()],
                 region: None,
                 edge: Some(Edge::W),
+                grid: false,
+                surround: None,
             },
         ],
+        ..Default::default()
     };
     let hinted = place(&problem, &hints);
     assert!(hinted.legal, "hinted placement legal: {hinted:?}");

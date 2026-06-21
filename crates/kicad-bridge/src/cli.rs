@@ -508,6 +508,16 @@ impl DrcReport {
         self.count_severity("warning")
     }
 
+    /// Number of `error`-severity COPPER faults — error-severity `violations`
+    /// only (shorts, clearance, track width, copper-to-edge), EXCLUDING the
+    /// `unconnected_items`. This is the engine's hard "never ship a DRC fault"
+    /// metric: a board may legitimately have unrouted (unconnected) nets — an
+    /// honest failure — but the copper it DOES emit must be fault-free, so this
+    /// count must always be 0.
+    pub fn copper_error_count(&self) -> usize {
+        self.violations.iter().filter(|v| v.severity == "error").count()
+    }
+
     fn count_severity(&self, severity: &str) -> usize {
         self.violations
             .iter()

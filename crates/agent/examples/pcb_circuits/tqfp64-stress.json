@@ -1,0 +1,660 @@
+{
+  "description": "STRESS: tqfp64 fine-pitch IC + 32 decoupling caps + 32 series resistors + 5 break-out headers (70 parts total)",
+  "rules": {
+    "layers": 4
+  },
+  "bounds": {
+    "min_x": 0.0,
+    "max_x": 90.0,
+    "min_y": 0.0,
+    "max_y": 80.0
+  },
+  "parts": [
+    {
+      "reference": "U1",
+      "footprint": "Package_QFP:TQFP-64_14x14mm_P0.8mm",
+      "pad_nets": {
+        "1": "GND",
+        "2": "S1",
+        "3": "VCC",
+        "4": "S2",
+        "5": "GND",
+        "6": "S3",
+        "7": "VCC",
+        "8": "S4",
+        "9": "GND",
+        "10": "S5",
+        "11": "VCC",
+        "12": "S6",
+        "13": "GND",
+        "14": "S7",
+        "15": "VCC",
+        "16": "S8",
+        "17": "GND",
+        "18": "S9",
+        "19": "VCC",
+        "20": "S10",
+        "21": "GND",
+        "22": "S11",
+        "23": "VCC",
+        "24": "S12",
+        "25": "GND",
+        "26": "S13",
+        "27": "VCC",
+        "28": "S14",
+        "29": "GND",
+        "30": "S15",
+        "31": "VCC",
+        "32": "S16",
+        "33": "GND",
+        "34": "S17",
+        "35": "VCC",
+        "36": "S18",
+        "37": "GND",
+        "38": "S19",
+        "39": "VCC",
+        "40": "S20",
+        "41": "GND",
+        "42": "S21",
+        "43": "VCC",
+        "44": "S22",
+        "45": "GND",
+        "46": "S23",
+        "47": "VCC",
+        "48": "S24",
+        "49": "GND",
+        "50": "S25",
+        "51": "VCC",
+        "52": "S26",
+        "53": "GND",
+        "54": "S27",
+        "55": "VCC",
+        "56": "S28",
+        "57": "GND",
+        "58": "S29",
+        "59": "VCC",
+        "60": "S30",
+        "61": "GND",
+        "62": "S31",
+        "63": "VCC",
+        "64": "S32"
+      }
+    },
+    {
+      "reference": "C1",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C2",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C3",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C4",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C5",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C6",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C7",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C8",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C9",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C10",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C11",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C12",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C13",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C14",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C15",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C16",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C17",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C18",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C19",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C20",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C21",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C22",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C23",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C24",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C25",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C26",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C27",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C28",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C29",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C30",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C31",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "C32",
+      "footprint": "Capacitor_SMD:C_0402_1005Metric",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND"
+      }
+    },
+    {
+      "reference": "R1",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S1",
+        "2": "S1_O"
+      }
+    },
+    {
+      "reference": "R2",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S2",
+        "2": "S2_O"
+      }
+    },
+    {
+      "reference": "R3",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S3",
+        "2": "S3_O"
+      }
+    },
+    {
+      "reference": "R4",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S4",
+        "2": "S4_O"
+      }
+    },
+    {
+      "reference": "R5",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S5",
+        "2": "S5_O"
+      }
+    },
+    {
+      "reference": "R6",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S6",
+        "2": "S6_O"
+      }
+    },
+    {
+      "reference": "R7",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S7",
+        "2": "S7_O"
+      }
+    },
+    {
+      "reference": "R8",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S8",
+        "2": "S8_O"
+      }
+    },
+    {
+      "reference": "R9",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S9",
+        "2": "S9_O"
+      }
+    },
+    {
+      "reference": "R10",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S10",
+        "2": "S10_O"
+      }
+    },
+    {
+      "reference": "R11",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S11",
+        "2": "S11_O"
+      }
+    },
+    {
+      "reference": "R12",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S12",
+        "2": "S12_O"
+      }
+    },
+    {
+      "reference": "R13",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S13",
+        "2": "S13_O"
+      }
+    },
+    {
+      "reference": "R14",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S14",
+        "2": "S14_O"
+      }
+    },
+    {
+      "reference": "R15",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S15",
+        "2": "S15_O"
+      }
+    },
+    {
+      "reference": "R16",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S16",
+        "2": "S16_O"
+      }
+    },
+    {
+      "reference": "R17",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S17",
+        "2": "S17_O"
+      }
+    },
+    {
+      "reference": "R18",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S18",
+        "2": "S18_O"
+      }
+    },
+    {
+      "reference": "R19",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S19",
+        "2": "S19_O"
+      }
+    },
+    {
+      "reference": "R20",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S20",
+        "2": "S20_O"
+      }
+    },
+    {
+      "reference": "R21",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S21",
+        "2": "S21_O"
+      }
+    },
+    {
+      "reference": "R22",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S22",
+        "2": "S22_O"
+      }
+    },
+    {
+      "reference": "R23",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S23",
+        "2": "S23_O"
+      }
+    },
+    {
+      "reference": "R24",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S24",
+        "2": "S24_O"
+      }
+    },
+    {
+      "reference": "R25",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S25",
+        "2": "S25_O"
+      }
+    },
+    {
+      "reference": "R26",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S26",
+        "2": "S26_O"
+      }
+    },
+    {
+      "reference": "R27",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S27",
+        "2": "S27_O"
+      }
+    },
+    {
+      "reference": "R28",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S28",
+        "2": "S28_O"
+      }
+    },
+    {
+      "reference": "R29",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S29",
+        "2": "S29_O"
+      }
+    },
+    {
+      "reference": "R30",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S30",
+        "2": "S30_O"
+      }
+    },
+    {
+      "reference": "R31",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S31",
+        "2": "S31_O"
+      }
+    },
+    {
+      "reference": "R32",
+      "footprint": "Resistor_SMD:R_0402_1005Metric",
+      "pad_nets": {
+        "1": "S32",
+        "2": "S32_O"
+      }
+    },
+    {
+      "reference": "J1",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "VCC",
+        "2": "GND",
+        "3": "S1_O",
+        "4": "S2_O",
+        "5": "S3_O",
+        "6": "S4_O",
+        "7": "S5_O",
+        "8": "S6_O"
+      }
+    },
+    {
+      "reference": "J2",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "S7_O",
+        "2": "S8_O",
+        "3": "S9_O",
+        "4": "S10_O",
+        "5": "S11_O",
+        "6": "S12_O",
+        "7": "S13_O",
+        "8": "S14_O"
+      }
+    },
+    {
+      "reference": "J3",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "S15_O",
+        "2": "S16_O",
+        "3": "S17_O",
+        "4": "S18_O",
+        "5": "S19_O",
+        "6": "S20_O",
+        "7": "S21_O",
+        "8": "S22_O"
+      }
+    },
+    {
+      "reference": "J4",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "S23_O",
+        "2": "S24_O",
+        "3": "S25_O",
+        "4": "S26_O",
+        "5": "S27_O",
+        "6": "S28_O",
+        "7": "S29_O",
+        "8": "S30_O"
+      }
+    },
+    {
+      "reference": "J5",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+      "pad_nets": {
+        "1": "S31_O",
+        "2": "S32_O"
+      }
+    }
+  ]
+}

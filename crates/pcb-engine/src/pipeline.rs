@@ -11,10 +11,14 @@
 //! [`route_detailed`] folds every stage's failures into one [`RouteResult`] with
 //! provenance in the reason string (`"global: …"`, `"assign: …"`, `"cell N: …"`),
 //! and stitches only the *fully successful* nets into copper. [`route_auto`] runs
-//! the detailed pipeline and, if anything failed, also runs the always-correct
-//! slice-1 router ([`crate::router::route`]) and returns whichever has fewer
-//! failed nets (naive wins ties — it is the battle-tested path). A [`RouterKind`]
-//! tag records which engine produced the returned result.
+//! BOTH the detailed pipeline and the always-correct slice-1 router
+//! ([`crate::router::route`]) and keeps the better by a quality key
+//! (`faults, via_count, wirelength`): faults are primary (never trade
+//! routability), then the tidier copper wins — so the detailed router's
+//! capacity-aware routing is kept where it reduces faults, and the direct grid
+//! router is kept where it is neater on a board both can route. The naive router
+//! wins exact ties as the battle-tested path. A [`RouterKind`] tag records which
+//! engine produced the returned result.
 //!
 //! ## Stitching (the connectivity contract)
 //!
@@ -35,7 +39,7 @@
 use crate::crossing::assign_crossings;
 use crate::detail::{self, CellRoute, CellRouteResult};
 use crate::pathing::{global_route, GlobalRouteResult};
-use crate::problem::{FailedNet, Point2, RouteProblem, RouteSolution, Trace, Via};
+use crate::problem::{FailedNet, LayerRef, Point2, RouteProblem, RouteSolution, Trace, Via, ViaSpan};
 use crate::router;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -162,13 +166,34 @@ pub fn route_detailed(problem: &RouteProblem) -> RouteResult {
 /// router wins ties as the battle-tested fallback. The returned result's
 /// [`RouteResult::router`] records which engine won.
 pub fn route_auto(problem: &RouteProblem) -> RouteResult {
-    let detailed = route_detailed(problem);
-    if detailed.failed.is_empty() {
-        return detailed;
-    }
-    let naive = router::route(problem);
-    // Fewer failed nets wins; naive wins ties.
-    if naive.failed.len() <= detailed.failed.len() {
+    let mut detailed = route_detailed(problem);
+    reconcile_connectivity(problem, &mut detailed.solution, &mut detailed.failed);
+
+    // Always also run the slice-1 router and keep the BETTER of the two. FAULTS
+    // are primary (never trade routability). At equal faults, prefer the slice-1
+    // router: its orthogonal copper reads cleaner than the detailed router's
+    // octilinear style on a board both can route — UNLESS the grid router pays a
+    // big DETOUR for it (much longer copper, e.g. it lacks the via the detailed
+    // router used to go direct), in which case the detailed result is cleaner.
+    let strict = router::route(problem);
+    let lenient = router::route_lenient(problem);
+    let naive = if score(problem, &lenient) < score(problem, &strict) {
+        lenient
+    } else {
+        strict
+    };
+    let n_faults = failed_pad_weight(problem, &naive.failed) + geometry_violations(problem, &naive.solution);
+    let d_faults =
+        failed_pad_weight(problem, &detailed.failed) + geometry_violations(problem, &detailed.solution);
+    let use_naive = if n_faults != d_faults {
+        n_faults < d_faults
+    } else {
+        let nwl = metrics(&naive.solution).wirelength;
+        let dwl = metrics(&detailed.solution).wirelength;
+        // Tidy orthogonal naive wins unless it detours > the tolerance longer.
+        nwl <= dwl * NAIVE_DETOUR_TOLERANCE
+    };
+    let mut result = if use_naive {
         RouteResult {
             solution: naive.solution,
             failed: naive.failed,
@@ -176,7 +201,103 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
         }
     } else {
         detailed
-    }
+    };
+    drop_redundant_thruhole_vias(problem, &mut result.solution);
+    result
+}
+
+/// Drop a via that sits inside a SAME-NET through-hole pad: the pad's barrel
+/// already spans every copper layer, so a via on it is a redundant layer change —
+/// and its drill collides with the pad's (a KiCAD `hole_to_hole` defect). The
+/// trace stays connected THROUGH the pad (both trace ends land inside it, and the
+/// pad bridges the layers). A pad is through-hole when its obstacle reaches both
+/// the top and bottom copper layers.
+fn drop_redundant_thruhole_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
+    let (top, bottom) = (LayerRef::top(), LayerRef::bottom());
+    solution.vias.retain(|v| {
+        !problem.obstacles.iter().any(|ob| {
+            ob.connected_to.contains(&v.connection)
+                && ob.layers.contains(&top)
+                && ob.layers.contains(&bottom)
+                && (v.at.x - ob.center.x).abs() <= ob.width / 2.0
+                && (v.at.y - ob.center.y).abs() <= ob.height / 2.0
+        })
+    });
+}
+
+/// At equal faults, keep the tidy orthogonal naive route unless its copper is more
+/// than this factor longer than the detailed route (then the detailed router's
+/// via-enabled direct routing is the cleaner result).
+const NAIVE_DETOUR_TOLERANCE: f64 = 1.15;
+
+/// `(total DRC faults, geometry faults)` for choosing between slice-1 variants.
+fn key(failed: usize, geom: usize) -> (usize, usize) {
+    (failed + geom, geom)
+}
+
+/// Connectivity cost: PADS left unconnected (sum over failed nets of pin count), not the
+/// net count — failing one 8-pin power net is worse than two 2-pin signals. Keeps the
+/// variant choice consistent with the naive's pad-weighted rip-up retry so they never
+/// disagree (which previously let a fewer-nets-but-more-pads result win).
+fn failed_pad_weight(problem: &RouteProblem, failed: &[crate::problem::FailedNet]) -> usize {
+    failed
+        .iter()
+        .map(|f| {
+            problem
+                .connections
+                .iter()
+                .find(|c| c.name == f.connection)
+                .map(|c| c.points_to_connect.len().max(1))
+                .unwrap_or(1)
+        })
+        .sum()
+}
+
+/// [`key`] for a slice-1 candidate, weighted by unconnected pads.
+fn score(problem: &RouteProblem, r: &router::RouteResult) -> (usize, usize) {
+    key(failed_pad_weight(problem, &r.failed), geometry_violations(problem, &r.solution))
+}
+
+/// Make a routed result DRC-HONEST: the lint is the authority, not the router's
+/// own bookkeeping. First drop any net whose copper violates GEOMETRY (clearance
+/// / width / via / bounds) — the engine must never emit copper that fails DRC —
+/// then drop any net left unconnected or shorted (a cross-net merge). Every
+/// dropped net is reported failed. After this `failed` is faithful and the
+/// surviving copper is fully DRC-clean, so `route_auto`'s comparison ranks a
+/// silent violation or phantom-route below an engine that cleanly connected
+/// fewer nets, and the engine never ships copper that fails DRC.
+fn reconcile_connectivity(
+    problem: &RouteProblem,
+    solution: &mut RouteSolution,
+    failed: &mut Vec<FailedNet>,
+) {
+    let mut broken = crate::lint::drop_violating_copper(problem, solution);
+    broken.extend(crate::lint::drop_unconnected_copper(problem, solution));
+    let known: std::collections::BTreeSet<&str> =
+        failed.iter().map(|f| f.connection.as_str()).collect();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let new: Vec<FailedNet> = broken
+        .into_iter()
+        .filter(|name| !known.contains(name.as_str()) && seen.insert(name.clone()))
+        .map(|name| FailedNet {
+            connection: name,
+            reason: "DRC oracle: net dropped — could not be routed cleanly (clearance/connectivity)"
+                .to_string(),
+        })
+        .collect();
+    failed.extend(new);
+}
+
+/// Count the *geometry* DRC violations of a solution — clearance, trace width,
+/// via clearance, out-of-bounds, invalid layer — excluding the connectivity
+/// lints, which already correlate with the failed-net count. This is the
+/// tiebreaker [`route_auto`] uses so a fully-routed-but-violating solution never
+/// beats a DRC-clean one.
+fn geometry_violations(problem: &RouteProblem, solution: &RouteSolution) -> usize {
+    crate::lint::lint(problem, solution)
+        .iter()
+        .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
+        .count()
 }
 
 /// The outcome of a pipeline route: copper, failures, and which engine produced
@@ -210,8 +331,6 @@ fn stitch(
     cell_routes: &[CellRoute],
     skip: &std::collections::BTreeSet<String>,
 ) -> RouteSolution {
-    let width = problem.min_trace_width;
-
     // Group cell copper by net, preserving deterministic (net, then layer) order.
     // Per net: per-layer list of polylines, plus the net's via sites.
     let mut by_net: BTreeMap<String, NetCopper> = BTreeMap::new();
@@ -242,12 +361,19 @@ fn stitch(
                 traces.push(Trace {
                     connection: connection.clone(),
                     layer: crate::problem::LayerRef(layer.clone()),
-                    width,
+                    width: problem.net_width(&connection), // per-net: fat power, thin signals
                     path: simplified,
                 });
             }
         }
-        // Vias: dedup by exact position.
+        // Vias: dedup by exact position, and DROP spurious ones. A via is real
+        // only if this net actually changes layer there — i.e. it has copper (a
+        // trace endpoint or a pad) on ≥2 distinct layers at the via's position.
+        // The cell stitch can emit a via where the net only has copper on one
+        // layer (a layer transition that simplified away), which KiCAD flags as
+        // `via_dangling`. Dropping it cannot break connectivity: by definition the
+        // net is already connected without it, and the connectivity oracle +
+        // naive fallback in `route_auto` catch any over-drop.
         for at in nc.vias {
             if vias
                 .iter()
@@ -255,11 +381,39 @@ fn stitch(
             {
                 continue;
             }
+            // A via connects a layer if a same-net trace TOUCHES it there — and
+            // that touch can be at a trace endpoint OR a point the trace passes
+            // straight through (a collinear interior point `simplify` removed). So
+            // test distance to each trace SEGMENT, not just to its vertices, or a
+            // genuinely-connecting via is mistaken for dangling and dropped.
+            const TOUCH: f64 = 0.02;
+            let mut layers: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+            for t in &traces {
+                if t.connection == connection
+                    && t.path.windows(2).any(|w| seg_point_dist(&w[0], &w[1], &at) < TOUCH)
+                {
+                    layers.insert(t.layer.0.as_str());
+                }
+            }
+            for ob in &problem.obstacles {
+                if ob.connected_to.contains(&connection)
+                    && (at.x - ob.center.x).abs() <= ob.width / 2.0 + 0.01
+                    && (at.y - ob.center.y).abs() <= ob.height / 2.0 + 0.01
+                {
+                    for lr in &ob.layers {
+                        layers.insert(lr.0.as_str());
+                    }
+                }
+            }
+            if layers.len() < 2 {
+                continue; // spurious / dangling — drop
+            }
             vias.push(Via {
                 connection: connection.clone(),
                 at,
                 diameter: problem.via_diameter,
                 drill: problem.via_drill,
+                span: ViaSpan::Through,
             });
         }
     }
@@ -394,6 +548,19 @@ fn same_point(a: &Point2, b: &Point2) -> bool {
     (a.x - b.x).abs() < JOIN_EPS && (a.y - b.y).abs() < JOIN_EPS
 }
 
+/// Distance from point `p` to segment `a`–`b` (mm). Used to test whether a via
+/// lies on a trace (endpoint or pass-through) when filtering dangling vias.
+fn seg_point_dist(a: &Point2, b: &Point2, p: &Point2) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    if len2 < 1e-12 {
+        return ((p.x - a.x).powi(2) + (p.y - a.y).powi(2)).sqrt();
+    }
+    let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0);
+    let (cx, cy) = (a.x + t * dx, a.y + t * dy);
+    ((p.x - cx).powi(2) + (p.y - cy).powi(2)).sqrt()
+}
+
 /// Quantise a point to an integer key so byte-exact-equal points collide in a
 /// `BTreeMap`. The detailed stage emits identical bytes for shared endpoints, so
 /// a fine quantum (1e9 ⇒ ~1 nm) keeps distinct points distinct while collapsing
@@ -507,13 +674,14 @@ mod tests {
     }
 
     #[test]
-    fn quad_auto_returns_detailed_and_is_clean() {
-        // With route_detailed now clean on quad, route_auto returns the Detailed
-        // result (no fallback) — the provenance flips from Naive (pre-3.5) to
-        // Detailed.
+    fn quad_auto_is_clean() {
+        // route_auto now picks the NEATER of detailed/naive (quality key: faults,
+        // then vias, then wirelength), so for quad it keeps the tidier naive
+        // result — equally clean, fewer vias. The invariant guarded here is that
+        // route_auto's chosen result is fully routed and lints CLEAN, whichever
+        // router wins (the provenance is a quality outcome, not a fixed promise).
         let p = load("quad.json");
         let r = route_auto(&p);
-        assert_eq!(r.router, RouterKind::Detailed, "quad: the detailed router now wins");
         assert!(r.failed.is_empty(), "route_auto routes quad cleanly: {:?}", r.failed);
         let vs = lint(&p, &r.solution);
         assert!(vs.is_empty(), "quad route_auto solution must lint CLEAN, got {vs:?}");
@@ -681,6 +849,7 @@ mod tests {
                 at: pt(3.0, 0.0),
                 diameter: 0.6,
                 drill: 0.3,
+                span: ViaSpan::Through,
             }],
         };
         let m = metrics(&s);

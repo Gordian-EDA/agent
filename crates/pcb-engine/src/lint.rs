@@ -46,6 +46,10 @@ use serde::Serialize;
 /// Geometric slop, mm. A gap is only a violation when it falls short of the
 /// required clearance by more than this.
 const EPS: f64 = 1e-6;
+/// KiCAD's relaxed minimum diameter for a true MICRO via (laser, adjacent-layer). Matches the
+/// netclass `microvia_diameter` the board export writes (kicad-bridge synth / tools_pcb
+/// write_kicad_project = 0.3 mm). Through/blind vias instead use `problem.via_diameter`.
+const MICRO_VIA_MIN_DIAMETER: f64 = 0.3;
 
 /// A design-rule violation in a [`RouteSolution`] relative to its problem.
 ///
@@ -132,6 +136,21 @@ pub enum DrcViolation {
         /// The board's layer count (provided for context when debugging).
         layer_count: u32,
     },
+    /// A via's diameter is below KiCAD's minimum for its type. Through/blind/buried vias
+    /// must meet the netclass via diameter (`problem.via_diameter`); only true micro vias
+    /// get the relaxed microvia floor. kicad-cli flags this as `via_diameter`; the in-house
+    /// lint must too, or the engine would ship a fault (it once shipped 56 — an HDI blind
+    /// via emitted below the netclass min before this check existed).
+    ViaDiameterBelowMin {
+        /// The via's connection name.
+        connection: String,
+        /// The via's diameter, mm.
+        diameter: f64,
+        /// Required minimum diameter for this via type, mm.
+        required: f64,
+        /// The via position, for debugging.
+        at: [f64; 2],
+    },
     /// A connectivity defect from the slice-0 oracle, folded in.
     Connectivity {
         /// The wrapped connectivity violation.
@@ -146,6 +165,92 @@ pub enum DrcViolation {
 /// Returns every violation in deterministic order: geometry violations first
 /// (collection order — traces, then vias, then bounds), then the connectivity
 /// oracle's violations folded in last.
+/// Make `solution` connectivity-honest: drop the copper of every net the
+/// connectivity oracle reports as unconnected (a half-route a router miscounted
+/// as done) or cross-net-shorted, and return those net names (sorted, unique).
+///
+/// The connectivity oracle — not a router's own bookkeeping — is the authority on
+/// what is actually joined. After this call the surviving copper carries no
+/// connectivity defect; callers should mark the returned names as failed nets so
+/// the reported result is faithful (an honest unrouted net, never silent copper
+/// that lies about connectivity). Dropping a net's copper only removes obstacles,
+/// so it can never break another net or introduce a geometry violation.
+pub fn drop_unconnected_copper(problem: &RouteProblem, solution: &mut RouteSolution) -> Vec<String> {
+    use crate::connectivity::Violation as ConnViolation;
+    let mut broken: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for v in lint(problem, solution) {
+        if let DrcViolation::Connectivity { violation } = v {
+            match violation {
+                ConnViolation::Unconnected { connection, .. } => {
+                    broken.insert(connection);
+                }
+                ConnViolation::CrossNetMerge { a, b } => {
+                    broken.insert(a);
+                    broken.insert(b);
+                }
+            }
+        }
+    }
+    if broken.is_empty() {
+        return Vec::new();
+    }
+    solution.traces.retain(|t| !broken.contains(&t.connection));
+    solution.vias.retain(|v| !broken.contains(&v.connection));
+    broken.into_iter().collect()
+}
+
+/// Make `solution` GEOMETRY-clean: while the lint reports any geometry violation
+/// (clearance / trace-width / via-clearance / out-of-bounds / invalid-layer),
+/// drop the copper of the net involved in the most violations and retry. Returns
+/// the dropped net names. The engine must never EMIT copper that fails DRC — on a
+/// board too dense to route a net cleanly, dropping it (and reporting it failed)
+/// is correct; a silent clearance violation that looks routed is not. Bounded by
+/// the net count so it always terminates. Connectivity is handled separately by
+/// [`drop_unconnected_copper`]; callers typically run both.
+pub fn drop_violating_copper(problem: &RouteProblem, solution: &mut RouteSolution) -> Vec<String> {
+    let mut dropped: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // One net can be dropped per pass; at most one pass per net plus a margin.
+    let max_passes = problem.connections.len() + 1;
+    for _ in 0..max_passes {
+        let mut tally: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for v in lint(problem, solution) {
+            for net in violation_nets(&v) {
+                *tally.entry(net).or_default() += 1;
+            }
+        }
+        if tally.is_empty() {
+            break;
+        }
+        // Drop the worst offender (most violations); ties broken by name (BTreeMap
+        // iteration order) for determinism.
+        let worst = tally
+            .iter()
+            .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+            .map(|(n, _)| n.clone())
+            .unwrap();
+        solution.traces.retain(|t| t.connection != worst);
+        solution.vias.retain(|v| v.connection != worst);
+        dropped.insert(worst);
+    }
+    dropped.into_iter().collect()
+}
+
+/// The net name(s) a GEOMETRY violation implicates (empty for connectivity, which
+/// this never returns since callers pre-filter). For a trace/trace clearance both
+/// nets are implicated; dropping the one in more violations resolves the most.
+fn violation_nets(v: &DrcViolation) -> Vec<String> {
+    match v {
+        DrcViolation::ClearanceTraceTrace { a, b, .. } => vec![a.clone(), b.clone()],
+        DrcViolation::ClearanceTraceObstacle { connection, .. }
+        | DrcViolation::ClearanceViaAny { connection, .. }
+        | DrcViolation::TraceWidthBelowMin { connection, .. }
+        | DrcViolation::OutOfBounds { connection, .. }
+        | DrcViolation::ViaDiameterBelowMin { connection, .. }
+        | DrcViolation::InvalidLayer { connection, .. } => vec![connection.clone()],
+        DrcViolation::Connectivity { .. } => Vec::new(),
+    }
+}
+
 pub fn lint(problem: &RouteProblem, solution: &RouteSolution) -> Vec<DrcViolation> {
     let items = collect_items(problem, solution);
     let clearance = problem.clearance;
@@ -197,12 +302,123 @@ pub fn lint(problem: &RouteProblem, solution: &RouteSolution) -> Vec<DrcViolatio
         }
     }
 
+    // (2b) Copper-to-board-EDGE clearance for a CUSTOM outline. (2) only checks the rectangular
+    //      bounds; KiCAD checks copper against the actual Edge.Cuts POLYGON, so routed copper near
+    //      a non-rect outline's diagonal edge (invisible to the bbox check) would ship a
+    //      copper_edge_clearance fault. Mirror KiCAD: a routed trace/via's copper edge must clear
+    //      every outline segment by EDGE_CLEAR. Pads are placed copper (kept inside by the placer's
+    //      copper-extent legality check), so only the router's traces/vias are checked here.
+    const EDGE_CLEAR: f64 = 0.5;
+    if let Some(poly) = &problem.outline {
+        let pts: Vec<[f64; 2]> = poly.iter().map(|p| [p.x, p.y]).collect();
+        for item in &items {
+            let (gap, half, at) = match &item.geom {
+                Geom::Via { at, radius } => (poly_edge_gap(*at, *at, &pts), *radius, *at),
+                Geom::Segment { a, b, half_w, .. } => (poly_edge_gap(*a, *b, &pts), *half_w, *a),
+                Geom::Rect { .. } => continue,
+            };
+            if gap < EDGE_CLEAR + half - EPS {
+                out.push(DrcViolation::OutOfBounds {
+                    connection: item.owners.first().cloned().unwrap_or_default(),
+                    overshoot: (EDGE_CLEAR + half - gap).max(0.0),
+                    at,
+                });
+            }
+        }
+    }
+
     // (3) Pairwise clearance — brute force O(n²) over the flat item vec.
     for i in 0..items.len() {
         for j in (i + 1)..items.len() {
             if let Some(v) = pair_clearance(&items[i], &items[j], clearance) {
                 out.push(v);
             }
+        }
+    }
+
+    // (3b) Hole-to-hole / track-to-hole clearance (KiCAD's drill-EDGE rule, 0.25mm).
+    //      The copper-clearance checks above don't cover it: a via's drill sits its annular
+    //      INSIDE its copper, so for a small via copper clearance can still leave the DRILL
+    //      too close to a foreign track or another drill (adversarial fat/small-via configs
+    //      shipped exactly this — the oracle was blind to it). Surfaced as ClearanceViaAny so
+    //      the existing drop_violating_copper path turns it into an honest unrouted net rather
+    //      than a shipped fault. Covers via↔via, via↔track, AND via↔foreign-PAD copper (KiCAD's
+    //      hole-to-copper rule: a via's drill must clear foreign pad copper by 0.25 too — a
+    //      dense fine-clearance escape shipped exactly this, the drill edge 0.245mm from a
+    //      foreign pad while the via COPPER cleared at 0.1).
+    const HOLE_CLEAR: f64 = 0.25;
+    for (vi, a) in solution.vias.iter().enumerate() {
+        let ar = a.drill / 2.0;
+        let aat = [a.at.x, a.at.y];
+        // drill ↔ drill: a mechanical (drill-bit) rule, independent of net.
+        for b in &solution.vias[vi + 1..] {
+            let gap = dist(aat, [b.at.x, b.at.y]) - ar - b.drill / 2.0;
+            if gap + EPS < HOLE_CLEAR {
+                out.push(DrcViolation::ClearanceViaAny {
+                    connection: a.connection.clone(),
+                    other_owners: vec![b.connection.clone()],
+                    gap,
+                    required: HOLE_CLEAR,
+                    at: aat,
+                });
+            }
+        }
+        // FOREIGN track copper ↔ this via's drill edge (same-net track connects to it).
+        for t in &solution.traces {
+            if t.connection == a.connection {
+                continue;
+            }
+            let hw = t.width / 2.0;
+            if t.path.windows(2).any(|w| {
+                point_seg_dist(aat, [w[0].x, w[0].y], [w[1].x, w[1].y]) - hw - ar + EPS < HOLE_CLEAR
+            }) {
+                out.push(DrcViolation::ClearanceViaAny {
+                    connection: a.connection.clone(),
+                    other_owners: vec![t.connection.clone()],
+                    gap: 0.0,
+                    required: HOLE_CLEAR,
+                    at: aat,
+                });
+            }
+        }
+        // FOREIGN pad copper ↔ this via's drill edge (hole-to-copper). A same-net pad is
+        // via-in-pad (intentional), so skip it; any other pad must clear the drill by 0.25.
+        for ob in &problem.obstacles {
+            if ob.connected_to.iter().any(|n| *n == a.connection) {
+                continue;
+            }
+            let dx = (a.at.x - ob.center.x).abs() - ob.width / 2.0;
+            let dy = (a.at.y - ob.center.y).abs() - ob.height / 2.0;
+            let gap = (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt() - ar;
+            if gap + EPS < HOLE_CLEAR {
+                out.push(DrcViolation::ClearanceViaAny {
+                    connection: a.connection.clone(),
+                    other_owners: ob.connected_to.clone(),
+                    gap,
+                    required: HOLE_CLEAR,
+                    at: aat,
+                });
+            }
+        }
+    }
+
+    // (3c) Via diameter below KiCAD's minimum. Through/blind/buried vias must meet the netclass
+    //      via diameter (problem.via_diameter — what kicad-cli enforces); only true micro vias get
+    //      the relaxed microvia floor. Iterates solution.vias directly (the Geom model drops the
+    //      span/type), so it's the one place that knows micro-vs-through. Without this the engine
+    //      shipped 56 via_diameter faults when an HDI blind via was emitted below the netclass min.
+    for v in &solution.vias {
+        let required = match v.span {
+            crate::problem::ViaSpan::Partial { micro: true, .. } => MICRO_VIA_MIN_DIAMETER,
+            _ => problem.via_diameter,
+        };
+        if v.diameter + EPS < required {
+            out.push(DrcViolation::ViaDiameterBelowMin {
+                connection: v.connection.clone(),
+                diameter: v.diameter,
+                required,
+                at: [v.at.x, v.at.y],
+            });
         }
     }
 
@@ -552,6 +768,23 @@ fn point_seg_dist(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     dist(p, proj)
 }
 
+/// Minimum distance from segment `pq` (a via passes p == q) to the boundary of polygon `poly` —
+/// i.e. to its nearest edge. Used to verify routed copper clears a custom board outline.
+fn poly_edge_gap(p: [f64; 2], q: [f64; 2], poly: &[[f64; 2]]) -> f64 {
+    let n = poly.len();
+    if n < 2 {
+        return f64::INFINITY;
+    }
+    let mut best = f64::INFINITY;
+    for i in 0..n {
+        let g = seg_seg_dist(p, q, poly[i], poly[(i + 1) % n]);
+        if g < best {
+            best = g;
+        }
+    }
+    best
+}
+
 /// Minimum distance between segments `ab` and `cd`. Zero when they intersect.
 fn seg_seg_dist(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> f64 {
     if segments_intersect(a, b, c, d) {
@@ -627,7 +860,7 @@ fn seg_rect_dist(a: [f64; 2], b: [f64; 2], min: [f64; 2], max: [f64; 2]) -> f64 
 mod tests {
     use super::*;
     use crate::problem::{
-        Bounds, Connection, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace, Via,
+        Bounds, Connection, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace, Via, ViaSpan,
     };
     use crate::router;
     use std::path::Path;
@@ -651,6 +884,8 @@ mod tests {
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
         }
     }
 
@@ -697,7 +932,58 @@ mod tests {
             at: Point2 { x: at.0, y: at.1 },
             diameter: 0.6,
             drill: 0.3,
+            span: ViaSpan::Through,
         }
+    }
+
+    #[test]
+    fn via_diameter_below_min_flags_undersized_through_but_allows_micro() {
+        // Board netclass via diameter = 0.6 (problem()); micro floor = 0.3.
+        let p = problem(vec![], vec![]);
+        let mk = |dia: f64, span: ViaSpan| RouteSolution {
+            traces: vec![],
+            vias: vec![Via {
+                connection: "GND".to_owned(),
+                at: Point2 { x: 50.0, y: 50.0 },
+                diameter: dia,
+                drill: 0.3,
+                span,
+            }],
+        };
+        let flagged = |s: &RouteSolution| {
+            lint(&p, s)
+                .iter()
+                .any(|v| matches!(v, DrcViolation::ViaDiameterBelowMin { .. }))
+        };
+        let micro = ViaSpan::Partial { from: 0, to: 1, micro: true };
+        // A 0.5 THROUGH via is below the 0.6 netclass min → flagged (the exact class that shipped
+        // 56 via_diameter faults from an undersized HDI blind via before this check existed).
+        assert!(flagged(&mk(0.5, ViaSpan::Through)), "undersized through via must flag");
+        // A full-size through via is fine.
+        assert!(!flagged(&mk(0.6, ViaSpan::Through)), "full through via must pass");
+        // A 0.4 MICRO via clears the relaxed 0.3 micro floor → NOT flagged (the HDI escape size).
+        assert!(!flagged(&mk(0.4, micro.clone())), "0.4 micro via must pass the micro floor");
+        // A 0.2 MICRO via is below even the micro floor → flagged.
+        assert!(flagged(&mk(0.2, micro)), "sub-floor micro via must flag");
+    }
+
+    #[test]
+    fn drop_violating_copper_drops_undersized_via_net() {
+        // The oracle must DROP a net whose via is undersized, not ship it (honest unrouted).
+        let p = problem(vec![], vec![]);
+        let mut sol = RouteSolution {
+            traces: vec![],
+            vias: vec![Via {
+                connection: "VCC".to_owned(),
+                at: Point2 { x: 50.0, y: 50.0 },
+                diameter: 0.5, // < 0.6 netclass min, span Through
+                drill: 0.3,
+                span: ViaSpan::Through,
+            }],
+        };
+        let dropped = drop_violating_copper(&p, &mut sol);
+        assert_eq!(dropped, vec!["VCC".to_owned()]);
+        assert!(sol.vias.is_empty(), "undersized via dropped, not shipped");
     }
 
     fn load(name: &str) -> RouteProblem {
@@ -831,10 +1117,95 @@ mod tests {
             vias: vec![via("NET_B", (20.0, 10.0))],
         };
         let vs = lint(&p, &s);
+        // The COPPER via-clearance (required == the board clearance 0.2) fires exactly once.
+        // The fixture is close enough that the drill-edge HOLE-clearance check (required 0.25)
+        // also fires — a second, legitimate violation — so filter to the copper one here.
         assert_eq!(
-            count(&vs, |v| matches!(v, DrcViolation::ClearanceViaAny { .. })),
+            count(&vs, |v| matches!(
+                v,
+                DrcViolation::ClearanceViaAny { required, .. } if *required < 0.24
+            )),
             1,
-            "exactly one via/any clearance violation, got {vs:?}"
+            "exactly one COPPER via/any clearance violation, got {vs:?}"
+        );
+    }
+
+    #[test]
+    fn hole_clearance_fires_for_close_drills() {
+        // Two SAME-NET vias 0.4mm apart (drill 0.3 → edge-to-edge 0.4 − 0.15 − 0.15 = 0.10 <
+        // KiCAD's 0.25mm hole-to-hole). Same net, so the COPPER via-clearance check skips them
+        // (their copper may legally overlap) — only the new drill-edge hole check should fire.
+        // Guards the fidelity hole that let small/fat-via configs ship hole_clearance faults.
+        let p = problem(
+            vec![conn("NET_A", &[(20.0, 10.0, "top"), (20.0, 10.4, "top")])],
+            vec![],
+        );
+        let s = RouteSolution {
+            traces: vec![],
+            vias: vec![via("NET_A", (20.0, 10.0)), via("NET_A", (20.0, 10.4))],
+        };
+        let vs = lint(&p, &s);
+        let hole = count(&vs, |v| matches!(
+            v,
+            DrcViolation::ClearanceViaAny { required, .. } if (*required - 0.25).abs() < 1e-9
+        ));
+        assert_eq!(hole, 1, "drill-to-drill hole clearance must fire once, got {vs:?}");
+    }
+
+    #[test]
+    fn hole_clearance_fires_for_via_near_foreign_pad() {
+        // A via (NET_A) whose DRILL edge sits < 0.25mm from a FOREIGN pad's copper. KiCAD's
+        // hole-to-copper rule fires here even though the via COPPER could clear — this is the
+        // via↔PAD case the oracle used to skip (a dense fine-clearance escape shipped it).
+        // via at (10,10) drill 0.3 (r 0.15); pad NET_B at (10.5,10) is 0.4×0.4 (hw 0.2) →
+        // rect-edge gap 0.3, drill-edge gap 0.15 < 0.25.
+        let p = problem(
+            vec![conn("NET_A", &[(10.0, 10.0, "top")])],
+            vec![pad(&["NET_B"], (10.5, 10.0), 0.4, 0.4, &["top"])],
+        );
+        let s = RouteSolution { traces: vec![], vias: vec![via("NET_A", (10.0, 10.0))] };
+        let hole = count(&lint(&p, &s), |v| matches!(
+            v,
+            DrcViolation::ClearanceViaAny { required, .. } if (*required - 0.25).abs() < 1e-9
+        ));
+        assert_eq!(hole, 1, "via↔foreign-pad hole clearance must fire once");
+
+        // SAME-NET pad is via-in-pad (intentional) — no hole violation.
+        let p2 = problem(
+            vec![conn("NET_A", &[(10.0, 10.0, "top")])],
+            vec![pad(&["NET_A"], (10.5, 10.0), 0.4, 0.4, &["top"])],
+        );
+        let s2 = RouteSolution { traces: vec![], vias: vec![via("NET_A", (10.0, 10.0))] };
+        let hole2 = count(&lint(&p2, &s2), |v| matches!(
+            v,
+            DrcViolation::ClearanceViaAny { required, .. } if (*required - 0.25).abs() < 1e-9
+        ));
+        assert_eq!(hole2, 0, "same-net pad (via-in-pad) must NOT fire hole clearance");
+    }
+
+    #[test]
+    fn copper_edge_clearance_fires_for_via_near_custom_outline() {
+        // A routed via inside a CUSTOM square outline but <0.5mm from an edge. The bbox check (2)
+        // can't see the polygon (bounds are 0..100), so only the new (2b) polygon-edge check
+        // catches it — mirroring KiCAD's copper-to-edge rule. via at (5.3,10) is 0.3mm from the
+        // x=5 edge; with the 0.3mm via radius the copper touches the edge → violation.
+        let mut p = problem(vec![conn("NET", &[(5.3, 10.0, "top")])], vec![]);
+        p.outline = Some(vec![
+            Point2 { x: 5.0, y: 5.0 },
+            Point2 { x: 15.0, y: 5.0 },
+            Point2 { x: 15.0, y: 15.0 },
+            Point2 { x: 5.0, y: 15.0 },
+        ]);
+        let near = RouteSolution { traces: vec![], vias: vec![via("NET", (5.3, 10.0))] };
+        assert!(
+            lint(&p, &near).iter().any(|v| matches!(v, DrcViolation::OutOfBounds { .. })),
+            "via <0.5mm from a custom outline edge must fire copper-edge clearance"
+        );
+        // A via centred in the outline is well clear → no edge violation.
+        let mid = RouteSolution { traces: vec![], vias: vec![via("NET", (10.0, 10.0))] };
+        assert!(
+            !lint(&p, &mid).iter().any(|v| matches!(v, DrcViolation::OutOfBounds { .. })),
+            "a centred via must NOT fire copper-edge clearance"
         );
     }
 

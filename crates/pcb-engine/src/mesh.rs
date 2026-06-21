@@ -185,6 +185,16 @@ impl Leaf {
             _ => l.capacity,
         }
     }
+
+    /// Whether FOREIGN copper (a pad of a net other than `conn`) covers this leaf
+    /// on `layer`. Distinct from [`capacity_for`] == 0, which is ALSO true for a
+    /// leaf whose own track capacity is 0 (a small cell, or one filled by the
+    /// net's OWN pad). A net must be able to start at and reach its own pad's
+    /// cell even though the pad zeroes that cell's track capacity — so endpoint
+    /// traversal gates on `foreign_blocked`, not on capacity.
+    pub fn foreign_blocked(&self, layer: usize, conn: usize) -> bool {
+        matches!(self.blocking.get(layer), Some(b) if b.iter().any(|&owner| owner != conn))
+    }
 }
 
 /// An adjacency edge between two leaves that share a boundary segment.
@@ -755,6 +765,8 @@ mod tests {
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
         }
     }
 

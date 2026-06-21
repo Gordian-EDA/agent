@@ -446,11 +446,16 @@ impl<'a> Router<'a> {
         let start = input.endpoints[0];
         tree.insert((start.layer, start.leaf));
 
+        // The net's own pad cells: a pad zeroes its cell's track capacity, but the
+        // net must still start at and reach its own pads — so these cells gate on
+        // FOREIGN copper only, not on capacity.
+        let own_leaves: BTreeSet<LeafId> = input.endpoints.iter().map(|e| e.leaf).collect();
+
         let mut failed: Option<String> = None;
         let mut paths: Vec<CellPath> = Vec::new();
 
         for (pi, ep) in input.endpoints.iter().enumerate().skip(1) {
-            match self.astar(conn, *ep, &tree) {
+            match self.astar(conn, *ep, &tree, &own_leaves) {
                 Some(path) => {
                     // Add all the path's cells to the tree so later points can
                     // tap anywhere along it.
@@ -528,9 +533,27 @@ impl<'a> Router<'a> {
         conn: usize,
         ep: Endpoint,
         tree: &BTreeSet<(usize, LeafId)>,
+        own_leaves: &BTreeSet<LeafId>,
     ) -> Option<CellPath> {
         let n_leaves = self.mesh.leaves.len();
         let lc = self.layer_count;
+
+        // A cell is passable for this net if it has track capacity — OR it is one
+        // of the net's OWN pad cells (which the pad zeroes), in which case only
+        // FOREIGN copper blocks it. Without this, a net can never start at or reach
+        // its own pads and the global router fails every net.
+        let passable = |leaf: LeafId, layer: usize| -> bool {
+            if own_leaves.contains(&leaf) {
+                // The net's own pad cell: it MUST be able to start at and reach
+                // its pads. At the mesh's resolution a pad can share a leaf with a
+                // different-net pad (foreign_blocked), but the net still has to
+                // get to its own copper there — the cell router resolves the exact
+                // track geometry around the foreign pad in stage 3.
+                true
+            } else {
+                self.leaf_capacity(leaf, layer, conn) > 0
+            }
+        };
 
         // State index = leaf * lc + layer, for dense visited / g-score arrays.
         let sidx = |leaf: LeafId, layer: usize| leaf * lc + layer;
@@ -549,9 +572,10 @@ impl<'a> Router<'a> {
                 .fold(f64::INFINITY, f64::min)
         };
 
-        // The start endpoint's cell must admit the net (own capacity > 0); if the
-        // pad's own leaf is blocked for it the net cannot start — honest fail.
-        if self.leaf_capacity(ep.leaf, ep.layer, conn) == 0 {
+        // The start endpoint's cell must admit the net; its own pad zeroes the
+        // cell's track capacity, so this gates on foreign copper (via `passable`),
+        // not raw capacity — else the net could never start at its own pad.
+        if !passable(ep.leaf, ep.layer) {
             return None;
         }
 
@@ -587,8 +611,9 @@ impl<'a> Router<'a> {
 
             // 1. Cross an edge to an adjacent leaf, same layer.
             for &(nb, ei) in &self.adjacency[item.leaf] {
-                // The neighbour must admit this net on this layer.
-                if self.leaf_capacity(nb, item.layer, conn) == 0 {
+                // The neighbour must admit this net on this layer (own pad cells
+                // gate on foreign copper, not capacity — see `passable`).
+                if !passable(nb, item.layer) {
                     continue;
                 }
                 // A boundary with zero *structural* capacity (a keepout sits on
@@ -597,7 +622,13 @@ impl<'a> Router<'a> {
                 // what makes a true cut honestly unroutable rather than an
                 // overflow through solid copper. (A congested edge — capacity ≥ 1,
                 // usage over it — stays passable so rip-up can negotiate it.)
-                if self.mesh.edges[ei].capacity.get(item.layer).copied().unwrap_or(0) == 0 {
+                // EXCEPTION: a boundary touching one of the net's OWN pad cells is
+                // the pad's own edge (the pad covers it, zeroing structural cap) —
+                // the owning net must be able to cross into/out of its pad.
+                let own_edge = own_leaves.contains(&item.leaf) || own_leaves.contains(&nb);
+                if !own_edge
+                    && self.mesh.edges[ei].capacity.get(item.layer).copied().unwrap_or(0) == 0
+                {
                     continue;
                 }
                 let step_cost = self.edge_cost(ei, item.layer, item.leaf, nb);
@@ -621,9 +652,7 @@ impl<'a> Router<'a> {
                 if other == item.layer {
                     continue;
                 }
-                if self.leaf_capacity(item.leaf, item.layer, conn) == 0
-                    || self.leaf_capacity(item.leaf, other, conn) == 0
-                {
+                if !passable(item.leaf, item.layer) || !passable(item.leaf, other) {
                     continue;
                 }
                 let step_cost = self.via_cost(item.leaf);
@@ -991,6 +1020,8 @@ mod tests {
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
         }
     }
 

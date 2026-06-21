@@ -56,10 +56,24 @@ pub fn part_from_footprint(
     reference: &str,
     net_map: &BTreeMap<String, String>,
 ) -> Part {
+    part_from_footprint_layers(footprint, reference, net_map, 2)
+}
+
+/// [`part_from_footprint`] for a board of `layer_count` copper layers. A
+/// through-hole pad spans EVERY copper layer (its plated barrel passes through
+/// all of them), so on a 4-layer board its inner layers are correctly occupied —
+/// otherwise the router would run an inner-layer trace straight through a header
+/// pin and short it (a defect KiCAD's DRC catches but the 2-layer pad model hid).
+pub fn part_from_footprint_layers(
+    footprint: &Footprint,
+    reference: &str,
+    net_map: &BTreeMap<String, String>,
+    layer_count: u32,
+) -> Part {
     let pads: Vec<PartPad> = footprint
         .pads
         .iter()
-        .map(|p| part_pad(p, net_map))
+        .map(|p| part_pad(p, net_map, layer_count))
         .collect();
 
     let (courtyard_w, courtyard_h) = enclosing_courtyard(footprint);
@@ -73,8 +87,55 @@ pub fn part_from_footprint(
     }
 }
 
+/// Different-net pad pairs within `footprint` whose copper edge-to-edge gap is
+/// below `clearance` (given the pad→net assignment), as `(pad_a, pad_b, gap_mm)`.
+///
+/// A footprint whose own two pads sit closer than the board clearance (a fine
+/// 0201 at a coarse clearance, say) produces an inherent clearance DRC fault that
+/// NO placement or routing can fix — the part simply cannot meet the rules. The
+/// agent checks this at `create_board` and rejects it with a clear message, so
+/// the engine never ships a board with a built-in clearance violation. Only
+/// pads with two DIFFERENT assigned nets are compared (KiCAD checks different-net
+/// copper; same-net or unconnected pads do not conflict here).
+pub fn pad_clearance_violations(
+    footprint: &Footprint,
+    pad_nets: &BTreeMap<String, String>,
+    clearance: f64,
+) -> Vec<(String, String, f64)> {
+    const EPS: f64 = 1e-6;
+    let pads = &footprint.pads;
+    let mut out = Vec::new();
+    for i in 0..pads.len() {
+        for j in (i + 1)..pads.len() {
+            let (a, b) = (&pads[i], &pads[j]);
+            // A numberless pad (empty `number`) is a NON-electrical feature — a paste/thermal
+            // sub-pad or mechanical pad — which KiCAD does not net-clearance-check; skip it
+            // (else an EP's thermal sub-pads false-trip on their own neighbours).
+            if a.number.is_empty() || b.number.is_empty() {
+                continue;
+            }
+            // Two ELECTRICAL pads need clearance UNLESS they share the same non-empty net
+            // (then they're intentionally connected). Different nets OR either pad un-netted (a
+            // no-net / NC ball) conflict — KiCAD enforces clearance between no-net pads too, so
+            // the old `(Some, Some) if x != y` (which skipped any un-netted pad) let a too-large
+            // clearance ship a built-in pad-to-pad fault on a footprint's own NC pads.
+            match (pad_nets.get(&a.number), pad_nets.get(&b.number)) {
+                (Some(x), Some(y)) if x == y => continue,
+                _ => {}
+            }
+            let gx = ((a.at[0] - b.at[0]).abs() - (a.size[0] + b.size[0]) / 2.0).max(0.0);
+            let gy = ((a.at[1] - b.at[1]).abs() - (a.size[1] + b.size[1]) / 2.0).max(0.0);
+            let gap = (gx * gx + gy * gy).sqrt();
+            if gap + EPS < clearance {
+                out.push((a.number.clone(), b.number.clone(), gap));
+            }
+        }
+    }
+    out
+}
+
 /// Translate one library [`FootprintPad`] into a placement [`PartPad`].
-fn part_pad(pad: &FootprintPad, net_map: &BTreeMap<String, String>) -> PartPad {
+fn part_pad(pad: &FootprintPad, net_map: &BTreeMap<String, String>, layer_count: u32) -> PartPad {
     PartPad {
         number: pad.number.clone(),
         offset: Point2 {
@@ -83,25 +144,37 @@ fn part_pad(pad: &FootprintPad, net_map: &BTreeMap<String, String>) -> PartPad {
         },
         width: pad.size[0],
         height: pad.size[1],
-        layers: pad_layers(pad),
+        layers: pad_layers(pad, layer_count),
         net: net_map.get(&pad.number).cloned(),
     }
 }
 
+/// Every copper layer of a `layer_count`-layer board as a [`LayerRef`]:
+/// `top, inner1, …, inner(layer_count-2), bottom`.
+fn all_copper_layers(layer_count: u32) -> Vec<LayerRef> {
+    let n = layer_count.max(2);
+    let mut v = vec![LayerRef::top()];
+    for i in 1..=(n.saturating_sub(2)) {
+        v.push(LayerRef(format!("inner{i}")));
+    }
+    v.push(LayerRef::bottom());
+    v
+}
+
 /// The engine [`LayerRef`]s a pad sits on. A surface-mount pad on a single face
-/// maps to that face; a through-hole / `*.Cu` pad spans both copper faces (the
-/// same top+bottom convention `to_route_problem` and `pcb.rs` use for a
-/// full-stack pad on a 2-layer board).
-fn pad_layers(pad: &FootprintPad) -> Vec<LayerRef> {
+/// maps to that face; a through-hole / `*.Cu` pad spans EVERY copper layer of the
+/// board (its barrel is through-plated), so the router treats the inner layers
+/// under it as occupied too.
+fn pad_layers(pad: &FootprintPad, layer_count: u32) -> Vec<LayerRef> {
     let spans_all = matches!(pad.technology, PadTechnology::ThruHole | PadTechnology::NpThruHole)
         || pad.layers.iter().any(|l| l == "*.Cu");
     if spans_all {
-        return vec![LayerRef::top(), LayerRef::bottom()];
+        return all_copper_layers(layer_count);
     }
     let on_front = pad.layers.iter().any(|l| l == "F.Cu");
     let on_back = pad.layers.iter().any(|l| l == "B.Cu");
     match (on_front, on_back) {
-        (true, true) => vec![LayerRef::top(), LayerRef::bottom()],
+        (true, true) => all_copper_layers(layer_count),
         (false, true) => vec![LayerRef::bottom()],
         // Default (front-only, or no copper layer named) to the top face.
         _ => vec![LayerRef::top()],
@@ -403,5 +476,23 @@ mod tests {
             part_from_footprint(&fp, "U1", &net(&[("1", "VIN"), ("2", "GND"), ("3", "VOUT")]));
         assert_eq!(part.pads.len(), 3);
         assert_courtyard_encloses_pads(&part);
+    }
+
+    #[test]
+    fn pad_clearance_violations_fire_on_too_tight_clearance() {
+        let fp = Footprint::load(&fixture("SOT-23.kicad_mod")).unwrap();
+        let nets = net(&[("1", "VIN"), ("2", "GND"), ("3", "VOUT")]);
+        // SOT-23 different-net pads sit well over 0.2mm apart → no violation.
+        assert!(pad_clearance_violations(&fp, &nets, 0.2).is_empty());
+        // At an absurd 1.0mm clearance the adjacent pads violate.
+        assert!(!pad_clearance_violations(&fp, &nets, 1.0).is_empty());
+        // Same-net pads never conflict, even at a huge clearance.
+        let same = net(&[("1", "N"), ("2", "N"), ("3", "N")]);
+        assert!(pad_clearance_violations(&fp, &same, 5.0).is_empty());
+        // NO-NET pads still need clearance (KiCAD enforces it): an un-netted pad conflicts
+        // with a netted neighbour, and at an absurd clearance it must fire — the old check
+        // skipped any un-netted pad and let such a config ship a built-in DRC fault.
+        let partial = net(&[("1", "VIN"), ("3", "VOUT")]); // pad 2 left un-netted
+        assert!(!pad_clearance_violations(&fp, &partial, 1.0).is_empty());
     }
 }

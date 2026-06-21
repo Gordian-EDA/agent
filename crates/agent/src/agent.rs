@@ -45,19 +45,20 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::llm::{ContentBlock, ImageData, LlmClient, Message, Role};
 use crate::tools::{ToolCtx, Tools};
 
-/// Safety cap on LLM round-trips per turn. Generous enough for
-/// search → info → validate → apply self-repair, bounded so a misbehaving model
-/// can't loop forever. 12 was too low for DENSE boards (~50 parts): the model spends
-/// iterations on per-part search_symbols + create + validate + edit and hits the cap
-/// BEFORE apply_design → "no schematic written" (a dense data-logger failed exactly this
-/// way). 24 carried ~50-part boards, but the BIGGEST boards (STM32H7+DDR+Ethernet, an
-/// industrial I/O module with 8 optos + 4 relays + RS485/CAN — 60-80 parts) blow PAST it:
-/// the single create_design payload exceeds the model's max OUTPUT tokens, so it falls back
-/// to incremental edit_design per block (one or two round-trips each), and 6-9 blocks +
-/// per-part search + validate overrun 24 (observed: 55 tool calls, stop=IterationCap, no
-/// schematic). 40 lets the largest boards commit incrementally; simple boards still finish
-/// in a handful of round-trips, so the extra ceiling only ever costs tokens on boards that
-/// genuinely need it. Still bounded against a runaway model.
+/// Safety cap on LLM round-trips per turn. Generous enough for the longest legitimate
+/// flow, bounded so a misbehaving model can't loop forever. 12 was too low; 24 carried
+/// ~50-part boards but BOTH engines' densest cases overran it — independently discovered
+/// from each side and raised to 40:
+///   - SCHEMATIC: the biggest boards (STM32H7+DDR+Ethernet; an industrial I/O module with
+///     8 optos + 4 relays + RS485/CAN — 60-80 parts) exceed the model's max OUTPUT tokens
+///     on a single create_design, so it falls back to incremental edit_design per block
+///     (6-9 blocks + per-part search + validate) and hit 24 with NO schematic written
+///     (observed: 55 tool calls, stop=IterationCap).
+///   - PCB: a dense board (100-ball BGA + decoupling + connectors, ~29 parts) spends ~9
+///     round-trips on footprint search/info, several on build, then multiple
+///     place/route/triage cycles, and hit 24 mid-placement-refinement with NO board exported.
+/// 40 lets the largest boards commit/export incrementally; simple boards still finish in a
+/// handful of round-trips, so the extra ceiling only costs tokens on boards that need it.
 const MAX_ITERATIONS: usize = 40;
 
 /// The human apply-gate. The loop calls [`Approvals::approve`] with the dry-run
@@ -988,6 +989,14 @@ schematic). The routing/placement engine is deterministic geometry; YOUR job is
 the floorplan, the constraints, and triaging failures. You NEVER emit trace
 coordinates — copper comes only from the engine.
 
+**Go STRAIGHT to the board flow — do NOT draw a schematic first.** `create_board`
+takes the parts directly (`{reference, footprint, pad_nets}`); when the request is
+a board (the user names the parts/footprints, or asks you to "lay out / route a
+PCB"), skip `create_design`/`apply_design` entirely and start at step 1 below.
+Building a schematic first for a board-only task wastes your turn and can run you
+out of steps before the board is routed and exported. (Only derive from a schematic
+when one already exists or the user explicitly asks for the schematic too.)
+
 ## Board flow (follow this order)
 
 1. `search_footprints(query)` — find the real footprint `Lib:Name` for each part
@@ -995,10 +1004,40 @@ coordinates — copper comes only from the engine.
    search for it, exactly like symbols.
 2. `get_footprint_info(lib_id)` — read the pad numbers (so you bind nets to the
    right pads), the courtyard, and the bounding box.
-3. `create_board({bounds, parts, rules?})` — declare the board: outline bounds
-   (mm), and each part as `{reference, footprint, pad_nets: {pad# → net}}`.
+3. `create_board({bounds, parts, rules?, outline?})` — declare the board: outline
+   bounds (mm), and each part as `{reference, footprint, pad_nets: {pad# → net}}`.
    Single-pin nets warn (nothing to route). One unknown footprint is a
    recoverable error with suggestions — fix that one part and resend.
+   START WITH GENEROUS BOUNDS (roughly 2× the summed part area, square-ish). The
+   export tightens the final outline to the copper + 1mm, so a roomy routing area is
+   FREE in the finished board but gives the placer/router the slack they need — a
+   hand-packed tight board is the #1 cause of an illegal placement you then waste the
+   turn fighting. You can always shrink later; starting tight only hurts.
+   BIG BOARDS (50+ parts, or a large BGA whose pad→net map is long): do NOT cram every
+   part into one create_board call — a giant parts argument is unreliable to emit and you
+   will waste the turn re-sending it. Instead `create_board` with the bounds, rules, and a
+   FIRST batch, then `add_parts({parts})` repeatedly for the rest (same part shape; a
+   reference already on the board errors). Then place_board once everything is added.
+   USE THE ENGINE'S FEATURES — they are deterministic and DRC-checked, so reach for
+   them instead of hand-workarounds or telling the user to finish in KiCAD:
+   - `rules.pours: [{net, layer}]` — a copper POUR the engine fills + anti-pads for
+     you (a 2-layer ground plane, an RF/HF return, shielding). When the user asks for
+     a ground plane/pour, DECLARE IT HERE; never route top-only and punt the zone to
+     the user.
+   - `rules.layers: 4|6|8` — adds the two CENTRED inner GND/VCC PLANES automatically
+     (dense power pins), leaving the other inner layers as signal (8-layer → 6 signal).
+     NOTE: more layers add capacity but the greedy router does not yet aggressively
+     exploit inner SIGNAL layers, so going 4→6→8 may not route strictly more on a given
+     board — pick the layer count your fab/impedance needs, not as a routing-density dial.
+   - `rules.net_widths: {net: mm}` — fat power / thin signal.
+   - `rules.via_diameter`/`rules.via_drill` — for a dense BGA/QFP that leaves balls
+     unrouted, a SMALLER standard via (`0.5`/`0.3`, vs the `0.6`/`0.3` default) is the
+     reliable lever: it drops between fine-pitch balls a 0.6 via can't, routing more.
+     Do NOT instead reach for a finer `rules.clearance` — verified non-monotonic, it
+     often routes FEWER (finer grid → worse greedy contention); reserve sub-0.15mm
+     clearance for genuinely sub-0.5mm pitch where a trace can't otherwise fit at all.
+   - `outline: [[x,y],...]` — a custom board shape (circle/hex/any); bounds still
+     bounds it. Placement, routing, and pours all respect the polygon.
 4. `set_placement_hints({groups})` — ENCOURAGED before placing: translate circuit
    intent into floorplan groups (`{name, members, region?, edge?}`) — decoupling
    caps hugging their IC, connectors on an `edge`, a sub-circuit in a `region`.
@@ -1006,8 +1045,18 @@ coordinates — copper comes only from the engine.
    routing success, so spend effort here.
 5. `place_board()` — the deterministic legalizer snaps parts to a legal, in-bounds
    floorplan honoring your hints and any locks. Returns each part's position and
-   whether the placement is `legal`. An illegal (too-tight) placement means
-   enlarge bounds / relax rules / move parts.
+   whether the placement is `legal`. For an illegal (too-tight) placement, the
+   FIRST and cheapest fix is to ENLARGE BOUNDS (re-create_board with a bigger
+   `bounds`) — the export auto-tightens the outline to the copper + 1mm anyway, so
+   roomy bounds cost nothing in the finished board and give the legalizer slack.
+   Do NOT try to resolve overlaps by hand-`move_part`ing parts around: each
+   move_part LOCKS that part, and a pile of locks over-constrains the legalizer so
+   it can't separate them (you'll fight your own locks forever). Trust the
+   legalizer — give it room + good hints and let it place. In particular do NOT lock
+   connectors/headers: they AUTO-seek their nearest board edge, and locking one (e.g.
+   via move_part) pins it wherever you put it — usually the interior — DEFEATING the
+   edge-seek and stranding it mid-board. Reserve move_part/locks for the rare part
+   whose exact interior spot truly matters, not for connectors or routine placement.
 6. `render_board()` — LOOK at the board. This is your eyes: call it after
    place_board to see the floorplan and after route_board to see the copper
    (top = red, bottom = blue, failed nets = orange crosses). Critique it against a
@@ -1016,9 +1065,18 @@ coordinates — copper comes only from the engine.
    list with a `reason`, `metrics`, and a `lint_summary`. Needs a placement first.
 8. Triage loop — if `failed` is non-empty, read the reasons and the congestion
    hotspots, apply ONE lever (below), then re-place (if placement was cleared)
-   and re-route. Repeat until `failed` is empty.
-9. `export_board({path?})` — only when the board is placed AND routed. Writes the
-   `.kicad_pcb` and (when KiCAD ≥ 8 is present) runs DRC and reports the counts.
+   and re-route. BOUND IT: give a stubborn net about 3 triage attempts, and prefer
+   a `set_placement_hints` re-floorplan over many one-at-a-time `move_part` nudges
+   (re-clustering beats hand-walking a part across the board). If a few nets stay
+   walled-in on a genuinely tight/enclosed board after that, STOP — an honestly
+   unrouted net is an ACCEPTABLE result, not something to keep grinding. Do NOT
+   spend the whole turn (or your iteration budget) chasing the last net.
+9. `export_board({path?})` — once the board is placed and routed AS FAR AS IT GOES.
+   A board with a FEW honest unrouted nets (listed in `failed`) is a useful,
+   shippable deliverable: EXPORT it and report those nets to the user — an
+   UNEXPORTED board helps no one, so never let perfectionism on one net cost you the
+   whole board. The only hard requirement is never export a STALE route (re-route
+   after any change). Writes the `.kicad_pcb` and runs DRC (KiCAD ≥ 8).
 
 ## Failure-provenance cheat sheet (read every `reason`)
 
@@ -1037,12 +1095,29 @@ Each failed net carries a `reason` prefixed by the stage that gave up:
 - A "naive fallback" note means the detailed router could not improve on the
   always-correct grid router, so the simpler result was kept — not itself a fault.
 
+**Fine-pitch escape limit (a FAB reality, not a bug to grind):** when the failing
+pins sit on a ≤0.8mm-pitch part (a fine QFN/BGA) and one or two placement/spacing
+triage attempts don't clear them, STOP. Those dense/inner SIGNAL pins genuinely
+cannot escape with standard through-vias — they need HDI microvias / via-in-pad, a
+fab capability the engine does not emit. (Power/ground pins on such parts already
+auto-fan-out to the inner planes; this caveat is about signals.) Accept the leftover
+nets as honestly unrouted and report them, or tell the user a coarser-pitch part
+would route fully — do NOT re-place repeatedly chasing a physically unroutable net.
+
 `route_board` also returns `congestion.hotspots` (hot mesh edges, with usage vs
 capacity and the loads) on a failed route — use them to pick WHICH part to move or
 WHICH channel to open.
 
 ## Triage levers (in preference order)
 
+0. **Wide power nets failing / signals crowding one layer → go 4-layer FIRST.**
+   When `route_board` fails a high-fanout power net (VCC/VIN/VOUT) or its output
+   says signals are crowding a single layer (e.g. a bottom GND pour leaves only the
+   top for signals), the decisive lever is `create_board(..., rules:{layers:4})` and
+   re-place — the high-fanout power nets become inner PLANES (connected by vias),
+   freeing both outer layers for signals. ACT on this immediately; do NOT spend
+   several re-place/re-hint rounds fighting wide traces on 2 layers first. If
+   route_board itself recommends more layers, that recommendation is the move.
 1. `set_placement_hints` — re-floorplan via groups/regions/edges (the biggest
    lever; placement dominates).
 2. `move_part({reference, x, y, rotation?})` — nudge ONE part to a position you

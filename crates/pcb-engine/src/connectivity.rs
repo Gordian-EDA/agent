@@ -625,7 +625,7 @@ fn rect_rect_dist(mn1: [f64; 2], mx1: [f64; 2], mn2: [f64; 2], mx2: [f64; 2]) ->
 mod tests {
     use super::*;
     use crate::problem::{
-        Bounds, Connection, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace, Via,
+        Bounds, Connection, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace, Via, ViaSpan,
     };
 
     fn bounds() -> Bounds {
@@ -647,6 +647,8 @@ mod tests {
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
         }
     }
 
@@ -693,6 +695,7 @@ mod tests {
             at: Point2 { x: at.0, y: at.1 },
             diameter: 0.6,
             drill: 0.3,
+            span: ViaSpan::Through,
         }
     }
 

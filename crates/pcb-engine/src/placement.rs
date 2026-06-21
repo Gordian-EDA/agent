@@ -68,6 +68,17 @@ const GROUP_SPRING_K: f64 = 0.05;
 const REGION_PULL_K: f64 = 0.10;
 const EDGE_PULL_K: f64 = 0.10;
 
+/// Pull strength for auto edge-affinity (connectors → nearest edge). Stronger
+/// than [`EDGE_PULL_K`] so it overcomes the inward net springs of a connector
+/// wired to several nets, which would otherwise strand it in the interior.
+const EDGE_SEEK_K: f64 = 0.30;
+
+/// Direct pull of a decoupling cap toward its IC ([`decoupling_pairs`]), in the
+/// decoupling placement variant only. Strong enough that the cap hugs the IC
+/// (shortening the supply loop); [`place_best`] keeps the variant only when it
+/// routes at least as cleanly, so this never regresses a board it does not help.
+const DECOUPLE_K: f64 = 0.35;
+
 /// Short-range repulsion gain on margin-inflated courtyard overlap.
 const REPULSION_K: f64 = 0.5;
 
@@ -104,6 +115,17 @@ pub struct PlaceProblem {
     pub min_trace_width: f64,
     /// The parts to place.
     pub parts: Vec<Part>,
+    /// Rectangular keep-out regions on the SIGNAL layers (top/bottom) the placer
+    /// must keep parts OUT of — a part dropped inside one would have its pads
+    /// trapped (no track can leave without crossing the keep-out). Inner-only
+    /// (plane) keep-outs are not included here. Empty for most boards.
+    #[serde(default)]
+    pub keepouts: Vec<Rect>,
+    /// Optional custom board OUTLINE (closed polygon, mm). When set, a part is illegal if
+    /// its courtyard falls outside the polygon — so concave shapes (a star) keep parts
+    /// inside the TRUE outline, not just its bounding box. Carried into the [`RouteProblem`].
+    #[serde(default)]
+    pub outline: Option<Vec<Point2>>,
 }
 
 fn default_clearance() -> f64 {
@@ -176,6 +198,21 @@ pub struct PlacementHints {
     /// Grouping/region/edge hints.
     #[serde(default)]
     pub groups: Vec<GroupHint>,
+    /// References that should be pulled to their NEAREST board edge (connectors,
+    /// headers, mounting holes — parts a cable or the enclosure reaches from
+    /// outside). Unlike a group `edge` hint, the engine picks each part's nearest
+    /// edge automatically, so the caller need not know the final layout. A
+    /// professional board puts these at the perimeter, not stranded in the
+    /// interior with copper wrapping around them.
+    #[serde(default)]
+    pub edge_seek: Vec<String>,
+    /// References pulled to their NEAREST board CORNER (mounting holes — mechanical
+    /// fixings belong at the corners, where screws clear the components). Stronger
+    /// and more specific than [`Self::edge_seek`] (a corner, not anywhere along an
+    /// edge), so a board's 2–4 mounting holes settle one per corner instead of
+    /// stranding in the interior or bunching mid-edge.
+    #[serde(default)]
+    pub corner_seek: Vec<String>,
 }
 
 /// A group of parts that should cohere, optionally pulled into a region and/or
@@ -193,6 +230,102 @@ pub struct GroupHint {
     /// Optional board edge the group should hug.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge: Option<Edge>,
+    /// Tile the members in a regular GRID filling [`Self::region`] (row-major, in
+    /// member order), locking each at its cell. For repetitive arrays the agent
+    /// wants laid out tidily (LED matrices, resistor networks) rather than the
+    /// general annealer's scatter. Requires `region`; ignored without it.
+    #[serde(default)]
+    pub grid: bool,
+    /// Ring the members tightly around the perimeter of this target part (by
+    /// reference) — the decoupling-cap pattern: caps hug their IC instead of
+    /// scattering. The target must be LOCKED (the agent fixes the IC first) so its
+    /// position is known when the ring is laid out. Ignored otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surround: Option<String>,
+}
+
+/// Lock each member of a `grid` group at a computed cell of a regular grid filling
+/// the group's region (row-major, member order). The grid's column count is sized
+/// from the region aspect and member count. Locked members are then fixed for the
+/// rest of placement, so the annealer lays out the remaining parts around the tidy
+/// array instead of scattering it. A no-op for groups without `grid`/`region`, or
+/// whose members aren't found.
+pub fn apply_grid_hints(problem: &mut PlaceProblem, hints: &PlacementHints) {
+    for g in &hints.groups {
+        // `surround`: ring the members tightly around a locked target part's edges
+        // (the decoupling pattern). Handled first; falls through to `grid` otherwise.
+        if let Some(target) = &g.surround {
+            apply_surround(problem, &g.members, target);
+            continue;
+        }
+        if !g.grid {
+            continue;
+        }
+        let Some(region) = &g.region else { continue };
+        let idxs: Vec<usize> = g
+            .members
+            .iter()
+            .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
+            .collect();
+        if idxs.is_empty() {
+            continue;
+        }
+        let n = idxs.len();
+        let (rw, rh) = (region.max_x - region.min_x, region.max_y - region.min_y);
+        let cols = (((n as f64) * rw / rh).sqrt().round() as usize).clamp(1, n);
+        let rows = n.div_ceil(cols);
+        let (px, py) = (rw / cols as f64, rh / rows as f64);
+        for (k, &i) in idxs.iter().enumerate() {
+            let (c, r) = (k % cols, k / cols);
+            problem.parts[i].locked = Some(LockedAt {
+                at: Point2 {
+                    x: region.min_x + (c as f64 + 0.5) * px,
+                    y: region.min_y + (r as f64 + 0.5) * py,
+                },
+                rotation: 0,
+            });
+        }
+    }
+}
+
+/// Ring `members` tightly around the perimeter of the LOCKED `target` part (the
+/// decoupling-cap pattern): space them evenly by ARC LENGTH around the target's
+/// courtyard, just outside each edge, and lock each there. Arc-length spacing makes
+/// the per-edge count proportional to edge length, so a long edge gets more caps than
+/// a short one — a tall IC no longer overflows (and overlaps) its short edges. The
+/// target must already be locked (the agent fixes the IC first) so its centre is known.
+/// A no-op otherwise.
+fn apply_surround(problem: &mut PlaceProblem, members: &[String], target: &str) {
+    let Some(ti) = problem.parts.iter().position(|p| p.reference == target) else { return };
+    let Some(loc) = problem.parts[ti].locked.clone() else { return };
+    let (cx, cy) = (loc.at.x, loc.at.y);
+    let (hw, hh) = (problem.parts[ti].courtyard_w / 2.0, problem.parts[ti].courtyard_h / 2.0);
+    let idxs: Vec<usize> = members
+        .iter()
+        .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
+        .collect();
+    let n = idxs.len();
+    if n == 0 {
+        return;
+    }
+    let gap = 0.6; // mm clear of the IC courtyard edge
+    // Walk the courtyard perimeter clockwise: top (len 2hw) → right (2hh) → bottom
+    // (2hw) → left (2hh). Place member k at arc position (k+0.5)/n of the perimeter.
+    let perim = 4.0 * (hw + hh);
+    for (k, &i) in idxs.iter().enumerate() {
+        let (chw, chh) = (problem.parts[i].courtyard_w / 2.0, problem.parts[i].courtyard_h / 2.0);
+        let pos = (k as f64 + 0.5) / n as f64 * perim;
+        let at = if pos < 2.0 * hw {
+            Point2 { x: cx - hw + pos, y: cy - hh - gap - chh } // top, L→R
+        } else if pos < 2.0 * hw + 2.0 * hh {
+            Point2 { x: cx + hw + gap + chw, y: cy - hh + (pos - 2.0 * hw) } // right, T→B
+        } else if pos < 4.0 * hw + 2.0 * hh {
+            Point2 { x: cx + hw - (pos - 2.0 * hw - 2.0 * hh), y: cy + hh + gap + chh } // bottom, R→L
+        } else {
+            Point2 { x: cx - hw - gap - chw, y: cy + hh - (pos - 4.0 * hw - 2.0 * hh) } // left, B→T
+        };
+        problem.parts[i].locked = Some(LockedAt { at, rotation: 0 });
+    }
 }
 
 /// An axis-aligned region rectangle (mm).
@@ -265,6 +398,11 @@ pub struct PlaceReport {
     /// Half-perimeter wirelength over net bounding boxes (mm) — the cheap
     /// placement-quality number (lower is tighter).
     pub hpwl: f64,
+    /// The full [`place_cost`] of the final placement (overlap + wirelength +
+    /// compaction + decoupling cohesion + silk gap). [`place_best`] selects the
+    /// variant with the lowest layout_cost among those that route as cleanly, so
+    /// the annealer's layout-quality gains are actually chosen.
+    pub layout_cost: f64,
 }
 
 // ── derived nets ─────────────────────────────────────────────────────────────
@@ -308,13 +446,449 @@ pub fn derive_nets(problem: &PlaceProblem) -> Vec<LogicalNet> {
 
 // ── public entry: place ──────────────────────────────────────────────────────
 
+/// Detect decoupling co-placement pairs `(cap_idx, ic_idx)`: a 2-pad part whose
+/// BOTH pad nets also appear on a larger (≥3-pad) part is its decoupling cap and
+/// should hug that IC/regulator. The smaller-index qualifying anchor wins
+/// (deterministic). A part wired to two unrelated nets (e.g. a divider resistor)
+/// finds no single anchor with both nets, so this fires only for real bypass caps.
+/// Public so the agent surface can suggest a `surround` hint for a decoupling-heavy IC.
+pub fn decoupling_pairs(problem: &PlaceProblem) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::new();
+    for (si, small) in problem.parts.iter().enumerate() {
+        if small.pads.len() != 2 {
+            continue;
+        }
+        let nets: Vec<&str> = small.pads.iter().filter_map(|p| p.net.as_deref()).collect();
+        if nets.len() != 2 || nets[0] == nets[1] {
+            continue;
+        }
+        for (ai, anc) in problem.parts.iter().enumerate() {
+            if ai == si || anc.pads.len() < 3 {
+                continue;
+            }
+            let anc_nets: std::collections::BTreeSet<&str> =
+                anc.pads.iter().filter_map(|p| p.net.as_deref()).collect();
+            if anc_nets.contains(nets[0]) && anc_nets.contains(nets[1]) {
+                pairs.push((si, ai));
+                break;
+            }
+        }
+    }
+    pairs
+}
+
+// ── simulated-annealing placement refinement ─────────────────────────────────
+//
+// A direct analog of the schematic floorplan SA (`sch-layout::floorplan`): from
+// the force-directed seed, anneal part positions to minimize an explicit cost,
+// escaping the local minima the springs settle into. Crucially the SA OWNS its
+// cost (overlap included), so — unlike the reverted spring/halo heuristics — the
+// legalizer never has to fight it: the annealed state is already near-legal and
+// the final `legalize` only nudges. The cost carries a SILK-GAP term so parts
+// keep room for their reference designators (the recurring critic complaint).
+
+/// SA cost weights (mm units), scaled like the schematic floorplan cost.
+const SA_OVERLAP_W: f64 = 1000.0; // hard: courtyard collision
+const SA_BOUNDS_W: f64 = 1000.0; // hard: out of board bounds
+const SA_KEEPOUT_W: f64 = 1000.0; // hard: part overlapping a signal-layer keep-out
+const SA_SILK_W: f64 = 6.0; // soft: parts crowding each other's refdes
+const SA_WL_W: f64 = 0.4; // half-perimeter wirelength (over part centres)
+const SA_SPREAD_W: f64 = 0.25; // mild whole-board compaction
+const SA_COHERE_W: f64 = 8.0; // decoupling cap → nearest anchor power pad (hug the IC).
+// Deliberately ABOVE SA_SILK_W (refdes-crowding): a bypass cap hugging its IC is an
+// electrical necessity that must outrank silk aesthetics, else a big cap (1210) next to a
+// small IC (SOIC-8) gets pushed away by the crowding penalty and strands (critic-caught on
+// power-buck). Targeted to detected decoupling PAIRS only, so it does not perturb parts
+// with normal net springs.
+const SA_EDGE_W: f64 = 2.5; // connector → nearest board edge
+/// Breathing room (mm) a refdes needs around a part before it crowds a neighbour.
+const SA_SILK_GAP: f64 = 1.0;
+/// Fixed seed — placement is deterministic (same board → same layout).
+const SA_SEED: u64 = 0xB5AD_C0DE_1234_5678;
+
+/// Deterministic SplitMix64 (no `rand`, no clock — reproducible placement).
+struct SaRng(u64);
+impl SaRng {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    fn below(&mut self, n: usize) -> usize {
+        if n == 0 { 0 } else { (self.next_u64() % n as u64) as usize }
+    }
+    fn unit(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64)
+    }
+    fn range(&mut self, lo: f64, hi: f64) -> f64 {
+        lo + self.unit() * (hi - lo)
+    }
+}
+
+/// Distance from a decoupling cap's origin to the NEAREST power pad of its anchor
+/// (the proximity a bypass cap should minimize). 0 if the anchor shares no pad net.
+fn cap_anchor_dist(
+    problem: &PlaceProblem,
+    pos: &[Point2],
+    rotations: &[i32],
+    cap: usize,
+    ic: usize,
+) -> f64 {
+    let cap_nets: Vec<&str> =
+        problem.parts[cap].pads.iter().filter_map(|p| p.net.as_deref()).collect();
+    let mut best = f64::MAX;
+    for pad in &problem.parts[ic].pads {
+        if pad.net.as_deref().is_some_and(|nn| cap_nets.contains(&nn)) {
+            let off = rotate_offset(&pad.offset, rotations[ic]);
+            let (px, py) = (pos[ic].x + off.x, pos[ic].y + off.y);
+            best = best.min(((pos[cap].x - px).powi(2) + (pos[cap].y - py).powi(2)).sqrt());
+        }
+    }
+    if best.is_finite() { best } else { 0.0 }
+}
+
+/// The placement cost the SA minimizes (also the [`place_best`] selection key, so
+/// the variant that genuinely lays out best is the one chosen). Lower is better.
+fn place_cost(
+    problem: &PlaceProblem,
+    nets: &[LogicalNet],
+    half: &[(f64, f64)],
+    margin: f64,
+    rotations: &[i32],
+    pairs: &[(usize, usize)],
+    edge_idx: &[usize],
+    pos: &[Point2],
+) -> f64 {
+    let n = problem.parts.len();
+    let mut cost = 0.0;
+
+    // Pairwise courtyard overlap (hard) + a soft silk gap so refdes don't crowd.
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (ox, oy) = courtyard_overlap(pos, half, margin, i, j);
+            if ox > 0.0 && oy > 0.0 {
+                cost += SA_OVERLAP_W * ox.min(oy);
+            } else {
+                let (sx, sy) = courtyard_overlap(pos, half, margin + 2.0 * SA_SILK_GAP, i, j);
+                if sx > 0.0 && sy > 0.0 {
+                    cost += SA_SILK_W * sx.min(sy);
+                }
+            }
+        }
+    }
+
+    // Out-of-bounds (hard).
+    let b = &problem.bounds;
+    for i in 0..n {
+        let h = half[i];
+        let dx = (b.min_x - (pos[i].x - h.0)).max(0.0) + ((pos[i].x + h.0) - b.max_x).max(0.0);
+        let dy = (b.min_y - (pos[i].y - h.1)).max(0.0) + ((pos[i].y + h.1) - b.max_y).max(0.0);
+        cost += SA_BOUNDS_W * (dx + dy);
+    }
+
+    // Keep-out overlap (hard): a part inside a signal-layer keep-out has trapped
+    // pads. Penalize the penetration depth so the SA pushes parts clear.
+    for i in 0..n {
+        for k in &problem.keepouts {
+            let (ox, oy) = part_keepout_overlap(&pos[i], half[i], k);
+            if ox > 0.0 && oy > 0.0 {
+                cost += SA_KEEPOUT_W * ox.min(oy);
+            }
+        }
+    }
+
+    // Half-perimeter wirelength over part centres + whole-board spread.
+    let (mut gx0, mut gy0, mut gx1, mut gy1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for p in pos {
+        gx0 = gx0.min(p.x);
+        gy0 = gy0.min(p.y);
+        gx1 = gx1.max(p.x);
+        gy1 = gy1.max(p.y);
+    }
+    if gx1 >= gx0 {
+        cost += SA_SPREAD_W * ((gx1 - gx0) + (gy1 - gy0));
+    }
+    for net in nets {
+        if net.pins.len() < 2 {
+            continue;
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for pin in &net.pins {
+            let p = &pos[pin.part];
+            x0 = x0.min(p.x);
+            y0 = y0.min(p.y);
+            x1 = x1.max(p.x);
+            y1 = y1.max(p.y);
+        }
+        cost += SA_WL_W * ((x1 - x0) + (y1 - y0));
+    }
+
+    // Decoupling cohesion + connector edge-seek.
+    for &(cap, ic) in pairs {
+        cost += SA_COHERE_W * cap_anchor_dist(problem, pos, rotations, cap, ic);
+    }
+    for &i in edge_idx {
+        let h = half[i];
+        let dl = (pos[i].x - h.0) - b.min_x;
+        let dr = b.max_x - (pos[i].x + h.0);
+        let dt = (pos[i].y - h.1) - b.min_y;
+        let db = b.max_y - (pos[i].y + h.1);
+        cost += SA_EDGE_W * dl.min(dr).min(dt).min(db).max(0.0);
+    }
+    cost
+}
+
+/// Anneal `pos` (the force-directed seed) to a lower [`place_cost`]. Metropolis
+/// acceptance with a linearly-cooled temperature; move set = relocate a part,
+/// swap two parts, or shift a whole decoupling cluster (anchor + its caps).
+/// Locked parts never move. Deterministic.
+fn anneal_placement(
+    problem: &PlaceProblem,
+    hints: &PlacementHints,
+    nets: &[LogicalNet],
+    half: &[(f64, f64)],
+    margin: f64,
+    rotations: &[i32],
+    pos: &mut [Point2],
+) {
+    let n = problem.parts.len();
+    let movable: Vec<usize> =
+        (0..n).filter(|&i| problem.parts[i].locked.is_none()).collect();
+    if movable.len() < 2 {
+        return;
+    }
+    let pairs = decoupling_pairs(problem);
+    let edge_idx: Vec<usize> = hints
+        .edge_seek
+        .iter()
+        .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
+        .collect();
+    // Clusters for the block move: anchor → its caps.
+    let mut clusters: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for &(cap, ic) in &pairs {
+        if problem.parts[cap].locked.is_none() {
+            clusters.entry(ic).or_default().push(cap);
+        }
+    }
+    let anchors: Vec<usize> = clusters.keys().copied().collect();
+
+    let mut rng = SaRng(SA_SEED);
+    let iters = (250 * movable.len()).clamp(1000, 8000);
+    let t0 = 8.0;
+    let cost_of = |p: &[Point2]| place_cost(problem, nets, half, margin, rotations, &pairs, &edge_idx, p);
+    let mut cost = cost_of(pos);
+
+    let mut restore: Vec<(usize, Point2)> = Vec::with_capacity(8);
+    for it in 0..iters {
+        let t = (t0 * (1.0 - it as f64 / iters as f64)).max(0.05);
+        restore.clear();
+        let kind = rng.below(10);
+        if kind < 7 {
+            // Relocate one part; amplitude shrinks as the board cools.
+            let k = movable[rng.below(movable.len())];
+            restore.push((k, pos[k].clone()));
+            let amp = 0.5 + 5.0 * (t / t0);
+            pos[k].x = snap(pos[k].x + rng.range(-amp, amp));
+            pos[k].y = snap(pos[k].y + rng.range(-amp, amp));
+            clamp_into_bounds(&mut pos[k], &problem.bounds, half[k]);
+        } else if kind < 9 || anchors.is_empty() {
+            // Swap two parts.
+            let a = movable[rng.below(movable.len())];
+            let b = movable[rng.below(movable.len())];
+            if a == b {
+                continue;
+            }
+            restore.push((a, pos[a].clone()));
+            restore.push((b, pos[b].clone()));
+            pos.swap(a, b);
+            clamp_into_bounds(&mut pos[a], &problem.bounds, half[a]);
+            clamp_into_bounds(&mut pos[b], &problem.bounds, half[b]);
+        } else {
+            // Shift a whole decoupling cluster (anchor + caps) rigidly.
+            let ic = anchors[rng.below(anchors.len())];
+            let amp = 0.5 + 3.0 * (t / t0);
+            let (dx, dy) = (rng.range(-amp, amp), rng.range(-amp, amp));
+            let mut members = vec![ic];
+            members.extend(clusters.get(&ic).into_iter().flatten().copied());
+            for &m in &members {
+                restore.push((m, pos[m].clone()));
+                pos[m].x = snap(pos[m].x + dx);
+                pos[m].y = snap(pos[m].y + dy);
+                clamp_into_bounds(&mut pos[m], &problem.bounds, half[m]);
+            }
+        }
+        let new_cost = cost_of(pos);
+        let d = new_cost - cost;
+        if d < 0.0 || rng.unit() < (-d / t).exp() {
+            cost = new_cost;
+        } else {
+            for (i, p) in restore.drain(..) {
+                pos[i] = p;
+            }
+        }
+    }
+}
+
+/// Place `problem` and return the variant that ROUTES cleanest — the placement
+/// analog of [`crate::pipeline::route_auto`]. It runs the baseline placement plus
+/// idiom variants (decoupling co-placement, aspect-aware connector edges, both),
+/// routes each, and keeps whichever yields fewer routing faults (unrouted nets +
+/// geometry DRC violations), breaking ties by lower routed wirelength then HPWL.
+/// The baseline is always a candidate, so an idiom variant that does not actually
+/// help (e.g. one that scatters a board's power net) is automatically discarded —
+/// the oracle decides per board, so aggressive idioms can never regress a board
+/// they do not improve.
+pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
+    let has_decouple = !decoupling_pairs(problem).is_empty();
+    let has_edge = !hints.edge_seek.is_empty();
+
+    // The variants worth trying for THIS board (always include the baseline).
+    // The SA refinement subsumes the decouple/edge springs (its cost does
+    // cohesion + edge-seek directly), so the annealed variant is the main
+    // alternative; the spring variants stay as cheap extra candidates.
+    let mut opts = vec![PlaceOpts::default()];
+    opts.push(PlaceOpts { anneal: true, aspect_edge: has_edge, decouple: false });
+    if has_decouple {
+        opts.push(PlaceOpts { decouple: true, aspect_edge: false, anneal: false });
+    }
+    if has_edge {
+        opts.push(PlaceOpts { decouple: false, aspect_edge: true, anneal: false });
+    }
+
+    let cost = |r: &PlaceResult| -> (usize, u64, u64) {
+        if !r.legal {
+            return (usize::MAX, u64::MAX, u64::MAX);
+        }
+        let rp = to_route_problem(problem, &r.placements);
+        // Rank variants with the FAST naive router — only relative routability
+        // matters here, and the slow capacity-mesh router on every variant of a
+        // 70-part board is needlessly expensive (export re-routes with route_auto).
+        let routed = crate::router::route(&rp);
+        let geom = crate::lint::lint(&rp, &routed.solution)
+            .iter()
+            .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
+            .count();
+        // PRIMARY: routing faults (an honest unrouted net + geometry violations) —
+        // a worse-routed layout is never chosen. SECONDARY: the layout cost (so the
+        // annealer's compaction / cohesion / silk-gap gains decide among equally-
+        // routable layouts). hpwl breaks final ties.
+        (
+            routed.failed.len() + geom,
+            (r.report.layout_cost * 1000.0) as u64,
+            (r.report.hpwl * 1000.0) as u64,
+        )
+    };
+
+    // Evaluate every variant IN PARALLEL — each is an independent, pure place+route
+    // (the SA seed is fixed, so a variant's result is deterministic regardless of
+    // thread/order). We then pick the lowest-cost; opts[0] is the baseline and wins
+    // exact ties via the index tie-break, preserving the previous baseline-first
+    // selection bit-for-bit. The slow part of a big board is these N variant
+    // place+rank-route passes, so fanning them across cores is the main speed lever.
+    use rayon::prelude::*;
+    let mut scored: Vec<(usize, (usize, u64, u64), PlaceResult)> = opts
+        .par_iter()
+        .enumerate()
+        .map(|(i, &o)| {
+            let r = place_variant(problem, hints, o);
+            let c = cost(&r);
+            (i, c, r)
+        })
+        .collect();
+    scored.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let mut best = scored.swap_remove(0).2;
+    // Post-pass: seat mounting holes (corner_seek) at the board corners on the
+    // WINNING placement. They carry no signal nets (GND-plane only), so moving
+    // them never changes routing — which is why this must run AFTER the faults-
+    // ranked variant selection rather than inside a routing-affecting variant.
+    seat_corner_seek_parts(problem, hints, &mut best);
+    best
+}
+
+/// Move each `corner_seek` part to its nearest board CORNER that leaves the
+/// placement legal (greedy, nearest-first; a corner already taken by another
+/// such part or overlapping a component is skipped). A no-op when there are no
+/// corner-seek parts. Safe on any placement: corner-seek parts (mounting holes)
+/// have no nets, so this cannot change connectivity or routing.
+fn seat_corner_seek_parts(problem: &PlaceProblem, hints: &PlacementHints, best: &mut PlaceResult) {
+    if !best.legal {
+        return;
+    }
+    let corner_idx: Vec<usize> = hints
+        .corner_seek
+        .iter()
+        .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
+        .collect();
+    if corner_idx.is_empty() {
+        return;
+    }
+    let margin = courtyard_margin(problem.clearance);
+    let rots: Vec<i32> = best.placements.iter().map(|p| p.rotation).collect();
+    let half: Vec<(f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(&rots)
+        .map(|(p, &r)| rotated_courtyard_half(p, r))
+        .collect();
+    let copper_bbox: Vec<(f64, f64, f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(&rots)
+        .map(|(p, &r)| rotated_copper_bbox(p, r))
+        .collect();
+    let mut pos: Vec<Point2> = best.placements.iter().map(|p| p.at.clone()).collect();
+    let b = &problem.bounds;
+    let corners = [
+        (b.min_x, b.min_y),
+        (b.max_x, b.min_y),
+        (b.min_x, b.max_y),
+        (b.max_x, b.max_y),
+    ];
+    let mut used = [false; 4];
+    for &i in &corner_idx {
+        let h = half[i];
+        // Inset each corner by this part's half so it sits fully on-board.
+        let inset = |c: (f64, f64)| Point2 {
+            x: if c.0 == b.min_x { b.min_x + h.0 } else { b.max_x - h.0 },
+            y: if c.1 == b.min_y { b.min_y + h.1 } else { b.max_y - h.1 },
+        };
+        let mut order: Vec<usize> = (0..4).collect();
+        let d = |c: (f64, f64)| (pos[i].x - c.0).powi(2) + (pos[i].y - c.1).powi(2);
+        order.sort_by(|&a, &c| d(corners[a]).partial_cmp(&d(corners[c])).unwrap());
+        let saved = pos[i].clone();
+        for &ci in &order {
+            if used[ci] {
+                continue;
+            }
+            pos[i] = inset(corners[ci]);
+            if is_legal(problem, &half, &copper_bbox, margin, &pos) {
+                used[ci] = true;
+                break;
+            }
+            pos[i] = saved.clone();
+        }
+    }
+    for (p, np) in best.placements.iter_mut().zip(&pos) {
+        p.at = np.clone();
+    }
+}
+
 /// Place `problem`'s parts under `hints`, deterministically.
 ///
 /// Runs the force-directed seed then the legalizer; locked parts never move;
 /// empty hints are fully supported. The returned `legal` flag is verified by
 /// exact geometry. Never panics: an impossible board returns `legal: false`
-/// with a report rather than overlapping silently or aborting.
+/// with a report rather than overlapping silently or aborting. This is the
+/// baseline (no idiom variants); [`place_best`] selects among variants.
 pub fn place(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
+    place_variant(problem, hints, PlaceOpts::default())
+}
+
+/// [`place`] with a specific set of idiom variant toggles.
+fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts: PlaceOpts) -> PlaceResult {
     let n = problem.parts.len();
     let nets = derive_nets(problem);
     let margin = courtyard_margin(problem.clearance);
@@ -335,6 +909,12 @@ pub fn place(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
         .zip(&rotations)
         .map(|(p, &rot)| rotated_courtyard_half(p, rot))
         .collect();
+    let copper_bbox: Vec<(f64, f64, f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &rot)| rotated_copper_bbox(p, rot))
+        .collect();
 
     // 1. Deterministic initial grid (sorted by reference), seeding positions.
     let mut pos = initial_grid(problem, &half);
@@ -346,7 +926,14 @@ pub fn place(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
     }
 
     // 2. Force-directed relaxation (skips locked parts).
-    force_layout(problem, hints, &nets, &half, margin, &mut pos);
+    force_layout(problem, hints, &nets, &half, margin, opts, &mut pos);
+
+    // 2b. SA refinement (variant-gated): escape the springs' local minima and
+    //     optimize the explicit cost (overlap + wirelength + compaction +
+    //     decoupling cohesion + a silk gap so refdes don't collide).
+    if opts.anneal {
+        anneal_placement(problem, hints, &nets, &half, margin, &rotations, &mut pos);
+    }
 
     // 3. Legalize: snap + spiral-resolve overlaps + clamp. Locked immovable.
     let leg = legalize(problem, &half, margin, &mut pos);
@@ -361,9 +948,16 @@ pub fn place(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
         .collect();
 
     // 5. Verify legality by EXACT geometry — never trust the algorithm.
-    let legal = is_legal(problem, &half, margin, &pos);
+    let legal = is_legal(problem, &half, &copper_bbox, margin, &pos);
 
     let hpwl = compute_hpwl(problem, &nets, &pos, &rotations);
+    let pairs = decoupling_pairs(problem);
+    let edge_idx: Vec<usize> = hints
+        .edge_seek
+        .iter()
+        .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
+        .collect();
+    let layout_cost = place_cost(problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos);
 
     PlaceResult {
         placements,
@@ -372,6 +966,7 @@ pub fn place(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
             overlaps_resolved: leg.overlaps_resolved,
             out_of_bounds_clamps: leg.out_of_bounds_clamps,
             hpwl,
+            layout_cost,
         },
     }
 }
@@ -387,10 +982,29 @@ fn force_layout(
     nets: &[LogicalNet],
     half: &[(f64, f64)],
     margin: f64,
+    opts: PlaceOpts,
     pos: &mut [Point2],
 ) {
     let n = problem.parts.len();
     let locked: Vec<bool> = problem.parts.iter().map(|p| p.locked.is_some()).collect();
+    // Decoupling co-placement pairs (cap → IC), only when this variant enables it.
+    let decoupling: Vec<(usize, usize)> = if opts.decouple {
+        let grouped: std::collections::BTreeSet<usize> = hints
+            .groups
+            .iter()
+            .flat_map(|g| {
+                g.members
+                    .iter()
+                    .filter_map(|m| problem.parts.iter().position(|p| &p.reference == m))
+            })
+            .collect();
+        decoupling_pairs(problem)
+            .into_iter()
+            .filter(|(cap, _)| !grouped.contains(cap))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Per-part group hints (a part may be in several groups).
     // We precompute, for each group, the member indices that exist.
@@ -403,6 +1017,13 @@ fn force_layout(
                 .filter_map(|m| problem.parts.iter().position(|p| &p.reference == m))
                 .collect()
         })
+        .collect();
+
+    // Parts that should hug their nearest board edge (connectors/headers).
+    let edge_seek: Vec<usize> = hints
+        .edge_seek
+        .iter()
+        .filter_map(|m| problem.parts.iter().position(|p| &p.reference == m))
         .collect();
 
     let mut scale = 1.0_f64;
@@ -480,6 +1101,36 @@ fn force_layout(
                     force[m].1 += EDGE_PULL_K * dy;
                 }
             }
+        }
+
+        // (d2) Auto edge-affinity: pull each edge-seeking part (connector/header)
+        //      toward its NEAREST board edge, recomputed each iteration so it
+        //      tracks the part as the net springs move it. Connectors belong at
+        //      the perimeter; this stops the router from having to wrap copper
+        //      around a centrally-stranded header.
+        for &m in &edge_seek {
+            // Aspect-aware variant: a tall part (a vertical multi-pin header) is
+            // pulled to the nearest SIDE edge so its pad column lies ALONG that
+            // edge, instead of the nearest edge overall (often the top) where the
+            // column pokes into the interior. Wide parts prefer a top/bottom edge.
+            let edge = if opts.aspect_edge {
+                aspect_edge(&pos[m], &problem.bounds, problem.parts[m].courtyard_w, problem.parts[m].courtyard_h)
+            } else {
+                nearest_edge(&pos[m], &problem.bounds)
+            };
+            let target = edge_target(edge, &problem.bounds, half[m]);
+            let (dx, dy) = edge_delta(edge, &pos[m], target);
+            force[m].0 += EDGE_SEEK_K * dx;
+            force[m].1 += EDGE_SEEK_K * dy;
+        }
+
+        // (d3) Decoupling co-placement (variant-gated): pull each bypass cap
+        //      toward its IC so it seats beside it — one-directional (the IC is
+        //      not dragged around by its caps). Only active in the decoupling
+        //      variant; place_best keeps it only when it routes at least as clean.
+        for &(cap, ic) in &decoupling {
+            force[cap].0 += DECOUPLE_K * (pos[ic].x - pos[cap].x);
+            force[cap].1 += DECOUPLE_K * (pos[ic].y - pos[cap].y);
         }
 
         // (e) Short-range courtyard repulsion: only on margin-inflated overlap.
@@ -754,12 +1405,50 @@ fn rotated_courtyard_half(part: &Part, rot: i32) -> (f64, f64) {
     }
 }
 
+/// KiCAD's copper-to-board-edge clearance (its default). A part's PADS must clear the board
+/// outline by this — otherwise an edge-seeking connector lands a pad on the Edge.Cuts and trips
+/// `copper_edge_clearance`. (The COURTYARD may still overhang — only copper is constrained.)
+const EDGE_CLEAR_PLACE_MM: f64 = 0.5;
+
+/// Half-extents of the part's PAD (copper) bounding box after a quadrant rotation. Bounds ONLY
+/// the copper — so the outline check can keep pads inside the board while a part's courtyard
+/// (its non-copper margin) is still free to overhang a notch (the mounting-hole allowance).
+fn rotated_copper_bbox(part: &Part, rot: i32) -> (f64, f64, f64, f64) {
+    let (mut xmin, mut ymin, mut xmax, mut ymax) =
+        (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for pad in &part.pads {
+        let off = rotate_offset(&pad.offset, rot);
+        let (pw, ph) = match rot.rem_euclid(360) {
+            90 | 270 => (pad.height / 2.0, pad.width / 2.0),
+            _ => (pad.width / 2.0, pad.height / 2.0),
+        };
+        // TRUE (asymmetric) bbox relative to the part origin — a connector's pads are OFF-CENTRE
+        // (origin at pin 1, not the courtyard centre), so a symmetric centre±max|offset| box would
+        // be ~2× too large on the empty side and FALSE-REJECT a connector that actually clears the
+        // edge. Track real min/max so the outline check is exact.
+        xmin = xmin.min(off.x - pw);
+        xmax = xmax.max(off.x + pw);
+        ymin = ymin.min(off.y - ph);
+        ymax = ymax.max(off.y + ph);
+    }
+    if xmin > xmax {
+        (0.0, 0.0, 0.0, 0.0) // no pads
+    } else {
+        (xmin, ymin, xmax, ymax)
+    }
+}
+
 /// A pad offset rotated by a quadrant (degrees), y-down.
 fn rotate_offset(off: &Point2, rot: i32) -> Point2 {
+    // KiCAD footprint-rotation convention (y-down board coords): a pad's local
+    // offset under a footprint rotated by `rot` lands at these world offsets.
+    // Verified against kicad-cli: a 270° footprint maps local (x,y) → (-y, x).
+    // (The 90 and 270 cases were previously swapped, which placed the engine's
+    // routing targets on the WRONG physical pad for any rotated part → shorts.)
     match rot.rem_euclid(360) {
-        90 => Point2 { x: -off.y, y: off.x },
+        90 => Point2 { x: off.y, y: -off.x },
         180 => Point2 { x: -off.x, y: -off.y },
-        270 => Point2 { x: off.y, y: -off.x },
+        270 => Point2 { x: -off.y, y: off.x },
         _ => off.clone(),
     }
 }
@@ -777,6 +1466,52 @@ fn pad_world(problem: &PlaceProblem, pos: &[Point2], pin: &Pin) -> Point2 {
 
 /// The pull target for an edge hint: a point on the edge band line, keeping the
 /// part's other coordinate where it is (only the edge-normal coordinate matters).
+/// Per-variant placement toggles, tried and selected by [`place_best`].
+#[derive(Debug, Clone, Copy, Default)]
+struct PlaceOpts {
+    /// Pull each decoupling cap to hug its IC ([`decoupling_pairs`]).
+    decouple: bool,
+    /// Bias edge-seeking by part aspect: a tall connector goes to a side edge so
+    /// its pad column lies along it, not the top where it pokes inward.
+    aspect_edge: bool,
+    /// Refine the force-directed seed with simulated annealing ([`anneal_placement`]):
+    /// escapes local minima the springs settle into, and optimizes an explicit
+    /// cost (overlap + wirelength + compactness + decoupling cohesion + a SILK GAP
+    /// so reference designators don't collide). Mirrors the schematic floorplan SA.
+    anneal: bool,
+}
+
+/// The board edge a part should hug given its aspect: a part taller than wide
+/// prefers the nearer SIDE edge (E/W) — its long axis then runs along the edge;
+/// a wider part prefers the nearer top/bottom (N/S). Square parts fall back to
+/// the overall nearest edge.
+fn aspect_edge(p: &Point2, b: &Bounds, w: f64, h: f64) -> Edge {
+    if h > w {
+        if p.x - b.min_x <= b.max_x - p.x { Edge::W } else { Edge::E }
+    } else if w > h {
+        if p.y - b.min_y <= b.max_y - p.y { Edge::N } else { Edge::S }
+    } else {
+        nearest_edge(p, b)
+    }
+}
+
+/// The board edge nearest to `p`. Ties break in N, S, W, E order (deterministic).
+fn nearest_edge(p: &Point2, b: &Bounds) -> Edge {
+    let d_n = p.y - b.min_y;
+    let d_s = b.max_y - p.y;
+    let d_w = p.x - b.min_x;
+    let d_e = b.max_x - p.x;
+    let mut best = Edge::N;
+    let mut best_d = d_n;
+    for (d, e) in [(d_s, Edge::S), (d_w, Edge::W), (d_e, Edge::E)] {
+        if d < best_d {
+            best_d = d;
+            best = e;
+        }
+    }
+    best
+}
+
 fn edge_target(edge: Edge, b: &Bounds, h: (f64, f64)) -> f64 {
     match edge {
         Edge::N => b.min_y + h.1 + EDGE_BAND.min((b.max_y - b.min_y) / 2.0),
@@ -800,11 +1535,49 @@ fn edge_delta(edge: Edge, p: &Point2, target: f64) -> (f64, f64) {
 /// The placement analog of the lint: re-verify in exact geometry that no two
 /// courtyards overlap (with margin) and every part is in bounds. Never trusts
 /// the legalizer.
-fn is_legal(problem: &PlaceProblem, half: &[(f64, f64)], margin: f64, pos: &[Point2]) -> bool {
+fn is_legal(
+    problem: &PlaceProblem,
+    half: &[(f64, f64)],
+    copper_bbox: &[(f64, f64, f64, f64)],
+    margin: f64,
+    pos: &[Point2],
+) -> bool {
     let n = problem.parts.len();
     for i in 0..n {
         if !fits_in_bounds(&pos[i], &problem.bounds, half[i]) {
             return false;
+        }
+        // On a custom outline, a part's CENTRE must be inside the true polygon (keeps parts out
+        // of a star's concave notches the bbox alone allows), AND its PAD (copper) bounding box,
+        // grown by the edge clearance, must be inside too — a part's placed pads are copper the
+        // router never relocates, so an edge-seeking connector whose centre is inside but whose
+        // far pad overhangs the edge would otherwise ship a copper_edge_clearance fault. The
+        // COURTYARD may still overhang (only copper is constrained), preserving the mounting-hole
+        // -in-a-notch allowance.
+        if let Some(poly) = &problem.outline {
+            if !crate::problem::point_in_polygon(&pos[i], poly) {
+                return false;
+            }
+            let (xmin, ymin, xmax, ymax) = copper_bbox[i];
+            let ec = EDGE_CLEAR_PLACE_MM;
+            for (dx, dy) in [
+                (xmin - ec, ymin - ec),
+                (xmax + ec, ymin - ec),
+                (xmax + ec, ymax + ec),
+                (xmin - ec, ymax + ec),
+            ] {
+                let c = Point2 { x: pos[i].x + dx, y: pos[i].y + dy };
+                if !crate::problem::point_in_polygon(&c, poly) {
+                    return false;
+                }
+            }
+        }
+        // A part overlapping a signal-layer keep-out is illegal (its pads can't route).
+        for k in &problem.keepouts {
+            let (ox, oy) = part_keepout_overlap(&pos[i], half[i], k);
+            if ox > 1e-9 && oy > 1e-9 {
+                return false;
+            }
         }
         for j in (i + 1)..n {
             let (ox, oy) = courtyard_overlap(pos, half, margin, i, j);
@@ -816,6 +1589,14 @@ fn is_legal(problem: &PlaceProblem, half: &[(f64, f64)], margin: f64, pos: &[Poi
         }
     }
     true
+}
+
+/// Overlap `(ox, oy)` of a part's courtyard (centre `p`, half-extents `h`) with a
+/// keep-out rect; both strictly positive means the part intrudes into the keep-out.
+fn part_keepout_overlap(p: &Point2, h: (f64, f64), k: &Rect) -> (f64, f64) {
+    let ox = (p.x + h.0).min(k.max_x) - (p.x - h.0).max(k.min_x);
+    let oy = (p.y + h.1).min(k.max_y) - (p.y - h.1).max(k.min_y);
+    (ox, oy)
 }
 
 // ── HPWL ─────────────────────────────────────────────────────────────────────
@@ -972,6 +1753,11 @@ pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> Rou
         // model via sizing, so it carries these constants.
         via_diameter: DEFAULT_VIA_DIAMETER,
         via_drill: DEFAULT_VIA_DRILL,
+        // Per-net widths are applied by the agent layer (route_board) after this, from
+        // the board's design rules; placement itself is width-agnostic.
+        net_widths: std::collections::BTreeMap::new(),
+        // Carry the custom outline so the router keeps copper inside the true shape.
+        outline: problem.outline.clone(),
     }
 }
 
@@ -1052,11 +1838,13 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![
                 r0603("R1", Some("A"), Some("B")),
                 r0603("R2", Some("B"), Some("C")),
                 r0603("R3", Some("C"), Some("A")),
             ],
+            outline: None,
         };
         let hints = PlacementHints::default();
         let a = place(&problem, &hints);
@@ -1080,17 +1868,88 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![
                 locked,
                 r0603("R2", Some("B"), Some("C")),
                 r0603("R3", Some("C"), Some("A")),
             ],
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         let r1 = res.placements.iter().find(|p| p.reference == "R1").unwrap();
         assert_eq!(r1.at, Point2 { x: 7.5, y: 12.0 }, "locked R1 must stay put");
         assert_eq!(r1.rotation, 90, "locked rotation preserved");
         assert!(res.legal, "board with a locked part still legal: {res:?}");
+    }
+
+    #[test]
+    fn locked_anchor_with_unlocked_caps_does_not_move() {
+        // A LOCKED IC (≥3-pad decoupling anchor) carrying UNLOCKED bypass caps must
+        // not be dragged by the annealer's block-move (which rigidly shifts an anchor
+        // + its caps). The cap-anchor cohesion still clusters the caps around the
+        // fixed IC; only unlocked anchors may be block-shifted.
+        let mut ic = Part {
+            reference: "U1".to_owned(),
+            courtyard_w: 3.0,
+            courtyard_h: 3.0,
+            pads: vec![
+                PartPad {
+                    number: "1".to_owned(),
+                    offset: Point2 { x: -1.0, y: 0.0 },
+                    width: 0.6,
+                    height: 0.6,
+                    layers: top(),
+                    net: Some("VCC".to_owned()),
+                },
+                PartPad {
+                    number: "2".to_owned(),
+                    offset: Point2 { x: 1.0, y: 0.0 },
+                    width: 0.6,
+                    height: 0.6,
+                    layers: top(),
+                    net: Some("GND".to_owned()),
+                },
+                PartPad {
+                    number: "3".to_owned(),
+                    offset: Point2 { x: 0.0, y: 1.0 },
+                    width: 0.6,
+                    height: 0.6,
+                    layers: top(),
+                    net: Some("OUT".to_owned()),
+                },
+            ],
+            locked: None,
+        };
+        place_at(&mut ic, 4.0, 10.0, 0);
+        // A LOCKED sink on U1's OUT net, pinned far to the right: the only way the
+        // annealer can shorten the OUT net is to block-shift the (locked) U1 cluster
+        // rightward — which it must NOT do. (Both ends locked → the net length is
+        // fixed and the lock wins.)
+        let mut sink = r0603("R3", Some("OUT"), Some("GND"));
+        place_at(&mut sink, 26.0, 10.0, 0);
+        let problem = PlaceProblem {
+            bounds: board(30.0, 20.0),
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts: vec![
+                ic,
+                r0603("C1", Some("VCC"), Some("GND")),
+                r0603("C2", Some("VCC"), Some("GND")),
+                sink,
+            ],
+            outline: None,
+        };
+        let res = place(&problem, &PlacementHints::default());
+        let u1 = res.placements.iter().find(|p| p.reference == "U1").unwrap();
+        assert_eq!(
+            u1.at,
+            Point2 { x: 4.0, y: 10.0 },
+            "locked anchor U1 must stay put despite carrying unlocked caps + a far net sink: {res:?}"
+        );
+        assert!(res.legal, "{res:?}");
     }
 
     // ── connected parts end closer than unconnected ─────────────────────────
@@ -1108,6 +1967,7 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![
                 r0603("R1", Some("L"), Some("P1")),
                 r0603("R2", None, None),
@@ -1119,6 +1979,7 @@ mod tests {
                 r0603("R8", None, None),
                 r0603("R9", Some("L"), Some("P2")),
             ],
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         assert!(res.legal, "{res:?}");
@@ -1154,11 +2015,13 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![
                 r0603("R1", Some("A"), Some("B")),
                 r0603("R2", Some("B"), Some("C")),
                 r0603("R3", None, None),
             ],
+            outline: None,
         };
         let hints = PlacementHints {
             groups: vec![GroupHint {
@@ -1166,7 +2029,10 @@ mod tests {
                 members: vec!["R1".to_owned(), "R2".to_owned()],
                 region: Some(region.clone()),
                 edge: None,
+                grid: false,
+                surround: None,
             }],
+            ..Default::default()
         };
         let res = place(&problem, &hints);
         assert!(res.legal, "{res:?}");
@@ -1189,6 +2055,7 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![
                 // A connector-ish 2-pin part.
                 Part {
@@ -1218,6 +2085,7 @@ mod tests {
                 r0603("R1", Some("NET1"), Some("X")),
                 r0603("R2", Some("NET2"), Some("Y")),
             ],
+            outline: None,
         };
         let hints = PlacementHints {
             groups: vec![GroupHint {
@@ -1225,7 +2093,10 @@ mod tests {
                 members: vec!["J1".to_owned()],
                 region: None,
                 edge: Some(Edge::W),
+                grid: false,
+                surround: None,
             }],
+            ..Default::default()
         };
         let res = place(&problem, &hints);
         assert!(res.legal, "{res:?}");
@@ -1255,7 +2126,9 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts,
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         assert!(
@@ -1269,8 +2142,81 @@ mod tests {
             .iter()
             .map(|p| (p.courtyard_w / 2.0, p.courtyard_h / 2.0))
             .collect();
+        let copper_bbox: Vec<(f64, f64, f64, f64)> =
+            problem.parts.iter().map(|p| rotated_copper_bbox(p, 0)).collect();
         let pos: Vec<Point2> = res.placements.iter().map(|p| p.at.clone()).collect();
-        assert!(is_legal(&problem, &half, courtyard_margin(0.2), &pos));
+        assert!(is_legal(&problem, &half, &copper_bbox, courtyard_margin(0.2), &pos));
+    }
+
+    #[test]
+    fn is_legal_rejects_pad_overhang_on_custom_outline() {
+        // The connector-pad-overhang fidelity guard: a part whose CENTRE is inside the outline
+        // but whose PAD copper overhangs the edge is illegal (it would ship copper_edge_clearance),
+        // even though the old centre-only check passed it. r0603 copper reaches ~1.225mm in x.
+        let problem = PlaceProblem {
+            bounds: board(20.0, 20.0),
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts: vec![r0603("R1", Some("A"), Some("B"))],
+            // A 5..15 square outline.
+            outline: Some(vec![
+                Point2 { x: 5.0, y: 5.0 },
+                Point2 { x: 15.0, y: 5.0 },
+                Point2 { x: 15.0, y: 15.0 },
+                Point2 { x: 5.0, y: 15.0 },
+            ]),
+        };
+        let half = vec![rotated_courtyard_half(&problem.parts[0], 0)];
+        let copper_bbox = vec![rotated_copper_bbox(&problem.parts[0], 0)];
+        let margin = courtyard_margin(0.2);
+        // Centred: copper (±1.225) + 0.5 clearance sits well inside the square → legal.
+        assert!(is_legal(&problem, &half, &copper_bbox, margin, &[Point2 { x: 10.0, y: 10.0 }]));
+        // Near the right edge: centre x=14.4 is inside the polygon, but copper reaches
+        // 14.4 + 1.225 = 15.6 > 15 → overhangs → illegal (the centre-only check missed this).
+        assert!(!is_legal(&problem, &half, &copper_bbox, margin, &[Point2 { x: 14.4, y: 10.0 }]));
+    }
+
+    #[test]
+    fn is_legal_uses_asymmetric_copper_bbox_for_off_centre_pads() {
+        // A connector's pads are OFF-CENTRE from the origin (origin at pin 1). A symmetric
+        // centre±max|offset| box would be ~2× too large on the empty side and FALSE-REJECT a part
+        // whose copper actually clears the edge — this guards the true-bbox fix. Two pads both at
+        // +x (offsets 2.0 and 4.0, 1×1mm): real copper bbox x = 1.5..4.5 (no copper on the −x side).
+        let off_centre = Part {
+            reference: "J1".to_owned(),
+            courtyard_w: 6.0,
+            courtyard_h: 2.0,
+            pads: vec![
+                PartPad { number: "1".to_owned(), offset: Point2 { x: 2.0, y: 0.0 }, width: 1.0, height: 1.0, layers: top(), net: Some("A".to_owned()) },
+                PartPad { number: "2".to_owned(), offset: Point2 { x: 4.0, y: 0.0 }, width: 1.0, height: 1.0, layers: top(), net: Some("B".to_owned()) },
+            ],
+            locked: None,
+        };
+        // Asymmetric bbox: +x only, nothing on −x.
+        let bb = rotated_copper_bbox(&off_centre, 0);
+        assert!((bb.0 - 1.5).abs() < 1e-9 && (bb.2 - 4.5).abs() < 1e-9, "x bbox 1.5..4.5, got {bb:?}");
+        let problem = PlaceProblem {
+            bounds: board(20.0, 20.0),
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts: vec![off_centre],
+            outline: Some(vec![
+                Point2 { x: 5.0, y: 5.0 },
+                Point2 { x: 15.0, y: 5.0 },
+                Point2 { x: 15.0, y: 15.0 },
+                Point2 { x: 5.0, y: 15.0 },
+            ]),
+        };
+        let half = vec![rotated_courtyard_half(&problem.parts[0], 0)];
+        let copper_bbox = vec![bb];
+        let margin = courtyard_margin(0.2);
+        // At x=8 the real copper is 9.5..12.5 (+0.5 → 9..13, inside the 5..15 square) → LEGAL.
+        // A symmetric ±4.5 box would reach x=3 (<5) and wrongly reject. This is the regression guard.
+        assert!(is_legal(&problem, &half, &copper_bbox, margin, &[Point2 { x: 8.0, y: 10.0 }]));
     }
 
     // ── to_route_problem: parseable + connectivity oracle accepts pads/points ─
@@ -1282,10 +2228,12 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.25,
+            keepouts: vec![],
             parts: vec![
                 r0603("R1", Some("SIG"), Some("GND")),
                 r0603("R2", Some("SIG"), Some("GND")),
             ],
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         assert!(res.legal);
@@ -1328,10 +2276,12 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.25,
+            keepouts: vec![],
             parts: vec![
                 r0603("R1", Some("SIG"), Some("GND")),
                 r0603("R2", Some("SIG"), Some("GND")),
             ],
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         assert!(res.legal, "placement legal: {res:?}");
@@ -1358,10 +2308,12 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![
                 r0603("R1", Some("A"), Some("B")),
                 r0603("R2", Some("B"), Some("C")),
             ],
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         assert!(res.report.hpwl >= 0.0, "HPWL must be non-negative");
@@ -1382,11 +2334,13 @@ mod tests {
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![
                 r0603("R1", Some("A"), Some("B")),
                 r0603("R2", Some("B"), Some("C")),
                 r0603("R3", Some("C"), Some("A")),
             ],
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         assert!(!res.legal, "an impossible board must report legal:false");
@@ -1396,13 +2350,29 @@ mod tests {
     // ── empty problem is trivially legal ────────────────────────────────────
 
     #[test]
+    fn rotate_offset_matches_kicad_convention() {
+        // Verified against kicad-cli: a SOIC-8 pad at local (-2.475, 1.905) under a
+        // footprint rotated 270° lands at world offset (-1.905, -2.475). The two
+        // 90/270 directions must not be swapped, or routing targets the wrong pad.
+        let p = rotate_offset(&Point2 { x: -2.475, y: 1.905 }, 270);
+        assert!((p.x - -1.905).abs() < 1e-9 && (p.y - -2.475).abs() < 1e-9, "{p:?}");
+        // 90 is the inverse; 180 negates; 0 is identity.
+        let q = rotate_offset(&Point2 { x: -2.475, y: 1.905 }, 90);
+        assert!((q.x - 1.905).abs() < 1e-9 && (q.y - 2.475).abs() < 1e-9, "{q:?}");
+        let r = rotate_offset(&Point2 { x: 1.0, y: 2.0 }, 180);
+        assert!((r.x - -1.0).abs() < 1e-9 && (r.y - -2.0).abs() < 1e-9, "{r:?}");
+    }
+
+    #[test]
     fn empty_problem_is_legal() {
         let problem = PlaceProblem {
             bounds: board(10.0, 10.0),
             clearance: 0.2,
             layer_count: 2,
             min_trace_width: 0.2,
+            keepouts: vec![],
             parts: vec![],
+            outline: None,
         };
         let res = place(&problem, &PlacementHints::default());
         assert!(res.legal);

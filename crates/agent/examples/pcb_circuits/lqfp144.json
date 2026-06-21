@@ -1,0 +1,368 @@
+{
+ "description": "LQFP-144 + exposed thermal pad (EP=GND, 72 signals), 4-layer GND/VCC planes, 12 decoupling, 2 breakout headers \u2014 fine-pitch 0.5mm stress",
+ "rules": {
+  "layers": 4,
+  "clearance": 0.13,
+  "min_trace_width": 0.13,
+  "via_diameter": 0.6,
+  "via_drill": 0.3
+ },
+ "bounds": {
+  "min_x": 0.0,
+  "max_x": 120.0,
+  "min_y": 0.0,
+  "max_y": 120.0
+ },
+ "parts": [
+  {
+   "reference": "U1",
+   "footprint": "Package_QFP:LQFP-144-1EP_20x20mm_P0.5mm_EP6.5x6.5mm",
+   "pad_nets": {
+    "1": "S0",
+    "2": "VCC",
+    "3": "S1",
+    "4": "GND",
+    "5": "S2",
+    "6": "VCC",
+    "7": "S3",
+    "8": "GND",
+    "9": "S4",
+    "10": "VCC",
+    "11": "S5",
+    "12": "GND",
+    "13": "S6",
+    "14": "VCC",
+    "15": "S7",
+    "16": "GND",
+    "17": "S8",
+    "18": "VCC",
+    "19": "S9",
+    "20": "GND",
+    "21": "S10",
+    "22": "VCC",
+    "23": "S11",
+    "24": "GND",
+    "25": "S12",
+    "26": "VCC",
+    "27": "S13",
+    "28": "GND",
+    "29": "S14",
+    "30": "VCC",
+    "31": "S15",
+    "32": "GND",
+    "33": "S16",
+    "34": "VCC",
+    "35": "S17",
+    "36": "GND",
+    "37": "S18",
+    "38": "VCC",
+    "39": "S19",
+    "40": "GND",
+    "41": "S20",
+    "42": "VCC",
+    "43": "S21",
+    "44": "GND",
+    "45": "S22",
+    "46": "VCC",
+    "47": "S23",
+    "48": "GND",
+    "49": "S24",
+    "50": "VCC",
+    "51": "S25",
+    "52": "GND",
+    "53": "S26",
+    "54": "VCC",
+    "55": "S27",
+    "56": "GND",
+    "57": "S28",
+    "58": "VCC",
+    "59": "S29",
+    "60": "GND",
+    "61": "S30",
+    "62": "VCC",
+    "63": "S31",
+    "64": "GND",
+    "65": "S32",
+    "66": "VCC",
+    "67": "S33",
+    "68": "GND",
+    "69": "S34",
+    "70": "VCC",
+    "71": "S35",
+    "72": "GND",
+    "73": "S36",
+    "74": "VCC",
+    "75": "S37",
+    "76": "GND",
+    "77": "S38",
+    "78": "VCC",
+    "79": "S39",
+    "80": "GND",
+    "81": "S40",
+    "82": "VCC",
+    "83": "S41",
+    "84": "GND",
+    "85": "S42",
+    "86": "VCC",
+    "87": "S43",
+    "88": "GND",
+    "89": "S44",
+    "90": "VCC",
+    "91": "S45",
+    "92": "GND",
+    "93": "S46",
+    "94": "VCC",
+    "95": "S47",
+    "96": "GND",
+    "97": "S48",
+    "98": "VCC",
+    "99": "S49",
+    "100": "GND",
+    "101": "S50",
+    "102": "VCC",
+    "103": "S51",
+    "104": "GND",
+    "105": "S52",
+    "106": "VCC",
+    "107": "S53",
+    "108": "GND",
+    "109": "S54",
+    "110": "VCC",
+    "111": "S55",
+    "112": "GND",
+    "113": "S56",
+    "114": "VCC",
+    "115": "S57",
+    "116": "GND",
+    "117": "S58",
+    "118": "VCC",
+    "119": "S59",
+    "120": "GND",
+    "121": "S60",
+    "122": "VCC",
+    "123": "S61",
+    "124": "GND",
+    "125": "S62",
+    "126": "VCC",
+    "127": "S63",
+    "128": "GND",
+    "129": "S64",
+    "130": "VCC",
+    "131": "S65",
+    "132": "GND",
+    "133": "S66",
+    "134": "VCC",
+    "135": "S67",
+    "136": "GND",
+    "137": "S68",
+    "138": "VCC",
+    "139": "S69",
+    "140": "GND",
+    "141": "S70",
+    "142": "VCC",
+    "143": "S71",
+    "144": "GND",
+    "145": "GND"
+   },
+   "locked": {
+    "x": 62,
+    "y": 60,
+    "rotation": 0
+   }
+  },
+  {
+   "reference": "C1",
+   "footprint": "Capacitor_SMD:C_0402_1005Metric",
+   "pad_nets": {
+    "1": "VCC",
+    "2": "GND"
+   }
+  },
+  {
+   "reference": "C2",
+   "footprint": "Capacitor_SMD:C_0402_1005Metric",
+   "pad_nets": {
+    "1": "VCC",
+    "2": "GND"
+   }
+  },
+  {
+   "reference": "C3",
+   "footprint": "Capacitor_SMD:C_0402_1005Metric",
+   "pad_nets": {
+    "1": "VCC",
+    "2": "GND"
+   }
+  },
+  {
+   "reference": "C4",
+   "footprint": "Capacitor_SMD:C_0402_1005Metric",
+   "pad_nets": {
+    "1": "VCC",
+    "2": "GND"
+   }
+  },
+  {
+   "reference": "C5",
+   "footprint": "Capacitor_SMD:C_0402_1005Metric",
+   "pad_nets": {
+    "1": "VCC",
+    "2": "GND"
+   }
+  },
+  {
+   "reference": "C6",
+   "footprint": "Capacitor_SMD:C_0402_1005Metric",
+   "pad_nets": {
+    "1": "VCC",
+    "2": "GND"
+   }
+  },
+  {
+   "reference": "C7",
+   "footprint": "Capacitor_SMD:C_0402_1005Metric",
+   "pad_nets": {
+    "1": "VCC",
+    "2": "GND"
+   }
+  },
+  {
+   "reference": "C8",
+   "footprint": "Capacitor_SMD:C_0402_1005Metric",
+   "pad_nets": {
+    "1": "VCC",
+    "2": "GND"
+   }
+  },
+  {
+   "reference": "C9",
+   "footprint": "Capacitor_SMD:C_0402_1005Metric",
+   "pad_nets": {
+    "1": "VCC",
+    "2": "GND"
+   }
+  },
+  {
+   "reference": "C10",
+   "footprint": "Capacitor_SMD:C_0402_1005Metric",
+   "pad_nets": {
+    "1": "VCC",
+    "2": "GND"
+   }
+  },
+  {
+   "reference": "C11",
+   "footprint": "Capacitor_SMD:C_0402_1005Metric",
+   "pad_nets": {
+    "1": "VCC",
+    "2": "GND"
+   }
+  },
+  {
+   "reference": "C12",
+   "footprint": "Capacitor_SMD:C_0402_1005Metric",
+   "pad_nets": {
+    "1": "VCC",
+    "2": "GND"
+   }
+  },
+  {
+   "reference": "J1",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_2x16_P2.54mm_Vertical",
+   "pad_nets": {
+    "1": "S0",
+    "2": "S1",
+    "3": "S2",
+    "4": "S3",
+    "5": "S4",
+    "6": "S5",
+    "7": "S6",
+    "8": "S7",
+    "9": "S8",
+    "10": "S9",
+    "11": "S10",
+    "12": "S11",
+    "13": "S12",
+    "14": "S13",
+    "15": "S14",
+    "16": "S15",
+    "17": "S16",
+    "18": "S17",
+    "19": "S18",
+    "20": "S19",
+    "21": "S20",
+    "22": "S21",
+    "23": "S22",
+    "24": "S23",
+    "25": "S24",
+    "26": "S25",
+    "27": "S26",
+    "28": "S27",
+    "29": "S28",
+    "30": "S29",
+    "31": "S30",
+    "32": "S31"
+   }
+  },
+  {
+   "reference": "J2",
+   "footprint": "Connector_PinHeader_2.54mm:PinHeader_2x16_P2.54mm_Vertical",
+   "pad_nets": {
+    "1": "S32",
+    "2": "S33",
+    "3": "S34",
+    "4": "S35",
+    "5": "S36",
+    "6": "S37",
+    "7": "S38",
+    "8": "S39",
+    "9": "S40",
+    "10": "S41",
+    "11": "S42",
+    "12": "S43",
+    "13": "S44",
+    "14": "S45",
+    "15": "S46",
+    "16": "S47",
+    "17": "S48",
+    "18": "S49",
+    "19": "S50",
+    "20": "S51",
+    "21": "S52",
+    "22": "S53",
+    "23": "S54",
+    "24": "S55",
+    "25": "S56",
+    "26": "S57",
+    "27": "S58",
+    "28": "S59",
+    "29": "S60",
+    "30": "S61",
+    "31": "S62",
+    "32": "S63"
+   }
+  }
+ ],
+ "hints": {
+  "groups": [
+   {
+    "name": "dec",
+    "members": [
+     "C1",
+     "C2",
+     "C3",
+     "C4",
+     "C5",
+     "C6",
+     "C7",
+     "C8",
+     "C9",
+     "C10",
+     "C11",
+     "C12"
+    ],
+    "surround": "U1"
+   }
+  ]
+ }
+}

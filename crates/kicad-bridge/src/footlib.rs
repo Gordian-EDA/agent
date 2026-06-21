@@ -182,7 +182,26 @@ impl Footprint {
             .unwrap_or_default()
             .to_string();
 
-        let pads: Vec<FootprintPad> = ast.pads.iter().map(pad_detail).collect();
+        let mut pads: Vec<FootprintPad> = ast.pads.iter().map(pad_detail).collect();
+        // kiutils 0.3 exposes only a COUNT of a custom pad's primitives, not their
+        // geometry — so a custom pad (e.g. an FFC connector's polygon mounting tab)
+        // would be modelled by its tiny base anchor, under-sizing the real copper.
+        // The placer/router/outline would then seat parts too close or crop the
+        // board outline inside the actual pad (a copper_edge_clearance fault KiCAD
+        // catches). Re-parse each custom pad's primitive bounding box from the raw
+        // source and grow the pad to it. (Same kiutils-drops-geometry class as the
+        // fp_arc/fp_circle courtyard fixes.)
+        if pads.iter().any(|p| p.shape == "custom")
+            && let Ok(raw) = std::fs::read_to_string(path) {
+                let bboxes = custom_pad_bboxes(&raw);
+                let mut bi = 0;
+                for pad in pads.iter_mut().filter(|p| p.shape == "custom") {
+                    if let Some(&(hx, hy)) = bboxes.get(bi) {
+                        pad.size = [pad.size[0].max(2.0 * hx), pad.size[1].max(2.0 * hy)];
+                    }
+                    bi += 1;
+                }
+            }
         let (courtyard, courtyard_source) = courtyard_bbox(ast, &pads);
         let bbox = overall_bbox(ast, &pads).unwrap_or_else(BBox::zero);
 
@@ -200,6 +219,60 @@ impl Footprint {
     pub fn pad_count(&self) -> usize {
         self.pads.len()
     }
+}
+
+/// Per custom pad (in file order), the half-extents `(hx, hy)` of its primitive
+/// polygon, parsed from the raw `.kicad_mod` source (kiutils 0.3 drops these).
+/// Primitive points are relative to the pad origin, so the centred-rect model's
+/// half-extent on each axis is the max absolute coordinate. Covers `(xy …)`
+/// points (gr_poly / gr_line) — the shape FFC/FPC and similar custom pads use.
+pub(crate) fn custom_pad_bboxes(raw: &str) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    let mut search = 0;
+    while let Some(rel) = raw[search..].find("(pad ") {
+        let start = search + rel;
+        let Some(end) = matching_paren(raw, start) else { break };
+        let block = &raw[start..end];
+        search = end;
+        if !block.contains(" custom") {
+            continue;
+        }
+        let (mut hx, mut hy) = (0.0_f64, 0.0_f64);
+        let mut p = 0;
+        while let Some(r) = block[p..].find("(xy ") {
+            let s = p + r + "(xy ".len();
+            let mut it = block[s..].split_whitespace();
+            if let (Some(xs), Some(ys)) = (it.next(), it.next())
+                && let (Ok(x), Ok(y)) =
+                    (xs.parse::<f64>(), ys.trim_end_matches(')').parse::<f64>())
+                {
+                    hx = hx.max(x.abs());
+                    hy = hy.max(y.abs());
+                }
+            p = s;
+        }
+        out.push((hx, hy));
+    }
+    out
+}
+
+/// Byte index just past the `)` that closes the `(` at `open`.
+pub(crate) fn matching_paren(s: &str, open: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut depth = 0i32;
+    for i in open..b.len() {
+        match b[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Translate one [`kiutils_kicad::FpPad`] into a [`FootprintPad`], defaulting
@@ -245,7 +318,33 @@ fn rotated_aabb_half(w: f64, h: f64, deg: f64) -> (f64, f64) {
 
 /// All defined geometry points of a graphic (`start`/`end`/`center`/`at`).
 fn graphic_points(g: &kiutils_kicad::FpGraphic) -> Vec<[f64; 2]> {
-    [g.start, g.end, g.center, g.at].into_iter().flatten().collect()
+    let mut pts: Vec<[f64; 2]> = [g.start, g.end, g.center, g.at].into_iter().flatten().collect();
+    // An `fp_arc` bulges BEYOND its endpoints, but kiutils 0.3 drops the `(mid)`
+    // apex — so a rounded courtyard (a crystal's curved end, a round connector)
+    // would be read only to its chord and the bbox under-sized, seating parts too
+    // close (a courtyard-overlap DRC fault KiCAD catches). Bound the arc
+    // conservatively by a square of side = the chord length centred on the chord
+    // midpoint; this contains any arc up to a semicircle, which every courtyard
+    // arc is. (Recovers the HC49 crystal's true 8.47mm extent from start/end.)
+    if g.token == "fp_arc"
+        && let (Some(s), Some(e)) = (g.start, g.end) {
+            let mid = [(s[0] + e[0]) / 2.0, (s[1] + e[1]) / 2.0];
+            let r = ((s[0] - e[0]).powi(2) + (s[1] - e[1]).powi(2)).sqrt() / 2.0;
+            pts.push([mid[0] - r, mid[1] - r]);
+            pts.push([mid[0] + r, mid[1] + r]);
+        }
+    // An `fp_circle` ((center) + an `(end)` point on the circumference) bounds a
+    // disc of that radius — but only the two stored points would be read, missing
+    // the ±radius extent on the other quadrants. A radial cap / round footprint's
+    // circular courtyard would then be badly under-sized (the D8 electrolytic's
+    // 8mm courtyard read as a sliver). Add the disc's bounding box.
+    if g.token == "fp_circle"
+        && let (Some(c), Some(e)) = (g.center.or(g.start), g.end) {
+            let r = ((c[0] - e[0]).powi(2) + (c[1] - e[1]).powi(2)).sqrt();
+            pts.push([c[0] - r, c[1] - r]);
+            pts.push([c[0] + r, c[1] + r]);
+        }
+    pts
 }
 
 /// Courtyard bounding box. Primary source is the bbox of every `F.CrtYd` /

@@ -52,7 +52,7 @@ use std::fmt::Write as _;
 use std::io;
 
 use pcb_engine::placement::Placement;
-use pcb_engine::problem::Bounds;
+use pcb_engine::problem::{Bounds, Point2};
 
 /// One part to synthesize onto the board: its board identity, the source
 /// `.kicad_mod` text, its pad→net wiring, and where the engine placed it.
@@ -71,14 +71,63 @@ pub struct SynthPart {
     pub placement: Placement,
 }
 
-/// Synthesize a complete `.kicad_pcb` from `parts` on a board of `bounds`.
+/// Synthesize a complete 2-layer `.kicad_pcb` from `parts` on a board of
+/// `bounds`. Convenience wrapper over [`synthesize_board_layers`].
+pub fn synthesize_board(parts: &[SynthPart], bounds: &Bounds) -> io::Result<String> {
+    synthesize_board_layers(parts, bounds, 2)
+}
+
+/// Synthesize a complete `.kicad_pcb` from `parts` on a board of `bounds` with
+/// `layer_count` copper layers (2 or 4 — the engine's supported stackups).
 ///
 /// The result parses with [`crate::pcb::read_problem`] and is structurally a
 /// KiCAD-9 board (see the module docs). Net codes are 1-based over the sorted
 /// union of every part's pad nets. Returns an [`io::Error`] if a part's source
 /// has no parseable footprint block, a placement is missing for a part, or a
 /// non-axis-aligned rotation is requested.
-pub fn synthesize_board(parts: &[SynthPart], bounds: &Bounds) -> io::Result<String> {
+pub fn synthesize_board_layers(
+    parts: &[SynthPart],
+    bounds: &Bounds,
+    layer_count: u32,
+) -> io::Result<String> {
+    synthesize_board_full(parts, bounds, layer_count, &[], &[], None)
+}
+
+/// A copper-plane zone to emit: the net it belongs to, the copper layer name
+/// (e.g. `"In1.Cu"`), and the precomputed fill rectangles ([`plane_fill_rects`]).
+#[derive(Debug, Clone)]
+pub struct ZoneSpec {
+    pub net_name: String,
+    pub layer_name: String,
+    pub fill_rects: Vec<[f64; 4]>,
+    /// Zone copper-to-foreign clearance (mm) — the board's design clearance, so the
+    /// zone is checked against the SAME rule the router used (not KiCAD's 0.2 default,
+    /// which false-flags a finer-pitch board's plane).
+    pub clearance: f64,
+    /// Minimum zone copper width (mm) — the board's min trace width.
+    pub min_thickness: f64,
+}
+
+/// A routing keep-out exported as a KiCAD rule area: tracks + vias are not allowed inside
+/// `[min, max]` on the listed copper `layers`. Lets the finished board carry the design
+/// intent the engine routed around, and gives KiCAD an independent check that it did.
+pub struct KeepoutZone {
+    pub layers: Vec<String>,
+    pub min: [f64; 2],
+    pub max: [f64; 2],
+}
+
+/// [`synthesize_board_layers`] plus copper-plane `zones` (power pours) and routing
+/// `keepouts` (rule areas), all emitted before the board close. Each zone's net must be
+/// one of the parts' nets.
+pub fn synthesize_board_full(
+    parts: &[SynthPart],
+    bounds: &Bounds,
+    layer_count: u32,
+    zones: &[ZoneSpec],
+    keepouts: &[KeepoutZone],
+    outline: Option<&[Point2]>,
+) -> io::Result<String> {
     // Net code table: 1-based over the sorted union of every bound pad's net.
     let net_codes = net_codes(parts);
 
@@ -89,25 +138,228 @@ pub fn synthesize_board(parts: &[SynthPart], bounds: &Bounds) -> io::Result<Stri
     out.push_str("\t(generator_version \"9.0\")\n");
     out.push_str("\t(general\n\t\t(thickness 1.6)\n\t\t(legacy_teardrops no)\n\t)\n");
     out.push_str("\t(paper \"A4\")\n");
-    push_layers(&mut out);
+    push_layers(&mut out, layer_count);
     out.push_str(
         "\t(setup\n\t\t(pad_to_mask_clearance 0)\n\
          \t\t(allow_soldermask_bridges_in_footprints no)\n\
          \t\t(aux_axis_origin 0 0)\n\t\t(grid_origin 0 0)\n\t)\n",
     );
     push_nets(&mut out, &net_codes);
-    push_edge_cuts(&mut out, bounds);
+    push_edge_cuts(&mut out, bounds, outline);
 
     for part in parts {
         let block = synth_footprint(part, &net_codes)?;
         out.push_str(&block);
     }
 
+    for (i, z) in zones.iter().enumerate() {
+        let code = net_codes.get(&z.net_name).copied().unwrap_or(0);
+        push_zone(&mut out, code, z, i);
+    }
+
+    for (i, k) in keepouts.iter().enumerate() {
+        push_keepout_zone(&mut out, k, i);
+    }
+
     out.push_str(")\n");
     Ok(out)
 }
 
+/// Emit one routing keep-out as a KiCAD rule area: `(tracks not_allowed) (vias not_allowed)`
+/// over the keep-out rectangle. Pads/copperpour are left ALLOWED so this never false-flags a
+/// pad the placer legitimately kept clear or a plane already carved around the keep-out — it
+/// only enforces (and documents) the track/via routing keep-out the engine honoured.
+fn push_keepout_zone(out: &mut String, k: &KeepoutZone, idx: usize) {
+    let uuid = synth_uuid(&format!("keepout:{idx}:{}:{}", k.min[0], k.min[1]));
+    let layers = k
+        .layers
+        .iter()
+        .map(|l| format!("\"{l}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let _ = writeln!(
+        out,
+        "\t(zone\n\t\t(net 0)\n\t\t(net_name \"\")\n\t\t(layers {layers})\n\t\t(uuid \"{uuid}\")\n\
+         \t\t(name \"keepout\")\n\t\t(hatch edge 0.5)\n\
+         \t\t(keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (copperpour allowed) (footprints allowed))\n\
+         \t\t(polygon (pts (xy {} {}) (xy {} {}) (xy {} {}) (xy {} {})))\n\t)",
+        fmt_num(k.min[0]), fmt_num(k.min[1]), fmt_num(k.max[0]), fmt_num(k.min[1]),
+        fmt_num(k.max[0]), fmt_num(k.max[1]), fmt_num(k.min[0]), fmt_num(k.max[1])
+    );
+}
+
+/// Emit one copper-plane `(zone …)` with the precomputed fill rectangles as
+/// edge-sharing `filled_polygon` islands (KiCAD treats them as one connected
+/// pour — see [`plane_fill_rects`]).
+fn push_zone(out: &mut String, net_code: i32, z: &ZoneSpec, idx: usize) {
+    let uuid = synth_uuid(&format!("zone:{}:{}", z.net_name, z.layer_name));
+    let _ = idx;
+    let _ = writeln!(
+        out,
+        // SOLID pad connection (`connect_pads yes`): a power/ground plane should
+        // tie to its same-net pads with full copper, not thermal-relief spokes —
+        // the spokes starve on large through-hole pads (mounting holes, TH power),
+        // which KiCAD flags as `starved_thermal`. Solid is the standard plane
+        // connection and is low-impedance. Foreign pads are still carved out by the
+        // anti-pad keepouts baked into `fill_rects`, so this only ties same-net copper.
+        "\t(zone\n\t\t(net {net_code})\n\t\t(net_name \"{}\")\n\t\t(layer \"{}\")\n\
+         \t\t(uuid \"{uuid}\")\n\t\t(hatch edge 0.5)\n\t\t(connect_pads yes (clearance {clr}))\n\
+         \t\t(min_thickness {mt})\n\t\t(fill yes (thermal_gap 0.3) (thermal_bridge_width 0.5))",
+        z.net_name, z.layer_name, clr = fmt_num(z.clearance), mt = fmt_num(z.min_thickness)
+    );
+    // Zone outline = the board's fill bounding box (KiCAD requires a polygon; the
+    // filled_polygon islands below are the authoritative copper).
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for r in &z.fill_rects {
+        x0 = x0.min(r[0]);
+        y0 = y0.min(r[1]);
+        x1 = x1.max(r[2]);
+        y1 = y1.max(r[3]);
+    }
+    if x0 <= x1 {
+        let _ = writeln!(
+            out,
+            "\t\t(polygon (pts (xy {} {}) (xy {} {}) (xy {} {}) (xy {} {})))",
+            fmt_num(x0), fmt_num(y0), fmt_num(x1), fmt_num(y0),
+            fmt_num(x1), fmt_num(y1), fmt_num(x0), fmt_num(y1)
+        );
+    }
+    for r in &z.fill_rects {
+        let _ = writeln!(
+            out,
+            "\t\t(filled_polygon (layer \"{}\") (pts (xy {} {}) (xy {} {}) (xy {} {}) (xy {} {})))",
+            z.layer_name,
+            fmt_num(r[0]), fmt_num(r[1]), fmt_num(r[2]), fmt_num(r[1]),
+            fmt_num(r[2]), fmt_num(r[3]), fmt_num(r[0]), fmt_num(r[3])
+        );
+    }
+    out.push_str("\t)\n");
+}
+
 /// 1-based net codes over the sorted union of every part's pad net names.
+/// A copper-plane (power-pour) fill as axis-aligned rectangles tiling `bounds`
+/// inset by `edge_margin`, MINUS a rectangular keep-out around each item in
+/// `keepouts` (`(center, half_x, half_y)` — the halves already include the
+/// required clearance; a via/pad passes equal halves, a keep-out region its rect
+/// halves). Returns rects as `[min_x, min_y, max_x, max_y]`.
+///
+/// KiCAD treats edge-sharing `filled_polygon` islands as one connected plane
+/// (verified against kicad-cli), so a horizontal-band sweep produces a valid,
+/// DRC-clean fill with NO clipping / keyhole geometry: cut the board into y-bands
+/// at every keep-out edge, and in each band emit the x-segments left free by the
+/// keep-outs active there. This is how a power net's many pins are joined without
+/// routing each one — the lever a BGA's power balls need.
+pub fn plane_fill_rects(
+    bounds: &Bounds,
+    edge_margin: f64,
+    keepouts: &[(Point2, f64, f64)],
+    outline: Option<&[Point2]>,
+) -> Vec<[f64; 4]> {
+    let (bx0, bx1) = (bounds.min_x + edge_margin, bounds.max_x - edge_margin);
+    let (by0, by1) = (bounds.min_y + edge_margin, bounds.max_y - edge_margin);
+    if bx1 <= bx0 || by1 <= by0 {
+        return Vec::new();
+    }
+    // y-band boundaries: the board edges plus each keep-out's top/bottom (clamped).
+    let mut ycuts: Vec<f64> = vec![by0, by1];
+    for (c, _hx, hy) in keepouts {
+        ycuts.push((c.y - hy).clamp(by0, by1));
+        ycuts.push((c.y + hy).clamp(by0, by1));
+    }
+    // For a custom OUTLINE, add fine y-bands so the per-band polygon scanline clip
+    // (taken at the band mid-y) follows the true edge smoothly instead of overhanging.
+    if outline.is_some() {
+        let mut y = by0;
+        while y < by1 {
+            ycuts.push(y);
+            y += 0.5;
+        }
+    }
+    ycuts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ycuts.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+
+    let mut rects = Vec::new();
+    for w in ycuts.windows(2) {
+        let (y0, y1) = (w[0], w[1]);
+        if y1 - y0 < 1e-6 {
+            continue;
+        }
+        let ymid = (y0 + y1) / 2.0;
+        // x-intervals blocked by keep-outs straddling this band, merged.
+        let mut blocked: Vec<(f64, f64)> = keepouts
+            .iter()
+            .filter(|(c, _hx, hy)| c.y - hy < ymid && ymid < c.y + hy)
+            .map(|(c, hx, _hy)| ((c.x - hx).max(bx0), (c.x + hx).min(bx1)))
+            .filter(|(a, b)| b > a)
+            .collect();
+        blocked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut merged: Vec<(f64, f64)> = Vec::new();
+        for (a, b) in blocked {
+            match merged.last_mut() {
+                Some(last) if a <= last.1 + 1e-9 => last.1 = last.1.max(b),
+                _ => merged.push((a, b)),
+            }
+        }
+        // Free x-segments = [bx0, bx1] minus the merged blocked intervals.
+        let mut free: Vec<(f64, f64)> = Vec::new();
+        let mut x = bx0;
+        for (a, b) in &merged {
+            if a - x > 1e-6 {
+                free.push((x, *a));
+            }
+            x = x.max(*b);
+        }
+        if bx1 - x > 1e-6 {
+            free.push((x, bx1));
+        }
+        // Custom outline: clip each free segment to the polygon's interior at this band
+        // (scanline x-spans at mid-y, inset by the edge margin), so copper never reaches
+        // past the true edge — a pour/plane on a non-rectangular board.
+        if let Some(poly) = outline {
+            let spans: Vec<(f64, f64)> = polygon_x_spans(poly, ymid)
+                .into_iter()
+                .map(|(a, b)| (a + edge_margin, b - edge_margin))
+                .filter(|(a, b)| b - a > 1e-6)
+                .collect();
+            let mut clipped = Vec::new();
+            for (fa, fb) in &free {
+                for (pa, pb) in &spans {
+                    let (lo, hi) = (fa.max(*pa), fb.min(*pb));
+                    if hi - lo > 1e-6 {
+                        clipped.push((lo, hi));
+                    }
+                }
+            }
+            free = clipped;
+        }
+        for (a, b) in free {
+            rects.push([a, y0, b, y1]);
+        }
+    }
+    rects
+}
+
+/// The x-intervals where the horizontal line `y` is INSIDE polygon `poly` (scanline,
+/// even-odd): the sorted edge crossings paired up. A convex shape gives one interval; a
+/// concave one (a star) gives several. Used to clip a plane/pour fill to a custom outline.
+fn polygon_x_spans(poly: &[Point2], y: f64) -> Vec<(f64, f64)> {
+    let n = poly.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    let mut xs: Vec<f64> = Vec::new();
+    let mut j = n - 1;
+    for i in 0..n {
+        let (a, b) = (&poly[j], &poly[i]);
+        if (a.y > y) != (b.y > y) {
+            xs.push(a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x));
+        }
+        j = i;
+    }
+    xs.sort_by(|p, q| p.partial_cmp(q).unwrap_or(std::cmp::Ordering::Equal));
+    xs.chunks(2).filter(|c| c.len() == 2).map(|c| (c[0], c[1])).collect()
+}
+
 fn net_codes(parts: &[SynthPart]) -> BTreeMap<String, i32> {
     let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for p in parts {
@@ -126,10 +378,21 @@ fn net_codes(parts: &[SynthPart]) -> BTreeMap<String, i32> {
 
 /// Emit the `(layers …)` declaration: a 2-layer board with the silk/mask/edge
 /// technical layers KiCAD 9 expects (matches `placed_template.kicad_pcb`).
-fn push_layers(out: &mut String) {
+fn push_layers(out: &mut String, layer_count: u32) {
     out.push_str("\t(layers\n");
     out.push_str("\t\t(0 \"F.Cu\" signal)\n");
-    out.push_str("\t\t(2 \"B.Cu\" signal)\n");
+    // Inner copper layers (4-layer stackup): In1.Cu=1, In2.Cu=2, … sequential,
+    // with B.Cu following. KiCAD 9 accepts this sequential numbering (verified by
+    // load + DRC); the 2-layer board keeps the canonical (0 F.Cu)(2 B.Cu).
+    if layer_count >= 4 {
+        for i in 1..=(layer_count - 2) {
+            let _ = writeln!(out, "\t\t({i} \"In{i}.Cu\" signal)");
+        }
+        let b = layer_count - 1;
+        let _ = writeln!(out, "\t\t({b} \"B.Cu\" signal)");
+    } else {
+        out.push_str("\t\t(2 \"B.Cu\" signal)\n");
+    }
     out.push_str("\t\t(36 \"B.SilkS\" user \"B.Silkscreen\")\n");
     out.push_str("\t\t(37 \"F.SilkS\" user \"F.Silkscreen\")\n");
     out.push_str("\t\t(38 \"B.Mask\" user)\n");
@@ -149,8 +412,27 @@ fn push_nets(out: &mut String, net_codes: &BTreeMap<String, i32>) {
     }
 }
 
-/// Emit the board outline as an `Edge.Cuts` rectangle from `bounds`.
-fn push_edge_cuts(out: &mut String, bounds: &Bounds) {
+/// Emit the board outline on `Edge.Cuts`. With `outline = Some(pts)` (≥3 points) the
+/// outline is that closed polygon (one `gr_line` per edge) — circle (many points),
+/// square, star, any custom shape. Otherwise the `bounds` rectangle (the default).
+fn push_edge_cuts(out: &mut String, bounds: &Bounds, outline: Option<&[Point2]>) {
+    if let Some(pts) = outline
+        && pts.len() >= 3 {
+            for i in 0..pts.len() {
+                let a = &pts[i];
+                let b = &pts[(i + 1) % pts.len()];
+                let (x0, y0) = (fmt_num(a.x), fmt_num(a.y));
+                let (x1, y1) = (fmt_num(b.x), fmt_num(b.y));
+                let uuid = synth_uuid(&format!("edge:{x0}:{y0}:{x1}:{y1}"));
+                let _ = write!(
+                    out,
+                    "\t(gr_line\n\t\t(start {x0} {y0})\n\t\t(end {x1} {y1})\n\
+                     \t\t(stroke\n\t\t\t(width 0.1)\n\t\t\t(type default)\n\t\t)\n\
+                     \t\t(layer \"Edge.Cuts\")\n\t\t(uuid \"{uuid}\")\n\t)\n"
+                );
+            }
+            return;
+        }
     let (x0, y0) = (fmt_num(bounds.min_x), fmt_num(bounds.min_y));
     let (x1, y1) = (fmt_num(bounds.max_x), fmt_num(bounds.max_y));
     let uuid = synth_uuid(&format!("edge:{x0}:{y0}:{x1}:{y1}"));
@@ -249,17 +531,27 @@ fn transform_node(
         // drop any the source carried so they are not duplicated. (`.kicad_mod`
         // has none, but be robust to sources that do.)
         "at" | "uuid" | "layer" => Ok(None),
-        // Silkscreen graphics are dropped (slice-4 silk_over_copper pitfall).
-        "fp_line" | "fp_rect" | "fp_circle" | "fp_arc" | "fp_poly" | "fp_text" | "fp_curve"
-            if on_silk(node) =>
-        {
-            Ok(None)
-        }
+        // Silkscreen *text* is dropped — the only library silk text is a value/
+        // ref placeholder that would duplicate the reference designator (which we
+        // keep, see `property` below) and clutter the board. Silk *graphics* (the
+        // component outline lines/arcs) are KEPT: they are what makes the render
+        // read as a real board, they sit outside the part's own pads, and any
+        // silk-over-neighbour-copper is a tolerated DRC warning, not an error.
+        "fp_text" if on_silk(node) => Ok(None),
         // Library cruft that does not belong on a board footprint instance.
         "version" | "generator" | "generator_version" | "embedded_fonts" | "model"
         | "tags" | "descr" => Ok(None),
-        // The Reference property: set its value to the real designator and put it
-        // on F.Fab. The Value property and others are kept but forced to F.Fab.
+        // Version-specific footprint-authoring hints that postdate the minimum
+        // KiCAD we target: KiCAD 9.0.2's board loader rejects the whole file on
+        // an unknown footprint token (silent "Failed to load board"). These carry
+        // no copper/courtyard/routing meaning, so drop them rather than gate the
+        // board on the writer's KiCAD version. `duplicate_pad_numbers_are_jumpers`
+        // appears in library footprints saved by KiCAD ≥ 9.0.3; none of the
+        // 9.0.2-era system libraries emit it.
+        "duplicate_pad_numbers_are_jumpers" => Ok(None),
+        // Reference property: set the designator, leave it on its library layer
+        // (F.SilkS, positioned above the part). Value property: hide it so the
+        // long footprint-name string never clutters the board render.
         "property" => Ok(Some(transform_property(node, &part.reference))),
         // Pads: inject the (net …) binding for bound pads, and bump pad rotation
         // by the footprint angle when the footprint is rotated.
@@ -272,19 +564,46 @@ fn transform_node(
 
 /// Rewrite a `(property …)` node: when it is the `Reference`, replace the value
 /// with `reference`; force the property's `(layer …)` to `F.Fab` either way.
+/// Reference-designator text height cap (mm). KiCAD library defaults are 1.0mm,
+/// which crowd dense boards; 0.8mm stays legible and reduces silk collisions.
+const REF_TEXT_SIZE_MM: f64 = 0.8;
+
+/// Cap the first `(size W H)` in `body` to `max` mm on each axis (shrink only —
+/// a smaller library value is left alone). Used to keep refdes text compact.
+fn cap_font_size(body: &str, max: f64) -> String {
+    let Some(start) = body.find("(size ") else { return body.to_owned() };
+    let open = start + "(size ".len();
+    let Some(rel_close) = body[open..].find(')') else { return body.to_owned() };
+    let inner = &body[open..open + rel_close];
+    let nums: Vec<f64> = inner.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+    if nums.len() != 2 {
+        return body.to_owned();
+    }
+    let (w, h) = (nums[0].min(max), nums[1].min(max));
+    format!("{}(size {} {}){}", &body[..start], fmt_num(w), fmt_num(h), &body[open + rel_close + 1..])
+}
+
 fn transform_property(node: &str, reference: &str) -> String {
-    let mut out = node.to_owned();
-    // `(property "Reference" "REF**"` → `(property "Reference" "<ref>"`.
-    if let Some(rest) = out.strip_prefix("(property \"Reference\" \"")
+    // Reference: set the designator and keep it on its library layer (F.SilkS,
+    // positioned above the part) — that is where it belongs on a fabricated
+    // board and what a professional render shows.
+    if let Some(rest) = node.strip_prefix("(property \"Reference\" \"")
         && let Some(close) = rest.find('"')
     {
-        out = format!(
-            "(property \"Reference\" \"{reference}\"{}",
-            &rest[close + 1..]
-        );
+        // Cap the refdes text height: a 1.0mm library default crowds a dense
+        // board, and a smaller refdes only ever REDUCES silk overlap (it never
+        // moves a ref into a collision), so this is a safe legibility win.
+        let body = cap_font_size(&rest[close + 1..], REF_TEXT_SIZE_MM);
+        return format!("(property \"Reference\" \"{reference}\"{body}");
     }
-    // Force the property onto F.Fab (libraries put Reference on F.SilkS).
-    out.replace("(layer \"F.SilkS\")", "(layer \"F.Fab\")")
+    // Value: keep the property (KiCAD expects it to exist) but hide it. Its text
+    // is the full footprint library name, which on a small board dominates the
+    // render and overlaps neighbouring parts; a hidden value is conventional.
+    if node.starts_with("(property \"Value\"") && !node.contains("(hide yes)")
+        && let Some(hidden) = inject_before_close(node, "(hide yes)") {
+            return hidden;
+        }
+    node.to_owned()
 }
 
 /// Inject `(net N "name")` into a pad node for a bound pad, and add the
@@ -532,6 +851,32 @@ mod tests {
     use pcb_engine::problem::Point2;
     use std::path::PathBuf;
 
+    #[test]
+    fn plane_fill_empty_is_single_inset_rect() {
+        let b = Bounds { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 10.0 };
+        let rects = plane_fill_rects(&b, 0.5, &[], None);
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0], [0.5, 0.5, 19.5, 9.5]);
+    }
+
+    #[test]
+    fn plane_fill_carves_keepouts_and_stays_in_bounds() {
+        let b = Bounds { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 20.0 };
+        let ko = (Point2 { x: 10.0, y: 10.0 }, 0.65, 0.65);
+        let rects = plane_fill_rects(&b, 0.5, &[ko], None);
+        assert!(rects.len() > 1, "a central keep-out must split the fill");
+        // The keep-out square [9.35,10.65]^2 must contain NO fill rect interior.
+        let (kx0, kx1, ky0, ky1) = (9.35, 10.65, 9.35, 10.65);
+        for r in &rects {
+            // every rect within the inset board
+            assert!(r[0] >= 0.5 - 1e-9 && r[2] <= 19.5 + 1e-9);
+            assert!(r[1] >= 0.5 - 1e-9 && r[3] <= 19.5 + 1e-9);
+            // and not overlapping the keep-out interior
+            let overlap = r[0] < kx1 - 1e-6 && r[2] > kx0 + 1e-6 && r[1] < ky1 - 1e-6 && r[3] > ky0 + 1e-6;
+            assert!(!overlap, "rect {r:?} overlaps the keep-out");
+        }
+    }
+
     fn fixture(name: &str) -> String {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/footprints")
@@ -588,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn synthesize_two_part_board_has_no_silk() {
+    fn synthesize_two_part_board_is_render_ready() {
         let parts = vec![
             SynthPart {
                 reference: "R1".into(),
@@ -608,14 +953,18 @@ mod tests {
         let bounds = Bounds { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
         let board = synthesize_board(&parts, &bounds).unwrap();
 
-        // No silkscreen *graphics* leaked through. (The layer table still
-        // declares F.SilkS/B.SilkS — that is the layer definition, not a graphic;
-        // we assert no graphic node sits on a silk layer.)
+        // Silkscreen survives so the board renders like a real PCB: the layer
+        // table declares F.SilkS and the footprint outline graphics sit on it.
         assert!(
-            !board.contains("(layer \"F.SilkS\")"),
-            "silk graphics must be dropped:\n{board}"
+            board.contains("(layer \"F.SilkS\")"),
+            "silk graphics (component outline + reference) must be kept:\n{board}"
         );
-        assert!(!board.contains("(layer \"B.SilkS\")"));
+        // The reference designator is kept on silk; the long Value name is hidden.
+        assert!(board.contains("(property \"Reference\" \"R1\""), "ref on board: {board}");
+        assert!(
+            board.contains("(property \"Value\"") && board.contains("(hide yes)"),
+            "Value property must be present but hidden:\n{board}"
+        );
         // Reference value was set; REF** placeholder is gone.
         assert!(board.contains("\"R1\""));
         assert!(board.contains("\"U1\""));
@@ -627,6 +976,12 @@ mod tests {
         }
         // Courtyards survive (kept from the library).
         assert!(board.contains("F.CrtYd"));
+        // Version-specific authoring tokens that KiCAD 9.0.2's loader rejects must
+        // not leak through from the source library (silent "Failed to load board").
+        assert!(
+            !board.contains("duplicate_pad_numbers_are_jumpers"),
+            "loader-breaking footprint token leaked into the board:\n{board}"
+        );
     }
 
     /// The synthesized board parses with `read_problem`, pads land at

@@ -201,6 +201,7 @@ fn defs_lists_all_tools() {
         "search_footprints",
         "get_footprint_info",
         "create_board",
+        "add_parts",
         "get_board",
         "place_board",
         "set_placement_hints",
@@ -213,7 +214,7 @@ fn defs_lists_all_tools() {
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
-    assert_eq!(names.len(), 23, "expected exactly 23 tools, got {}: {:?}", names.len(), names);
+    assert_eq!(names.len(), 24, "expected exactly 24 tools, got {}: {:?}", names.len(), names);
 
     // Names are unique.
     let mut sorted = names.clone();
@@ -611,17 +612,19 @@ fn get_footprint_info_returns_pads_courtyard_bbox() {
             &ctx,
         )
         .unwrap();
-    let pads = out["pads"].as_array().expect("pads array");
-    assert_eq!(pads.len(), 3, "SOT-23 has 3 pads: {out}");
-    let p0 = &pads[0];
-    assert!(p0.get("number").is_some());
-    assert!(p0.get("offset").is_some());
-    assert!(p0.get("size").is_some());
-    assert!(p0.get("technology").is_some());
-    assert!(p0.get("layers").is_some());
+    // Lean shape: pad NUMBER list + a compact geometry summary (no per-pad coordinate dump).
+    let nums = out["pad_numbers"].as_array().expect("pad_numbers array");
+    assert_eq!(nums.len(), 3, "SOT-23 has 3 pads: {out}");
+    assert!(nums.iter().all(|n| n.is_string()), "pad numbers are strings: {out}");
+    assert_eq!(out["pad_count"], 3);
+    assert!(out["min_pitch_mm"].as_f64().is_some_and(|p| p > 0.0), "min_pitch present: {out}");
+    assert!(out.get("pad_min_dim_mm").is_some(), "pad dims present: {out}");
+    assert!(out.get("technologies").is_some(), "technologies present: {out}");
     assert!(out.get("courtyard").is_some(), "courtyard present: {out}");
     assert!(out["courtyard"].get("width").is_some());
     assert!(out.get("bbox").is_some(), "bbox present: {out}");
+    // Per-pad coordinate table is intentionally summarized away (model places nothing by coord).
+    assert!(out.get("pads").is_none(), "per-pad table should be gone: {out}");
 }
 
 #[test]
@@ -690,6 +693,63 @@ fn create_board_resolves_vendored_footprints_and_persists_draft() {
 }
 
 #[test]
+fn add_parts_appends_incrementally_and_rejects_duplicate() {
+    let (ctx, _guard) = fixture_ctx();
+    let tools = Tools::new();
+
+    // add_parts before any board -> recoverable error.
+    let pre = tools
+        .run(
+            "add_parts",
+            serde_json::json!({ "parts": [] }),
+            &ctx,
+        )
+        .unwrap();
+    assert!(pre["error"].as_str().is_some_and(|e| e.contains("no board draft")), "got: {pre}");
+
+    // Base board with two parts.
+    let board = serde_json::json!({
+        "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
+        "parts": [
+            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
+              "pad_nets": { "1": "VIN", "2": "MID" } },
+            { "reference": "U1", "footprint": "Fixtures:SOT-23",
+              "pad_nets": { "1": "MID", "2": "GND", "3": "VOUT" } }
+        ]
+    });
+    let out = tools.run("create_board", board, &ctx).unwrap();
+    assert!(out.get("error").is_none(), "create_board ok: {out}");
+
+    // Append a third part WITHOUT re-sending the first two.
+    let add = serde_json::json!({
+        "parts": [
+            { "reference": "J1", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
+              "pad_nets": { "1": "VIN", "2": "GND" } }
+        ]
+    });
+    let out = tools.run("add_parts", add, &ctx).unwrap();
+    assert_eq!(out["part_count"], serde_json::json!(3), "appended to 3 parts: {out}");
+    assert!(out["added"].as_array().unwrap().iter().any(|r| r == "J1"), "J1 reported added: {out}");
+
+    // get_board reflects all three (the first two were NOT re-sent).
+    let gb = tools.run("get_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(gb["summary"]["part_count"], serde_json::json!(3), "draft has 3 parts: {gb}");
+
+    // A reference already on the board is rejected.
+    let dup = serde_json::json!({
+        "parts": [
+            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
+              "pad_nets": { "1": "A", "2": "B" } }
+        ]
+    });
+    let out = tools.run("add_parts", dup, &ctx).unwrap();
+    assert!(
+        out["error"].as_str().is_some_and(|e| e.contains("already on the board")),
+        "duplicate reference rejected: {out}"
+    );
+}
+
+#[test]
 fn create_board_unknown_footprint_errors_with_suggestions() {
     let (ctx, _guard) = fixture_ctx();
     let tools = Tools::new();
@@ -736,6 +796,8 @@ fn board_draft_round_trips_through_the_workspace() {
         keepouts: vec![],
         hints: PlacementHints::default(),
         last_placement: None,
+        last_place_illegal: false,
+        outline: None,
     };
     draft.save(&ctx).unwrap();
     let loaded = BoardDraft::load(&ctx).expect("draft loads back");
@@ -767,6 +829,76 @@ fn placed_board_ctx() -> (ToolCtx, tempfile::TempDir, Tools) {
     let out = tools.run("create_board", board, &ctx).unwrap();
     assert_eq!(out["ok"], serde_json::json!(true), "create_board: {out}");
     (ctx, guard, tools)
+}
+
+#[test]
+fn place_board_failure_suggests_a_larger_bounds() {
+    // Three parts crammed into a 3x3 mm board cannot fit; the failure must hand the
+    // agent a CONCRETE, larger min-bounds suggestion so it can retry deterministically.
+    let (ctx, _g) = fixture_ctx();
+    let tools = Tools::new();
+    let board = serde_json::json!({
+        "bounds": { "min_x": 0.0, "max_x": 3.0, "min_y": 0.0, "max_y": 3.0 },
+        "parts": [
+            { "reference": "J1", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
+              "pad_nets": { "1": "A", "2": "B" } },
+            { "reference": "J2", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
+              "pad_nets": { "1": "A", "2": "B" } },
+            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
+              "pad_nets": { "1": "A", "2": "B" } }
+        ]
+    });
+    tools.run("create_board", board, &ctx).unwrap();
+    let out = tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["legal"], serde_json::json!(false), "should not fit in 3x3: {out}");
+    let s = &out["suggested_min_bounds_mm"];
+    let (w, h) = (s["w"].as_f64().unwrap(), s["h"].as_f64().unwrap());
+    assert!(w > 3.0 && h > 3.0, "suggestion must exceed the failing bounds: {out}");
+    assert!(
+        out["parts_courtyard_area_mm2"].as_f64().unwrap() > 0.0,
+        "must report the parts' courtyard area: {out}"
+    );
+}
+
+#[test]
+fn locked_part_rejects_non_axis_aligned_rotation() {
+    // A 45° lock must be rejected at the surface (the placer/synth are axis-aligned
+    // only) with a clear message — not silently routed to wrong pads then failed at
+    // export. 0/90/180/270 are accepted.
+    let (ctx, _g) = fixture_ctx();
+    let tools = Tools::new();
+    let bad = tools.run(
+        "create_board",
+        serde_json::json!({
+            "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
+            "parts": [
+                { "reference": "U1", "footprint": "Fixtures:R_0603_1608Metric",
+                  "pad_nets": { "1": "A", "2": "B" },
+                  "locked": { "x": 15.0, "y": 10.0, "rotation": 45 } }
+            ]
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert!(
+        bad["error"].as_str().is_some_and(|e| e.contains("not supported")),
+        "45° lock must be rejected: {bad}"
+    );
+    let ok = tools.run(
+        "create_board",
+        serde_json::json!({
+            "overwrite": true,
+            "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
+            "parts": [
+                { "reference": "U1", "footprint": "Fixtures:R_0603_1608Metric",
+                  "pad_nets": { "1": "A", "2": "B" },
+                  "locked": { "x": 15.0, "y": 10.0, "rotation": 90 } }
+            ]
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(ok["ok"], serde_json::json!(true), "90° lock must be accepted: {ok}");
 }
 
 #[test]
@@ -866,11 +998,17 @@ fn export_board_requires_place_and_route_then_writes_parseable_board() {
     let copper = extract_copper(&path).expect("extract_copper");
     assert!(!copper.traces.is_empty(), "exported board carries routed copper");
 
-    // No silkscreen graphics leaked into the synthesized board.
+    // Silkscreen is kept so the board renders like a real PCB: reference
+    // designators on F.SilkS and component outline graphics. (The Value property
+    // is hidden, not rendered, so the long footprint name never clutters.)
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(
-        !text.contains("(layer \"F.SilkS\")") && !text.contains("(layer \"B.SilkS\")"),
-        "exported board must be silk-graphic-free"
+        text.contains("(layer \"F.SilkS\")"),
+        "exported board must keep silkscreen (refs + outlines) for a real-board render"
+    );
+    assert!(
+        text.contains("(property \"Value\"") && text.contains("(hide yes)"),
+        "the Value property must be hidden, not rendered at full size"
     );
 
     // DRC is reported as run-or-skipped depending on the environment.
@@ -908,6 +1046,9 @@ fn export_board_e2e_kicad_drc_clean() {
 
     let drc = &out["drc"];
     assert_eq!(drc["ran"], serde_json::json!(true), "DRC should have run: {out}");
+    // Strict: zero copper-layer violations of ANY severity (the detailed router's
+    // spurious via_dangling vias are dropped at the stitch source, so this stays
+    // clean — and now guards against that regression).
     assert_eq!(
         drc["copper_violations"], serde_json::json!(0),
         "exported board must be copper-DRC-clean: {out}"

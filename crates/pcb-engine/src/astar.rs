@@ -85,6 +85,20 @@ pub struct AStarCosts {
     /// for the common single-layer net; only if that fails does it retry with vias
     /// allowed. Correct either way (a net that needs a via just falls to the retry).
     pub allow_via: bool,
+    /// Bitmask of PLANE layers (bit `l` set ⇒ layer `l` carries a solid GND/VCC
+    /// plane). The search never *routes* on a plane layer — signal copper there would
+    /// short to the plane — so the via step skips these layers as destinations; a via
+    /// still passes THROUGH them (a through-via, anti-padded at synth). `0` (default)
+    /// = every layer is a signal layer (2-layer / fixture default). This is what lets
+    /// an inner BGA ball escape F→B instead of taking the cheaper F→In1 hop onto the
+    /// plane and being dropped as a short.
+    pub plane_mask: u32,
+    /// Extra planar clearance (grid cells, per LAYER) the CURRENT net's trace needs
+    /// beyond the min-width clearance already baked into the grid: `ceil((w-min)/2 /
+    /// pitch)`. `0` (the default, every min-width net) means no scan — bit-identical to
+    /// before. A wider power/HF net scans this radius so its fat copper keeps full
+    /// clearance without inflating spacing for thin nets.
+    pub trace_clear_radius_cells: usize,
 }
 
 impl Default for AStarCosts {
@@ -98,6 +112,8 @@ impl Default for AStarCosts {
             moves: MoveSet::Orthogonal,
             via_clear_radius_cells: 0,
             allow_via: true,
+            plane_mask: 0,
+            trace_clear_radius_cells: 0,
         }
     }
 }
@@ -263,6 +279,12 @@ pub fn search_bounded(
             if !grid.is_free_for(next.layer, next.ix, next.iy, conn) {
                 continue;
             }
+            // A wider-than-min net keeps its extra half-width clear of foreign copper.
+            if costs.trace_clear_radius_cells > 0
+                && !planar_clear(grid, conn, next.layer, next.ix, next.iy, costs.trace_clear_radius_cells)
+            {
+                continue;
+            }
             let bend = if matches!(heading, Heading::None | Heading::Via) || heading == dir {
                 0
             } else {
@@ -293,6 +315,11 @@ pub fn search_bounded(
                     iy: ny as usize,
                 };
                 if !grid.is_free_for(next.layer, next.ix, next.iy, conn) {
+                    continue;
+                }
+                if costs.trace_clear_radius_cells > 0
+                    && !planar_clear(grid, conn, next.layer, next.ix, next.iy, costs.trace_clear_radius_cells)
+                {
                     continue;
                 }
                 // Both orthogonal neighbours bridging this diagonal must be free
@@ -333,6 +360,11 @@ pub fn search_bounded(
         {
             for layer in 0..grid.layer_count {
                 if layer == cur.layer {
+                    continue;
+                }
+                // Never route ON a plane layer (a signal there shorts to the plane);
+                // a via still tunnels through it to reach the far signal layer.
+                if costs.plane_mask & (1u32 << layer) != 0 {
                     continue;
                 }
                 let next = State {
@@ -381,6 +413,32 @@ const DIAGONALS: [(Heading, isize, isize); 4] = [
 /// Chebyshev box) enforces a via's clearance halo at its true geometry, so a
 /// spontaneous via cannot sit too close to foreign copper without over-blocking the
 /// box corners.
+/// Is every cell within `radius_cells` (Euclidean) of `(ix,iy)` on `layer` free for
+/// `conn`? The single-layer analog of [`via_barrel_clear`]: a wider-than-min trace must
+/// keep its extra half-width clear of foreign copper on its OWN layer (a trace lives on
+/// one layer, unlike a through via). Off-board reads blocked — fat copper may not poke
+/// past the edge. `conn`'s own copper reads free, so a trace runs freely along itself.
+fn planar_clear(grid: &RouteGrid, conn: usize, layer: usize, ix: usize, iy: usize, radius_cells: usize) -> bool {
+    let r = radius_cells as isize;
+    let r2 = (radius_cells * radius_cells) as isize;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy > r2 {
+                continue;
+            }
+            let hx = ix as isize + dx;
+            let hy = iy as isize + dy;
+            if hx < 0 || hy < 0 || hx >= grid.nx as isize || hy >= grid.ny as isize {
+                return false;
+            }
+            if !grid.is_free_for(layer, hx as usize, hy as usize, conn) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn via_barrel_clear(grid: &RouteGrid, conn: usize, ix: usize, iy: usize, radius_cells: usize) -> bool {
     let r = radius_cells as isize;
     let r2 = (radius_cells * radius_cells) as isize;
@@ -474,6 +532,8 @@ mod tests {
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
         }
     }
 

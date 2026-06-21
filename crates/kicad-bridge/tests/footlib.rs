@@ -27,6 +27,36 @@ fn close(a: f64, b: f64) -> bool {
 // ── fixture parse correctness (no KiCAD needed) ──────────────────────────────
 
 #[test]
+fn arc_courtyard_bulge_is_captured() {
+    // kiutils 0.3 drops an fp_arc's (mid) apex; the courtyard parser must still
+    // bound the bulge from start/end. This footprint's right-end arc bulges to
+    // x=8.47 and the left to x=-3.59 → courtyard x must span [-3.59, 8.47].
+    let fp = load("ArcCourtyard");
+    assert_eq!(fp.courtyard_source, CourtyardSource::Crtyd);
+    assert!(
+        fp.courtyard.max_x >= 8.46,
+        "right arc bulge missed: max_x={}",
+        fp.courtyard.max_x
+    );
+    assert!(
+        fp.courtyard.min_x <= -3.58,
+        "left arc bulge missed: min_x={}",
+        fp.courtyard.min_x
+    );
+}
+
+#[test]
+fn circle_courtyard_radius_is_captured() {
+    // A circular courtyard ((center 1.25 0) (end 5.25 0) → r=4) must bound the
+    // whole disc x=[-2.75, 5.25], not just the center+edge sliver — else a radial
+    // cap / round footprint is badly under-sized and overlaps its neighbours.
+    let fp = load("CircleCourtyard");
+    assert_eq!(fp.courtyard_source, CourtyardSource::Crtyd);
+    assert!(close(fp.courtyard.width(), 8.0), "circle width {}", fp.courtyard.width());
+    assert!(close(fp.courtyard.height(), 8.0), "circle height {}", fp.courtyard.height());
+}
+
+#[test]
 fn r0603_two_smd_pads_and_rect_courtyard() {
     let fp = load("R_0603_1608Metric");
     assert_eq!(fp.pad_count(), 2);
