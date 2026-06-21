@@ -92,7 +92,7 @@ impl SymbolIndex {
 
     /// Return the `n` best matches for `query`.
     ///
-    /// Ranking is fzf-style subsequence scoring (see [`rank`]). Pin counts are
+    /// Ranking is fzf-style subsequence scoring (see `rank`). Pin counts are
     /// resolved lazily, for the returned hits only.
     pub fn search(&self, query: &str, n: usize) -> Vec<Hit> {
         let needle = normalize(query);

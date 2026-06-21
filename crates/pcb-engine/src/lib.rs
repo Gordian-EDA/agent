@@ -3,7 +3,7 @@
 //! Pure geometry crate; no I/O beyond `serde`. KiCAD file access lives in
 //! `kicad-bridge`. The LLM sits *around* this crate, never inside it.
 //!
-//! - [`problem`] — [`RouteProblem`] / [`RouteSolution`] data model,
+//! - [`problem`] — [`problem::RouteProblem`] / [`problem::RouteSolution`] data model,
 //!   SimpleRouteJson-compatible.
 
 pub mod astar;

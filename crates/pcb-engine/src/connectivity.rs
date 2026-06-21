@@ -20,7 +20,7 @@
 //! and no component may carry copper owned by two different connection names
 //! (else `CrossNetMerge`).
 //!
-//! ## Touch geometry (all distances in mm, slop [`EPS`])
+//! ## Touch geometry (all distances in mm, slop `EPS`)
 //!
 //! Copper is fattened by half its width; two elements touch when their fattened
 //! shapes overlap:

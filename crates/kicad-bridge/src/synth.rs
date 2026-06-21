@@ -42,7 +42,7 @@
 //! footprint rotation on the footprint-level `(at x y rot)`; each pad's own
 //! stored rotation is *absolute* (footprint angle folded in), so a rotated
 //! footprint needs every pad's `(at … rot)` bumped by the footprint angle — the
-//! convention [`crate::pcb::pad_center`] reads back. v1 supports 0/90/180/270
+//! convention `pad_center` reads back. v1 supports 0/90/180/270
 //! (the only values the placer emits) by adding the footprint angle to each pad's
 //! `(at)` rotation; any other angle is rejected with a clear error rather than
 //! emitting wrong geometry (honest rejection beats a silent short).

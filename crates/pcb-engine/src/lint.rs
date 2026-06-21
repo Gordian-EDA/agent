@@ -30,7 +30,7 @@
 //! Clearance is between copper **edges**: the gap is the distance between
 //! centrelines (or centre-to-segment, etc.) minus the two half-widths. A via's
 //! half-width is its radius; a pad/obstacle is a hard rectangle (half-width 0).
-//! [`EPS`] of slop is allowed before a gap counts as a violation.
+//! `EPS` of slop is allowed before a gap counts as a violation.
 //!
 //! ## Structure
 //!

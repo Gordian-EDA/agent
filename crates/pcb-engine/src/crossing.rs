@@ -1,6 +1,6 @@
 //! Boundary crossing assignment: the first detailed-routing stage (slice 3).
 //!
-//! The slice-2 [`GlobalPlan`](crate::pathing::GlobalPlan) is a coarse, *cell-level*
+//! The slice-2 [`crate::pathing::GlobalPlan`] is a coarse, *cell-level*
 //! plan: each net crosses a sequence of mesh-edge boundaries, but every crossing
 //! carries only a placeholder coordinate — the shared-boundary **midpoint** (see
 //! [`Crossing::at`](crate::pathing::Crossing)). If the detailed router took those
@@ -20,7 +20,7 @@
 //! ## Algorithm
 //!
 //! 1. **Gather crossings.** Walk every net's cell paths. Each non-final step has
-//!    an `exit` [`Crossing`]; that is one *use* of a mesh edge on a layer, shared
+//!    an `exit` `Crossing`; that is one *use* of a mesh edge on a layer, shared
 //!    between the step's leaf (the exit side) and the neighbour (the entry side of
 //!    the next step). We record, per `(edge, layer)`, every using net together
 //!    with the two anchor points that decide where on the boundary the net "wants"
@@ -110,7 +110,7 @@ pub struct Terminal {
 ///
 /// A net that merely passes through a leaf has an [`TerminalKind::Entry`] and an
 /// [`TerminalKind::Exit`]; a net that starts/ends here has its
-/// [`TerminalKind::Pad`](s); a layer change inside the leaf adds a
+/// `TerminalKind::Pad`; a layer change inside the leaf adds a
 /// [`TerminalKind::Via`]. The router connects all terminals in a job into copper.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -124,7 +124,7 @@ pub struct CellJob {
     pub terminals: Vec<Terminal>,
 }
 
-/// The concrete crossing point assigned to one plan [`Crossing`], replacing its
+/// The concrete crossing point assigned to one plan `Crossing`, replacing its
 /// default midpoint. Carried separately from the cell jobs so Task 3 can stitch
 /// per-net polylines across cells by matching `(net, edge, layer)`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

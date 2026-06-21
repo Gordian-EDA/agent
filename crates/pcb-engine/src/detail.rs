@@ -1,6 +1,6 @@
 //! Per-cell detailed router: the second detailed-routing stage (slice 3, Task 2).
 //!
-//! [`crate::crossing::assign_crossings`] turns a slice-2 [`GlobalPlan`] into a
+//! [`crate::crossing::assign_crossings`] turns a slice-2 [`crate::pathing::GlobalPlan`] into a
 //! list of [`CellJob`]s — one per `(leaf, net)` — each carrying the terminals
 //! (pads, boundary entry/exit points, via sites) the net must connect *inside*
 //! that one quadtree leaf. This stage routes each job with a fine **octilinear**

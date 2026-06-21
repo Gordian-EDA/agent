@@ -1,7 +1,7 @@
 //! Footprint → placement bridge: turn a parsed [`Footprint`] into a
 //! [`pcb_engine::placement::Part`], and move a template board's footprints to an
 //! engine placement. The placement-side companion to [`crate::pcb`]'s
-//! board↔[`RouteProblem`] translation.
+//! board↔`RouteProblem` translation.
 //!
 //! ## The courtyard-enclosing rule (the load-bearing invariant)
 //!

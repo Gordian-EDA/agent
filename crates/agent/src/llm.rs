@@ -297,7 +297,7 @@ impl OpenAiClient {
     }
 
     /// Set the sampling temperature (builder-style). Left unset by default — see
-    /// [`OpenAiClient::temperature`].
+    /// `OpenAiClient::temperature`.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.temperature = Some(temperature);
         self

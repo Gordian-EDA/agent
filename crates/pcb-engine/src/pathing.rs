@@ -39,7 +39,7 @@
 //! ## Determinism
 //!
 //! Net order is fixed; the A\* heap tie-breaks on `(cost, leaf, layer)` with a
-//! total float order ([`OrdF64`]); usage and history live in dense `Vec`s keyed
+//! total float order (`OrdF64`); usage and history live in dense `Vec`s keyed
 //! by edge/leaf id; rip-up sets are collected in sorted order. Two runs serialize
 //! byte-for-byte (a determinism test asserts this).
 
@@ -205,7 +205,7 @@ pub struct EdgeHotspot {
 /// The honest congestion report for a [`global_route`] run.
 ///
 /// A plan is *feasible* iff `final_overflow == 0 && unrouted.is_empty()`; see
-/// [`GlobalRouteResult::is_feasible`]. Hitting [`MAX_ITERATIONS`] with overflow
+/// [`GlobalRouteResult::is_feasible`]. Hitting `MAX_ITERATIONS` with overflow
 /// remaining is visible here (`iterations == MAX_ITERATIONS` with
 /// `final_overflow > 0`), never silently absorbed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

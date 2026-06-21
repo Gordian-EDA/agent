@@ -7,7 +7,7 @@
 //! co-place them. This crate models the graph ([`CircuitGraph`]) and matches it
 //! against a **library of declarative patterns** ([`library`]) with an attributed
 //! subgraph-similarity algorithm ([`matcher`]). Idioms can also be **derived** from
-//! an existing design ([`derive`]).
+//! an existing design ([`mod@derive`]).
 //!
 //! Design goals:
 //! - **Pure & testable.** No KiCAD, geometry, or I/O — just data in, matches out.

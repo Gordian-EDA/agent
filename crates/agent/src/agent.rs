@@ -14,7 +14,7 @@
 //!
 //! ## Context is persistent
 //!
-//! The conversation lives in [`Agent::history`] and is carried across turns, so
+//! The conversation lives in `Agent::history` and is carried across turns, so
 //! "are you done?" after a build refers to the build. The history can be
 //! unwound one turn at a time ([`Agent::pop_last_turn`]), cleared
 //! ([`Agent::clear_history`]), or compacted into a summary ([`Agent::compact`]).
@@ -169,7 +169,7 @@ fn emit(events: Events<'_>, ev: AgentEvent) {
 pub enum StopReason {
     /// The model returned a final text with no pending tool calls — done.
     Completed,
-    /// The loop hit [`MAX_ITERATIONS`] before the model finished; the turn was
+    /// The loop hit `MAX_ITERATIONS` before the model finished; the turn was
     /// cut off mid-work. The conversation persists, so a follow-up "continue"
     /// resumes it.
     IterationCap,
@@ -194,7 +194,7 @@ pub struct TurnOutcome {
 /// registry.
 ///
 /// The context lives in an [`Arc`] because every tool call executes on the
-/// blocking thread pool (see [`Agent::run_tool_blocking`]) — a compile, render,
+/// blocking thread pool (see `Agent::run_tool_blocking`) — a compile, render,
 /// or `kicad-cli` subprocess must never stall the caller's (possibly
 /// single-threaded, UI-owning) async runtime.
 pub struct Agent {
@@ -343,12 +343,12 @@ impl Agent {
     ///
     /// Loops: call the model → run any requested tools (gating `apply_design`
     /// commits through `approvals`) → feed results back → repeat, until the model
-    /// returns a final text with no pending tool calls, or [`MAX_ITERATIONS`] is
+    /// returns a final text with no pending tool calls, or `MAX_ITERATIONS` is
     /// reached.
     ///
     /// The turn appends to the agent's persistent history, so later turns see
     /// the full conversation. A turn that was cancelled mid-flight may leave a
-    /// ragged tail (a dangling `tool_use`); [`repair_history`] patches that
+    /// ragged tail (a dangling `tool_use`); `repair_history` patches that
     /// before the new turn starts.
     ///
     /// `events`, when `Some`, receives [`AgentEvent`]s as the loop runs so a UI

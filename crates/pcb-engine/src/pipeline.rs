@@ -5,7 +5,7 @@
 //!
 //! 1. [`global_route`] — coarse, congestion-negotiated cell paths over the mesh.
 //! 2. [`assign_crossings`] — concrete per-boundary crossing points + cell jobs.
-//! 3. [`route_cells`] — fine octilinear A* inside each cell, emitting cell-local
+//! 3. `route_cells` — fine octilinear A* inside each cell, emitting cell-local
 //!    polylines that meet **byte-exactly** at the shared crossing points.
 //!
 //! [`route_detailed`] folds every stage's failures into one [`RouteResult`] with
@@ -22,7 +22,7 @@
 //!
 //! ## Stitching (the connectivity contract)
 //!
-//! [`route_cells`] snaps every terminal endpoint to its exact mm position, so a
+//! `route_cells` snaps every terminal endpoint to its exact mm position, so a
 //! leaf's `Exit` and the neighbour's `Entry` are byte-identical [`Point2`]s.
 //! Stitching therefore joins cell-local polylines **by exact coordinate
 //! identity**: per net, per layer, two polylines that share a byte-identical

@@ -187,7 +187,7 @@ impl Leaf {
     }
 
     /// Whether FOREIGN copper (a pad of a net other than `conn`) covers this leaf
-    /// on `layer`. Distinct from [`capacity_for`] == 0, which is ALSO true for a
+    /// on `layer`. Distinct from `capacity_for` == 0, which is ALSO true for a
     /// leaf whose own track capacity is 0 (a small cell, or one filled by the
     /// net's OWN pad). A net must be able to start at and reach its own pad's
     /// cell even though the pad zeroes that cell's track capacity — so endpoint

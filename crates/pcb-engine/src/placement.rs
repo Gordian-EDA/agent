@@ -19,17 +19,17 @@
 //!
 //! ## The two stages
 //!
-//! 1. **Force-directed seed** ([`force_layout`]): parts start on a deterministic
+//! 1. **Force-directed seed** (`force_layout`): parts start on a deterministic
 //!    grid sorted by reference, then relax under net centroid springs, group
 //!    cohesion springs, region/edge pulls, short-range courtyard repulsion
 //!    (only on margin-inflated overlap — not a global n-body), and a bounds
 //!    clamp. Fixed iteration count with cooling; locked parts never move.
-//! 2. **Legalizer** ([`legalize`]): snap every movable part to the placement
+//! 2. **Legalizer** (`legalize`): snap every movable part to the placement
 //!    grid, then — processing parts area-descending — resolve any residual
 //!    courtyard overlap by a deterministic spiral search for the nearest free
 //!    grid cell, clamping in bounds. Locked parts are immovable obstacles.
 //!
-//! `legal` is then **verified by exact geometry** ([`is_legal`]) — never trusted
+//! `legal` is then **verified by exact geometry** (`is_legal`) — never trusted
 //! from the algorithm. If the legalizer cannot seat every part without overlap
 //! in bounds, the result is returned with `legal: false` and a report; the
 //! engine never panics and never silently overlaps.
@@ -398,7 +398,7 @@ pub struct PlaceReport {
     /// Half-perimeter wirelength over net bounding boxes (mm) — the cheap
     /// placement-quality number (lower is tighter).
     pub hpwl: f64,
-    /// The full [`place_cost`] of the final placement (overlap + wirelength +
+    /// The full `place_cost` of the final placement (overlap + wirelength +
     /// compaction + decoupling cohesion + silk gap). [`place_best`] selects the
     /// variant with the lowest layout_cost among those that route as cleanly, so
     /// the annealer's layout-quality gains are actually chosen.
@@ -641,7 +641,7 @@ fn place_cost(
     cost
 }
 
-/// Anneal `pos` (the force-directed seed) to a lower [`place_cost`]. Metropolis
+/// Anneal `pos` (the force-directed seed) to a lower `place_cost`. Metropolis
 /// acceptance with a linearly-cooled temperature; move set = relocate a part,
 /// swap two parts, or shift a whole decoupling cluster (anchor + its caps).
 /// Locked parts never move. Deterministic.
@@ -1181,7 +1181,7 @@ fn sign_nonzero(v: f64) -> f64 {
 
 // ── legalizer ────────────────────────────────────────────────────────────────
 
-/// Outcome counters from [`legalize`].
+/// Outcome counters from `legalize`.
 struct LegalizeStats {
     overlaps_resolved: usize,
     out_of_bounds_clamps: usize,
@@ -1191,7 +1191,7 @@ struct LegalizeStats {
 /// overlaps by a deterministic nearest-free-cell spiral, processing parts
 /// area-descending (big parts seat first). Locked parts are fixed obstacles.
 ///
-/// Records (and never trusts) — legality is re-checked by [`is_legal`] after.
+/// Records (and never trusts) — legality is re-checked by `is_legal` after.
 fn legalize(
     problem: &PlaceProblem,
     half: &[(f64, f64)],
