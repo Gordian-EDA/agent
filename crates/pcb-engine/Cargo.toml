@@ -9,5 +9,4 @@ description = "Deterministic copper autorouter and placement engine for KiCAD PC
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-thiserror.workspace = true
 rayon.workspace = true

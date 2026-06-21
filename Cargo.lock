@@ -90,7 +90,6 @@ dependencies = [
  "agent",
  "anyhow",
  "async-trait",
- "circuit-lang",
  "crossterm",
  "futures",
  "kicad-bridge",
@@ -170,9 +169,6 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 [[package]]
 name = "circuit-graph"
 version = "0.1.0"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "circuit-lang"
@@ -1076,7 +1072,6 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
- "thiserror",
 ]
 
 [[package]]

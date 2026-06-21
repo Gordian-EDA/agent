@@ -10,4 +10,3 @@ description = "Attributed circuit graph and declarative idiom matcher."
 # free of KiCAD/geometry concerns so it is fast to test and reusable. Only serde
 # (idioms cross the wire to the agent) and nothing else.
 [dependencies]
-serde = { workspace = true }
