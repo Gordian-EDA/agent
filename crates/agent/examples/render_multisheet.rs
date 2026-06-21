@@ -63,12 +63,15 @@ fn main() -> anyhow::Result<()> {
     // are ports/power symbols anyway) — never trading density for port-crowding. A single tightly-
     // coupled component (everything hangs off one MCU) is left intact. Pairs with the merge below so
     // sheets converge to a uniform ~TARGET parts. render_multisheet-only ⇒ engine/snapshots untouched.
-    const SPLIT_MAX: usize = 16;
+    // SPLIT_MAX env override (default 16): raise it to keep a big functional block WHOLE on one
+    // sheet — for testing cola-whole-block vs the SA's split-into-fragments.
+    let split_max: usize =
+        std::env::var("SPLIT_MAX").ok().and_then(|s| s.parse().ok()).unwrap_or(16);
     const TARGET: usize = 11;
     const RAIL_DEG: usize = 4;
     let mut eff: IndexMap<String, circuit_lang::model::Block> = IndexMap::new();
     for (bname, block) in &design.blocks {
-        if block.components.len() <= SPLIT_MAX {
+        if block.components.len() <= split_max {
             eff.insert(bname.clone(), block.clone());
             continue;
         }
