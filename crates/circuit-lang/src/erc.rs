@@ -112,6 +112,10 @@ fn is_passive(c: &Component) -> bool {
 fn on_gnd(it: &Item) -> bool {
     it.nets.iter().any(|n| rail_voltage(n) == Some(0.0))
 }
+fn is_diode(c: &Component) -> bool {
+    let p = c.part.to_uppercase();
+    p.contains("LED") || p.contains("DIODE") || p.ends_with(":D") || p.contains(":D_")
+}
 
 /// Run all deterministic quantitative checks, returning defect lines (same `- REFDES: ...` shape the
 /// LLM review emits, so the agent's run_turn_reviewed can union them).
@@ -135,7 +139,43 @@ pub fn erc_checks(d: &Design) -> Vec<String> {
     check_fb_divider(&items, &net_items, &mut out);
     check_dangling(&items, &mut out);
     check_crystal(&items, &net_items, &mut out);
+    check_polarity(&items, &net_items, &mut out);
     out
+}
+
+/// A diode/LED installed BACKWARDS: by the KiCAD Device:LED/D convention the anode is pin 2 / "A".
+/// If that anode pin reaches ground through a series resistor, it is sitting on the cathode (return)
+/// side — current can't flow anode→cathode, so the part is reversed. Covers the common indicator
+/// topology (supply → anode → LED → cathode → R → GND); FP-averse (the anode is normally the driven
+/// / supply side, not ground-through-a-resistor).
+fn check_polarity(items: &[Item], net_items: &HashMap<&str, Vec<usize>>, out: &mut Vec<String>) {
+    for it in items {
+        if !is_diode(it.comp) {
+            continue;
+        }
+        let anode = it.comp.pins.iter().find_map(|(k, t)| {
+            let ku = k.to_uppercase();
+            if (ku == "2" || ku == "A" || k == "+")
+                && let PinTarget::Net(n) = t
+            {
+                Some(n.as_str())
+            } else {
+                None
+            }
+        });
+        let Some(an) = anode else { continue };
+        let reversed = net_items.get(an).into_iter().flatten().any(|&ri| {
+            let r = &items[ri];
+            is_resistor(r.comp) && r.nets.len() == 2 && rail_voltage(far(r, an)) == Some(0.0)
+        });
+        if reversed {
+            out.push(format!(
+                "- {}: appears installed BACKWARDS — its anode reaches ground through a series \
+                 resistor (the cathode/return side); a diode/LED conducts anode→cathode",
+                it.refdes
+            ));
+        }
+    }
 }
 
 /// A 2-terminal passive that can't conduct: a pin left unconnected, or both pins on one net.
@@ -439,5 +479,33 @@ blocks:
       C2: {part: Device:C, value: 22pF, pins: {1: OSC2, 2: GND}}
 ");
         assert!(erc_checks(&d).is_empty(), "{:?}", erc_checks(&d));
+    }
+
+    #[test]
+    fn reversed_led_flagged() {
+        // anode (pin 2) on the ground-via-resistor side ⇒ backwards.
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      D1: {part: Device:LED, pins: {1: DRIVE, 2: LED_K}}
+      R1: {part: Device:R, value: 330R, pins: {1: LED_K, 2: GND}}
+");
+        assert!(erc_checks(&d).iter().any(|s| s.contains("D1") && s.contains("BACKWARDS")), "{:?}", erc_checks(&d));
+    }
+
+    #[test]
+    fn correct_led_not_flagged() {
+        // anode (pin 2) on the driven side, cathode (pin 1) to ground via R ⇒ correct.
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      D1: {part: Device:LED, pins: {1: LED_K, 2: DRIVE}}
+      R1: {part: Device:R, value: 330R, pins: {1: LED_K, 2: GND}}
+");
+        assert!(!erc_checks(&d).iter().any(|s| s.contains("BACKWARDS")), "{:?}", erc_checks(&d));
     }
 }
