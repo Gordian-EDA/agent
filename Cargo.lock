@@ -1525,6 +1525,7 @@ version = "0.1.0"
 dependencies = [
  "circuit-graph",
  "circuit-lang",
+ "cola",
  "crossmin",
  "indexmap",
  "kicad-bridge",
