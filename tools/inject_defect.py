@@ -131,7 +131,71 @@ def inject_disconnect(lines, seed):
             "detail": f"{refdes} pin {k} disconnected (was net {old}, now nc)"}
 
 
-INJECTORS = {"pinswap": inject_pinswap, "value": inject_value, "disconnect": inject_disconnect}
+def inject_railswap(lines, seed):
+    """Swap two POWER pins of an IC (e.g. VCC↔GND, or 3V3↔5V) — a power-domain / reversed-supply fault."""
+    cands = []
+    for refdes, idx, inner in find_pin_comps(lines):
+        pairs = parse_pairs(inner)
+        pwr = [(k, v) for k, v in pairs if is_power_or_nc(v) and unq(v).lower() != "nc"]
+        distinct = {unq(v): k for k, v in pwr}
+        if len(pairs) >= 4 and len(distinct) >= 2:
+            cands.append((refdes, idx, pairs, pwr))
+    if not cands:
+        return None
+    refdes, idx, pairs, pwr = cands[seed % len(cands)]
+    seen, chosen = {}, []
+    for k, v in pwr:
+        if unq(v) not in seen:
+            seen[unq(v)] = k
+            chosen.append(k)
+        if len(chosen) == 2:
+            break
+    k1, k2 = chosen
+    d = {p[0]: i for i, p in enumerate(pairs)}
+    pairs[d[k1]][1], pairs[d[k2]][1] = pairs[d[k2]][1], pairs[d[k1]][1]
+    lines[idx] = PINS.sub("pins: " + fmt_pairs(pairs), lines[idx], count=1)
+    return {"refdes": refdes, "type": "railswap",
+            "detail": f"swapped {refdes} power pins {k1} and {k2} — its supply rails are exchanged (e.g. VCC/GND reversed)"}
+
+
+def inject_reverse(lines, seed):
+    """Reverse a polarized part (diode/LED/electrolytic): swap its two terminals — a backwards-part fault."""
+    cands = []
+    for i, line in enumerate(lines):
+        rd = REFDES.match(line)
+        if rd and "positive:" in line and "negative:" in line:
+            cands.append(("pn", rd.group(1), i))
+    for refdes, idx, inner in find_pin_comps(lines):
+        if refdes[0] in "Dd" and refdes[1:].isdigit():
+            pairs = parse_pairs(inner)
+            if len(pairs) == 2 and all(unq(v).lower() != "nc" for _, v in pairs):
+                cands.append(("pins", refdes, idx))
+    if not cands:
+        return None
+    kind, refdes, idx = cands[seed % len(cands)]
+    if kind == "pn":
+        line = lines[idx]
+        pos = re.search(r"positive:\s*([^,}\s]+)", line).group(1)
+        neg = re.search(r"negative:\s*([^,}\s]+)", line).group(1)
+        line = re.sub(r"positive:\s*[^,}\s]+", f"positive: {neg}", line, count=1)
+        line = re.sub(r"negative:\s*[^,}\s]+", f"negative: {pos}", line, count=1)
+        lines[idx] = line
+    else:
+        inner = PINS.search(lines[idx]).group(1)
+        pairs = parse_pairs(inner)
+        pairs[0][1], pairs[1][1] = pairs[1][1], pairs[0][1]
+        lines[idx] = PINS.sub("pins: " + fmt_pairs(pairs), lines[idx], count=1)
+    return {"refdes": refdes, "type": "reverse",
+            "detail": f"reversed {refdes} polarity — its two terminals are swapped (part installed backwards)"}
+
+
+INJECTORS = {
+    "pinswap": inject_pinswap,
+    "value": inject_value,
+    "disconnect": inject_disconnect,
+    "railswap": inject_railswap,
+    "reverse": inject_reverse,
+}
 
 
 def main():
