@@ -7,6 +7,7 @@ edition.workspace = true
 circuit-lang = { path = "../circuit-lang" }
 circuit-graph = { path = "../circuit-graph" }
 crossmin = { path = "../crossmin" }
+cola = { path = "../cola" }
 kicad-bridge = { path = "../kicad-bridge" }
 kiutils_kicad.workspace = true
 tempfile.workspace = true

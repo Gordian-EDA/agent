@@ -1582,6 +1582,45 @@ pub fn emit_anneal(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result
     emit_strategy(env, design, ir, Box::new(Anneal))
 }
 
+/// EXPERIMENTAL constraint-based placement via the `cola` engine (stress majorization with
+/// VPSC-projected constraints). v1 is stress-only: items sharing a SIGNAL net attract to an
+/// ideal distance → a compact, connectivity-aware layout. Rails / high-fan-out buses are
+/// excluded (they couple everything). Residual overlaps are left to the existing `decongest`.
+/// Structural constraints (rails-horizontal, decoupling banks, signal-flow order) are Phase 2b.
+/// Mutates `items[*].at`. Gated behind COLA_PLACE; never on the default/reference path.
+fn cola_place(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) {
+    let n = items.len();
+    if n < 2 {
+        return;
+    }
+    // Clique-expand each signal net into pairwise attractions; skip rails/buses.
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for (net, pins) in inc {
+        if ir.rails.contains_key(net) || is_power_net(net) || pins.len() > 5 {
+            continue;
+        }
+        for a in 0..pins.len() {
+            for b in (a + 1)..pins.len() {
+                let (ia, ib) = (pins[a].0, pins[b].0);
+                if ia != ib {
+                    edges.push((ia, ib));
+                }
+            }
+        }
+    }
+    if edges.is_empty() {
+        return;
+    }
+    const IDEAL: f64 = 12.7; // ~10 grid between directly-connected parts
+    let sm = cola::StressMajorizer::new(n, &edges, IDEAL);
+    let x0: Vec<f64> = items.iter().map(|it| it.at[0]).collect();
+    let y0: Vec<f64> = items.iter().map(|it| it.at[1]).collect();
+    let (x, y) = sm.run(&x0, &y0, &[], &[], 200);
+    for (i, it) in items.iter_mut().enumerate() {
+        it.at = [crate::grid::snap(x[i]), crate::grid::snap(y[i])];
+    }
+}
+
 fn emit_strategy(
     env: &KicadEnv,
     design: &Design,
@@ -1617,7 +1656,15 @@ fn emit_strategy(
     // re-polishes (which would re-add a seating pass the large-board pick had
     // deliberately rejected). Greedy keeps the exact refine→polish order, so the
     // reference snapshots stay byte-identical.
-    strategy.search(env, &mut items, &inc, ir, &needs_flag, SEARCH_SEED);
+    // EXPERIMENTAL constraint-based placement (the `cola` engine), gated by COLA_PLACE so the
+    // default path + reference snapshots are untouched. Places by minimising graph stress with
+    // VPSC-projected constraints, then the usual decongest/align passes tidy up. Validate-first:
+    // this replaces the SA search to render cola's layout in isolation for A/B against the SA.
+    if std::env::var("COLA_PLACE").is_ok() {
+        cola_place(&mut items, &inc, ir);
+    } else {
+        strategy.search(env, &mut items, &inc, ir, &needs_flag, SEARCH_SEED);
+    }
     // Guarantee no body overlap: the cost-gated refine can leave two parts
     // touching when separating them would transiently raise routed cost (a local
     // minimum), so a final, unconditional relaxation pushes any remaining
