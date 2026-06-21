@@ -3,6 +3,7 @@
 # Local secrets — AWS Bedrock credentials, never commit
 .env
 .env.*
+!.env.example
 
 # Git worktrees (superpowers)
 /.worktrees/

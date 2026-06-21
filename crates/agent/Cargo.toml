@@ -2,6 +2,9 @@
 name = "agent"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider-agnostic LLM client and agent loop for the auto-pcb KiCAD design agent."
 
 [dependencies]
 anyhow.workspace = true

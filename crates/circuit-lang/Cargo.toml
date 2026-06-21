@@ -2,6 +2,9 @@
 name = "circuit-lang"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Parser, linter, and canonical emitter for the auto-pcb circuit markup language."
 
 [dependencies]
 saphyr.workspace = true

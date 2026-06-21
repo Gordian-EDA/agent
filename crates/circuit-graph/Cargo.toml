@@ -2,6 +2,9 @@
 name = "circuit-graph"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Attributed circuit graph and declarative idiom matcher."
 
 # Pure, dependency-light: the attributed circuit graph + idiom matcher must stay
 # free of KiCAD/geometry concerns so it is fast to test and reusable. Only serde

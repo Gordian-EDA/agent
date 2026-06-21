@@ -2,6 +2,9 @@
 name = "crossmin"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Layered crossing-minimisation layout for schematic graphs."
 
 # Pure, dependency-FREE: a layered crossing-minimisation graph layout (the Sugiyama
 # pipeline). No KiCAD/geometry/serde concerns — the caller adapts its parts+nets into

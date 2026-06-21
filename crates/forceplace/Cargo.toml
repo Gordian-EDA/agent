@@ -2,6 +2,9 @@
 name = "forceplace"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Force-directed 2-D component placement (Fruchterman-Reingold)."
 
 # Pure, dependency-FREE force-directed 2-D placement (Fruchterman-Reingold with
 # rectangle-aware repulsion). The caller adapts its anchors+nets into a `Graph` and maps

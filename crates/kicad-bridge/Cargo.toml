@@ -2,6 +2,9 @@
 name = "kicad-bridge"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "KiCAD file I/O: schematic and PCB synthesis plus symbol and footprint libraries."
 
 [dependencies]
 circuit-lang = { path = "../circuit-lang" }
