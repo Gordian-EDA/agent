@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: build · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The engines and many tests resolve real KiCAD symbol/footprint libraries; install KiCAD.
+      # Tests that need a model provider (the LLM agent loop) skip gracefully without API keys.
+      - name: Install KiCAD
+        run: |
+          sudo add-apt-repository --yes ppa:kicad/kicad-9.0-releases
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends kicad
+      - name: Build
+        run: cargo build --workspace --all-targets
+      - name: Test
+        run: cargo test --workspace
+
+  lint:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # NOTE: the codebase uses a hand-maintained compact style, not stock rustfmt, so there is
+      # no `cargo fmt --check` gate. Adopting rustfmt is a future one-time, whole-workspace change.
+      # clippy runs informationally for now (sch-layout still has known warnings being addressed);
+      # tighten to `-- -D warnings` once the whole workspace is clean.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
