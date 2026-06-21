@@ -24,9 +24,11 @@ use super::ui;
 const OUT_DIR: &str = "/tmp/tui_shots";
 
 // Cell geometry, in SVG user units. Monospace glyphs are centred per cell, so the
-// advance width never drifts off the grid.
+// advance width never drifts off the grid. CH is a generous ~1.5× line-height
+// (24/15) so the captures read airy, the way a comfortable terminal looks — real
+// terminal leading is the emulator's to set, but the screenshot is ours.
 const CW: f64 = 9.0;
-const CH: f64 = 19.0;
+const CH: f64 = 24.0;
 const FS: f64 = 15.0;
 
 // Default terminal fg/bg used for `Color::Reset`.
@@ -183,7 +185,9 @@ fn buffer_to_svg(buf: &Buffer) -> String {
             let italic = if m.contains(Modifier::ITALIC) { " font-style=\"italic\"" } else { "" };
             let dim = if m.contains(Modifier::DIM) { " opacity=\"0.55\"" } else { "" };
             let tx = x as f64 * CW + CW / 2.0;
-            let ty = y as f64 * CH + FS * 0.78;
+            // Baseline centred in the (now taller) cell: vertical middle + half the
+            // cap height, so glyphs sit mid-row rather than hugging the top.
+            let ty = y as f64 * CH + (CH + FS * 0.7) / 2.0;
             let _ = writeln!(
                 s,
                 "<text x=\"{tx:.1}\" y=\"{ty:.1}\" font-family=\"DejaVu Sans Mono, monospace\" \
