@@ -32,12 +32,59 @@ pub async fn review_netlist(
     intent: &str,
     netlist: &str,
 ) -> Result<(f64, Vec<String>)> {
-    let user = format!("Intended circuit: {intent}\n\nNetlist:\n{netlist}");
-    let completion = client.complete(REVIEW_SYSTEM, &[Message::user(user)], &[]).await?;
-    Ok(match extract_json(&completion.text) {
-        Some(v) => parse_review(&v),
-        None => (0.0, Vec::new()),
-    })
+    review_netlist_n(client, intent, netlist, 2).await
+}
+
+/// As [`review_netlist`], but with `samples` independent review passes. A single pass has real
+/// run-to-run variance: it can FALSE-NEGATIVE (miss a defect — validated: a 5V-MCU-on-3.3V slip a
+/// 1-sample review rated "clean") or fail to emit parseable JSON. Taking the UNION of high-confidence
+/// defects across N samples (with the lowest score) trades a little precision for the recall that
+/// matters in a fix loop — catch the fault, let the agent push back if it disagrees. Each sample
+/// retries its own parse once.
+pub async fn review_netlist_n(
+    client: &dyn LlmClient,
+    intent: &str,
+    netlist: &str,
+    samples: usize,
+) -> Result<(f64, Vec<String>)> {
+    let msgs = [Message::user(format!("Intended circuit: {intent}\n\nNetlist:\n{netlist}"))];
+    let mut union: Vec<String> = Vec::new();
+    let mut min_score = f64::INFINITY;
+    let mut any = false;
+    for _ in 0..samples.max(1) {
+        // One sample, with a single parse-retry (the reviewer reasons in prose then emits JSON,
+        // which occasionally fails to parse on the first try).
+        let mut parsed = None;
+        for _ in 0..2 {
+            let completion = client.complete(REVIEW_SYSTEM, &msgs, &[]).await?;
+            if let Some(v) = extract_json(&completion.text) {
+                parsed = Some(v);
+                break;
+            }
+        }
+        if let Some(v) = parsed {
+            any = true;
+            let (score, defects) = parse_review(&v);
+            min_score = min_score.min(score);
+            for d in defects {
+                if !union.iter().any(|e| same_defect(e, &d)) {
+                    union.push(d);
+                }
+            }
+        }
+    }
+    if !any {
+        return Ok((0.0, Vec::new())); // never parsed ⇒ conservative: nothing actionable
+    }
+    Ok((min_score, union))
+}
+
+/// Two defect lines are "the same" if they target the same refdes (the `- U2:` prefix) — so the
+/// union across samples doesn't feed the agent two phrasings of one fault.
+fn same_defect(a: &str, b: &str) -> bool {
+    let refdes = |s: &str| s.trim_start_matches("- ").split(':').next().unwrap_or("").trim().to_string();
+    let (ra, rb) = (refdes(a), refdes(b));
+    !ra.is_empty() && ra == rb
 }
 
 /// Pull the verdict JSON from a reasoning+JSON response (prefer the block after `FINAL_JSON:`,
