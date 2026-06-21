@@ -45,12 +45,11 @@ pub fn rail_voltage(net: &str) -> Option<f64> {
     if n == "GND" || n.starts_with("GND") || n == "VSS" || n.starts_with("AGND") || n.starts_with("DGND") {
         return Some(0.0);
     }
-    // d.dV  e.g. 3.3V
-    if let Some(p) = n.strip_suffix('V') {
-        if let Ok(v) = p.parse::<f64>() {
-            return Some(v);
-        }
-        // dVd  e.g. 3V3, 1V8 — the V is the decimal point
+    // d.dV (e.g. 3.3V); else dVd (e.g. 3V3, 1V8 — V is the decimal point) is handled below.
+    if let Some(p) = n.strip_suffix('V')
+        && let Ok(v) = p.parse::<f64>()
+    {
+        return Some(v);
     }
     if let Some(vpos) = n.find('V') {
         let (a, b) = (&n[..vpos], &n[vpos + 1..]);
@@ -285,7 +284,7 @@ fn check_fb_divider(items: &[Item], net_items: &HashMap<&str, Vec<usize>>, out: 
         for r in &rs {
             let f = far(r, net);
             match rail_voltage(f) {
-                Some(v) if v == 0.0 => rbot = r.comp.value.as_deref().and_then(parse_value),
+                Some(v) if v <= 0.0 => rbot = r.comp.value.as_deref().and_then(parse_value),
                 Some(v) => {
                     rtop = r.comp.value.as_deref().and_then(parse_value);
                     target = Some(v);
