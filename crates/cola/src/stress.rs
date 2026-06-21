@@ -42,10 +42,14 @@ impl StressMajorizer {
     /// Run constrained stress majorization from the given initial positions, returning the
     /// final `(x, y)`. `cons_x` / `cons_y` are the separation/alignment/equality constraints
     /// for each axis (variable indices match node indices).
+    /// `sizes[i] = (half_width, half_height)` of node i's bounding box (including any label
+    /// allowance). When non-empty, non-overlap separation constraints are generated each
+    /// projection so the result is collision-free; pass `&[]` to skip non-overlap.
     pub fn run(
         &self,
         x0: &[f64],
         y0: &[f64],
+        sizes: &[(f64, f64)],
         cons_x: &[Constraint],
         cons_y: &[Constraint],
         max_iter: usize,
@@ -56,8 +60,8 @@ impl StressMajorizer {
         let mut y = y0.to_vec();
         let mut last = self.stress(&x, &y);
         for _ in 0..max_iter {
-            self.majorize_axis(&mut x, &y, cons_x);
-            self.majorize_axis(&mut y, &x, cons_y);
+            self.majorize_axis(true, &mut x, &y, cons_x, sizes);
+            self.majorize_axis(false, &mut y, &x, cons_y, sizes);
             let s = self.stress(&x, &y);
             if (last - s).abs() <= 1e-6 * last.max(1e-9) {
                 break;
@@ -67,9 +71,17 @@ impl StressMajorizer {
         (x, y)
     }
 
-    /// One SMACOF (Guttman) majorization step along one axis, then projected onto `cons`.
-    /// `a` is the axis being updated (in/out); `other` is the fixed orthogonal axis.
-    fn majorize_axis(&self, a: &mut Vec<f64>, other: &[f64], cons: &[Constraint]) {
+    /// One SMACOF (Guttman) majorization step along one axis, then projected (with any
+    /// structural + generated non-overlap constraints) through VPSC. `a` is the axis being
+    /// updated (`is_x` true ⇒ x); `other` is the fixed orthogonal axis.
+    fn majorize_axis(
+        &self,
+        is_x: bool,
+        a: &mut Vec<f64>,
+        other: &[f64],
+        cons: &[Constraint],
+        sizes: &[(f64, f64)],
+    ) {
         let n = self.n;
         let mut target = a.clone();
         let mut weight = vec![1.0; n];
@@ -104,10 +116,30 @@ impl StressMajorizer {
                 weight[i] = wsum;
             }
         }
-        if cons.is_empty() {
+        // Non-overlap: for every pair overlapping on the OTHER axis (so a same-axis push is
+        // what separates them), add a separation constraint on THIS axis in current order, with
+        // gap = sum of half-extents. Generated fresh from current positions each projection.
+        let mut all_cons: Vec<Constraint> = cons.to_vec();
+        if !sizes.is_empty() {
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    let (oh_i, oh_j) =
+                        if is_x { (sizes[i].1, sizes[j].1) } else { (sizes[i].0, sizes[j].0) };
+                    if (other[i] - other[j]).abs() >= oh_i + oh_j {
+                        continue; // clear on the other axis ⇒ no same-axis push needed
+                    }
+                    let (w_i, w_j) =
+                        if is_x { (sizes[i].0, sizes[j].0) } else { (sizes[i].1, sizes[j].1) };
+                    let gap = w_i + w_j;
+                    let (l, r) = if a[i] <= a[j] { (i, j) } else { (j, i) };
+                    all_cons.push(Constraint::sep(l, r, gap));
+                }
+            }
+        }
+        if all_cons.is_empty() {
             *a = target;
         } else {
-            *a = Solver::new(&target, &weight, cons).solve();
+            *a = Solver::new(&target, &weight, &all_cons).solve();
         }
     }
 
@@ -183,7 +215,7 @@ mod tests {
         let sm = StressMajorizer::new(4, &[(0, 1), (1, 2), (2, 3)], 10.0);
         let x0 = vec![0.0, 1.0, 2.0, 3.0];
         let y0 = vec![0.0, 0.3, -0.2, 0.1];
-        let (x, y) = sm.run(&x0, &y0, &[], &[], 200);
+        let (x, y) = sm.run(&x0, &y0, &[], &[], &[], 200);
         for i in 0..3 {
             let dl = dist(&x, &y, i, i + 1);
             assert!((dl - 10.0).abs() < 1.5, "adj {i}: {dl}");
@@ -209,7 +241,7 @@ mod tests {
             Constraint::eq(1, 2, 0.0),
             Constraint::eq(2, 3, 0.0),
         ];
-        let (x, y) = sm.run(&x0, &y0, &cons_x, &cons_y, 200);
+        let (x, y) = sm.run(&x0, &y0, &[], &cons_x, &cons_y, 200);
         // all aligned in y
         for i in 0..3 {
             assert!((y[i] - y[i + 1]).abs() < 1e-6, "y not aligned: {y:?}");
@@ -226,12 +258,29 @@ mod tests {
     }
 
     #[test]
+    fn non_overlap_separates_coincident_nodes() {
+        // 3 disconnected 10×10 boxes piled at the origin: no stress, but non-overlap must
+        // push them apart so no two boxes overlap.
+        let sm = StressMajorizer::new(3, &[], 10.0);
+        let x0 = vec![0.0, 0.1, -0.1];
+        let y0 = vec![0.0, 0.1, 0.2];
+        let sizes = vec![(5.0, 5.0); 3];
+        let (x, y) = sm.run(&x0, &y0, &sizes, &[], &[], 200);
+        for i in 0..3 {
+            for j in (i + 1)..3 {
+                let clear = (x[i] - x[j]).abs() >= 10.0 - 1e-6 || (y[i] - y[j]).abs() >= 10.0 - 1e-6;
+                assert!(clear, "boxes {i},{j} overlap: ({},{}) ({},{})", x[i], y[i], x[j], y[j]);
+            }
+        }
+    }
+
+    #[test]
     fn star_keeps_leaves_near_center() {
         // star: center 0 connected to 1,2,3,4. Each leaf should sit ~ideal from center.
         let sm = StressMajorizer::new(5, &[(0, 1), (0, 2), (0, 3), (0, 4)], 10.0);
         let x0 = vec![0.0, 1.0, -1.0, 0.5, -0.5];
         let y0 = vec![0.0, 1.0, 1.0, -1.0, -1.0];
-        let (x, y) = sm.run(&x0, &y0, &[], &[], 300);
+        let (x, y) = sm.run(&x0, &y0, &[], &[], &[], 300);
         for leaf in 1..5 {
             let dl = dist(&x, &y, 0, leaf);
             assert!((dl - 10.0).abs() < 2.0, "leaf {leaf} dist {dl}");

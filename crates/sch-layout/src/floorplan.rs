@@ -1672,7 +1672,16 @@ fn cola_place(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) {
     let sm = cola::StressMajorizer::new(n, &edges, IDEAL);
     let x0: Vec<f64> = items.iter().map(|it| it.at[0]).collect();
     let y0: Vec<f64> = items.iter().map(|it| it.at[1]).collect();
-    let (x, y) = sm.run(&x0, &y0, &cons_x, &cons_y, 200);
+    // Label-padded half-extents (item_rect reserves the refdes/value text footprint), so
+    // cola's non-overlap leaves room for labels — the congestion that lost the A/B.
+    let sizes: Vec<(f64, f64)> = items
+        .iter()
+        .map(|it| {
+            let r = item_rect(it, [0.0, 0.0]);
+            ((r[2] - r[0]) / 2.0, (r[3] - r[1]) / 2.0)
+        })
+        .collect();
+    let (x, y) = sm.run(&x0, &y0, &sizes, &cons_x, &cons_y, 200);
     for (i, it) in items.iter_mut().enumerate() {
         it.at = [crate::grid::snap(x[i]), crate::grid::snap(y[i])];
     }
