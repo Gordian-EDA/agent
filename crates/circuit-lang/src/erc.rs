@@ -91,6 +91,15 @@ fn is_resistor(c: &Component) -> bool {
 fn is_led(c: &Component) -> bool {
     c.part.to_uppercase().contains("LED")
 }
+fn is_cap(c: &Component) -> bool {
+    c.part.contains(":C") || c.part == "C"
+}
+fn is_passive(c: &Component) -> bool {
+    is_resistor(c) || is_cap(c) || c.part.contains(":L")
+}
+fn on_gnd(it: &Item) -> bool {
+    it.nets.iter().any(|n| rail_voltage(n) == Some(0.0))
+}
 
 /// Run all deterministic quantitative checks, returning defect lines (same `- REFDES: ...` shape the
 /// LLM review emits, so the agent's run_turn_reviewed can union them).
@@ -112,7 +121,52 @@ pub fn erc_checks(d: &Design) -> Vec<String> {
     let mut out = Vec::new();
     check_led_current(&items, &net_items, &mut out);
     check_fb_divider(&items, &net_items, &mut out);
+    check_dangling(&items, &mut out);
+    check_crystal(&items, &net_items, &mut out);
     out
+}
+
+/// A 2-terminal passive that can't conduct: a pin left unconnected, or both pins on one net.
+fn check_dangling(items: &[Item], out: &mut Vec<String>) {
+    for it in items {
+        if !is_passive(it.comp) || it.comp.pins.len() != 2 {
+            continue;
+        }
+        if it.nets.len() < 2 {
+            out.push(format!(
+                "- {}: a 2-pin part has a pin left unconnected — it cannot conduct (does nothing)",
+                it.refdes
+            ));
+        } else if it.nets[0] == it.nets[1] {
+            out.push(format!(
+                "- {}: both pins are on the same net ({}) — the part is shorted out",
+                it.refdes, it.nets[0]
+            ));
+        }
+    }
+}
+
+/// A 2-pin crystal whose pin has no load capacitor to ground — unreliable / no oscillation.
+fn check_crystal(items: &[Item], net_items: &HashMap<&str, Vec<usize>>, out: &mut Vec<String>) {
+    for it in items {
+        if !it.comp.part.contains("Crystal") || it.nets.len() != 2 {
+            continue;
+        }
+        for &n in &it.nets {
+            let has_load = net_items
+                .get(n)
+                .into_iter()
+                .flatten()
+                .any(|&ci| is_cap(items[ci].comp) && on_gnd(&items[ci]));
+            if !has_load {
+                out.push(format!(
+                    "- {}: crystal pin on net {} has no load capacitor to ground — unreliable oscillation",
+                    it.refdes, n
+                ));
+                break;
+            }
+        }
+    }
 }
 
 /// LED + series resistor between a rail and ground: I = (Vrail - Vf)/R. Flag clear overcurrent
@@ -304,6 +358,56 @@ blocks:
     components:
       R1: {part: Device:R, value: 31.6k, pins: {1: '3V3', 2: VFB}}
       R2: {part: Device:R, value: 10k, pins: {1: VFB, 2: GND}}
+");
+        assert!(erc_checks(&d).is_empty(), "{:?}", erc_checks(&d));
+    }
+
+    #[test]
+    fn dangling_pin_flagged() {
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      C1: {part: Device:C, value: 100nF, pins: {1: SIG, 2: nc}}
+");
+        assert!(erc_checks(&d).iter().any(|s| s.contains("C1") && s.contains("unconnected")), "{:?}", erc_checks(&d));
+    }
+
+    #[test]
+    fn shorted_part_flagged() {
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: Device:R, value: 10k, pins: {1: A, 2: A}}
+");
+        assert!(erc_checks(&d).iter().any(|s| s.contains("R1") && s.contains("shorted")), "{:?}", erc_checks(&d));
+    }
+
+    #[test]
+    fn crystal_without_load_caps_flagged() {
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      Y1: {part: Device:Crystal, value: 8MHz, pins: {1: OSC1, 2: OSC2}}
+");
+        assert!(erc_checks(&d).iter().any(|s| s.contains("Y1") && s.contains("load cap")), "{:?}", erc_checks(&d));
+    }
+
+    #[test]
+    fn crystal_with_load_caps_ok() {
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      Y1: {part: Device:Crystal, value: 8MHz, pins: {1: OSC1, 2: OSC2}}
+      C1: {part: Device:C, value: 22pF, pins: {1: OSC1, 2: GND}}
+      C2: {part: Device:C, value: 22pF, pins: {1: OSC2, 2: GND}}
 ");
         assert!(erc_checks(&d).is_empty(), "{:?}", erc_checks(&d));
     }
