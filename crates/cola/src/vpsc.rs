@@ -234,12 +234,40 @@ impl Solver {
     }
 
     fn satisfy(&mut self) {
+        // Equality constraints must be tight regardless of slack sign (mergeLeft below only
+        // merges on slack < 0, which misses equalities whose right side is currently too far
+        // right). Make every equality active+tight first; the inequality pass then runs over
+        // the resulting blocks. Equalities are never split (refine skips them).
+        self.merge_equalities();
         let order = self.total_order();
         for v in order {
             let b = self.vars[v].block;
             if !self.blocks[b].deleted {
                 self.merge_left(b);
             }
+        }
+    }
+
+    fn merge_equalities(&mut self) {
+        for c in 0..self.cons.len() {
+            if !self.cons[c].equality {
+                continue;
+            }
+            let lvar = self.cons[c].left;
+            let rvar = self.cons[c].right;
+            let l = self.vars[lvar].block;
+            let r = self.vars[rvar].block;
+            if l == r {
+                continue; // already joined (e.g. an equality chain)
+            }
+            let mut dist = self.vars[rvar].offset - self.vars[lvar].offset - self.cons[c].gap;
+            let (into, from) = if self.blocks[r].vars.len() < self.blocks[l].vars.len() {
+                dist = -dist;
+                (l, r)
+            } else {
+                (r, l)
+            };
+            self.merge_block(into, from, c, dist);
         }
     }
 

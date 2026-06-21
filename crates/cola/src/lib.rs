@@ -5,6 +5,8 @@
 //! built on top of it (alternating x/y axes, each majorization step projected through
 //! VPSC). See `docs/specs/constraint-placement-and-vlm-structure.md`.
 
+pub mod stress;
 pub mod vpsc;
 
+pub use stress::StressMajorizer;
 pub use vpsc::{Constraint, Solver};
