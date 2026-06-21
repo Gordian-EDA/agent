@@ -61,6 +61,18 @@ pub fn rail_voltage(net: &str) -> Option<f64> {
             }
         }
     }
+    // SoC/FPGA core-rail convention: V<2 digits> = deci-volts (V12=1.2, V33=3.3, V25=2.5, V18=1.8).
+    // Bounded to low-voltage core rails (0.8-6 V), where the V-prefix naming is unambiguous; a true
+    // 12 V rail is conventionally "+12V"/"12V" (handled above), not "V12".
+    if let Some(d) = n.strip_prefix('V') {
+        let b = d.as_bytes();
+        if b.len() == 2 && b.iter().all(u8::is_ascii_digit) {
+            let v = (b[0] - b'0') as f64 + (b[1] - b'0') as f64 / 10.0;
+            if (0.8..=6.0).contains(&v) {
+                return Some(v);
+            }
+        }
+    }
     None
 }
 
@@ -299,8 +311,25 @@ mod tests {
         assert_eq!(rail_voltage("12V"), Some(12.0));
         assert_eq!(rail_voltage("3.3V"), Some(3.3));
         assert_eq!(rail_voltage("GND"), Some(0.0));
+        assert_eq!(rail_voltage("V12"), Some(1.2)); // SoC core-rail convention
+        assert_eq!(rail_voltage("V33"), Some(3.3));
         assert_eq!(rail_voltage("VOUT"), None); // ambiguous → skip
         assert_eq!(rail_voltage("VCC"), None);
+        assert_eq!(rail_voltage("V5"), None); // single digit → ambiguous
+    }
+
+    #[test]
+    fn wrong_v12_divider_flagged() {
+        // The recall harness's proven LLM miss: a 1.2 V (V12) core rail whose FB divider is 100x off.
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      R5: {part: Device:R, value: 150k, pins: {1: V12, 2: V12_FB}}
+      R6: {part: Device:R, value: 10k, pins: {1: V12_FB, 2: GND}}
+");
+        assert!(erc_checks(&d).iter().any(|s| s.contains("feedback-divider")), "{:?}", erc_checks(&d));
     }
 
     #[test]
