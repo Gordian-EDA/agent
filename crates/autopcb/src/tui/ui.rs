@@ -526,14 +526,18 @@ fn draw_running(f: &mut Frame, area: Rect, app: &App) {
 /// line wrapped + the hint line), capped so a huge diff can't squeeze out the
 /// transcript.
 fn diff_height(d: &PendingDiff, width: u16) -> u16 {
-    let inner_w = width.saturating_sub(MARGIN).max(1) as usize;
-    let summary_w: usize = 20 // "◆ PROPOSED CHANGES  "
-        + d.added.iter().chain(&d.removed).chain(&d.changed)
-            .map(|r| r.chars().count() + 2)
-            .sum::<usize>()
-        + 16; // " nets nn→nn "
+    let inner_w = width.saturating_sub(MARGIN + 2).max(1) as usize; // minus the border
+    let summary_w: usize = d
+        .added
+        .iter()
+        .chain(&d.removed)
+        .chain(&d.changed)
+        .map(|r| r.chars().count() + 4) // "+ r   "
+        .sum::<usize>()
+        + 16; // "nets nn → nn"
     let summary_rows = summary_w.div_ceil(inner_w) as u16;
-    (summary_rows + 1).clamp(2, 6)
+    // content = summary rows + a blank + the hint; +2 for the rounded border.
+    (summary_rows + 2 + 2).clamp(5, 9)
 }
 
 fn draw_diff(f: &mut Frame, area: Rect, app: &App) {
@@ -541,51 +545,53 @@ fn draw_diff(f: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
-    let mut spans: Vec<Span> = vec![Span::styled(
-        "◆ PROPOSED CHANGES  ",
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    )];
-    for r in &d.added {
-        spans.push(Span::styled(
-            format!("+{r} "),
-            Style::default().fg(Color::Green),
+    // An actionable card: a caution-yellow rounded frame (matching the composer's
+    // shape) titled "proposed changes", so a pending write reads as a deliberate
+    // gate rather than another transcript line.
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(Span::styled(
+            " proposed changes ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ));
+    let inner = block.inner(body(area));
+    f.render_widget(block, body(area));
+
+    let mut spans: Vec<Span> = Vec::new();
+    for r in &d.added {
+        spans.push(Span::styled(format!("+ {r}   "), Style::default().fg(Color::Green)));
     }
     for r in &d.removed {
-        spans.push(Span::styled(
-            format!("-{r} "),
-            Style::default().fg(Color::Red),
-        ));
+        spans.push(Span::styled(format!("- {r}   "), Style::default().fg(Color::Red)));
     }
     for r in &d.changed {
-        spans.push(Span::styled(
-            format!("~{r} "),
-            Style::default().fg(Color::Cyan),
-        ));
+        spans.push(Span::styled(format!("~ {r}   "), Style::default().fg(Color::Cyan)));
     }
-    spans.push(Span::raw(format!(
-        " nets {}→{} ",
-        d.nets_before, d.nets_after
-    )));
+    spans.push(Span::styled(
+        format!("nets {} → {}", d.nets_before, d.nets_after),
+        Style::default().fg(Color::DarkGray),
+    ));
 
     let hint = Line::from(vec![
         Span::styled(
-            "  [a]pprove",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            "[a] approve",
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         ),
-        Span::raw("   "),
+        Span::raw("    "),
         Span::styled(
-            "[r]eject",
+            "[r] reject",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
+        Span::styled("    Esc rejects", Style::default().fg(Color::DarkGray)),
     ]);
 
-    let para = Paragraph::new(vec![Line::from(spans), hint]).wrap(Wrap { trim: true });
-    f.render_widget(para, body(area));
+    let para =
+        Paragraph::new(vec![Line::from(spans), Line::from(""), hint]).wrap(Wrap { trim: true });
+    f.render_widget(para, inner);
 }
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {

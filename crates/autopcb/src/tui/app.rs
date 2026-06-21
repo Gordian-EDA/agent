@@ -382,7 +382,9 @@ pub struct App {
 impl App {
     /// Build a fresh cockpit over a project.
     pub fn new(status: Status) -> Self {
-        let mut app = Self {
+        // The empty transcript renders a welcome splash (see `ui::draw_welcome`),
+        // so no seed entry is needed.
+        Self {
             transcript: Vec::new(),
             input: String::new(),
             cursor: 0,
@@ -404,10 +406,7 @@ impl App {
             scroll: 0,
             status,
             should_quit: false,
-        };
-        // The empty transcript renders a welcome splash (see `ui::draw_welcome`),
-        // so no seed entry is needed.
-        app
+        }
     }
 
     /// Apply one message, mutating state and returning the shell's next action.
