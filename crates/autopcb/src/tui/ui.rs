@@ -1084,8 +1084,8 @@ mod tests {
             "diff": { "added": ["U1"], "removed": [], "changed": [], "nets_before": 0, "nets_after": 5 }
         })));
         let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("PROPOSED CHANGES"), "diff header:\n{text}");
-        assert!(text.contains("+U1"), "added refdes:\n{text}");
+        assert!(text.contains("proposed changes"), "diff header:\n{text}");
+        assert!(text.contains("+ U1"), "added refdes:\n{text}");
         assert!(text.contains("approve"), "approve hint:\n{text}");
         assert!(text.contains("reject"), "reject hint:\n{text}");
     }
@@ -1096,13 +1096,14 @@ mod tests {
             added: vec!["U1".into()],
             ..Default::default()
         };
-        // One summary row + the hint row, borderless.
-        assert_eq!(diff_height(&small, 80), 2);
+        // One summary row + a blank + the hint row, inside a rounded border (+2):
+        // floored at 5 so the card always frames cleanly.
+        assert_eq!(diff_height(&small, 80), 5);
         let big = PendingDiff {
             added: (0..60).map(|i| format!("U{i}")).collect(),
             ..Default::default()
         };
-        assert_eq!(diff_height(&big, 80), 6, "capped so it can't eat the transcript");
+        assert_eq!(diff_height(&big, 80), 9, "capped so it can't eat the transcript");
     }
 
     #[test]
