@@ -2,16 +2,29 @@
 
 A research-grounded design for breaking the placement ceiling.
 
-> **STATUS (2026-06-21): BUILT + VALIDATED on branch `experimental/cola-engine`.** The `cola` crate
-> (VPSC block solver + constrained stress-majorization + non-overlap + signal-flow) is done and
-> tested; it's wired into sch-layout behind a never-regress 3-way A/B (shelf/crossmin/cola). **Result:
-> cola is *competitive* with the mature SA — it TIES on dense MCU (8=8), gate-driver (7=7), and BGA
-> (9=9) sheets, wins occasionally (a decoupling-bank MCU 9 vs 8), and loses on simple/header sheets.
-> It does NOT broadly surpass the SA.** Honest reason: the multi-sheet partitioning keeps sheets small
-> (≤~20 parts), where the SA's local search already reaches near-optimal, so cola's global-optimisation
-> edge has nothing to exploit. A from-scratch constraint engine MATCHING the tuned SA in days validates
-> the approach; surpassing it would need large un-partitioned sheets (which the engine doesn't produce)
-> or the Phase 3 VLM-structure lever. Full detail in memory `cola-engine-state.md`.
+> **STATUS (2026-06-21): EXPLORATION COMPLETE — both D (cola) and E (VLM-structure) built, validated,
+> and concluded on branch `experimental/cola-engine`.**
+>
+> **Built:** the `cola` crate (VPSC block solver + constrained stress-majorization + label-aware
+> non-overlap + crossmin signal-flow ordering + per-IC cap-bank; pure, dependency-free, 11 tests),
+> integrated into sch-layout behind a never-regress 3-way A/B (shelf/crossmin/cola), plus a Phase-3 VLM
+> structure POC (`tools/vlm_structure.py` → soft `COLA_VLM` flow/alignment constraints). All env-gated;
+> `placement_snapshot` byte-identical throughout.
+>
+> **Result — both paths MATCH the mature pipeline but cannot beat it, for one architectural reason.**
+> On the small sheets the pipeline produces, cola TIES the SA (dense MCU 8=8, gate-driver 7=7, BGA 9=9).
+> On LARGE un-partitioned sheets cola WINS (6–7 vs 5 — global optimisation out-routes the SA's local
+> search; 61 vs 169 crossings). BUT the **agent self-partitions every design into functional blocks
+> ≤16 parts**, so the engine never receives a large sheet — cola's edge never materialises. The
+> VLM-structure POC emits *sensible* structure, yet ADDING it regresses already-good sheets (8→6/7):
+> no headroom, because small-sheet placement is already near-optimal. ⇒ **The quality lever is the
+> AGENT's design / partitioning, UPSTREAM of placement — not the placement engine.** A from-scratch
+> constraint engine and a VLM structure pass, both matching the tuned pipeline within days, is the
+> honest, negative-with-a-clear-reason research result.
+>
+> **Reusable if the architecture ever changes** (large un-partitioned sheets, or a single-page-overview
+> mode) — where both demonstrably DO help: the `cola` crate and `vlm_structure.py`. No further
+> placement work is warranted; the lever is upstream. Full journey in memory `cola-engine-state.md`.
 Captures a literature pass (see "Sources") so the build, when approved, targets the proven structural
 solution rather than another round of SA term-tweaks (which are exhausted — see
 `schematic-quality-and-the-critic-ceiling.md`).
