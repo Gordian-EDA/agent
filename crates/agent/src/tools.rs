@@ -763,6 +763,36 @@ impl Tools {
                 }),
             },
             ToolDef {
+                name: "resize_board".into(),
+                description: "Enlarge (or shrink) the board's rectangular BOUNDS without \
+                    re-sending parts — the cheap fix when place_board reports the board too tight \
+                    (legal=false + suggested_min_bounds_mm). All parts are kept; the stale \
+                    placement and route are cleared, so re-run place_board then route_board. \
+                    PREFER this over re-running create_board to relieve a too-tight placement \
+                    (create_board re-sends every part). A board with a custom outline is rejected \
+                    (resizing bounds alone would desync the outline — re-run create_board with new \
+                    bounds + outline)."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "bounds": {
+                            "type": "object",
+                            "description": "New board extent (mm). Use at least place_board's \
+                                suggested_min_bounds_mm.",
+                            "properties": {
+                                "min_x": { "type": "number" },
+                                "max_x": { "type": "number" },
+                                "min_y": { "type": "number" },
+                                "max_y": { "type": "number" }
+                            },
+                            "required": ["min_x", "max_x", "min_y", "max_y"]
+                        }
+                    },
+                    "required": ["bounds"]
+                }),
+            },
+            ToolDef {
                 name: "move_part".into(),
                 description: "Pin a part at a position (the triage lever): lock its \
                     origin to (x, y) with an optional rotation (0/90/180/270). The \
@@ -899,6 +929,7 @@ impl Tools {
             "place_board" => crate::tools_pcb::place_board(input, ctx),
             "set_placement_hints" => crate::tools_pcb::set_placement_hints(input, ctx),
             "set_constraints" => crate::tools_pcb::set_constraints(input, ctx),
+            "resize_board" => crate::tools_pcb::resize_board(input, ctx),
             "move_part" => crate::tools_pcb::move_part(input, ctx),
             "unlock_part" => crate::tools_pcb::unlock_part(input, ctx),
             "route_board" => crate::tools_pcb::route_board(input, ctx),

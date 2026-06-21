@@ -206,6 +206,7 @@ fn defs_lists_all_tools() {
         "place_board",
         "set_placement_hints",
         "set_constraints",
+        "resize_board",
         "move_part",
         "unlock_part",
         "route_board",
@@ -214,7 +215,7 @@ fn defs_lists_all_tools() {
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
-    assert_eq!(names.len(), 24, "expected exactly 24 tools, got {}: {:?}", names.len(), names);
+    assert_eq!(names.len(), 25, "expected exactly 25 tools, got {}: {:?}", names.len(), names);
 
     // Names are unique.
     let mut sorted = names.clone();
@@ -1199,6 +1200,71 @@ fn set_constraints_partial_rules_merge_and_clear_route() {
     assert_eq!(out["rules"]["min_trace_width"], serde_json::json!(0.2), "{out}");
     assert_eq!(out["route_cleared"], serde_json::json!(true), "{out}");
     assert!(ctx.workspace().read_route().is_none(), "route cleared by rule change");
+}
+
+#[test]
+fn resize_board_enlarges_keeps_parts_and_clears_state() {
+    let (ctx, _g, tools) = placed_board_ctx();
+    // Place + route so there is placement + route state for resize to clear.
+    tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(ctx.workspace().read_route().is_some(), "routed before resize");
+
+    let out = tools
+        .run(
+            "resize_board",
+            serde_json::json!({ "bounds": { "min_x": 0.0, "max_x": 200.0, "min_y": 0.0, "max_y": 200.0 } }),
+            &ctx,
+        )
+        .unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "{out}");
+    assert_eq!(out["bounds"]["max_x"], serde_json::json!(200.0), "{out}");
+    assert!(out["parts_kept"].as_u64().is_some_and(|n| n > 0), "parts kept: {out}");
+    assert_eq!(out["route_cleared"], serde_json::json!(true), "{out}");
+    assert!(ctx.workspace().read_route().is_none(), "route cleared by resize");
+
+    // Parts were kept, so a fresh place succeeds into the new (larger) bounds.
+    let p = tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(p["legal"], serde_json::json!(true), "re-place legal after enlarge: {p}");
+}
+
+#[test]
+fn resize_board_closes_the_too_tight_placement_trap() {
+    // The deterministic proof of the convergence fix: a board too small for its parts is illegal,
+    // and resize_board (not move_part, not re-create_board) is what makes the re-place legal.
+    let (ctx, _g) = fixture_ctx();
+    let tools = Tools::new();
+    let board = serde_json::json!({
+        "bounds": { "min_x": 0.0, "max_x": 4.0, "min_y": 0.0, "max_y": 4.0 },
+        "parts": [
+            { "reference": "J1", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
+              "pad_nets": { "1": "A", "2": "B" } },
+            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
+              "pad_nets": { "1": "A", "2": "B" } }
+        ]
+    });
+    assert_eq!(tools.run("create_board", board, &ctx).unwrap()["ok"], serde_json::json!(true));
+
+    // Too tight → place_board reports illegal + a suggested larger bounds.
+    let p = tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(p["legal"], serde_json::json!(false), "a 4x4 board can't hold a 1x2 header: {p}");
+    let sw = p["suggested_min_bounds_mm"]["w"].as_f64().expect("suggested w");
+    let sh = p["suggested_min_bounds_mm"]["h"].as_f64().expect("suggested h");
+
+    // The cheap lever: resize to the suggestion (no re-create_board, parts kept).
+    let r = tools
+        .run(
+            "resize_board",
+            serde_json::json!({ "bounds": { "min_x": 0.0, "max_x": sw + 2.0, "min_y": 0.0, "max_y": sh + 2.0 } }),
+            &ctx,
+        )
+        .unwrap();
+    assert_eq!(r["ok"], serde_json::json!(true), "resize: {r}");
+    assert_eq!(r["parts_kept"], serde_json::json!(2), "both parts kept: {r}");
+
+    // Re-place is now LEGAL — the trap is closed without re-sending parts.
+    let p2 = tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(p2["legal"], serde_json::json!(true), "legal after resize: {p2}");
 }
 
 #[test]

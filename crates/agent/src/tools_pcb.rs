@@ -1026,9 +1026,10 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
             "placement is legal (no courtyard overlap, all parts in bounds). \
              Call route_board next, or render_board to see it."
         } else {
-            "placement is NOT legal — the board is too tight for these parts. \
-             See suggested_min_bounds_mm: re-run create_board with at least that \
-             bounds (it keeps your aspect ratio), or relax rules / move-unlock parts."
+            "placement is NOT legal — the board is too tight for these parts. The fix is more \
+             room, not rearrangement: call resize_board with at least suggested_min_bounds_mm \
+             (it keeps all parts — far cheaper than re-create_board — then re-run place_board). \
+             move_part/unlock won't help when the board is simply too small for the courtyards."
         },
     });
     if let (Value::Object(o), Value::Object(e)) = (&mut out, extra) {
@@ -1334,6 +1335,55 @@ fn clear_route(ctx: &ToolCtx) -> Result<bool> {
     }
     std::fs::remove_file(ctx.workspace().route_path())?;
     Ok(true)
+}
+
+/// Resize the board's rectangular bounds WITHOUT re-sending parts — the cheap way to enlarge a
+/// board the placer reports too tight (place_board `legal=false` + `suggested_min_bounds_mm`).
+///
+/// Keeps every part; drops the now-stale placement + route so the agent re-places into the new
+/// room. This is what closes the placement-convergence trap: previously the only way to change
+/// board size was `create_board` (re-send ALL parts — expensive on a dense board), so a model
+/// facing an illegal placement would loop `move_part` (futile — the board is genuinely too small)
+/// until the iteration cap. For a custom (non-rect) outline, resizing the bounds alone would
+/// leave the outline inconsistent, so we honestly redirect those to `create_board`.
+pub fn resize_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let Some(mut draft) = BoardDraft::load(ctx) else {
+        return Ok(json!({ "error": "no board draft yet — call create_board first" }));
+    };
+    if draft.outline.is_some() {
+        return Ok(json!({
+            "error": "this board has a custom outline; resizing bounds alone would leave the \
+                      outline inconsistent — re-run create_board with the new bounds + outline",
+        }));
+    }
+    let new_bounds = match parse_bounds(input.get("bounds")) {
+        Ok(b) => b,
+        Err(e) => return Ok(json!({ "error": e })),
+    };
+    if new_bounds.max_x <= new_bounds.min_x || new_bounds.max_y <= new_bounds.min_y {
+        return Ok(json!({
+            "error": "bounds must have max_x > min_x and max_y > min_y",
+        }));
+    }
+    draft.bounds = new_bounds.clone();
+    // The old placement was made for the old (too-tight) bounds — drop it so the agent re-places
+    // into the new room, and clear any route built on it.
+    draft.last_placement = None;
+    draft.last_place_illegal = false;
+    let route_cleared = clear_route(ctx)?;
+    draft.save(ctx)?;
+    Ok(json!({
+        "ok": true,
+        "bounds": {
+            "min_x": new_bounds.min_x, "max_x": new_bounds.max_x,
+            "min_y": new_bounds.min_y, "max_y": new_bounds.max_y,
+        },
+        "parts_kept": draft.parts.len(),
+        "route_cleared": route_cleared,
+        "note": "board resized; all parts kept, placement cleared. Re-run place_board (then \
+                 route_board). This is the cheap enlarge — prefer it over re-create_board when \
+                 place_board reports the board too tight.",
+    }))
 }
 
 // ── move_part / unlock_part ──────────────────────────────────────────────────
