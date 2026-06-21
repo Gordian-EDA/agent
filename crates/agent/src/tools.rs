@@ -382,6 +382,29 @@ impl Tools {
                 }),
             },
             ToolDef {
+                name: "review_design".into(),
+                description: "Get an INDEPENDENT electrical-correctness review of the \
+                    current design. A FRESH reviewer (no memory of your work, so it \
+                    won't rationalise your choices) plus a deterministic exact-math ERC \
+                    audit the netlist for FUNCTIONAL faults that pass ERC and look clean \
+                    but are electrically wrong: pin-function mis-wires (a bus signal on \
+                    the wrong device pin), a part on the wrong voltage rail, a feedback \
+                    divider set for the wrong output voltage, reversed polarity, a missing \
+                    essential part (crystal load caps, regulator output cap). Returns a \
+                    score (0-10) and a list of high-confidence defects. STRONGLY \
+                    RECOMMENDED once your design is complete (before you finish): call it, \
+                    fix any defects with edit_design, then re-check. It reviews the current \
+                    draft, so you can run it before committing."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "intent": { "type": "string",
+                            "description": "What the circuit is supposed to do (the design goal), for the reviewer's context. Be specific about rails, key parts, and interfaces." }
+                    }
+                }),
+            },
+            ToolDef {
                 name: "run_erc".into(),
                 description: "Run KiCAD's Electrical Rules Check on the current \
                     schematic and return the error/warning counts plus the \

@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
                     tout += output_tokens;
                 }
                 agent::AgentEvent::ToolStarted { name } => eprintln!("  tool -> {name}"),
+                agent::AgentEvent::ToolFinished { name, summary } => eprintln!("       {name}: {summary}"),
                 agent::AgentEvent::AssistantText(t) if !t.trim().is_empty() => {
                     eprintln!("  ...: {}", t.trim());
                 }

@@ -560,6 +560,10 @@ impl Agent {
         let result = if call.name == "apply_design" && wants_commit(&call.input) {
             self.gated_apply(&call.input, approvals, applied, events)
                 .await
+        } else if call.name == "review_design" {
+            // Independent review needs the LlmClient + async, so it can't ride the sync tool
+            // dispatch — handle it here like the apply-gate.
+            self.review_design(&call.input).await
         } else {
             self.run_tool_blocking(&call.name, call.input.clone()).await
         };
@@ -621,6 +625,47 @@ impl Agent {
             emit(events, AgentEvent::Applied { errors, warnings });
         }
         Ok(committed)
+    }
+
+    /// The `review_design` tool: an INDEPENDENT electrical-correctness review of the current design,
+    /// called by the agent in-flow (transparent — it shows up as a normal tool card). Takes the
+    /// current design YAML (the same draft-or-lifted source as `get_design`, so the agent can review
+    /// BEFORE committing — one apply-gate), runs a FRESH diverse-lens LLM review
+    /// ([`crate::review::review_netlist`] — no conversation history, so it doesn't rationalise the
+    /// agent's own choices) UNIONED with the deterministic exact-math ERC, and returns the score +
+    /// high-confidence functional defects for the agent to fix and re-check. Async + needs the
+    /// LlmClient, so it's handled here rather than in the sync tool dispatch.
+    async fn review_design(&self, input: &Value) -> Result<Value> {
+        let intent = input.get("intent").and_then(Value::as_str).unwrap_or("");
+        let dv = self.run_tool_blocking("get_design", json!({})).await?;
+        let netlist = dv
+            .get("yaml")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if netlist.trim().is_empty() {
+            return Ok(json!({
+                "error": "no design to review yet — build one with create_design/edit_design (or apply_design) first",
+            }));
+        }
+        let (score, mut defects) =
+            crate::review::review_netlist(self.client.as_ref(), intent, &netlist).await?;
+        // Deterministic exact-math ERC under the LLM ensemble (feedback-divider ratios, LED current,
+        // dangling/crystal/polarity) — unioned by refdes so a fault both layers find isn't doubled.
+        if let Some(design) = circuit_lang::compile(&netlist, self.ctx.provider()).design {
+            for d in circuit_lang::erc::erc_checks(&design) {
+                if !defects.iter().any(|e| crate::review::same_defect(e, &d)) {
+                    defects.push(d);
+                }
+            }
+        }
+        let note = if defects.is_empty() {
+            "no high-confidence functional defects — the design looks electrically sound"
+        } else {
+            "high-confidence functional defects found (they pass ERC but are electrically wrong); \
+             fix each with edit_design and re-check"
+        };
+        Ok(json!({ "score": score, "defects": defects, "note": note }))
     }
 }
 
@@ -723,6 +768,19 @@ fn tool_summary(name: &str, input: &Value, result_json: &str) -> String {
             format!("lifted {path}")
         }
         "render_schematic" => "rendered schematic to PNG".to_string(),
+        "review_design" => {
+            let score = result.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+            let n = result
+                .get("defects")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            if n == 0 {
+                format!("score {score:.0}/10 — clean")
+            } else {
+                format!("score {score:.0}/10 — {n} defect(s) to fix")
+            }
+        }
         _ => "done".to_string(),
     }
 }
@@ -1023,13 +1081,20 @@ For fine control WITHIN a block, that block may carry its own 2-D `layout:` grid
    power pins where you must key by number.
 4. `validate_design(yaml)` — compile your YAML WITHOUT writing. Read the
    diagnostics and self-repair until it reports `ok: true` and 0 errors.
-5. `apply_design(yaml, commit:false)` — preview: returns the structured diff
+5. `review_design(intent)` — once the design is COMPLETE, get an INDEPENDENT
+   electrical-correctness review: a FRESH reviewer (no memory of your work, so it
+   won't rationalise your choices) plus a deterministic exact-math ERC flag
+   FUNCTIONAL faults that pass ERC but are electrically wrong (pin-function
+   mis-wires, a part on the wrong voltage rail, a feedback divider set for the wrong
+   output, reversed polarity, missing essentials). Fix any high-confidence defects
+   with edit_design, then re-review. Do this BEFORE you commit.
+6. `apply_design(yaml, commit:false)` — preview: returns the structured diff
    (added/removed/changed refdes, net delta) WITHOUT writing. Inspect it.
-6. `apply_design(yaml, commit:true)` — propose the WRITE. A human must approve
+7. `apply_design(yaml, commit:true)` — propose the WRITE. A human must approve
    the diff before it lands; on approval it writes the .kicad_sch, snapshots the
    prior, and runs ERC, returning the ERC counts. On rejection nothing is written
    — explain or revise.
-7. `run_erc()` — re-run KiCAD's Electrical Rules Check on the current schematic.
+8. `run_erc()` — re-run KiCAD's Electrical Rules Check on the current schematic.
 
 Two more tools answer questions rather than edit:
 
@@ -1041,9 +1106,10 @@ Two more tools answer questions rather than edit:
   points you at a schematic by path.
 
 Doctrine: search before you reference a part; read pins with get_symbol_info;
-validate before you apply; preview (commit:false) before you commit (commit:true).
-Aim for ERC-clean designs. When you are finished, reply with a short plain-text
-summary of what you did — no tool call.
+validate before you apply; review_design before you commit (it catches FUNCTIONAL
+faults ERC can't see); preview (commit:false) before you commit (commit:true).
+Aim for designs that are ERC-clean AND electrically correct. When you are finished,
+reply with a short plain-text summary of what you did — no tool call.
 
 # PCB layout & routing (the board side)
 
