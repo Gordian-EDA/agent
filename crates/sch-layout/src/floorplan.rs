@@ -1588,7 +1588,7 @@ pub fn emit_anneal(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result
 /// excluded (they couple everything). Residual overlaps are left to the existing `decongest`.
 /// Structural constraints (rails-horizontal, decoupling banks, signal-flow order) are Phase 2b.
 /// Mutates `items[*].at`. Gated behind COLA_PLACE; never on the default/reference path.
-fn cola_place(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) {
+fn cola_place(env: &KicadEnv, items: &mut [Item], inc: &Incidence, ir: &LayoutIr) {
     let n = items.len();
     if n < 2 {
         return;
@@ -1668,6 +1668,27 @@ fn cola_place(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) {
         }
     }
 
+    // Signal-flow: order anchors LEFT→RIGHT by crossmin's dataflow layering (Sugiyama), so the
+    // sheet reads input→output like a hand-drawn schematic — cutting both crossings and the
+    // stress-only "lone part flung to an empty area" sprawl. A consecutive-layer x-separation puts
+    // each layer's anchors left of the next layer's; non-overlap then sets the real spacing.
+    let anchors: Vec<usize> = (0..n).filter(|&i| items[i].geom.pins.len() >= 3).collect();
+    if let Some(cells) = crossmin_anchor_cells(env, items, inc, &anchors, &ir.rails) {
+        const FLOW_GAP: f64 = 20.0;
+        for &a in &anchors {
+            for &b in &anchors {
+                if a == b {
+                    continue;
+                }
+                if let (Some(&(la, _)), Some(&(lb, _))) = (cells.get(&a), cells.get(&b)) {
+                    if la + 1 == lb {
+                        cons_x.push(cola::Constraint::sep(a, b, FLOW_GAP));
+                    }
+                }
+            }
+        }
+    }
+
     const IDEAL: f64 = 12.7; // ~10 grid between directly-connected parts
     let sm = cola::StressMajorizer::new(n, &edges, IDEAL);
     let x0: Vec<f64> = items.iter().map(|it| it.at[0]).collect();
@@ -1727,7 +1748,7 @@ fn emit_strategy(
     // VPSC-projected constraints, then the usual decongest/align passes tidy up. Validate-first:
     // this replaces the SA search to render cola's layout in isolation for A/B against the SA.
     if std::env::var("COLA_PLACE").is_ok() {
-        cola_place(&mut items, &inc, ir);
+        cola_place(env, &mut items, &inc, ir);
     } else {
         strategy.search(env, &mut items, &inc, ir, &needs_flag, SEARCH_SEED);
     }
