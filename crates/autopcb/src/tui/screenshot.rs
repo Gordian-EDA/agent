@@ -17,7 +17,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 
-use super::app::{App, Entry, NoticeLevel, PendingDiff, Speaker, Status};
+use super::app::{App, Entry, Msg, NoticeLevel, PendingDiff, Speaker, Status};
 use super::ui;
 
 /// Where the SVGs are written; `tools/tui_shot.sh` reads from here.
@@ -273,4 +273,28 @@ fn tui_screenshots() {
     // 4. Empty / first-launch state.
     let mut app = App::new(status());
     shoot("04_empty", 96, 32, &mut app);
+
+    // 5. The `/`-command completion popup, floated above the composer.
+    let mut app = App::new(status());
+    seed_conversation(&mut app);
+    for c in "/c".chars() {
+        app.update(Msg::Char(c));
+    }
+    shoot("05_completions", 96, 32, &mut app);
+
+    // 6. The unwind picker (double-Esc), listing recent prompts.
+    let mut app = App::new(status());
+    seed_conversation(&mut app);
+    app.open_unwind(vec![
+        "design a 5V 3A buck converter from 12V in".into(),
+        "use a TPS54331 and add a soft-start cap".into(),
+        "bump the output cap to 47uF".into(),
+    ]);
+    shoot("06_unwind", 96, 32, &mut app);
+
+    // 7. The :help overlay.
+    let mut app = App::new(status());
+    seed_conversation(&mut app);
+    app.help = true;
+    shoot("07_help", 96, 32, &mut app);
 }

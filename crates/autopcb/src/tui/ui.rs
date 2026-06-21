@@ -26,7 +26,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 
 use super::app::{App, Entry, NoticeLevel, PendingDiff, Speaker};
 use super::md::{self, MdLine, WrapMode};
@@ -116,46 +116,32 @@ fn draw_completions(f: &mut Frame, input_area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let highlight = selected == Some(i);
-            let style = if highlight {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Cyan)
-            };
+            // Selected row: an accent caret + bold name. Others: a blank gutter,
+            // plain name, dim description — the soft Codex selection, not an
+            // inverted bar.
+            let sel = selected == Some(i);
+            let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+            let name_style = if sel { accent } else { Style::default().fg(Color::Cyan) };
             Line::from(vec![
-                Span::styled(format!(" {:<name_w$}  ", c.name), style),
-                Span::styled(
-                    c.desc.to_string(),
-                    if highlight {
-                        Style::default().fg(Color::Black).bg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
-                ),
+                Span::styled(if sel { "› " } else { "  " }, accent),
+                Span::styled(format!("{:<name_w$}  ", c.name), name_style),
+                Span::styled(c.desc.to_string(), Style::default().fg(Color::DarkGray)),
             ])
         })
         .collect();
 
-    let w = (lines
+    let content_w = lines
         .iter()
-        .map(|l| {
-            l.spans
-                .iter()
-                .map(|s| s.content.chars().count())
-                .sum::<usize>()
-        })
+        .map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
         .max()
-        .unwrap_or(0) as u16
-        + 2)
-    .min(input_area.width);
+        .unwrap_or(0) as u16;
+    let maxw = input_area.width.saturating_sub(2 * MARGIN);
+    let w = (content_w + 2).max(24).min(maxw);
     let h = (matches.len() as u16 + 2).min(input_area.y); // never above the screen top
     let popup = Rect {
-        x: input_area.x,
+        x: input_area.x + MARGIN, // align the popup's left edge with the composer
         y: input_area.y.saturating_sub(h),
-        width: w.max(20).min(input_area.width),
+        width: w,
         height: h,
     };
     f.render_widget(Clear, popup);
@@ -163,8 +149,12 @@ fn draw_completions(f: &mut Frame, input_area: Rect, app: &App) {
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(Color::Cyan))
-                .title(" Tab to complete "),
+                .title(Span::styled(
+                    " commands · Tab ",
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )),
         ),
         popup,
     );
@@ -669,22 +659,17 @@ fn draw_unwind(f: &mut Frame, input_area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, prompt)| {
+            // Soft selection: accent caret + bold on the chosen row; others dim.
             let sel = i == p.selected;
-            let (lead, lead_style, text_style) = if sel {
-                let hl = Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD);
-                ("▶ ", hl, Style::default().fg(Color::Black).bg(Color::Cyan))
+            let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+            let text_style = if sel {
+                accent
             } else {
-                (
-                    "  ",
-                    Style::default().fg(Color::Cyan),
-                    Style::default().fg(Color::Gray),
-                )
+                Style::default().fg(Color::Gray)
             };
             Line::from(vec![
-                Span::styled(format!("{lead}↶{:<idx_w$} ", i + 1), lead_style),
+                Span::styled(if sel { "› " } else { "  " }, accent),
+                Span::styled(format!("↶{:<idx_w$}  ", i + 1), Style::default().fg(Color::DarkGray)),
                 Span::styled(prompt.clone(), text_style),
             ])
         })
@@ -702,10 +687,10 @@ fn draw_unwind(f: &mut Frame, input_area: Rect, app: &App) {
         .unwrap_or(0) as u16;
     // `.max().min()` not `clamp()`: a terminal narrower than the floor would
     // make clamp(lo, hi) panic with lo > hi.
-    let w = (content_w + 2).max(24).min(input_area.width);
+    let w = (content_w + 2).max(24).min(input_area.width.saturating_sub(2 * MARGIN));
     let h = (p.prompts.len() as u16 + 2).min(input_area.y); // never above the screen top
     let popup = Rect {
-        x: input_area.x,
+        x: input_area.x + MARGIN, // align with the composer
         y: input_area.y.saturating_sub(h),
         width: w,
         height: h,
@@ -715,8 +700,12 @@ fn draw_unwind(f: &mut Frame, input_area: Rect, app: &App) {
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(Color::Cyan))
-                .title(" unwind to… · ↑↓ Enter · Esc cancels "),
+                .title(Span::styled(
+                    " unwind to… · ↑↓ Enter · Esc ",
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )),
         ),
         popup,
     );
@@ -776,43 +765,61 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
-    let w = 64u16.min(area.width.saturating_sub(4));
-    let h = 23u16.min(area.height.saturating_sub(2));
+    let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+    // A key/description row: the key in accent, the description in soft gray.
+    let kv = |k: &str, d: &str| {
+        Line::from(vec![
+            Span::styled(format!("{k:<15} "), Style::default().fg(Color::Cyan)),
+            Span::styled(d.to_string(), Style::default().fg(Color::Gray)),
+        ])
+    };
+    let section = |t: &str| Line::from(Span::styled(t.to_string(), dim.add_modifier(Modifier::BOLD)));
+
+    let mut lines = vec![
+        Line::from(Span::styled("auto-pcb copilot", accent)),
+        Line::from(Span::styled("keys & commands", dim)),
+        Line::from(""),
+        section("KEYS"),
+        kv("Enter", "send the prompt"),
+        kv("Tab", "complete a /command"),
+        kv("a / r", "approve / reject a proposed change"),
+        kv("Up / Down", "recall prompt history"),
+        kv("PgUp / PgDn", "scroll the transcript"),
+        kv("Ctrl-U/W/A/E", "line editing (kill line/word, home/end)"),
+        kv("Esc", "close help / reject gate / clear input"),
+        kv("Esc Esc", "unwind the last turn (context only)"),
+        kv("Ctrl-C", "exit"),
+        Line::from(""),
+        section("COMMANDS"),
+    ];
+    for c in crate::tui::app::COMMANDS {
+        lines.push(kv(c.name, c.desc));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("Esc to close", dim)));
+
+    // Wide enough that key/description rows never wrap (longest desc + key col +
+    // border + horizontal padding), so the height stays exact.
+    let w = 68u16.min(area.width.saturating_sub(2 * MARGIN));
+    let h = (lines.len() as u16 + 4).min(area.height.saturating_sub(2)); // +border +padding
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
         width: w,
         height: h,
     };
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "auto-pcb copilot — help",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from("Type a prompt, Enter to send. Tab completes /commands."),
-        Line::from("a / r            approve / reject a proposed change"),
-        Line::from("Up / Down        recall prompt history"),
-        Line::from("PgUp/PgDn/wheel  scroll the transcript"),
-        Line::from("Ctrl-U/W/A/E     line editing (kill line/word, home/end)"),
-        Line::from("Esc              close help / reject gate / clear input"),
-        Line::from("                 / cancel the running turn"),
-        Line::from("Esc Esc          unwind the last turn (context only)"),
-        Line::from("Ctrl-C           exit"),
-        Line::from(""),
-    ];
-    for c in crate::tui::app::COMMANDS {
-        lines.push(Line::from(format!("{:<16} {}", c.name, c.desc)));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Esc to close.",
-        Style::default().fg(Color::DarkGray),
-    )));
     f.render_widget(Clear, popup);
     f.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" help "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(dim)
+                    .padding(Padding::symmetric(2, 1))
+                    .title(Span::styled(" help ", accent)),
+            )
             .wrap(Wrap { trim: true }),
         popup,
     );
@@ -1125,7 +1132,7 @@ mod tests {
         let text = render_to_string(&mut a, 80, 24);
         assert!(text.contains("/clear"), "popup lists /clear:\n{text}");
         assert!(text.contains("/compact"), "popup lists /compact:\n{text}");
-        assert!(text.contains("Tab to complete"), "popup title:\n{text}");
+        assert!(text.contains("commands"), "popup title:\n{text}");
 
         a.update(Msg::Complete);
         let text = render_to_string(&mut a, 80, 24);
