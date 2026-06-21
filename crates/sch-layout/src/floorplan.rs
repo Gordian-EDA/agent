@@ -1703,6 +1703,38 @@ fn cola_place(env: &KicadEnv, items: &mut [Item], inc: &Incidence, ir: &LayoutIr
         }
     }
 
+    // EXPERIMENTAL (Phase 3, path E): VLM-supplied structure. If COLA_VLM points to a JSON
+    // {flow:[refdes...], rows:[[refdes...]]} (tools/vlm_structure.py), add left→right x-sep
+    // along the flow and equal-y per row — soft structure the rules/crossmin may miss. Refdes
+    // that don't resolve on this sheet are skipped, so one file is harmless across sub-sheets.
+    if let Ok(path) = std::env::var("COLA_VLM") {
+        if let Ok(txt) = std::fs::read_to_string(&path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+                let idx: std::collections::HashMap<&str, usize> =
+                    items.iter().enumerate().map(|(i, it)| (it.refdes.as_str(), i)).collect();
+                let resolve = |r: &serde_json::Value| r.as_str().and_then(|s| idx.get(s).copied());
+                if let Some(flow) = v.get("flow").and_then(|f| f.as_array()) {
+                    let seq: Vec<usize> = flow.iter().filter_map(&resolve).collect();
+                    for w in seq.windows(2) {
+                        if w[0] != w[1] {
+                            cons_x.push(cola::Constraint::sep(w[0], w[1], 20.0));
+                        }
+                    }
+                }
+                if let Some(rows) = v.get("rows").and_then(|r| r.as_array()) {
+                    for row in rows.iter().filter_map(|r| r.as_array()) {
+                        let seq: Vec<usize> = row.iter().filter_map(&resolve).collect();
+                        for w in seq.windows(2) {
+                            if w[0] != w[1] {
+                                cons_y.push(cola::Constraint::eq(w[0], w[1], 0.0));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     const IDEAL: f64 = 12.7; // ~10 grid between directly-connected parts
     let sm = cola::StressMajorizer::new(n, &edges, IDEAL);
     let x0: Vec<f64> = items.iter().map(|it| it.at[0]).collect();
