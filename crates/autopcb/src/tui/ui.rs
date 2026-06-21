@@ -169,7 +169,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     let area = body(area);
     let dim = Style::default().fg(Color::DarkGray);
     let sep = || Span::styled("  ·  ", dim);
-    let spans = vec![
+    let mut spans = vec![
         // The brand carries the accent; everything else is metadata, so it dims.
         Span::styled(
             "auto-pcb",
@@ -186,12 +186,12 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
                 Color::Red
             }),
         ),
-        sep(),
-        Span::styled(
-            if app.auto { "auto on" } else { "auto off" },
-            if app.auto { Style::default().fg(Color::Yellow) } else { dim },
-        ),
     ];
+    // `auto` only appears when it's ON — the default (off) is silent, not chrome.
+    if app.auto {
+        spans.push(sep());
+        spans.push(Span::styled("auto on", Style::default().fg(Color::Yellow)));
+    }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 
     // The `↑n` scrolled-back indicator sits at the header's right edge, overlaid
@@ -306,11 +306,13 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
             false,
             true,
         ),
-        // Assistant prose: a dim bullet, markdown body, hanging 2-col indent.
+        // Assistant prose: plain markdown at a blank 2-col gutter, aligned under
+        // the user's text. No bullet — the user's caret alone marks the turns, so
+        // the transcript stays lean (the Codex idiom).
         Speaker::Assistant => (
-            "• ",
             "  ",
-            Style::default().fg(Color::Cyan),
+            "  ",
+            Style::default(),
             Style::default(),
             true,
             true,
@@ -327,8 +329,9 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
             false,
         ),
         Speaker::System => {
-            // Most system notes are dim; turn-end indicators carry a severity
-            // tint (a finished turn green, a cap cutoff yellow, an error red).
+            // System notes recede: a finished turn is muted (dim green — it's just
+            // metadata, not a result), while a cap cutoff (yellow) or error (red)
+            // stay bright because they want attention.
             let color = match e.level {
                 NoticeLevel::Plain => Color::DarkGray,
                 NoticeLevel::Success => Color::Green,
@@ -336,7 +339,9 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
                 NoticeLevel::Error => Color::Red,
             };
             let body = match e.level {
-                NoticeLevel::Plain => Style::default().fg(color).add_modifier(Modifier::ITALIC),
+                NoticeLevel::Plain | NoticeLevel::Success => {
+                    Style::default().fg(color).add_modifier(Modifier::DIM)
+                }
                 _ => Style::default().fg(color),
             };
             ("  ", "  ", Style::default().fg(color), body, false, false)
@@ -602,8 +607,8 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
 
     let line = if app.pending.is_some() {
         Line::from(Span::styled(
-            "approve or reject the change above ([a]/[r])",
-            Style::default().fg(Color::Yellow),
+            "approve or reject the change above",
+            Style::default().fg(Color::DarkGray),
         ))
     } else if app.esc_armed {
         Line::from(Span::styled(
@@ -714,27 +719,25 @@ fn draw_unwind(f: &mut Frame, input_area: Rect, app: &App) {
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let area = body(area);
     let s = &app.status;
-    let mut left = format!(
-        "{} · {} · turns {} · applied {}",
-        s.provider,
-        short_model(&s.model),
-        s.turn_count,
-        s.applied_count,
-    );
+    // Lean footer: just provider · model, plus applied/context only once they're
+    // non-zero. Turn count and the /command list are dropped — the `/` popup and
+    // the welcome splash already cover discovery.
+    let mut left = format!("{} · {}", s.provider, short_model(&s.model));
+    if s.applied_count > 0 {
+        left.push_str(&format!(" · {} applied", s.applied_count));
+    }
     if s.ctx_tokens > 0 {
         let pct = (s.ctx_tokens as f64 / CONTEXT_WINDOW_TOKENS as f64 * 100.0).round() as u64;
         left.push_str(&format!(" · ctx {} ({pct}%)", fmt_tokens(s.ctx_tokens)));
     }
-    // Context-sensitive key hints. While running, the interrupt hint already
-    // lives on the running line, so the bar only needs the hard-quit reminder.
-    let right = if app.pending.is_some() {
-        "a approve · r reject · Esc reject "
-    } else if app.running {
-        "Ctrl-C quit "
+    // The right side only carries a hint that isn't already on screen. A pending
+    // change shows its actions on the card, so the footer stays quiet there.
+    let right = if app.running {
+        "Ctrl-C quit"
     } else if app.esc_armed {
-        "Esc unwind last turn "
+        "Esc again to unwind"
     } else {
-        "/help  /undo  /auto  /clear  /quit "
+        ""
     };
 
     // Compose a bar exactly `width` columns wide: pin `right` to the edge, give
@@ -1218,7 +1221,9 @@ mod tests {
     fn status_bar_hints_follow_the_mode() {
         let mut a = app();
         let idle = render_to_string(&mut a, 80, 24);
-        assert!(idle.contains("/help"), "idle hints:\n{idle}");
+        // Idle footer is lean: provider/model only, no /command list.
+        assert!(idle.contains("bedrock"), "idle footer shows the provider:\n{idle}");
+        assert!(!idle.contains("/clear"), "idle footer drops the command list:\n{idle}");
 
         for c in "go".chars() {
             a.update(Msg::Char(c));
@@ -1237,7 +1242,8 @@ mod tests {
             "diff": { "added": ["U1"], "removed": [], "changed": [] }
         })));
         let gated = render_to_string(&mut a, 80, 24);
-        assert!(gated.contains("a approve"), "gate hints:\n{gated}");
+        // The gate's actions live on the card, not duplicated in the footer.
+        assert!(gated.contains("approve"), "gate shows approve action:\n{gated}");
     }
 
     #[test]
@@ -1247,14 +1253,13 @@ mod tests {
             input_tokens: 19_000,
             output_tokens: 200,
         }));
-        // A terminal too narrow for the full status + the full key hints.
+        // Arming Esc surfaces the right-side unwind hint; on a terminal too narrow
+        // for both halves, the left status must ellipsize rather than overlap it.
+        a.update(Msg::Cancel);
         let text = render_to_string(&mut a, 56, 24);
         let bar = text.lines().last().expect("status row");
-        // Exactly one row's width — the dark bar fills the whole line, with no
-        // doubled/overlapping content where the two halves used to collide.
-        assert_eq!(bar.chars().count(), 56, "bar fills the width exactly:\n{bar}");
-        // The right-edge hints survive intact; the left status is ellipsized.
-        assert!(bar.contains("/quit"), "right hint pinned to the edge:\n{bar}");
+        // The right-edge hint survives intact; the left status is ellipsized.
+        assert!(bar.contains("unwind"), "right hint pinned to the edge:\n{bar}");
         assert!(bar.contains('…'), "left status is truncated, not overlapped:\n{bar}");
     }
 
