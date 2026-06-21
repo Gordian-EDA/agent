@@ -1593,17 +1593,34 @@ fn cola_place(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) {
     if n < 2 {
         return;
     }
-    // Clique-expand each signal net into pairwise attractions; skip rails/buses.
+    let pins_len = |i: usize| items[i].geom.pins.len();
+    // Stress edges. SIGNAL nets clique-expand (real placement coupling). On a non-ground V+
+    // RAIL, add cohesion edges from each bypass cap to the anchor(s) it bypasses (a star, not
+    // a clique) so the cap clusters by its IC; ground is skipped (it couples everything).
     let mut edges: Vec<(usize, usize)> = Vec::new();
     for (net, pins) in inc {
-        if ir.rails.contains_key(net) || is_power_net(net) || pins.len() > 5 {
-            continue;
-        }
-        for a in 0..pins.len() {
-            for b in (a + 1)..pins.len() {
-                let (ia, ib) = (pins[a].0, pins[b].0);
-                if ia != ib {
-                    edges.push((ia, ib));
+        let is_rail = ir.rails.contains_key(net) || is_power_net(net);
+        if is_rail {
+            if is_ground(net) {
+                continue;
+            }
+            let anchors: Vec<usize> =
+                pins.iter().map(|p| p.0).filter(|&i| pins_len(i) >= 3).collect();
+            for p in pins {
+                if pins_len(p.0) == 2 {
+                    for &a in &anchors {
+                        if a != p.0 {
+                            edges.push((p.0, a));
+                        }
+                    }
+                }
+            }
+        } else if pins.len() <= 5 {
+            for a in 0..pins.len() {
+                for b in (a + 1)..pins.len() {
+                    if pins[a].0 != pins[b].0 {
+                        edges.push((pins[a].0, pins[b].0));
+                    }
                 }
             }
         }
@@ -1611,11 +1628,51 @@ fn cola_place(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) {
     if edges.is_empty() {
         return;
     }
+
+    // Structural constraints: align each V+ rail's bypass caps into ONE row (equal y) spread
+    // left-to-right (min x gap) — the decoupling-bank structure the SA could only get by
+    // freezing an idiom. Here it falls out of the global constrained solve.
+    let mut by_rail: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (i, it) in items.iter().enumerate() {
+        if it.geom.pins.len() != 2 {
+            continue;
+        }
+        let nets: Vec<&str> = it.pins.iter().filter_map(|(_, _, nn)| nn.as_deref()).collect();
+        if nets.len() != 2 {
+            continue;
+        }
+        let vp = match (is_ground(nets[0]), is_ground(nets[1])) {
+            (true, false) => nets[1],
+            (false, true) => nets[0],
+            _ => continue,
+        };
+        if ir.rails.contains_key(vp) || is_power_net(vp) {
+            by_rail.entry(vp.to_string()).or_default().push(i);
+        }
+    }
+    let mut cons_x: Vec<cola::Constraint> = Vec::new();
+    let mut cons_y: Vec<cola::Constraint> = Vec::new();
+    for caps in by_rail.values() {
+        if caps.len() < 2 {
+            continue;
+        }
+        // Wide enough that each cap's "C## / value" text clears the next cap (tight COL_GAP
+        // packs labels on top of one another — the text-overlap warnings).
+        const CAP_GAP: f64 = 12.7;
+        let mut row = caps.clone();
+        row.sort_by(|&a, &b| items[a].at[0].total_cmp(&items[b].at[0]));
+        for w in row.windows(2) {
+            cons_y.push(cola::Constraint::eq(w[0], w[1], 0.0));
+            cons_x.push(cola::Constraint::sep(w[0], w[1], CAP_GAP));
+        }
+    }
+
     const IDEAL: f64 = 12.7; // ~10 grid between directly-connected parts
     let sm = cola::StressMajorizer::new(n, &edges, IDEAL);
     let x0: Vec<f64> = items.iter().map(|it| it.at[0]).collect();
     let y0: Vec<f64> = items.iter().map(|it| it.at[1]).collect();
-    let (x, y) = sm.run(&x0, &y0, &[], &[], 200);
+    let (x, y) = sm.run(&x0, &y0, &cons_x, &cons_y, 200);
     for (i, it) in items.iter_mut().enumerate() {
         it.at = [crate::grid::snap(x[i]), crate::grid::snap(y[i])];
     }
