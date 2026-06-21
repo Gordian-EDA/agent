@@ -1,6 +1,17 @@
 # Constraint-based placement (D) + VLM-supplied structure (E)
 
-A research-grounded design for breaking the placement ceiling. **Status: design only — no code yet.**
+A research-grounded design for breaking the placement ceiling.
+
+> **STATUS (2026-06-21): BUILT + VALIDATED on branch `experimental/cola-engine`.** The `cola` crate
+> (VPSC block solver + constrained stress-majorization + non-overlap + signal-flow) is done and
+> tested; it's wired into sch-layout behind a never-regress 3-way A/B (shelf/crossmin/cola). **Result:
+> cola is *competitive* with the mature SA — it TIES on dense MCU (8=8), gate-driver (7=7), and BGA
+> (9=9) sheets, wins occasionally (a decoupling-bank MCU 9 vs 8), and loses on simple/header sheets.
+> It does NOT broadly surpass the SA.** Honest reason: the multi-sheet partitioning keeps sheets small
+> (≤~20 parts), where the SA's local search already reaches near-optimal, so cola's global-optimisation
+> edge has nothing to exploit. A from-scratch constraint engine MATCHING the tuned SA in days validates
+> the approach; surpassing it would need large un-partitioned sheets (which the engine doesn't produce)
+> or the Phase 3 VLM-structure lever. Full detail in memory `cola-engine-state.md`.
 Captures a literature pass (see "Sources") so the build, when approved, targets the proven structural
 solution rather than another round of SA term-tweaks (which are exhausted — see
 `schematic-quality-and-the-critic-ceiling.md`).
