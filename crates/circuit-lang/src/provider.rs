@@ -12,9 +12,9 @@ pub enum PinType {
 }
 
 /// Signal DIRECTION of a pin, preserved from KiCAD's electrical type (which
-/// [`PinType`] collapses). Drives dataflow-aware layout (`crossmin`): a net flows from
-/// its `Out` pin to its `In` pins, which lets the layered placer order parts
-/// left→right by signal flow. Orthogonal to [`PinType`] — kept as a separate field so
+/// [`PinType`] collapses): a net flows from its `Out` pin to its `In` pins, which lets
+/// a dataflow-aware placer order parts left→right by signal flow. Orthogonal to
+/// [`PinType`] — kept as a separate field so
 /// existing `PinType` matches are untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PinDir {
