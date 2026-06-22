@@ -392,75 +392,77 @@ pub fn derive_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
 
-    // One create_board-style part per component: footprint from the map, pad_nets
-    // from the (pad-number-keyed) pins, flattened across units. NoConnect / absent
-    // pins are simply omitted (an absent pad is unconnected).
-    let index = ctx.footprint_index()?;
-    let mut parts = Vec::new();
-    let mut needs_footprints = Vec::new();
-    let mut wrong_footprints = Vec::new();
+    // Build a Board-DSL skeleton: one part per component — footprint from the map
+    // (empty if unassigned, flagged in `missing_footprints` for the agent to fill in
+    // the YAML), pad→net from the (pad-number-keyed) pins flattened across units. The
+    // agent then fills any footprints, sets the outline + rules, and design_board's it
+    // — footprints and layout intent live in the DSL now, not a side map.
+    let mut parts = indexmap::IndexMap::new();
+    let mut missing_footprints = Vec::new();
     for (refdes, c) in design.blocks.values().flat_map(|b| b.components.iter()) {
-        let Some(footprint) = map.get(refdes) else {
-            needs_footprints.push(refdes.clone());
-            continue;
-        };
-        let mut pad_nets = serde_json::Map::new();
+        let footprint = map.get(refdes).cloned().unwrap_or_default();
+        if footprint.is_empty() {
+            missing_footprints.push(refdes.clone());
+        }
+        let mut pads = indexmap::IndexMap::new();
         for pins in std::iter::once(&c.pins).chain(c.units.values()) {
             for (pad, target) in pins {
                 if let PinTarget::Net(net) = target {
-                    pad_nets.insert(pad.clone(), json!(net));
+                    pads.insert(pad.clone(), net.clone());
                 }
             }
         }
-        // pin↔pad: every pad the schematic nets must exist on the assigned footprint.
-        // A missing one means the wrong footprint for this part. (Unknown lib_ids fall
-        // through to create_board, which reports them with suggestions.)
-        if let Some(fp) = index.footprint(footprint) {
-            let fp_pads: Vec<&str> = fp.pads.iter().map(|p| p.number.as_str()).collect();
-            let missing = pads_missing(pad_nets.keys().map(String::as_str), &fp_pads);
-            if !missing.is_empty() {
-                wrong_footprints.push(json!({
-                    "reference": refdes, "footprint": footprint, "missing_pads": missing,
-                }));
-            }
-        }
-        parts.push(json!({
-            "reference": refdes,
-            "footprint": footprint,
-            "pad_nets": Value::Object(pad_nets),
-        }));
+        parts.insert(
+            refdes.clone(),
+            board_lang::model::Part {
+                footprint,
+                pads,
+                edge: false,
+                corner: false,
+                lock: None,
+            },
+        );
     }
 
-    if !needs_footprints.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "needs_footprints": needs_footprints,
-            "note": "assign these with assign_footprints (use search_footprints to find lib_ids), \
-                     then re-run derive_board",
-        }));
-    }
-    if !wrong_footprints.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "wrong_footprints": wrong_footprints,
-            "note": "the assigned footprint lacks pads the schematic uses — pick a footprint that \
-                     fits the part's pins (search_footprints), re-assign_footprints, then re-run",
-        }));
-    }
+    // Outline from the optional `bounds` (else a default the agent resizes in the
+    // YAML); layers from optional `rules.layers`.
+    let outline = match input.get("bounds") {
+        Some(b) => board_lang::model::Outline::Rect {
+            w: b.get("max_x").and_then(Value::as_f64).unwrap_or(50.0)
+                - b.get("min_x").and_then(Value::as_f64).unwrap_or(0.0),
+            h: b.get("max_y").and_then(Value::as_f64).unwrap_or(40.0)
+                - b.get("min_y").and_then(Value::as_f64).unwrap_or(0.0),
+        },
+        None => board_lang::model::Outline::Rect { w: 50.0, h: 40.0 },
+    };
+    let layers = input
+        .get("rules")
+        .and_then(|r| r.get("layers"))
+        .and_then(Value::as_u64)
+        .unwrap_or(2) as u32;
 
-    // Hand the derived parts to the internal builder (footprint resolution, pad/uniqueness
-    // validation, BoardDraft build + save). bounds / rules / overwrite pass through.
-    let mut cb = json!({
-        "parts": parts,
-        "overwrite": input.get("overwrite").and_then(Value::as_bool).unwrap_or(false),
-    });
-    if let Some(b) = input.get("bounds") {
-        cb["bounds"] = b.clone();
-    }
-    if let Some(r) = input.get("rules") {
-        cb["rules"] = r.clone();
-    }
-    build_board_draft(cb, ctx)
+    let board_design = board_lang::model::BoardDesign {
+        name: design.name.clone(),
+        board: board_lang::model::BoardSpec {
+            layers,
+            outline,
+            rules: board_lang::model::Rules::default(),
+        },
+        parts,
+        groups: indexmap::IndexMap::new(),
+        keepouts: Vec::new(),
+    };
+    let dsl = board_lang::to_canonical_yaml(&board_design);
+
+    Ok(json!({
+        "ok": true,
+        "yaml": dsl,
+        "part_count": board_design.parts.len(),
+        "missing_footprints": missing_footprints,
+        "note": "a Board-DSL skeleton lifted from the schematic (parts + pad→net). Fill any \
+                 empty footprints (search_footprints), set board.outline + rules, then commit \
+                 with design_board(yaml). Footprints and layout intent live in the DSL.",
+    }))
 }
 
 // ── create_board ─────────────────────────────────────────────────────────────
@@ -847,13 +849,26 @@ pub fn design_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // model fixes exactly the bad lib_ids via search_footprints, never guesses).
     let index = ctx.footprint_index()?;
     let mut unknown = Vec::new();
+    let mut wrong = Vec::new();
     for (refdes, p) in &design.parts {
-        if index.footprint(&p.footprint).is_none() {
-            unknown.push(json!({
+        match index.footprint(&p.footprint) {
+            None => unknown.push(json!({
                 "reference": refdes,
                 "footprint": p.footprint,
                 "suggestions": index.suggest(&p.footprint),
-            }));
+            })),
+            // pin↔pad: every pad the design nets must exist on the chosen footprint.
+            Some(fp) => {
+                let fp_pads: Vec<&str> = fp.pads.iter().map(|pp| pp.number.as_str()).collect();
+                let missing = pads_missing(p.pads.keys().map(String::as_str), &fp_pads);
+                if !missing.is_empty() {
+                    wrong.push(json!({
+                        "reference": refdes,
+                        "footprint": p.footprint,
+                        "missing_pads": missing,
+                    }));
+                }
+            }
         }
     }
     if !unknown.is_empty() {
@@ -861,6 +876,14 @@ pub fn design_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
             "ok": false,
             "unknown_footprints": unknown,
             "note": "search_footprints for the real lib_ids and fix them in the `parts` map",
+        }));
+    }
+    if !wrong.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "wrong_footprints": wrong,
+            "note": "a footprint lacks pads the design nets — pick one that fits the part's pins \
+                     (search_footprints), fix it in the `parts` map, and resubmit",
         }));
     }
 

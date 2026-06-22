@@ -609,33 +609,30 @@ impl Tools {
             },
             ToolDef {
                 name: "derive_board".into(),
-                description: "Build the board draft from the committed schematic + the \
-                    footprint map — instead of re-typing parts. Reads the schematic's parts \
-                    and netlist (pin→pad is KiCAD's), takes each part's footprint from \
-                    assign_footprints, and builds the board. You supply only the outline \
-                    (bounds) and optional rules; parts and nets come from the schematic. \
-                    Requires a committed .kicad_sch (run apply_design first). If any part \
-                    has no footprint yet it returns `needs_footprints` — run assign_footprints, \
-                    then retry. overwrite=true rebuilds over an existing board draft."
+                description: "Lift the committed schematic into a Board-DSL SKELETON — so you \
+                    don't re-type parts. Reads the schematic's parts + netlist (pin->pad is \
+                    KiCAD's) and returns `yaml`: one part per component with its pad->net map \
+                    filled in (footprint pre-filled from any assign_footprints map, else blank). \
+                    You then fill blank footprints (search_footprints), set board.outline + \
+                    rules, and commit with design_board(yaml). Requires a committed .kicad_sch \
+                    (run apply_design first). `missing_footprints` lists parts still needing a \
+                    footprint. Optional `bounds` seeds the outline; `rules.layers` the layer \
+                    count — both editable in the returned YAML."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "bounds": {
                             "type": "object",
-                            "description": "Board outline in mm (y-down).",
+                            "description": "Optional: seed the board outline (mm, y-down). Editable in the YAML.",
                             "properties": {
                                 "min_x": { "type": "number" }, "max_x": { "type": "number" },
                                 "min_y": { "type": "number" }, "max_y": { "type": "number" }
-                            },
-                            "required": ["min_x", "max_x", "min_y", "max_y"]
+                            }
                         },
                         "rules": { "type": "object",
-                            "description": "Board design rules (same shape as derive_board); omit for engine defaults." },
-                        "overwrite": { "type": "boolean",
-                            "description": "Rebuild over an existing board draft." }
-                    },
-                    "required": ["bounds"]
+                            "description": "Optional: {layers: 2|4} seeds the layer count in the YAML." }
+                    }
                 }),
             },
             ToolDef {

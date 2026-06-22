@@ -636,7 +636,7 @@ fn assign_footprints_validates_and_persists() {
 }
 
 #[test]
-fn derive_board_builds_from_schematic_and_footprint_map() {
+fn derive_board_lifts_schematic_into_dsl_then_design_board_builds_it() {
     // Needs a real KiCAD env (lift runs kicad-cli + resolves real footprints).
     let Some(ctx) = ToolCtx::detect_for_test() else {
         eprintln!("SKIP derive_board: no KiCAD env");
@@ -650,18 +650,23 @@ fn derive_board_builds_from_schematic_and_footprint_map() {
 
     let bounds = serde_json::json!({ "min_x": 0, "max_x": 20, "min_y": 0, "max_y": 12 });
 
-    // No footprints assigned yet → derive_board reports the gaps (R1, C1).
-    let gaps = tools
+    // No footprints assigned yet → derive emits a Board-DSL skeleton flagging the gaps.
+    let skel = tools
         .run("derive_board", serde_json::json!({ "bounds": bounds }), &ctx)
         .unwrap();
-    if gaps.get("error").is_some() {
-        eprintln!("SKIP derive_board: lift failed (kicad-cli unavailable?): {gaps}");
+    if skel.get("error").is_some() {
+        eprintln!("SKIP derive_board: lift failed (kicad-cli unavailable?): {skel}");
         return;
     }
-    assert_eq!(gaps["ok"], serde_json::json!(false), "gaps reported: {gaps}");
-    assert_eq!(gaps["needs_footprints"].as_array().unwrap().len(), 2, "R1 + C1: {gaps}");
+    assert_eq!(skel["ok"], serde_json::json!(true), "skeleton emitted: {skel}");
+    assert!(skel["yaml"].as_str().unwrap_or("").contains("parts:"), "yaml has parts: {skel}");
+    assert_eq!(
+        skel["missing_footprints"].as_array().unwrap().len(),
+        2,
+        "R1 + C1 still blank: {skel}"
+    );
 
-    // Assign real footprints, then derive succeeds and builds the board.
+    // Assign real footprints; derive again → the YAML carries them, no gaps.
     tools
         .run(
             "assign_footprints",
@@ -673,11 +678,17 @@ fn derive_board_builds_from_schematic_and_footprint_map() {
         )
         .unwrap();
     let out = tools
-        .run("derive_board", serde_json::json!({ "bounds": bounds, "overwrite": true }), &ctx)
+        .run("derive_board", serde_json::json!({ "bounds": bounds }), &ctx)
         .unwrap();
-    assert!(out.get("error").is_none(), "derive succeeded: {out}");
+    assert_eq!(out["missing_footprints"].as_array().unwrap().len(), 0, "no gaps: {out}");
+    let yaml = out["yaml"].as_str().unwrap().to_string();
+    assert!(yaml.contains("R1") && yaml.contains("C1"), "yaml has R1 + C1: {yaml}");
 
-    // The board draft now carries R1 + C1, derived from the schematic (not retyped).
+    // Commit the DSL → the board draft carries R1 + C1, derived (not retyped).
+    let d = tools
+        .run("design_board", serde_json::json!({ "yaml": yaml, "overwrite": true }), &ctx)
+        .unwrap();
+    assert_eq!(d["ok"], serde_json::json!(true), "design_board committed: {d}");
     let board = tools.run("get_board", serde_json::json!({}), &ctx).unwrap();
     let s = board.to_string();
     assert!(s.contains("R1") && s.contains("C1"), "board has R1 + C1: {board}");
