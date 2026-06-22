@@ -391,8 +391,10 @@ fn messages_to_openai(system: &str, messages: &[Message]) -> Vec<Value> {
                     }
                 }
                 let mut msg = json!({ "role": "assistant" });
-                // `content` must be present; null is allowed alongside tool_calls.
-                msg["content"] = if text.is_empty() { Value::Null } else { json!(text) };
+                // `content` must be present AND a STRING: the respan.ai gateway rejects `null` even
+                // alongside tool_calls ("Invalid value for 'content': expected a string, got null"),
+                // and GPT-5.5 emits tool-call-only turns (empty text). Serialize "" rather than null.
+                msg["content"] = json!(text);
                 if !tool_calls.is_empty() {
                     msg["tool_calls"] = json!(tool_calls);
                 }
