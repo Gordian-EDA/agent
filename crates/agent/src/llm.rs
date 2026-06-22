@@ -494,9 +494,14 @@ pub(crate) fn parse_openai_completion(value: &Value) -> Result<Completion> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let args = func.and_then(|f| f.get("arguments")).and_then(Value::as_str).unwrap_or("{}");
-            // Arguments arrive as a JSON string; parse to the structured input.
-            let input = serde_json::from_str(args).unwrap_or(Value::Null);
+            // Tool-call arguments arrive as a JSON STRING in the OpenAI spec, but Anthropic models
+            // proxied through the respan gateway return them as an already-structured OBJECT.
+            // Accept both, else an object-form `create_design` loses its `yaml` ("missing field").
+            let input = match func.and_then(|f| f.get("arguments")) {
+                Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
+                Some(other) => other.clone(),
+                None => Value::Null,
+            };
             tool_calls.push(ToolCall { id, name, input });
         }
     }
@@ -927,6 +932,30 @@ mod tests {
         assert_eq!(call.id, "call_abc");
         assert_eq!(call.name, "search_symbols");
         assert_eq!(call.input["query"], "STM32H743");
+    }
+
+    #[test]
+    fn openai_parses_object_form_tool_arguments() {
+        // Anthropic models via the gateway return `arguments` as a structured OBJECT, not a JSON
+        // string; the input must still be recovered (else create_design loses its `yaml`).
+        let raw = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_xyz",
+                        "type": "function",
+                        "function": { "name": "create_design", "arguments": { "yaml": "version: 1" } }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let completion = parse_openai_completion(&raw).unwrap();
+        let call = &completion.tool_calls[0];
+        assert_eq!(call.name, "create_design");
+        assert_eq!(call.input["yaml"], "version: 1");
     }
 
     #[test]
