@@ -299,112 +299,48 @@ fn bbox_json(b: &kicad_bridge::footlib::BBox) -> Value {
 
 // ── assign_footprints ─────────────────────────────────────────────────────────
 
-/// `assign_footprints` — the canonical, board-side home for footprint selection.
-///
-/// Reads the schematic's parts from the current draft `Design`, reports each
-/// part's footprint status, validates any `assignments` (refdes → footprint
-/// `lib_id`) the caller passes, and — on `commit` — persists them to
-/// `.autopcb/footprints.json`. The schematic engine never touches footprints
-/// (see `docs/specs/schematic-driven-pcb.md`); the assignment lives here and is
-/// what `derive_board` reads. The agent resolves candidates for the gaps with
-/// `search_footprints`.
+/// `assign_footprints` — set each part's footprint: a `refdes → footprint lib_id`
+/// map. A plain board-side map writer (`.autopcb/footprints.json`), the canonical
+/// home for footprint selection — the schematic engine never stores footprints
+/// (see `docs/specs/schematic-driven-pcb.md`). The one check is that each lib_id
+/// is a real footprint; an unknown one is reported with suggestions and skipped,
+/// the rest are saved. `derive_board` reads this map and reports any part still
+/// missing a footprint.
 pub fn assign_footprints(input: Value, ctx: &ToolCtx) -> Result<Value> {
-    // Slice-1 source: the authored draft Design.
-    let Some(yaml) = ctx.workspace().read_draft() else {
-        return Ok(json!({
-            "error": "no schematic draft yet — author one with create_design / apply_design first"
-        }));
-    };
-    let Some(design) = circuit_lang::compile(&yaml, ctx.provider()).design else {
-        return Ok(json!({
-            "error": "the schematic draft does not compile; fix it (apply_design dry-run shows the \
-                      errors) before assigning footprints"
-        }));
-    };
-
-    let commit = input.get("commit").and_then(Value::as_bool).unwrap_or(false);
     let incoming: BTreeMap<String, String> = input
         .get("assignments")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
-    // Every part in the schematic, refdes → component, flattened across blocks.
-    let parts: Vec<(&String, &circuit_lang::model::Component)> = design
-        .blocks
-        .values()
-        .flat_map(|b| b.components.iter())
-        .collect();
-    let known: std::collections::HashSet<&str> = parts.iter().map(|(r, _)| r.as_str()).collect();
-
-    // Stage incoming assignments onto the existing map, validating each lib_id.
     let mut map: BTreeMap<String, String> = ctx
         .workspace()
         .read_footprints()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
+
     let index = ctx.footprint_index()?;
-    let mut unresolved = Vec::new();
-    for (refdes, lib_id) in &incoming {
-        if !known.contains(refdes.as_str()) {
-            unresolved.push(json!({ "reference": refdes, "error": "no such part in the schematic" }));
-        } else if index.footprint(lib_id).is_some() {
-            map.insert(refdes.clone(), lib_id.clone());
+    let mut unknown = Vec::new();
+    for (refdes, lib_id) in incoming {
+        if index.footprint(&lib_id).is_some() {
+            map.insert(refdes, lib_id);
         } else {
-            unresolved.push(json!({
-                "reference": refdes, "lib_id": lib_id,
-                "error": format!("unknown footprint `{lib_id}`"),
-                "suggestions": index.suggest(lib_id),
+            unknown.push(json!({
+                "reference": refdes,
+                "lib_id": lib_id,
+                "suggestions": index.suggest(&lib_id),
             }));
         }
     }
 
-    // Per-part status + the gap list, against the staged map.
-    let mut parts_report = Vec::new();
-    let mut gaps = Vec::new();
-    for &(refdes, c) in &parts {
-        // A footprint comes from the board-side map (or, rarely, the YAML field).
-        let fp = map.get(refdes.as_str()).cloned().or_else(|| c.footprint.clone());
-        let pins = c.pins.len() + c.units.values().map(|u| u.len()).sum::<usize>();
-        if fp.is_none() {
-            gaps.push(refdes.clone());
-        }
-        parts_report.push(json!({
-            "reference": refdes, "part": c.part, "value": c.value,
-            "pins": pins, "footprint": fp,
-        }));
-    }
-
-    if !commit {
-        return Ok(json!({
-            "ok": unresolved.is_empty(),
-            "parts": parts_report,
-            "gaps": gaps,
-            "unresolved": unresolved,
-            "assigned": map.len(),
-            "note": "dry-run — resolve gaps with search_footprints, then re-call with assignments + \
-                     commit:true. Footprints are board-side; the schematic is untouched.",
-        }));
-    }
-    if !unresolved.is_empty() {
-        return Ok(json!({
-            "error": "some assignments did not resolve; nothing written",
-            "unresolved": unresolved,
-        }));
-    }
     ctx.workspace()
         .write_footprints(&serde_json::to_string_pretty(&map)?)
         .context("writing .autopcb/footprints.json")?;
-    Ok(json!({
-        "ok": true,
-        "written": true,
-        "assigned": map.len(),
-        "gaps": gaps,
-        "note": if gaps.is_empty() {
-            "every part has a footprint — derive_board is next"
-        } else {
-            "footprints written; some parts still need one (see gaps)"
-        },
-    }))
+
+    let mut out = json!({ "ok": unknown.is_empty(), "footprints": map });
+    if !unknown.is_empty() {
+        out["unknown"] = json!(unknown);
+    }
+    Ok(out)
 }
 
 // ── create_board ─────────────────────────────────────────────────────────────

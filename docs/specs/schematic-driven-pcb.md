@@ -46,7 +46,7 @@ The only thing that varies is where the `Design` (parts + pin→net) comes from:
 | Connectivity source | compiled draft `Design` (`Component.pins`) | `kicad-cli` netlist of the user's `.kicad_sch` |
 | Footprint origin | `assign_footprints` (all parts) | user's pre-assigned footprints + `assign_footprints` for gaps |
 | Schematic write path | `apply_design` re-emits (agent owns layout) | **never re-emit**; optional in-place property patch only |
-| Gate | on `apply_design` | on `assign_footprints` (the choices) |
+| Gate | `apply_design` + `derive_board` | `derive_board` (the agent doesn't write the user's sheet) |
 | `derive_board` | identical | identical |
 
 `derive_board` accepts connectivity from **either** source, normalized to
@@ -67,23 +67,27 @@ A board-side assignment map: `refdes → footprint lib_id`, persisted in
 
 ### `assign_footprints`
 
-> Assign a footprint to each part that lacks one. Reads the current `Design` (compiled
-> draft, or lifted from the project `.kicad_sch`), lists parts with no footprint, and for
-> each suggests candidates via `search_footprints` keyed on the symbol's value + pin
-> count. Writes choices to `.autopcb/footprints.json`. **Gated** — the dry-run returns the
-> proposed `refdes → lib_id` table for approval.
+> Set the footprint for parts: a `refdes → lib_id` map. A plain board-side map writer over
+> `.autopcb/footprints.json` — **not** gated, and it does **not** read the `Design` or report
+> gaps (that's `derive_board`'s job). It is the canonical home for footprint selection: the
+> agent finds a `lib_id` with `search_footprints`, then sets it here. Kept deliberately simple
+> — footprint assignment is low-stakes (a trivially-overwritten map entry).
 
-- Input: `{ assignments?: {refdes: lib_id}, auto?: bool, commit?: bool }`.
-  - `assignments` — explicit picks (overrides suggestions).
-  - `auto` — accept the top suggestion for every gap (still gated unless committed).
-- Output (dry-run): `{ gaps: [{refdes, symbol, value, pin_count, suggestions:[lib_id…]}],
-  proposed: {refdes: lib_id}, unresolved: [refdes…] }`.
-- Output (commit): writes the map; for a **user-supplied** sheet, optionally back-patches
-  the `Footprint` property in place via `kicad-bridge` (a targeted s-expr edit on each
-  `(symbol …)`, **not** a re-emit) so KiCAD shows the assignment. Never touches wires,
-  placement, or connectivity.
-- Validation: chosen footprint's pad count must cover the symbol's pin count → mismatch is
-  a recoverable error with the count delta, like the current unknown-`lib_id` path.
+- Input: `{ assignments: {refdes: lib_id} }` (required).
+- Behavior: merges the assignments onto the existing map and writes it. The **one** check is
+  that each `lib_id` is a real footprint (via the footprint index) — an unknown one would
+  silently break the board downstream. Unknown lib_ids are returned in `unknown` with
+  suggestions and **skipped**; the valid ones are saved (partial success).
+- Output: `{ ok, footprints: {refdes: lib_id}, unknown?: [{reference, lib_id, suggestions}] }`.
+- **Gaps live in `derive_board`**, not here — it joins the map against the schematic's parts
+  and reports any part still missing a footprint. The agent typically assigns all parts in
+  one call (it knows them), and `derive_board` catches anything missed.
+- For a **user-supplied** sheet, an optional `kicad-bridge` in-place patch can write the
+  `Footprint` property back onto each `(symbol …)` (a targeted s-expr edit, **not** a re-emit)
+  so KiCAD shows the assignment — a later slice, never touching wires/placement/connectivity.
+
+> Deferred to `derive_board`: the symbol-pin-count ⟷ footprint-pad-count validation (it needs
+> the `Design`, which `derive_board` already has).
 
 ### `derive_board`
 
@@ -141,15 +145,16 @@ a gate before `export_board`, closing the "nothing verifies board ⟷ schematic"
 ```
 search_symbols → create_design(YAML)        part: only, no footprints (unchanged)
 apply_design(commit)            ── GATE ──   write .kicad_sch + ERC (Footprint stays "")
-assign_footprints               ── GATE ──   search_footprints per part → .autopcb/footprints.json
-derive_board({bounds, rules})   ── GATE ──   parts+nets from Design, footprints from the map
+search_footprints → assign_footprints        refdes → lib_id → .autopcb/footprints.json (not gated)
+derive_board({bounds, rules})   ── GATE ──   parts+nets from Design, footprints from the map;
+                                             reports any part still missing a footprint
 place_board → route_board → export_board
 ```
 
 **Scenario 2 — bring-your-own `.kicad_sch`**
 ```
 read_schematic / lift(user.kicad_sch)        Design (parts, pin#→net, any pre-assigned footprints)
-assign_footprints  (gaps only)  ── GATE ──   fill missing → map; optional in-place patch to user sheet
+search_footprints → assign_footprints        fill missing → map (optional in-place patch to user sheet)
 derive_board({bounds, rules})   ── GATE ──   identical to S1
 place_board → route_board → export_board     user's connectivity untouched
 ```

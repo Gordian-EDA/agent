@@ -528,26 +528,23 @@ impl Tools {
             },
             ToolDef {
                 name: "assign_footprints".into(),
-                description: "Assign a footprint to each schematic part — the canonical, \
-                    board-side home for footprint selection (the schematic engine never \
-                    stores footprints). Lists every part with its current footprint status \
-                    and a `gaps` list of parts that still need one. Resolve a gap by finding \
-                    a lib_id with search_footprints, then pass it in `assignments` (refdes → \
-                    footprint lib_id). Dry-run by default; pass commit:true to persist to \
-                    .autopcb/footprints.json (what derive_board will read). Unknown lib_ids \
-                    come back in `unresolved` with suggestions; nothing is written then."
+                description: "Set the footprint for parts: a refdes → footprint lib_id map. \
+                    The board-side home for footprint selection (the schematic never stores \
+                    footprints). Find a lib_id with search_footprints, then pass {refdes: \
+                    lib_id} in `assignments`; it's saved to .autopcb/footprints.json (what \
+                    derive_board reads). An unknown lib_id comes back in `unknown` with \
+                    suggestions and is skipped; the rest are saved. Returns the full map."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "assignments": {
                             "type": "object",
-                            "description": "refdes → footprint lib_id (e.g. {\"R1\": \"Resistor_SMD:R_0603_1608Metric\"}). Each lib_id must come from search_footprints.",
+                            "description": "refdes → footprint lib_id, e.g. {\"R1\": \"Resistor_SMD:R_0603_1608Metric\"}. Each lib_id must come from search_footprints.",
                             "additionalProperties": { "type": "string" }
-                        },
-                        "commit": { "type": "boolean",
-                            "description": "false (default) = dry-run report; true = persist the assignments." }
-                    }
+                        }
+                    },
+                    "required": ["assignments"]
                 }),
             },
             ToolDef {

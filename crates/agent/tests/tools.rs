@@ -605,54 +605,33 @@ fn search_footprints_finds_vendored_fixture() {
 }
 
 #[test]
-fn assign_footprints_reports_gaps_validates_and_persists() {
+fn assign_footprints_validates_and_persists() {
     let (ctx, _guard) = fixture_ctx();
     let tools = Tools::new();
-    // A tiny schematic: two resistors, no footprints assigned.
-    let yaml = "version: 1\nname: t\nblocks:\n  main:\n    components:\n      \
-                R1: {part: R, value: 10k, pins: {1: VIN, 2: GND}}\n      \
-                R2: {part: R, value: 1k, pins: {1: VIN, 2: OUT}}\n";
-    ctx.workspace().write_draft(yaml, None).unwrap();
 
-    let dry = tools.run("assign_footprints", serde_json::json!({}), &ctx).unwrap();
-    if dry.get("error").is_some() {
-        // Draft didn't compile (KiCAD symbol libs absent) — skip, like the symlib tests.
-        eprintln!("SKIP assign_footprints: draft did not compile: {dry}");
-        return;
-    }
-    // Both resistors are gaps; nothing assigned yet.
-    assert_eq!(dry["gaps"].as_array().unwrap().len(), 2, "both parts are gaps: {dry}");
-    assert_eq!(dry["assigned"], serde_json::json!(0));
-
-    // Assign R1 to a valid fixture footprint + commit.
+    // A valid fixture footprint is stored under its refdes.
     let out = tools
         .run(
             "assign_footprints",
-            serde_json::json!({ "assignments": { "R1": "Fixtures:R_0603_1608Metric" }, "commit": true }),
+            serde_json::json!({ "assignments": { "R1": "Fixtures:R_0603_1608Metric" } }),
             &ctx,
         )
         .unwrap();
-    assert_eq!(out["written"], serde_json::json!(true), "{out}");
-    assert_eq!(out["assigned"], serde_json::json!(1));
+    assert_eq!(out["ok"], serde_json::json!(true), "{out}");
+    assert_eq!(out["footprints"]["R1"], serde_json::json!("Fixtures:R_0603_1608Metric"));
 
-    // The map persisted: R1 resolved, R2 still a gap.
-    let again = tools.run("assign_footprints", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(again["assigned"], serde_json::json!(1));
-    assert_eq!(again["gaps"].as_array().unwrap(), &[serde_json::json!("R2")], "only R2 left: {again}");
-
-    // An unknown lib_id is rejected with suggestions; nothing is written.
-    let bad = tools
+    // An unknown lib_id is reported in `unknown` and skipped; R1 still persists.
+    let out2 = tools
         .run(
             "assign_footprints",
-            serde_json::json!({ "assignments": { "R2": "Nope:DoesNotExist" }, "commit": true }),
+            serde_json::json!({ "assignments": { "R2": "Nope:DoesNotExist" } }),
             &ctx,
         )
         .unwrap();
-    assert!(bad.get("error").is_some(), "bad lib_id rejected: {bad}");
-    assert!(!bad["unresolved"].as_array().unwrap().is_empty(), "unresolved listed: {bad}");
-    // R2 must still be unassigned after the rejected commit.
-    let after = tools.run("assign_footprints", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(after["assigned"], serde_json::json!(1), "rejected commit wrote nothing: {after}");
+    assert_eq!(out2["ok"], serde_json::json!(false), "{out2}");
+    assert!(!out2["unknown"].as_array().unwrap().is_empty(), "unknown listed: {out2}");
+    assert_eq!(out2["footprints"]["R1"], serde_json::json!("Fixtures:R_0603_1608Metric"));
+    assert!(out2["footprints"].get("R2").is_none(), "bad lib_id not stored: {out2}");
 }
 
 #[test]
