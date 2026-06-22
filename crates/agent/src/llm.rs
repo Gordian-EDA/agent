@@ -822,7 +822,9 @@ mod tests {
         let body = c.build_request("sys", &messages, &[]);
         let assistant = &body["messages"][1];
         assert_eq!(assistant["role"], "assistant");
-        assert!(assistant["content"].is_null());
+        // A tool-call-only turn serializes content as "" (not null) — the respan.ai gateway
+        // rejects null content even alongside tool_calls.
+        assert_eq!(assistant["content"], json!(""));
         let call = &assistant["tool_calls"][0];
         assert_eq!(call["id"], "tu_1");
         assert_eq!(call["type"], "function");
