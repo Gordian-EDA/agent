@@ -200,7 +200,6 @@ fn defs_lists_all_tools() {
         "edit_design",
         "search_footprints",
         "get_footprint_info",
-        "create_board",
         "add_parts",
         "get_board",
         "place_board",
@@ -218,7 +217,7 @@ fn defs_lists_all_tools() {
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
-    assert_eq!(names.len(), 28, "expected exactly 28 tools, got {}: {:?}", names.len(), names);
+    assert_eq!(names.len(), 27, "expected exactly 27 tools, got {}: {:?}", names.len(), names);
 
     // Names are unique.
     let mut sorted = names.clone();
@@ -729,7 +728,7 @@ fn get_footprint_info_suggests_for_unknown_lib_id() {
 }
 
 #[test]
-fn create_board_resolves_vendored_footprints_and_persists_draft() {
+fn build_board_draft_resolves_vendored_footprints_and_persists() {
     let (ctx, _guard) = fixture_ctx();
     let tools = Tools::new();
 
@@ -748,7 +747,7 @@ fn create_board_resolves_vendored_footprints_and_persists_draft() {
               "pad_nets": { "1": "VIN", "2": "GND" } }
         ]
     });
-    let out = tools.run("create_board", board.clone(), &ctx).unwrap();
+    let out = agent::tools_pcb::build_board_draft(board.clone(), &ctx).unwrap();
     assert_eq!(out["ok"], serde_json::json!(true), "got: {out}");
     assert_eq!(out["part_count"], serde_json::json!(3), "got: {out}");
     // VIN(2), MID(2), GND(2), VOUT(1) -> 4 nets; VOUT is a single-pin warning.
@@ -770,7 +769,7 @@ fn create_board_resolves_vendored_footprints_and_persists_draft() {
     assert_eq!(out["draft"]["rules"]["viaDiameter"], serde_json::json!(0.6), "got: {out}");
 
     // A second create_board without overwrite is rejected.
-    let out = tools.run("create_board", board, &ctx).unwrap();
+    let out = agent::tools_pcb::build_board_draft(board, &ctx).unwrap();
     assert!(out["error"].as_str().is_some_and(|e| e.contains("already exists")), "got: {out}");
 }
 
@@ -799,7 +798,7 @@ fn add_parts_appends_incrementally_and_rejects_duplicate() {
               "pad_nets": { "1": "MID", "2": "GND", "3": "VOUT" } }
         ]
     });
-    let out = tools.run("create_board", board, &ctx).unwrap();
+    let out = agent::tools_pcb::build_board_draft(board, &ctx).unwrap();
     assert!(out.get("error").is_none(), "create_board ok: {out}");
 
     // Append a third part WITHOUT re-sending the first two.
@@ -832,22 +831,19 @@ fn add_parts_appends_incrementally_and_rejects_duplicate() {
 }
 
 #[test]
-fn create_board_unknown_footprint_errors_with_suggestions() {
+fn build_board_draft_unknown_footprint_errors_with_suggestions() {
     let (ctx, _guard) = fixture_ctx();
-    let tools = Tools::new();
-    let out = tools
-        .run(
-            "create_board",
-            serde_json::json!({
-                "bounds": { "min_x": 0.0, "max_x": 10.0, "min_y": 0.0, "max_y": 10.0 },
-                "parts": [
-                    { "reference": "R1", "footprint": "Fixtures:R_0603_WRONG",
-                      "pad_nets": { "1": "A", "2": "B" } }
-                ]
-            }),
-            &ctx,
-        )
-        .unwrap();
+    let out = agent::tools_pcb::build_board_draft(
+        serde_json::json!({
+            "bounds": { "min_x": 0.0, "max_x": 10.0, "min_y": 0.0, "max_y": 10.0 },
+            "parts": [
+                { "reference": "R1", "footprint": "Fixtures:R_0603_WRONG",
+                  "pad_nets": { "1": "A", "2": "B" } }
+            ]
+        }),
+        &ctx,
+    )
+    .unwrap();
     assert!(
         out["error"].as_str().is_some_and(|e| e.contains("R1") && e.contains("unknown footprint")),
         "got: {out}"
@@ -908,7 +904,7 @@ fn placed_board_ctx() -> (ToolCtx, tempfile::TempDir, Tools) {
               "pad_nets": { "1": "VIN", "2": "GND" } }
         ]
     });
-    let out = tools.run("create_board", board, &ctx).unwrap();
+    let out = agent::tools_pcb::build_board_draft(board, &ctx).unwrap();
     assert_eq!(out["ok"], serde_json::json!(true), "create_board: {out}");
     (ctx, guard, tools)
 }
@@ -930,7 +926,7 @@ fn place_board_failure_suggests_a_larger_bounds() {
               "pad_nets": { "1": "A", "2": "B" } }
         ]
     });
-    tools.run("create_board", board, &ctx).unwrap();
+    agent::tools_pcb::build_board_draft(board, &ctx).unwrap();
     let out = tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
     assert_eq!(out["legal"], serde_json::json!(false), "should not fit in 3x3: {out}");
     let s = &out["suggested_min_bounds_mm"];
@@ -948,9 +944,7 @@ fn locked_part_rejects_non_axis_aligned_rotation() {
     // only) with a clear message — not silently routed to wrong pads then failed at
     // export. 0/90/180/270 are accepted.
     let (ctx, _g) = fixture_ctx();
-    let tools = Tools::new();
-    let bad = tools.run(
-        "create_board",
+    let bad = agent::tools_pcb::build_board_draft(
         serde_json::json!({
             "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
             "parts": [
@@ -966,8 +960,7 @@ fn locked_part_rejects_non_axis_aligned_rotation() {
         bad["error"].as_str().is_some_and(|e| e.contains("not supported")),
         "45° lock must be rejected: {bad}"
     );
-    let ok = tools.run(
-        "create_board",
+    let ok = agent::tools_pcb::build_board_draft(
         serde_json::json!({
             "overwrite": true,
             "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
@@ -1171,7 +1164,7 @@ fn keepout_wall_changes_routing_outcome() {
               "pad_nets": { "1": "A", "2": "B" } }
         ]
     });
-    assert_eq!(tools.run("create_board", board, &ctx).unwrap()["ok"], serde_json::json!(true));
+    assert_eq!(agent::tools_pcb::build_board_draft(board, &ctx).unwrap()["ok"], serde_json::json!(true));
 
     // Lock J1 on the far west, J2 on the far east — connected by nets A and B.
     tools.run("move_part",
@@ -1324,7 +1317,7 @@ fn resize_board_closes_the_too_tight_placement_trap() {
               "pad_nets": { "1": "A", "2": "B" } }
         ]
     });
-    assert_eq!(tools.run("create_board", board, &ctx).unwrap()["ok"], serde_json::json!(true));
+    assert_eq!(agent::tools_pcb::build_board_draft(board, &ctx).unwrap()["ok"], serde_json::json!(true));
 
     // Too tight → place_board reports illegal + a suggested larger bounds.
     let p = tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
@@ -1398,7 +1391,7 @@ fn render_board_before_place_is_recoverable_error() {
               "pad_nets": { "1": "VIN", "2": "GND" } }
         ]
     });
-    assert_eq!(tools.run("create_board", board, &ctx).unwrap()["ok"], serde_json::json!(true));
+    assert_eq!(agent::tools_pcb::build_board_draft(board, &ctx).unwrap()["ok"], serde_json::json!(true));
 
     // No placement yet: both explicit "placed" and auto (no route) must error.
     let out = tools.run("render_board", serde_json::json!({"view": "placed"}), &ctx).unwrap();

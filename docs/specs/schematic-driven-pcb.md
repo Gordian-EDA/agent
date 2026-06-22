@@ -170,10 +170,21 @@ place_board → route_board → export_board     user's connectivity untouched
 - **`sch-layout`** — untouched. `derive_board` calls `lift()`; `assign_footprints` patches
   via `kicad-bridge`. Emit keeps writing an empty `Footprint` property.
 - **`create_design`** — keeps authoring symbols + nets only; no footprint guidance added.
-- **`create_board`** — stays as the explicit-parts escape hatch for board-only / no-
-  schematic use. `derive_board` is additive, not a replacement.
 - **The "LLM never emits coordinates" contract** — preserved; `derive_board` adds parts +
   nets, never positions.
+
+### Update (Jun 22): `create_board` removed from the agent tool surface
+
+The agent always starts from a schematic, so `create_board` is no longer an LLM tool. The
+builder it wrapped was renamed `build_board_draft` (an internal `pub fn`, NOT registered as a
+tool) and is now called only by (a) `derive_board`, which assembles its `{bounds, parts,
+pad_nets, rules?}` spec from the committed schematic + the footprint map, and (b) the
+deterministic test harnesses (`board_harness` / `pcb_gate` / `board_artifact`) that build boards
+from standalone JSON with no schematic. The ToolDef + dispatch arm were deleted; the prompt
+board-flow doctrine now reads `search_footprints → assign_footprints → derive_board → place →
+route → export`; agent-facing error/description strings point at `derive_board`. Tool count 28→27.
+(`add_parts` remains a tool — appends an extra part to an already-derived board — but is now a
+rarely-needed escape hatch, not part of the main flow.)
 
 ## Implementation slices
 

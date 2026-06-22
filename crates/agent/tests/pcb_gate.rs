@@ -117,23 +117,12 @@ fn staged_footprint_dir() -> (tempfile::TempDir, std::path::PathBuf) {
 /// The scripted triage conversation: build a walled board, fail the first route,
 /// relax the keepout, route clean. One completion per `complete()` call.
 fn triage_script() -> Vec<Completion> {
-    let header = "Fixtures:PinHeader_1x02_P2.54mm_Vertical";
     vec![
-        // 1. Declare the board: two pin-headers, nets A and B.
-        tool_call(
-            "tu_create",
-            "create_board",
-            serde_json::json!({
-                "bounds": { "min_x": 0.0, "max_x": 40.0, "min_y": 0.0, "max_y": 20.0 },
-                "parts": [
-                    { "reference": "J1", "footprint": header,
-                      "pad_nets": { "1": "A", "2": "B" } },
-                    { "reference": "J2", "footprint": header,
-                      "pad_nets": { "1": "A", "2": "B" } }
-                ]
-            }),
-        ),
-        // 2–3. Lock the two connectors on opposite sides — they MUST cross the wall.
+        // The board (two pin-headers, nets A and B) is seeded directly in the test via
+        // the internal builder — board creation is no longer an agent tool (the agent
+        // always derives the board from a committed schematic). The script picks up at
+        // triage.
+        // Lock the two connectors on opposite sides — they MUST cross the wall.
         tool_call(
             "tu_mv1",
             "move_part",
@@ -208,6 +197,22 @@ async fn agent_closes_a_failed_board_by_relaxing_a_keepout() {
     };
     let workspace_route = ctx.workspace().route_path();
 
+    // Seed the two-connector board directly via the internal builder — board creation
+    // is no longer an agent tool (the agent derives boards from a committed schematic).
+    // The scripted loop then triages the keepout wall on this seeded board.
+    let header = "Fixtures:PinHeader_1x02_P2.54mm_Vertical";
+    agent::tools_pcb::build_board_draft(
+        serde_json::json!({
+            "bounds": { "min_x": 0.0, "max_x": 40.0, "min_y": 0.0, "max_y": 20.0 },
+            "parts": [
+                { "reference": "J1", "footprint": header, "pad_nets": { "1": "A", "2": "B" } },
+                { "reference": "J2", "footprint": header, "pad_nets": { "1": "A", "2": "B" } }
+            ]
+        }),
+        &ctx,
+    )
+    .unwrap();
+
     // A shared handle the mock writes the live history into; the test reads it
     // back after the turn to inspect the REAL tool results the loop produced.
     let seen: Arc<Mutex<Vec<Message>>> = Arc::new(Mutex::new(Vec::new()));
@@ -237,9 +242,9 @@ async fn agent_closes_a_failed_board_by_relaxing_a_keepout() {
         "final assistant text should summarize the close: {:?}",
         outcome.final_text
     );
-    // create + 2×move + 2×set_constraints + place + 2×route = 8 tool calls.
+    // 2×move + 2×set_constraints + place + 2×route = 7 tool calls (board pre-seeded).
     assert_eq!(
-        outcome.tool_calls_made, 8,
+        outcome.tool_calls_made, 7,
         "the full scripted tool sequence must execute: {outcome:?}"
     );
 

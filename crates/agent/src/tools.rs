@@ -90,7 +90,7 @@ pub struct ToolCtx {
     /// Cross-library name index, built on first `search_symbols` and reused.
     index: OnceLock<SymbolIndex>,
     /// Cross-library footprint index, built on first `search_footprints` /
-    /// `get_footprint_info` / `create_board` and reused. Scanning every
+    /// `get_footprint_info` / `derive_board` and reused. Scanning every
     /// `.pretty` library is expensive, so (like `index`) it is built once.
     footprint_index: OnceLock<FootprintIndex>,
     /// Test override: when set, the footprint index is built from this directory
@@ -494,7 +494,7 @@ impl Tools {
                     `Lib:Name` ids with their pad counts. Use this to find the \
                     real footprint lib_id for a part before putting it on a board \
                     — NEVER guess a footprint lib_id. The pad count is the number \
-                    of pads you must assign nets to in create_board."
+                    of pads you must assign nets to in derive_board."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -510,7 +510,7 @@ impl Tools {
             ToolDef {
                 name: "get_footprint_info".into(),
                 description: "Return the pad NUMBER list (use these to build the pad_nets \
-                    map for create_board) plus a compact shape summary — pad_count, \
+                    map for derive_board) plus a compact shape summary — pad_count, \
                     min_pitch_mm, pad dimensions, pad technologies, the courtyard rectangle, \
                     and the bounding box — for a fully-qualified `Lib:Name` footprint. \
                     (Per-pad coordinates are summarized, not listed: the engine places pads, \
@@ -571,7 +571,7 @@ impl Tools {
                             "required": ["min_x", "max_x", "min_y", "max_y"]
                         },
                         "rules": { "type": "object",
-                            "description": "Board design rules (same shape as create_board); omit for engine defaults." },
+                            "description": "Board design rules (same shape as derive_board); omit for engine defaults." },
                         "overwrite": { "type": "boolean",
                             "description": "Rebuild over an existing board draft." }
                     },
@@ -579,111 +579,22 @@ impl Tools {
                 }),
             },
             ToolDef {
-                name: "create_board".into(),
-                description: "Create the working board draft from a board outline \
-                    plus a list of parts. Each part names a footprint lib_id \
-                    (resolve it with search_footprints first — never guess) and a \
-                    pad_nets map (pad number → net name; pads sharing a net name \
-                    ARE the net). Footprints are resolved up front: an unknown \
-                    lib_id is a recoverable error with suggestions. Nets with \
-                    fewer than 2 pins are reported as warnings (nothing to route), \
-                    not errors. Fails if a board draft already exists unless \
-                    overwrite=true. The draft persists to .autopcb/board.json; \
-                    place_board / route_board (later) read it. You never give \
-                    coordinates here — placement decides positions."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "bounds": {
-                            "type": "object",
-                            "description": "Board outline in mm (y-down).",
-                            "properties": {
-                                "min_x": { "type": "number" },
-                                "max_x": { "type": "number" },
-                                "min_y": { "type": "number" },
-                                "max_y": { "type": "number" }
-                            },
-                            "required": ["min_x", "max_x", "min_y", "max_y"]
-                        },
-                        "parts": {
-                            "type": "array",
-                            "description": "The parts on the board.",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "reference": { "type": "string",
-                                        "description": "Unique reference designator, e.g. \"R1\", \"U2\"." },
-                                    "footprint": { "type": "string",
-                                        "description": "Footprint lib_id from search_footprints, e.g. \"Resistor_SMD:R_0603_1608Metric\"." },
-                                    "pad_nets": {
-                                        "type": "object",
-                                        "description": "Pad number → net name. A pad absent from this map is left unconnected.",
-                                        "additionalProperties": { "type": "string" }
-                                    }
-                                },
-                                "required": ["reference", "footprint"]
-                            }
-                        },
-                        "rules": {
-                            "type": "object",
-                            "description": "Board design rules — ALL FIELDS OPTIONAL; omit for engine defaults (clearance 0.2mm, min_trace_width 0.2mm, via_diameter 0.6mm, via_drill 0.3mm, 2 layers, no pours).",
-                            "properties": {
-                                "clearance": { "type": "number", "description": "Min copper-copper clearance (mm)." },
-                                "min_trace_width": { "type": "number", "description": "Default trace width (mm)." },
-                                "via_diameter": { "type": "number", "description": "Via pad diameter (mm); standard-fab min 0.5." },
-                                "via_drill": { "type": "number", "description": "Via drill (mm); standard-fab min 0.3." },
-                                "layers": { "type": "integer", "enum": [2, 4, 6],
-                                    "description": "Copper layer count. 4 or 6 AUTOMATICALLY add inner GND/VCC PLANES (the highest-fanout power nets) — the way a dense part's many power pins connect without per-pin traces. Default 2." },
-                                "net_widths": {
-                                    "type": "object",
-                                    "additionalProperties": { "type": "number" },
-                                    "description": "Per-net trace width override {net: width_mm} — fat power, thin signal, e.g. {\"VCC\": 0.6, \"VIN\": 0.8}." },
-                                "pours": {
-                                    "type": "array",
-                                    "description": "Copper POURS the engine fills FOR YOU — a flood of a net over a signal layer (a GND plane on a 2-layer board, an RF/HF return, shielding). The engine fills the board outline, carves anti-pads around foreign copper, and clips to a custom outline. Use this when the user wants a ground plane/pour — do NOT route top-only and tell the user to draw a zone in KiCAD by hand.",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "net": { "type": "string", "description": "Net to flood, e.g. \"GND\"." },
-                                            "layer": { "type": "string", "description": "Signal layer: \"top\", \"bottom\", or \"innerN\" (NOT a plane layer — a plane is already full copper)." }
-                                        },
-                                        "required": ["net", "layer"]
-                                    }
-                                }
-                            }
-                        },
-                        "outline": {
-                            "type": "array",
-                            "description": "Optional CUSTOM board outline as polygon points [[x,y],...] (>= 3, mm) — a circle (sample many points), hexagon, or any shape. Omit for a rectangular board (just `bounds`). `bounds` must still be the polygon's bounding box. Placement, routing, and pours all respect the polygon.",
-                            "items": { "type": "array", "items": { "type": "number" } }
-                        },
-                        "overwrite": { "type": "boolean",
-                            "description": "Replace an existing board draft (default false)." }
-                    },
-                    "required": ["bounds", "parts"]
-                }),
-            },
-            ToolDef {
                 name: "get_board".into(),
                 description: "Return the current board draft (parts as \
                     reference/footprint/lock + a pad_count — the full per-pad net map you \
-                    passed to create_board is summarized, not echoed) plus a derived \
+                    passed to derive_board is summarized, not echoed) plus a derived \
                     summary: part count, net count, the per-net pin counts, the keepout \
                     count, and whether the board has been placed / routed yet. Use this to \
                     inspect board state before placing or routing, or to confirm a \
-                    create_board / triage edit took effect."
+                    derive_board / triage edit took effect."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             ToolDef {
                 name: "add_parts".into(),
-                description: "Append parts to the existing board draft WITHOUT re-sending the \
-                    whole board. Build a big board incrementally: create_board with the bounds, \
-                    rules, and a FIRST batch of parts, then call add_parts repeatedly for the \
-                    rest. This is the reliable way to assemble a 50+ part board or a large BGA \
-                    pad map — cramming every part (and a 100-ball pad→net map) into one \
-                    create_board call is error-prone. Same per-part validation as create_board \
+                description: "Append extra parts to an EXISTING board draft (one already built \
+                    by derive_board) without rebuilding it — e.g. mounting holes, test points, or \
+                    a part not in the schematic. Same per-part validation as derive_board \
                     (footprint resolved up front with suggestions; a footprint whose own pads \
                     violate rules.clearance is rejected); a reference already on the board is an \
                     error. Returns the references added and the new part/net counts. Adding parts \
@@ -694,7 +605,7 @@ impl Tools {
                     "properties": {
                         "parts": {
                             "type": "array",
-                            "description": "More parts to append (same shape as create_board.parts).",
+                            "description": "More parts to append (each: reference, footprint, pad_nets).",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -726,7 +637,7 @@ impl Tools {
                     many overlaps the legalizer resolved / parts it clamped, and the \
                     per-part positions [{reference, x, y, rotation}]. NOTE: keepouts do \
                     NOT affect placement in v1 — they only block ROUTING (route_board). \
-                    Run create_board first; an unplaceable (too-tight) board returns \
+                    Run derive_board first; an unplaceable (too-tight) board returns \
                     legal=false with a note on how to relax it."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
@@ -843,9 +754,9 @@ impl Tools {
                     re-sending parts — the cheap fix when place_board reports the board too tight \
                     (legal=false + suggested_min_bounds_mm). All parts are kept; the stale \
                     placement and route are cleared, so re-run place_board then route_board. \
-                    PREFER this over re-running create_board to relieve a too-tight placement \
-                    (create_board re-sends every part). A board with a custom outline is rejected \
-                    (resizing bounds alone would desync the outline — re-run create_board with new \
+                    PREFER this over re-running derive_board to relieve a too-tight placement \
+                    (derive_board rebuilds the whole board). A board with a custom outline is rejected \
+                    (resizing bounds alone would desync the outline — re-run derive_board with new \
                     bounds + outline)."
                     .into(),
                 input_schema: json!({
@@ -1000,7 +911,6 @@ impl Tools {
             "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
             "assign_footprints" => crate::tools_pcb::assign_footprints(input, ctx),
             "derive_board" => crate::tools_pcb::derive_board(input, ctx),
-            "create_board" => crate::tools_pcb::create_board(input, ctx),
             "add_parts" => crate::tools_pcb::add_parts(input, ctx),
             "get_board" => crate::tools_pcb::get_board(ctx),
             "place_board" => crate::tools_pcb::place_board(input, ctx),

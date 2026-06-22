@@ -448,7 +448,7 @@ pub fn derive_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
         }));
     }
 
-    // Hand the derived parts to create_board (footprint resolution, pad/uniqueness
+    // Hand the derived parts to the internal builder (footprint resolution, pad/uniqueness
     // validation, BoardDraft build + save). bounds / rules / overwrite pass through.
     let mut cb = json!({
         "parts": parts,
@@ -460,7 +460,7 @@ pub fn derive_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     if let Some(r) = input.get("rules") {
         cb["rules"] = r.clone();
     }
-    create_board(cb, ctx)
+    build_board_draft(cb, ctx)
 }
 
 // ── create_board ─────────────────────────────────────────────────────────────
@@ -687,7 +687,7 @@ fn parse_draft_part(
 pub fn add_parts(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first (bounds + rules + some parts), then add_parts",
+            "error": "no board draft yet — run derive_board first (bounds + rules + some parts), then add_parts",
         }));
     };
     let Some(parts_json) = input.get("parts").and_then(Value::as_array) else {
@@ -708,7 +708,7 @@ pub fn add_parts(input: Value, ctx: &ToolCtx) -> Result<Value> {
             return Ok(json!({
                 "error": format!(
                     "part `{}` is already on the board — references must be unique \
-                     (pick a new reference, or rebuild via create_board with overwrite)",
+                     (pick a new reference, or rebuild via derive_board with overwrite)",
                     part.reference
                 ),
             }));
@@ -729,7 +729,12 @@ pub fn add_parts(input: Value, ctx: &ToolCtx) -> Result<Value> {
     }))
 }
 
-pub fn create_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
+/// Build (and persist) the working [`BoardDraft`] from a `{bounds, parts, rules?, outline?,
+/// overwrite?}` spec. **Internal builder — NOT an agent tool.** The agent reaches the board
+/// only through [`derive_board`], which assembles this spec from the committed schematic + the
+/// footprint map. Also called directly by the deterministic test harnesses (board_harness /
+/// pcb_gate / board_artifact) that build boards from standalone JSON, no schematic.
+pub fn build_board_draft(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let overwrite = input.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
     if BoardDraft::load(ctx).is_some() && !overwrite {
         return Ok(json!({
@@ -875,7 +880,7 @@ fn net_pin_counts(parts: &[DraftPart], ctx: &ToolCtx) -> BTreeMap<String, usize>
 pub fn get_board(ctx: &ToolCtx) -> Result<Value> {
     let Some(draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
 
@@ -1063,7 +1068,7 @@ fn axis_aligned_rotation(rot: i32) -> std::result::Result<i32, String> {
 pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
 
@@ -1194,7 +1199,7 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         } else {
             "placement is NOT legal — the board is too tight for these parts. The fix is more \
              room, not rearrangement: call resize_board with at least suggested_min_bounds_mm \
-             (it keeps all parts — far cheaper than re-create_board — then re-run place_board). \
+             (it keeps all parts — far cheaper than re-running derive_board — then re-run place_board). \
              move_part/unlock won't help when the board is simply too small for the courtyards."
         },
     });
@@ -1301,7 +1306,7 @@ fn parse_edge(v: &Value) -> std::result::Result<pcb_engine::placement::Edge, Str
 pub fn set_placement_hints(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
 
@@ -1409,7 +1414,7 @@ fn parse_keepout(
 pub fn set_constraints(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
 
@@ -1514,12 +1519,12 @@ fn clear_route(ctx: &ToolCtx) -> Result<bool> {
 /// leave the outline inconsistent, so we honestly redirect those to `create_board`.
 pub fn resize_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
-        return Ok(json!({ "error": "no board draft yet — call create_board first" }));
+        return Ok(json!({ "error": "no board draft yet — run derive_board first" }));
     };
     if draft.outline.is_some() {
         return Ok(json!({
             "error": "this board has a custom outline; resizing bounds alone would leave the \
-                      outline inconsistent — re-run create_board with the new bounds + outline",
+                      outline inconsistent — re-run derive_board with the new bounds + outline",
         }));
     }
     let new_bounds = match parse_bounds(input.get("bounds")) {
@@ -1547,7 +1552,7 @@ pub fn resize_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
         "parts_kept": draft.parts.len(),
         "route_cleared": route_cleared,
         "note": "board resized; all parts kept, placement cleared. Re-run place_board (then \
-                 route_board). This is the cheap enlarge — prefer it over re-create_board when \
+                 route_board). This is the cheap enlarge — prefer it over re-running derive_board when \
                  place_board reports the board too tight.",
     }))
 }
@@ -1557,7 +1562,7 @@ pub fn resize_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
 pub fn move_part(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
     let reference = require_str(&input, "reference")?;
@@ -1623,7 +1628,7 @@ pub fn move_part(input: Value, ctx: &ToolCtx) -> Result<Value> {
 pub fn unlock_part(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
     let reference = require_str(&input, "reference")?;
@@ -1820,7 +1825,7 @@ fn escape_bottleneck(
 pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
     let Some(placements) = draft.last_placement.clone() else {
@@ -1981,7 +1986,7 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         // choice). Surface the option here so the model knows to reach for it.
         if rp.layer_count <= 2 {
             out["layer_suggestion"] = json!(format!(
-                "{} net(s) failed on a 2-layer board. Re-create_board with rules.layers=4: \
+                "{} net(s) failed on a 2-layer board. Re-run derive_board with rules.layers=4: \
                  it adds GND+VCC power planes (power pins drop straight to a plane via a \
                  drilled via) and frees F.Cu/B.Cu for signals — usually the biggest win on \
                  dense or multi-power-net boards. Then re-place and re-route.",
@@ -2635,7 +2640,7 @@ pub fn render_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // ── load draft ───────────────────────────────────────────────────────────
     let Some(draft) = crate::tools_pcb::BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
 
@@ -2925,7 +2930,7 @@ fn write_kicad_project(board_path: &std::path::Path, rules: &DraftRules) -> std:
 pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
     let Some(placements) = draft.last_placement.clone() else {

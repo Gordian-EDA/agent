@@ -1,6 +1,6 @@
 //! Headless LLM-driven PCB run: hand the model a natural-language BOARD request,
-//! let it drive the real PCB tool loop (search footprints → create_board →
-//! place_board → render_board → route_board → export_board), then locate the
+//! let it drive the real PCB tool loop (search footprints → assign_footprints →
+//! derive_board → place_board → route_board → export_board), then locate the
 //! exported `.kicad_pcb`, run KiCAD DRC on it, and report.
 //!
 //! This is the PCB analog of `agent_design` (which exercises the schematic side).

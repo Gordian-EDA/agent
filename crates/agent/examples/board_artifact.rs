@@ -45,8 +45,8 @@ fn main() {
               "pad_nets": { "1": "VIN", "2": "GND" } }
         ]
     });
-    let r = tools.run("create_board", board, &ctx).unwrap();
-    println!("create_board: ok={}", r["ok"]);
+    let r = agent::tools_pcb::build_board_draft(board, &ctx).unwrap();
+    println!("build_board_draft: ok={}", r["ok"]);
     let r = tools.run("place_board", json!({}), &ctx).unwrap();
     println!("place_board: legal={} hpwl={}", r["legal"], r["hpwl"]);
     let r = tools.run("route_board", json!({}), &ctx).unwrap();
