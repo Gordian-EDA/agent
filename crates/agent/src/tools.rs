@@ -527,6 +527,30 @@ impl Tools {
                 }),
             },
             ToolDef {
+                name: "assign_footprints".into(),
+                description: "Assign a footprint to each schematic part — the canonical, \
+                    board-side home for footprint selection (the schematic engine never \
+                    stores footprints). Lists every part with its current footprint status \
+                    and a `gaps` list of parts that still need one. Resolve a gap by finding \
+                    a lib_id with search_footprints, then pass it in `assignments` (refdes → \
+                    footprint lib_id). Dry-run by default; pass commit:true to persist to \
+                    .autopcb/footprints.json (what derive_board will read). Unknown lib_ids \
+                    come back in `unresolved` with suggestions; nothing is written then."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "assignments": {
+                            "type": "object",
+                            "description": "refdes → footprint lib_id (e.g. {\"R1\": \"Resistor_SMD:R_0603_1608Metric\"}). Each lib_id must come from search_footprints.",
+                            "additionalProperties": { "type": "string" }
+                        },
+                        "commit": { "type": "boolean",
+                            "description": "false (default) = dry-run report; true = persist the assignments." }
+                    }
+                }),
+            },
+            ToolDef {
                 name: "create_board".into(),
                 description: "Create the working board draft from a board outline \
                     plus a list of parts. Each part names a footprint lib_id \
@@ -946,6 +970,7 @@ impl Tools {
             "edit_design" => edit_design(input, ctx),
             "search_footprints" => crate::tools_pcb::search_footprints(input, ctx),
             "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
+            "assign_footprints" => crate::tools_pcb::assign_footprints(input, ctx),
             "create_board" => crate::tools_pcb::create_board(input, ctx),
             "add_parts" => crate::tools_pcb::add_parts(input, ctx),
             "get_board" => crate::tools_pcb::get_board(ctx),
