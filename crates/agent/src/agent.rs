@@ -62,6 +62,12 @@ use crate::tools::{ToolCtx, Tools};
 /// handful of round-trips, so the extra ceiling only costs tokens on boards that need it.
 const MAX_ITERATIONS: usize = 40;
 
+/// How many times a turn that ends WITHOUT a committed design (the model
+/// researched or drafted but never called `apply_design(commit:true)`) is
+/// re-prompted to finish and commit before we give up. Bounded so a model that
+/// genuinely can't finish doesn't loop forever.
+const MAX_COMMIT_NUDGES: usize = 2;
+
 /// The human apply-gate. The loop calls [`Approvals::approve`] with the dry-run
 /// diff before any `apply_design` write; returning `false` cancels the write.
 ///
@@ -376,6 +382,19 @@ impl Agent {
 
         let mut applied = false;
         let mut tool_calls_made = 0usize;
+        // Whether the model ever DISPATCHED an `apply_design(commit:true)` this
+        // turn. Distinguishes the genuine stall ("researched/drafted but never
+        // tried to commit") from a deliberate human rejection (which DID attempt
+        // a commit) — we only nudge the former.
+        let mut commit_attempted = false;
+        // Whether the model did SCHEMATIC-authoring work this turn (researched
+        // symbols or drafted a design). The same loop also drives the PCB board
+        // flow (`create_board`/`place_board`/`route_board`/`export_board`), which
+        // legitimately never calls `apply_design` — so the "didn't commit" nudge
+        // must only fire on a stalled SCHEMATIC turn, not a board turn.
+        let mut did_schematic_work = false;
+        // Bounded re-prompts that push a stalled model past a premature stop.
+        let mut nudges_left = MAX_COMMIT_NUDGES;
         let mut final_text = String::new();
 
         for _ in 0..MAX_ITERATIONS {
@@ -411,9 +430,31 @@ impl Agent {
                 content: assistant_blocks,
             });
 
-            // No tool calls → the model is done; return its text.
+            // No tool calls → the model wants to stop.
             if completion.tool_calls.is_empty() {
                 final_text = completion.text;
+
+                // Catch the premature stop: the model did schematic-authoring
+                // work (researched with `search_symbols`, or drafted with
+                // `create_design`) but ended the turn WITHOUT ever attempting
+                // `apply_design(commit:true)`, so nothing ships. Re-prompt it to
+                // finish and commit (bounded), rather than silently returning an
+                // empty design. Excluded by design: a deliberate human rejection
+                // (DID attempt a commit), a pure-text stop / plain answer (no
+                // schematic work), and a PCB board-flow turn (never uses
+                // `apply_design`).
+                if did_schematic_work && !applied && !commit_attempted && nudges_left > 0 {
+                    nudges_left -= 1;
+                    self.history.push(Message::user(
+                        "Your turn ended without a committed design — nothing was \
+                         written. You MUST finish the schematic now: call \
+                         `create_design`/`edit_design` to author the full design, \
+                         then `apply_design(commit:true)` to commit it. Do this now \
+                         before ending your turn.",
+                    ));
+                    continue;
+                }
+
                 emit(
                     events,
                     AgentEvent::TurnDone(TurnOutcomeSummary {
@@ -435,6 +476,12 @@ impl Agent {
             let mut result_blocks: Vec<ContentBlock> = Vec::new();
             for call in &completion.tool_calls {
                 tool_calls_made += 1;
+                if call.name == "apply_design" && wants_commit(&call.input) {
+                    commit_attempted = true;
+                }
+                if is_schematic_authoring_tool(&call.name) {
+                    did_schematic_work = true;
+                }
                 emit(
                     events,
                     AgentEvent::ToolStarted {
@@ -790,6 +837,18 @@ fn wants_commit(input: &Value) -> bool {
     input.get("commit").and_then(Value::as_bool) == Some(true)
 }
 
+/// Whether a tool call is SCHEMATIC-authoring/research work — the kind of turn
+/// whose deliverable is a committed design. Used to scope the "ended without a
+/// committed design" nudge to schematic turns only, so the PCB board flow
+/// (`create_board`/`place_board`/`route_board`/`export_board`, which never calls
+/// `apply_design`) is never spuriously nudged.
+fn is_schematic_authoring_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "search_symbols" | "get_symbol_info" | "create_design" | "edit_design" | "apply_design"
+    )
+}
+
 /// The instruction `compact` sends as the final user message.
 const COMPACT_PROMPT: &str = "Summarize this conversation so far for your own \
 future reference: the user's goals, every design decision made, the current \
@@ -1069,9 +1128,15 @@ For fine control WITHIN a block, that block may carry its own 2-D `layout:` grid
 
 # Tools and workflow (follow this order)
 
-1. `get_design()` — lift the CURRENT schematic back to circuit-YAML. ALWAYS call
-   this first when editing an existing design so you build on it (don't recreate
-   from scratch and don't clobber the user's work).
+0. DECIDE the path. For a NEW design on an empty project: author your FULL
+   circuit-YAML and call `create_design(yaml)` to write the working draft (then
+   refine with `edit_design`). For EDITING an existing schematic: call
+   `get_design()` first to lift it so you build on it (don't clobber the user's
+   work). Researching parts is NOT the deliverable — you are NOT done until you have
+   authored a complete design and committed it with `apply_design(commit:true)`. Do
+   not stop after only searching/reading symbols.
+1. `get_design()` — lift the CURRENT schematic back to circuit-YAML (EDIT path only;
+   on an empty project it returns nothing — go straight to `create_design`).
 2. `search_symbols(query)` — find the real `Lib:Name` lib_id for any part BEFORE
    you reference it. KiCAD 10 renamed many symbols (e.g.
    `USB_C_Receptacle_USB2.0` is now `USB_C_Receptacle_USB2.0_16P`), so do not
@@ -1108,8 +1173,10 @@ Two more tools answer questions rather than edit:
 Doctrine: search before you reference a part; read pins with get_symbol_info;
 validate before you apply; review_design before you commit (it catches FUNCTIONAL
 faults ERC can't see); preview (commit:false) before you commit (commit:true).
-Aim for designs that are ERC-clean AND electrically correct. When you are finished,
-reply with a short plain-text summary of what you did — no tool call.
+Aim for designs that are ERC-clean AND electrically correct. You are only FINISHED
+once `apply_design(commit:true)` has COMMITTED the design (it returns the ERC counts);
+a turn that ends after only searching/validating with nothing committed is a FAILURE.
+Once committed, reply with a short plain-text summary of what you did — no tool call.
 
 # PCB layout & routing (the board side)
 
@@ -1410,6 +1477,34 @@ mod tests {
         assert!(wants_commit(&json!({ "yaml": "x", "commit": true })));
         assert!(!wants_commit(&json!({ "yaml": "x", "commit": false })));
         assert!(!wants_commit(&json!({ "yaml": "x" })));
+    }
+
+    #[test]
+    fn schematic_authoring_tools_scope_the_commit_nudge() {
+        // Schematic research/authoring → these turns' deliverable is a commit.
+        for t in [
+            "search_symbols",
+            "get_symbol_info",
+            "create_design",
+            "edit_design",
+            "apply_design",
+        ] {
+            assert!(is_schematic_authoring_tool(t), "{t} is schematic work");
+        }
+        // PCB board-flow tools never call `apply_design`, so they must NOT arm
+        // the "didn't commit a design" nudge (else a clean board turn re-prompts
+        // forever — the pcb_gate regression).
+        for t in [
+            "create_board",
+            "place_board",
+            "route_board",
+            "export_board",
+            "set_constraints",
+            "move_part",
+            "render_board",
+        ] {
+            assert!(!is_schematic_authoring_tool(t), "{t} is board work");
+        }
     }
 
     #[test]

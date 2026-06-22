@@ -47,6 +47,7 @@ fn node_matches(pred: &NodePred, node: &Node) -> bool {
         NodePred::LibAny(subs) => subs.iter().any(|s| node.lib_id.contains(s)),
         NodePred::Pins(n) => node.pin_count() == *n,
         NodePred::PinsAtLeast(n) => node.pin_count() >= *n,
+        NodePred::PinsAtMost(n) => node.pin_count() <= *n,
         NodePred::Value { lo, hi } => {
             crate::value::parse_eng(&node.value).is_some_and(|v| v >= *lo && v <= *hi)
         }

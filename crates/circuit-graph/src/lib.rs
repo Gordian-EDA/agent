@@ -206,6 +206,43 @@ mod tests {
     }
 
     #[test]
+    fn i2c_pullup_matches_small_sensor_not_large_mcu() {
+        // A small I2C sensor (8 pins) with SDA/SCL pull-ups to +3V3 → one match.
+        let sensor = vec![
+            node(
+                "U1",
+                "Sensor:BME280",
+                "",
+                &[
+                    ("SCK", "SCL"), ("SDI", "SDA"), ("VDD", "+3V3"), ("GND", "GND"),
+                    ("SDO", "AD"), ("CSB", "+3V3"), ("VDDIO", "+3V3"), ("GND2", "GND"),
+                ],
+            ),
+            node("R1", "Device:R", "4.7k", &[("1", "+3V3"), ("2", "SDA")]),
+            node("R2", "Device:R", "4.7k", &[("1", "+3V3"), ("2", "SCL")]),
+        ];
+        let g = CircuitGraph::new(sensor, kind_of);
+        let ms = find(&g, &library::I2C_PULLUP);
+        assert_eq!(ms.len(), 1, "I2C pull-ups match a small sensor");
+        assert_eq!(ms[0].anchor, "U1");
+
+        // The SAME pull-up shape on a 17-pin MCU must NOT match (PinsAtMost(16)) — EN/BOOT
+        // control pull-ups are not an I2C bus pair and must not be frozen as a cluster.
+        let mut pins: Vec<(&str, &str)> =
+            vec![("EN", "ENN"), ("IO0", "BOOT"), ("VDD", "+3V3"), ("GND", "GND")];
+        for n in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m"] {
+            pins.push((n, n));
+        }
+        let mcu = vec![
+            node("U1", "RF:ESP32", "", &pins),
+            node("R1", "Device:R", "10k", &[("1", "+3V3"), ("2", "ENN")]),
+            node("R2", "Device:R", "10k", &[("1", "+3V3"), ("2", "BOOT")]),
+        ];
+        let g2 = CircuitGraph::new(mcu, kind_of);
+        assert!(find(&g2, &library::I2C_PULLUP).is_empty(), "control pull-ups on a large MCU don't match");
+    }
+
+    #[test]
     fn derive_from_example_reproduces_a_matchable_sketch() {
         let g = stm32_graph();
         let d = derive::derive(&g, "U1", 1).expect("derive around U1");
