@@ -24,9 +24,12 @@ fn main() {
 
     let mut cfg = prost_build::Config::new();
     // (prost-build already maps the google well-knowns onto prost-types.)
-    // Generate `prost::Name` impls so commands pack into `google.protobuf.Any`
-    // (the envelope's message field) by their `type.googleapis.com/...` URL.
+    // Generate `prost::Name` impls so commands/items pack into `google.protobuf.Any`
+    // by their type URL. KiCAD strips a `type.googleapis.com/` prefix when matching
+    // the Any's type, so the URL MUST carry that domain (prost defaults to none,
+    // which yields `/kiapi...` and a decode failure).
     cfg.enable_type_names();
+    cfg.type_name_domain(["."], "type.googleapis.com");
     // Emit one file with the full nested `kiapi::...` module tree.
     cfg.include_file("_proto.rs");
     cfg.compile_protos(&protos, &[root])

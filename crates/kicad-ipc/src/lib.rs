@@ -36,6 +36,10 @@ pub enum Error {
     EmptyResponse,
     #[error("response Any did not hold the expected `{0}`")]
     TypeMismatch(&'static str),
+    #[error("no PCB document open in KiCAD (call open_board first; is a board loaded?)")]
+    NoBoard,
+    #[error("KiCAD rejected an item (status {code}): {message}")]
+    Item { code: i32, message: String },
 }
 
 /// A connection to a running KiCAD instance's IPC API server.
@@ -47,6 +51,8 @@ pub struct Kicad {
     socket: nng::Socket,
     token: String,
     client_name: String,
+    /// The open PCB document, cached by [`Kicad::open_board`].
+    board_doc: Option<proto::kiapi::common::types::DocumentSpecifier>,
 }
 
 impl Kicad {
@@ -68,16 +74,13 @@ impl Kicad {
             socket,
             token: String::new(),
             client_name: format!("auto-pcb-agent-{}", std::process::id()),
+            board_doc: None,
         })
     }
 
-    /// Send a command (wrapped in `google.protobuf.Any`) and decode the typed reply.
-    /// Bootstraps the instance token from the first reply and surfaces API errors.
-    pub fn call<C, R>(&mut self, cmd: &C) -> Result<R, Error>
-    where
-        C: Message + Name,
-        R: Message + Name + Default,
-    {
+    /// Send a command (wrapped in `Any`), return the raw [`ApiResponse`]. Bootstraps
+    /// the instance token from the first reply and surfaces API-level errors.
+    fn send_request<C: Message + Name>(&mut self, cmd: &C) -> Result<ApiResponse, Error> {
         let any = prost_types::Any::from_msg(cmd)?;
         let req = ApiRequest {
             header: Some(ApiRequestHeader {
@@ -92,7 +95,6 @@ impl Kicad {
             .map_err(|(_, e)| Error::Nng(e))?;
         let reply = self.socket.recv()?;
         let resp = ApiResponse::decode(reply.as_slice())?;
-
         if self.token.is_empty() {
             if let Some(h) = &resp.header {
                 if !h.kicad_token.is_empty() {
@@ -108,8 +110,24 @@ impl Kicad {
                 });
             }
         }
+        Ok(resp)
+    }
+
+    /// Send a command and decode the typed reply (unpacked from the response `Any`).
+    pub fn call<C, R>(&mut self, cmd: &C) -> Result<R, Error>
+    where
+        C: Message + Name,
+        R: Message + Name + Default,
+    {
+        let resp = self.send_request(cmd)?;
         let any = resp.message.ok_or(Error::EmptyResponse)?;
         any.to_msg::<R>().map_err(|_| Error::TypeMismatch(R::NAME))
+    }
+
+    /// Send a command whose response carries no payload (just check status).
+    pub fn call_void<C: Message + Name>(&mut self, cmd: &C) -> Result<(), Error> {
+        self.send_request(cmd)?;
+        Ok(())
     }
 
     /// `(major, minor, patch, full_version)` of the connected KiCAD.
@@ -117,5 +135,135 @@ impl Kicad {
         let r: GetVersionResponse = self.call(&GetVersion {})?;
         let v = r.version.unwrap_or_default();
         Ok((v.major, v.minor, v.patch, v.full_version))
+    }
+}
+
+// ── Board read / edit ────────────────────────────────────────────────────────
+
+use proto::kiapi::board::types::{FootprintInstance, Track};
+use proto::kiapi::common::commands::{
+    BeginCommit, BeginCommitResponse, CommitAction, CreateItems, CreateItemsResponse, EndCommit,
+    GetItems, GetItemsResponse, GetOpenDocuments, GetOpenDocumentsResponse, ItemStatusCode,
+    SaveDocument, UpdateItems, UpdateItemsResponse,
+};
+use proto::kiapi::common::types::{DocumentType, ItemHeader, KiCadObjectType};
+
+/// Turn a per-item `ItemStatus` into an error unless it is `ISC_OK`.
+fn check_item_status(status: &Option<proto::kiapi::common::commands::ItemStatus>) -> Result<(), Error> {
+    if let Some(s) = status {
+        if s.code != ItemStatusCode::IscOk as i32 {
+            return Err(Error::Item {
+                code: s.code,
+                message: s.error_message.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+impl Kicad {
+    /// Find and cache the open PCB document. Call once before any board op.
+    pub fn open_board(&mut self) -> Result<(), Error> {
+        let resp: GetOpenDocumentsResponse = self.call(&GetOpenDocuments {
+            r#type: DocumentType::DoctypePcb as i32,
+        })?;
+        self.board_doc = resp.documents.into_iter().next();
+        if self.board_doc.is_none() {
+            return Err(Error::NoBoard);
+        }
+        Ok(())
+    }
+
+    fn header(&self) -> Result<ItemHeader, Error> {
+        Ok(ItemHeader {
+            document: Some(self.board_doc.clone().ok_or(Error::NoBoard)?),
+            container: None,
+            field_mask: None,
+        })
+    }
+
+    /// Raw board items of the given object types (packed in `Any`).
+    pub fn get_items(&mut self, types: &[KiCadObjectType]) -> Result<Vec<prost_types::Any>, Error> {
+        let header = self.header()?;
+        let resp: GetItemsResponse = self.call(&GetItems {
+            header: Some(header),
+            types: types.iter().map(|t| *t as i32).collect(),
+        })?;
+        Ok(resp.items)
+    }
+
+    /// All footprints on the board.
+    pub fn footprints(&mut self) -> Result<Vec<FootprintInstance>, Error> {
+        self.get_items(&[KiCadObjectType::KotPcbFootprint])?
+            .into_iter()
+            .map(|a| {
+                a.to_msg::<FootprintInstance>()
+                    .map_err(|_| Error::TypeMismatch("FootprintInstance"))
+            })
+            .collect()
+    }
+
+    /// All track segments on the board.
+    pub fn tracks(&mut self) -> Result<Vec<Track>, Error> {
+        self.get_items(&[KiCadObjectType::KotPcbTrace])?
+            .into_iter()
+            .map(|a| a.to_msg::<Track>().map_err(|_| Error::TypeMismatch("Track")))
+            .collect()
+    }
+
+    /// Create new board items (tracks, vias, zones, ...). Pack each with
+    /// `prost_types::Any::from_msg(&item)`.
+    pub fn create_items(&mut self, items: Vec<prost_types::Any>) -> Result<(), Error> {
+        let header = self.header()?;
+        let resp: CreateItemsResponse = self.call(&CreateItems {
+            header: Some(header),
+            items,
+            container: None,
+        })?;
+        for r in &resp.created_items {
+            check_item_status(&r.status)?;
+        }
+        Ok(())
+    }
+
+    /// Update existing board items (e.g. a moved footprint).
+    pub fn update_items(&mut self, items: Vec<prost_types::Any>) -> Result<(), Error> {
+        let header = self.header()?;
+        let resp: UpdateItemsResponse = self.call(&UpdateItems {
+            header: Some(header),
+            items,
+        })?;
+        for r in &resp.updated_items {
+            check_item_status(&r.status)?;
+        }
+        Ok(())
+    }
+
+    /// Run `f`'s edits inside ONE KiCAD commit (a single undo step). Commits on
+    /// success, drops on error.
+    pub fn commit<F>(&mut self, message: &str, f: F) -> Result<(), Error>
+    where
+        F: FnOnce(&mut Self) -> Result<(), Error>,
+    {
+        let begun: BeginCommitResponse = self.call(&BeginCommit {})?;
+        let id = begun.id;
+        let result = f(self);
+        let action = if result.is_ok() {
+            CommitAction::CmaCommit
+        } else {
+            CommitAction::CmaDrop
+        };
+        self.call_void(&EndCommit {
+            id,
+            action: action as i32,
+            message: message.to_string(),
+        })?;
+        result
+    }
+
+    /// Save the open board to disk.
+    pub fn save(&mut self) -> Result<(), Error> {
+        let document = Some(self.board_doc.clone().ok_or(Error::NoBoard)?);
+        self.call_void(&SaveDocument { document })
     }
 }
