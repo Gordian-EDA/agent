@@ -170,10 +170,21 @@ place_board → route_board → export_board     user's connectivity untouched
 - **`sch-layout`** — untouched. `derive_board` calls `lift()`; `assign_footprints` patches
   via `kicad-bridge`. Emit keeps writing an empty `Footprint` property.
 - **`create_design`** — keeps authoring symbols + nets only; no footprint guidance added.
-- **`create_board`** — stays as the explicit-parts escape hatch for board-only / no-
-  schematic use. `derive_board` is additive, not a replacement.
 - **The "LLM never emits coordinates" contract** — preserved; `derive_board` adds parts +
   nets, never positions.
+
+### Update (Jun 22): `create_board` removed from the agent tool surface
+
+The agent always starts from a schematic, so `create_board` is no longer an LLM tool. The
+builder it wrapped was renamed `build_board_draft` (an internal `pub fn`, NOT registered as a
+tool) and is now called only by (a) `derive_board`, which assembles its `{bounds, parts,
+pad_nets, rules?}` spec from the committed schematic + the footprint map, and (b) the
+deterministic test harnesses (`board_harness` / `pcb_gate` / `board_artifact`) that build boards
+from standalone JSON with no schematic. The ToolDef + dispatch arm were deleted; the prompt
+board-flow doctrine now reads `search_footprints → assign_footprints → derive_board → place →
+route → export`; agent-facing error/description strings point at `derive_board`. `add_parts` was
+removed in the same spirit (manual part-appending has no place in a derive-from-schematic flow, and
+nothing internal called it — it was deleted outright, fn + ToolDef + test). Tool count 28 → 26.
 
 ## Implementation slices
 
@@ -184,8 +195,17 @@ place_board → route_board → export_board     user's connectivity untouched
    pad-number-keyed pins for free and serves both scenarios with one path, so slices 2 and 3
    collapsed. (The in-place footprint patcher for the user's sheet — the only S2-specific
    extra — is deferred until a user actually needs it.)
-4. ⬜ **Sync/diff re-run semantics** (placement preservation) + the **consistency lint**, plus
-   the pin-count ⟷ pad-count check now that `derive_board` has the `Design`.
+4. ✅ **pin↔pad check** — `derive_board` rejects an assigned footprint that lacks a pad the
+   schematic nets (a pure `pads_missing()` helper), returning `wrong_footprints` so the agent
+   re-assigns. Scoped to `derive_board` (the schematic-driven path), NOT the shared
+   `create_board` builder — so it doesn't relitigate the PCB engine's manual stress fixtures.
+   **Deferred** (low ROI for now): placement-preservation on re-derive (the agent re-places via
+   `place_board`) and a net-consistency lint (a fresh derive is consistent by construction).
+
+> Aside — the check surfaced a latent bug while it briefly lived in the shared builder: several
+> BGA-64 harness fixtures (`bga-custom-outline-edge`, `bga64-stress`, …) net inner balls (C3–H8)
+> that don't exist on their perimeter-64 footprint — silently dropped today. Flagged for the PCB
+> side; not fixed here (out of this feature's scope).
 
 Each slice is gated on `cargo test -p pcb-engine -p kicad-bridge -p agent` and the
 `board_harness` staying 0-copper-fault.

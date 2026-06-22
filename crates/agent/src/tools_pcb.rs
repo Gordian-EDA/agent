@@ -348,6 +348,20 @@ pub fn assign_footprints(input: Value, ctx: &ToolCtx) -> Result<Value> {
 
 // ── derive_board ──────────────────────────────────────────────────────────────
 
+/// Pad numbers in `pad_keys` that aren't among the footprint's real pads `fp_pads`
+/// — sorted + deduped. Empty means every referenced pad exists. The pin↔pad check.
+fn pads_missing<'a>(pad_keys: impl IntoIterator<Item = &'a str>, fp_pads: &[&str]) -> Vec<String> {
+    let have: std::collections::HashSet<&str> = fp_pads.iter().copied().collect();
+    let mut missing: Vec<String> = pad_keys
+        .into_iter()
+        .filter(|p| !have.contains(p))
+        .map(str::to_string)
+        .collect();
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
 /// `derive_board` — build the board draft from the committed schematic + the
 /// footprint map, instead of re-typing parts by hand. Connectivity comes from the
 /// schematic's netlist (via `lift`, which keys pins by pad number — KiCAD does the
@@ -381,8 +395,10 @@ pub fn derive_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // One create_board-style part per component: footprint from the map, pad_nets
     // from the (pad-number-keyed) pins, flattened across units. NoConnect / absent
     // pins are simply omitted (an absent pad is unconnected).
+    let index = ctx.footprint_index()?;
     let mut parts = Vec::new();
     let mut needs_footprints = Vec::new();
+    let mut wrong_footprints = Vec::new();
     for (refdes, c) in design.blocks.values().flat_map(|b| b.components.iter()) {
         let Some(footprint) = map.get(refdes) else {
             needs_footprints.push(refdes.clone());
@@ -394,6 +410,18 @@ pub fn derive_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
                 if let PinTarget::Net(net) = target {
                     pad_nets.insert(pad.clone(), json!(net));
                 }
+            }
+        }
+        // pin↔pad: every pad the schematic nets must exist on the assigned footprint.
+        // A missing one means the wrong footprint for this part. (Unknown lib_ids fall
+        // through to create_board, which reports them with suggestions.)
+        if let Some(fp) = index.footprint(footprint) {
+            let fp_pads: Vec<&str> = fp.pads.iter().map(|p| p.number.as_str()).collect();
+            let missing = pads_missing(pad_nets.keys().map(String::as_str), &fp_pads);
+            if !missing.is_empty() {
+                wrong_footprints.push(json!({
+                    "reference": refdes, "footprint": footprint, "missing_pads": missing,
+                }));
             }
         }
         parts.push(json!({
@@ -411,8 +439,16 @@ pub fn derive_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
                      then re-run derive_board",
         }));
     }
+    if !wrong_footprints.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "wrong_footprints": wrong_footprints,
+            "note": "the assigned footprint lacks pads the schematic uses — pick a footprint that \
+                     fits the part's pins (search_footprints), re-assign_footprints, then re-run",
+        }));
+    }
 
-    // Hand the derived parts to create_board (footprint resolution, pad/uniqueness
+    // Hand the derived parts to the internal builder (footprint resolution, pad/uniqueness
     // validation, BoardDraft build + save). bounds / rules / overwrite pass through.
     let mut cb = json!({
         "parts": parts,
@@ -424,7 +460,7 @@ pub fn derive_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     if let Some(r) = input.get("rules") {
         cb["rules"] = r.clone();
     }
-    create_board(cb, ctx)
+    build_board_draft(cb, ctx)
 }
 
 // ── create_board ─────────────────────────────────────────────────────────────
@@ -573,10 +609,10 @@ const KICAD_HOLE_CLEAR_MM: f64 = 0.25;
 const HDI_VIA_DIAMETER: f64 = 0.4;
 const HDI_VIA_DRILL: f64 = 0.2;
 
-/// Parse one part JSON into a validated [`DraftPart`]. Shared by `create_board` and
-/// `add_parts` so both apply identical footprint resolution, intrinsic pad-clearance
-/// rejection, and lock parsing. Returns the error-shaped `Value` on any problem so the
-/// caller can return it directly (the model then fixes just that part).
+/// Parse one part JSON into a validated [`DraftPart`] for [`build_board_draft`]: footprint
+/// resolution, intrinsic pad-clearance rejection, and lock parsing. Returns the error-shaped
+/// `Value` on any problem so the caller can return it directly (the model then fixes just
+/// that part).
 fn parse_draft_part(
     pj: &Value,
     index: &kicad_bridge::footlib::FootprintIndex,
@@ -643,57 +679,12 @@ fn parse_draft_part(
     Ok(DraftPart { reference, footprint, pad_nets, locked })
 }
 
-/// Append parts to the existing draft WITHOUT re-sending the whole board — the lever for big
-/// boards (50+ parts, or a 100-ball BGA's pad map) where re-emitting every part in one
-/// create_board call is unreliable for the model. Same per-part validation as create_board;
-/// a reference that already exists is rejected. Build incrementally: create_board (bounds +
-/// rules + the first parts), then add_parts(more) as many times as needed.
-pub fn add_parts(input: Value, ctx: &ToolCtx) -> Result<Value> {
-    let Some(mut draft) = BoardDraft::load(ctx) else {
-        return Ok(json!({
-            "error": "no board draft yet — call create_board first (bounds + rules + some parts), then add_parts",
-        }));
-    };
-    let Some(parts_json) = input.get("parts").and_then(Value::as_array) else {
-        return Ok(json!({
-            "error": "missing required `parts` array (each {reference, footprint, pad_nets})",
-        }));
-    };
-    let index = ctx.footprint_index()?;
-    let mut seen: std::collections::BTreeSet<String> =
-        draft.parts.iter().map(|p| p.reference.clone()).collect();
-    let mut added: Vec<String> = Vec::new();
-    for pj in parts_json {
-        let part = match parse_draft_part(pj, index, draft.rules.clearance) {
-            Ok(p) => p,
-            Err(e) => return Ok(e),
-        };
-        if !seen.insert(part.reference.clone()) {
-            return Ok(json!({
-                "error": format!(
-                    "part `{}` is already on the board — references must be unique \
-                     (pick a new reference, or rebuild via create_board with overwrite)",
-                    part.reference
-                ),
-            }));
-        }
-        added.push(part.reference.clone());
-        draft.parts.push(part);
-    }
-    // New parts aren't placed, so any prior placement is now stale.
-    draft.last_placement = None;
-    draft.last_place_illegal = false;
-    draft.save(ctx)?;
-    let net_pins = net_pin_counts(&draft.parts, ctx);
-    Ok(json!({
-        "ok": true,
-        "added": added,
-        "part_count": draft.parts.len(),
-        "net_count": net_pins.len(),
-    }))
-}
-
-pub fn create_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
+/// Build (and persist) the working [`BoardDraft`] from a `{bounds, parts, rules?, outline?,
+/// overwrite?}` spec. **Internal builder — NOT an agent tool.** The agent reaches the board
+/// only through [`derive_board`], which assembles this spec from the committed schematic + the
+/// footprint map. Also called directly by the deterministic test harnesses (board_harness /
+/// pcb_gate / board_artifact) that build boards from standalone JSON, no schematic.
+pub fn build_board_draft(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let overwrite = input.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
     if BoardDraft::load(ctx).is_some() && !overwrite {
         return Ok(json!({
@@ -839,7 +830,7 @@ fn net_pin_counts(parts: &[DraftPart], ctx: &ToolCtx) -> BTreeMap<String, usize>
 pub fn get_board(ctx: &ToolCtx) -> Result<Value> {
     let Some(draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
 
@@ -1027,7 +1018,7 @@ fn axis_aligned_rotation(rot: i32) -> std::result::Result<i32, String> {
 pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
 
@@ -1158,7 +1149,7 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         } else {
             "placement is NOT legal — the board is too tight for these parts. The fix is more \
              room, not rearrangement: call resize_board with at least suggested_min_bounds_mm \
-             (it keeps all parts — far cheaper than re-create_board — then re-run place_board). \
+             (it keeps all parts — far cheaper than re-running derive_board — then re-run place_board). \
              move_part/unlock won't help when the board is simply too small for the courtyards."
         },
     });
@@ -1265,7 +1256,7 @@ fn parse_edge(v: &Value) -> std::result::Result<pcb_engine::placement::Edge, Str
 pub fn set_placement_hints(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
 
@@ -1373,7 +1364,7 @@ fn parse_keepout(
 pub fn set_constraints(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
 
@@ -1478,12 +1469,12 @@ fn clear_route(ctx: &ToolCtx) -> Result<bool> {
 /// leave the outline inconsistent, so we honestly redirect those to `create_board`.
 pub fn resize_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
-        return Ok(json!({ "error": "no board draft yet — call create_board first" }));
+        return Ok(json!({ "error": "no board draft yet — run derive_board first" }));
     };
     if draft.outline.is_some() {
         return Ok(json!({
             "error": "this board has a custom outline; resizing bounds alone would leave the \
-                      outline inconsistent — re-run create_board with the new bounds + outline",
+                      outline inconsistent — re-run derive_board with the new bounds + outline",
         }));
     }
     let new_bounds = match parse_bounds(input.get("bounds")) {
@@ -1511,7 +1502,7 @@ pub fn resize_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
         "parts_kept": draft.parts.len(),
         "route_cleared": route_cleared,
         "note": "board resized; all parts kept, placement cleared. Re-run place_board (then \
-                 route_board). This is the cheap enlarge — prefer it over re-create_board when \
+                 route_board). This is the cheap enlarge — prefer it over re-running derive_board when \
                  place_board reports the board too tight.",
     }))
 }
@@ -1521,7 +1512,7 @@ pub fn resize_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
 pub fn move_part(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
     let reference = require_str(&input, "reference")?;
@@ -1587,7 +1578,7 @@ pub fn move_part(input: Value, ctx: &ToolCtx) -> Result<Value> {
 pub fn unlock_part(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
     let reference = require_str(&input, "reference")?;
@@ -1784,7 +1775,7 @@ fn escape_bottleneck(
 pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
     let Some(placements) = draft.last_placement.clone() else {
@@ -1945,7 +1936,7 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         // choice). Surface the option here so the model knows to reach for it.
         if rp.layer_count <= 2 {
             out["layer_suggestion"] = json!(format!(
-                "{} net(s) failed on a 2-layer board. Re-create_board with rules.layers=4: \
+                "{} net(s) failed on a 2-layer board. Re-run derive_board with rules.layers=4: \
                  it adds GND+VCC power planes (power pins drop straight to a plane via a \
                  drilled via) and frees F.Cu/B.Cu for signals — usually the biggest win on \
                  dense or multi-power-net boards. Then re-place and re-route.",
@@ -2599,7 +2590,7 @@ pub fn render_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // ── load draft ───────────────────────────────────────────────────────────
     let Some(draft) = crate::tools_pcb::BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
 
@@ -2889,7 +2880,7 @@ fn write_kicad_project(board_path: &std::path::Path, rules: &DraftRules) -> std:
 pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
-            "error": "no board draft yet — call create_board first",
+            "error": "no board draft yet — run derive_board first",
         }));
     };
     let Some(placements) = draft.last_placement.clone() else {
@@ -3098,6 +3089,26 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod pads_missing_tests {
+    use super::pads_missing;
+
+    #[test]
+    fn flags_only_pads_absent_from_the_footprint() {
+        // R-style: pins 1,2 on a footprint with pads 1,2 — nothing missing.
+        assert!(pads_missing(["1", "2"], &["1", "2"]).is_empty());
+        // A pin mapped to a pad the footprint lacks (3 on a 2-pad part) is flagged.
+        assert_eq!(pads_missing(["1", "2", "3"], &["1", "2"]), vec!["3".to_string()]);
+        // BGA-style alphanumeric pads; the inner ball isn't on a perimeter footprint.
+        assert_eq!(
+            pads_missing(["A1", "C5"], &["A1", "A2", "B1"]),
+            vec!["C5".to_string()]
+        );
+        // Result is sorted + deduped.
+        assert_eq!(pads_missing(["5", "5", "4"], &["1"]), vec!["4".to_string(), "5".to_string()]);
+    }
 }
 
 #[cfg(test)]

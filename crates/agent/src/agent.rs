@@ -1127,35 +1127,34 @@ schematic). The routing/placement engine is deterministic geometry; YOUR job is
 the floorplan, the constraints, and triaging failures. You NEVER emit trace
 coordinates — copper comes only from the engine.
 
-**Go STRAIGHT to the board flow — do NOT draw a schematic first.** `create_board`
-takes the parts directly (`{reference, footprint, pad_nets}`); when the request is
-a board (the user names the parts/footprints, or asks you to "lay out / route a
-PCB"), skip `create_design`/`apply_design` entirely and start at step 1 below.
-Building a schematic first for a board-only task wastes your turn and can run you
-out of steps before the board is routed and exported. (Only derive from a schematic
-when one already exists or the user explicitly asks for the schematic too.)
+**The board is DERIVED from the schematic — you never re-type parts or nets.** Once a
+schematic is committed (you drew it with `create_design` → `apply_design`, or the user
+supplied a `.kicad_sch`), `derive_board` reuses its parts and netlist for the board. So if
+the user asks for a board and no schematic exists yet, draw and commit one FIRST
+(`create_design` → `apply_design`), THEN run the board flow below. Your board-side job is
+just choosing footprints and driving the floorplan/routing — the parts and pad-nets come
+from the schematic.
 
 ## Board flow (follow this order)
 
 1. `search_footprints(query)` — find the real footprint `Lib:Name` for each part
    (e.g. `Resistor_SMD:R_0603_1608Metric`). NEVER guess a footprint lib_id —
    search for it, exactly like symbols.
-2. `get_footprint_info(lib_id)` — read the pad numbers (so you bind nets to the
-   right pads), the courtyard, and the bounding box.
-3. `create_board({bounds, parts, rules?, outline?})` — declare the board: outline
-   bounds (mm), and each part as `{reference, footprint, pad_nets: {pad# → net}}`.
-   Single-pin nets warn (nothing to route). One unknown footprint is a
-   recoverable error with suggestions — fix that one part and resend.
+2. `get_footprint_info(lib_id)` — read the pad numbers / courtyard / bbox to confirm
+   the footprint fits, then `assign_footprints({assignments: {refdes: lib_id}})` to
+   record each part's footprint (board-side; the schematic stays footprint-agnostic).
+   An unknown lib_id comes back with suggestions — fix it and re-assign.
+3. `derive_board({bounds, rules?, outline?})` — build the board draft from the committed
+   schematic + the footprint map. The parts and pad-nets come from the netlist; you supply
+   ONLY the outline bounds (mm) and optional rules — never re-type parts. A part with no
+   footprint yet comes back as `needs_footprints` (assign it, then retry); a footprint
+   missing a pad the schematic nets comes back as `wrong_footprints` (wrong footprint for
+   that part — pick one that fits, re-assign, retry).
    START WITH GENEROUS BOUNDS (roughly 2× the summed part area, square-ish). The
    export tightens the final outline to the copper + 1mm, so a roomy routing area is
    FREE in the finished board but gives the placer/router the slack they need — a
    hand-packed tight board is the #1 cause of an illegal placement you then waste the
    turn fighting. You can always shrink later; starting tight only hurts.
-   BIG BOARDS (50+ parts, or a large BGA whose pad→net map is long): do NOT cram every
-   part into one create_board call — a giant parts argument is unreliable to emit and you
-   will waste the turn re-sending it. Instead `create_board` with the bounds, rules, and a
-   FIRST batch, then `add_parts({parts})` repeatedly for the rest (same part shape; a
-   reference already on the board errors). Then place_board once everything is added.
    USE THE ENGINE'S FEATURES — they are deterministic and DRC-checked, so reach for
    them instead of hand-workarounds or telling the user to finish in KiCAD:
    - `rules.pours: [{net, layer}]` — a copper POUR the engine fills + anti-pads for
@@ -1184,8 +1183,8 @@ when one already exists or the user explicitly asks for the schematic too.)
 5. `place_board()` — the deterministic legalizer snaps parts to a legal, in-bounds
    floorplan honoring your hints and any locks. Returns each part's position and
    whether the placement is `legal`. For an illegal (too-tight) placement, the
-   FIRST and cheapest fix is to ENLARGE BOUNDS (re-create_board with a bigger
-   `bounds`) — the export auto-tightens the outline to the copper + 1mm anyway, so
+   FIRST and cheapest fix is to ENLARGE BOUNDS (`resize_board` to a bigger
+   `bounds`, keeping the parts) — the export auto-tightens the outline to the copper + 1mm anyway, so
    roomy bounds cost nothing in the finished board and give the legalizer slack.
    Do NOT try to resolve overlaps by hand-`move_part`ing parts around: each
    move_part LOCKS that part, and a pile of locks over-constrains the legalizer so
@@ -1251,7 +1250,7 @@ WHICH channel to open.
 0. **Wide power nets failing / signals crowding one layer → go 4-layer FIRST.**
    When `route_board` fails a high-fanout power net (VCC/VIN/VOUT) or its output
    says signals are crowding a single layer (e.g. a bottom GND pour leaves only the
-   top for signals), the decisive lever is `create_board(..., rules:{layers:4})` and
+   top for signals), the decisive lever is `derive_board(..., rules:{layers:4})` and
    re-place — the high-fanout power nets become inner PLANES (connected by vias),
    freeing both outer layers for signals. ACT on this immediately; do NOT spend
    several re-place/re-hint rounds fighting wide traces on 2 layers first. If
@@ -1449,7 +1448,8 @@ mod tests {
         let p = system_prompt();
         // Board tool flow.
         assert!(p.contains("search_footprints"));
-        assert!(p.contains("create_board"));
+        assert!(p.contains("assign_footprints"));
+        assert!(p.contains("derive_board"));
         assert!(p.contains("set_placement_hints"));
         assert!(p.contains("place_board"));
         assert!(p.contains("render_board"));
