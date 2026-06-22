@@ -2414,7 +2414,15 @@ fn align_repeated_columns(items: &mut [Item], ir: &LayoutIr) -> bool {
                 r[3] - r[1]
             })
             .fold(0.0_f64, f64::max);
-        let ypitch = snap((col_h + 7.62).max(25.4));
+        // Inter-row text headroom: a multi-pin anchor (the FET) carries refdes+value on a HORIZONTAL
+        // band ABOVE and BELOW its body (~4.78 mm each, see emit::solve_text_positions), and the
+        // BOTTOM role-row's source pin drops to a port/label (SHUNT_x_TOP) that occupies the band
+        // directly below it. With only one cell of slack the top-row's value band, the bottom-row's
+        // refdes band, and that hanging port all crowd the same narrow gap and collide (the
+        // "bottom-row label/refdes text collisions" defect). Open the pitch to fit a clear text band
+        // on BOTH sides of every body (two ~4.78 mm bands + a cell of margin) so the solver always has
+        // a collision-free above/below spot. The overlap-safety check below still gates the move.
+        let ypitch = snap((col_h + 15.24).max(30.48));
         // CONSISTENT internal order: rank each member by a connectivity ROLE so corresponding parts sit
         // in the same row across columns (every HS FET on top, every LS FET below) — the critic's "same
         // internal vertical order" ask. Role key = (#pins on a positive supply rail) DESCENDING: the
