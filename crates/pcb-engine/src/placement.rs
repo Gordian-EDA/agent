@@ -477,6 +477,73 @@ pub fn decoupling_pairs(problem: &PlaceProblem) -> Vec<(usize, usize)> {
     pairs
 }
 
+/// Series co-placement earns its keep only where escape congestion is real: a DENSE
+/// package (QFP/BGA/QFN — many pads on tight pitch) whose signal pads must thread
+/// limited channels to break out. A small anchor (SOIC-8, SOT-223) has trivial escape,
+/// so pulling a series part to it just perturbs an already-clean layout — it cost
+/// power-stage a net in the full-harness sweep. Gate the anchor on pad count.
+const SERIES_ANCHOR_MIN_PADS: usize = 16;
+
+/// Detect series co-placement pairs `(part_idx, anchor_idx)`: a 2-pad part with a
+/// pad on a **2-pin net** whose other pin belongs to a dense (≥[`SERIES_ANCHOR_MIN_PADS`]
+/// -pad) anchor — a series element hanging directly off one anchor pin (the classic
+/// BGA/IC signal
+/// breakout: ball → series R → header). Co-placing it next to that anchor pad keeps
+/// the congested escape hop short, so the breakout actually routes. The 2-pin-net
+/// test is what makes this safe: a divider resistor's nets are high-fanout power
+/// rails (≥3 pins), so it never matches — this fires only for true series taps.
+/// When both pads qualify (R between two ICs), the LARGER anchor wins (the dense
+/// package whose escape congestion matters most). Disjoint from [`decoupling_pairs`]
+/// (whose caps share BOTH nets with one anchor, i.e. high-fanout power).
+fn series_pairs(problem: &PlaceProblem) -> Vec<(usize, usize)> {
+    // net name → the part indices with a pad on it (one entry per pad).
+    let mut net_pins: std::collections::HashMap<&str, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (pi, part) in problem.parts.iter().enumerate() {
+        for pad in &part.pads {
+            if let Some(n) = pad.net.as_deref() {
+                net_pins.entry(n).or_default().push(pi);
+            }
+        }
+    }
+    let mut pairs = Vec::new();
+    for (si, small) in problem.parts.iter().enumerate() {
+        if small.pads.len() != 2 {
+            continue;
+        }
+        let mut best: Option<usize> = None;
+        let mut best_pads = 0usize;
+        for pad in &small.pads {
+            let Some(net) = pad.net.as_deref() else { continue };
+            let pins = &net_pins[net];
+            // 2-pin net: exactly this part's pad + one other pin.
+            if pins.len() != 2 {
+                continue;
+            }
+            if let Some(&anchor) = pins.iter().find(|&&p| p != si) {
+                let np = problem.parts[anchor].pads.len();
+                if np >= SERIES_ANCHOR_MIN_PADS && np > best_pads {
+                    best_pads = np;
+                    best = Some(anchor);
+                }
+            }
+        }
+        if let Some(anchor) = best {
+            pairs.push((si, anchor));
+        }
+    }
+    pairs
+}
+
+/// Co-placement pairs the SA cohesion honours: decoupling caps (hug their IC) plus
+/// series taps (hug their dense anchor). A part can appear once — `decoupling_pairs`
+/// and `series_pairs` are disjoint by construction (both-nets-shared vs 2-pin-net).
+fn coplacement_pairs(problem: &PlaceProblem) -> Vec<(usize, usize)> {
+    let mut pairs = decoupling_pairs(problem);
+    pairs.extend(series_pairs(problem));
+    pairs
+}
+
 // ── simulated-annealing placement refinement ─────────────────────────────────
 //
 // A direct analog of the schematic floorplan SA (`sch-layout::floorplan`): from
@@ -660,7 +727,7 @@ fn anneal_placement(
     if movable.len() < 2 {
         return;
     }
-    let pairs = decoupling_pairs(problem);
+    let pairs = coplacement_pairs(problem);
     let edge_idx: Vec<usize> = hints
         .edge_seek
         .iter()
@@ -1856,6 +1923,61 @@ mod tests {
         let ja = serde_json::to_string(&a).unwrap();
         let jb = serde_json::to_string(&b).unwrap();
         assert_eq!(ja, jb, "two place() runs must serialize byte-equal");
+    }
+
+    // ── series co-placement detection ───────────────────────────────────────
+
+    /// An anchor with `npads` pads, pad `Pi` on net `Si` (so each is a 1-pin net
+    /// until something else taps it). Courtyard sized to enclose the pad span.
+    fn dense_anchor(reference: &str, npads: usize) -> Part {
+        let pads = (0..npads)
+            .map(|i| PartPad {
+                number: format!("P{i}"),
+                offset: Point2 { x: i as f64 * 0.5, y: 0.0 },
+                width: 0.3,
+                height: 0.3,
+                layers: top(),
+                net: Some(format!("S{i}")),
+            })
+            .collect();
+        Part {
+            reference: reference.to_owned(),
+            courtyard_w: npads as f64 * 0.5 + 1.0,
+            courtyard_h: 2.0,
+            pads,
+            locked: None,
+        }
+    }
+
+    #[test]
+    fn series_pairs_fires_only_for_a_2pin_tap_to_a_dense_anchor() {
+        // R1.pad1 shares the 2-pin net S0 with a 16-pad anchor; pad2 ("OUT") dangles
+        // to a header. This is a true series tap off a dense package → should pair.
+        let dense = PlaceProblem {
+            bounds: board(40.0, 40.0),
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts: vec![r0603("R1", Some("S0"), Some("OUT")), dense_anchor("U1", 16)],
+            outline: None,
+        };
+        assert_eq!(
+            series_pairs(&dense),
+            vec![(0, 1)],
+            "R1 should co-place with the 16-pad anchor U1"
+        );
+
+        // Same topology but the anchor has only 3 pads — below the escape-critical
+        // threshold, so series co-placement must NOT fire (it perturbs clean boards).
+        let small = PlaceProblem {
+            parts: vec![r0603("R2", Some("S0"), Some("OUT")), dense_anchor("U2", 3)],
+            ..dense
+        };
+        assert!(
+            series_pairs(&small).is_empty(),
+            "a 3-pad anchor is below SERIES_ANCHOR_MIN_PADS — no series pair"
+        );
     }
 
     // ── locked parts never move ─────────────────────────────────────────────
