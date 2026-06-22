@@ -16,9 +16,10 @@ Initial public version of **auto-pcb** — an LLM agent that designs KiCAD schem
 natural-language prompts, orchestrating deterministic, oracle-gated layout and routing engines.
 
 ### Highlights
-- **Schematic generation** (`sch-layout` + `circuit-lang` + `crossmin`): natural-language prompt →
-  deterministic `.kicad_sch`, with multi-sheet floorplanning, crossing-minimised layout, idiom
-  recognition (decoupling, crystal, LED indicators, …), and an authoritative netlist oracle.
+- **Schematic generation** (`sch-layout` + `circuit-lang`): natural-language prompt →
+  deterministic `.kicad_sch`, with multi-sheet floorplanning, shelf-pack + locality-aware annealed
+  placement, idiom recognition (decoupling, crystal, LED indicators, …), and an authoritative netlist
+  oracle.
 - **PCB place & route** (`pcb-engine` + `forceplace` + `kicad-bridge`): force-directed placement and
   a deterministic copper autorouter (slice-1 grid ∨ capacity-mesh detailed), GND/VCC plane synthesis,
   HDI micro-via in-pad escape, and per-net trace widths — every board gated to **0 copper-error DRC

@@ -57,7 +57,6 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | `circuit-lang` | Parser, linter, and canonical emitter for the circuit markup language |
 | `circuit-graph` | Attributed circuit graph + a declarative idiom matcher |
 | `sch-layout` | Deterministic schematic floorplan engine (`Design` → `.kicad_sch`) |
-| `crossmin` | Layered crossing-minimisation for schematic dataflow graphs |
 | `forceplace` | Force-directed 2-D component placement (Fruchterman–Reingold) |
 | `pcb-engine` | Deterministic copper autorouter + placement (force-layout, capacity-mesh routing, DRC lint) |
 | `kicad-bridge` | KiCAD file I/O — schematic/PCB synthesis, symbol/footprint library parsing |
