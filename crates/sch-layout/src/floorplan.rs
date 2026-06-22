@@ -2673,6 +2673,13 @@ impl PlacementStrategy for Anneal {
         use rayon::prelude::*;
         let timed_top = std::env::var("DEBUG_SA_TIME").is_ok();
 
+        // A group with no placed items (e.g. a sub-sheet holding only power/label
+        // declarations, which `gather` skips) has nothing to search — and the fast
+        // lane's `30_000 / pins` would divide by zero. Bail out cleanly.
+        if items.is_empty() {
+            return;
+        }
+
         // FAST LANE (large boards): the tuned routed paths below route the whole sheet
         // per move and cost minutes past ~60 pins. Here the search is router-free —
         // multi-start `anneal_locality` (proxy cost + range-limited cluster jump) from
@@ -5213,6 +5220,47 @@ fn supply_pin_target(
     best.map(|(p, _)| p)
 }
 
+/// For each DRIVEN, non-ground power rail, the world position of the regulator/IC
+/// OUTPUT pin that drives it. A rail's power symbol belongs at its DRIVER's output
+/// (the LDO `VO`, the buck `SW→VOUT`) so the regulated rail's *exit* is unambiguous —
+/// not at whatever bypass cap happens to sit nearest the trunk's left end. The driver
+/// is a ≥3-pin anchor whose pin on the net carries `PinType::PowerOutput` (which by
+/// construction excludes inputs and grounds — the task's "≥3-pin pin that drives, not
+/// an input/ground"). Ground rails are skipped (the GND symbol's home is its return,
+/// not a driver). Returns at most one driver per net (first wins — a rail has one
+/// source); empty when nothing drives the net (the common undriven-bus case), so the
+/// caller's existing placement is untouched.
+fn driven_rail_drivers(
+    env: &KicadEnv,
+    w: &SchematicWriter,
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+) -> BTreeMap<String, [f64; 2]> {
+    let provider = RealSymbolProvider::new(env.clone());
+    let mut out: BTreeMap<String, [f64; 2]> = BTreeMap::new();
+    for (net, pins) in inc {
+        if !ir.rails.contains_key(net) || is_ground(net) {
+            continue;
+        }
+        for (i, num) in pins {
+            if items[*i].geom.pins.len() < 3 {
+                continue; // only an IC/regulator pin can drive a rail
+            }
+            let Some(meta) = provider.symbol(&items[*i].part) else { continue };
+            if find_pin(&meta.pins, num).map(|p| p.etype) != Some(PinType::PowerOutput) {
+                continue;
+            }
+            if let Ok(eps) = w.pin_dirs(env, &items[*i].refdes, num) {
+                if let Some((p, _)) = eps.first() {
+                    out.entry(net.clone()).or_insert(*p);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Two parallel axis-aligned segments running too close for a sustained length —
 /// nearly on top of each other, which reads as cramped. Returns true past the
 /// per-call `near` cutoff: wire-vs-wire uses 1 grid (a 2-grid gap, e.g. risers
@@ -5503,6 +5551,17 @@ fn wire(
         Vec::new()
     };
 
+    // Driver-pin position per driven non-ground rail, so a rail's power symbol can be
+    // anchored at its regulator/IC OUTPUT (the LDO `VO`) instead of the trunk's left end
+    // or a bypass cap — making the regulated rail's exit unambiguous. Multi-sheet only
+    // (and finalize-only via `fan_risers`): the per-move scorer and every single-sheet
+    // reference snapshot pass an empty map ⇒ their power-symbol placement is byte-identical.
+    let rail_drivers = if fan_risers && std::env::var_os("MULTISHEET_REFINE").is_some() {
+        driven_rail_drivers(env, w, items, inc, ir)
+    } else {
+        BTreeMap::new()
+    };
+
     // Phase A — rails (shared wires + stubs + power symbols), so their wires are
     // in the writer before we build the routing scene.
     for (net, eps) in &net_eps {
@@ -5535,7 +5594,8 @@ fn wire(
                 || (pin_total > FAST_PINS && rail_should_distribute(eps))
                 || multisheet_spread;
             let rail_y = rail_y_map.get(net).copied().filter(|_| !distribute);
-            emit_rail(env, w, net, eps, *band, rail_y, flag, &riser_offsets, &bodies)?;
+            let driver = rail_drivers.get(net).copied();
+            emit_rail(env, w, net, eps, *band, rail_y, flag, &riser_offsets, &bodies, driver)?;
         }
     }
 
@@ -6163,6 +6223,14 @@ fn riser_hits_body(x: f64, ylo: f64, yhi: f64, bodies: &[([f64; 2], [f64; 2])]) 
 /// each pin to it, and put one power symbol at the left end. With fewer pins (or
 /// no common band), emit a per-pin power symbol instead (the clustered case,
 /// e.g. a divider's two GNDs).
+///
+/// `driver` (multi-sheet only) is the world position of the regulator/IC OUTPUT pin
+/// that drives this rail: when present, the rail's single power symbol is anchored
+/// there (the LDO `VO`) so the regulated rail's exit is unambiguous — instead of the
+/// trunk's left end or a bypass cap. In the per-pin path it also collapses the
+/// scattered per-pin symbols into ONE symbol at the driver with a wire to each other
+/// pin, tying the output cap to the regulator output instead of leaving it a detached
+/// implicit-net island.
 fn emit_rail(
     env: &KicadEnv,
     w: &mut SchematicWriter,
@@ -6173,9 +6241,41 @@ fn emit_rail(
     flag: Option<&mut BTreeMap<String, ([f64; 2], f64)>>,
     riser_offsets: &BTreeMap<(String, i64), f64>,
     bodies: &[([f64; 2], [f64; 2])],
+    driver: Option<[f64; 2]>,
 ) -> io::Result<()> {
     let lib = power_lib_id(net);
     let Some(rail_y) = rail_y.filter(|_| eps.len() >= 3) else {
+        // DRIVEN small rail: anchor the supply symbol at the regulator OUTPUT pin and
+        // wire every other pin of the net to it, so the regulated rail's exit reads
+        // straight off the driver (the LDO `VO`) and the output cap is a drawn member
+        // of the net, not a detached implicit-net island. Only when the driver pin is
+        // actually one of this net's endpoints. Multi-sheet only (driver is `None`
+        // elsewhere), so reference snapshots keep the per-pin behaviour below.
+        if let Some(dp) = driver {
+            if let Some((_, ddir)) =
+                eps.iter().copied().find(|(p, _)| (p[0] - dp[0]).abs() < EPS && (p[1] - dp[1]).abs() < EPS)
+            {
+                w.add_power_symbol(env, &lib, &format!("#PWR_{net}"), net, dp, power_angle(ddir))?;
+                for (ep, _) in eps.iter() {
+                    if (ep[0] - dp[0]).abs() >= EPS || (ep[1] - dp[1]).abs() >= EPS {
+                        // Manhattan two-segment hop from the driver to this pin (a single
+                        // straight wire when they already share a row/column).
+                        if (ep[0] - dp[0]).abs() >= EPS && (ep[1] - dp[1]).abs() >= EPS {
+                            w.add_wire_on_net(dp, [ep[0], dp[1]], net);
+                            w.add_wire_on_net([ep[0], dp[1]], *ep, net);
+                        } else {
+                            w.add_wire_on_net(dp, *ep, net);
+                        }
+                    }
+                }
+                if let (Some(flag_points), Some((_, dir))) =
+                    (flag, eps.iter().find(|(p, _)| (p[0] - dp[0]).abs() < EPS && (p[1] - dp[1]).abs() < EPS))
+                {
+                    flag_points.entry(net.to_string()).or_insert((dp, flag_angle(*dir)));
+                }
+                return Ok(());
+            }
+        }
         // One power symbol per pin — but MERGE a pin into a nearby, COLLINEAR
         // already-placed symbol (≤2 grid, same x or y) via a short connecting wire
         // instead of stamping a second symbol. Two adjacent same-net pins (e.g. the
@@ -6253,15 +6353,26 @@ fn emit_rail(
         w.add_junction([ax, rail_y]);
     }
     // One power symbol at the left end (pin coincident with the rail). A top
-    // rail's symbol sits above, a bottom rail's below — both at angle 0.
-    let flag_at = [span_lo, rail_y];
+    // rail's symbol sits above, a bottom rail's below — both at angle 0. For a DRIVEN
+    // rail, anchor it at the DRIVER pin's attach point instead, so the supply label
+    // reads at the regulator OUTPUT (the rail's source) rather than at whatever cap
+    // sits leftmost on the trunk.
+    let sym_x = driver
+        .and_then(|dp| {
+            eps.iter()
+                .zip(&attaches)
+                .find(|((ep, _), _)| (ep[0] - dp[0]).abs() < EPS && (ep[1] - dp[1]).abs() < EPS)
+                .map(|(_, &ax)| ax)
+        })
+        .unwrap_or(span_lo);
+    let flag_at = [sym_x, rail_y];
     w.add_power_symbol(env, &lib, &format!("#PWR_{net}"), net, flag_at, 0.0)?;
     // The ERC flag (only when this net needs one) sits COINCIDENT with the rail's
     // power symbol, rotated to extend the same way the symbol does (up for a top
     // V+ rail, down for a bottom GND rail) — into open space, no dangling stub.
     if let Some(flag_points) = flag {
         let angle = if band == Band::Top { 0.0 } else { 180.0 };
-        flag_points.entry(net.to_string()).or_insert(([span_lo, rail_y], angle));
+        flag_points.entry(net.to_string()).or_insert(([sym_x, rail_y], angle));
     }
     Ok(())
 }
