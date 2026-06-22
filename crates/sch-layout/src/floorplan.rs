@@ -1564,8 +1564,20 @@ fn emit_strategy(
     // single-sheet references never reach it ⇒ snapshots stay byte-identical.
     if std::env::var("MULTISHEET_REFINE").is_ok() {
         let keepouts = port_label_keepouts(env, &mut w, &items, &inc, ir)?;
+        let mut changed = false;
         if nudge_satellites_off_labels(&mut items, &inc, &keepouts) {
             decongest(&mut items);
+            changed = true;
+        }
+        // DEAD LAST: snap N repeated same-part anchor motifs (the three half-bridges) into N aligned
+        // columns — the critic's literal "repeated columns" ask. The grid keeps its members internally
+        // collision-free; the follow-up decongest pushes any unrelated bystander (a bypass cap that
+        // happened to sit in the FETs' new footprint) out of the way, as after the other align passes.
+        if align_repeated_columns(&mut items, ir) {
+            decongest(&mut items);
+            changed = true;
+        }
+        if changed {
             w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
         }
     }
@@ -2036,6 +2048,265 @@ fn align_rail_cap_rows(items: &mut [Item], ir: &LayoutIr) -> bool {
     let moved = !moves.is_empty();
     for (i, at) in moves {
         items[i].at = at;
+    }
+    moved
+}
+
+/// Repeated-motif column alignment (the 3-phase / N-stage fix). A sheet built from N copies of the
+/// same building block — three half-bridges (each = 2 IRLZ44N FETs), three bootstrap stages (each =
+/// a 1N5819 diode + cap) — reads best as N ALIGNED COLUMNS, same x-pitch, consistent internal
+/// vertical order, so the repetition + symmetry is legible. The SA optimizes each copy's wires
+/// locally and scatters the copies diagonally; the critic calls this out directly ("scattered instead
+/// of three aligned half-bridge columns", score 5). This finalize pass detects such repeats and snaps
+/// each instance to its own evenly-spaced column.
+///
+/// Why a FINAL pass works here where it failed for the bus-row (17 reverts, see
+/// docs/specs/flow-aware-global-placement.md): the bus-row tried to CRAM clusters into ONE shared
+/// column and collided on dense sheets; this gives each instance a DISTINCT x and these sheets have
+/// EMPTY SPACE, so the overlap check passes. It runs DEAD LAST (after every decongest), carries each
+/// instance's satellites by the same Δx (no stranding), and COMMITS A GROUP ONLY if the proposed
+/// positions are overlap-free — exactly the `align_rail_cap_rows` discipline. Gated on
+/// MULTISHEET_REFINE so single-sheet reference snapshots stay byte-identical.
+fn align_repeated_columns(items: &mut [Item], ir: &LayoutIr) -> bool {
+    if std::env::var("MULTISHEET_REFINE").is_err() {
+        return false;
+    }
+    let snap = crate::grid::snap;
+    let is_rail = |n: &str| is_power_net(n) || ir.rails.contains_key(n);
+    // A "spine" is one instance of the repeated block: a MULTI-PIN ANCHOR (≥3 pins — same definition the
+    // engine uses for `anchors`). Three half-bridges = six IRLZ44N FETs (3-pin). We deliberately do NOT
+    // match 2-pin parts here: a sheet's same-value caps/diodes/resistors are heterogeneous (bypass +
+    // bootstrap + filter share lib_id but are NOT a repeated motif), and column-snapping them scatters a
+    // correctly placed bank (verified: it regressed gate_drive 20→28 wire-xings and current_sense). The
+    // motif must be carried by the anchor; its 2-pin satellites RIDE the anchor's Δx (below).
+    let mut by_part: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut refdes_seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for (i, it) in items.iter().enumerate() {
+        if it.frozen || it.part.is_empty() || it.geom.pins.len() < 3 {
+            continue;
+        }
+        // Skip the second+ UNIT of a multi-unit part (op-amp A/B/power share one refdes): they are ONE
+        // device split across items, not N repeated devices, and column-spreading them tears the device
+        // apart (verified: scattered current_sense's LM358 units). One item per refdes.
+        let prev = refdes_seen.insert(it.refdes.as_str(), i);
+        if prev.is_some() {
+            by_part.entry(it.part.clone()).and_modify(|v| {
+                v.retain(|&j| items[j].refdes != it.refdes);
+            });
+            continue;
+        }
+        by_part.entry(it.part.clone()).or_default().push(i);
+    }
+
+    let mut moved = false;
+    // BTreeMap iteration is sorted by part name ⇒ deterministic.
+    for members in by_part.values() {
+        if members.len() < 3 {
+            continue;
+        }
+        // Partition the copies into COLUMNS via shared non-power nets (union-find): the two FETs of a
+        // half-bridge share PHASE_x, so they land in the same column (HS stacked over LS); three
+        // independent bootstrap diodes share nothing ⇒ each is its own column. This recovers the
+        // repeated UNIT generically from connectivity, not from refdes arithmetic.
+        let n = members.len();
+        let mut parent: Vec<usize> = (0..n).collect();
+        fn find(parent: &mut [usize], x: usize) -> usize {
+            let mut r = x;
+            while parent[r] != r {
+                r = parent[r];
+            }
+            let mut c = x;
+            while parent[c] != c {
+                let next = parent[c];
+                parent[c] = r;
+                c = next;
+            }
+            r
+        }
+        // net -> first member (local index) seen carrying it; only signal nets join copies.
+        let mut net_owner: BTreeMap<String, usize> = BTreeMap::new();
+        for (k, &i) in members.iter().enumerate() {
+            for (_, _, net) in &items[i].pins {
+                let Some(net) = net else { continue };
+                if is_rail(net) {
+                    continue;
+                }
+                if let Some(&other) = net_owner.get(net) {
+                    let (ra, rb) = (find(&mut parent, k), find(&mut parent, other));
+                    if ra != rb {
+                        parent[ra] = rb;
+                    }
+                } else {
+                    net_owner.insert(net.clone(), k);
+                }
+            }
+        }
+        // Collect columns: root -> member item indices.
+        let mut cols_map: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for k in 0..n {
+            let r = find(&mut parent, k);
+            cols_map.entry(r).or_default().push(members[k]);
+        }
+        // Need ≥3 columns for this to be a "repeated columns" motif.
+        if cols_map.len() < 3 {
+            continue;
+        }
+        // Order columns left→right by current centroid x.
+        let mut columns: Vec<Vec<usize>> = cols_map.into_values().collect();
+        let col_cx =
+            |c: &[usize]| c.iter().map(|&i| items[i].at[0]).sum::<f64>() / c.len() as f64;
+        columns.sort_by(|a, b| col_cx(a).total_cmp(&col_cx(b)));
+        // A clean repeat has uniform-size columns; skip ragged groups (mixed roles).
+        let sz0 = columns[0].len();
+        if !columns.iter().all(|c| c.len() == sz0) {
+            continue;
+        }
+        // For each spine, find its satellites = nearby non-grouped 2-pin parts whose NEAREST grouped
+        // spine is this one (within a radius). They ride along with their spine's Δx.
+        let grouped: BTreeSet<usize> = members.iter().copied().collect();
+        const SAT_R: f64 = 22.0; // ~2 grid cells: a tap part sits this close to its anchor
+        let mut sat_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (j, jt) in items.iter().enumerate() {
+            if grouped.contains(&j) || jt.frozen || jt.geom.pins.len() != 2 {
+                continue;
+            }
+            // A satellite must be ELECTRICALLY LOCAL to exactly one anchor: it shares a SIGNAL (non-rail)
+            // net with that anchor. A shared power/ground rail does NOT qualify — a bulk/bypass cap on
+            // VIN-GND ties to ALL high-side FETs equally, so it is stage-shared decoupling, not a
+            // per-instance satellite; carrying it with one column drags it across the others and self-
+            // collides. Requiring a private signal net (GATE_x / a PHASE/SHUNT node) keeps only true taps.
+            let jnets: BTreeSet<&str> =
+                jt.pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+            let mut best: Option<(f64, usize)> = None;
+            for &i in members.iter() {
+                let shares_signal = items[i].pins.iter().any(|(_, _, n)| {
+                    n.as_deref().is_some_and(|n| !is_rail(n) && jnets.contains(n))
+                });
+                if !shares_signal {
+                    continue;
+                }
+                let dx = items[i].at[0] - jt.at[0];
+                let dy = items[i].at[1] - jt.at[1];
+                let d = (dx * dx + dy * dy).sqrt();
+                if d <= SAT_R && best.map_or(true, |(bd, _)| d < bd) {
+                    best = Some((d, i));
+                }
+            }
+            if let Some((_, i)) = best {
+                sat_of.entry(i).or_default().push(j);
+            }
+        }
+        // Build a true GRID: m columns × sz0 rows. The members within a column are scattered (the SA
+        // placed each FET by its own wires), so we must not only align their x but STACK them at shared
+        // row-y slots in a consistent order — that is what makes the repeats read as aligned columns.
+        let m = columns.len();
+        // Column x: evenly spaced about the current centroid (minimizes total Δx for the existing
+        // left→right order). x-pitch = widest member footprint + a cell of slack.
+        let col_w = members
+            .iter()
+            .map(|&i| {
+                let r = item_rect(&items[i], items[i].at);
+                r[2] - r[0]
+            })
+            .fold(0.0_f64, f64::max);
+        let xpitch = snap((col_w + 12.7).max(25.4));
+        let cur_cx: Vec<f64> = columns.iter().map(|c| col_cx(c)).collect();
+        let xcenter = cur_cx.iter().sum::<f64>() / cur_cx.len() as f64;
+        let x0 = xcenter - xpitch * (m as f64 - 1.0) / 2.0;
+        let target_cx: Vec<f64> = (0..m).map(|k| snap(x0 + k as f64 * xpitch)).collect();
+        // Row y: order each column's members top→bottom by current y, then give role-rank r a COMMON y
+        // across all columns = the median current y of that rank (keeps the grid where the SA already
+        // put the mass) on a fixed pitch so a role-row is a clean horizontal line.
+        let col_h = members
+            .iter()
+            .map(|&i| {
+                let r = item_rect(&items[i], items[i].at);
+                r[3] - r[1]
+            })
+            .fold(0.0_f64, f64::max);
+        let ypitch = snap((col_h + 7.62).max(25.4));
+        // CONSISTENT internal order: rank each member by a connectivity ROLE so corresponding parts sit
+        // in the same row across columns (every HS FET on top, every LS FET below) — the critic's "same
+        // internal vertical order" ask. Role key = (#pins on a positive supply rail) DESCENDING: the
+        // high-side FET's drain is on VIN (1 supply pin) so it ranks above the low-side FET (drain on
+        // PHASE, source on a SHUNT ⇒ 0 supply pins). Ties (e.g. truly symmetric parts) fall back to the
+        // SA's current y so a stable order is still chosen. Generalizes to any rail-anchored repeat.
+        let is_pos_supply =
+            |n: &str| is_power_net(n) && !is_ground(n) && !n.eq_ignore_ascii_case("GND");
+        let supply_pins = |i: usize| -> i32 {
+            items[i].pins.iter().filter(|(_, _, n)| n.as_deref().is_some_and(is_pos_supply)).count()
+                as i32
+        };
+        let mut ranked: Vec<Vec<usize>> = columns.clone();
+        for c in &mut ranked {
+            c.sort_by(|&a, &b| {
+                supply_pins(b)
+                    .cmp(&supply_pins(a))
+                    .then(items[a].at[1].total_cmp(&items[b].at[1]))
+            });
+        }
+        let row_y: Vec<f64> = (0..sz0)
+            .map(|r| {
+                let mut ys: Vec<f64> = ranked.iter().map(|c| items[c[r]].at[1]).collect();
+                ys.sort_by(f64::total_cmp);
+                ys[ys.len() / 2] // median current y of this role-rank
+            })
+            .collect();
+        // Snap each role-row to a fixed pitch anchored at the topmost row's median (uniform spacing).
+        let y0 = row_y[0];
+        let target_ry: Vec<f64> = (0..sz0).map(|r| snap(y0 + r as f64 * ypitch)).collect();
+
+        // Propose per-item moves: each member goes to (target_cx[k], target_ry[r]); its satellites ride
+        // by the SAME (Δx, Δy) so a tap cap stays glued to its anchor.
+        let mut proposed: BTreeMap<usize, [f64; 2]> = BTreeMap::new();
+        for (k, col) in ranked.iter().enumerate() {
+            for (r, &i) in col.iter().enumerate() {
+                let to = [target_cx[k], target_ry[r]];
+                let dx = to[0] - items[i].at[0];
+                let dy = to[1] - items[i].at[1];
+                proposed.insert(i, to);
+                for &s in sat_of.get(&i).into_iter().flatten() {
+                    proposed.insert(s, [snap(items[s].at[0] + dx), snap(items[s].at[1] + dy)]);
+                }
+            }
+        }
+        // No-op guard: skip if already grid-aligned (every member within a grid cell of its target).
+        if proposed.iter().all(|(&i, at)| {
+            (items[i].at[0] - at[0]).abs() < 1.27 && (items[i].at[1] - at[1]).abs() < 1.27
+        }) {
+            continue;
+        }
+        // OVERLAP-SAFETY: the cluster's INTERNAL integrity must hold — reject if the grid would make two
+        // MOVED items (anchors and/or their carried satellites) collide, because the follow-up decongest
+        // can't fix that without tearing the grid apart. A collision between a moved item and a STATIONARY
+        // bystander (e.g. a VIN bypass cap that isn't part of the motif) is fine: the caller's decongest
+        // pushes the bystander aside, exactly as it does after align_rail_cap_rows / align_led_chains.
+        // (A pre-existing overlap is likewise not ours to relitigate.) This is the discipline that lets a
+        // final pass make room on a sheet with empty space — the property the bus-row reverts lacked.
+        let now_at = |idx: usize| item_rect(&items[idx], items[idx].at);
+        let new_at = |idx: usize| -> [f64; 4] {
+            let at = proposed.get(&idx).copied().unwrap_or(items[idx].at);
+            item_rect(&items[idx], at)
+        };
+        let mut ok = true;
+        'check: for (&a, _) in &proposed {
+            for (&b, _) in &proposed {
+                if a >= b {
+                    continue;
+                }
+                if rects_overlap(new_at(a), new_at(b)) && !rects_overlap(now_at(a), now_at(b)) {
+                    ok = false;
+                    break 'check;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        for (&i, &at) in &proposed {
+            items[i].at = at;
+        }
+        moved = true;
     }
     moved
 }
