@@ -15,10 +15,10 @@
 //! the middle (the draft-level mirror of `congested.json`'s saturated-wall
 //! defeat). The wall encloses both nets, so the FIRST `route_board` reports honest
 //! failures (and an empty `lint_summary` — those gaps are expected, not an engine
-//! bug). The triage scripted here is the RELAX-A-RULE path: `set_constraints`
-//! replaces the solid wall with a gapped pair, opening a corridor; the SECOND
-//! `route_board` then routes clean. (Keepouts don't move parts, so no re-place is
-//! needed between the two routes — this is the simplest deterministic triage.)
+//! bug). The triage scripted here is RE-AUTHORING THE BOARD-DSL: a second
+//! `design_board` replaces the solid wall with a gapped keepout pair, opening a
+//! corridor; re-place, then the SECOND `route_board` routes clean. Triage is a DSL
+//! edit — there is no imperative keepout/move tool any more.
 //!
 //! ## Tighten, don't delete
 //!
