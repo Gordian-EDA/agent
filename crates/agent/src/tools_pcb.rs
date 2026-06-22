@@ -26,6 +26,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use circuit_lang::model::PinTarget;
+use sch_layout::lift::lift;
+
 use kicad_bridge::cli::{KicadCli, Violation};
 use kicad_bridge::pcb::{read_problem, write_solution};
 use kicad_bridge::placefp::{part_from_footprint, part_from_footprint_layers};
@@ -341,6 +344,87 @@ pub fn assign_footprints(input: Value, ctx: &ToolCtx) -> Result<Value> {
         out["unknown"] = json!(unknown);
     }
     Ok(out)
+}
+
+// ── derive_board ──────────────────────────────────────────────────────────────
+
+/// `derive_board` — build the board draft from the committed schematic + the
+/// footprint map, instead of re-typing parts by hand. Connectivity comes from the
+/// schematic's netlist (via `lift`, which keys pins by pad number — KiCAD does the
+/// pin→pad resolution for us), footprints from `.autopcb/footprints.json`. The
+/// caller supplies only `bounds` and `rules`; parts and nets come from the
+/// schematic. Delegates to `create_board` for footprint resolution, validation,
+/// and the draft build. See `docs/specs/schematic-driven-pcb.md`.
+pub fn derive_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    if !ctx.sch_path().exists() {
+        return Ok(json!({
+            "error": "no .kicad_sch yet — commit the schematic with apply_design first, \
+                      then derive_board"
+        }));
+    }
+    let yaml = match lift(ctx.env(), ctx.sch_path()) {
+        Ok(y) => y,
+        Err(e) => {
+            return Ok(json!({ "error": format!("could not read the schematic netlist: {e}") }));
+        }
+    };
+    let Some(design) = circuit_lang::compile(&yaml, ctx.provider()).design else {
+        return Ok(json!({ "error": "the schematic netlist did not compile back to a design" }));
+    };
+
+    let map: BTreeMap<String, String> = ctx
+        .workspace()
+        .read_footprints()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    // One create_board-style part per component: footprint from the map, pad_nets
+    // from the (pad-number-keyed) pins, flattened across units. NoConnect / absent
+    // pins are simply omitted (an absent pad is unconnected).
+    let mut parts = Vec::new();
+    let mut needs_footprints = Vec::new();
+    for (refdes, c) in design.blocks.values().flat_map(|b| b.components.iter()) {
+        let Some(footprint) = map.get(refdes) else {
+            needs_footprints.push(refdes.clone());
+            continue;
+        };
+        let mut pad_nets = serde_json::Map::new();
+        for pins in std::iter::once(&c.pins).chain(c.units.values()) {
+            for (pad, target) in pins {
+                if let PinTarget::Net(net) = target {
+                    pad_nets.insert(pad.clone(), json!(net));
+                }
+            }
+        }
+        parts.push(json!({
+            "reference": refdes,
+            "footprint": footprint,
+            "pad_nets": Value::Object(pad_nets),
+        }));
+    }
+
+    if !needs_footprints.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "needs_footprints": needs_footprints,
+            "note": "assign these with assign_footprints (use search_footprints to find lib_ids), \
+                     then re-run derive_board",
+        }));
+    }
+
+    // Hand the derived parts to create_board (footprint resolution, pad/uniqueness
+    // validation, BoardDraft build + save). bounds / rules / overwrite pass through.
+    let mut cb = json!({
+        "parts": parts,
+        "overwrite": input.get("overwrite").and_then(Value::as_bool).unwrap_or(false),
+    });
+    if let Some(b) = input.get("bounds") {
+        cb["bounds"] = b.clone();
+    }
+    if let Some(r) = input.get("rules") {
+        cb["rules"] = r.clone();
+    }
+    create_board(cb, ctx)
 }
 
 // ── create_board ─────────────────────────────────────────────────────────────

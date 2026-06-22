@@ -91,22 +91,28 @@ A board-side assignment map: `refdes → footprint lib_id`, persisted in
 
 ### `derive_board`
 
-> Build (or update) the board draft from the schematic's parts + netlist, joining in the
-> footprint assignment map. The LLM supplies only the outline and rules. Replaces the
-> hand-typed `create_board` parts array for the schematic-driven path.
+> Build the board draft from the committed schematic + the footprint map, joining the two.
+> The LLM supplies only the outline and rules; parts and nets come from the schematic.
+> Replaces the hand-typed `create_board` parts array for the schematic-driven path.
+> **Implemented (slices 2+3 merged).**
 
-- Input: `{ bounds, rules?, source?: "draft"|"sch", overwrite?: bool, commit?: bool }`.
-  - `source` — `draft` (compiled YAML draft) or `sch` (lift the project `.kicad_sch`);
-    default: `sch` if the file exists, else `draft`.
+- Input: `{ bounds, rules?, overwrite?: bool }`.
 - Behavior:
-  1. Obtain connectivity: compile the draft `Design`, **or** `lift()`→`compile()` /
-     parse the `kicad-cli` netlist for a user sheet.
-  2. For each component → one `DraftPart`: `footprint` from the assignment map (else report
-     as an unresolved gap → caller runs `assign_footprints`), `pad_nets` from the pins via
-     the pin→pad rules below.
-  3. Diff against any existing `BoardDraft` (see Sync) and write.
-- Output: `{ parts: N, nets: M, footprints: "N/N", unresolved:[…], diff:{added,removed,
-  rewired}, warnings:[…] }`. **Gated** like `apply_design`.
+  1. **Connectivity from `lift()`** of the committed `.kicad_sch` → `compile()` → `Design`.
+     This is the key simplicity win: KiCAD's netlist keys pins by **pad number**, so we never
+     reimplement pin-name→pad-number resolution, and the *same* path serves both the
+     agent-authored and user-supplied scenarios. Requires a committed `.kicad_sch` (run
+     `apply_design` first) — error otherwise.
+  2. For each component → one `create_board` part: `footprint` from the assignment map (else
+     collected into `needs_footprints`), `pad_nets` straight from the (pad-number-keyed) pins,
+     flattened across units, `NoConnect`/absent pins omitted.
+  3. If any `needs_footprints`, return them (recoverable → run `assign_footprints`, retry).
+     Otherwise **delegate to `create_board`** (footprint resolution, pad/uniqueness validation,
+     `BoardDraft` build + save) — no duplicated logic.
+- Output: `create_board`'s result, or `{ ok: false, needs_footprints: [refdes…] }`.
+- Not yet: the diff/sync re-run semantics (placement preservation) and the consistency lint —
+  those stay in slice 4. `overwrite=true` rebuilds; without it, an existing draft errors (the
+  `create_board` behavior, reused).
 
 ### Sync / drift (re-run semantics)
 
@@ -169,15 +175,17 @@ place_board → route_board → export_board     user's connectivity untouched
 - **The "LLM never emits coordinates" contract** — preserved; `derive_board` adds parts +
   nets, never positions.
 
-## Suggested implementation slices
+## Implementation slices
 
-1. **Footprint map + `assign_footprints`** (board-side store, suggestions, gate). No
-   derive yet — proves footprint selection end-to-end.
-2. **`derive_board` from the draft `Design`** (Scenario 1), reusing `create_board`'s
-   `BoardDraft` builder with `pad_nets` from `Component.pins`.
-3. **`source: "sch"`** — derive from a user `.kicad_sch` via `lift`/netlist (Scenario 2) +
-   the in-place footprint patcher in `kicad-bridge`.
-4. **Sync/diff re-run semantics** (placement preservation) + the **consistency lint**.
+1. ✅ **Footprint map + `assign_footprints`** — a plain board-side `refdes → lib_id` map
+   writer with lib_id validation. (Done; kept deliberately simple — no gate, no gaps.)
+2. + 3. ✅ **`derive_board`** — done, and **merged**: rather than a draft `source` + a separate
+   `lift` source, `derive_board` *always* lifts the committed `.kicad_sch`. That gives
+   pad-number-keyed pins for free and serves both scenarios with one path, so slices 2 and 3
+   collapsed. (The in-place footprint patcher for the user's sheet — the only S2-specific
+   extra — is deferred until a user actually needs it.)
+4. ⬜ **Sync/diff re-run semantics** (placement preservation) + the **consistency lint**, plus
+   the pin-count ⟷ pad-count check now that `derive_board` has the `Design`.
 
 Each slice is gated on `cargo test -p pcb-engine -p kicad-bridge -p agent` and the
 `board_harness` staying 0-copper-fault.

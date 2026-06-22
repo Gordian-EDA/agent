@@ -214,10 +214,11 @@ fn defs_lists_all_tools() {
         "export_board",
         "review_design",
         "assign_footprints",
+        "derive_board",
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
-    assert_eq!(names.len(), 27, "expected exactly 27 tools, got {}: {:?}", names.len(), names);
+    assert_eq!(names.len(), 28, "expected exactly 28 tools, got {}: {:?}", names.len(), names);
 
     // Names are unique.
     let mut sorted = names.clone();
@@ -632,6 +633,54 @@ fn assign_footprints_validates_and_persists() {
     assert!(!out2["unknown"].as_array().unwrap().is_empty(), "unknown listed: {out2}");
     assert_eq!(out2["footprints"]["R1"], serde_json::json!("Fixtures:R_0603_1608Metric"));
     assert!(out2["footprints"].get("R2").is_none(), "bad lib_id not stored: {out2}");
+}
+
+#[test]
+fn derive_board_builds_from_schematic_and_footprint_map() {
+    // Needs a real KiCAD env (lift runs kicad-cli + resolves real footprints).
+    let Some(ctx) = ToolCtx::detect_for_test() else {
+        eprintln!("SKIP derive_board: no KiCAD env");
+        return;
+    };
+    let tools = Tools::new();
+    // Stage the RC-pair fixture as the project's schematic.
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../kicad-bridge/tests/fixtures/rc_pair.kicad_sch");
+    std::fs::copy(&fixture, ctx.sch_path()).unwrap();
+
+    let bounds = serde_json::json!({ "min_x": 0, "max_x": 20, "min_y": 0, "max_y": 12 });
+
+    // No footprints assigned yet → derive_board reports the gaps (R1, C1).
+    let gaps = tools
+        .run("derive_board", serde_json::json!({ "bounds": bounds }), &ctx)
+        .unwrap();
+    if gaps.get("error").is_some() {
+        eprintln!("SKIP derive_board: lift failed (kicad-cli unavailable?): {gaps}");
+        return;
+    }
+    assert_eq!(gaps["ok"], serde_json::json!(false), "gaps reported: {gaps}");
+    assert_eq!(gaps["needs_footprints"].as_array().unwrap().len(), 2, "R1 + C1: {gaps}");
+
+    // Assign real footprints, then derive succeeds and builds the board.
+    tools
+        .run(
+            "assign_footprints",
+            serde_json::json!({ "assignments": {
+                "R1": "Resistor_SMD:R_0603_1608Metric",
+                "C1": "Capacitor_SMD:C_0603_1608Metric"
+            }}),
+            &ctx,
+        )
+        .unwrap();
+    let out = tools
+        .run("derive_board", serde_json::json!({ "bounds": bounds, "overwrite": true }), &ctx)
+        .unwrap();
+    assert!(out.get("error").is_none(), "derive succeeded: {out}");
+
+    // The board draft now carries R1 + C1, derived from the schematic (not retyped).
+    let board = tools.run("get_board", serde_json::json!({}), &ctx).unwrap();
+    let s = board.to_string();
+    assert!(s.contains("R1") && s.contains("C1"), "board has R1 + C1: {board}");
 }
 
 #[test]

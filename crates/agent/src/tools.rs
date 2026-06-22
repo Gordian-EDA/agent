@@ -548,6 +548,37 @@ impl Tools {
                 }),
             },
             ToolDef {
+                name: "derive_board".into(),
+                description: "Build the board draft from the committed schematic + the \
+                    footprint map — instead of re-typing parts. Reads the schematic's parts \
+                    and netlist (pin→pad is KiCAD's), takes each part's footprint from \
+                    assign_footprints, and builds the board. You supply only the outline \
+                    (bounds) and optional rules; parts and nets come from the schematic. \
+                    Requires a committed .kicad_sch (run apply_design first). If any part \
+                    has no footprint yet it returns `needs_footprints` — run assign_footprints, \
+                    then retry. overwrite=true rebuilds over an existing board draft."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "bounds": {
+                            "type": "object",
+                            "description": "Board outline in mm (y-down).",
+                            "properties": {
+                                "min_x": { "type": "number" }, "max_x": { "type": "number" },
+                                "min_y": { "type": "number" }, "max_y": { "type": "number" }
+                            },
+                            "required": ["min_x", "max_x", "min_y", "max_y"]
+                        },
+                        "rules": { "type": "object",
+                            "description": "Board design rules (same shape as create_board); omit for engine defaults." },
+                        "overwrite": { "type": "boolean",
+                            "description": "Rebuild over an existing board draft." }
+                    },
+                    "required": ["bounds"]
+                }),
+            },
+            ToolDef {
                 name: "create_board".into(),
                 description: "Create the working board draft from a board outline \
                     plus a list of parts. Each part names a footprint lib_id \
@@ -968,6 +999,7 @@ impl Tools {
             "search_footprints" => crate::tools_pcb::search_footprints(input, ctx),
             "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
             "assign_footprints" => crate::tools_pcb::assign_footprints(input, ctx),
+            "derive_board" => crate::tools_pcb::derive_board(input, ctx),
             "create_board" => crate::tools_pcb::create_board(input, ctx),
             "add_parts" => crate::tools_pcb::add_parts(input, ctx),
             "get_board" => crate::tools_pcb::get_board(ctx),
