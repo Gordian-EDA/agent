@@ -14,6 +14,72 @@ use kicad_bridge::cli::KicadCli;
 use kicad_bridge::env::KicadEnv;
 use kicad_bridge::provider::RealSymbolProvider;
 
+/// Deterministic UUIDv5-style id from a seed (engine forbids random; keeps re-emits stable).
+fn det_uuid(seed: &str) -> String {
+    let h = |salt: u64| -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325 ^ salt;
+        for b in seed.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    };
+    let (a, b) = (h(1), h(2));
+    format!(
+        "{:08x}-{:04x}-5{:03x}-8{:03x}-{:012x}",
+        (a & 0xffffffff) as u32,
+        ((a >> 32) & 0xffff) as u16,
+        ((a >> 48) & 0xfff) as u16,
+        (b & 0xfff) as u16,
+        (b >> 12) & 0xffffffffffff
+    )
+}
+
+fn sanitize(name: &str) -> String {
+    name.chars().map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
+}
+
+/// COMMIT per-block sub-sheets as a hierarchical KiCAD project (root + sub-sheet files,
+/// global-label connectivity). See docs/specs/multisheet-commit.md.
+fn write_multisheet_project(env: &KicadEnv, out_dir: &str, sheets: &[(String, String)]) -> anyhow::Result<()> {
+    use std::fmt::Write as _;
+    let main_root = det_uuid(&format!("root:{out_dir}"));
+    let mut root = String::new();
+    root.push_str("(kicad_sch\n\t(version 20250114)\n\t(generator \"eeschema\")\n\t(generator_version \"9.0\")\n");
+    let _ = writeln!(root, "\t(uuid \"{main_root}\")");
+    root.push_str("\t(paper \"A4\")\n\t(lib_symbols\n\t)\n");
+    let mut inst = String::from("\t(sheet_instances\n\t\t(path \"/\"\n\t\t\t(page \"1\")\n\t\t)\n");
+    for (i, (name, sch)) in sheets.iter().enumerate() {
+        let page = i + 2;
+        let sheet_uuid = det_uuid(&format!("{out_dir}:{name}"));
+        let fname = sanitize(name);
+        let sub_root =
+            sch.split("(uuid \"").nth(1).and_then(|s| s.split('"').next()).unwrap_or("").to_string();
+        let mut sub = sch.replace(&format!("/{sub_root}\""), &format!("/{main_root}/{sheet_uuid}\""));
+        sub = sub.replacen("(path \"/\"", &format!("(path \"/{sheet_uuid}\""), 1);
+        sub = sub.replacen("(page \"1\")", &format!("(page \"{page}\")"), 1);
+        std::fs::write(format!("{out_dir}/{fname}.kicad_sch"), &sub)?;
+        let (x, y) = (25.4 + (i % 4) as f64 * 55.0, 25.4 + (i / 4) as f64 * 35.0);
+        let (ny, fy) = (y - 0.7, y + 18.6);
+        let _ = write!(
+            root,
+            "\t(sheet\n\t\t(at {x} {y})\n\t\t(size 35 18)\n\t\t(fields_autoplaced yes)\n\t\t(stroke (width 0.1524) (type solid))\n\t\t(fill (color 0 0 0 0.0000))\n\t\t(uuid \"{sheet_uuid}\")\n\t\t(property \"Sheetname\" \"{name}\"\n\t\t\t(at {x} {ny} 0)\n\t\t\t(effects (font (size 1.27 1.27) (bold yes)) (justify left bottom))\n\t\t)\n\t\t(property \"Sheetfile\" \"{fname}.kicad_sch\"\n\t\t\t(at {x} {fy} 0)\n\t\t\t(effects (font (size 1.27 1.27)) (justify left top) (hide yes))\n\t\t)\n\t\t(instances\n\t\t\t(project \"root\"\n\t\t\t\t(path \"/{main_root}\"\n\t\t\t\t\t(page \"{page}\")\n\t\t\t\t)\n\t\t\t)\n\t\t)\n\t)\n"
+        );
+        let _ = write!(inst, "\t\t(path \"/{sheet_uuid}\"\n\t\t\t(page \"{page}\")\n\t\t)\n");
+    }
+    inst.push_str("\t)\n");
+    root.push_str(&inst);
+    root.push_str(")\n");
+    let root_path = format!("{out_dir}/root.kicad_sch");
+    std::fs::write(&root_path, &root)?;
+    println!("wrote multi-sheet project -> {root_path} ({} sheets)", sheets.len());
+    match KicadCli::new(env).erc(std::path::Path::new(&root_path)) {
+        Ok(r) => println!("PROJECT ERC: {} errors, {} warnings", r.error_count(), r.warning_count()),
+        Err(e) => println!("PROJECT ERC failed: {e}"),
+    }
+    Ok(())
+}
+
 /// Union-find root with path-halving.
 fn uf_find(parent: &mut [usize], x: usize) -> usize {
     let mut r = x;
@@ -215,6 +281,7 @@ fn main() -> anyhow::Result<()> {
         groups.entry(t.clone()).or_default().push(n.clone());
     }
 
+    let mut sheets: Vec<(String, String)> = Vec::new();
     for (name, gblocks) in &groups {
         // A sub-design holding this group's block(s): cross-group nets touch only these pins, so the
         // engine auto-labels the single-pin ones as ports and keeps multi-pin ones internal.
@@ -253,6 +320,11 @@ fn main() -> anyhow::Result<()> {
         for w in &emit.layout_warnings {
             println!("    WARN[{name}]: {w}");
         }
+        sheets.push((sanitize(name), emit.sch.clone()));
     }
+
+    // COMMIT a hierarchical KiCAD project (root + per-block sub-sheets) so the multi-sheet
+    // design is openable + ERC-checkable, not just separate rendered PNGs.
+    write_multisheet_project(&env, &out_dir, &sheets)?;
     Ok(())
 }

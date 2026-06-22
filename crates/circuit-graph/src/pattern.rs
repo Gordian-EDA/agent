@@ -18,6 +18,9 @@ pub enum NodePred {
     Pins(usize),
     /// At least `n` pins (an anchor IC).
     PinsAtLeast(usize),
+    /// At most `n` pins — to distinguish a small peripheral IC (an I2C sensor/EEPROM) from a
+    /// large MCU, whose control pull-ups (EN/BOOT) must NOT be mistaken for an I2C bus pair.
+    PinsAtMost(usize),
     /// Parsed value within `[lo, hi]` in base SI units (see [`crate::value`]).
     /// Parts whose value does not parse simply fail this predicate.
     Value { lo: f64, hi: f64 },

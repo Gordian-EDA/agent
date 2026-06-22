@@ -9,6 +9,7 @@
 pub mod agent;
 pub mod config;
 pub mod llm;
+pub mod multisheet;
 pub mod render;
 pub mod review;
 pub mod tools;

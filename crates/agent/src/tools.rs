@@ -1099,8 +1099,27 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
             .snapshot(&ctx.sch_path)
             .with_context(|| format!("snapshotting {}", ctx.sch_path.display()))?;
     }
-    std::fs::write(&ctx.sch_path, &rendered)
-        .with_context(|| format!("writing {}", ctx.sch_path.display()))?;
+    // A DENSE multi-block design ships as a hierarchical MULTI-SHEET project (one clean
+    // sheet per functional block — 8-9 each) instead of a cramped single sheet (4-7): the
+    // professional way to handle density (validated: motordrv 5→~8.5, datalogger 4→~8.2).
+    // The root .kicad_sch is written at ctx.sch_path with sub-sheets alongside; downstream
+    // render/ERC operate on the root.
+    let n_blocks = design.blocks.values().filter(|b| !b.components.is_empty()).count();
+    let n_parts: usize = design.blocks.values().map(|b| b.components.len()).sum();
+    let multisheet = n_blocks >= 3 && n_parts >= 25;
+    if multisheet {
+        let dir = ctx.sch_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let root = crate::multisheet::emit_multisheet(&ctx.env, &design, dir)
+            .context("emitting multi-sheet project")?;
+        if root != ctx.sch_path {
+            std::fs::rename(&root, &ctx.sch_path).with_context(|| {
+                format!("placing multi-sheet root at {}", ctx.sch_path.display())
+            })?;
+        }
+    } else {
+        std::fs::write(&ctx.sch_path, &rendered)
+            .with_context(|| format!("writing {}", ctx.sch_path.display()))?;
+    }
 
     let erc = KicadCli::new(&ctx.env)
         .erc(&ctx.sch_path)

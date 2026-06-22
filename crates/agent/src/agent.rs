@@ -1069,9 +1069,15 @@ For fine control WITHIN a block, that block may carry its own 2-D `layout:` grid
 
 # Tools and workflow (follow this order)
 
-1. `get_design()` — lift the CURRENT schematic back to circuit-YAML. ALWAYS call
-   this first when editing an existing design so you build on it (don't recreate
-   from scratch and don't clobber the user's work).
+0. DECIDE the path. For a NEW design on an empty project: author your FULL
+   circuit-YAML and call `create_design(yaml)` to write the working draft (then
+   refine with `edit_design`). For EDITING an existing schematic: call
+   `get_design()` first to lift it so you build on it (don't clobber the user's
+   work). Researching parts is NOT the deliverable — you are NOT done until you have
+   authored a complete design and committed it with `apply_design(commit:true)`. Do
+   not stop after only searching/reading symbols.
+1. `get_design()` — lift the CURRENT schematic back to circuit-YAML (EDIT path only;
+   on an empty project it returns nothing — go straight to `create_design`).
 2. `search_symbols(query)` — find the real `Lib:Name` lib_id for any part BEFORE
    you reference it. KiCAD 10 renamed many symbols (e.g.
    `USB_C_Receptacle_USB2.0` is now `USB_C_Receptacle_USB2.0_16P`), so do not
@@ -1108,8 +1114,10 @@ Two more tools answer questions rather than edit:
 Doctrine: search before you reference a part; read pins with get_symbol_info;
 validate before you apply; review_design before you commit (it catches FUNCTIONAL
 faults ERC can't see); preview (commit:false) before you commit (commit:true).
-Aim for designs that are ERC-clean AND electrically correct. When you are finished,
-reply with a short plain-text summary of what you did — no tool call.
+Aim for designs that are ERC-clean AND electrically correct. You are only FINISHED
+once `apply_design(commit:true)` has COMMITTED the design (it returns the ERC counts);
+a turn that ends after only searching/validating with nothing committed is a FAILURE.
+Once committed, reply with a short plain-text summary of what you did — no tool call.
 
 # PCB layout & routing (the board side)
 
