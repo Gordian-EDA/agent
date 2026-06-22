@@ -98,6 +98,23 @@ pub fn to_canonical_yaml(d: &BoardDesign) -> String {
         }
     }
 
+    // keepouts (only if any)
+    if !d.keepouts.is_empty() {
+        let _ = writeln!(o, "keepouts:");
+        for k in &d.keepouts {
+            let layers: Vec<String> = k.layers.iter().map(|l| q(l)).collect();
+            let _ = writeln!(
+                o,
+                "  - {{rect: [{}, {}, {}, {}], layers: [{}]}}",
+                n(k.rect[0]),
+                n(k.rect[1]),
+                n(k.rect[2]),
+                n(k.rect[3]),
+                layers.join(", ")
+            );
+        }
+    }
+
     o
 }
 

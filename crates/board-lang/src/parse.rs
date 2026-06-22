@@ -26,7 +26,7 @@ pub fn parse_str(src: &str) -> (Option<BoardDesign>, Diagnostics) {
         }
     };
 
-    known_keys(top, &["version", "name", "board", "parts", "place"], &mut ds);
+    known_keys(top, &["version", "name", "board", "parts", "place", "keepouts"], &mut ds);
 
     // version: required, must be 1.
     match find(top, "version") {
@@ -64,11 +64,17 @@ pub fn parse_str(src: &str) -> (Option<BoardDesign>, Diagnostics) {
         None => IndexMap::new(),
     };
 
+    let keepouts = match find(top, "keepouts") {
+        Some(n) => parse_keepouts(n, &mut ds),
+        None => Vec::new(),
+    };
+
     let design = BoardDesign {
         name,
         board,
         parts,
         groups,
+        keepouts,
     };
     let out = if ds.has_errors() { None } else { Some(design) };
     (out, ds)
@@ -383,6 +389,50 @@ fn parse_place(n: &Node, ds: &mut Diagnostics) -> IndexMap<String, Group> {
         groups.insert(name.clone(), group);
     }
     groups
+}
+
+// ── keepouts ───────────────────────────────────────────────────────────────
+
+fn parse_keepouts(n: &Node, ds: &mut Diagnostics) -> Vec<Keepout> {
+    let mut out = Vec::new();
+    let Node::Seq(items, _) = n else {
+        ds.push(
+            Diagnostic::error("keepouts", "`keepouts` must be a list of {rect, layers}")
+                .with_span(n.span()),
+        );
+        return out;
+    };
+    for item in items {
+        let Node::Map(m, _) = item else {
+            ds.push(
+                Diagnostic::error("keepouts", "each keepout must be {rect: [...], layers: [...]}")
+                    .with_span(item.span()),
+            );
+            continue;
+        };
+        known_keys(m, &["rect", "layers"], ds);
+        let rect = find(m, "rect").map(|r| number_seq(r, "keepout.rect", ds)).unwrap_or_default();
+        if rect.len() != 4 {
+            ds.push(
+                Diagnostic::error("keepouts", "`rect` needs [min_x, min_y, max_x, max_y]")
+                    .with_span(item.span()),
+            );
+            continue;
+        }
+        let layers = find(m, "layers").map(|l| string_seq(l, "keepout.layers", ds)).unwrap_or_default();
+        if layers.is_empty() {
+            ds.push(
+                Diagnostic::error("keepouts", "a keepout needs at least one layer (top/bottom/...)")
+                    .with_span(item.span()),
+            );
+            continue;
+        }
+        out.push(Keepout {
+            rect: [rect[0], rect[1], rect[2], rect[3]],
+            layers,
+        });
+    }
+    out
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────

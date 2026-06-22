@@ -106,6 +106,17 @@ place:
     }
 
     #[test]
+    fn keepouts_round_trip() {
+        let src = "version: 1\nboard:\n  layers: 2\n  outline: {rect: [40, 30]}\n  rules: {clearance: 0.2, trace_width: 0.2, via: [0.6, 0.3]}\nparts:\n  U1: {footprint: 'X:Y', pads: {1: A}}\nkeepouts:\n  - {rect: [5, 5, 15, 12], layers: [top, bottom]}\n";
+        let d1 = compile(src).design.expect("parse keepout");
+        assert_eq!(d1.keepouts.len(), 1);
+        assert_eq!(d1.keepouts[0].rect, [5.0, 5.0, 15.0, 12.0]);
+        assert_eq!(d1.keepouts[0].layers, vec!["top".to_string(), "bottom".to_string()]);
+        let d2 = compile(&to_canonical_yaml(&d1)).design.unwrap();
+        assert_eq!(d1, d2, "keepout did not round-trip");
+    }
+
+    #[test]
     fn missing_version_is_an_error() {
         let r = compile("board:\n  layers: 2\nparts: {}\n");
         assert!(r.diagnostics.has_errors());

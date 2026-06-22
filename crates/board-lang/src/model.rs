@@ -20,6 +20,8 @@ pub struct BoardDesign {
     pub parts: IndexMap<RefDes, Part>,
     /// Placement-intent groups (cohesion / region / edge / surround).
     pub groups: IndexMap<String, Group>,
+    /// Rectangular routing keepouts (copper-layer no-go regions).
+    pub keepouts: Vec<Keepout>,
 }
 
 impl Default for BoardDesign {
@@ -29,8 +31,19 @@ impl Default for BoardDesign {
             board: BoardSpec::default(),
             parts: IndexMap::new(),
             groups: IndexMap::new(),
+            keepouts: Vec::new(),
         }
     }
+}
+
+/// A rectangular routing keepout: the router keeps copper out of `rect` on the
+/// listed copper `layers`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Keepout {
+    /// [min_x, min_y, max_x, max_y] in mm.
+    pub rect: [f64; 4],
+    /// Copper layers blocked: `top` / `bottom` / `in1` / ...
+    pub layers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

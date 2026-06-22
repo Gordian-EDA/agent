@@ -567,7 +567,9 @@ impl Tools {
                     \u{20}\u{20}H1: {footprint: 'MountingHole:MountingHole_3.2mm_M3', corner: true}\n\
                     place:                       # optional placement intent\n\
                     \u{20}\u{20}groups:\n\
-                    \u{20}\u{20}\u{20}\u{20}deco: {members: [C1, C2], surround: U1}   # ring around U1; or region/edge/grid\n\n\
+                    \u{20}\u{20}\u{20}\u{20}deco: {members: [C1, C2], surround: U1}   # ring around U1; or region/edge/grid\n\
+                    keepouts:                    # optional copper no-go regions\n\
+                    \u{20}\u{20}- {rect: [x0, y0, x1, y1], layers: [top, bottom]}\n\n\
                     `edge: true` pulls a part to the nearest board edge (connectors); `corner: true` \
                     to a board corner (mounting holes); `lock: {at: [x, y], rot: 90}` pins a part. \
                     Coordinates and copper are the engine's job — never author them except a lock. \

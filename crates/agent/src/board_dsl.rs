@@ -7,9 +7,9 @@
 
 use board_lang::model as bl;
 use pcb_engine::placement::{Edge, GroupHint, LockedAt, PlacementHints, Rect};
-use pcb_engine::problem::{Bounds, Point2};
+use pcb_engine::problem::{Bounds, LayerRef, Point2};
 
-use crate::tools_pcb::{BoardDraft, DraftPart, DraftRules, PourSpec};
+use crate::tools_pcb::{BoardDraft, DraftPart, DraftRules, Keepout, PourSpec};
 
 /// Number of segments used to approximate a `circle` outline as a polygon.
 const CIRCLE_SEGMENTS: usize = 48;
@@ -79,11 +79,25 @@ pub fn design_to_draft(d: &bl::BoardDesign) -> BoardDraft {
         })
         .collect();
 
+    let keepouts = d
+        .keepouts
+        .iter()
+        .map(|k| Keepout {
+            rect: Rect {
+                min_x: k.rect[0],
+                min_y: k.rect[1],
+                max_x: k.rect[2],
+                max_y: k.rect[3],
+            },
+            layers: k.layers.iter().map(|l| LayerRef(l.clone())).collect(),
+        })
+        .collect();
+
     BoardDraft {
         bounds,
         rules,
         parts,
-        keepouts: Vec::new(),
+        keepouts,
         hints: PlacementHints {
             groups,
             edge_seek,
@@ -215,6 +229,7 @@ pub fn import_to_design(path: &std::path::Path) -> std::io::Result<bl::BoardDesi
         },
         parts,
         groups: indexmap::IndexMap::new(),
+        keepouts: Vec::new(),
     })
 }
 
