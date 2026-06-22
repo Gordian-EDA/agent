@@ -1099,14 +1099,15 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
             .snapshot(&ctx.sch_path)
             .with_context(|| format!("snapshotting {}", ctx.sch_path.display()))?;
     }
-    // A DENSE multi-block design ships as a hierarchical MULTI-SHEET project (one clean
-    // sheet per functional block — 8-9 each) instead of a cramped single sheet (4-7): the
-    // professional way to handle density (validated: motordrv 5→~8.5, datalogger 4→~8.2).
+    // ANY multi-block design ships as a hierarchical MULTI-SHEET project (one clean sheet per
+    // functional block — 8-9 each) instead of a single sheet: per-block independent layout is
+    // the RULE, not a dense-only special case. `multisheet::refine_blocks` first normalizes
+    // the blocks (split over-crammed, merge tiny) so even a 2-block design lays out per-block
+    // with no cross-border global SA. Only a single-block design takes the single-sheet path.
     // The root .kicad_sch is written at ctx.sch_path with sub-sheets alongside; downstream
     // render/ERC operate on the root.
     let n_blocks = design.blocks.values().filter(|b| !b.components.is_empty()).count();
-    let n_parts: usize = design.blocks.values().map(|b| b.components.len()).sum();
-    let multisheet = n_blocks >= 3 && n_parts >= 25;
+    let multisheet = n_blocks >= 2;
     if multisheet {
         let dir = ctx.sch_path.parent().unwrap_or_else(|| std::path::Path::new("."));
         let root = crate::multisheet::emit_multisheet(&ctx.env, &design, dir)
