@@ -803,6 +803,86 @@ pub fn build_board_draft(input: Value, ctx: &ToolCtx) -> Result<Value> {
     }))
 }
 
+/// `board_lang::compile`'s diagnostics as the same `{ok, diagnostics, errors,
+/// warnings}` shape the schematic DSL returns, so the agent self-repairs a
+/// board document exactly the way it does a circuit document.
+fn board_compile_report(diags: &board_lang::Diagnostics) -> Value {
+    use board_lang::Severity;
+    let strings: Vec<String> = diags.0.iter().map(|d| d.to_string()).collect();
+    let errors = diags.0.iter().filter(|d| d.severity == Severity::Error).count();
+    let warnings = diags.0.iter().filter(|d| d.severity == Severity::Warning).count();
+    json!({
+        "ok": errors == 0,
+        "diagnostics": strings,
+        "errors": errors,
+        "warnings": warnings,
+    })
+}
+
+/// `design_board`: author (or replace) the ENTIRE board from one Board-DSL
+/// document — the PCB analog of `create_design`. Compiles the YAML to a
+/// [`board_lang::BoardDesign`], lowers it to a [`BoardDraft`], checks every
+/// footprint resolves, and persists it. The single board authoring surface:
+/// outline + rules + parts (footprint, pad→net) + placement intent, all in text
+/// the agent edits and that round-trips with a `.kicad_pcb`.
+pub fn design_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let Some(yaml) = input.get("yaml").and_then(Value::as_str) else {
+        return Ok(json!({ "error": "missing required `yaml` (a Board-DSL document)" }));
+    };
+    let overwrite = input.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
+
+    let result = board_lang::compile(yaml);
+    let Some(design) = result.design else {
+        // Compile errors — hand back diagnostics so the model fixes the YAML.
+        return Ok(board_compile_report(&result.diagnostics));
+    };
+
+    if BoardDraft::load(ctx).is_some() && !overwrite {
+        return Ok(json!({
+            "error": "a board draft already exists — pass overwrite=true to replace it",
+        }));
+    }
+
+    // Every footprint must resolve in the installed library (recoverable: the
+    // model fixes exactly the bad lib_ids via search_footprints, never guesses).
+    let index = ctx.footprint_index()?;
+    let mut unknown = Vec::new();
+    for (refdes, p) in &design.parts {
+        if index.footprint(&p.footprint).is_none() {
+            unknown.push(json!({
+                "reference": refdes,
+                "footprint": p.footprint,
+                "suggestions": index.suggest(&p.footprint),
+            }));
+        }
+    }
+    if !unknown.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "unknown_footprints": unknown,
+            "note": "search_footprints for the real lib_ids and fix them in the `parts` map",
+        }));
+    }
+
+    let draft = crate::board_dsl::design_to_draft(&design);
+    let net_pins = net_pin_counts(&draft.parts, ctx);
+    let part_count = draft.parts.len();
+    let net_count = net_pins.len();
+    draft.save(ctx)?;
+
+    let mut report = board_compile_report(&result.diagnostics);
+    if let Value::Object(m) = &mut report {
+        m.insert("board_written".to_string(), json!(true));
+        m.insert("part_count".to_string(), json!(part_count));
+        m.insert("net_count".to_string(), json!(net_count));
+        m.insert(
+            "note".to_string(),
+            json!("board compiled from the DSL and saved — run place_board, then route_board, then export_board"),
+        );
+    }
+    Ok(report)
+}
+
 /// Pin count per net across the draft, derived from the resolved footprints via
 /// `placefp::part_from_footprint` (the SAME geometry place/route consumes). A
 /// pad whose number is absent from `pad_nets` contributes no pin.

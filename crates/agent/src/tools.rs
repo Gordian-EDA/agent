@@ -548,6 +548,45 @@ impl Tools {
                 }),
             },
             ToolDef {
+                name: "design_board".into(),
+                description: "Author (or replace) the WHOLE board from one Board-DSL document \
+                    — the PCB analog of create_design. Submit `yaml`; it compiles to the board \
+                    draft you then place_board -> route_board -> export_board. This is the single \
+                    board authoring surface: outline, design rules, parts (footprint + pad->net), \
+                    and placement intent, all in editable text.\n\n\
+                    FORMAT (YAML):\n\
+                    version: 1\n\
+                    name: my-board\n\
+                    board:\n\
+                    \u{20}\u{20}layers: 2                 # 2/4/6/8\n\
+                    \u{20}\u{20}outline: {rect: [40, 30]} # or {circle: 16} or {polygon: [[x,y],...]}\n\
+                    \u{20}\u{20}rules: {clearance: 0.2, trace_width: 0.2, via: [0.6, 0.3], net_widths: {VCC: 0.8}, pours: [{net: GND, layer: bottom}]}\n\
+                    parts:\n\
+                    \u{20}\u{20}U1: {footprint: 'Package_SO:SOIC-8_3.9x4.9mm_P1.27mm', pads: {1: VCC, 2: GND}}\n\
+                    \u{20}\u{20}J1: {footprint: 'Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical', pads: {1: VCC, 2: GND}, edge: true}\n\
+                    \u{20}\u{20}H1: {footprint: 'MountingHole:MountingHole_3.2mm_M3', corner: true}\n\
+                    place:                       # optional placement intent\n\
+                    \u{20}\u{20}groups:\n\
+                    \u{20}\u{20}\u{20}\u{20}deco: {members: [C1, C2], surround: U1}   # ring around U1; or region/edge/grid\n\n\
+                    `edge: true` pulls a part to the nearest board edge (connectors); `corner: true` \
+                    to a board corner (mounting holes); `lock: {at: [x, y], rot: 90}` pins a part. \
+                    Coordinates and copper are the engine's job — never author them except a lock. \
+                    Find footprint lib_ids with search_footprints (never guess). Compile errors and \
+                    unknown footprints return as diagnostics so you fix the YAML and resubmit. \
+                    overwrite=true replaces an existing board."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "yaml": { "type": "string",
+                            "description": "The Board-DSL document (see the format in this tool's description)." },
+                        "overwrite": { "type": "boolean",
+                            "description": "Replace an existing board draft." }
+                    },
+                    "required": ["yaml"]
+                }),
+            },
+            ToolDef {
                 name: "derive_board".into(),
                 description: "Build the board draft from the committed schematic + the \
                     footprint map — instead of re-typing parts. Reads the schematic's parts \
@@ -874,6 +913,7 @@ impl Tools {
             "search_footprints" => crate::tools_pcb::search_footprints(input, ctx),
             "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
             "assign_footprints" => crate::tools_pcb::assign_footprints(input, ctx),
+            "design_board" => crate::tools_pcb::design_board(input, ctx),
             "derive_board" => crate::tools_pcb::derive_board(input, ctx),
             "get_board" => crate::tools_pcb::get_board(ctx),
             "place_board" => crate::tools_pcb::place_board(input, ctx),
