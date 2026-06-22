@@ -1,0 +1,16 @@
+[package]
+name = "kicad-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native Rust client for the KiCAD IPC API (protobuf over NNG) — read and edit a live KiCAD board."
+
+[dependencies]
+prost = "0.13"
+prost-types = "0.13"
+nng = "1.0"
+thiserror.workspace = true
+
+[build-dependencies]
+prost-build = "0.13"
