@@ -1697,6 +1697,13 @@ fn emit_strategy(
             decongest(&mut items);
             changed = true;
         }
+        // DEAD LAST: re-gather each IC-anchored decoupling bank hugging its MCU's supply pins. The
+        // bank caps are frozen, so decongest_off_labels scattered them across the sparse sheet (critic
+        // 6, "decoupling caps far from the parts they serve") and no other finalize pass touches them
+        // (align_rail_cap_rows skips IC-bypass caps by design). This rows them back beside the anchor
+        // as the final placement word; it is overlap-safe against the WHOLE sheet (frozen ⇒ no
+        // downstream decongest can repair a collision), so it only ever commits a clean gather.
+        changed |= gather_decoupling_bank(&mut items, ir);
         if changed {
             w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
         }
@@ -2238,6 +2245,273 @@ fn align_rail_cap_rows(items: &mut [Item], ir: &LayoutIr) -> bool {
     let moved = !moves.is_empty();
     for (i, at) in moves {
         items[i].at = at;
+    }
+    moved
+}
+
+/// GATHER an IC-anchored decoupling bank back beside its IC (the "decoupling caps scattered across a
+/// sparse sheet" defect, critic 6). On a busy MCU sub-sheet the bypass caps connect 3V3↔GND but, with
+/// the IC explicitly gridded by the author (`layout:`), the decoupling idiom is dropped (so the caps
+/// are NOT frozen and never reported), and they flow through normal placement; the finalize
+/// `decongest_off_labels` pass then nudges each cap off the many off-sheet port labels (LED_CTL, SPI_*,
+/// I2C_*…) and scatters the bank across the sheet's empty area. `align_rail_cap_rows` deliberately SKIPS
+/// these caps (they're on `ic_nets`), so nothing re-gathers them.
+///
+/// This is the SIBLING of `align_rail_cap_rows`/`align_repeated_columns`: a DEAD-LAST, overlap-safe,
+/// MULTISHEET_REFINE-gated re-row. It re-derives the bank GENERICALLY from the placed netlist (NOT from
+/// `ir.idioms`, which the gridded-anchor case drops, NOR from `frozen`, which that case clears): for each
+/// ≥3-pin IC-like anchor it collects the 2-pin caps bridging the anchor's V+ rail and ground (≥3 ⇒ a real
+/// bank) and lays them in a tidy row HUGGING the anchor — one cap pitch off its supply-pin edge, evenly
+/// spaced and centred on the supply pins. Each cap keeps its angle (V+ up / GND down), so its short risers
+/// drop straight to the rails. The bank's distributed look is PRESERVED (a row of separate caps, not one
+/// merged blob), which the critic praises — the only change is that the row sits BESIDE the IC, not flung
+/// across empty space.
+///
+/// SAFETY: this commits ONLY when the proposed row introduces NO new overlap against ANY item on the
+/// sheet (moved bank cap, anchor, or unrelated bystander) — there is no follow-up decongest to repair a
+/// collision (and re-running one would just re-scatter the caps). A pre-existing overlap is not ours to
+/// relitigate. Multi-sheet only (gated) ⇒ single-sheet reference snapshots stay byte-identical.
+fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool {
+    if std::env::var("MULTISHEET_REFINE").is_err() {
+        return false;
+    }
+    let snap = crate::grid::snap;
+    let is_rail = |n: &str| is_power_net(n) || ir.rails.contains_key(n);
+    // A positive supply net (the rail whose pins the bank hugs): a power net that is neither ground
+    // nor a negative supply.
+    let is_vp = |n: &str| is_rail(n) && !is_ground(n) && !is_neg_supply(n);
+    const GAP: f64 = 7.62; // anchor edge → first cap row, on grid
+
+    // Candidate anchors: ≥3-pin IC-like parts (NOT a connector — a power/SWD header touches the same
+    // rails as the bypass caps but is the supply ENTRY, not the decoupling target; same exclusion the
+    // decoupling matcher's `Not(Connector)` guard makes). Ordered by item index for determinism.
+    let anchor_idxs: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() >= 3 && !is_connector_like(&items[i].part))
+        .collect();
+    // Assign each candidate bypass cap to its NEAREST qualifying anchor, so two ICs on the same sheet
+    // each gather their own caps (and a shared bulk cap rides with the closer one).
+    let mut bank_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (ci, it) in items.iter().enumerate() {
+        if !it.refdes.starts_with('C') || it.geom.pins.len() != 2 {
+            continue;
+        }
+        let nets: Vec<&str> = it.pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+        // A pure bypass cap: V+ ↔ GND, both pins on rails, exactly one of each polarity.
+        if nets.len() != 2
+            || !nets.iter().all(|n| is_rail(n))
+            || !nets.iter().any(|n| is_vp(n))
+            || !nets.iter().any(|n| is_ground(n))
+        {
+            continue;
+        }
+        let vp_net = *nets.iter().find(|n| is_vp(n)).unwrap();
+        // Nearest anchor that actually carries this cap's V+ rail.
+        let best = anchor_idxs
+            .iter()
+            .copied()
+            .filter(|&ai| items[ai].pins.iter().any(|(_, _, n)| n.as_deref() == Some(vp_net)))
+            .min_by(|&a, &b| {
+                let d = |ai: usize| {
+                    let dx = items[ai].at[0] - it.at[0];
+                    let dy = items[ai].at[1] - it.at[1];
+                    dx * dx + dy * dy
+                };
+                d(a).total_cmp(&d(b))
+            });
+        if let Some(ai) = best {
+            bank_of.entry(ai).or_default().push(ci);
+        }
+    }
+
+    let mut moves: Vec<(usize, [f64; 2], f64)> = Vec::new();
+    for (&ai, bank) in &bank_of {
+        // A real bank is ≥3 bypass caps (the decoupling pattern's `Role::many(.., 3, 64)` threshold);
+        // a lone cap or pair is not a "scattered bank" and rowing it risks stranding a filter cap.
+        if bank.len() < 3 {
+            continue;
+        }
+        // Which V+ rail does the bank predominantly serve?
+        let mut vp_count: BTreeMap<String, usize> = BTreeMap::new();
+        for &ci in bank {
+            for (_, _, n) in &items[ci].pins {
+                if let Some(n) = n.as_deref() {
+                    if is_vp(n) {
+                        *vp_count.entry(n.to_string()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        let Some(vp) = vp_count.into_iter().max_by_key(|(_, c)| *c).map(|(n, _)| n) else {
+            continue;
+        };
+        // World positions of the anchor's pins on that V+ rail (the supply edge the bank should hug).
+        let supply_pts: Vec<[f64; 2]> = items[ai]
+            .pins
+            .iter()
+            .filter(|(_, _, n)| n.as_deref() == Some(vp.as_str()))
+            .filter_map(|(num, _, _)| {
+                items[ai].geom.pins.iter().find(|p| &p.number == num).map(|pg| {
+                    crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror)
+                })
+            })
+            .collect();
+        if supply_pts.is_empty() {
+            continue;
+        }
+        // The anchor's pin bbox, to decide which edge the supply pins hug.
+        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+        for pg in &items[ai].geom.pins {
+            let w = crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
+            lo[0] = lo[0].min(w[0]);
+            lo[1] = lo[1].min(w[1]);
+            hi[0] = hi[0].max(w[0]);
+            hi[1] = hi[1].max(w[1]);
+        }
+        let supply_cx = supply_pts.iter().map(|p| p[0]).sum::<f64>() / supply_pts.len() as f64;
+        let supply_cy = supply_pts.iter().map(|p| p[1]).sum::<f64>() / supply_pts.len() as f64;
+        // Nearest edge of the IC the supply pins sit on (same classifier as align_idiom_clusters).
+        let (dl, dr, dt, db) =
+            (supply_cx - lo[0], hi[0] - supply_cx, supply_cy - lo[1], hi[1] - supply_cy);
+        let m = dl.min(dr).min(dt).min(db);
+        let half = item_rect(&items[ai], items[ai].at);
+        let n = bank.len();
+        // A top/bottom supply edge ⇒ the row of (tall) caps runs horizontally; a left/right edge ⇒ it
+        // runs vertically. Order caps by current position along the row axis so the re-row is minimal.
+        let horizontal_row = m == dt || m == db;
+        let mut sorted = bank.clone();
+        if horizontal_row {
+            sorted.sort_by(|&a, &b| items[a].at[0].total_cmp(&items[b].at[0]));
+        } else {
+            sorted.sort_by(|&a, &b| items[a].at[1].total_cmp(&items[b].at[1]));
+        }
+        // ORIENT every bank cap the same way: its V+ pin points TOWARD the supply rail (the edge the
+        // bank hugs), the other pin toward ground. This makes the grid uniform (the search leaves some
+        // caps drawn sideways — C16/C18 in the scattered layout — which both look ragged and stack their
+        // value/refdes label over a power glyph). A top/bottom-edge bank stands the caps vertically; a
+        // left/right-edge bank lays them horizontally; in both the V+ pin faces the rail.
+        let rail_orient = if horizontal_row {
+            if m == dt { Orient::Up } else { Orient::Down }
+        } else if m == dl {
+            Orient::Left
+        } else {
+            Orient::Right
+        };
+        let cap_angle = |i: usize| -> f64 {
+            // orient_angle takes the desired pin1→pin2 direction. We want the V+ pin to face the rail.
+            let p1_is_vp = items[i]
+                .pins
+                .first()
+                .and_then(|(_, _, n)| n.as_deref())
+                .is_some_and(is_vp);
+            let face = if p1_is_vp {
+                // pin1 (V+) faces the rail ⇒ pin1→pin2 points AWAY from the rail.
+                match rail_orient {
+                    Orient::Up => Orient::Down,
+                    Orient::Down => Orient::Up,
+                    Orient::Left => Orient::Right,
+                    Orient::Right => Orient::Left,
+                }
+            } else {
+                // pin2 (V+) faces the rail ⇒ pin1→pin2 points TOWARD the rail.
+                rail_orient
+            };
+            orient_angle(&items[i].geom, face)
+        };
+        let new_angle: BTreeMap<usize, f64> = bank.iter().map(|&i| (i, cap_angle(i))).collect();
+        // Cap extents at the TARGET orientation (the field-stack-inclusive rect `item_rect` reserves)
+        // drive the cell pitch, so adjacent caps never overlap — derived from geometry exactly as
+        // align_repeated_columns does its column pitch.
+        let cap_extent = |i: usize, horizontal: bool| -> f64 {
+            let mut probe = items[i].clone();
+            probe.angle = new_angle[&i];
+            let r = item_rect(&probe, items[i].at);
+            if horizontal { r[2] - r[0] } else { r[3] - r[1] }
+        };
+        let cw = bank.iter().map(|&i| cap_extent(i, true)).fold(0.0_f64, f64::max);
+        let ch = bank.iter().map(|&i| cap_extent(i, false)).fold(0.0_f64, f64::max);
+        // GRID, not one long row: 6 caps in a single 95 mm row overran the crystal cluster. Lay the bank
+        // as a compact grid hugging the supply edge — its along-edge span kept near the IC body width so
+        // the bank reads as a tidy block beside the IC, not a sprawling line. `lane` = the along-edge
+        // axis (x for a top/bottom edge, y for a side edge), `depth` = the perpendicular outward axis.
+        let xpitch = snap(cw + 2.54);
+        let ypitch = snap(ch + 2.54);
+        let (lane_pitch, depth_pitch) =
+            if horizontal_row { (xpitch, ypitch) } else { (ypitch, xpitch) };
+        // Columns along the edge: enough to span ~the IC body extent, but at least 2 and at most n.
+        let body_extent = if horizontal_row { half[2] - half[0] } else { half[3] - half[1] };
+        let ncol = ((body_extent / lane_pitch).floor() as usize).clamp(2, n).min(n);
+        let nrow = n.div_ceil(ncol);
+        // Lane origin: centre the grid on the supply pins. Depth origin: first cell one GAP + half a cap
+        // off the body edge, growing OUTWARD (away from the IC).
+        let lane0 = if horizontal_row { supply_cx } else { supply_cy }
+            - (ncol as f64 - 1.0) * lane_pitch / 2.0;
+        let (depth0, depth_sign) = if horizontal_row {
+            if m == dt { (half[1] - GAP - ch / 2.0, -1.0) } else { (half[3] + GAP + ch / 2.0, 1.0) }
+        } else if m == dl {
+            (half[0] - GAP - cw / 2.0, -1.0)
+        } else {
+            (half[2] + GAP + cw / 2.0, 1.0)
+        };
+        let targets: Vec<[f64; 2]> = (0..n)
+            .map(|k| {
+                let col = k % ncol;
+                let row = k / ncol;
+                let lane = snap(lane0 + col as f64 * lane_pitch);
+                let depth = snap(depth0 + depth_sign * row as f64 * depth_pitch);
+                if horizontal_row { [lane, depth] } else { [depth, lane] }
+            })
+            .collect();
+        let _ = nrow;
+        // No-op guard: skip if the bank is already at the proposed row with the right orientation.
+        if sorted.iter().zip(&targets).all(|(&i, t)| {
+            (items[i].at[0] - t[0]).abs() < 1.27
+                && (items[i].at[1] - t[1]).abs() < 1.27
+                && (items[i].angle - new_angle[&i]).abs() < 0.5
+        }) {
+            continue;
+        }
+        // OVERLAP-SAFETY against the WHOLE sheet: there is no follow-up decongest to repair a collision
+        // (and one would just re-scatter the caps). Reject the gather if any proposed cap position+angle
+        // would newly overlap ANY other item (anchor, other bank cap, or unrelated bystander) that it
+        // does not overlap today. `rect_at` evaluates item_rect under a hypothetical angle.
+        let proposed: BTreeMap<usize, [f64; 2]> =
+            sorted.iter().copied().zip(targets.iter().copied()).collect();
+        let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> [f64; 4] {
+            let mut probe = items[idx].clone();
+            probe.angle = angle;
+            item_rect(&probe, at)
+        };
+        let at_now = |idx: usize| item_rect(&items[idx], items[idx].at);
+        let at_new = |idx: usize| -> [f64; 4] {
+            match proposed.get(&idx) {
+                Some(&at) => rect_at(idx, at, new_angle[&idx]),
+                None => item_rect(&items[idx], items[idx].at),
+            }
+        };
+        let mut ok = true;
+        'check: for &c in &sorted {
+            for other in 0..items.len() {
+                if other == c {
+                    continue;
+                }
+                if rects_overlap(at_new(c), at_new(other)) && !rects_overlap(at_now(c), at_now(other))
+                {
+                    ok = false;
+                    break 'check;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        for (&i, &at) in &proposed {
+            moves.push((i, at, new_angle[&i]));
+        }
+    }
+    let moved = !moves.is_empty();
+    for (i, at, angle) in moves {
+        items[i].at = at;
+        items[i].angle = angle;
     }
     moved
 }
