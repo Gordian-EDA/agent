@@ -348,6 +348,20 @@ pub fn assign_footprints(input: Value, ctx: &ToolCtx) -> Result<Value> {
 
 // ── derive_board ──────────────────────────────────────────────────────────────
 
+/// Pad numbers in `pad_keys` that aren't among the footprint's real pads `fp_pads`
+/// — sorted + deduped. Empty means every referenced pad exists. The pin↔pad check.
+fn pads_missing<'a>(pad_keys: impl IntoIterator<Item = &'a str>, fp_pads: &[&str]) -> Vec<String> {
+    let have: std::collections::HashSet<&str> = fp_pads.iter().copied().collect();
+    let mut missing: Vec<String> = pad_keys
+        .into_iter()
+        .filter(|p| !have.contains(p))
+        .map(str::to_string)
+        .collect();
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
 /// `derive_board` — build the board draft from the committed schematic + the
 /// footprint map, instead of re-typing parts by hand. Connectivity comes from the
 /// schematic's netlist (via `lift`, which keys pins by pad number — KiCAD does the
@@ -381,8 +395,10 @@ pub fn derive_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // One create_board-style part per component: footprint from the map, pad_nets
     // from the (pad-number-keyed) pins, flattened across units. NoConnect / absent
     // pins are simply omitted (an absent pad is unconnected).
+    let index = ctx.footprint_index()?;
     let mut parts = Vec::new();
     let mut needs_footprints = Vec::new();
+    let mut wrong_footprints = Vec::new();
     for (refdes, c) in design.blocks.values().flat_map(|b| b.components.iter()) {
         let Some(footprint) = map.get(refdes) else {
             needs_footprints.push(refdes.clone());
@@ -394,6 +410,18 @@ pub fn derive_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
                 if let PinTarget::Net(net) = target {
                     pad_nets.insert(pad.clone(), json!(net));
                 }
+            }
+        }
+        // pin↔pad: every pad the schematic nets must exist on the assigned footprint.
+        // A missing one means the wrong footprint for this part. (Unknown lib_ids fall
+        // through to create_board, which reports them with suggestions.)
+        if let Some(fp) = index.footprint(footprint) {
+            let fp_pads: Vec<&str> = fp.pads.iter().map(|p| p.number.as_str()).collect();
+            let missing = pads_missing(pad_nets.keys().map(String::as_str), &fp_pads);
+            if !missing.is_empty() {
+                wrong_footprints.push(json!({
+                    "reference": refdes, "footprint": footprint, "missing_pads": missing,
+                }));
             }
         }
         parts.push(json!({
@@ -409,6 +437,14 @@ pub fn derive_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
             "needs_footprints": needs_footprints,
             "note": "assign these with assign_footprints (use search_footprints to find lib_ids), \
                      then re-run derive_board",
+        }));
+    }
+    if !wrong_footprints.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "wrong_footprints": wrong_footprints,
+            "note": "the assigned footprint lacks pads the schematic uses — pick a footprint that \
+                     fits the part's pins (search_footprints), re-assign_footprints, then re-run",
         }));
     }
 
@@ -3098,6 +3134,26 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod pads_missing_tests {
+    use super::pads_missing;
+
+    #[test]
+    fn flags_only_pads_absent_from_the_footprint() {
+        // R-style: pins 1,2 on a footprint with pads 1,2 — nothing missing.
+        assert!(pads_missing(["1", "2"], &["1", "2"]).is_empty());
+        // A pin mapped to a pad the footprint lacks (3 on a 2-pad part) is flagged.
+        assert_eq!(pads_missing(["1", "2", "3"], &["1", "2"]), vec!["3".to_string()]);
+        // BGA-style alphanumeric pads; the inner ball isn't on a perimeter footprint.
+        assert_eq!(
+            pads_missing(["A1", "C5"], &["A1", "A2", "B1"]),
+            vec!["C5".to_string()]
+        );
+        // Result is sorted + deduped.
+        assert_eq!(pads_missing(["5", "5", "4"], &["1"]), vec!["4".to_string(), "5".to_string()]);
+    }
 }
 
 #[cfg(test)]

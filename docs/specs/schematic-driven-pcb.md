@@ -184,8 +184,17 @@ place_board → route_board → export_board     user's connectivity untouched
    pad-number-keyed pins for free and serves both scenarios with one path, so slices 2 and 3
    collapsed. (The in-place footprint patcher for the user's sheet — the only S2-specific
    extra — is deferred until a user actually needs it.)
-4. ⬜ **Sync/diff re-run semantics** (placement preservation) + the **consistency lint**, plus
-   the pin-count ⟷ pad-count check now that `derive_board` has the `Design`.
+4. ✅ **pin↔pad check** — `derive_board` rejects an assigned footprint that lacks a pad the
+   schematic nets (a pure `pads_missing()` helper), returning `wrong_footprints` so the agent
+   re-assigns. Scoped to `derive_board` (the schematic-driven path), NOT the shared
+   `create_board` builder — so it doesn't relitigate the PCB engine's manual stress fixtures.
+   **Deferred** (low ROI for now): placement-preservation on re-derive (the agent re-places via
+   `place_board`) and a net-consistency lint (a fresh derive is consistent by construction).
+
+> Aside — the check surfaced a latent bug while it briefly lived in the shared builder: several
+> BGA-64 harness fixtures (`bga-custom-outline-edge`, `bga64-stress`, …) net inner balls (C3–H8)
+> that don't exist on their perimeter-64 footprint — silently dropped today. Flagged for the PCB
+> side; not fixed here (out of this feature's scope).
 
 Each slice is gated on `cargo test -p pcb-engine -p kicad-bridge -p agent` and the
 `board_harness` staying 0-copper-fault.
