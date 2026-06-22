@@ -1568,6 +1568,14 @@ impl SchematicWriter {
         // Falls back to A4 when there is no content to measure.
         match self.content_extent() {
             Some([w, h]) => {
+                // A multi-sheet sub-sheet carries a title block, which KiCAD draws at the page
+                // bottom-right; the tight content-fit page leaves no room, so it overprints the
+                // lowest parts (the committed-sheet defect — content-only renders hide it).
+                // Reserve a bottom band so content sits above it. Gated on MULTISHEET_REFINE +
+                // a title, so single-sheet references (no MULTISHEET_REFINE) stay byte-identical.
+                const TITLE_BLOCK_RESERVE: f64 = 33.0;
+                let reserve = self.title.is_some() && std::env::var("MULTISHEET_REFINE").is_ok();
+                let h = if reserve { h + TITLE_BLOCK_RESERVE } else { h };
                 let _ = writeln!(out, "\t(paper \"User\" {} {})", fmt_coord(w), fmt_coord(h));
             }
             None => out.push_str("\t(paper \"A4\")\n"),

@@ -71,6 +71,12 @@ async fn main() -> anyhow::Result<()> {
     );
     eprintln!("final reply:\n{}\n", outcome.final_text.trim());
 
+    // Save the agent's DRAFT (its multi-block source) regardless of whether it committed,
+    // so a dense design can be re-emitted as multi-sheet even if the agent only previewed.
+    if draft_path.exists() {
+        std::fs::copy(&draft_path, std::path::Path::new(&out).with_extension("draft.yaml")).ok();
+    }
+
     if !sch_path.exists() {
         eprintln!("NO SCHEMATIC WRITTEN — the agent did not commit a design.");
         return Ok(());

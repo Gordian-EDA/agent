@@ -14,3 +14,6 @@ design.kicad_sch
 !crates/sch-layout/tests/snapshots/*.kicad_sch
 
 docs/validation/*.png
+
+# Python bytecode cache for the tools/ scripts
+tools/__pycache__/
