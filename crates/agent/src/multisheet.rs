@@ -1,15 +1,20 @@
-//! Multi-sheet (hierarchical) commit for DENSE designs — the validated answer to the
-//! single-sheet density ceiling: one sheet per functional block scores 8-9 each, vs a
-//! cramped single sheet at 4-7. Emits a committable KiCAD project (root `.kicad_sch` +
-//! per-block sub-sheet files, global-label cross-sheet connectivity). See
-//! `docs/specs/multisheet-commit.md`. Refined block-split/merge lives in the
-//! `render_multisheet` example; this lean path is one-sheet-per-block (agent blocks are
-//! already well-sized) — split/merge is a follow-up refinement.
+//! Multi-sheet (hierarchical) commit — the validated answer to the single-sheet density
+//! ceiling: one sheet per functional block scores 8-9 each, vs a cramped single sheet at
+//! 4-7. Emits a committable KiCAD project (root `.kicad_sch` + per-block sub-sheet files,
+//! global-label cross-sheet connectivity). See `docs/specs/multisheet-commit.md`.
+//!
+//! Per-block independent layout is the RULE here, not a dense-only special case.
+//! [`refine_blocks`] first normalizes the agent's blocks into uniform-sized SHEET GROUPS
+//! (split over-crammed blocks, merge tiny fragments), then [`emit_multisheet`] runs a
+//! SEPARATE anneal per group → one sub-sheet per group, disjoint by construction. A group
+//! holding ≥2 blocks is emitted together as a sub-design; the single-sheet floorplan is
+//! block-aware (Tier-B disjoint-region placement) so those blocks stay spatially disjoint.
 
-use circuit_lang::model::Design;
+use circuit_lang::model::{Block, Design, PinTarget};
 use indexmap::IndexMap;
 use kicad_bridge::cli::KicadCli;
 use kicad_bridge::env::KicadEnv;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Deterministic UUIDv5-style id from a seed (no randomness ⇒ stable re-emits).
@@ -38,28 +43,244 @@ pub fn sanitize(name: &str) -> String {
     name.chars().map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
 }
 
-/// Emit a DENSE multi-block `Design` as a hierarchical KiCAD project under `out_dir`:
-/// one sub-sheet per block + a root that references them. Returns the root `.kicad_sch`
-/// path. Cross-block nets auto-become global labels (single-pin ports) / power symbols, so
-/// the sheets connect. Sets `MULTISHEET_REFINE` so each sub-sheet gets the route-aware
-/// crossing refinement (the validated sub-sheet path).
+/// Union-find root with path-halving.
+fn uf_find(parent: &mut [usize], x: usize) -> usize {
+    let mut r = x;
+    while parent[r] != r {
+        r = parent[r];
+    }
+    let mut c = x;
+    while parent[c] != r {
+        let n = parent[c];
+        parent[c] = r;
+        c = n;
+    }
+    r
+}
+
+/// The non-GND nets a block touches (component- and unit-level pins). A net shared by ≥2
+/// blocks is a cross-block PORT; GND/VSS are excluded (every sheet carries them, so they'd
+/// drown out the signal coupling that drives the merge target).
+fn block_nets(b: &Block) -> HashSet<String> {
+    let mut s = HashSet::new();
+    let mut add = |t: &PinTarget| {
+        if let PinTarget::Net(n) = t {
+            let u = n.to_ascii_uppercase();
+            if u != "GND" && !u.starts_with("GND") && u != "VSS" {
+                s.insert(n.clone());
+            }
+        }
+    };
+    for c in b.components.values() {
+        for t in c.pins.values() {
+            add(t);
+        }
+        for unit in c.units.values() {
+            for t in unit.values() {
+                add(t);
+            }
+        }
+    }
+    s
+}
+
+/// One sheet group from [`refine_blocks`]: a name (the sub-sheet / file stem) and the member
+/// blocks (each a `(block_name, Block)`) to lay out TOGETHER on that sheet. A single-block
+/// group → one sub-sheet; a multi-block group is emitted as a sub-design (Tier-B keeps the
+/// members disjoint). Carrying the `Block` bodies means the split partition is computed ONCE
+/// here — callers never re-derive it.
+pub type SheetGroup = (String, Vec<(String, Block)>);
+
+/// SPLIT a single block along its CONNECTED COMPONENTS (rail-excluded graph) into effective
+/// blocks, the shared primitive behind [`refine_blocks`]. Returns `(name, Block)` pairs:
+/// ≤ SPLIT_MAX parts (or one tightly-coupled component) → the block unchanged (`[(name, b)]`);
+/// else → `ceil(parts/TARGET)` bin-packed fragments named `{bname}_{g}`.
+///
+/// "Coupled" = sharing a LOW-degree (deg ≤ `RAIL_DEG`) point-to-point signal net; high-degree
+/// rail/bus nets (VCC/GND/VM/…) are excluded, so independent sub-circuits fall into separate
+/// components and split at a near-zero signal cut, while a half-bridge sharing a high-degree
+/// rail stays intact.
+fn split_block(bname: &str, block: &Block) -> Vec<(String, Block)> {
+    const SPLIT_MAX: usize = 16;
+    const TARGET: usize = 11;
+    const RAIL_DEG: usize = 4;
+    if block.components.len() <= SPLIT_MAX {
+        return vec![(bname.to_string(), block.clone())];
+    }
+    let refs: Vec<String> = block.components.keys().cloned().collect();
+    // net -> indices of parts on it (any net, rail or signal).
+    let mut net_refs: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, rd) in refs.iter().enumerate() {
+        let c = &block.components[rd];
+        let mut nets = HashSet::new();
+        for t in c.pins.values() {
+            if let PinTarget::Net(n) = t {
+                nets.insert(n.clone());
+            }
+        }
+        for u in c.units.values() {
+            for t in u.values() {
+                if let PinTarget::Net(n) = t {
+                    nets.insert(n.clone());
+                }
+            }
+        }
+        for n in nets {
+            net_refs.entry(n).or_default().push(i);
+        }
+    }
+    // Union parts that share a LOW-degree (point-to-point signal) net; skip rails/buses.
+    let mut parent: Vec<usize> = (0..refs.len()).collect();
+    for ids in net_refs.values() {
+        if ids.len() > RAIL_DEG {
+            continue;
+        }
+        for w in ids.windows(2) {
+            let (a, b) = (uf_find(&mut parent, w[0]), uf_find(&mut parent, w[1]));
+            parent[a] = b;
+        }
+    }
+    let mut comps: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..refs.len() {
+        let r = uf_find(&mut parent, i);
+        comps.entry(r).or_default().push(i);
+    }
+    let comp_list: Vec<Vec<usize>> = comps.into_values().collect();
+    if comp_list.len() < 2 {
+        return vec![(bname.to_string(), block.clone())]; // one tightly-coupled component — don't split
+    }
+    // Bin-pack components into ceil(parts/TARGET) groups, largest component to the smallest group.
+    let ngroups = block.components.len().div_ceil(TARGET).clamp(2, comp_list.len());
+    let mut order: Vec<usize> = (0..comp_list.len()).collect();
+    order.sort_by_key(|&ci| std::cmp::Reverse(comp_list[ci].len()));
+    let mut groups_idx: Vec<Vec<usize>> = vec![Vec::new(); ngroups];
+    let mut sizes = vec![0usize; ngroups];
+    for &ci in &order {
+        let g = (0..ngroups).min_by_key(|&g| sizes[g]).unwrap();
+        groups_idx[g].extend(&comp_list[ci]);
+        sizes[g] += comp_list[ci].len();
+    }
+    println!(
+        "  [split] block '{bname}' ({} parts, {} signal-components) -> {ngroups} sheets",
+        block.components.len(),
+        comp_list.len()
+    );
+    let mut out = Vec::new();
+    let mut g = 0;
+    for ris in &groups_idx {
+        if ris.is_empty() {
+            continue;
+        }
+        g += 1;
+        let mut sub = block.clone();
+        sub.components = IndexMap::new();
+        for &ri in ris {
+            let rd = &refs[ri];
+            sub.components.insert(rd.clone(), block.components[rd].clone());
+        }
+        out.push((format!("{bname}_{g}"), sub));
+    }
+    out
+}
+
+/// Normalize the agent's blocks into uniform-sized SHEET GROUPS — the single source of truth
+/// for per-block independent layout. Each [`SheetGroup`] carries the actual member blocks, so
+/// the split partition is computed exactly once. Two refinements, both connectivity-based and
+/// deterministic (the agent over/under-partitions despite the ~6-10 parts/block prompt):
+///
+/// - **SPLIT** (see [`split_block`]): any block with > 16 parts bisects along its rail-excluded
+///   connected components into ~11-part fragments. A single tightly-coupled component is left
+///   intact, so half-bridge / one-MCU motifs never split.
+/// - **MERGE** any block with < `MERGE_MIN` parts into the block it shares the most non-GND
+///   nets with, UNLESS it is PORT-RICH (≥5 cross-block nets — a real breakout/header sheet
+///   that reads cleanly on its own, e.g. an SWD/GPIO pinout). Only the smallest blocks move.
+pub fn refine_blocks(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
+    const MERGE_MIN: usize = 4;
+
+    // ── SPLIT ── into the effective (post-split) blocks, keyed by name, in deterministic order.
+    let mut eff: IndexMap<String, Block> = IndexMap::new();
+    for (bname, block) in blocks {
+        if block.components.is_empty() {
+            continue;
+        }
+        for (mname, frag) in split_block(bname, block) {
+            eff.insert(mname, frag);
+        }
+    }
+
+    // ── MERGE ── fold each tiny, non-port-rich block into its strongest neighbour.
+    let bnames: Vec<String> = eff.keys().cloned().collect();
+    let bnets: HashMap<String, HashSet<String>> =
+        bnames.iter().map(|n| (n.clone(), block_nets(&eff[n]))).collect();
+    let bsize = |n: &str| eff[n].components.len();
+    // A net shared by ≥2 blocks is a cross-block PORT.
+    let mut net_blocks: HashMap<String, usize> = HashMap::new();
+    for n in &bnames {
+        for net in &bnets[n] {
+            *net_blocks.entry(net.clone()).or_default() += 1;
+        }
+    }
+    let port_rich = |n: &str| {
+        bnets[n].iter().filter(|net| net_blocks.get(*net).copied().unwrap_or(0) >= 2).count() >= 5
+    };
+    let mut merge_into: HashMap<String, String> = HashMap::new();
+    for n in &bnames {
+        if bsize(n) >= MERGE_MIN || port_rich(n) {
+            continue;
+        }
+        if let Some(t) = bnames
+            .iter()
+            .filter(|m| m.as_str() != n.as_str() && bsize(m) >= MERGE_MIN)
+            .max_by_key(|m| (bnets[n].intersection(&bnets[*m]).count(), bsize(m)))
+        {
+            println!("  [merge] tiny block '{n}' ({} parts) -> '{t}'", bsize(n));
+            merge_into.insert(n.clone(), t.clone());
+        }
+    }
+
+    // ── ASSEMBLE ── sheet groups keyed by surviving block, members carrying their Block body.
+    // Preserve the (split) block order; merged blocks fold into their target's group.
+    let mut groups: IndexMap<String, Vec<String>> = IndexMap::new();
+    for n in &bnames {
+        if !merge_into.contains_key(n) {
+            groups.entry(n.clone()).or_default().push(n.clone());
+        }
+    }
+    for n in &bnames {
+        if let Some(t) = merge_into.get(n) {
+            groups.entry(t.clone()).or_default().push(n.clone());
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(name, members)| {
+            let blocks = members.into_iter().map(|m| (m.clone(), eff[&m].clone())).collect();
+            (name, blocks)
+        })
+        .collect()
+}
+
+/// Emit a multi-block `Design` as a hierarchical KiCAD project under `out_dir`. Refines the
+/// blocks into uniform sheet GROUPS ([`refine_blocks`]), then runs a SEPARATE anneal per
+/// group → one sub-sheet per group + a root that references them. Returns the root
+/// `.kicad_sch` path. Cross-group nets auto-become global labels (single-pin ports) / power
+/// symbols, so the sheets connect. Sets `MULTISHEET_REFINE` so each sub-sheet gets the
+/// route-aware crossing refinement (the validated sub-sheet path).
 pub fn emit_multisheet(env: &KicadEnv, design: &Design, out_dir: &Path) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(out_dir)?;
     // SAFETY: process-wide flag read by the engine to opt sub-sheets into route-aware
     // refinement; this whole operation is a multi-sheet emit, so it's the intended scope.
     unsafe { std::env::set_var("MULTISHEET_REFINE", "1") };
     let mut sheets: Vec<(String, String)> = Vec::new();
-    for (bname, block) in &design.blocks {
-        if block.components.is_empty() {
-            continue;
-        }
+    for (gname, members) in refine_blocks(&design.blocks) {
+        // A sub-design holding this group's block(s): cross-group nets touch only these pins,
+        // so the engine auto-labels single-pin ones as ports and keeps multi-pin ones internal.
         let mut sub = design.clone();
-        sub.blocks = IndexMap::new();
-        sub.blocks.insert(bname.clone(), block.clone());
+        sub.blocks = members.into_iter().collect();
         let ir = sch_layout::floorplan::infer_ir(env, &sub);
         let emit = sch_layout::floorplan::emit_anneal(env, &sub, &ir)
-            .map_err(|e| anyhow::anyhow!("emit block '{bname}': {e}"))?;
-        sheets.push((sanitize(bname), emit.sch));
+            .map_err(|e| anyhow::anyhow!("emit sheet '{gname}': {e}"))?;
+        sheets.push((sanitize(&gname), emit.sch));
     }
     dedup_pwr_flags(&mut sheets);
     write_project(env, out_dir, &sheets)
