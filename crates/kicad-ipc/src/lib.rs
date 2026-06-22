@@ -267,3 +267,49 @@ impl Kicad {
         self.call_void(&SaveDocument { document })
     }
 }
+
+// ── Nets & net classes (design rules: "wide copper for power") ───────────────
+
+use proto::kiapi::board::commands::{GetNets, NetsResponse};
+use proto::kiapi::common::commands::SetNetClasses;
+use proto::kiapi::common::project::{NetClass, NetClassBoardSettings, NetClassType};
+use proto::kiapi::common::types::{Distance, MapMergeMode};
+
+impl Kicad {
+    /// Names of all nets on the open board.
+    pub fn nets(&mut self) -> Result<Vec<String>, Error> {
+        let board = Some(self.board_doc.clone().ok_or(Error::NoBoard)?);
+        let resp: NetsResponse = self.call(&GetNets {
+            board,
+            netclass_filter: vec![],
+        })?;
+        Ok(resp.nets.into_iter().map(|n| n.name).collect())
+    }
+
+    /// Define (or update, by name) a net class with a given track width + clearance
+    /// (mm → nanometers) and assign the named nets to it — the idiomatic "wide copper
+    /// for power" lever. Merges by name; never erases other classes.
+    pub fn set_net_class(
+        &mut self,
+        name: &str,
+        track_width_nm: i64,
+        clearance_nm: i64,
+        nets: &[&str],
+    ) -> Result<(), Error> {
+        let nc = NetClass {
+            name: name.to_string(),
+            r#type: NetClassType::NctExplicit as i32,
+            constituents: nets.iter().map(|s| s.to_string()).collect(),
+            board: Some(NetClassBoardSettings {
+                track_width: Some(Distance { value_nm: track_width_nm }),
+                clearance: (clearance_nm > 0).then_some(Distance { value_nm: clearance_nm }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        self.call_void(&SetNetClasses {
+            net_classes: vec![nc],
+            merge_mode: MapMergeMode::MmmMerge as i32,
+        })
+    }
+}
