@@ -591,42 +591,6 @@ impl Tools {
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             ToolDef {
-                name: "add_parts".into(),
-                description: "Append extra parts to an EXISTING board draft (one already built \
-                    by derive_board) without rebuilding it — e.g. mounting holes, test points, or \
-                    a part not in the schematic. Same per-part validation as derive_board \
-                    (footprint resolved up front with suggestions; a footprint whose own pads \
-                    violate rules.clearance is rejected); a reference already on the board is an \
-                    error. Returns the references added and the new part/net counts. Adding parts \
-                    clears any prior placement — run place_board again afterwards."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "parts": {
-                            "type": "array",
-                            "description": "More parts to append (each: reference, footprint, pad_nets).",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "reference": { "type": "string",
-                                        "description": "Unique reference designator not already on the board." },
-                                    "footprint": { "type": "string",
-                                        "description": "Footprint lib_id from search_footprints." },
-                                    "pad_nets": {
-                                        "type": "object",
-                                        "description": "Pad number → net name. A pad absent from this map is left unconnected.",
-                                        "additionalProperties": { "type": "string" }
-                                    }
-                                },
-                                "required": ["reference", "footprint"]
-                            }
-                        }
-                    },
-                    "required": ["parts"]
-                }),
-            },
-            ToolDef {
                 name: "place_board".into(),
                 description: "Place the current board: turn every part's footprint \
                     + design rules + any locked positions into a placement problem, \
@@ -911,7 +875,6 @@ impl Tools {
             "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
             "assign_footprints" => crate::tools_pcb::assign_footprints(input, ctx),
             "derive_board" => crate::tools_pcb::derive_board(input, ctx),
-            "add_parts" => crate::tools_pcb::add_parts(input, ctx),
             "get_board" => crate::tools_pcb::get_board(ctx),
             "place_board" => crate::tools_pcb::place_board(input, ctx),
             "set_placement_hints" => crate::tools_pcb::set_placement_hints(input, ctx),

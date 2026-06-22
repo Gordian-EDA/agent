@@ -182,9 +182,9 @@ pad_nets, rules?}` spec from the committed schematic + the footprint map, and (b
 deterministic test harnesses (`board_harness` / `pcb_gate` / `board_artifact`) that build boards
 from standalone JSON with no schematic. The ToolDef + dispatch arm were deleted; the prompt
 board-flow doctrine now reads `search_footprints → assign_footprints → derive_board → place →
-route → export`; agent-facing error/description strings point at `derive_board`. Tool count 28→27.
-(`add_parts` remains a tool — appends an extra part to an already-derived board — but is now a
-rarely-needed escape hatch, not part of the main flow.)
+route → export`; agent-facing error/description strings point at `derive_board`. `add_parts` was
+removed in the same spirit (manual part-appending has no place in a derive-from-schematic flow, and
+nothing internal called it — it was deleted outright, fn + ToolDef + test). Tool count 28 → 26.
 
 ## Implementation slices
 

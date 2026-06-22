@@ -609,10 +609,10 @@ const KICAD_HOLE_CLEAR_MM: f64 = 0.25;
 const HDI_VIA_DIAMETER: f64 = 0.4;
 const HDI_VIA_DRILL: f64 = 0.2;
 
-/// Parse one part JSON into a validated [`DraftPart`]. Shared by `create_board` and
-/// `add_parts` so both apply identical footprint resolution, intrinsic pad-clearance
-/// rejection, and lock parsing. Returns the error-shaped `Value` on any problem so the
-/// caller can return it directly (the model then fixes just that part).
+/// Parse one part JSON into a validated [`DraftPart`] for [`build_board_draft`]: footprint
+/// resolution, intrinsic pad-clearance rejection, and lock parsing. Returns the error-shaped
+/// `Value` on any problem so the caller can return it directly (the model then fixes just
+/// that part).
 fn parse_draft_part(
     pj: &Value,
     index: &kicad_bridge::footlib::FootprintIndex,
@@ -677,56 +677,6 @@ fn parse_draft_part(
         }
     };
     Ok(DraftPart { reference, footprint, pad_nets, locked })
-}
-
-/// Append parts to the existing draft WITHOUT re-sending the whole board — the lever for big
-/// boards (50+ parts, or a 100-ball BGA's pad map) where re-emitting every part in one
-/// create_board call is unreliable for the model. Same per-part validation as create_board;
-/// a reference that already exists is rejected. Build incrementally: create_board (bounds +
-/// rules + the first parts), then add_parts(more) as many times as needed.
-pub fn add_parts(input: Value, ctx: &ToolCtx) -> Result<Value> {
-    let Some(mut draft) = BoardDraft::load(ctx) else {
-        return Ok(json!({
-            "error": "no board draft yet — run derive_board first (bounds + rules + some parts), then add_parts",
-        }));
-    };
-    let Some(parts_json) = input.get("parts").and_then(Value::as_array) else {
-        return Ok(json!({
-            "error": "missing required `parts` array (each {reference, footprint, pad_nets})",
-        }));
-    };
-    let index = ctx.footprint_index()?;
-    let mut seen: std::collections::BTreeSet<String> =
-        draft.parts.iter().map(|p| p.reference.clone()).collect();
-    let mut added: Vec<String> = Vec::new();
-    for pj in parts_json {
-        let part = match parse_draft_part(pj, index, draft.rules.clearance) {
-            Ok(p) => p,
-            Err(e) => return Ok(e),
-        };
-        if !seen.insert(part.reference.clone()) {
-            return Ok(json!({
-                "error": format!(
-                    "part `{}` is already on the board — references must be unique \
-                     (pick a new reference, or rebuild via derive_board with overwrite)",
-                    part.reference
-                ),
-            }));
-        }
-        added.push(part.reference.clone());
-        draft.parts.push(part);
-    }
-    // New parts aren't placed, so any prior placement is now stale.
-    draft.last_placement = None;
-    draft.last_place_illegal = false;
-    draft.save(ctx)?;
-    let net_pins = net_pin_counts(&draft.parts, ctx);
-    Ok(json!({
-        "ok": true,
-        "added": added,
-        "part_count": draft.parts.len(),
-        "net_count": net_pins.len(),
-    }))
 }
 
 /// Build (and persist) the working [`BoardDraft`] from a `{bounds, parts, rules?, outline?,
