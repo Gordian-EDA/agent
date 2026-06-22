@@ -1188,93 +1188,89 @@ schematic). The routing/placement engine is deterministic geometry; YOUR job is
 the floorplan, the constraints, and triaging failures. You NEVER emit trace
 coordinates — copper comes only from the engine.
 
-**The board is DERIVED from the schematic — you never re-type parts or nets.** Once a
-schematic is committed (you drew it with `create_design` → `apply_design`, or the user
-supplied a `.kicad_sch`), `derive_board` reuses its parts and netlist for the board. So if
-the user asks for a board and no schematic exists yet, draw and commit one FIRST
-(`create_design` → `apply_design`), THEN run the board flow below. Your board-side job is
-just choosing footprints and driving the floorplan/routing — the parts and pad-nets come
-from the schematic.
+**The board is AUTHORED in the Board-DSL — a text design you edit, exactly like the circuit
+YAML.** A board document carries the parts (footprint + pad→net), the outline, the design
+rules, and placement intent — NEVER coordinates. You reach one three ways: `derive_board`
+lifts a committed schematic into a Board-DSL SKELETON (parts + pad→net from the netlist; you
+fill footprints + outline + rules); `import_board(path)` lifts an existing `.kicad_pcb` (to
+start from a given board); or you author the YAML directly. You then COMMIT the document with
+`design_board(yaml)`. So if the user asks for a board and no schematic exists yet, draw and
+commit one FIRST (`create_design` → `apply_design`), THEN run the board flow below. You never
+re-type parts or nets (they come from the schematic) and never emit geometry — the engine
+places and routes; the DSL carries only intent (plus an optional explicit part `lock`).
 
 ## Board flow (follow this order)
 
 1. `search_footprints(query)` — find the real footprint `Lib:Name` for each part
    (e.g. `Resistor_SMD:R_0603_1608Metric`). NEVER guess a footprint lib_id —
    search for it, exactly like symbols.
-2. `get_footprint_info(lib_id)` — read the pad numbers / courtyard / bbox to confirm
-   the footprint fits, then `assign_footprints({assignments: {refdes: lib_id}})` to
-   record each part's footprint (board-side; the schematic stays footprint-agnostic).
-   An unknown lib_id comes back with suggestions — fix it and re-assign.
-3. `derive_board({bounds, rules?, outline?})` — build the board draft from the committed
-   schematic + the footprint map. The parts and pad-nets come from the netlist; you supply
-   ONLY the outline bounds (mm) and optional rules — never re-type parts. A part with no
-   footprint yet comes back as `needs_footprints` (assign it, then retry); a footprint
-   missing a pad the schematic nets comes back as `wrong_footprints` (wrong footprint for
-   that part — pick one that fits, re-assign, retry).
-   START WITH GENEROUS BOUNDS (roughly 2× the summed part area, square-ish). The
+   `get_footprint_info(lib_id)` reads pad numbers / courtyard / bbox to confirm a footprint
+   fits before you use it.
+2. `derive_board()` — lift the committed schematic into a Board-DSL skeleton: parts +
+   pad→net pre-filled, footprints BLANK (`missing_footprints` lists them). (Instead:
+   `import_board(path)` to start from an existing `.kicad_pcb`, or author the YAML from
+   scratch.) You set each part's `footprint` directly in the YAML — footprints live in
+   the DSL, there is no separate footprint map.
+3. EDIT the YAML, then `design_board(yaml)` to compile + commit it. Fill every part's
+   `footprint`, the `board.outline`, `board.rules`, and any placement intent
+   (`place.groups`, per-part `edge`/`corner`, `keepouts`, an explicit part `lock`). Compile
+   errors, unknown footprints, and a footprint missing a netted pad come back as diagnostics
+   — fix the YAML and resubmit (never guess a lib_id — search_footprints).
+   START WITH A GENEROUS OUTLINE (roughly 2× the summed part area, square-ish). The
    export tightens the final outline to the copper + 1mm, so a roomy routing area is
    FREE in the finished board but gives the placer/router the slack they need — a
    hand-packed tight board is the #1 cause of an illegal placement you then waste the
    turn fighting. You can always shrink later; starting tight only hurts.
-   USE THE ENGINE'S FEATURES — they are deterministic and DRC-checked, so reach for
-   them instead of hand-workarounds or telling the user to finish in KiCAD:
+   USE THE ENGINE'S FEATURES via the DSL `board:` section — deterministic + DRC-checked,
+   so reach for them instead of hand-workarounds or telling the user to finish in KiCAD:
    - `rules.pours: [{net, layer}]` — a copper POUR the engine fills + anti-pads for
      you (a 2-layer ground plane, an RF/HF return, shielding). When the user asks for
      a ground plane/pour, DECLARE IT HERE; never route top-only and punt the zone to
      the user.
-   - `rules.layers: 4|6|8` — adds the two CENTRED inner GND/VCC PLANES automatically
+   - `board.layers: 4|6|8` — adds the two CENTRED inner GND/VCC PLANES automatically
      (dense power pins), leaving the other inner layers as signal (8-layer → 6 signal).
      NOTE: more layers add capacity but the greedy router does not yet aggressively
      exploit inner SIGNAL layers, so going 4→6→8 may not route strictly more on a given
      board — pick the layer count your fab/impedance needs, not as a routing-density dial.
    - `rules.net_widths: {net: mm}` — fat power / thin signal.
-   - `rules.via_diameter`/`rules.via_drill` — for a dense BGA/QFP that leaves balls
-     unrouted, a SMALLER standard via (`0.5`/`0.3`, vs the `0.6`/`0.3` default) is the
-     reliable lever: it drops between fine-pitch balls a 0.6 via can't, routing more.
+   - `rules.via: [diameter, drill]` — for a dense BGA/QFP that leaves balls unrouted, a
+     SMALLER standard via (`[0.5, 0.3]`, vs the `[0.6, 0.3]` default) is the reliable
+     lever: it drops between fine-pitch balls a 0.6 via can't, routing more.
      Do NOT instead reach for a finer `rules.clearance` — verified non-monotonic, it
      often routes FEWER (finer grid → worse greedy contention); reserve sub-0.15mm
      clearance for genuinely sub-0.5mm pitch where a trace can't otherwise fit at all.
-   - `outline: [[x,y],...]` — a custom board shape (circle/hex/any); bounds still
-     bounds it. Placement, routing, and pours all respect the polygon.
-4. `set_placement_hints({groups})` — ENCOURAGED before placing: translate circuit
-   intent into floorplan groups (`{name, members, region?, edge?}`) — decoupling
-   caps hugging their IC, connectors on an `edge`, a sub-circuit in a `region`.
-   Hints only IMPROVE placement; they never gate it. Good placement dominates
-   routing success, so spend effort here.
-5. `place_board()` — the deterministic legalizer snaps parts to a legal, in-bounds
-   floorplan honoring your hints and any locks. Returns each part's position and
-   whether the placement is `legal`. For an illegal (too-tight) placement, the
-   FIRST and cheapest fix is to ENLARGE BOUNDS (`resize_board` to a bigger
-   `bounds`, keeping the parts) — the export auto-tightens the outline to the copper + 1mm anyway, so
-   roomy bounds cost nothing in the finished board and give the legalizer slack.
-   Do NOT try to resolve overlaps by hand-`move_part`ing parts around: each
-   move_part LOCKS that part, and a pile of locks over-constrains the legalizer so
-   it can't separate them (you'll fight your own locks forever). Trust the
-   legalizer — give it room + good hints and let it place. In particular do NOT lock
-   connectors/headers: they AUTO-seek their nearest board edge, and locking one (e.g.
-   via move_part) pins it wherever you put it — usually the interior — DEFEATING the
-   edge-seek and stranding it mid-board. Reserve move_part/locks for the rare part
-   whose exact interior spot truly matters, not for connectors or routine placement.
-6. `render_board()` — LOOK at the board. This is your eyes: call it after
-   place_board to see the floorplan and after route_board to see the copper
-   (top = red, bottom = blue, failed nets = orange crosses). Critique it against a
-   manufacturability bar before and after routing.
-7. `route_board()` — the engine routes. Returns the router used, per-net `failed`
-   list with a `reason`, `metrics`, and a `lint_summary`. Needs a placement first.
-8. Triage loop — if `failed` is non-empty, read the reasons and the congestion
-   hotspots, apply ONE lever (below), then re-place (if placement was cleared)
-   and re-route. BOUND IT: give a stubborn net about 3 triage attempts, and prefer
-   a `set_placement_hints` re-floorplan over many one-at-a-time `move_part` nudges
-   (re-clustering beats hand-walking a part across the board). If a few nets stay
-   walled-in on a genuinely tight/enclosed board after that, STOP — an honestly
-   unrouted net is an ACCEPTABLE result, not something to keep grinding. Do NOT
-   spend the whole turn (or your iteration budget) chasing the last net.
-9. `export_board({path?})` — once the board is placed and routed AS FAR AS IT GOES.
-   A board with a FEW honest unrouted nets (listed in `failed`) is a useful,
-   shippable deliverable: EXPORT it and report those nets to the user — an
-   UNEXPORTED board helps no one, so never let perfectionism on one net cost you the
-   whole board. The only hard requirement is never export a STALE route (re-route
-   after any change). Writes the `.kicad_pcb` and runs DRC (KiCAD ≥ 8).
+   - `board.outline: {circle: r}` / `{polygon: [[x,y],...]}` — a custom board shape
+     (circle/hex/any). Placement, routing, and pours all respect the outline.
+   (Placement intent lives IN the DSL — `place.groups` with `members` + `region`/`edge`/
+   `surround`/`grid`, per-part `edge`/`corner`, and a part `lock`. Set it in the YAML
+   before `design_board`; good placement dominates routing, so spend effort here.)
+4. `place_board()` — the deterministic legalizer snaps parts to a legal, in-bounds
+   floorplan honoring your `place.groups` and any `lock`s. Returns each part's position
+   and whether the placement is `legal`. For an illegal (too-tight) placement, the FIRST
+   and cheapest fix is to ENLARGE `board.outline` in the DSL and re-`design_board` — the
+   export auto-tightens the final outline to the copper + 1mm anyway, so roomy bounds
+   cost nothing in the finished board and give the legalizer slack. Do NOT hand-place
+   parts with `lock`s to resolve overlaps: a pile of locks over-constrains the legalizer
+   so it can't separate them. Trust it — give it room + good `place.groups`. In
+   particular do NOT lock connectors/headers: with `edge: true` they AUTO-seek their
+   nearest board edge; a `lock` pins one wherever you put it (usually the interior),
+   DEFEATING the edge-seek. Reserve `lock` for the rare part whose exact spot matters.
+5. `render_board()` — LOOK at the board. This is your eyes: call it after place_board to
+   see the floorplan and after route_board to see the copper (top = red, bottom = blue,
+   failed nets = orange crosses). Critique it against a manufacturability bar.
+6. `route_board()` — the engine routes. Returns the router used, per-net `failed` list
+   with a `reason`, `metrics`, and a `lint_summary`. Needs a placement first.
+7. Triage loop — if `failed` is non-empty, read the reasons + congestion hotspots, apply
+   ONE lever (below) by RE-AUTHORING the Board-DSL and `design_board`-ing it again, then
+   re-`place_board` and re-`route_board`. BOUND IT: ~3 attempts per stubborn net, and
+   prefer a `place.groups` re-floorplan over many one-off `lock` nudges. If a few nets
+   stay walled-in on a genuinely tight/enclosed board after that, STOP — an honestly
+   unrouted net is an ACCEPTABLE result, not something to keep grinding.
+8. `export_board({path?})` — once the board is placed and routed AS FAR AS IT GOES. A
+   board with a FEW honest unrouted nets (listed in `failed`) is a useful, shippable
+   deliverable: EXPORT it and report those nets to the user — an UNEXPORTED board helps
+   no one. The only hard requirement is never export a STALE route (re-route after any
+   change). Writes the `.kicad_pcb` and runs DRC (KiCAD ≥ 8).
 
 ## Failure-provenance cheat sheet (read every `reason`)
 
@@ -1311,27 +1307,27 @@ WHICH channel to open.
 0. **Wide power nets failing / signals crowding one layer → go 4-layer FIRST.**
    When `route_board` fails a high-fanout power net (VCC/VIN/VOUT) or its output
    says signals are crowding a single layer (e.g. a bottom GND pour leaves only the
-   top for signals), the decisive lever is `derive_board(..., rules:{layers:4})` and
-   re-place — the high-fanout power nets become inner PLANES (connected by vias),
+   top for signals), the decisive lever is `board.layers: 4` in the DSL (re-`design_board`)
+   and re-place — the high-fanout power nets become inner PLANES (connected by vias),
    freeing both outer layers for signals. ACT on this immediately; do NOT spend
    several re-place/re-hint rounds fighting wide traces on 2 layers first. If
    route_board itself recommends more layers, that recommendation is the move.
-1. `set_placement_hints` — re-floorplan via groups/regions/edges (the biggest
+   Every lever below is a DSL EDIT — change the YAML and `design_board` it again.
+1. `place.groups` — re-floorplan via groups/regions/edges/`surround` (the biggest
    lever; placement dominates).
-2. `move_part({reference, x, y, rotation?})` — nudge ONE part to a position you
-   reasoned from the render and the place_board positions. The engine legalizes
-   around the lock on the next place.
-3. `unlock_part({reference})` — release a lock you no longer want pinned.
-4. `set_constraints({rules?, keepouts?})` — relax a rule (clearance, trace width)
-   or replace a blocking keepout with a gapped one. `net_classes` are reserved but
-   NOT yet honored — they are rejected.
-5. Re-`place_board` (whenever a change cleared the placement), then re-`route_board`.
+2. a part `lock: {at: [x, y], rot}` — pin ONE part at a position you reasoned from the
+   render + place_board positions; the engine legalizes around it. Remove the `lock`
+   to release it.
+3. `board.outline` — a bigger or differently-shaped outline when the placement is tight.
+4. `rules` / `keepouts` — relax a rule (clearance, trace width) or replace a blocking
+   keepout with a gapped pair.
+5. Re-`design_board`, then re-`place_board` and re-`route_board`.
 
 ## Hard rules (non-negotiable)
 
 - NEVER guess a footprint lib_id — `search_footprints` for it, every time.
 - NEVER invent trace coordinates. Copper comes only from `route_board`.
-- `move_part` positions must be REASONED from `render_board` + the `place_board`
+- a part `lock` must be REASONED from `render_board` + the `place_board`
   positions — never a blind guess. It is a deliberate nudge, not a coordinate dump.
 - After ANY constraint or part change, re-run `place_board` (when the placement was
   cleared) and then `route_board` — a stale route is invalid and must not be
@@ -1535,24 +1531,34 @@ mod tests {
     #[test]
     fn system_prompt_covers_the_pcb_workflow_and_triage() {
         let p = system_prompt();
-        // Board tool flow.
+        // Board tool flow — the Board-DSL is the single authoring surface.
         assert!(p.contains("search_footprints"));
-        assert!(p.contains("assign_footprints"));
         assert!(p.contains("derive_board"));
-        assert!(p.contains("set_placement_hints"));
+        assert!(p.contains("design_board"));
+        assert!(p.contains("import_board"));
         assert!(p.contains("place_board"));
         assert!(p.contains("render_board"));
         assert!(p.contains("route_board"));
         assert!(p.contains("export_board"));
+        // The imperative board mutators are GONE — triage is re-authoring the DSL.
+        for gone in [
+            "assign_footprints",
+            "set_placement_hints",
+            "set_constraints",
+            "resize_board",
+            "move_part",
+            "unlock_part",
+        ] {
+            assert!(!p.contains(gone), "prompt still mentions removed tool `{gone}`");
+        }
         // Failure-provenance cheat sheet (the four stage prefixes).
         assert!(p.contains("global:"));
         assert!(p.contains("assign:"));
         assert!(p.contains("cell N:"));
         assert!(p.contains("finisher:"));
-        // Triage levers.
-        assert!(p.contains("move_part"));
-        assert!(p.contains("unlock_part"));
-        assert!(p.contains("set_constraints"));
+        // Triage via the DSL.
+        assert!(p.contains("place.groups"));
+        assert!(p.contains("RE-AUTHORING the Board-DSL"));
         // Hard rules.
         assert!(p.contains("NEVER guess a footprint lib_id"));
         assert!(p.contains("NEVER invent trace coordinates"));

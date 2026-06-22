@@ -14,7 +14,7 @@
 //! locked position), board bounds, design rules, keepouts, placement hints, and
 //! the last placement. Tools mutate the draft; `place_board`/`route_board` (Task
 //! 2) read it. The LLM never emits trace coordinates — placement positions enter
-//! only via `move_part`, snapped/legalized by the engine on the next place.
+//! only via a part `lock` in the Board-DSL, snapped/legalized by the engine on place.
 //!
 //! The serde shape reuses pcb-engine types directly ([`PlacementHints`],
 //! [`Placement`], [`LockedAt`], [`Rect`], [`LayerRef`]) so a draft round-trips
@@ -150,7 +150,7 @@ impl Default for DraftRules {
 
 /// One part on the board: a reference, the footprint `Lib:Name` lib_id, the
 /// per-pad net assignment (pad number → net name), and an optional locked
-/// position (the triage lever, set via `move_part` in Task 2).
+/// position (set via a part `lock` in the Board-DSL).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DraftPart {
@@ -300,51 +300,6 @@ fn bbox_json(b: &kicad_bridge::footlib::BBox) -> Value {
     })
 }
 
-// ── assign_footprints ─────────────────────────────────────────────────────────
-
-/// `assign_footprints` — set each part's footprint: a `refdes → footprint lib_id`
-/// map. A plain board-side map writer (`.autopcb/footprints.json`), the canonical
-/// home for footprint selection — the schematic engine never stores footprints
-/// (see `docs/specs/schematic-driven-pcb.md`). The one check is that each lib_id
-/// is a real footprint; an unknown one is reported with suggestions and skipped,
-/// the rest are saved. `derive_board` reads this map and reports any part still
-/// missing a footprint.
-pub fn assign_footprints(input: Value, ctx: &ToolCtx) -> Result<Value> {
-    let incoming: BTreeMap<String, String> = input
-        .get("assignments")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-
-    let mut map: BTreeMap<String, String> = ctx
-        .workspace()
-        .read_footprints()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-
-    let index = ctx.footprint_index()?;
-    let mut unknown = Vec::new();
-    for (refdes, lib_id) in incoming {
-        if index.footprint(&lib_id).is_some() {
-            map.insert(refdes, lib_id);
-        } else {
-            unknown.push(json!({
-                "reference": refdes,
-                "lib_id": lib_id,
-                "suggestions": index.suggest(&lib_id),
-            }));
-        }
-    }
-
-    ctx.workspace()
-        .write_footprints(&serde_json::to_string_pretty(&map)?)
-        .context("writing .autopcb/footprints.json")?;
-
-    let mut out = json!({ "ok": unknown.is_empty(), "footprints": map });
-    if !unknown.is_empty() {
-        out["unknown"] = json!(unknown);
-    }
-    Ok(out)
-}
 
 // ── derive_board ──────────────────────────────────────────────────────────────
 
@@ -386,81 +341,74 @@ pub fn derive_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
         return Ok(json!({ "error": "the schematic netlist did not compile back to a design" }));
     };
 
-    let map: BTreeMap<String, String> = ctx
-        .workspace()
-        .read_footprints()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-
-    // One create_board-style part per component: footprint from the map, pad_nets
-    // from the (pad-number-keyed) pins, flattened across units. NoConnect / absent
-    // pins are simply omitted (an absent pad is unconnected).
-    let index = ctx.footprint_index()?;
-    let mut parts = Vec::new();
-    let mut needs_footprints = Vec::new();
-    let mut wrong_footprints = Vec::new();
+    // Build a Board-DSL skeleton: one part per component — pad→net from the
+    // (pad-number-keyed) pins flattened across units, footprint left BLANK for the
+    // agent to fill in the YAML (footprints live in the DSL, not a side map). Every
+    // part is flagged in `missing_footprints` so the agent knows what to fill.
+    let mut parts = indexmap::IndexMap::new();
+    let mut missing_footprints = Vec::new();
     for (refdes, c) in design.blocks.values().flat_map(|b| b.components.iter()) {
-        let Some(footprint) = map.get(refdes) else {
-            needs_footprints.push(refdes.clone());
-            continue;
-        };
-        let mut pad_nets = serde_json::Map::new();
+        let footprint = String::new();
+        missing_footprints.push(refdes.clone());
+        let mut pads = indexmap::IndexMap::new();
         for pins in std::iter::once(&c.pins).chain(c.units.values()) {
             for (pad, target) in pins {
                 if let PinTarget::Net(net) = target {
-                    pad_nets.insert(pad.clone(), json!(net));
+                    pads.insert(pad.clone(), net.clone());
                 }
             }
         }
-        // pin↔pad: every pad the schematic nets must exist on the assigned footprint.
-        // A missing one means the wrong footprint for this part. (Unknown lib_ids fall
-        // through to create_board, which reports them with suggestions.)
-        if let Some(fp) = index.footprint(footprint) {
-            let fp_pads: Vec<&str> = fp.pads.iter().map(|p| p.number.as_str()).collect();
-            let missing = pads_missing(pad_nets.keys().map(String::as_str), &fp_pads);
-            if !missing.is_empty() {
-                wrong_footprints.push(json!({
-                    "reference": refdes, "footprint": footprint, "missing_pads": missing,
-                }));
-            }
-        }
-        parts.push(json!({
-            "reference": refdes,
-            "footprint": footprint,
-            "pad_nets": Value::Object(pad_nets),
-        }));
+        parts.insert(
+            refdes.clone(),
+            board_lang::model::Part {
+                footprint,
+                pads,
+                edge: false,
+                corner: false,
+                lock: None,
+            },
+        );
     }
 
-    if !needs_footprints.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "needs_footprints": needs_footprints,
-            "note": "assign these with assign_footprints (use search_footprints to find lib_ids), \
-                     then re-run derive_board",
-        }));
-    }
-    if !wrong_footprints.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "wrong_footprints": wrong_footprints,
-            "note": "the assigned footprint lacks pads the schematic uses — pick a footprint that \
-                     fits the part's pins (search_footprints), re-assign_footprints, then re-run",
-        }));
-    }
+    // Outline from the optional `bounds` (else a default the agent resizes in the
+    // YAML); layers from optional `rules.layers`.
+    let outline = match input.get("bounds") {
+        Some(b) => board_lang::model::Outline::Rect {
+            w: b.get("max_x").and_then(Value::as_f64).unwrap_or(50.0)
+                - b.get("min_x").and_then(Value::as_f64).unwrap_or(0.0),
+            h: b.get("max_y").and_then(Value::as_f64).unwrap_or(40.0)
+                - b.get("min_y").and_then(Value::as_f64).unwrap_or(0.0),
+        },
+        None => board_lang::model::Outline::Rect { w: 50.0, h: 40.0 },
+    };
+    let layers = input
+        .get("rules")
+        .and_then(|r| r.get("layers"))
+        .and_then(Value::as_u64)
+        .unwrap_or(2) as u32;
 
-    // Hand the derived parts to the internal builder (footprint resolution, pad/uniqueness
-    // validation, BoardDraft build + save). bounds / rules / overwrite pass through.
-    let mut cb = json!({
-        "parts": parts,
-        "overwrite": input.get("overwrite").and_then(Value::as_bool).unwrap_or(false),
-    });
-    if let Some(b) = input.get("bounds") {
-        cb["bounds"] = b.clone();
-    }
-    if let Some(r) = input.get("rules") {
-        cb["rules"] = r.clone();
-    }
-    build_board_draft(cb, ctx)
+    let board_design = board_lang::model::BoardDesign {
+        name: design.name.clone(),
+        board: board_lang::model::BoardSpec {
+            layers,
+            outline,
+            rules: board_lang::model::Rules::default(),
+        },
+        parts,
+        groups: indexmap::IndexMap::new(),
+        keepouts: Vec::new(),
+    };
+    let dsl = board_lang::to_canonical_yaml(&board_design);
+
+    Ok(json!({
+        "ok": true,
+        "yaml": dsl,
+        "part_count": board_design.parts.len(),
+        "missing_footprints": missing_footprints,
+        "note": "a Board-DSL skeleton lifted from the schematic (parts + pad→net). Fill any \
+                 empty footprints (search_footprints), set board.outline + rules, then commit \
+                 with design_board(yaml). Footprints and layout intent live in the DSL.",
+    }))
 }
 
 // ── create_board ─────────────────────────────────────────────────────────────
@@ -688,9 +636,7 @@ pub fn build_board_draft(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let overwrite = input.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
     if BoardDraft::load(ctx).is_some() && !overwrite {
         return Ok(json!({
-            "error": "a board draft already exists — pass overwrite=true to \
-                      replace it (a future move_part/set_constraints tool edits \
-                      it in place)",
+            "error": "a board draft already exists — pass overwrite=true to replace it",
         }));
     }
 
@@ -803,6 +749,130 @@ pub fn build_board_draft(input: Value, ctx: &ToolCtx) -> Result<Value> {
     }))
 }
 
+/// `board_lang::compile`'s diagnostics as the same `{ok, diagnostics, errors,
+/// warnings}` shape the schematic DSL returns, so the agent self-repairs a
+/// board document exactly the way it does a circuit document.
+fn board_compile_report(diags: &board_lang::Diagnostics) -> Value {
+    use board_lang::Severity;
+    let strings: Vec<String> = diags.0.iter().map(|d| d.to_string()).collect();
+    let errors = diags.0.iter().filter(|d| d.severity == Severity::Error).count();
+    let warnings = diags.0.iter().filter(|d| d.severity == Severity::Warning).count();
+    json!({
+        "ok": errors == 0,
+        "diagnostics": strings,
+        "errors": errors,
+        "warnings": warnings,
+    })
+}
+
+/// `design_board`: author (or replace) the ENTIRE board from one Board-DSL
+/// document — the PCB analog of `create_design`. Compiles the YAML to a
+/// [`board_lang::BoardDesign`], lowers it to a [`BoardDraft`], checks every
+/// footprint resolves, and persists it. The single board authoring surface:
+/// outline + rules + parts (footprint, pad→net) + placement intent, all in text
+/// the agent edits and that round-trips with a `.kicad_pcb`.
+pub fn design_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let Some(yaml) = input.get("yaml").and_then(Value::as_str) else {
+        return Ok(json!({ "error": "missing required `yaml` (a Board-DSL document)" }));
+    };
+    let overwrite = input.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
+
+    let result = board_lang::compile(yaml);
+    let Some(design) = result.design else {
+        // Compile errors — hand back diagnostics so the model fixes the YAML.
+        return Ok(board_compile_report(&result.diagnostics));
+    };
+
+    if BoardDraft::load(ctx).is_some() && !overwrite {
+        return Ok(json!({
+            "error": "a board draft already exists — pass overwrite=true to replace it",
+        }));
+    }
+
+    // Every footprint must resolve in the installed library (recoverable: the
+    // model fixes exactly the bad lib_ids via search_footprints, never guesses).
+    let index = ctx.footprint_index()?;
+    let mut unknown = Vec::new();
+    let mut wrong = Vec::new();
+    for (refdes, p) in &design.parts {
+        match index.footprint(&p.footprint) {
+            None => unknown.push(json!({
+                "reference": refdes,
+                "footprint": p.footprint,
+                "suggestions": index.suggest(&p.footprint),
+            })),
+            // pin↔pad: every pad the design nets must exist on the chosen footprint.
+            Some(fp) => {
+                let fp_pads: Vec<&str> = fp.pads.iter().map(|pp| pp.number.as_str()).collect();
+                let missing = pads_missing(p.pads.keys().map(String::as_str), &fp_pads);
+                if !missing.is_empty() {
+                    wrong.push(json!({
+                        "reference": refdes,
+                        "footprint": p.footprint,
+                        "missing_pads": missing,
+                    }));
+                }
+            }
+        }
+    }
+    if !unknown.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "unknown_footprints": unknown,
+            "note": "search_footprints for the real lib_ids and fix them in the `parts` map",
+        }));
+    }
+    if !wrong.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "wrong_footprints": wrong,
+            "note": "a footprint lacks pads the design nets — pick one that fits the part's pins \
+                     (search_footprints), fix it in the `parts` map, and resubmit",
+        }));
+    }
+
+    let draft = crate::board_dsl::design_to_draft(&design);
+    let net_pins = net_pin_counts(&draft.parts, ctx);
+    let part_count = draft.parts.len();
+    let net_count = net_pins.len();
+    draft.save(ctx)?;
+
+    let mut report = board_compile_report(&result.diagnostics);
+    if let Value::Object(m) = &mut report {
+        m.insert("board_written".to_string(), json!(true));
+        m.insert("part_count".to_string(), json!(part_count));
+        m.insert("net_count".to_string(), json!(net_count));
+        m.insert(
+            "note".to_string(),
+            json!("board compiled from the DSL and saved — run place_board, then route_board, then export_board"),
+        );
+    }
+    Ok(report)
+}
+
+/// `import_board`: lift an existing `.kicad_pcb` into a Board-DSL document — the
+/// round-trip entry so the agent can start from a given board. Returns the
+/// canonical YAML (every part locked at its current position, layout preserved);
+/// the model edits it and `design_board`s it, mirroring schematic `lift` → YAML.
+pub fn import_board(input: Value, _ctx: &ToolCtx) -> Result<Value> {
+    let Some(path) = input.get("path").and_then(Value::as_str) else {
+        return Ok(json!({ "error": "missing required `path` to a .kicad_pcb file" }));
+    };
+    let design = match crate::board_dsl::import_to_design(std::path::Path::new(path)) {
+        Ok(d) => d,
+        Err(e) => return Ok(json!({ "error": format!("could not read board `{path}`: {e}") })),
+    };
+    let yaml = board_lang::to_canonical_yaml(&design);
+    Ok(json!({
+        "ok": true,
+        "yaml": yaml,
+        "part_count": design.parts.len(),
+        "note": "imported into Board-DSL with every part LOCKED at its current position (the \
+                 layout is preserved). Pass this yaml to design_board to work on it; drop a \
+                 part's `lock:` to let place_board move it.",
+    }))
+}
+
 /// Pin count per net across the draft, derived from the resolved footprints via
 /// `placefp::part_from_footprint` (the SAME geometry place/route consumes). A
 /// pad whose number is absent from `pad_nets` contributes no pin.
@@ -823,6 +893,32 @@ fn net_pin_counts(parts: &[DraftPart], ctx: &ToolCtx) -> BTreeMap<String, usize>
         }
     }
     counts
+}
+
+/// TEST-HARNESS support (NOT an agent tool): set a draft's keepouts + placement-hint
+/// groups from a circuit-spec JSON (`{keepouts: [{rect, layers}], hints: {groups: […]}}`),
+/// reusing the same parsers the engine uses. The agent authors keepouts/groups in the
+/// Board-DSL; this lets the deterministic harnesses seed them on a built draft.
+pub fn apply_spec_extras(draft: &mut BoardDraft, spec: &Value) {
+    if let Some(kos) = spec.get("keepouts").and_then(Value::as_array) {
+        let (bounds, layers) = (draft.bounds.clone(), draft.rules.layer_count);
+        draft.keepouts = kos
+            .iter()
+            .enumerate()
+            .filter_map(|(i, k)| parse_keepout(k, &bounds, layers, i).ok())
+            .collect();
+    }
+    if let Some(groups) = spec
+        .get("hints")
+        .and_then(|h| h.get("groups"))
+        .and_then(Value::as_array)
+    {
+        let known: Vec<&str> = draft.parts.iter().map(|p| p.reference.as_str()).collect();
+        draft.hints.groups = groups
+            .iter()
+            .filter_map(|g| parse_group_hint(g, &known).ok())
+            .collect();
+    }
 }
 
 // ── get_board ────────────────────────────────────────────────────────────────
@@ -907,7 +1003,7 @@ fn place_problem_from_draft(
         };
         let mut part =
             part_from_footprint_layers(&fp, &dp.reference, &dp.pad_nets, draft.rules.layer_count);
-        // The triage lever: a `move_part`-set lock pins the part for the placer.
+        // A DSL part `lock` pins the part for the placer (carried through here).
         part.locked = dp.locked.clone();
         parts.push(part);
     }
@@ -1094,10 +1190,9 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
                     "target": ic_ref,
                     "members": cap_refs,
                     "note": format!(
-                        "{ic_ref} has {} decoupling caps the placer scattered. For a tidy \
-                         ring: move_part to lock {ic_ref} at a position, then set_placement_hints \
-                         with a group {{\"members\":[<the caps>],\"surround\":\"{ic_ref}\"}}, then \
-                         place_board again.",
+                        "{ic_ref} has {} decoupling caps the placer scattered. For a tidy ring, \
+                         add a `place.groups` entry to the DSL — {{<name>: {{members: [<the caps>], \
+                         surround: {ic_ref}}}}} — and design_board again, then place_board.",
                         caps.len()
                     ),
                 }));
@@ -1148,9 +1243,9 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
              Call route_board next, or render_board to see it."
         } else {
             "placement is NOT legal — the board is too tight for these parts. The fix is more \
-             room, not rearrangement: call resize_board with at least suggested_min_bounds_mm \
-             (it keeps all parts — far cheaper than re-running derive_board — then re-run place_board). \
-             move_part/unlock won't help when the board is simply too small for the courtyards."
+             room, not rearrangement: enlarge `board.outline` in the DSL to at least \
+             suggested_min_bounds_mm and design_board again, then re-run place_board. \
+             Locking/nudging parts won't help when the board is simply too small for the courtyards."
         },
     });
     if let (Value::Object(o), Value::Object(e)) = (&mut out, extra) {
@@ -1162,7 +1257,7 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     Ok(out)
 }
 
-// ── set_placement_hints ──────────────────────────────────────────────────────
+// ── placement-hint helpers (group parsing for the DSL) ───────────────────────
 
 /// Parse one group hint from snake_case model input, validating its members
 /// against the draft's known references. Returns the engine [`GroupHint`] on
@@ -1253,52 +1348,8 @@ fn parse_edge(v: &Value) -> std::result::Result<pcb_engine::placement::Edge, Str
     }
 }
 
-pub fn set_placement_hints(input: Value, ctx: &ToolCtx) -> Result<Value> {
-    let Some(mut draft) = BoardDraft::load(ctx) else {
-        return Ok(json!({
-            "error": "no board draft yet — run derive_board first",
-        }));
-    };
 
-    let Some(groups_json) = input.get("groups").and_then(Value::as_array) else {
-        return Ok(json!({
-            "error": "missing required `groups` array (each {name, members, region?, edge?})",
-        }));
-    };
-
-    let known_refs: Vec<&str> = draft.parts.iter().map(|p| p.reference.as_str()).collect();
-    let mut groups = Vec::with_capacity(groups_json.len());
-    for g in groups_json {
-        match parse_group_hint(g, &known_refs) {
-            Ok(gh) => groups.push(gh),
-            Err(msg) => return Ok(json!({ "error": msg })),
-        }
-    }
-
-    let summary: Vec<Value> = groups
-        .iter()
-        .map(|g| {
-            json!({
-                "name": g.name,
-                "members": g.members,
-                "region": g.region.is_some(),
-                "edge": g.edge.is_some(),
-            })
-        })
-        .collect();
-
-    draft.hints = PlacementHints { groups, ..Default::default() };
-    draft.save(ctx)?;
-
-    Ok(json!({
-        "ok": true,
-        "group_count": summary.len(),
-        "groups": summary,
-        "note": "hints stored; they steer the NEXT place_board (they improve, never gate).",
-    }))
-}
-
-// ── set_constraints ──────────────────────────────────────────────────────────
+// ── keepout helpers (rect parsing for the DSL) ───────────────────────────────
 
 /// Validate a keepout rectangle lies within the board bounds and lists only
 /// known copper layers, then return the engine [`Keepout`].
@@ -1361,252 +1412,6 @@ fn parse_keepout(
     Ok(Keepout { rect, layers })
 }
 
-pub fn set_constraints(input: Value, ctx: &ToolCtx) -> Result<Value> {
-    let Some(mut draft) = BoardDraft::load(ctx) else {
-        return Ok(json!({
-            "error": "no board draft yet — run derive_board first",
-        }));
-    };
-
-    // Net classes are vocabulary-reserved but honestly rejected: the router does
-    // not honor them yet, so accepting them silently would lie about the present.
-    if input.get("net_classes").is_some_and(|v| !v.is_null()) {
-        return Ok(json!({
-            "error": "net classes are reserved but not yet supported by the router \
-                      — use rules/keepouts",
-        }));
-    }
-
-    // Merge rules: a partial `rules` object updates only the fields it names, so
-    // the model can tweak clearance alone without re-sending the whole block.
-    let mut rules_changed = false;
-    if let Some(r) = input.get("rules").filter(|v| !v.is_null()) {
-        if let Some(n) = r.get("clearance").and_then(Value::as_f64) {
-            draft.rules.clearance = n;
-            rules_changed = true;
-        }
-        if let Some(n) = r.get("min_trace_width").and_then(Value::as_f64) {
-            draft.rules.min_trace_width = n;
-            rules_changed = true;
-        }
-        if let Some(n) = r.get("via_diameter").and_then(Value::as_f64) {
-            draft.rules.via_diameter = n;
-            rules_changed = true;
-        }
-        if let Some(n) = r.get("via_drill").and_then(Value::as_f64) {
-            draft.rules.via_drill = n;
-            rules_changed = true;
-        }
-    }
-
-    // Replace keepouts wholesale when present (validated against bounds/layers).
-    let mut keepouts_changed = false;
-    if let Some(ko) = input.get("keepouts").filter(|v| !v.is_null()) {
-        let Some(arr) = ko.as_array() else {
-            return Ok(json!({
-                "error": "keepouts must be an array of {rect, layers}",
-            }));
-        };
-        let mut keepouts = Vec::with_capacity(arr.len());
-        for (i, k) in arr.iter().enumerate() {
-            match parse_keepout(k, &draft.bounds, draft.rules.layer_count, i) {
-                Ok(keepout) => keepouts.push(keepout),
-                Err(msg) => return Ok(json!({ "error": msg })),
-            }
-        }
-        draft.keepouts = keepouts;
-        keepouts_changed = true;
-    }
-
-    if !rules_changed && !keepouts_changed {
-        return Ok(json!({
-            "error": "nothing to set — pass `rules` (partial updates allowed) \
-                      and/or `keepouts`",
-        }));
-    }
-
-    // Rules/keepouts do not MOVE parts, so the placement stays valid — but the
-    // copper does not: clearance/keepout changes invalidate any routed solution.
-    // Drop the stored route.json so a stale route can't be exported.
-    let route_cleared = clear_route(ctx)?;
-
-    draft.save(ctx)?;
-
-    Ok(json!({
-        "ok": true,
-        "rules": {
-            "clearance": draft.rules.clearance,
-            "min_trace_width": draft.rules.min_trace_width,
-            "via_diameter": draft.rules.via_diameter,
-            "via_drill": draft.rules.via_drill,
-        },
-        "keepout_count": draft.keepouts.len(),
-        "placement_kept": draft.last_placement.is_some(),
-        "route_cleared": route_cleared,
-        "note": "rules/keepouts don't move parts so the placement stands, but the \
-                 routing was invalidated — run route_board again before export.",
-    }))
-}
-
-/// Remove the stored route solution (if any) so a state change can't leave a
-/// stale `route.json` behind. Returns whether a route was actually cleared.
-fn clear_route(ctx: &ToolCtx) -> Result<bool> {
-    if ctx.workspace().read_route().is_none() {
-        return Ok(false);
-    }
-    std::fs::remove_file(ctx.workspace().route_path())?;
-    Ok(true)
-}
-
-/// Resize the board's rectangular bounds WITHOUT re-sending parts — the cheap way to enlarge a
-/// board the placer reports too tight (place_board `legal=false` + `suggested_min_bounds_mm`).
-///
-/// Keeps every part; drops the now-stale placement + route so the agent re-places into the new
-/// room. This is what closes the placement-convergence trap: previously the only way to change
-/// board size was `create_board` (re-send ALL parts — expensive on a dense board), so a model
-/// facing an illegal placement would loop `move_part` (futile — the board is genuinely too small)
-/// until the iteration cap. For a custom (non-rect) outline, resizing the bounds alone would
-/// leave the outline inconsistent, so we honestly redirect those to `create_board`.
-pub fn resize_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
-    let Some(mut draft) = BoardDraft::load(ctx) else {
-        return Ok(json!({ "error": "no board draft yet — run derive_board first" }));
-    };
-    if draft.outline.is_some() {
-        return Ok(json!({
-            "error": "this board has a custom outline; resizing bounds alone would leave the \
-                      outline inconsistent — re-run derive_board with the new bounds + outline",
-        }));
-    }
-    let new_bounds = match parse_bounds(input.get("bounds")) {
-        Ok(b) => b,
-        Err(e) => return Ok(json!({ "error": e })),
-    };
-    if new_bounds.max_x <= new_bounds.min_x || new_bounds.max_y <= new_bounds.min_y {
-        return Ok(json!({
-            "error": "bounds must have max_x > min_x and max_y > min_y",
-        }));
-    }
-    draft.bounds = new_bounds.clone();
-    // The old placement was made for the old (too-tight) bounds — drop it so the agent re-places
-    // into the new room, and clear any route built on it.
-    draft.last_placement = None;
-    draft.last_place_illegal = false;
-    let route_cleared = clear_route(ctx)?;
-    draft.save(ctx)?;
-    Ok(json!({
-        "ok": true,
-        "bounds": {
-            "min_x": new_bounds.min_x, "max_x": new_bounds.max_x,
-            "min_y": new_bounds.min_y, "max_y": new_bounds.max_y,
-        },
-        "parts_kept": draft.parts.len(),
-        "route_cleared": route_cleared,
-        "note": "board resized; all parts kept, placement cleared. Re-run place_board (then \
-                 route_board). This is the cheap enlarge — prefer it over re-running derive_board when \
-                 place_board reports the board too tight.",
-    }))
-}
-
-// ── move_part / unlock_part ──────────────────────────────────────────────────
-
-pub fn move_part(input: Value, ctx: &ToolCtx) -> Result<Value> {
-    let Some(mut draft) = BoardDraft::load(ctx) else {
-        return Ok(json!({
-            "error": "no board draft yet — run derive_board first",
-        }));
-    };
-    let reference = require_str(&input, "reference")?;
-    let x = match input.get("x").and_then(Value::as_f64) {
-        Some(v) => v,
-        None => return Ok(json!({ "error": "missing or non-numeric `x`" })),
-    };
-    let y = match input.get("y").and_then(Value::as_f64) {
-        Some(v) => v,
-        None => return Ok(json!({ "error": "missing or non-numeric `y`" })),
-    };
-    let rotation = match axis_aligned_rotation(
-        input.get("rotation").and_then(Value::as_i64).map(|r| r as i32).unwrap_or(0),
-    ) {
-        Ok(r) => r,
-        Err(e) => return Ok(json!({ "error": e })),
-    };
-
-    // A part origin must sit within the board (an out-of-bounds nudge is a model
-    // mistake; the engine would clamp it silently, hiding the error). We check
-    // the ORIGIN against bounds — the placer legalizes the courtyard on the next
-    // place_board, but the origin itself must be on the board.
-    let b = &draft.bounds;
-    if x < b.min_x || x > b.max_x || y < b.min_y || y > b.max_y {
-        return Ok(json!({
-            "error": format!(
-                "({x}, {y}) is outside the board bounds [{},{}]x[{},{}] — pick a point on the board",
-                b.min_x, b.max_x, b.min_y, b.max_y
-            ),
-        }));
-    }
-
-    let Some(part) = draft.parts.iter_mut().find(|p| p.reference == reference) else {
-        let known: Vec<&str> = draft.parts.iter().map(|p| p.reference.as_str()).collect();
-        return Ok(json!({
-            "error": format!(
-                "unknown reference `{reference}` — known references: {}",
-                known.join(", ")
-            ),
-        }));
-    };
-    part.locked = Some(LockedAt {
-        at: Point2 { x, y },
-        rotation,
-    });
-
-    // State changed: the stored route is stale, and the placement no longer
-    // reflects the lock until place_board re-runs.
-    let route_cleared = clear_route(ctx)?;
-    draft.last_placement = None;
-    draft.save(ctx)?;
-
-    Ok(json!({
-        "ok": true,
-        "reference": reference,
-        "locked_at": { "x": x, "y": y, "rotation": rotation },
-        "route_cleared": route_cleared,
-        "note": "part pinned here; run place_board (it legalizes around the lock) \
-                 then route_board.",
-    }))
-}
-
-pub fn unlock_part(input: Value, ctx: &ToolCtx) -> Result<Value> {
-    let Some(mut draft) = BoardDraft::load(ctx) else {
-        return Ok(json!({
-            "error": "no board draft yet — run derive_board first",
-        }));
-    };
-    let reference = require_str(&input, "reference")?;
-
-    let Some(part) = draft.parts.iter_mut().find(|p| p.reference == reference) else {
-        let known: Vec<&str> = draft.parts.iter().map(|p| p.reference.as_str()).collect();
-        return Ok(json!({
-            "error": format!(
-                "unknown reference `{reference}` — known references: {}",
-                known.join(", ")
-            ),
-        }));
-    };
-    let was_locked = part.locked.is_some();
-    part.locked = None;
-
-    let route_cleared = clear_route(ctx)?;
-    draft.last_placement = None;
-    draft.save(ctx)?;
-
-    Ok(json!({
-        "ok": true,
-        "reference": reference,
-        "was_locked": was_locked,
-        "route_cleared": route_cleared,
-        "note": "part released; run place_board to re-place it freely.",
-    }))
-}
 
 // ── route_board ──────────────────────────────────────────────────────────────
 
@@ -1922,9 +1727,10 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         } else {
             out["note"] = json!(
                 "some nets did not route — read each failure `reason` (global:/assign:/cell:/\
-                 finisher: provenance) and the congestion hotspots, then triage: move_part to \
-                 relieve a hot region, relax rules via set_constraints, or remove a blocking \
-                 keepout. Re-place and re-route after each change."
+                 finisher: provenance) and the congestion hotspots, then triage by RE-AUTHORING \
+                 the Board-DSL and design_board: spread parts via `place.groups`, enlarge \
+                 `board.outline`, relax `rules`, or replace a blocking `keepout` with a gapped \
+                 pair. Re-place and re-route after each change."
             );
         }
         // Layer escalation: on a 2-layer board with unrouted nets, more copper layers
@@ -2818,12 +2624,13 @@ fn content_bounds(
         let r = v.diameter / 2.0;
         acc(v.at.x - r, v.at.y - r, v.at.x + r, v.at.y + r);
     }
-    // Keepouts are DELIBERATE empty board regions (antenna / mounting / connector
-    // clear-outs) — the finished board must INCLUDE them, so the content-tightening must
-    // not shrink the outline inward past a keepout and drop it off the board.
-    for k in keepouts {
-        acc(k.rect.min_x, k.rect.min_y, k.rect.max_x, k.rect.max_y);
-    }
+    // Keepouts are ROUTING obstacles (copper is kept out of them), NOT board-defining
+    // features. Including them inflated the outline whenever a keepout sat in otherwise
+    // empty space (e.g. planes-keepout: parts in the upper-left, a keepout on the far
+    // right → a board twice as wide as the copper, scored "vastly oversized" by the
+    // critic). The outline tightens to actual COPPER; a keepout in dead space no longer
+    // bloats the board. (No copper ever sits inside a keepout, so this can't clip anything.)
+    let _ = keepouts;
     if !min_x.is_finite() {
         return budget.clone();
     }

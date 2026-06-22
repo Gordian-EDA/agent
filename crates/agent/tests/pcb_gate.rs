@@ -15,10 +15,10 @@
 //! the middle (the draft-level mirror of `congested.json`'s saturated-wall
 //! defeat). The wall encloses both nets, so the FIRST `route_board` reports honest
 //! failures (and an empty `lint_summary` — those gaps are expected, not an engine
-//! bug). The triage scripted here is the RELAX-A-RULE path: `set_constraints`
-//! replaces the solid wall with a gapped pair, opening a corridor; the SECOND
-//! `route_board` then routes clean. (Keepouts don't move parts, so no re-place is
-//! needed between the two routes — this is the simplest deterministic triage.)
+//! bug). The triage scripted here is RE-AUTHORING THE BOARD-DSL: a second
+//! `design_board` replaces the solid wall with a gapped keepout pair, opening a
+//! corridor; re-place, then the SECOND `route_board` routes clean. Triage is a DSL
+//! edit — there is no imperative keepout/move tool any more.
 //!
 //! ## Tighten, don't delete
 //!
@@ -114,58 +114,42 @@ fn staged_footprint_dir() -> (tempfile::TempDir, std::path::PathBuf) {
     (tmp, p)
 }
 
-/// The scripted triage conversation: build a walled board, fail the first route,
-/// relax the keepout, route clean. One completion per `complete()` call.
+/// The scripted triage conversation, ALL through the Board-DSL: author a walled board,
+/// fail the first route, RE-AUTHOR with a gapped keepout (triage = a DSL edit), route
+/// clean. One completion per `complete()` call.
 fn triage_script() -> Vec<Completion> {
+    let header = "Fixtures:PinHeader_1x02_P2.54mm_Vertical";
+    // Two connectors locked on opposite sides (nets A, B must cross the middle), with a
+    // keepout the `{keepouts}` body supplies.
+    let board = |keepouts: &str| {
+        format!(
+            "version: 1\nname: gate\nboard:\n  layers: 2\n  outline: {{rect: [40, 20]}}\n  \
+             rules: {{clearance: 0.2, trace_width: 0.2, via: [0.6, 0.3]}}\nparts:\n  \
+             J1: {{footprint: '{header}', pads: {{1: A, 2: B}}, lock: {{at: [3, 10], rot: 0}}}}\n  \
+             J2: {{footprint: '{header}', pads: {{1: A, 2: B}}, lock: {{at: [37, 10], rot: 0}}}}\n\
+             keepouts:\n{keepouts}"
+        )
+    };
+    // A solid full-height wall splits the board → the first route must fail honestly.
+    let wall = board("  - {rect: [19, 0, 21, 20], layers: [top, bottom]}\n");
+    // A gapped PAIR opens a corridor at y∈[8,12] → the second route is clean.
+    let gapped = board(
+        "  - {rect: [19, 0, 21, 8], layers: [top, bottom]}\n  \
+         - {rect: [19, 12, 21, 20], layers: [top, bottom]}\n",
+    );
     vec![
-        // The board (two pin-headers, nets A and B) is seeded directly in the test via
-        // the internal builder — board creation is no longer an agent tool (the agent
-        // always derives the board from a committed schematic). The script picks up at
-        // triage.
-        // Lock the two connectors on opposite sides — they MUST cross the wall.
-        tool_call(
-            "tu_mv1",
-            "move_part",
-            serde_json::json!({ "reference": "J1", "x": 3.0, "y": 10.0 }),
-        ),
-        tool_call(
-            "tu_mv2",
-            "move_part",
-            serde_json::json!({ "reference": "J2", "x": 37.0, "y": 10.0 }),
-        ),
-        // 4. Craft the defeat: a full-height keepout WALL on both layers, splitting
-        //    the board so both nets are enclosed and the first route must fail.
-        tool_call(
-            "tu_wall",
-            "set_constraints",
-            serde_json::json!({
-                "keepouts": [
-                    { "rect": { "min_x": 19.0, "max_x": 21.0, "min_y": 0.0, "max_y": 20.0 },
-                      "layers": ["top", "bottom"] }
-                ]
-            }),
-        ),
-        // 5. Place (legal — the wall is a routing obstacle, not a placement no-go).
-        tool_call("tu_place", "place_board", serde_json::json!({})),
-        // 6. FIRST route — fails honestly (the wall encloses A and B).
+        // 1. Author the walled board from the DSL.
+        tool_call("tu_design1", "design_board", serde_json::json!({ "yaml": wall })),
+        // 2. Place (legal — the wall is a routing obstacle, not a placement no-go).
+        tool_call("tu_place1", "place_board", serde_json::json!({})),
+        // 3. FIRST route — fails honestly (the wall encloses A and B).
         tool_call("tu_route1", "route_board", serde_json::json!({})),
-        // 7. TRIAGE (relax-a-rule): replace the solid wall with a gapped PAIR,
-        //    opening a corridor through the middle.
-        tool_call(
-            "tu_relax",
-            "set_constraints",
-            serde_json::json!({
-                "keepouts": [
-                    { "rect": { "min_x": 19.0, "max_x": 21.0, "min_y": 0.0, "max_y": 8.0 },
-                      "layers": ["top", "bottom"] },
-                    { "rect": { "min_x": 19.0, "max_x": 21.0, "min_y": 12.0, "max_y": 20.0 },
-                      "layers": ["top", "bottom"] }
-                ]
-            }),
-        ),
-        // 8. SECOND route — clean (keepouts don't move parts, so no re-place needed).
+        // 4. TRIAGE = re-author the DSL: replace the solid wall with a gapped pair.
+        tool_call("tu_design2", "design_board", serde_json::json!({ "yaml": gapped, "overwrite": true })),
+        // 5. Re-place (design_board cleared the placement) then route — clean.
+        tool_call("tu_place2", "place_board", serde_json::json!({})),
         tool_call("tu_route2", "route_board", serde_json::json!({})),
-        // 9. Done.
+        // 6. Done.
         final_text("Closed the board: relaxed the wall keepout into a gapped pair and re-routed clean."),
     ]
 }
@@ -197,21 +181,9 @@ async fn agent_closes_a_failed_board_by_relaxing_a_keepout() {
     };
     let workspace_route = ctx.workspace().route_path();
 
-    // Seed the two-connector board directly via the internal builder — board creation
-    // is no longer an agent tool (the agent derives boards from a committed schematic).
-    // The scripted loop then triages the keepout wall on this seeded board.
-    let header = "Fixtures:PinHeader_1x02_P2.54mm_Vertical";
-    agent::tools_pcb::build_board_draft(
-        serde_json::json!({
-            "bounds": { "min_x": 0.0, "max_x": 40.0, "min_y": 0.0, "max_y": 20.0 },
-            "parts": [
-                { "reference": "J1", "footprint": header, "pad_nets": { "1": "A", "2": "B" } },
-                { "reference": "J2", "footprint": header, "pad_nets": { "1": "A", "2": "B" } }
-            ]
-        }),
-        &ctx,
-    )
-    .unwrap();
+    // The scripted loop authors the WHOLE board via the Board-DSL (design_board) — there
+    // is no imperative board-creation or triage tool any more; triage IS re-authoring the
+    // DSL (here: replacing the solid keepout wall with a gapped pair).
 
     // A shared handle the mock writes the live history into; the test reads it
     // back after the turn to inspect the REAL tool results the loop produced.
@@ -242,9 +214,9 @@ async fn agent_closes_a_failed_board_by_relaxing_a_keepout() {
         "final assistant text should summarize the close: {:?}",
         outcome.final_text
     );
-    // 2×move + 2×set_constraints + place + 2×route = 7 tool calls (board pre-seeded).
+    // 2×design_board + 2×place + 2×route = 6 tool calls (all via the DSL).
     assert_eq!(
-        outcome.tool_calls_made, 7,
+        outcome.tool_calls_made, 6,
         "the full scripted tool sequence must execute: {outcome:?}"
     );
 
