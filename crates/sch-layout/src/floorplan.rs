@@ -6310,6 +6310,76 @@ fn route_signal(
         }
     }
 
+    // MULTI-PIN PORT whose local pins the MST couldn't join (an op-amp follower's OUT↔IN-
+    // feedback the router can't wrap around the body — BLDC current_sense U6/ISENSE_W): force
+    // a clean OVERHEAD wire so the local pins unify into ONE component named by the single port
+    // label, instead of a duplicate local label on each split pin. The detour leaves each pin
+    // along its facing dir then runs OUTSIDE the terminal bbox (above, else below), so it never
+    // crosses a body — `path_ok` validates it against the live scene before commit. Only the
+    // first `eps.len()` terminals are real pins; the port exit is excluded. Marked ports only,
+    // and only when the route genuinely failed, so cleanly-routed nets stay byte-identical.
+    if port.is_some() && eps.len() >= 2 {
+        // The bodies the detour must clear: any scene solid the feedback pins straddle (the op-amp
+        // body between OUT and IN-), unioned, so the band runs fully ABOVE or BELOW it like the
+        // clean U5A/U5B follower loops — not just a hair off the pin row (which still grazes the
+        // triangle). Fall back to the pin row when no straddled body is found.
+        let (px_lo, px_hi) = eps.iter().fold((f64::MAX, f64::MIN), |(lo, hi), (p, _)| {
+            (lo.min(p[0]), hi.max(p[0]))
+        });
+        let (py_lo, py_hi) = eps.iter().fold((f64::MAX, f64::MIN), |(lo, hi), (p, _)| {
+            (lo.min(p[1]), hi.max(p[1]))
+        });
+        // Only the body the feedback pins actually straddle (overlaps their x-span AND their
+        // y-span): an op-amp's units stack in one column, so an x-only test grabs the whole
+        // column (band lands at the sheet edge, always blocked). Default to the pin row.
+        let (mut by_lo, mut by_hi) = (py_lo, py_hi);
+        for r in &scene.solids {
+            if r[0] < px_hi - EPS && px_lo < r[2] - EPS && r[1] < py_hi + EPS && py_lo < r[3] + EPS {
+                by_lo = by_lo.min(r[1]);
+                by_hi = by_hi.max(r[3]);
+            }
+        }
+        let lead = 2.54;
+        let stub = |p: [f64; 2], d: Option<Dir>| -> [f64; 2] {
+            match d {
+                Some(Dir::East) => [crate::grid::snap(p[0] + lead), p[1]],
+                Some(Dir::West) => [crate::grid::snap(p[0] - lead), p[1]],
+                Some(Dir::North) => [p[0], crate::grid::snap(p[1] - lead)],
+                Some(Dir::South) => [p[0], crate::grid::snap(p[1] + lead)],
+                None => p,
+            }
+        };
+        for k in 1..eps.len() {
+            let (ra, rk) = (find(&mut parent, 0), find(&mut parent, k));
+            if ra == rk {
+                continue; // already joined to pin 0's component by the MST
+            }
+            let (pa, da) = (pts[0], terms[0].1);
+            let (pb, db) = (pts[k], terms[k].1);
+            let (sa, sb) = (stub(pa, da), stub(pb, db));
+            // Try clear bands at growing distance, BELOW the body first (the conventional
+            // follower loop drops under), then ABOVE.
+            let mut bands: Vec<f64> = Vec::new();
+            for step in 1..=6 {
+                bands.push(crate::grid::snap(by_hi + 1.27 * step as f64));
+                bands.push(crate::grid::snap(by_lo - 1.27 * step as f64));
+            }
+            for band_y in bands {
+                let path = vec![pa, sa, [sa[0], band_y], [sb[0], band_y], sb, pb];
+                if crate::route::path_ok(&path, net, scene) {
+                    for seg in path.windows(2) {
+                        if (seg[0][0] - seg[1][0]).abs() > EPS || (seg[0][1] - seg[1][1]).abs() > EPS {
+                            w.add_wire_on_net(seg[0], seg[1], net);
+                            scene.segments.push((seg[0], seg[1], net.to_string()));
+                        }
+                    }
+                    parent[ra] = rk;
+                    break;
+                }
+            }
+        }
+    }
+
     // Bridge connected components by net name: every component must carry the net
     // somewhere. A component holding the port exit is named by the port label; any
     // other component gets one net label on a real pin. With one component the net

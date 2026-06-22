@@ -12,7 +12,7 @@
 //!
 //! Usage: cargo run --release -p agent --example render_multisheet -- <draft.yaml> <out_dir>
 
-use agent::multisheet::{refine_blocks, sanitize, write_project};
+use agent::multisheet::{cross_sheet_nets, mark_cross_sheet_ports, refine_blocks, sanitize, write_project};
 use circuit_lang::SymbolProvider;
 use kicad_bridge::cli::KicadCli;
 use kicad_bridge::env::KicadEnv;
@@ -46,11 +46,16 @@ fn main() -> anyhow::Result<()> {
     // Refine the agent's blocks into uniform sheet GROUPS (split over-crammed, merge tiny) —
     // the production logic, shared with the agent's commit path.
     let mut sheets: Vec<(String, String)> = Vec::new();
-    for (name, members) in refine_blocks(&design.blocks) {
+    let groups = refine_blocks(&design.blocks);
+    let cross_sheet = cross_sheet_nets(&groups);
+    for (name, members) in groups {
         // A sub-design holding this group's block(s): cross-group nets touch only these pins, so
         // the engine auto-labels the single-pin ones as ports and keeps multi-pin ones internal.
+        // A cross-sheet net with ≥2 LOCAL pins is marked a port too, so it wires its local pins
+        // together and emits ONE global label per sheet instead of duplicate local labels.
         let mut sub = design.clone();
         sub.blocks = members.into_iter().collect();
+        mark_cross_sheet_ports(&mut sub, &cross_sheet);
         let nparts: usize = sub.blocks.values().map(|b| b.components.len()).sum();
 
         // Shelf-pack seed + Anneal search (the premium tier).

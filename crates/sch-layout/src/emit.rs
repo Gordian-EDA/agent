@@ -688,7 +688,7 @@ impl SchematicWriter {
     /// label, no-connect, and power-flag emission so they always agree on where a
     /// pin's connection point lands.
     fn pin_endpoints(&self, env: &KicadEnv, refdes: &str, pin: &str) -> io::Result<Vec<[f64; 2]>> {
-        let inst = self
+        let any = self
             .instances
             .iter()
             .find(|i| i.refdes == refdes)
@@ -698,11 +698,8 @@ impl SchematicWriter {
                     format!("no placed symbol with refdes {refdes:?}"),
                 )
             })?;
-        let inst_at = inst.at;
-        let inst_angle = inst.angle;
-        let inst_mirror = inst.mirror;
 
-        let geom = SymbolGeometry::load(env, &inst.lib_id)?;
+        let geom = SymbolGeometry::load(env, &any.lib_id)?;
 
         // Resolve the pin: number first, then name. A name may match several
         // physical pins (e.g. multiple GND pins), so collect all matches.
@@ -717,13 +714,25 @@ impl SchematicWriter {
         if matches.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("no pin {pin:?} (by number or name) on {}", inst.lib_id),
+                format!("no pin {pin:?} (by number or name) on {}", any.lib_id),
             ));
         }
 
+        // Each matched pin lives at the instance that draws ITS unit — a multi-unit
+        // part places one instance per unit, all sharing `refdes`. Resolving every pin
+        // through `any` (unit 1) drops a unit-2 pin's label/no-connect onto unit 1's
+        // body at the same geom offset (an LM358 unit-2 OUT lands on unit-1 OUT — the
+        // misplaced no_connect over a connected feedback pin). Fall back to `any` for an
+        // unplaced unit / single-unit part (byte-identical there). Mirrors `pin_dirs`.
+        let inst_for = |u: u8| -> &Instance {
+            self.instances.iter().find(|i| i.refdes == refdes && i.unit == u).unwrap_or(any)
+        };
         Ok(matches
             .into_iter()
-            .map(|pg| pin_endpoint(pg, inst_at, inst_angle, inst_mirror))
+            .map(|pg| {
+                let inst = inst_for(pg.unit.max(1));
+                pin_endpoint(pg, inst.at, inst.angle, inst.mirror)
+            })
             .collect())
     }
 

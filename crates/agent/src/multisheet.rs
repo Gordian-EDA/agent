@@ -271,12 +271,17 @@ pub fn emit_multisheet(env: &KicadEnv, design: &Design, out_dir: &Path) -> anyho
     // SAFETY: process-wide flag read by the engine to opt sub-sheets into route-aware
     // refinement; this whole operation is a multi-sheet emit, so it's the intended scope.
     unsafe { std::env::set_var("MULTISHEET_REFINE", "1") };
+    let groups = refine_blocks(&design.blocks);
+    let cross_sheet = cross_sheet_nets(&groups);
+
     let mut sheets: Vec<(String, String)> = Vec::new();
-    for (gname, members) in refine_blocks(&design.blocks) {
-        // A sub-design holding this group's block(s): cross-group nets touch only these pins,
-        // so the engine auto-labels single-pin ones as ports and keeps multi-pin ones internal.
+    for (gname, members) in groups {
+        // A sub-design holding this group's block(s). Mark every cross-sheet net this group
+        // touches as a PORT so the engine emits one global label per sheet for the hop and
+        // wires any ≥2 local pins together (instead of duplicate local labels).
         let mut sub = design.clone();
         sub.blocks = members.into_iter().collect();
+        mark_cross_sheet_ports(&mut sub, &cross_sheet);
         let ir = sch_layout::floorplan::infer_ir(env, &sub);
         let emit = sch_layout::floorplan::emit_anneal(env, &sub, &ir)
             .map_err(|e| anyhow::anyhow!("emit sheet '{gname}': {e}"))?;
@@ -284,6 +289,38 @@ pub fn emit_multisheet(env: &KicadEnv, design: &Design, out_dir: &Path) -> anyho
     }
     dedup_pwr_flags(&mut sheets);
     write_project(env, out_dir, &sheets)
+}
+
+/// Nets that CROSS sheets: a signal net (`block_nets` excludes GND/VSS rails) present in ≥2
+/// sheet GROUPS. On the sheet where such a net has exactly one pin, the engine's degree-1 rule
+/// already makes it a global-label port. But where it has ≥2 LOCAL pins (an op-amp follower's
+/// OUT+IN-, any feedback loop), the degree-1 rule can't see it, so the engine either wires it
+/// locally with NO cross-sheet label (a silent disconnect) or — when a local tee can't form —
+/// drops a duplicate LOCAL label on each pin (the "confusing duplicate ISENSE_W label" defect,
+/// BLDC current_sense). [`mark_cross_sheet_ports`] flags these as ports so each sheet emits one
+/// global label for the hop and wires its local pins together. A purely single-sheet net (in one
+/// group only) is excluded, so its wiring is untouched.
+pub fn cross_sheet_nets(groups: &[SheetGroup]) -> HashSet<String> {
+    let mut net_groups: HashMap<String, usize> = HashMap::new();
+    for (_, members) in groups {
+        let nets: HashSet<String> = members.iter().flat_map(|(_, b)| block_nets(b)).collect();
+        for net in nets {
+            *net_groups.entry(net).or_default() += 1;
+        }
+    }
+    net_groups.into_iter().filter(|(_, c)| *c >= 2).map(|(n, _)| n).collect()
+}
+
+/// Mark every cross-sheet net (see [`cross_sheet_nets`]) that `sub` touches as a PORT, so
+/// `infer_ir` treats it as one global-label hop per sheet instead of N local labels. Power nets
+/// are inert (`infer_ir` never makes a power net a port), and connectivity is unchanged: a local
+/// wire + one global label is electrically identical to a label on each local pin.
+pub fn mark_cross_sheet_ports(sub: &mut Design, cross_sheet: &HashSet<String>) {
+    let touched: HashSet<String> =
+        sub.blocks.values().flat_map(block_nets).filter(|n| cross_sheet.contains(n)).collect();
+    for net in touched {
+        sub.nets.entry(net).or_default().port = true;
+    }
 }
 
 /// Each sub-sheet emits its OWN `PWR_FLAG` for the power nets it uses; across sheets the
