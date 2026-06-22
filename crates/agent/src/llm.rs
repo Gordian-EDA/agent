@@ -146,6 +146,10 @@ pub trait LlmClient: Send + Sync {
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<Completion>;
+
+    /// Start a new thread (a fresh conversation/session, e.g. on `/clear`): regenerate any
+    /// per-thread state such as the request `thread_identifier`. Default: no-op.
+    fn new_thread(&mut self) {}
 }
 
 /// Thin AWS Bedrock Converse client using a bearer token.
@@ -268,6 +272,19 @@ impl LlmClient for BedrockClient {
 /// map onto OpenAI roles: a [`ContentBlock::ToolResult`] becomes a `tool`
 /// message (with any attached images riding on a trailing `user` message, since
 /// OpenAI `tool` messages are text-only).
+/// A fresh random id for a new thread (one conversation/session). Random — not derived from
+/// time or content — so distinct threads never collide. Uses the OS-seeded RandomState (no extra
+/// deps); adequate for gateway thread-grouping, not for security.
+fn random_thread_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let rnd = |salt: u64| -> u64 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(salt);
+        h.finish()
+    };
+    crate::multisheet::det_uuid(&format!("{:016x}{:016x}", rnd(1), rnd(2)))
+}
+
 pub struct OpenAiClient {
     config: OpenAiConfig,
     http: reqwest::Client,
@@ -276,13 +293,18 @@ pub struct OpenAiClient {
     /// Anthropic models (proxied through the gateway) reject `temperature` as
     /// deprecated, so the safe default is to not send it at all.
     temperature: Option<f32>,
+    /// Randomly generated once per client, i.e. once per conversation/thread (the `Agent`
+    /// owns one client for its whole conversation). Sent as `thread_identifier` in the
+    /// request body so the respan gateway groups this thread's completions together;
+    /// random (not derived from time/content) so two distinct threads never collide.
+    thread_id: String,
 }
 
 impl OpenAiClient {
     /// Build from an explicit [`OpenAiConfig`].
     pub fn new(config: OpenAiConfig) -> Result<Self> {
         let http = reqwest::Client::builder().build().context("building reqwest client")?;
-        Ok(Self { config, http, max_tokens: 4096, temperature: None })
+        Ok(Self { config, http, max_tokens: 4096, temperature: None, thread_id: random_thread_id() })
     }
 
     /// Build from the environment / local `.env`.
@@ -310,6 +332,9 @@ impl OpenAiClient {
             "messages": messages_to_openai(system, messages),
             "max_tokens": self.max_tokens,
         });
+        // `extra_body` (OpenAI SDK) merges into the request body top-level; the respan gateway
+        // groups this client's completions into one thread by `thread_identifier`.
+        body["thread_identifier"] = json!(self.thread_id);
         if let Some(t) = self.temperature {
             body["temperature"] = json!(t);
         }
@@ -362,6 +387,10 @@ impl LlmClient for OpenAiClient {
         let value: Value =
             serde_json::from_str(&text).context("parsing OpenAI chat-completions response JSON")?;
         parse_openai_completion(&value)
+    }
+
+    fn new_thread(&mut self) {
+        self.thread_id = random_thread_id();
     }
 }
 
@@ -825,6 +854,8 @@ mod tests {
         // A tool-call-only turn serializes content as "" (not null) — the respan.ai gateway
         // rejects null content even alongside tool_calls.
         assert_eq!(assistant["content"], json!(""));
+        // thread_identifier is sent for gateway thread-grouping.
+        assert!(body["thread_identifier"].is_string());
         let call = &assistant["tool_calls"][0];
         assert_eq!(call["id"], "tu_1");
         assert_eq!(call["type"], "function");

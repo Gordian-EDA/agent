@@ -238,10 +238,12 @@ impl Agent {
         }
     }
 
-    /// Drop the entire conversation history (a fresh start; files untouched).
+    /// Drop the entire conversation history (a fresh start; files untouched). This begins a
+    /// NEW thread/session, so the LLM client regenerates its `thread_identifier`.
     pub fn clear_history(&mut self) {
         self.history.clear();
         self.turn_starts.clear();
+        self.client.new_thread();
     }
 
     /// Unwind the most recent user turn: remove its user message and everything
