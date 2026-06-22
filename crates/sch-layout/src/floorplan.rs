@@ -1704,6 +1704,12 @@ fn emit_strategy(
         // as the final placement word; it is overlap-safe against the WHOLE sheet (frozen ⇒ no
         // downstream decongest can repair a collision), so it only ever commits a clean gather.
         changed |= gather_decoupling_bank(&mut items, ir);
+        // DEAD LAST: re-gather each scattered crystal cluster (Y* + its two load caps) hugging the
+        // MCU's OSC pins. When the author grids the anchor, the crystal idiom is dropped so the cluster
+        // is never frozen and decongest_off_labels strands a load cap far from the crystal (critic 6);
+        // no other finalize pass touches it. This re-derives the cluster from the placed netlist and
+        // lays it as the textbook block beside the OSC pins, overlap-safe against the whole sheet.
+        changed |= gather_crystal_cluster(&mut items, ir);
         if changed {
             w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
         }
@@ -2507,6 +2513,257 @@ fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool {
         for (&i, &at) in &proposed {
             moves.push((i, at, new_angle[&i]));
         }
+    }
+    let moved = !moves.is_empty();
+    for (i, at, angle) in moves {
+        items[i].at = at;
+        items[i].angle = angle;
+    }
+    moved
+}
+
+/// GATHER a scattered crystal cluster back beside its MCU's oscillator pins (the "crystal load cap
+/// stranded on the far side, separated from its sibling and the crystal" defect, critic 6). On a busy
+/// MCU sub-sheet the crystal `Y*` and its two load caps `C*` form an oscillator block hugging the
+/// OSC_IN/OSC_OUT pins — but when the author GRIDS the MCU anchor (`layout: [[~, U2, J2]]`), the
+/// `gridded` guard in the idiom loop DROPS the crystal idiom, so Y* + its caps are never frozen and
+/// never reach `ir.idioms`. They flow through normal placement and the finalize `decongest_off_labels`
+/// pass nudges them apart off the many off-sheet port labels, stranding one load cap far from the
+/// crystal. A pass keyed on `ir.idioms`/`frozen` cannot see them.
+///
+/// This is the SIBLING of `gather_decoupling_bank`: a DEAD-LAST, overlap-safe, MULTISHEET_REFINE-gated
+/// re-gather. It re-derives the cluster GENERICALLY from the placed netlist (NOT from `ir.idioms`, which
+/// the gridded case drops, NOR from `frozen`, which it clears): find a 2-pin crystal (`part` ~ Crystal/
+/// Resonator/Oscillator, or refdes `Y*`), its two osc nets (its non-ground pins), the anchor IC (≥3-pin,
+/// non-connector) that taps BOTH osc nets, and the two 2-pin load caps (`C*`) each bridging one osc net
+/// to ground. It then lays Y* + its two caps as ONE compact group hugging the anchor's OSC pins — the
+/// textbook block: crystal one gap out from the osc-pin midpoint (oriented so its pins run toward the
+/// IC), a load cap two gaps out on each leg — reusing `align_idiom_clusters`' exact placement geometry.
+///
+/// SAFETY: identical to `gather_decoupling_bank`. It commits a cluster ONLY when the proposed positions
+/// introduce NO new overlap against ANY item on the sheet — there is no follow-up decongest to repair a
+/// collision (one would just re-scatter the caps). A pre-existing overlap is not ours to relitigate.
+/// Multi-sheet only (gated) ⇒ single-sheet reference snapshots stay byte-identical.
+fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool {
+    if std::env::var("MULTISHEET_REFINE").is_err() {
+        return false;
+    }
+    let snap = crate::grid::snap;
+    const GAP: f64 = 7.62;
+    let is_crystal = |it: &Item| {
+        it.geom.pins.len() == 2
+            && (it.part.contains("Crystal")
+                || it.part.contains("Resonator")
+                || it.part.contains("Oscillator")
+                || it.refdes.starts_with('Y'))
+    };
+    // Candidate IC anchors: ≥3-pin, non-connector (same exclusion gather_decoupling_bank makes — a
+    // power/SWD header touches rails but is not the oscillator host). Ordered by index for determinism.
+    let anchor_idxs: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() >= 3 && !is_connector_like(&items[i].part))
+        .collect();
+
+    // (item, target position, target angle).
+    let mut moves: Vec<(usize, [f64; 2], f64)> = Vec::new();
+    // Items already claimed by a committed cluster (so two crystals can't fight over a shared cap).
+    let mut claimed: BTreeSet<usize> = BTreeSet::new();
+
+    for yi in (0..items.len()).filter(|&i| is_crystal(&items[i])) {
+        if claimed.contains(&yi) {
+            continue;
+        }
+        // The crystal's two OSC nets = its non-ground pin nets (a grounded-case 2-pin crystal still
+        // returns its case via a separate symbol; here we model the common 2-pin variant).
+        let onets: Vec<String> = items[yi]
+            .pins
+            .iter()
+            .filter_map(|(_, _, n)| n.clone())
+            .filter(|n| !is_ground(n))
+            .collect();
+        if onets.len() != 2 || onets[0] == onets[1] {
+            continue;
+        }
+        // The anchor IC = the ≥3-pin non-connector that taps BOTH osc nets. If several do (rare),
+        // pick the NEAREST to the crystal — the one the cluster should hug.
+        let taps_both = |ai: usize| -> bool {
+            onets
+                .iter()
+                .all(|net| items[ai].pins.iter().any(|(_, _, n)| n.as_deref() == Some(net.as_str())))
+        };
+        let Some(ai) = anchor_idxs
+            .iter()
+            .copied()
+            .filter(|&ai| ai != yi && taps_both(ai))
+            .min_by(|&a, &b| {
+                let d = |ai: usize| {
+                    let dx = items[ai].at[0] - items[yi].at[0];
+                    let dy = items[ai].at[1] - items[yi].at[1];
+                    dx * dx + dy * dy
+                };
+                d(a).total_cmp(&d(b))
+            })
+        else {
+            continue;
+        };
+        // The two load caps: a 2-pin C* whose pins are {one osc net, ground}, one per osc leg.
+        let cap_on = |net: &str| -> Option<usize> {
+            (0..items.len())
+                .filter(|&ci| {
+                    ci != yi
+                        && !claimed.contains(&ci)
+                        && items[ci].refdes.starts_with('C')
+                        && items[ci].geom.pins.len() == 2
+                })
+                .find(|&ci| {
+                    let nets: Vec<&str> =
+                        items[ci].pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+                    nets.len() == 2
+                        && nets.iter().any(|n| *n == net)
+                        && nets.iter().any(|n| is_ground(n))
+                })
+        };
+        let (Some(ca), Some(cb)) = (cap_on(&onets[0]), cap_on(&onets[1])) else {
+            continue;
+        };
+        if ca == cb {
+            continue;
+        }
+        // The IC's pin-tip world position for an osc net.
+        let osc_world = |net: &str| -> Option<[f64; 2]> {
+            let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net))?.0.clone();
+            let pg = items[ai].geom.pins.iter().find(|p| p.number == num)?;
+            Some(crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
+        };
+        let (Some(wa), Some(wb)) = (osc_world(&onets[0]), osc_world(&onets[1])) else {
+            continue;
+        };
+        let mid = [(wa[0] + wb[0]) / 2.0, (wa[1] + wb[1]) / 2.0];
+        // Outward direction = the IC EDGE the osc pins hug (classify by nearest edge of the IC's pin
+        // bbox — a corner osc pin sticks out the SIDE even if it's more vertically offset). Identical
+        // classifier to align_idiom_clusters.
+        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+        for pg in &items[ai].geom.pins {
+            let w = crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
+            lo[0] = lo[0].min(w[0]);
+            lo[1] = lo[1].min(w[1]);
+            hi[0] = hi[0].max(w[0]);
+            hi[1] = hi[1].max(w[1]);
+        }
+        let (dl, dr, dt, db) = (mid[0] - lo[0], hi[0] - mid[0], mid[1] - lo[1], hi[1] - mid[1]);
+        let m = dl.min(dr).min(dt).min(db);
+        let dir: [f64; 2] = if m == dl {
+            [-1.0, 0.0]
+        } else if m == dr {
+            [1.0, 0.0]
+        } else if m == dt {
+            [0.0, -1.0]
+        } else {
+            [0.0, 1.0]
+        };
+        let dir_orient = if dir[0] < 0.0 {
+            Orient::Left
+        } else if dir[0] > 0.0 {
+            Orient::Right
+        } else if dir[1] < 0.0 {
+            Orient::Up
+        } else {
+            Orient::Down
+        };
+        let cry_angle = orient_angle(&items[yi].geom, dir_orient);
+        // Project the cluster OUT from the IC's item_rect EDGE (not just the pin tip): the IC reserves a
+        // field/text stack beyond its pins, so one GAP off the pin tip can still leave the crystal
+        // overlapping the IC's rect (and the whole-sheet overlap check then rejects the gather). Like
+        // gather_decoupling_bank, take the body edge on the `dir` side as the depth origin and grow out.
+        let body = item_rect(&items[ai], items[ai].at);
+        let body_edge = if dir[0] > 0.0 {
+            body[2]
+        } else if dir[0] < 0.0 {
+            body[0]
+        } else if dir[1] > 0.0 {
+            body[3]
+        } else {
+            body[1]
+        };
+        // Crystal extent along `dir` at its target angle ⇒ a half-extent margin so its near edge clears
+        // the body, and a step pitch that keeps each load cap one cap clear of the crystal.
+        let extent_along = |idx: usize, angle: f64| -> f64 {
+            let mut probe = items[idx].clone();
+            probe.angle = angle;
+            let r = item_rect(&probe, items[idx].at);
+            if dir[0] != 0.0 { r[2] - r[0] } else { r[3] - r[1] }
+        };
+        let cry_ext = extent_along(yi, cry_angle);
+        let cap_ext = extent_along(ca, items[ca].angle).max(extent_along(cb, items[cb].angle));
+        // Sign of the outward `dir` along its nonzero axis (+1 grows away from the IC, −1 toward).
+        let dir_sign = if dir[0] != 0.0 { dir[0] } else { dir[1] };
+        // The along-edge midpoint coordinate (perp axis) the cluster centres on.
+        let lane_mid = if dir[0] != 0.0 { mid[1] } else { mid[0] };
+        // Depth (the `dir` axis) of the crystal: body edge + GAP + half the crystal.
+        let cry_depth = body_edge + dir_sign * (GAP + cry_ext / 2.0);
+        let cry_at = if dir[0] != 0.0 {
+            [snap(cry_depth), snap(lane_mid)]
+        } else {
+            [snap(lane_mid), snap(cry_depth)]
+        };
+        // Each load cap one step FURTHER out (so it sits past the crystal) and two perp gaps to its osc
+        // pin's side of the midpoint — the textbook oscillator block, room for labels.
+        let cap_depth = cry_depth + dir_sign * (cry_ext / 2.0 + GAP + cap_ext / 2.0);
+        let cap_at = |w: [f64; 2]| -> [f64; 2] {
+            let pin_lane = if dir[0] != 0.0 { w[1] } else { w[0] };
+            let side = (pin_lane - lane_mid).signum();
+            let side = if side == 0.0 { 1.0 } else { side };
+            let lane = lane_mid + side * GAP * 2.0;
+            if dir[0] != 0.0 { [snap(cap_depth), snap(lane)] } else { [snap(lane), snap(cap_depth)] }
+        };
+        // Proposed (item, new_at, new_angle). Caps keep their angle (only the crystal is re-oriented,
+        // matching align_idiom_clusters).
+        let proposed: Vec<(usize, [f64; 2], f64)> = vec![
+            (yi, cry_at, cry_angle),
+            (ca, cap_at(wa), items[ca].angle),
+            (cb, cap_at(wb), items[cb].angle),
+        ];
+        // No-op guard: skip if the cluster already sits at the proposed geometry.
+        if proposed.iter().all(|&(i, at, ang)| {
+            (items[i].at[0] - at[0]).abs() < 1.27
+                && (items[i].at[1] - at[1]).abs() < 1.27
+                && (items[i].angle - ang).abs() < 0.5
+        }) {
+            continue;
+        }
+        // OVERLAP-SAFETY against the WHOLE sheet — there is no follow-up decongest to repair a
+        // collision. Reject if any moved member would NEWLY overlap an item it doesn't overlap today.
+        let prop: BTreeMap<usize, ([f64; 2], f64)> =
+            proposed.iter().map(|&(i, at, ang)| (i, (at, ang))).collect();
+        let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> [f64; 4] {
+            let mut probe = items[idx].clone();
+            probe.angle = angle;
+            item_rect(&probe, at)
+        };
+        let at_now = |idx: usize| item_rect(&items[idx], items[idx].at);
+        let at_new = |idx: usize| -> [f64; 4] {
+            match prop.get(&idx) {
+                Some(&(at, ang)) => rect_at(idx, at, ang),
+                None => item_rect(&items[idx], items[idx].at),
+            }
+        };
+        let members = [yi, ca, cb];
+        let mut ok = true;
+        'check: for &c in &members {
+            for other in 0..items.len() {
+                if other == c {
+                    continue;
+                }
+                if rects_overlap(at_new(c), at_new(other)) && !rects_overlap(at_now(c), at_now(other)) {
+                    ok = false;
+                    break 'check;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        claimed.extend(members);
+        moves.extend(proposed);
     }
     let moved = !moves.is_empty();
     for (i, at, angle) in moves {
