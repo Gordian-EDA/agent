@@ -1496,3 +1496,4 @@ fn render_board_default_view_logic() {
     assert_eq!(out["ok"], serde_json::json!(true), "auto after route: {out}");
     assert_eq!(out["view"], serde_json::json!("routed"), "default after route must be routed: {out}");
 }
+
