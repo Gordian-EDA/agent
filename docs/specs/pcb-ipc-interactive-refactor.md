@@ -42,17 +42,22 @@ association). Faithful routing boards (≥2-pin signal nets): `soc-system`, `bga
 Route success on faithful boards (`route_auto` = best of detailed-mesh ∨ naive-grid):
 | board | routed | verdict |
 |---|---|---|
-| tqfp64-stress | 61/64 (95%) | good |
-| dual-bga-bus | 44/48 (92%) | good |
-| bga-escape-fineclear | 21/70 (30%) | FAILS |
-| soc-system | 11/79 (14%) | FAILS |
+| tqfp64-stress | 61/64 (95%) | good (3 stragglers) |
+| dual-bga-bus | 44/48 (92%) | good (4 stragglers) |
+| bga64-stress (2-layer) | 42/46 (91%) | good (4 stragglers) |
+| bga64-8layer | 39/46 (85%) | 8 layers did NOT help (7 fail vs 4) |
+| bga-escape-fineclear | 21/70 (30%) | FAILS (tight clearance) |
+| soc-system | 11/79 (14%) | FAILS (2 BGAs, congestion) |
 
-**Root cause of the failures = BGA inner-pad escape.** The router has via + multi-layer
-machinery, but via SITES are assigned **per mesh-leaf** (`crossing.rs::place_via`, one site where
-a layer change happens inside a leaf). BGA escape needs a **dog-bone via adjacent to EACH inner
-pad** to drop to an inner layer — per-pad fan-out that the leaf-mesh model does not produce, so
-inner pads stay on the top layer, get blocked by outer pads, and fail (render: dashed ratsnest
-under the BGA). Non-BGA dense (tqfp64) and BGA-with-bus (dual-bga-bus) route fine.
+**Refined root cause: the router under-uses copper layers + can't relieve congestion.** Note
+bga64 routes the same (~85-91%) at 2 AND 8 layers — the (selected) naive grid router stays
+effectively ~2-layer and does NOT exploit inner layers for escape or congestion relief, so extra
+layers are wasted. Two failure modes: (a) **a few stragglers everywhere** (3-4 nets that lose a
+congestion race — need rip-up/reorder retry); (b) **hard outliers** (fineclear = escape channels
+too tight for vias; soc-system = two-BGA congestion) — these need genuine **layer-aware escape**
+(drop inner pads to inner layers via dog-bone vias; `crossing.rs::place_via` assigns via sites
+per mesh-leaf, not per-pad, so per-pad fan-out isn't produced). Lever = make routing layer-aware
+(use inner layers) + per-pad BGA escape; secondary = stronger rip-up/retry for stragglers.
 
 Placement also sprawls / scatters caps on large boards (partly degenerate-circuit-driven).
 
