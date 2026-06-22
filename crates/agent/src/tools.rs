@@ -587,6 +587,25 @@ impl Tools {
                 }),
             },
             ToolDef {
+                name: "import_board".into(),
+                description: "Lift an existing .kicad_pcb into a Board-DSL document so you can \
+                    start from a given board (the round-trip entry; mirrors the schematic lift). \
+                    Returns the canonical `yaml`: parts (footprint + pad->net) recovered from the \
+                    file, each LOCKED at its current position so the layout is preserved, plus \
+                    the layer count and outline bbox. Edit the yaml and design_board it; drop a \
+                    part's `lock:` to let place_board move it. (Design rules default — a board \
+                    file doesn't carry copper clearance/width; a non-rectangular outline is \
+                    approximated by its bounding box for now.)"
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Path to the .kicad_pcb file to import." }
+                    },
+                    "required": ["path"]
+                }),
+            },
+            ToolDef {
                 name: "derive_board".into(),
                 description: "Build the board draft from the committed schematic + the \
                     footprint map — instead of re-typing parts. Reads the schematic's parts \
@@ -914,6 +933,7 @@ impl Tools {
             "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
             "assign_footprints" => crate::tools_pcb::assign_footprints(input, ctx),
             "design_board" => crate::tools_pcb::design_board(input, ctx),
+            "import_board" => crate::tools_pcb::import_board(input, ctx),
             "derive_board" => crate::tools_pcb::derive_board(input, ctx),
             "get_board" => crate::tools_pcb::get_board(ctx),
             "place_board" => crate::tools_pcb::place_board(input, ctx),

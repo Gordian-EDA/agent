@@ -68,7 +68,34 @@ fn main() {
     let out = "/tmp/dsl_demo.kicad_pcb";
     let e = tools.run("export_board", json!({ "path": out }), &ctx).unwrap();
     println!("export_board -> {}", compact(&e));
-    println!("\nAuthored from {} bytes of Board-DSL; artifact at {out}", BOARD_YAML.len());
+
+    // ── Round-trip: import the exported .kicad_pcb back into Board-DSL ──────────
+    let imp = tools.run("import_board", json!({ "path": out }), &ctx).unwrap();
+    let imported_yaml = imp["yaml"].as_str().unwrap_or("").to_string();
+    println!(
+        "\nimport_board -> part_count={}  ({} bytes of recovered YAML)",
+        imp["part_count"],
+        imported_yaml.len()
+    );
+    assert_eq!(imp["part_count"], json!(8), "round-trip lost parts");
+    println!("--- recovered Board-DSL ---\n{imported_yaml}---");
+
+    // Re-author from the imported YAML and re-export; layout is locked, so it must
+    // reproduce a DRC-clean board.
+    let d2 = tools
+        .run("design_board", json!({ "yaml": imported_yaml, "overwrite": true }), &ctx)
+        .unwrap();
+    assert_eq!(d2["ok"], json!(true), "imported YAML did not recompile: {}", compact(&d2));
+    tools.run("place_board", json!({}), &ctx).unwrap();
+    tools.run("route_board", json!({}), &ctx).unwrap();
+    let out2 = "/tmp/dsl_demo_roundtrip.kicad_pcb";
+    let e2 = tools.run("export_board", json!({ "path": out2 }), &ctx).unwrap();
+    println!("round-trip export -> {}", compact(&e2));
+
+    println!(
+        "\nAuthored from {} bytes of Board-DSL; round-tripped .kicad_pcb -> DSL -> .kicad_pcb.",
+        BOARD_YAML.len()
+    );
 }
 
 fn compact(v: &Value) -> String {

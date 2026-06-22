@@ -883,6 +883,29 @@ pub fn design_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     Ok(report)
 }
 
+/// `import_board`: lift an existing `.kicad_pcb` into a Board-DSL document — the
+/// round-trip entry so the agent can start from a given board. Returns the
+/// canonical YAML (every part locked at its current position, layout preserved);
+/// the model edits it and `design_board`s it, mirroring schematic `lift` → YAML.
+pub fn import_board(input: Value, _ctx: &ToolCtx) -> Result<Value> {
+    let Some(path) = input.get("path").and_then(Value::as_str) else {
+        return Ok(json!({ "error": "missing required `path` to a .kicad_pcb file" }));
+    };
+    let design = match crate::board_dsl::import_to_design(std::path::Path::new(path)) {
+        Ok(d) => d,
+        Err(e) => return Ok(json!({ "error": format!("could not read board `{path}`: {e}") })),
+    };
+    let yaml = board_lang::to_canonical_yaml(&design);
+    Ok(json!({
+        "ok": true,
+        "yaml": yaml,
+        "part_count": design.parts.len(),
+        "note": "imported into Board-DSL with every part LOCKED at its current position (the \
+                 layout is preserved). Pass this yaml to design_board to work on it; drop a \
+                 part's `lock:` to let place_board move it.",
+    }))
+}
+
 /// Pin count per net across the draft, derived from the resolved footprints via
 /// `placefp::part_from_footprint` (the SAME geometry place/route consumes). A
 /// pad whose number is absent from `pad_nets` contributes no pin.

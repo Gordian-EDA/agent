@@ -159,6 +159,65 @@ fn parse_edge(s: &str) -> Option<Edge> {
     }
 }
 
+/// Round to 2 decimals so imported coordinates read cleanly in YAML.
+fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
+/// Import an existing `.kicad_pcb` into a [`bl::BoardDesign`] — the round-trip
+/// companion to the DSL exporter, so the agent can start from a given board.
+///
+/// Recovers each part's reference + footprint lib_id + pad→net, the layer count,
+/// and the outline bbox. Parts are emitted with an explicit `lock` at their
+/// existing position (shifted so the board origin is 0,0), so the imported board
+/// reproduces the original LAYOUT — the agent unlocks a part (drops its `lock:`)
+/// to let the engine re-place it. Mirrors the schematic `lift` contract:
+/// connectivity round-trips exactly; design rules default (a `.kicad_pcb` doesn't
+/// surface board clearance/width in this kiutils version) and a non-rectangular
+/// outline is approximated by its bbox for now.
+pub fn import_to_design(path: &std::path::Path) -> std::io::Result<bl::BoardDesign> {
+    let b = kicad_bridge::pcb::read_board(path)?;
+    let (ox, oy) = (b.bounds.min_x, b.bounds.min_y);
+
+    let mut parts = indexmap::IndexMap::new();
+    for ip in &b.parts {
+        let mut pads = indexmap::IndexMap::new();
+        for (num, net) in &ip.pads {
+            if let Some(net) = net {
+                pads.insert(num.clone(), net.clone());
+            }
+        }
+        parts.insert(
+            ip.reference.clone(),
+            bl::Part {
+                footprint: ip.lib_id.clone(),
+                pads,
+                edge: false,
+                corner: false,
+                lock: Some(bl::Lock {
+                    x: round2(ip.at.x - ox),
+                    y: round2(ip.at.y - oy),
+                    rot: ip.rotation,
+                }),
+            },
+        );
+    }
+
+    Ok(bl::BoardDesign {
+        name: path.file_stem().and_then(|s| s.to_str()).map(String::from),
+        board: bl::BoardSpec {
+            layers: b.layer_count,
+            outline: bl::Outline::Rect {
+                w: round2(b.bounds.max_x - b.bounds.min_x),
+                h: round2(b.bounds.max_y - b.bounds.min_y),
+            },
+            rules: bl::Rules::default(),
+        },
+        parts,
+        groups: indexmap::IndexMap::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

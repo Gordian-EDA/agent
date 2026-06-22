@@ -109,6 +109,95 @@ pub fn read_problem(path: &Path) -> io::Result<BoardProblem> {
     })
 }
 
+/// A board parsed at the FOOTPRINT level — each part's reference + lib_id +
+/// placed position/rotation + pad→net, plus layer count and the Edge.Cuts bbox.
+/// The import companion to the DSL exporter: [`read_problem`] is routing-oriented
+/// and discards refdes/lib_id, so the round-trip into the board DSL reads here.
+#[derive(Debug, Clone)]
+pub struct ImportedBoard {
+    pub layer_count: u32,
+    /// Edge.Cuts bounding box (mm). v1 recovers the bbox; a non-rectangular
+    /// outline is not yet reconstructed as a polygon.
+    pub bounds: Bounds,
+    pub parts: Vec<ImportedPart>,
+}
+
+/// One placed part recovered from a `.kicad_pcb`.
+#[derive(Debug, Clone)]
+pub struct ImportedPart {
+    pub reference: String,
+    pub lib_id: String,
+    pub at: Point2,
+    /// Placement angle snapped to the nearest quadrant (0/90/180/270).
+    pub rotation: i32,
+    /// `(pad number, net name)` in file order; a pad with no net is `None`.
+    pub pads: Vec<(String, Option<String>)>,
+}
+
+/// Read a `.kicad_pcb` into footprint-level [`ImportedBoard`] data for the DSL
+/// importer. Skips items with no `lib_id` or no reference (board-graphic-only
+/// footprints). Net names come straight from each pad's `(net code "name")`.
+pub fn read_board(path: &Path) -> io::Result<ImportedBoard> {
+    let doc = PcbFile::read(path).map_err(map_kiutils_err)?;
+    let ast = doc.ast();
+    let layer_count = copper_layers(ast).len().max(1) as u32;
+    let bounds = board_bounds(ast);
+
+    let mut parts = Vec::new();
+    for fp in &ast.footprints {
+        let Some(lib_id) = fp.lib_id.clone() else {
+            continue;
+        };
+        let reference = fp
+            .reference
+            .clone()
+            .or_else(|| {
+                fp.properties
+                    .iter()
+                    .find(|p| p.key == "Reference")
+                    .map(|p| p.value.clone())
+            })
+            .unwrap_or_default();
+        if reference.is_empty() {
+            continue;
+        }
+        let [x, y] = fp.at.unwrap_or([0.0, 0.0]);
+        let rotation = snap_quadrant(fp.rotation.unwrap_or(0.0));
+        let pads = fp
+            .pads
+            .iter()
+            .filter_map(|pad| {
+                pad.number.clone().map(|num| {
+                    let net = pad
+                        .net
+                        .as_ref()
+                        .and_then(|n| n.name.clone())
+                        .filter(|n| !n.is_empty());
+                    (num, net)
+                })
+            })
+            .collect();
+        parts.push(ImportedPart {
+            reference,
+            lib_id,
+            at: Point2 { x, y },
+            rotation,
+            pads,
+        });
+    }
+    Ok(ImportedBoard {
+        layer_count,
+        bounds,
+        parts,
+    })
+}
+
+/// Snap a file angle (any degrees, CCW) to the nearest 0/90/180/270 quadrant.
+fn snap_quadrant(deg: f64) -> i32 {
+    let q = ((deg / 90.0).round() as i32).rem_euclid(4);
+    q * 90
+}
+
 // ── layers ───────────────────────────────────────────────────────────────────
 
 /// Copper layers (type `signal`/`power`, name ending `.Cu`) ordered

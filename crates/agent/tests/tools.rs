@@ -213,11 +213,12 @@ fn defs_lists_all_tools() {
         "review_design",
         "assign_footprints",
         "design_board",
+        "import_board",
         "derive_board",
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
-    assert_eq!(names.len(), 27, "expected exactly 27 tools, got {}: {:?}", names.len(), names);
+    assert_eq!(names.len(), 28, "expected exactly 28 tools, got {}: {:?}", names.len(), names);
 
     // Names are unique.
     let mut sorted = names.clone();
