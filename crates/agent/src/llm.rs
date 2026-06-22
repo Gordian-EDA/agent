@@ -304,7 +304,10 @@ impl OpenAiClient {
     /// Build from an explicit [`OpenAiConfig`].
     pub fn new(config: OpenAiConfig) -> Result<Self> {
         let http = reqwest::Client::builder().build().context("building reqwest client")?;
-        Ok(Self { config, http, max_tokens: 4096, temperature: None, thread_id: random_thread_id() })
+        // 16k, not 4k: a single create_design carries the whole circuit YAML, which for a large
+        // board exceeds 4k tokens and gets TRUNCATED — the truncated args then fail to parse and the
+        // yaml silently vanishes ("missing required string field yaml"). Gateway models allow ≥16k.
+        Ok(Self { config, http, max_tokens: 16384, temperature: None, thread_id: random_thread_id() })
     }
 
     /// Build from the environment / local `.env`.
@@ -498,7 +501,12 @@ pub(crate) fn parse_openai_completion(value: &Value) -> Result<Completion> {
             // proxied through the respan gateway return them as an already-structured OBJECT.
             // Accept both, else an object-form `create_design` loses its `yaml` ("missing field").
             let input = match func.and_then(|f| f.get("arguments")) {
-                Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
+                Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|e| {
+                    // A parse failure here almost always means the arguments string was TRUNCATED
+                    // (output token cap). Make it visible instead of silently dropping the fields.
+                    eprintln!("warning: tool-call arguments did not parse (likely truncated): {e}");
+                    Value::Null
+                }),
                 Some(other) => other.clone(),
                 None => Value::Null,
             };
