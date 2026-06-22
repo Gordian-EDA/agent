@@ -2818,12 +2818,13 @@ fn content_bounds(
         let r = v.diameter / 2.0;
         acc(v.at.x - r, v.at.y - r, v.at.x + r, v.at.y + r);
     }
-    // Keepouts are DELIBERATE empty board regions (antenna / mounting / connector
-    // clear-outs) — the finished board must INCLUDE them, so the content-tightening must
-    // not shrink the outline inward past a keepout and drop it off the board.
-    for k in keepouts {
-        acc(k.rect.min_x, k.rect.min_y, k.rect.max_x, k.rect.max_y);
-    }
+    // Keepouts are ROUTING obstacles (copper is kept out of them), NOT board-defining
+    // features. Including them inflated the outline whenever a keepout sat in otherwise
+    // empty space (e.g. planes-keepout: parts in the upper-left, a keepout on the far
+    // right → a board twice as wide as the copper, scored "vastly oversized" by the
+    // critic). The outline tightens to actual COPPER; a keepout in dead space no longer
+    // bloats the board. (No copper ever sits inside a keepout, so this can't clip anything.)
+    let _ = keepouts;
     if !min_x.is_finite() {
         return budget.clone();
     }
