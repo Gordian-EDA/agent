@@ -1737,6 +1737,12 @@ fn emit_strategy(
         // tell the (possibly rebuilt) writer before its `prepare` solves text.
         w.prefer_fields_above(&fields_above);
     }
+    // DIAGNOSTIC (gated, no-op on normal runs): report exactly which rail/trunk wire
+    // crosses which foreign pin to merge two nets, so the connectivity bug is
+    // pinpointable without the slow kicad-cli netlist round-trip.
+    if std::env::var_os("FLOORPLAN_SHORT_DIAG").is_some() {
+        diagnose_shorts(env, &w, &items, &inc, design);
+    }
     // ORPHANED NET-LABEL COLUMN. A `label:global` component has no geometry, so
     // `gather` skips it — the label is normally drawn as the port pennant of the
     // pin it shares a net with. But a net carried ONLY by label parts (no placed
@@ -6998,6 +7004,86 @@ fn count_crossings(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
     n
 }
 
+/// DIAGNOSTIC (env-gated): print every short — a pin landing on a foreign net's
+/// wire (endpoint or interior) and every collinear/junction merge — naming the
+/// pin (refdes.num@net) and the offending wire (net + endpoints), so the exact
+/// rail/trunk wire that merges two nets is pinpointable without kicad-cli.
+fn diagnose_shorts(
+    env: &KicadEnv,
+    w: &SchematicWriter,
+    items: &[Item],
+    inc: &Incidence,
+    design: &Design,
+) {
+    let wires = w.wires_with_nets();
+    let junctions = w.junction_positions();
+    eprintln!(
+        "[SHORT-DIAG] {} ({} wires, {} junctions)",
+        design.name.as_deref().unwrap_or("<unnamed>"),
+        wires.len(),
+        junctions.len()
+    );
+    // (1) pin-on-foreign-wire shorts (count_shorts geometry).
+    for (net, pins) in inc {
+        for (i, num) in pins {
+            let Ok(eps) = w.pin_dirs(env, &items[*i].refdes, num) else { continue };
+            for (ep, _) in eps {
+                for (a, b, wn) in &wires {
+                    if wn.as_deref() == Some(net.as_str()) {
+                        continue;
+                    }
+                    let how = if near(ep, *a) || near(ep, *b) {
+                        "ENDPOINT"
+                    } else if crate::emit::point_on_segment(ep, *a, *b) {
+                        "INTERIOR"
+                    } else {
+                        continue;
+                    };
+                    eprintln!(
+                        "[SHORT-DIAG]  PIN {}.{}@{net} at [{:.2},{:.2}] lands {how} of net {:?} wire \
+                         [{:.2},{:.2}]->[{:.2},{:.2}]",
+                        items[*i].refdes, num, ep[0], ep[1], wn, a[0], a[1], b[0], b[1]
+                    );
+                }
+            }
+        }
+    }
+    // (2) collinear overlaps of different nets.
+    for i in 0..wires.len() {
+        for j in (i + 1)..wires.len() {
+            let (a1, a2, an) = &wires[i];
+            let (b1, b2, bn) = &wires[j];
+            if an == bn || an.is_none() || bn.is_none() {
+                continue;
+            }
+            if collinear_overlap(*a1, *a2, *b1, *b2) {
+                eprintln!(
+                    "[SHORT-DIAG]  COLLINEAR net {:?} [{:.2},{:.2}]->[{:.2},{:.2}] overlaps net {:?} \
+                     [{:.2},{:.2}]->[{:.2},{:.2}]",
+                    an, a1[0], a1[1], a2[0], a2[1], bn, b1[0], b1[1], b2[0], b2[1]
+                );
+            }
+        }
+    }
+    // (3) junctions fusing >1 net.
+    for &jp in &junctions {
+        let mut nets: BTreeSet<&str> = BTreeSet::new();
+        for (a, b, wn) in &wires {
+            if let Some(net) = wn {
+                if crate::emit::point_on_segment(jp, *a, *b) {
+                    nets.insert(net.as_str());
+                }
+            }
+        }
+        if nets.len() > 1 {
+            eprintln!(
+                "[SHORT-DIAG]  JUNCTION at [{:.2},{:.2}] fuses nets {:?}",
+                jp[0], jp[1], nets
+            );
+        }
+    }
+}
+
 /// Placement shorts: a pin whose connection point coincides exactly with the
 /// ENDPOINT of a different net's wire (two wire/pin terminals at one point fuse
 /// in KiCAD). A pin merely sitting on a wire's interior is NOT a connection
@@ -7915,6 +8001,28 @@ fn emit_rail(
         // of the net, not a detached implicit-net island. Only when the driver pin is
         // actually one of this net's endpoints. Multi-sheet only (driver is `None`
         // elsewhere), so reference snapshots keep the per-pin behaviour below.
+        //
+        // CRITICAL: the star is a hub-and-spoke whose spokes are blind Manhattan hops
+        // (no body/foreign-pin avoidance). On a SPREAD rail (a distributed power net
+        // with many pins scattered across the sheet — the MCU's stacked decoupling-cap
+        // columns) those spokes become long risers that run STRAIGHT DOWN a cap column,
+        // crossing every cap's GND pin and body in between → the rail swallows GND and
+        // the GPIO pins it grazes (the bedrock/ice40 "PA2/GPIO ↔ 3V3" short). The star
+        // is only safe for a TIGHT driven cluster (LDO VO + its 1-2 output caps), so
+        // gate it on a small pin-bounding-box extent. A spread driven rail falls through
+        // to per-pin LOCAL power symbols below — one symbol AT each pin, no riser to
+        // cross anything.
+        const DRIVEN_STAR_MAX_SPREAD: f64 = 38.0; // matches the multisheet_spread gate
+        let driver = driver.filter(|_| {
+            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+            for (p, _) in eps {
+                lo[0] = lo[0].min(p[0]);
+                lo[1] = lo[1].min(p[1]);
+                hi[0] = hi[0].max(p[0]);
+                hi[1] = hi[1].max(p[1]);
+            }
+            (hi[0] - lo[0]) + (hi[1] - lo[1]) <= DRIVEN_STAR_MAX_SPREAD
+        });
         if let Some(dp) = driver {
             if let Some((_, ddir)) =
                 eps.iter().copied().find(|(p, _)| (p[0] - dp[0]).abs() < EPS && (p[1] - dp[1]).abs() < EPS)

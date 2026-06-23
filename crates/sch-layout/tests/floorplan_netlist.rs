@@ -14,6 +14,15 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
+
+/// The floorplan engine reads `MULTISHEET_REFINE` from the PROCESS environment deep
+/// in the emit path, so a test that toggles it must not run concurrently with one
+/// that reads it. Every env-sensitive test in this file takes this lock for its whole
+/// body; the multisheet variant additionally sets+restores the var inside the locked
+/// region, so the two single-sheet-mode tests never observe it mid-flight. (Tests
+/// serialize, but each is the same ~8 min either way — correctness over parallelism.)
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 use circuit_lang::provider::SymbolProvider;
 use kicad_bridge::cli::{KicadCli, Netlist};
@@ -60,6 +69,7 @@ fn nl_pin_matches(provider: &RealSymbolProvider, lib_id: &str, authored: &str, n
 
 #[test]
 fn floorplan_reference_fixtures_emit_truthful_netlists() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let Some(env) = KicadEnv::detect() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
@@ -72,6 +82,47 @@ fn floorplan_reference_fixtures_emit_truthful_netlists() {
 
 #[test]
 fn floorplan_challenge_fixtures_emit_truthful_netlists() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    run_challenge_fixtures();
+}
+
+/// HARDENED GATE: the SAME challenge fixtures, but emitted through the PRODUCTION
+/// `MULTISHEET_REFINE` finalize path (the path `emit_multisheet` — the agent's real
+/// board flow — uses). The default variant above runs the engine in single-sheet
+/// mode, which DOES NOT EXERCISE the multisheet-only finalize passes (distributed
+/// rails, the driven-rail star, the dead-last re-gathers). Those passes can route a
+/// rail/trunk wire through an IC body or a column of foreign pins, merging two nets
+/// into one — a real SHORT that ships on agent boards but that the default run is
+/// structurally blind to. This variant closes that blind spot: it sets the env var
+/// (inside the ENV_LOCK so the single-sheet tests never observe it) and asserts the
+/// finalize-path netlists are still truthful. Regression-tested by reverting the
+/// emit_rail driven-star spread guard: this test FAILS, the default one PASSES.
+#[test]
+fn floorplan_challenge_fixtures_emit_truthful_netlists_multisheet() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Set the production finalize flag for the duration of this locked region, then
+    // RESTORE it so a later (lock-serialized) single-sheet test sees the original env.
+    // SAFETY (edition 2024 `set_var`/`remove_var` are unsafe): every env-sensitive
+    // test in this file holds `ENV_LOCK` for its whole body, so no other thread reads
+    // or writes the process environment while we mutate it here.
+    let prev = std::env::var_os("MULTISHEET_REFINE");
+    unsafe { std::env::set_var("MULTISHEET_REFINE", "1") };
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_challenge_fixtures));
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("MULTISHEET_REFINE", v),
+            None => std::env::remove_var("MULTISHEET_REFINE"),
+        }
+    }
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+/// Run the challenge tier over every (or `FLOORPLAN_ONLY`-restricted) fixture in the
+/// CURRENT engine mode (single-sheet, or multisheet when the caller set the env var).
+fn run_challenge_fixtures() {
     let Some(env) = KicadEnv::detect() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
