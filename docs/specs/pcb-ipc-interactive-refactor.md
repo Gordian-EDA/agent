@@ -91,6 +91,29 @@ Placement also sprawls / scatters caps on large boards (partly degenerate-circui
    tools. Rewrite the agent PCB prompt to the interactive doctrine. e2e harness over the IPC
    flow on hard boards → iterate render→critic to consistently 9+.
 
+## The 9+ blocker = a placement/router metric DIVERGENCE (the key reframe)
+
+Measured (Jun 22): with routing solved (Freerouting, 92-95% KiCAD-clean), faithful boards still
+score only ~4-5/10 on the VLM critic. Root cause, traced precisely: **`place_best` selects the
+placement variant that the ENGINE router routes cleanest** — and clustering decoupling caps
+around their IC (what the critic demands) CREATES congestion the engine router can't handle, so
+`place_best` DISCARDS the clustered variant and keeps the SPREAD one (caps stranded far from the
+IC, oversized board, long detour routes). Strengthening `SA_COHERE_W` doesn't help: the clustered
+variant is still discarded at selection. So routability-as-the-placement-metric is now WRONG.
+
+**Reframe:** Freerouting can route the congested/clustered layouts the engine can't. So the
+placement metric should be **layout QUALITY** (compactness + cap↔IC cohesion + connector
+edge-seek + tight outline), NOT engine-routability — then route the chosen quality-layout with
+Freerouting (the `autoroute` tool). Concretely: change `place_best`'s selection cost from
+`(engine_faults, layout_cost, hpwl)` to lead with `layout_cost` (quality), with a light
+routability floor so a truly-unroutable layout is still rejected; validate with Freerouting +
+the critic across the faithful boards, gated on `board_harness` DRC. Also: the IPC refiner
+(`examples/refine_placement`) clusters caps via `move_part` but can't tighten the board OUTLINE
+(content_bounds tighten lives in the engine export path) — wire outline-tighten into the
+interactive path too, or re-export after refinement. This is the remaining 9+ campaign, now
+precisely scoped (placement-quality selection + Freerouting + outline handling), iterated
+render→critic to consistently 9+.
+
 ## Gates
 
 `cargo test --release -p pcb-engine -p kicad-bridge -p agent` + `board_harness` (DRC clean,
