@@ -427,8 +427,14 @@ pub fn write_project(
     sheets: &[(String, String)],
 ) -> anyhow::Result<PathBuf> {
     use std::fmt::Write as _;
-    let dir = out_dir.to_string_lossy().to_string();
-    let main_root = det_uuid(&format!("root:{dir}"));
+    // Root/sheet UUIDs are keyed on STABLE content (a fixed project token + the sheet
+    // name), NOT on `out_dir`. The output path is incidental to *where* the project is
+    // written and differs across the two render-validation dirs (and between a draft and
+    // its committed copy); keying UUIDs on it leaked that volatility into the
+    // `(path ...)` hierarchy, so the same Design rendered to two directories produced
+    // byte-different schematics. Sheet names are unique within a project, so dropping the
+    // dir keeps every UUID distinct while making output byte-identical for a given input.
+    let main_root = det_uuid("root:auto-pcb");
     let mut root = String::new();
     root.push_str("(kicad_sch\n\t(version 20250114)\n\t(generator \"eeschema\")\n\t(generator_version \"9.0\")\n");
     let _ = writeln!(root, "\t(uuid \"{main_root}\")");
@@ -436,7 +442,7 @@ pub fn write_project(
     let mut inst = String::from("\t(sheet_instances\n\t\t(path \"/\"\n\t\t\t(page \"1\")\n\t\t)\n");
     for (i, (name, sch)) in sheets.iter().enumerate() {
         let page = i + 2;
-        let sheet_uuid = det_uuid(&format!("{dir}:{name}"));
+        let sheet_uuid = det_uuid(&format!("sheet:{name}"));
         let sub_root =
             sch.split("(uuid \"").nth(1).and_then(|s| s.split('"').next()).unwrap_or("").to_string();
         let mut sub = sch.replace(&format!("/{sub_root}\""), &format!("/{main_root}/{sheet_uuid}\""));
