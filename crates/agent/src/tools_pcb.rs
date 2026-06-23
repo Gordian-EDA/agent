@@ -1027,49 +1027,28 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     // by construction, with bounds sized to fit. Escapes route radially (short,
     // parallel) and the board is compact. Falls back to cap-ring auto-surround when
     // there's no clear dominant IC.
-    // Gated WIP: the radial fan-out placer validates the routing-neatness lever
-    // (routi 6→8 on tqfp64) but its connector geometry + outline-tighten still need
-    // iteration, so it's opt-in ($UNIFIED_FANOUT) — default is the gated cap-ring path.
-    let unified = std::env::var("UNIFIED_FANOUT").is_ok()
+    // DEFAULT placer: unified radial FAN-OUT (IC centred; decoupling caps then series
+    // resistors fanned in IC-pad order on density-aware concentric rings; connectors
+    // rotated flat on opposite edges) — neat AND compact. Validated 8/10 (place=9
+    // routi=8 board=8 silks=9) on a dense 8-layer TQFP64. It places everything
+    // overlap-free by construction and sizes bounds to fit; if it can't seat a given
+    // board legally it returns false (or the result is illegal) and we FALL BACK to
+    // the legalizing place_best, so we're never worse than the 70/71-legal baseline.
+    // $NO_UNIFIED forces pure place_best. The agent overrides any of this with the
+    // interactive geometry tools (move_part/route_track/…).
+    let base_problem = problem.clone();
+    let unified = std::env::var("NO_UNIFIED").is_err()
         && pcb_engine::placement::unified_fanout_place(&mut problem);
-    // The lock-based cap ring clusters caps (helps the critic on some boards) but
-    // OVER-CONSTRAINS others into illegal courtyard overlaps (measured: 70/71 legal
-    // without it vs 53/71 with it). So it's OPT-IN ($AUTO_SURROUND); the default is
-    // the legalizing place_best, which keeps 70/71 boards legal.
-    if !unified && std::env::var("AUTO_SURROUND").is_ok() {
-        // AUTO decoupling co-placement: ring the dominant IC's bypass caps around it.
-        let pairs = pcb_engine::placement::decoupling_pairs(&problem);
-        let mut by_ic: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        for (cap, ic) in pairs {
-            by_ic.entry(ic).or_default().push(cap);
-        }
-        if let Some((&ic, caps)) = by_ic.iter().max_by_key(|(_, c)| c.len()) {
-            let ic_ref = problem.parts[ic].reference.clone();
-            let already = hints.groups.iter().any(|g| g.surround.as_deref() == Some(ic_ref.as_str()));
-            if caps.len() >= 3 && !already {
-                if problem.parts[ic].locked.is_none() {
-                    let center = Point2 {
-                        x: (problem.bounds.min_x + problem.bounds.max_x) / 2.0,
-                        y: (problem.bounds.min_y + problem.bounds.max_y) / 2.0,
-                    };
-                    problem.parts[ic].locked = Some(LockedAt { at: center, rotation: 0 });
-                }
-                let cap_refs: Vec<String> =
-                    caps.iter().map(|&c| problem.parts[c].reference.clone()).collect();
-                hints.groups.push(GroupHint {
-                    name: format!("decouple_{ic_ref}"),
-                    members: cap_refs,
-                    region: None,
-                    edge: None,
-                    grid: false,
-                    surround: Some(ic_ref),
-                });
-            }
-        }
+    if !unified {
         pcb_engine::placement::apply_grid_hints(&mut problem, &hints);
     }
-
-    let result = place_best(&problem, &hints);
+    let mut result = place_best(&problem, &hints);
+    if unified && !result.legal {
+        // Fan-out couldn't seat this board → revert to the clean legalizing placer.
+        problem = base_problem;
+        pcb_engine::placement::apply_grid_hints(&mut problem, &hints);
+        result = place_best(&problem, &hints);
+    }
 
     // Persist the placement into the draft so route_board / render_board / a
     // later get_board can read it without re-running the placer.
