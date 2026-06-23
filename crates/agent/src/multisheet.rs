@@ -1,14 +1,16 @@
-//! Multi-sheet (hierarchical) commit — the validated answer to the single-sheet density
-//! ceiling: one sheet per functional block scores 8-9 each, vs a cramped single sheet at
-//! 4-7. Emits a committable KiCAD project (root `.kicad_sch` + per-block sub-sheet files,
-//! global-label cross-sheet connectivity). See `docs/specs/multisheet-commit.md`.
+//! Composed single-sheet commit — the validated answer to the single-sheet density
+//! ceiling: each functional block is laid out INDEPENDENTLY (8-9 each), then the blocks
+//! are tiled onto ONE `.kicad_sch` as labeled bounding-box regions. No hierarchy, no
+//! sub-sheet files, no root nav page: cross-block nets connect via GLOBAL LABELS only
+//! (matching names auto-join on a single sheet, so no wire ever crosses a block border).
 //!
 //! Per-block independent layout is the RULE here, not a dense-only special case.
 //! [`refine_blocks`] first normalizes the agent's blocks into uniform-sized SHEET GROUPS
-//! (split over-crammed blocks, merge tiny fragments), then [`emit_multisheet`] runs a
-//! SEPARATE anneal per group → one sub-sheet per group, disjoint by construction. A group
-//! holding ≥2 blocks is emitted together as a sub-design; the single-sheet floorplan is
-//! block-aware (Tier-B disjoint-region placement) so those blocks stay spatially disjoint.
+//! (split over-crammed blocks, merge tiny fragments), then [`compose_single_sheet`] runs a
+//! SEPARATE anneal per group (each in its own coordinate space), shelf-packs the group
+//! regions onto one sheet with margins so they never touch, translates each group's
+//! geometry to its tile, and frames each with a graphic rectangle + a name label. The page
+//! is enlarged to fit; global labels mean a large sheet still has no long wires.
 
 use circuit_lang::model::{Block, Design, PinTarget};
 use indexmap::IndexMap;
@@ -260,35 +262,48 @@ pub fn refine_blocks(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
         .collect()
 }
 
-/// Emit a multi-block `Design` as a hierarchical KiCAD project under `out_dir`. Refines the
-/// blocks into uniform sheet GROUPS ([`refine_blocks`]), then runs a SEPARATE anneal per
-/// group → one sub-sheet per group + a root that references them. Returns the root
-/// `.kicad_sch` path. Cross-group nets auto-become global labels (single-pin ports) / power
-/// symbols, so the sheets connect. Sets `MULTISHEET_REFINE` so each sub-sheet gets the
-/// route-aware crossing refinement (the validated sub-sheet path).
-pub fn emit_multisheet(env: &KicadEnv, design: &Design, out_dir: &Path) -> anyhow::Result<PathBuf> {
+/// Emit a multi-block `Design` as ONE composed `.kicad_sch` under `out_dir` (file
+/// `root.kicad_sch`). Refines the blocks into uniform sheet GROUPS ([`refine_blocks`]), runs
+/// a SEPARATE anneal per group (each in its own coordinate space, as a TYPED writer), then
+/// hands the group writers to the engine's `compose_writers`, which tiles the group regions
+/// onto a single enlarged page (translating each writer's items in mm) and frames each with a
+/// labeled bounding box. Cross-group nets auto-become global labels (single-pin ports) / power
+/// symbols, and matching global-label names join across the sheet — no wire crosses a block
+/// border. Sets `MULTISHEET_REFINE` so each group gets the route-aware crossing refinement.
+/// Returns the composed `.kicad_sch` path.
+pub fn compose_single_sheet(
+    env: &KicadEnv,
+    design: &Design,
+    out_dir: &Path,
+) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(out_dir)?;
-    // SAFETY: process-wide flag read by the engine to opt sub-sheets into route-aware
-    // refinement; this whole operation is a multi-sheet emit, so it's the intended scope.
+    // SAFETY: process-wide flag read by the engine to opt each group into route-aware
+    // refinement; this whole operation is a composed multi-block emit, the intended scope.
     unsafe { std::env::set_var("MULTISHEET_REFINE", "1") };
     let groups = refine_blocks(&design.blocks);
     let cross_sheet = cross_sheet_nets(&groups);
 
-    let mut sheets: Vec<(String, String)> = Vec::new();
+    let mut groups_w: Vec<(String, sch_layout::emit::SchematicWriter)> = Vec::new();
     for (gname, members) in groups {
         // A sub-design holding this group's block(s). Mark every cross-sheet net this group
-        // touches as a PORT so the engine emits one global label per sheet for the hop and
+        // touches as a PORT so the engine emits one global label per group for the hop and
         // wires any ≥2 local pins together (instead of duplicate local labels).
         let mut sub = design.clone();
         sub.blocks = members.into_iter().collect();
         mark_cross_sheet_ports(&mut sub, &cross_sheet);
         let ir = sch_layout::floorplan::infer_ir(env, &sub);
-        let emit = sch_layout::floorplan::emit_anneal(env, &sub, &ir)
-            .map_err(|e| anyhow::anyhow!("emit sheet '{gname}': {e}"))?;
-        sheets.push((sanitize(&gname), emit.sch));
+        // Lay out each group INDEPENDENTLY and keep its TYPED writer (not a rendered
+        // string): the engine composer translates each group's items to its tile in mm
+        // and folds them into one sheet — no string-level geometry math here.
+        let w = sch_layout::floorplan::emit_anneal_writer(env, &sub, &ir)
+            .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
+        groups_w.push((sanitize(&gname), w));
     }
-    dedup_pwr_flags(&mut sheets);
-    write_project(env, out_dir, &sheets)
+    let composed = sch_layout::floorplan::compose_writers(groups_w, design.name.as_deref());
+    let path = out_dir.join("root.kicad_sch");
+    std::fs::write(&path, &composed)?;
+    let _ = env; // reserved (validation hook); kept for signature symmetry
+    Ok(path)
 }
 
 /// Nets that CROSS sheets: a signal net (`block_nets` excludes GND/VSS rails) present in ≥2
@@ -323,156 +338,13 @@ pub fn mark_cross_sheet_ports(sub: &mut Design, cross_sheet: &HashSet<String>) {
     }
 }
 
-/// Each sub-sheet emits its OWN `PWR_FLAG` for the power nets it uses; across sheets the
-/// same net then has multiple "power output" pins → KiCAD ERC error ("power output connected
-/// to power output"). Two rules clean this up while preserving connectivity:
-///  - **DRIVEN nets** (a regulator/source drives them — e.g. 3V3 off an LDO): the net appears
-///    on some sheet that has NO flag for it (the engine doesn't flag a driven net). Such a net
-///    needs NO flag at all → strip EVERY `PWR_FLAG` for it (the flag would conflict with the
-///    real driver's power-output pin).
-///  - **UNDRIVEN nets** (raw rails off a connector — e.g. VBUS, GND: flagged on every sheet
-///    that uses them): keep exactly ONE `PWR_FLAG` globally, strip the duplicates.
-fn dedup_pwr_flags(sheets: &mut [(String, String)]) {
-    use std::collections::HashSet;
-    // Strip a trailing 4-digit instance suffix: `VMOTOR0101` → `VMOTOR`, but keep `3V3`.
-    let base = |raw: &str| -> String {
-        if raw.len() > 4 && raw[raw.len() - 4..].bytes().all(|c| c.is_ascii_digit()) {
-            raw[..raw.len() - 4].to_string()
-        } else {
-            raw.to_string()
-        }
-    };
-    // 1. Every net that has a PWR_FLAG anywhere.
-    let mut flag_nets: HashSet<String> = HashSet::new();
-    for (_, sch) in sheets.iter() {
-        let mut rest = sch.as_str();
-        while let Some(p) = rest.find("\"#FLG_") {
-            let after = &rest[p + 6..];
-            if let Some(e) = after.find('"') {
-                flag_nets.insert(base(&after[..e]));
-            }
-            rest = after;
-        }
-    }
-    // 2. DRIVEN = some sheet references the net (`"<net>"`) but carries no flag for it.
-    let mut driven: HashSet<String> = HashSet::new();
-    for net in &flag_nets {
-        let needle = format!("\"{net}\"");
-        let flag_pfx = format!("\"#FLG_{net}");
-        if sheets.iter().any(|(_, s)| s.contains(&needle) && !s.contains(&flag_pfx)) {
-            driven.insert(net.clone());
-        }
-    }
-    let mut seen: HashSet<String> = HashSet::new();
-    // End index (exclusive) of the balanced `(symbol …)` block starting at `s[0..]`.
-    let block_end = |s: &str| -> usize {
-        let b = s.as_bytes();
-        let (mut depth, mut in_str, mut started) = (0i32, false, false);
-        let mut i = 0;
-        while i < b.len() {
-            match b[i] {
-                b'"' => in_str = !in_str,
-                b'(' if !in_str => {
-                    depth += 1;
-                    started = true;
-                }
-                b')' if !in_str => {
-                    depth -= 1;
-                    if started && depth == 0 {
-                        return i + 1;
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        s.len()
-    };
-    // Net a PWR_FLAG drives, parsed from its `#FLG_<net><4-digit-instance?>` reference.
-    let flag_net = |block: &str| -> Option<String> {
-        let r = block.find("\"Reference\"")?;
-        let q = block[r..].find("\"#FLG_")? + r + 6;
-        let raw = &block[q..block[q..].find('"').map(|e| q + e)?];
-        Some(if raw.len() > 4 && raw[raw.len() - 4..].bytes().all(|c| c.is_ascii_digit()) {
-            raw[..raw.len() - 4].to_string()
-        } else {
-            raw.to_string()
-        })
-    };
-    for (_, sch) in sheets.iter_mut() {
-        let mut out = String::with_capacity(sch.len());
-        let mut rest = sch.as_str();
-        while let Some(pos) = rest.find("\t(symbol\n") {
-            out.push_str(&rest[..pos]);
-            let end = block_end(&rest[pos..]);
-            let block = &rest[pos..pos + end];
-            let drop = block.contains("power:PWR_FLAG")
-                && flag_net(block).map(|n| driven.contains(&n) || !seen.insert(n)).unwrap_or(false);
-            if !drop {
-                out.push_str(block);
-            }
-            rest = &rest[pos + end..];
-        }
-        out.push_str(rest);
-        *sch = out;
-    }
-}
-
-/// Write a hierarchical KiCAD project (root + sub-sheet files) from per-block emitted
-/// schematics. Rewrites each sub-sheet's symbol instance-paths into the hierarchy
-/// (`/SUB_ROOT` → `/MAIN_ROOT/SHEET_UUID`). Returns the root path.
-pub fn write_project(
-    env: &KicadEnv,
-    out_dir: &Path,
-    sheets: &[(String, String)],
-) -> anyhow::Result<PathBuf> {
-    use std::fmt::Write as _;
-    // Root/sheet UUIDs are keyed on STABLE content (a fixed project token + the sheet
-    // name), NOT on `out_dir`. The output path is incidental to *where* the project is
-    // written and differs across the two render-validation dirs (and between a draft and
-    // its committed copy); keying UUIDs on it leaked that volatility into the
-    // `(path ...)` hierarchy, so the same Design rendered to two directories produced
-    // byte-different schematics. Sheet names are unique within a project, so dropping the
-    // dir keeps every UUID distinct while making output byte-identical for a given input.
-    let main_root = det_uuid("root:auto-pcb");
-    let mut root = String::new();
-    root.push_str("(kicad_sch\n\t(version 20250114)\n\t(generator \"eeschema\")\n\t(generator_version \"9.0\")\n");
-    let _ = writeln!(root, "\t(uuid \"{main_root}\")");
-    root.push_str("\t(paper \"A4\")\n\t(lib_symbols\n\t)\n");
-    let mut inst = String::from("\t(sheet_instances\n\t\t(path \"/\"\n\t\t\t(page \"1\")\n\t\t)\n");
-    for (i, (name, sch)) in sheets.iter().enumerate() {
-        let page = i + 2;
-        let sheet_uuid = det_uuid(&format!("sheet:{name}"));
-        let sub_root =
-            sch.split("(uuid \"").nth(1).and_then(|s| s.split('"').next()).unwrap_or("").to_string();
-        let mut sub = sch.replace(&format!("/{sub_root}\""), &format!("/{main_root}/{sheet_uuid}\""));
-        sub = sub.replacen("(path \"/\"", &format!("(path \"/{sheet_uuid}\""), 1);
-        sub = sub.replacen("(page \"1\")", &format!("(page \"{page}\")"), 1);
-        std::fs::write(out_dir.join(format!("{name}.kicad_sch")), &sub)?;
-        let (x, y) = (25.4 + (i % 4) as f64 * 55.0, 25.4 + (i / 4) as f64 * 35.0);
-        let (ny, fy) = (y - 0.7, y + 18.6);
-        let _ = write!(
-            root,
-            "\t(sheet\n\t\t(at {x} {y})\n\t\t(size 35 18)\n\t\t(fields_autoplaced yes)\n\t\t(stroke (width 0.1524) (type solid))\n\t\t(fill (color 0 0 0 0.0000))\n\t\t(uuid \"{sheet_uuid}\")\n\t\t(property \"Sheetname\" \"{name}\"\n\t\t\t(at {x} {ny} 0)\n\t\t\t(effects (font (size 1.27 1.27) (bold yes)) (justify left bottom))\n\t\t)\n\t\t(property \"Sheetfile\" \"{name}.kicad_sch\"\n\t\t\t(at {x} {fy} 0)\n\t\t\t(effects (font (size 1.27 1.27)) (justify left top) (hide yes))\n\t\t)\n\t\t(instances\n\t\t\t(project \"root\"\n\t\t\t\t(path \"/{main_root}\"\n\t\t\t\t\t(page \"{page}\")\n\t\t\t\t)\n\t\t\t)\n\t\t)\n\t)\n"
-        );
-        let _ = write!(inst, "\t\t(path \"/{sheet_uuid}\"\n\t\t\t(page \"{page}\")\n\t\t)\n");
-    }
-    inst.push_str("\t)\n");
-    root.push_str(&inst);
-    root.push_str(")\n");
-    let root_path = out_dir.join("root.kicad_sch");
-    std::fs::write(&root_path, &root)?;
-    let _ = env; // reserved (validation hook); kept for signature symmetry
-    Ok(root_path)
-}
-
-/// Convenience: emit + run ERC, returning (root_path, erc_errors, erc_warnings).
+/// Convenience: compose + run ERC, returning (sheet_path, erc_errors, erc_warnings).
 pub fn emit_and_check(
     env: &KicadEnv,
     design: &Design,
     out_dir: &Path,
 ) -> anyhow::Result<(PathBuf, usize, usize)> {
-    let root = emit_multisheet(env, design, out_dir)?;
+    let root = compose_single_sheet(env, design, out_dir)?;
     let (e, w) = match KicadCli::new(env).erc(&root) {
         Ok(r) => (r.error_count(), r.warning_count()),
         Err(_) => (usize::MAX, 0),

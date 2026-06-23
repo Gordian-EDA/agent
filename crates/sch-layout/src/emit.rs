@@ -1383,6 +1383,84 @@ impl SchematicWriter {
         Some([max_x + PAGE_MARGIN, max_y + PAGE_MARGIN])
     }
 
+    /// Size `[w, h]` of the laid-out content, for the multi-block composer's tile
+    /// packing. After `prepare`/`reframe` the content's min corner sits at the page
+    /// margin `M`, so its extent above the margin is `content_extent - 2·M`. Returns
+    /// `None` for an empty writer.
+    pub fn content_size(&self) -> Option<[f64; 2]> {
+        const M: f64 = 12.7; // `content_extent`'s PAGE_MARGIN / `reframe`'s M
+        self.content_extent().map(|[w, h]| [(w - 2.0 * M).max(1.0), (h - 2.0 * M).max(1.0)])
+    }
+
+    /// Absorb every drawn element of `other` into `self` (lib_symbols merged by
+    /// `lib_id`, all geometry moved verbatim). The multi-block composer translates
+    /// each group writer to its tile, then folds them all into one writer for a
+    /// single `finish` — no per-sheet string splicing. `other`'s items already
+    /// carry distinct refdes / content-derived uuid_keys, so no key collides.
+    pub fn absorb(&mut self, other: SchematicWriter) {
+        for (id, body) in other.lib_symbols {
+            self.lib_symbols.entry(id.clone()).or_insert(body);
+        }
+        for (id, sz) in other.sym_sizes {
+            self.sym_sizes.entry(id).or_insert(sz);
+        }
+        for (id, pins) in other.sym_pins {
+            self.sym_pins.entry(id).or_insert(pins);
+        }
+        self.instances.extend(other.instances);
+        self.labels.extend(other.labels);
+        self.no_connects.extend(other.no_connects);
+        self.wires.extend(other.wires);
+        self.junctions.extend(other.junctions);
+        self.texts.extend(other.texts);
+        self.rects.extend(other.rects);
+        self.fields_above.extend(other.fields_above);
+    }
+
+    /// The PWR_FLAG instances in this writer, as `(net, index)` pairs — the flag's
+    /// `#FLG_<net>` refdes carries the net verbatim. Used by the composer to dedup
+    /// flags across groups (KiCAD ERCs "power output ↔ power output" when the same
+    /// rail is flagged on two groups). Index lets a caller drop a chosen flag.
+    pub fn pwr_flag_nets(&self) -> Vec<(String, usize)> {
+        self.instances
+            .iter()
+            .enumerate()
+            .filter_map(|(i, inst)| {
+                (inst.lib_id == "power:PWR_FLAG")
+                    .then(|| inst.refdes.strip_prefix("#FLG_").map(|n| (n.to_string(), i)))
+                    .flatten()
+            })
+            .collect()
+    }
+
+    /// Every net NAME referenced by a placed element on this writer (signal/port
+    /// labels + power-symbol values), used to decide whether a flagged net is
+    /// already DRIVEN elsewhere. A power symbol stores its rail in `value`.
+    pub fn referenced_nets(&self) -> std::collections::HashSet<String> {
+        let mut nets: std::collections::HashSet<String> =
+            self.labels.iter().map(|l| l.net.clone()).collect();
+        for inst in &self.instances {
+            if inst.refdes.starts_with("#PWR") {
+                nets.insert(inst.value.clone());
+            }
+        }
+        nets
+    }
+
+    /// Remove the instances (and their pin label) at the given instance indices —
+    /// the composer's flag-dedup drop. Indices are removed high-to-low so earlier
+    /// ones stay valid.
+    pub fn remove_instances(&mut self, mut idx: Vec<usize>) {
+        idx.sort_unstable();
+        idx.dedup();
+        for &i in idx.iter().rev() {
+            let inst = self.instances.remove(i);
+            // Drop any pin label that drove this flag (keyed to its refdes' pin).
+            let tag = format!("{}:", inst.refdes);
+            self.labels.retain(|l| !l.uuid_key.starts_with(&tag));
+        }
+    }
+
     /// Split each wire at every junction / other-wire endpoint lying strictly in
     /// its interior, so every electrical tap is an endpoint-to-endpoint join.
     ///
@@ -1503,6 +1581,16 @@ impl SchematicWriter {
         if dx.abs() < 1e-9 && dy.abs() < 1e-9 {
             return;
         }
+        self.translate(dx, dy);
+    }
+
+    /// Rigidly shift EVERY drawn element (instances + their solved field text,
+    /// wires, labels + stubs, junctions, no-connects, free text, rects) by
+    /// `(dx, dy)`. The typed sibling of `reframe`'s shift block: connectivity is
+    /// preserved (everything moves together), so the multi-block composer can
+    /// translate a fully-laid-out group writer to its tile in mm — no string
+    /// geometry math. Caller keeps the shift grid-aligned to stay on the KiCAD grid.
+    pub fn translate(&mut self, dx: f64, dy: f64) {
         let sh = |p: &mut [f64; 2]| {
             p[0] += dx;
             p[1] += dy;

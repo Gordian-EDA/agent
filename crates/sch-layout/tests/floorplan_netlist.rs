@@ -87,8 +87,8 @@ fn floorplan_challenge_fixtures_emit_truthful_netlists() {
 }
 
 /// HARDENED GATE: the SAME challenge fixtures, but emitted through the PRODUCTION
-/// `MULTISHEET_REFINE` finalize path (the path `emit_multisheet` — the agent's real
-/// board flow — uses). The default variant above runs the engine in single-sheet
+/// `MULTISHEET_REFINE` finalize path (the path `compose_single_sheet` — the agent's real
+/// board flow — uses for each block). The default variant above runs the engine in single-sheet
 /// mode, which DOES NOT EXERCISE the multisheet-only finalize passes (distributed
 /// rails, the driven-rail star, the dead-last re-gathers). Those passes can route a
 /// rail/trunk wire through an IC body or a column of foreign pins, merging two nets

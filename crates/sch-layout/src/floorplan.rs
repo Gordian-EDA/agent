@@ -1612,6 +1612,23 @@ fn emit_strategy(
     ir: &LayoutIr,
     strategy: Box<dyn PlacementStrategy>,
 ) -> io::Result<EmitOutput> {
+    let (w, mut out) = prepare_writer(env, design, ir, strategy)?;
+    out.sch = w.finish();
+    Ok(out)
+}
+
+/// Lay out `design` under `strategy` and build its FINALIZED writer (placed,
+/// routed, text-solved, reframed) WITHOUT rendering it. Returns the prepared
+/// writer plus the readability metadata; `EmitOutput.sch` is left empty (the
+/// caller either `finish`es this single writer or composes several into one).
+/// This is the shared body of `emit_strategy` and the multi-block
+/// `emit_anneal_writer` compose entry, so both judge the same geometry.
+fn prepare_writer(
+    env: &KicadEnv,
+    design: &Design,
+    ir: &LayoutIr,
+    strategy: Box<dyn PlacementStrategy>,
+) -> io::Result<(SchematicWriter, EmitOutput)> {
     let mut items = gather(env, design)?;
     // Seed each item's mirror flag from the IR (lifted onto Item so the search
     // can flip it and the cost/emit read one source of truth).
@@ -1761,15 +1778,118 @@ fn emit_strategy(
     let warnings = w.layout_warnings();
     let (body_crossings, ic_crossings, wire_crossings) =
         crossing_counts(env, &items, &inc, ir, &needs_flag);
-    let sch = w.finish();
-    Ok(EmitOutput {
-        sch,
-        layout_warnings: warnings,
-        body_crossings,
-        ic_crossings,
-        wire_crossings,
-        detected_idioms: ir.idioms.clone(),
-    })
+    Ok((
+        w,
+        EmitOutput {
+            sch: String::new(),
+            layout_warnings: warnings,
+            body_crossings,
+            ic_crossings,
+            wire_crossings,
+            detected_idioms: ir.idioms.clone(),
+        },
+    ))
+}
+
+/// Lay out one block GROUP and return its FINALIZED-but-unrendered writer (see
+/// [`prepare_writer`]), for the multi-block single-sheet composer. Each group is
+/// laid out INDEPENDENTLY in its own coordinate space (min corner at the page
+/// margin), exactly as a standalone `emit_anneal`; the composer then translates
+/// each writer to its tile and folds them into one. Forces the premium anneal so
+/// composed groups match the agent's single-block quality.
+pub fn emit_anneal_writer(
+    env: &KicadEnv,
+    design: &Design,
+    ir: &LayoutIr,
+) -> io::Result<SchematicWriter> {
+    Ok(prepare_writer(env, design, ir, Box::new(Anneal))?.0)
+}
+
+/// Compose independently-laid-out block-GROUP writers into ONE `.kicad_sch`. Each
+/// group writer arrives finalized in its own coordinate space (min corner at the
+/// page margin); this shelf-packs the groups onto a roughly-square grid,
+/// translates each to its tile (typed mm math — no string geometry), frames it
+/// with a dashed rectangle + a bold name label, dedups cross-group `PWR_FLAG`s,
+/// folds every group into one writer, and renders it via a single `finish`.
+/// Cross-group nets are already global labels (same name ⇒ KiCAD joins them on the
+/// one sheet), so no wire crosses a tile border and enlarging the page is free.
+pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&str>) -> String {
+    /// Clear space around each group's content so two frames never touch.
+    const TILE_MARGIN: f64 = 22.0;
+    /// The page margin each group writer is reframed to (its min corner sits here).
+    const M: f64 = 12.7;
+
+    // ── PWR_FLAG dedup across groups (KiCAD ERCs "power output ↔ power output" when
+    // the same rail is flagged twice). DRIVEN = a group references the net but flags
+    // no flag for it (a regulator drives it) ⇒ drop ALL its flags; UNDRIVEN raw rail
+    // ⇒ keep exactly one flag globally.
+    let mut groups = groups;
+    let flag_nets: std::collections::HashSet<String> =
+        groups.iter().flat_map(|(_, w)| w.pwr_flag_nets()).map(|(n, _)| n).collect();
+    // A flagged net is driven iff some group references it WITHOUT flagging it.
+    let driven: std::collections::HashSet<String> = flag_nets
+        .into_iter()
+        .filter(|net| {
+            groups.iter().any(|(_, w)| {
+                w.referenced_nets().contains(net)
+                    && !w.pwr_flag_nets().iter().any(|(n, _)| n == net)
+            })
+        })
+        .collect();
+    let mut kept: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (_, w) in &mut groups {
+        let drop: Vec<usize> = w
+            .pwr_flag_nets()
+            .into_iter()
+            .filter(|(net, _)| driven.contains(net) || !kept.insert(net.clone()))
+            .map(|(_, i)| i)
+            .collect();
+        if !drop.is_empty() {
+            w.remove_instances(drop);
+        }
+    }
+
+    // ── Shelf-pack onto a roughly-square grid: wrap rows at a target width derived
+    // from total width / sqrt(n) so a 6-group board is ~2-3 wide, not a tall column.
+    let sizes: Vec<[f64; 2]> = groups.iter().map(|(_, w)| w.content_size().unwrap_or([1.0, 1.0])).collect();
+    let total_w: f64 = sizes.iter().map(|s| s[0]).sum();
+    let widest = sizes.iter().map(|s| s[0]).fold(0.0_f64, f64::max);
+    let target_row = (total_w / (groups.len().max(1) as f64).sqrt()).max(widest);
+    // (tile x, tile y) per group, packed shelf by shelf.
+    let mut tiles: Vec<[f64; 2]> = Vec::with_capacity(groups.len());
+    let (mut cx, mut cy, mut row_h) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for s in &sizes {
+        if cx > 0.0 && cx + s[0] > target_row {
+            cx = 0.0;
+            cy += row_h + TILE_MARGIN;
+            row_h = 0.0;
+        }
+        tiles.push([cx, cy]);
+        cx += s[0] + TILE_MARGIN;
+        row_h = row_h.max(s[1]);
+    }
+
+    // ── Translate each group to its tile, frame it, and fold into one writer. The
+    // group's content min corner sits at M; map it to (tile + TILE_MARGIN).
+    let mut out = SchematicWriter::new();
+    if let Some(t) = title {
+        out.set_title(t);
+    }
+    for (i, (name, mut w)) in groups.into_iter().enumerate() {
+        let [tx, ty] = tiles[i];
+        let [tw, th] = sizes[i];
+        let (dx, dy) = (crate::grid::snap(tx + TILE_MARGIN - M), crate::grid::snap(ty + TILE_MARGIN - M));
+        w.translate(dx, dy);
+        // Frame: a dashed box hugging the tile's content + a bold name above it.
+        let (rx0, ry0) = (tx + TILE_MARGIN - 6.0, ty + TILE_MARGIN - 6.0);
+        let (rx1, ry1) = (tx + TILE_MARGIN + tw + 1.0, ty + TILE_MARGIN + th + 1.0);
+        out.add_rect([rx0, ry0], [rx1, ry1], &format!("frame:{name}"));
+        out.add_text(&name, [rx0 + 1.0, ry0 - 1.5], 3.0, true, &format!("label:{name}"));
+        out.absorb(w);
+    }
+    // Already laid out per group + tiled here; a global reframe would only re-snap.
+    out.set_frame(false);
+    out.finish()
 }
 
 /// Build the complete schematic writer for a placed `items`: symbols (+mirror),

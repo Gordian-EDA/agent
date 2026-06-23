@@ -1099,22 +1099,23 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
             .snapshot(&ctx.sch_path)
             .with_context(|| format!("snapshotting {}", ctx.sch_path.display()))?;
     }
-    // ANY multi-block design ships as a hierarchical MULTI-SHEET project (one clean sheet per
-    // functional block — 8-9 each) instead of a single sheet: per-block independent layout is
-    // the RULE, not a dense-only special case. `multisheet::refine_blocks` first normalizes
-    // the blocks (split over-crammed, merge tiny) so even a 2-block design lays out per-block
-    // with no cross-border global SA. Only a single-block design takes the single-sheet path.
-    // The root .kicad_sch is written at ctx.sch_path with sub-sheets alongside; downstream
-    // render/ERC operate on the root.
+    // ANY multi-block design ships as ONE COMPOSED sheet: each functional block is laid out
+    // independently (8-9 each), then the block regions are tiled onto a single enlarged page
+    // as labeled bounding boxes — per-block independent layout is the RULE, not a dense-only
+    // special case. `multisheet::refine_blocks` first normalizes the blocks (split
+    // over-crammed, merge tiny) so even a 2-block design lays out per-block with no
+    // cross-border global SA; cross-block nets join via matching global labels on the one
+    // sheet. Only a single-block design takes the plain single-sheet emit. The composed
+    // .kicad_sch is written at ctx.sch_path; downstream render/ERC operate on it.
     let n_blocks = design.blocks.values().filter(|b| !b.components.is_empty()).count();
     let multisheet = n_blocks >= 2;
     if multisheet {
         let dir = ctx.sch_path.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let root = crate::multisheet::emit_multisheet(&ctx.env, &design, dir)
-            .context("emitting multi-sheet project")?;
+        let root = crate::multisheet::compose_single_sheet(&ctx.env, &design, dir)
+            .context("composing single-sheet schematic")?;
         if root != ctx.sch_path {
             std::fs::rename(&root, &ctx.sch_path).with_context(|| {
-                format!("placing multi-sheet root at {}", ctx.sch_path.display())
+                format!("placing composed sheet at {}", ctx.sch_path.display())
             })?;
         }
     } else {

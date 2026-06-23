@@ -1,6 +1,6 @@
-//! Validate the production multi-sheet commit (`agent::multisheet::emit_multisheet` — the
-//! exact function `apply_design` calls for dense multi-block designs): compile a draft,
-//! emit a hierarchical KiCAD project, run ERC.
+//! Validate the production composed-sheet commit (`agent::multisheet::compose_single_sheet`
+//! — the exact function `apply_design` calls for multi-block designs): compile a draft,
+//! compose ONE labeled-block-region `.kicad_sch`, run ERC.
 //!
 //! Usage: cargo run --release -p agent --example commit_multisheet -- <draft.yaml> <out_dir>
 
