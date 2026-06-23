@@ -11,6 +11,9 @@ pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/_proto.rs"));
 }
 
+pub mod session;
+pub use session::Session;
+
 use std::time::Duration;
 
 use prost::{Message, Name};
@@ -21,6 +24,12 @@ use proto::kiapi::common::{ApiRequest, ApiRequestHeader, ApiResponse};
 const DEFAULT_SOCKET: &str = "ipc:///tmp/kicad/api.sock";
 /// `ApiStatusCode::AS_OK`.
 const AS_OK: i32 = 1;
+/// `AS_NOT_READY` (KiCAD just started) — transient, retry.
+const AS_NOT_READY: i32 = 4;
+/// `AS_BUSY` (KiCAD mid-operation) — transient, retry.
+const AS_BUSY: i32 = 7;
+/// How long to keep retrying a transient NOT_READY/BUSY before giving up.
+const RETRY_BUDGET: Duration = Duration::from_secs(40);
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -40,6 +49,10 @@ pub enum Error {
     NoBoard,
     #[error("KiCAD rejected an item (status {code}): {message}")]
     Item { code: i32, message: String },
+    #[error("launching KiCAD: {0}")]
+    Spawn(String),
+    #[error("timed out waiting for the KiCAD IPC socket to appear")]
+    LaunchTimeout,
 }
 
 /// A connection to a running KiCAD instance's IPC API server.
@@ -65,10 +78,11 @@ impl Kicad {
     /// Connect to a specific NNG socket URL (e.g. `ipc:///tmp/kicad/api.sock`).
     pub fn connect_to(socket_url: &str) -> Result<Self, Error> {
         let socket = nng::Socket::new(nng::Protocol::Req0)?;
-        // Don't hang forever if KiCAD is busy / wedged.
+        // Don't hang forever if KiCAD is wedged, but allow slow ops (save with
+        // zone refill, autoroute) to complete.
         use nng::options::Options;
-        let _ = socket.set_opt::<nng::options::RecvTimeout>(Some(Duration::from_secs(15)));
-        let _ = socket.set_opt::<nng::options::SendTimeout>(Some(Duration::from_secs(15)));
+        let _ = socket.set_opt::<nng::options::RecvTimeout>(Some(Duration::from_secs(120)));
+        let _ = socket.set_opt::<nng::options::SendTimeout>(Some(Duration::from_secs(30)));
         socket.dial(socket_url)?;
         Ok(Self {
             socket,
@@ -82,35 +96,45 @@ impl Kicad {
     /// the instance token from the first reply and surfaces API-level errors.
     fn send_request<C: Message + Name>(&mut self, cmd: &C) -> Result<ApiResponse, Error> {
         let any = prost_types::Any::from_msg(cmd)?;
-        let req = ApiRequest {
-            header: Some(ApiRequestHeader {
-                kicad_token: self.token.clone(),
-                client_name: self.client_name.clone(),
-            }),
-            message: Some(any),
-        };
-        let bytes = req.encode_to_vec();
-        self.socket
-            .send(nng::Message::from(&bytes[..]))
-            .map_err(|(_, e)| Error::Nng(e))?;
-        let reply = self.socket.recv()?;
-        let resp = ApiResponse::decode(reply.as_slice())?;
-        if self.token.is_empty() {
-            if let Some(h) = &resp.header {
-                if !h.kicad_token.is_empty() {
-                    self.token = h.kicad_token.clone();
+        let deadline = std::time::Instant::now() + RETRY_BUDGET;
+        loop {
+            let req = ApiRequest {
+                header: Some(ApiRequestHeader {
+                    kicad_token: self.token.clone(),
+                    client_name: self.client_name.clone(),
+                }),
+                message: Some(any.clone()),
+            };
+            let bytes = req.encode_to_vec();
+            self.socket
+                .send(nng::Message::from(&bytes[..]))
+                .map_err(|(_, e)| Error::Nng(e))?;
+            let reply = self.socket.recv()?;
+            let resp = ApiResponse::decode(reply.as_slice())?;
+            if self.token.is_empty() {
+                if let Some(h) = &resp.header {
+                    if !h.kicad_token.is_empty() {
+                        self.token = h.kicad_token.clone();
+                    }
                 }
             }
-        }
-        if let Some(st) = &resp.status {
-            if st.status != AS_OK {
-                return Err(Error::Api {
-                    code: st.status,
-                    message: st.error_message.clone(),
-                });
+            if let Some(st) = &resp.status {
+                // KiCAD just started / is mid-operation — back off and retry.
+                if (st.status == AS_NOT_READY || st.status == AS_BUSY)
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(400));
+                    continue;
+                }
+                if st.status != AS_OK {
+                    return Err(Error::Api {
+                        code: st.status,
+                        message: st.error_message.clone(),
+                    });
+                }
             }
+            return Ok(resp);
         }
-        Ok(resp)
     }
 
     /// Send a command and decode the typed reply (unpacked from the response `Any`).
