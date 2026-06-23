@@ -680,19 +680,28 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
     else {
         return false;
     };
+    // A connector with 2 power pads (e.g. a 1x02 VCC/GND header) looks like a
+    // decoupling cap to decoupling_pairs — exclude J/P/H refs so connectors go to the
+    // edge frame, not the inner cap ring.
+    let is_connector = |i: usize| {
+        matches!(problem.parts[i].reference.chars().next(), Some('J') | Some('P') | Some('H'))
+    };
     let caps: Vec<usize> = decoupling_pairs(problem)
         .iter()
-        .filter(|(_, a)| *a == ic)
+        .filter(|(c, a)| *a == ic && !is_connector(*c))
         .map(|(c, _)| *c)
         .collect();
-    if caps.len() < 3 {
-        return false;
-    }
     let res: Vec<usize> = series_pairs(problem)
         .iter()
-        .filter(|(_, a)| *a == ic)
+        .filter(|(r, a)| *a == ic && !is_connector(*r))
         .map(|(r, _)| *r)
         .collect();
+    // Engage when the dominant IC has enough fan-out members to ring (decoupling caps
+    // and/or series elements). Caps alone <3 isn't enough, but caps+series ≥3 is — so
+    // boards with few caps but a series/connector fan-out still get the neat ring.
+    if caps.len() + res.len() < 3 {
+        return false;
+    }
     let res_ordered: Vec<usize> = series_fanout_order(problem, ic, &res)
         .iter()
         .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
@@ -781,6 +790,50 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
                 },
                 rotation: rot,
             });
+        }
+    }
+
+    // Nudge each connector OUTWARD (away from centre) until it clears every ring part
+    // — the frame estimate can under-clear a connector whose courtyard exceeds the
+    // short-dim guess. Locked ring parts don't move; the connector slides out.
+    let chalf = |p: &Part, rot: i32| -> (f64, f64) {
+        if rot == 90 || rot == 270 {
+            (p.courtyard_h / 2.0, p.courtyard_w / 2.0)
+        } else {
+            (p.courtyard_w / 2.0, p.courtyard_h / 2.0)
+        }
+    };
+    for &i in &connectors {
+        let mut steps = 0;
+        for _ in 0..60 {
+            let (ix, iy, irot) = {
+                let l = problem.parts[i].locked.as_ref().unwrap();
+                (l.at.x, l.at.y, l.rotation)
+            };
+            let (ihw, ihh) = chalf(&problem.parts[i], irot);
+            let hit = (0..problem.parts.len()).any(|j| {
+                if j == i {
+                    return false;
+                }
+                let Some(lj) = &problem.parts[j].locked else { return false };
+                let (jhw, jhh) = chalf(&problem.parts[j], lj.rotation);
+                (ix - lj.at.x).abs() < ihw + jhw && (iy - lj.at.y).abs() < ihh + jhh
+            });
+            if !hit {
+                break;
+            }
+            // Push along whichever axis is the connector's outward (edge-normal) one,
+            // away from centre, so it slides off the ring rather than along it.
+            let l = problem.parts[i].locked.as_mut().unwrap();
+            if ihh <= ihw {
+                l.at.y += if iy >= 0.0 { 2.0 } else { -2.0 };
+            } else {
+                l.at.x += if ix >= 0.0 { 2.0 } else { -2.0 };
+            }
+            steps += 1;
+        }
+        if std::env::var("FANOUT_DEBUG").is_ok() {
+            eprintln!("[nudge] {} pushed {steps} steps", problem.parts[i].reference);
         }
     }
 
