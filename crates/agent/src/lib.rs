@@ -7,7 +7,6 @@
 //! Bedrock), so callers stay provider-agnostic.
 
 pub mod agent;
-pub mod board_dsl;
 pub mod config;
 pub mod llm;
 pub mod multisheet;

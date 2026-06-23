@@ -303,19 +303,6 @@ fn bbox_json(b: &kicad_bridge::footlib::BBox) -> Value {
 
 // ── derive_board ──────────────────────────────────────────────────────────────
 
-/// Pad numbers in `pad_keys` that aren't among the footprint's real pads `fp_pads`
-/// — sorted + deduped. Empty means every referenced pad exists. The pin↔pad check.
-fn pads_missing<'a>(pad_keys: impl IntoIterator<Item = &'a str>, fp_pads: &[&str]) -> Vec<String> {
-    let have: std::collections::HashSet<&str> = fp_pads.iter().copied().collect();
-    let mut missing: Vec<String> = pad_keys
-        .into_iter()
-        .filter(|p| !have.contains(p))
-        .map(str::to_string)
-        .collect();
-    missing.sort();
-    missing.dedup();
-    missing
-}
 
 /// `derive_board` — build the board draft from the committed schematic + the
 /// footprint map, instead of re-typing parts by hand. Connectivity comes from the
@@ -340,74 +327,75 @@ pub fn derive_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     let Some(design) = circuit_lang::compile(&yaml, ctx.provider()).design else {
         return Ok(json!({ "error": "the schematic netlist did not compile back to a design" }));
     };
+    let overwrite = input.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
+    if BoardDraft::load(ctx).is_some() && !overwrite {
+        return Ok(json!({ "error": "a board draft already exists — pass overwrite=true to replace it" }));
+    }
 
-    // Build a Board-DSL skeleton: one part per component — pad→net from the
-    // (pad-number-keyed) pins flattened across units, footprint left BLANK for the
-    // agent to fill in the YAML (footprints live in the DSL, not a side map). Every
-    // part is flagged in `missing_footprints` so the agent knows what to fill.
-    let mut parts = indexmap::IndexMap::new();
+    // Seed a BoardDraft directly from the schematic: one part per component, pads
+    // from the (pad-number-keyed) pins flattened across units, footprint taken
+    // from the symbol's footprint field. Parts whose symbol carries no footprint
+    // are flagged in `missing_footprints` for `assign_footprint`.
+    let mut parts = Vec::new();
     let mut missing_footprints = Vec::new();
     for (refdes, c) in design.blocks.values().flat_map(|b| b.components.iter()) {
-        let footprint = String::new();
-        missing_footprints.push(refdes.clone());
-        let mut pads = indexmap::IndexMap::new();
+        let footprint = c.footprint.clone().unwrap_or_default();
+        if footprint.is_empty() {
+            missing_footprints.push(refdes.clone());
+        }
+        let mut pad_nets = BTreeMap::new();
         for pins in std::iter::once(&c.pins).chain(c.units.values()) {
             for (pad, target) in pins {
                 if let PinTarget::Net(net) = target {
-                    pads.insert(pad.clone(), net.clone());
+                    pad_nets.insert(pad.clone(), net.clone());
                 }
             }
         }
-        parts.insert(
-            refdes.clone(),
-            board_lang::model::Part {
-                footprint,
-                pads,
-                edge: false,
-                corner: false,
-                lock: None,
-            },
-        );
+        parts.push(DraftPart {
+            reference: refdes.clone(),
+            footprint,
+            pad_nets,
+            locked: None,
+        });
     }
 
-    // Outline from the optional `bounds` (else a default the agent resizes in the
-    // YAML); layers from optional `rules.layers`.
-    let outline = match input.get("bounds") {
-        Some(b) => board_lang::model::Outline::Rect {
-            w: b.get("max_x").and_then(Value::as_f64).unwrap_or(50.0)
-                - b.get("min_x").and_then(Value::as_f64).unwrap_or(0.0),
-            h: b.get("max_y").and_then(Value::as_f64).unwrap_or(40.0)
-                - b.get("min_y").and_then(Value::as_f64).unwrap_or(0.0),
-        },
-        None => board_lang::model::Outline::Rect { w: 50.0, h: 40.0 },
+    let bounds = if input.get("bounds").is_some() {
+        match parse_bounds(input.get("bounds")) {
+            Ok(b) => b,
+            Err(e) => return Ok(json!({ "error": e })),
+        }
+    } else {
+        Bounds { min_x: 0.0, min_y: 0.0, max_x: 50.0, max_y: 40.0 }
     };
-    let layers = input
+    let layer_count = input
         .get("rules")
         .and_then(|r| r.get("layers"))
         .and_then(Value::as_u64)
         .unwrap_or(2) as u32;
 
-    let board_design = board_lang::model::BoardDesign {
-        name: design.name.clone(),
-        board: board_lang::model::BoardSpec {
-            layers,
-            outline,
-            rules: board_lang::model::Rules::default(),
-        },
+    let part_count = parts.len();
+    let draft = BoardDraft {
+        bounds,
+        rules: DraftRules { layer_count, ..Default::default() },
         parts,
-        groups: indexmap::IndexMap::new(),
         keepouts: Vec::new(),
+        hints: PlacementHints::default(),
+        last_placement: None,
+        last_place_illegal: false,
+        outline: None,
     };
-    let dsl = board_lang::to_canonical_yaml(&board_design);
+    draft.save(ctx)?;
 
+    let note = if missing_footprints.is_empty() {
+        "board seeded from the schematic — run place_board, then route_board, then open_board to refine it interactively"
+    } else {
+        "board seeded; some parts have no footprint — set each with assign_footprint (use search_footprints for the lib_id), then place_board"
+    };
     Ok(json!({
         "ok": true,
-        "yaml": dsl,
-        "part_count": board_design.parts.len(),
+        "part_count": part_count,
         "missing_footprints": missing_footprints,
-        "note": "a Board-DSL skeleton lifted from the schematic (parts + pad→net). Fill any \
-                 empty footprints (search_footprints), set board.outline + rules, then commit \
-                 with design_board(yaml). Footprints and layout intent live in the DSL.",
+        "note": note,
     }))
 }
 
@@ -746,130 +734,6 @@ pub fn build_board_draft(input: Value, ctx: &ToolCtx) -> Result<Value> {
         "part_count": draft.parts.len(),
         "net_count": net_pins.len(),
         "warnings": warnings,
-    }))
-}
-
-/// `board_lang::compile`'s diagnostics as the same `{ok, diagnostics, errors,
-/// warnings}` shape the schematic DSL returns, so the agent self-repairs a
-/// board document exactly the way it does a circuit document.
-fn board_compile_report(diags: &board_lang::Diagnostics) -> Value {
-    use board_lang::Severity;
-    let strings: Vec<String> = diags.0.iter().map(|d| d.to_string()).collect();
-    let errors = diags.0.iter().filter(|d| d.severity == Severity::Error).count();
-    let warnings = diags.0.iter().filter(|d| d.severity == Severity::Warning).count();
-    json!({
-        "ok": errors == 0,
-        "diagnostics": strings,
-        "errors": errors,
-        "warnings": warnings,
-    })
-}
-
-/// `design_board`: author (or replace) the ENTIRE board from one Board-DSL
-/// document — the PCB analog of `create_design`. Compiles the YAML to a
-/// [`board_lang::BoardDesign`], lowers it to a [`BoardDraft`], checks every
-/// footprint resolves, and persists it. The single board authoring surface:
-/// outline + rules + parts (footprint, pad→net) + placement intent, all in text
-/// the agent edits and that round-trips with a `.kicad_pcb`.
-pub fn design_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
-    let Some(yaml) = input.get("yaml").and_then(Value::as_str) else {
-        return Ok(json!({ "error": "missing required `yaml` (a Board-DSL document)" }));
-    };
-    let overwrite = input.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
-
-    let result = board_lang::compile(yaml);
-    let Some(design) = result.design else {
-        // Compile errors — hand back diagnostics so the model fixes the YAML.
-        return Ok(board_compile_report(&result.diagnostics));
-    };
-
-    if BoardDraft::load(ctx).is_some() && !overwrite {
-        return Ok(json!({
-            "error": "a board draft already exists — pass overwrite=true to replace it",
-        }));
-    }
-
-    // Every footprint must resolve in the installed library (recoverable: the
-    // model fixes exactly the bad lib_ids via search_footprints, never guesses).
-    let index = ctx.footprint_index()?;
-    let mut unknown = Vec::new();
-    let mut wrong = Vec::new();
-    for (refdes, p) in &design.parts {
-        match index.footprint(&p.footprint) {
-            None => unknown.push(json!({
-                "reference": refdes,
-                "footprint": p.footprint,
-                "suggestions": index.suggest(&p.footprint),
-            })),
-            // pin↔pad: every pad the design nets must exist on the chosen footprint.
-            Some(fp) => {
-                let fp_pads: Vec<&str> = fp.pads.iter().map(|pp| pp.number.as_str()).collect();
-                let missing = pads_missing(p.pads.keys().map(String::as_str), &fp_pads);
-                if !missing.is_empty() {
-                    wrong.push(json!({
-                        "reference": refdes,
-                        "footprint": p.footprint,
-                        "missing_pads": missing,
-                    }));
-                }
-            }
-        }
-    }
-    if !unknown.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "unknown_footprints": unknown,
-            "note": "search_footprints for the real lib_ids and fix them in the `parts` map",
-        }));
-    }
-    if !wrong.is_empty() {
-        return Ok(json!({
-            "ok": false,
-            "wrong_footprints": wrong,
-            "note": "a footprint lacks pads the design nets — pick one that fits the part's pins \
-                     (search_footprints), fix it in the `parts` map, and resubmit",
-        }));
-    }
-
-    let draft = crate::board_dsl::design_to_draft(&design);
-    let net_pins = net_pin_counts(&draft.parts, ctx);
-    let part_count = draft.parts.len();
-    let net_count = net_pins.len();
-    draft.save(ctx)?;
-
-    let mut report = board_compile_report(&result.diagnostics);
-    if let Value::Object(m) = &mut report {
-        m.insert("board_written".to_string(), json!(true));
-        m.insert("part_count".to_string(), json!(part_count));
-        m.insert("net_count".to_string(), json!(net_count));
-        m.insert(
-            "note".to_string(),
-            json!("board compiled from the DSL and saved — run place_board, then route_board, then export_board"),
-        );
-    }
-    Ok(report)
-}
-
-/// `import_board`: lift an existing `.kicad_pcb` into a Board-DSL document — the
-/// round-trip entry so the agent can start from a given board. Returns the
-/// canonical YAML (every part locked at its current position, layout preserved);
-/// the model edits it and `design_board`s it, mirroring schematic `lift` → YAML.
-pub fn import_board(input: Value, _ctx: &ToolCtx) -> Result<Value> {
-    let Some(path) = input.get("path").and_then(Value::as_str) else {
-        return Ok(json!({ "error": "missing required `path` to a .kicad_pcb file" }));
-    };
-    let design = match crate::board_dsl::import_to_design(std::path::Path::new(path)) {
-        Ok(d) => d,
-        Err(e) => return Ok(json!({ "error": format!("could not read board `{path}`: {e}") })),
-    };
-    let yaml = board_lang::to_canonical_yaml(&design);
-    Ok(json!({
-        "ok": true,
-        "yaml": yaml,
-        "part_count": design.parts.len(),
-        "note": "imported into Board-DSL with every part LOCKED at its current position (the \
-                 layout is preserved). Pass this yaml to design_board to work on it; drop a \
-                 part's `lock:` to let place_board move it.",
     }))
 }
 
@@ -2963,5 +2827,208 @@ mod escape_bottleneck_tests {
         // "<N plane stitching vias>" is not a net name → matches no pad → no bottleneck.
         let parts = vec![part("U1", "fp", &[("1", "GND")])];
         assert!(escape_bottleneck(&parts, &failed(&["<7 plane stitching vias>"]) ).is_none());
+    }
+}
+
+// ── Interactive IPC board editing ────────────────────────────────────────────
+//
+// Once the engine has seeded a board (derive_board → place_board → route_board →
+// export_board), `open_board` launches a live headless KiCAD and the geometry
+// tools edit the REAL board over IPC. This is where the LLM directly controls
+// geometry (the engine is the assist that produced the starting point).
+
+use kicad_ipc::proto::kiapi::board::types::BoardLayer;
+use kicad_ipc::{footprint_reference, Session};
+
+fn ipc_err(e: kicad_ipc::Error) -> anyhow::Error {
+    anyhow::anyhow!(e.to_string())
+}
+
+fn mm_to_nm(mm: f64) -> i64 {
+    (mm * 1_000_000.0).round() as i64
+}
+
+/// Parse a copper-layer name ("F.Cu", "B.Cu", "In1.Cu", "top", "bottom").
+fn parse_copper_layer(name: &str) -> std::result::Result<BoardLayer, String> {
+    Ok(match name.to_ascii_lowercase().replace('.', "_").as_str() {
+        "f_cu" | "top" | "front" => BoardLayer::BlFCu,
+        "b_cu" | "bottom" | "back" => BoardLayer::BlBCu,
+        "in1_cu" | "in1" => BoardLayer::BlIn1Cu,
+        "in2_cu" | "in2" => BoardLayer::BlIn2Cu,
+        "in3_cu" | "in3" => BoardLayer::BlIn3Cu,
+        "in4_cu" | "in4" => BoardLayer::BlIn4Cu,
+        other => return Err(format!("unknown copper layer `{other}` (use F.Cu / B.Cu / In1.Cu …)")),
+    })
+}
+
+/// Open the exported board in a live headless KiCAD for interactive editing.
+pub fn open_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let path = ctx.pcb_path();
+    if !path.exists() {
+        return Ok(json!({
+            "error": "no .kicad_pcb yet — seed the board first (derive_board → place_board → route_board → export_board), then open_board"
+        }));
+    }
+    match Session::launch_headless(&path) {
+        Ok(s) => *ctx.kicad() = Some(s),
+        Err(e) => return Ok(json!({ "error": format!("could not open the board in KiCAD: {e}") })),
+    }
+    board_state(ctx)
+}
+
+/// Read the live board: footprints (ref + position mm), track/net counts.
+pub fn board_state(ctx: &ToolCtx) -> Result<Value> {
+    let mut guard = ctx.kicad();
+    let Some(session) = guard.as_mut() else {
+        return Ok(json!({ "error": "no board open — call open_board first" }));
+    };
+    let k = session.kicad();
+    let fps = k.footprints().map_err(ipc_err)?;
+    let tracks = k.tracks().map_err(ipc_err)?;
+    let nets = k.nets().map_err(ipc_err)?;
+    let parts: Vec<Value> = fps
+        .iter()
+        .map(|f| {
+            let p = f.position.clone().unwrap_or_default();
+            json!({
+                "reference": footprint_reference(f),
+                "x": p.x_nm as f64 / 1e6,
+                "y": p.y_nm as f64 / 1e6,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "ok": true,
+        "footprints": parts.len(),
+        "parts": parts,
+        "tracks": tracks.len(),
+        "nets": nets,
+    }))
+}
+
+/// Move a part (reference) to (x,y) mm, optional rotation degrees.
+pub fn move_part(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let reference = require_str(&input, "reference")?;
+    let x = match req_num(&input, "x", "move_part") { Ok(v) => v, Err(e) => return Ok(json!({ "error": e })) };
+    let y = match req_num(&input, "y", "move_part") { Ok(v) => v, Err(e) => return Ok(json!({ "error": e })) };
+    let rot = input.get("rotation").and_then(Value::as_f64);
+    let mut guard = ctx.kicad();
+    let Some(session) = guard.as_mut() else {
+        return Ok(json!({ "error": "no board open — call open_board first" }));
+    };
+    match session.kicad().move_footprint(&reference, mm_to_nm(x), mm_to_nm(y), rot) {
+        Ok(()) => Ok(json!({ "ok": true, "reference": reference, "x": x, "y": y })),
+        Err(e) => Ok(json!({ "error": e.to_string() })),
+    }
+}
+
+/// Route a straight track segment: start [x,y], end [x,y] (mm), width (mm),
+/// layer (F.Cu/…), optional net.
+pub fn route_track(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let start = input.get("start").and_then(|v| v.as_array());
+    let end = input.get("end").and_then(|v| v.as_array());
+    let (Some(s), Some(e)) = (start, end) else {
+        return Ok(json!({ "error": "route_track needs `start` and `end` as [x,y] mm arrays" }));
+    };
+    let coord = |a: &[Value], i: usize| a.get(i).and_then(Value::as_f64);
+    let (Some(sx), Some(sy), Some(ex), Some(ey)) = (coord(s, 0), coord(s, 1), coord(e, 0), coord(e, 1)) else {
+        return Ok(json!({ "error": "start/end must be [x,y] numbers (mm)" }));
+    };
+    let width = input.get("width").and_then(Value::as_f64).unwrap_or(0.2);
+    let layer = match parse_copper_layer(input.get("layer").and_then(Value::as_str).unwrap_or("F.Cu")) {
+        Ok(l) => l,
+        Err(err) => return Ok(json!({ "error": err })),
+    };
+    let net = input.get("net").and_then(Value::as_str);
+    let mut guard = ctx.kicad();
+    let Some(session) = guard.as_mut() else {
+        return Ok(json!({ "error": "no board open — call open_board first" }));
+    };
+    match session.kicad().add_track(
+        (mm_to_nm(sx), mm_to_nm(sy)),
+        (mm_to_nm(ex), mm_to_nm(ey)),
+        mm_to_nm(width),
+        layer,
+        net,
+    ) {
+        Ok(()) => Ok(json!({ "ok": true })),
+        Err(e) => Ok(json!({ "error": e.to_string() })),
+    }
+}
+
+/// Set (or update) a net class with a track width + clearance (mm) and assign
+/// nets to it — "wide copper for power". (Note: also achievable per-track via
+/// route_track width.)
+pub fn set_net_width(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let name = require_str(&input, "name")?;
+    let width = input.get("width").and_then(Value::as_f64).unwrap_or(0.5);
+    let clearance = input.get("clearance").and_then(Value::as_f64).unwrap_or(0.2);
+    let nets: Vec<String> = input
+        .get("nets")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let net_refs: Vec<&str> = nets.iter().map(String::as_str).collect();
+    let mut guard = ctx.kicad();
+    let Some(session) = guard.as_mut() else {
+        return Ok(json!({ "error": "no board open — call open_board first" }));
+    };
+    match session.kicad().set_net_class(&name, mm_to_nm(width), mm_to_nm(clearance), &net_refs) {
+        Ok(()) => Ok(json!({ "ok": true, "net_class": name, "width": width, "nets": nets })),
+        Err(e) => Ok(json!({ "error": e.to_string() })),
+    }
+}
+
+/// Pad numbers the part nets that the chosen footprint does NOT have (sorted, deduped).
+fn pads_missing<'a>(pad_keys: impl IntoIterator<Item = &'a str>, fp_pads: &[&str]) -> Vec<String> {
+    let mut missing: Vec<String> = pad_keys
+        .into_iter()
+        .filter(|p| !fp_pads.contains(p))
+        .map(String::from)
+        .collect();
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
+/// Assign a footprint to a part in the draft (fills a missing footprint before placement).
+pub fn assign_footprint(input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let reference = require_str(&input, "reference")?;
+    let footprint = require_str(&input, "footprint")?;
+    let Some(mut draft) = BoardDraft::load(ctx) else {
+        return Ok(json!({ "error": "no board draft — run derive_board first" }));
+    };
+    let index = ctx.footprint_index()?;
+    let Some(fp) = index.footprint(&footprint) else {
+        return Ok(json!({
+            "error": format!("unknown footprint `{footprint}`"),
+            "suggestions": index.suggest(&footprint),
+        }));
+    };
+    let Some(part) = draft.parts.iter_mut().find(|p| p.reference == reference) else {
+        return Ok(json!({ "error": format!("no part `{reference}` on the board") }));
+    };
+    // The footprint must carry every pad the part nets.
+    let fp_pads: Vec<&str> = fp.pads.iter().map(|pp| pp.number.as_str()).collect();
+    let missing = pads_missing(part.pad_nets.keys().map(String::as_str), &fp_pads);
+    if !missing.is_empty() {
+        return Ok(json!({
+            "error": format!("footprint `{footprint}` lacks pads the part nets: {missing:?}"),
+            "note": "pick a footprint whose pads match the part's pins (search_footprints / get_footprint_info)",
+        }));
+    }
+    part.footprint = footprint.clone();
+    draft.save(ctx)?;
+    Ok(json!({ "ok": true, "reference": reference, "footprint": footprint }))
+}
+
+/// Save the live KiCAD board to disk if a session is open. Returns whether it saved.
+pub fn save_session_if_open(ctx: &ToolCtx) -> Result<bool> {
+    let mut guard = ctx.kicad();
+    if let Some(session) = guard.as_mut() {
+        session.kicad().save().map_err(ipc_err)?;
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }

@@ -15,8 +15,8 @@ serde.workspace = true
 serde_json.workspace = true
 
 circuit-lang = { path = "../circuit-lang" }
-board-lang = { path = "../board-lang" }
 kicad-bridge = { path = "../kicad-bridge" }
+kicad-ipc = { path = "../kicad-ipc" }
 pcb-engine = { path = "../pcb-engine" }
 sch-layout = { path = "../sch-layout" }
 indexmap.workspace = true

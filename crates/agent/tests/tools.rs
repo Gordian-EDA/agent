@@ -206,26 +206,32 @@ fn defs_lists_all_tools() {
         "render_board",
         "export_board",
         "review_design",
-        "design_board",
-        "import_board",
         "derive_board",
+        "assign_footprint",
+        "open_board",
+        "board_state",
+        "move_part",
+        "route_track",
+        "set_net_width",
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
-    // The imperative board mutators (set_placement_hints/set_constraints/resize_board/
-    // move_part/unlock_part) and assign_footprints are GONE — the Board-DSL (design_board)
-    // is the single board surface; footprints live in the DSL, not a side map.
+    // The Board-DSL authoring surface (design_board/import_board) and the old
+    // batch mutators are GONE — the board is seeded from the schematic
+    // (derive_board) and edited INTERACTIVELY over KiCAD IPC (open_board +
+    // move_part/route_track/set_net_width).
     for gone in [
         "set_placement_hints",
         "set_constraints",
         "resize_board",
-        "move_part",
         "unlock_part",
         "assign_footprints",
+        "design_board",
+        "import_board",
     ] {
         assert!(!names.contains(&gone.to_string()), "legacy tool still present: {gone}");
     }
-    assert_eq!(names.len(), 22, "expected exactly 22 tools, got {}: {:?}", names.len(), names);
+    assert_eq!(names.len(), 26, "expected exactly 26 tools, got {}: {:?}", names.len(), names);
 
     // Names are unique.
     let mut sorted = names.clone();
@@ -613,7 +619,7 @@ fn search_footprints_finds_vendored_fixture() {
 }
 
 #[test]
-fn derive_board_lifts_schematic_into_dsl_then_design_board_builds_it() {
+fn derive_board_seeds_draft_from_schematic_then_assign_footprint() {
     // Needs a real KiCAD env (lift runs kicad-cli + resolves real footprints).
     let Some(ctx) = ToolCtx::detect_for_test() else {
         eprintln!("SKIP derive_board: no KiCAD env");
@@ -627,35 +633,33 @@ fn derive_board_lifts_schematic_into_dsl_then_design_board_builds_it() {
 
     let bounds = serde_json::json!({ "min_x": 0, "max_x": 20, "min_y": 0, "max_y": 12 });
 
-    // No footprints assigned yet → derive emits a Board-DSL skeleton flagging the gaps.
-    let skel = tools
+    // derive_board seeds the board draft directly from the schematic (no DSL/YAML).
+    let seed = tools
         .run("derive_board", serde_json::json!({ "bounds": bounds }), &ctx)
         .unwrap();
-    if skel.get("error").is_some() {
-        eprintln!("SKIP derive_board: lift failed (kicad-cli unavailable?): {skel}");
+    if seed.get("error").is_some() {
+        eprintln!("SKIP derive_board: lift failed (kicad-cli unavailable?): {seed}");
         return;
     }
-    assert_eq!(skel["ok"], serde_json::json!(true), "skeleton emitted: {skel}");
-    let yaml = skel["yaml"].as_str().unwrap_or("").to_string();
-    assert!(yaml.contains("parts:") && yaml.contains("R1") && yaml.contains("C1"), "lifted R1+C1: {yaml}");
-    assert_eq!(
-        skel["missing_footprints"].as_array().unwrap().len(),
-        2,
-        "both footprints blank for the agent to fill: {skel}"
-    );
+    assert_eq!(seed["ok"], serde_json::json!(true), "board seeded: {seed}");
+    assert_eq!(seed["part_count"], serde_json::json!(2), "R1 + C1 seeded: {seed}");
 
-    // Fill the blank footprints in the YAML (what the agent does after search_footprints) —
-    // footprints live in the DSL now, there is no assign_footprints map — then design_board it.
-    let filled = yaml
-        .replace("R1: {footprint: ''", "R1: {footprint: 'Resistor_SMD:R_0603_1608Metric'")
-        .replace("C1: {footprint: ''", "C1: {footprint: 'Capacitor_SMD:C_0603_1608Metric'");
-    assert!(filled != yaml, "the blank footprints must have been filled: {yaml}");
+    // Fill any footprint the schematic symbol didn't carry, via assign_footprint
+    // (the interactive replacement for the old DSL footprint field).
+    for r in seed["missing_footprints"].as_array().unwrap() {
+        let reference = r.as_str().unwrap();
+        let fp = if reference.starts_with('R') {
+            "Resistor_SMD:R_0603_1608Metric"
+        } else {
+            "Capacitor_SMD:C_0603_1608Metric"
+        };
+        let a = tools
+            .run("assign_footprint", serde_json::json!({ "reference": reference, "footprint": fp }), &ctx)
+            .unwrap();
+        assert_eq!(a["ok"], serde_json::json!(true), "assign {reference}: {a}");
+    }
 
-    // Commit the DSL → the board draft carries R1 + C1, derived (not retyped).
-    let d = tools
-        .run("design_board", serde_json::json!({ "yaml": filled, "overwrite": true }), &ctx)
-        .unwrap();
-    assert_eq!(d["ok"], serde_json::json!(true), "design_board committed: {d}");
+    // The board draft carries R1 + C1, derived (not retyped).
     let board = tools.run("get_board", serde_json::json!({}), &ctx).unwrap();
     let s = board.to_string();
     assert!(s.contains("R1") && s.contains("C1"), "board has R1 + C1: {board}");

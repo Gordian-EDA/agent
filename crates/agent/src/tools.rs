@@ -99,6 +99,10 @@ pub struct ToolCtx {
     footprint_dir_override: Option<PathBuf>,
     /// Project-local persistent state directory `.autopcb/`.
     workspace: crate::workspace::Workspace,
+    /// The live KiCAD IPC session for interactive board editing, launched lazily
+    /// by `open_board` and reused by the geometry tools (`move_part`,
+    /// `route_track`, …). `Mutex` so `ToolCtx` stays `Send + Sync`.
+    kicad: std::sync::Mutex<Option<kicad_ipc::Session>>,
     /// Keeps a test tempdir alive for the ctx's lifetime; `None` for real ctxs.
     _tempdir: Option<tempfile::TempDir>,
 }
@@ -130,6 +134,7 @@ impl ToolCtx {
             footprint_index: OnceLock::new(),
             footprint_dir_override: None,
             workspace,
+            kicad: std::sync::Mutex::new(None),
             _tempdir: None,
         })
     }
@@ -168,6 +173,7 @@ impl ToolCtx {
             footprint_index: OnceLock::new(),
             footprint_dir_override: None,
             workspace,
+            kicad: std::sync::Mutex::new(None),
             _tempdir: Some(tempdir),
         })
     }
@@ -203,6 +209,7 @@ impl ToolCtx {
             footprint_index: OnceLock::new(),
             footprint_dir_override: Some(footprint_dir),
             workspace,
+            kicad: std::sync::Mutex::new(None),
             _tempdir: Some(tempdir),
         })
     }
@@ -250,6 +257,12 @@ impl ToolCtx {
     /// The project's `.autopcb/` persistent state.
     pub fn workspace(&self) -> &crate::workspace::Workspace {
         &self.workspace
+    }
+
+    /// The live KiCAD IPC session (guarded). `open_board` installs one;
+    /// interactive geometry tools take `guard.as_mut()`.
+    pub(crate) fn kicad(&self) -> std::sync::MutexGuard<'_, Option<kicad_ipc::Session>> {
+        self.kicad.lock().expect("kicad session mutex poisoned")
     }
 
     /// The cross-library symbol index, built once and cached.
@@ -527,90 +540,114 @@ impl Tools {
                 }),
             },
             ToolDef {
-                name: "design_board".into(),
-                description: "Author (or replace) the WHOLE board from one Board-DSL document \
-                    — the PCB analog of create_design. Submit `yaml`; it compiles to the board \
-                    draft you then place_board -> route_board -> export_board. This is the single \
-                    board authoring surface: outline, design rules, parts (footprint + pad->net), \
-                    and placement intent, all in editable text.\n\n\
-                    FORMAT (YAML):\n\
-                    version: 1\n\
-                    name: my-board\n\
-                    board:\n\
-                    \u{20}\u{20}layers: 2                 # 2/4/6/8\n\
-                    \u{20}\u{20}outline: {rect: [40, 30]} # or {circle: 16} or {polygon: [[x,y],...]}\n\
-                    \u{20}\u{20}rules: {clearance: 0.2, trace_width: 0.2, via: [0.6, 0.3], net_widths: {VCC: 0.8}, pours: [{net: GND, layer: bottom}]}\n\
-                    parts:\n\
-                    \u{20}\u{20}U1: {footprint: 'Package_SO:SOIC-8_3.9x4.9mm_P1.27mm', pads: {1: VCC, 2: GND}}\n\
-                    \u{20}\u{20}J1: {footprint: 'Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical', pads: {1: VCC, 2: GND}, edge: true}\n\
-                    \u{20}\u{20}H1: {footprint: 'MountingHole:MountingHole_3.2mm_M3', corner: true}\n\
-                    place:                       # optional placement intent\n\
-                    \u{20}\u{20}groups:\n\
-                    \u{20}\u{20}\u{20}\u{20}deco: {members: [C1, C2], surround: U1}   # ring around U1; or region/edge/grid\n\
-                    keepouts:                    # optional copper no-go regions\n\
-                    \u{20}\u{20}- {rect: [x0, y0, x1, y1], layers: [top, bottom]}\n\n\
-                    `edge: true` pulls a part to the nearest board edge (connectors); `corner: true` \
-                    to a board corner (mounting holes); `lock: {at: [x, y], rot: 90}` pins a part. \
-                    Coordinates and copper are the engine's job — never author them except a lock. \
-                    Find footprint lib_ids with search_footprints (never guess). Compile errors and \
-                    unknown footprints return as diagnostics so you fix the YAML and resubmit. \
-                    overwrite=true replaces an existing board."
+                name: "assign_footprint".into(),
+                description: "Set a part's footprint in the board draft (fills a part whose \
+                    schematic symbol carried no footprint). The footprint must have every pad the \
+                    part nets (checked). Find lib_ids with search_footprints — never guess. Run \
+                    after derive_board, before place_board."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "yaml": { "type": "string",
-                            "description": "The Board-DSL document (see the format in this tool's description)." },
-                        "overwrite": { "type": "boolean",
-                            "description": "Replace an existing board draft." }
+                        "reference": { "type": "string", "description": "Part reference, e.g. \"U1\"." },
+                        "footprint": { "type": "string", "description": "Footprint lib_id, e.g. \"Package_SO:SOIC-8_3.9x4.9mm_P1.27mm\"." }
                     },
-                    "required": ["yaml"]
+                    "required": ["reference", "footprint"]
                 }),
             },
             ToolDef {
-                name: "import_board".into(),
-                description: "Lift an existing .kicad_pcb into a Board-DSL document so you can \
-                    start from a given board (the round-trip entry; mirrors the schematic lift). \
-                    Returns the canonical `yaml`: parts (footprint + pad->net) recovered from the \
-                    file, each LOCKED at its current position so the layout is preserved, plus \
-                    the layer count and outline bbox. Edit the yaml and design_board it; drop a \
-                    part's `lock:` to let place_board move it. (Design rules default — a board \
-                    file doesn't carry copper clearance/width; a non-rectangular outline is \
-                    approximated by its bounding box for now.)"
+                name: "open_board".into(),
+                description: "Open the exported .kicad_pcb in a LIVE headless KiCAD for INTERACTIVE \
+                    editing over IPC. After this you edit the REAL board directly — move_part, \
+                    route_track, set_net_width — with board_state to read it and render_board to see \
+                    it. Requires an exported board (derive_board -> [assign_footprint] -> place_board \
+                    -> route_board -> export_board). Returns the board state."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            ToolDef {
+                name: "board_state".into(),
+                description: "Read the live (open) board: every part's reference + position (mm), the \
+                    track count, and the net list. Inspect before/after an interactive edit. Requires open_board."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            ToolDef {
+                name: "move_part".into(),
+                description: "Move a part to (x, y) mm (optional rotation degrees) on the live board — \
+                    direct geometry control for thermal / decoupling / length-match placement. Requires open_board."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Path to the .kicad_pcb file to import." }
+                        "reference": { "type": "string", "description": "Part reference, e.g. \"U1\"." },
+                        "x": { "type": "number", "description": "X position (mm)." },
+                        "y": { "type": "number", "description": "Y position (mm)." },
+                        "rotation": { "type": "number", "description": "Optional rotation (degrees)." }
                     },
-                    "required": ["path"]
+                    "required": ["reference", "x", "y"]
+                }),
+            },
+            ToolDef {
+                name: "route_track".into(),
+                description: "Route a straight copper track on the live board: start/end as [x,y] mm, \
+                    width mm, a copper layer (F.Cu/B.Cu/In1.Cu/...), optionally on a net. WIDTH is the \
+                    engineering lever — fat copper for power/high current, thin for signals. Requires open_board."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "start": { "type": "array", "items": {"type":"number"}, "description": "[x, y] mm." },
+                        "end": { "type": "array", "items": {"type":"number"}, "description": "[x, y] mm." },
+                        "width": { "type": "number", "description": "Track width (mm). Default 0.2." },
+                        "layer": { "type": "string", "description": "Copper layer: F.Cu, B.Cu, In1.Cu, ... Default F.Cu." },
+                        "net": { "type": "string", "description": "Optional net name to assign." }
+                    },
+                    "required": ["start", "end"]
+                }),
+            },
+            ToolDef {
+                name: "set_net_width".into(),
+                description: "Define (or update) a net class with a track width + clearance (mm) and \
+                    assign nets to it — the idiomatic \"wide copper for power\" lever (e.g. widen \
+                    GND/VCC/VIN). Requires open_board. (Per-track widths are also settable via route_track.)"
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Net class name, e.g. \"Power\"." },
+                        "width": { "type": "number", "description": "Track width (mm). Default 0.5." },
+                        "clearance": { "type": "number", "description": "Clearance (mm). Default 0.2." },
+                        "nets": { "type": "array", "items": {"type":"string"}, "description": "Net names, e.g. [\"GND\",\"VCC\"]." }
+                    },
+                    "required": ["name", "nets"]
                 }),
             },
             ToolDef {
                 name: "derive_board".into(),
-                description: "Lift the committed schematic into a Board-DSL SKELETON — so you \
-                    don't re-type parts. Reads the schematic's parts + netlist (pin->pad is \
-                    KiCAD's) and returns `yaml`: one part per component with its pad->net map \
-                    filled in and a BLANK footprint. You then fill the footprints \
-                    (search_footprints), set board.outline + \
-                    rules, and commit with design_board(yaml). Requires a committed .kicad_sch \
-                    (run apply_design first). `missing_footprints` lists parts still needing a \
-                    footprint. Optional `bounds` seeds the outline; `rules.layers` the layer \
-                    count — both editable in the returned YAML."
+                description: "Seed the board from the committed schematic: reads the parts + \
+                    netlist (pin->pad is KiCAD's) and builds the board draft — one part per \
+                    component with its pad->net map and the footprint taken from the symbol. \
+                    Requires a committed .kicad_sch (run apply_design first). `missing_footprints` \
+                    lists parts whose symbol had no footprint — set each with assign_footprint. \
+                    Then place_board -> route_board -> export_board -> open_board to refine \
+                    interactively. Optional `bounds` seeds the outline (mm); `rules.layers` the \
+                    copper layer count; overwrite=true replaces an existing draft."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "bounds": {
                             "type": "object",
-                            "description": "Optional: seed the board outline (mm, y-down). Editable in the YAML.",
+                            "description": "Optional: seed the board outline (mm, y-down).",
                             "properties": {
                                 "min_x": { "type": "number" }, "max_x": { "type": "number" },
                                 "min_y": { "type": "number" }, "max_y": { "type": "number" }
                             }
                         },
                         "rules": { "type": "object",
-                            "description": "Optional: {layers: 2|4} seeds the layer count in the YAML." }
+                            "description": "Optional: {layers: 2|4} seeds the copper layer count." },
+                        "overwrite": { "type": "boolean", "description": "Replace an existing board draft." }
                     }
                 }),
             },
@@ -655,8 +692,8 @@ impl Tools {
                     by kind — EXPECTED ZERO; a non-zero count sets engine_bug=true and \
                     is an engine fault, not a board you can fix). When nets fail, a \
                     congestion report (iterations + edge hotspots) is included to guide \
-                    triage — re-author the Board-DSL (a bigger outline, looser rules, a \
-                    part lock, a relaxed keepout) and design_board it again."
+                    triage — re-seed with a bigger outline or more layers (derive_board \
+                    overwrite=true), or refine interactively after open_board."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
@@ -733,14 +770,18 @@ impl Tools {
             "edit_design" => edit_design(input, ctx),
             "search_footprints" => crate::tools_pcb::search_footprints(input, ctx),
             "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
-            "design_board" => crate::tools_pcb::design_board(input, ctx),
-            "import_board" => crate::tools_pcb::import_board(input, ctx),
             "derive_board" => crate::tools_pcb::derive_board(input, ctx),
+            "assign_footprint" => crate::tools_pcb::assign_footprint(input, ctx),
             "get_board" => crate::tools_pcb::get_board(ctx),
             "place_board" => crate::tools_pcb::place_board(input, ctx),
             "route_board" => crate::tools_pcb::route_board(input, ctx),
-            "render_board" => crate::tools_pcb::render_board(input, ctx),
             "export_board" => crate::tools_pcb::export_board(input, ctx),
+            "open_board" => crate::tools_pcb::open_board(input, ctx),
+            "board_state" => crate::tools_pcb::board_state(ctx),
+            "move_part" => crate::tools_pcb::move_part(input, ctx),
+            "route_track" => crate::tools_pcb::route_track(input, ctx),
+            "set_net_width" => crate::tools_pcb::set_net_width(input, ctx),
+            "render_board" => crate::tools_pcb::render_board(input, ctx),
             other => bail!("unknown tool: {other}"),
         }
     }
