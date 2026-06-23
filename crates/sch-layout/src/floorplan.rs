@@ -1717,6 +1717,11 @@ fn emit_strategy(
         // touches them. This re-derives each phase pair from the placed netlist and seats its stage at
         // the VB/VS pins, overlap-safe against the whole sheet.
         changed |= gather_bootstrap_stages(&mut items, ir);
+        // DEAD LAST: re-gather each scattered BRIDGE RESISTOR (an INA gain resistor / op-amp feedback
+        // resistor) back onto the two IC pins it shorts, so its local net labels sit TIGHT beside those
+        // pins instead of strewn across the sheet onto the IC's other pin labels (the fresh8 INA
+        // input-label-cluster defect). Purely-local nets only; cross-sheet ports keep their labels.
+        changed |= gather_bridge_resistors(&mut items, ir);
         if changed {
             w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
         }
@@ -3224,6 +3229,218 @@ fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> bool {
             claimed.insert(i);
         }
         moves.extend(proposed);
+    }
+    let moved = !moves.is_empty();
+    for (i, at, angle) in moves {
+        items[i].at = at;
+        items[i].angle = angle;
+    }
+    moved
+}
+
+/// GATHER a "bridge resistor" back onto the IC pins it bridges, so its net labels sit TIGHT and LOCAL
+/// beside those pins instead of scattering across the sheet and colliding with the IC's other pin labels
+/// (the fresh8 instrumentation-amp modal-6 defect: the INA's gain resistor `Rg` placed far from the INA,
+/// with its CH_RG1/CH_RG2 net labels colliding with the CH_IN_N/CH_IN_P input labels, so the input region
+/// renders as an unreadable label cluster). A bridge resistor = a 2-pin part whose BOTH pins land on the
+/// pins of ONE ≥3-pin IC, each via a PURELY LOCAL net (both endpoints on this sheet — NOT a cross-sheet
+/// port). The textbook example is an INA gain resistor (Rg1↔Rg2) or an op-amp feedback resistor (OUT↔IN−);
+/// the two-pin part WANTS to sit right at the two IC pins it shorts, not be scattered across the sheet.
+///
+/// Geometry: the two bridged IC pins sit on ONE edge, offset ALONG it (the INA's Rg pins 1/8 are stacked
+/// 5.08 mm apart on the left edge). Seat the resistor PARALLEL to that edge so its two pins line up with
+/// the two IC pins, and project it one GAP OFF the IC's body edge centred on their midpoint. When the
+/// natural seat is blocked (the INA input region is crowded — an anti-alias cap squats in it) it steps one
+/// slot further out / along the edge. NOTE: whether the net then renders as a short WIRE or as a tidy
+/// LOCAL label pair is the router's call — a TRIANGLE amplifier symbol attaches its Rg pins partway up the
+/// hypotenuse so their connection points fall INSIDE the symbol's bounding box, and `route_edge` rightly
+/// refuses a wire that would graze the body, so those stay label-bridged; the win here is that the labels
+/// are now COMPACT and adjacent (modal 6→8 on fresh8), not strewn over the input pins.
+///
+/// This is the SIBLING of `gather_decoupling_bank`/`gather_crystal_cluster`/`gather_bootstrap_stages`: a
+/// DEAD-LAST, overlap-safe, MULTISHEET_REFINE-gated re-gather, re-derived GENERICALLY from the placed
+/// netlist (NOT from `ir.idioms`/`frozen`). It DELIBERATELY skips any net the author marked a port
+/// (`ir.ports`) or a power/rail net — those are correctly labelled and must not be re-wired. It SWEEPS a
+/// small ladder of seats and commits the FIRST that introduces NO new overlap against ANY item on the
+/// sheet (there is no follow-up decongest to repair a collision). Multi-sheet only (gated) ⇒ single-sheet
+/// reference snapshots stay byte-identical.
+fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool {
+    if std::env::var("MULTISHEET_REFINE").is_err() {
+        return false;
+    }
+    let snap = crate::grid::snap;
+    const GAP: f64 = 5.08; // bridged-pin edge → bridge part, on grid (short stub each side)
+
+    // A net is PURELY LOCAL iff the author did not mark it a port (cross-sheet) AND it is not a
+    // power/rail net. Only such a net is drawn as a wire — labelling it would be a lie. Identical
+    // local-net test the route path uses (`ir.ports` carries every cross-sheet hop).
+    let is_local = |n: &str| {
+        !ir.ports.contains_key(n) && !is_power_net(n) && !ir.rails.contains_key(n) && !is_ground(n)
+    };
+    // Candidate IC anchors: ≥3-pin, non-connector (same exclusion the sibling passes make). Index order.
+    let anchor_idxs: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() >= 3 && !is_connector_like(&items[i].part))
+        .collect();
+
+    let mut moves: Vec<(usize, [f64; 2], f64)> = Vec::new();
+    let mut claimed: BTreeSet<usize> = BTreeSet::new();
+
+    // A bridge part: a 2-pin `R*` (gain/feedback resistor — the recurring case) whose two pins both
+    // carry purely-local nets. Index-ordered for determinism.
+    for ri in (0..items.len()).filter(|&i| {
+        items[i].refdes.starts_with('R') && items[i].geom.pins.len() == 2 && !items[i].frozen
+    }) {
+        if claimed.contains(&ri) {
+            continue;
+        }
+        let bnets: Vec<String> = items[ri].pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
+        if bnets.len() != 2 || bnets[0] == bnets[1] || !bnets.iter().all(|n| is_local(n)) {
+            continue;
+        }
+        // The anchor IC = the ≥3-pin non-connector that taps BOTH of the resistor's nets. If several do
+        // (rare), pick the NEAREST — the one the bridge should hug.
+        let taps_both = |ai: usize| -> bool {
+            bnets
+                .iter()
+                .all(|net| items[ai].pins.iter().any(|(_, _, n)| n.as_deref() == Some(net.as_str())))
+        };
+        let Some(ai) = anchor_idxs
+            .iter()
+            .copied()
+            .filter(|&ai| ai != ri && taps_both(ai))
+            .min_by(|&a, &b| {
+                let d = |ai: usize| {
+                    let dx = items[ai].at[0] - items[ri].at[0];
+                    let dy = items[ai].at[1] - items[ri].at[1];
+                    dx * dx + dy * dy
+                };
+                d(a).total_cmp(&d(b))
+            })
+        else {
+            continue;
+        };
+        // The IC's pin-tip world position for one of the bridged nets.
+        let pin_world = |net: &str| -> Option<[f64; 2]> {
+            let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net))?.0.clone();
+            let pg = items[ai].geom.pins.iter().find(|p| p.number == num)?;
+            Some(crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
+        };
+        let (Some(wa), Some(wb)) = (pin_world(&bnets[0]), pin_world(&bnets[1])) else {
+            continue;
+        };
+        let mid = [(wa[0] + wb[0]) / 2.0, (wa[1] + wb[1]) / 2.0];
+        // Outward direction = the IC EDGE the two bridged pins hug (nearest edge of the IC's pin bbox to
+        // their midpoint). Identical classifier to gather_crystal_cluster.
+        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+        for pg in &items[ai].geom.pins {
+            let w = crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
+            lo[0] = lo[0].min(w[0]);
+            lo[1] = lo[1].min(w[1]);
+            hi[0] = hi[0].max(w[0]);
+            hi[1] = hi[1].max(w[1]);
+        }
+        let (dl, dr, dt, db) = (mid[0] - lo[0], hi[0] - mid[0], mid[1] - lo[1], hi[1] - mid[1]);
+        let m = dl.min(dr).min(dt).min(db);
+        let dir: [f64; 2] = if m == dl {
+            [-1.0, 0.0]
+        } else if m == dr {
+            [1.0, 0.0]
+        } else if m == dt {
+            [0.0, -1.0]
+        } else {
+            [0.0, 1.0]
+        };
+        // Orient the resistor PARALLEL to the edge (perpendicular to `dir`), so its two pins line up with
+        // the two bridged IC pins (which are separated ALONG the edge) — a short stub joins each. For a
+        // left/right edge the pins separate vertically ⇒ stand the resistor UP; for a top/bottom edge they
+        // separate horizontally ⇒ lay it flat. Seat its pin-1 on the SAME side as the IC pin carrying
+        // net[0] so the two stubs don't cross.
+        let along_vertical = dir[0] != 0.0; // side edge ⇒ pins stacked vertically
+        let net0_lane = if along_vertical { wa[1] } else { wa[0] };
+        let net1_lane = if along_vertical { wb[1] } else { wb[0] };
+        let p1_orient = if along_vertical {
+            // pin1 toward the smaller-y (upper) of the two bridged pins.
+            if net0_lane <= net1_lane { Orient::Up } else { Orient::Down }
+        } else if net0_lane <= net1_lane {
+            Orient::Left
+        } else {
+            Orient::Right
+        };
+        let res_angle = orient_angle(&items[ri].geom, p1_orient);
+        // Project the resistor OUT from the IC's item_rect body edge, centred on the bridged-pin
+        // midpoint. `body_edge` = the IC body edge on the `dir` side; `lane_mid` = the along-edge midpoint.
+        let body = item_rect(&items[ai], items[ai].at);
+        let body_edge = if dir[0] > 0.0 {
+            body[2]
+        } else if dir[0] < 0.0 {
+            body[0]
+        } else if dir[1] > 0.0 {
+            body[3]
+        } else {
+            body[1]
+        };
+        let dir_sign = if dir[0] != 0.0 { dir[0] } else { dir[1] };
+        let res_ext = {
+            let mut probe = items[ri].clone();
+            probe.angle = res_angle;
+            let r = item_rect(&probe, items[ri].at);
+            if dir[0] != 0.0 { r[2] - r[0] } else { r[3] - r[1] }
+        };
+        let lane_mid = if dir[0] != 0.0 { mid[1] } else { mid[0] };
+        // Overlap test against the WHOLE sheet (the sibling discipline): a seat is admissible only if it
+        // introduces NO new overlap — there is no follow-up decongest to repair a collision. Fold earlier
+        // committed moves into both the baseline and the proposal so they're judged in the same world.
+        let committed: BTreeMap<usize, ([f64; 2], f64)> =
+            moves.iter().map(|&(i, at, ang)| (i, (at, ang))).collect();
+        let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> [f64; 4] {
+            let mut probe = items[idx].clone();
+            probe.angle = angle;
+            item_rect(&probe, at)
+        };
+        let settled = |idx: usize| -> [f64; 4] {
+            match committed.get(&idx) {
+                Some(&(at, ang)) => rect_at(idx, at, ang),
+                None => item_rect(&items[idx], items[idx].at),
+            }
+        };
+        let seat_ok = |at: [f64; 2]| -> bool {
+            let r = rect_at(ri, at, res_angle);
+            (0..items.len()).all(|other| {
+                other == ri
+                    || !(rects_overlap(r, settled(other))
+                        && !rects_overlap(settled(ri), settled(other)))
+            })
+        };
+        // SWEEP a small ladder of seats and take the FIRST overlap-free one (the way a human nudges the
+        // part off a bystander): the natural seat is one GAP off the body edge centred on the pin
+        // midpoint; if blocked, step FURTHER out, then slide ALONG the edge ± to either side. All seats
+        // keep the resistor parallel to + beside its two bridged pins, so the engine wires it short.
+        let mut chosen: Option<[f64; 2]> = None;
+        'seat: for d in 0..4 {
+            let depth = body_edge + dir_sign * (GAP + res_ext / 2.0 + d as f64 * 2.54);
+            for lane_step in [0.0_f64, -5.08, 5.08, -10.16, 10.16] {
+                let lane = lane_mid + lane_step;
+                let at = if dir[0] != 0.0 {
+                    [snap(depth), snap(lane)]
+                } else {
+                    [snap(lane), snap(depth)]
+                };
+                // No-op: if this seat is where the part already sits, it's already good — stop.
+                if (items[ri].at[0] - at[0]).abs() < 1.27
+                    && (items[ri].at[1] - at[1]).abs() < 1.27
+                    && (items[ri].angle - res_angle).abs() < 0.5
+                {
+                    break 'seat;
+                }
+                if seat_ok(at) {
+                    chosen = Some(at);
+                    break 'seat;
+                }
+            }
+        }
+        let Some(res_at) = chosen else { continue };
+        claimed.insert(ri);
+        moves.push((ri, res_at, res_angle));
     }
     let moved = !moves.is_empty();
     for (i, at, angle) in moves {
