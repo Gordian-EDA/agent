@@ -202,21 +202,37 @@ fn defs_lists_all_tools() {
         "get_footprint_info",
         "get_board",
         "place_board",
-        "set_placement_hints",
-        "set_constraints",
-        "resize_board",
-        "move_part",
-        "unlock_part",
         "route_board",
+        "autoroute",
         "render_board",
         "export_board",
         "review_design",
-        "assign_footprints",
         "derive_board",
+        "assign_footprint",
+        "open_board",
+        "board_state",
+        "move_part",
+        "route_track",
+        "set_net_width",
     ] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
-    assert_eq!(names.len(), 26, "expected exactly 26 tools, got {}: {:?}", names.len(), names);
+    // The Board-DSL authoring surface (design_board/import_board) and the old
+    // batch mutators are GONE — the board is seeded from the schematic
+    // (derive_board) and edited INTERACTIVELY over KiCAD IPC (open_board +
+    // move_part/route_track/set_net_width).
+    for gone in [
+        "set_placement_hints",
+        "set_constraints",
+        "resize_board",
+        "unlock_part",
+        "assign_footprints",
+        "design_board",
+        "import_board",
+    ] {
+        assert!(!names.contains(&gone.to_string()), "legacy tool still present: {gone}");
+    }
+    assert_eq!(names.len(), 27, "expected exactly 27 tools, got {}: {:?}", names.len(), names);
 
     // Names are unique.
     let mut sorted = names.clone();
@@ -604,37 +620,7 @@ fn search_footprints_finds_vendored_fixture() {
 }
 
 #[test]
-fn assign_footprints_validates_and_persists() {
-    let (ctx, _guard) = fixture_ctx();
-    let tools = Tools::new();
-
-    // A valid fixture footprint is stored under its refdes.
-    let out = tools
-        .run(
-            "assign_footprints",
-            serde_json::json!({ "assignments": { "R1": "Fixtures:R_0603_1608Metric" } }),
-            &ctx,
-        )
-        .unwrap();
-    assert_eq!(out["ok"], serde_json::json!(true), "{out}");
-    assert_eq!(out["footprints"]["R1"], serde_json::json!("Fixtures:R_0603_1608Metric"));
-
-    // An unknown lib_id is reported in `unknown` and skipped; R1 still persists.
-    let out2 = tools
-        .run(
-            "assign_footprints",
-            serde_json::json!({ "assignments": { "R2": "Nope:DoesNotExist" } }),
-            &ctx,
-        )
-        .unwrap();
-    assert_eq!(out2["ok"], serde_json::json!(false), "{out2}");
-    assert!(!out2["unknown"].as_array().unwrap().is_empty(), "unknown listed: {out2}");
-    assert_eq!(out2["footprints"]["R1"], serde_json::json!("Fixtures:R_0603_1608Metric"));
-    assert!(out2["footprints"].get("R2").is_none(), "bad lib_id not stored: {out2}");
-}
-
-#[test]
-fn derive_board_builds_from_schematic_and_footprint_map() {
+fn derive_board_seeds_draft_from_schematic_then_assign_footprint() {
     // Needs a real KiCAD env (lift runs kicad-cli + resolves real footprints).
     let Some(ctx) = ToolCtx::detect_for_test() else {
         eprintln!("SKIP derive_board: no KiCAD env");
@@ -648,34 +634,33 @@ fn derive_board_builds_from_schematic_and_footprint_map() {
 
     let bounds = serde_json::json!({ "min_x": 0, "max_x": 20, "min_y": 0, "max_y": 12 });
 
-    // No footprints assigned yet → derive_board reports the gaps (R1, C1).
-    let gaps = tools
+    // derive_board seeds the board draft directly from the schematic (no DSL/YAML).
+    let seed = tools
         .run("derive_board", serde_json::json!({ "bounds": bounds }), &ctx)
         .unwrap();
-    if gaps.get("error").is_some() {
-        eprintln!("SKIP derive_board: lift failed (kicad-cli unavailable?): {gaps}");
+    if seed.get("error").is_some() {
+        eprintln!("SKIP derive_board: lift failed (kicad-cli unavailable?): {seed}");
         return;
     }
-    assert_eq!(gaps["ok"], serde_json::json!(false), "gaps reported: {gaps}");
-    assert_eq!(gaps["needs_footprints"].as_array().unwrap().len(), 2, "R1 + C1: {gaps}");
+    assert_eq!(seed["ok"], serde_json::json!(true), "board seeded: {seed}");
+    assert_eq!(seed["part_count"], serde_json::json!(2), "R1 + C1 seeded: {seed}");
 
-    // Assign real footprints, then derive succeeds and builds the board.
-    tools
-        .run(
-            "assign_footprints",
-            serde_json::json!({ "assignments": {
-                "R1": "Resistor_SMD:R_0603_1608Metric",
-                "C1": "Capacitor_SMD:C_0603_1608Metric"
-            }}),
-            &ctx,
-        )
-        .unwrap();
-    let out = tools
-        .run("derive_board", serde_json::json!({ "bounds": bounds, "overwrite": true }), &ctx)
-        .unwrap();
-    assert!(out.get("error").is_none(), "derive succeeded: {out}");
+    // Fill any footprint the schematic symbol didn't carry, via assign_footprint
+    // (the interactive replacement for the old DSL footprint field).
+    for r in seed["missing_footprints"].as_array().unwrap() {
+        let reference = r.as_str().unwrap();
+        let fp = if reference.starts_with('R') {
+            "Resistor_SMD:R_0603_1608Metric"
+        } else {
+            "Capacitor_SMD:C_0603_1608Metric"
+        };
+        let a = tools
+            .run("assign_footprint", serde_json::json!({ "reference": reference, "footprint": fp }), &ctx)
+            .unwrap();
+        assert_eq!(a["ok"], serde_json::json!(true), "assign {reference}: {a}");
+    }
 
-    // The board draft now carries R1 + C1, derived from the schematic (not retyped).
+    // The board draft carries R1 + C1, derived (not retyped).
     let board = tools.run("get_board", serde_json::json!({}), &ctx).unwrap();
     let s = board.to_string();
     assert!(s.contains("R1") && s.contains("C1"), "board has R1 + C1: {board}");
@@ -1084,224 +1069,6 @@ fn export_board_e2e_kicad_drc_clean() {
          0 unconnected, {} tolerated footprint warning(s)",
         ctx.env().cli_version,
         drc["tolerated_footprint_warnings"]
-    );
-}
-
-#[test]
-fn keepout_wall_changes_routing_outcome() {
-    use agent::tools_pcb::BoardDraft;
-
-    // A board whose two connected parts are LOCKED on opposite sides, forced to
-    // route across the middle, then a keepout WALL on both layers spanning the
-    // whole height down the centre. With the wall, the only corridor is gone, so
-    // routing must differ — fail honestly or take a longer path — vs without it.
-    let (ctx, _g) = fixture_ctx();
-    let tools = Tools::new();
-    let board = serde_json::json!({
-        "bounds": { "min_x": 0.0, "max_x": 40.0, "min_y": 0.0, "max_y": 20.0 },
-        "parts": [
-            { "reference": "J1", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
-              "pad_nets": { "1": "A", "2": "B" } },
-            { "reference": "J2", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
-              "pad_nets": { "1": "A", "2": "B" } }
-        ]
-    });
-    assert_eq!(agent::tools_pcb::build_board_draft(board, &ctx).unwrap()["ok"], serde_json::json!(true));
-
-    // Lock J1 on the far west, J2 on the far east — connected by nets A and B.
-    tools.run("move_part",
-        serde_json::json!({ "reference": "J1", "x": 3.0, "y": 10.0 }), &ctx).unwrap();
-    tools.run("move_part",
-        serde_json::json!({ "reference": "J2", "x": 37.0, "y": 10.0 }), &ctx).unwrap();
-
-    // Baseline: place + route with NO keepout.
-    assert_eq!(tools.run("place_board", serde_json::json!({}), &ctx).unwrap()["legal"],
-        serde_json::json!(true));
-    let base = tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
-    let base_failed = base["failed"].as_array().unwrap().len();
-    let base_wirelength = base["metrics"]["wirelength"].as_f64().unwrap();
-
-    // Now add a full-height wall keepout on BOTH layers down the middle.
-    let out = tools.run("set_constraints", serde_json::json!({
-        "keepouts": [
-            { "rect": { "min_x": 19.0, "max_x": 21.0, "min_y": 0.0, "max_y": 20.0 },
-              "layers": ["top", "bottom"] }
-        ]
-    }), &ctx).unwrap();
-    assert_eq!(out["ok"], serde_json::json!(true), "set_constraints: {out}");
-    assert_eq!(out["keepout_count"], serde_json::json!(1), "{out}");
-    // Placement stands (rules/keepouts don't move parts).
-    assert_eq!(out["placement_kept"], serde_json::json!(true), "{out}");
-    // The route was invalidated and cleared.
-    assert_eq!(out["route_cleared"], serde_json::json!(true), "{out}");
-    let draft = BoardDraft::load(&ctx).expect("draft");
-    assert!(draft.last_placement.is_some(), "set_constraints keeps the placement");
-    assert!(ctx.workspace().read_route().is_none(), "route.json cleared");
-
-    // Re-route WITH the wall: the outcome must be observably different.
-    let walled = tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
-    let walled_failed = walled["failed"].as_array().unwrap().len();
-    let walled_wirelength = walled["metrics"]["wirelength"].as_f64().unwrap();
-
-    let differs = walled_failed != base_failed
-        || (walled_wirelength - base_wirelength).abs() > 1e-6;
-    assert!(
-        differs,
-        "a full-height wall keepout on both layers must change the route \
-         (failed: {base_failed} -> {walled_failed}, wirelength: {base_wirelength} -> {walled_wirelength})"
-    );
-}
-
-#[test]
-fn move_part_lock_is_honored_by_place_board() {
-    let (ctx, _g, tools) = placed_board_ctx();
-
-    // Pin U1... actually our standard board has R1/R2/J1; pin R2 at a corner.
-    let out = tools.run("move_part",
-        serde_json::json!({ "reference": "R2", "x": 25.0, "y": 5.0, "rotation": 90 }), &ctx).unwrap();
-    assert_eq!(out["ok"], serde_json::json!(true), "move_part: {out}");
-
-    let out = tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(out["legal"], serde_json::json!(true), "{out}");
-    let r2 = out["positions"].as_array().unwrap().iter()
-        .find(|p| p["reference"] == "R2").expect("R2 placed");
-    assert_eq!(r2["x"], serde_json::json!(25.0), "locked R2 keeps its x: {out}");
-    assert_eq!(r2["y"], serde_json::json!(5.0), "locked R2 keeps its y: {out}");
-    assert_eq!(r2["rotation"], serde_json::json!(90), "locked R2 keeps its rotation: {out}");
-
-    // Out-of-bounds move is a recoverable error.
-    let out = tools.run("move_part",
-        serde_json::json!({ "reference": "R2", "x": 999.0, "y": 5.0 }), &ctx).unwrap();
-    assert!(out["error"].as_str().is_some_and(|e| e.contains("outside the board")), "{out}");
-
-    // Unknown reference is a recoverable error.
-    let out = tools.run("move_part",
-        serde_json::json!({ "reference": "ZZ", "x": 5.0, "y": 5.0 }), &ctx).unwrap();
-    assert!(out["error"].as_str().is_some_and(|e| e.contains("unknown reference")), "{out}");
-
-    // unlock_part releases the lock.
-    let out = tools.run("unlock_part", serde_json::json!({ "reference": "R2" }), &ctx).unwrap();
-    assert_eq!(out["ok"], serde_json::json!(true), "{out}");
-    assert_eq!(out["was_locked"], serde_json::json!(true), "{out}");
-}
-
-#[test]
-fn set_constraints_rejects_net_classes() {
-    let (ctx, _g, tools) = placed_board_ctx();
-    let out = tools.run("set_constraints", serde_json::json!({
-        "net_classes": [ { "name": "power", "clearance": 0.5 } ]
-    }), &ctx).unwrap();
-    assert!(
-        out["error"].as_str().is_some_and(|e| e.contains("net classes")
-            && e.contains("not yet supported")),
-        "net_classes must be honestly rejected: {out}"
-    );
-}
-
-#[test]
-fn set_constraints_partial_rules_merge_and_clear_route() {
-    let (ctx, _g, tools) = placed_board_ctx();
-    // Place + route so there's a route.json to invalidate.
-    tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
-    tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
-    assert!(ctx.workspace().read_route().is_some(), "routed");
-
-    // Partial rules update: only clearance changes.
-    let out = tools.run("set_constraints", serde_json::json!({
-        "rules": { "clearance": 0.3 }
-    }), &ctx).unwrap();
-    assert_eq!(out["ok"], serde_json::json!(true), "{out}");
-    assert_eq!(out["rules"]["clearance"], serde_json::json!(0.3), "{out}");
-    // The other rules kept their defaults (partial update).
-    assert_eq!(out["rules"]["min_trace_width"], serde_json::json!(0.2), "{out}");
-    assert_eq!(out["route_cleared"], serde_json::json!(true), "{out}");
-    assert!(ctx.workspace().read_route().is_none(), "route cleared by rule change");
-}
-
-#[test]
-fn resize_board_enlarges_keeps_parts_and_clears_state() {
-    let (ctx, _g, tools) = placed_board_ctx();
-    // Place + route so there is placement + route state for resize to clear.
-    tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
-    tools.run("route_board", serde_json::json!({}), &ctx).unwrap();
-    assert!(ctx.workspace().read_route().is_some(), "routed before resize");
-
-    let out = tools
-        .run(
-            "resize_board",
-            serde_json::json!({ "bounds": { "min_x": 0.0, "max_x": 200.0, "min_y": 0.0, "max_y": 200.0 } }),
-            &ctx,
-        )
-        .unwrap();
-    assert_eq!(out["ok"], serde_json::json!(true), "{out}");
-    assert_eq!(out["bounds"]["max_x"], serde_json::json!(200.0), "{out}");
-    assert!(out["parts_kept"].as_u64().is_some_and(|n| n > 0), "parts kept: {out}");
-    assert_eq!(out["route_cleared"], serde_json::json!(true), "{out}");
-    assert!(ctx.workspace().read_route().is_none(), "route cleared by resize");
-
-    // Parts were kept, so a fresh place succeeds into the new (larger) bounds.
-    let p = tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(p["legal"], serde_json::json!(true), "re-place legal after enlarge: {p}");
-}
-
-#[test]
-fn resize_board_closes_the_too_tight_placement_trap() {
-    // The deterministic proof of the convergence fix: a board too small for its parts is illegal,
-    // and resize_board (not move_part, not re-create_board) is what makes the re-place legal.
-    let (ctx, _g) = fixture_ctx();
-    let tools = Tools::new();
-    let board = serde_json::json!({
-        "bounds": { "min_x": 0.0, "max_x": 4.0, "min_y": 0.0, "max_y": 4.0 },
-        "parts": [
-            { "reference": "J1", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
-              "pad_nets": { "1": "A", "2": "B" } },
-            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
-              "pad_nets": { "1": "A", "2": "B" } }
-        ]
-    });
-    assert_eq!(agent::tools_pcb::build_board_draft(board, &ctx).unwrap()["ok"], serde_json::json!(true));
-
-    // Too tight → place_board reports illegal + a suggested larger bounds.
-    let p = tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(p["legal"], serde_json::json!(false), "a 4x4 board can't hold a 1x2 header: {p}");
-    let sw = p["suggested_min_bounds_mm"]["w"].as_f64().expect("suggested w");
-    let sh = p["suggested_min_bounds_mm"]["h"].as_f64().expect("suggested h");
-
-    // The cheap lever: resize to the suggestion (no re-create_board, parts kept).
-    let r = tools
-        .run(
-            "resize_board",
-            serde_json::json!({ "bounds": { "min_x": 0.0, "max_x": sw + 2.0, "min_y": 0.0, "max_y": sh + 2.0 } }),
-            &ctx,
-        )
-        .unwrap();
-    assert_eq!(r["ok"], serde_json::json!(true), "resize: {r}");
-    assert_eq!(r["parts_kept"], serde_json::json!(2), "both parts kept: {r}");
-
-    // Re-place is now LEGAL — the trap is closed without re-sending parts.
-    let p2 = tools.run("place_board", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(p2["legal"], serde_json::json!(true), "legal after resize: {p2}");
-}
-
-#[test]
-fn set_placement_hints_validates_members() {
-    let (ctx, _g, tools) = placed_board_ctx();
-
-    // Valid: a group over known references.
-    let out = tools.run("set_placement_hints", serde_json::json!({
-        "groups": [ { "name": "resistors", "members": ["R1", "R2"], "edge": "w" } ]
-    }), &ctx).unwrap();
-    assert_eq!(out["ok"], serde_json::json!(true), "{out}");
-    assert_eq!(out["group_count"], serde_json::json!(1), "{out}");
-    assert_eq!(out["groups"][0]["edge"], serde_json::json!(true), "edge recorded: {out}");
-
-    // Invalid member -> recoverable error listing known refs.
-    let out = tools.run("set_placement_hints", serde_json::json!({
-        "groups": [ { "name": "bad", "members": ["R1", "NOPE"] } ]
-    }), &ctx).unwrap();
-    assert!(
-        out["error"].as_str().is_some_and(|e| e.contains("NOPE") && e.contains("R1")),
-        "unknown member must error listing known refs: {out}"
     );
 }
 

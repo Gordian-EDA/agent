@@ -60,13 +60,12 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
     if created["ok"] != json!(true) {
         return json!({ "name": name, "stage": "create", "result": created });
     }
-    // Optional keepouts (rule areas) from the spec, applied via set_constraints.
-    if let Some(kos) = spec.get("keepouts") {
-        let _ = tools.run("set_constraints", json!({ "keepouts": kos.clone() }), &ctx);
-    }
-    // Optional placement hints (groups: regions / edges / grid arrays) from the spec.
-    if let Some(groups) = spec.get("hints").and_then(|h| h.get("groups")) {
-        let _ = tools.run("set_placement_hints", json!({ "groups": groups.clone() }), &ctx);
+    // Keepouts + placement hints from the spec, set directly on the saved draft
+    // (the agent authors these in the Board-DSL; the harness seeds them on the draft).
+    if spec.get("keepouts").is_some() || spec.get("hints").is_some() {
+        let mut draft = agent::tools_pcb::BoardDraft::load(&ctx).unwrap();
+        agent::tools_pcb::apply_spec_extras(&mut draft, spec);
+        draft.save(&ctx).unwrap();
     }
     let placed = tools.run("place_board", json!({}), &ctx).unwrap();
     if placed["legal"] != json!(true) {

@@ -99,6 +99,10 @@ pub struct ToolCtx {
     footprint_dir_override: Option<PathBuf>,
     /// Project-local persistent state directory `.autopcb/`.
     workspace: crate::workspace::Workspace,
+    /// The live KiCAD IPC session for interactive board editing, launched lazily
+    /// by `open_board` and reused by the geometry tools (`move_part`,
+    /// `route_track`, …). `Mutex` so `ToolCtx` stays `Send + Sync`.
+    kicad: std::sync::Mutex<Option<kicad_ipc::Session>>,
     /// Keeps a test tempdir alive for the ctx's lifetime; `None` for real ctxs.
     _tempdir: Option<tempfile::TempDir>,
 }
@@ -130,6 +134,7 @@ impl ToolCtx {
             footprint_index: OnceLock::new(),
             footprint_dir_override: None,
             workspace,
+            kicad: std::sync::Mutex::new(None),
             _tempdir: None,
         })
     }
@@ -168,6 +173,7 @@ impl ToolCtx {
             footprint_index: OnceLock::new(),
             footprint_dir_override: None,
             workspace,
+            kicad: std::sync::Mutex::new(None),
             _tempdir: Some(tempdir),
         })
     }
@@ -203,6 +209,7 @@ impl ToolCtx {
             footprint_index: OnceLock::new(),
             footprint_dir_override: Some(footprint_dir),
             workspace,
+            kicad: std::sync::Mutex::new(None),
             _tempdir: Some(tempdir),
         })
     }
@@ -250,6 +257,12 @@ impl ToolCtx {
     /// The project's `.autopcb/` persistent state.
     pub fn workspace(&self) -> &crate::workspace::Workspace {
         &self.workspace
+    }
+
+    /// The live KiCAD IPC session (guarded). `open_board` installs one;
+    /// interactive geometry tools take `guard.as_mut()`.
+    pub(crate) fn kicad(&self) -> std::sync::MutexGuard<'_, Option<kicad_ipc::Session>> {
+        self.kicad.lock().expect("kicad session mutex poisoned")
     }
 
     /// The cross-library symbol index, built once and cached.
@@ -527,55 +540,115 @@ impl Tools {
                 }),
             },
             ToolDef {
-                name: "assign_footprints".into(),
-                description: "Set the footprint for parts: a refdes → footprint lib_id map. \
-                    The board-side home for footprint selection (the schematic never stores \
-                    footprints). Find a lib_id with search_footprints, then pass {refdes: \
-                    lib_id} in `assignments`; it's saved to .autopcb/footprints.json (what \
-                    derive_board reads). An unknown lib_id comes back in `unknown` with \
-                    suggestions and is skipped; the rest are saved. Returns the full map."
+                name: "assign_footprint".into(),
+                description: "Set a part's footprint in the board draft (fills a part whose \
+                    schematic symbol carried no footprint). The footprint must have every pad the \
+                    part nets (checked). Find lib_ids with search_footprints — never guess. Run \
+                    after derive_board, before place_board."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "assignments": {
-                            "type": "object",
-                            "description": "refdes → footprint lib_id, e.g. {\"R1\": \"Resistor_SMD:R_0603_1608Metric\"}. Each lib_id must come from search_footprints.",
-                            "additionalProperties": { "type": "string" }
-                        }
+                        "reference": { "type": "string", "description": "Part reference, e.g. \"U1\"." },
+                        "footprint": { "type": "string", "description": "Footprint lib_id, e.g. \"Package_SO:SOIC-8_3.9x4.9mm_P1.27mm\"." }
                     },
-                    "required": ["assignments"]
+                    "required": ["reference", "footprint"]
+                }),
+            },
+            ToolDef {
+                name: "open_board".into(),
+                description: "Open the exported .kicad_pcb in a LIVE headless KiCAD for INTERACTIVE \
+                    editing over IPC. After this you edit the REAL board directly — move_part, \
+                    route_track, set_net_width — with board_state to read it and render_board to see \
+                    it. Requires an exported board (derive_board -> [assign_footprint] -> place_board \
+                    -> route_board -> export_board). Returns the board state."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            ToolDef {
+                name: "board_state".into(),
+                description: "Read the live (open) board: every part's reference + position (mm), the \
+                    track count, and the net list. Inspect before/after an interactive edit. Requires open_board."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            ToolDef {
+                name: "move_part".into(),
+                description: "Move a part to (x, y) mm (optional rotation degrees) on the live board — \
+                    direct geometry control for thermal / decoupling / length-match placement. Requires open_board."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "reference": { "type": "string", "description": "Part reference, e.g. \"U1\"." },
+                        "x": { "type": "number", "description": "X position (mm)." },
+                        "y": { "type": "number", "description": "Y position (mm)." },
+                        "rotation": { "type": "number", "description": "Optional rotation (degrees)." }
+                    },
+                    "required": ["reference", "x", "y"]
+                }),
+            },
+            ToolDef {
+                name: "route_track".into(),
+                description: "Route a straight copper track on the live board: start/end as [x,y] mm, \
+                    width mm, a copper layer (F.Cu/B.Cu/In1.Cu/...), optionally on a net. WIDTH is the \
+                    engineering lever — fat copper for power/high current, thin for signals. Requires open_board."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "start": { "type": "array", "items": {"type":"number"}, "description": "[x, y] mm." },
+                        "end": { "type": "array", "items": {"type":"number"}, "description": "[x, y] mm." },
+                        "width": { "type": "number", "description": "Track width (mm). Default 0.2." },
+                        "layer": { "type": "string", "description": "Copper layer: F.Cu, B.Cu, In1.Cu, ... Default F.Cu." },
+                        "net": { "type": "string", "description": "Optional net name to assign." }
+                    },
+                    "required": ["start", "end"]
+                }),
+            },
+            ToolDef {
+                name: "set_net_width".into(),
+                description: "Define (or update) a net class with a track width + clearance (mm) and \
+                    assign nets to it — the idiomatic \"wide copper for power\" lever (e.g. widen \
+                    GND/VCC/VIN). Requires open_board. (Per-track widths are also settable via route_track.)"
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Net class name, e.g. \"Power\"." },
+                        "width": { "type": "number", "description": "Track width (mm). Default 0.5." },
+                        "clearance": { "type": "number", "description": "Clearance (mm). Default 0.2." },
+                        "nets": { "type": "array", "items": {"type":"string"}, "description": "Net names, e.g. [\"GND\",\"VCC\"]." }
+                    },
+                    "required": ["name", "nets"]
                 }),
             },
             ToolDef {
                 name: "derive_board".into(),
-                description: "Build the board draft from the committed schematic + the \
-                    footprint map — instead of re-typing parts. Reads the schematic's parts \
-                    and netlist (pin→pad is KiCAD's), takes each part's footprint from \
-                    assign_footprints, and builds the board. You supply only the outline \
-                    (bounds) and optional rules; parts and nets come from the schematic. \
-                    Requires a committed .kicad_sch (run apply_design first). If any part \
-                    has no footprint yet it returns `needs_footprints` — run assign_footprints, \
-                    then retry. overwrite=true rebuilds over an existing board draft."
+                description: "Seed the board from the committed schematic: reads the parts + \
+                    netlist (pin->pad is KiCAD's) and builds the board draft — one part per \
+                    component with its pad->net map and the footprint taken from the symbol. \
+                    Requires a committed .kicad_sch (run apply_design first). `missing_footprints` \
+                    lists parts whose symbol had no footprint — set each with assign_footprint. \
+                    Then place_board -> route_board -> export_board -> open_board to refine \
+                    interactively. Optional `bounds` seeds the outline (mm); `rules.layers` the \
+                    copper layer count; overwrite=true replaces an existing draft."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "bounds": {
                             "type": "object",
-                            "description": "Board outline in mm (y-down).",
+                            "description": "Optional: seed the board outline (mm, y-down).",
                             "properties": {
                                 "min_x": { "type": "number" }, "max_x": { "type": "number" },
                                 "min_y": { "type": "number" }, "max_y": { "type": "number" }
-                            },
-                            "required": ["min_x", "max_x", "min_y", "max_y"]
+                            }
                         },
                         "rules": { "type": "object",
-                            "description": "Board design rules (same shape as derive_board); omit for engine defaults." },
-                        "overwrite": { "type": "boolean",
-                            "description": "Rebuild over an existing board draft." }
-                    },
-                    "required": ["bounds"]
+                            "description": "Optional: {layers: 2|4} seeds the copper layer count." },
+                        "overwrite": { "type": "boolean", "description": "Replace an existing board draft." }
+                    }
                 }),
             },
             ToolDef {
@@ -607,183 +680,6 @@ impl Tools {
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             ToolDef {
-                name: "set_placement_hints".into(),
-                description: "Replace the board's placement hints: a list of groups, \
-                    each with a name, the member references that should cohere, and an \
-                    optional region rectangle to land inside and/or a board edge to \
-                    hug. Members must be parts on the board (an unknown reference is a \
-                    recoverable error listing the known references). Hints only IMPROVE \
-                    placement — they never gate it — and steer the NEXT place_board. \
-                    Use them to express intent (\"keep the decoupling caps near the \
-                    MCU\", \"connectors on the west edge\") instead of coordinates."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "groups": {
-                            "type": "array",
-                            "description": "The placement-hint groups (replaces any prior hints).",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": { "type": "string",
-                                        "description": "Human label for the group, e.g. \"mcu_decoupling\"." },
-                                    "members": {
-                                        "type": "array",
-                                        "items": { "type": "string" },
-                                        "description": "References of the parts in this group."
-                                    },
-                                    "region": {
-                                        "type": "object",
-                                        "description": "Optional rectangle (mm) the members should land inside.",
-                                        "properties": {
-                                            "min_x": { "type": "number" },
-                                            "max_x": { "type": "number" },
-                                            "min_y": { "type": "number" },
-                                            "max_y": { "type": "number" }
-                                        },
-                                        "required": ["min_x", "max_x", "min_y", "max_y"]
-                                    },
-                                    "edge": { "type": "string", "enum": ["n", "s", "e", "w"],
-                                        "description": "Optional board edge the group should hug." }
-                                },
-                                "required": ["name", "members"]
-                            }
-                        }
-                    },
-                    "required": ["groups"]
-                }),
-            },
-            ToolDef {
-                name: "set_constraints".into(),
-                description: "Update the board's constraints in place: `rules` \
-                    (partial — only the fields you name are changed: clearance, \
-                    min_trace_width, via_diameter, via_drill) and/or `keepouts` \
-                    (replaced wholesale; each {rect, layers} must lie within the board \
-                    bounds and name only \"top\"/\"bottom\"). Keepouts block ROUTING on \
-                    their layers (they do NOT affect placement in v1). Changing rules \
-                    or keepouts does NOT move parts, so the placement stands — but it \
-                    invalidates any routed solution, so the stored route is cleared and \
-                    you must run route_board again. `net_classes` is reserved but NOT \
-                    yet supported by the router: passing it is rejected (use rules / \
-                    keepouts instead)."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "rules": {
-                            "type": "object",
-                            "description": "Partial design-rule update (only named fields change).",
-                            "properties": {
-                                "clearance": { "type": "number" },
-                                "min_trace_width": { "type": "number" },
-                                "via_diameter": { "type": "number" },
-                                "via_drill": { "type": "number" }
-                            }
-                        },
-                        "keepouts": {
-                            "type": "array",
-                            "description": "Rectangular routing keepouts (replaces all prior keepouts).",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "rect": {
-                                        "type": "object",
-                                        "properties": {
-                                            "min_x": { "type": "number" },
-                                            "max_x": { "type": "number" },
-                                            "min_y": { "type": "number" },
-                                            "max_y": { "type": "number" }
-                                        },
-                                        "required": ["min_x", "max_x", "min_y", "max_y"]
-                                    },
-                                    "layers": {
-                                        "type": "array",
-                                        "items": { "type": "string", "enum": ["top", "bottom"] },
-                                        "description": "Copper layers this keepout blocks."
-                                    }
-                                },
-                                "required": ["rect", "layers"]
-                            }
-                        },
-                        "net_classes": {
-                            "description": "RESERVED — not yet supported by the router; passing this is rejected."
-                        }
-                    }
-                }),
-            },
-            ToolDef {
-                name: "resize_board".into(),
-                description: "Enlarge (or shrink) the board's rectangular BOUNDS without \
-                    re-sending parts — the cheap fix when place_board reports the board too tight \
-                    (legal=false + suggested_min_bounds_mm). All parts are kept; the stale \
-                    placement and route are cleared, so re-run place_board then route_board. \
-                    PREFER this over re-running derive_board to relieve a too-tight placement \
-                    (derive_board rebuilds the whole board). A board with a custom outline is rejected \
-                    (resizing bounds alone would desync the outline — re-run derive_board with new \
-                    bounds + outline)."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "bounds": {
-                            "type": "object",
-                            "description": "New board extent (mm). Use at least place_board's \
-                                suggested_min_bounds_mm.",
-                            "properties": {
-                                "min_x": { "type": "number" },
-                                "max_x": { "type": "number" },
-                                "min_y": { "type": "number" },
-                                "max_y": { "type": "number" }
-                            },
-                            "required": ["min_x", "max_x", "min_y", "max_y"]
-                        }
-                    },
-                    "required": ["bounds"]
-                }),
-            },
-            ToolDef {
-                name: "move_part".into(),
-                description: "Pin a part at a position (the triage lever): lock its \
-                    origin to (x, y) with an optional rotation (0/90/180/270). The \
-                    next place_board legalizes the rest of the board around the lock; \
-                    the part itself never moves. The (x, y) must be a point on the \
-                    board (out of bounds is a recoverable error); an unknown reference \
-                    is a recoverable error. This clears the stored placement and route \
-                    (state changed), so re-run place_board then route_board. Use this \
-                    AFTER looking at render_board and the place_board positions to nudge \
-                    a part — never to author a full layout."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "reference": { "type": "string",
-                            "description": "The part to pin, e.g. \"U1\"." },
-                        "x": { "type": "number", "description": "Part-origin x (mm, on the board)." },
-                        "y": { "type": "number", "description": "Part-origin y (mm, on the board)." },
-                        "rotation": { "type": "integer",
-                            "description": "Rotation in degrees (0/90/180/270; default 0)." }
-                    },
-                    "required": ["reference", "x", "y"]
-                }),
-            },
-            ToolDef {
-                name: "unlock_part".into(),
-                description: "Release a part previously pinned with move_part so the \
-                    placer can move it freely again. Unknown reference is a recoverable \
-                    error. Clears the stored placement and route (state changed) — \
-                    re-run place_board then route_board."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "reference": { "type": "string",
-                            "description": "The part to unlock, e.g. \"U1\"." }
-                    },
-                    "required": ["reference"]
-                }),
-            },
-            ToolDef {
                 name: "route_board".into(),
                 description: "Route the placed board: build the routing problem from \
                     the placement, add the keepouts as blocking obstacles, and run the \
@@ -796,7 +692,20 @@ impl Tools {
                     by kind — EXPECTED ZERO; a non-zero count sets engine_bug=true and \
                     is an engine fault, not a board you can fix). When nets fail, a \
                     congestion report (iterations + edge hotspots) is included to guide \
-                    triage (move_part, relax rules, or remove a keepout)."
+                    triage — re-seed with a bigger outline or more layers (derive_board \
+                    overwrite=true), or refine interactively after open_board."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            ToolDef {
+                name: "autoroute".into(),
+                description: "Auto-route the exported board with the FREEROUTING autorouter — the \
+                    heavy-duty assist for dense boards (BGA/QFP fan-out) the in-house route_board \
+                    can't escape. Routes from scratch at the board's design rules, writes the \
+                    routed copper back to the .kicad_pcb, and reports copper DRC + unconnected \
+                    counts. Requires an exported (placed) board (derive_board → place_board → \
+                    export_board → autoroute). Use this instead of route_board when route_board \
+                    leaves many nets failed on a dense board; then open_board to inspect/refine."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
@@ -873,18 +782,19 @@ impl Tools {
             "edit_design" => edit_design(input, ctx),
             "search_footprints" => crate::tools_pcb::search_footprints(input, ctx),
             "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
-            "assign_footprints" => crate::tools_pcb::assign_footprints(input, ctx),
             "derive_board" => crate::tools_pcb::derive_board(input, ctx),
+            "assign_footprint" => crate::tools_pcb::assign_footprint(input, ctx),
             "get_board" => crate::tools_pcb::get_board(ctx),
             "place_board" => crate::tools_pcb::place_board(input, ctx),
-            "set_placement_hints" => crate::tools_pcb::set_placement_hints(input, ctx),
-            "set_constraints" => crate::tools_pcb::set_constraints(input, ctx),
-            "resize_board" => crate::tools_pcb::resize_board(input, ctx),
-            "move_part" => crate::tools_pcb::move_part(input, ctx),
-            "unlock_part" => crate::tools_pcb::unlock_part(input, ctx),
             "route_board" => crate::tools_pcb::route_board(input, ctx),
-            "render_board" => crate::tools_pcb::render_board(input, ctx),
+            "autoroute" => crate::tools_pcb::autoroute(input, ctx),
             "export_board" => crate::tools_pcb::export_board(input, ctx),
+            "open_board" => crate::tools_pcb::open_board(input, ctx),
+            "board_state" => crate::tools_pcb::board_state(ctx),
+            "move_part" => crate::tools_pcb::move_part(input, ctx),
+            "route_track" => crate::tools_pcb::route_track(input, ctx),
+            "set_net_width" => crate::tools_pcb::set_net_width(input, ctx),
+            "render_board" => crate::tools_pcb::render_board(input, ctx),
             other => bail!("unknown tool: {other}"),
         }
     }

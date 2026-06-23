@@ -16,10 +16,12 @@ use anyhow::{Context, Result};
 pub const DEFAULT_MODEL: &str = "us.anthropic.claude-opus-4-5-20251101-v1:0";
 /// Default region used when `AWS_REGION` is unset.
 pub const DEFAULT_REGION: &str = "us-east-1";
-/// Default model for the OpenAI-compatible backend when `AGENT_MODEL` is unset.
-/// The gateway namespaces models as `provider/model`, so Opus 4.8 is requested
-/// as `anthropic/claude-opus-4-8`.
-pub const DEFAULT_OPENAI_MODEL: &str = "anthropic/claude-opus-4-8";
+/// Default model for the OpenAI-compatible backend when `AGENT_MODEL` is unset —
+/// the model the e2e tests (`bluepill_agent`, `pcb_gate`'s real-model run) and the
+/// `agent_design`/`board_agent` examples drive via `from_env`. The gateway
+/// namespaces models as `provider/model`, so Sonnet 4.6 is requested as
+/// `anthropic/claude-sonnet-4-6`. (Override per-run with `AGENT_MODEL`.)
+pub const DEFAULT_OPENAI_MODEL: &str = "anthropic/claude-sonnet-4-6";
 
 /// Which LLM backend to talk to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

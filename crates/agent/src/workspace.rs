@@ -79,25 +79,6 @@ impl Workspace {
         std::fs::write(self.board_path(), json)
     }
 
-    /// Path of the board-side footprint assignment map (`footprints.json`):
-    /// `{ refdes: footprint_lib_id }`. Footprints are a board concern, not a
-    /// schematic one (the schematic engine never emits a real footprint), so the
-    /// assignment lives here and is read by `derive_board`. Written by
-    /// `assign_footprints`.
-    pub fn footprints_path(&self) -> PathBuf {
-        self.root.join("footprints.json")
-    }
-
-    /// The raw footprint-map JSON text, if any assignments exist.
-    pub fn read_footprints(&self) -> Option<String> {
-        std::fs::read_to_string(self.footprints_path()).ok()
-    }
-
-    /// Persist the footprint-map JSON text.
-    pub fn write_footprints(&self, json: &str) -> io::Result<()> {
-        std::fs::write(self.footprints_path(), json)
-    }
-
     /// Path of the persisted route solution (`route.json`) inside `.autopcb/`.
     /// Written by `route_board` (Task 2); read here so `get_board` can report
     /// the routed flag.
