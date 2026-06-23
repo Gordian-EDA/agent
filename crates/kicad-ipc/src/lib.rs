@@ -53,6 +53,8 @@ pub enum Error {
     Spawn(String),
     #[error("timed out waiting for the KiCAD IPC socket to appear")]
     LaunchTimeout,
+    #[error("not found: {0}")]
+    NotFound(String),
 }
 
 /// A connection to a running KiCAD instance's IPC API server.
@@ -334,6 +336,83 @@ impl Kicad {
         self.call_void(&SetNetClasses {
             net_classes: vec![nc],
             merge_mode: MapMergeMode::MmmMerge as i32,
+        })
+    }
+}
+
+// ── Geometry edit helpers (the interactive tool primitives) ──────────────────
+
+use proto::kiapi::board::types::{BoardLayer, Net};
+use proto::kiapi::common::types::{Angle, Vector2};
+
+/// The reference designator of a footprint (e.g. "U1"), or "" if unset.
+pub fn footprint_reference(fp: &FootprintInstance) -> String {
+    fp.reference_field
+        .as_ref()
+        .and_then(|f| f.text.as_ref())
+        .and_then(|t| t.text.as_ref())
+        .map(|x| x.text.clone())
+        .unwrap_or_default()
+}
+
+impl Kicad {
+    /// Full `Net` objects (name + code) for the open board.
+    fn net_list(&mut self) -> Result<Vec<Net>, Error> {
+        let board = Some(self.board_doc.clone().ok_or(Error::NoBoard)?);
+        let resp: NetsResponse = self.call(&GetNets {
+            board,
+            netclass_filter: vec![],
+        })?;
+        Ok(resp.nets)
+    }
+
+    /// Move a footprint (by reference designator) to `(x,y)` nm, with optional
+    /// rotation in degrees. One commit. Errors if no footprint has that reference.
+    pub fn move_footprint(
+        &mut self,
+        reference: &str,
+        x_nm: i64,
+        y_nm: i64,
+        rotation_deg: Option<f64>,
+    ) -> Result<(), Error> {
+        let mut fp = self
+            .footprints()?
+            .into_iter()
+            .find(|f| footprint_reference(f) == reference)
+            .ok_or_else(|| Error::NotFound(format!("footprint {reference}")))?;
+        fp.position = Some(Vector2 { x_nm, y_nm });
+        if let Some(deg) = rotation_deg {
+            fp.orientation = Some(Angle { value_degrees: deg });
+        }
+        self.commit(&format!("move {reference}"), |k| {
+            k.update_items(vec![prost_types::Any::from_msg(&fp)?])
+        })
+    }
+
+    /// Route a straight track segment on `layer` with `width_nm`, optionally on a
+    /// named net (matched by name). One commit.
+    pub fn add_track(
+        &mut self,
+        start_nm: (i64, i64),
+        end_nm: (i64, i64),
+        width_nm: i64,
+        layer: BoardLayer,
+        net_name: Option<&str>,
+    ) -> Result<(), Error> {
+        let net = match net_name {
+            Some(name) => self.net_list()?.into_iter().find(|n| n.name == name),
+            None => None,
+        };
+        let track = Track {
+            start: Some(Vector2 { x_nm: start_nm.0, y_nm: start_nm.1 }),
+            end: Some(Vector2 { x_nm: end_nm.0, y_nm: end_nm.1 }),
+            width: Some(Distance { value_nm: width_nm }),
+            layer: layer as i32,
+            net,
+            ..Default::default()
+        };
+        self.commit("add track", |k| {
+            k.create_items(vec![prost_types::Any::from_msg(&track)?])
         })
     }
 }
