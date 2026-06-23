@@ -3022,6 +3022,50 @@ pub fn assign_footprint(input: Value, ctx: &ToolCtx) -> Result<Value> {
     Ok(json!({ "ok": true, "reference": reference, "footprint": footprint }))
 }
 
+/// Auto-route the exported board with the Freerouting autorouter (the heavy-duty
+/// assist for dense boards the in-house router can't escape). Routes from scratch
+/// at the board's design rules, writes the routed copper back to the project
+/// `.kicad_pcb`, and reports DRC. Requires an exported (placed) board.
+pub fn autoroute(_input: Value, ctx: &ToolCtx) -> Result<Value> {
+    let board_path = ctx.pcb_path();
+    if !board_path.exists() {
+        return Ok(json!({ "error": "no .kicad_pcb — run export_board first (derive_board → place_board → export_board → autoroute)" }));
+    }
+    let problem = match read_problem(&board_path) {
+        Ok(p) => p,
+        Err(e) => return Ok(json!({ "error": format!("could not read the board: {e}") })),
+    };
+    let rules = kicad_bridge::specctra::RouteRules::from_board(&problem);
+    let geo = match kicad_bridge::specctra::freeroute_with_rules(&board_path, rules) {
+        Ok(g) => g,
+        Err(e) => return Ok(json!({ "error": format!("freerouting failed: {e}") })),
+    };
+    let (wires, vias) = (geo.wires.len(), geo.vias.len());
+    let solution = geo.to_solution(&problem);
+    if let Err(e) = write_solution(&board_path, &solution, &problem) {
+        return Ok(json!({ "error": format!("could not write the routed board: {e}") }));
+    }
+    let _ = kicad_bridge::specctra::write_net_settings(&board_path, rules);
+
+    // DRC via KiCAD (the external authority); copper faults only.
+    let mut copper_violations = None;
+    let mut unconnected = None;
+    if let Ok(report) = KicadCli::new(ctx.env()).drc(&board_path) {
+        copper_violations = Some(report.violations.iter().filter(|v| !is_non_copper(v)).count());
+        unconnected = Some(report.unconnected_items.len());
+    }
+    Ok(json!({
+        "ok": true,
+        "router": "freerouting",
+        "wires": wires,
+        "vias": vias,
+        "copper_violations": copper_violations,
+        "unconnected_items": unconnected,
+        "note": "routed with Freerouting and written to the board. open_board to inspect/refine, \
+                 or render_board. A few honest unconnected nets on a dense board are acceptable.",
+    }))
+}
+
 /// Save the live KiCAD board to disk if a session is open. Returns whether it saved.
 pub fn save_session_if_open(ctx: &ToolCtx) -> Result<bool> {
     let mut guard = ctx.kicad();

@@ -1200,9 +1200,11 @@ KiCAD board, with the deterministic engine as your ASSIST for the bulk work.
    export tightens it to copper + 1 mm, so room is FREE but a hand-tight board is the #1
    cause of an illegal placement you waste the turn fighting. `rules.layers: 2|4|6|8`.
 3. `place_board()` — the engine legalizes a floorplan (the AUTOPLACE assist). `render_board()`
-   to SEE it. `route_board()` — the engine routes (the AUTOROUTE assist); returns the failed
-   nets + metrics + `lint_summary` (expected zero; non-zero = an engine bug to report
-   verbatim, not triage). A few honest unrouted nets are acceptable.
+   to SEE it. `route_board()` — the in-house router (the fast AUTOROUTE assist); returns the
+   failed nets + metrics + `lint_summary` (expected zero; non-zero = an engine bug to report
+   verbatim, not triage). On a DENSE board (BGA/QFP fan-out) where route_board leaves many nets
+   failed, `autoroute()` runs the heavy-duty FREEROUTING autorouter instead (export_board first).
+   A few honest unrouted nets are acceptable.
 4. `export_board()` — writes the `.kicad_pcb` (+ project) and runs DRC (KiCAD ≥ 8).
 5. `open_board()` — open THAT board in a live headless KiCAD. From here you EDIT THE REAL
    BOARD interactively over IPC — this is where you apply engineering judgement the engine
@@ -1432,6 +1434,7 @@ mod tests {
             "assign_footprint",
             "place_board",
             "route_board",
+            "autoroute",
             "export_board",
             "open_board",
             "board_state",

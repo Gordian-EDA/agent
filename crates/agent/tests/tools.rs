@@ -203,6 +203,7 @@ fn defs_lists_all_tools() {
         "get_board",
         "place_board",
         "route_board",
+        "autoroute",
         "render_board",
         "export_board",
         "review_design",
@@ -231,7 +232,7 @@ fn defs_lists_all_tools() {
     ] {
         assert!(!names.contains(&gone.to_string()), "legacy tool still present: {gone}");
     }
-    assert_eq!(names.len(), 26, "expected exactly 26 tools, got {}: {:?}", names.len(), names);
+    assert_eq!(names.len(), 27, "expected exactly 27 tools, got {}: {:?}", names.len(), names);
 
     // Names are unique.
     let mut sorted = names.clone();

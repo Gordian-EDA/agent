@@ -698,6 +698,18 @@ impl Tools {
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             ToolDef {
+                name: "autoroute".into(),
+                description: "Auto-route the exported board with the FREEROUTING autorouter — the \
+                    heavy-duty assist for dense boards (BGA/QFP fan-out) the in-house route_board \
+                    can't escape. Routes from scratch at the board's design rules, writes the \
+                    routed copper back to the .kicad_pcb, and reports copper DRC + unconnected \
+                    counts. Requires an exported (placed) board (derive_board → place_board → \
+                    export_board → autoroute). Use this instead of route_board when route_board \
+                    leaves many nets failed on a dense board; then open_board to inspect/refine."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            ToolDef {
                 name: "render_board".into(),
                 description: "Render the board to a PNG image and attach it so you can \
                     SEE the board. Call this AFTER place_board to inspect part positions \
@@ -775,6 +787,7 @@ impl Tools {
             "get_board" => crate::tools_pcb::get_board(ctx),
             "place_board" => crate::tools_pcb::place_board(input, ctx),
             "route_board" => crate::tools_pcb::route_board(input, ctx),
+            "autoroute" => crate::tools_pcb::autoroute(input, ctx),
             "export_board" => crate::tools_pcb::export_board(input, ctx),
             "open_board" => crate::tools_pcb::open_board(input, ctx),
             "board_state" => crate::tools_pcb::board_state(ctx),
