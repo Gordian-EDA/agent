@@ -60,7 +60,7 @@ use crate::tools::{ToolCtx, Tools};
 ///
 /// 40 lets the largest boards commit/export incrementally; simple boards still finish in a
 /// handful of round-trips, so the extra ceiling only costs tokens on boards that need it.
-const MAX_ITERATIONS: usize = 40;
+const MAX_ITERATIONS: usize = 90;
 
 /// How many times a turn that ends WITHOUT a committed design (the model
 /// researched or drafted but never called `apply_design(commit:true)`) is
