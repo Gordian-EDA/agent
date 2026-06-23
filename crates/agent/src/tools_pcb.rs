@@ -1058,6 +1058,11 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         }
     }
 
+    // (apply_edge_lock exists for deterministic connector edges, but hard-locking
+    // every connector over-constrains a tight board into an illegal placement; the
+    // soft edge-seek hint handles the common case. Reserved for the interactive
+    // path, where the LLM edge-locks the specific strays it sees.)
+
     // Tile any `grid` group (repetitive array) by locking its members at grid cells
     // before the annealer runs, so it lays out the rest around the tidy array.
     pcb_engine::placement::apply_grid_hints(&mut problem, &hints);
