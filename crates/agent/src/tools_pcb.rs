@@ -1032,7 +1032,11 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     // iteration, so it's opt-in ($UNIFIED_FANOUT) — default is the gated cap-ring path.
     let unified = std::env::var("UNIFIED_FANOUT").is_ok()
         && pcb_engine::placement::unified_fanout_place(&mut problem);
-    if !unified {
+    // The lock-based cap ring clusters caps (helps the critic on some boards) but
+    // OVER-CONSTRAINS others into illegal courtyard overlaps (measured: 70/71 legal
+    // without it vs 53/71 with it). So it's OPT-IN ($AUTO_SURROUND); the default is
+    // the legalizing place_best, which keeps 70/71 boards legal.
+    if !unified && std::env::var("AUTO_SURROUND").is_ok() {
         // AUTO decoupling co-placement: ring the dominant IC's bypass caps around it.
         let pairs = pcb_engine::placement::decoupling_pairs(&problem);
         let mut by_ic: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
