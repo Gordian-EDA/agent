@@ -28,7 +28,7 @@
 //!   positions are snapped via [`crate::grid::snap_point`], so re-emitting the
 //!   same placements yields byte-identical output (spec §5.1).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io;
 
@@ -249,6 +249,16 @@ pub struct SchematicWriter {
     /// extend past the symbol bodies). Off for direct-writer and legacy paths,
     /// which place content at fixed absolute coordinates.
     frame: bool,
+    /// Refdes whose Reference/Value fields should be solved ABOVE the body in
+    /// preference to below. Set for a repeated-column anchor (a low-side
+    /// half-bridge FET) whose down-facing source pin hangs a rotated global PORT
+    /// label (`SHUNT_x`): the conventional below-body field band would crowd that
+    /// label's vertical strip and the two read as one garbled token ("V_LS" right
+    /// under "SHUNT_V_TOP"). Placing the fields above mirrors the high-side row
+    /// (text below) and leaves the port label its own clear space. Empty on every
+    /// path except the `MULTISHEET_REFINE` low-side case, so the single-sheet
+    /// reference snapshots stay byte-identical.
+    fields_above: BTreeSet<String>,
 }
 
 impl SchematicWriter {
@@ -1162,6 +1172,20 @@ impl SchematicWriter {
                     above_far, below_far,
                 ]
             };
+            // A flagged low-side FET (its down-facing source pin hangs a rotated
+            // SHUNT port label) prefers its fields ABOVE the body: stable-partition
+            // the candidate list so every above-the-body band comes first, before
+            // the solver's first-fit reaches a below-body spot that would crowd the
+            // port label's vertical strip. Stable so the existing tie-break order
+            // within "above" and within "the rest" is preserved.
+            let cands = if self.fields_above.contains(&inst.refdes) {
+                let (mut up, mut rest): (Vec<_>, Vec<_>) =
+                    cands.into_iter().partition(|c| c.2[3] <= cy);
+                up.append(&mut rest);
+                up
+            } else {
+                cands
+            };
             movables.push(Movable {
                 owner: Some(inst.refdes.clone()),
                 candidates: cands.iter().map(|c| c.2).collect(),
@@ -1559,6 +1583,14 @@ impl SchematicWriter {
     /// Enable [`Self::reframe`] at finalize (floorplan engine).
     pub fn set_frame(&mut self, on: bool) {
         self.frame = on;
+    }
+
+    /// Mark `refdes` as preferring its Reference/Value fields ABOVE the body (see
+    /// [`SchematicWriter::fields_above`]). Called by the floorplan engine for the
+    /// low-side half-bridge FETs after `align_repeated_columns`, so their fields
+    /// don't crowd the rotated SHUNT port label hanging below the source pin.
+    pub fn prefer_fields_above(&mut self, refdes: &BTreeSet<String>) {
+        self.fields_above.extend(refdes.iter().cloned());
     }
 
     pub fn finish(mut self) -> String {

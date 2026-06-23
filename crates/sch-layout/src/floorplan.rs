@@ -1675,6 +1675,7 @@ fn emit_strategy(
     // (usb io / FPGA io = 5). Push such satellites toward their own connections, off the foreign
     // labels, then rebuild the routed writer on the corrected placement. Gated on MULTISHEET_REFINE so
     // single-sheet references never reach it ⇒ snapshots stay byte-identical.
+    let mut fields_above: BTreeSet<String> = BTreeSet::new();
     if std::env::var("MULTISHEET_REFINE").is_ok() {
         let keepouts = port_label_keepouts(env, &mut w, &items, &inc, ir)?;
         let mut changed = false;
@@ -1693,7 +1694,7 @@ fn emit_strategy(
         // columns — the critic's literal "repeated columns" ask. The grid keeps its members internally
         // collision-free; the follow-up decongest pushes any unrelated bystander (a bypass cap that
         // happened to sit in the FETs' new footprint) out of the way, as after the other align passes.
-        if align_repeated_columns(&mut items, ir) {
+        if align_repeated_columns(&mut items, ir, &mut fields_above) {
             decongest(&mut items);
             changed = true;
         }
@@ -1713,6 +1714,10 @@ fn emit_strategy(
         if changed {
             w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
         }
+        // The low-side FETs that `align_repeated_columns` flagged want their fields
+        // ABOVE the body (clear of the rotated SHUNT port label below their source);
+        // tell the (possibly rebuilt) writer before its `prepare` solves text.
+        w.prefer_fields_above(&fields_above);
     }
     // Finalize geometry (text solve, wire split, reframe) BEFORE linting so the
     // reported warnings reflect the actual emitted sheet, not the pre-solve state.
@@ -2788,7 +2793,11 @@ fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool {
 /// instance's satellites by the same Δx (no stranding), and COMMITS A GROUP ONLY if the proposed
 /// positions are overlap-free — exactly the `align_rail_cap_rows` discipline. Gated on
 /// MULTISHEET_REFINE so single-sheet reference snapshots stay byte-identical.
-fn align_repeated_columns(items: &mut [Item], ir: &LayoutIr) -> bool {
+fn align_repeated_columns(
+    items: &mut [Item],
+    ir: &LayoutIr,
+    fields_above: &mut BTreeSet<String>,
+) -> bool {
     if std::env::var("MULTISHEET_REFINE").is_err() {
         return false;
     }
@@ -3034,6 +3043,47 @@ fn align_repeated_columns(items: &mut [Item], ir: &LayoutIr) -> bool {
         }
         for (&i, &at) in &proposed {
             items[i].at = at;
+        }
+        // LOW-SIDE FIELD KEEPOUT: in each column the role-rank-0 member is the high
+        // side (text below it, clear); a member in a LOWER role-row whose own
+        // down-facing pin hangs a rotated global PORT label (the SHUNT_x source node)
+        // would have its below-body refdes/value band crowd that label's vertical
+        // strip — the two read as one garbled token ("V_LS" jammed under
+        // "SHUNT_V_TOP"). Flag those so the emitter solves their fields ABOVE the body,
+        // mirroring the high-side row. Done on the COMMITTED grid positions (the moves
+        // are applied above) so the down-pin direction is the one that ships.
+        for col in &ranked {
+            for (r, &i) in col.iter().enumerate() {
+                if r == 0 {
+                    continue; // top role-row = high side: its below-body text is clear.
+                }
+                let cy = items[i].at[1];
+                // The member's pin whose sheet endpoint sits LOWEST (furthest down)
+                // is its down-facing pin; flag if that pin's net exits as a port.
+                let down_port = items[i]
+                    .pins
+                    .iter()
+                    .filter_map(|(num, _, net)| {
+                        let net = net.as_ref()?;
+                        if !ir.ports.contains_key(net) {
+                            return None;
+                        }
+                        let pg = items[i].geom.pins.iter().find(|p| &p.number == num)?;
+                        let ep = crate::emit::pin_endpoint(
+                            pg,
+                            items[i].at,
+                            items[i].angle,
+                            items[i].mirror,
+                        );
+                        // Only a pin that genuinely points DOWN (its endpoint below the
+                        // body centre) hangs its label into the below-body band.
+                        (ep[1] > cy + 1.0).then_some(())
+                    })
+                    .next();
+                if down_port.is_some() {
+                    fields_above.insert(items[i].refdes.clone());
+                }
+            }
         }
         moved = true;
     }
