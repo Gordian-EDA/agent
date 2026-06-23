@@ -648,6 +648,162 @@ pub fn fan_out_rings(
     }
 }
 
+/// A point on the perimeter of the axis-aligned rectangle (cx±rw, cy±rh) at arc
+/// position `pos` ∈ [0, 4(rw+rh)), walking top→right→bottom→left.
+fn ring_pos(cx: f64, cy: f64, rw: f64, rh: f64, pos: f64) -> Point2 {
+    if pos < 2.0 * rw {
+        Point2 { x: cx - rw + pos, y: cy - rh }
+    } else if pos < 2.0 * rw + 2.0 * rh {
+        Point2 { x: cx + rw, y: cy - rh + (pos - 2.0 * rw) }
+    } else if pos < 4.0 * rw + 2.0 * rh {
+        Point2 { x: cx + rw - (pos - 2.0 * rw - 2.0 * rh), y: cy + rh }
+    } else {
+        Point2 { x: cx - rw, y: cy + rh - (pos - 4.0 * rw - 2.0 * rh) }
+    }
+}
+
+/// UNIFIED radial fan-out placement: the dominant IC centred, its decoupling caps
+/// then series resistors (in IC-pad order) then other passives on density-aware
+/// CONCENTRIC rings, and connectors on the outer frame — EVERYTHING placed
+/// overlap-free by construction and locked, with `bounds` sized to fit. This is the
+/// placer the lock-then-legalize path couldn't be: escapes route radially (short,
+/// parallel, non-crossing) and the board is compact. Returns false (no-op) when
+/// there's no clear dominant fine-pitch IC or the agent already pinned parts.
+pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
+    let n = problem.parts.len();
+    if problem.parts.iter().any(|p| p.locked.is_some()) {
+        return false; // respect any agent-pinned layout
+    }
+    let Some(ic) = (0..n)
+        .filter(|&i| problem.parts[i].pads.len() >= 16)
+        .max_by_key(|&i| problem.parts[i].pads.len())
+    else {
+        return false;
+    };
+    let caps: Vec<usize> = decoupling_pairs(problem)
+        .iter()
+        .filter(|(_, a)| *a == ic)
+        .map(|(c, _)| *c)
+        .collect();
+    if caps.len() < 3 {
+        return false;
+    }
+    let res: Vec<usize> = series_pairs(problem)
+        .iter()
+        .filter(|(_, a)| *a == ic)
+        .map(|(r, _)| *r)
+        .collect();
+    let res_ordered: Vec<usize> = series_fanout_order(problem, ic, &res)
+        .iter()
+        .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
+        .collect();
+
+    let used: std::collections::BTreeSet<usize> = std::iter::once(ic)
+        .chain(caps.iter().copied())
+        .chain(res_ordered.iter().copied())
+        .collect();
+    let (mut connectors, mut others) = (Vec::new(), Vec::new());
+    for i in 0..n {
+        if used.contains(&i) {
+            continue;
+        }
+        let r = &problem.parts[i].reference;
+        if r.starts_with('J') || r.starts_with('P') || r.starts_with('H') {
+            connectors.push(i);
+        } else {
+            others.push(i);
+        }
+    }
+
+    let (ihw, ihh) = (problem.parts[ic].courtyard_w / 2.0, problem.parts[ic].courtyard_h / 2.0);
+    problem.parts[ic].locked = Some(LockedAt { at: Point2 { x: 0.0, y: 0.0 }, rotation: 0 });
+
+    // Concentric rings: caps (innermost), then pad-ordered resistors, then others.
+    let mut ring_order = caps.clone();
+    ring_order.extend(res_ordered.iter().copied());
+    ring_order.extend(others.iter().copied());
+    let spacing = 3.0_f64; // generous: locked parts can't be nudged, so never overlap
+    let mut max_extent = ihw.max(ihh);
+    let (mut k, mut ring) = (0usize, 0usize);
+    while k < ring_order.len() {
+        let g = 1.5 + ring as f64 * spacing;
+        let (rw, rh) = (ihw + g, ihh + g);
+        let perim = 4.0 * (rw + rh);
+        let cap = ((perim / spacing).floor() as usize).max(1);
+        let m = cap.min(ring_order.len() - k);
+        for j in 0..m {
+            let i = ring_order[k + j];
+            let pos = (j as f64 + 0.5) / m as f64 * perim;
+            problem.parts[i].locked = Some(LockedAt { at: ring_pos(0.0, 0.0, rw, rh, pos), rotation: 0 });
+        }
+        max_extent = max_extent.max(rw.max(rh));
+        k += m;
+        ring += 1;
+    }
+
+    // Connectors on the outer frame, each ROTATED to lie flat along its edge (long
+    // dim along the edge, SHORT dim pointing outward) and packed per-side by its long
+    // dim. The frame sits just the short half-extent beyond the rings → compact.
+    let conn_out = connectors
+        .iter()
+        .map(|&i| problem.parts[i].courtyard_w.min(problem.parts[i].courtyard_h) / 2.0)
+        .fold(0.0_f64, f64::max);
+    let frame = max_extent + conn_out + 3.0;
+    let mut cursor = [-max_extent; 4]; // running position along each side
+    for (j, &i) in connectors.iter().enumerate() {
+        let side = j % 4;
+        let (cw, ch) = (problem.parts[i].courtyard_w, problem.parts[i].courtyard_h);
+        let (long, _short) = (cw.max(ch), cw.min(ch));
+        // Rotate so the LONG dimension runs ALONG the edge.
+        let horizontal_edge = side == 0 || side == 2;
+        let rot = if (cw >= ch) == horizontal_edge { 0 } else { 90 };
+        cursor[side] += long / 2.0;
+        let along = cursor[side];
+        cursor[side] += long / 2.0 + 2.0;
+        problem.parts[i].locked = Some(LockedAt {
+            at: match side {
+                0 => Point2 { x: along, y: -frame },
+                1 => Point2 { x: frame, y: along },
+                2 => Point2 { x: along, y: frame },
+                _ => Point2 { x: -frame, y: along },
+            },
+            rotation: rot,
+        });
+    }
+
+    // Shift everything into the first quadrant with a margin and size `bounds` to fit.
+    let margin = 2.0;
+    let (mut mnx, mut mny, mut mxx, mut mxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for p in &problem.parts {
+        if let Some(l) = &p.locked {
+            // Rotation-aware extent: a 90/270° part swaps w/h.
+            let (phw, phh) = if l.rotation == 90 || l.rotation == 270 {
+                (p.courtyard_h / 2.0, p.courtyard_w / 2.0)
+            } else {
+                (p.courtyard_w / 2.0, p.courtyard_h / 2.0)
+            };
+            mnx = mnx.min(l.at.x - phw);
+            mny = mny.min(l.at.y - phh);
+            mxx = mxx.max(l.at.x + phw);
+            mxy = mxy.max(l.at.y + phh);
+        }
+    }
+    let (dx, dy) = (margin - mnx, margin - mny);
+    for p in &mut problem.parts {
+        if let Some(l) = &mut p.locked {
+            l.at.x += dx;
+            l.at.y += dy;
+        }
+    }
+    problem.bounds = Bounds {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: (mxx - mnx) + 2.0 * margin,
+        max_y: (mxy - mny) + 2.0 * margin,
+    };
+    true
+}
+
 /// Co-placement pairs the SA cohesion honours: decoupling caps (hug their IC) plus
 /// series taps (hug their dense anchor). A part can appear once — `decoupling_pairs`
 /// and `series_pairs` are disjoint by construction (both-nets-shared vs 2-pin-net).

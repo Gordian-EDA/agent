@@ -1020,15 +1020,20 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         }
     }
 
-    // AUTO decoupling co-placement (the #1 layout-quality lever): ring the
-    // dominant decoupling IC's bypass caps tightly around it (locked) and anchor
-    // that IC at the board centre, UNLESS the agent already pinned/surrounded it.
-    // The placer then clusters caps next to their IC instead of scattering them;
-    // the engine router may route less of the denser result, but `autoroute`
-    // (Freerouting) handles the density and `export_board` tightens the outline to
-    // the now-compact content.
-    let mut surround_ic: Option<usize> = None;
-    {
+    // UNIFIED FAN-OUT placement (the routing-neatness + compactness lever): for a
+    // board with a dominant fine-pitch IC, lay the WHOLE board as a radial fan-out —
+    // IC centred, caps then series resistors (in IC-pad order) then passives on
+    // density-aware concentric rings, connectors on the outer frame — overlap-free
+    // by construction, with bounds sized to fit. Escapes route radially (short,
+    // parallel) and the board is compact. Falls back to cap-ring auto-surround when
+    // there's no clear dominant IC.
+    // Gated WIP: the radial fan-out placer validates the routing-neatness lever
+    // (routi 6→8 on tqfp64) but its connector geometry + outline-tighten still need
+    // iteration, so it's opt-in ($UNIFIED_FANOUT) — default is the gated cap-ring path.
+    let unified = std::env::var("UNIFIED_FANOUT").is_ok()
+        && pcb_engine::placement::unified_fanout_place(&mut problem);
+    if !unified {
+        // AUTO decoupling co-placement: ring the dominant IC's bypass caps around it.
         let pairs = pcb_engine::placement::decoupling_pairs(&problem);
         let mut by_ic: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (cap, ic) in pairs {
@@ -1055,20 +1060,10 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
                     grid: false,
                     surround: Some(ic_ref),
                 });
-                surround_ic = Some(ic);
             }
         }
+        pcb_engine::placement::apply_grid_hints(&mut problem, &hints);
     }
-
-    // Tile any `grid` group + ring the cap members around the (locked) IC.
-    // (series_fanout_order + fan_out_rings are reserved primitives for a future
-    // unified fan-out placer: ringing the series resistors in IC-pad order would
-    // make escapes route radially, but LOCKING them — like every connector edge or
-    // resistor ring tried — over-constrains the legalizer into an illegal board.
-    // The fix is a placer that builds the whole fan-out overlap-free by
-    // construction, not lock-then-legalize. Only the cap ring is auto-applied.)
-    let _ = surround_ic;
-    pcb_engine::placement::apply_grid_hints(&mut problem, &hints);
 
     let result = place_best(&problem, &hints);
 
