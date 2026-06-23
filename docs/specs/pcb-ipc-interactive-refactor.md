@@ -68,10 +68,16 @@ Placement also sprawls / scatters caps on large boards (partly degenerate-circui
    connect pad→via on the top layer, and rewrite that terminal to the via on an inner signal
    layer. Then the existing router routes inner-layer→destination. Gate on `board_harness`
    (bga-escape-fineclear + soc-system route %, DRC stays clean).
-2. **Routing escalation lever — Freerouting** (if (1) is insufficient for the hardest boards).
-   Java 21 is present; need a `.dsn` exporter + `.ses` importer (NOT in `kicad-cli`; write in
-   `kicad-bridge`, or drive pcbnew's Specctra actions via IPC `RunAction`). Freerouting is the
-   field's proven escape/dense router. Expose as the `autoroute` assist's escalation tier.
+2. **Routing escalation lever — Freerouting** (likely the PRIMARY routing answer: the in-house
+   router is MATURE/already-tuned — layer-aware planes, inner signal layers, escape-via tuning,
+   iterated retry — and decent at 85-95% except the hardest BGA escape; per the project's
+   anti-tuning rule, don't grind it, bring in the field's proven router). Java 21 is present.
+   Plumbing: **must write a custom `.dsn` exporter + `.ses` importer in `kicad-bridge`** — NOT
+   in `kicad-cli`, and IPC `RunAction` is insufficient (it only submits an action *name*: no
+   output path, no params, fire-and-forget `RAS_OK`=submitted-not-done → can't get a `.dsn` at a
+   known path headless). Flow: placed board → `.dsn` → `java -jar freerouting.jar -de b.dsn -do
+   b.ses` → parse `.ses` → apply tracks/vias via `kicad-ipc` create_items. Expose as the
+   `autoroute` assist.
 3. **Faithful hard test circuits.** Author/generate dense boards with REAL connectivity
    (per-IC decoupling power nets, real inter-chip buses, BGA escape) so place+route are tested
    honestly. The current `*-scale` circuits stay only as placement-scale tests.
