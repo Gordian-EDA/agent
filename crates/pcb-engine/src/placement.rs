@@ -575,6 +575,79 @@ pub fn series_pairs(problem: &PlaceProblem) -> Vec<(usize, usize)> {
     pairs
 }
 
+/// Order series parts by the ANGLE of their connected `ic` pad around the IC
+/// centre. Ringing them in this order makes each IC→part escape route radially
+/// (short, parallel, NON-crossing) instead of spaghetti — the key to neat fan-out
+/// on a board whose signal pins each tap a series element (the routing-neatness
+/// lever). `parts` are part indices (e.g. from [`series_pairs`] anchored at `ic`).
+pub fn series_fanout_order(problem: &PlaceProblem, ic: usize, parts: &[usize]) -> Vec<String> {
+    let mut with_angle: Vec<(f64, String)> = parts
+        .iter()
+        .filter_map(|&p| {
+            let p_nets: std::collections::BTreeSet<&str> =
+                problem.parts[p].pads.iter().filter_map(|pp| pp.net.as_deref()).collect();
+            // The IC pad sharing this part's 2-pin net → its angle around the IC.
+            problem.parts[ic].pads.iter().find_map(|pad| {
+                let n = pad.net.as_deref()?;
+                p_nets.contains(n).then(|| {
+                    (pad.offset.y.atan2(pad.offset.x), problem.parts[p].reference.clone())
+                })
+            })
+        })
+        .collect();
+    with_angle.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    with_angle.into_iter().map(|(_, r)| r).collect()
+}
+
+/// Place `ordered` parts in CONCENTRIC rings around the (locked) IC, density-aware
+/// so each ring holds only as many as fit without overlap (the rest spill to the
+/// next, larger ring). Members keep their given order around the perimeter — pass
+/// [`series_fanout_order`] output for a radial fan-out (short, parallel,
+/// non-crossing escapes). Unlike [`apply_surround`] (one rectangular ring → corner
+/// overlap + illegal beyond ~a dozen parts), this scales to a full pin field and
+/// stays legal. Each member is locked.
+pub fn fan_out_rings(
+    problem: &mut PlaceProblem,
+    ic: usize,
+    ordered: &[String],
+    start_gap: f64,
+    spacing: f64,
+) {
+    let Some(loc) = problem.parts[ic].locked.clone() else { return };
+    let (cx, cy) = (loc.at.x, loc.at.y);
+    let (hw, hh) = (problem.parts[ic].courtyard_w / 2.0, problem.parts[ic].courtyard_h / 2.0);
+    let idxs: Vec<usize> = ordered
+        .iter()
+        .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
+        .collect();
+    let row_step = spacing; // radial gap between successive rings
+    let mut k = 0usize;
+    let mut ring = 0usize;
+    while k < idxs.len() {
+        let g = start_gap + ring as f64 * row_step;
+        let (ihw, ihh) = (hw + g, hh + g);
+        let perim = 4.0 * (ihw + ihh);
+        let cap = ((perim / spacing).floor() as usize).max(1);
+        let n = cap.min(idxs.len() - k);
+        for j in 0..n {
+            let i = idxs[k + j];
+            let pos = (j as f64 + 0.5) / n as f64 * perim;
+            let at = if pos < 2.0 * ihw {
+                Point2 { x: cx - ihw + pos, y: cy - ihh }
+            } else if pos < 2.0 * ihw + 2.0 * ihh {
+                Point2 { x: cx + ihw, y: cy - ihh + (pos - 2.0 * ihw) }
+            } else if pos < 4.0 * ihw + 2.0 * ihh {
+                Point2 { x: cx + ihw - (pos - 2.0 * ihw - 2.0 * ihh), y: cy + ihh }
+            } else {
+                Point2 { x: cx - ihw, y: cy + ihh - (pos - 4.0 * ihw - 2.0 * ihh) }
+            };
+            problem.parts[i].locked = Some(LockedAt { at, rotation: 0 });
+        }
+        k += n;
+        ring += 1;
+    }
+}
+
 /// Co-placement pairs the SA cohesion honours: decoupling caps (hug their IC) plus
 /// series taps (hug their dense anchor). A part can appear once — `decoupling_pairs`
 /// and `series_pairs` are disjoint by construction (both-nets-shared vs 2-pin-net).

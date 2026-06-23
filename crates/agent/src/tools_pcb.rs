@@ -1027,6 +1027,7 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     // the engine router may route less of the denser result, but `autoroute`
     // (Freerouting) handles the density and `export_board` tightens the outline to
     // the now-compact content.
+    let mut surround_ic: Option<usize> = None;
     {
         let pairs = pcb_engine::placement::decoupling_pairs(&problem);
         let mut by_ic: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -1054,17 +1055,19 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
                     grid: false,
                     surround: Some(ic_ref),
                 });
+                surround_ic = Some(ic);
             }
         }
     }
 
-    // (apply_surround/apply_edge_lock + series_pairs are reserved placement
-    // primitives. Hard-locking the series resistors into an outer ring OR every
-    // connector to an edge over-constrains a tight board into an illegal placement,
-    // so only the cap ring is auto-applied; the rest is the interactive path's job.)
-
-    // Tile any `grid` group (repetitive array) by locking its members at grid cells
-    // before the annealer runs, so it lays out the rest around the tidy array.
+    // Tile any `grid` group + ring the cap members around the (locked) IC.
+    // (series_fanout_order + fan_out_rings are reserved primitives for a future
+    // unified fan-out placer: ringing the series resistors in IC-pad order would
+    // make escapes route radially, but LOCKING them — like every connector edge or
+    // resistor ring tried — over-constrains the legalizer into an illegal board.
+    // The fix is a placer that builds the whole fan-out overlap-free by
+    // construction, not lock-then-legalize. Only the cap ring is auto-applied.)
+    let _ = surround_ic;
     pcb_engine::placement::apply_grid_hints(&mut problem, &hints);
 
     let result = place_best(&problem, &hints);
