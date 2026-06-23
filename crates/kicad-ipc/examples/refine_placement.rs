@@ -52,12 +52,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("anchor IC: {ic_ref} @ ({:.1},{:.1}) mm; {} caps, {} conns, {} xtal",
         ic_pos.x_nm as f64 / NM, ic_pos.y_nm as f64 / NM, caps.len(), conns.len(), xtals.len());
 
+    // CONNS_ONLY: only edge-seek connectors (caps are already well-placed by the
+    // engine's auto-surround) — the interactive fix for the stray inboard connector.
+    let conns_only = std::env::var("CONNS_ONLY").is_ok();
+
     // Each move_footprint self-commits (one undo step), so call them directly —
     // wrapping in an outer commit would nest and KiCAD rejects that.
     let k = session.kicad();
     // 1) Caps on concentric rings hugging the IC. Spacing keeps them clear.
     let per_ring = 12usize;
     for (i, (r, _)) in caps.iter().enumerate() {
+        if conns_only { break; }
         let ring = i / per_ring;
         let radius = (ring_mm + ring as f64 * 2.5) * NM;
         let n = per_ring.min(caps.len() - ring * per_ring).max(1);

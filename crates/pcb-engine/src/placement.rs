@@ -328,6 +328,46 @@ fn apply_surround(problem: &mut PlaceProblem, members: &[String], target: &str) 
     }
 }
 
+/// Lock each named connector at a BOARD EDGE, distributed by arc position around
+/// the perimeter and seated just inside the bound. Deterministic — the soft
+/// edge-seek SA force is unreliable when the interior is crowded (it strands a
+/// connector or two inboard, which the critic flags). Already-locked parts are
+/// left alone. Pairs with [`apply_surround`]: IC + caps centred, connectors framed
+/// at the edges, the rest placed between, then the outline tightens to it.
+pub fn apply_edge_lock(problem: &mut PlaceProblem, refs: &[String]) {
+    let b = problem.bounds.clone();
+    let idxs: Vec<usize> = refs
+        .iter()
+        .filter_map(|r| {
+            problem
+                .parts
+                .iter()
+                .position(|p| &p.reference == r && p.locked.is_none())
+        })
+        .collect();
+    let n = idxs.len();
+    if n == 0 {
+        return;
+    }
+    let (w, h) = (b.max_x - b.min_x, b.max_y - b.min_y);
+    let perim = 2.0 * (w + h);
+    for (k, &i) in idxs.iter().enumerate() {
+        let (hw, hh) = (problem.parts[i].courtyard_w / 2.0, problem.parts[i].courtyard_h / 2.0);
+        let t = (k as f64 + 0.5) / n as f64 * perim;
+        let mut at = if t < w {
+            Point2 { x: b.min_x + t, y: b.min_y + hh } // top edge, L→R
+        } else if t < w + h {
+            Point2 { x: b.max_x - hw, y: b.min_y + (t - w) } // right edge, T→B
+        } else if t < 2.0 * w + h {
+            Point2 { x: b.max_x - (t - w - h), y: b.max_y - hh } // bottom edge, R→L
+        } else {
+            Point2 { x: b.min_x + hw, y: b.max_y - (t - 2.0 * w - h) } // left edge, B→T
+        };
+        clamp_into_bounds(&mut at, &b, (hw, hh));
+        problem.parts[i].locked = Some(LockedAt { at, rotation: 0 });
+    }
+}
+
 /// An axis-aligned region rectangle (mm).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
