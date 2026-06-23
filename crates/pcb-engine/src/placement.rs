@@ -255,7 +255,7 @@ pub fn apply_grid_hints(problem: &mut PlaceProblem, hints: &PlacementHints) {
         // `surround`: ring the members tightly around a locked target part's edges
         // (the decoupling pattern). Handled first; falls through to `grid` otherwise.
         if let Some(target) = &g.surround {
-            apply_surround(problem, &g.members, target);
+            apply_surround(problem, &g.members, target, 0.6);
             continue;
         }
         if !g.grid {
@@ -295,7 +295,7 @@ pub fn apply_grid_hints(problem: &mut PlaceProblem, hints: &PlacementHints) {
 /// a short one — a tall IC no longer overflows (and overlaps) its short edges. The
 /// target must already be locked (the agent fixes the IC first) so its centre is known.
 /// A no-op otherwise.
-fn apply_surround(problem: &mut PlaceProblem, members: &[String], target: &str) {
+pub fn apply_surround(problem: &mut PlaceProblem, members: &[String], target: &str, gap: f64) {
     let Some(ti) = problem.parts.iter().position(|p| p.reference == target) else { return };
     let Some(loc) = problem.parts[ti].locked.clone() else { return };
     let (cx, cy) = (loc.at.x, loc.at.y);
@@ -308,7 +308,7 @@ fn apply_surround(problem: &mut PlaceProblem, members: &[String], target: &str) 
     if n == 0 {
         return;
     }
-    let gap = 0.6; // mm clear of the IC courtyard edge
+    // `gap` = mm clear of the IC courtyard edge (an outer ring uses a larger gap).
     // Walk the courtyard perimeter clockwise: top (len 2hw) → right (2hh) → bottom
     // (2hw) → left (2hh). Place member k at arc position (k+0.5)/n of the perimeter.
     let perim = 4.0 * (hw + hh);
@@ -535,7 +535,7 @@ const SERIES_ANCHOR_MIN_PADS: usize = 16;
 /// When both pads qualify (R between two ICs), the LARGER anchor wins (the dense
 /// package whose escape congestion matters most). Disjoint from [`decoupling_pairs`]
 /// (whose caps share BOTH nets with one anchor, i.e. high-fanout power).
-fn series_pairs(problem: &PlaceProblem) -> Vec<(usize, usize)> {
+pub fn series_pairs(problem: &PlaceProblem) -> Vec<(usize, usize)> {
     // net name → the part indices with a pad on it (one entry per pad).
     let mut net_pins: std::collections::HashMap<&str, Vec<usize>> =
         std::collections::HashMap::new();

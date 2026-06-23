@@ -1058,10 +1058,10 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         }
     }
 
-    // (apply_edge_lock exists for deterministic connector edges, but hard-locking
-    // every connector over-constrains a tight board into an illegal placement; the
-    // soft edge-seek hint handles the common case. Reserved for the interactive
-    // path, where the LLM edge-locks the specific strays it sees.)
+    // (apply_surround/apply_edge_lock + series_pairs are reserved placement
+    // primitives. Hard-locking the series resistors into an outer ring OR every
+    // connector to an edge over-constrains a tight board into an illegal placement,
+    // so only the cap ring is auto-applied; the rest is the interactive path's job.)
 
     // Tile any `grid` group (repetitive array) by locking its members at grid cells
     // before the annealer runs, so it lays out the rest around the tidy array.
