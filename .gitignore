@@ -17,3 +17,4 @@ docs/validation/*.png
 
 # Python bytecode cache for the tools/ scripts
 tools/__pycache__/
+tools/vendor/freerouting.jar
