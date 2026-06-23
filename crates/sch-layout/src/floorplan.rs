@@ -7268,7 +7268,10 @@ fn wire(
         // around it instead of straight through someone else's edge tag. The label
         // is added during Phase C — too late to obstruct nets routed before it.
         if let Some(side) = effective_port_side(ir.ports.get(net).copied(), eps) {
-            let at = port_exit_point(eps, side);
+            // Mirror route_signal's IC-pin override so the reserved box matches where
+            // the label actually lands (clear of the IC's long pin-name text).
+            let (side, at) = ic_port_exit_override(env, w, items, inc, net, eps, side)
+                .unwrap_or((side, port_exit_point(eps, side)));
             scene.label_solids.push((port_label_obstacle(at, side, net), net.clone()));
         }
     }
@@ -7314,10 +7317,18 @@ fn route_signal(
     // body. Multi-pin marked ports keep the name-inferred side.
     let port = effective_port_side(port, eps);
 
+    // A port tapping an IC pin whose long internal pin-name text the name-inferred
+    // side would cross (the ADXL343 SDA/SCL garble): flip the exit to the pin's
+    // outward face and hug the pin, clear of the body. Self-adjusting on the pin's
+    // actual name extent, so short-name parts (all references) stay byte-identical.
+    let ic_exit = port.and_then(|side| ic_port_exit_override(env, w, items, inc, net, eps, side));
+    let port = ic_exit.map(|(s, _)| s).or(port);
+
     // Terminals: real pins (with outward dir) + an optional virtual port exit.
     let mut terms: Vec<([f64; 2], Option<Dir>)> = eps.iter().map(|(p, d)| (*p, Some(*d))).collect();
     let port_idx = port.map(|side| {
-        terms.push((port_exit_point(eps, side), None));
+        let at = ic_exit.map(|(_, at)| at).unwrap_or_else(|| port_exit_point(eps, side));
+        terms.push((at, None));
         terms.len() - 1
     });
 
@@ -7699,6 +7710,99 @@ fn effective_port_side(port: Option<Side>, eps: &[([f64; 2], Dir)]) -> Option<Si
         Some(_) if eps.len() == 1 => Some(dir_to_side(eps[0].1)),
         other => other,
     }
+}
+
+/// When a port net taps an IC pin, the name-inferred side can point straight INTO
+/// the IC body — dragging the global label across the IC's long internal pin-name
+/// text (the ADXL343 `SDA/SDI/SDIO` / `SCL/SCLK` garble). Return a corrected
+/// (side, exit) that hugs the IC pin and reads OUTWARD (the way the pin faces, away
+/// from the body) whenever the name side would land the label on the pin-name text.
+///
+/// General + self-adjusting: the trigger and the clearance are driven by the IC's
+/// ACTUAL pin-name text extent (`length + offset + text_width(name)`), so a short
+/// pin name never triggers (output stays byte-identical) and a long one is cleared.
+/// Anchoring the exit on the IC pin (not the whole-net bbox) also lets the virtual
+/// exit JOIN the IC pin's routed component — so the net reads as ONE clean port
+/// label, never the redundant junction-label-plus-body-label pair.
+fn ic_port_exit_override(
+    env: &KicadEnv,
+    w: &SchematicWriter,
+    items: &[Item],
+    inc: &Incidence,
+    net: &str,
+    eps: &[([f64; 2], Dir)],
+    name_side: Side,
+) -> Option<(Side, [f64; 2])> {
+    const NAME_OFFSET: f64 = 0.508; // KiCAD default pin-name offset (matches textplace)
+    let snap = crate::grid::snap;
+    // Map the net's pins (same flatten order `wire()` used to build `eps`) back to
+    // their (item, pin) so we can read each IC pin's geometry + name.
+    let mut pin_of: Vec<Option<(usize, String)>> = vec![None; eps.len()];
+    {
+        let mut k = 0;
+        for (i, num) in inc.get(net).into_iter().flatten() {
+            if let Ok(ds) = w.pin_dirs(env, &items[*i].refdes, num) {
+                for _ in ds {
+                    if k < eps.len() {
+                        pin_of[k] = Some((*i, num.clone()));
+                        k += 1;
+                    }
+                }
+            }
+        }
+    }
+    // Find an IC anchor pin on this net (≥3-pin non-connector) whose outward facing
+    // is HORIZONTALLY OPPOSITE the name side — the case where a Left/Right name exit
+    // would cross its body. Among candidates pick the one whose pin name reaches
+    // deepest (the worst overlap).
+    let name_dir = side_dir(name_side);
+    let mut best: Option<([f64; 2], Dir, f64)> = None; // (pin tip, outward dir, name extent)
+    for (k, slot) in pin_of.iter().enumerate() {
+        let Some((i, num)) = slot else { continue };
+        let it = &items[*i];
+        if it.geom.pins.len() < 3 || is_connector_like(&it.part) {
+            continue;
+        }
+        let (tip, dir) = eps[k];
+        // Only the horizontal-vs-horizontal clash: the pin faces the OPPOSITE way to
+        // the name exit, so the exit would be pushed toward the body / pin-name text.
+        let opposed = matches!(
+            (dir, name_dir),
+            (Dir::West, Dir::East) | (Dir::East, Dir::West)
+        );
+        if !opposed {
+            continue;
+        }
+        // This pin's NAME text extent, measured from the tip INTO the body. We only
+        // care about the case where the name actually reaches past a plain exit reach.
+        let Some(pg) = it.geom.pins.iter().find(|p| p.number == *num) else { continue };
+        if pg.name == "~" {
+            continue;
+        }
+        let extent = pg.length + NAME_OFFSET + crate::textplace::text_width(&pg.name);
+        if best.map(|(_, _, e)| extent > e).unwrap_or(true) {
+            best = Some((tip, dir, extent));
+        }
+    }
+    let (tip, dir, extent) = best?;
+    // The plain name-side exit would sit at `tip ± reach` TOWARD the body — and the
+    // pin name occupies `[tip, tip + extent]` on that side. So a name-side exit
+    // collides exactly when `extent` exceeds the plain reach. Only then do we flip;
+    // otherwise leave the caller's behavior untouched (short-name parts byte-identical).
+    let plain_reach = if eps.len() == 1 { 2.54 } else { 7.62 };
+    if extent <= plain_reach + EPS {
+        return None;
+    }
+    // Flip to the side the pin FACES (away from the body) and hug the pin: the exit
+    // sits one plain reach OUTWARD of the tip, reading away from the IC. This places
+    // the single port label clear of the body and lets it join the pin's component.
+    let side = dir_to_side(dir);
+    let exit = match dir {
+        Dir::West => [snap(tip[0] - 2.54), tip[1]],
+        Dir::East => [snap(tip[0] + 2.54), tip[1]],
+        _ => return None,
+    };
+    Some((side, exit))
 }
 
 /// The box a port pennant occupies, for the router to keep FOREIGN wires out of it
