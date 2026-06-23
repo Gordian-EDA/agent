@@ -7,5 +7,6 @@ pub mod placefp;
 pub mod provider;
 pub mod search;
 pub mod snapshot;
+pub mod specctra;
 pub mod symlib;
 pub mod synth;
