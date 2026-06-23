@@ -1725,6 +1725,17 @@ fn emit_strategy(
         // tell the (possibly rebuilt) writer before its `prepare` solves text.
         w.prefer_fields_above(&fields_above);
     }
+    // ORPHANED NET-LABEL COLUMN. A `label:global` component has no geometry, so
+    // `gather` skips it — the label is normally drawn as the port pennant of the
+    // pin it shares a net with. But a net carried ONLY by label parts (no placed
+    // symbol on this sheet touches it) reaches neither `items` nor `inc`, so it
+    // produces nothing: a block of PURE label parts (an external-I/O / pinout
+    // breakout sheet — every net a cross-sheet hop) would render COMPLETELY BLANK.
+    // Draw those orphaned nets as an evenly-spaced READABLE COLUMN of global
+    // labels so the pinout sheet shows its named I/O. Additive: it only fires for
+    // nets with no placed pin, so any sheet whose labels sit on real parts (the
+    // hbridge fixture, every multi-part block) is byte-identical.
+    add_orphan_label_columns(&mut w, design, &inc);
     // Finalize geometry (text solve, wire split, reframe) BEFORE linting so the
     // reported warnings reflect the actual emitted sheet, not the pre-solve state.
     w.set_frame(true);
@@ -1896,6 +1907,54 @@ fn gather(env: &KicadEnv, design: &Design) -> io::Result<Vec<Item>> {
         }
     }
     Ok(items)
+}
+
+/// Draw every ORPHANED `label:global` net — one carried by label parts but by no
+/// placed symbol on this sheet (so it never reaches `inc`) — as a clean, evenly
+/// spaced vertical COLUMN of global labels. This rescues a pure/mostly-label
+/// block (an external-I/O / pinout breakout sheet) from rendering blank: each
+/// label part is geometry-free and skipped by `gather`, and the engine's port
+/// pennants attach only to real pins, so without this such a sheet emits nothing.
+///
+/// The pennant text is the NET name — cross-sheet connectivity binds by net, so
+/// the same name's global labels on this net's target sheets join to it, exactly
+/// as a wired pin's port pennant would. (The label part's `value`, e.g. `CH1P`,
+/// is a shorter human alias of the same net and carries no extra connectivity, so
+/// the pennant's own net text is the clearer, complete annotation.) Labels are
+/// ordered by the design's component order and deduplicated by net, so the
+/// emission is deterministic. Coordinates are nominal: `reframe` shifts the whole
+/// column to the page margin. No-op (byte-identical) when no net is orphaned.
+fn add_orphan_label_columns(w: &mut SchematicWriter, design: &Design, inc: &Incidence) {
+    // Orphaned nets in component order, deduplicated by net (first occurrence wins).
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut orphans: Vec<String> = Vec::new();
+    for block in design.blocks.values() {
+        for comp in block.components.values() {
+            if comp.dnp || comp.part != "label:global" {
+                continue;
+            }
+            for target in comp.pins.values() {
+                if let PinTarget::Net(net) = target {
+                    if inc.contains_key(net) || !seen.insert(net.clone()) {
+                        continue; // already drawn (real pin) or already in the column
+                    }
+                    orphans.push(net.clone());
+                }
+            }
+        }
+    }
+    if orphans.is_empty() {
+        return;
+    }
+    // A readable single column: even vertical pitch, each pennant pointing right
+    // (text reads outward). PITCH leaves a clear gap between the 1.27 mm-tall rows.
+    const X: f64 = 25.4;
+    const Y0: f64 = 25.4;
+    const PITCH: f64 = 7.62;
+    for (i, net) in orphans.iter().enumerate() {
+        let y = Y0 + i as f64 * PITCH;
+        w.add_cluster_label(net, [X, y], Dir::East, true);
+    }
 }
 
 /// net -> list of (item index, pin number).
