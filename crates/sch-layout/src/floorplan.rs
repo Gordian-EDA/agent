@@ -1722,6 +1722,13 @@ fn emit_strategy(
         // pins instead of strewn across the sheet onto the IC's other pin labels (the fresh8 INA
         // input-label-cluster defect). Purely-local nets only; cross-sheet ports keep their labels.
         changed |= gather_bridge_resistors(&mut items, ir);
+        // DEAD LAST: re-gather each I2C/bus PULL-UP PAIR (a 2-pin R bridging a power rail + a cross-sheet
+        // bus port) back tight against the IC's SCL/SDA pins. The i2c_pullup idiom seats them a couple
+        // columns RIGHT of the IC, so on a sparse sheet they strand a wide gap away and the bus net
+        // splits into several labelled components — the same I2C net reads ~3× in one crowded knot
+        // (the gpt55test i2c_sensors "crowded, ambiguous net labeling" defect). This seats the pair as a
+        // tidy adjacent vertical block off the bus-pin edge so each bus net is named ONCE, compactly.
+        changed |= gather_i2c_pullups(&mut items, ir);
         if changed {
             w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
         }
@@ -3441,6 +3448,305 @@ fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool {
         let Some(res_at) = chosen else { continue };
         claimed.insert(ri);
         moves.push((ri, res_at, res_angle));
+    }
+    let moved = !moves.is_empty();
+    for (i, at, angle) in moves {
+        items[i].at = at;
+        items[i].angle = angle;
+    }
+    moved
+}
+
+/// DEAD-LAST re-gather of an I2C (bus) PULL-UP PAIR back tight against the IC's bus pins. A pull-up is
+/// a 2-pin `R*` bridging a POWER RAIL (3V3/VCC) and a BUS SIGNAL that is a CROSS-SHEET PORT
+/// (`I2C_SCL`/`I2C_SDA` to the MCU) — so UNLIKE the `gather_bridge_resistors` case the signal net is a
+/// port and is correctly drawn as a label, never a wire across the sheet. The `i2c_pullup` idiom seats
+/// the pair a couple of columns to the RIGHT of the IC (`acol+1`/`acol+2`), so on a sparse sheet they
+/// land a wide gap from the IC's SCL/SDA pins; the bus net then SPLITS into several routed components
+/// (the IC's pin, the far resistor, the port exit) and the writer names EACH split with its own label —
+/// the same I2C net reads ~3× in one crowded knot (the gpt55test `i2c_sensors` "crowded, ambiguous net
+/// labeling" defect).
+///
+/// Re-seat the pair as a TIDY ADJACENT VERTICAL pair (tap UP to power), one GAP off the IC's bus-pin
+/// edge and centred on the two bus pins, so each resistor's bus (bottom) pin sits RIGHT BESIDE the IC
+/// pin it pulls up. The writer then joins each resistor to its IC pin with a SHORT wire (one component
+/// per bus net near the IC), so the bus net is named ONCE, compactly, instead of strewn across the knot.
+///
+/// SIBLING of `gather_decoupling_bank`/`gather_crystal_cluster`/`gather_bootstrap_stages`/
+/// `gather_bridge_resistors`: a DEAD-LAST, overlap-safe, MULTISHEET_REFINE-gated re-gather, re-derived
+/// GENERICALLY from the placed netlist (NOT from `ir.idioms`/`frozen`). Multi-sheet only (gated) ⇒
+/// single-sheet reference snapshots stay byte-identical. Commits ONLY a group of seats that introduces
+/// NO new overlap against ANY item on the sheet (there is no follow-up decongest to repair a collision).
+fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
+    if std::env::var("MULTISHEET_REFINE").is_err() {
+        return false;
+    }
+    let snap = crate::grid::snap;
+    const GAP: f64 = 5.08; // IC bus-pin edge → pull-up's near (bus) pin, on grid (short stub)
+
+    // A pull-up bridges a power RAIL and a non-power BUS SIGNAL that the author marked a cross-sheet
+    // port (so the signal is correctly drawn as a label, never re-wired across the sheet).
+    let is_rail = |n: &str| is_power_net(n) || ir.rails.contains_key(n);
+    let is_bus_port = |n: &str| !is_rail(n) && ir.ports.contains_key(n);
+
+    // Candidate IC anchors: ≥3-pin, non-connector (same exclusion the sibling passes make). Index order.
+    let anchor_idxs: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() >= 3 && !is_connector_like(&items[i].part))
+        .collect();
+
+    // Bind each candidate pull-up to (IC anchor, its bus net, the IC's bus-pin world position). A pull-up
+    // is a 2-pin `R*` with exactly one rail pin + one bus-port pin, whose bus net taps a ≥3-pin IC (the
+    // part it pulls up). The `i2c_pullup` idiom FREEZES the pair, so we DELIBERATELY include frozen items
+    // (like `gather_decoupling_bank` re-seats its frozen idiom caps) — this is the dead-last word that
+    // re-seats exactly that idiom placement. Index-ordered for determinism.
+    struct Pullup {
+        ri: usize,
+        ai: usize,
+        pin_world: [f64; 2],
+    }
+    let pin_world = |ai: usize, net: &str| -> Option<[f64; 2]> {
+        let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net))?.0.clone();
+        let pg = items[ai].geom.pins.iter().find(|p| p.number == num)?;
+        Some(crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
+    };
+    let mut pullups: Vec<Pullup> = Vec::new();
+    for ri in (0..items.len()).filter(|&i| {
+        items[i].refdes.starts_with('R') && items[i].geom.pins.len() == 2
+    }) {
+        let bnets: Vec<String> = items[ri].pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
+        if bnets.len() != 2 || bnets[0] == bnets[1] {
+            continue;
+        }
+        // Exactly one rail pin + one bus-port pin.
+        let (rails, buses): (Vec<&String>, Vec<&String>) = bnets.iter().partition(|n| is_rail(n));
+        if rails.len() != 1 || buses.len() != 1 || !is_bus_port(buses[0]) {
+            continue;
+        }
+        let bus = buses[0].clone();
+        // The IC the pull-up pulls up = the ≥3-pin non-connector that taps this bus net. If several do,
+        // pick the NEAREST — the one the resistor should hug.
+        let taps = |ai: usize| items[ai].pins.iter().any(|(_, _, n)| n.as_deref() == Some(bus.as_str()));
+        let Some(ai) = anchor_idxs
+            .iter()
+            .copied()
+            .filter(|&ai| ai != ri && taps(ai))
+            .min_by(|&a, &b| {
+                let d = |ai: usize| {
+                    let dx = items[ai].at[0] - items[ri].at[0];
+                    let dy = items[ai].at[1] - items[ri].at[1];
+                    dx * dx + dy * dy
+                };
+                d(a).total_cmp(&d(b))
+            })
+        else {
+            continue;
+        };
+        let Some(pw) = pin_world(ai, &bus) else { continue };
+        pullups.push(Pullup { ri, ai, pin_world: pw });
+    }
+    if pullups.is_empty() {
+        return false;
+    }
+
+    // Group pull-ups by their IC anchor — the pair (SCL+SDA) seats as one compact block. Anchor index
+    // order, then bus-pin lane order WITHIN a group, both deterministic.
+    let mut by_anchor: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (k, p) in pullups.iter().enumerate() {
+        by_anchor.entry(p.ai).or_default().push(k);
+    }
+
+    let mut moves: Vec<(usize, [f64; 2], f64)> = Vec::new();
+    let mut claimed: BTreeSet<usize> = BTreeSet::new();
+    for (&ai, group) in &by_anchor {
+        // The IC's bus-pin midpoint + the outward edge those pins hug (nearest edge of the IC's pin bbox
+        // to their midpoint). Identical classifier to the sibling gathers.
+        let (mut blo, mut bhi) = ([f64::MAX; 2], [f64::MIN; 2]);
+        for &k in group {
+            let w = pullups[k].pin_world;
+            blo[0] = blo[0].min(w[0]);
+            blo[1] = blo[1].min(w[1]);
+            bhi[0] = bhi[0].max(w[0]);
+            bhi[1] = bhi[1].max(w[1]);
+        }
+        let busmid = [(blo[0] + bhi[0]) / 2.0, (blo[1] + bhi[1]) / 2.0];
+        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+        for pg in &items[ai].geom.pins {
+            let w = crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
+            lo[0] = lo[0].min(w[0]);
+            lo[1] = lo[1].min(w[1]);
+            hi[0] = hi[0].max(w[0]);
+            hi[1] = hi[1].max(w[1]);
+        }
+        let (dl, dr, dt, db) =
+            (busmid[0] - lo[0], hi[0] - busmid[0], busmid[1] - lo[1], hi[1] - busmid[1]);
+        let m = dl.min(dr).min(dt).min(db);
+        let dir: [f64; 2] = if m == dl {
+            [-1.0, 0.0]
+        } else if m == dr {
+            [1.0, 0.0]
+        } else if m == dt {
+            [0.0, -1.0]
+        } else {
+            [0.0, 1.0]
+        };
+        // SEAT the pull-ups VERTICAL (tap 3V3 UP — the writer risers the rail), STACKED IN ONE COLUMN one
+        // GAP off the IC's bus-pin edge, ordered top→bottom to MATCH the IC's bus-pin order. Each resistor's
+        // BOTTOM pin then drops to its own bus pin (an L: down/over) and these L-routes never cross because
+        // the resistors keep the same vertical order as the pins they serve. The column pitch ≈ a resistor
+        // height so the bodies never overlap, and the 3V3 taps go straight UP — the textbook two-resistor
+        // pull-up block. (A horizontal pair can't tap 3V3 up; a tight common-row pair let one bus stub cross
+        // the other tall body and split the net into the redundant-label knot — this column avoids both.)
+        let r0 = pullups[group[0]].ri; // a representative resistor item (all pull-ups are 2-pin R, same geom)
+        let _ = busmid;
+        let along_x = dir[0] != 0.0; // side (left/right) edge ⇒ the column sits beside the IC
+        let res_angle = orient_angle(&items[r0].geom, Orient::Up);
+        let body = item_rect(&items[ai], items[ai].at);
+        let body_edge = if dir[0] > 0.0 {
+            body[2]
+        } else if dir[0] < 0.0 {
+            body[0]
+        } else if dir[1] > 0.0 {
+            body[3]
+        } else {
+            body[1]
+        };
+        // The vertical resistor's real pin span (height), and the column pitch (a touch over the body so
+        // two stacked resistors never lap).
+        let res_h_real = {
+            let mut probe = items[r0].clone();
+            probe.angle = res_angle;
+            let ys: Vec<f64> = probe
+                .geom
+                .pins
+                .iter()
+                .map(|pg| crate::emit::pin_endpoint(pg, [0.0, 0.0], probe.angle, probe.mirror)[1])
+                .collect();
+            let (lo, hi) = ys.iter().fold((f64::MAX, f64::MIN), |(l, h), &v| (l.min(v), h.max(v)));
+            hi - lo
+        };
+        let col_pitch = res_h_real + 6.35; // body span + a clear gap (room for the shared rail tap + label)
+        // TIGHT body rect of a vertical resistor (real pin span + thin margin, plus the field stack to the
+        // RIGHT) — used for the INTER-MEMBER check so the column packs at ~col_pitch instead of the
+        // conservative `item_rect`'s 12.7-mm reservation (which would force a ~13-mm pitch and long drops).
+        let val_chars = items[r0].value.chars().count().max(items[r0].refdes.chars().count()) as f64;
+        let tight_at = |at: [f64; 2]| -> [f64; 4] {
+            let mut probe = items[r0].clone();
+            probe.angle = res_angle;
+            let mut lo = [f64::MAX; 2];
+            let mut hi = [f64::MIN; 2];
+            for pg in &probe.geom.pins {
+                let w = crate::emit::pin_endpoint(pg, at, probe.angle, probe.mirror);
+                lo[0] = lo[0].min(w[0]);
+                lo[1] = lo[1].min(w[1]);
+                hi[0] = hi[0].max(w[0]);
+                hi[1] = hi[1].max(w[1]);
+            }
+            [lo[0] - 0.9, lo[1] - 1.0, hi[0] + 0.9 + val_chars * 1.1, hi[1] + 1.0]
+        };
+
+        let committed: BTreeMap<usize, ([f64; 2], f64)> =
+            moves.iter().map(|&(i, at, ang)| (i, (at, ang))).collect();
+        let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> [f64; 4] {
+            let mut probe = items[idx].clone();
+            probe.angle = angle;
+            item_rect(&probe, at)
+        };
+        let settled = |idx: usize| -> [f64; 4] {
+            match committed.get(&idx) {
+                Some(&(at, ang)) => rect_at(idx, at, ang),
+                None => item_rect(&items[idx], items[idx].at),
+            }
+        };
+        let group_set: BTreeSet<usize> = group.iter().map(|&k| pullups[k].ri).collect();
+
+        // Order top→bottom by the IC bus pin each resistor serves (smaller y first), so the column's
+        // vertical order matches the pins' — no crossed drops. Tie-break by refdes index for determinism.
+        let mut ord: Vec<usize> = group.clone();
+        ord.sort_by(|&a, &b| {
+            pullups[a].pin_world[1]
+                .total_cmp(&pullups[b].pin_world[1])
+                .then(pullups[a].ri.cmp(&pullups[b].ri))
+        });
+        let n = ord.len();
+
+        // Column x: one GAP off the IC's bus edge (the body's `dir` side) for a side edge; for a top/bottom
+        // edge fall back to just past the bus-pin bbox. Column is centred on the bus-pin midpoint in y, the
+        // members col_pitch apart, so the top resistor's bottom pin sits a little above the top bus pin.
+        // Distance from the IC bus edge to the resistor CENTRE = one GAP + the resistor's half-width.
+        let res_half_w = {
+            let r = rect_at(r0, [0.0, 0.0], res_angle);
+            (r[2] - r[0]) / 2.0
+        };
+        let col_x = if along_x {
+            body_edge + dir[0].signum() * (GAP + res_half_w)
+        } else {
+            hi[0] + GAP + res_half_w
+        };
+        // First resistor's centre y so the STACK is centred on the bus-pin band's vertical midpoint.
+        let bus_mid_y = (blo[1] + bhi[1]) / 2.0;
+        let col_top_cy = bus_mid_y - col_pitch * ((n as f64) - 1.0) / 2.0;
+
+        // Seats: one column. Try the natural column; if any seat clashes the sheet, step the WHOLE column
+        // further out along the edge normal, then nudge it ± in the across direction.
+        let mut seats: Vec<(usize, [f64; 2], f64)> = Vec::new();
+        let mut ok = false;
+        'col: for d in 0..5 {
+            let cx = if along_x {
+                col_x + dir[0].signum() * d as f64 * 2.54
+            } else {
+                col_x
+            };
+            for shift in [0.0_f64, -2.54, 2.54, -5.08, 5.08] {
+                let mut trial: Vec<(usize, [f64; 2], f64)> = Vec::new();
+                let mut placed: Vec<[f64; 4]> = Vec::new();
+                let mut all_ok = true;
+                for (slot, &k) in ord.iter().enumerate() {
+                    let ri = pullups[k].ri;
+                    let cy = col_top_cy + (slot as f64) * col_pitch + shift;
+                    let at = if along_x { [snap(cx), snap(cy)] } else { [snap(cx + shift), snap(col_top_cy + (slot as f64) * col_pitch)] };
+                    let r = rect_at(ri, at, res_angle);
+                    // Against prior group seats (TIGHT — column packs close) AND the rest of the sheet
+                    // (conservative; pre-existing overlaps aren't ours to relitigate).
+                    if placed.iter().any(|pr| rects_overlap(tight_at(at), *pr)) {
+                        all_ok = false;
+                        break;
+                    }
+                    let clash = (0..items.len()).find(|&other| {
+                        !group_set.contains(&other)
+                            && rects_overlap(r, settled(other))
+                            && !rects_overlap(settled(ri), settled(other))
+                    });
+                    if clash.is_some() {
+                        all_ok = false;
+                        break;
+                    }
+                    placed.push(tight_at(at));
+                    trial.push((ri, at, res_angle));
+                }
+                if all_ok {
+                    seats = trial;
+                    ok = true;
+                    break 'col;
+                }
+            }
+        }
+        // No-op short-circuit: if every member already sits at its chosen seat + orientation, skip (no churn).
+        if ok
+            && seats.iter().all(|&(ri, at, ang)| {
+                (items[ri].at[0] - at[0]).abs() < 1.27
+                    && (items[ri].at[1] - at[1]).abs() < 1.27
+                    && (items[ri].angle - ang).abs() < 0.5
+            })
+        {
+            continue;
+        }
+        if ok {
+            for (ri, at, ang) in seats {
+                if claimed.insert(ri) {
+                    moves.push((ri, at, ang));
+                }
+            }
+        }
     }
     let moved = !moves.is_empty();
     for (i, at, angle) in moves {
@@ -6856,7 +7162,7 @@ fn wire(
                 || multisheet_spread;
             let rail_y = rail_y_map.get(net).copied().filter(|_| !distribute);
             let driver = rail_drivers.get(net).copied();
-            emit_rail(env, w, net, eps, *band, rail_y, flag, &riser_offsets, &bodies, driver)?;
+            emit_rail(env, w, net, eps, *band, rail_y, flag, &riser_offsets, &bodies, driver, fan_risers)?;
         }
     }
 
@@ -7005,6 +7311,21 @@ fn route_signal(
             }
         }
         if let Some(p) = crate::route::route_edge(a, da, b, net, scene) {
+            // The DIRECT gap may be short while the only obstacle-free ROUTE is a sheet-wide DETOUR
+            // (two ICs whose shared bus pins face opposite ways, so the wire wraps the perimeter — the
+            // i2c_sensors U4 SCL case). A drawn perimeter wraparound reads far worse than the human
+            // idiom of naming each end. So when long-haul bridging is active (finalize on large boards),
+            // DISCARD a path whose actual routed length exceeds `span` and leave the endpoints split —
+            // the label-bridge below then names each side, exactly as it already does for a too-long
+            // direct hop. Short/clean routes (length ≈ direct gap) are unaffected, so every tuned
+            // reference keeps its drawn wires.
+            if let Some(span) = long_edge_span {
+                let routed: f64 =
+                    p.windows(2).map(|s| (s[0][0] - s[1][0]).abs() + (s[0][1] - s[1][1]).abs()).sum();
+                if routed > span {
+                    continue;
+                }
+            }
             for seg in p.windows(2) {
                 w.add_wire_on_net(seg[0], seg[1], net);
                 scene.segments.push((seg[0], seg[1], net.to_string()));
@@ -7075,6 +7396,17 @@ fn route_signal(
             let (ra, rk) = (find(&mut parent, 0), find(&mut parent, k));
             if ra == rk {
                 continue; // already joined to pin 0's component by the MST
+            }
+            // Don't force an OVERHEAD detour across a long-haul gap: that recreates the very sheet-wide
+            // wraparound the MST already declined (the i2c_sensors U4 SCL pin, ~110 mm from the rest of
+            // the bus). When long-haul bridging is active, leave such a pin SPLIT so the label-bridge
+            // below names it instead — exactly as the too-long MST hop already does, and as the sibling
+            // SDA pin already gets. The local op-amp feedback case (pins a few mm apart) is well under
+            // the span, so it still forces its clean loop and stays byte-identical.
+            if let Some(span) = long_edge_span {
+                if (pts[0][0] - pts[k][0]).abs() + (pts[0][1] - pts[k][1]).abs() > span {
+                    continue;
+                }
             }
             let (pa, da) = (pts[0], terms[0].1);
             let (pb, db) = (pts[k], terms[k].1);
@@ -7573,6 +7905,7 @@ fn emit_rail(
     riser_offsets: &BTreeMap<(String, i64), f64>,
     bodies: &[([f64; 2], [f64; 2])],
     driver: Option<[f64; 2]>,
+    fan_risers: bool,
 ) -> io::Result<()> {
     let lib = power_lib_id(net);
     let Some(rail_y) = rail_y.filter(|_| eps.len() >= 3) else {
@@ -7615,6 +7948,16 @@ fn emit_rail(
         // immediate neighbour, never the whole spread (which would recreate the long
         // trunk distribution exists to avoid).
         const MERGE: f64 = 5.08;
+        // A GND tie on a SIDE (E/W) pin — a lone address-select / strap pin like the BME280 SDO=GND
+        // (I2C address 0x76) — gets a power_angle of 90°/270°, so its triangle points SIDEWAYS into
+        // open space and reads as a dangling port labelled "GND" (the i2c_sensors floating-GND defect).
+        // Convention is the GND triangle points DOWN, so we re-orient such a symbol to angle 0 below.
+        // Multi-sheet only and gated on `fan_risers`, the FINALIZE-only flag ⇒ the per-move SA scorer
+        // passes `fan_risers = false` so its cost landscape is byte-identical and the placement is never
+        // perturbed, and every single-sheet reference snapshot keeps its exact per-pin placement. Only
+        // ground (the recurring eyesore); V+ side ties keep their outward arrow.
+        let drop_side_gnd =
+            is_ground(net) && fan_risers && std::env::var_os("MULTISHEET_REFINE").is_some();
         let mut syms: Vec<[f64; 2]> = Vec::new();
         let mut idx = 0usize;
         for (ep, dir) in eps.iter() {
@@ -7625,7 +7968,16 @@ fn emit_rail(
                 w.add_wire_on_net(*ep, near, net);
                 continue;
             }
-            let angle = power_angle(*dir);
+            // A GND symbol on an E/W pin points SIDEWAYS (angle 90/270), reading as a dangling port.
+            // Re-orient it to point DOWN (angle 0 — the conventional GND triangle) IN PLACE: a pure
+            // angle change adds no wire, so the measured crossing geometry the SA scores on is
+            // unchanged and the placement is not perturbed. The triangle's connection point stays at
+            // the pin tip, so connectivity is identical.
+            let angle = if drop_side_gnd && matches!(dir, Dir::East | Dir::West) {
+                0.0
+            } else {
+                power_angle(*dir)
+            };
             w.add_power_symbol(env, &lib, &format!("#PWR_{net}_{idx}"), net, *ep, angle)?;
             syms.push(*ep);
             idx += 1;
