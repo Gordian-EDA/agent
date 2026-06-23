@@ -749,26 +749,39 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
         .map(|&i| problem.parts[i].courtyard_w.min(problem.parts[i].courtyard_h) / 2.0)
         .fold(0.0_f64, f64::max);
     let frame = max_extent + conn_out + 3.0;
-    let mut cursor = [-max_extent; 4]; // running position along each side
+    // Group connectors per side, then CENTRE each side's run on its edge so none sit
+    // at a corner (where adjacent-edge connectors would collide).
+    // Use only the OPPOSITE top/bottom edges (sides 0 and 2): adjacent edges would
+    // collide at the shared corner when the headers are large vs the cluster.
+    let mut by_side: [Vec<usize>; 4] = Default::default();
     for (j, &i) in connectors.iter().enumerate() {
-        let side = j % 4;
-        let (cw, ch) = (problem.parts[i].courtyard_w, problem.parts[i].courtyard_h);
-        let (long, _short) = (cw.max(ch), cw.min(ch));
-        // Rotate so the LONG dimension runs ALONG the edge.
-        let horizontal_edge = side == 0 || side == 2;
-        let rot = if (cw >= ch) == horizontal_edge { 0 } else { 90 };
-        cursor[side] += long / 2.0;
-        let along = cursor[side];
-        cursor[side] += long / 2.0 + 2.0;
-        problem.parts[i].locked = Some(LockedAt {
-            at: match side {
-                0 => Point2 { x: along, y: -frame },
-                1 => Point2 { x: frame, y: along },
-                2 => Point2 { x: along, y: frame },
-                _ => Point2 { x: -frame, y: along },
-            },
-            rotation: rot,
-        });
+        by_side[(j % 2) * 2].push(i);
+    }
+    for (side, group) in by_side.iter().enumerate() {
+        let total: f64 = group
+            .iter()
+            .map(|&i| problem.parts[i].courtyard_w.max(problem.parts[i].courtyard_h) + 2.0)
+            .sum::<f64>()
+            - 2.0;
+        let mut cur = -total / 2.0;
+        for &i in group {
+            let (cw, ch) = (problem.parts[i].courtyard_w, problem.parts[i].courtyard_h);
+            let l = cw.max(ch);
+            let horizontal_edge = side == 0 || side == 2;
+            let rot = if (cw >= ch) == horizontal_edge { 0 } else { 90 };
+            cur += l / 2.0;
+            let along = cur;
+            cur += l / 2.0 + 2.0;
+            problem.parts[i].locked = Some(LockedAt {
+                at: match side {
+                    0 => Point2 { x: along, y: -frame },
+                    1 => Point2 { x: frame, y: along },
+                    2 => Point2 { x: along, y: frame },
+                    _ => Point2 { x: -frame, y: along },
+                },
+                rotation: rot,
+            });
+        }
     }
 
     // Shift everything into the first quadrant with a margin and size `bounds` to fit.
@@ -801,6 +814,29 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
         max_x: (mxx - mnx) + 2.0 * margin,
         max_y: (mxy - mny) + 2.0 * margin,
     };
+    if std::env::var("FANOUT_DEBUG").is_ok() {
+        let rh = |p: &Part, r: i32| {
+            if r == 90 || r == 270 {
+                (p.courtyard_h / 2.0, p.courtyard_w / 2.0)
+            } else {
+                (p.courtyard_w / 2.0, p.courtyard_h / 2.0)
+            }
+        };
+        for a in 0..problem.parts.len() {
+            for b in (a + 1)..problem.parts.len() {
+                let (pa, pb) = (&problem.parts[a], &problem.parts[b]);
+                let (Some(la), Some(lb)) = (&pa.locked, &pb.locked) else { continue };
+                let (ahw, ahh) = rh(pa, la.rotation);
+                let (bhw, bhh) = rh(pb, lb.rotation);
+                if (la.at.x - lb.at.x).abs() < ahw + bhw && (la.at.y - lb.at.y).abs() < ahh + bhh {
+                    eprintln!(
+                        "[fanout] OVERLAP {} (rot{}) <-> {} (rot{})",
+                        pa.reference, la.rotation, pb.reference, lb.rotation
+                    );
+                }
+            }
+        }
+    }
     true
 }
 
