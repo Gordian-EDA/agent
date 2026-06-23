@@ -1020,6 +1020,44 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         }
     }
 
+    // AUTO decoupling co-placement (the #1 layout-quality lever): ring the
+    // dominant decoupling IC's bypass caps tightly around it (locked) and anchor
+    // that IC at the board centre, UNLESS the agent already pinned/surrounded it.
+    // The placer then clusters caps next to their IC instead of scattering them;
+    // the engine router may route less of the denser result, but `autoroute`
+    // (Freerouting) handles the density and `export_board` tightens the outline to
+    // the now-compact content.
+    {
+        let pairs = pcb_engine::placement::decoupling_pairs(&problem);
+        let mut by_ic: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (cap, ic) in pairs {
+            by_ic.entry(ic).or_default().push(cap);
+        }
+        if let Some((&ic, caps)) = by_ic.iter().max_by_key(|(_, c)| c.len()) {
+            let ic_ref = problem.parts[ic].reference.clone();
+            let already = hints.groups.iter().any(|g| g.surround.as_deref() == Some(ic_ref.as_str()));
+            if caps.len() >= 3 && !already {
+                if problem.parts[ic].locked.is_none() {
+                    let center = Point2 {
+                        x: (problem.bounds.min_x + problem.bounds.max_x) / 2.0,
+                        y: (problem.bounds.min_y + problem.bounds.max_y) / 2.0,
+                    };
+                    problem.parts[ic].locked = Some(LockedAt { at: center, rotation: 0 });
+                }
+                let cap_refs: Vec<String> =
+                    caps.iter().map(|&c| problem.parts[c].reference.clone()).collect();
+                hints.groups.push(GroupHint {
+                    name: format!("decouple_{ic_ref}"),
+                    members: cap_refs,
+                    region: None,
+                    edge: None,
+                    grid: false,
+                    surround: Some(ic_ref),
+                });
+            }
+        }
+    }
+
     // Tile any `grid` group (repetitive array) by locking its members at grid cells
     // before the annealer runs, so it lays out the rest around the tidy array.
     pcb_engine::placement::apply_grid_hints(&mut problem, &hints);
