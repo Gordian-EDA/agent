@@ -1711,6 +1711,12 @@ fn emit_strategy(
         // no other finalize pass touches it. This re-derives the cluster from the placed netlist and
         // lays it as the textbook block beside the OSC pins, overlap-safe against the whole sheet.
         changed |= gather_crystal_cluster(&mut items, ir);
+        // DEAD LAST: re-gather each scattered high-side bootstrap stage (a {diode, cap} per phase)
+        // beside its gate-driver IC's VB/VS pins. The SA flings the three IR2133 bootstrap stages to
+        // opposite edges of the IC with long detoured runs (critic modal 6); no other finalize pass
+        // touches them. This re-derives each phase pair from the placed netlist and seats its stage at
+        // the VB/VS pins, overlap-safe against the whole sheet.
+        changed |= gather_bootstrap_stages(&mut items, ir);
         if changed {
             w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
         }
@@ -2768,6 +2774,396 @@ fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool {
             continue;
         }
         claimed.extend(members);
+        moves.extend(proposed);
+    }
+    let moved = !moves.is_empty();
+    for (i, at, angle) in moves {
+        items[i].at = at;
+        items[i].angle = angle;
+    }
+    moved
+}
+
+/// GATHER each scattered high-side bootstrap stage back beside its gate-driver IC's per-phase VB/VS
+/// pins (the BLDC `gate_drive` modal-6 defect). A 3-phase gate driver (IR2133 etc.) exposes per-phase
+/// high-side pins VB1/VS1, VB2/VS2, VB3/VS3. Each phase's bootstrap network = a bootstrap CAP bridging
+/// VBx↔VSx + a bootstrap DIODE with its cathode on VBx's net (anode on the VCC/bootstrap rail). The SA
+/// optimizes each phase's wires locally and flings the three stages to opposite edges of the IC (one
+/// top, one right, one bottom) with long detoured runs, instead of each {diode, cap} sitting at its own
+/// VB/VS pins — the critic calls this out directly (the modal-6 outlier over ~10 reads).
+///
+/// This is the SIBLING of `gather_decoupling_bank`/`gather_crystal_cluster`: a DEAD-LAST, overlap-safe,
+/// MULTISHEET_REFINE-gated re-gather. It re-derives the stages GENERICALLY from the placed netlist (NOT
+/// from `ir.idioms`/`frozen`): find a gate-driver IC = a ≥3-pin non-connector whose pins host ≥2 phase
+/// PAIRS, where a pair {VBx, VSx} is two of its pins such that a 2-pin cap bridges VBx↔VSx AND a 2-pin
+/// diode taps VBx's net. For each phase pair it seats that {diode, cap} stage at the VBx/VSx pins —
+/// projected OUT from the IC's `item_rect` body edge + GAP (the same depth-origin technique the sibling
+/// passes use to clear the IC's field/text stack), the cap centred on the VB/VS midpoint and the diode
+/// one step further out on the VBx leg. A per-stage `claimed` set stops two phases grabbing the same
+/// part.
+///
+/// SAFETY: identical to the siblings. It commits a stage ONLY when the proposed positions introduce NO
+/// new overlap against ANY item on the sheet — there is no follow-up decongest to repair a collision.
+/// Multi-sheet only (gated) ⇒ single-sheet reference snapshots stay byte-identical.
+fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> bool {
+    if std::env::var("MULTISHEET_REFINE").is_err() {
+        return false;
+    }
+    let snap = crate::grid::snap;
+    const GAP: f64 = 7.62;
+
+    // A 2-pin part's net set (filters None). Used to match the bridging cap / feeding diode.
+    let nets_of = |i: usize| -> Vec<String> {
+        items[i].pins.iter().filter_map(|(_, _, n)| n.clone()).collect()
+    };
+    // The bootstrap CAP for a phase: a 2-pin `C*` whose two pins are exactly {vb, vs}.
+    let cap_bridging = |vb: &str, vs: &str, claimed: &BTreeSet<usize>| -> Option<usize> {
+        (0..items.len()).find(|&ci| {
+            !claimed.contains(&ci)
+                && items[ci].refdes.starts_with('C')
+                && items[ci].geom.pins.len() == 2
+                && {
+                    let ns = nets_of(ci);
+                    ns.len() == 2
+                        && ns.iter().any(|n| n == vb)
+                        && ns.iter().any(|n| n == vs)
+                }
+        })
+    };
+    // The bootstrap DIODE for a phase: a 2-pin `D*` with ONE pin on vb's net (cathode on VBx, anode on
+    // the bootstrap rail). Its other pin must NOT be vs (that would be the cap, not a feed diode).
+    let diode_on = |vb: &str, vs: &str, claimed: &BTreeSet<usize>| -> Option<usize> {
+        (0..items.len()).find(|&di| {
+            !claimed.contains(&di)
+                && items[di].refdes.starts_with('D')
+                && items[di].geom.pins.len() == 2
+                && {
+                    let ns = nets_of(di);
+                    ns.len() == 2 && ns.iter().any(|n| n == vb) && !ns.iter().any(|n| n == vs)
+                }
+        })
+    };
+
+    // Candidate gate-driver ICs: ≥3-pin, non-connector. Ordered by index for determinism.
+    let anchor_idxs: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() >= 3 && !is_connector_like(&items[i].part))
+        .collect();
+
+    let mut moves: Vec<(usize, [f64; 2], f64)> = Vec::new();
+    let mut claimed: BTreeSet<usize> = BTreeSet::new();
+
+    for ai in anchor_idxs {
+        // Discover this IC's phase pairs GENERICALLY: a net `vb` (a non-ground IC pin net) is a
+        // bootstrap node iff SOME 2-pin diode taps it AND SOME 2-pin cap bridges it to ANOTHER non-ground
+        // IC net `vs`. We collect (vb, vs) without consuming the cap/diode yet, so the per-stage
+        // `claimed` seating below decides ownership.
+        let pin_nets: Vec<String> = items[ai]
+            .pins
+            .iter()
+            .filter_map(|(_, _, n)| n.clone())
+            .filter(|n| !is_ground(n))
+            .collect();
+        // Unique nets, index-ordered, dedup-preserving (deterministic pair order).
+        let mut uniq: Vec<String> = Vec::new();
+        for n in &pin_nets {
+            if !uniq.contains(n) {
+                uniq.push(n.clone());
+            }
+        }
+        let empty: BTreeSet<usize> = BTreeSet::new();
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for vb in &uniq {
+            // A diode must tap vb (necessary for a bootstrap node).
+            let has_diode = (0..items.len()).any(|di| {
+                items[di].refdes.starts_with('D')
+                    && items[di].geom.pins.len() == 2
+                    && nets_of(di).iter().any(|n| n == vb)
+            });
+            if !has_diode {
+                continue;
+            }
+            // Some OTHER IC net vs with a 2-pin cap bridging vb↔vs.
+            let vs = uniq
+                .iter()
+                .find(|vs| vs.as_str() != vb.as_str() && cap_bridging(vb, vs, &empty).is_some());
+            if let Some(vs) = vs {
+                if !pairs.iter().any(|(b, _)| b == vb) {
+                    pairs.push((vb.clone(), vs.clone()));
+                }
+            }
+        }
+        // A gate driver hosts ≥2 such bootstrap phase pairs; a lone {cap, diode} is some other network.
+        if pairs.len() < 2 {
+            continue;
+        }
+
+        // The IC's pin-tip world position for a given net.
+        let pin_world = |net: &str| -> Option<[f64; 2]> {
+            let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net))?.0.clone();
+            let pg = items[ai].geom.pins.iter().find(|p| p.number == num)?;
+            Some(crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
+        };
+        // The IC's pin bbox (to classify which edge a phase pair hugs).
+        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+        for pg in &items[ai].geom.pins {
+            let w = crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
+            lo[0] = lo[0].min(w[0]);
+            lo[1] = lo[1].min(w[1]);
+            hi[0] = hi[0].max(w[0]);
+            hi[1] = hi[1].max(w[1]);
+        }
+        let body = item_rect(&items[ai], items[ai].at);
+        // The IC's right/left edges are a WALL of port labels (GATE_xH, PHASE_x are cross-sheet and keep
+        // their pennants; BOOT_x is local). A stage hugging the body edge lands ON that label band, so
+        // project past it: the band extends from the pin tip outward by ~text_width(net)+2.54 (the same
+        // obstacle `port_label_obstacle` reserves). Take the widest label among the IC's pins as the
+        // band depth so every phase clears it.
+        let max_label_w = items[ai]
+            .pins
+            .iter()
+            .filter_map(|(_, _, n)| n.as_deref())
+            .map(|n| crate::textplace::text_width(n) + 2.54)
+            .fold(0.0_f64, f64::max);
+
+        // STAGE 1 — resolve each phase's {cap, diode} parts and its outward edge. The cap+diode of a
+        // phase form a horizontal ROW projecting out from the IC; the rows STACK on the lane axis. The
+        // IC's VB/VS phase pins sit ~7.62 mm apart, but a 100nF cap's field-stack footprint is ~14 mm,
+        // so the rows CANNOT sit at the pin pitch — they must spread to a uniform component pitch,
+        // centred on the pin-pair centroid, the same way `gather_decoupling_bank` derives its grid pitch
+        // from `item_rect` rather than cramming caps at the pin spacing. Short wires bridge each row to
+        // its phase's pins (exact pin alignment isn't needed — wires connect).
+        struct Stage {
+            ci: usize,
+            di: usize,
+            vb: String,    // the bootstrap node (cap↔diode junction net), to orient each part's pins
+            lane_pin: f64, // the pin-pair centroid on the lane (stack) axis — the row's natural slot
+        }
+        let mut stages: Vec<Stage> = Vec::new();
+        // In-progress claims for THIS anchor's phases (so two phases of the same IC can't both grab a
+        // shared part) layered on top of the cross-anchor `claimed` set.
+        let mut local_claim = claimed.clone();
+        // The shared outward edge: the edge the phase pins predominantly hug (all phases share an IC
+        // edge in practice). Decide it from the FIRST resolvable phase's midpoint.
+        let mut dir: Option<[f64; 2]> = None;
+        for (vb, vs) in &pairs {
+            let (Some(ci), Some(di)) =
+                (cap_bridging(vb, vs, &local_claim), diode_on(vb, vs, &local_claim))
+            else {
+                continue;
+            };
+            if ci == di {
+                continue;
+            }
+            local_claim.insert(ci);
+            local_claim.insert(di);
+            let (Some(wb), Some(wvs)) = (pin_world(vb), pin_world(vs)) else {
+                continue;
+            };
+            let mid = [(wb[0] + wvs[0]) / 2.0, (wb[1] + wvs[1]) / 2.0];
+            if dir.is_none() {
+                let (dl, dr, dt, db) =
+                    (mid[0] - lo[0], hi[0] - mid[0], mid[1] - lo[1], hi[1] - mid[1]);
+                let m = dl.min(dr).min(dt).min(db);
+                dir = Some(if m == dl {
+                    [-1.0, 0.0]
+                } else if m == dr {
+                    [1.0, 0.0]
+                } else if m == dt {
+                    [0.0, -1.0]
+                } else {
+                    [0.0, 1.0]
+                });
+            }
+            let d = dir.unwrap();
+            let lane_pin = if d[0] != 0.0 { mid[1] } else { mid[0] };
+            // Reserve the parts NOW so a later anchor / phase can't grab them, but only COMMIT the moves
+            // if the whole stack is overlap-free below.
+            stages.push(Stage { ci, di, vb: vb.clone(), lane_pin });
+        }
+        let Some(dir) = dir else { continue };
+        if stages.len() < 2 {
+            continue;
+        }
+        let dir_sign = if dir[0] != 0.0 { dir[0] } else { dir[1] };
+
+        // STAGE 2 — lay the rows. The row reads IC → cap → diode → rail along `dir`, so the local
+        // bootstrap net `vb` (BOOT_x) must be the cap↔diode junction in the MIDDLE: orient the cap so its
+        // vb pin faces OUTWARD (toward the diode) and its PHASE_x pin faces the IC (so that cross-sheet
+        // pennant draws inward, short); orient the diode so its vb pin (cathode) faces INWARD (toward the
+        // cap) and its rail pin (VIN, cross-sheet) faces out — keeping the diode body off the pennants.
+        let opposite = |o: Orient| match o {
+            Orient::Left => Orient::Right,
+            Orient::Right => Orient::Left,
+            Orient::Up => Orient::Down,
+            Orient::Down => Orient::Up,
+        };
+        let outward = if dir[0] < 0.0 {
+            Orient::Left
+        } else if dir[0] > 0.0 {
+            Orient::Right
+        } else if dir[1] < 0.0 {
+            Orient::Up
+        } else {
+            Orient::Down
+        };
+        let inward = opposite(outward);
+        // Angle that makes `idx`'s pin on net `net` point toward `face`. `orient_angle(o)` aims the
+        // pin1→pin2 axis at `o`, i.e. pin1 sits on the side OPPOSITE `o`. So to seat the named pin on the
+        // `face` side: if pin1 is the named pin, aim pin1→pin2 at the OPPOSITE of `face`; otherwise
+        // (pin2 is named) aim pin1→pin2 straight at `face`.
+        let face_net = |idx: usize, net: &str, face: Orient| -> f64 {
+            let p1_on_net = items[idx]
+                .pins
+                .first()
+                .and_then(|(_, _, n)| n.as_deref())
+                == Some(net);
+            let dirn = if p1_on_net { opposite(face) } else { face };
+            orient_angle(&items[idx].geom, dirn)
+        };
+        // Extent of an item along an axis at a hypothetical angle. `along_dir=true` ⇒ the depth axis.
+        let extent = |idx: usize, angle: f64, along_dir: bool| -> f64 {
+            let mut probe = items[idx].clone();
+            probe.angle = angle;
+            let r = item_rect(&probe, items[idx].at);
+            let on_x = if along_dir { dir[0] != 0.0 } else { dir[0] == 0.0 };
+            if on_x { r[2] - r[0] } else { r[3] - r[1] }
+        };
+        // Uniform ROW PITCH on the lane axis = the tallest stage member's lane extent + a gap, so no two
+        // rows ever collide regardless of the IC's tight pin pitch.
+        let row_pitch = stages
+            .iter()
+            .flat_map(|s| {
+                [
+                    extent(s.ci, orient_angle(&items[s.ci].geom, outward), false),
+                    extent(s.di, face_net(s.di, &s.vb, inward), false),
+                ]
+            })
+            .fold(0.0_f64, f64::max)
+            + 2.54;
+        let n = stages.len();
+        // Each row WANTS to sit at its own phase's pin-pair midpoint (so its wires to the VB/VS pins run
+        // straight — minimising the fan-out knot). But the rows need `row_pitch` of lane room and the IC
+        // pins are far tighter than that, so resolve overlaps with a minimal symmetric 1D spread: keep
+        // phases in pin order, then push neighbours apart only as far as `row_pitch` demands, centred so
+        // the block stays beside its pins. This keeps each row as close to its pins as collision allows.
+        stages.sort_by(|a, b| a.lane_pin.total_cmp(&b.lane_pin));
+        let mut row_lane: Vec<f64> = stages.iter().map(|s| s.lane_pin).collect();
+        // Forward pass: enforce a minimum gap walking up the order.
+        for i in 1..n {
+            let lo = row_lane[i - 1] + row_pitch;
+            if row_lane[i] < lo {
+                row_lane[i] = lo;
+            }
+        }
+        // Re-centre the spread block on the mean of the desired pin midpoints so it doesn't drift off one
+        // end (the forward pass only ever pushes outward/up).
+        let want_centre = stages.iter().map(|s| s.lane_pin).sum::<f64>() / n as f64;
+        let got_centre = row_lane.iter().sum::<f64>() / n as f64;
+        let shift = want_centre - got_centre;
+        for l in &mut row_lane {
+            *l += shift;
+        }
+        // Depth origin: past the IC body edge AND the port-label band, so rows clear the GATE_xH/PHASE_x
+        // pennant wall the IC's pins carry.
+        let body_edge = (if dir[0] > 0.0 {
+            body[2]
+        } else if dir[0] < 0.0 {
+            body[0]
+        } else if dir[1] > 0.0 {
+            body[3]
+        } else {
+            body[1]
+        }) + dir_sign * max_label_w;
+
+        // Build the full proposed move set for the whole stack, then commit it ATOMICALLY only if every
+        // member is overlap-free against the rest of the sheet (and against each other).
+        let mut proposed: Vec<(usize, [f64; 2], f64)> = Vec::new();
+        for (row, s) in stages.iter().enumerate() {
+            // Cap bridges BOOT_x↔PHASE_x along `dir`; diode's vb (cathode) faces the cap so BOOT_x is the
+            // junction between them and the diode's VIN (rail) pin faces out. Keeping the cap on a fixed
+            // along-edge orientation (not vb-aware) draws BOOT_x as a single clean junction WIRE between
+            // the parts — orienting the cap's BOOT pin outward instead made the writer label BOOT_x twice.
+            let cap_angle = orient_angle(&items[s.ci].geom, outward);
+            let dio_angle = face_net(s.di, &s.vb, inward);
+            let cap_ext = extent(s.ci, cap_angle, true);
+            let dio_ext = extent(s.di, dio_angle, true);
+            let lane = snap(row_lane[row]);
+            let cap_depth = body_edge + dir_sign * (GAP + cap_ext / 2.0);
+            // The cap's outer pin carries the cross-sheet PHASE_x net, whose pennant the writer draws
+            // ~one label-width outward; seat the diode PAST that band so its body never lands on the
+            // pennant (the recurring "diode over PHASE_x label" defect).
+            let phase_band = stages
+                .iter()
+                .filter_map(|s| {
+                    items[s.ci].pins.iter().find_map(|(_, _, n)| {
+                        n.as_deref().filter(|n| *n != s.vb).map(crate::textplace::text_width)
+                    })
+                })
+                .fold(0.0_f64, f64::max)
+                + 2.54;
+            let dio_depth =
+                cap_depth + dir_sign * (cap_ext / 2.0 + phase_band + 2.54 + dio_ext / 2.0);
+            let pos = |depth: f64| -> [f64; 2] {
+                if dir[0] != 0.0 { [snap(depth), lane] } else { [lane, snap(depth)] }
+            };
+            proposed.push((s.ci, pos(cap_depth), cap_angle));
+            proposed.push((s.di, pos(dio_depth), dio_angle));
+        }
+        // No-op guard: if the stack already sits at the proposal, just claim and move on.
+        if proposed.iter().all(|&(i, at, ang)| {
+            (items[i].at[0] - at[0]).abs() < 1.27
+                && (items[i].at[1] - at[1]).abs() < 1.27
+                && (items[i].angle - ang).abs() < 0.5
+        }) {
+            for &(i, _, _) in &proposed {
+                claimed.insert(i);
+            }
+            continue;
+        }
+        // OVERLAP-SAFETY against the WHOLE sheet — no follow-up decongest repairs a collision. Fold both
+        // this stack's proposal AND moves committed by earlier anchors into the rects, so the baseline
+        // ("didn't overlap before") and the proposal are evaluated in the same post-move world.
+        let prop: BTreeMap<usize, ([f64; 2], f64)> =
+            proposed.iter().map(|&(i, at, ang)| (i, (at, ang))).collect();
+        let committed: BTreeMap<usize, ([f64; 2], f64)> =
+            moves.iter().map(|&(i, at, ang)| (i, (at, ang))).collect();
+        let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> [f64; 4] {
+            let mut probe = items[idx].clone();
+            probe.angle = angle;
+            item_rect(&probe, at)
+        };
+        let settled = |idx: usize| -> [f64; 4] {
+            match committed.get(&idx) {
+                Some(&(at, ang)) => rect_at(idx, at, ang),
+                None => item_rect(&items[idx], items[idx].at),
+            }
+        };
+        let at_now = |idx: usize| settled(idx);
+        let at_new = |idx: usize| -> [f64; 4] {
+            match prop.get(&idx) {
+                Some(&(at, ang)) => rect_at(idx, at, ang),
+                None => settled(idx),
+            }
+        };
+        let mut ok = true;
+        'check: for &(c, _, _) in &proposed {
+            for other in 0..items.len() {
+                if other == c {
+                    continue;
+                }
+                if rects_overlap(at_new(c), at_new(other)) && !rects_overlap(at_now(c), at_now(other))
+                {
+                    ok = false;
+                    break 'check;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        for &(i, _, _) in &proposed {
+            claimed.insert(i);
+        }
         moves.extend(proposed);
     }
     let moved = !moves.is_empty();
