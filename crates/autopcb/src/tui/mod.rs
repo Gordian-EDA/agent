@@ -50,8 +50,8 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
-use kicad_bridge::env::KicadEnv;
-use kicad_bridge::snapshot::SnapshotStore;
+use kicad_cli_rs::env::KicadEnv;
+use kicad_sexpr::snapshot::SnapshotStore;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use serde_json::Value;

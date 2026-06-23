@@ -19,9 +19,9 @@ use std::io;
 
 use circuit_lang::model::{Component, Design, PinTarget};
 use circuit_lang::{find_pin, PinType, SymbolProvider};
-use kicad_bridge::env::KicadEnv;
-use kicad_bridge::geometry::SymbolGeometry;
-use kicad_bridge::provider::RealSymbolProvider;
+use kicad_cli_rs::env::KicadEnv;
+use kicad_sexpr::geometry::SymbolGeometry;
+use kicad_sexpr::provider::RealSymbolProvider;
 use serde::{Deserialize, Serialize};
 
 use crate::emit::{Dir, SchematicWriter};

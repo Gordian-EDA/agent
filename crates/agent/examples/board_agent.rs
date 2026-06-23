@@ -15,8 +15,8 @@
 //! installed KiCAD (footprint library + `kicad-cli pcb drc`).
 
 use agent::{Agent, AutoApprove};
-use kicad_bridge::cli::KicadCli;
-use kicad_bridge::env::KicadEnv;
+use kicad_cli_rs::cli::KicadCli;
+use kicad_cli_rs::env::KicadEnv;
 use tokio::sync::mpsc;
 
 #[tokio::main]

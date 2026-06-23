@@ -1,10 +1,10 @@
-//! Read-side tests for `kicad_bridge::pcb`: the hand-authored `two_res`
+//! Read-side tests for `kicad_sexpr::pcb`: the hand-authored `two_res`
 //! fixture must parse cleanly and translate into the expected routing problem.
 //! (The write side extends this file in the next task.)
 
 use std::path::PathBuf;
 
-use kicad_bridge::pcb::{extract_copper, read_problem, write_solution};
+use kicad_sexpr::pcb::{extract_copper, read_problem, write_solution};
 use pcb_engine::problem::{LayerRef, Point2, RouteSolution, Trace, Via, ViaSpan};
 
 fn fixture() -> PathBuf {
@@ -352,7 +352,7 @@ fn oracle_confirms_written_copper_connects_pads() {
 /// expected on a hand-authored fixture and ignored). Gated on a KiCAD install.
 #[test]
 fn drc_unconnected_count_decreases_after_routing() {
-    use kicad_bridge::env::KicadEnv;
+    use kicad_cli_rs::env::KicadEnv;
     let Some(env) = KicadEnv::detect() else {
         eprintln!("SKIP: no KiCAD installation detected");
         return;
@@ -377,7 +377,7 @@ fn drc_unconnected_count_decreases_after_routing() {
 
 /// Run `kicad-cli pcb drc --format json` and return the `unconnected_items`
 /// count. Panics on execution failure (the test is already gated on detect()).
-fn drc_unconnected_count(env: &kicad_bridge::env::KicadEnv, board: &std::path::Path) -> usize {
+fn drc_unconnected_count(env: &kicad_cli_rs::env::KicadEnv, board: &std::path::Path) -> usize {
     let out = tempfile::Builder::new()
         .prefix("autopcb-drc-")
         .suffix(".json")

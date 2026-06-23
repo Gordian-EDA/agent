@@ -15,7 +15,10 @@ serde.workspace = true
 serde_json.workspace = true
 
 circuit-lang = { path = "../circuit-lang" }
-kicad-bridge = { path = "../kicad-bridge" }
+kicad-cli-rs = { path = "../kicad-cli-rs" }
+kicad-sexpr = { path = "../kicad-sexpr" }
+pcb-synth = { path = "../pcb-synth" }
+specctra = { path = "../specctra" }
 kicad-ipc = { path = "../kicad-ipc" }
 pcb-engine = { path = "../pcb-engine" }
 sch-layout = { path = "../sch-layout" }

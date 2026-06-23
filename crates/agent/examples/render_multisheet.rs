@@ -13,9 +13,9 @@
 //! Usage: cargo run --release -p agent --example render_multisheet -- <draft.yaml> <out_dir>
 
 use circuit_lang::SymbolProvider;
-use kicad_bridge::cli::KicadCli;
-use kicad_bridge::env::KicadEnv;
-use kicad_bridge::provider::RealSymbolProvider;
+use kicad_cli_rs::cli::KicadCli;
+use kicad_cli_rs::env::KicadEnv;
+use kicad_sexpr::provider::RealSymbolProvider;
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);

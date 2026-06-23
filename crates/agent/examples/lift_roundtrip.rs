@@ -5,8 +5,8 @@
 //! Exits nonzero if any lifted YAML fails to compile.
 
 use circuit_lang::SymbolProvider;
-use kicad_bridge::env::KicadEnv;
-use kicad_bridge::provider::RealSymbolProvider;
+use kicad_cli_rs::env::KicadEnv;
+use kicad_sexpr::provider::RealSymbolProvider;
 
 fn main() -> anyhow::Result<()> {
     let env = KicadEnv::detect().expect("no KiCAD environment");

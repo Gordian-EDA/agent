@@ -18,15 +18,18 @@ dependencies = [
  "circuit-lang",
  "dotenvy",
  "indexmap",
- "kicad-bridge",
+ "kicad-cli-rs",
  "kicad-ipc",
+ "kicad-sexpr",
  "pcb-engine",
+ "pcb-synth",
  "rayon",
  "reqwest",
  "resvg",
  "sch-layout",
  "serde",
  "serde_json",
+ "specctra",
  "tempfile",
  "tokio",
 ]
@@ -102,7 +105,8 @@ dependencies = [
  "async-trait",
  "crossterm",
  "futures",
- "kicad-bridge",
+ "kicad-cli-rs",
+ "kicad-sexpr",
  "pulldown-cmark",
  "ratatui",
  "serde_json",
@@ -892,21 +896,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "kicad-bridge"
+name = "kicad-cli-rs"
 version = "0.1.0"
 dependencies = [
- "circuit-lang",
- "elsa",
- "fuzzy-matcher",
- "kiutils_kicad",
- "kiutils_sexpr",
- "pcb-engine",
  "quick-xml",
  "serde",
  "serde_json",
- "strsim",
  "tempfile",
- "uuid",
 ]
 
 [[package]]
@@ -918,6 +914,25 @@ dependencies = [
  "prost-build",
  "prost-types",
  "thiserror",
+]
+
+[[package]]
+name = "kicad-sexpr"
+version = "0.1.0"
+dependencies = [
+ "circuit-lang",
+ "elsa",
+ "fuzzy-matcher",
+ "kicad-cli-rs",
+ "kiutils_kicad",
+ "kiutils_sexpr",
+ "pcb-engine",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "strsim",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
@@ -1134,6 +1149,17 @@ name = "pcb-model"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "pcb-synth"
+version = "0.1.0"
+dependencies = [
+ "kicad-sexpr",
+ "kiutils_kicad",
+ "pcb-engine",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
@@ -1672,7 +1698,8 @@ dependencies = [
  "circuit-graph",
  "circuit-lang",
  "indexmap",
- "kicad-bridge",
+ "kicad-cli-rs",
+ "kicad-sexpr",
  "kiutils_kicad",
  "rayon",
  "serde",
@@ -1832,6 +1859,18 @@ checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "specctra"
+version = "0.1.0"
+dependencies = [
+ "kicad-sexpr",
+ "kiutils_kicad",
+ "kiutils_sexpr",
+ "pcb-engine",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -1,4 +1,4 @@
-use kicad_bridge::{cli::KicadCli, env::KicadEnv};
+use kicad_cli_rs::{cli::KicadCli, env::KicadEnv};
 
 #[test]
 fn erc_runs_on_blank_schematic_and_parses_report() {

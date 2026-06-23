@@ -1,5 +1,6 @@
 use circuit_lang::SymbolProvider;
-use kicad_bridge::{env::KicadEnv, provider::RealSymbolProvider};
+use kicad_cli_rs::env::KicadEnv;
+use kicad_sexpr::provider::RealSymbolProvider;
 
 #[test]
 fn compiles_validated_bedrock_design_against_real_libs() {

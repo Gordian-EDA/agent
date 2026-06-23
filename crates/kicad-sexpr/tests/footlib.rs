@@ -8,8 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
-use kicad_bridge::env::KicadEnv;
-use kicad_bridge::footlib::{CourtyardSource, Footprint, FootprintIndex, PadTechnology};
+use kicad_cli_rs::env::KicadEnv;
+use kicad_sexpr::footlib::{CourtyardSource, Footprint, FootprintIndex, PadTechnology};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/footprints")

@@ -1,0 +1,17 @@
+[package]
+name = "specctra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Specctra .dsn/.ses codec bridging KiCAD boards and the Freerouting autorouter."
+
+[dependencies]
+kicad-sexpr = { path = "../kicad-sexpr" }
+pcb-engine = { path = "../pcb-engine" }
+kiutils_kicad.workspace = true
+kiutils_sexpr.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

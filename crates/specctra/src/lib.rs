@@ -8,7 +8,7 @@
 //! placed `.kicad_pcb` into a `.dsn`, [`import_ses`] parses the `.ses` back into
 //! geometry, and [`freeroute`] orchestrates the round-trip through the jar.
 //!
-//! ## Why a dedicated exporter (vs. reusing [`crate::pcb::read_problem`])
+//! ## Why a dedicated exporter (vs. reusing [`kicad_sexpr::pcb::read_problem`])
 //!
 //! `read_problem` *flattens* the board into engine obstacles — it loses the
 //! component → pad-offset structure that Specctra's `placement` + `library`
@@ -41,7 +41,7 @@ use kiutils_kicad::{PcbAst, PcbFile, PcbFootprint, PcbPad};
 use kiutils_sexpr::{parse_one, Atom, Node};
 use pcb_engine::problem::{LayerRef, Point2, RouteSolution, Trace, Via, ViaSpan};
 
-use crate::pcb::{read_problem, BoardProblem};
+use kicad_sexpr::pcb::{read_problem, BoardProblem};
 
 /// mm → Specctra um (the `.dsn` unit). KiCAD stores mm; Freerouting wants um.
 const UM_PER_MM: f64 = 1000.0;
@@ -92,7 +92,7 @@ pub struct RoutedGeometry {
 }
 
 impl RoutedGeometry {
-    /// Convert into an engine [`RouteSolution`] (the form [`crate::pcb::write_solution`]
+    /// Convert into an engine [`RouteSolution`] (the form [`kicad_sexpr::pcb::write_solution`]
     /// consumes). Wire layers/vias map back through the board's layer order, so
     /// `board` must be the same board the `.dsn` was exported from.
     pub fn to_solution(&self, board: &BoardProblem) -> RouteSolution {
@@ -124,7 +124,7 @@ impl RoutedGeometry {
 
 /// Map a KiCAD copper layer name to the engine [`LayerRef`] for `layer_names`
 /// (`F.Cu` → top, `B.Cu` → bottom, inners → `inner{idx}`). Mirrors the private
-/// helper in [`crate::pcb`]; duplicated here to keep that module's surface intact.
+/// helper in [`kicad_sexpr::pcb`]; duplicated here to keep that module's surface intact.
 fn layer_ref_for(kicad_layer: &str, layer_names: &[String]) -> LayerRef {
     if kicad_layer == "F.Cu" {
         LayerRef::top()
@@ -197,7 +197,7 @@ struct Padstack {
 /// Design rules to route against, overriding the [`BoardProblem`] defaults.
 ///
 /// `read_problem` can only return engine defaults for copper rules (this kiutils
-/// version doesn't surface board clearance/width — see [`crate::pcb`]), so a
+/// version doesn't surface board clearance/width — see [`kicad_sexpr::pcb`]), so a
 /// caller that knows the board's true fine rules (e.g. a 0.1mm-clearance BGA
 /// escape) passes them here. The same rules are emitted to Freerouting AND should
 /// be written into the board's `net_settings` (via [`write_net_settings`]) so the

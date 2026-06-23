@@ -7,9 +7,9 @@
 //! With no args, renders all four targets.
 
 use circuit_lang::SymbolProvider;
-use kicad_bridge::cli::KicadCli;
-use kicad_bridge::env::KicadEnv;
-use kicad_bridge::provider::RealSymbolProvider;
+use kicad_cli_rs::cli::KicadCli;
+use kicad_cli_rs::env::KicadEnv;
+use kicad_sexpr::provider::RealSymbolProvider;
 
 const TARGETS: &[&str] =
     &["divider-filter", "mcp1703-power-entry", "555-blinker", "uart-level-translator"];

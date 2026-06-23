@@ -9,8 +9,8 @@
 //! truthfulness oracle (`floorplan_netlist.rs`); this gate guards the *aesthetic*
 //! placement the oracle can't see.
 
-use kicad_bridge::env::KicadEnv;
-use kicad_bridge::provider::RealSymbolProvider;
+use kicad_cli_rs::env::KicadEnv;
+use kicad_sexpr::provider::RealSymbolProvider;
 use sch_layout::floorplan::{self, LayoutIr};
 use std::path::{Path, PathBuf};
 

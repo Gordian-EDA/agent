@@ -1,4 +1,4 @@
-use kicad_bridge::env::KicadEnv;
+use kicad_cli_rs::env::KicadEnv;
 
 #[test]
 fn detects_installed_kicad() {

@@ -1,6 +1,6 @@
 //! Integration tests for solved text positions in emitted documents.
 
-use kicad_bridge::env::KicadEnv;
+use kicad_cli_rs::env::KicadEnv;
 use sch_layout::emit::SchematicWriter;
 
 fn detect_env() -> Option<KicadEnv> {

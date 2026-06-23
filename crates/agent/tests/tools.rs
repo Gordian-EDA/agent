@@ -576,7 +576,7 @@ blocks:
 /// alive by the caller) plus its path. The lib nickname is therefore `Fixtures`.
 fn staged_footprint_dir() -> (tempfile::TempDir, std::path::PathBuf) {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../kicad-bridge/tests/fixtures/footprints");
+        .join("../kicad-sexpr/tests/fixtures/footprints");
     let tmp = tempfile::tempdir().unwrap();
     let pretty = tmp.path().join("Fixtures.pretty");
     std::fs::create_dir_all(&pretty).unwrap();
@@ -629,7 +629,7 @@ fn derive_board_seeds_draft_from_schematic_then_assign_footprint() {
     let tools = Tools::new();
     // Stage the RC-pair fixture as the project's schematic.
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../kicad-bridge/tests/fixtures/rc_pair.kicad_sch");
+        .join("../kicad-sexpr/tests/fixtures/rc_pair.kicad_sch");
     std::fs::copy(&fixture, ctx.sch_path()).unwrap();
 
     let bounds = serde_json::json!({ "min_x": 0, "max_x": 20, "min_y": 0, "max_y": 12 });
@@ -954,7 +954,7 @@ fn full_flow_create_place_route_is_clean() {
 
 #[test]
 fn export_board_requires_place_and_route_then_writes_parseable_board() {
-    use kicad_bridge::pcb::{extract_copper, read_problem};
+    use kicad_sexpr::pcb::{extract_copper, read_problem};
 
     let (ctx, _g, tools) = placed_board_ctx();
 

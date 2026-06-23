@@ -29,10 +29,10 @@ use serde_json::{Value, json};
 use circuit_lang::model::PinTarget;
 use sch_layout::lift::lift;
 
-use kicad_bridge::cli::{KicadCli, Violation};
-use kicad_bridge::pcb::{read_problem, write_solution};
-use kicad_bridge::placefp::{part_from_footprint, part_from_footprint_layers};
-use kicad_bridge::synth::{
+use kicad_cli_rs::cli::{KicadCli, Violation};
+use kicad_sexpr::pcb::{read_problem, write_solution};
+use pcb_synth::placefp::{part_from_footprint, part_from_footprint_layers};
+use pcb_synth::synth::{
     plane_fill_rects, synthesize_board_full, synthesize_board_layers, SynthPart, ZoneSpec,
 };
 use pcb_engine::connectivity::Violation as ConnViolation;
@@ -269,10 +269,10 @@ pub fn get_footprint_info(input: Value, ctx: &ToolCtx) -> Result<Value> {
     }
 }
 
-/// Render a [`kicad_bridge::footlib::PadTechnology`] as a stable lowercase
+/// Render a [`kicad_sexpr::footlib::PadTechnology`] as a stable lowercase
 /// string for the LLM.
-fn technology_str(t: kicad_bridge::footlib::PadTechnology) -> &'static str {
-    use kicad_bridge::footlib::PadTechnology::*;
+fn technology_str(t: kicad_sexpr::footlib::PadTechnology) -> &'static str {
+    use kicad_sexpr::footlib::PadTechnology::*;
     match t {
         Smd => "smd",
         ThruHole => "thru_hole",
@@ -281,15 +281,15 @@ fn technology_str(t: kicad_bridge::footlib::PadTechnology) -> &'static str {
     }
 }
 
-fn courtyard_source_str(s: kicad_bridge::footlib::CourtyardSource) -> &'static str {
-    use kicad_bridge::footlib::CourtyardSource::*;
+fn courtyard_source_str(s: kicad_sexpr::footlib::CourtyardSource) -> &'static str {
+    use kicad_sexpr::footlib::CourtyardSource::*;
     match s {
         Crtyd => "crtyd",
         PadSilkFallback => "pad_silk_fallback",
     }
 }
 
-fn bbox_json(b: &kicad_bridge::footlib::BBox) -> Value {
+fn bbox_json(b: &kicad_sexpr::footlib::BBox) -> Value {
     json!({
         "min_x": b.min_x,
         "min_y": b.min_y,
@@ -551,7 +551,7 @@ const HDI_VIA_DRILL: f64 = 0.2;
 /// that part).
 fn parse_draft_part(
     pj: &Value,
-    index: &kicad_bridge::footlib::FootprintIndex,
+    index: &kicad_sexpr::footlib::FootprintIndex,
     clearance: f64,
 ) -> std::result::Result<DraftPart, Value> {
     let reference = pj
@@ -582,7 +582,7 @@ fn parse_draft_part(
     // Reject a footprint whose own pads (different-net OR un-netted/NC) sit closer than the
     // board clearance — an inherent clearance DRC fault no routing can fix.
     if let Some((a, b, gap)) =
-        kicad_bridge::placefp::pad_clearance_violations(&resolved_fp, &pad_nets, clearance).first()
+        pcb_synth::placefp::pad_clearance_violations(&resolved_fp, &pad_nets, clearance).first()
     {
         return Err(json!({
             "error": format!(
@@ -2679,7 +2679,7 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // design intent the placer/router worked around — and KiCAD independently confirms no
     // track/via landed inside it. Resolve each keep-out's layers to KiCAD names; drop a
     // keep-out whose layers don't resolve rather than emit a malformed zone.
-    let keepout_zones: Vec<kicad_bridge::synth::KeepoutZone> = draft
+    let keepout_zones: Vec<pcb_synth::synth::KeepoutZone> = draft
         .keepouts
         .iter()
         .map(|k| {
@@ -2688,7 +2688,7 @@ pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
                 .iter()
                 .filter_map(|l| resolve_pour_layer(&l.0, draft.rules.layer_count).map(|(_, n)| n))
                 .collect();
-            kicad_bridge::synth::KeepoutZone {
+            pcb_synth::synth::KeepoutZone {
                 layers,
                 min: [k.rect.min_x, k.rect.min_y],
                 max: [k.rect.max_x, k.rect.max_y],
@@ -3059,8 +3059,8 @@ pub fn autoroute(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         Ok(p) => p,
         Err(e) => return Ok(json!({ "error": format!("could not read the board: {e}") })),
     };
-    let rules = kicad_bridge::specctra::RouteRules::from_board(&problem);
-    let geo = match kicad_bridge::specctra::freeroute_with_rules(&board_path, rules) {
+    let rules = specctra::RouteRules::from_board(&problem);
+    let geo = match specctra::freeroute_with_rules(&board_path, rules) {
         Ok(g) => g,
         Err(e) => return Ok(json!({ "error": format!("freerouting failed: {e}") })),
     };
@@ -3069,7 +3069,7 @@ pub fn autoroute(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     if let Err(e) = write_solution(&board_path, &solution, &problem) {
         return Ok(json!({ "error": format!("could not write the routed board: {e}") }));
     }
-    let _ = kicad_bridge::specctra::write_net_settings(&board_path, rules);
+    let _ = specctra::write_net_settings(&board_path, rules);
 
     // DRC via KiCAD (the external authority); copper faults only.
     let mut copper_violations = None;

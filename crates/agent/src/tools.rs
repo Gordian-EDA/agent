@@ -56,12 +56,12 @@ use serde_json::{Value, json};
 
 use circuit_lang::model::{Component, Design, PinTarget};
 use circuit_lang::{SymbolProvider, compile};
-use kicad_bridge::cli::KicadCli;
-use kicad_bridge::env::KicadEnv;
-use kicad_bridge::footlib::FootprintIndex;
-use kicad_bridge::provider::RealSymbolProvider;
-use kicad_bridge::search::SymbolIndex;
-use kicad_bridge::snapshot::SnapshotStore;
+use kicad_cli_rs::cli::KicadCli;
+use kicad_cli_rs::env::KicadEnv;
+use kicad_sexpr::footlib::FootprintIndex;
+use kicad_sexpr::provider::RealSymbolProvider;
+use kicad_sexpr::search::SymbolIndex;
+use kicad_sexpr::snapshot::SnapshotStore;
 
 use sch_layout::floorplan::{infer_ir, LayoutIr};
 use sch_layout::lift::lift;

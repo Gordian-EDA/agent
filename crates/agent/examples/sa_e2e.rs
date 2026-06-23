@@ -6,8 +6,8 @@
 //! Usage: cargo run --release -p agent --example sa_e2e [name ...]
 
 use circuit_lang::SymbolProvider;
-use kicad_bridge::env::KicadEnv;
-use kicad_bridge::provider::RealSymbolProvider;
+use kicad_cli_rs::env::KicadEnv;
+use kicad_sexpr::provider::RealSymbolProvider;
 use sch_layout::floorplan::{self, LayoutIr};
 
 const FIXTURES: &[&str] = &[

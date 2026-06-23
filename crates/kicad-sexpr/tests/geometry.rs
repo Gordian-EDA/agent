@@ -3,9 +3,9 @@
 //! Gated on a real KiCAD install (`KicadEnv::detect()` → SKIP-graceful); these
 //! RUN on the dev machine where KiCAD 10 and its symbol libraries are present.
 
-use kicad_bridge::cli::KicadCli;
-use kicad_bridge::env::KicadEnv;
-use kicad_bridge::geometry::SymbolGeometry;
+use kicad_cli_rs::cli::KicadCli;
+use kicad_cli_rs::env::KicadEnv;
+use kicad_sexpr::geometry::SymbolGeometry;
 
 #[test]
 fn device_r_pin_geometry() {

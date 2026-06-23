@@ -2,8 +2,8 @@
 //! decoupling-bank idioms from connectivity alone (no new YAML syntax) and report
 //! them on `LayoutIr.idioms`, pinning their members in `LayoutIr.frozen`.
 
-use kicad_bridge::env::KicadEnv;
-use kicad_bridge::provider::RealSymbolProvider;
+use kicad_cli_rs::env::KicadEnv;
+use kicad_sexpr::provider::RealSymbolProvider;
 use sch_layout::floorplan;
 use std::path::Path;
 

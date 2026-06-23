@@ -1,6 +1,6 @@
 //! Footprint → placement bridge: turn a parsed [`Footprint`] into a
 //! [`pcb_engine::placement::Part`], and move a template board's footprints to an
-//! engine placement. The placement-side companion to [`crate::pcb`]'s
+//! engine placement. The placement-side companion to [`kicad_sexpr::pcb`]'s
 //! board↔`RouteProblem` translation.
 //!
 //! ## The courtyard-enclosing rule (the load-bearing invariant)
@@ -28,7 +28,7 @@
 //! invariant: the courtyard encloses the pads on every side. Folding in the
 //! footprint courtyard too means a tight body-hugging `F.CrtYd` never *shrinks*
 //! the keep-out below the real one. Pad rotation is folded into each pad's AABB
-//! exactly as [`crate::pcb`] does for board pads.
+//! exactly as [`kicad_sexpr::pcb`] does for board pads.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -38,7 +38,7 @@ use kiutils_kicad::PcbFile;
 use pcb_engine::placement::{Part, Placement, PartPad};
 use pcb_engine::problem::{LayerRef, Point2};
 
-use crate::footlib::{BBox, Footprint, FootprintPad, PadTechnology};
+use kicad_sexpr::footlib::{BBox, Footprint, FootprintPad, PadTechnology};
 
 /// Build a placement [`Part`] from a parsed [`Footprint`].
 ///
@@ -47,7 +47,7 @@ use crate::footlib::{BBox, Footprint, FootprintPad, PadTechnology};
 /// belongs to; a pad whose number is absent from the map is left unconnected
 /// (`net: None`). Pad offsets, sizes and layers are carried over; layers map
 /// `F.Cu`→top, `B.Cu`→bottom, and a `*.Cu` / through-hole pad to both copper
-/// faces (consistent with how [`crate::pcb`] reads board pads).
+/// faces (consistent with how [`kicad_sexpr::pcb`] reads board pads).
 ///
 /// The courtyard follows the origin-symmetric enclosing rule documented on this
 /// module: it encloses both the footprint's `F.CrtYd` and every pad.
@@ -414,7 +414,7 @@ mod tests {
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/footprints")
+            .join("../kicad-sexpr/tests/fixtures/footprints")
             .join(name)
     }
 

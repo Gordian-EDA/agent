@@ -17,8 +17,8 @@ use std::process::ExitCode;
 use agent::tools::ToolCtx;
 use agent::{Agent, AutoApprove};
 use anyhow::{Context, Result, bail};
-use kicad_bridge::cli::KicadCli;
-use kicad_bridge::env::KicadEnv;
+use kicad_cli_rs::cli::KicadCli;
+use kicad_cli_rs::env::KicadEnv;
 
 /// Default project directory when `--project` is omitted.
 const DEFAULT_PROJECT_DIR: &str = "autopcb-project";

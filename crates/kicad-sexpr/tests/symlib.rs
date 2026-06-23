@@ -2,8 +2,8 @@
 //! validated ground truth from the installed KiCAD libraries.
 
 use circuit_lang::PinType;
-use kicad_bridge::env::KicadEnv;
-use kicad_bridge::symlib::SymbolLib;
+use kicad_cli_rs::env::KicadEnv;
+use kicad_sexpr::symlib::SymbolLib;
 
 fn lib(name: &str) -> Option<SymbolLib> {
     let env = KicadEnv::detect()?;

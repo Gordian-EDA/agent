@@ -8,7 +8,8 @@ description = "CLI and TUI for the auto-pcb LLM agent that designs KiCAD schemat
 
 [dependencies]
 agent = { path = "../agent" }
-kicad-bridge = { path = "../kicad-bridge" }
+kicad-cli-rs = { path = "../kicad-cli-rs" }
+kicad-sexpr = { path = "../kicad-sexpr" }
 
 anyhow.workspace = true
 tokio.workspace = true

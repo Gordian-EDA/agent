@@ -18,7 +18,7 @@ fn main() {
 
     // Stage the vendored fixture footprints into a .pretty dir for the index.
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../kicad-bridge/tests/fixtures/footprints");
+        .join("../kicad-sexpr/tests/fixtures/footprints");
     let staging = PathBuf::from(&out_dir).join("fp");
     let pretty = staging.join("Fixtures.pretty");
     std::fs::create_dir_all(&pretty).unwrap();

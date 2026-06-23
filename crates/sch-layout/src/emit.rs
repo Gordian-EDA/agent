@@ -32,8 +32,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io;
 
-use kicad_bridge::env::KicadEnv;
-use kicad_bridge::geometry::{PinGeom, SymbolGeometry};
+use kicad_cli_rs::env::KicadEnv;
+use kicad_sexpr::geometry::{PinGeom, SymbolGeometry};
 
 use crate::grid::snap_point;
 use crate::ids::stable_uuid;
@@ -2743,7 +2743,7 @@ mod tests {
 #[cfg(test)]
 mod repro_tests {
     use super::*;
-    use kicad_bridge::env::KicadEnv;
+    use kicad_cli_rs::env::KicadEnv;
 
     #[test]
     fn u1_fields_dodge_out_label() {

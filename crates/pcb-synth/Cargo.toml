@@ -1,0 +1,14 @@
+[package]
+name = "pcb-synth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Synthesize a KiCAD .kicad_pcb (footprints, planes, zones, outline, silk) from a placed BoardDraft."
+
+[dependencies]
+kicad-sexpr = { path = "../kicad-sexpr" }
+pcb-engine = { path = "../pcb-engine" }
+kiutils_kicad.workspace = true
+tempfile.workspace = true
+uuid.workspace = true

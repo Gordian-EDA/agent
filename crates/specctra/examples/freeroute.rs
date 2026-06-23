@@ -22,8 +22,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use kicad_bridge::pcb::{read_problem, write_solution};
-use kicad_bridge::specctra::{freeroute_with_rules, plane_nets, write_net_settings, RouteRules};
+use kicad_sexpr::pcb::{read_problem, write_solution};
+use specctra::{freeroute_with_rules, plane_nets, write_net_settings, RouteRules};
 
 fn main() {
     let mut args = std::env::args().skip(1).peekable();

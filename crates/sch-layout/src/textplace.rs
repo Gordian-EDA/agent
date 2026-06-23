@@ -71,7 +71,7 @@ pub(crate) fn choose(obstacles: &[Obstacle], movables: &[Movable]) -> Vec<(usize
     out
 }
 
-use kicad_bridge::geometry::PinGeom;
+use kicad_sexpr::geometry::PinGeom;
 
 use crate::emit::{transform_offset, Dir};
 

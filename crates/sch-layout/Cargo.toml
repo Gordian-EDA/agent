@@ -9,7 +9,8 @@ description = "Deterministic schematic floorplan layout engine (Design to .kicad
 [dependencies]
 circuit-lang = { path = "../circuit-lang" }
 circuit-graph = { path = "../circuit-graph" }
-kicad-bridge = { path = "../kicad-bridge" }
+kicad-cli-rs = { path = "../kicad-cli-rs" }
+kicad-sexpr = { path = "../kicad-sexpr" }
 kiutils_kicad.workspace = true
 tempfile.workspace = true
 uuid.workspace = true

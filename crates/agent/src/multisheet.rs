@@ -14,8 +14,8 @@
 
 use circuit_lang::model::{Block, Design, PinTarget};
 use indexmap::IndexMap;
-use kicad_bridge::cli::KicadCli;
-use kicad_bridge::env::KicadEnv;
+use kicad_cli_rs::cli::KicadCli;
+use kicad_cli_rs::env::KicadEnv;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 

@@ -40,7 +40,7 @@ use std::path::PathBuf;
 use kiutils_kicad::{SymPin, Symbol, SymbolLibFile};
 use kiutils_sexpr::{Atom, Node, parse_one};
 
-use crate::env::KicadEnv;
+use kicad_cli_rs::env::KicadEnv;
 
 /// Local geometry of a single symbol pin, in symbol coordinates.
 ///

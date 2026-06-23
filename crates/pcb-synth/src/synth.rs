@@ -16,10 +16,10 @@
 //! from ONE description: the pads the router targets MUST be byte-for-byte the
 //! pads KiCAD sees, or `move`/synthesis lands copper a pad does not reach and DRC
 //! reports it unconnected. The `.kicad_mod` *is* that one description (the same
-//! file [`crate::footlib::Footprint::load`] and `part_from_footprint` read), so we
+//! file [`kicad_sexpr::footlib::Footprint::load`] and `part_from_footprint` read), so we
 //! transform its raw text rather than round-tripping through a lossy parsed form
 //! (kiutils' footprint `ast_mut` does not round-trip through `write()`, the same
-//! limitation [`crate::pcb::write_solution`] documents). The transforms are:
+//! limitation [`kicad_sexpr::pcb::write_solution`] documents). The transforms are:
 //!
 //! 1. Rewrite the `(footprint "NAME" …)` header token to the board `lib_id`.
 //! 2. Inject `(at x y [rot])` + a deterministic board-instance `(uuid …)` right
@@ -80,7 +80,7 @@ pub fn synthesize_board(parts: &[SynthPart], bounds: &Bounds) -> io::Result<Stri
 /// Synthesize a complete `.kicad_pcb` from `parts` on a board of `bounds` with
 /// `layer_count` copper layers (2 or 4 — the engine's supported stackups).
 ///
-/// The result parses with [`crate::pcb::read_problem`] and is structurally a
+/// The result parses with [`kicad_sexpr::pcb::read_problem`] and is structurally a
 /// KiCAD-9 board (see the module docs). Net codes are 1-based over the sorted
 /// union of every part's pad nets. Returns an [`io::Error`] if a part's source
 /// has no parseable footprint block, a placement is missing for a part, or a
@@ -827,7 +827,7 @@ fn push_reindented(out: &mut String, node: &str) {
 // ── formatting / ids ─────────────────────────────────────────────────────────
 
 /// Fixed namespace UUID for synthesized board identifiers (distinct from the
-/// copper namespace in [`crate::pcb`]). Content-derived so a given board re-emits
+/// copper namespace in [`kicad_sexpr::pcb`]). Content-derived so a given board re-emits
 /// byte-identically.
 const SYNTH_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x7b2e_91c0_4d3a_5e6f_8a9b_0c1d_2e3f_4a5b);
 
@@ -879,7 +879,7 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/footprints")
+            .join("../kicad-sexpr/tests/fixtures/footprints")
             .join(name);
         std::fs::read_to_string(p).unwrap()
     }
@@ -988,7 +988,7 @@ mod tests {
     /// placement+offset, nets bind, and `write_solution` then round-trips copper.
     #[test]
     fn synthesized_board_round_trips_through_read_problem_and_write_solution() {
-        use crate::pcb::{extract_copper, read_problem, write_solution};
+        use kicad_sexpr::pcb::{extract_copper, read_problem, write_solution};
         use pcb_engine::problem::{LayerRef, RouteSolution, Trace};
 
         let parts = vec![
