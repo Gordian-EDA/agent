@@ -1009,6 +1009,9 @@ fn via_padstack_diameters(root: &Node, mm_div: f64) -> BTreeMap<String, f64> {
 
 /// Path to the vendored Freerouting jar, relative to the workspace root.
 fn jar_path() -> std::path::PathBuf {
+    if let Ok(j) = std::env::var("FREEROUTING_JAR") {
+        return std::path::PathBuf::from(j);
+    }
     // CARGO_MANIFEST_DIR for kicad-bridge is <root>/crates/kicad-bridge.
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest
@@ -1104,9 +1107,10 @@ fn run_freerouting(
     max_passes: u32,
     timeout: Duration,
 ) -> Result<String, FreerouteError> {
+    let java = std::env::var("FREEROUTING_JAVA").unwrap_or_else(|_| "java".to_string());
     let mut child = Command::new("xvfb-run")
         .arg("-a")
-        .arg("java")
+        .arg(java)
         .arg("-jar")
         .arg(jar)
         .arg("-de")

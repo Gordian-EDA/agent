@@ -22,3 +22,4 @@ tools/vendor/freerouting.jar
 # Freerouting writes its run log here (CWD/logs/)
 logs/
 freerouting.json
+tools/vendor/freerouting-2.2.4.jar
