@@ -1010,7 +1010,7 @@ fn jar_path() -> std::path::PathBuf {
     if let Ok(j) = std::env::var("FREEROUTING_JAR") {
         return std::path::PathBuf::from(j);
     }
-    // CARGO_MANIFEST_DIR for kicad-bridge is <root>/crates/kicad-bridge.
+    // CARGO_MANIFEST_DIR for specctra is <root>/crates/specctra.
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest
         .parent()

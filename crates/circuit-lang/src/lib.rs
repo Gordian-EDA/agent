@@ -1,5 +1,5 @@
 //! circuit-lang: parse, desugar, lint, and canonically emit the
-//! auto-pcb circuit markup language (spec §5). Pure — no I/O.
+//! auto-pcb circuit markup language. Pure — no I/O.
 
 pub mod canon;
 pub mod desugar;
@@ -22,7 +22,7 @@ pub struct CompileResult {
     pub diagnostics: Diagnostics,
 }
 
-/// Full gauntlet, pure half: parse -> desugar -> lint (spec §6).
+/// Full gauntlet, pure half: parse -> desugar -> lint.
 pub fn compile(src: &str, provider: &dyn SymbolProvider) -> CompileResult {
     let (surface, mut diagnostics) = parse::parse_str(src);
     let design = surface.map(|s| {

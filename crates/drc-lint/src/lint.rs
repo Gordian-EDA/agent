@@ -47,8 +47,8 @@ use serde::Serialize;
 /// required clearance by more than this.
 const EPS: f64 = 1e-6;
 /// KiCAD's relaxed minimum diameter for a true MICRO via (laser, adjacent-layer). Matches the
-/// netclass `microvia_diameter` the board export writes (kicad-bridge synth / tools_pcb
-/// write_kicad_project = 0.3 mm). Through/blind vias instead use `problem.via_diameter`.
+/// netclass `microvia_diameter` the board export writes (= 0.3 mm). Through/blind vias instead
+/// use `problem.via_diameter`.
 const MICRO_VIA_MIN_DIAMETER: f64 = 0.3;
 
 /// A design-rule violation in a [`RouteSolution`] relative to its problem.

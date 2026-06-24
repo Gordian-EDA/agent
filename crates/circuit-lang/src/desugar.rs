@@ -1,4 +1,4 @@
-//! Sugar -> kernel lowering (spec §5.5). The reconciler and lints see
+//! Sugar -> kernel lowering. The reconciler and lints see
 //! only the output of this pass.
 
 use crate::diag::{Diagnostic, Diagnostics};
@@ -7,7 +7,7 @@ use crate::provider::SymbolProvider;
 use crate::surface::*;
 use indexmap::IndexMap;
 
-/// Closed alias table (spec §5.5) — exactly these five.
+/// Closed alias table — exactly these five.
 fn alias(part: &str) -> String {
     match part {
         "R" => "Device:R".into(),
@@ -222,7 +222,7 @@ fn lower_block_layout(sb: &SurfaceBlock, diags: &mut Diagnostics) -> LayoutGrid 
 
 /// Final desugar pass: for every component whose symbol is known, any physical
 /// pin not covered by an author key and whose `etype` is not `PowerInput`
-/// becomes an explicit `nc` (spec §5.3.5). A net-mapped pin, an explicit `nc`,
+/// becomes an explicit `nc`. A net-mapped pin, an explicit `nc`,
 /// or a stacked name covering the pin all count as coverage; power-input pins
 /// are skipped (lint.rs already errors when they are left unconnected).
 /// Markers are keyed by pin number and inserted in symbol pin order, so the
@@ -404,7 +404,7 @@ fn apply_two_pin(
         }
         let ((a, aspan), (b, bspan)) = sc.between.take().unwrap();
         // Map `between` args by numeric pin NUMBER, not library order: first arg →
-        // lowest-numbered pin, second arg → highest (spec §5.5). Fall back to
+        // lowest-numbered pin, second arg → highest. Fall back to
         // string order for non-numeric pin numbers.
         let mut ordered: Vec<&crate::provider::PinMeta> = meta.pins.iter().collect();
         ordered.sort_by(

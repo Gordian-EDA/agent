@@ -5590,7 +5590,7 @@ fn ic_port_exit_override(
     eps: &[([f64; 2], Dir)],
     name_side: Side,
 ) -> Option<(Side, [f64; 2])> {
-    const NAME_OFFSET: f64 = 0.508; // KiCAD default pin-name offset (matches textplace)
+    const NAME_OFFSET: f64 = 0.508; // KiCAD default pin-name offset (matches the `label` solver)
     let snap = crate::grid::snap;
     // Map the net's pins (same flatten order `wire()` used to build `eps`) back to
     // their (item, pin) so we can read each IC pin's geometry + name.

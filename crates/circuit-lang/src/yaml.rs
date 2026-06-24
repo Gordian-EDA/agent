@@ -4,7 +4,7 @@
 //! We load with scalar *representation* preservation (`early_parse(false)`)
 //! so every scalar surfaces as its literal source string — `4.7k`, `NO`,
 //! `1`, `true` all come out as those exact strings (YAML 1.2 / Norway-problem
-//! safe, spec §5.3.7). saphyr's default loader would otherwise resolve
+//! safe). saphyr's default loader would otherwise resolve
 //! scalars to typed `Scalar`s and lose the literal form.
 
 use crate::diag::{Diagnostic, Diagnostics, Span};
@@ -17,7 +17,7 @@ use std::collections::HashSet;
 #[derive(Debug, Clone)]
 pub enum Node {
     /// All scalars are surfaced as their literal string form (pin
-    /// numbers, values like `4.7k`, `NO` — spec §5.3.7).
+    /// numbers, values like `4.7k`, `NO`).
     Scalar(String, Span),
     Seq(Vec<Node>, Span),
     /// Key order preserved; keys are scalars-as-strings with spans.

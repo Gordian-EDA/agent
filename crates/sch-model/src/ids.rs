@@ -1,6 +1,6 @@
 //! Deterministic, content-derived identifiers.
 //!
-//! Spec §5.1 requires byte-identical output for the same `Design`, so every
+//! Byte-identical output for the same `Design` is required, so every
 //! UUID we emit is derived from stable content via UUIDv5 — never random.
 
 /// Fixed project namespace UUID for auto-pcb schematic identifiers

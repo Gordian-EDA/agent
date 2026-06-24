@@ -1,5 +1,5 @@
-//! Symbol metadata injection point. Implemented by kicad-bridge
-//! against real .kicad_sym libraries; mocked here for tests.
+//! Symbol metadata injection point. Implemented by `kicad-sexpr`'s
+//! `RealSymbolProvider` against real .kicad_sym libraries; mocked here for tests.
 
 use std::collections::HashMap;
 

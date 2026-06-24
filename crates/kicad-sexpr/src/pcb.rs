@@ -555,7 +555,7 @@ fn board_bounds(ast: &PcbAst) -> Bounds {
 // `kiutils_kicad`'s `PcbDocument` cannot append segments/vias (its `ast_mut`
 // edits are rejected at `write()`; only title-block/property setters round-trip).
 // So write-back follows the house "render text, validate by re-parse" precedent
-// (`sch-engine/src/emit.rs`): we render the `(segment …)` / `(via …)`
+// (`sch-io/src/write.rs`): we render the `(segment …)` / `(via …)`
 // s-expressions ourselves, splice them in before the file's final closing paren
 // — preserving every original byte outside the insertion point — then re-read
 // with `PcbFile::read` and assert the counts grew by exactly what we emitted with
@@ -565,7 +565,7 @@ fn board_bounds(ast: &PcbAst) -> Bounds {
 
 /// Fixed namespace UUID for auto-pcb **board** copper identifiers
 /// (`5c1a7d4e-3f62-5b89-a0d1-2e3f4a5b6c7d`). Distinct from the schematic
-/// namespace in `sch-engine/src/ids.rs` so a segment and a symbol never collide.
+/// namespace in `sch-model/src/ids.rs` so a segment and a symbol never collide.
 /// Do not change: doing so would alter every emitted segment/via UUID.
 const PCB_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x5c1a_7d4e_3f62_5b89_a0d1_2e3f_4a5b_6c7d);
 
@@ -579,7 +579,7 @@ fn copper_uuid(key: &str) -> String {
 
 /// Format an `f64` the way KiCAD writes coordinates: a bare minimal decimal with
 /// no trailing zeros (`10`, `8.9125`), and `-0.0` collapsed to `0`. Mirrors
-/// `sch-engine/src/emit.rs::fmt_coord`'s negative-zero canonicalization.
+/// `sch_io::write::fmt_coord`'s negative-zero canonicalization.
 fn fmt_num(v: f64) -> String {
     let v = if v == 0.0 { 0.0 } else { v };
     // Rust's `{}` for f64 already prints the shortest round-tripping decimal

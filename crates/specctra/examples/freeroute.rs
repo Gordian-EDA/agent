@@ -3,7 +3,7 @@
 //! with KiCAD's DRC.
 //!
 //! Usage:
-//!   cargo run --release -p kicad-bridge --example freeroute [BOARD.kicad_pcb] \
+//!   cargo run --release -p specctra --example freeroute [BOARD.kicad_pcb] \
 //!       [--clearance MM] [--width MM] [--via MM] [--drill MM]
 //!
 //! Defaults to `/tmp/pcb-harness/bga-escape-fineclear/board.kicad_pcb` with that
