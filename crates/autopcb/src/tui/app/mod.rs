@@ -771,4 +771,57 @@ mod tests {
                 .any(|e| e.speaker == Speaker::Assistant && e.text.contains("search"))
         );
     }
+
+    #[test]
+    fn assistant_deltas_grow_a_live_entry_then_text_finalizes_it() {
+        let mut a = app();
+        // The first delta opens a live assistant entry; subsequent ones grow it.
+        a.update(Msg::Agent(AgentEvent::AssistantDelta("I'll ".into())));
+        a.update(Msg::Agent(AgentEvent::AssistantDelta("search".into())));
+        let live = a.live_assistant.expect("a live entry is open mid-stream");
+        assert_eq!(a.transcript[live].text, "I'll search");
+        assert_eq!(a.transcript[live].speaker, Speaker::Assistant);
+        let count = a.transcript.iter().filter(|e| e.speaker == Speaker::Assistant).count();
+        assert_eq!(count, 1, "deltas grow ONE entry, not one per chunk");
+
+        // The final text finalizes the same entry in place (no second entry).
+        a.update(Msg::Agent(AgentEvent::AssistantText("I'll search for the part.".into())));
+        assert!(a.live_assistant.is_none(), "finalized: no live entry");
+        let assistants: Vec<&Entry> =
+            a.transcript.iter().filter(|e| e.speaker == Speaker::Assistant).collect();
+        assert_eq!(assistants.len(), 1, "still one assistant entry (finalized in place)");
+        assert_eq!(assistants[0].text, "I'll search for the part.");
+    }
+
+    #[test]
+    fn a_new_streamed_run_opens_a_fresh_live_entry() {
+        // Prose, then tool work, then more prose: two separate streamed runs each
+        // get their own finalized entry.
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::AssistantDelta("first".into())));
+        a.update(Msg::Agent(AgentEvent::AssistantText("first".into())));
+        a.update(Msg::Agent(AgentEvent::ToolStarted { name: "get_design".into() }));
+        a.update(Msg::Agent(AgentEvent::AssistantDelta("second".into())));
+        a.update(Msg::Agent(AgentEvent::AssistantText("second".into())));
+        let texts: Vec<&str> = a
+            .transcript
+            .iter()
+            .filter(|e| e.speaker == Speaker::Assistant)
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn turn_done_closes_an_unfinalized_live_entry() {
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::AssistantDelta("partial".into())));
+        assert!(a.live_assistant.is_some());
+        a.update(Msg::Agent(AgentEvent::TurnDone(TurnOutcomeSummary {
+            applied: false,
+            tool_calls_made: 0,
+            final_text: "partial".into(),
+        })));
+        assert!(a.live_assistant.is_none(), "TurnDone closes the live entry");
+    }
 }

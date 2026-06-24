@@ -343,4 +343,20 @@ fn tui_screenshots() {
         NoticeLevel::Error,
     );
     shoot("08_markdown", 96, 32, &mut app);
+
+    // 9. A turn mid-stream: assistant prose still arriving token-by-token (a
+    //    live entry with its trailing cursor), the running indicator below.
+    let mut app = App::new(status());
+    push(&mut app, Speaker::User, "design a 3.3V LDO with input and output caps", NoticeLevel::Plain);
+    tool(&mut app, "search_symbols", "\"LDO 3.3V\" → 9 hits");
+    for chunk in [
+        "I'll use an **AMS1117-3.3** with a 10µF input cap and a 22µF output ",
+        "cap for stability. Adding a power-on LED on the output and",
+    ] {
+        app.update(Msg::Agent(AgentEvent::AssistantDelta(chunk.into())));
+    }
+    app.running = true;
+    app.spinner = 2;
+    app.turn_tool_calls = 1;
+    shoot("09_streaming", 96, 32, &mut app);
 }

@@ -36,11 +36,20 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
     // tight.
     let mut prev: Option<Speaker> = None;
     let mut lines: Vec<Line> = Vec::new();
-    for e in &app.transcript {
+    for (i, e) in app.transcript.iter().enumerate() {
         if gap_above(prev, e.speaker) {
             lines.push(Line::from(""));
         }
-        lines.extend(render_entry(e, body_w));
+        // The entry still being streamed gets a trailing cursor so live prose
+        // reads as in-flight; it word-wraps with the text tail and vanishes the
+        // moment the turn finalizes the entry.
+        if app.live_assistant == Some(i) {
+            let mut live = e.clone();
+            live.text.push('▌');
+            lines.extend(render_entry(&live, body_w));
+        } else {
+            lines.extend(render_entry(e, body_w));
+        }
         prev = Some(e.speaker);
     }
 

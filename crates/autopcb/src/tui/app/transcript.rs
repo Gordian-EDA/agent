@@ -136,8 +136,23 @@ impl App {
     /// Fold an agent event into the transcript / status.
     pub(super) fn on_agent_event(&mut self, ev: AgentEvent) {
         match ev {
+            // A streamed chunk: grow the live in-progress assistant entry (created
+            // on the first delta of a streamed run) so prose renders token-by-token.
+            AgentEvent::AssistantDelta(t) => {
+                match self.live_assistant {
+                    Some(i) => self.transcript[i].text.push_str(&t),
+                    None => {
+                        self.live_assistant = Some(self.transcript.len());
+                        self.transcript.push(Entry::assistant(t));
+                    }
+                }
+            }
+            // The turn's final text: finalize the streamed entry in place (no
+            // double-render). With no live entry — a non-streamed path — push it.
             AgentEvent::AssistantText(t) => {
-                if !t.trim().is_empty() {
+                if let Some(i) = self.live_assistant.take() {
+                    self.transcript[i].text = t;
+                } else if !t.trim().is_empty() {
                     self.transcript.push(Entry::assistant(t));
                 }
             }
@@ -202,7 +217,9 @@ impl App {
                 // upcoming `TurnEnded` to read the elapsed time from. `TurnEnded`
                 // owns the rest of teardown and is the sole indicator source, so
                 // the two signals can arrive in either order without double-
-                // printing or losing the clock.
+                // printing or losing the clock. Any unfinalized streamed entry is
+                // closed so the next turn's deltas can't append to it.
+                self.live_assistant = None;
                 self.running = false;
             }
         }
@@ -251,6 +268,7 @@ impl App {
         if let Some(at) = cut {
             self.transcript.truncate(at);
         }
+        self.live_assistant = None;
         self.status.turn_count = self.status.turn_count.saturating_sub(popped);
         self.scroll = 0;
         let what = if popped == 1 {

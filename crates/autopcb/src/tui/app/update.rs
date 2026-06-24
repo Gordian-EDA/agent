@@ -387,6 +387,7 @@ impl App {
             }
             "/clear" => {
                 self.transcript.clear();
+                self.live_assistant = None;
                 self.scroll = 0;
                 Action::ClearContext
             }

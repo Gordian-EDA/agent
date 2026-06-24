@@ -55,6 +55,11 @@ impl Status {
 pub struct App {
     /// The chat transcript (top pane), oldest first.
     pub transcript: Vec<Entry>,
+    /// Index into `transcript` of the assistant entry currently being streamed
+    /// token-by-token (an in-progress `AssistantDelta` run), or `None` between
+    /// streamed runs. The final `AssistantText` finalizes it in place; the
+    /// renderer reads it to draw a trailing live cursor.
+    pub live_assistant: Option<usize>,
     /// The current input-line buffer.
     pub input: String,
     /// Cursor position in the input line, in **chars** (0 ..= char count).
@@ -115,6 +120,7 @@ impl App {
         // so no seed entry is needed.
         Self {
             transcript: Vec::new(),
+            live_assistant: None,
             input: String::new(),
             cursor: 0,
             history: Vec::new(),
