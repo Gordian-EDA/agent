@@ -1,29 +1,20 @@
-//! The eleven-tool registry the agent drives (spec §10).
+//! The schematic + PCB tool registry the agent drives.
 //!
 //! Each tool is a thin, deterministic wrapper over logic that already lives in
-//! `circuit-lang`, `kicad-sexpr`/`kicad-cli-rs`, and `sch-layout`. The registry exposes:
+//! `circuit-lang`, `kicad-sexpr`/`kicad-cli-rs`, and `sch-layout`. The registry
+//! exposes two free functions, both consumed by the [`crate::PcbTools`] provider:
 //!
-//! - [`Tools::defs`] — the JSON-Schema [`ToolDef`]s handed to the LLM.
-//! - [`Tools::run`] — dispatch a tool by name with a JSON input, returning JSON
-//!   the model reads back. Results are structured for **self-repair**: failures
-//!   carry diagnostic strings and "did you mean" suggestions rather than just an
-//!   error flag, so the model can correct itself on the next turn.
+//! - [`tool_defs`] — the JSON-Schema [`ToolDef`]s handed to the LLM.
+//! - [`run_tool`] — dispatch a tool by name with a JSON input, returning JSON the
+//!   model reads back. Results are structured for **self-repair**: failures carry
+//!   diagnostic strings and "did you mean" suggestions rather than just an error
+//!   flag, so the model can correct itself on the next turn.
 //!
-//! ## The eleven tools
-//!
-//! | name | input | output |
-//! |---|---|---|
-//! | `search_symbols` | `{query, limit?}` | `{hits: [{lib_id, pin_count}]}` |
-//! | `get_symbol_info` | `{lib_id}` | `{lib_id, pins: [{number,name,type,unit}]}` or `{error, suggestions}` |
-//! | `get_design` | `{}` | `{yaml, source, stale?, note?}` |
-//! | `validate_design` | `{yaml}` | `{ok, diagnostics, errors, warnings}` |
-//! | `apply_design` | `{yaml?, commit?, ...}` | dry-run diff, or (commit) `{written, path, erc}` |
-//! | `run_erc` | `{}` | `{errors, warnings, violations: [...]}` |
-//! | `project_info` | `{}` | `{project_dir, sch_path, sch_exists, snapshots, cwd}` |
-//! | `read_schematic` | `{path}` | `{path, yaml, note?}` or `{error}` |
-//! | `render_schematic` | `{}` | `{ok, png_path, note}` (+image attached) or `{error}` |
-//! | `create_design` | `{yaml, overwrite?}` | compile report + `{draft_written}` or `{error}` |
-//! | `edit_design` | `{old_string, new_string, replace_all?}` | compile report + `{replacements}` or `{error}` |
+//! The schematic side covers `search_symbols` / `get_symbol_info` / `get_design`
+//! / `validate_design` / `apply_design` / `review_design` / `run_erc` /
+//! `project_info` / `read_schematic` / `render_schematic` / `create_design` /
+//! `edit_design`; the PCB side (in [`crate::tools_pcb`]) covers the footprint
+//! search/info, `derive_board`, and the place/route/export/interactive flow.
 //!
 //! ## `apply_design`: dry-run vs commit
 //!
@@ -31,10 +22,12 @@
 //! compiles the YAML, and on success renders the reconciled schematic against
 //! the current `.kicad_sch` (if any), then returns a structured diff
 //! (`added`/`removed`/`changed` refdes + a net-count delta) and the rendered
-//! text length — **without writing anything**. The human apply-gate lives in the
-//! agent loop (Task 3); only once it approves does the loop re-call with
-//! `commit: true`, which writes the file, snapshots the prior, and runs ERC,
-//! returning `{written: true, erc: {errors, warnings}}`.
+//! text length — **without writing anything**. The human apply-gate lives in
+//! [`crate::PcbTools`]'s [`gordian_core::ToolProvider`] (the loop's
+//! preview → approve → commit choreography over [`gordian_core::ToolEffect::Gated`]);
+//! only once it approves does the loop re-call with `commit: true`, which writes
+//! the file, snapshots the prior, and runs ERC, returning
+//! `{written: true, erc: {errors, warnings}}`.
 //!
 //! ## Symbol-index caching
 //!
