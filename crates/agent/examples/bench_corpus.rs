@@ -76,7 +76,7 @@ fn bench_one(
         }
     }
     let t0 = std::time::Instant::now();
-    let emit = sch_layout::floorplan::emit_anneal(env, &design, &ir)
+    let emit = sch_layout::floorplan::emit_strategy(env, &design, &ir, Box::new(anneal_place::Anneal))
         .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
     let secs = t0.elapsed().as_secs_f64();
 

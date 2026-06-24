@@ -12,7 +12,7 @@ pub use sch_model::ir::{Band, Cell, Flow, LayoutIr, Orient, Side};
 
 mod idiom;
 mod infer;
-mod place;
+pub mod place;
 
 pub use infer::{baseline_ir, infer_ir};
-pub use place::{compose_writers, emit, emit_anneal, emit_anneal_writer};
+pub use place::{compose_writers, emit, emit_strategy, emit_writer};

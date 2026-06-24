@@ -980,7 +980,7 @@ fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
     // Production uses the locality-aware ANNEAL search (strictly ≥ greedy via the
     // candidate pick) so generated boards get the premium placement, not the
     // env-defaulted greedy free tier.
-    let emitted = sch_layout::floorplan::emit_anneal(&ctx.env, &design, &ir)
+    let emitted = sch_layout::floorplan::emit_strategy(&ctx.env, &design, &ir, Box::new(anneal_place::Anneal))
         .context("rendering schematic")?;
     let rendered = emitted.sch;
     let diff = design_diff(prior_design.as_ref(), &design);

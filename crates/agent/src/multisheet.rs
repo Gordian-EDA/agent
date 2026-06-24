@@ -295,7 +295,7 @@ pub fn compose_single_sheet(
         // Lay out each group INDEPENDENTLY and keep its TYPED writer (not a rendered
         // string): the engine composer translates each group's items to its tile in mm
         // and folds them into one sheet — no string-level geometry math here.
-        let w = sch_layout::floorplan::emit_anneal_writer(env, &sub, &ir)
+        let w = sch_layout::floorplan::emit_writer(env, &sub, &ir, Box::new(anneal_place::Anneal))
             .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
         groups_w.push((sanitize(&gname), w));
     }

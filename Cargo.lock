@@ -12,6 +12,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "agent"
 version = "0.1.0"
 dependencies = [
+ "anneal-place",
  "anyhow",
  "async-trait",
  "base64",
@@ -53,6 +54,17 @@ name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
+name = "anneal-place"
+version = "0.1.0"
+dependencies = [
+ "kicad-cli-rs",
+ "rayon",
+ "sch-io",
+ "sch-layout",
+ "sch-model",
+]
 
 [[package]]
 name = "anyhow"
