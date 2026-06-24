@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use kicad_cli_rs::cli::{KicadCli, Violation};
 use kicad_sexpr::pcb::{read_problem, write_solution};
 use pcb_synth::synth::{
-    plane_fill_rects, synthesize_board_full, synthesize_board_layers, SynthPart, ZoneSpec,
+    plane_fill_rects, synthesize_board_full, synthesize_board_layers, NetClass, SynthPart, ZoneSpec,
 };
 use pcb_model::{Bounds, Point2, RouteProblem, RouteSolution};
 use pcb_place::placement::Placement;
@@ -420,12 +420,81 @@ fn content_bounds(
     }
 }
 
-/// Write a sibling `.kicad_pro` for `board_path` declaring the board's design rules as
-/// the "Default" net class, so KiCAD DRC (and any downstream tool that opens the board)
-/// checks copper against the engine's clearance / trace width / via — NOT KiCAD's
-/// built-in 0.2 mm netclass default, which false-flags a finer-pitch board whose
-/// footprint pads are inherently closer than 0.2 mm. KiCAD loads the same-stem project.
-fn write_kicad_project(board_path: &std::path::Path, rules: &DraftRules) -> std::io::Result<()> {
+/// Derive the board's net classes from the per-net widths the router already carries
+/// (`rules.net_widths`), grouping the board's nets by trace width: every net at the
+/// board minimum forms the `Default` class; each distinct fat (over-minimum) width
+/// forms a `Power` class (suffixed `_<n>mm` when several fat widths coexist, so the
+/// names stay distinct and self-describing). Clearance / via geometry are the board's
+/// own — only the trace width varies — so a class is purely additive metadata that
+/// cannot change a routing/clearance outcome. Returns the classes ordered with
+/// `Default` first; a board with no fat nets yields a single `Default` class.
+///
+/// This invents no data the board lacks: the only per-net intent present is the width,
+/// so the classes are exactly the width groups. `all_nets` is the union of the board's
+/// pad nets (so even an unrouted net at default width still lands in `Default`).
+fn net_classes_from_rules(rules: &DraftRules, all_nets: &std::collections::BTreeSet<String>) -> Vec<NetClass> {
+    use std::collections::BTreeMap;
+    let width_of = |net: &str| rules.net_widths.get(net).copied().unwrap_or(rules.min_trace_width);
+    // net width (scaled to integer µm so f64 keys group exactly) → member nets.
+    let key = |w: f64| (w * 1000.0).round() as i64;
+    let mut by_width: BTreeMap<i64, (f64, Vec<String>)> = BTreeMap::new();
+    for net in all_nets {
+        let w = width_of(net);
+        by_width.entry(key(w)).or_insert_with(|| (w, Vec::new())).1.push(net.clone());
+    }
+    let default_key = key(rules.min_trace_width);
+    let fat_count = by_width.keys().filter(|k| **k != default_key).count();
+    let mk = |name: String, description: String, trace_width: f64, members: Vec<String>| NetClass {
+        name,
+        description,
+        clearance: rules.clearance,
+        trace_width,
+        via_diameter: rules.via_diameter,
+        via_drill: rules.via_drill,
+        members,
+    };
+    let mut classes = Vec::new();
+    // Default first (the board minimum width), so KiCAD shows it as the base class.
+    if let Some((w, members)) = by_width.get(&default_key) {
+        classes.push(mk("Default".into(), "board default — thin signal".into(), *w, members.clone()));
+    }
+    for (k, (w, members)) in &by_width {
+        if *k == default_key {
+            continue;
+        }
+        // Disambiguate names only when several fat widths coexist.
+        let name = if fat_count > 1 { format!("Power_{}mm", kicad_sexpr::fmt_num(*w)) } else { "Power".into() };
+        classes.push(mk(name, format!("fat power/high-current — {} mm", kicad_sexpr::fmt_num(*w)), *w, members.clone()));
+    }
+    classes
+}
+
+/// The union of every part's bound pad nets — the board's real net names.
+fn all_board_nets(parts: &[SynthPart]) -> std::collections::BTreeSet<String> {
+    let mut nets = std::collections::BTreeSet::new();
+    for p in parts {
+        for net in p.pad_nets.values() {
+            if !net.is_empty() {
+                nets.insert(net.clone());
+            }
+        }
+    }
+    nets
+}
+
+/// Write a sibling `.kicad_pro` for `board_path` declaring the board's net classes (the
+/// same width groups [`net_classes_from_rules`] emits into the `.kicad_pcb`), so KiCAD DRC
+/// (and any downstream tool that opens the board) checks copper against the engine's
+/// clearance / trace width / via — NOT KiCAD's built-in 0.2 mm netclass default, which
+/// false-flags a finer-pitch board whose footprint pads are inherently closer than 0.2 mm.
+/// Each non-Default class's nets are assigned via `net_settings.netclass_assignments`, so
+/// the board setup dialog shows the fat-power vs thin-signal grouping. KiCAD loads the
+/// same-stem project.
+fn write_kicad_project(
+    board_path: &std::path::Path,
+    rules: &DraftRules,
+    classes: &[NetClass],
+) -> std::io::Result<()> {
     let stem = board_path.file_stem().and_then(|s| s.to_str()).unwrap_or("board");
     let pro = board_path.with_extension("kicad_pro");
     let vmin = (rules.via_diameter - 0.05).max(0.1);
@@ -439,21 +508,45 @@ fn write_kicad_project(board_path: &std::path::Path, rules: &DraftRules) -> std:
     // = 0.25 / 0.5) are set to MATCH those same defaults — the DRC gate is meaningful via the
     // netclass + matching pre-checks, NOT this block. Don't add a rule here expecting kicad-cli to
     // honour it (it won't); enforce new minimums in the in-house lint + a create_board pre-check.
+    // One project class per synth class (same width groups), plus a guaranteed "Default"
+    // (KiCAD requires it) when the derived classes carry none. Non-Default classes get a
+    // net→class assignment so board setup shows the grouping.
+    let class_obj = |c: &NetClass| {
+        json!({
+            "name": c.name,
+            "clearance": c.clearance, "track_width": c.trace_width,
+            "via_diameter": c.via_diameter, "via_drill": c.via_drill,
+            "microvia_diameter": 0.3, "microvia_drill": 0.1,
+            "diff_pair_gap": 0.25, "diff_pair_width": 0.2,
+            "bus_width": 12.0, "line_style": 0, "wire_width": 6.0,
+            "pcb_color": "rgba(0, 0, 0, 0.000)", "schematic_color": "rgba(0, 0, 0, 0.000)"
+        })
+    };
+    let mut class_json: Vec<Value> = classes.iter().map(class_obj).collect();
+    if !classes.iter().any(|c| c.name == "Default") {
+        class_json.insert(0, class_obj(&NetClass {
+            name: "Default".into(), description: String::new(),
+            clearance: rules.clearance, trace_width: rules.min_trace_width,
+            via_diameter: rules.via_diameter, via_drill: rules.via_drill, members: Vec::new(),
+        }));
+    }
+    let mut assignments = serde_json::Map::new();
+    for c in classes.iter().filter(|c| c.name != "Default") {
+        for net in &c.members {
+            assignments.insert(net.clone(), Value::String(c.name.clone()));
+        }
+    }
     let doc = json!({
         "board": {"design_settings": {"rules": {
             "min_clearance": 0.0, "min_track_width": 0.0,
             "min_via_diameter": vmin, "min_through_hole_diameter": 0.1
         }}},
         "meta": {"filename": format!("{stem}.kicad_pro"), "version": 1},
-        "net_settings": {"classes": [{
-            "name": "Default",
-            "clearance": rules.clearance, "track_width": rules.min_trace_width,
-            "via_diameter": rules.via_diameter, "via_drill": rules.via_drill,
-            "microvia_diameter": 0.3, "microvia_drill": 0.1,
-            "diff_pair_gap": 0.25, "diff_pair_width": 0.2,
-            "bus_width": 12.0, "line_style": 0, "wire_width": 6.0,
-            "pcb_color": "rgba(0, 0, 0, 0.000)", "schematic_color": "rgba(0, 0, 0, 0.000)"
-        }], "meta": {"version": 3}}
+        "net_settings": {
+            "classes": class_json,
+            "netclass_assignments": Value::Object(assignments),
+            "meta": {"version": 3}
+        }
     });
     std::fs::write(pro, serde_json::to_string_pretty(&doc).unwrap_or_default())
 }
@@ -586,10 +679,17 @@ pub fn export_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         })
         .filter(|k| !k.layers.is_empty())
         .collect();
+    // Net classes from the per-net widths the router already carries: fat power vs thin
+    // signal, made legible/editable in KiCAD. Only emit them into the `.kicad_pcb` when
+    // there is a real fat/thin distinction (>1 class) — a uniform board needs no blocks
+    // (its single Default rule already lives in the `.kicad_pro`).
+    let net_classes = net_classes_from_rules(&draft.rules, &all_board_nets(&parts));
+    let pcb_classes: &[NetClass] = if net_classes.len() > 1 { &net_classes } else { &[] };
     let board = if tight != draft.bounds
         || !zones.is_empty()
         || !keepout_zones.is_empty()
         || draft.outline.is_some()
+        || !pcb_classes.is_empty()
     {
         match synthesize_board_full(
             &parts,
@@ -598,6 +698,7 @@ pub fn export_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             &zones,
             &keepout_zones,
             draft.outline.as_deref(),
+            pcb_classes,
         ) {
             Ok(t) => {
                 std::fs::write(&path, t.as_bytes())
@@ -616,7 +717,7 @@ pub fn export_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // downstream tool) checks against the SAME clearance/width/via the router used — not
     // KiCAD's 0.2 mm netclass default, which false-flags a finer-pitch board. KiCAD loads
     // the same-stem project when opening the board.
-    let _ = write_kicad_project(&path, &draft.rules);
+    let _ = write_kicad_project(&path, &draft.rules, &net_classes);
 
     let mut out = json!({
         "ok": true,

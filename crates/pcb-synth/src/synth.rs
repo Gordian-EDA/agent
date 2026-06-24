@@ -91,7 +91,7 @@ pub fn synthesize_board_layers(
     bounds: &Bounds,
     layer_count: u32,
 ) -> io::Result<String> {
-    synthesize_board_full(parts, bounds, layer_count, &[], &[], None)
+    synthesize_board_full(parts, bounds, layer_count, &[], &[], None, &[])
 }
 
 /// A copper-plane zone to emit: the net it belongs to, the copper layer name
@@ -118,9 +118,35 @@ pub struct KeepoutZone {
     pub max: [f64; 2],
 }
 
-/// [`synthesize_board_layers`] plus copper-plane `zones` (power pours) and routing
-/// `keepouts` (rule areas), all emitted before the board close. Each zone's net must be
-/// one of the parts' nets.
+/// A KiCAD net class: a named group of nets sharing one set of design rules
+/// (clearance / trace width / via geometry). Emitting these makes the board's
+/// per-net intent — fat power vs thin signal — LEGIBLE and editable once the
+/// `.kicad_pcb` is opened in KiCAD (board setup → net classes), instead of being
+/// baked invisibly into trace widths only. The class is derived from the per-net
+/// widths the router already carries (see the export's `net_classes_from_rules`);
+/// `members` are the net names assigned to the class via `(add_net …)`.
+#[derive(Debug, Clone)]
+pub struct NetClass {
+    /// Class name as shown in KiCAD (e.g. `"Power"`, `"Signal"`, `"Default"`).
+    pub name: String,
+    /// Human-readable description string.
+    pub description: String,
+    /// Copper-to-copper clearance (mm) for nets in this class.
+    pub clearance: f64,
+    /// Trace width (mm) for nets in this class.
+    pub trace_width: f64,
+    /// Via copper diameter (mm).
+    pub via_diameter: f64,
+    /// Via drill diameter (mm).
+    pub via_drill: f64,
+    /// Net names assigned to this class (emitted as `(add_net …)`), sorted.
+    pub members: Vec<String>,
+}
+
+/// [`synthesize_board_layers`] plus copper-plane `zones` (power pours), routing
+/// `keepouts` (rule areas), and `net_classes` (the per-net design-rule groups that
+/// make fat-power/thin-signal intent legible in KiCAD), all emitted before the
+/// board close. Each zone's net must be one of the parts' nets.
 pub fn synthesize_board_full(
     parts: &[SynthPart],
     bounds: &Bounds,
@@ -128,6 +154,7 @@ pub fn synthesize_board_full(
     zones: &[ZoneSpec],
     keepouts: &[KeepoutZone],
     outline: Option<&[Point2]>,
+    net_classes: &[NetClass],
 ) -> io::Result<String> {
     // Net code table: 1-based over the sorted union of every bound pad's net.
     let net_codes = net_codes(parts);
@@ -146,6 +173,7 @@ pub fn synthesize_board_full(
          \t\t(aux_axis_origin 0 0)\n\t\t(grid_origin 0 0)\n\t)\n",
     );
     push_nets(&mut out, &net_codes);
+    push_net_classes(&mut out, net_classes, &net_codes);
     push_edge_cuts(&mut out, bounds, outline);
 
     for part in parts {
@@ -410,6 +438,31 @@ fn push_nets(out: &mut String, net_codes: &BTreeMap<String, i32>) {
     by_code.sort();
     for (code, name) in by_code {
         let _ = writeln!(out, "\t(net {code} \"{name}\")");
+    }
+}
+
+/// Emit one `(net_class …)` block per class, each carrying its design rules
+/// (clearance / trace width / via geometry) and its member nets via `(add_net …)`.
+/// Only members that are real nets on this board (present in `net_codes`) are
+/// emitted, so a class never references a net the board does not have. KiCAD reads
+/// these from the `.kicad_pcb` directly (board setup → net classes) and `kicad-cli
+/// pcb drc` honours their clearance/width — making the per-net intent both visible
+/// and an independent DRC check, additive to the routed copper.
+fn push_net_classes(out: &mut String, classes: &[NetClass], net_codes: &BTreeMap<String, i32>) {
+    for c in classes {
+        let members: Vec<&String> = c.members.iter().filter(|m| net_codes.contains_key(*m)).collect();
+        if members.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, "\t(net_class \"{}\" \"{}\"", c.name, c.description);
+        let _ = writeln!(out, "\t\t(clearance {})", fmt_num(c.clearance));
+        let _ = writeln!(out, "\t\t(trace_width {})", fmt_num(c.trace_width));
+        let _ = writeln!(out, "\t\t(via_dia {})", fmt_num(c.via_diameter));
+        let _ = writeln!(out, "\t\t(via_drill {})", fmt_num(c.via_drill));
+        for m in members {
+            let _ = writeln!(out, "\t\t(add_net \"{m}\")");
+        }
+        out.push_str("\t)\n");
     }
 }
 
@@ -974,6 +1027,67 @@ mod tests {
             !board.contains("duplicate_pad_numbers_are_jumpers"),
             "loader-breaking footprint token leaked into the board:\n{board}"
         );
+    }
+
+    /// A board with two distinct net widths emits ≥2 `(net_class …)` blocks, each
+    /// carrying its trace width and the right member nets (`add_net`). This is the
+    /// fat-power vs thin-signal intent made legible in the `.kicad_pcb`.
+    #[test]
+    fn distinct_net_widths_emit_net_class_blocks() {
+        let parts = vec![SynthPart {
+            reference: "R1".into(),
+            lib_id: "Resistor_SMD:R_0603_1608Metric".into(),
+            source: fixture("R_0603_1608Metric.kicad_mod"),
+            pad_nets: nets(&[("1", "VOUT"), ("2", "GND")]),
+            placement: place("R1", 10.0, 10.0, 0),
+        }];
+        let bounds = Bounds { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
+        let classes = vec![
+            NetClass {
+                name: "Power".into(),
+                description: "fat power nets".into(),
+                clearance: 0.2,
+                trace_width: 0.8,
+                via_diameter: 0.6,
+                via_drill: 0.3,
+                members: vec!["VOUT".into()],
+            },
+            NetClass {
+                name: "Default".into(),
+                description: "board default".into(),
+                clearance: 0.2,
+                trace_width: 0.2,
+                via_diameter: 0.6,
+                via_drill: 0.3,
+                members: vec!["GND".into()],
+            },
+        ];
+        let board =
+            synthesize_board_full(&parts, &bounds, 2, &[], &[], None, &classes).unwrap();
+
+        // Two distinct widths → two classes.
+        assert_eq!(board.matches("(net_class ").count(), 2, "two classes:\n{board}");
+        // Power class: fat width + the VOUT member.
+        assert!(board.contains("(net_class \"Power\" \"fat power nets\""), "{board}");
+        assert!(board.contains("(trace_width 0.8)"), "fat trace width:\n{board}");
+        assert!(board.contains("(add_net \"VOUT\")"), "VOUT in a class:\n{board}");
+        // Default class: thin width + the GND member.
+        assert!(board.contains("(net_class \"Default\""), "{board}");
+        assert!(board.contains("(trace_width 0.2)"), "thin trace width:\n{board}");
+        assert!(board.contains("(add_net \"GND\")"), "GND in a class:\n{board}");
+        // A class member that is not a real board net is dropped, never emitted.
+        let phantom = vec![NetClass {
+            name: "Ghost".into(),
+            description: "no real nets".into(),
+            clearance: 0.2,
+            trace_width: 0.5,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            members: vec!["NOPE".into()],
+        }];
+        let board2 =
+            synthesize_board_full(&parts, &bounds, 2, &[], &[], None, &phantom).unwrap();
+        assert!(!board2.contains("net_class"), "empty class dropped:\n{board2}");
     }
 
     /// The synthesized board parses with `read_problem`, pads land at
