@@ -1,6 +1,6 @@
 //! Independent electrical-CORRECTNESS review of a committed netlist — the netlist analog of the
 //! layout critic (`tools/schematic_critic.py`). The review MECHANICS (the diverse-lens ensemble,
-//! verdict parsing, defect dedup) live in [`gordian_core::review`]; THIS module supplies the
+//! verdict parsing, defect dedup) live in [`gordian_core::review`](mod@gordian_core::review); THIS module supplies the
 //! domain: the netlist [`REVIEW_SYSTEM`] prompt and the diverse [`LENSES`], and unions in the
 //! deterministic exact-math ERC. Run as a FRESH [`Provider::complete`] call (no conversation
 //! history → unbiased; the generating model rationalises its own slips). Catches faults that pass
@@ -42,7 +42,7 @@ pub const LENSES: &[&str] = &[
 
 /// Review a netlist with the diverse-lens ENSEMBLE and return `(lowest score, union of
 /// high-confidence critical/major defect lines)` — ready to feed back as a fix turn. Thin domain
-/// wrapper over [`gordian_core::review`] with this module's [`REVIEW_SYSTEM`] + [`LENSES`].
+/// wrapper over [`gordian_core::review()`](fn@gordian_core::review) with this module's [`REVIEW_SYSTEM`] + [`LENSES`].
 pub async fn review_netlist(
     client: &dyn Provider,
     intent: &str,

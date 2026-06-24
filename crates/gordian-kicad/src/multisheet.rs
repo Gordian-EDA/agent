@@ -190,7 +190,7 @@ fn split_block(bname: &str, block: &Block) -> Vec<(String, Block)> {
 /// the split partition is computed exactly once. Two refinements, both connectivity-based and
 /// deterministic (the agent over/under-partitions despite the ~6-10 parts/block prompt):
 ///
-/// - **SPLIT** (see [`split_block`]): any block with > 16 parts bisects along its rail-excluded
+/// - **SPLIT** (see `split_block`): any block with > 16 parts bisects along its rail-excluded
 ///   connected components into ~11-part fragments. A single tightly-coupled component is left
 ///   intact, so half-bridge / one-MCU motifs never split.
 /// - **MERGE** any block with < `MERGE_MIN` parts into the block it shares the most non-GND

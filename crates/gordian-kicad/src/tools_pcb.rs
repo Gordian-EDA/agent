@@ -1,7 +1,7 @@
 //! PCB-side tools and the persisted board draft (slice 5).
 //!
 //! `tools.rs` stays the schematic file; the PCB tools live here and are merged
-//! into [`crate::tools::Tools::defs`]/`run`. They follow the same house pattern:
+//! into [`crate::tools::tool_defs`]/[`run`](crate::tools::run_tool). They follow the same house pattern:
 //! [`gordian_core::ToolDef`] JSON schemas, free `fn(input, ctx) -> Result<Value>`
 //! handlers, `require_str`-style arg handling, and recoverable failures returned
 //! as `{"error": …, "suggestions": …}` values rather than `Err`.
@@ -3105,7 +3105,7 @@ pub fn move_part(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     }
 }
 
-/// Route a straight track segment: start [x,y], end [x,y] (mm), width (mm),
+/// Route a straight track segment: start `[x,y]`, end `[x,y]` (mm), width (mm),
 /// layer (F.Cu/…), optional net.
 pub fn route_track(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let start = input.get("start").and_then(|v| v.as_array());

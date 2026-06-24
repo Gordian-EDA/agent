@@ -2,12 +2,12 @@
 //!
 //! This crate owns the generic half of the agent: the [`Agent`] turn loop, the
 //! human apply-gate, conversation history (unwind / clear / [`Agent::compact`]),
-//! and the diverse-lens [`review`] mechanics — all over two injected seams and
-//! NOTHING domain-specific (no KiCAD, UI, or rendering dependencies).
+//! and the diverse-lens [`review()`](fn@review) mechanics — all over two injected
+//! seams and NOTHING domain-specific (no KiCAD, UI, or rendering dependencies).
 //!
 //! The two seams the loop is built around:
 //!
-//! - [`Provider`](llm_client::Provider) (from `llm-client`) — the LLM backend.
+//! - [`llm_client::Provider`] (from `llm-client`) — the LLM backend.
 //! - [`ToolProvider`] — the domain's tools, tagged by [`ToolEffect`]
 //!   (`ReadOnly` | `Authoring` | `Gated`). The loop drives a `Gated` write
 //!   through preview → approve → commit ([`RunMode`]), reporting via
