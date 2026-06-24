@@ -3,10 +3,69 @@
 //!
 //! Kept as a single embedded string (no design state) — the model pulls the
 //! design on demand via `get_design`.
+//!
+//! For a NEW design the prompt can be RETRIEVAL-AUGMENTED: [`system_prompt_with_reference`]
+//! appends the single best-matching real human design (lifted to circuit-YAML) as a
+//! worked few-shot example, grounding the agent in professional patterns. The example sits
+//! in the cached system-prompt prefix, so it costs once per session, and is size-capped so
+//! it never bloats the prompt.
+
+use crate::retrieval::Corpus;
+use kicad_cli_rs::env::KicadEnv;
+
+/// Cap on the few-shot reference YAML embedded in the system prompt (chars). A
+/// human schematic can lift to a multi-KB document; beyond this it stops being a
+/// crisp example and just inflates every cached prefix, so it is truncated.
+const REFERENCE_YAML_CAP: usize = 6000;
 
 /// The domain system prompt handed to the agent loop.
 pub fn system_prompt() -> String {
     SYSTEM_PROMPT.to_string()
+}
+
+/// The system prompt with a single best-matching real design appended as a
+/// worked few-shot example, when a reference corpus is installed AND a plausible
+/// match lifts to circuit-YAML. Falls back to the plain [`system_prompt`] when
+/// there is no corpus, no match, or the match won't lift — so this is always safe
+/// to call at design-start.
+///
+/// Bounded by design: exactly ONE example, capped at [`REFERENCE_YAML_CAP`] chars,
+/// so the retrieval grounding rides in the cached prefix without bloating calls.
+pub fn system_prompt_with_reference(env: &KicadEnv, intent: &str) -> String {
+    let base = system_prompt();
+    let corpus = Corpus::discover();
+    if corpus.is_empty() {
+        return base;
+    }
+    // One lifted reference is enough; ask for k=1 successful lift.
+    let report = corpus.find_similar(env, intent, 1);
+    let Some(reference) = report.lifted().next() else {
+        return base;
+    };
+    let yaml = reference.yaml.as_deref().unwrap_or_default();
+    let example = if yaml.len() > REFERENCE_YAML_CAP {
+        // Truncate on a char boundary so the slice never splits a UTF-8 sequence.
+        let mut end = REFERENCE_YAML_CAP;
+        while !yaml.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}\n# … (truncated)\n", &yaml[..end])
+    } else {
+        yaml.to_string()
+    };
+
+    format!(
+        "{base}\n\n\
+         # Worked reference (a REAL professional design, for style only)\n\n\
+         To ground you in professional practice, here is a real human-authored KiCAD design \
+         that resembles the current request, lifted to circuit-YAML. STUDY its block \
+         partition, decoupling, power-symbol distribution, and part idioms — emulate the \
+         STYLE, do NOT copy it verbatim (the user's requirements differ). You can pull more \
+         references at any time with the `find_similar_designs` tool.\n\n\
+         Reference — {desc} (from {repo}):\n\n```yaml\n{example}```\n",
+        desc = reference.meta.description,
+        repo = if reference.meta.repo.is_empty() { "unknown" } else { &reference.meta.repo },
+    )
 }
 
 const SYSTEM_PROMPT: &str = r#"You are an expert KiCAD schematic copilot. You design and edit electronic

@@ -1032,6 +1032,7 @@ dependencies = [
  "base64",
  "circuit-lang",
  "drc-lint",
+ "fuzzy-matcher",
  "gordian-core",
  "greedy-place",
  "grid-astar",

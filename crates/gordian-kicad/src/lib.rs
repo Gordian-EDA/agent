@@ -24,6 +24,7 @@ pub mod multisheet;
 pub mod prompts;
 mod provider;
 pub mod render;
+pub mod retrieval;
 pub mod review;
 pub mod tools;
 pub mod tools_pcb;
