@@ -2103,7 +2103,6 @@ dependencies = [
  "kicad-sexpr",
  "kiutils_kicad",
  "pcb-model",
- "pcb-place",
  "tempfile",
  "uuid",
 ]

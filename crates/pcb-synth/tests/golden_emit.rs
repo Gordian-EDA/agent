@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use std::io;
 
+use pcb_model::place::Placement;
 use pcb_model::{Bounds, Point2};
-use pcb_place::placement::Placement;
 use pcb_synth::synth::{
     plane_fill_rects, synthesize_board_full, BoardModel, KeepoutZone, NetClass, SynthPart,
     Synthesizer, ZoneSpec,

@@ -59,7 +59,7 @@ use std::fmt::Write as _;
 use std::io;
 
 use kicad_sexpr::fmt_num;
-use pcb_place::placement::Placement;
+use pcb_model::place::Placement;
 use pcb_model::{Bounds, Point2};
 
 use crate::ids::synth_uuid;

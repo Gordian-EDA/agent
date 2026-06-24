@@ -1,5 +1,5 @@
 //! Footprint → placement bridge: turn a parsed [`Footprint`] into a
-//! [`pcb_place::placement::Part`], and move a template board's footprints to an
+//! [`pcb_model::place::Part`], and move a template board's footprints to an
 //! engine placement. The placement-side companion to [`kicad_sexpr::pcb`]'s
 //! board↔`RouteProblem` translation.
 //!
@@ -35,7 +35,7 @@ use std::io;
 use std::path::Path;
 
 use kiutils_kicad::PcbFile;
-use pcb_place::placement::{Part, Placement, PartPad};
+use pcb_model::place::{Part, PartPad, Placement};
 use pcb_model::{LayerRef, Point2};
 
 use kicad_sexpr::fmt_num;
