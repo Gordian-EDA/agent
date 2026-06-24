@@ -15,6 +15,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+llm-client = { path = "../llm-client" }
 circuit-lang = { path = "../circuit-lang" }
 kicad-cli-rs = { path = "../kicad-cli-rs" }
 kicad-sexpr = { path = "../kicad-sexpr" }

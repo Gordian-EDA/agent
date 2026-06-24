@@ -26,6 +26,7 @@ dependencies = [
  "kicad-cli-rs",
  "kicad-ipc",
  "kicad-sexpr",
+ "llm-client",
  "negotiated-mesh",
  "pcb-model",
  "pcb-place",
@@ -1042,6 +1043,21 @@ name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
+
+[[package]]
+name = "llm-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dotenvy",
+ "fastrand",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "lock_api"
