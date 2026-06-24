@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     // The agent's own MULTI-BLOCK source (what it wrote via create_design) — preserved so the
     // multi-sheet path (tools/multisheet.py) can render one clean sheet per block. The lifted
     // YAML below is FLAT; this draft keeps the block structure.
-    let draft_path = tmp.path().join(".autopcb/draft.circuit.yaml");
+    let draft_path = tmp.path().join(".gordian/draft.circuit.yaml");
 
     let client = llm_client::from_env()?;
     let mut agent = Agent::new(client, ctx, gordian_core::prompts::system_prompt());

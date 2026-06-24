@@ -13,7 +13,7 @@ use super::place::place_problem_from_draft;
 use super::route::{StoredRoute, inject_keepouts};
 
 /// Render the board to a PNG using the placement or routed SVG, save under
-/// `.autopcb/renders/`, and attach via `IMAGE_PATH_KEY`.
+/// `.gordian/renders/`, and attach via `IMAGE_PATH_KEY`.
 ///
 /// `view` may be `"placed"` or `"routed"`. When omitted the default is
 /// `"routed"` when `route.json` exists, `"placed"` otherwise.

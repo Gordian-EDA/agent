@@ -544,7 +544,7 @@ blocks:
     let png_path = out["_image_path"].as_str().expect("image path");
     let bytes = std::fs::read(png_path).unwrap();
     assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
-    assert!(png_path.contains(".autopcb/renders/render-001.png"));
+    assert!(png_path.contains(".gordian/renders/render-001.png"));
 }
 
 #[test]
@@ -1135,7 +1135,7 @@ fn render_board_placed_returns_ok_and_png_magic() {
     assert_eq!(out["view"], serde_json::json!("placed"), "view field: {out}");
 
     let png_path = out["png_path"].as_str().expect("png_path present");
-    assert!(png_path.contains(".autopcb/renders/"), "path under renders/: {out}");
+    assert!(png_path.contains(".gordian/renders/"), "path under renders/: {out}");
     let png_bytes = std::fs::read(png_path).expect("PNG file written");
     assert_eq!(&png_bytes[..8], PNG_MAGIC, "must be a valid PNG");
     assert!(png_bytes.len() > 100, "PNG suspiciously small: {} bytes", png_bytes.len());

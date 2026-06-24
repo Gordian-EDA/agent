@@ -26,7 +26,7 @@ use super::export::resolve_pour_layer;
 /// `derive_board` — build the board draft from the committed schematic + the
 /// footprint map, instead of re-typing parts by hand. Connectivity comes from the
 /// schematic's netlist (via `lift`, which keys pins by pad number — KiCAD does the
-/// pin→pad resolution for us), footprints from `.autopcb/footprints.json`. The
+/// pin→pad resolution for us), footprints from `.gordian/footprints.json`. The
 /// caller supplies only `bounds` and `rules`; parts and nets come from the
 /// schematic. See `docs/specs/schematic-driven-pcb.md`.
 pub fn derive_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {

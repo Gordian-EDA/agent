@@ -1,4 +1,4 @@
-//! The persisted board draft (`.autopcb/board.json`) and its serde model — the
+//! The persisted board draft (`.gordian/board.json`) and its serde model — the
 //! PCB analog of the schematic `draft.circuit.yaml`. Tools mutate it; place/route
 //! read it. The serde shape reuses `pcb-place` types directly so a draft
 //! round-trips straight into a `PlaceProblem` without a translation layer.
@@ -16,7 +16,7 @@ use crate::tools::PcbToolCtx;
 
 use super::create::{parse_group_hint, parse_keepout};
 
-/// The persisted board draft (`.autopcb/board.json`) — the PCB analog of the
+/// The persisted board draft (`.gordian/board.json`) — the PCB analog of the
 /// schematic `draft.circuit.yaml`. Tools mutate it; place/route read it.
 ///
 /// Unknown JSON fields are rejected (`deny_unknown_fields`) so a schema drift
@@ -147,7 +147,7 @@ impl BoardDraft {
         serde_json::from_str(&raw).ok()
     }
 
-    /// Persist this draft to `.autopcb/board.json` (pretty-printed for the
+    /// Persist this draft to `.gordian/board.json` (pretty-printed for the
     /// human reader, mirroring how the schematic draft stays inspectable).
     pub fn save(&self, ctx: &PcbToolCtx) -> Result<()> {
         let json = serde_json::to_string_pretty(self)?;

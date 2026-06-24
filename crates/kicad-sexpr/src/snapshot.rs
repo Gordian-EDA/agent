@@ -1,6 +1,6 @@
 //! Snapshot / undo store backing the TUI's `:undo` and the per-write safety net.
 //!
-//! Snapshots live under `<project>/.auto-pcb/history/` as `<NNNN>-<filename>`,
+//! Snapshots live under `<project>/.gordian/history/` as `<NNNN>-<filename>`,
 //! where `NNNN` is a monotonically increasing 4-digit counter. There are no
 //! timestamps in filenames: the numbering provides ordering and the store is
 //! deterministic. `undo` has *pop* semantics — it restores the latest snapshot
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 /// Width of the zero-padded numeric prefix on snapshot filenames.
 const SEQ_WIDTH: usize = 4;
 
-/// A history store rooted at a project's `.auto-pcb/history` directory.
+/// A history store rooted at a project's `.gordian/history` directory.
 pub struct SnapshotStore {
     history_dir: PathBuf,
 }
@@ -30,7 +30,7 @@ pub struct SnapshotStore {
 impl SnapshotStore {
     /// Open (creating if necessary) the snapshot store for `project_dir`.
     pub fn for_project(project_dir: impl AsRef<Path>) -> io::Result<Self> {
-        let history_dir = project_dir.as_ref().join(".auto-pcb").join("history");
+        let history_dir = project_dir.as_ref().join(".gordian").join("history");
         std::fs::create_dir_all(&history_dir)?;
         Ok(Self { history_dir })
     }
@@ -169,7 +169,7 @@ mod tests {
         store.snapshot(&sch).unwrap(); // 0003
 
         // Simulate a gap: delete the middle snapshot.
-        let history = tmp.path().join(".auto-pcb/history");
+        let history = tmp.path().join(".gordian/history");
         std::fs::remove_file(history.join("0002-x.kicad_sch")).unwrap();
 
         // Next snapshot must be 0004, never reusing 0002.

@@ -393,7 +393,7 @@ fn tui_screenshots() {
     app.update(Msg::Agent(AgentEvent::ToolFinished {
         name: "render_board".into(),
         summary: "routed view → ok".into(),
-        image_path: Some("/home/you/projects/buck/.autopcb/renders/003.png".into()),
+        image_path: Some("/home/you/projects/buck/.gordian/renders/003.png".into()),
     }));
     app.update(Msg::Agent(AgentEvent::AssistantText(
         "Routed cleanly on two layers — preview above.".into(),

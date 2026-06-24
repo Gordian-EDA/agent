@@ -9,7 +9,7 @@
 //! ## The board draft
 //!
 //! Board state follows the DRAFT pattern (the mirror of the schematic
-//! `draft.circuit.yaml`): a [`BoardDraft`] persisted as `.autopcb/board.json`.
+//! `draft.circuit.yaml`): a [`BoardDraft`] persisted as `.gordian/board.json`.
 //! It carries the parts (reference, footprint lib_id, per-pad nets, optional
 //! locked position), board bounds, design rules, keepouts, placement hints, and
 //! the last placement. Tools mutate the draft; `place_board`/`route_board` read

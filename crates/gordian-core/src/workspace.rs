@@ -1,4 +1,4 @@
-//! Project-local persistent state: `<project>/.autopcb/`.
+//! Project-local persistent state: `<project>/.gordian/`.
 //!
 //! Holds the working draft (`draft.circuit.yaml` — the document `edit_design`
 //! patches and `apply_design` applies), `draft.meta.json` (the content hash of
@@ -15,9 +15,9 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Open (creating if needed) the `.autopcb/` directory under `project_dir`.
+    /// Open (creating if needed) the `.gordian/` directory under `project_dir`.
     pub fn for_project(project_dir: &Path) -> io::Result<Self> {
-        let root = project_dir.join(".autopcb");
+        let root = project_dir.join(".gordian");
         std::fs::create_dir_all(root.join("renders"))?;
         let gi = root.join(".gitignore");
         if !gi.exists() {
@@ -26,7 +26,7 @@ impl Workspace {
         Ok(Self { root })
     }
 
-    /// Path of the working draft (`draft.circuit.yaml`) inside `.autopcb/`.
+    /// Path of the working draft (`draft.circuit.yaml`) inside `.gordian/`.
     pub fn draft_path(&self) -> PathBuf {
         self.root.join("draft.circuit.yaml")
     }
@@ -63,7 +63,7 @@ impl Workspace {
         recorded != current_sch_text.map(fnv1a64)
     }
 
-    /// Path of the persisted board draft (`board.json`) inside `.autopcb/`.
+    /// Path of the persisted board draft (`board.json`) inside `.gordian/`.
     pub fn board_path(&self) -> PathBuf {
         self.root.join("board.json")
     }
@@ -79,7 +79,7 @@ impl Workspace {
         std::fs::write(self.board_path(), json)
     }
 
-    /// Path of the persisted route solution (`route.json`) inside `.autopcb/`.
+    /// Path of the persisted route solution (`route.json`) inside `.gordian/`.
     /// Written by `route_board` (Task 2); read here so `get_board` can report
     /// the routed flag.
     pub fn route_path(&self) -> PathBuf {
@@ -130,9 +130,9 @@ mod tests {
     fn creates_self_ignoring_state_dir() {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::for_project(dir.path()).unwrap();
-        assert!(dir.path().join(".autopcb/renders").is_dir());
+        assert!(dir.path().join(".gordian/renders").is_dir());
         assert_eq!(
-            std::fs::read_to_string(dir.path().join(".autopcb/.gitignore")).unwrap(),
+            std::fs::read_to_string(dir.path().join(".gordian/.gitignore")).unwrap(),
             "*\n"
         );
         assert!(ws.read_draft().is_none());

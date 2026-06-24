@@ -72,7 +72,7 @@ const DEFAULT_SEARCH_LIMIT: usize = 8;
 /// `&PcbToolCtx` — tools never need exclusive access.
 pub struct PcbToolCtx {
     env: KicadEnv,
-    /// Project directory holding the schematic and `.auto-pcb/history`.
+    /// Project directory holding the schematic and `.gordian/history`.
     project_dir: PathBuf,
     /// Path to the project's `.kicad_sch` (may not exist yet).
     sch_path: PathBuf,
@@ -90,7 +90,7 @@ pub struct PcbToolCtx {
     /// of `.pretty` libraries (the vendored fixtures) instead of the installed
     /// KiCAD footprint share dir, so footprint tests run without KiCAD libs.
     footprint_dir_override: Option<PathBuf>,
-    /// Project-local persistent state directory `.autopcb/`.
+    /// Project-local persistent state directory `.gordian/`.
     workspace: crate::workspace::Workspace,
     /// The live KiCAD IPC session for interactive board editing, launched lazily
     /// by `open_board` and reused by the geometry tools (`move_part`,
@@ -115,7 +115,7 @@ impl PcbToolCtx {
         let snapshots = SnapshotStore::for_project(&project_dir)
             .with_context(|| format!("opening snapshot store in {}", project_dir.display()))?;
         let workspace = crate::workspace::Workspace::for_project(&project_dir)
-            .with_context(|| format!("opening .autopcb workspace in {}", project_dir.display()))?;
+            .with_context(|| format!("opening .gordian workspace in {}", project_dir.display()))?;
         let provider = RealSymbolProvider::new(env.clone());
         Ok(Self {
             env,
@@ -247,7 +247,7 @@ impl PcbToolCtx {
         &self.snapshots
     }
 
-    /// The project's `.autopcb/` persistent state.
+    /// The project's `.gordian/` persistent state.
     pub fn workspace(&self) -> &crate::workspace::Workspace {
         &self.workspace
     }
@@ -473,7 +473,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     return it so you can SEE the sheet. Use after apply_design \
                     to inspect layout quality: overlapping text, crowding, \
                     confusing arrangement. The PNG is also saved under \
-                    .autopcb/renders/."
+                    .gordian/renders/."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
@@ -735,7 +735,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     When view is omitted the default is \"routed\" if route.json exists, \
                     \"placed\" otherwise. Requires place_board (placed view) or route_board \
                     (routed view); missing state returns a recoverable error. The PNG is \
-                    also saved under .autopcb/renders/."
+                    also saved under .gordian/renders/."
                     .into(),
                 input_schema: json!({
                     "type": "object",

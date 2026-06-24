@@ -249,7 +249,7 @@ mod tests {
         a.update(Msg::Agent(AgentEvent::ToolFinished {
             name: "render_board".into(),
             summary: "routed view → ok".into(),
-            image_path: Some("/tmp/proj/.autopcb/renders/000.png".into()),
+            image_path: Some("/tmp/proj/.gordian/renders/000.png".into()),
         }));
         assert_eq!(a.images.len(), 1, "an image cell was posted");
         // In text-label mode (no picker, like the screenshot harness) the cell
