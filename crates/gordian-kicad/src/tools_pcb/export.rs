@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 use kicad_cli_rs::cli::{KicadCli, Violation};
 use kicad_sexpr::pcb::{read_problem, write_solution};
 use pcb_synth::synth::{
-    plane_fill_rects, synthesize_board_full, synthesize_board_layers, NetClass, SynthPart, ZoneSpec,
+    plane_fill_rects, BoardModel, KeepoutZone, KicadV9Synth, NetClass, SynthPart, Synthesizer,
+    ZoneSpec,
 };
 use pcb_model::{Bounds, Point2, RouteProblem, RouteSolution};
 use pcb_place::placement::Placement;
@@ -573,12 +574,15 @@ pub fn export_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         }
     };
 
-    // Build the synthesis inputs and assemble the board text.
+    // Build the synthesis inputs and assemble the board text. The first pass is a
+    // minimal model (parts + bounds + stackup) we read back only for its net-code /
+    // layer map; zones/outline/net-classes are added in the second pass below.
     let parts = match synth_parts_from_draft(&draft, &placements, ctx) {
         Ok(p) => p,
         Err(msg) => return Ok(json!({ "error": msg })),
     };
-    let board_text = match synthesize_board_layers(&parts, &draft.bounds, draft.rules.layer_count) {
+    let model = BoardModel::new(parts.clone(), draft.bounds.clone(), draft.rules.layer_count);
+    let board_text = match KicadV9Synth.emit(&model) {
         Ok(t) => t,
         Err(e) => {
             return Ok(json!({
@@ -644,7 +648,7 @@ pub fn export_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // design intent the placer/router worked around — and KiCAD independently confirms no
     // track/via landed inside it. Resolve each keep-out's layers to KiCAD names; drop a
     // keep-out whose layers don't resolve rather than emit a malformed zone.
-    let keepout_zones: Vec<pcb_synth::synth::KeepoutZone> = draft
+    let keepout_zones: Vec<KeepoutZone> = draft
         .keepouts
         .iter()
         .map(|k| {
@@ -653,7 +657,7 @@ pub fn export_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
                 .iter()
                 .filter_map(|l| resolve_pour_layer(&l.0, draft.rules.layer_count).map(|(_, n)| n))
                 .collect();
-            pcb_synth::synth::KeepoutZone {
+            KeepoutZone {
                 layers,
                 min: [k.rect.min_x, k.rect.min_y],
                 max: [k.rect.max_x, k.rect.max_y],
@@ -666,22 +670,25 @@ pub fn export_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // there is a real fat/thin distinction (>1 class) — a uniform board needs no blocks
     // (its single Default rule already lives in the `.kicad_pro`).
     let net_classes = net_classes_from_rules(&draft.rules, &all_board_nets(&parts));
-    let pcb_classes: &[NetClass] = if net_classes.len() > 1 { &net_classes } else { &[] };
+    let pcb_classes: Vec<NetClass> = if net_classes.len() > 1 { net_classes.clone() } else { Vec::new() };
     let board = if tight != draft.bounds
         || !zones.is_empty()
         || !keepout_zones.is_empty()
         || draft.outline.is_some()
         || !pcb_classes.is_empty()
     {
-        match synthesize_board_full(
-            &parts,
-            &tight,
-            draft.rules.layer_count,
-            &zones,
-            &keepout_zones,
-            draft.outline.as_deref(),
-            pcb_classes,
-        ) {
+        // The full board model: parts on the tight outline, with the copper zones,
+        // routing keep-outs, custom outline, and net classes. KicadV9Synth emits it.
+        let full = BoardModel {
+            parts: parts.clone(),
+            bounds: tight.clone(),
+            layer_count: draft.rules.layer_count,
+            zones,
+            keepouts: keepout_zones,
+            outline: draft.outline.clone(),
+            net_classes: pcb_classes,
+        };
+        match KicadV9Synth.emit(&full) {
             Ok(t) => {
                 std::fs::write(&path, t.as_bytes())
                     .with_context(|| format!("writing tight-outline board to {}", path.display()))?;
