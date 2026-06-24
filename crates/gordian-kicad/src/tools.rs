@@ -440,6 +440,34 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 }),
             },
             ToolDef {
+                name: "find_similar_designs".into(),
+                description: "Study REAL professional KiCAD schematics that match your \
+                    design intent, returned as circuit-YAML you can emulate. Given a \
+                    one-line intent (e.g. \"STM32 board with USB and a 3V3 regulator\"), \
+                    this ranks a corpus of human-authored designs and returns the top \
+                    matches — each with its description, origin repo, and (when it lifts \
+                    cleanly) its full circuit-YAML — so you can copy professional patterns: \
+                    how to PARTITION into blocks, place decoupling, wire idioms (crystal + \
+                    load caps, regulator in/out caps), and which parts pros actually use. \
+                    Call this BEFORE authoring a new design to ground yourself in real \
+                    references. Some human schematics won't lift to YAML (exotic libs / \
+                    hierarchy); those still return their description, and lift_success_rate \
+                    reports how many produced YAML. Returns empty when no reference corpus \
+                    is installed — that is fine, just design from first principles."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "intent": { "type": "string",
+                            "description": "One-line description of what you want to design, \
+                                e.g. \"STM32 microcontroller board with USB and 3V3 regulator\"." },
+                        "k": { "type": "integer",
+                            "description": "How many references to return (default 3).", "minimum": 1 }
+                    },
+                    "required": ["intent"]
+                }),
+            },
+            ToolDef {
                 name: "render_schematic".into(),
                 description: "Render the current schematic to a PNG image and \
                     return it so you can SEE the sheet. Use after apply_design \
@@ -791,6 +819,7 @@ pub fn run_tool(name: &str, input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             "run_erc" => run_erc(ctx),
             "project_info" => project_info(ctx),
             "read_schematic" => read_schematic(input, ctx),
+            "find_similar_designs" => find_similar_designs(input, ctx),
             "render_schematic" => render_schematic(ctx),
             "create_design" => create_design(input, ctx),
             "edit_design" => edit_design(input, ctx),
@@ -1241,6 +1270,64 @@ fn same_file(a: &Path, b: &Path) -> bool {
         (Ok(ca), Ok(cb)) => ca == cb,
         _ => a == b,
     }
+}
+
+// ── find_similar_designs (retrieval-augmented references) ───────────────────
+
+/// Rank the corpus of real human schematics against `intent` and return the
+/// top-`k` as circuit-YAML the model can emulate. Absent-safe: with no corpus
+/// installed it returns `{matches: [], note: ...}` rather than erroring.
+fn find_similar_designs(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+    use crate::retrieval::{Corpus, DEFAULT_K};
+
+    let intent = require_str(&input, "intent")?;
+    let k = input
+        .get("k")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize)
+        .unwrap_or(DEFAULT_K)
+        .max(1);
+
+    let corpus = Corpus::discover();
+    if corpus.is_empty() {
+        return Ok(json!({
+            "matches": [],
+            "note": "no reference corpus installed — design from first principles \
+                     (set GORDIAN_CORPUS_DIR to a dataset of *.kicad_sch + *.json to \
+                     enable references)",
+        }));
+    }
+
+    let report = corpus.find_similar(&ctx.env, &intent, k);
+    let matches: Vec<Value> = report
+        .references
+        .iter()
+        .map(|r| {
+            let mut m = json!({
+                "id": r.meta.id,
+                "repo": r.meta.repo,
+                "description": r.meta.description,
+                "score": r.score,
+            });
+            match (&r.yaml, &r.lift_error) {
+                (Some(yaml), _) => m["yaml"] = json!(yaml),
+                (None, Some(err)) => m["lift_error"] = json!(err),
+                (None, None) => {}
+            }
+            m
+        })
+        .collect();
+
+    Ok(json!({
+        "matches": matches,
+        "corpus_size": corpus.len(),
+        "ranked_total": report.ranked_total,
+        "lifted_ok": report.successes,
+        "lift_success_rate": report.lift_success_rate(),
+        "note": "circuit-YAML references from real human designs — study their block \
+                 partition, decoupling, and idioms; do NOT copy verbatim. Entries with \
+                 only a description + lift_error could not be lifted.",
+    }))
 }
 
 // ── 8. run_erc ─────────────────────────────────────────────────────────────

@@ -89,11 +89,13 @@ impl ToolProvider for ReviewMockProvider {
             ("apply", RunMode::Preview) => ToolOutcome {
                 value: json!({ "ok": true, "would_write": true }),
                 images: Vec::new(),
+                image_path: None,
                 apply: Some(ApplyInfo { ready: true, ..Default::default() }),
             },
             ("apply", RunMode::Commit) => ToolOutcome {
                 value: json!({ "ok": true, "written": true }),
                 images: Vec::new(),
+                image_path: None,
                 apply: Some(ApplyInfo { ready: true, committed: true, summary: "ok".into() }),
             },
             _ => ToolOutcome::plain(json!({ "ok": true })),

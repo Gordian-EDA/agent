@@ -16,7 +16,7 @@ use std::process::ExitCode;
 
 use gordian_core::{Agent, AgentEvent, AutoApprove};
 use gordian_kicad::PcbTools;
-use gordian_kicad::prompts::system_prompt;
+use gordian_kicad::prompts::system_prompt_with_reference;
 use gordian_kicad::tools::PcbToolCtx;
 use anyhow::{Context, Result, bail};
 use kicad_cli_rs::cli::KicadCli;
@@ -206,7 +206,11 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     //    defects into a bounded follow-up fix turn. `--no-review` runs the plain
     //    turn. A live events channel surfaces each `Reviewed` round to the log.
     let runtime = tokio::runtime::Runtime::new().context("starting the Tokio runtime")?;
-    let mut agent = Agent::new(client, Box::new(PcbTools::new(ctx)), system_prompt());
+    // Retrieval-augment the system prompt: at design-start the intent (the prompt)
+    // is known, so inject the single best-matching real human design as a worked
+    // few-shot example. Falls back to the plain prompt when no corpus / match.
+    let system = system_prompt_with_reference(&env, &prompt);
+    let mut agent = Agent::new(client, Box::new(PcbTools::new(ctx)), system);
     let mut approvals = AutoApprove::yes();
     let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
