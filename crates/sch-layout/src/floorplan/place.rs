@@ -123,7 +123,7 @@ fn resolve_pins(comp: &Component, geom: &SymbolGeometry) -> Vec<(String, String,
 /// Emit the schematic with the env-defaulted placement strategy (greedy unless
 /// `ANNEAL`/`LAYOUT_SEARCH=anneal`). The engine/test default.
 pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOutput> {
-    emit_strategy(env, design, ir, pick_strategy())
+    emit_strategy(env, design, ir, pick_engine())
 }
 
 /// Emit forcing the simulated-annealing (premium) search regardless of env. The
@@ -137,9 +137,9 @@ fn emit_strategy(
     env: &KicadEnv,
     design: &Design,
     ir: &LayoutIr,
-    strategy: Box<dyn PlacementStrategy>,
+    engine: Box<dyn PlacementEngine>,
 ) -> io::Result<EmitOutput> {
-    let (w, mut out) = prepare_writer(env, design, ir, strategy)?;
+    let (w, mut out) = prepare_writer(env, design, ir, engine)?;
     out.sch = w.finish();
     Ok(out)
 }
@@ -154,7 +154,7 @@ fn prepare_writer(
     env: &KicadEnv,
     design: &Design,
     ir: &LayoutIr,
-    strategy: Box<dyn PlacementStrategy>,
+    engine: Box<dyn PlacementEngine>,
 ) -> io::Result<(SchematicWriter, EmitOutput)> {
     let mut items = gather(env, design)?;
     // Seed each item's mirror flag from the IR (lifted onto Item so the search
@@ -177,7 +177,7 @@ fn prepare_writer(
     let cells = assign_cells(&items, ir);
     apply_cells(&mut items, &cells);
     normalize(&mut items);
-    // Placement search behind the strategy interface (`PlacementStrategy`): greedy
+    // Placement search behind the engine interface (`PlacementEngine`): greedy
     // (free tier) or simulated annealing (premium); both mutate `items` in mm.
     // The placement search now OWNS the continuous polish (small boards: the routed
     // `polish`; large boards: the router-free `polish_proxy`, picked per-board among
@@ -185,12 +185,22 @@ fn prepare_writer(
     // re-polishes (which would re-add a seating pass the large-board pick had
     // deliberately rejected). Greedy keeps the exact refine→polish order, so the
     // reference snapshots stay byte-identical.
-    strategy.search(env, &mut items, &inc, ir, &needs_flag, SEARCH_SEED);
+    let problem = PlaceProblem {
+        env,
+        inc: &inc,
+        ir,
+        needs_flag: &needs_flag,
+        seed: SEARCH_SEED,
+    };
+    if std::env::var("DEBUG_PLACE").is_ok() {
+        eprintln!("[place] engine = {}", engine.name());
+    }
+    engine.place(&problem, &mut items);
     // Guarantee no body overlap: the cost-gated refine can leave two parts
     // touching when separating them would transiently raise routed cost (a local
     // minimum), so a final, unconditional relaxation pushes any remaining
     // overlaps apart. Cheap a frame may be, the shipped sheet never collides.
-    decongest(&mut items);
+    problem.legalize(&mut items);
     // Snap each frozen idiom cluster to its IC's ACTUAL pin positions in mm. The
     // coarse grid (IC = one cell, but renders tall) packs a cluster's cells OUTSIDE
     // the body, leaving long dog-legs to the pins; this aligns the crystal beside its
@@ -2841,55 +2851,64 @@ const FAST_PINS: usize = 34;
 /// swappable COUNTERPARTS (owner: SA is the paid tier, possibly with a richer
 /// cost). `cells` is IN = the seed frame (`assign_cells`), OUT = the chosen
 /// placement; `seed` drives any randomness so the result is reproducible.
-trait PlacementStrategy {
-    fn search(
-        &self,
-        env: &KicadEnv,
-        items: &mut [Item],
-        inc: &Incidence,
-        ir: &LayoutIr,
-        needs_flag: &BTreeSet<String>,
-        seed: u64,
-    );
+/// The placement problem an engine works on: the scoring `env`, the connectivity
+/// (`inc`), the intent (`ir` — rails/frozen/zones), the ERC `needs_flag` set, and a
+/// `seed` for stochastic engines. It bundles what the placement primitives used to
+/// thread by hand. A cost-based engine evaluates placements against it; a learned or
+/// template engine may only read it. `legalize` is the one shared, cost-free repair.
+pub(crate) struct PlaceProblem<'a> {
+    pub env: &'a KicadEnv,
+    pub inc: &'a Incidence,
+    pub ir: &'a LayoutIr,
+    pub needs_flag: &'a BTreeSet<String>,
+    pub seed: u64,
+}
+
+impl PlaceProblem<'_> {
+    /// Geometric overlap repair (cost-free) — usable by any engine.
+    pub(crate) fn legalize(&self, items: &mut [Item]) {
+        decongest(items);
+    }
+}
+
+/// A schematic placement ENGINE: given the [`PlaceProblem`], write final positions
+/// into `items`. The only contract is "produce a placement" — *how* (cost-search,
+/// learned, constraint, template, portfolio) is the engine's own business, so the
+/// trait assumes nothing (no cost, no move-set). Greedy/Anneal happen to be
+/// cost-based and keep their cost private; a future engine need not be.
+pub(crate) trait PlacementEngine {
+    fn name(&self) -> &'static str;
+    fn place(&self, problem: &PlaceProblem, items: &mut [Item]);
 }
 
 /// Greedy hill-climb (free tier): local, strictly-cost-improving moves only over
 /// the seeded mm placement.
 struct Greedy;
-impl PlacementStrategy for Greedy {
-    fn search(
-        &self,
-        env: &KicadEnv,
-        items: &mut [Item],
-        inc: &Incidence,
-        ir: &LayoutIr,
-        needs_flag: &BTreeSet<String>,
-        _seed: u64,
-    ) {
-        refine_items(env, items, inc, ir, needs_flag);
+impl PlacementEngine for Greedy {
+    fn name(&self) -> &'static str {
+        "greedy"
+    }
+    fn place(&self, p: &PlaceProblem, items: &mut [Item]) {
+        refine_items(p.env, items, p.inc, p.ir, p.needs_flag);
         // Own the continuous polish (moved out of emit), returning the FINAL placement.
         // The free tier uses the ROUTED polish at EVERY size: it is the truthfulness-
         // safe path (each move re-routes, so the cost sees a net merge / short — the
         // router-free proxy polish does NOT, and greedy has no candidate pick to reject
         // a mis-wire). Slow on a dense board, but only the premium anneal (fast lane) is
         // latency-bound. References keep the exact refine→polish order → byte-identical.
-        polish(env, items, inc, ir, needs_flag);
+        polish(p.env, items, p.inc, p.ir, p.needs_flag);
     }
 }
 
 /// Simulated annealing (paid tier): a seeded refine→anneal AND a broad anneal from
 /// the raw seed, keeping whichever the cost prefers (today's multi-start best-of).
 struct Anneal;
-impl PlacementStrategy for Anneal {
-    fn search(
-        &self,
-        env: &KicadEnv,
-        items: &mut [Item],
-        inc: &Incidence,
-        ir: &LayoutIr,
-        needs_flag: &BTreeSet<String>,
-        seed: u64,
-    ) {
+impl PlacementEngine for Anneal {
+    fn name(&self) -> &'static str {
+        "anneal"
+    }
+    fn place(&self, p: &PlaceProblem, items: &mut [Item]) {
+        let (env, inc, ir, needs_flag, seed) = (p.env, p.inc, p.ir, p.needs_flag, p.seed);
         use rayon::prelude::*;
         let timed_top = std::env::var("DEBUG_SA_TIME").is_ok();
 
@@ -3251,7 +3270,10 @@ fn truthfulness_breaks(
 /// Select the placement strategy. Free tier = `Greedy`; SA is opt-in (a later
 /// `Tier` enum from agent config wires the paid feature here). Honors
 /// `LAYOUT_SEARCH=greedy|anneal` and the `ANNEAL=1` / `GREEDY=1` aliases.
-fn pick_strategy() -> Box<dyn PlacementStrategy> {
+/// Select the placement engine from the environment — the registry of built-in
+/// engines. `LAYOUT_SEARCH=anneal|greedy` is explicit; else `ANNEAL` opts into
+/// anneal unless `GREEDY` overrides. A new engine registers by adding an arm here.
+fn pick_engine() -> Box<dyn PlacementEngine> {
     let anneal = match std::env::var("LAYOUT_SEARCH").ok().as_deref() {
         Some("anneal") => true,
         Some("greedy") => false,
