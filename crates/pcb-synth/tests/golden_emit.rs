@@ -5,10 +5,13 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use std::io;
+
 use pcb_model::{Bounds, Point2};
 use pcb_place::placement::Placement;
 use pcb_synth::synth::{
-    plane_fill_rects, synthesize_board_full, KeepoutZone, NetClass, SynthPart, ZoneSpec,
+    plane_fill_rects, synthesize_board_full, BoardModel, KeepoutZone, NetClass, SynthPart,
+    Synthesizer, ZoneSpec,
 };
 
 fn fixture(name: &str) -> String {
@@ -85,6 +88,40 @@ fn golden_board() -> String {
         },
     ];
     synthesize_board_full(&parts, &bounds, 4, &zones, &keepouts, Some(&outline), &classes).unwrap()
+}
+
+/// The third-party SDK story: a foreign emitter targets a different format by
+/// implementing [`Synthesizer`] for the SAME [`BoardModel`] — no change to the
+/// placement / route / DRC stages. Here, a trivial summary dumper.
+struct SummaryDumper;
+impl Synthesizer for SummaryDumper {
+    fn name(&self) -> &'static str {
+        "summary"
+    }
+    fn emit(&self, board: &BoardModel) -> io::Result<String> {
+        Ok(format!(
+            "parts={} layers={} zones={} nets_classes={}",
+            board.parts.len(),
+            board.layer_count,
+            board.zones.len(),
+            board.net_classes.len()
+        ))
+    }
+}
+
+#[test]
+fn third_party_synthesizer_consumes_the_same_model() {
+    let parts = vec![SynthPart {
+        reference: "R1".into(),
+        lib_id: "Resistor_SMD:R_0603_1608Metric".into(),
+        source: fixture("R_0603_1608Metric.kicad_mod"),
+        pad_nets: nets(&[("1", "VOUT"), ("2", "GND")]),
+        placement: place("R1", 10.0, 10.0, 0),
+    }];
+    let model = BoardModel::new(parts, Bounds { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 }, 2);
+    let out = SummaryDumper.emit(&model).unwrap();
+    assert_eq!(out, "parts=1 layers=2 zones=0 nets_classes=0");
+    assert_eq!(SummaryDumper.name(), "summary");
 }
 
 #[test]
