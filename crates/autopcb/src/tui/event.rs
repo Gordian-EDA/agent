@@ -19,6 +19,16 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
         return None;
     }
 
+    // Shift/Alt+Enter inserts a newline (a multi-line prompt) rather than
+    // submitting. Checked before the Control block so a bare Enter still submits.
+    if key.code == KeyCode::Enter
+        && key
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+    {
+        return Some(Msg::Newline);
+    }
+
     // Control chords (readline-style line editing + hard quit).
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
@@ -43,8 +53,9 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Home => Some(Msg::Home),
         KeyCode::End => Some(Msg::End),
         KeyCode::Esc => Some(Msg::Cancel),
-        KeyCode::PageUp => Some(Msg::ScrollUp),
-        KeyCode::PageDown => Some(Msg::ScrollDown),
+        // A full screenful jump; the height tracks the last-drawn viewport.
+        KeyCode::PageUp => Some(Msg::PageUp(app.viewport_h)),
+        KeyCode::PageDown => Some(Msg::PageDown(app.viewport_h)),
         // Up/Down edit history while the input line is live; with the gate
         // open they fall back to scrolling the transcript.
         KeyCode::Up if app.input_active() => Some(Msg::HistoryPrev),
@@ -152,16 +163,28 @@ mod tests {
     }
 
     #[test]
-    fn page_keys_always_scroll() {
-        let a = app();
+    fn page_keys_jump_by_a_viewport() {
+        let mut a = app();
+        a.viewport_h = 17;
         assert!(matches!(
             map_key(&a, key(KeyCode::PageUp)),
-            Some(Msg::ScrollUp)
+            Some(Msg::PageUp(17))
         ));
         assert!(matches!(
             map_key(&a, key(KeyCode::PageDown)),
-            Some(Msg::ScrollDown)
+            Some(Msg::PageDown(17))
         ));
+    }
+
+    #[test]
+    fn shift_or_alt_enter_inserts_a_newline_not_a_submit() {
+        let a = app();
+        let shift = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        let alt = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+        assert!(matches!(map_key(&a, shift), Some(Msg::Newline)));
+        assert!(matches!(map_key(&a, alt), Some(Msg::Newline)));
+        // A bare Enter still submits.
+        assert!(matches!(map_key(&a, key(KeyCode::Enter)), Some(Msg::Submit)));
     }
 
     #[test]

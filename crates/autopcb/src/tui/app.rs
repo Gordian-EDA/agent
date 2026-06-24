@@ -250,6 +250,13 @@ pub enum Msg {
     /// Scroll the transcript up / down by one line.
     ScrollUp,
     ScrollDown,
+    /// Jump the transcript by roughly a viewport height (PgUp / PgDn). The
+    /// shell passes the live viewport height so the jump tracks the window.
+    PageUp(u16),
+    PageDown(u16),
+    /// Shift/Alt+Enter — insert a literal newline into the composer (a
+    /// multi-line prompt) rather than submitting.
+    Newline,
     /// Esc — close help / reject a gate / clear input / cancel a turn / arm
     /// (then perform) a context unwind, in that order of precedence.
     Cancel,
@@ -373,6 +380,9 @@ pub struct App {
     /// Lines scrolled up from the bottom of the transcript (0 = follow tail).
     /// The renderer clamps this to the real maximum for the viewport.
     pub scroll: u16,
+    /// The transcript viewport height the renderer last drew, so a PgUp/PgDn
+    /// can jump by a screenful. The renderer writes it; `map_key` reads it.
+    pub viewport_h: u16,
     /// Status-bar data.
     pub status: Status,
     /// Set once the user asks to quit; the shell's loop exits.
@@ -404,6 +414,7 @@ impl App {
             unwind: None,
             help: false,
             scroll: 0,
+            viewport_h: 0,
             status,
             should_quit: false,
         }
@@ -441,15 +452,20 @@ impl App {
             self.esc_armed = false;
         }
         // Any input change other than Tab itself restarts completion cycling.
+        // Submit is excluded so it can read the highlighted completion (it
+        // resets the cycle itself once it has decided accept-vs-run).
         if !matches!(
             msg,
             Msg::Complete
+                | Msg::Submit
                 | Msg::Tick
                 | Msg::Agent(_)
                 | Msg::PendingDiff(_)
                 | Msg::TurnEnded(_)
                 | Msg::ScrollUp
                 | Msg::ScrollDown
+                | Msg::PageUp(_)
+                | Msg::PageDown(_)
         ) {
             self.completion_stem = None;
             self.completion_idx = None;
@@ -532,6 +548,20 @@ impl App {
             }
             Msg::ScrollDown => {
                 self.scroll = self.scroll.saturating_sub(1);
+                Action::None
+            }
+            Msg::PageUp(h) => {
+                self.scroll = self.scroll.saturating_add(h.max(1));
+                Action::None
+            }
+            Msg::PageDown(h) => {
+                self.scroll = self.scroll.saturating_sub(h.max(1));
+                Action::None
+            }
+            Msg::Newline => {
+                if self.pending.is_none() {
+                    self.insert_char('\n');
+                }
                 Action::None
             }
             Msg::Cancel => self.cancel(),
@@ -650,8 +680,19 @@ impl App {
         )));
     }
 
-    /// Submit the input line: a `/command` or a prompt.
+    /// Submit the input line: a `/command` or a prompt. When the user has
+    /// highlighted a completion (Tab-cycled into the popup), Enter accepts it
+    /// into the input instead of submitting — they confirm the command first,
+    /// then press Enter again to run it. A bare `/help` with no highlight still
+    /// submits directly.
     fn submit(&mut self) -> Action {
+        if let Some((matches, Some(idx))) = self.completion_view() {
+            self.input = matches[idx].name.to_string();
+            self.cursor = self.char_len();
+            self.completion_stem = None;
+            self.completion_idx = None;
+            return Action::None;
+        }
         let line = self.input.trim().to_string();
         if line.is_empty() {
             return Action::None;
@@ -807,22 +848,24 @@ impl App {
             AgentEvent::ToolStarted { name } => {
                 self.turn_tool_calls += 1;
                 self.transcript
-                    .push(Entry::tool(format!("▸ {name}(…) running…")));
+                    .push(Entry::tool(format!("{name}(…) running…")));
             }
             AgentEvent::ToolFinished { name, summary } => {
                 // Replace the most recent "running…" card for this tool, if any,
-                // so the card collapses into its result in place.
-                let placeholder = format!("▸ {name}(…) running…");
+                // so the card collapses into its result in place. The leading
+                // marker glyph is the renderer's job — the text carries none, or
+                // the card would show a double arrow.
+                let placeholder = format!("{name}(…) running…");
                 if let Some(slot) = self
                     .transcript
                     .iter_mut()
                     .rev()
                     .find(|e| e.speaker == Speaker::Tool && e.text == placeholder)
                 {
-                    slot.text = format!("▸ {name} → {summary}");
+                    slot.text = format!("{name} → {summary}");
                 } else {
                     self.transcript
-                        .push(Entry::tool(format!("▸ {name} → {summary}")));
+                        .push(Entry::tool(format!("{name} → {summary}")));
                 }
             }
             AgentEvent::Applied { errors, warnings } => {
@@ -902,26 +945,28 @@ impl App {
         self.turn_started = None;
         self.pending = None;
 
+        // The level glyph is the renderer's job (it tints the whole notice as a
+        // callout); the text carries none, or each line would show two markers.
         let entry = match reason {
             TurnEndReason::Compacted => None,
             TurnEndReason::Completed => Some(Entry::notice(
                 NoticeLevel::Success,
-                format!("✓ Cogitated for {secs}s · {calls}"),
+                format!("Cogitated for {secs}s · {calls}"),
             )),
             TurnEndReason::IterationCap => Some(Entry::notice(
                 NoticeLevel::Warn,
                 format!(
-                    "⚠ Hit the per-turn step limit after {secs}s · {calls} \
+                    "Hit the per-turn step limit after {secs}s · {calls} \
                      — send \"continue\" to resume"
                 ),
             )),
             TurnEndReason::Interrupted => Some(Entry::notice(
                 NoticeLevel::Plain,
-                format!("⊘ Interrupted after {secs}s · {calls}"),
+                format!("Interrupted after {secs}s · {calls}"),
             )),
             TurnEndReason::Error(e) => Some(Entry::notice(
                 NoticeLevel::Error,
-                format!("✗ Stopped after {secs}s — {e}"),
+                format!("Stopped after {secs}s — {e}"),
             )),
         };
         if let Some(entry) = entry {
@@ -991,6 +1036,8 @@ impl App {
         self.input.clear();
         self.cursor = 0;
         self.history_pos = None;
+        self.completion_stem = None;
+        self.completion_idx = None;
     }
 
     /// Up: step back through history, stashing the live draft first.
@@ -1457,6 +1504,34 @@ mod tests {
         a.update(Msg::Backspace);
         assert!(a.completion_view().is_some());
         assert_eq!(a.completion_idx, None, "edit resets the cycle");
+    }
+
+    #[test]
+    fn enter_accepts_a_highlighted_completion_instead_of_submitting() {
+        let mut a = app();
+        type_str(&mut a, "/c");
+        // No highlight yet: Enter would submit (here it's an unknown prefix, so
+        // submit reports it), not accept.
+        assert!(a.completion_idx.is_none());
+        // Tab highlights the first match; now Enter accepts it into the input.
+        a.update(Msg::Complete);
+        assert_eq!(a.input, "/clear");
+        assert_eq!(a.update(Msg::Submit), Action::None, "Enter accepts, not submits");
+        assert_eq!(a.input, "/clear");
+        assert!(a.completion_idx.is_none(), "accepting clears the cycle");
+        // A second Enter now runs the confirmed command.
+        assert_eq!(a.update(Msg::Submit), Action::ClearContext);
+    }
+
+    #[test]
+    fn enter_submits_a_complete_command_with_no_highlight() {
+        let mut a = app();
+        type_str(&mut a, "/help");
+        // The popup is open (matches /help) but nothing is highlighted, so Enter
+        // runs the command rather than re-accepting it.
+        assert!(a.completion_view().is_some());
+        a.update(Msg::Submit);
+        assert!(a.help, "/help runs on a bare Enter");
     }
 
     #[test]

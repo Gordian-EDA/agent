@@ -43,11 +43,13 @@ use agent::{Agent, AgentEvent, Approvals, StopReason};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, MouseEventKind,
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyboardEnhancementFlags,
+    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
 };
 use futures::StreamExt;
 use kicad_cli_rs::env::KicadEnv;
@@ -442,10 +444,21 @@ async fn event_loop(
 }
 
 /// Enter raw mode + the alternate screen and build the ratatui terminal.
+///
+/// On terminals that speak the Kitty keyboard protocol we push
+/// `DISAMBIGUATE_ESCAPE_CODES` so chords like Shift+Enter arrive distinct from a
+/// bare Enter; legacy terminals are left untouched (the composer hint still
+/// advertises ⇧⏎, it just won't fire there).
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    if supports_keyboard_enhancement().unwrap_or(false) {
+        execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+    }
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -453,6 +466,9 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
 
 /// Restore the terminal to its normal state. Always safe to call.
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    if supports_keyboard_enhancement().unwrap_or(false) {
+        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+    }
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),

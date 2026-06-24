@@ -17,6 +17,8 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 
+use agent::AgentEvent;
+
 use super::app::{App, Entry, Msg, NoticeLevel, PendingDiff, Speaker, Status};
 use super::ui;
 
@@ -222,26 +224,35 @@ fn push(app: &mut App, speaker: Speaker, text: &str, level: NoticeLevel) {
     app.transcript.push(Entry { speaker, text: text.into(), level });
 }
 
-/// A representative conversation, shared by several states.
+/// Drive a finished tool card through the real agent-event path (start → finish)
+/// so the screenshot exercises the same renderer code as production — the card's
+/// single marker comes from the renderer, never the event text.
+fn tool(app: &mut App, name: &str, summary: &str) {
+    app.update(Msg::Agent(AgentEvent::ToolStarted { name: name.into() }));
+    app.update(Msg::Agent(AgentEvent::ToolFinished {
+        name: name.into(),
+        summary: summary.into(),
+    }));
+}
+
+/// A representative conversation, shared by several states. Built through the
+/// same `update`/agent-event path the running app uses, so the captures can't
+/// drift from real rendering (e.g. mask a double marker).
 fn seed_conversation(app: &mut App) {
     push(app, Speaker::User, "design a 5V 3A buck converter from 12V in", NoticeLevel::Plain);
-    push(
-        app,
-        Speaker::Assistant,
+    app.update(Msg::Agent(AgentEvent::AssistantText(
         "I'll build a synchronous buck around a TPS54331. Let me search for parts and lay out \
-         the power stage with input/output bulk caps and a feedback divider.",
-        NoticeLevel::Plain,
-    );
-    push(app, Speaker::Tool, "search_symbols(\"buck converter\") → 12 hits", NoticeLevel::Plain);
-    push(app, Speaker::Tool, "create_design(8 parts) → ok", NoticeLevel::Plain);
-    push(app, Speaker::Tool, "run_erc → 0 errors, 2 warnings", NoticeLevel::Plain);
-    push(
-        app,
-        Speaker::Assistant,
+         the power stage with input/output bulk caps and a feedback divider."
+            .into(),
+    )));
+    tool(app, "search_symbols", "\"buck converter\" → 12 hits");
+    tool(app, "create_design", "8 parts → ok");
+    tool(app, "run_erc", "0 errors, 2 warnings");
+    app.update(Msg::Agent(AgentEvent::AssistantText(
         "Done — the buck converter schematic compiles cleanly with **0 ERC errors**. The power \
-         stage, feedback network, and decoupling are all in place. Want me to lay out the PCB next?",
-        NoticeLevel::Plain,
-    );
+         stage, feedback network, and decoupling are all in place. Want me to lay out the PCB next?"
+            .into(),
+    )));
     push(app, Speaker::System, "turn finished · 6 tool calls · 12.4k tokens", NoticeLevel::Success);
 }
 
@@ -301,4 +312,35 @@ fn tui_screenshots() {
     seed_conversation(&mut app);
     app.help = true;
     shoot("07_help", 96, 32, &mut app);
+
+    // 8. Markdown + notice styling: accented headings, a fenced code block (slate
+    //    band, gutter rule, language label), inline code, and the three notice
+    //    levels as callouts.
+    let mut app = App::new(status());
+    push(&mut app, Speaker::User, "show me the feedback divider values", NoticeLevel::Plain);
+    app.update(Msg::Agent(AgentEvent::AssistantText(
+        "## Feedback network\n\
+         The divider sets the output to **5.0 V** with `Vref = 0.8 V`:\n\n\
+         ```python\n\
+         r2 = r1 * (vout / vref - 1)\n\
+         # 10k * (5.0/0.8 - 1) = 52.5k\n\
+         ```\n\n\
+         I picked the nearest E96 value, `52.3k`."
+            .into(),
+    )));
+    tool(&mut app, "run_erc", "0 errors, 1 warning");
+    push(&mut app, Speaker::System, "applied — ERC 0 errors, 1 warning", NoticeLevel::Success);
+    push(
+        &mut app,
+        Speaker::System,
+        "Hit the per-turn step limit after 41s · 8 tool calls — send \"continue\" to resume",
+        NoticeLevel::Warn,
+    );
+    push(
+        &mut app,
+        Speaker::System,
+        "Stopped after 12s — provider throttled the request (429)",
+        NoticeLevel::Error,
+    );
+    shoot("08_markdown", 96, 32, &mut app);
 }

@@ -7,7 +7,7 @@
 //! the renderer wraps them to the viewport ([`super::ui`]), so nothing here
 //! needs to know the terminal width.
 
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 
 /// How the renderer may wrap a logical line.
@@ -19,11 +19,26 @@ pub enum WrapMode {
     Preserve,
 }
 
-/// One logical (unwrapped) line: styled segments plus its wrap mode.
+/// What kind of block a logical line belongs to, so the renderer can frame it
+/// (a fenced code block gets a slate background and a gutter rule; prose does
+/// not).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum LineKind {
+    /// Ordinary prose / list / quote line.
+    #[default]
+    Prose,
+    /// A line inside a fenced code block. `lang` is `Some` only on the opening
+    /// row, carrying the fence's info string (e.g. `yaml`) for a dim label.
+    Code { lang: Option<String> },
+}
+
+/// One logical (unwrapped) line: styled segments, its wrap mode, and its block
+/// kind (so the renderer can frame code blocks distinctly).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MdLine {
     pub segments: Vec<(String, Style)>,
     pub wrap: WrapMode,
+    pub kind: LineKind,
 }
 
 /// Render markdown text into logical lines styled relative to `base`
@@ -58,6 +73,9 @@ struct Renderer {
     link: usize,
     heading: bool,
     code_block: bool,
+    /// The fenced block's info string (language), pending until its first row is
+    /// emitted; `None` thereafter so only the opening row carries the label.
+    code_lang: Option<String>,
     quote_depth: usize,
     /// Open lists; `Some(n)` is the next ordered-item number.
     lists: Vec<Option<u64>>,
@@ -77,6 +95,7 @@ impl Renderer {
             link: 0,
             heading: false,
             code_block: false,
+            code_lang: None,
             quote_depth: 0,
             lists: Vec::new(),
         }
@@ -130,9 +149,16 @@ impl Renderer {
                 self.block_start();
                 self.quote_depth += 1;
             }
-            Tag::CodeBlock(_) => {
+            Tag::CodeBlock(kind) => {
                 self.block_start();
                 self.code_block = true;
+                self.code_lang = match kind {
+                    CodeBlockKind::Fenced(info) => {
+                        let lang = info.split_whitespace().next().unwrap_or("");
+                        (!lang.is_empty()).then(|| lang.to_string())
+                    }
+                    CodeBlockKind::Indented => None,
+                };
             }
             Tag::List(start) => {
                 if self.lists.is_empty() {
@@ -206,6 +232,11 @@ impl Renderer {
         if self.bold > 0 || self.heading {
             s = s.add_modifier(Modifier::BOLD);
         }
+        // Headings carry an accent so they read as structure, not just bold
+        // prose; inline **strong** stays plain bold (no recolour).
+        if self.heading {
+            s = s.fg(Color::Cyan);
+        }
         if self.italic > 0 || self.quote_depth > 0 {
             s = s.add_modifier(Modifier::ITALIC);
         }
@@ -242,11 +273,14 @@ impl Renderer {
     }
 
     /// Push the pending code row even when blank (blank lines inside a code
-    /// block are content).
+    /// block are content). The fence's language rides on the first row only.
     fn flush_code_row(&mut self) {
         self.lines.push(MdLine {
             segments: std::mem::take(&mut self.current),
             wrap: WrapMode::Preserve,
+            kind: LineKind::Code {
+                lang: self.code_lang.take(),
+            },
         });
         self.line_open = false;
     }
@@ -273,14 +307,20 @@ impl Renderer {
         if !self.line_open && self.current.is_empty() {
             return;
         }
-        let wrap = if self.code_block {
-            WrapMode::Preserve
+        let (wrap, kind) = if self.code_block {
+            (
+                WrapMode::Preserve,
+                LineKind::Code {
+                    lang: self.code_lang.take(),
+                },
+            )
         } else {
-            WrapMode::Word
+            (WrapMode::Word, LineKind::Prose)
         };
         self.lines.push(MdLine {
             segments: std::mem::take(&mut self.current),
             wrap,
+            kind,
         });
         self.line_open = false;
     }
@@ -291,6 +331,7 @@ impl Renderer {
             self.lines.push(MdLine {
                 segments: vec![(String::new(), self.base)],
                 wrap: WrapMode::Word,
+                kind: LineKind::Prose,
             });
         }
         self.sep_pending = false;
@@ -377,10 +418,18 @@ mod tests {
     }
 
     #[test]
-    fn headings_strip_hashes_and_bold() {
+    fn headings_are_accented_bold_distinct_from_inline_strong() {
         let lines = render_markdown("## Power section", base());
         assert_eq!(text_of(&lines[0]), "Power section");
-        assert!(lines[0].segments[0].1.add_modifier.contains(Modifier::BOLD));
+        let h = lines[0].segments[0].1;
+        assert!(h.add_modifier.contains(Modifier::BOLD), "heading is bold");
+        assert_eq!(h.fg, Some(Color::Cyan), "heading carries the accent");
+
+        // Inline **strong** is plain bold — no recolour — so the two are distinct.
+        let strong = render_markdown("a **bold** word", base());
+        let seg = strong[0].segments.iter().find(|(t, _)| t == "bold").unwrap();
+        assert!(seg.1.add_modifier.contains(Modifier::BOLD));
+        assert_ne!(seg.1.fg, Some(Color::Cyan), "strong stays plain, not accented");
     }
 
     #[test]
@@ -418,6 +467,9 @@ mod tests {
             "code is preserve-wrapped"
         );
         assert_eq!(lines[3].segments[0].1.fg, Some(Color::Cyan));
+        // The fence language rides the opening code row only.
+        assert_eq!(lines[2].kind, LineKind::Code { lang: Some("yaml".into()) });
+        assert_eq!(lines[3].kind, LineKind::Code { lang: None });
     }
 
     #[test]

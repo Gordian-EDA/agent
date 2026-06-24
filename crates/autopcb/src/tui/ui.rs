@@ -29,10 +29,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 
 use super::app::{App, Entry, NoticeLevel, PendingDiff, Speaker};
-use super::md::{self, MdLine, WrapMode};
+use super::md::{self, LineKind, MdLine, WrapMode};
 
-/// Braille spinner shown in the transcript title while a turn runs.
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// The running-indicator spinner. Quadrant blocks (U+2596…U+259F) are far more
+/// widely covered than braille, so they animate cleanly instead of rendering as
+/// tofu boxes in fonts that lack the braille range.
+const SPINNER: [&str; 4] = ["▘", "▝", "▗", "▖"];
 
 /// Nominal context window used for the status-bar percentage (Claude-class
 /// models on Bedrock).
@@ -64,6 +66,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .unwrap_or(0);
     // The running indicator takes a row only while a turn is in flight.
     let running_h = u16::from(app.running);
+    // The composer grows with a multi-line draft (capped), so a pasted or
+    // Shift-Enter'd prompt stays visible instead of scrolling under the border.
+    let input_h = composer_height(app, area.height);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -72,7 +77,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             Constraint::Min(3),            // transcript
             Constraint::Length(diff_h),    // proposed-changes pane
             Constraint::Length(running_h), // running indicator
-            Constraint::Length(3),         // input composer (rounded box)
+            Constraint::Length(input_h),   // input composer (rounded box)
             Constraint::Length(1),         // status bar
         ])
         .split(area);
@@ -217,6 +222,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
     let inner = body(area);
+    app.viewport_h = inner.height;
     // Before the first real exchange, fill the pane with a welcome splash rather
     // than leaving it blank (the Codex first-launch idiom).
     let started = app
@@ -229,11 +235,19 @@ fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let body_w = inner.width.max(1) as usize;
-    let lines: Vec<Line> = app
-        .transcript
-        .iter()
-        .flat_map(|e| render_entry(e, body_w))
-        .collect();
+    // Thread the previous speaker so a turn gets one blank row of rhythm at its
+    // boundaries — before a new user/assistant turn, the first tool card of a
+    // run, and the turn-summary line — while consecutive same-class lines stay
+    // tight.
+    let mut prev: Option<Speaker> = None;
+    let mut lines: Vec<Line> = Vec::new();
+    for e in &app.transcript {
+        if gap_above(prev, e.speaker) {
+            lines.push(Line::from(""));
+        }
+        lines.extend(render_entry(e, body_w));
+        prev = Some(e.speaker);
+    }
 
     let total = lines.len() as u16;
     // scroll == 0 follows the tail; larger scrolls back into history. Clamp it
@@ -269,18 +283,19 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
         example("lay out and route the PCB for this schematic"),
         Line::from(""),
         Line::from(Span::styled(
-            "  /help for commands  ·  Tab completes  ·  :auto toggles auto-apply",
+            "  /help for commands  ·  Tab completes  ·  /auto toggles auto-apply",
             dim,
         )),
     ];
 
-    // Centre the block vertically; indent it from the left margin.
+    // Centre vertically; the splash shares the header's left edge (its area is
+    // already inset by the body margin — no extra indent).
     let h = lines.len() as u16;
     let top = area.y + area.height.saturating_sub(h) / 2;
     let block = Rect {
-        x: area.x + 2,
+        x: area.x,
         y: top,
-        width: area.width.saturating_sub(2),
+        width: area.width,
         height: h.min(area.height),
     };
     f.render_widget(Paragraph::new(lines), block);
@@ -292,10 +307,25 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
 /// markdown, and tool / system lines recede (dim, italic) so they read as
 /// sub-steps of the turn above them.
 ///
+/// Whether a blank rhythm row belongs *before* an entry of class `cur` that
+/// follows one of class `prev` (`None` = top of the transcript): a new
+/// user/assistant turn, the first tool card of a run, and the turn-summary line
+/// all open with a gap; consecutive same-class lines stay tight.
+fn gap_above(prev: Option<Speaker>, cur: Speaker) -> bool {
+    let Some(prev) = prev else { return false };
+    match cur {
+        Speaker::User => true,
+        Speaker::Assistant => prev != Speaker::Assistant,
+        Speaker::Tool => prev != Speaker::Tool,
+        Speaker::System => matches!(prev, Speaker::Assistant | Speaker::Tool),
+    }
+}
+
 /// `first` is the row-0 marker, `cont` the indent repeated on wrapped rows.
 fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
-    // (first_marker, cont_marker, marker_style, body_style, markdown, gap_above)
-    let (first, cont, marker_style, body_style, markdown, gap) = match e.speaker {
+    // (first_marker, cont_marker, marker_style, body_style, markdown) — the
+    // inter-entry blank is owned by `draw_transcript` (see `gap_above`).
+    let (first, cont, marker_style, body_style, markdown) = match e.speaker {
         // The user's turn: a cyan caret and bold text — the one thing the eye
         // should land on when scanning back through the transcript.
         Speaker::User => (
@@ -304,20 +334,12 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             Style::default().add_modifier(Modifier::BOLD),
             false,
-            true,
         ),
         // Assistant prose: plain markdown at a blank 2-col gutter, aligned under
         // the user's text. No bullet — the user's caret alone marks the turns, so
         // the transcript stays lean (the Codex idiom).
-        Speaker::Assistant => (
-            "  ",
-            "  ",
-            Style::default(),
-            Style::default(),
-            true,
-            true,
-        ),
-        // Tool calls cluster under the assistant turn (no gap) and recede.
+        Speaker::Assistant => ("  ", "  ", Style::default(), Style::default(), true),
+        // Tool calls cluster under the assistant turn and recede.
         Speaker::Tool => (
             "  ▸ ",
             "    ",
@@ -326,17 +348,16 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
             false,
-            false,
         ),
         Speaker::System => {
-            // System notes recede: a finished turn is muted (dim green — it's just
-            // metadata, not a result), while a cap cutoff (yellow) or error (red)
-            // stay bright because they want attention.
-            let color = match e.level {
-                NoticeLevel::Plain => Color::DarkGray,
-                NoticeLevel::Success => Color::Green,
-                NoticeLevel::Warn => Color::Yellow,
-                NoticeLevel::Error => Color::Red,
+            // A notice reads as a callout: a level glyph leads it, the text takes
+            // the level colour, and a warn/error gets a colored left rule on every
+            // row so failures stand out from the recessed metadata around them.
+            let (glyph, color) = match e.level {
+                NoticeLevel::Plain => ("• ", Color::DarkGray),
+                NoticeLevel::Success => ("✓ ", Color::Green),
+                NoticeLevel::Warn => ("⚠ ", Color::Yellow),
+                NoticeLevel::Error => ("✗ ", Color::Red),
             };
             let body = match e.level {
                 NoticeLevel::Plain | NoticeLevel::Success => {
@@ -344,7 +365,11 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
                 }
                 _ => Style::default().fg(color),
             };
-            ("  ", "  ", Style::default().fg(color), body, false, false)
+            // Continuation rows of a loud notice keep a colored rule; quiet ones
+            // just indent under the glyph.
+            let loud = matches!(e.level, NoticeLevel::Warn | NoticeLevel::Error);
+            let cont = if loud { "▌ " } else { "  " };
+            (glyph, cont, Style::default().fg(color), body, false)
         }
     };
     let body_w = width.saturating_sub(first.chars().count()).max(1);
@@ -356,21 +381,45 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
             .map(|l| MdLine {
                 segments: vec![(l.to_string(), body_style)],
                 wrap: WrapMode::Word,
+                kind: LineKind::Prose,
             })
             .collect()
     };
 
-    // A blank opener separates turns; clustered sub-steps (tool/system) omit it.
+    // Warn/error notices get a one-cell background tint so the whole line reads
+    // as a callout band, not just a colored glyph.
+    let notice_tint = match (e.speaker, e.level) {
+        (Speaker::System, NoticeLevel::Error) => Some(Color::Rgb(58, 30, 36)),
+        (Speaker::System, NoticeLevel::Warn) => Some(Color::Rgb(54, 46, 28)),
+        _ => None,
+    };
+
     let mut lines = Vec::new();
-    if gap {
-        lines.push(Line::from(""));
-    }
     let mut first_row = true;
     for ml in &logical {
+        let code = matches!(ml.kind, LineKind::Code { .. });
+        let mut logical_first = true;
         for row in wrap_segments(&ml.segments, body_w, ml.wrap == WrapMode::Preserve) {
-            let marker = if first_row { first } else { cont };
-            let mut spans = vec![Span::styled(marker, marker_style)];
-            spans.extend(row);
+            let mut spans = if code {
+                // The language label rides the code block's opening row only,
+                // which is the only logical line carrying `lang`.
+                code_row_spans(ml, row, logical_first)
+            } else {
+                let marker = if first_row { first } else { cont };
+                let mut s = vec![Span::styled(marker, marker_style)];
+                s.extend(row);
+                s
+            };
+            logical_first = false;
+            if let Some(bg) = notice_tint {
+                spans = spans
+                    .into_iter()
+                    .map(|s| {
+                        let st = s.style.bg(bg);
+                        Span::styled(s.content, st)
+                    })
+                    .collect();
+            }
             lines.push(Line::from(spans));
             first_row = false;
         }
@@ -381,6 +430,28 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
         lines.push(Line::from(Span::styled(first, marker_style)));
     }
     lines
+}
+
+/// Frame one wrapped row of a fenced code block: a slate background across the
+/// row, a DarkGray left rule in place of the speaker gutter, and — on the
+/// opening row — a dim language label so the block reads as code without a
+/// boxed container.
+fn code_row_spans(ml: &MdLine, row: Vec<Span<'static>>, opening: bool) -> Vec<Span<'static>> {
+    const SLATE: Color = Color::Rgb(33, 36, 51);
+    let bg = |st: Style| st.bg(SLATE);
+    let mut spans = vec![Span::styled("▎ ", bg(Style::default().fg(Color::DarkGray)))];
+    for s in row {
+        spans.push(Span::styled(s.content, bg(s.style)));
+    }
+    if opening {
+        if let LineKind::Code { lang: Some(lang) } = &ml.kind {
+            spans.push(Span::styled(
+                format!("  {lang}"),
+                bg(Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+            ));
+        }
+    }
+    spans
 }
 
 /// Wrap styled segments into rows of at most `width` chars, preserving each
@@ -591,6 +662,15 @@ fn draw_diff(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(para, inner);
 }
 
+/// Rows the composer needs: one per draft line (split on `\n`), inside the
+/// rounded border (+2), floored at 3 (one content row) and capped at a third of
+/// the screen so a giant paste can't swallow the transcript.
+fn composer_height(app: &App, screen_h: u16) -> u16 {
+    let draft_rows = app.input.split('\n').count().max(1) as u16;
+    let cap = (screen_h / 3).max(3);
+    (draft_rows + 2).clamp(3, cap)
+}
+
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     // A rounded composer box (Codex idiom). The border brightens to the accent
     // while typing is live and dims otherwise, so the eye knows where focus is.
@@ -604,51 +684,100 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(block, body(area));
 
     let avail = (inner.width as usize).saturating_sub(2).max(1); // minus the "› " prompt
+    let caret = || Span::styled("› ", Style::default().fg(Color::Cyan));
 
-    let line = if app.pending.is_some() {
-        Line::from(Span::styled(
-            "approve or reject the change above",
-            Style::default().fg(Color::DarkGray),
-        ))
-    } else if app.esc_armed {
-        Line::from(Span::styled(
-            "Esc again: open the unwind picker (context only) — any key cancels",
-            Style::default().fg(Color::Yellow),
-        ))
-    } else if app.input.is_empty() {
+    if app.pending.is_some() {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "approve or reject the change above",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            inner,
+        );
+        return;
+    }
+    if app.esc_armed {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Esc again: open the unwind picker (context only) — any key cancels",
+                Style::default().fg(Color::Yellow),
+            ))),
+            inner,
+        );
+        return;
+    }
+    if app.input.is_empty() {
         let placeholder = if app.running {
             "agent is working…"
         } else {
-            "type a prompt — /help for commands, Tab completes"
+            "type a prompt — /help for commands, ⏎ sends · ⇧⏎ newline"
         };
-        Line::from(vec![
-            Span::styled("› ", Style::default().fg(Color::Cyan)),
-            Span::styled(
-                placeholder,
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC),
-            ),
-        ])
-    } else {
-        // Window the input horizontally so the cursor stays visible.
-        let chars: Vec<char> = app.input.chars().collect();
-        let start = app.cursor.saturating_sub(avail.saturating_sub(1));
-        let visible: String = chars.iter().skip(start).take(avail).collect();
-        Line::from(vec![
-            Span::styled("› ", Style::default().fg(Color::Cyan)),
-            Span::raw(visible),
-        ])
-    };
-
-    f.render_widget(Paragraph::new(line), inner);
-
-    // A real terminal cursor at the edit point (only while typing is live).
-    if app.input_active() {
-        let start = app.cursor.saturating_sub(avail.saturating_sub(1));
-        let x = inner.x + 2 + (app.cursor - start) as u16; // "› " is 2 cols
-        f.set_cursor_position((x.min(inner.x + inner.width.saturating_sub(1)), inner.y));
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                caret(),
+                Span::styled(
+                    placeholder,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ])),
+            inner,
+        );
+        if app.input_active() {
+            f.set_cursor_position((inner.x + 2, inner.y));
+        }
+        return;
     }
+
+    // A multi-line draft: each `\n`-separated logical line gets its own visible
+    // row (the caret marks only the first), each windowed horizontally so its
+    // own tail stays in view. Locate the cursor's line/column to place the
+    // terminal cursor on the right row.
+    let logical: Vec<&str> = app.input.split('\n').collect();
+    let (cur_line, cur_col) = cursor_line_col(&app.input, app.cursor);
+    let rows = inner.height as usize;
+    let first = logical.len().saturating_sub(rows); // show the tail if it overflows
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, text) in logical.iter().enumerate().skip(first) {
+        let chars: Vec<char> = text.chars().collect();
+        // Window this line so the cursor (on its own row) or its tail is visible.
+        let focus = if i == cur_line { cur_col } else { chars.len() };
+        let start = focus.saturating_sub(avail.saturating_sub(1));
+        let visible: String = chars.iter().skip(start).take(avail).collect();
+        let prefix = if i == 0 { caret() } else { Span::raw("  ") };
+        lines.push(Line::from(vec![prefix, Span::raw(visible)]));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+
+    // The terminal cursor on the cursor's row, windowed to match its line.
+    if app.input_active() {
+        let chars = logical.get(cur_line).map(|l| l.chars().count()).unwrap_or(0);
+        let start = cur_col.min(chars).saturating_sub(avail.saturating_sub(1));
+        let row = cur_line.saturating_sub(first) as u16;
+        let x = inner.x + 2 + (cur_col - start) as u16;
+        let y = (inner.y + row).min(inner.y + inner.height.saturating_sub(1));
+        f.set_cursor_position((x.min(inner.x + inner.width.saturating_sub(1)), y));
+    }
+}
+
+/// The (line, column) of a char-offset cursor in a `\n`-split string — the
+/// number of newlines before it, and its offset within that line.
+fn cursor_line_col(input: &str, cursor: usize) -> (usize, usize) {
+    let mut line = 0;
+    let mut col = 0;
+    for (i, c) in input.chars().enumerate() {
+        if i == cursor {
+            return (line, col);
+        }
+        if c == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
 }
 
 /// The double-Esc unwind picker, floated just above the input pane. Lists the
@@ -780,15 +909,13 @@ fn draw_help(f: &mut Frame, area: Rect) {
     let section = |t: &str| Line::from(Span::styled(t.to_string(), dim.add_modifier(Modifier::BOLD)));
 
     let mut lines = vec![
-        Line::from(Span::styled("auto-pcb copilot", accent)),
-        Line::from(Span::styled("keys & commands", dim)),
-        Line::from(""),
         section("KEYS"),
         kv("Enter", "send the prompt"),
+        kv("Shift/Alt-Enter", "newline (multi-line prompt)"),
         kv("Tab", "complete a /command"),
         kv("a / r", "approve / reject a proposed change"),
         kv("Up / Down", "recall prompt history"),
-        kv("PgUp / PgDn", "scroll the transcript"),
+        kv("PgUp / PgDn", "jump the transcript by a screenful"),
         kv("Ctrl-U/W/A/E", "line editing (kill line/word, home/end)"),
         kv("Esc", "close help / reject gate / clear input"),
         kv("Esc Esc", "unwind the last turn (context only)"),
@@ -803,9 +930,10 @@ fn draw_help(f: &mut Frame, area: Rect) {
     lines.push(Line::from(Span::styled("Esc to close", dim)));
 
     // Wide enough that key/description rows never wrap (longest desc + key col +
-    // border + horizontal padding), so the height stays exact.
+    // border + horizontal padding), so the height stays exact. Tight vertical
+    // padding keeps every row on screen even on a short (24-row) terminal.
     let w = 68u16.min(area.width.saturating_sub(2 * MARGIN));
-    let h = (lines.len() as u16 + 4).min(area.height.saturating_sub(2)); // +border +padding
+    let h = (lines.len() as u16 + 2).min(area.height); // +border; use the full height if needed
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(w)) / 2,
         y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -820,8 +948,8 @@ fn draw_help(f: &mut Frame, area: Rect) {
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(dim)
-                    .padding(Padding::symmetric(2, 1))
-                    .title(Span::styled(" help ", accent)),
+                    .padding(Padding::horizontal(2))
+                    .title(Span::styled(" help · keys & commands ", accent)),
             )
             .wrap(Wrap { trim: true }),
         popup,
@@ -970,7 +1098,10 @@ mod tests {
         assert!(!text.contains('`'), "code markers stripped:\n{text}");
         assert!(text.contains("• pull-up"), "bullet normalized:\n{text}");
         assert!(text.contains("nets:"), "fence content shows:\n{text}");
-        assert!(!text.contains("yaml"), "fence marker line hidden:\n{text}");
+        // The ``` fence markers are gone; the language surfaces as a dim label on
+        // the code block's opening row, not as a literal fence line.
+        assert!(!text.contains("```"), "fence markers stripped:\n{text}");
+        assert!(text.contains("yaml"), "fence language shows as a label:\n{text}");
     }
 
     #[test]
