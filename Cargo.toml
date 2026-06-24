@@ -32,7 +32,7 @@ async-trait = "0.1"
 dotenvy = "0.15"
 fastrand = "2"
 directories = "6"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
