@@ -244,7 +244,7 @@ fn kernel_net_name(name: &str) -> String {
         }
         let out = out.trim_matches('_').to_string();
         // Net names must start with a letter (UPPER_SNAKE).
-        if out.chars().next().map_or(true, |c| !c.is_ascii_alphabetic()) {
+        if out.chars().next().is_none_or(|c| !c.is_ascii_alphabetic()) {
             format!("N_{out}")
         } else {
             out

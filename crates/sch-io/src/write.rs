@@ -969,15 +969,14 @@ impl SchematicWriter {
             });
             // Pin name/number text (skip power/flag graphics — single
             // unnamed pin, no meaningful pin text).
-            if !inst.refdes.starts_with('#') {
-                if let Some(pins) = self.sym_pins.get(&inst.lib_id) {
+            if !inst.refdes.starts_with('#')
+                && let Some(pins) = self.sym_pins.get(&inst.lib_id) {
                     for pg in pins {
                         for b in pin_text_boxes(pg, inst.at, inst.angle, inst.mirror) {
                             obstacles.push(Obstacle { bbox: b, kind: ObKind::Hard });
                         }
                     }
                 }
-            }
         }
         for w in &self.wires {
             obstacles.push(Obstacle { bbox: wire_box(w.a, w.b), kind: ObKind::Hard });

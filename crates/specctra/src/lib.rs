@@ -861,8 +861,8 @@ pub fn import_ses(ses_path: &Path, board: &BoardProblem) -> Result<RoutedGeometr
     let mut geo = RoutedGeometry::default();
 
     // Walk to (routes (network_out (net NAME (wire ...)(via ...)) ...)).
-    if let Some(routes) = find_child(root, "routes") {
-        if let Some(network_out) = find_child(routes, "network_out") {
+    if let Some(routes) = find_child(root, "routes")
+        && let Some(network_out) = find_child(routes, "network_out") {
             for net_node in children_named(network_out, "net") {
                 let net_name = match first_atom_string(net_node) {
                     Some(n) => n,
@@ -888,7 +888,6 @@ pub fn import_ses(ses_path: &Path, board: &BoardProblem) -> Result<RoutedGeometr
                 }
             }
         }
-    }
 
     Ok(geo)
 }
@@ -989,14 +988,13 @@ fn via_padstack_diameters(root: &Node, mm_div: f64) -> BTreeMap<String, f64> {
         // Diameter = max extent of any shape in the padstack.
         let mut d = 0.0_f64;
         for shape in children_named(ps, "shape") {
-            if let Some(circle) = find_child(shape, "circle") {
-                if let Some(items) = list_items(circle) {
+            if let Some(circle) = find_child(shape, "circle")
+                && let Some(items) = list_items(circle) {
                     // (circle LAYER DIAMETER [x y])
                     if let Some(dia) = items.get(2).and_then(node_f64) {
                         d = d.max(dia / mm_div);
                     }
                 }
-            }
         }
         if d > 0.0 {
             out.insert(id, d);

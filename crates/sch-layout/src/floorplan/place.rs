@@ -1069,11 +1069,10 @@ fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool {
         let mut vp_count: BTreeMap<String, usize> = BTreeMap::new();
         for &ci in bank {
             for (_, _, n) in &items[ci].pins {
-                if let Some(n) = n.as_deref() {
-                    if is_vp(n) {
+                if let Some(n) = n.as_deref()
+                    && is_vp(n) {
                         *vp_count.entry(n.to_string()).or_insert(0) += 1;
                     }
-                }
             }
         }
         let Some(vp) = vp_count.into_iter().max_by_key(|(_, c)| *c).map(|(n, _)| n) else {
@@ -1347,7 +1346,7 @@ fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool {
                     let nets: Vec<&str> =
                         items[ci].pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
                     nets.len() == 2
-                        && nets.iter().any(|n| *n == net)
+                        && nets.contains(&net)
                         && nets.iter().any(|n| is_ground(n))
                 })
         };
@@ -1604,11 +1603,10 @@ fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> bool {
             let vs = uniq
                 .iter()
                 .find(|vs| vs.as_str() != vb.as_str() && cap_bridging(vb, vs, &empty).is_some());
-            if let Some(vs) = vs {
-                if !pairs.iter().any(|(b, _)| b == vb) {
+            if let Some(vs) = vs
+                && !pairs.iter().any(|(b, _)| b == vb) {
                     pairs.push((vb.clone(), vs.clone()));
                 }
-            }
         }
         // A gate driver hosts ≥2 such bootstrap phase pairs; a lone {cap, diode} is some other network.
         if pairs.len() < 2 {
@@ -2527,7 +2525,7 @@ fn align_repeated_columns(
                 let dx = items[i].at[0] - jt.at[0];
                 let dy = items[i].at[1] - jt.at[1];
                 let d = (dx * dx + dy * dy).sqrt();
-                if d <= SAT_R && best.map_or(true, |(bd, _)| d < bd) {
+                if d <= SAT_R && best.is_none_or(|(bd, _)| d < bd) {
                     best = Some((d, i));
                 }
             }
@@ -2636,8 +2634,8 @@ fn align_repeated_columns(
             item_rect(&items[idx], at)
         };
         let mut ok = true;
-        'check: for (&a, _) in &proposed {
-            for (&b, _) in &proposed {
+        'check: for &a in proposed.keys() {
+            for &b in proposed.keys() {
                 if a >= b {
                     continue;
                 }
@@ -3932,15 +3930,14 @@ pub fn layout_cost(
             let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
             let mut any = false;
             for pg in &it.geom.pins {
-                if let Ok(d) = w.pin_dirs(env, &it.refdes, &pg.number) {
-                    if let Some((p, _)) = d.first() {
+                if let Ok(d) = w.pin_dirs(env, &it.refdes, &pg.number)
+                    && let Some((p, _)) = d.first() {
                         lo[0] = lo[0].min(p[0]);
                         lo[1] = lo[1].min(p[1]);
                         hi[0] = hi[0].max(p[0]);
                         hi[1] = hi[1].max(p[1]);
                         any = true;
                     }
-                }
             }
             // Shrink 2.0 mm/side: past the pin-stub roots, onto the body rectangle.
             any.then(|| [lo[0] + 2.0, lo[1] + 2.0, hi[0] - 2.0, hi[1] - 2.0])
@@ -3999,8 +3996,8 @@ pub fn layout_cost(
         };
         let Some(prefer_vertical) = prefer_vertical else { continue };
         let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
-        if let (Ok(d0), Ok(d1)) = (w.pin_dirs(env, &it.refdes, n0), w.pin_dirs(env, &it.refdes, n1)) {
-            if let (Some((a, _)), Some((b, _))) = (d0.first(), d1.first()) {
+        if let (Ok(d0), Ok(d1)) = (w.pin_dirs(env, &it.refdes, n0), w.pin_dirs(env, &it.refdes, n1))
+            && let (Some((a, _)), Some((b, _))) = (d0.first(), d1.first()) {
                 let horizontal = (a[0] - b[0]).abs() > (a[1] - b[1]).abs();
                 if prefer_vertical == horizontal {
                     orient_viol += 1;
@@ -4023,13 +4020,12 @@ pub fn layout_cost(
                     if let Some(rn) = rail {
                         let (rail_pos, other_pos) = if n0_rail { (a, b) } else { (b, a) };
                         let rail_up = rail_pos[1] < other_pos[1] - EPS;
-                        if !is_ground(rn) != rail_up {
+                        if is_ground(rn) == rail_up {
                             leg_viol += 1;
                         }
                     }
                 }
             }
-        }
     }
     // Spine collinearity: two VERTICAL 2-pin legs that share a non-rail node and
     // whose FAR ends are each a rail form a divider / totem-pole spine
@@ -4253,15 +4249,14 @@ pub fn crossing_counts(
             let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
             let mut any = false;
             for pg in &it.geom.pins {
-                if let Ok(d) = w.pin_dirs(env, &it.refdes, &pg.number) {
-                    if let Some((p, _)) = d.first() {
+                if let Ok(d) = w.pin_dirs(env, &it.refdes, &pg.number)
+                    && let Some((p, _)) = d.first() {
                         lo[0] = lo[0].min(p[0]);
                         lo[1] = lo[1].min(p[1]);
                         hi[0] = hi[0].max(p[0]);
                         hi[1] = hi[1].max(p[1]);
                         any = true;
                     }
-                }
             }
             any.then(|| [lo[0] + 2.0, lo[1] + 2.0, hi[0] - 2.0, hi[1] - 2.0])
         })
@@ -4361,15 +4356,14 @@ fn signal_anchor_centroid(
                 continue;
             }
             for (j, num) in inc.get(net).into_iter().flatten() {
-                if is_anchor(*j) {
-                    if let Ok(eps) = w.pin_dirs(env, &items[*j].refdes, num) {
+                if is_anchor(*j)
+                    && let Ok(eps) = w.pin_dirs(env, &items[*j].refdes, num) {
                         for (p, _) in &eps {
                             sum[0] += p[0];
                             sum[1] += p[1];
                             cnt += 1.0;
                         }
                     }
-                }
             }
         }
         (sum, cnt)
@@ -4410,7 +4404,7 @@ fn supply_pin_target(
             if let Ok(eps) = w.pin_dirs(env, &items[*j].refdes, num) {
                 for (p, _) in eps {
                     let d = (p[0] - s.at[0]).abs() + (p[1] - s.at[1]).abs();
-                    if best.map_or(true, |(_, bd)| d < bd) {
+                    if best.is_none_or(|(_, bd)| d < bd) {
                         best = Some((p, d));
                     }
                 }
@@ -4451,11 +4445,10 @@ fn driven_rail_drivers(
             if find_pin(&meta.pins, num).map(|p| p.etype) != Some(PinType::PowerOutput) {
                 continue;
             }
-            if let Ok(eps) = w.pin_dirs(env, &items[*i].refdes, num) {
-                if let Some((p, _)) = eps.first() {
+            if let Ok(eps) = w.pin_dirs(env, &items[*i].refdes, num)
+                && let Some((p, _)) = eps.first() {
                     out.entry(net.clone()).or_insert(*p);
                 }
-            }
         }
     }
     out
@@ -4565,11 +4558,10 @@ pub fn count_merges(
     for &jp in junctions {
         let mut nets: BTreeSet<&str> = BTreeSet::new();
         for (a, b, wn) in wires {
-            if let Some(net) = wn {
-                if sch_model::geom::point_on_segment(jp, *a, *b) {
+            if let Some(net) = wn
+                && sch_model::geom::point_on_segment(jp, *a, *b) {
                     nets.insert(net.as_str());
                 }
-            }
         }
         if nets.len() > 1 {
             n += 1;
@@ -4696,11 +4688,10 @@ fn diagnose_shorts(
     for &jp in &junctions {
         let mut nets: BTreeSet<&str> = BTreeSet::new();
         for (a, b, wn) in &wires {
-            if let Some(net) = wn {
-                if sch_model::geom::point_on_segment(jp, *a, *b) {
+            if let Some(net) = wn
+                && sch_model::geom::point_on_segment(jp, *a, *b) {
                     nets.insert(net.as_str());
                 }
-            }
         }
         if nets.len() > 1 {
             eprintln!(
@@ -5016,11 +5007,10 @@ fn route_signal(
         // long cross-sheet wire into a net-label pair (the human idiom). `long_edge_span`
         // is Some only at finalize on large boards (see `wire`), so short/local hops and
         // every per-move route are unaffected.
-        if let Some(span) = long_edge_span {
-            if (a[0] - b[0]).abs() + (a[1] - b[1]).abs() > span {
+        if let Some(span) = long_edge_span
+            && (a[0] - b[0]).abs() + (a[1] - b[1]).abs() > span {
                 continue;
             }
-        }
         if let Some(p) = crate::wire::route_edge(a, da, b, net, scene) {
             // The DIRECT gap may be short while the only obstacle-free ROUTE is a sheet-wide DETOUR
             // (two ICs whose shared bus pins face opposite ways, so the wire wraps the perimeter — the
@@ -5052,15 +5042,13 @@ fn route_signal(
     // body) AND the port label at the exit — the net renders twice (the BGA GPIO-bank defect). The
     // hop is short + axis-aligned (single-pin ports follow the pin's own dir) so it's safe, and it
     // only fires when the route genuinely failed, so cleanly-routed references stay byte-identical.
-    if eps.len() == 1 {
-        if let Some(pi) = port_idx {
-            if uf_find(&mut parent, 0) != uf_find(&mut parent, pi) {
+    if eps.len() == 1
+        && let Some(pi) = port_idx
+            && uf_find(&mut parent, 0) != uf_find(&mut parent, pi) {
                 w.add_wire_on_net(pts[0], pts[pi], net);
                 scene.segments.push((pts[0], pts[pi], net.to_string()));
                 uf_union(&mut parent, 0, pi);
             }
-        }
-    }
 
     // MULTI-PIN PORT whose local pins the MST couldn't join (an op-amp follower's OUT↔IN-
     // feedback the router can't wrap around the body — BLDC current_sense U6/ISENSE_W): force
@@ -5111,11 +5099,10 @@ fn route_signal(
             // below names it instead — exactly as the too-long MST hop already does, and as the sibling
             // SDA pin already gets. The local op-amp feedback case (pins a few mm apart) is well under
             // the span, so it still forces its clean loop and stays byte-identical.
-            if let Some(span) = long_edge_span {
-                if (pts[0][0] - pts[k][0]).abs() + (pts[0][1] - pts[k][1]).abs() > span {
+            if let Some(span) = long_edge_span
+                && (pts[0][0] - pts[k][0]).abs() + (pts[0][1] - pts[k][1]).abs() > span {
                     continue;
                 }
-            }
             let (pa, da) = (pts[0], terms[0].1);
             let (pb, db) = (pts[k], terms[k].1);
             let (sa, sb) = (stub(pa, da), stub(pb, db));
@@ -5150,11 +5137,10 @@ fn route_signal(
     for k in 0..terms.len() {
         let r = uf_find(&mut parent, k);
         let slot = roots.entry(r).or_insert(None);
-        if slot.is_none() {
-            if let Some(pin) = &term_pin[k] {
+        if slot.is_none()
+            && let Some(pin) = &term_pin[k] {
                 *slot = Some(pin.clone());
             }
-        }
     }
     let port_root = port_idx.map(|pi| uf_find(&mut parent, pi));
     if roots.len() > 1 {
@@ -5738,8 +5724,8 @@ fn emit_rail(
             }
             (hi[0] - lo[0]) + (hi[1] - lo[1]) <= DRIVEN_STAR_MAX_SPREAD
         });
-        if let Some(dp) = driver {
-            if let Some((_, ddir)) =
+        if let Some(dp) = driver
+            && let Some((_, ddir)) =
                 eps.iter().copied().find(|(p, _)| (p[0] - dp[0]).abs() < EPS && (p[1] - dp[1]).abs() < EPS)
             {
                 w.add_power_symbol(env, &lib, &format!("#PWR_{net}"), net, dp, power_angle(ddir))?;
@@ -5762,7 +5748,6 @@ fn emit_rail(
                 }
                 return Ok(());
             }
-        }
         // One power symbol per pin — but MERGE a pin into a nearby, COLLINEAR
         // already-placed symbol (≤2 grid, same x or y) via a short connecting wire
         // instead of stamping a second symbol. Two adjacent same-net pins (e.g. the
@@ -5835,15 +5820,14 @@ fn emit_rail(
                 base + riser_offsets.get(&(net.to_string(), col_key(base))).copied().unwrap_or(0.0);
             if !bodies.is_empty() {
                 let (rlo, rhi) = (ep[1].min(rail_y), ep[1].max(rail_y));
-                if riser_hits_body(ax, rlo, rhi, bodies) {
-                    if let Some(clear) = (1..=8)
+                if riser_hits_body(ax, rlo, rhi, bodies)
+                    && let Some(clear) = (1..=8)
                         .flat_map(|k| [k as f64, -(k as f64)])
                         .map(|m| ax + m * RAIL_LANE)
                         .find(|&c| !riser_hits_body(c, rlo, rhi, bodies))
                     {
                         ax = clear;
                     }
-                }
             }
             ax
         })

@@ -509,11 +509,10 @@ pub(super) fn best_decoupling_anchor(
     let mut vp_count: BTreeMap<String, usize> = BTreeMap::new();
     for &ci in caps {
         for (_, _, n) in &items[ci].pins {
-            if let Some(n) = n.as_deref() {
-                if rails.contains_key(n) && !is_ground(n) {
+            if let Some(n) = n.as_deref()
+                && rails.contains_key(n) && !is_ground(n) {
                     *vp_count.entry(n.to_string()).or_insert(0) += 1;
                 }
-            }
         }
     }
     let vp = vp_count.into_iter().max_by_key(|(_, c)| *c).map(|(n, _)| n)?;
@@ -919,13 +918,12 @@ fn wants_mirror(
             // one more hop through a 2-pin part
             if items[*j].geom.pins.len() == 2 {
                 for (_, _, n2) in &items[*j].pins {
-                    if let Some(n2) = n2 {
-                        if n2 != net
+                    if let Some(n2) = n2
+                        && n2 != net
                             && inc.get(n2).into_iter().flatten().any(|(k, _)| is_conn(*k))
                         {
                             return true;
                         }
-                    }
                 }
             }
         }

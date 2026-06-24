@@ -315,7 +315,7 @@ pub fn mst_edges(terminals: &[Pt]) -> Vec<(usize, usize)> {
                 }
                 let d = dist(i, j);
                 let key = (d, i, j);
-                if best.map_or(true, |b| key < b) {
+                if best.is_none_or(|b| key < b) {
                     best = Some(key);
                 }
             }

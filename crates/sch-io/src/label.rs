@@ -63,7 +63,7 @@ pub fn choose(obstacles: &[Obstacle], movables: &[Movable]) -> Vec<(usize, bool)
                 _ => !boxes_overlap(b, &o.bbox),
             }) && placed.iter().all(|p| !boxes_overlap(&grow(b), p))
         };
-        let pick = m.candidates.iter().position(|c| free(c));
+        let pick = m.candidates.iter().position(free);
         let idx = pick.unwrap_or(0);
         placed.push(m.candidates[idx]);
         out.push((idx, pick.is_some()));

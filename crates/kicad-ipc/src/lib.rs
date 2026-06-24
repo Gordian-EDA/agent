@@ -113,13 +113,11 @@ impl Kicad {
                 .map_err(|(_, e)| Error::Nng(e))?;
             let reply = self.socket.recv()?;
             let resp = ApiResponse::decode(reply.as_slice())?;
-            if self.token.is_empty() {
-                if let Some(h) = &resp.header {
-                    if !h.kicad_token.is_empty() {
+            if self.token.is_empty()
+                && let Some(h) = &resp.header
+                    && !h.kicad_token.is_empty() {
                         self.token = h.kicad_token.clone();
                     }
-                }
-            }
             if let Some(st) = &resp.status {
                 // KiCAD just started / is mid-operation — back off and retry.
                 if (st.status == AS_NOT_READY || st.status == AS_BUSY)
@@ -176,14 +174,13 @@ use proto::kiapi::common::types::{DocumentType, ItemHeader, KiCadObjectType};
 
 /// Turn a per-item `ItemStatus` into an error unless it is `ISC_OK`.
 fn check_item_status(status: &Option<proto::kiapi::common::commands::ItemStatus>) -> Result<(), Error> {
-    if let Some(s) = status {
-        if s.code != ItemStatusCode::IscOk as i32 {
+    if let Some(s) = status
+        && s.code != ItemStatusCode::IscOk as i32 {
             return Err(Error::Item {
                 code: s.code,
                 message: s.error_message.clone(),
             });
         }
-    }
     Ok(())
 }
 

@@ -154,8 +154,7 @@ pub(super) fn detect_idioms(
                     if std::env::var_os("MULTISHEET_REFINE").is_some()
                         && (3..=4).contains(&items[ai].geom.pins.len())
                         && !claimed.contains(&ai)
-                    {
-                        if let (Some(&acol), Some(&arow)) =
+                        && let (Some(&acol), Some(&arow)) =
                             (anchor_col.get(&ai), anchor_row.get(&ai))
                         {
                             cells.push((
@@ -163,7 +162,6 @@ pub(super) fn detect_idioms(
                                 Cell { col: acol, row: arow, orient: Orient::Right },
                             ));
                         }
-                    }
                     claimed.extend(cells.iter().filter_map(|(rd, _)| get(rd)));
                     out.push(Idiom { kind: "decoupling", anchor: ai, cells, freeze: true });
                 }
