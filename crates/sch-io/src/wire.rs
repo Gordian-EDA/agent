@@ -179,6 +179,41 @@ pub fn path_ok(path: &Path, net: &str, scene: &RouteScene) -> bool {
     true
 }
 
+/// Number of VISUAL crossings `path` (drawn for `net`) would add against the
+/// scene's already-committed foreign-net segments: a perpendicular pair (one
+/// horizontal, one vertical) meeting at a point INTERIOR to both — the same
+/// over-pass clutter `score::count_crossings` and the corpus oracle count. Used
+/// by the router's wire-vs-label decision: a crossing-heavy hop is better named
+/// (the human idiom) than drawn as a literal wire that reads as spaghetti.
+pub fn path_crossings(path: &[Pt], net: &str, scene: &RouteScene) -> usize {
+    let horiz = |a: &Pt, b: &Pt| (a[1] - b[1]).abs() < EPS;
+    let vert = |a: &Pt, b: &Pt| (a[0] - b[0]).abs() < EPS;
+    let interior = |v: f64, lo: f64, hi: f64| v > lo + EPS && v < hi - EPS;
+    let mut n = 0;
+    for w in path.windows(2) {
+        let (a1, a2) = (w[0], w[1]);
+        for (b1, b2, bn) in &scene.segments {
+            if bn == net {
+                continue; // same net: a deliberate join, not a crossing
+            }
+            let (h, v) = if horiz(&a1, &a2) && vert(b1, b2) {
+                ((a1, a2), (*b1, *b2))
+            } else if vert(&a1, &a2) && horiz(b1, b2) {
+                ((*b1, *b2), (a1, a2))
+            } else {
+                continue; // parallel
+            };
+            let (hy, vx) = (h.0[1], v.0[0]);
+            let (hx_lo, hx_hi) = (h.0[0].min(h.1[0]), h.0[0].max(h.1[0]));
+            let (vy_lo, vy_hi) = (v.0[1].min(v.1[1]), v.0[1].max(v.1[1]));
+            if interior(vx, hx_lo, hx_hi) && interior(hy, vy_lo, vy_hi) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 /// Clearance candidates keep this far off obstacle edges, mm.
 const CLEAR_MM: f64 = 2.54;
 
@@ -548,6 +583,27 @@ mod tests {
         // Same-net touches are deliberate joins.
         let s = scene(vec![], vec![], vec![([5.0, -4.0], [5.0, 0.0], "A")]);
         assert!(path_ok(&p, "A", &s));
+    }
+
+    #[test]
+    fn path_crossings_counts_foreign_overpasses_only() {
+        // One foreign vertical wire crossing our horizontal path strictly mid-to-mid.
+        let s = scene(vec![], vec![], vec![([5.0, -4.0], [5.0, 4.0], "B")]);
+        let p = vec![[0.0, 0.0], [10.0, 0.0]];
+        assert_eq!(path_crossings(&p, "A", &s), 1);
+        // SAME-net crossing is a deliberate join, not clutter — not counted.
+        assert_eq!(path_crossings(&p, "B", &s), 0);
+        // A shared ENDPOINT (the foreign wire ends ON our path) is a T-join, not an
+        // over-pass: the crossing point is not interior to the vertical wire.
+        let s = scene(vec![], vec![], vec![([5.0, -4.0], [5.0, 0.0], "B")]);
+        assert_eq!(path_crossings(&p, "A", &s), 0);
+        // Two foreign over-passes -> count 2.
+        let s = scene(
+            vec![],
+            vec![],
+            vec![([3.0, -4.0], [3.0, 4.0], "B"), ([7.0, -4.0], [7.0, 4.0], "C")],
+        );
+        assert_eq!(path_crossings(&p, "A", &s), 2);
     }
 
     #[test]

@@ -167,22 +167,51 @@ pub(crate) fn wire(
     // obstacle-avoiding elbow router so wires leave pins along their facing
     // direction and detour around bodies (never through them).
     //
-    // Long-haul hops are delegated to net-label pairs (the human idiom) instead of
-    // dragging a wire across the sheet — but FINALIZE-ONLY (`fan_risers`) and only on
-    // boards > FAST_PINS, so the per-move scorer and every tuned small reference keep
-    // their drawn wires byte-identical. Mirrors the spread-rail → local-power-symbol
-    // distribution above.
-    let long_edge_span = (fan_risers && pin_total > FAST_PINS).then(|| {
-        // Overridable for threshold sweeps / clean A-B (set very high to disable).
-        std::env::var("SIGNAL_LABEL_SPAN_MM").ok().and_then(|v| v.parse().ok()).unwrap_or(SIGNAL_LABEL_SPAN)
-    });
+    // Long/crossing hops are delegated to net-label pairs (the human idiom) instead of
+    // dragging a literal wire across the sheet. FINALIZE-ONLY (`fan_risers`), so the
+    // per-move scorer's cost landscape — and thus the placement — is never perturbed.
+    // The policy is corpus-anchored (humans keep ~0% of wires >50mm and ~0 crossings),
+    // and applies to EVERY board, not just dense ones: the wire-dense small references
+    // (555/uart/grid) are exactly where literal long crossing wires read worst. Mirrors
+    // the spread-rail → local-power-symbol distribution above.
+    let label_policy = fan_risers.then(LabelPolicy::from_env);
     for (net, eps) in &net_eps {
         if ir.rails.contains_key(net) {
             continue;
         }
-        route_signal(env, w, items, inc, net, eps, ir.ports.get(net).copied(), long_edge_span, &mut scene)?;
+        route_signal(env, w, items, inc, net, eps, ir.ports.get(net).copied(), label_policy, &mut scene)?;
     }
     Ok(())
+}
+
+/// When the orthogonal router should promote a signal hop to a net-LABEL pair
+/// instead of drawing the literal wire — the wire-vs-label decision, anchored to
+/// the human corpus (`tools/layout_metrics.py`: humans keep wires short, ~0% >50mm,
+/// and ~0 crossings; long literal crossing wires are the auto-layout "spaghetti"
+/// tell). A hop is labelled when EITHER:
+///   * its (direct or routed) length exceeds [`LABEL_LEN_MM`] — too long to draw; or
+///   * its DIRECT pin gap exceeds [`CROSS_LABEL_LEN_MM`], the literal route would CROSS
+///     a foreign wire, AND both endpoints could carry a body-clear label — a crossing
+///     reads as clutter, so name it instead (but never if naming would just move the
+///     defect to a label-over-body).
+/// Local short hops (the bulk of a human sheet) stay drawn, so `label_per_part`
+/// climbs toward the human ~0.76 without labelling everything.
+#[derive(Clone, Copy)]
+pub(crate) struct LabelPolicy {
+    pub len_mm: f64,
+    pub cross_len_mm: f64,
+}
+
+impl LabelPolicy {
+    /// Thresholds, overridable for sweeps via `SIGNAL_LABEL_SPAN_MM` (length) and
+    /// `SIGNAL_CROSS_SPAN_MM` (crossing) — set length very high to disable entirely.
+    pub(crate) fn from_env() -> Self {
+        let env = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        LabelPolicy {
+            len_mm: env("SIGNAL_LABEL_SPAN_MM", LABEL_LEN_MM),
+            cross_len_mm: env("SIGNAL_CROSS_SPAN_MM", CROSS_LABEL_LEN_MM),
+        }
+    }
 }
 
 /// Route one signal/port net's terminals as a tree (MST) with the direction-
@@ -196,7 +225,7 @@ pub(crate) fn route_signal(
     net: &str,
     eps: &[([f64; 2], Dir)],
     port: Option<Side>,
-    long_edge_span: Option<f64>,
+    label_policy: Option<LabelPolicy>,
     scene: &mut crate::wire::RouteScene,
 ) -> io::Result<()> {
     // A single-pin port follows its pin's real direction (see effective_port_side):
@@ -258,6 +287,54 @@ pub(crate) fn route_signal(
         }
     }
 
+    // Whether a NET LABEL on each terminal's pin would read CLEAR of nearby symbol
+    // geometry — using the same boxes `layout_warnings` lints against (see
+    // `obstacle_boxes`), so a "clear" terminal is clear to the lint. The label sits at
+    // the stub end (pin + STUB_MM along the pin's outward dir); a virtual port exit (no
+    // pin) is trivially clear. Drives BOTH the crossing-promotion (never strand a pin
+    // whose only label collides geometry — the R2-over-U1 overlap) AND the bridge's
+    // per-component pin pick.
+    const STUB_MM: f64 = 3.81; // matches add_signal_label
+    // Obstacle boxes for the label-clearance predictor — the SAME geometry
+    // `layout_warnings` lints a net label against, so "clear" here ⇒ no overlap warning
+    // there: every symbol's pin-name/number text boxes (the OWN symbol's pin text IS an
+    // obstacle — a label over its own pin names is the artifact the lint catches), plus
+    // every FOREIGN symbol's body bbox (full `approx_size`, the lint's extent). Only the
+    // OWN body is exempt (a label on its own pin legitimately sits inside its generous
+    // body bbox — the lint exempts that pairing).
+    let obstacle_boxes = |it: usize| -> Vec<[f64; 4]> {
+        let mut boxes = Vec::new();
+        for (i, item) in items.iter().enumerate() {
+            if i != it {
+                let s = item.geom.approx_size();
+                let quarter = ((item.angle / 90.0).round() as i64).rem_euclid(2) == 1;
+                let (bw, bh) = if quarter { (s[1], s[0]) } else { (s[0], s[1]) };
+                boxes.push([item.at[0] - bw / 2.0, item.at[1] - bh / 2.0, item.at[0] + bw / 2.0, item.at[1] + bh / 2.0]);
+            }
+            for pg in &item.geom.pins {
+                boxes.extend(crate::label::pin_text_boxes(pg, item.at, item.angle, item.mirror));
+            }
+        }
+        boxes
+    };
+    let label_clear = |it: usize, num: &str| -> bool {
+        let Ok(ds) = w.pin_dirs(env, &items[it].refdes, num) else { return true };
+        let obstacles = obstacle_boxes(it);
+        ds.iter().all(|(ep, dir)| {
+            let v = dir.vec();
+            let end = [ep[0] + v[0] * STUB_MM, ep[1] + v[1] * STUB_MM];
+            let bx = crate::label::label_box(end, *dir, crate::label::text_width(net));
+            !obstacles.iter().any(|r| crate::label::boxes_overlap(&bx, r))
+        })
+    };
+    // Whether each terminal could carry a body-clear net label (a virtual port exit,
+    // having no pin, trivially can). Gates the crossing-promotion (only name a hop whose
+    // endpoints could both be cleanly labelled) and breaks ties in the bridge's pin pick.
+    let term_label_clear: Vec<bool> = term_pin
+        .iter()
+        .map(|tp| tp.as_ref().is_none_or(|(it, num)| label_clear(*it, num)))
+        .collect();
+
     let pts: Vec<[f64; 2]> = terms.iter().map(|t| t.0).collect();
     // Union-find over terminals: a successful edge merges its endpoints; a failed
     // one leaves them split. Route each edge as it succeeds and commit it to the
@@ -271,30 +348,41 @@ pub(crate) fn route_signal(
             (None, Some(d)) => (pts[j], d, pts[i]),
             (None, None) => (pts[i], dir_toward(pts[i], pts[j]), pts[j]),
         };
-        // A hop longer than SIGNAL_LABEL_SPAN is left unrouted so the union-find leaves
-        // its endpoints split — the label-bridge below then names each side, turning a
-        // long cross-sheet wire into a net-label pair (the human idiom). `long_edge_span`
-        // is Some only at finalize on large boards (see `wire`), so short/local hops and
-        // every per-move route are unaffected.
-        if let Some(span) = long_edge_span
-            && (a[0] - b[0]).abs() + (a[1] - b[1]).abs() > span {
+        // A hop longer than the label policy's length is left unrouted so the union-find
+        // leaves its endpoints split — the label-bridge below then names each side,
+        // turning a long literal wire into a net-label pair (the human idiom). The policy
+        // is Some only at finalize (see `wire`), so every per-move route is unaffected.
+        let direct = (a[0] - b[0]).abs() + (a[1] - b[1]).abs();
+        if let Some(pol) = label_policy
+            && direct > pol.len_mm {
                 continue;
             }
         if let Some(p) = crate::wire::route_edge(a, da, b, net, scene) {
-            // The DIRECT gap may be short while the only obstacle-free ROUTE is a sheet-wide DETOUR
-            // (two ICs whose shared bus pins face opposite ways, so the wire wraps the perimeter — the
-            // i2c_sensors U4 SCL case). A drawn perimeter wraparound reads far worse than the human
-            // idiom of naming each end. So when long-haul bridging is active (finalize on large boards),
-            // DISCARD a path whose actual routed length exceeds `span` and leave the endpoints split —
-            // the label-bridge below then names each side, exactly as it already does for a too-long
-            // direct hop. Short/clean routes (length ≈ direct gap) are unaffected, so every tuned
-            // reference keeps its drawn wires.
-            if let Some(span) = long_edge_span {
+            if let Some(pol) = label_policy {
+                // The DIRECT gap may be short while the only obstacle-free ROUTE is a sheet-wide
+                // DETOUR (two ICs whose shared bus pins face opposite ways, so the wire wraps the
+                // perimeter). A drawn wraparound reads far worse than naming each end, so discard a
+                // path whose routed length exceeds the policy length and leave the endpoints split.
                 let routed: f64 =
                     p.windows(2).map(|s| (s[0][0] - s[1][0]).abs() + (s[0][1] - s[1][1]).abs()).sum();
-                if routed > span {
+                if routed > pol.len_mm {
                     continue;
                 }
+                // CROSSING-DRIVEN promotion: a cross-block hop whose literal route would CROSS a
+                // foreign wire reads as spaghetti (humans keep ~0 crossings). Name it instead —
+                // leave the endpoints split for the label-bridge. Gated on the DIRECT pin-to-pin
+                // gap (not the routed length): a LOCAL node (terminals a few mm apart) keeps its
+                // wires even when the only obstacle-free route detours far around a body, so a
+                // tight cluster isn't fragmented into label spam. Only promote when BOTH endpoints
+                // could carry a body-CLEAR label (predictor matches the lint's geometry), so a pin
+                // whose label would land over a chip body or pin-name text — including after the
+                // finalize stub-retraction — keeps its wire instead of becoming a lint-flagged
+                // label. Conservative on purpose: the TIER-1 references must stay 0-warning.
+                if direct > pol.cross_len_mm
+                    && term_label_clear[i] && term_label_clear[j]
+                    && crate::wire::path_crossings(&p, net, scene) > 0 {
+                        continue;
+                    }
             }
             for seg in p.windows(2) {
                 w.add_wire_on_net(seg[0], seg[1], net);
@@ -364,12 +452,12 @@ pub(crate) fn route_signal(
             }
             // Don't force an OVERHEAD detour across a long-haul gap: that recreates the very sheet-wide
             // wraparound the MST already declined (the i2c_sensors U4 SCL pin, ~110 mm from the rest of
-            // the bus). When long-haul bridging is active, leave such a pin SPLIT so the label-bridge
+            // the bus). When the label policy is active, leave such a pin SPLIT so the label-bridge
             // below names it instead — exactly as the too-long MST hop already does, and as the sibling
             // SDA pin already gets. The local op-amp feedback case (pins a few mm apart) is well under
-            // the span, so it still forces its clean loop and stays byte-identical.
-            if let Some(span) = long_edge_span
-                && (pts[0][0] - pts[k][0]).abs() + (pts[0][1] - pts[k][1]).abs() > span {
+            // the length, so it still forces its clean loop.
+            if let Some(pol) = label_policy
+                && (pts[0][0] - pts[k][0]).abs() + (pts[0][1] - pts[k][1]).abs() > pol.len_mm {
                     continue;
                 }
             let (pa, da) = (pts[0], terms[0].1);
@@ -402,14 +490,25 @@ pub(crate) fn route_signal(
     // somewhere. A component holding the port exit is named by the port label; any
     // other component gets one net label on a real pin. With one component the net
     // is fully wired and no label is emitted.
+    //
+    // Within a component, pick the pin whose net label reads CLEAR of every foreign
+    // body (`term_label_clear`), breaking ties toward the part with the FEWEST pins (a
+    // 2-pin satellite's stub reads into open space; an IC pin's label risks landing over
+    // the chip body). Falls back to fewest-pins when no candidate is body-clear. Ties
+    // keep the earlier terminal (deterministic).
+    let pin_count = |i: usize| items[i].geom.pins.len();
+    // Per-component: the chosen labelling pin and its score `(body_clear, -pin_count)`.
     let mut roots: BTreeMap<usize, Option<(usize, String)>> = BTreeMap::new();
+    let mut score: BTreeMap<usize, (bool, std::cmp::Reverse<usize>)> = BTreeMap::new();
     for k in 0..terms.len() {
         let r = uf_find(&mut parent, k);
         let slot = roots.entry(r).or_insert(None);
-        if slot.is_none()
-            && let Some(pin) = &term_pin[k] {
-                *slot = Some(pin.clone());
-            }
+        let Some(pin) = &term_pin[k] else { continue };
+        let cand = (term_label_clear[k], std::cmp::Reverse(pin_count(pin.0)));
+        if slot.is_none() || cand > score[&r] {
+            *slot = Some(pin.clone());
+            score.insert(r, cand);
+        }
     }
     let port_root = port_idx.map(|pi| uf_find(&mut parent, pi));
     if roots.len() > 1 {
@@ -713,23 +812,25 @@ pub(crate) fn near(p: [f64; 2], q: [f64; 2]) -> bool {
 /// (≤34-pin compact boards), so they keep their trunk and stay byte-identical.
 pub(crate) const RAIL_DISTRIBUTE_SPAN: f64 = 76.0;
 
-/// A signal-net MST hop longer than this (mm) is delegated to a name-matched net-label
-/// pair instead of a drawn wire — the professional idiom for long-haul / cross-block
-/// connectivity (mined from dense human boards: ~0% of human wires exceed 50mm; a long
-/// wire is the auto-layout "spaghetti" tell). The signal-net analog of
-/// [`RAIL_DISTRIBUTE_SPAN`]. Applied FINALIZE-ONLY and only on boards > FAST_PINS (see
-/// `wire`), so the per-move scorer and every tuned small reference stay byte-identical.
+/// A signal-net MST hop whose (direct OR routed) length exceeds this (mm) is delegated
+/// to a name-matched net-label pair instead of a drawn wire — the professional idiom for
+/// long-haul / cross-block connectivity. The signal-net analog of [`RAIL_DISTRIBUTE_SPAN`].
+/// Applied FINALIZE-ONLY (see [`LabelPolicy`]) so the per-move scorer / placement is never
+/// perturbed.
 ///
-/// 90mm. Picked to eliminate `ic_crossings` (wires routed through IC bodies — the worst
-/// defect: those wires are all >90mm, so they get labelled and the crossing disappears)
-/// while keeping the label count LOW. A tighter 70mm was tried (it minimised
-/// `wire_frac_gt50`) but the FAITHFUL VLM critic, not that proxy, is the judge — and it
-/// penalises label-heaviness ("connectivity conveyed almost entirely by net labels, hard
-/// to trace at a glance"); 70mm pushed esp32 to 41 labels vs 26 at 90 with the SAME
-/// ic_crossings=0, so 70 was a self-inflicted regression. Lesson: `frac>50`/sprawl are
-/// MISLEADING proxies; validate label/wire tradeoffs on the critic (samples≥2), not the
-/// deterministic metric. Override via `SIGNAL_LABEL_SPAN_MM`.
-pub(crate) const SIGNAL_LABEL_SPAN: f64 = 90.0;
+/// 50mm, anchored directly to the human corpus (`tools/layout_metrics.py`): humans keep
+/// ~0% of wires above 50mm (`wire_frac_gt50` median 0). A literal wire longer than this is
+/// the auto-layout "spaghetti" tell. Override via `SIGNAL_LABEL_SPAN_MM`.
+pub(crate) const LABEL_LEN_MM: f64 = 50.0;
+
+/// The CROSSING-driven label threshold (mm): a hop longer than this whose literal route
+/// would cross a foreign wire is named rather than drawn (see [`LabelPolicy`]). Lower than
+/// [`LABEL_LEN_MM`] because a crossing — not raw length — is the trigger; a crossing reads
+/// as clutter regardless of length, but very short hops stay drawn so the sheet keeps its
+/// local wires (humans still draw short stubs; `label_per_part` ≈ 0.76, not everything).
+/// 19mm ≈ 7.5 grid: above the human wire-length median (~5mm) and p75, so only the longer,
+/// genuinely-crossing hops promote. Override via `SIGNAL_CROSS_SPAN_MM`.
+pub(crate) const CROSS_LABEL_LEN_MM: f64 = 19.0;
 
 /// Whether a rail net's pins are spread far enough to prefer DISTRIBUTED local power
 /// symbols over one spanning trunk (see [`RAIL_DISTRIBUTE_SPAN`]). A net with <3 pins

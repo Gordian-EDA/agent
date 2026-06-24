@@ -1207,6 +1207,16 @@
 		(at 22.86 59.690000000000005)
 		(uuid "631209de-2590-5f71-875b-0b1d3b68af9f")
 	)
+	(label "B2"
+		(at 44.449999999999996 85.09 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "6cee44e9-99d1-5966-ad86-f53a86f04602")
+	)
+	(label "B2"
+		(at 46.99 59.690000000000005 180)
+		(effects (font (size 1.27 1.27)) (justify right bottom))
+		(uuid "75a49237-6655-509b-a8dd-3b896941d76c")
+	)
 	(global_label "RXD1"
 		(shape bidirectional)
 		(at 127 71.12 0)
@@ -1361,10 +1371,17 @@
 	)
 	(wire
 		(pts
-			(xy 40.64 85.09) (xy 50.8 85.09)
+			(xy 40.64 85.09) (xy 44.449999999999996 85.09)
 		)
 		(stroke (width 0) (type default))
-		(uuid "e5568fb0-4186-558f-af7a-9875ad0b4301")
+		(uuid "3676c5ec-d559-5666-bd60-c899ea22edc0")
+	)
+	(wire
+		(pts
+			(xy 40.64 85.09) (xy 44.45 85.09)
+		)
+		(stroke (width 0) (type default))
+		(uuid "847d64d6-b783-55fe-a9c2-bf1e0acf9ec4")
 	)
 	(wire
 		(pts
@@ -1372,6 +1389,13 @@
 		)
 		(stroke (width 0) (type default))
 		(uuid "70b6171e-fc70-52ef-b818-1e0daf2aae5e")
+	)
+	(wire
+		(pts
+			(xy 48.26 59.690000000000005) (xy 46.99 59.690000000000005)
+		)
+		(stroke (width 0) (type default))
+		(uuid "7427fa11-2f1f-5393-a190-2e078ec9b776")
 	)
 	(wire
 		(pts
@@ -1396,10 +1420,10 @@
 	)
 	(wire
 		(pts
-			(xy 50.8 85.09) (xy 50.8 59.690000000000005)
+			(xy 48.26 59.690000000000005) (xy 46.99 59.69)
 		)
 		(stroke (width 0) (type default))
-		(uuid "505be3d7-9c45-5852-ad1a-f135061251d8")
+		(uuid "8c575077-4e10-5c0b-a7ad-230df0bc17b5")
 	)
 	(wire
 		(pts
@@ -1414,6 +1438,13 @@
 		)
 		(stroke (width 0) (type default))
 		(uuid "ee1b4e91-af51-5d7a-a7c3-88a536bd93f0")
+	)
+	(wire
+		(pts
+			(xy 50.8 59.69) (xy 48.26 59.690000000000005)
+		)
+		(stroke (width 0) (type default))
+		(uuid "02e2b0e2-3af0-5128-a107-3163d62a5ef8")
 	)
 	(wire
 		(pts
@@ -1604,18 +1635,6 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "4182a6a1-d240-54c8-8d66-3d2ddfc18aa0")
-	)
-	(junction
-		(at 50.8 59.690000000000005)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "38d67a28-0088-557c-a69b-a17686fdad09")
-	)
-	(junction
-		(at 50.8 85.09)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "e4d0aad7-c2b5-5261-aaf2-ab5136ed4d99")
 	)
 	(junction
 		(at 54.61 26.67)
