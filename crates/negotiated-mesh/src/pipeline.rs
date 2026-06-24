@@ -184,7 +184,14 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
     let n_faults =
         failed_pad_weight(problem, &naive.failed) + geometry_violations(problem, &naive.solution);
 
-    let mut result = if n_faults == 0 {
+    // A board with an inner-layer BGA escape assignment routes on the FULL stack with a
+    // per-net layer restriction the naive router honours (`escape_layers` + `layer_mask`).
+    // The detailed engine has no such restriction and would free-maze every net over all
+    // layers — the self-blocking, runtime-exploding behaviour the structured escape exists
+    // to avoid — so it is never run here; the naive structured result stands.
+    let skip_detailed = !problem.escape_layers.is_empty();
+
+    let mut result = if n_faults == 0 || skip_detailed {
         // Naive routed the whole board cleanly — the detailed engine cannot do
         // better on routability, so skip it.
         RouteResult {

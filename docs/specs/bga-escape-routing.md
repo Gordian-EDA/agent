@@ -1,5 +1,47 @@
 # BGA escape routing (inner-ball signal escape)
 
+## RESOLVED (Jun 2026) — the corpus blocker was a BOUNDS-CLAMP bug, not escape
+
+The dense 6/8-layer BGA boards (bga64-8l/8layer/stress, 37 failed each) were diagnosed —
+here and in `pcb-engine-routing-gap.md` — as "inner balls enclosed on F/B, need an inner
+signal layer." Measuring it proved that diagnosis a **bounds-clamping artifact**: the
+fan-out placer expands the working frame to fit the parts (bga64 → ~91 mm), but
+`to_route_problem` kept the board's *declared* 46 mm bounds, so every pad past 46 mm was
+**clamped onto the grid edge** and piled up unroutable. The field only *looked* enclosed
+because it was crushed against the grid wall.
+
+Fix (`route_board`, `fit_bounds_to_obstacles`): grow the routing bounds per-axis to
+enclose any obstacle the placer put outside the declared frame (a strict no-op for a board
+already inside its bounds, so no in-bounds board's grid shifts). **Corpus: 617 → 432
+failed nets, zero regressions, `copper_errors = 0`.** bga64 37 → 2; tqfp64-6l 40 → 12;
+bga64-fattrace 39 → 13; bga64-bigvia 39 → 17. With the clamp gone, F.Cu/B.Cu suffice for
+these (depopulated) fields — the inner-layer escape is *not* what fixes them.
+
+## The structured inner-layer escape (built, kept, exercised by `bga49-dense-escape-8l`)
+
+The inner-layer escape is still the right lever for a TRUE dense full array — it just had
+no such board in the corpus (every other dense BGA here is 4-layer, whose inner pair are
+GND/VCC planes with no signal layer to escape onto). Implemented and proven on the new
+`bga49-dense-escape-8l` vehicle (full 7×7 0.8 mm, inner 5×5 all signals, 8-layer):
+`7% → 33%` complete, `copper_errors = 0`.
+
+- `RouteProblem.escape_layers` (net → assigned inner signal layer), set by the agent's
+  `assign_inner_escape` for a dense fine-pitch ball field (`pitch ≥ 0.75 mm` so a 0.6 mm
+  via-in-pad clears its neighbour ball; `(col + 2·row) mod n_inner` colouring so no two
+  adjacent balls share a layer — adjacent escaped barrels one pitch apart leave only a
+  0.2 mm gap, unroutable on one layer).
+- The grid router (`router::via_in_pad_escape`) drops a through-via ON an enclosed ball's
+  pad (same net → clears its own copper; the pitch gate guarantees the neighbour balls)
+  and seeds the routed tree on the assigned inner layer; `AStarCosts.layer_mask` restricts
+  the net's search to `{top, bottom, escape}` (a 3-layer problem — a free all-layer maze
+  self-blocks on the via field and blows up runtime, measured 37→39 / 60 s).
+- `route_with_planes` routes BOTH with and without the escape and keeps the one that
+  connects more real nets, so the escape is a strict capability ADD: it can only help.
+- Known ceiling: at 0.8 mm only ~1 trace fits between barrels, so each inner layer drains
+  ~2 rings; the deep interior of a large array still won't fully escape (33% on the 7×7).
+  The next lever is an angular-corridor escape (per `docs/specs/bga-hdi-escape.md`), not a
+  fault.
+
 ## The finding (reframe)
 
 "BGA signals don't route" has been attributed to the **microvia / fine-pitch limit**.

@@ -1373,6 +1373,7 @@ mod tests {
                 via_drill: 0.3,
                 net_widths: BTreeMap::new(),
                 outline: None,
+                escape_layers: Default::default(),
             },
             net_codes: BTreeMap::new(),
             layer_names: vec!["F.Cu".into(), "B.Cu".into()],

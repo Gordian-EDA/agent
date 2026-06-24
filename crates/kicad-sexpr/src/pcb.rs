@@ -100,6 +100,7 @@ pub fn read_problem(path: &Path) -> io::Result<BoardProblem> {
         via_drill: 0.3,
         net_widths: Default::default(),
         outline: None,
+        escape_layers: Default::default(),
     };
 
     Ok(BoardProblem {
@@ -895,6 +896,7 @@ mod via_render_tests {
             via_drill: 0.3,
             net_widths: BTreeMap::new(),
             outline: None,
+            escape_layers: Default::default(),
         };
         let mut net_codes = BTreeMap::new();
         net_codes.insert("GND".to_owned(), 1);

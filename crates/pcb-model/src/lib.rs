@@ -122,6 +122,15 @@ pub struct RouteProblem {
     /// bounding box. None = the rectangular `bounds`.
     #[serde(default)]
     pub outline: Option<Vec<Point2>>,
+    /// Inner-layer escape assignment: net → the inner SIGNAL copper layer that net's
+    /// ENCLOSED fine-pitch ball must drop to (via-in-pad) and route out on. The agent
+    /// computes this for dense BGA fields (by ring/quadrant depth) so each escape layer
+    /// drains a disjoint wedge of balls — the structured fan-out a free maze can't find.
+    /// A net listed here that is enclosed on its own face gets a forced via-in-pad to the
+    /// assigned layer, and its A* is restricted to {top, bottom, assigned} so the ring→
+    /// layer assignment holds. Empty (the default) = the old surface-only escape.
+    #[serde(default)]
+    pub escape_layers: std::collections::BTreeMap<String, u32>,
 }
 
 /// Is `pt` inside the closed polygon `poly` (ray-casting, even-odd rule)? A polygon of

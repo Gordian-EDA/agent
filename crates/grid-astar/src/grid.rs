@@ -676,6 +676,7 @@ mod tests {
             via_drill: 0.3,
             net_widths: Default::default(),
             outline: None,
+            escape_layers: Default::default(),
         }
     }
 

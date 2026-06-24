@@ -922,6 +922,38 @@ fn routing_bounds(draft: &BoardDraft) -> Bounds {
     }
 }
 
+/// Grow `rp.bounds` ONLY when a placed obstacle falls OUTSIDE the declared frame, so the
+/// routing grid covers a placement the fan-out expanded past `bounds` (else its pads are
+/// clamped onto the grid edge and unroutable — the bga64 fields: balls at x≈91 on a 46 mm
+/// frame). A board whose obstacles already fit is left BYTE-IDENTICAL (the grow runs only
+/// per-axis when that axis overflows), so no in-bounds board's grid shifts. The overflow
+/// side grows to the obstacle edge + a board-edge margin (copper off the finished edge).
+fn fit_bounds_to_obstacles(rp: &mut RouteProblem) {
+    let (mut mnx, mut mxx, mut mny, mut mxy) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for ob in &rp.obstacles {
+        mnx = mnx.min(ob.center.x - ob.width / 2.0);
+        mxx = mxx.max(ob.center.x + ob.width / 2.0);
+        mny = mny.min(ob.center.y - ob.height / 2.0);
+        mxy = mxy.max(ob.center.y + ob.height / 2.0);
+    }
+    if !mnx.is_finite() {
+        return; // no obstacles
+    }
+    let b = &mut rp.bounds;
+    if mnx < b.min_x {
+        b.min_x = mnx - EDGE_CLEAR_MM;
+    }
+    if mxx > b.max_x {
+        b.max_x = mxx + EDGE_CLEAR_MM;
+    }
+    if mny < b.min_y {
+        b.min_y = mny - EDGE_CLEAR_MM;
+    }
+    if mxy > b.max_y {
+        b.max_y = mxy + EDGE_CLEAR_MM;
+    }
+}
+
 /// JSON shape for one placed part, returned by `place_board` (and reused as the
 /// model's view of `last_placement`).
 fn placement_json(p: &Placement) -> Value {
@@ -1468,6 +1500,18 @@ pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     // Placement → RouteProblem, then inject the keepouts as BLOCKED_ALL obstacles
     // (the one place v1 keepouts bite: routing, not placement).
     let mut rp = to_route_problem(&problem, &placements);
+    // The fan-out placer can expand the working frame past the declared `bounds` (it
+    // sizes to fit the parts), but `to_route_problem` keeps the original bounds — so a
+    // part placed beyond them has its pads CLAMPED onto the grid edge and is unroutable
+    // (the bga64 fields: balls at x≈91 on a 46 mm frame all collapse onto column 0).
+    // Grow the routing bounds to enclose every placed obstacle with an edge margin, so
+    // the grid covers the real placement. Export auto-tightens the edge to copper+1 mm
+    // regardless, so this only fixes routability; a board already inside its bounds is
+    // unchanged (the grow is a max, never a shrink). Skipped for a custom outline, whose
+    // shape is authoritative.
+    if rp.outline.is_none() {
+        fit_bounds_to_obstacles(&mut rp);
+    }
     inject_keepouts(&mut rp, &draft.keepouts);
     // Per-net trace widths from the board rules: fat power copper, thin signals. (Plane
     // nets on a 4-layer board are pours, not traces, so a width on them is simply moot.)
@@ -1789,12 +1833,144 @@ fn fanout_seg_clears(
     true
 }
 
+/// The largest fine-pitch ball pitch (mm) at which a through-via centred ON a 0.5 mm ball
+/// pad still clears its orthogonal neighbour ball: `pitch ≥ pad_r + via_r + clearance`.
+/// Below this the via-in-pad does not fit and the deeper balls need an HDI microvia (a
+/// separate frontier) — so the structured inner-layer escape is gated to `pitch ≥` this.
+const VIA_IN_PAD_MIN_PITCH_MM: f64 = 0.75;
+
+/// Assign each ENCLOSED fine-pitch ball an inner SIGNAL layer to escape onto, by
+/// (ring, quadrant) depth, so each layer drains a disjoint wedge of the field and the
+/// radial escapes never collide (the structured BGA fan-out a free maze can't find).
+///
+/// Returns `net → inner copper layer`. Only nets whose ball sits in a dense fine-pitch
+/// field (≥ [`VIA_IN_PAD_MIN_PITCH_MM`] pitch — coarse enough for a via-in-pad — and ≥ 16
+/// balls) and that are NOT plane nets are assigned; the router fires the via-in-pad only
+/// on the ones it finds actually enclosed. Empty when the board has no inner signal layer
+/// (a 4-layer board's inner pair are both planes) or no qualifying field.
+fn assign_inner_escape(
+    rp: &RouteProblem,
+    planes: &[(String, u32)],
+    layer_count: usize,
+) -> std::collections::BTreeMap<String, u32> {
+    let plane_layers = grid_astar::router::plane_layers(layer_count);
+    // Inner SIGNAL layers = inner copper layers that are not planes. Ordered for a
+    // deterministic round-robin.
+    let inner_sig: Vec<u32> = (1..layer_count as u32 - 1)
+        .filter(|l| !plane_layers.contains(l))
+        .collect();
+    if inner_sig.is_empty() {
+        return Default::default();
+    }
+    let plane_nets: std::collections::BTreeSet<&str> =
+        planes.iter().map(|(n, _)| n.as_str()).collect();
+
+    // Candidate balls: small square top-only SMD pads owning a single net.
+    let balls: Vec<&Obstacle> = rp
+        .obstacles
+        .iter()
+        .filter(|ob| {
+            ob.layers == vec![LayerRef::top()]
+                && ob.connected_to.len() == 1
+                && ob.width <= 0.6
+                && ob.height <= 0.6
+                && (ob.width - ob.height).abs() < 0.15
+        })
+        .collect();
+    if balls.len() < 16 {
+        return Default::default();
+    }
+
+    // Ball pitch = the smallest centre-to-centre distance among balls.
+    let mut pitch = f64::INFINITY;
+    for i in 0..balls.len() {
+        for j in (i + 1)..balls.len() {
+            let d = ((balls[i].center.x - balls[j].center.x).powi(2)
+                + (balls[i].center.y - balls[j].center.y).powi(2))
+            .sqrt();
+            if d > 0.05 {
+                pitch = pitch.min(d);
+            }
+        }
+    }
+    if !pitch.is_finite() || pitch < VIA_IN_PAD_MIN_PITCH_MM {
+        return Default::default();
+    }
+
+    // Colour the ball lattice so NO TWO orthogonally- or diagonally-adjacent balls share
+    // an inner layer: at 0.8 mm pitch two escaped via barrels one pitch apart leave only a
+    // 0.2 mm copper gap — unroutable — so adjacent balls MUST escape on different layers.
+    // Snap each ball to integer lattice (row, col) from the field origin and assign
+    // `inner_sig[(col + 2·row) mod n]`; with n ≥ 4 inner layers this gives every cell a
+    // colour distinct from all 8 neighbours (a generalized brick/knight colouring), so on
+    // any one layer the same-layer balls sit ≥ √5·pitch apart and the radial escapes have
+    // room. Deterministic; the origin is the min-corner ball.
+    let min_x = balls.iter().map(|b| b.center.x).fold(f64::INFINITY, f64::min);
+    let min_y = balls.iter().map(|b| b.center.y).fold(f64::INFINITY, f64::min);
+    let n = inner_sig.len() as i64;
+    let mut out: std::collections::BTreeMap<String, u32> = Default::default();
+    for b in &balls {
+        let net = b.connected_to[0].as_str();
+        if plane_nets.contains(net) || net == "GND" || net == "VCC" {
+            continue;
+        }
+        let col = ((b.center.x - min_x) / pitch).round() as i64;
+        let row = ((b.center.y - min_y) / pitch).round() as i64;
+        let idx = (col + 2 * row).rem_euclid(n) as usize;
+        out.insert(net.to_owned(), inner_sig[idx]);
+    }
+    out
+}
+
 fn route_with_planes(
+    rp: RouteProblem,
+    planes: &[(String, u32)],
+    rules: &DraftRules,
+) -> negotiated_mesh::pipeline::RouteResult {
+    // Inner-layer escape assignment for dense BGA fields, computed on the FULL stack —
+    // each enclosed ball gets an inner signal layer to drop to (via-in-pad) so it escapes
+    // where F/B are walled in. Empty on a 4-layer board (no inner signal layer) or a board
+    // with no dense fine-pitch field. When non-empty, route BOTH with the escape (full
+    // stack, per-net layer restriction) and without (the old F/B-only flow) and keep the
+    // one that connects more pads — so the escape is a strict capability ADD: it can only
+    // help, never regress a board where the field can't actually use it.
+    let escape = assign_inner_escape(&rp, planes, rules.layer_count as usize);
+    if escape.is_empty() {
+        let mut base = rp;
+        base.layer_count = 2;
+        return route_planes_core(base, planes, rules);
+    }
+    let mut esc_rp = rp.clone();
+    esc_rp.escape_layers = escape;
+    let with_escape = route_planes_core(esc_rp, planes, rules);
+    let mut base = rp;
+    base.layer_count = 2;
+    let without = route_planes_core(base, planes, rules);
+    // Tie → prefer WITHOUT escape (fewer vias, the established flow). Use the escape only
+    // when it strictly connects more REAL nets (a stranded-stitch pseudo-failure is not a
+    // net, so it doesn't sway the choice).
+    if real_failed_count(&with_escape) < real_failed_count(&without) {
+        with_escape
+    } else {
+        without
+    }
+}
+
+/// Count of REAL failed nets in a finished plane route — the `<N plane stitching vias>`
+/// pseudo-failure is not a net, so it is excluded. Used to keep the better of {escape,
+/// no-escape}; the relative ordering of two routes of the SAME board is what matters.
+fn real_failed_count(r: &negotiated_mesh::pipeline::RouteResult) -> usize {
+    r.failed
+        .iter()
+        .filter(|f| !f.connection.contains("plane stitching"))
+        .count()
+}
+
+fn route_planes_core(
     mut rp: RouteProblem,
     planes: &[(String, u32)],
     rules: &DraftRules,
 ) -> negotiated_mesh::pipeline::RouteResult {
-    rp.layer_count = 2;
     let plane_names: std::collections::BTreeSet<String> =
         planes.iter().map(|(n, _)| n.clone()).collect();
     // net → its copper-plane layer index (1 = In1 …) for the HDI via-in-pad fallback below.

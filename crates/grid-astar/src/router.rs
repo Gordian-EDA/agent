@@ -249,8 +249,25 @@ pub fn route_with(
         let nw = problem.net_width(&conn.name);
         let halo =
             (((nw / 2.0 + problem.clearance + min_w / 2.0) / pitch).ceil() as usize).max(1);
+        // An ENCLOSED fine-pitch ball with an assigned inner escape layer escapes
+        // VERTICALLY (a via-in-pad to that layer) instead of along a surface axis. The
+        // A* is then restricted to {top, bottom, escape layer} so the ring→layer
+        // assignment holds and the search stays a 3-layer problem (a free all-layer maze
+        // self-blocks on the via field). `None` = no assignment → the old surface escape.
+        let escape_layer = problem.escape_layers.get(&conn.name).copied();
+        // When ANY net has an inner-layer escape, the board routes on the full stack — so
+        // every net is restricted to the OUTER pair {top, bottom} (the fast 2-layer bulk
+        // maze) and an escape net additionally gets its one assigned inner layer. With no
+        // escapes at all the mask is 0 (unrestricted) — bit-identical to before.
+        let outer_mask = (1u32 << 0) | (1u32 << (layer_count as u32 - 1));
+        let layer_mask = if problem.escape_layers.is_empty() {
+            0
+        } else {
+            outer_mask | escape_layer.map_or(0, |l| 1u32 << l)
+        };
         let costs = AStarCosts {
             trace_clear_radius_cells: (((nw - min_w) / 2.0 / pitch).ceil() as usize),
+            layer_mask,
             ..design.costs
         };
 
@@ -260,14 +277,19 @@ pub fn route_with(
         // gets a radial ESCAPE STUB pre-routed along its own long axis out to open
         // board, and the stub tip — not the over-blocked pad cell — seeds the tree.
         let seed_pad = point_cell(&grid, &conn.points_to_connect[0], layer_count);
-        let mut tree_cells: Vec<State> =
-            escape_cells(&mut grid, problem, conn_idx, &conn.points_to_connect[0], seed_pad, halo, &mut traces);
+        let mut tree_cells: Vec<State> = escape_cells(
+            &mut grid, problem, conn_idx, &conn.points_to_connect[0], seed_pad, halo,
+            escape_layer, &mut traces, &mut vias,
+        );
 
         let mut net_failed: Option<String> = None;
 
         for (pi, pt) in conn.points_to_connect.iter().enumerate().skip(1) {
             let start_pad = point_cell(&grid, pt, layer_count);
-            let starts = escape_cells(&mut grid, problem, conn_idx, pt, start_pad, halo, &mut traces);
+            let starts = escape_cells(
+                &mut grid, problem, conn_idx, pt, start_pad, halo, escape_layer,
+                &mut traces, &mut vias,
+            );
             // A* from the new point's cell to the nearest cell of the tree.
             let path = astar::search(&grid, conn_idx, &starts, &tree_cells, costs);
             let Some(path) = path else {
@@ -367,6 +389,7 @@ fn half_perimeter(conn: &crate::problem::Connection) -> f64 {
 /// pads are ≥ pitch away laterally); and the final `drop_violating_copper` lint
 /// gates the whole solution, so a stub that ever grazed foreign copper would be
 /// dropped and the net reported failed — never shipped.
+#[allow(clippy::too_many_arguments)] // one cohesive escape primitive; flat args keep it inline-able
 fn escape_cells(
     grid: &mut RouteGrid,
     problem: &RouteProblem,
@@ -374,14 +397,30 @@ fn escape_cells(
     pt: &crate::problem::RoutePoint,
     pad_cell: State,
     halo: usize,
+    escape_layer: Option<u32>,
     traces: &mut Vec<Trace>,
+    vias: &mut Vec<Via>,
 ) -> Vec<State> {
     grid.mark_net_halo(pad_cell.layer, pad_cell.ix, pad_cell.iy, conn_idx, halo);
     let mut cells = vec![pad_cell];
 
-    // Only an enclosed pad needs a stub. "Enclosed" = its own-layer free region is
-    // small (a handful of cells), which is exactly the fine-pitch-pin case.
+    // Only an enclosed pad needs help. "Enclosed" = its own-layer free region is
+    // small (a handful of cells), which is exactly the fine-pitch-pin/inner-ball case.
     if local_region(grid, conn_idx, pad_cell, 64) >= 64 {
+        return cells;
+    }
+
+    // INNER-LAYER VIA-IN-PAD escape: an enclosed ball with an assigned inner signal
+    // layer drops a through-via centred ON its pad (same net → clears its own copper;
+    // at ≥0.8 mm pitch the via barrel clears the neighbour balls — verified geometry)
+    // and seeds the routed tree on the assigned inner layer, where the field is open.
+    // The maze then routes radially out THERE, restricted (by `layer_mask`) to this
+    // net's three layers. Tried before the surface stub: a truly-enclosed ball (free
+    // region 1) has no surface axis to escape along, only a vertical one.
+    if let Some(out) = escape_layer
+        .and_then(|el| via_in_pad_escape(grid, problem, conn_idx, pt, pad_cell, el as usize, halo, vias))
+    {
+        cells.push(out);
         return cells;
     }
     // Find the pad obstacle at this point: an owned obstacle covering pt. Need its
@@ -466,6 +505,96 @@ fn escape_cells(
     mark_segment(grid, conn_idx, pad_cell, tip, halo);
     cells.push(tip);
     cells
+}
+
+/// Drop a through-via centred ON an enclosed ball's pad and seed the routed tree on the
+/// assigned inner signal layer `el`. Returns the inner-layer landing [`State`] (added to
+/// the tree) when the escape is placed, else `None` (the inner cell is not free for this
+/// net — another escape already claimed it; the caller falls back to the surface stub /
+/// reports the net unrouted).
+///
+/// The via sits at the pad CENTRE (sub-grid mm), same net as the pad, so it never shorts
+/// its own copper; at ≥0.8 mm pitch the 0.6 mm barrel clears the orthogonal neighbour
+/// balls by ≥0.05 mm beyond clearance (the pitch gate is the caller's `escape_layers`
+/// assignment — only assigned where the geometry fits). The inner-layer landing cell and
+/// its clearance halo are marked so the next ball's escape keeps the full via spacing,
+/// and `drop_violating_copper` is the final authority: a via that still grazed a
+/// neighbour is dropped and the net reported unrouted, never shipped failing.
+#[allow(clippy::too_many_arguments)]
+fn via_in_pad_escape(
+    grid: &mut RouteGrid,
+    problem: &RouteProblem,
+    conn_idx: usize,
+    pt: &crate::problem::RoutePoint,
+    pad_cell: State,
+    el: usize,
+    halo: usize,
+    vias: &mut Vec<Via>,
+) -> Option<State> {
+    let layer_count = problem.layer_count.max(1) as usize;
+    if el == 0 || el >= layer_count {
+        return None;
+    }
+    let landing = State { layer: el, ix: pad_cell.ix, iy: pad_cell.iy };
+    // The inner-layer landing must be open for this net (it is empty unless another
+    // escape's via halo already claimed it).
+    if !grid.is_free_for(landing.layer, landing.ix, landing.iy, conn_idx) {
+        return None;
+    }
+    // The via sits ON the pad (its own copper), so its TOP-layer neighbour clearance is
+    // the pitch gate's guarantee (the caller assigns an escape layer only where the via
+    // fits), NOT a grid scan — the enclosed ball's top neighbourhood is legitimately
+    // BlockedAll from neighbour halos, which a top scan would wrongly reject. The barrel
+    // must, however, clear foreign copper on every INNER / bottom layer it pierces (a
+    // foreign via or a through-hole barrel would collide there). `drop_violating_copper`
+    // is the final authority regardless: a via that still grazed a neighbour is dropped
+    // and the net reported unrouted, never shipped failing.
+    let via_extra = (problem.via_diameter / 2.0 - problem.min_trace_width / 2.0).max(0.0);
+    let r = (via_extra / grid.pitch).ceil() as usize;
+    if !via_barrel_clear_below_top(grid, conn_idx, pad_cell.ix, pad_cell.iy, r) {
+        return None;
+    }
+    vias.push(Via {
+        connection: problem.connections[conn_idx].name.clone(),
+        at: Point2 { x: pt.x, y: pt.y },
+        diameter: problem.via_diameter,
+        drill: problem.via_drill,
+        span: ViaSpan::Through,
+    });
+    // Reserve the inner-layer landing + its via clearance halo for this net so a
+    // neighbouring escape's via keeps the full barrel spacing.
+    let via_halo = (((problem.via_diameter / 2.0 + problem.clearance + problem.min_trace_width / 2.0)
+        / grid.pitch)
+        .ceil() as usize)
+        .max(halo);
+    grid.mark_net_halo(landing.layer, landing.ix, landing.iy, conn_idx, via_halo);
+    Some(landing)
+}
+
+/// Is every cell within `radius_cells` (Euclidean) of `(ix,iy)` free for `conn` on every
+/// layer BELOW the top (`1..layer_count`)? The via-in-pad barrel's top-layer clearance is
+/// the pitch gate's guarantee (the via sits on the ball's own pad, and the enclosed ball's
+/// top neighbourhood is legitimately BlockedAll from neighbour halos), so the top layer is
+/// excluded; the inner/bottom layers it pierces must be free of any foreign barrel.
+fn via_barrel_clear_below_top(grid: &RouteGrid, conn: usize, ix: usize, iy: usize, radius_cells: usize) -> bool {
+    let r = radius_cells as isize;
+    let r2 = (radius_cells * radius_cells) as isize;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy > r2 {
+                continue;
+            }
+            let hx = ix as isize + dx;
+            let hy = iy as isize + dy;
+            if hx < 0 || hy < 0 || hx >= grid.nx as isize || hy >= grid.ny as isize {
+                return false;
+            }
+            if !(1..grid.layer_count).all(|l| grid.is_free_for(l, hx as usize, hy as usize, conn)) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Size of the connected free-for-`conn` region around `from` on its OWN layer
@@ -706,6 +835,7 @@ mod tests {
             via_drill: 0.3,
             net_widths: Default::default(),
             outline: None,
+            escape_layers: Default::default(),
         };
 
         // Without the stub these pins are unroutable (their own cell is BlockedAll);
@@ -726,6 +856,132 @@ mod tests {
             result.solution.traces.iter().all(|t| !failed_names.contains(t.connection.as_str())),
             "a failed net must not ship a stub/trace"
         );
+    }
+
+    /// A dense BGA inner ball, walled in on F.Cu by its 8 neighbour balls (a 0.8 mm
+    /// array), escapes to its ASSIGNED inner signal layer via a via-in-pad and routes out
+    /// there to a far header — where a surface-only (F/B) router leaves it unrouted. The
+    /// emitted copper is geometry-clean. Regression guard for the structured inner-layer
+    /// escape (`escape_layers` → `via_in_pad_escape`).
+    #[test]
+    fn enclosed_bga_inner_ball_escapes_to_its_assigned_inner_layer() {
+        // 3×3 of 0.5 mm balls at 0.8 mm pitch, centred at (5,5). The centre ball is the
+        // SIGNAL net S; the 8 neighbours are foreign (GND/VCC) so S is fully enclosed on
+        // F.Cu. 8-layer board → planes at {3,4}, inner signal layers {1,2,5,6}. S also
+        // connects to a header pad far away in open board.
+        let ball = |net: &str, cx: f64, cy: f64, owned: bool| Obstacle {
+            kind: "rect".into(),
+            layers: vec![LayerRef::top()],
+            center: Point2 { x: cx, y: cy },
+            width: 0.5,
+            height: 0.5,
+            connected_to: if owned { vec![net.into()] } else { vec![] },
+        };
+        let mut obstacles = Vec::new();
+        let mut k = 0;
+        for (i, dy) in [-0.8f64, 0.0, 0.8].into_iter().enumerate() {
+            for (j, dx) in [-0.8f64, 0.0, 0.8].into_iter().enumerate() {
+                if i == 1 && j == 1 {
+                    continue; // centre is the signal, added below
+                }
+                k += 1;
+                // Neighbour balls own a foreign net each so they wall the centre in.
+                obstacles.push(ball(&format!("P{k}"), 5.0 + dx, 5.0 + dy, true));
+            }
+        }
+        obstacles.push(ball("S", 5.0, 5.0, true)); // the enclosed inner signal
+        obstacles.push(ball("S", 12.0, 12.0, true)); // a far header pad in open board
+        let connections = vec![Connection {
+            name: "S".into(),
+            points_to_connect: vec![
+                RoutePoint { x: 5.0, y: 5.0, layer: LayerRef::top() },
+                RoutePoint { x: 12.0, y: 12.0, layer: LayerRef::top() },
+            ],
+        }];
+        let mut escape_layers = std::collections::BTreeMap::new();
+        escape_layers.insert("S".to_string(), 2u32); // an inner SIGNAL layer
+        let problem = RouteProblem {
+            layer_count: 8,
+            min_trace_width: 0.2,
+            obstacles,
+            connections,
+            bounds: Bounds { min_x: 0.0, max_x: 16.0, min_y: 0.0, max_y: 16.0 },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers,
+        };
+
+        let result = route(&problem);
+        assert!(
+            result.failed.is_empty(),
+            "the enclosed inner ball must escape to its inner layer, failed: {:?}",
+            result.failed
+        );
+        // It dropped a via (the via-in-pad escape).
+        assert!(!result.solution.vias.is_empty(), "escape must place a via-in-pad");
+        // Some copper lands on the assigned inner signal layer (inner2).
+        assert!(
+            result.solution.traces.iter().any(|t| t.layer == LayerRef("inner2".into())),
+            "the escape must route on the assigned inner signal layer"
+        );
+        // The emitted copper is geometry-clean (the lint is the authority).
+        let geom: Vec<_> = crate::lint::lint(&problem, &result.solution)
+            .into_iter()
+            .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
+            .collect();
+        assert!(geom.is_empty(), "inner-layer escape copper must be geometry-clean: {geom:?}");
+    }
+
+    /// Without the escape assignment the SAME enclosed inner ball is unroutable (F/B are
+    /// walled in) — confirming the escape is what routes it, not the open board.
+    #[test]
+    fn enclosed_bga_inner_ball_is_unroutable_without_an_escape_layer() {
+        let ball = |net: &str, cx: f64, cy: f64, owned: bool| Obstacle {
+            kind: "rect".into(),
+            layers: vec![LayerRef::top()],
+            center: Point2 { x: cx, y: cy },
+            width: 0.5,
+            height: 0.5,
+            connected_to: if owned { vec![net.into()] } else { vec![] },
+        };
+        let mut obstacles = Vec::new();
+        let mut k = 0;
+        for (i, dy) in [-0.8f64, 0.0, 0.8].into_iter().enumerate() {
+            for (j, dx) in [-0.8f64, 0.0, 0.8].into_iter().enumerate() {
+                if i == 1 && j == 1 {
+                    continue;
+                }
+                k += 1;
+                obstacles.push(ball(&format!("P{k}"), 5.0 + dx, 5.0 + dy, true));
+            }
+        }
+        obstacles.push(ball("S", 5.0, 5.0, true));
+        obstacles.push(ball("S", 12.0, 12.0, true));
+        let connections = vec![Connection {
+            name: "S".into(),
+            points_to_connect: vec![
+                RoutePoint { x: 5.0, y: 5.0, layer: LayerRef::top() },
+                RoutePoint { x: 12.0, y: 12.0, layer: LayerRef::top() },
+            ],
+        }];
+        let problem = RouteProblem {
+            layer_count: 8,
+            min_trace_width: 0.2,
+            obstacles,
+            connections,
+            bounds: Bounds { min_x: 0.0, max_x: 16.0, min_y: 0.0, max_y: 16.0 },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(), // NO escape assignment
+        };
+        let result = route(&problem);
+        assert_eq!(result.failed.len(), 1, "with no escape, the walled-in ball cannot route");
     }
 
     #[test]

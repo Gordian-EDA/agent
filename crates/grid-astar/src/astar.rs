@@ -99,6 +99,13 @@ pub struct AStarCosts {
     /// before. A wider power/HF net scans this radius so its fat copper keeps full
     /// clearance without inflating spacing for thin nets.
     pub trace_clear_radius_cells: usize,
+    /// Bitmask of layers this net's search may ROUTE on. `0` (the default) means every
+    /// layer is allowed — bit-identical to before. A BGA inner-ball escape sets this to
+    /// `{top, bottom, its assigned escape layer}` so its A* is a 3-layer problem and the
+    /// ring→layer assignment holds (a free choice over all 8 layers self-blocks on the
+    /// via field and blows up runtime — measured). The plane mask still applies on top:
+    /// a layer in this mask that is also a plane is never a routing destination.
+    pub layer_mask: u32,
 }
 
 impl Default for AStarCosts {
@@ -114,6 +121,7 @@ impl Default for AStarCosts {
             allow_via: true,
             plane_mask: 0,
             trace_clear_radius_cells: 0,
+            layer_mask: 0,
         }
     }
 }
@@ -367,6 +375,12 @@ pub fn search_bounded(
                 if costs.plane_mask & (1u32 << layer) != 0 {
                     continue;
                 }
+                // A net with a restricted layer set (a forced BGA escape) may only land
+                // a via on one of its allowed layers; a via still tunnels THROUGH the
+                // others. `0` = unrestricted (the default).
+                if costs.layer_mask != 0 && costs.layer_mask & (1u32 << layer) == 0 {
+                    continue;
+                }
                 let next = State {
                     layer,
                     ix: cur.ix,
@@ -534,6 +548,7 @@ mod tests {
             via_drill: 0.3,
             net_widths: Default::default(),
             outline: None,
+            escape_layers: Default::default(),
         }
     }
 

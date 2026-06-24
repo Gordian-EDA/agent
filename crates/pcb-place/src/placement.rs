@@ -2307,6 +2307,7 @@ pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> Rou
         net_widths: std::collections::BTreeMap::new(),
         // Carry the custom outline so the router keeps copper inside the true shape.
         outline: problem.outline.clone(),
+        escape_layers: Default::default(),
     }
 }
 
