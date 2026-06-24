@@ -237,7 +237,9 @@ pub fn route_cells(
     // in-cell copper and re-route it **pad-to-pad on a fresh full-board grid** that
     // carries only the copper that survives into the solution (every successful
     // net's traces/vias + every net's pad anchor). The finisher routes
-    // ORTHOGONALLY (see [`run_finisher_pass`] for why diagonals are unsafe here),
+    // OCTILINEARLY (8-way); its diagonals are DRC-safe because every routed run is
+    // marked as a swept-clearance CAPSULE ([`mark_segment_capsule`]), so a later net
+    // keeps full clearance from the diagonal body (see [`run_finisher_pass`]). It is
     // bounded to the net's own corridor for speed, trying free pad-to-pad first and
     // a plan-guided wall-gap waypoint only as a fallback. Each repaired net's copper
     // is marked before the next runs, so repairs keep clearance from each other.
@@ -321,23 +323,26 @@ pub fn route_cells(
         // the pass that repairs the most nets (tie-break: fewest, then the earliest
         // candidate, for stability). Each pass runs on its own clone of the residual
         // grid, so the trials are independent and the result is reproducible.
-        // The finisher routes ORTHOGONALLY (4-neighbour), not octilinearly. Two
-        // free 45° runs in adjacent lanes can approach closer than their cell
-        // centres' spacing — the Euclidean cell-centre halo blocks cells, not the
-        // diagonal segment bodies between them, so adjacent diagonal finisher runs
-        // can dip under clearance (the exact lint catches it). Orthogonal traces are
-        // axis-aligned: two of them one track pitch apart stay exactly legal under
-        // the same halo, and the saturated wall is crossed orthogonally anyway.
-        // `..costs` inherits the per-cell DIAG_COST, so `diag` MUST be set back to
-        // the `u32::MAX` orthogonal sentinel explicitly — the finisher's Euclidean
-        // cell-centre halo guards cell centres, not the diagonal segment bodies
-        // between parallel 45° runs (which would dip under clearance → DRC faults).
+        // The finisher routes OCTILINEARLY (8-way), inheriting the per-cell
+        // `DIAG_COST` via `..costs`. A diagonal finisher run is DRC-safe because its
+        // copper is marked as a swept-clearance CAPSULE ([`mark_segment_capsule`]):
+        // the exact Minkowski dilation of the centreline, not just a disc at each
+        // vertex cell. So a later net is kept the full clearance from the diagonal
+        // *body* — closing the cell-centre-halo notch around a 45° segment's midpoint
+        // that made vertex-only marking unsafe (two adjacent 45° lanes dipping under
+        // clearance). Diagonals give the finisher routing freedom (and neater copper)
+        // on the hardest hotspot nets. The corner-cut guard in the A* core keeps a 45°
+        // step from slipping through a blocked corner.
         let finish_costs = AStarCosts {
-            diag: u32::MAX,
+            diag: DIAG_COST,
             via_clear_radius_cells: (via_halo / finish_pitch).ceil() as usize,
             ..costs
         };
-        debug_assert_eq!(finish_costs.diag, u32::MAX, "finisher must stay orthogonal");
+        // The diagonal-safe clearance is the capsule MARK, so the finisher may go
+        // octilinear: assert diagonals are ON (and routable) rather than the old
+        // orthogonal-only sentinel.
+        debug_assert_ne!(finish_costs.diag, u32::MAX, "finisher routes octilinearly");
+        debug_assert_eq!(finish_costs.diag, DIAG_COST, "finisher uses the octilinear diagonal cost");
         // Repair the failed nets in slice-1 net-rank order (lower half-perimeter
         // first — the short local nets that the per-cell pass laid around, matching
         // the order the global stage negotiated). Each net marks its copper before
@@ -442,13 +447,12 @@ fn run_finisher_pass(
 }
 
 /// Stamp one [`CellRoute`]'s emitted copper into `grid` as its net's occupancy:
-/// every trace polyline's cells (Euclidean clearance halo) and every via barrel
-/// (via halo on every layer). Used to rebuild a clean finisher grid from only the
-/// copper that survives into the solution. A trace point is mapped to its grid cell
-/// and the run between two points is walked cell-by-cell (Bresenham-free: octilinear
-/// runs touch a contiguous cell chain, but to be safe against the half-pitch lattice
-/// we sample each segment at the grid pitch). The owning net is found by name; an
-/// unknown connection is skipped (it would carry no foreign-blocking weight anyway).
+/// every trace polyline's swept clearance **capsule** and every via barrel (via halo
+/// on every layer). Used to rebuild a clean finisher grid from only the copper that
+/// survives into the solution, so a later finisher net keeps the full clearance from
+/// the diagonal *body* of this copper (not just its vertex cells — see
+/// [`mark_segment_capsule`]). The owning net is found by name; an unknown connection
+/// is skipped (it would carry no foreign-blocking weight anyway).
 fn stamp_route(grid: &mut RouteGrid, cr: &CellRoute, halo: f64, via_halo: f64) {
     let Some(conn_idx) = grid.connection_index(&cr.connection) else {
         return;
@@ -460,18 +464,7 @@ fn stamp_route(grid: &mut RouteGrid, cr: &CellRoute, halo: f64, via_halo: f64) {
             .unwrap_or(0)
             .min(grid.layer_count as u32 - 1) as usize;
         for w in t.points.windows(2) {
-            let (a, b) = (&w[0], &w[1]);
-            let dx = b.x - a.x;
-            let dy = b.y - a.y;
-            let len = (dx * dx + dy * dy).sqrt();
-            // Sample the segment at half the grid pitch so every cell the trace
-            // passes through is marked (no gaps between adjacent samples).
-            let steps = ((len / (grid.pitch / 2.0)).ceil() as usize).max(1);
-            for k in 0..=steps {
-                let f = k as f64 / steps as f64;
-                let (ix, iy) = grid.cell_of(a.x + dx * f, a.y + dy * f);
-                grid.mark_net_halo_euclid(layer, ix, iy, conn_idx, halo);
-            }
+            mark_segment_capsule(grid, layer, &w[0], &w[1], conn_idx, halo);
         }
     }
     for v in &cr.vias {
@@ -482,18 +475,120 @@ fn stamp_route(grid: &mut RouteGrid, cr: &CellRoute, halo: f64, via_halo: f64) {
     }
 }
 
+/// Stamp the **exact swept-clearance capsule** of trace segment `a`–`b` (mm) on
+/// `layer` as copper owned by `conn`: every grid cell whose centre lies strictly
+/// within `halo` (= `min_trace_width + clearance`, mm) of the *segment body* is
+/// marked, not just the cells under the segment's endpoints.
+///
+/// This is the detailed router's diagonal-safe clearance primitive. The per-cell
+/// Euclidean halo ([`RouteGrid::mark_net_halo_euclid`]) stamps a disc only around a
+/// path's discrete cell **centres**; for a 45° run the union of those discs leaves a
+/// thin un-stamped notch around each diagonal segment's midpoint, so a foreign trace
+/// could dip under clearance against the diagonal *body* there (orthogonal runs have
+/// no such notch — cell-centre spacing equals the perpendicular segment spacing).
+/// Marking the analytic capsule — cell centre within `halo` of the segment, via exact
+/// point-to-segment distance — closes the notch with zero residual: the owned region
+/// is the true Minkowski dilation of the centreline, so two octilinear traces are
+/// kept the full clearance apart by construction. Marking only adds obstacles for
+/// FOREIGN nets (`conn` is never blocked from its own copper), so A* stays optimal and
+/// the result deterministic. The scan is bounded to the segment's bbox dilated by
+/// `halo`. A degenerate (zero-length) segment falls back to the single end cell's halo.
+fn mark_segment_capsule(
+    grid: &mut RouteGrid,
+    layer: usize,
+    a: &Point2,
+    b: &Point2,
+    conn: usize,
+    halo: f64,
+) {
+    if layer >= grid.layer_count {
+        return;
+    }
+    // A foreign centre exactly `halo` away is legal copper (its edge gap equals
+    // `clearance`), so only strictly-closer centres are owned — matching the exact
+    // DRC trace/trace edge-gap test and [`RouteGrid::mark_net_halo_euclid`].
+    let thresh = halo - 1e-9;
+    let thresh2 = thresh * thresh;
+    // Cells whose centre could be within `halo` of the segment lie in its bbox
+    // dilated by `halo`; clamp to the grid and test each by exact distance.
+    let lo_x = a.x.min(b.x) - halo;
+    let hi_x = a.x.max(b.x) + halo;
+    let lo_y = a.y.min(b.y) - halo;
+    let hi_y = a.y.max(b.y) + halo;
+    let (ix0, iy0) = grid.cell_of(lo_x, lo_y);
+    let (ix1, iy1) = grid.cell_of(hi_x, hi_y);
+    for ix in ix0..=ix1 {
+        let cx = grid.cell_center_x(ix);
+        for iy in iy0..=iy1 {
+            let cy = grid.cell_center_y(iy);
+            if point_seg_dist2(cx, cy, a, b) <= thresh2 {
+                grid.mark_net(layer, ix, iy, conn);
+            }
+        }
+    }
+}
+
+/// Squared distance (mm²) from point `(px, py)` to segment `a`–`b`. The exact
+/// kernel of [`mark_segment_capsule`].
+fn point_seg_dist2(px: f64, py: f64, a: &Point2, b: &Point2) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len2 = dx * dx + dy * dy;
+    let (cx, cy) = if len2 < 1e-18 {
+        (a.x, a.y)
+    } else {
+        let t = (((px - a.x) * dx + (py - a.y) * dy) / len2).clamp(0.0, 1.0);
+        (a.x + t * dx, a.y + t * dy)
+    };
+    let (ex, ey) = (px - cx, py - cy);
+    ex * ex + ey * ey
+}
+
+/// Stamp a freshly routed cell `path`'s swept-clearance capsule into `grid` as
+/// copper owned by `conn`, so a later net keeps the full clearance from this run's
+/// diagonal *body* (see [`mark_segment_capsule`] for why vertex-only marking is
+/// unsafe once the search routes octilinearly). Each same-layer segment of the path
+/// is marked as a capsule; a layer change (via) breaks the run, so the two adjacent
+/// states are marked as their own (single-cell) capsules on their respective layers.
+/// Every state's own cell is haloed too, so a single-cell path still reserves its
+/// clearance.
+fn mark_path_capsule(grid: &mut RouteGrid, path: &[State], conn: usize, halo: f64) {
+    if path.is_empty() {
+        return;
+    }
+    // Precompute each state's cell-centre mm so the mark loop can borrow the grid
+    // mutably (the closure would otherwise hold an immutable borrow of `grid`).
+    let mm: Vec<Point2> = path
+        .iter()
+        .map(|s| Point2 {
+            x: grid.cell_center_x(s.ix),
+            y: grid.cell_center_y(s.iy),
+        })
+        .collect();
+    // Halo every vertex cell (covers a lone-state path and the via endpoints).
+    for (s, p) in path.iter().zip(&mm) {
+        mark_segment_capsule(grid, s.layer, p, p, conn, halo);
+    }
+    // Capsule every same-layer segment body.
+    for i in 0..path.len() - 1 {
+        if path[i].layer == path[i + 1].layer {
+            mark_segment_capsule(grid, path[i].layer, &mm[i], &mm[i + 1], conn, halo);
+        }
+    }
+}
+
 /// Re-route one failed net on the shared full-board `grid` — the hotspot finisher
 /// (slice 3, Task 3.5).
 ///
 /// Mirrors the slice-1 per-net tree routing ([`crate::router::route`]) on the
-/// detailed stage's fine grid with the exact-geometry Euclidean halo: route point 0
-/// seeds a routed tree; each further `points_to_connect` (and, when `waypoints` is
-/// non-empty, each wall-gap waypoint first) is A*-routed to the nearest tree cell,
-/// bounded to the net's own corridor ([`leg_bounds`]). The move set and via policy
-/// come from `costs` (the caller uses orthogonal moves and tries no-via before
-/// with-via). The net's own partial in-cell copper already on the grid (marked
-/// `Net(conn)`) never blocks it, so the finisher routes freely through where its
-/// dropped copper sat. On success the net's full copper + halo is marked into the
+/// detailed stage's fine grid with the diagonal-safe swept-clearance capsule
+/// ([`mark_segment_capsule`]): route point 0 seeds a routed tree; each further
+/// `points_to_connect` (and, when `waypoints` is non-empty, each wall-gap waypoint
+/// first) is A*-routed to the nearest tree cell, bounded to the net's own corridor
+/// ([`leg_bounds`]). The move set and via policy come from `costs` (the caller routes
+/// octilinearly and tries no-via before with-via). The net's own partial in-cell
+/// copper already on the grid (marked `Net(conn)`) never blocks it, so the finisher
+/// routes freely through where its dropped copper sat. On success the net's full
+/// copper capsule is marked into the
 /// grid (so later finishers keep clearance) and a single full-board [`CellRoute`] is
 /// returned. The synthetic leaf id is [`usize::MAX`] — a finisher route spans the
 /// board, not one leaf, and Task 3 stitches purely by net + endpoint identity.
@@ -524,23 +619,14 @@ fn finish_net(
         });
     }
 
-    // Snap map: a guided leg's endpoint that lands on an assigned crossing is
-    // replaced with that crossing's exact mm position so consecutive legs meet
-    // byte-exactly. Route-point (pad) endpoints are deliberately NOT snapped: a
-    // snapped pad endpoint sits off its cell centre (by up to half a cell diagonal),
-    // which the exact-geometry lint can see as a sub-clearance near-miss against a
-    // neighbouring net's centre-aligned copper. Leaving the endpoint at its cell
-    // centre keeps every trace point centre-aligned — so two parallel finisher
-    // traces one track pitch apart stay exactly legal — while the cell centre is
-    // still within half a trace width of the route point, so the connectivity oracle
-    // joins them. (Slice-1's router emits cell-centre endpoints for the same reason
-    // and lints clean.)
-    // No endpoint snapping: legs route to a target CELL SET and continuity is carried
-    // by shared tree cells, so consecutive legs meet without snapping; pads connect
-    // because a half-pitch cell centre sits within half a trace width of the route
-    // point. Snapping a pad endpoint off its cell centre would, at this resolution,
-    // read to the exact lint as a sub-clearance near-miss against a neighbour's
-    // centre-aligned copper — so every emitted point stays centre-aligned.
+    // No endpoint snapping (the snap map stays empty): legs route to a target CELL
+    // SET and continuity is carried by shared tree cells, so consecutive legs meet
+    // without snapping, and a pad connects because the half-pitch cell centre sits
+    // within half a trace width of the route point. Every emitted point therefore
+    // stays cell-centre-aligned — which is also what the capsule clearance MARK
+    // assumes (it dilates the cell-centre centreline). Snapping a pad endpoint off
+    // its cell centre would read to the exact lint as a sub-clearance near-miss
+    // against a neighbour's centre-aligned copper.
     let snap: BTreeMap<(usize, usize, usize), Point2> = BTreeMap::new();
 
     // Seed the tree with route point 0; mark its halo as this net's copper.
@@ -572,10 +658,10 @@ fn finish_net(
         let bounds = leg_bounds(grid, tree_cells, targets, margin_cells);
         let path = astar::search_bounded(grid, conn_idx, targets, tree_cells, costs, Some(bounds))
             .ok_or_else(|| format!("no full-board path to {what}"))?;
-        for s in &path {
-            grid.mark_net_halo_euclid(s.layer, s.ix, s.iy, conn_idx, halo);
-            tree_cells.push(*s);
-        }
+        // Mark the leg's swept-clearance capsule (diagonal-safe) so a later finisher
+        // net keeps full clearance from this run's body, then fold it into the tree.
+        mark_path_capsule(grid, &path, conn_idx, halo);
+        tree_cells.extend_from_slice(&path);
         emit_path(grid, &path, &snap, &mut traces, &mut vias);
         Ok(())
     };
@@ -777,11 +863,10 @@ fn route_one_job(
                 )
             })?;
 
-        // Mark copper + halo and fold the path into the tree.
-        for s in &path {
-            wgrid.mark_net_halo_euclid(s.layer, s.ix, s.iy, conn_idx, halo);
-            tree_cells.push(*s);
-        }
+        // Mark copper + clearance capsule (diagonal-safe) and fold the path into
+        // the tree.
+        mark_path_capsule(wgrid, &path, conn_idx, halo);
+        tree_cells.extend_from_slice(&path);
 
         emit_path(wgrid, &path, &snap, &mut traces, &mut vias);
     }
@@ -1232,22 +1317,55 @@ mod tests {
         }
     }
 
-    /// The hotspot-repair finisher must stay orthogonal: it builds `finish_costs`
-    /// with the `diag = u32::MAX` sentinel, guarded by a `debug_assert` that this
-    /// test (a debug build) makes live. `congested` exercises the finisher (its
-    /// per-cell pass leaves failures the finisher repairs), so a finisher that
-    /// drifted to octilinear (`diag = DIAG_COST`) would panic here. We also assert
-    /// the run completes — the finisher ran without tripping its own invariant.
+    /// The hotspot-repair finisher routes OCTILINEARLY: it builds `finish_costs`
+    /// with `diag = DIAG_COST`, guarded by a `debug_assert` this (debug build) test
+    /// makes live. `congested` exercises the finisher (its per-cell pass leaves
+    /// failures the finisher repairs), so a finisher that drifted back to the
+    /// `u32::MAX` orthogonal sentinel would panic here. We also assert the run
+    /// completes sanely — the finisher ran without tripping its own invariant.
     #[test]
-    fn finisher_stays_orthogonal() {
+    fn finisher_routes_octilinearly() {
         let p = load("congested.json");
         let r = crate::pipeline::route_detailed(&p);
-        // Either it repaired nets or reported honest failures; either way the
-        // finisher's `debug_assert_eq!(finish_costs.diag, u32::MAX)` held.
         assert!(
             r.failed.len() <= p.connections.len(),
             "finisher produced a sane result"
         );
+    }
+
+    /// The win: the finisher actually EMITS diagonal (45°) segments now, and its
+    /// diagonal copper is DRC-clean. `quad` over-converges six central crossings the
+    /// per-cell pass cannot complete; the full-board finisher (leaf `usize::MAX`)
+    /// repairs them — octilinearly. We assert at least one finisher trace segment is a
+    /// true 45° run (|dx| ≈ |dy| > 0), and that the stitched solution lints CLEAN — so
+    /// the diagonal swept-clearance capsule held (no trace/trace clearance fault).
+    #[test]
+    fn finisher_emits_clean_diagonals() {
+        let p = load("quad.json");
+        let mesh = CapacityMesh::build(&p);
+        let plan = global_route(&p).plan;
+        let a = assign_crossings(&p, &mesh, &plan);
+        let r = route_cells(&p, &mesh, &a);
+        assert!(r.is_clean(), "quad must route clean through the finisher: {:?}", r.failed);
+        // Finisher routes carry the synthetic leaf id usize::MAX.
+        let finisher: Vec<&CellRoute> =
+            r.cell_routes.iter().filter(|cr| cr.leaf == usize::MAX).collect();
+        assert!(!finisher.is_empty(), "the finisher must have repaired at least one net");
+        let has_45 = finisher.iter().any(|cr| {
+            cr.traces.iter().any(|t| {
+                t.points.windows(2).any(|w| {
+                    let dx = (w[1].x - w[0].x).abs();
+                    let dy = (w[1].y - w[0].y).abs();
+                    dx > 1e-9 && dy > 1e-9 && (dx - dy).abs() < 1e-6
+                })
+            })
+        });
+        assert!(has_45, "the finisher must emit a 45° diagonal segment (the win)");
+        // The whole detailed solution (per-cell + finisher copper) lints CLEAN: the
+        // capsule MARK kept the diagonal finisher runs the full clearance apart.
+        let r = crate::pipeline::route_detailed(&p);
+        let vs = crate::lint::lint(&p, &r.solution);
+        assert!(vs.is_empty(), "finisher diagonals must lint clean, got {vs:?}");
     }
 
     /// Determinism: serialize twice, compare byte-for-byte.
