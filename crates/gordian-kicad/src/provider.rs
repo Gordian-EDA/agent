@@ -249,7 +249,7 @@ impl ToolProvider for PcbTools {
         if !sch.exists() {
             return None;
         }
-        let netlist = sch_layout::read::lift(self.ctx.env(), sch).ok()?;
+        let netlist = sch_io::read::lift(self.ctx.env(), sch).ok()?;
         let (mut score, mut defects) =
             self.review_netlist_with_erc(reviewer, intent, &netlist).await.ok()?;
 

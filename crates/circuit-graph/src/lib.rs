@@ -11,7 +11,7 @@
 //!
 //! Design goals:
 //! - **Pure & testable.** No KiCAD, geometry, or I/O — just data in, matches out.
-//!   The host (`sch-layout`) adapts its own structures into [`CircuitGraph`].
+//!   The host (`sch-place-core`) adapts its own structures into [`CircuitGraph`].
 //! - **Extensible.** A new idiom is one [`pattern::Pattern`] value; the matcher is
 //!   generic and never changes.
 //! - **Robust.** Optional roles/edges yield a graph-similarity *score* so a

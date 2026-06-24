@@ -7,7 +7,7 @@
 //! Given a design INTENT string, [`Corpus::find_similar`] ranks the descriptions
 //! with `fuzzy-matcher`'s `SkimMatcherV2` (fzf-style subsequence scoring, the
 //! project's mandated fuzzy ranker) and lifts the top matches' schematics to
-//! circuit-YAML via the existing [`sch_layout::read::lift`] path — so the agent
+//! circuit-YAML via the existing [`sch_io::read::lift`] path — so the agent
 //! studies references in the SAME language it authors in.
 //!
 //! ## Configurable + absent-safe
@@ -221,7 +221,7 @@ impl Corpus {
             }
             let meta = self.designs[idx].clone();
             let (yaml, lift_error) = match self.sch_path(&meta.id) {
-                Some(path) if path.is_file() => match sch_layout::read::lift(env, &path) {
+                Some(path) if path.is_file() => match sch_io::read::lift(env, &path) {
                     Ok(y) => {
                         successes += 1;
                         (Some(y), None)

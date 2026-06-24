@@ -4,9 +4,9 @@
 //! around, packaged as a one-command convenience.
 //!
 //! ```text
-//! cargo run -p agent --example eyeball                 # all bundled fixtures
-//! cargo run -p agent --example eyeball -- quad         # one named fixture
-//! cargo run -p agent --example eyeball -- path/to.json # an arbitrary problem
+//! cargo run -p gordian-kicad --example eyeball                 # all bundled fixtures
+//! cargo run -p gordian-kicad --example eyeball -- quad         # one named fixture
+//! cargo run -p gordian-kicad --example eyeball -- path/to.json # an arbitrary problem
 //! ```
 //!
 //! Legend: red = top-layer copper, blue = bottom layer, magenta rings = vias,
@@ -15,19 +15,19 @@
 
 use std::path::{Path, PathBuf};
 
+use gordian_kicad::tools_pcb::engine_svg::render_svg;
 use negotiated_mesh::pipeline::route_auto;
 use pcb_model::RouteProblem;
-use pcb_svg::svg::render_svg;
 
-/// The fixtures shipped with `pcb-engine`, rendered when no argument is given.
-const DEFAULT_FIXTURES: &[&str] = &["led-r", "quad", "congested-relief"];
+/// The fixtures shipped with `negotiated-mesh`, rendered when no argument is given.
+const DEFAULT_FIXTURES: &[&str] = &["led-r", "quad", "congested"];
 
 /// Pixels-per-mm multiplier over the SVG's native 10 px/mm — 6× gives a crisp
 /// ~60 px/mm raster without re-laying-out the vector art.
 const SCALE: f32 = 6.0;
 
 fn fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../pcb-engine/fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../negotiated-mesh/fixtures")
 }
 
 /// Resolve a CLI argument to a problem-JSON path: a bare name like `quad` maps to

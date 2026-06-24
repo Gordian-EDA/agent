@@ -1,6 +1,6 @@
 //! Simulated-annealing placement refinement.
 //!
-//! A direct analog of the schematic floorplan SA (`sch-layout::floorplan`): from
+//! A direct analog of the schematic floorplan SA (`sch-place-core::floorplan`): from
 //! the force-directed seed, anneal part positions to minimize an explicit cost
 //! ([`super::cost::place_cost`]), escaping the local minima the springs settle into.
 //! Crucially the SA OWNS its cost (overlap included), so — unlike the reverted

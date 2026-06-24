@@ -32,11 +32,14 @@
 //! - [`export`] — `export_board`, the synth wiring, and the copper-zone builders.
 //! - [`fab`] — `export_fab`: bundle a routed board into Gerbers/drill/pos/BOM.
 //! - [`render`] — `render_board`.
+//! - [`engine_svg`] — diagnostic SVG of the engine's own view (placement/routed),
+//!   the fast in-loop alternative to the `kicad-cli` production render.
 //! - [`interactive`] — live IPC board editing (`open_board`, `move_part`,
 //!   `route_track`, `set_net_width`, `board_state`) + `autoroute`.
 
 mod create;
 mod draft;
+pub mod engine_svg;
 mod export;
 mod fab;
 mod footprints;

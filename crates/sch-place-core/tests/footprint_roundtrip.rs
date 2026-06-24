@@ -5,8 +5,8 @@
 
 use kicad_cli_rs::env::KicadEnv;
 use kicad_sexpr::provider::RealSymbolProvider;
-use sch_layout::floorplan;
-use sch_layout::read::lift;
+use sch_place_core::floorplan;
+use sch_io::read::lift;
 
 #[test]
 fn footprint_survives_emit_then_lift() {

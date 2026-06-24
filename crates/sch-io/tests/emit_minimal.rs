@@ -3,7 +3,7 @@
 
 use kicad_cli_rs::cli::KicadCli;
 use kicad_cli_rs::env::KicadEnv;
-use sch_layout::write::SchematicWriter;
+use sch_io::write::SchematicWriter;
 
 #[test]
 fn emits_single_symbol_that_kicad_loads() {

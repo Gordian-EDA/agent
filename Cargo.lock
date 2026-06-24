@@ -1043,11 +1043,11 @@ dependencies = [
  "negotiated-mesh",
  "pcb-model",
  "pcb-place",
- "pcb-svg",
  "pcb-synth",
  "rayon",
  "resvg",
- "sch-layout",
+ "sch-io",
+ "sch-place-core",
  "serde",
  "serde_json",
  "specctra",
@@ -2097,17 +2097,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pcb-svg"
-version = "0.1.0"
-dependencies = [
- "grid-astar",
- "negotiated-mesh",
- "pcb-model",
- "pcb-place",
- "serde_json",
-]
-
-[[package]]
 name = "pcb-synth"
 version = "0.1.0"
 dependencies = [
@@ -2899,22 +2888,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sch-layout"
-version = "0.1.0"
-dependencies = [
- "anneal-place",
- "circuit-lang",
- "greedy-place",
- "kicad-cli-rs",
- "kicad-sexpr",
- "kiutils_kicad",
- "sch-io",
- "sch-model",
- "sch-place-core",
- "tempfile",
-]
-
-[[package]]
 name = "sch-model"
 version = "0.1.0"
 dependencies = [
@@ -2931,6 +2904,7 @@ version = "0.1.0"
 dependencies = [
  "circuit-graph",
  "circuit-lang",
+ "greedy-place",
  "indexmap 2.14.0",
  "kicad-cli-rs",
  "kicad-sexpr",
@@ -2938,6 +2912,7 @@ dependencies = [
  "sch-io",
  "sch-model",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

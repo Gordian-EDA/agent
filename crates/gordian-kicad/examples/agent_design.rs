@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
     // reproduced deterministically (re-render via layout_spike) without re-spending
     // an LLM call.
     std::fs::copy(&sch_path, std::path::Path::new(&out).with_extension("kicad_sch")).ok();
-    if let Ok(yaml) = sch_layout::read::lift(&env, &sch_path) {
+    if let Ok(yaml) = sch_io::read::lift(&env, &sch_path) {
         std::fs::write(std::path::Path::new(&out).with_extension("circuit.yaml"), yaml).ok();
     }
     if draft_path.exists() {

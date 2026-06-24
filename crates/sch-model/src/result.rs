@@ -1,7 +1,7 @@
 //! Shared emission types and identity-property keys.
 //!
-//! These live in `sch-layout` so the modern floorplan engine ([`crate::floorplan`])
-//! and the round-trip lifter ([`crate::lift`]) can use them.
+//! These live in `sch-model` so the floorplan engine (`sch-place-core`) and the
+//! round-trip reader (`sch-io::read`) can share them.
 
 /// Property key for the block a component belongs to.
 pub const AP_BLOCK: &str = "ap_block";

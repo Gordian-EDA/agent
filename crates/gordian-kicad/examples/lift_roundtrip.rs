@@ -13,7 +13,7 @@ fn main() -> anyhow::Result<()> {
     let provider = RealSymbolProvider::new(env.clone());
     let mut bad = 0;
     for path in std::env::args().skip(1) {
-        let yaml = match sch_layout::read::lift(&env, std::path::Path::new(&path)) {
+        let yaml = match sch_io::read::lift(&env, std::path::Path::new(&path)) {
             Ok(y) => y,
             Err(e) => {
                 println!("LIFT-FAIL {path}: {e}");

@@ -58,9 +58,9 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | `gordian-kicad` | The KiCAD domain — schematic/PCB tools, prompts, render — as a `gordian-core` `ToolProvider` |
 | `circuit-lang` | Parser, linter, and canonical emitter for the circuit markup language |
 | `circuit-graph` | Attributed circuit graph + a declarative idiom matcher |
-| `sch-layout` | Deterministic schematic floorplan engine (`Design` → `.kicad_sch`), over the `greedy-place`/`anneal-place` engines |
+| `sch-place-core` / `sch-io` / `sch-model` | Deterministic schematic floorplan core (`Design` → `.kicad_sch` and back), over the `greedy-place`/`anneal-place` engines, with the shared model + I/O layers |
 | `grid-astar` / `pcb-place` / `negotiated-mesh` | Deterministic placement + grid-A\* escape + capacity-mesh copper routing |
-| `pcb-synth` / `pcb-svg` / `drc-lint` | `.kicad_pcb` synthesis, board render, and DRC lint |
+| `pcb-synth` / `drc-lint` | `.kicad_pcb` synthesis and DRC lint |
 | `kicad-sexpr` / `kicad-cli-rs` / `kicad-ipc` / `specctra` | KiCAD file I/O, `kicad-cli` driver, live IPC session, Specctra DSN/SES |
 
 ## Testing

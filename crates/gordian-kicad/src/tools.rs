@@ -1,7 +1,7 @@
 //! The schematic + PCB tool registry the agent drives.
 //!
 //! Each tool is a thin, deterministic wrapper over logic that already lives in
-//! `circuit-lang`, `kicad-sexpr`/`kicad-cli-rs`, and `sch-layout`. The registry
+//! `circuit-lang`, `kicad-sexpr`/`kicad-cli-rs`, and `sch-place-core`/`sch-io`. The registry
 //! exposes two free functions, both consumed by the [`crate::PcbTools`] provider:
 //!
 //! - [`tool_defs`] — the JSON-Schema [`ToolDef`]s handed to the LLM.
@@ -56,8 +56,8 @@ use kicad_sexpr::provider::RealSymbolProvider;
 use kicad_sexpr::search::SymbolIndex;
 use kicad_sexpr::snapshot::SnapshotStore;
 
-use sch_layout::floorplan::{infer_ir, LayoutIr};
-use sch_layout::read::lift;
+use sch_place_core::floorplan::{infer_ir, LayoutIr};
+use sch_io::read::lift;
 
 use gordian_core::ToolDef;
 
@@ -1023,7 +1023,7 @@ fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // Production uses the locality-aware ANNEAL search (strictly ≥ greedy via the
     // candidate pick) so generated boards get the premium placement, not the
     // env-defaulted greedy free tier.
-    let emitted = sch_layout::floorplan::emit_strategy(&ctx.env, &design, &ir, Box::new(anneal_place::Anneal))
+    let emitted = sch_place_core::floorplan::emit_strategy(&ctx.env, &design, &ir, Box::new(anneal_place::Anneal))
         .context("rendering schematic")?;
     let rendered = emitted.sch;
     let diff = design_diff(prior_design.as_ref(), &design);

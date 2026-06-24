@@ -1,4 +1,4 @@
-//! `sch-model` — the shared schematic vocabulary the engine (`sch-layout`) builds
+//! `sch-model` — the shared schematic vocabulary the placement engine (`sch-place-core`) builds
 //! on: geometry primitives (`geom`), KiCAD `grid` snapping, deterministic `ids`,
 //! and the emit `result` types. No engine logic; just the types and pure helpers
 //! that every stage (infer → place → wire → write) speaks.

@@ -283,7 +283,7 @@ pub fn compose_single_sheet(
     let groups = refine_blocks(&design.blocks);
     let cross_sheet = cross_sheet_nets(&groups);
 
-    let mut groups_w: Vec<(String, sch_layout::write::SchematicWriter)> = Vec::new();
+    let mut groups_w: Vec<(String, sch_io::write::SchematicWriter)> = Vec::new();
     for (gname, members) in groups {
         // A sub-design holding this group's block(s). Mark every cross-sheet net this group
         // touches as a PORT so the engine emits one global label per group for the hop and
@@ -291,15 +291,15 @@ pub fn compose_single_sheet(
         let mut sub = design.clone();
         sub.blocks = members.into_iter().collect();
         mark_cross_sheet_ports(&mut sub, &cross_sheet);
-        let ir = sch_layout::floorplan::infer_ir(env, &sub);
+        let ir = sch_place_core::floorplan::infer_ir(env, &sub);
         // Lay out each group INDEPENDENTLY and keep its TYPED writer (not a rendered
         // string): the engine composer translates each group's items to its tile in mm
         // and folds them into one sheet — no string-level geometry math here.
-        let w = sch_layout::floorplan::emit_writer(env, &sub, &ir, Box::new(anneal_place::Anneal))
+        let w = sch_place_core::floorplan::emit_writer(env, &sub, &ir, Box::new(anneal_place::Anneal))
             .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
         groups_w.push((sanitize(&gname), w));
     }
-    let composed = sch_layout::floorplan::compose_writers(groups_w, design.name.as_deref());
+    let composed = sch_place_core::floorplan::compose_writers(groups_w, design.name.as_deref());
     let path = out_dir.join("root.kicad_sch");
     std::fs::write(&path, &composed)?;
     let _ = env; // reserved (validation hook); kept for signature symmetry

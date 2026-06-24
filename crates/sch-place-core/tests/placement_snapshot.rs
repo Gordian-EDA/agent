@@ -11,7 +11,7 @@
 
 use kicad_cli_rs::env::KicadEnv;
 use kicad_sexpr::provider::RealSymbolProvider;
-use sch_layout::floorplan::{self, LayoutIr};
+use sch_place_core::floorplan::{self, LayoutIr};
 use std::path::{Path, PathBuf};
 
 /// The aesthetic targets: the 4 tuned references (sidecar IR) + the grid demo

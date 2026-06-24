@@ -10,7 +10,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use circuit_lang::model::PinTarget;
-use sch_layout::read::lift;
+use sch_io::read::lift;
 
 use pcb_synth::placefp::part_from_footprint;
 use pcb_place::placement::{Edge, GroupHint, LockedAt, PlacementHints, Rect};

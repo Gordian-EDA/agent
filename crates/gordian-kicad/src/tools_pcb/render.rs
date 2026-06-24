@@ -71,7 +71,7 @@ pub fn render_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
                     layout_cost: 0.0,
                 },
             };
-            pcb_svg::svg::render_placement(&problem, &draft.hints, &result)
+            super::engine_svg::render_placement(&problem, &draft.hints, &result)
         }
         "routed" => {
             // Need route.json.
@@ -102,7 +102,7 @@ pub fn render_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             };
             let mut rp = to_route_problem(&problem, &placements);
             inject_keepouts(&mut rp, &draft.keepouts);
-            pcb_svg::svg::render_svg(&rp, &stored.solution, &stored.failed)
+            super::engine_svg::render_svg(&rp, &stored.solution, &stored.failed)
         }
         // The match above is exhaustive over {"placed","routed"}; the `other`
         // arm returned early, so this branch is unreachable.

@@ -46,15 +46,15 @@ fn render_fixture(env: &KicadEnv, yaml_path: &std::path::Path, out: &std::path::
 
     // INFER=1 → engine-inferred frame (no LLM/hand layout.json); else the sidecar.
     let ir = if std::env::var("INFER").is_ok() {
-        sch_layout::floorplan::infer_ir(env, &design)
+        sch_place_core::floorplan::infer_ir(env, &design)
     } else {
         let ir_path = yaml_path.to_string_lossy().replace(".circuit.yaml", ".layout.json");
         match std::fs::read_to_string(&ir_path) {
-            Ok(s) => sch_layout::floorplan::LayoutIr::from_json(&s)?,
-            Err(_) => sch_layout::floorplan::baseline_ir(&design),
+            Ok(s) => sch_place_core::floorplan::LayoutIr::from_json(&s)?,
+            Err(_) => sch_place_core::floorplan::baseline_ir(&design),
         }
     };
-    let emit = sch_layout::floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy))
+    let emit = sch_place_core::floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy))
         .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
 
     let tmp = tempfile::tempdir()?;

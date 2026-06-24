@@ -16,3 +16,7 @@ kicad-sexpr = { path = "../kicad-sexpr" }
 indexmap.workspace = true
 serde_json.workspace = true
 rayon.workspace = true
+
+[dev-dependencies]
+greedy-place = { path = "../greedy-place" }
+tempfile.workspace = true

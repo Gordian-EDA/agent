@@ -67,7 +67,7 @@ fn bench_one(
         anyhow::anyhow!("compile produced no design: {}", errs.join("; "))
     })?;
 
-    let ir = sch_layout::floorplan::infer_ir(env, &design);
+    let ir = sch_place_core::floorplan::infer_ir(env, &design);
     if std::env::var("SHOW_IR").is_ok() {
         eprintln!("  [{stem}] rails={:?}", ir.rails.keys().collect::<Vec<_>>());
         eprintln!("  [{stem}] frozen={:?}", ir.frozen);
@@ -76,7 +76,7 @@ fn bench_one(
         }
     }
     let t0 = std::time::Instant::now();
-    let emit = sch_layout::floorplan::emit_strategy(env, &design, &ir, Box::new(anneal_place::Anneal))
+    let emit = sch_place_core::floorplan::emit_strategy(env, &design, &ir, Box::new(anneal_place::Anneal))
         .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
     let secs = t0.elapsed().as_secs_f64();
 

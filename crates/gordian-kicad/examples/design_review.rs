@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     let png = gordian_kicad::render::svg_to_png(&svg, 1600)?;
     std::fs::write(&out, png)?;
     std::fs::copy(&sch_path, std::path::Path::new(&out).with_extension("kicad_sch")).ok();
-    if let Ok(y) = sch_layout::read::lift(&env, &sch_path) {
+    if let Ok(y) = sch_io::read::lift(&env, &sch_path) {
         std::fs::write(std::path::Path::new(&out).with_extension("circuit.yaml"), y).ok();
     }
     println!("done: {out}");
