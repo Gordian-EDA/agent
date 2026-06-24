@@ -120,18 +120,6 @@ pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
 
 pub(super) fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let area = body(area);
-    let s = &app.status;
-    // Lean footer: just provider · model, plus applied/context only once they're
-    // non-zero. Turn count and the /command list are dropped — the `/` popup and
-    // the welcome splash already cover discovery.
-    let mut left = format!("{} · {}", s.provider, short_model(&s.model));
-    if s.applied_count > 0 {
-        left.push_str(&format!(" · {} applied", s.applied_count));
-    }
-    if s.ctx_tokens > 0 {
-        let pct = (s.ctx_tokens as f64 / CONTEXT_WINDOW_TOKENS as f64 * 100.0).round() as u64;
-        left.push_str(&format!(" · ctx {} ({pct}%)", fmt_tokens(s.ctx_tokens)));
-    }
     // The right side only carries a hint that isn't already on screen. A pending
     // change shows its actions on the card, so the footer stays quiet there.
     let right = if app.running {
@@ -143,30 +131,89 @@ pub(super) fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     };
 
     // Compose a bar exactly `width` columns wide: pin `right` to the edge, give
-    // `left` the rest, and ellipsize `left` rather than let the two collide.
-    // (Char counts, not bytes — the labels carry multibyte punctuation.)
+    // `left` the rest, and progressively drop HUD fields (then ellipsize) rather
+    // than let the two collide. (Char counts, not bytes — multibyte punctuation.)
     let width = area.width as usize;
     let right_len = right.chars().count();
     let text = if width <= right_len {
         right.chars().take(width).collect::<String>()
     } else {
         let avail = width - right_len; // columns to the left of the hint
-        let left = if left.chars().count() > avail {
-            let kept: String = left.chars().take(avail.saturating_sub(1)).collect();
-            format!("{kept}…")
-        } else {
-            left
-        };
+        let left = status_left(app, avail);
         let pad = avail.saturating_sub(left.chars().count());
         format!("{left}{}{right}", " ".repeat(pad))
     };
     // A recessed footer (dim, no bar) rather than a heavy inverted band — it
-    // carries context and hints without competing with the transcript.
+    // carries the cost/context HUD and hints without competing with the transcript.
     let para = Paragraph::new(Line::from(Span::styled(
         text,
         Style::default().fg(Color::DarkGray),
     )));
     f.render_widget(para, area);
+}
+
+/// Build the footer's left run — model identity plus the live TOKEN / COST /
+/// CONTEXT / elapsed HUD — to fit within `avail` columns. Fields are joined by
+/// ` · ` and dropped from the tail (least essential first) until the run fits;
+/// the model anchor is ellipsized only as a last resort, matching the rest of
+/// the chrome's ellipsis discipline.
+fn status_left(app: &App, avail: usize) -> String {
+    let s = &app.status;
+    let l = &s.ledger;
+
+    // The anchor is always present (ellipsized last); the rest are HUD fields in
+    // priority order — earlier fields survive longer as the bar narrows.
+    let anchor = format!("{} · {}", s.provider, short_model(&s.model));
+    let mut fields: Vec<String> = Vec::new();
+    if s.applied_count > 0 {
+        fields.push(format!("{} applied", s.applied_count));
+    }
+    if l.total_tokens() > 0 {
+        fields.push(format!(
+            "{} tok ({}/{})",
+            fmt_tokens(l.total_tokens()),
+            fmt_tokens(l.input + l.cache_read + l.cache_write),
+            fmt_tokens(l.output),
+        ));
+    }
+    if let Some(cost) = l.cost(&s.model) {
+        fields.push(format!("${cost:.2}"));
+    } else if l.total_tokens() > 0 {
+        // Priced model unknown — show a placeholder, never a wrong number.
+        fields.push("—".into());
+    }
+    // A small "cached" badge when the cache is doing non-trivial work (showcases
+    // the prompt-caching win). Threshold avoids noise on tiny warmups.
+    if l.cache_read >= 1_000 {
+        fields.push(format!("⚡{} cached", fmt_tokens(l.cache_read)));
+    }
+    if s.ctx_tokens > 0 {
+        let used = s.ctx_tokens.min(CONTEXT_WINDOW_TOKENS);
+        let left_pct =
+            ((CONTEXT_WINDOW_TOKENS - used) as f64 / CONTEXT_WINDOW_TOKENS as f64 * 100.0).round();
+        fields.push(format!("{left_pct:.0}% ctx left"));
+    }
+    if let Some(secs) = app.turn_elapsed_secs() {
+        fields.push(format!("{secs}s"));
+    }
+
+    // Drop fields from the tail until the anchor + remaining fields fit, then
+    // ellipsize the anchor if even it overflows.
+    loop {
+        let joined = if fields.is_empty() {
+            anchor.clone()
+        } else {
+            format!("{anchor} · {}", fields.join(" · "))
+        };
+        if joined.chars().count() <= avail {
+            return joined;
+        }
+        if fields.pop().is_none() {
+            // Only the anchor is left and it still overflows — ellipsize it.
+            let kept: String = anchor.chars().take(avail.saturating_sub(1)).collect();
+            return format!("{kept}…");
+        }
+    }
 }
 
 pub(super) fn draw_help(f: &mut Frame, area: Rect) {

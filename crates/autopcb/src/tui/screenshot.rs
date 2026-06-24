@@ -249,6 +249,21 @@ fn seed_conversation(app: &mut App) {
     tool(app, "search_symbols", "\"buck converter\" → 12 hits");
     tool(app, "create_design", "8 parts → ok");
     tool(app, "run_erc", "0 errors, 2 warnings");
+    // Drive real usage so the footer's TOKEN / COST / CONTEXT / cached HUD shows:
+    // a cold first call (cache write) then a warm one (cache read) — the cached
+    // prefix is exactly the prompt-caching win the HUD is meant to surface.
+    app.update(Msg::Agent(AgentEvent::Usage {
+        input_tokens: 8_200,
+        output_tokens: 900,
+        cache_write_tokens: 6_400,
+        cache_read_tokens: 0,
+    }));
+    app.update(Msg::Agent(AgentEvent::Usage {
+        input_tokens: 9_100,
+        output_tokens: 1_400,
+        cache_write_tokens: 0,
+        cache_read_tokens: 6_400,
+    }));
     app.update(Msg::Agent(AgentEvent::AssistantText(
         "Done — the buck converter schematic compiles cleanly with **0 ERC errors**. The power \
          stage, feedback network, and decoupling are all in place. Want me to lay out the PCB next?"

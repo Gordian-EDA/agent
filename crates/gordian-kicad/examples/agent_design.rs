@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
         let (mut tin, mut tout) = (0u64, 0u64);
         while let Some(ev) = rx.recv().await {
             match ev {
-                gordian_core::AgentEvent::Usage { input_tokens, output_tokens } => {
+                gordian_core::AgentEvent::Usage { input_tokens, output_tokens, .. } => {
                     tin += input_tokens;
                     tout += output_tokens;
                 }

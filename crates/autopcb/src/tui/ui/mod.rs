@@ -340,6 +340,8 @@ mod tests {
         a.update(Msg::Agent(AgentEvent::Usage {
             input_tokens: 100,
             output_tokens: 1200,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
         }));
         a.update(Msg::Tick);
         let text = render_to_string(&mut a, 80, 24);
@@ -402,17 +404,43 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_shows_context_tokens_after_usage() {
-        let mut a = app();
+    fn status_bar_shows_the_cost_hud_after_usage() {
+        let mut a = app(); // bedrock opus-4-5 → priced at $5/$25 per 1M
         a.update(Msg::Agent(AgentEvent::Usage {
             input_tokens: 23_000,
             output_tokens: 400,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
         }));
-        // Wide enough that the footer's two halves don't collide (the left side
-        // ellipsizes gracefully on narrow terminals; here we want the full ctx).
-        let text = render_to_string(&mut a, 110, 24);
-        assert!(text.contains("ctx 23.4k"), "token display:\n{text}");
-        assert!(text.contains("(12%)"), "window percentage:\n{text}");
+        // Wide enough that every HUD field fits (narrow terminals drop fields;
+        // here we want the full token/cost/context/elapsed run).
+        let text = render_to_string(&mut a, 120, 24);
+        assert!(text.contains("23.4k tok"), "total tokens:\n{text}");
+        assert!(text.contains("(23.0k/400)"), "in/out split:\n{text}");
+        // 23000 in / 1M * $5 + 400 out / 1M * $25 = $0.115 + $0.01 = $0.12 (2dp).
+        assert!(text.contains("$0.12"), "session cost:\n{text}");
+        // ctx 23.4k of a 200k window → ~88% left.
+        assert!(text.contains("88% ctx left"), "context-left percentage:\n{text}");
+    }
+
+    #[test]
+    fn status_bar_shows_a_cached_badge_and_dash_for_unpriced_models() {
+        // An unknown model id has no price → cost renders "—", never wrong.
+        let mut a = App::new(Status::new(
+            "openai",
+            "some/unknown-model-9",
+            "/tmp/p/d.kicad_sch",
+            true,
+        ));
+        a.update(Msg::Agent(AgentEvent::Usage {
+            input_tokens: 10_000,
+            output_tokens: 500,
+            cache_write_tokens: 0,
+            cache_read_tokens: 8_000, // non-trivial cache read → "cached" badge
+        }));
+        let text = render_to_string(&mut a, 120, 24);
+        assert!(text.contains("cached"), "cache indicator shows:\n{text}");
+        assert!(text.contains('—'), "unpriced model renders a dash, not a number:\n{text}");
     }
 
     #[test]
@@ -501,15 +529,41 @@ mod tests {
         a.update(Msg::Agent(AgentEvent::Usage {
             input_tokens: 19_000,
             output_tokens: 200,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
         }));
-        // Arming Esc surfaces the right-side unwind hint; on a terminal too narrow
-        // for both halves, the left status must ellipsize rather than overlap it.
+        // Arming Esc surfaces the right-side unwind hint; once the HUD fields have
+        // all collapsed and even the model anchor can't fit beside the hint, the
+        // anchor itself ellipsizes rather than overlapping it.
         a.update(Msg::Cancel);
-        let text = render_to_string(&mut a, 56, 24);
+        let text = render_to_string(&mut a, 36, 24);
         let bar = text.lines().last().expect("status row");
         // The right-edge hint survives intact; the left status is ellipsized.
         assert!(bar.contains("unwind"), "right hint pinned to the edge:\n{bar}");
         assert!(bar.contains('…'), "left status is truncated, not overlapped:\n{bar}");
+    }
+
+    #[test]
+    fn status_hud_collapses_fields_when_the_bar_is_narrow() {
+        let mut a = app();
+        a.update(Msg::Agent(AgentEvent::Usage {
+            input_tokens: 23_000,
+            output_tokens: 400,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
+        }));
+        // Wide: the full HUD (tokens, cost, context-left) is present.
+        let wide = render_to_string(&mut a, 120, 24);
+        let wide_bar = wide.lines().last().expect("status row");
+        assert!(wide_bar.contains("ctx left"), "wide bar keeps context field:\n{wide_bar}");
+        assert!(wide_bar.contains('$'), "wide bar keeps cost field:\n{wide_bar}");
+        assert!(wide_bar.contains("tok"), "wide bar keeps token field:\n{wide_bar}");
+
+        // Narrow: tail fields drop, but the model anchor always survives.
+        let narrow = render_to_string(&mut a, 30, 24);
+        let narrow_bar = narrow.lines().last().expect("status row");
+        assert!(narrow_bar.contains("opus"), "model anchor survives the collapse:\n{narrow_bar}");
+        assert!(!narrow_bar.contains("ctx left"), "tail field dropped when narrow:\n{narrow_bar}");
     }
 
     #[test]

@@ -193,11 +193,17 @@ impl App {
             AgentEvent::Usage {
                 input_tokens,
                 output_tokens,
+                cache_write_tokens,
+                cache_read_tokens,
             } => {
                 // What the next request will roughly resend is this whole call.
                 self.status.ctx_tokens = input_tokens + output_tokens;
-                self.status.total_input_tokens += input_tokens;
-                self.status.total_output_tokens += output_tokens;
+                self.status.ledger.record(
+                    input_tokens,
+                    output_tokens,
+                    cache_write_tokens,
+                    cache_read_tokens,
+                );
             }
             AgentEvent::Compacted {
                 messages_before,

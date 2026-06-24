@@ -5,6 +5,7 @@
 use std::time::{Duration, Instant};
 
 use super::{Entry, NoticeLevel, PendingDiff, TurnEndReason, UnwindPicker};
+use crate::tui::pricing::Ledger;
 
 /// Static-ish status shown in the status bar.
 #[derive(Clone, Debug)]
@@ -25,9 +26,8 @@ pub struct Status {
     /// history + tools), plus its output — what the *next* call will roughly
     /// resend. 0 until the first call reports usage.
     pub ctx_tokens: u64,
-    /// Cumulative provider-reported tokens this session.
-    pub total_input_tokens: u64,
-    pub total_output_tokens: u64,
+    /// Cumulative session token usage + cost basis (the HUD's source of truth).
+    pub ledger: Ledger,
 }
 
 impl Status {
@@ -45,8 +45,7 @@ impl Status {
             applied_count: 0,
             turn_count: 0,
             ctx_tokens: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
+            ledger: Ledger::default(),
         }
     }
 }
@@ -104,7 +103,7 @@ pub struct App {
     /// When the current pause began, if a gate is open right now. `None` between
     /// gates; folded into `paused_total` when the gate resolves.
     pub paused_since: Option<Instant>,
-    /// `total_output_tokens` snapshot at turn start, so the running line can show
+    /// `ledger.output` snapshot at turn start, so the running line can show
     /// the output tokens streamed *this* turn ([`App::turn_output_tokens`]).
     pub turn_output_base: u64,
     /// Tool calls started during the current turn, counted from `ToolStarted`
@@ -184,7 +183,7 @@ impl App {
         self.turn_started = Some(Instant::now());
         self.paused_total = Duration::ZERO;
         self.paused_since = None;
-        self.turn_output_base = self.status.total_output_tokens;
+        self.turn_output_base = self.status.ledger.output;
         self.turn_tool_calls = 0;
         self.active_tool = None;
         self.scroll = 0;
@@ -278,7 +277,8 @@ impl App {
     /// Output tokens streamed during the current turn (for the running line).
     pub fn turn_output_tokens(&self) -> u64 {
         self.status
-            .total_output_tokens
+            .ledger
+            .output
             .saturating_sub(self.turn_output_base)
     }
 }

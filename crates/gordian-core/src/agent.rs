@@ -127,8 +127,15 @@ pub enum AgentEvent {
     /// post-write digest (e.g. ERC counts).
     Applied { summary: String },
     /// Provider-reported token usage for one model call. `input_tokens` is the
-    /// full prompt size (system + history + tools) — i.e. the live context.
-    Usage { input_tokens: u64, output_tokens: u64 },
+    /// full prompt size (system + history + tools) — i.e. the live context — and
+    /// *includes* `cache_write_tokens` and `cache_read_tokens`. The cache counts
+    /// let a UI bill the cached prefix at the cheaper rate and surface caching.
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_write_tokens: u64,
+        cache_read_tokens: u64,
+    },
     /// `compact` replaced the conversation history with a summary pair.
     Compacted { messages_before: usize, messages_after: usize },
     /// The turn finished.
@@ -320,6 +327,8 @@ impl Agent {
             AgentEvent::Usage {
                 input_tokens: completion.input_tokens,
                 output_tokens: completion.output_tokens,
+                cache_write_tokens: completion.cache_write_tokens,
+                cache_read_tokens: completion.cache_read_tokens,
             },
         );
 
@@ -390,6 +399,8 @@ impl Agent {
                 AgentEvent::Usage {
                     input_tokens: completion.input_tokens,
                     output_tokens: completion.output_tokens,
+                    cache_write_tokens: completion.cache_write_tokens,
+                    cache_read_tokens: completion.cache_read_tokens,
                 },
             );
 

@@ -28,6 +28,7 @@
 pub mod app;
 pub mod event;
 pub mod md;
+pub mod pricing;
 pub mod ui;
 
 #[cfg(test)]
@@ -305,10 +306,17 @@ impl Shell {
                 "model: {} ({}) · turns {} · applied {}",
                 s.model, s.provider, s.turn_count, s.applied_count
             ),
-            format!(
-                "tokens: ctx {} · session {} in / {} out",
-                s.ctx_tokens, s.total_input_tokens, s.total_output_tokens
-            ),
+            {
+                let l = &s.ledger;
+                let cost = l
+                    .cost(&s.model)
+                    .map(|c| format!("${c:.2}"))
+                    .unwrap_or_else(|| "—".into());
+                format!(
+                    "tokens: ctx {} · session {} in / {} out · {} cached · {cost}",
+                    s.ctx_tokens, l.input, l.output, l.cache_read
+                )
+            },
         ];
         match stats {
             Some(c) => lines.push(format!(

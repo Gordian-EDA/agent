@@ -546,17 +546,27 @@ mod tests {
     #[test]
     fn usage_events_update_token_status() {
         let mut a = app();
+        // Cold first call: 800 of the 1000 input was a cache write.
         a.update(Msg::Agent(AgentEvent::Usage {
             input_tokens: 1000,
             output_tokens: 200,
+            cache_write_tokens: 800,
+            cache_read_tokens: 0,
         }));
+        // Warm second call: reads the 800 back, 700 fresh input.
         a.update(Msg::Agent(AgentEvent::Usage {
             input_tokens: 1500,
             output_tokens: 300,
+            cache_write_tokens: 0,
+            cache_read_tokens: 800,
         }));
         assert_eq!(a.status.ctx_tokens, 1800, "latest call defines the context");
-        assert_eq!(a.status.total_input_tokens, 2500);
-        assert_eq!(a.status.total_output_tokens, 500);
+        let l = &a.status.ledger;
+        assert_eq!(l.input, 200 + 700, "full-price input excludes cache reads/writes");
+        assert_eq!(l.output, 500);
+        assert_eq!(l.cache_write, 800);
+        assert_eq!(l.cache_read, 800);
+        assert_eq!(l.total_tokens(), 900 + 500 + 800 + 800);
     }
 
     #[test]
