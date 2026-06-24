@@ -105,29 +105,38 @@ pub(super) fn draw_diff(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(body(area));
     f.render_widget(block, body(area));
 
+    // Each refdes is a background-tinted chip: a soft green band for an add, red
+    // for a delete, neutral slate for a modify — so the eye reads the operation
+    // from the fill, not just a leading glyph. A plain gap separates chips so the
+    // bands don't merge into one bar.
     let mut spans: Vec<Span> = Vec::new();
     for r in &d.added {
-        spans.push(Span::styled(format!("+ {r}   "), Style::default().fg(Color::Green)));
+        spans.push(chip(format!("+ {r}"), Color::Green, Color::Rgb(22, 40, 26)));
+        spans.push(chip_gap());
     }
     for r in &d.removed {
-        spans.push(Span::styled(format!("- {r}   "), Style::default().fg(Color::Red)));
+        spans.push(chip(format!("- {r}"), Color::Red, Color::Rgb(46, 24, 28)));
+        spans.push(chip_gap());
     }
     for r in &d.changed {
-        spans.push(Span::styled(format!("~ {r}   "), Style::default().fg(Color::Cyan)));
+        spans.push(chip(format!("~ {r}"), Color::Gray, Color::Rgb(38, 40, 51)));
+        spans.push(chip_gap());
     }
     spans.push(Span::styled(
         format!("nets {} → {}", d.nets_before, d.nets_after),
         Style::default().fg(Color::DarkGray),
     ));
 
+    // The key letters are sourced from the keybinding definitions, not hardcoded,
+    // so the labels can never drift from what `event::map_key` actually accepts.
     let hint = Line::from(vec![
         Span::styled(
-            "[a] approve",
+            format!("[{}] approve", super::super::event::APPROVE_KEY),
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         ),
         Span::raw("    "),
         Span::styled(
-            "[r] reject",
+            format!("[{}] reject", super::super::event::REJECT_KEY),
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         Span::styled("    Esc rejects", Style::default().fg(Color::DarkGray)),
@@ -136,6 +145,20 @@ pub(super) fn draw_diff(f: &mut Frame, area: Rect, app: &App) {
     let para =
         Paragraph::new(vec![Line::from(spans), Line::from(""), hint]).wrap(Wrap { trim: true });
     f.render_widget(para, inner);
+}
+
+/// One background-tinted diff chip: bold `fg` label on a soft dark `bg` band, with
+/// a one-cell pad on each side so the fill frames the refdes.
+fn chip(label: String, fg: Color, bg: Color) -> Span<'static> {
+    Span::styled(
+        format!(" {label} "),
+        Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+    )
+}
+
+/// The un-tinted gap between two chips, so their background bands stay distinct.
+fn chip_gap() -> Span<'static> {
+    Span::raw("  ")
 }
 
 /// Rows the composer needs: one per draft line (split on `\n`), inside the

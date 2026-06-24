@@ -10,8 +10,14 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::app::{App, Msg};
 
+/// The apply-gate keys, defined once here — the single source of truth shared by
+/// the key mapping below and the gate card's hint text ([`super::ui`]), so a key
+/// and its on-screen label can never drift apart.
+pub const APPROVE_KEY: char = 'a';
+pub const REJECT_KEY: char = 'r';
+
 /// Map a key press to a [`Msg`], given the current [`App`] state (which decides
-/// whether `a`/`r` are gate keys or plain text). Returns `None` for keys we
+/// whether the gate keys are decisions or plain text). Returns `None` for keys we
 /// ignore.
 pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
     // Only react to presses (Windows also emits Release/Repeat).
@@ -62,9 +68,9 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
         KeyCode::Down if app.input_active() => Some(Msg::HistoryNext),
         KeyCode::Up => Some(Msg::ScrollUp),
         KeyCode::Down => Some(Msg::ScrollDown),
-        // While the apply-gate is open, a/r are decisions, not text.
-        KeyCode::Char('a') if gate_open => Some(Msg::Approve),
-        KeyCode::Char('r') if gate_open => Some(Msg::Reject),
+        // While the apply-gate is open, the gate keys are decisions, not text.
+        KeyCode::Char(APPROVE_KEY) if gate_open => Some(Msg::Approve),
+        KeyCode::Char(REJECT_KEY) if gate_open => Some(Msg::Reject),
         KeyCode::Char(c) => Some(Msg::Char(c)),
         _ => None,
     }
