@@ -1,0 +1,432 @@
+//! The event reducer: [`Msg`] in, [`Action`] out.
+//!
+//! [`App::update`] is the single entry point — it maps a keypress, an agent
+//! event, or an async arrival into a state transition and returns the [`Action`]
+//! the shell performs. The submit / command-dispatch / apply-gate transitions it
+//! delegates to live here too ([`App::submit`], [`App::run_command`],
+//! [`App::cancel`], [`App::resolve_pending`]).
+
+use gordian_core::AgentEvent;
+use serde_json::Value;
+
+use super::{App, Entry, PendingDiff};
+
+/// An input event or async arrival the [`App`] reacts to.
+#[derive(Clone, Debug)]
+pub enum Msg {
+    /// A printable character typed into the input line.
+    Char(char),
+    /// Backspace — delete the char before the cursor.
+    Backspace,
+    /// Delete — delete the char under the cursor.
+    Delete,
+    /// Move the input cursor.
+    CursorLeft,
+    CursorRight,
+    Home,
+    End,
+    /// Ctrl-U — kill from the line start to the cursor.
+    KillToStart,
+    /// Ctrl-W — kill the word before the cursor.
+    KillWordBack,
+    /// Recall the previous / next prompt from history (Up / Down).
+    HistoryPrev,
+    HistoryNext,
+    /// Tab — complete / cycle the `/command` matching the input.
+    Complete,
+    /// Enter — submit the input line (a prompt or a `/command`).
+    Submit,
+    /// Approve the pending diff (`a`).
+    Approve,
+    /// Reject the pending diff (`r`).
+    Reject,
+    /// Scroll the transcript up / down by one line.
+    ScrollUp,
+    ScrollDown,
+    /// Jump the transcript by roughly a viewport height (PgUp / PgDn). The
+    /// shell passes the live viewport height so the jump tracks the window.
+    PageUp(u16),
+    PageDown(u16),
+    /// Shift/Alt+Enter — insert a literal newline into the composer (a
+    /// multi-line prompt) rather than submitting.
+    Newline,
+    /// Esc — close help / reject a gate / clear input / cancel a turn / arm
+    /// (then perform) a context unwind, in that order of precedence.
+    Cancel,
+    /// Ctrl-C — quit unconditionally.
+    ForceQuit,
+    /// A periodic animation tick from the shell (advances the spinner).
+    Tick,
+    /// An event from the running agent turn.
+    Agent(AgentEvent),
+    /// The apply-gate fired: a dry-run diff awaits a decision.
+    PendingDiff(Value),
+    /// A turn finished (the spawned task joined). This is the single, reliable
+    /// teardown point — it fires exactly once per turn (from the join channel,
+    /// or directly from the shell on a user abort) and carries *why* the turn
+    /// stopped so the indicator can be labelled. Clears the running flag even if
+    /// no `TurnDone` event arrived (e.g. the turn errored or was interrupted).
+    TurnEnded(TurnEndReason),
+}
+
+/// Why an in-flight turn stopped, carried on [`Msg::TurnEnded`]. The agent loop
+/// reports `Completed`/`IterationCap` (via its `StopReason`); the shell adds
+/// `Interrupted` (user abort) and `Error`; `/compact` reports `Compacted`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TurnEndReason {
+    /// The model returned a final reply — a clean finish.
+    Completed,
+    /// The loop hit its per-turn iteration cap and was cut off mid-work.
+    IterationCap,
+    /// The user pressed Esc to abort the turn.
+    Interrupted,
+    /// The turn failed (provider/network/tool error); carries the message.
+    Error(String),
+    /// A `/compact` run finished (its own shrink note is shown separately).
+    Compacted,
+}
+
+/// What the shell must do after an [`App::update`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum Action {
+    /// Do nothing further.
+    None,
+    /// Spawn an agent turn with this prompt.
+    SpawnTurn(String),
+    /// Resolve the pending apply-gate with this decision.
+    ResolveApproval(bool),
+    /// Abort the in-flight agent turn.
+    CancelTurn,
+    /// Restore the previous schematic from the snapshot store.
+    Undo,
+    /// `/clear` — drop the agent's conversation history (the transcript is
+    /// already cleared by the time this is returned).
+    ClearContext,
+    /// Double-Esc — the shell fetches the agent's unwindable turns and opens the
+    /// picker via [`App::open_unwind`].
+    OpenUnwind,
+    /// The picker was confirmed: pop this many of the agent's most recent turns,
+    /// then roll the transcript back via [`App::apply_unwind_to`].
+    UnwindTo(usize),
+    /// `/compact` — run the agent's context compaction (spinner like a turn).
+    Compact,
+    /// `/context` — the shell gathers agent stats and prints them.
+    ShowContext,
+    /// Tear down the TUI and exit.
+    Quit,
+}
+
+impl App {
+    /// Apply one message, mutating state and returning the shell's next action.
+    pub fn update(&mut self, msg: Msg) -> Action {
+        // While the unwind picker owns the screen it is modal: arrow keys move the
+        // selection, Enter confirms, Esc cancels, and every other key is swallowed
+        // so it can't disturb the input or scroll underneath.
+        if self.unwind.is_some() {
+            return match msg {
+                Msg::HistoryPrev | Msg::ScrollUp => {
+                    self.unwind_move(-1);
+                    Action::None
+                }
+                Msg::HistoryNext | Msg::ScrollDown => {
+                    self.unwind_move(1);
+                    Action::None
+                }
+                Msg::Submit | Msg::Approve => self.confirm_unwind(),
+                Msg::Cancel => {
+                    self.unwind = None;
+                    Action::None
+                }
+                _ => Action::None,
+            };
+        }
+
+        // Any user action other than another Esc disarms the pending unwind.
+        if !matches!(
+            msg,
+            Msg::Cancel | Msg::Tick | Msg::Agent(_) | Msg::PendingDiff(_) | Msg::TurnEnded(_)
+        ) {
+            self.esc_armed = false;
+        }
+        // Any input change other than Tab itself restarts completion cycling.
+        // Submit is excluded so it can read the highlighted completion (it
+        // resets the cycle itself once it has decided accept-vs-run).
+        if !matches!(
+            msg,
+            Msg::Complete
+                | Msg::Submit
+                | Msg::Tick
+                | Msg::Agent(_)
+                | Msg::PendingDiff(_)
+                | Msg::TurnEnded(_)
+                | Msg::ScrollUp
+                | Msg::ScrollDown
+                | Msg::PageUp(_)
+                | Msg::PageDown(_)
+        ) {
+            self.completion_stem = None;
+            self.completion_idx = None;
+        }
+
+        match msg {
+            Msg::Char(c) => {
+                // While a diff is pending, the keyboard belongs to the gate.
+                if self.pending.is_some() {
+                    match c {
+                        'a' => return self.resolve_pending(true),
+                        'r' => return self.resolve_pending(false),
+                        _ => return Action::None,
+                    }
+                }
+                self.insert_char(c);
+                Action::None
+            }
+            Msg::Backspace => {
+                if self.cursor > 0 {
+                    let at = self.byte_at(self.cursor - 1);
+                    self.input.remove(at);
+                    self.cursor -= 1;
+                }
+                Action::None
+            }
+            Msg::Delete => {
+                if self.cursor < self.char_len() {
+                    let at = self.byte_at(self.cursor);
+                    self.input.remove(at);
+                }
+                Action::None
+            }
+            Msg::CursorLeft => {
+                self.cursor = self.cursor.saturating_sub(1);
+                Action::None
+            }
+            Msg::CursorRight => {
+                self.cursor = (self.cursor + 1).min(self.char_len());
+                Action::None
+            }
+            Msg::Home => {
+                self.cursor = 0;
+                Action::None
+            }
+            Msg::End => {
+                self.cursor = self.char_len();
+                Action::None
+            }
+            Msg::KillToStart => {
+                let at = self.byte_at(self.cursor);
+                self.input.drain(..at);
+                self.cursor = 0;
+                Action::None
+            }
+            Msg::KillWordBack => {
+                self.kill_word_back();
+                Action::None
+            }
+            Msg::HistoryPrev => {
+                self.history_prev();
+                Action::None
+            }
+            Msg::HistoryNext => {
+                self.history_next();
+                Action::None
+            }
+            Msg::Complete => {
+                if self.pending.is_none() {
+                    self.complete_next();
+                }
+                Action::None
+            }
+            Msg::Submit => self.submit(),
+            Msg::Approve => self.resolve_pending(true),
+            Msg::Reject => self.resolve_pending(false),
+            Msg::ScrollUp => {
+                self.scroll = self.scroll.saturating_add(1);
+                Action::None
+            }
+            Msg::ScrollDown => {
+                self.scroll = self.scroll.saturating_sub(1);
+                Action::None
+            }
+            Msg::PageUp(h) => {
+                self.scroll = self.scroll.saturating_add(h.max(1));
+                Action::None
+            }
+            Msg::PageDown(h) => {
+                self.scroll = self.scroll.saturating_sub(h.max(1));
+                Action::None
+            }
+            Msg::Newline => {
+                if self.pending.is_none() {
+                    self.insert_char('\n');
+                }
+                Action::None
+            }
+            Msg::Cancel => self.cancel(),
+            Msg::ForceQuit => {
+                self.should_quit = true;
+                Action::Quit
+            }
+            Msg::Tick => {
+                if self.running {
+                    self.spinner = self.spinner.wrapping_add(1);
+                }
+                Action::None
+            }
+            Msg::Agent(ev) => {
+                self.on_agent_event(ev);
+                Action::None
+            }
+            Msg::PendingDiff(v) => {
+                self.pending = Some(PendingDiff::from_dry_run(&v));
+                Action::None
+            }
+            Msg::TurnEnded(reason) => {
+                self.end_turn(reason);
+                Action::None
+            }
+        }
+    }
+
+    /// Esc, layered: close help → reject the gate → clear a non-empty input →
+    /// cancel a running turn → arm, then perform, a one-turn context unwind.
+    /// Esc never quits; that's `Ctrl-C` or `/quit`.
+    fn cancel(&mut self) -> Action {
+        if self.help {
+            self.help = false;
+            Action::None
+        } else if self.pending.is_some() {
+            self.resolve_pending(false)
+        } else if !self.input.is_empty() {
+            self.clear_input();
+            Action::None
+        } else if self.running {
+            // The shell aborts the task and replies with `TurnEnded(Interrupted)`,
+            // which posts the "⊘ Interrupted after …" indicator — no separate
+            // note needed here.
+            Action::CancelTurn
+        } else if self.esc_armed {
+            self.esc_armed = false;
+            Action::OpenUnwind
+        } else {
+            self.esc_armed = true;
+            Action::None
+        }
+    }
+
+    /// Confirm the picker: close it and ask the shell to drop `selected + 1`
+    /// turns (the selected prompt and everything after it).
+    fn confirm_unwind(&mut self) -> Action {
+        match self.unwind.take() {
+            Some(p) => Action::UnwindTo(p.selected + 1),
+            None => Action::None,
+        }
+    }
+
+    /// Submit the input line: a `/command` or a prompt. When the user has
+    /// highlighted a completion (Tab-cycled into the popup), Enter accepts it
+    /// into the input instead of submitting — they confirm the command first,
+    /// then press Enter again to run it. A bare `/help` with no highlight still
+    /// submits directly.
+    fn submit(&mut self) -> Action {
+        if let Some((matches, Some(idx))) = self.completion_view() {
+            self.input = matches[idx].name.to_string();
+            self.cursor = self.char_len();
+            self.completion_stem = None;
+            self.completion_idx = None;
+            return Action::None;
+        }
+        let line = self.input.trim().to_string();
+        if line.is_empty() {
+            return Action::None;
+        }
+        if line.starts_with('/') {
+            self.clear_input();
+            return self.run_command(&line);
+        }
+        if let Some(cmd) = line.strip_prefix(':') {
+            // The old prefix: nudge instead of sending ":help" to the model.
+            self.clear_input();
+            self.transcript.push(Entry::system(format!(
+                "commands now start with / — try /{}",
+                cmd.trim()
+            )));
+            return Action::None;
+        }
+        if self.running {
+            // Don't start a second turn; the draft stays in the input line.
+            return Action::None;
+        }
+        self.clear_input();
+        if self.history.last() != Some(&line) {
+            self.history.push(line.clone());
+        }
+        self.transcript.push(Entry::user(line.clone()));
+        self.status.turn_count += 1;
+        self.begin_turn();
+        Action::SpawnTurn(line)
+    }
+
+    /// Run a `/command` (the leading slash is included in `line`).
+    fn run_command(&mut self, line: &str) -> Action {
+        match line.trim() {
+            "/auto" => {
+                self.auto = !self.auto;
+                let state = if self.auto { "ON (yolo)" } else { "OFF" };
+                self.transcript
+                    .push(Entry::system(format!("apply-gate auto-approve: {state}")));
+                Action::None
+            }
+            "/undo" => {
+                if self.running {
+                    self.transcript
+                        .push(Entry::system("can't undo while a turn is running"));
+                    Action::None
+                } else {
+                    Action::Undo
+                }
+            }
+            "/clear" => {
+                self.transcript.clear();
+                self.scroll = 0;
+                Action::ClearContext
+            }
+            "/context" => Action::ShowContext,
+            "/compact" => {
+                if self.running {
+                    self.transcript
+                        .push(Entry::system("can't compact while a turn is running"));
+                    return Action::None;
+                }
+                self.begin_turn();
+                self.transcript.push(Entry::system("compacting context…"));
+                Action::Compact
+            }
+            "/help" => {
+                self.help = !self.help;
+                Action::None
+            }
+            "/quit" | "/q" => {
+                self.should_quit = true;
+                Action::Quit
+            }
+            other => {
+                self.transcript.push(Entry::system(format!(
+                    "unknown command {other} — /help lists them"
+                )));
+                Action::None
+            }
+        }
+    }
+
+    /// Resolve a pending apply-gate decision. No-op (returns `None`) if nothing
+    /// is pending.
+    fn resolve_pending(&mut self, approve: bool) -> Action {
+        if self.pending.take().is_none() {
+            return Action::None;
+        }
+        let note = if approve { "approved" } else { "rejected" };
+        self.transcript
+            .push(Entry::system(format!("change {note}")));
+        Action::ResolveApproval(approve)
+    }
+}
