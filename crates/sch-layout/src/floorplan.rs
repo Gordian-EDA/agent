@@ -1549,6 +1549,10 @@ struct Item {
     refdes: String,
     part: String,
     value: String,
+    /// Footprint lib_id from the kernel `Component`, carried to emit so the
+    /// `.kicad_sch` symbol records its assignment. Multi-unit parts set this on
+    /// the FIRST emitted unit only (like `value`) to avoid duplicate fields.
+    footprint: Option<String>,
     geom: SymbolGeometry,
     /// (pin number, pin name, net or None for NC). For a multi-unit part this
     /// holds only the pins of THIS item's `unit` (each unit is its own Item).
@@ -1913,7 +1917,17 @@ fn build_writer(
         w.set_title(name);
     }
     for it in items {
-        w.add_symbol(env, &it.part, &it.refdes, &it.value, it.at, it.angle)?;
+        w.add_symbol_full(
+            env,
+            &it.part,
+            &it.refdes,
+            &it.value,
+            it.at,
+            it.angle,
+            it.footprint.as_deref(),
+            &[],
+            None,
+        )?;
         if it.unit != 1 {
             w.set_unit_last(it.unit);
         }
@@ -2033,6 +2047,7 @@ fn gather(env: &KicadEnv, design: &Design) -> io::Result<Vec<Item>> {
                     // Show the MPN/value on the FIRST placed unit only — N copies
                     // of "MCP6002" across the units would just be clutter.
                     value: if k == 0 { value.clone() } else { String::new() },
+                    footprint: if k == 0 { comp.footprint.clone() } else { None },
                     geom: geom.clone(),
                     pins: unit_pins,
                     at: [0.0, 0.0],

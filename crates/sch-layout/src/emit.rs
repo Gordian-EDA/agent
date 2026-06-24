@@ -66,6 +66,11 @@ struct Instance {
     lib_id: String,
     refdes: String,
     value: String,
+    /// Footprint lib_id for the symbol's `Footprint` property, or `None` when the
+    /// part is unassigned (emits an empty property, KiCAD's placeholder). Sourced
+    /// from the kernel `Component.footprint` via `Item` (the schematic-side home
+    /// of footprint assignment — see docs/specs/unified-kicad-pcb-state.md).
+    footprint: Option<String>,
     /// Grid-snapped sheet position.
     at: [f64; 2],
     /// Orientation in degrees (0/90/180/270).
@@ -285,7 +290,7 @@ impl SchematicWriter {
         at: [f64; 2],
         angle: f64,
     ) -> io::Result<()> {
-        self.add_symbol_full(env, lib_id, refdes, value, at, angle, &[], None)
+        self.add_symbol_full(env, lib_id, refdes, value, at, angle, None, &[], None)
     }
 
     /// Place one symbol instance with reconciliation metadata.
@@ -310,6 +315,7 @@ impl SchematicWriter {
         value: &str,
         at: [f64; 2],
         angle: f64,
+        footprint: Option<&str>,
         extra_props: &[(String, String)],
         uuid: Option<String>,
     ) -> io::Result<()> {
@@ -332,6 +338,7 @@ impl SchematicWriter {
             lib_id: lib_id.to_string(),
             refdes: refdes.to_string(),
             value: value.to_string(),
+            footprint: footprint.map(str::to_string),
             at: snap_point(at),
             angle,
             mirror: false,
@@ -2133,7 +2140,8 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
         );
     }
     s.push_str("\t\t)\n");
-    let _ = writeln!(s, "\t\t(property \"Footprint\" \"\"");
+    let footprint = escape_sexpr_string(inst.footprint.as_deref().unwrap_or(""));
+    let _ = writeln!(s, "\t\t(property \"Footprint\" \"{footprint}\"");
     let _ = writeln!(s, "\t\t\t(at {x} {y} 0)");
     s.push_str("\t\t\t(effects (font (size 1.27 1.27)) (hide yes))\n");
     s.push_str("\t\t)\n");
@@ -2426,6 +2434,43 @@ mod tests {
                 None
             }
         }
+    }
+
+    #[test]
+    fn writes_footprint_property_from_instance() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        w.add_symbol_full(
+            &env,
+            "Device:C",
+            "C1",
+            "100nF",
+            [127.0, 63.5],
+            0.0,
+            Some("Capacitor_SMD:C_0603_1608Metric"),
+            &[],
+            None,
+        )
+        .unwrap();
+        let text = w.finish();
+        assert!(
+            text.contains("(property \"Footprint\" \"Capacitor_SMD:C_0603_1608Metric\""),
+            "emitted Footprint property must carry the lib_id:\n{text}"
+        );
+    }
+
+    #[test]
+    fn omitted_footprint_emits_empty_property() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        // The 6-arg convenience passes no footprint -> empty property (unchanged behaviour).
+        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0)
+            .unwrap();
+        let text = w.finish();
+        assert!(
+            text.contains("(property \"Footprint\" \"\""),
+            "an unassigned part still emits an empty Footprint property:\n{text}"
+        );
     }
 
     #[test]
