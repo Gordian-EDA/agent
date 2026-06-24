@@ -1223,3 +1223,53 @@ pub fn count_shorts(
     }
     n
 }
+
+/// Geometric TRUTHFULNESS breaks (net merges / shorts / foreign taps) of a placement
+/// as it would SHIP — the same checks `layout_cost` prices, returned as a hard count
+/// so the candidate pick can REJECT any layout that mis-wires. Critical: the
+/// readability `warning_count` does NOT detect a merge (a rail-to-rail short actually
+/// LOWERS length+junctions), so a placement move that strands two nets onto one wire
+/// would otherwise be shipped as a fewest-warning candidate — the documented
+/// dense-board truthfulness failure. Gating the pick on this makes the router-free
+/// fast lane truthfulness-safe without a full netlist extraction.
+pub fn truthfulness_breaks(
+    env: &KicadEnv,
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+) -> usize {
+    match build_writer(env, None, items, inc, ir, needs_flag, true) {
+        Ok(w) => {
+            let wires = w.wires_with_nets();
+            count_merges(&wires, &w.junction_positions())
+                + count_shorts(env, &w, items, inc, &wires)
+                + count_foreign_taps(&wires)
+        }
+        Err(_) => usize::MAX,
+    }
+}
+
+/// `premium_score_items` when the caller ALREADY knows the shipped warning count
+/// `w` (the candidate pick computes it for the primary sort). Identical result, but
+/// skips the redundant second text-solving `warning_count` — the candidate
+/// evaluation was paying for two full text solves per candidate.
+pub fn premium_score_with_w(
+    env: &KicadEnv,
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    needs_flag: &BTreeSet<String>,
+    w: usize,
+) -> f64 {
+    let aes = match build_writer(env, None, items, inc, ir, needs_flag, false) {
+        Ok(wr) => layout_cost(env, &wr, items, inc, ir, true),
+        Err(_) => return f64::INFINITY,
+    };
+    let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
+    if pins <= 250 && inc.len() <= 40 {
+        10_000.0 * w as f64 + aes
+    } else {
+        aes
+    }
+}

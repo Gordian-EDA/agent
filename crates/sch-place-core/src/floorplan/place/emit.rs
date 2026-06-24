@@ -23,6 +23,18 @@ use sch_model::item::{Incidence, Item};
 // `sch_model::union_find`, shared with circuit-lang's pin reconciler.
 use sch_model::ir::{Cell, LayoutIr, Orient};
 
+/// Read the engine [`PlaceOptions`] from the environment at problem construction —
+/// the env coupling stays here at the composition root, so the engines themselves
+/// never touch `std::env`. (Other `MULTISHEET_REFINE` reads scattered through this
+/// crate steer non-engine layout passes and stay as direct env reads.)
+fn place_options_from_env() -> sch_model::place::PlaceOptions {
+    sch_model::place::PlaceOptions {
+        debug_timing: std::env::var("DEBUG_SA_TIME").is_ok(),
+        force_fast: std::env::var("MULTISHEET_REFINE").is_ok(),
+        motif_tile: std::env::var("MOTIF_TILE").is_ok(),
+    }
+}
+
 /// Compose every block's per-block `layout:` grid into one global relative seed:
 /// refdes → (grid col, grid row). Each gridded block occupies its own column band
 /// (declaration order, laid left→right); within a band a cell maps its refdes to
@@ -155,17 +167,18 @@ pub(crate) fn prepare_writer(
     // re-polishes (which would re-add a seating pass the large-board pick had
     // deliberately rejected). Greedy keeps the exact refine→polish order, so the
     // reference snapshots stay byte-identical.
+    let cost = RoutedCost::new(env, &inc, ir, &needs_flag);
     let problem = PlaceProblem {
-        env,
         inc: &inc,
         ir,
-        needs_flag: &needs_flag,
         seed: SEARCH_SEED,
+        options: place_options_from_env(),
+        cost: &cost,
     };
     if std::env::var("DEBUG_PLACE").is_ok() {
         eprintln!("[place] engine = {}", engine.name());
     }
-    engine.place(&problem, &mut items);
+    let _report = engine.place(&problem, &mut items);
     // Guarantee no body overlap: the cost-gated refine can leave two parts
     // touching when separating them would transiently raise routed cost (a local
     // minimum), so a final, unconditional relaxation pushes any remaining
