@@ -1,10 +1,10 @@
 //! Scripted test for the IN-LOOP review→fix loop with BOTH a netlist and a VISION
 //! layout critic — no KiCAD, no network.
 //!
-//! A [`ReviewMockProvider`] stands in for [`gordian_kicad::PcbTools`]: its
-//! `review_committed` runs the REAL [`gordian_kicad::review`] passes (netlist over
-//! text, layout over a mocked PNG) against a recording reviewer client, then
-//! UNIONS the two defect lists exactly as the production provider does. Driving it
+//! A [`ReviewStub`] backend stands in for the production KiCAD backend: its
+//! `review_committed` runs the REAL [`gordian_core::review_kicad`] passes (netlist
+//! over text, layout over a mocked PNG) against a recording reviewer client, then
+//! UNIONS the two defect lists exactly as the production path does. Driving it
 //! through [`Agent::run_turn_reviewed`] proves:
 //!
 //! - the layout-review call is MADE, and carries a [`ContentBlock::Image`] (the
@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use gordian_core::testing::{ScriptedClient, final_text, tool_call};
 use gordian_core::{
     Agent, AgentEvent, ApplyInfo, AutoApprove, Completion, ContentBlock, ImageData, Message,
-    Provider, ReviewOutcome, RunMode, ToolCall, ToolDef, ToolEffect, ToolOutcome, ToolProvider,
+    Provider, ReviewOutcome, RunMode, TestBackend, ToolCall, ToolDef, ToolOutcome,
 };
 use serde_json::{Value, json};
 
@@ -61,38 +61,26 @@ FINAL_JSON:
  "defects": [{"severity":"major","confidence":"high","category":"spacing",
    "location":"C1","description":"decoupling cap C1 sits across the sheet from U1's power pin"}]}"#;
 
-/// A mock provider whose `review_committed` runs the real netlist + layout review
+/// A stub backend whose `review_committed` runs the real netlist + layout review
 /// passes (the layout pass over a fixed mocked PNG) against `reviewer`, unioning
-/// their defects exactly as the production provider does.
-struct ReviewMockProvider {
+/// their defects exactly as the production path does.
+struct ReviewStub {
     reviewer: Arc<CannedReviewer>,
     /// Number of times `review_committed` was called (one per fix round).
     reviews_done: Arc<Mutex<usize>>,
 }
 
 #[async_trait]
-impl ToolProvider for ReviewMockProvider {
-    fn defs(&self) -> Vec<ToolDef> {
-        vec![ToolDef { name: "apply".into(), description: "".into(), input_schema: json!({}) }]
-    }
-
-    fn effect(&self, name: &str) -> ToolEffect {
-        if name == "apply" { ToolEffect::Gated } else { ToolEffect::ReadOnly }
-    }
-
-    fn wants_apply(&self, call: &ToolCall) -> bool {
-        call.input.get("commit").and_then(Value::as_bool) == Some(true)
-    }
-
+impl TestBackend for ReviewStub {
     async fn run(&self, call: &ToolCall, mode: RunMode, _r: &dyn Provider) -> ToolOutcome {
         match (call.name.as_str(), mode) {
-            ("apply", RunMode::Preview) => ToolOutcome {
+            ("apply_design", RunMode::Preview) => ToolOutcome {
                 value: json!({ "ok": true, "would_write": true }),
                 images: Vec::new(),
                 image_path: None,
                 apply: Some(ApplyInfo { ready: true, ..Default::default() }),
             },
-            ("apply", RunMode::Commit) => ToolOutcome {
+            ("apply_design", RunMode::Commit) => ToolOutcome {
                 value: json!({ "ok": true, "written": true }),
                 images: Vec::new(),
                 image_path: None,
@@ -103,7 +91,7 @@ impl ToolProvider for ReviewMockProvider {
     }
 
     /// Run BOTH planes against the recording reviewer and union them — the real
-    /// `gordian_kicad::review` calls, with the layout pass over a 1x1 mock PNG.
+    /// `gordian_core::review_kicad` calls, with the layout pass over a 1x1 mock PNG.
     async fn review_committed(&self, intent: &str, _r: &dyn Provider) -> Option<ReviewOutcome> {
         let round = {
             let mut n = self.reviews_done.lock().unwrap();
@@ -119,21 +107,21 @@ impl ToolProvider for ReviewMockProvider {
         let reviewer = self.reviewer.as_ref();
         // Netlist plane (text subject).
         let (n_score, mut defects) =
-            gordian_kicad::review::review_netlist(reviewer, intent, "R1: {between:[A,B]}")
+            gordian_core::review_kicad::review_netlist(reviewer, intent, "R1: {between:[A,B]}")
                 .await
                 .ok()?;
         // Layout plane (vision over a mocked render).
         let image = ImageData { format: "png".into(), base64: tiny_png_b64() };
-        let (l_score, l_defects) = gordian_kicad::review::review_layout(
+        let (l_score, l_defects) = gordian_core::review_kicad::review_layout(
             reviewer,
             intent,
             image,
-            gordian_kicad::review::LayoutKind::Schematic,
+            gordian_core::review_kicad::LayoutKind::Schematic,
         )
         .await
         .ok()?;
         for d in l_defects {
-            if !defects.iter().any(|e| gordian_kicad::review::same_defect(e, &d)) {
+            if !defects.iter().any(|e| gordian_core::review_kicad::same_defect(e, &d)) {
                 defects.push(d);
             }
         }
@@ -154,19 +142,19 @@ async fn committed_turn_runs_netlist_and_layout_review_then_fixes_the_layout_def
 
     let (reviewer, seen) = CannedReviewer::new(LAYOUT_VERDICT);
     let reviewer = Arc::new(reviewer);
-    let tools = ReviewMockProvider {
+    let backend = ReviewStub {
         reviewer: Arc::clone(&reviewer),
         reviews_done: Arc::new(Mutex::new(0)),
     };
 
     // The agent's OWN client (drives the turns), separate from the reviewer client.
     let client = ScriptedClient::new(vec![
-        tool_call("t1", "apply", json!({ "commit": true })), // turn 1: commit
+        tool_call("t1", "apply_design", json!({ "commit": true })), // turn 1: commit
         final_text("committed"),
-        tool_call("t2", "apply", json!({ "commit": true })), // fix turn: re-commit
+        tool_call("t2", "apply_design", json!({ "commit": true })), // fix turn: re-commit
         final_text("layout fixed"),
     ]);
-    let mut agent = Agent::new(Box::new(client), Box::new(tools), "sys");
+    let mut agent = Agent::with_test_backend(Box::new(client), Box::new(backend), "sys");
     let mut approvals = AutoApprove::yes();
     let (tx, mut rx) = unbounded_channel();
 
@@ -206,14 +194,15 @@ async fn committed_turn_runs_netlist_and_layout_review_then_fixes_the_layout_def
 }
 
 /// LIVE one-turn smoke (`#[ignore]` — needs KiCAD + `.env` creds): commit a small
-/// real design, then run the REAL [`gordian_kicad::PcbTools::review_committed`]
-/// (netlist + the vision LAYOUT critic over the actual render) against the live
-/// provider, and print the unioned verdict. Run with:
-///   cargo test -p gordian-kicad --test review_loop -- --ignored --nocapture
+/// real design, then drive the REAL production review (netlist + the vision LAYOUT
+/// critic over the actual render) through [`Agent::run_turn_reviewed`], printing
+/// the unioned verdict from the emitted `Reviewed` events. Run with:
+///   cargo test -p gordian-core --test review_loop -- --ignored --nocapture
 #[tokio::test]
 #[ignore = "live: needs KiCAD and LLM creds in .env"]
 async fn live_layout_review_smoke() {
-    use gordian_kicad::tools::{PcbToolCtx, run_tool};
+    use tokio::sync::mpsc::unbounded_channel;
+    use gordian_core::tools::{PcbToolCtx, run_tool};
 
     let Some(ctx) = PcbToolCtx::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
@@ -233,13 +222,30 @@ async fn live_layout_review_smoke() {
     let out = run_tool("apply_design", json!({ "yaml": yaml, "commit": true }), &ctx).unwrap();
     assert_eq!(out.get("written").and_then(Value::as_bool), Some(true), "committed: {out}");
 
-    let tools = gordian_kicad::PcbTools::new(ctx);
-    let review = tools
-        .review_committed("a decoupled supply rail", client.as_ref())
+    // Drive a review-only turn through the production loop so the real netlist +
+    // vision review runs over the committed schematic. The model immediately
+    // re-commits with no change; the post-turn review then runs.
+    let mut agent = Agent::new(client, ctx, "sys");
+    let mut approvals = AutoApprove::yes();
+    let (tx, mut rx) = unbounded_channel();
+    agent
+        .run_turn_reviewed(
+            &format!("Re-apply this exact design with apply_design(commit:true), no change:\n{yaml}"),
+            "a decoupled supply rail",
+            &mut approvals,
+            Some(&tx),
+            1,
+        )
         .await
-        .expect("review_committed returns a verdict for a committed schematic");
-    eprintln!("LIVE layout+netlist review: score={} defects={:#?}", review.score, review.defects);
-    // The smoke proves the live vision call completed end-to-end with an image and
-    // produced a scored verdict; we don't assert a specific defect (model-dependent).
-    assert!((0.0..=10.0).contains(&review.score), "a sane score: {}", review.score);
+        .expect("the reviewed turn should complete");
+
+    let mut saw_review = false;
+    while let Ok(ev) = rx.try_recv() {
+        if let AgentEvent::Reviewed { round, score, defects } = ev {
+            eprintln!("LIVE review round {round}: score={score} defects={defects:#?}");
+            assert!((0.0..=10.0).contains(&score), "a sane score: {score}");
+            saw_review = true;
+        }
+    }
+    assert!(saw_review, "the production review ran end-to-end with a live vision call");
 }

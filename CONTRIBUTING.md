@@ -28,8 +28,8 @@ A change is a **regression** if it raises copper-error DRC faults or breaks conn
 render looks nicer. Gate every engine change on:
 
 ```sh
-cargo test --release -p llm-client -p gordian-core -p gordian-kicad
-cargo run --release -p gordian-kicad --example board_harness   # must report 0 copper DRC faults
+cargo test --release -p llm-client -p gordian-core
+cargo run --release -p gordian-core --example board_harness   # must report 0 copper DRC faults
 ```
 
 For the schematic side, the netlist oracle is authoritative:

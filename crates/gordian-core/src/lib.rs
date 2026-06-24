@@ -1,40 +1,51 @@
-//! Gordian's domain-agnostic agent core.
+//! Gordian's KiCAD schematic + PCB design agent.
 //!
-//! This crate owns the generic half of the agent: the [`Agent`] turn loop, the
-//! human apply-gate, conversation history (unwind / clear / [`Agent::compact`]),
-//! and the diverse-lens [`review()`](fn@review) mechanics — all over two injected
-//! seams and NOTHING domain-specific (no KiCAD, UI, or rendering dependencies).
+//! This crate IS the agent: the [`Agent`] turn loop with a human apply-gate, the
+//! conversation history (unwind / clear / [`Agent::compact`]), the schematic/PCB
+//! tool registry ([`tools`] + [`tools_pcb`]), the composed-sheet emit
+//! ([`multisheet`]), the SVG→PNG [`render`], the netlist + vision [`review`]
+//! mechanics, the [`prompts`] system prompt, and the design [`retrieval`] corpus.
 //!
-//! The two seams the loop is built around:
+//! The loop is built around ONE external seam — [`llm_client::Provider`], the LLM
+//! backend — plus the KiCAD tools it drives directly. The only decoupling that
+//! remains is this library vs. the [`autopcb`](../autopcb/index.html) CLI binary,
+//! so a future web frontend reuses the lib. To build a working agent:
 //!
-//! - [`llm_client::Provider`] (from `llm-client`) — the LLM backend.
-//! - [`ToolProvider`] — the domain's tools, tagged by [`ToolEffect`]
-//!   (`ReadOnly` | `Authoring` | `Gated`). The loop drives a `Gated` write
-//!   through preview → approve → commit ([`RunMode`]), reporting via
-//!   [`ApplyInfo`]; an independent post-turn review comes back as a
-//!   [`ReviewOutcome`].
+//! ```ignore
+//! let ctx = gordian_core::tools::PcbToolCtx::for_project(env, project_dir)?;
+//! let agent = gordian_core::Agent::new(
+//!     llm_client::from_env()?,
+//!     ctx,
+//!     gordian_core::prompts::system_prompt(),
+//! );
+//! ```
 //!
-//! [`Agent::new`] takes a `Box<dyn Provider>`, a `Box<dyn ToolProvider>`, and the
-//! domain's system prompt — so the same loop serves any domain, any backend, a
-//! CLI, or a web frontend. The [`testing`] module's [`testing::ScriptedClient`]
-//! drives the loop without a network.
+//! The [`testing`] module's [`testing::ScriptedClient`] drives the loop without a
+//! network; the gating tests inject a [`TestBackend`] instead of a real
+//! [`PcbToolCtx`].
 
 mod agent;
+pub mod multisheet;
+pub mod prompts;
+pub mod render;
+pub mod retrieval;
 pub mod review;
+pub mod review_kicad;
 pub mod session;
 pub mod testing;
 mod tool;
+pub mod tools;
+pub mod tools_pcb;
+pub mod workspace;
 
 pub use agent::{
-    Agent, AgentEvent, Approvals, AutoApprove, ContextStats, StopReason, TurnOutcome,
+    Agent, AgentEvent, Approvals, AutoApprove, ContextStats, StopReason, TestBackend, TurnOutcome,
     TurnOutcomeSummary,
 };
 pub use review::{review, review_image};
-pub use tool::{
-    ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome, ToolProvider,
-};
+pub use tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
 
-// Re-export the LLM seam so domain crates can build on `gordian_core::*` alone.
+// Re-export the LLM seam so callers can build on `gordian_core::*` alone.
 pub use llm_client::{
     Completion, ContentBlock, ImageData, Message, Provider, Role, ToolCall, ToolDef,
 };

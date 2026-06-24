@@ -2,7 +2,7 @@
 //! LLM): create_design → apply_design{commit:true}; assert the committed sch is a
 //! multi-sheet root. Usage: cargo run -p agent --example test_apply_multisheet -- <draft.yaml>
 
-use gordian_kicad::tools::{PcbToolCtx, run_tool};
+use gordian_core::tools::{PcbToolCtx, run_tool};
 use kicad_cli_rs::env::KicadEnv;
 use serde_json::json;
 

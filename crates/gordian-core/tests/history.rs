@@ -11,9 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use gordian_core::testing::{ScriptedClient, final_text};
 use gordian_core::{Agent, AutoApprove, Completion, ContentBlock, Message, Role};
-use gordian_kicad::PcbTools;
-use gordian_kicad::prompts::system_prompt;
-use gordian_kicad::tools::PcbToolCtx;
+use gordian_core::prompts::system_prompt;
+use gordian_core::tools::PcbToolCtx;
 
 /// Build an agent over a [`PcbToolCtx`] + a recording client, returning the agent
 /// and the shared handle to the recorded `messages` slices.
@@ -22,7 +21,7 @@ fn recording_agent(
     completions: Vec<Completion>,
 ) -> (Agent, Arc<Mutex<Vec<Vec<Message>>>>) {
     let (client, seen) = ScriptedClient::recording(completions);
-    let agent = Agent::new(Box::new(client), Box::new(PcbTools::new(ctx)), system_prompt());
+    let agent = Agent::new(Box::new(client), ctx, system_prompt());
     (agent, seen)
 }
 

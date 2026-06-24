@@ -54,8 +54,7 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 |-------|------|
 | `autopcb` | CLI + ratatui copilot TUI — the entry point |
 | `llm-client` | Provider-agnostic LLM client: neutral message/tool types + the `Provider` trait (OpenAI / AWS Bedrock backends) |
-| `gordian-core` | Domain-agnostic agent core: the turn loop, the apply-gate, and the `ToolProvider` seam (no KiCAD/UI deps) |
-| `gordian-kicad` | The KiCAD domain — schematic/PCB tools, prompts, render — as a `gordian-core` `ToolProvider` |
+| `gordian-core` | The KiCAD agent: the turn loop + apply-gate, the schematic/PCB tools, prompts, review, and render — over any `llm-client` `Provider` |
 | `circuit-lang` | Parser, linter, and canonical emitter for the circuit markup language |
 | `circuit-graph` | Attributed circuit graph + a declarative idiom matcher |
 | `sch-place-core` / `sch-io` / `sch-model` | Deterministic schematic floorplan core (`Design` → `.kicad_sch` and back), over the `greedy-place`/`anneal-place` engines, with the shared model + I/O layers |
@@ -75,7 +74,7 @@ KiCAD libraries and assert **0 copper-error DRC faults** (unrouted nets are repo
 hidden):
 
 ```sh
-cargo run --release -p gordian-kicad --example board_harness   # PCB place/route/DRC across all fixtures
+cargo run --release -p gordian-core --example board_harness   # PCB place/route/DRC across all fixtures
 ```
 
 ## Status

@@ -33,11 +33,11 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("provider={provider} model={model}\nprompt: {prompt}\n");
 
     let tmp = tempfile::tempdir()?;
-    let ctx = gordian_kicad::tools::PcbToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
+    let ctx = gordian_core::tools::PcbToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
     let pcb_path = ctx.pcb_path();
 
     let client = llm_client::from_env()?;
-    let mut agent = Agent::new(client, Box::new(gordian_kicad::PcbTools::new(ctx)), gordian_kicad::prompts::system_prompt());
+    let mut agent = Agent::new(client, ctx, gordian_core::prompts::system_prompt());
 
     // Stream the tool calls so the run is visible while it works.
     let (tx, mut rx) = mpsc::unbounded_channel();

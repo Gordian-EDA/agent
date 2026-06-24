@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use gordian_kicad::tools::{PcbToolCtx, run_tool};
+use gordian_core::tools::{PcbToolCtx, run_tool};
 use serde_json::json;
 
 fn main() {
@@ -44,7 +44,7 @@ fn main() {
               "pad_nets": { "1": "VIN", "2": "GND" } }
         ]
     });
-    let r = gordian_kicad::tools_pcb::build_board_draft(board, &ctx).unwrap();
+    let r = gordian_core::tools_pcb::build_board_draft(board, &ctx).unwrap();
     println!("build_board_draft: ok={}", r["ok"]);
     let r = run_tool("place_board", json!({}), &ctx).unwrap();
     println!("place_board: legal={} hpwl={}", r["legal"], r["hpwl"]);

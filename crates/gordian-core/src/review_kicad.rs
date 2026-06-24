@@ -10,7 +10,7 @@
 //!   This is the in-loop port of the standalone VLM critics
 //!   `tools/schematic_critic.py` / `tools/pcb_critic.py`.
 //!
-//! Both share the [`gordian_core::review`](mod@gordian_core::review) MECHANICS
+//! Both share the [`crate::review`](mod@crate::review) MECHANICS
 //! (the diverse-lens ensemble, verdict parsing, defect dedup) — the netlist pass
 //! over a text subject, the layout pass over a rendered image — and both return
 //! the same `(score, high-confidence defects)` shape the review→fix loop feeds
@@ -19,7 +19,7 @@
 //! pass also unions in the deterministic exact-math ERC.
 
 use anyhow::Result;
-use gordian_core::{ImageData, Provider};
+use crate::{ImageData, Provider};
 
 pub const REVIEW_SYSTEM: &str = r#"You are a senior electronics design engineer performing a NETLIST review (NOT a layout review).
 
@@ -53,13 +53,13 @@ pub const LENSES: &[&str] = &[
 
 /// Review a netlist with the diverse-lens ENSEMBLE and return `(lowest score, union of
 /// high-confidence critical/major defect lines)` — ready to feed back as a fix turn. Thin domain
-/// wrapper over [`gordian_core::review()`](fn@gordian_core::review) with this module's [`REVIEW_SYSTEM`] + [`LENSES`].
+/// wrapper over [`crate::review()`](fn@crate::review) with this module's [`REVIEW_SYSTEM`] + [`LENSES`].
 pub async fn review_netlist(
     client: &dyn Provider,
     intent: &str,
     netlist: &str,
 ) -> Result<(f64, Vec<String>)> {
-    gordian_core::review(client, REVIEW_SYSTEM, LENSES, intent, netlist).await
+    crate::review(client, REVIEW_SYSTEM, LENSES, intent, netlist).await
 }
 
 // ── LAYOUT (vision) critic ───────────────────────────────────────────────────
@@ -336,7 +336,7 @@ pub const LAYOUT_LENSES: &[&str] = &[
 
 /// The prompt text that rides ALONGSIDE the rendered image: the design intent plus
 /// the "reason first, then FINAL_JSON" instruction. The image itself is attached as
-/// a vision block by [`gordian_core::review_image`].
+/// a vision block by [`crate::review_image`].
 fn layout_prompt(intent: &str, kind: LayoutKind) -> String {
     let what = match kind {
         LayoutKind::Schematic => "rendered schematic",
@@ -354,7 +354,7 @@ fn layout_prompt(intent: &str, kind: LayoutKind) -> String {
 /// lines)` — the SAME shape [`review_netlist`] returns, so the review→fix loop
 /// folds layout defects in beside the netlist ones. `kind` picks the ported critic
 /// prompt ([`SCHEMATIC_CRITIC_SYSTEM`] / [`PCB_CRITIC_SYSTEM`]). A flaky/empty
-/// vision response degrades to `(0.0, [])` inside [`gordian_core::review_image`].
+/// vision response degrades to `(0.0, [])` inside [`crate::review_image`].
 pub async fn review_layout(
     client: &dyn Provider,
     intent: &str,
@@ -366,10 +366,10 @@ pub async fn review_layout(
         LayoutKind::Board => PCB_CRITIC_SYSTEM,
     };
     let prompt = layout_prompt(intent, kind);
-    gordian_core::review_image(client, system, LAYOUT_LENSES, &prompt, image).await
+    crate::review_image(client, system, LAYOUT_LENSES, &prompt, image).await
 }
 
 /// Two defect lines are "the same" if they target the same refdes — so a union (across lenses, or
 /// with the deterministic ERC layer) doesn't feed the agent two phrasings of one fault. Re-exported
-/// from [`gordian_core::review::same_defect`] so the ERC-union sites here read locally.
-pub use gordian_core::review::same_defect;
+/// from [`crate::review::same_defect`] so the ERC-union sites here read locally.
+pub use crate::review::same_defect;

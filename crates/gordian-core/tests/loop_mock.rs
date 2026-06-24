@@ -1,5 +1,5 @@
 //! Agent-loop tests with a SCRIPTED client (no network), driving the REAL KiCAD
-//! tools via the [`PcbTools`] provider.
+//! tools via the KiCAD tools (a real `PcbToolCtx`).
 //!
 //! [`ScriptedClient`] returns a fixed `Vec<Completion>`, one per `complete()`
 //! call in order, so the loop's control flow (tool dispatch → result feedback →
@@ -9,13 +9,12 @@
 
 use gordian_core::testing::{ScriptedClient, final_text, tool_call};
 use gordian_core::{Agent, AutoApprove};
-use gordian_kicad::PcbTools;
-use gordian_kicad::prompts::system_prompt;
-use gordian_kicad::tools::PcbToolCtx;
+use gordian_core::prompts::system_prompt;
+use gordian_core::tools::PcbToolCtx;
 
 /// Build an agent over a [`PcbToolCtx`] and a scripted client.
 fn agent(ctx: PcbToolCtx, completions: Vec<gordian_core::Completion>) -> Agent {
-    Agent::new(Box::new(ScriptedClient::new(completions)), Box::new(PcbTools::new(ctx)), system_prompt())
+    Agent::new(Box::new(ScriptedClient::new(completions)), ctx, system_prompt())
 }
 
 /// A tiny, self-contained valid design: two resistors so that GND has 2 pins and

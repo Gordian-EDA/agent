@@ -51,7 +51,7 @@ def split_blocks(path):
 def render(yaml_path, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     subprocess.run(
-        ["cargo", "run", "--release", "-p", "gordian-kicad", "--example", "bench_corpus",
+        ["cargo", "run", "--release", "-p", "gordian-core", "--example", "bench_corpus",
          "--", "--out", out_dir, yaml_path],
         cwd=ROOT, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )

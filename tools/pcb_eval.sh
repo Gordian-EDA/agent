@@ -14,7 +14,7 @@ OUT=/tmp/pcb-harness
 SCALE=16
 
 # (Re)generate boards from the circuit specs.
-cargo run --release -q -p gordian-kicad --example board_harness >/dev/null 2>&1
+cargo run --release -q -p gordian-core --example board_harness >/dev/null 2>&1
 
 declare -A DESC=(
   [rc-divider]="resistive voltage divider with a 2-pin power/ground header"

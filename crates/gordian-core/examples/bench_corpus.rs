@@ -98,7 +98,7 @@ fn bench_one(
     let svg_dir = tempfile::tempdir()?;
     let svg_path = KicadCli::new(env).export_svg_opts(&sch_path, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
-    let png = gordian_kicad::render::svg_to_png(&svg, 1600)?;
+    let png = gordian_core::render::svg_to_png(&svg, 1600)?;
     std::fs::write(out_dir.join(format!("{stem}.png")), png)?;
 
     Ok((

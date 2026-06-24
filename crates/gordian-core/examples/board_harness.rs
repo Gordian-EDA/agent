@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gordian_kicad::tools::{PcbToolCtx, run_tool};
+use gordian_core::tools::{PcbToolCtx, run_tool};
 use serde_json::{json, Value};
 
 fn footprint_dir() -> PathBuf {
@@ -55,15 +55,15 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
     if let Some(outline) = spec.get("outline") {
         board["outline"] = outline.clone();
     }
-    let created = gordian_kicad::tools_pcb::build_board_draft(board, &ctx).unwrap();
+    let created = gordian_core::tools_pcb::build_board_draft(board, &ctx).unwrap();
     if created["ok"] != json!(true) {
         return json!({ "name": name, "stage": "create", "result": created });
     }
     // Keepouts + placement hints from the spec, set directly on the saved draft
     // (the agent authors these in the Board-DSL; the harness seeds them on the draft).
     if spec.get("keepouts").is_some() || spec.get("hints").is_some() {
-        let mut draft = gordian_kicad::tools_pcb::BoardDraft::load(&ctx).unwrap();
-        gordian_kicad::tools_pcb::apply_spec_extras(&mut draft, spec);
+        let mut draft = gordian_core::tools_pcb::BoardDraft::load(&ctx).unwrap();
+        gordian_core::tools_pcb::apply_spec_extras(&mut draft, spec);
         draft.save(&ctx).unwrap();
     }
     let placed = run_tool("place_board", json!({}), &ctx).unwrap();

@@ -1,5 +1,5 @@
 //! Agent design with an INDEPENDENT review→fix loop, via [`gordian_core::Agent::run_turn_reviewed`]:
-//! turn 1 drafts the design, then a FRESH LLM reviewer (see `gordian_kicad::review`) audits the committed
+//! turn 1 drafts the design, then a FRESH LLM reviewer (see `gordian_core::review`) audits the committed
 //! netlist for electrical-CORRECTNESS faults (pin-function mis-wires, voltage-domain part-selection,
 //! topology errors — the class ERC and the layout critic both miss) and feeds any high-confidence
 //! defects back as fix turns. This example just drives the method and renders the result.
@@ -19,9 +19,9 @@ async fn main() -> anyhow::Result<()> {
 
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
     let tmp = tempfile::tempdir()?;
-    let ctx = gordian_kicad::tools::PcbToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
+    let ctx = gordian_core::tools::PcbToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
     let sch_path = ctx.sch_path().to_path_buf();
-    let mut agent = Agent::new(llm_client::from_env()?, Box::new(gordian_kicad::PcbTools::new(ctx)), gordian_kicad::prompts::system_prompt());
+    let mut agent = Agent::new(llm_client::from_env()?, ctx, gordian_core::prompts::system_prompt());
     let mut approvals = AutoApprove::yes();
 
     // Show the per-round review verdicts (and apply commits) as they happen.
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let svg_dir = tempfile::tempdir()?;
     let svg_path = KicadCli::new(&env).export_svg_opts(&sch_path, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
-    let png = gordian_kicad::render::svg_to_png(&svg, 1600)?;
+    let png = gordian_core::render::svg_to_png(&svg, 1600)?;
     std::fs::write(&out, png)?;
     std::fs::copy(&sch_path, std::path::Path::new(&out).with_extension("kicad_sch")).ok();
     if let Ok(y) = sch_io::read::lift(&env, &sch_path) {

@@ -6,7 +6,7 @@
 //! `kicad-cli` therefore only assert on machines with KiCAD installed (the
 //! project's test environment has KiCAD 10.0.3).
 
-use gordian_kicad::tools::{PcbToolCtx, run_tool, tool_defs};
+use gordian_core::tools::{PcbToolCtx, run_tool, tool_defs};
 
 /// A tiny self-contained valid design: one resistor between two named nets.
 const TINY_YAML: &str =
@@ -431,7 +431,7 @@ fn unknown_tool_is_an_error() {
 
 #[test]
 fn draft_lifecycle_create_edit_apply() {
-    let Some(ctx) = gordian_kicad::tools::PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = gordian_core::tools::PcbToolCtx::detect_for_test() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
@@ -478,7 +478,7 @@ blocks:
 
 #[test]
 fn get_design_seeds_draft_from_lift_and_flags_staleness() {
-    let Some(ctx) = gordian_kicad::tools::PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = gordian_core::tools::PcbToolCtx::detect_for_test() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
@@ -511,7 +511,7 @@ blocks:
 
 #[test]
 fn render_schematic_returns_png_and_image_path() {
-    let Some(ctx) = gordian_kicad::tools::PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = gordian_core::tools::PcbToolCtx::detect_for_test() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
@@ -549,7 +549,7 @@ blocks:
 
 #[test]
 fn apply_design_surfaces_layout_warnings() {
-    let Some(ctx) = gordian_kicad::tools::PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = gordian_core::tools::PcbToolCtx::detect_for_test() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
@@ -734,7 +734,7 @@ fn build_board_draft_resolves_vendored_footprints_and_persists() {
               "pad_nets": { "1": "VIN", "2": "GND" } }
         ]
     });
-    let out = gordian_kicad::tools_pcb::build_board_draft(board.clone(), &ctx).unwrap();
+    let out = gordian_core::tools_pcb::build_board_draft(board.clone(), &ctx).unwrap();
     assert_eq!(out["ok"], serde_json::json!(true), "got: {out}");
     assert_eq!(out["part_count"], serde_json::json!(3), "got: {out}");
     // VIN(2), MID(2), GND(2), VOUT(1) -> 4 nets; VOUT is a single-pin warning.
@@ -756,14 +756,14 @@ fn build_board_draft_resolves_vendored_footprints_and_persists() {
     assert_eq!(out["draft"]["rules"]["viaDiameter"], serde_json::json!(0.6), "got: {out}");
 
     // A second create_board without overwrite is rejected.
-    let out = gordian_kicad::tools_pcb::build_board_draft(board, &ctx).unwrap();
+    let out = gordian_core::tools_pcb::build_board_draft(board, &ctx).unwrap();
     assert!(out["error"].as_str().is_some_and(|e| e.contains("already exists")), "got: {out}");
 }
 
 #[test]
 fn build_board_draft_unknown_footprint_errors_with_suggestions() {
     let (ctx, _guard) = fixture_ctx();
-    let out = gordian_kicad::tools_pcb::build_board_draft(
+    let out = gordian_core::tools_pcb::build_board_draft(
         serde_json::json!({
             "bounds": { "min_x": 0.0, "max_x": 10.0, "min_y": 0.0, "max_y": 10.0 },
             "parts": [
@@ -783,7 +783,7 @@ fn build_board_draft_unknown_footprint_errors_with_suggestions() {
 
 #[test]
 fn board_draft_round_trips_through_the_workspace() {
-    use gordian_kicad::tools_pcb::{BoardDraft, DraftPart, DraftRules};
+    use gordian_core::tools_pcb::{BoardDraft, DraftPart, DraftRules};
     use pcb_place::placement::PlacementHints;
     use pcb_model::Bounds;
 
@@ -833,7 +833,7 @@ fn placed_board_ctx() -> (PcbToolCtx, tempfile::TempDir) {
               "pad_nets": { "1": "VIN", "2": "GND" } }
         ]
     });
-    let out = gordian_kicad::tools_pcb::build_board_draft(board, &ctx).unwrap();
+    let out = gordian_core::tools_pcb::build_board_draft(board, &ctx).unwrap();
     assert_eq!(out["ok"], serde_json::json!(true), "create_board: {out}");
     (ctx, guard)
 }
@@ -854,7 +854,7 @@ fn place_board_failure_suggests_a_larger_bounds() {
               "pad_nets": { "1": "A", "2": "B" } }
         ]
     });
-    gordian_kicad::tools_pcb::build_board_draft(board, &ctx).unwrap();
+    gordian_core::tools_pcb::build_board_draft(board, &ctx).unwrap();
     let out = run_tool("place_board", serde_json::json!({}), &ctx).unwrap();
     assert_eq!(out["legal"], serde_json::json!(false), "should not fit in 3x3: {out}");
     let s = &out["suggested_min_bounds_mm"];
@@ -872,7 +872,7 @@ fn locked_part_rejects_non_axis_aligned_rotation() {
     // only) with a clear message — not silently routed to wrong pads then failed at
     // export. 0/90/180/270 are accepted.
     let (ctx, _g) = fixture_ctx();
-    let bad = gordian_kicad::tools_pcb::build_board_draft(
+    let bad = gordian_core::tools_pcb::build_board_draft(
         serde_json::json!({
             "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
             "parts": [
@@ -888,7 +888,7 @@ fn locked_part_rejects_non_axis_aligned_rotation() {
         bad["error"].as_str().is_some_and(|e| e.contains("not supported")),
         "45° lock must be rejected: {bad}"
     );
-    let ok = gordian_kicad::tools_pcb::build_board_draft(
+    let ok = gordian_core::tools_pcb::build_board_draft(
         serde_json::json!({
             "overwrite": true,
             "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
@@ -1098,7 +1098,7 @@ fn render_board_before_place_is_recoverable_error() {
               "pad_nets": { "1": "VIN", "2": "GND" } }
         ]
     });
-    assert_eq!(gordian_kicad::tools_pcb::build_board_draft(board, &ctx).unwrap()["ok"], serde_json::json!(true));
+    assert_eq!(gordian_core::tools_pcb::build_board_draft(board, &ctx).unwrap()["ok"], serde_json::json!(true));
 
     // No placement yet: both explicit "placed" and auto (no route) must error.
     let out = run_tool("render_board", serde_json::json!({"view": "placed"}), &ctx).unwrap();
@@ -1142,7 +1142,7 @@ fn render_board_placed_returns_ok_and_png_magic() {
 
     // IMAGE_PATH_KEY must be set to the same path (so the agent loop attaches it).
     assert_eq!(
-        out[gordian_kicad::tools::IMAGE_PATH_KEY].as_str(),
+        out[gordian_core::tools::IMAGE_PATH_KEY].as_str(),
         Some(png_path),
         "IMAGE_PATH_KEY must equal png_path"
     );
@@ -1172,7 +1172,7 @@ fn render_board_routed_returns_ok_and_png_magic() {
 
     // IMAGE_PATH_KEY set.
     assert_eq!(
-        out[gordian_kicad::tools::IMAGE_PATH_KEY].as_str(),
+        out[gordian_core::tools::IMAGE_PATH_KEY].as_str(),
         Some(png_path),
         "IMAGE_PATH_KEY must equal png_path"
     );
