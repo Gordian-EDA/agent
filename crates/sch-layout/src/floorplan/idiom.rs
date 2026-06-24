@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use super::place::{Incidence, Item};
-use super::infer::is_ground;
-use super::infer::{best_decoupling_anchor, place_cc_pulldown, place_crystal, place_decoupling, place_i2c_pullup, PinSide};
+use sch_model::netclass::{is_ground, PinSide};
+use super::infer::{best_decoupling_anchor, place_cc_pulldown, place_crystal, place_decoupling, place_i2c_pullup};
 
 /// A circuit idiom recognized purely from connectivity + symbol pin geometry.
 /// `infer_ir` turns it into an [`sch_model::result::IdiomReport`] for the LLM. A FROZEN

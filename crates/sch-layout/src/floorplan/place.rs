@@ -17,7 +17,8 @@ use sch_model::geom::Dir;
 use sch_model::result::EmitOutput;
 
 use super::*;
-use super::infer::{anchor_tap, is_connector_like, is_ground, is_neg_supply, is_power_net};
+use super::infer::anchor_tap;
+use sch_model::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net};
 
 /// Compose every block's per-block `layout:` grid into one global relative seed:
 /// refdes → (grid col, grid row). Each gridded block occupies its own column band
