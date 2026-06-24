@@ -21,6 +21,28 @@ use sch_model::item::{Incidence, Item};
 use super::infer::anchor_tap;
 use sch_model::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net};
 
+/// Find the root of `x` in a disjoint-set forest, compressing the path to it.
+fn uf_find(parent: &mut [usize], x: usize) -> usize {
+    let mut r = x;
+    while parent[r] != r {
+        r = parent[r];
+    }
+    let mut c = x;
+    while parent[c] != r {
+        let next = parent[c];
+        parent[c] = r;
+        c = next;
+    }
+    r
+}
+
+/// Union the sets containing `a` and `b`; returns the surviving root.
+fn uf_union(parent: &mut [usize], a: usize, b: usize) -> usize {
+    let (ra, rb) = (uf_find(parent, a), uf_find(parent, b));
+    parent[ra] = rb;
+    rb
+}
+
 /// Compose every block's per-block `layout:` grid into one global relative seed:
 /// refdes → (grid col, grid row). Each gridded block occupies its own column band
 /// (declaration order, laid left→right); within a band a cell maps its refdes to
@@ -311,10 +333,63 @@ pub fn emit_writer(
     Ok(prepare_writer(env, design, ir, engine)?.0)
 }
 
+/// Bin-pack tile sizes into the column count whose packed sheet aspect is closest to
+/// `target_aspect`. For each candidate column count `1..=n` the blocks are placed
+/// first-fit-decreasing by height (tallest first, into the currently-shortest column),
+/// the resulting sheet width/height is measured, and the column count minimising
+/// `|width/height - target_aspect|` wins. Returns the per-input tile origin `(x, y)`,
+/// in original input order. A single block (or empty) trivially packs to one column.
+fn pack_columns(sizes: &[[f64; 2]], margin: f64, target_aspect: f64) -> Vec<[f64; 2]> {
+    let n = sizes.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    // Tallest-first order; ties broken by input index for determinism.
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| sizes[b][1].total_cmp(&sizes[a][1]).then(a.cmp(&b)));
+
+    let pack = |ncol: usize| -> (Vec<[f64; 2]>, f64) {
+        // Per-column running height (next free y) and accumulated max width.
+        let mut col_y = vec![0.0_f64; ncol];
+        let mut col_w = vec![0.0_f64; ncol];
+        let mut col_of = vec![0usize; n];
+        let mut yof = vec![0.0_f64; n];
+        for &i in &order {
+            // Shortest column (lowest running y), ties to the leftmost.
+            let c = (0..ncol).min_by(|&a, &b| col_y[a].total_cmp(&col_y[b])).unwrap();
+            yof[i] = col_y[c];
+            col_of[i] = c;
+            col_y[c] += sizes[i][1] + margin;
+            col_w[c] = col_w[c].max(sizes[i][0]);
+        }
+        // Column x origins from the cumulative max widths.
+        let mut col_x = vec![0.0_f64; ncol];
+        let mut acc = 0.0_f64;
+        for c in 0..ncol {
+            col_x[c] = acc;
+            acc += col_w[c] + margin;
+        }
+        let width = col_x[ncol - 1] + col_w[ncol - 1];
+        let height = col_y.iter().cloned().fold(0.0_f64, f64::max);
+        let tiles: Vec<[f64; 2]> = (0..n).map(|i| [col_x[col_of[i]], yof[i]]).collect();
+        ((tiles), if height > 0.0 { width / height } else { 1.0 })
+    };
+
+    (1..=n)
+        .map(|ncol| {
+            let (tiles, aspect) = pack(ncol);
+            (tiles, (aspect - target_aspect).abs())
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(tiles, _)| tiles)
+        .unwrap()
+}
+
 /// Compose independently-laid-out block-GROUP writers into ONE `.kicad_sch`. Each
 /// group writer arrives finalized in its own coordinate space (min corner at the
-/// page margin); this shelf-packs the groups onto a roughly-square grid,
-/// translates each to its tile (typed mm math — no string geometry), frames it
+/// page margin); this column bin-packs the groups (via `pack_columns`) toward a
+/// landscape sheet aspect, translates each to its tile (typed mm math — no string
+/// geometry), frames it
 /// with a dashed rectangle + a bold name label, dedups cross-group `PWR_FLAG`s,
 /// folds every group into one writer, and renders it via a single `finish`.
 /// Cross-group nets are already global labels (same name ⇒ KiCAD joins them on the
@@ -355,25 +430,14 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
         }
     }
 
-    // ── Shelf-pack onto a roughly-square grid: wrap rows at a target width derived
-    // from total width / sqrt(n) so a 6-group board is ~2-3 wide, not a tall column.
+    // ── Column bin-pack onto a roughly-square sheet. A width-only shelf target degenerates
+    // into a tall ribbon when blocks vary in height (one wide-but-short block forces a narrow
+    // row width, stacking the rest). Instead pick the column count in 1..=n whose packed sheet
+    // is closest to TARGET_ASPECT — first-fit-decreasing by height, each block dropped into the
+    // currently-shortest column — and keep the column assignment that minimises |aspect - 1.4|.
+    const TARGET_ASPECT: f64 = 1.4; // landscape sheets read better than square or portrait
     let sizes: Vec<[f64; 2]> = groups.iter().map(|(_, w)| w.content_size().unwrap_or([1.0, 1.0])).collect();
-    let total_w: f64 = sizes.iter().map(|s| s[0]).sum();
-    let widest = sizes.iter().map(|s| s[0]).fold(0.0_f64, f64::max);
-    let target_row = (total_w / (groups.len().max(1) as f64).sqrt()).max(widest);
-    // (tile x, tile y) per group, packed shelf by shelf.
-    let mut tiles: Vec<[f64; 2]> = Vec::with_capacity(groups.len());
-    let (mut cx, mut cy, mut row_h) = (0.0_f64, 0.0_f64, 0.0_f64);
-    for s in &sizes {
-        if cx > 0.0 && cx + s[0] > target_row {
-            cx = 0.0;
-            cy += row_h + TILE_MARGIN;
-            row_h = 0.0;
-        }
-        tiles.push([cx, cy]);
-        cx += s[0] + TILE_MARGIN;
-        row_h = row_h.max(s[1]);
-    }
+    let tiles = pack_columns(&sizes, TILE_MARGIN, TARGET_ASPECT);
 
     // ── Translate each group to its tile, frame it, and fold into one writer. The
     // group's content min corner sits at M; map it to (tile + TILE_MARGIN).
@@ -839,15 +903,76 @@ pub fn align_led_chains(items: &mut [Item], _inc: &Incidence, ir: &LayoutIr) -> 
     moved
 }
 
+/// Assign each two-pin rail bypass cap to the nearest non-connector ≥3-pin anchor on its V+ rail and
+/// return only the banks of ≥3 caps — the SINGLE source of truth for "which caps form a decoupling bank
+/// gather will re-seat". `gather_decoupling_bank` uses this to lay each bank beside its anchor;
+/// `align_rail_cap_rows` uses it to know which caps to DEFER (an anchor with <3 bypass caps yields no
+/// bank, so its caps stay in the bulk row rather than being stranded by a defer gather never honours).
+/// Mirrors gather's candidate filter exactly: a 2-pin `C*` with both pins on rails, ≥1 V+ pin whose rail
+/// reaches an anchor pin, bound to a V+ rail an anchor actually carries (preferring the V+ pin), assigned
+/// to the nearest such anchor.
+fn decoupling_bank_of(items: &[Item], ir: &LayoutIr) -> BTreeMap<usize, Vec<usize>> {
+    let is_rail = |n: &str| is_power_net(n) || ir.rails.contains_key(n);
+    let is_vp = |n: &str| is_rail(n) && !is_ground(n) && !is_neg_supply(n);
+    let anchor_idxs: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() >= 3 && !is_connector_like(&items[i].part))
+        .collect();
+    let mut bank_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (ci, it) in items.iter().enumerate() {
+        if !it.refdes.starts_with('C') || it.geom.pins.len() != 2 {
+            continue;
+        }
+        let nets: Vec<&str> = it.pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+        if nets.len() != 2 || !nets.iter().all(|n| is_rail(n)) || !nets.iter().any(|n| is_vp(n)) {
+            continue;
+        }
+        let Some(vp_net) = nets.iter().copied().filter(|n| is_vp(n)).find(|n| {
+            anchor_idxs.iter().any(|&ai| items[ai].pins.iter().any(|(_, _, an)| an.as_deref() == Some(*n)))
+        }) else {
+            continue;
+        };
+        let best = anchor_idxs
+            .iter()
+            .copied()
+            .filter(|&ai| items[ai].pins.iter().any(|(_, _, n)| n.as_deref() == Some(vp_net)))
+            .min_by(|&a, &b| {
+                let d = |ai: usize| {
+                    let dx = items[ai].at[0] - it.at[0];
+                    let dy = items[ai].at[1] - it.at[1];
+                    dx * dx + dy * dy
+                };
+                d(a).total_cmp(&d(b))
+            });
+        if let Some(ai) = best {
+            bank_of.entry(ai).or_default().push(ci);
+        }
+    }
+    // A real bank is ≥3 bypass caps (the decoupling pattern's `Role::many(.., 3, 64)` threshold); a lone
+    // cap or pair is not a "scattered bank" and gather leaves it untouched.
+    bank_of.retain(|_, bank| bank.len() >= 3);
+    bank_of
+}
+
+/// The flat set of cap indices that `gather_decoupling_bank` will re-seat (every member of every ≥3 bank).
+fn decoupling_bank_caps(items: &[Item], ir: &LayoutIr) -> std::collections::HashSet<usize> {
+    decoupling_bank_of(items, ir).into_values().flatten().collect()
+}
+
 /// Align stray BULK rail caps into a tidy row. A power-only sheet (a connector + a couple of bulk
 /// caps, the load IC being a cross-sheet port) has no IC for the decoupling-bank idiom to align the
 /// caps against, so the search drops one cap far from the other — vertical sprawl the critic flags
 /// ("place C2 beside C1 at the same height"). This rows any group of 2+ non-frozen caps whose BOTH
 /// pins are power/ground (a bulk cap has no signal pin to hug, so rowing can't strand it).
 ///
-/// SAFETY: caps on a rail that an actual IC (refdes U*, ≥3 pins) also sits on are LEFT ALONE — those
-/// are (often distributed) IC-bypass caps, and the critic PRAISES distributed decoupling; centralising
-/// them into a row would regress it. Frozen idiom-bank caps are skipped too. Multi-sheet only (gated).
+/// SAFETY: a cap is DEFERRED to `gather_decoupling_bank` only when that pass will ACTUALLY re-seat it —
+/// i.e. it is one of a ≥3 bank of two-pin rail bypass caps assigned (nearest-anchor) to a non-connector
+/// ≥3-pin anchor on its V+ rail (the same bank-assignment + `bank.len() >= 3` floor gather applies). Such
+/// a cap is that IC's distributed decoupling: centralising it in the bulk row lengthens every supply wire,
+/// and the critic PRAISES the bank beside the part. A cap whose anchor carries only 1–2 bypass caps is NOT
+/// deferred — gather skips it, so rowing it here is the only thing keeping it from vertical sprawl; a
+/// 3-pin regulator/MOSFET/relay (VR*/Q*/K*) with just a couple of bulk caps therefore does NOT suppress
+/// rowing, and those caps stay in the bulk row. Frozen idiom-bank caps are skipped too. Multi-sheet only
+/// (gated).
 fn align_rail_cap_rows(items: &mut [Item], ir: &LayoutIr) -> bool {
     if std::env::var("MULTISHEET_REFINE").is_err() {
         return false;
@@ -858,12 +983,10 @@ fn align_rail_cap_rows(items: &mut [Item], ir: &LayoutIr) -> bool {
     let snap = crate::grid::snap;
     const PITCH: f64 = 12.7; // cap body + value/refdes label width, on grid (7.62 packed the labels
     // tight enough that the follow-up decongest scattered the whole row back out)
-    // Nets a real IC sits on — caps there are IC-bypass; never row them.
-    let ic_nets: std::collections::HashSet<String> = items
-        .iter()
-        .filter(|it| it.refdes.starts_with('U') && it.geom.pins.len() >= 3)
-        .flat_map(|it| it.pins.iter().filter_map(|(_, _, n)| n.clone()))
-        .collect();
+    // The exact set of caps `gather_decoupling_bank` will re-seat — only THESE may be deferred from the
+    // bulk row. A bypass cap deferred here but skipped by gather (its anchor's bank is <3) would be left
+    // stranded, the vertical-sprawl defect this pass exists to fix.
+    let deferred = decoupling_bank_caps(items, ir);
     let mut groups: std::collections::BTreeMap<(String, String), Vec<usize>> =
         std::collections::BTreeMap::new();
     for (i, it) in items.iter().enumerate() {
@@ -871,10 +994,7 @@ fn align_rail_cap_rows(items: &mut [Item], ir: &LayoutIr) -> bool {
             continue;
         }
         let nets: Vec<String> = it.pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
-        if nets.len() != 2
-            || !nets.iter().all(|n| is_rail(n))
-            || nets.iter().any(|n| ic_nets.contains(n))
-        {
+        if nets.len() != 2 || !nets.iter().all(|n| is_rail(n)) || deferred.contains(&i) {
             continue;
         }
         let mut np = [nets[0].clone(), nets[1].clone()];
@@ -910,14 +1030,15 @@ fn align_rail_cap_rows(items: &mut [Item], ir: &LayoutIr) -> bool {
 /// the IC explicitly gridded by the author (`layout:`), the decoupling idiom is dropped (so the caps
 /// are NOT frozen and never reported), and they flow through normal placement; the finalize
 /// `decongest_off_labels` pass then nudges each cap off the many off-sheet port labels (LED_CTL, SPI_*,
-/// I2C_*…) and scatters the bank across the sheet's empty area. `align_rail_cap_rows` deliberately SKIPS
-/// these caps (they're on `ic_nets`), so nothing re-gathers them.
+/// I2C_*…) and scatters the bank across the sheet's empty area. `align_rail_cap_rows` deliberately DEFERS
+/// exactly the caps this pass will take — the members of each ≥3 bank (`decoupling_bank_of`) — so the two
+/// passes share one notion of "what is a bank" and never strand a cap between them.
 ///
 /// This is the SIBLING of `align_rail_cap_rows`/`align_repeated_columns`: a DEAD-LAST, overlap-safe,
-/// MULTISHEET_REFINE-gated re-row. It re-derives the bank GENERICALLY from the placed netlist (NOT from
-/// `ir.idioms`, which the gridded-anchor case drops, NOR from `frozen`, which that case clears): for each
-/// ≥3-pin IC-like anchor it collects the 2-pin caps bridging the anchor's V+ rail and ground (≥3 ⇒ a real
-/// bank) and lays them in a tidy row HUGGING the anchor — one cap pitch off its supply-pin edge, evenly
+/// MULTISHEET_REFINE-gated re-row. The bank is re-derived GENERICALLY from the placed netlist by
+/// `decoupling_bank_of` (NOT from `ir.idioms`, which the gridded-anchor case drops, NOR from `frozen`,
+/// which that case clears): each non-connector ≥3-pin anchor with ≥3 of the 2-pin caps bridging its V+
+/// rail. This pass lays each such bank in a tidy row HUGGING the anchor — one cap pitch off its supply-pin edge, evenly
 /// spaced and centred on the supply pins. Each cap keeps its angle (V+ up / GND down), so its short risers
 /// drop straight to the rails. The bank's distributed look is PRESERVED (a row of separate caps, not one
 /// merged blob), which the critic praises — the only change is that the row sits BESIDE the IC, not flung
@@ -938,54 +1059,12 @@ fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool {
     let is_vp = |n: &str| is_rail(n) && !is_ground(n) && !is_neg_supply(n);
     const GAP: f64 = 7.62; // anchor edge → first cap row, on grid
 
-    // Candidate anchors: ≥3-pin IC-like parts (NOT a connector — a power/SWD header touches the same
-    // rails as the bypass caps but is the supply ENTRY, not the decoupling target; same exclusion the
-    // decoupling matcher's `Not(Connector)` guard makes). Ordered by item index for determinism.
-    let anchor_idxs: Vec<usize> = (0..items.len())
-        .filter(|&i| items[i].geom.pins.len() >= 3 && !is_connector_like(&items[i].part))
-        .collect();
-    // Assign each candidate bypass cap to its NEAREST qualifying anchor, so two ICs on the same sheet
-    // each gather their own caps (and a shared bulk cap rides with the closer one).
-    let mut bank_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (ci, it) in items.iter().enumerate() {
-        if !it.refdes.starts_with('C') || it.geom.pins.len() != 2 {
-            continue;
-        }
-        let nets: Vec<&str> = it.pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
-        // A pure bypass cap: V+ ↔ GND, both pins on rails, exactly one of each polarity.
-        if nets.len() != 2
-            || !nets.iter().all(|n| is_rail(n))
-            || !nets.iter().any(|n| is_vp(n))
-            || !nets.iter().any(|n| is_ground(n))
-        {
-            continue;
-        }
-        let vp_net = *nets.iter().find(|n| is_vp(n)).unwrap();
-        // Nearest anchor that actually carries this cap's V+ rail.
-        let best = anchor_idxs
-            .iter()
-            .copied()
-            .filter(|&ai| items[ai].pins.iter().any(|(_, _, n)| n.as_deref() == Some(vp_net)))
-            .min_by(|&a, &b| {
-                let d = |ai: usize| {
-                    let dx = items[ai].at[0] - it.at[0];
-                    let dy = items[ai].at[1] - it.at[1];
-                    dx * dx + dy * dy
-                };
-                d(a).total_cmp(&d(b))
-            });
-        if let Some(ai) = best {
-            bank_of.entry(ai).or_default().push(ci);
-        }
-    }
+    // The ≥3 bypass-cap banks, each keyed by its nearest non-connector ≥3-pin anchor — the same
+    // assignment `align_rail_cap_rows` consults to decide what to DEFER, so the two passes never drift.
+    let bank_of = decoupling_bank_of(items, ir);
 
     let mut moves: Vec<(usize, [f64; 2], f64)> = Vec::new();
     for (&ai, bank) in &bank_of {
-        // A real bank is ≥3 bypass caps (the decoupling pattern's `Role::many(.., 3, 64)` threshold);
-        // a lone cap or pair is not a "scattered bank" and rowing it risks stranding a filter cap.
-        if bank.len() < 3 {
-            continue;
-        }
         // Which V+ rail does the bank predominantly serve?
         let mut vp_count: BTreeMap<String, usize> = BTreeMap::new();
         for &ci in bank {
@@ -2386,19 +2465,6 @@ fn align_repeated_columns(
         // repeated UNIT generically from connectivity, not from refdes arithmetic.
         let n = members.len();
         let mut parent: Vec<usize> = (0..n).collect();
-        fn find(parent: &mut [usize], x: usize) -> usize {
-            let mut r = x;
-            while parent[r] != r {
-                r = parent[r];
-            }
-            let mut c = x;
-            while parent[c] != c {
-                let next = parent[c];
-                parent[c] = r;
-                c = next;
-            }
-            r
-        }
         // net -> first member (local index) seen carrying it; only signal nets join copies.
         let mut net_owner: BTreeMap<String, usize> = BTreeMap::new();
         for (k, &i) in members.iter().enumerate() {
@@ -2408,10 +2474,7 @@ fn align_repeated_columns(
                     continue;
                 }
                 if let Some(&other) = net_owner.get(net) {
-                    let (ra, rb) = (find(&mut parent, k), find(&mut parent, other));
-                    if ra != rb {
-                        parent[ra] = rb;
-                    }
+                    uf_union(&mut parent, k, other);
                 } else {
                     net_owner.insert(net.clone(), k);
                 }
@@ -2420,7 +2483,7 @@ fn align_repeated_columns(
         // Collect columns: root -> member item indices.
         let mut cols_map: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for k in 0..n {
-            let r = find(&mut parent, k);
+            let r = uf_find(&mut parent, k);
             cols_map.entry(r).or_default().push(members[k]);
         }
         // Need ≥3 columns for this to be a "repeated columns" motif.
@@ -4941,19 +5004,6 @@ fn route_signal(
     // scene immediately so later edges detour around it (partial progress, never
     // the old all-or-nothing that label-bombed the whole net on one bad edge).
     let mut parent: Vec<usize> = (0..terms.len()).collect();
-    fn find(parent: &mut [usize], x: usize) -> usize {
-        let mut r = x;
-        while parent[r] != r {
-            r = parent[r];
-        }
-        let mut c = x;
-        while parent[c] != r {
-            let n = parent[c];
-            parent[c] = r;
-            c = n;
-        }
-        r
-    }
     let mut paths: Vec<crate::wire::Path> = Vec::new();
     for (i, j) in crate::wire::mst_edges(&pts) {
         let (a, da, b) = match (terms[i].1, terms[j].1) {
@@ -4992,8 +5042,7 @@ fn route_signal(
                 scene.segments.push((seg[0], seg[1], net.to_string()));
             }
             paths.push(p);
-            let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
-            parent[ri] = rj;
+            uf_union(&mut parent, i, j);
         }
     }
 
@@ -5005,11 +5054,10 @@ fn route_signal(
     // only fires when the route genuinely failed, so cleanly-routed references stay byte-identical.
     if eps.len() == 1 {
         if let Some(pi) = port_idx {
-            let (rp, re) = (find(&mut parent, 0), find(&mut parent, pi));
-            if rp != re {
+            if uf_find(&mut parent, 0) != uf_find(&mut parent, pi) {
                 w.add_wire_on_net(pts[0], pts[pi], net);
                 scene.segments.push((pts[0], pts[pi], net.to_string()));
-                parent[rp] = re;
+                uf_union(&mut parent, 0, pi);
             }
         }
     }
@@ -5054,8 +5102,7 @@ fn route_signal(
             }
         };
         for k in 1..eps.len() {
-            let (ra, rk) = (find(&mut parent, 0), find(&mut parent, k));
-            if ra == rk {
+            if uf_find(&mut parent, 0) == uf_find(&mut parent, k) {
                 continue; // already joined to pin 0's component by the MST
             }
             // Don't force an OVERHEAD detour across a long-haul gap: that recreates the very sheet-wide
@@ -5088,7 +5135,7 @@ fn route_signal(
                             scene.segments.push((seg[0], seg[1], net.to_string()));
                         }
                     }
-                    parent[ra] = rk;
+                    uf_union(&mut parent, 0, k);
                     break;
                 }
             }
@@ -5101,7 +5148,7 @@ fn route_signal(
     // is fully wired and no label is emitted.
     let mut roots: BTreeMap<usize, Option<(usize, String)>> = BTreeMap::new();
     for k in 0..terms.len() {
-        let r = find(&mut parent, k);
+        let r = uf_find(&mut parent, k);
         let slot = roots.entry(r).or_insert(None);
         if slot.is_none() {
             if let Some(pin) = &term_pin[k] {
@@ -5109,7 +5156,7 @@ fn route_signal(
             }
         }
     }
-    let port_root = port_idx.map(|pi| find(&mut parent, pi));
+    let port_root = port_idx.map(|pi| uf_find(&mut parent, pi));
     if roots.len() > 1 {
         for (root, pin) in &roots {
             if Some(*root) == port_root {
@@ -5944,6 +5991,85 @@ mod grid_tests {
         for s in [Side::Left, Side::Right, Side::Top, Side::Bottom] {
             assert_eq!(dir_to_side(side_dir(s)), s);
         }
+    }
+
+    /// Minimal `Item` for the decoupling-bank deferral tests: `geom.pins` is padded to the right COUNT
+    /// (the assignment only reads `geom.pins.len()`), while `pins` carries the (number,name,net) the
+    /// classifier inspects. `at` drives the nearest-anchor tie-break.
+    fn item(refdes: &str, part: &str, at: [f64; 2], nets: &[&str]) -> Item {
+        let pins: Vec<(String, String, Option<String>)> = nets
+            .iter()
+            .enumerate()
+            .map(|(k, n)| ((k + 1).to_string(), n.to_string(), Some(n.to_string())))
+            .collect();
+        let geom_pins = (0..nets.len())
+            .map(|k| kicad_sexpr::geometry::PinGeom {
+                number: (k + 1).to_string(),
+                name: nets[k].to_string(),
+                at: [0.0, 0.0],
+                angle: 0.0,
+                length: 2.54,
+                unit: 1,
+            })
+            .collect();
+        Item {
+            refdes: refdes.into(),
+            part: part.into(),
+            value: String::new(),
+            footprint: None,
+            geom: SymbolGeometry { lib_id: part.into(), pins: geom_pins, raw_definition: String::new() },
+            pins,
+            at,
+            angle: 0.0,
+            unit: 1,
+            mirror: false,
+            frozen: false,
+        }
+    }
+
+    /// A 3-pin regulator with only TWO bulk caps on its V+ rail forms NO decoupling bank (gather's ≥3
+    /// floor), so those caps must NOT be deferred — `align_rail_cap_rows` keeps them in the bulk row
+    /// instead of stranding them. The regression for align_rail_cap_rows defer-vs-gather drift.
+    #[test]
+    fn three_pin_anchor_with_two_caps_is_not_a_deferred_bank() {
+        let ir = LayoutIr::default();
+        let items = vec![
+            item("VR1", "Regulator_Linear:AMS1117", [0.0, 0.0], &["VIN", "GND", "VCC"]),
+            item("C1", "Device:C", [10.0, 0.0], &["VCC", "GND"]),
+            item("C2", "Device:C", [20.0, 0.0], &["VCC", "GND"]),
+        ];
+        // Two caps < 3 ⇒ no bank ⇒ nothing deferred.
+        assert!(decoupling_bank_caps(&items, &ir).is_empty());
+    }
+
+    /// Three+ bypass caps on a 3-pin anchor's V+ rail DO form a bank gather will re-seat, so every member
+    /// is deferred (and `align_rail_cap_rows` leaves them for the gather rather than rowing them).
+    #[test]
+    fn three_pin_anchor_with_three_caps_is_a_deferred_bank() {
+        let ir = LayoutIr::default();
+        let items = vec![
+            item("U1", "MCU_ST:STM32", [0.0, 0.0], &["VIN", "GND", "VCC"]),
+            item("C1", "Device:C", [10.0, 0.0], &["VCC", "GND"]),
+            item("C2", "Device:C", [20.0, 0.0], &["VCC", "GND"]),
+            item("C3", "Device:C", [30.0, 0.0], &["VCC", "GND"]),
+        ];
+        let deferred = decoupling_bank_caps(&items, &ir);
+        assert_eq!(deferred.len(), 3);
+        assert_eq!(deferred, [1usize, 2, 3].into_iter().collect());
+    }
+
+    /// A connector touching the rail is the supply ENTRY, not a decoupling target: its caps never form a
+    /// deferred bank even at ≥3 (mirrors gather's `Not(Connector)` exclusion).
+    #[test]
+    fn connector_anchor_never_forms_a_deferred_bank() {
+        let ir = LayoutIr::default();
+        let items = vec![
+            item("J1", "Connector:Conn_01x03", [0.0, 0.0], &["VIN", "GND", "VCC"]),
+            item("C1", "Device:C", [10.0, 0.0], &["VCC", "GND"]),
+            item("C2", "Device:C", [20.0, 0.0], &["VCC", "GND"]),
+            item("C3", "Device:C", [30.0, 0.0], &["VCC", "GND"]),
+        ];
+        assert!(decoupling_bank_caps(&items, &ir).is_empty());
     }
 
     #[test]
