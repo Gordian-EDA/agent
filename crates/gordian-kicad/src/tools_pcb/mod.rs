@@ -30,6 +30,7 @@
 //! - [`place`] — `get_board`, the draft→`PlaceProblem` bridge, and `place_board`.
 //! - [`route`] — `route_board` and the plane/escape routing pipeline + triage.
 //! - [`export`] — `export_board`, the synth wiring, and the copper-zone builders.
+//! - [`fab`] — `export_fab`: bundle a routed board into Gerbers/drill/pos/BOM.
 //! - [`render`] — `render_board`.
 //! - [`interactive`] — live IPC board editing (`open_board`, `move_part`,
 //!   `route_track`, `set_net_width`, `board_state`) + `autoroute`.
@@ -37,6 +38,7 @@
 mod create;
 mod draft;
 mod export;
+mod fab;
 mod footprints;
 mod interactive;
 mod place;
@@ -46,6 +48,7 @@ mod route;
 pub use create::{build_board_draft, derive_board};
 pub use draft::{apply_spec_extras, BoardDraft, DraftPart, DraftRules, Keepout, PourSpec};
 pub use export::export_board;
+pub use fab::export_fab;
 pub use footprints::{assign_footprint, get_footprint_info, search_footprints};
 pub use interactive::{
     autoroute, board_state, move_part, open_board, route_track, save_session_if_open, set_net_width,

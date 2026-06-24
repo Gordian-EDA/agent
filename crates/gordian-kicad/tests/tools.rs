@@ -191,6 +191,7 @@ fn defs_lists_all_tools() {
         "autoroute",
         "render_board",
         "export_board",
+        "export_fab",
         "review_design",
         "derive_board",
         "assign_footprint",
@@ -217,7 +218,7 @@ fn defs_lists_all_tools() {
     ] {
         assert!(!names.contains(&gone.to_string()), "legacy tool still present: {gone}");
     }
-    assert_eq!(names.len(), 27, "expected exactly 27 tools, got {}: {:?}", names.len(), names);
+    assert_eq!(names.len(), 28, "expected exactly 28 tools, got {}: {:?}", names.len(), names);
 
     // Names are unique.
     let mut sorted = names.clone();
@@ -264,6 +265,56 @@ fn project_info_reports_paths_and_state() {
     let out = run_tool("project_info", serde_json::json!({}), &ctx)
         .unwrap();
     assert_eq!(out["sch_exists"], serde_json::json!(true), "got: {out}");
+}
+
+/// The two-resistor fixture board, shared with `kicad-sexpr`/`kicad-cli-rs`.
+const TWO_RES_PCB: &str = include_str!("../../kicad-sexpr/tests/fixtures/two_res.kicad_pcb");
+
+#[test]
+fn export_fab_errors_without_a_board() {
+    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    // No board exported yet → a recoverable error pointing at export_board.
+    let out = run_tool("export_fab", serde_json::json!({}), &ctx).unwrap();
+    let err = out["error"].as_str().unwrap_or_default();
+    assert!(err.contains("export_board"), "expected an export_board hint, got: {out}");
+}
+
+#[test]
+fn export_fab_bundles_gerbers_and_drill() {
+    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    // Stand in a routed board at the project's default .kicad_pcb path, then
+    // bundle it. (export_fab reads the exported board; it does not re-route.)
+    std::fs::write(ctx.pcb_path(), TWO_RES_PCB).unwrap();
+    let out = run_tool("export_fab", serde_json::json!({}), &ctx).unwrap();
+
+    assert_eq!(out["ok"], serde_json::json!(true), "got: {out}");
+    let files: Vec<String> = out["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    // Real Gerber layers + an Excellon drill file landed in the bundle.
+    assert!(files.iter().any(|f| f.ends_with(".gbr")), "no Gerber in {files:?}");
+    assert!(files.iter().any(|f| f.ends_with(".drl")), "no drill in {files:?}");
+    assert!(files.iter().any(|f| f.ends_with("-pos.csv")), "no pos in {files:?}");
+
+    // The bundle dir exists and every reported file is a real, non-empty file.
+    let fab_dir = std::path::PathBuf::from(out["fab_dir"].as_str().unwrap());
+    assert!(fab_dir.is_dir(), "fab dir missing: {}", fab_dir.display());
+    for f in &files {
+        let p = fab_dir.join(f);
+        let len = std::fs::metadata(&p)
+            .unwrap_or_else(|_| panic!("missing {}", p.display()))
+            .len();
+        assert!(len > 0, "{} is empty", p.display());
+    }
 }
 
 #[test]

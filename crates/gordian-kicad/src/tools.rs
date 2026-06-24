@@ -747,6 +747,34 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     }
                 }),
             },
+            ToolDef {
+                name: "export_fab".into(),
+                description: "Bundle the routed board into a manufacturable FAB deliverable: \
+                    Gerbers (one *.gbr per copper/mask/silk/edge layer), an Excellon drill set \
+                    (separate plated/non-plated files + drill maps), a CSV pick-and-place \
+                    (component positions), and — when the project has a schematic — a grouped \
+                    BOM CSV. Everything lands in a single fab/ directory you hand to a board \
+                    house. Call this LAST, AFTER export_board has written the .kicad_pcb \
+                    (place_board → route_board → export_board → export_fab); if no board file \
+                    exists it returns a recoverable error pointing at export_board. Returns the \
+                    fab directory and the produced file list."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Input .kicad_pcb to bundle. Omit to use the \
+                                project's default <stem>.kicad_pcb (what export_board wrote)."
+                        },
+                        "out_dir": {
+                            "type": "string",
+                            "description": "Output directory for the bundle. Omit for the \
+                                project's default fab/ directory."
+                        }
+                    }
+                }),
+            },
     ]
 }
 
@@ -775,6 +803,7 @@ pub fn run_tool(name: &str, input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             "route_board" => crate::tools_pcb::route_board(input, ctx),
             "autoroute" => crate::tools_pcb::autoroute(input, ctx),
             "export_board" => crate::tools_pcb::export_board(input, ctx),
+            "export_fab" => crate::tools_pcb::export_fab(input, ctx),
             "open_board" => crate::tools_pcb::open_board(input, ctx),
             "board_state" => crate::tools_pcb::board_state(ctx),
             "move_part" => crate::tools_pcb::move_part(input, ctx),
