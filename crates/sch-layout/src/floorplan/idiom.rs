@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use super::*;
+use super::infer::{best_decoupling_anchor, place_cc_pulldown, place_crystal, place_decoupling, place_i2c_pullup, PinSide};
 
 /// A circuit idiom recognized purely from connectivity + symbol pin geometry.
 /// `infer_ir` turns it into an [`sch_model::result::IdiomReport`] for the LLM. A FROZEN
