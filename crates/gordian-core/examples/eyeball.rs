@@ -4,9 +4,9 @@
 //! around, packaged as a one-command convenience.
 //!
 //! ```text
-//! cargo run -p gordian-kicad --example eyeball                 # all bundled fixtures
-//! cargo run -p gordian-kicad --example eyeball -- quad         # one named fixture
-//! cargo run -p gordian-kicad --example eyeball -- path/to.json # an arbitrary problem
+//! cargo run -p gordian-core --example eyeball                 # all bundled fixtures
+//! cargo run -p gordian-core --example eyeball -- quad         # one named fixture
+//! cargo run -p gordian-core --example eyeball -- path/to.json # an arbitrary problem
 //! ```
 //!
 //! Legend: red = top-layer copper, blue = bottom layer, magenta rings = vias,
@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gordian_kicad::tools_pcb::engine_svg::render_svg;
+use gordian_core::tools_pcb::engine_svg::render_svg;
 use negotiated_mesh::pipeline::route_auto;
 use pcb_model::RouteProblem;
 
@@ -42,7 +42,7 @@ fn resolve(arg: &str) -> PathBuf {
 }
 
 /// Rasterize an SVG string to PNG bytes at [`SCALE`]× on a white background
-/// (the same path `gordian_kicad::render::svg_to_png` uses, inlined so the example has
+/// (the same path `gordian_core::render::svg_to_png` uses, inlined so the example has
 /// no internal-API dependency).
 fn rasterize(svg: &str) -> Vec<u8> {
     let opt = resvg::usvg::Options::default();

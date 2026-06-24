@@ -2,7 +2,7 @@
 //!
 //! Each tool is a thin, deterministic wrapper over logic that already lives in
 //! `circuit-lang`, `kicad-sexpr`/`kicad-cli-rs`, and `sch-place-core`/`sch-io`. The registry
-//! exposes two free functions, both consumed by the [`crate::PcbTools`] provider:
+//! exposes two free functions, both driven directly by the [`crate::Agent`] loop:
 //!
 //! - [`tool_defs`] — the JSON-Schema [`ToolDef`]s handed to the LLM.
 //! - [`run_tool`] — dispatch a tool by name with a JSON input, returning JSON the
@@ -22,10 +22,10 @@
 //! compiles the YAML, and on success renders the reconciled schematic against
 //! the current `.kicad_sch` (if any), then returns a structured diff
 //! (`added`/`removed`/`changed` refdes + a net-count delta) and the rendered
-//! text length — **without writing anything**. The human apply-gate lives in
-//! [`crate::PcbTools`]'s [`gordian_core::ToolProvider`] (the loop's
-//! preview → approve → commit choreography over [`gordian_core::ToolEffect::Gated`]);
-//! only once it approves does the loop re-call with `commit: true`, which writes
+//! text length — **without writing anything**. The human apply-gate lives in the
+//! [`crate::Agent`] loop (the preview → approve → commit choreography over a
+//! [`crate::ToolEffect::Gated`] tool); only once it approves does the loop re-call
+//! with `commit: true`, which writes
 //! the file, snapshots the prior, and runs ERC, returning
 //! `{written: true, erc: {errors, warnings}}`.
 //!
@@ -59,7 +59,7 @@ use kicad_sexpr::snapshot::SnapshotStore;
 use sch_place_core::floorplan::{infer_ir, LayoutIr};
 use sch_io::read::lift;
 
-use gordian_core::ToolDef;
+use crate::ToolDef;
 
 /// Default number of symbol-search hits returned when `limit` is omitted.
 const DEFAULT_SEARCH_LIMIT: usize = 8;
@@ -294,7 +294,7 @@ impl PcbToolCtx {
 }
 
 /// The JSON-Schema definitions for every tool, in a stable order. The
-/// [`crate::PcbTools`] provider hands these to the agent loop.
+/// [`crate::Agent`] loop hands these to the model.
 pub fn tool_defs() -> Vec<ToolDef> {
     vec![
             ToolDef {
@@ -807,8 +807,8 @@ pub fn tool_defs() -> Vec<ToolDef> {
 }
 
 /// Dispatch a tool by name (synchronous). `input` is the model-supplied JSON
-/// arguments; the returned `Value` is fed back to the model. The [`crate::PcbTools`]
-/// provider off-loads this onto the blocking pool.
+/// arguments; the returned `Value` is fed back to the model. The [`crate::Agent`]
+/// loop off-loads this onto the blocking pool.
 pub fn run_tool(name: &str, input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     match name {
         "search_symbols" => search_symbols(input, ctx),

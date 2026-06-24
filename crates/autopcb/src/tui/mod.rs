@@ -40,9 +40,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gordian_core::{Agent, AgentEvent, Approvals, StopReason};
-use gordian_kicad::PcbTools;
-use gordian_kicad::prompts::system_prompt;
-use gordian_kicad::tools::PcbToolCtx;
+use gordian_core::prompts::system_prompt;
+use gordian_core::tools::PcbToolCtx;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use crossterm::event::{
@@ -119,7 +118,7 @@ pub async fn run(project_dir: PathBuf) -> Result<()> {
                 .context("building the tool context for the project")?;
             Some(Rc::new(Mutex::new(Agent::new(
                 client,
-                Box::new(PcbTools::new(ctx)),
+                ctx,
                 system_prompt(),
             ))))
         }

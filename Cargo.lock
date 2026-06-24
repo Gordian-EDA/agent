@@ -153,7 +153,6 @@ dependencies = [
  "crossterm",
  "futures",
  "gordian-core",
- "gordian-kicad",
  "image",
  "kicad-cli-rs",
  "kicad-sexpr",
@@ -1010,29 +1009,15 @@ dependencies = [
 name = "gordian-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "async-trait",
- "directories",
- "fastrand",
- "futures",
- "llm-client",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "gordian-kicad"
-version = "0.1.0"
-dependencies = [
  "anneal-place",
  "anyhow",
  "async-trait",
  "base64",
  "circuit-lang",
+ "directories",
  "drc-lint",
+ "futures",
  "fuzzy-matcher",
- "gordian-core",
  "greedy-place",
  "grid-astar",
  "indexmap 2.14.0",

@@ -69,7 +69,7 @@ fn render_fixture(env: &KicadEnv, yaml_path: &std::path::Path, out: &std::path::
     // content-only, matching the zoomed-to-content reference screenshots.
     let svg_path = KicadCli::new(env).export_svg_opts(&sch_path, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
-    let png = gordian_kicad::render::svg_to_png(&svg, 1600)?;
+    let png = gordian_core::render::svg_to_png(&svg, 1600)?;
     std::fs::write(out, png)?;
     for wmsg in &emit.layout_warnings {
         eprintln!("  WARN: {wmsg}");

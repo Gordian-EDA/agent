@@ -6,7 +6,7 @@
 //! independently (the professional practice) lets each region read like the clean fixtures
 //! (8-9), and global labels join cross-block nets across the one sheet with no border-crossing
 //! wires. Compiles the design with the REAL parser (handles `between:`, `power:`, multi-line,
-//! units), then composes via `gordian_kicad::multisheet::compose_single_sheet` (the production path —
+//! units), then composes via `gordian_core::multisheet::compose_single_sheet` (the production path —
 //! the exact function `apply_design` calls) and renders the result. Critic the PNG with
 //! tools/schematic_critic.py.
 //!
@@ -39,14 +39,14 @@ fn main() -> anyhow::Result<()> {
     // COMPOSE the single committable sheet (refine into groups, per-group anneal, tile each as
     // a labeled bounding box, join cross-block nets via global labels) — the production path.
     let root =
-        gordian_kicad::multisheet::compose_single_sheet(&env, &design, std::path::Path::new(&out_dir))?;
+        gordian_core::multisheet::compose_single_sheet(&env, &design, std::path::Path::new(&out_dir))?;
     println!("wrote composed sheet -> {}", root.display());
 
     // Render it to a PNG for the critic.
     let svg_dir = tempfile::tempdir()?;
     let svg_path = KicadCli::new(&env).export_svg_opts(&root, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
-    let png = gordian_kicad::render::svg_to_png(&svg, 2400)?;
+    let png = gordian_core::render::svg_to_png(&svg, 2400)?;
     let stem =
         std::path::Path::new(&yaml).file_stem().and_then(|s| s.to_str()).unwrap_or("composed");
     let out_png = format!("{out_dir}/{stem}.png");

@@ -15,9 +15,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use gordian_core::{Agent, AgentEvent, AutoApprove};
-use gordian_kicad::PcbTools;
-use gordian_kicad::prompts::system_prompt_with_reference;
-use gordian_kicad::tools::PcbToolCtx;
+use gordian_core::prompts::system_prompt_with_reference;
+use gordian_core::tools::PcbToolCtx;
 use anyhow::{Context, Result, bail};
 use kicad_cli_rs::cli::KicadCli;
 use kicad_cli_rs::env::KicadEnv;
@@ -210,7 +209,7 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     // is known, so inject the single best-matching real human design as a worked
     // few-shot example. Falls back to the plain prompt when no corpus / match.
     let system = system_prompt_with_reference(&env, &prompt);
-    let mut agent = Agent::new(client, Box::new(PcbTools::new(ctx)), system);
+    let mut agent = Agent::new(client, ctx, system);
     let mut approvals = AutoApprove::yes();
     let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 

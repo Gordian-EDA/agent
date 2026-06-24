@@ -8,7 +8,6 @@ description = "CLI and TUI for the auto-pcb LLM agent that designs KiCAD schemat
 
 [dependencies]
 gordian-core = { path = "../gordian-core" }
-gordian-kicad = { path = "../gordian-kicad" }
 llm-client = { path = "../llm-client" }
 kicad-cli-rs = { path = "../kicad-cli-rs" }
 kicad-sexpr = { path = "../kicad-sexpr" }

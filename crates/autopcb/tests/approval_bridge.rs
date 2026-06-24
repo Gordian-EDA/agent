@@ -3,18 +3,16 @@
 //! The cockpit's real bridge (`tui::TuiApprovals`) forwards the agent's
 //! `approve(diff)` over a channel and awaits a oneshot the UI fulfils on an
 //! `a`/`r` keypress. This test recreates that exact pattern with a public stand-in
-//! and drives a real [`gordian_core::Agent`] over the KiCAD [`PcbTools`] provider
 //! (so the async approval flow — agent awaits `approve()`, a "UI" task receives the
 //! diff, a simulated `a` resolves `true`, the write commits — is covered without a
-//! terminal).
+//! terminal). It drives a real [`gordian_core::Agent`] over the KiCAD tools.
 //!
 //! Needs KiCAD for the tools; SKIPs gracefully otherwise.
 
 use gordian_core::testing::{ScriptedClient, final_text, tool_call};
 use gordian_core::{Agent, Approvals};
-use gordian_kicad::PcbTools;
-use gordian_kicad::prompts::system_prompt;
-use gordian_kicad::tools::PcbToolCtx;
+use gordian_core::prompts::system_prompt;
+use gordian_core::tools::PcbToolCtx;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -47,7 +45,7 @@ blocks:\n\
 \x20     R2: {part: R, value: 10k, between: [GND, B]}\n";
 
 fn agent(ctx: PcbToolCtx, completions: Vec<gordian_core::Completion>) -> Agent {
-    Agent::new(Box::new(ScriptedClient::new(completions)), Box::new(PcbTools::new(ctx)), system_prompt())
+    Agent::new(Box::new(ScriptedClient::new(completions)), ctx, system_prompt())
 }
 
 #[tokio::test]

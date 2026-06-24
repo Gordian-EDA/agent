@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Fresh throwaway project for this run.
     let tmp = tempfile::tempdir()?;
-    let ctx = gordian_kicad::tools::PcbToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
+    let ctx = gordian_core::tools::PcbToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
     let sch_path = ctx.sch_path().to_path_buf();
     // The agent's own MULTI-BLOCK source (what it wrote via create_design) — preserved so the
     // multi-sheet path (tools/multisheet.py) can render one clean sheet per block. The lifted
@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
     let draft_path = tmp.path().join(".autopcb/draft.circuit.yaml");
 
     let client = llm_client::from_env()?;
-    let mut agent = Agent::new(client, Box::new(gordian_kicad::PcbTools::new(ctx)), gordian_kicad::prompts::system_prompt());
+    let mut agent = Agent::new(client, ctx, gordian_core::prompts::system_prompt());
 
     // Stream events so the run's tool calls are visible while it works.
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -86,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
     let svg_dir = tempfile::tempdir()?;
     let svg_path = KicadCli::new(&env).export_svg_opts(&sch_path, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
-    let png = gordian_kicad::render::svg_to_png(&svg, 1600)?;
+    let png = gordian_core::render::svg_to_png(&svg, 1600)?;
     std::fs::write(&out, png)?;
     // Keep the source sch + a lifted YAML next to the PNG so a defect can be
     // reproduced deterministically (re-render via layout_spike) without re-spending
