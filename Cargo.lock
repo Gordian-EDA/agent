@@ -826,6 +826,7 @@ dependencies = [
  "async-trait",
  "directories",
  "fastrand",
+ "futures",
  "llm-client",
  "serde",
  "serde_json",

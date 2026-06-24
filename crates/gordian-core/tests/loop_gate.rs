@@ -257,6 +257,35 @@ async fn usage_tokens_flow_through_completions() {
 }
 
 #[tokio::test]
+async fn assistant_prose_streams_as_deltas_then_one_final_text() {
+    // The loop drives the provider's stream: a turn's prose arrives as incremental
+    // AssistantDelta events (concatenating to the full text) and is finalized once
+    // as a single AssistantText.
+    use tokio::sync::mpsc::unbounded_channel;
+    let tools = MockToolProvider::default();
+    let client = ScriptedClient::new(vec![final_text("hello there, world")]);
+    let mut agent = Agent::new(Box::new(client), Box::new(tools), "sys");
+    let mut approvals = AutoApprove::yes();
+    let (tx, mut rx) = unbounded_channel();
+
+    let out = agent.run_turn("go", &mut approvals, Some(&tx)).await.unwrap();
+    assert_eq!(out.final_text, "hello there, world");
+
+    let mut deltas = Vec::new();
+    let mut finals = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            AgentEvent::AssistantDelta(t) => deltas.push(t),
+            AgentEvent::AssistantText(t) => finals.push(t),
+            _ => {}
+        }
+    }
+    assert!(deltas.len() >= 2, "prose streams as multiple deltas: {deltas:?}");
+    assert_eq!(deltas.concat(), "hello there, world", "deltas reassemble the text");
+    assert_eq!(finals, vec!["hello there, world".to_string()], "finalized exactly once");
+}
+
+#[tokio::test]
 async fn applied_event_carries_the_domain_summary() {
     use tokio::sync::mpsc::unbounded_channel;
     let tools = MockToolProvider::default();

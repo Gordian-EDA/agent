@@ -35,10 +35,11 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
-use llm_client::{ContentBlock, ImageData, Message, Provider, Role, ToolCall};
+use llm_client::{Completion, ContentBlock, ImageData, Message, Provider, Role, StreamEvent, ToolCall};
 
 use crate::tool::{ApplyInfo, RunMode, ToolEffect, ToolProvider};
 
@@ -104,6 +105,12 @@ pub struct TurnOutcomeSummary {
 /// `None` and never see these.
 #[derive(Clone, Debug)]
 pub enum AgentEvent {
+    /// An incremental chunk of assistant text, streamed live as the model
+    /// produces it. Concatenating a turn's `AssistantDelta`s reconstructs the
+    /// text later finalized in [`AgentEvent::AssistantText`]. A UI renders these
+    /// into an in-progress entry for token-by-token feel; non-streaming
+    /// consumers can ignore them and use `AssistantText` alone.
+    AssistantDelta(String),
     /// The model produced assistant text (interleaved with tool calls or final).
     AssistantText(String),
     /// A tool call is about to run.
@@ -145,6 +152,36 @@ fn emit(events: Events<'_>, ev: AgentEvent) {
     if let Some(tx) = events {
         let _ = tx.send(ev);
     }
+}
+
+/// Drain one provider [`stream`](Provider::stream) to its final [`Completion`],
+/// forwarding each text delta as an [`AgentEvent::AssistantDelta`] so the UI can
+/// render tokens as they arrive. The terminating `Completed` event supplies the
+/// assembled tool calls, stop reason, and usage; its text falls back to the
+/// concatenated deltas when the backend didn't fill it. Errors if the stream
+/// ends without a `Completed` event (a malformed / truncated stream).
+async fn stream_completion(
+    mut events_stream: llm_client::EventStream<'_>,
+    ui: Events<'_>,
+) -> Result<Completion> {
+    let mut text = String::new();
+    while let Some(ev) = events_stream.next().await {
+        match ev? {
+            StreamEvent::TextDelta(t) => {
+                if !t.is_empty() {
+                    text.push_str(&t);
+                    emit(ui, AgentEvent::AssistantDelta(t));
+                }
+            }
+            StreamEvent::Completed(mut c) => {
+                if c.text.is_empty() && !text.is_empty() {
+                    c.text = text;
+                }
+                return Ok(c);
+            }
+        }
+    }
+    anyhow::bail!("stream ended without a Completed event")
 }
 
 /// Why a [`Agent::run_turn`] stopped.
@@ -330,7 +367,16 @@ impl Agent {
         let mut final_text = String::new();
 
         for _ in 0..MAX_ITERATIONS {
-            let completion = self.client.complete(&self.system, &self.history, &defs).await?;
+            // Drive the provider's stream so assistant prose renders token-by-token
+            // (each delta forwarded as `AssistantDelta`), while accumulating the
+            // same final `Completion` — text, tool calls, usage — the loop drove
+            // before. A non-streaming backend's default `stream` yields one big
+            // delta then the completion, so the loop is unchanged for it.
+            let completion = stream_completion(
+                self.client.stream(&self.system, &self.history, &defs).await?,
+                events,
+            )
+            .await?;
             emit(
                 events,
                 AgentEvent::Usage {
@@ -339,7 +385,8 @@ impl Agent {
                 },
             );
 
-            // Surface any assistant text the moment we have it.
+            // Finalize the streamed prose so non-streaming consumers and the
+            // transcript see the whole assistant text once.
             if !completion.text.is_empty() {
                 emit(events, AgentEvent::AssistantText(completion.text.clone()));
             }
