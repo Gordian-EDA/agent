@@ -14,7 +14,7 @@
 
 use std::time::Instant;
 
-use agent::AgentEvent;
+use gordian_core::AgentEvent;
 use serde_json::Value;
 
 /// The role of a transcript line, used by the renderer to style it.
@@ -868,11 +868,9 @@ impl App {
                         .push(Entry::tool(format!("{name} → {summary}")));
                 }
             }
-            AgentEvent::Applied { errors, warnings } => {
+            AgentEvent::Applied { summary } => {
                 self.status.applied_count += 1;
-                self.transcript.push(Entry::system(format!(
-                    "applied — ERC {errors} errors, {warnings} warnings"
-                )));
+                self.transcript.push(Entry::system(format!("applied — {summary}")));
             }
             AgentEvent::Usage {
                 input_tokens,
@@ -1077,7 +1075,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent::TurnOutcomeSummary;
+    use gordian_core::TurnOutcomeSummary;
     use serde_json::json;
 
     fn app() -> App {
@@ -1706,8 +1704,7 @@ mod tests {
     fn applied_event_bumps_count_and_notes_erc() {
         let mut a = app();
         a.update(Msg::Agent(AgentEvent::Applied {
-            errors: 0,
-            warnings: 2,
+            summary: "ERC 0 errors, 2 warnings".into(),
         }));
         assert_eq!(a.status.applied_count, 1);
         assert!(

@@ -1,12 +1,12 @@
-//! Agent design with an INDEPENDENT review→fix loop, via [`agent::Agent::run_turn_reviewed`]:
-//! turn 1 drafts the design, then a FRESH LLM reviewer (see `agent::review`) audits the committed
+//! Agent design with an INDEPENDENT review→fix loop, via [`gordian_core::Agent::run_turn_reviewed`]:
+//! turn 1 drafts the design, then a FRESH LLM reviewer (see `gordian_kicad::review`) audits the committed
 //! netlist for electrical-CORRECTNESS faults (pin-function mis-wires, voltage-domain part-selection,
 //! topology errors — the class ERC and the layout critic both miss) and feeds any high-confidence
 //! defects back as fix turns. This example just drives the method and renders the result.
 //!
 //! Usage: cargo run --release -p agent --example design_review -- <out.png> "<prompt>"
 
-use agent::{Agent, AgentEvent, AutoApprove};
+use gordian_core::{Agent, AgentEvent, AutoApprove};
 use kicad_cli_rs::cli::KicadCli;
 use kicad_cli_rs::env::KicadEnv;
 use tokio::sync::mpsc;
@@ -19,9 +19,9 @@ async fn main() -> anyhow::Result<()> {
 
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
     let tmp = tempfile::tempdir()?;
-    let ctx = agent::tools::ToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
+    let ctx = gordian_kicad::tools::PcbToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
     let sch_path = ctx.sch_path().to_path_buf();
-    let mut agent = Agent::new(agent::llm::from_env()?, ctx);
+    let mut agent = Agent::new(llm_client::from_env()?, Box::new(gordian_kicad::PcbTools::new(ctx)), gordian_kicad::prompts::system_prompt());
     let mut approvals = AutoApprove::yes();
 
     // Show the per-round review verdicts (and apply commits) as they happen.
@@ -35,8 +35,8 @@ async fn main() -> anyhow::Result<()> {
                         eprintln!("    {d}");
                     }
                 }
-                AgentEvent::Applied { errors, warnings } => {
-                    eprintln!("  applied (ERC: {errors} errors, {warnings} warnings)");
+                AgentEvent::Applied { summary } => {
+                    eprintln!("  applied ({summary})");
                 }
                 _ => {}
             }
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let svg_dir = tempfile::tempdir()?;
     let svg_path = KicadCli::new(&env).export_svg_opts(&sch_path, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
-    let png = agent::render::svg_to_png(&svg, 1600)?;
+    let png = gordian_kicad::render::svg_to_png(&svg, 1600)?;
     std::fs::write(&out, png)?;
     std::fs::copy(&sch_path, std::path::Path::new(&out).with_extension("kicad_sch")).ok();
     if let Ok(y) = sch_layout::read::lift(&env, &sch_path) {

@@ -2,7 +2,7 @@
 //! LLM): create_design → apply_design{commit:true}; assert the committed sch is a
 //! multi-sheet root. Usage: cargo run -p agent --example test_apply_multisheet -- <draft.yaml>
 
-use agent::tools::{ToolCtx, Tools};
+use gordian_kicad::tools::{PcbToolCtx, run_tool};
 use kicad_cli_rs::env::KicadEnv;
 use serde_json::json;
 
@@ -11,13 +11,12 @@ fn main() -> anyhow::Result<()> {
     let yaml = std::fs::read_to_string(&yaml_path)?;
     let env = KicadEnv::detect().expect("no KiCAD environment");
     let tmp = tempfile::tempdir()?;
-    let ctx = ToolCtx::for_project(env, tmp.path().to_path_buf())?;
-    let tools = Tools::new();
+    let ctx = PcbToolCtx::for_project(env, tmp.path().to_path_buf())?;
 
-    let r1 = tools.run("create_design", json!({ "yaml": yaml }), &ctx);
+    let r1 = run_tool("create_design", json!({ "yaml": yaml }), &ctx);
     println!("create_design -> {}", summarize(&r1));
 
-    let r2 = tools.run("apply_design", json!({ "commit": true }), &ctx);
+    let r2 = run_tool("apply_design", json!({ "commit": true }), &ctx);
     println!("apply_design(commit) -> {}", summarize(&r2));
 
     let sch = ctx.sch_path();

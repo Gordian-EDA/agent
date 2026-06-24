@@ -1,4 +1,4 @@
-//! Validate the production composed-sheet commit (`agent::multisheet::compose_single_sheet`
+//! Validate the production composed-sheet commit (`gordian_kicad::multisheet::compose_single_sheet`
 //! — the exact function `apply_design` calls for multi-block designs): compile a draft,
 //! compose ONE labeled-block-region `.kicad_sch`, run ERC.
 //!
@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
     let n_parts: usize = design.blocks.values().map(|b| b.components.len()).sum();
     println!("design: {n_blocks} blocks, {n_parts} parts");
     let (root, errors, warnings) =
-        agent::multisheet::emit_and_check(&env, &design, std::path::Path::new(&out))?;
+        gordian_kicad::multisheet::emit_and_check(&env, &design, std::path::Path::new(&out))?;
     println!("root -> {}", root.display());
     println!("ERC: {errors} errors, {warnings} warnings");
     Ok(())

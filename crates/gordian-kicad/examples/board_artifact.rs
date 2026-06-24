@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use agent::tools::{ToolCtx, Tools};
+use gordian_kicad::tools::{PcbToolCtx, run_tool};
 use serde_json::json;
 
 fn main() {
@@ -30,8 +30,7 @@ fn main() {
         std::fs::copy(src.join(name), pretty.join(name)).unwrap();
     }
 
-    let ctx = ToolCtx::with_footprint_dir_for_test(staging).expect("ctx");
-    let tools = Tools::new();
+    let ctx = PcbToolCtx::with_footprint_dir_for_test(staging).expect("ctx");
 
     // A voltage divider with a 2-pin power/ground header.
     let board = json!({
@@ -45,13 +44,13 @@ fn main() {
               "pad_nets": { "1": "VIN", "2": "GND" } }
         ]
     });
-    let r = agent::tools_pcb::build_board_draft(board, &ctx).unwrap();
+    let r = gordian_kicad::tools_pcb::build_board_draft(board, &ctx).unwrap();
     println!("build_board_draft: ok={}", r["ok"]);
-    let r = tools.run("place_board", json!({}), &ctx).unwrap();
+    let r = run_tool("place_board", json!({}), &ctx).unwrap();
     println!("place_board: legal={} hpwl={}", r["legal"], r["hpwl"]);
-    let r = tools.run("route_board", json!({}), &ctx).unwrap();
+    let r = run_tool("route_board", json!({}), &ctx).unwrap();
     println!("route_board: router={} failed={} metrics={}", r["router"], r["failed"], r["metrics"]);
-    let r = tools.run("export_board", json!({}), &ctx).unwrap();
+    let r = run_tool("export_board", json!({}), &ctx).unwrap();
     println!("export_board: ok={} path={} drc={}", r["ok"], r["path"], r["drc"]);
 
     // Copy the exported board out to the stable artifact path.

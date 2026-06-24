@@ -1,0 +1,150 @@
+//! Agent-loop tests with a SCRIPTED client (no network), driving the REAL KiCAD
+//! tools via the [`PcbTools`] provider.
+//!
+//! [`ScriptedClient`] returns a fixed `Vec<Completion>`, one per `complete()`
+//! call in order, so the loop's control flow (tool dispatch → result feedback →
+//! apply-gate → final text) is exercised deterministically. The real tools the
+//! loop drives still need KiCAD (via [`PcbToolCtx::detect_for_test`]); all tests
+//! SKIP gracefully when no KiCAD is detected.
+
+use gordian_core::testing::{ScriptedClient, final_text, tool_call};
+use gordian_core::{Agent, AutoApprove};
+use gordian_kicad::PcbTools;
+use gordian_kicad::prompts::system_prompt;
+use gordian_kicad::tools::PcbToolCtx;
+
+/// Build an agent over a [`PcbToolCtx`] and a scripted client.
+fn agent(ctx: PcbToolCtx, completions: Vec<gordian_core::Completion>) -> Agent {
+    Agent::new(Box::new(ScriptedClient::new(completions)), Box::new(PcbTools::new(ctx)), system_prompt())
+}
+
+/// A tiny, self-contained valid design: two resistors so that GND has 2 pins and
+/// A / B are single-pin endpoints. Uses the `Device:R` alias (`R`) and the
+/// `between:` sugar. Compiles + emits cleanly against real libraries.
+const TINY_YAML: &str = "version: 1\n\
+blocks:\n\
+\x20 main:\n\
+\x20   components:\n\
+\x20     R1: {part: R, value: 10k, between: [A, GND]}\n\
+\x20     R2: {part: R, value: 10k, between: [GND, B]}\n";
+
+/// The shared script: (1) search_symbols, (2) apply_design{commit:true}, (3) done.
+fn script() -> Vec<gordian_core::Completion> {
+    vec![
+        tool_call("tu_1", "search_symbols", serde_json::json!({ "query": "resistor" })),
+        tool_call("tu_2", "apply_design", serde_json::json!({ "yaml": TINY_YAML, "commit": true })),
+        final_text("done"),
+    ]
+}
+
+#[tokio::test]
+async fn loop_runs_tools_and_gates_apply_on_yes() {
+    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let sch_path = ctx.sch_path().to_path_buf();
+    assert!(!sch_path.exists(), "fixture starts with no schematic");
+
+    let mut agent = agent(ctx, script());
+    let mut approvals = AutoApprove::yes();
+
+    let outcome = agent
+        .run_turn("add a 10k resistor between A and GND", &mut approvals, None)
+        .await
+        .unwrap();
+
+    assert!(outcome.applied, "approve=yes must commit the write: {outcome:?}");
+    assert!(sch_path.exists(), "approved apply must write the .kicad_sch: {outcome:?}");
+    assert!(
+        outcome.tool_calls_made >= 2,
+        "expected at least the search + apply tool calls, got {}",
+        outcome.tool_calls_made
+    );
+    assert_eq!(outcome.final_text, "done", "final text should pass through");
+}
+
+#[tokio::test]
+async fn stall_after_research_is_nudged_until_it_commits() {
+    // The bug: a model that RESEARCHES (search_symbols) then tries to stop with
+    // a text-only turn ships NOTHING (applied stays false). The loop must
+    // re-prompt it to finish + commit, so it lands the design instead.
+    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let sch_path = ctx.sch_path().to_path_buf();
+    assert!(!sch_path.exists(), "fixture starts with no schematic");
+
+    // (1) research, (2) premature text-only stop → NUDGE, (3) apply+commit, (4) done.
+    let script = vec![
+        tool_call("tu_1", "search_symbols", serde_json::json!({ "query": "resistor" })),
+        final_text("I looked up the parts."), // stalls without committing
+        tool_call("tu_2", "apply_design", serde_json::json!({ "yaml": TINY_YAML, "commit": true })),
+        final_text("done"),
+    ];
+    let mut agent = agent(ctx, script);
+    let mut approvals = AutoApprove::yes();
+
+    let outcome = agent
+        .run_turn("add a 10k resistor between A and GND", &mut approvals, None)
+        .await
+        .unwrap();
+
+    assert!(outcome.applied, "the nudge must drive the stalled model to commit: {outcome:?}");
+    assert!(sch_path.exists(), "the post-nudge commit must write the .kicad_sch: {outcome:?}");
+    assert_eq!(outcome.final_text, "done");
+}
+
+#[tokio::test]
+async fn stall_nudge_is_bounded_and_gives_up() {
+    // A model that simply will NOT commit (research, then stop, repeatedly) must
+    // not loop forever: at most MAX_COMMIT_NUDGES (2) re-prompts, then the turn
+    // returns honestly unapplied. The script ends after the 3rd stop; if the loop
+    // nudged a 3rd time it would exhaust the script and error.
+    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+
+    let script = vec![
+        tool_call("tu_1", "search_symbols", serde_json::json!({ "query": "resistor" })),
+        final_text("stop 1"), // → nudge 1
+        final_text("stop 2"), // → nudge 2
+        final_text("stop 3"), // nudges exhausted → return
+    ];
+    let mut agent = agent(ctx, script);
+    let mut approvals = AutoApprove::yes();
+
+    let outcome = agent
+        .run_turn("add a 10k resistor between A and GND", &mut approvals, None)
+        .await
+        .expect("must terminate, not loop forever / exhaust the script");
+
+    assert!(!outcome.applied, "model never committed: {outcome:?}");
+    assert_eq!(outcome.final_text, "stop 3", "returns the last stop's text");
+}
+
+#[tokio::test]
+async fn loop_rejects_apply_on_no_and_does_not_write() {
+    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let sch_path = ctx.sch_path().to_path_buf();
+    assert!(!sch_path.exists(), "fixture starts with no schematic");
+
+    let mut agent = agent(ctx, script());
+    let mut approvals = AutoApprove::no();
+
+    let outcome = agent
+        .run_turn("add a 10k resistor between A and GND", &mut approvals, None)
+        .await
+        .unwrap();
+
+    assert!(!outcome.applied, "approve=no must NOT report applied: {outcome:?}");
+    assert!(!sch_path.exists(), "rejected apply must NOT write the .kicad_sch: {outcome:?}");
+    // The loop still ran the tools and reached the final text.
+    assert!(outcome.tool_calls_made >= 2, "tools still ran: {outcome:?}");
+    assert_eq!(outcome.final_text, "done");
+}

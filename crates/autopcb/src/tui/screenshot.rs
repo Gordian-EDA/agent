@@ -17,7 +17,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 
-use agent::AgentEvent;
+use gordian_core::AgentEvent;
 
 use super::app::{App, Entry, Msg, NoticeLevel, PendingDiff, Speaker, Status};
 use super::ui;

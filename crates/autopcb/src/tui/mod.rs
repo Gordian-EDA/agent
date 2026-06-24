@@ -23,7 +23,7 @@
 //! oneshot reply channel** over `gate_tx`. The main loop receives it, shows the
 //! diff in the App, and stashes the oneshot sender. When the user presses `a`/`r`
 //! the loop fulfils the oneshot, unblocking the agent task. This is exactly why
-//! [`agent::Approvals::approve`] is async.
+//! [`gordian_core::Approvals::approve`] is async.
 
 pub mod app;
 pub mod event;
@@ -38,8 +38,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use agent::tools::ToolCtx;
-use agent::{Agent, AgentEvent, Approvals, StopReason};
+use gordian_core::{Agent, AgentEvent, Approvals, StopReason};
+use gordian_kicad::PcbTools;
+use gordian_kicad::prompts::system_prompt;
+use gordian_kicad::tools::PcbToolCtx;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use crossterm::event::{
@@ -106,13 +108,17 @@ pub async fn run(project_dir: PathBuf) -> Result<()> {
 
     // 2. Build the agent if we have both KiCAD and credentials; otherwise launch
     //    a "degraded" UI that explains what's missing (so `tui` never panics).
-    let (provider, model) = agent::config::provider_status();
+    let (provider, model) = llm_client::config::provider_status();
 
-    let agent_handle: Option<SharedAgent> = match (&env, agent::llm::from_env()) {
+    let agent_handle: Option<SharedAgent> = match (&env, llm_client::from_env()) {
         (Some(env), Ok(client)) => {
-            let ctx = ToolCtx::for_project(env.clone(), project_dir.clone())
+            let ctx = PcbToolCtx::for_project(env.clone(), project_dir.clone())
                 .context("building the tool context for the project")?;
-            Some(Rc::new(Mutex::new(Agent::new(client, ctx))))
+            Some(Rc::new(Mutex::new(Agent::new(
+                client,
+                Box::new(PcbTools::new(ctx)),
+                system_prompt(),
+            ))))
         }
         _ => None,
     };
@@ -199,7 +205,7 @@ impl Shell {
         let events_tx = self.events_tx.clone();
         let gate_tx = self.gate_tx.clone();
         let done_tx = self.done_tx.clone();
-        // spawn_local: the agent's ToolCtx is not Send, so the turn runs on
+        // spawn_local: the agent's PcbToolCtx is not Send, so the turn runs on
         // this thread's LocalSet rather than the shared scheduler.
         self.turn_task = Some(tokio::task::spawn_local(async move {
             let mut approvals = TuiApprovals { gate_tx };

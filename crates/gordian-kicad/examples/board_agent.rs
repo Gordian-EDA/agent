@@ -14,7 +14,7 @@
 //! Needs the OpenAI-compatible backend (OPENAI_API_KEY / OPENAI_BASE_URL) and an
 //! installed KiCAD (footprint library + `kicad-cli pcb drc`).
 
-use agent::{Agent, AutoApprove};
+use gordian_core::{Agent, AutoApprove};
 use kicad_cli_rs::cli::KicadCli;
 use kicad_cli_rs::env::KicadEnv;
 use tokio::sync::mpsc;
@@ -29,15 +29,15 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let (provider, model) = agent::config::provider_status();
+    let (provider, model) = llm_client::config::provider_status();
     eprintln!("provider={provider} model={model}\nprompt: {prompt}\n");
 
     let tmp = tempfile::tempdir()?;
-    let ctx = agent::tools::ToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
+    let ctx = gordian_kicad::tools::PcbToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
     let pcb_path = ctx.pcb_path();
 
-    let client = agent::llm::from_env()?;
-    let mut agent = Agent::new(client, ctx);
+    let client = llm_client::from_env()?;
+    let mut agent = Agent::new(client, Box::new(gordian_kicad::PcbTools::new(ctx)), gordian_kicad::prompts::system_prompt());
 
     // Stream the tool calls so the run is visible while it works.
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -45,12 +45,12 @@ async fn main() -> anyhow::Result<()> {
         let (mut tin, mut tout) = (0u64, 0u64);
         while let Some(ev) = rx.recv().await {
             match ev {
-                agent::AgentEvent::Usage { input_tokens, output_tokens } => {
+                gordian_core::AgentEvent::Usage { input_tokens, output_tokens } => {
                     tin += input_tokens;
                     tout += output_tokens;
                 }
-                agent::AgentEvent::ToolStarted { name } => eprintln!("  tool -> {name}"),
-                agent::AgentEvent::AssistantText(t) if !t.trim().is_empty() => {
+                gordian_core::AgentEvent::ToolStarted { name } => eprintln!("  tool -> {name}"),
+                gordian_core::AgentEvent::AssistantText(t) if !t.trim().is_empty() => {
                     eprintln!("  ...: {}", t.trim());
                 }
                 _ => {}

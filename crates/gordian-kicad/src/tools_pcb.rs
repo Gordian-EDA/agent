@@ -2,7 +2,7 @@
 //!
 //! `tools.rs` stays the schematic file; the PCB tools live here and are merged
 //! into [`crate::tools::Tools::defs`]/`run`. They follow the same house pattern:
-//! [`crate::llm::ToolDef`] JSON schemas, free `fn(input, ctx) -> Result<Value>`
+//! [`gordian_core::ToolDef`] JSON schemas, free `fn(input, ctx) -> Result<Value>`
 //! handlers, `require_str`-style arg handling, and recoverable failures returned
 //! as `{"error": …, "suggestions": …}` values rather than `Err`.
 //!
@@ -47,7 +47,7 @@ use pcb_model::{
     Bounds, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteSolution, Via, ViaSpan,
 };
 
-use crate::tools::{ToolCtx, require_str};
+use crate::tools::{PcbToolCtx, require_str};
 
 /// Default number of footprint-search hits returned when `limit` is omitted.
 /// Mirrors `tools::DEFAULT_SEARCH_LIMIT` for the symbol side.
@@ -181,14 +181,14 @@ pub struct Keepout {
 
 impl BoardDraft {
     /// Load the persisted board draft, if one exists and parses.
-    pub fn load(ctx: &ToolCtx) -> Option<BoardDraft> {
+    pub fn load(ctx: &PcbToolCtx) -> Option<BoardDraft> {
         let raw = ctx.workspace().read_board()?;
         serde_json::from_str(&raw).ok()
     }
 
     /// Persist this draft to `.autopcb/board.json` (pretty-printed for the
     /// human reader, mirroring how the schematic draft stays inspectable).
-    pub fn save(&self, ctx: &ToolCtx) -> Result<()> {
+    pub fn save(&self, ctx: &PcbToolCtx) -> Result<()> {
         let json = serde_json::to_string_pretty(self)?;
         ctx.workspace().write_board(&json)?;
         Ok(())
@@ -197,7 +197,7 @@ impl BoardDraft {
 
 // ── search_footprints ────────────────────────────────────────────────────────
 
-pub fn search_footprints(input: Value, ctx: &ToolCtx) -> Result<Value> {
+pub fn search_footprints(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let query = require_str(&input, "query")?;
     let limit = input
         .get("limit")
@@ -217,7 +217,7 @@ pub fn search_footprints(input: Value, ctx: &ToolCtx) -> Result<Value> {
 
 // ── get_footprint_info ───────────────────────────────────────────────────────
 
-pub fn get_footprint_info(input: Value, ctx: &ToolCtx) -> Result<Value> {
+pub fn get_footprint_info(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let lib_id = require_str(&input, "lib_id")?;
     let index = ctx.footprint_index()?;
 
@@ -311,7 +311,7 @@ fn bbox_json(b: &kicad_sexpr::footlib::BBox) -> Value {
 /// caller supplies only `bounds` and `rules`; parts and nets come from the
 /// schematic. Delegates to `create_board` for footprint resolution, validation,
 /// and the draft build. See `docs/specs/schematic-driven-pcb.md`.
-pub fn derive_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
+pub fn derive_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     if !ctx.sch_path().exists() {
         return Ok(json!({
             "error": "no .kicad_sch yet — commit the schematic with apply_design first, \
@@ -620,7 +620,7 @@ fn parse_draft_part(
 /// only through [`derive_board`], which assembles this spec from the committed schematic + the
 /// footprint map. Also called directly by the deterministic test harnesses (board_harness /
 /// pcb_gate / board_artifact) that build boards from standalone JSON, no schematic.
-pub fn build_board_draft(input: Value, ctx: &ToolCtx) -> Result<Value> {
+pub fn build_board_draft(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let overwrite = input.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
     if BoardDraft::load(ctx).is_some() && !overwrite {
         return Ok(json!({
@@ -740,7 +740,7 @@ pub fn build_board_draft(input: Value, ctx: &ToolCtx) -> Result<Value> {
 /// Pin count per net across the draft, derived from the resolved footprints via
 /// `placefp::part_from_footprint` (the SAME geometry place/route consumes). A
 /// pad whose number is absent from `pad_nets` contributes no pin.
-fn net_pin_counts(parts: &[DraftPart], ctx: &ToolCtx) -> BTreeMap<String, usize> {
+fn net_pin_counts(parts: &[DraftPart], ctx: &PcbToolCtx) -> BTreeMap<String, usize> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let Ok(index) = ctx.footprint_index() else {
         return counts;
@@ -787,7 +787,7 @@ pub fn apply_spec_extras(draft: &mut BoardDraft, spec: &Value) {
 
 // ── get_board ────────────────────────────────────────────────────────────────
 
-pub fn get_board(ctx: &ToolCtx) -> Result<Value> {
+pub fn get_board(ctx: &PcbToolCtx) -> Result<Value> {
     let Some(draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
             "error": "no board draft yet — run derive_board first",
@@ -852,7 +852,7 @@ pub fn get_board(ctx: &ToolCtx) -> Result<Value> {
 /// surface a recoverable error naming the part.
 fn place_problem_from_draft(
     draft: &BoardDraft,
-    ctx: &ToolCtx,
+    ctx: &PcbToolCtx,
 ) -> std::result::Result<PlaceProblem, String> {
     let index = ctx
         .footprint_index()
@@ -1007,7 +1007,7 @@ fn axis_aligned_rotation(rot: i32) -> std::result::Result<i32, String> {
     }
 }
 
-pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
+pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let Some(mut draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
             "error": "no board draft yet — run derive_board first",
@@ -1480,7 +1480,7 @@ fn escape_bottleneck(
     (total >= 3 && c * 100 >= total * 60).then_some((r, fp, c, total))
 }
 
-pub fn route_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
+pub fn route_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let Some(draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
             "error": "no board draft yet — run derive_board first",
@@ -2439,7 +2439,7 @@ fn pour_zones(
 ///
 /// `view` may be `"placed"` or `"routed"`. When omitted the default is
 /// `"routed"` when `route.json` exists, `"placed"` otherwise.
-pub fn render_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
+pub fn render_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // ── load draft ───────────────────────────────────────────────────────────
     let Some(draft) = crate::tools_pcb::BoardDraft::load(ctx) else {
         return Ok(json!({
@@ -2578,7 +2578,7 @@ fn is_non_copper(v: &Violation) -> bool {
 }
 
 /// The KiCAD major version, or 0 if unparseable / no real install.
-fn kicad_major(ctx: &ToolCtx) -> u32 {
+fn kicad_major(ctx: &PcbToolCtx) -> u32 {
     ctx.env()
         .cli_version
         .split('.')
@@ -2593,7 +2593,7 @@ fn kicad_major(ctx: &ToolCtx) -> u32 {
 fn synth_parts_from_draft(
     draft: &BoardDraft,
     placements: &[Placement],
-    ctx: &ToolCtx,
+    ctx: &PcbToolCtx,
 ) -> std::result::Result<Vec<SynthPart>, String> {
     let index = ctx
         .footprint_index()
@@ -2731,7 +2731,7 @@ fn write_kicad_project(board_path: &std::path::Path, rules: &DraftRules) -> std:
 }
 
 /// drc` and reports the counts.
-pub fn export_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
+pub fn export_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let Some(draft) = BoardDraft::load(ctx) else {
         return Ok(json!({
             "error": "no board draft yet — run derive_board first",
@@ -3045,7 +3045,7 @@ fn parse_copper_layer(name: &str) -> std::result::Result<BoardLayer, String> {
 }
 
 /// Open the exported board in a live headless KiCAD for interactive editing.
-pub fn open_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
+pub fn open_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let path = ctx.pcb_path();
     if !path.exists() {
         return Ok(json!({
@@ -3060,7 +3060,7 @@ pub fn open_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
 }
 
 /// Read the live board: footprints (ref + position mm), track/net counts.
-pub fn board_state(ctx: &ToolCtx) -> Result<Value> {
+pub fn board_state(ctx: &PcbToolCtx) -> Result<Value> {
     let mut guard = ctx.kicad();
     let Some(session) = guard.as_mut() else {
         return Ok(json!({ "error": "no board open — call open_board first" }));
@@ -3090,7 +3090,7 @@ pub fn board_state(ctx: &ToolCtx) -> Result<Value> {
 }
 
 /// Move a part (reference) to (x,y) mm, optional rotation degrees.
-pub fn move_part(input: Value, ctx: &ToolCtx) -> Result<Value> {
+pub fn move_part(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let reference = require_str(&input, "reference")?;
     let x = match req_num(&input, "x", "move_part") { Ok(v) => v, Err(e) => return Ok(json!({ "error": e })) };
     let y = match req_num(&input, "y", "move_part") { Ok(v) => v, Err(e) => return Ok(json!({ "error": e })) };
@@ -3107,7 +3107,7 @@ pub fn move_part(input: Value, ctx: &ToolCtx) -> Result<Value> {
 
 /// Route a straight track segment: start [x,y], end [x,y] (mm), width (mm),
 /// layer (F.Cu/…), optional net.
-pub fn route_track(input: Value, ctx: &ToolCtx) -> Result<Value> {
+pub fn route_track(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let start = input.get("start").and_then(|v| v.as_array());
     let end = input.get("end").and_then(|v| v.as_array());
     let (Some(s), Some(e)) = (start, end) else {
@@ -3142,7 +3142,7 @@ pub fn route_track(input: Value, ctx: &ToolCtx) -> Result<Value> {
 /// Set (or update) a net class with a track width + clearance (mm) and assign
 /// nets to it — "wide copper for power". (Note: also achievable per-track via
 /// route_track width.)
-pub fn set_net_width(input: Value, ctx: &ToolCtx) -> Result<Value> {
+pub fn set_net_width(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let name = require_str(&input, "name")?;
     let width = input.get("width").and_then(Value::as_f64).unwrap_or(0.5);
     let clearance = input.get("clearance").and_then(Value::as_f64).unwrap_or(0.2);
@@ -3175,7 +3175,7 @@ fn pads_missing<'a>(pad_keys: impl IntoIterator<Item = &'a str>, fp_pads: &[&str
 }
 
 /// Assign a footprint to a part in the draft (fills a missing footprint before placement).
-pub fn assign_footprint(input: Value, ctx: &ToolCtx) -> Result<Value> {
+pub fn assign_footprint(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let reference = require_str(&input, "reference")?;
     let footprint = require_str(&input, "footprint")?;
     let Some(mut draft) = BoardDraft::load(ctx) else {
@@ -3209,7 +3209,7 @@ pub fn assign_footprint(input: Value, ctx: &ToolCtx) -> Result<Value> {
 /// assist for dense boards the in-house router can't escape). Routes from scratch
 /// at the board's design rules, writes the routed copper back to the project
 /// `.kicad_pcb`, and reports DRC. Requires an exported (placed) board.
-pub fn autoroute(_input: Value, ctx: &ToolCtx) -> Result<Value> {
+pub fn autoroute(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let board_path = ctx.pcb_path();
     if !board_path.exists() {
         return Ok(json!({ "error": "no .kicad_pcb — run export_board first (derive_board → place_board → export_board → autoroute)" }));
@@ -3250,7 +3250,7 @@ pub fn autoroute(_input: Value, ctx: &ToolCtx) -> Result<Value> {
 }
 
 /// Save the live KiCAD board to disk if a session is open. Returns whether it saved.
-pub fn save_session_if_open(ctx: &ToolCtx) -> Result<bool> {
+pub fn save_session_if_open(ctx: &PcbToolCtx) -> Result<bool> {
     let mut guard = ctx.kicad();
     if let Some(session) = guard.as_mut() {
         session.kicad().save().map_err(ipc_err)?;

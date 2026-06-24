@@ -980,7 +980,7 @@ fn short_model(model: &str) -> String {
 mod tests {
     use super::*;
     use crate::tui::app::{Msg, Status};
-    use agent::AgentEvent;
+    use gordian_core::AgentEvent;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use serde_json::json;

@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent::tools::{ToolCtx, Tools};
+use gordian_kicad::tools::{PcbToolCtx, run_tool};
 use serde_json::{json, Value};
 
 fn footprint_dir() -> PathBuf {
@@ -42,11 +42,10 @@ fn rasterize(svg: &str, out: &Path, scale: f32) {
 }
 
 fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
-    let ctx = match ToolCtx::with_footprint_dir_for_test(fp_dir.to_path_buf()) {
+    let ctx = match PcbToolCtx::with_footprint_dir_for_test(fp_dir.to_path_buf()) {
         Some(c) => c,
         None => return json!({ "name": name, "error": "no footprint index / KiCAD env" }),
     };
-    let tools = Tools::new();
 
     // Forward an optional `rules` block (e.g. {"layers": 4}) from the spec.
     let mut board = json!({ "bounds": spec["bounds"], "parts": spec["parts"] });
@@ -56,18 +55,18 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
     if let Some(outline) = spec.get("outline") {
         board["outline"] = outline.clone();
     }
-    let created = agent::tools_pcb::build_board_draft(board, &ctx).unwrap();
+    let created = gordian_kicad::tools_pcb::build_board_draft(board, &ctx).unwrap();
     if created["ok"] != json!(true) {
         return json!({ "name": name, "stage": "create", "result": created });
     }
     // Keepouts + placement hints from the spec, set directly on the saved draft
     // (the agent authors these in the Board-DSL; the harness seeds them on the draft).
     if spec.get("keepouts").is_some() || spec.get("hints").is_some() {
-        let mut draft = agent::tools_pcb::BoardDraft::load(&ctx).unwrap();
-        agent::tools_pcb::apply_spec_extras(&mut draft, spec);
+        let mut draft = gordian_kicad::tools_pcb::BoardDraft::load(&ctx).unwrap();
+        gordian_kicad::tools_pcb::apply_spec_extras(&mut draft, spec);
         draft.save(&ctx).unwrap();
     }
-    let placed = tools.run("place_board", json!({}), &ctx).unwrap();
+    let placed = run_tool("place_board", json!({}), &ctx).unwrap();
     if placed["legal"] != json!(true) {
         eprintln!(
             "[place {name}] legal=false overlaps_resolved={} clamps={} suggested={:?} current={:?}",
@@ -75,8 +74,8 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
             placed.get("suggested_min_bounds_mm"), placed.get("current_bounds_mm")
         );
     }
-    let routed = tools.run("route_board", json!({}), &ctx).unwrap();
-    let exported = tools.run("export_board", json!({}), &ctx).unwrap();
+    let routed = run_tool("route_board", json!({}), &ctx).unwrap();
+    let exported = run_tool("export_board", json!({}), &ctx).unwrap();
 
     let out_dir = PathBuf::from("/tmp/pcb-harness").join(name);
     std::fs::create_dir_all(&out_dir).unwrap();
@@ -88,7 +87,7 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
         let _ = std::fs::copy(&pro, out_dir.join("board.kicad_pro"));
     }
     // Engine debug render (routed view).
-    if let Ok(render) = tools.run("render_board", json!({ "view": "routed" }), &ctx)
+    if let Ok(render) = run_tool("render_board", json!({ "view": "routed" }), &ctx)
         && let Some(p) = render["png_path"].as_str() {
             let _ = std::fs::copy(p, out_dir.join("engine.png"));
         }
@@ -130,7 +129,7 @@ fn main() {
 
     println!("footprint library: {}", fp_dir.display());
     // Route/export/DRC every circuit IN PARALLEL — each runs in its own isolated
-    // ToolCtx (a per-board tempdir) and writes to its own /tmp/pcb-harness/<name>/
+    // PcbToolCtx (a per-board tempdir) and writes to its own /tmp/pcb-harness/<name>/
     // dir, so the boards are independent. rayon's indexed collect preserves spec
     // order, so the printed report is identical to the sequential run, just faster.
     use rayon::prelude::*;

@@ -14,8 +14,10 @@ mod tui;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use agent::tools::ToolCtx;
-use agent::{Agent, AutoApprove};
+use gordian_core::{Agent, AutoApprove};
+use gordian_kicad::PcbTools;
+use gordian_kicad::prompts::system_prompt;
+use gordian_kicad::tools::PcbToolCtx;
 use anyhow::{Context, Result, bail};
 use kicad_cli_rs::cli::KicadCli;
 use kicad_cli_rs::env::KicadEnv;
@@ -169,7 +171,7 @@ fn run_agent_command(args: &[String]) -> Result<()> {
 
     // 2. Build the LLM client from the environment / local .env (OpenAI-compatible
     //    when OPENAI_API_KEY is set, else AWS Bedrock).
-    let client = agent::llm::from_env().context(
+    let client = llm_client::from_env().context(
         "could not build the LLM client — set OPENAI_API_KEY + OPENAI_BASE_URL (or \
          AWS_BEARER_TOKEN_BEDROCK) in the environment or a local .env file",
     )?;
@@ -177,7 +179,7 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     // 3. Tool context over the real project directory. `apply_design` derives
     //    its human-style floorplan from the netlist (`infer_ir`), so no separate
     //    layout client is wired here.
-    let ctx = ToolCtx::for_project(env.clone(), project_dir.clone())
+    let ctx = PcbToolCtx::for_project(env.clone(), project_dir.clone())
         .context("building the tool context for the project")?;
     let sch_path = ctx.sch_path().to_path_buf();
     eprintln!("project: {}", project_dir.display());
@@ -185,7 +187,7 @@ fn run_agent_command(args: &[String]) -> Result<()> {
 
     // 4. Run ONE agent turn, auto-approving the apply.
     let runtime = tokio::runtime::Runtime::new().context("starting the Tokio runtime")?;
-    let mut agent = Agent::new(client, ctx);
+    let mut agent = Agent::new(client, Box::new(PcbTools::new(ctx)), system_prompt());
     let mut approvals = AutoApprove::yes();
 
     let outcome = runtime

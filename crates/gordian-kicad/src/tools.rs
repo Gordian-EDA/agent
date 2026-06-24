@@ -39,12 +39,12 @@
 //! ## Symbol-index caching
 //!
 //! `search_symbols` is backed by [`SymbolIndex`], whose `build` scans every
-//! installed `.kicad_sym` (~0.5 s). The index is built **once per `ToolCtx`**
+//! installed `.kicad_sym` (~0.5 s). The index is built **once per `PcbToolCtx`**
 //! and cached in a [`OnceLock`]; subsequent searches reuse it.
 //!
 //! ## Threading
 //!
-//! [`ToolCtx`] is `Send + Sync` (asserted below) so the agent loop can run
+//! [`PcbToolCtx`] is `Send + Sync` (asserted below) so the agent loop can run
 //! tool calls on `spawn_blocking` threads — keeping a single-threaded UI
 //! responsive while a tool compiles, renders, or shells out to `kicad-cli`.
 
@@ -66,7 +66,7 @@ use kicad_sexpr::snapshot::SnapshotStore;
 use sch_layout::floorplan::{infer_ir, LayoutIr};
 use sch_layout::read::lift;
 
-use crate::llm::ToolDef;
+use gordian_core::ToolDef;
 
 /// Default number of symbol-search hits returned when `limit` is omitted.
 const DEFAULT_SEARCH_LIMIT: usize = 8;
@@ -76,8 +76,8 @@ const DEFAULT_SEARCH_LIMIT: usize = 8;
 /// and a lazily-built (then cached) symbol index.
 ///
 /// The provider and index are interior-mutable / cached, so `run` takes
-/// `&ToolCtx` — tools never need exclusive access.
-pub struct ToolCtx {
+/// `&PcbToolCtx` — tools never need exclusive access.
+pub struct PcbToolCtx {
     env: KicadEnv,
     /// Project directory holding the schematic and `.auto-pcb/history`.
     project_dir: PathBuf,
@@ -101,7 +101,7 @@ pub struct ToolCtx {
     workspace: crate::workspace::Workspace,
     /// The live KiCAD IPC session for interactive board editing, launched lazily
     /// by `open_board` and reused by the geometry tools (`move_part`,
-    /// `route_track`, …). `Mutex` so `ToolCtx` stays `Send + Sync`.
+    /// `route_track`, …). `Mutex` so `PcbToolCtx` stays `Send + Sync`.
     kicad: std::sync::Mutex<Option<kicad_ipc::Session>>,
     /// Keeps a test tempdir alive for the ctx's lifetime; `None` for real ctxs.
     _tempdir: Option<tempfile::TempDir>,
@@ -110,10 +110,10 @@ pub struct ToolCtx {
 /// Tool execution happens on blocking threads; the context must cross them.
 const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<ToolCtx>();
+    assert_send_sync::<PcbToolCtx>();
 };
 
-impl ToolCtx {
+impl PcbToolCtx {
     /// Build a context for an existing project directory.
     ///
     /// `project_dir` must exist; `<project_dir>/<name>.kicad_sch` is the file the
@@ -300,18 +300,10 @@ impl ToolCtx {
     }
 }
 
-/// The tool registry. Stateless — all state lives in [`ToolCtx`].
-#[derive(Default)]
-pub struct Tools;
-
-impl Tools {
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// The JSON-Schema definitions for every tool, in a stable order.
-    pub fn defs(&self) -> Vec<ToolDef> {
-        vec![
+/// The JSON-Schema definitions for every tool, in a stable order. The
+/// [`crate::PcbTools`] provider hands these to the agent loop.
+pub fn tool_defs() -> Vec<ToolDef> {
+    vec![
             ToolDef {
                 name: "search_symbols".into(),
                 description: "Search every installed KiCAD symbol library by name \
@@ -762,14 +754,15 @@ impl Tools {
                     }
                 }),
             },
-        ]
-    }
+    ]
+}
 
-    /// Dispatch a tool by name. `input` is the model-supplied JSON arguments;
-    /// the returned `Value` is fed back to the model.
-    pub fn run(&self, name: &str, input: Value, ctx: &ToolCtx) -> Result<Value> {
-        match name {
-            "search_symbols" => search_symbols(input, ctx),
+/// Dispatch a tool by name (synchronous). `input` is the model-supplied JSON
+/// arguments; the returned `Value` is fed back to the model. The [`crate::PcbTools`]
+/// provider off-loads this onto the blocking pool.
+pub fn run_tool(name: &str, input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+    match name {
+        "search_symbols" => search_symbols(input, ctx),
             "get_symbol_info" => get_symbol_info(input, ctx),
             "get_design" => get_design(ctx),
             "validate_design" => validate_design(input, ctx),
@@ -797,7 +790,6 @@ impl Tools {
             "render_board" => crate::tools_pcb::render_board(input, ctx),
             other => bail!("unknown tool: {other}"),
         }
-    }
 }
 
 /// Pull a required string field out of the input, with a clear error.
@@ -811,7 +803,7 @@ pub(crate) fn require_str(input: &Value, key: &str) -> Result<String> {
 
 // ── 1. search_symbols ──────────────────────────────────────────────────────
 
-fn search_symbols(input: Value, ctx: &ToolCtx) -> Result<Value> {
+fn search_symbols(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let query = require_str(&input, "query")?;
     let limit = input
         .get("limit")
@@ -831,7 +823,7 @@ fn search_symbols(input: Value, ctx: &ToolCtx) -> Result<Value> {
 
 // ── 2. get_symbol_info ─────────────────────────────────────────────────────
 
-fn get_symbol_info(input: Value, ctx: &ToolCtx) -> Result<Value> {
+fn get_symbol_info(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let lib_id = require_str(&input, "lib_id")?;
 
     match ctx.provider.symbol(&lib_id) {
@@ -873,11 +865,11 @@ fn pin_type_str(t: circuit_lang::PinType) -> &'static str {
 
 // ── 3. get_design ──────────────────────────────────────────────────────────
 
-fn current_sch_text(ctx: &ToolCtx) -> Option<String> {
+fn current_sch_text(ctx: &PcbToolCtx) -> Option<String> {
     std::fs::read_to_string(&ctx.sch_path).ok()
 }
 
-fn get_design(ctx: &ToolCtx) -> Result<Value> {
+fn get_design(ctx: &PcbToolCtx) -> Result<Value> {
     if let Some(draft) = ctx.workspace().read_draft() {
         let mut out = json!({ "yaml": draft, "source": "draft" });
         if ctx.workspace().draft_is_stale(current_sch_text(ctx).as_deref()) {
@@ -904,7 +896,7 @@ fn get_design(ctx: &ToolCtx) -> Result<Value> {
 
 // ── 4. validate_design ─────────────────────────────────────────────────────
 
-fn validate_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
+fn validate_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let yaml = require_str(&input, "yaml")?;
     let result = compile(&yaml, &ctx.provider);
     Ok(compile_report(&result.diagnostics))
@@ -934,7 +926,7 @@ fn compile_report(diags: &circuit_lang::Diagnostics) -> Value {
 
 // ── 5. apply_design ────────────────────────────────────────────────────────
 
-fn apply_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
+fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let explicit_yaml = input.get("yaml").and_then(Value::as_str).map(str::to_string);
     let yaml = match explicit_yaml.clone() {
         Some(y) => y,
@@ -1149,7 +1141,7 @@ fn design_diff(prior: Option<&Design>, new: &Design) -> Value {
 
 // ── 6. project_info ────────────────────────────────────────────────────────
 
-fn project_info(ctx: &ToolCtx) -> Result<Value> {
+fn project_info(ctx: &PcbToolCtx) -> Result<Value> {
     let snapshots = ctx
         .snapshots
         .list(&ctx.sch_path)
@@ -1168,7 +1160,7 @@ fn project_info(ctx: &ToolCtx) -> Result<Value> {
 
 // ── 7. read_schematic ──────────────────────────────────────────────────────
 
-fn read_schematic(input: Value, ctx: &ToolCtx) -> Result<Value> {
+fn read_schematic(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let raw = require_str(&input, "path")?;
     let path = resolve_user_path(&raw, &ctx.project_dir);
 
@@ -1231,7 +1223,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 // ── 8. run_erc ─────────────────────────────────────────────────────────────
 
-fn run_erc(ctx: &ToolCtx) -> Result<Value> {
+fn run_erc(ctx: &PcbToolCtx) -> Result<Value> {
     if !ctx.sch_path.exists() {
         bail!(
             "no schematic to check at {} — apply a design first",
@@ -1263,7 +1255,7 @@ fn run_erc(ctx: &ToolCtx) -> Result<Value> {
 
 // ── 9. create_design / edit_design ────────────────────────────────────────
 
-fn create_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
+fn create_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let yaml = require_str(&input, "yaml")?;
     let overwrite = input.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
     if ctx.workspace().read_draft().is_some() && !overwrite {
@@ -1279,7 +1271,7 @@ fn create_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
     Ok(report)
 }
 
-fn edit_design(input: Value, ctx: &ToolCtx) -> Result<Value> {
+fn edit_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let old = require_str(&input, "old_string")?;
     let new = require_str(&input, "new_string")?;
     let replace_all = input.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
@@ -1325,7 +1317,7 @@ pub const IMAGE_PATH_KEY: &str = "_image_path";
 /// Long-edge pixel cap for rendered schematics / board renders (Claude vision sweet spot).
 pub(crate) const RENDER_MAX_PX: u32 = 1600;
 
-fn render_schematic(ctx: &ToolCtx) -> Result<Value> {
+fn render_schematic(ctx: &PcbToolCtx) -> Result<Value> {
     if !ctx.sch_path.exists() {
         return Ok(json!({
             "error": "no schematic yet — apply a design first",

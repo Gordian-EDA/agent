@@ -13,10 +13,12 @@
 //!
 //! Run it manually:
 //!   set -a; source .env; set +a
-//!   cargo test -p agent --test bluepill_agent -- --ignored --nocapture
+//!   cargo test -p gordian-kicad --test bluepill_agent -- --ignored --nocapture
 
-use agent::tools::ToolCtx;
-use agent::{Agent, AutoApprove};
+use gordian_core::{Agent, AutoApprove};
+use gordian_kicad::PcbTools;
+use gordian_kicad::prompts::system_prompt;
+use gordian_kicad::tools::PcbToolCtx;
 use kicad_cli_rs::cli::KicadCli;
 use kicad_cli_rs::env::KicadEnv;
 
@@ -32,7 +34,7 @@ async fn bluepill_founding_prompt_yields_erc_clean_schematic() {
         return;
     };
     // SKIP gracefully if no LLM credentials are configured.
-    let client = match agent::llm::from_env() {
+    let client = match llm_client::from_env() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("SKIP: no LLM client ({e})");
@@ -42,12 +44,13 @@ async fn bluepill_founding_prompt_yields_erc_clean_schematic() {
 
     // Fresh temp project — the agent writes design.kicad_sch into it.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let ctx = ToolCtx::for_project(env.clone(), tempdir.path().to_path_buf())
+    let ctx = PcbToolCtx::for_project(env.clone(), tempdir.path().to_path_buf())
         .expect("tool context for temp project");
     let sch_path = ctx.sch_path().to_path_buf();
     assert!(!sch_path.exists(), "the project starts with no schematic");
 
-    let mut agent = Agent::new(client, ctx);
+    let mut agent =
+        Agent::new(client, Box::new(PcbTools::new(ctx)), system_prompt());
     let mut approvals = AutoApprove::yes();
 
     let outcome = agent

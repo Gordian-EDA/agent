@@ -1,52 +1,25 @@
-//! Exercise the TUI apply-gate **bridge** end to end with a scripted mock LLM.
+//! Exercise the TUI apply-gate **bridge** end to end with a scripted client.
 //!
 //! The cockpit's real bridge (`tui::TuiApprovals`) forwards the agent's
 //! `approve(diff)` over a channel and awaits a oneshot the UI fulfils on an
 //! `a`/`r` keypress. This test recreates that exact pattern with a public stand-in
-//! and drives a real [`agent::Agent`] (so the async approval flow — agent awaits
-//! `approve()`, a "UI" task receives the diff, a simulated `a` resolves `true`,
-//! the write commits — is covered without a terminal).
+//! and drives a real [`gordian_core::Agent`] over the KiCAD [`PcbTools`] provider
+//! (so the async approval flow — agent awaits `approve()`, a "UI" task receives the
+//! diff, a simulated `a` resolves `true`, the write commits — is covered without a
+//! terminal).
 //!
 //! Needs KiCAD for the tools; SKIPs gracefully otherwise.
 
-use agent::llm::{Completion, LlmClient, Message, ToolCall, ToolDef};
-use agent::tools::ToolCtx;
-use agent::{Agent, Approvals};
+use gordian_core::testing::{ScriptedClient, final_text, tool_call};
+use gordian_core::{Agent, Approvals};
+use gordian_kicad::PcbTools;
+use gordian_kicad::prompts::system_prompt;
+use gordian_kicad::tools::PcbToolCtx;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
-
-/// A mock LLM replaying a fixed script of completions, one per `complete()`.
-struct MockLlm {
-    script: Mutex<std::collections::VecDeque<Completion>>,
-}
-
-impl MockLlm {
-    fn script(c: Vec<Completion>) -> Self {
-        Self {
-            script: Mutex::new(c.into_iter().collect()),
-        }
-    }
-}
-
-#[async_trait]
-impl LlmClient for MockLlm {
-    async fn complete(
-        &self,
-        _system: &str,
-        _messages: &[Message],
-        _tools: &[ToolDef],
-    ) -> Result<Completion> {
-        self.script
-            .lock()
-            .unwrap()
-            .pop_front()
-            .ok_or_else(|| anyhow::anyhow!("mock script exhausted"))
-    }
-}
 
 /// The same bridge shape the cockpit uses: forward the diff + a reply oneshot.
 type GateRequest = (Value, oneshot::Sender<bool>);
@@ -73,46 +46,24 @@ blocks:\n\
 \x20     R1: {part: R, value: 10k, between: [A, GND]}\n\
 \x20     R2: {part: R, value: 10k, between: [GND, B]}\n";
 
-fn tool_call(id: &str, name: &str, input: Value) -> Completion {
-    Completion {
-        text: String::new(),
-        tool_calls: vec![ToolCall {
-            id: id.into(),
-            name: name.into(),
-            input,
-        }],
-        stop_reason: "tool_use".into(),
-        ..Default::default()
-    }
-}
-
-fn final_text(t: &str) -> Completion {
-    Completion {
-        text: t.into(),
-        tool_calls: Vec::new(),
-        stop_reason: "end_turn".into(),
-        ..Default::default()
-    }
+fn agent(ctx: PcbToolCtx, completions: Vec<gordian_core::Completion>) -> Agent {
+    Agent::new(Box::new(ScriptedClient::new(completions)), Box::new(PcbTools::new(ctx)), system_prompt())
 }
 
 #[tokio::test]
-async fn bridge_approval_a_keypress_commits_the_write() {
-    let Some(ctx) = ToolCtx::detect_for_test() else {
+async fn bridge_approval_a_keypress_commits_the_write() -> Result<()> {
+    let Some(ctx) = PcbToolCtx::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
-        return;
+        return Ok(());
     };
     let sch_path = ctx.sch_path().to_path_buf();
     assert!(!sch_path.exists());
 
     let script = vec![
-        tool_call(
-            "t1",
-            "apply_design",
-            json!({ "yaml": TINY_YAML, "commit": true }),
-        ),
+        tool_call("t1", "apply_design", json!({ "yaml": TINY_YAML, "commit": true })),
         final_text("done"),
     ];
-    let mut agent = Agent::new(Box::new(MockLlm::script(script)), ctx);
+    let mut agent = agent(ctx, script);
 
     let (gate_tx, mut gate_rx) = unbounded_channel::<GateRequest>();
     let mut approvals = BridgeApprovals { gate_tx };
@@ -128,33 +79,27 @@ async fn bridge_approval_a_keypress_commits_the_write() {
         }
     });
 
-    let outcome = agent
-        .run_turn("add two resistors", &mut approvals, None)
-        .await
-        .unwrap();
+    let outcome = agent.run_turn("add two resistors", &mut approvals, None).await.unwrap();
     ui.await.unwrap();
 
     assert!(outcome.applied, "approved gate must commit: {outcome:?}");
     assert!(sch_path.exists(), "approved write must land the .kicad_sch");
+    Ok(())
 }
 
 #[tokio::test]
-async fn bridge_rejection_r_keypress_blocks_the_write() {
-    let Some(ctx) = ToolCtx::detect_for_test() else {
+async fn bridge_rejection_r_keypress_blocks_the_write() -> Result<()> {
+    let Some(ctx) = PcbToolCtx::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
-        return;
+        return Ok(());
     };
     let sch_path = ctx.sch_path().to_path_buf();
 
     let script = vec![
-        tool_call(
-            "t1",
-            "apply_design",
-            json!({ "yaml": TINY_YAML, "commit": true }),
-        ),
+        tool_call("t1", "apply_design", json!({ "yaml": TINY_YAML, "commit": true })),
         final_text("done"),
     ];
-    let mut agent = Agent::new(Box::new(MockLlm::script(script)), ctx);
+    let mut agent = agent(ctx, script);
 
     let (gate_tx, mut gate_rx) = unbounded_channel::<GateRequest>();
     let mut approvals = BridgeApprovals { gate_tx };
@@ -166,15 +111,10 @@ async fn bridge_rejection_r_keypress_blocks_the_write() {
         }
     });
 
-    let outcome = agent
-        .run_turn("add two resistors", &mut approvals, None)
-        .await
-        .unwrap();
+    let outcome = agent.run_turn("add two resistors", &mut approvals, None).await.unwrap();
     ui.await.unwrap();
 
-    assert!(
-        !outcome.applied,
-        "rejected gate must not commit: {outcome:?}"
-    );
+    assert!(!outcome.applied, "rejected gate must not commit: {outcome:?}");
     assert!(!sch_path.exists(), "rejected write must not land the file");
+    Ok(())
 }

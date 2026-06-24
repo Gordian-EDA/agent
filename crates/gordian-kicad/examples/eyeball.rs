@@ -42,7 +42,7 @@ fn resolve(arg: &str) -> PathBuf {
 }
 
 /// Rasterize an SVG string to PNG bytes at [`SCALE`]× on a white background
-/// (the same path `agent::render::svg_to_png` uses, inlined so the example has
+/// (the same path `gordian_kicad::render::svg_to_png` uses, inlined so the example has
 /// no internal-API dependency).
 fn rasterize(svg: &str) -> Vec<u8> {
     let opt = resvg::usvg::Options::default();

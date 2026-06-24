@@ -1,20 +1,13 @@
 [package]
-name = "agent"
+name = "gordian-kicad"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Provider-agnostic LLM client and agent loop for the auto-pcb KiCAD design agent."
+description = "The KiCAD domain for the Gordian agent: PCB/schematic tools, prompts, and render — a gordian-core ToolProvider."
 
 [dependencies]
-anyhow.workspace = true
-async-trait.workspace = true
-dotenvy.workspace = true
-fastrand.workspace = true
-reqwest.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-
+gordian-core = { path = "../gordian-core" }
 llm-client = { path = "../llm-client" }
 circuit-lang = { path = "../circuit-lang" }
 kicad-cli-rs = { path = "../kicad-cli-rs" }
@@ -31,6 +24,11 @@ pcb-svg = { path = "../pcb-svg" }
 sch-layout = { path = "../sch-layout" }
 anneal-place = { path = "../anneal-place" }
 greedy-place = { path = "../greedy-place" }
+
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 indexmap.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent::tools::{ToolCtx, Tools};
+use gordian_kicad::tools::{PcbToolCtx, run_tool};
 use serde_json::{json, Value};
 
 fn footprint_dir() -> PathBuf {
@@ -19,11 +19,10 @@ fn circuits_dir() -> PathBuf {
 }
 
 fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
-    let ctx = match ToolCtx::with_footprint_dir_for_test(fp_dir.to_path_buf()) {
+    let ctx = match PcbToolCtx::with_footprint_dir_for_test(fp_dir.to_path_buf()) {
         Some(c) => c,
         None => return json!({ "name": name, "error": "no footprint index / KiCAD env" }),
     };
-    let tools = Tools::new();
 
     let mut board = json!({ "bounds": spec["bounds"], "parts": spec["parts"] });
     if let Some(rules) = spec.get("rules") {
@@ -32,20 +31,20 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
     if let Some(outline) = spec.get("outline") {
         board["outline"] = outline.clone();
     }
-    let created = agent::tools_pcb::build_board_draft(board, &ctx).unwrap();
+    let created = gordian_kicad::tools_pcb::build_board_draft(board, &ctx).unwrap();
     if created["ok"] != json!(true) {
         return json!({ "name": name, "stage": "create", "result": created });
     }
     if spec.get("keepouts").is_some() || spec.get("hints").is_some() {
-        let mut draft = agent::tools_pcb::BoardDraft::load(&ctx).unwrap();
-        agent::tools_pcb::apply_spec_extras(&mut draft, spec);
+        let mut draft = gordian_kicad::tools_pcb::BoardDraft::load(&ctx).unwrap();
+        gordian_kicad::tools_pcb::apply_spec_extras(&mut draft, spec);
         draft.save(&ctx).unwrap();
     }
     let t0 = std::time::Instant::now();
-    let placed = tools.run("place_board", json!({}), &ctx).unwrap();
+    let placed = run_tool("place_board", json!({}), &ctx).unwrap();
     let t_place = t0.elapsed().as_secs_f64();
     let t1 = std::time::Instant::now();
-    let routed = tools.run("route_board", json!({}), &ctx).unwrap();
+    let routed = run_tool("route_board", json!({}), &ctx).unwrap();
     let t_route = t1.elapsed().as_secs_f64();
 
     // Total nets the problem asked for: count distinct nets across all parts'
