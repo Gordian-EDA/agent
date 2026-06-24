@@ -12,6 +12,10 @@ pub struct Item {
     pub refdes: String,
     pub part: String,
     pub value: String,
+    /// Footprint lib_id from the kernel `Component`, carried to emit so the
+    /// `.kicad_sch` symbol records its assignment. Multi-unit parts set this on the
+    /// FIRST emitted unit only (like `value`) to avoid duplicate fields.
+    pub footprint: Option<String>,
     pub geom: SymbolGeometry,
     /// (pin number, pin name, net or None for NC). For a multi-unit part this
     /// holds only the pins of THIS item's `unit` (each unit is its own Item).

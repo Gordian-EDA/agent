@@ -110,6 +110,7 @@ fn design_from_netlist(netlist: &kicad_cli_rs::cli::Netlist) -> Design {
         let kernel = Component {
             part: comp.lib_id.clone(),
             value: kernel_value(&comp.value),
+            footprint: kernel_footprint(&comp.properties),
             origin,
             ..Component::default()
         };
@@ -263,6 +264,19 @@ fn kernel_value(s: &str) -> Option<String> {
     }
 }
 
+/// A component's footprint lib_id, or `None` when it has none.
+///
+/// The netlist parser folds `<footprint>` / a `Footprint` `<field>` / `<property>`
+/// into `NetComp.properties["Footprint"]` (`cli.rs`). Emit writes KiCAD's empty
+/// placeholder (`""`, or `~` for some fields) when a part is unassigned, so both
+/// map to `None` here — exactly as `kernel_value` treats the `Value` field.
+fn kernel_footprint(props: &std::collections::HashMap<String, String>) -> Option<String> {
+    match props.get("Footprint") {
+        Some(f) if !f.is_empty() && f != "~" => Some(f.clone()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +291,50 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+        }
+    }
+
+    #[test]
+    fn lifts_footprint_from_property() {
+        let netlist = Netlist {
+            components: vec![comp(
+                "C1",
+                "100nF",
+                "Device:C",
+                &[("Footprint", "Capacitor_SMD:C_0603_1608Metric")],
+            )],
+            nets: vec![],
+        };
+        let d = design_from_netlist(&netlist);
+        let c = d
+            .blocks
+            .values()
+            .flat_map(|b| b.components.iter())
+            .find(|(r, _)| r.as_str() == "C1")
+            .map(|(_, c)| c)
+            .expect("C1 present");
+        assert_eq!(
+            c.footprint.as_deref(),
+            Some("Capacitor_SMD:C_0603_1608Metric")
+        );
+    }
+
+    #[test]
+    fn empty_or_tilde_footprint_lifts_to_none() {
+        for fp in ["", "~"] {
+            let netlist = Netlist {
+                components: vec![comp("R1", "1k", "Device:R", &[("Footprint", fp)])],
+                nets: vec![],
+            };
+            let d = design_from_netlist(&netlist);
+            let c = d
+                .blocks
+                .values()
+                .flat_map(|b| b.components.iter())
+                .find(|(r, _)| r.as_str() == "R1")
+                .map(|(_, c)| c)
+                .expect("R1 present");
+            assert_eq!(c.footprint, None, "footprint {fp:?} must lift to None");
         }
     }
 
