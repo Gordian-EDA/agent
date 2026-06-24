@@ -955,7 +955,7 @@ fn congestion_penalty(usage: u32, capacity: u32) -> f64 {
 
 /// Centre point of a mesh [`Rect`] (mm). `Rect`'s fields are public, so pathing
 /// computes this without touching the mesh API surface.
-fn rect_center(r: &crate::mesh::Rect) -> Point2 {
+fn rect_center(r: &crate::problem::Rect) -> Point2 {
     Point2 {
         x: (r.min_x + r.max_x) / 2.0,
         y: (r.min_y + r.max_y) / 2.0,

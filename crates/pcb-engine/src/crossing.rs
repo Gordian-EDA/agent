@@ -57,7 +57,8 @@
 //! byte-for-byte (a determinism test asserts this).
 
 use crate::grid::grid_pitch;
-use crate::mesh::{CapacityMesh, LeafId, Rect};
+use crate::mesh::{CapacityMesh, LeafId};
+use crate::problem::Rect;
 use crate::pathing::GlobalPlan;
 use crate::problem::{LayerRef, Point2, RouteProblem};
 use serde::{Deserialize, Serialize};

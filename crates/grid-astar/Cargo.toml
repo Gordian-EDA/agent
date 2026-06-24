@@ -1,15 +1,13 @@
 [package]
-name = "pcb-engine"
+name = "grid-astar"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Deterministic copper autorouter and placement engine for KiCAD PCBs."
+description = "Sequential grid-A* PCB router: one shortest-net-first A* per net over a per-layer occupancy grid."
 
 [dependencies]
 pcb-model = { path = "../pcb-model" }
 drc-lint = { path = "../drc-lint" }
-grid-astar = { path = "../grid-astar" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-rayon.workspace = true

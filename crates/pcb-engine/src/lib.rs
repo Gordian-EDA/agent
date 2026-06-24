@@ -6,15 +6,13 @@
 //! Shared data types live in the [`pcb_model`] crate, re-exported here as
 //! [`problem`] for back-compat ([`problem::RouteProblem`] / [`problem::RouteSolution`]).
 
-pub mod astar;
 pub mod crossing;
 pub mod detail;
-pub mod grid;
 pub mod mesh;
 pub mod pathing;
 pub mod pipeline;
 pub mod placement;
 pub use drc_lint::{connectivity, lint};
+pub use grid_astar::{astar, grid, router};
 pub use pcb_model as problem;
-pub mod router;
 pub mod svg;

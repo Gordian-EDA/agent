@@ -38,83 +38,13 @@
 //! iteration, no float-keyed ordering, leaks into the output — the slice's
 //! determinism tests serialize the mesh twice and compare byte-for-byte.
 
-use crate::problem::{Point2, RouteProblem};
+use crate::problem::{Point2, Rect, RouteProblem};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// A leaf cell's stable identifier (depth-first tree-path order, 0-based).
 pub type LeafId = usize;
 
-/// An axis-aligned rectangle in board mm (y-down), `[min, max]` per axis.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Rect {
-    pub min_x: f64,
-    pub min_y: f64,
-    pub max_x: f64,
-    pub max_y: f64,
-}
-
-impl Rect {
-    #[inline]
-    fn width(&self) -> f64 {
-        self.max_x - self.min_x
-    }
-    #[inline]
-    fn height(&self) -> f64 {
-        self.max_y - self.min_y
-    }
-    #[inline]
-    fn area(&self) -> f64 {
-        self.width() * self.height()
-    }
-    #[inline]
-    fn center(&self) -> Point2 {
-        Point2 {
-            x: (self.min_x + self.max_x) / 2.0,
-            y: (self.min_y + self.max_y) / 2.0,
-        }
-    }
-    /// Does this rect overlap `other` with positive area?
-    #[inline]
-    fn overlaps(&self, other: &Rect) -> bool {
-        self.min_x < other.max_x
-            && self.max_x > other.min_x
-            && self.min_y < other.max_y
-            && self.max_y > other.min_y
-    }
-    /// The overlap rectangle with `other`, or `None` if they do not overlap.
-    fn intersection(&self, other: &Rect) -> Option<Rect> {
-        let min_x = self.min_x.max(other.min_x);
-        let max_x = self.max_x.min(other.max_x);
-        let min_y = self.min_y.max(other.min_y);
-        let max_y = self.max_y.min(other.max_y);
-        if min_x < max_x && min_y < max_y {
-            Some(Rect {
-                min_x,
-                min_y,
-                max_x,
-                max_y,
-            })
-        } else {
-            None
-        }
-    }
-    /// Does the *boundary* (any of the four edges) of `other` pass through the
-    /// interior of `self`? True when the rects overlap but `other` does not
-    /// wholly contain `self` — i.e. at least one edge of `other` cuts across.
-    fn boundary_crosses(&self, other: &Rect) -> bool {
-        if !self.overlaps(other) {
-            return false;
-        }
-        // `other` covers `self` entirely ⇒ no edge of `other` is inside `self`.
-        let covers = other.min_x <= self.min_x
-            && other.max_x >= self.max_x
-            && other.min_y <= self.min_y
-            && other.max_y >= self.max_y;
-        !covers
-    }
-}
 
 /// A flattened obstacle footprint on a single layer: its rectangle plus which
 /// connections own it (empty ⇒ keepout / foreign copper that blocks everyone).

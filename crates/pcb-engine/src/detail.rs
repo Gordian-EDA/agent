@@ -46,7 +46,8 @@
 use crate::astar::{self, AStarCosts, MoveSet, State};
 use crate::crossing::{CellJob, CrossingAssignment, Terminal, TerminalKind};
 use crate::grid::{self, RouteGrid};
-use crate::mesh::{CapacityMesh, LeafId, Rect};
+use crate::mesh::{CapacityMesh, LeafId};
+use crate::problem::Rect;
 use crate::problem::{FailedNet, LayerRef, Point2, RouteProblem};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

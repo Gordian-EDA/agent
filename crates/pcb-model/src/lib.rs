@@ -295,3 +295,67 @@ pub struct Via {
     #[serde(default)]
     pub span: ViaSpan,
 }
+
+/// An axis-aligned rectangle in board mm (y-down), `[min, max]` per axis.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Rect {
+    pub min_x: f64,
+    pub min_y: f64,
+    pub max_x: f64,
+    pub max_y: f64,
+}
+
+impl Rect {
+    #[inline]
+    pub fn width(&self) -> f64 {
+        self.max_x - self.min_x
+    }
+    #[inline]
+    pub fn height(&self) -> f64 {
+        self.max_y - self.min_y
+    }
+    #[inline]
+    pub fn area(&self) -> f64 {
+        self.width() * self.height()
+    }
+    #[inline]
+    pub fn center(&self) -> Point2 {
+        Point2 {
+            x: (self.min_x + self.max_x) / 2.0,
+            y: (self.min_y + self.max_y) / 2.0,
+        }
+    }
+    /// Does this rect overlap `other` with positive area?
+    #[inline]
+    pub fn overlaps(&self, other: &Rect) -> bool {
+        self.min_x < other.max_x
+            && self.max_x > other.min_x
+            && self.min_y < other.max_y
+            && self.max_y > other.min_y
+    }
+    /// The overlap rectangle with `other`, or `None` if they do not overlap.
+    pub fn intersection(&self, other: &Rect) -> Option<Rect> {
+        let min_x = self.min_x.max(other.min_x);
+        let max_x = self.max_x.min(other.max_x);
+        let min_y = self.min_y.max(other.min_y);
+        let max_y = self.max_y.min(other.max_y);
+        if min_x < max_x && min_y < max_y {
+            Some(Rect { min_x, min_y, max_x, max_y })
+        } else {
+            None
+        }
+    }
+    /// Does the *boundary* of `other` cross the interior of `self`? True when the
+    /// rects overlap but `other` does not wholly contain `self`.
+    pub fn boundary_crosses(&self, other: &Rect) -> bool {
+        if !self.overlaps(other) {
+            return false;
+        }
+        let covers = other.min_x <= self.min_x
+            && other.max_x >= self.max_x
+            && other.min_y <= self.min_y
+            && other.max_y >= self.max_y;
+        !covers
+    }
+}

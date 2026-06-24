@@ -166,7 +166,7 @@ impl RouteGrid {
     /// each terminal endpoint to its exact mm position, not by aligning window
     /// lattices (floating-point floor mismatches make exact lattice alignment
     /// unreliable, and snapping is exact regardless).
-    pub fn build_window(problem: &RouteProblem, window: &crate::mesh::Rect) -> RouteGrid {
+    pub fn build_window(problem: &RouteProblem, window: &crate::problem::Rect) -> RouteGrid {
         Self::build_window_with_pitch(problem, window, grid_pitch(problem))
     }
 
@@ -175,7 +175,7 @@ impl RouteGrid {
     /// grid-snap distortion). See [`Self::build_with_pitch`].
     pub fn build_window_with_pitch(
         problem: &RouteProblem,
-        window: &crate::mesh::Rect,
+        window: &crate::problem::Rect,
         pitch: f64,
     ) -> RouteGrid {
         let pitch = pitch.max(MIN_PITCH_MM);
@@ -699,7 +699,7 @@ mod tests {
 
     #[test]
     fn window_blocks_true_board_edges_but_not_interior_window_edges() {
-        use crate::mesh::Rect;
+        use crate::problem::Rect;
         // A 20x20 board. Take a window in the middle that touches the LEFT board
         // edge but whose right/top/bottom edges are interior to the board.
         let p = problem(vec![]);
@@ -732,7 +732,7 @@ mod tests {
 
     #[test]
     fn window_covers_its_rect_and_maps_interior_points() {
-        use crate::mesh::Rect;
+        use crate::problem::Rect;
         // A window must contain a cell for every interior point, and the cell↔mm
         // mapping round-trips within the window (the per-cell stitching contract
         // relies on endpoint snapping, not lattice alignment, so we only require
