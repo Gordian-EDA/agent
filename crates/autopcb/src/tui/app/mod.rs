@@ -17,11 +17,13 @@
 //! agent-event / unwind writers; [`input`] holds the composer (commands +
 //! completion + line editing); [`update`] holds the [`Msg`]→[`Action`] reducer.
 
+mod image_cell;
 mod input;
 mod state;
 mod transcript;
 mod update;
 
+pub use image_cell::{ImageCell, ImageState};
 pub use input::*;
 pub use state::{App, Status};
 pub use transcript::{Entry, NoticeLevel, PendingDiff, Speaker, UnwindPicker};
@@ -201,6 +203,46 @@ mod tests {
         type_str(&mut a, "/help");
         a.update(Msg::Submit);
         assert!(a.help, "/help should toggle even mid-turn");
+    }
+
+    #[test]
+    fn tab_queues_a_draft_while_running_and_it_auto_submits_on_turn_end() {
+        let mut a = app();
+        type_str(&mut a, "first");
+        a.update(Msg::Submit);
+        assert!(a.running);
+        // Tab with a plain draft mid-turn queues it (can't submit now) and clears
+        // the composer for the next thought.
+        type_str(&mut a, "then route it");
+        a.update(Msg::Complete);
+        assert_eq!(a.queued.as_deref(), Some("then route it"));
+        assert!(a.input.is_empty(), "the composer clears after queueing");
+        // When the turn ends, the queued prompt auto-submits as a fresh turn.
+        let action = a.update(Msg::TurnEnded(TurnEndReason::Completed));
+        assert_eq!(action, Action::SpawnTurn("then route it".into()));
+        assert!(a.running, "the queued turn starts");
+        assert!(a.queued.is_none(), "the queue is consumed");
+    }
+
+    #[test]
+    fn a_large_paste_collapses_to_a_placeholder_then_expands_on_submit() {
+        let mut a = app();
+        let big = "x".repeat(500);
+        a.update(Msg::Paste(big.clone()));
+        assert_eq!(a.input, "[Pasted 500 chars]", "composer shows the placeholder");
+        assert_eq!(a.paste.as_deref(), Some(big.as_str()), "real text stashed");
+        // Submitting expands the placeholder back to the real pasted text.
+        let action = a.update(Msg::Submit);
+        assert_eq!(action, Action::SpawnTurn(big.clone()));
+        assert!(a.paste.is_none(), "the stash clears on submit");
+    }
+
+    #[test]
+    fn a_small_paste_is_inserted_verbatim() {
+        let mut a = app();
+        a.update(Msg::Paste("add a 10k resistor".into()));
+        assert_eq!(a.input, "add a 10k resistor");
+        assert!(a.paste.is_none(), "no stash for a small paste");
     }
 
     #[test]
@@ -618,6 +660,21 @@ mod tests {
     }
 
     #[test]
+    fn the_elapsed_clock_pauses_while_a_gate_is_open() {
+        let mut a = app();
+        type_str(&mut a, "go");
+        a.update(Msg::Submit);
+        assert!(a.paused_since.is_none(), "no pause before a gate");
+        // Opening the gate freezes the clock; resolving it resumes and banks the
+        // paused span.
+        a.update(Msg::PendingDiff(dry_run_json()));
+        assert!(a.paused_since.is_some(), "gate open → clock frozen");
+        a.update(Msg::Char('a'));
+        assert!(a.paused_since.is_none(), "resolved → clock running again");
+        assert!(a.paused_total >= std::time::Duration::ZERO, "the pause was banked");
+    }
+
+    #[test]
     fn other_chars_do_not_leak_into_input_while_gate_open() {
         let mut a = app();
         a.update(Msg::PendingDiff(dry_run_json()));
@@ -645,6 +702,7 @@ mod tests {
         a.update(Msg::Agent(AgentEvent::ToolFinished {
             name: "search_symbols".into(),
             summary: "\"STM32\" → 4 hits".into(),
+            image_path: None,
         }));
         // The running placeholder is replaced in place by the finished card.
         let cards: Vec<&Entry> = a

@@ -81,6 +81,11 @@ pub struct ToolOutcome {
     pub value: Value,
     /// Images to attach to the tool result (e.g. a rendered schematic).
     pub images: Vec<ImageData>,
+    /// The on-disk path of the image a render tool produced, if any. The model
+    /// sees the base64 in [`Self::images`]; the *path* is kept here so a UI can
+    /// display the same PNG inline (rather than re-encoding it). Set by the
+    /// domain when it strips its image-path key out of `value`.
+    pub image_path: Option<String>,
     /// Gated-tool apply facts; `None` for ReadOnly / Authoring tools and for a
     /// gated tool run in [`RunMode::Normal`].
     pub apply: Option<ApplyInfo>,
@@ -89,7 +94,7 @@ pub struct ToolOutcome {
 impl ToolOutcome {
     /// A plain result (no images, not a gated apply).
     pub fn plain(value: Value) -> Self {
-        Self { value, images: Vec::new(), apply: None }
+        Self { value, images: Vec::new(), image_path: None, apply: None }
     }
 }
 

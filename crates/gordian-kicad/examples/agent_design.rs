@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
                     tout += output_tokens;
                 }
                 gordian_core::AgentEvent::ToolStarted { name } => eprintln!("  tool -> {name}"),
-                gordian_core::AgentEvent::ToolFinished { name, summary } => eprintln!("       {name}: {summary}"),
+                gordian_core::AgentEvent::ToolFinished { name, summary, .. } => eprintln!("       {name}: {summary}"),
                 gordian_core::AgentEvent::AssistantText(t) if !t.trim().is_empty() => {
                     eprintln!("  ...: {}", t.trim());
                 }

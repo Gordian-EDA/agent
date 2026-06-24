@@ -4,6 +4,10 @@
 
 use super::App;
 
+/// A paste longer than this many chars is collapsed to a `[Pasted N chars]`
+/// placeholder in the composer instead of flooding it with the raw text.
+pub(super) const PASTE_PLACEHOLDER_THRESHOLD: usize = 200;
+
 /// One `/command` the input line accepts, for dispatch and Tab completion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommandSpec {
@@ -38,6 +42,10 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "/compact",
         desc: "summarize the conversation to shrink context",
+    },
+    CommandSpec {
+        name: "/preview",
+        desc: "show the latest board/schematic render inline",
     },
     CommandSpec {
         name: "/quit",
@@ -97,6 +105,52 @@ impl App {
 
     // ── input-line editing helpers ────────────────────────────────────
 
+    /// Insert a bracketed-paste payload. A large block (more than
+    /// [`PASTE_PLACEHOLDER_THRESHOLD`] chars) is collapsed to a
+    /// `[Pasted N chars]` placeholder so a giant paste doesn't flood the
+    /// composer; the real text is stashed in `paste` and expanded back in on
+    /// submit. A small paste is inserted verbatim.
+    pub(super) fn paste_text(&mut self, text: String) {
+        let n = text.chars().count();
+        if n > PASTE_PLACEHOLDER_THRESHOLD {
+            self.paste = Some(text);
+            let placeholder = format!("[Pasted {n} chars]");
+            for c in placeholder.chars() {
+                self.insert_char(c);
+            }
+        } else {
+            for c in text.chars() {
+                self.insert_char(c);
+            }
+        }
+    }
+
+    /// Tab while a turn runs: stash the current draft as the queued prompt (it
+    /// auto-submits when the turn ends) and clear the composer for the next one.
+    pub(super) fn queue_input(&mut self) {
+        let line = self.expanded_input();
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            return;
+        }
+        self.queued = Some(line);
+        self.clear_input();
+    }
+
+    /// The composer text with any `[Pasted N chars]` placeholder expanded back to
+    /// the stashed paste payload (used at submit / queue time).
+    pub(super) fn expanded_input(&self) -> String {
+        match &self.paste {
+            Some(full) => {
+                // Replace the single placeholder token with the real text.
+                let n = full.chars().count();
+                let token = format!("[Pasted {n} chars]");
+                self.input.replacen(&token, full, 1)
+            }
+            None => self.input.clone(),
+        }
+    }
+
     pub(super) fn char_len(&self) -> usize {
         self.input.chars().count()
     }
@@ -135,6 +189,7 @@ impl App {
     pub(super) fn clear_input(&mut self) {
         self.input.clear();
         self.cursor = 0;
+        self.paste = None;
         self.history_pos = None;
         self.completion_stem = None;
         self.completion_idx = None;

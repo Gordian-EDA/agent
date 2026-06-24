@@ -6,7 +6,7 @@
 use gordian_core::AgentEvent;
 use serde_json::Value;
 
-use super::App;
+use super::{App, ImageCell};
 
 /// The role of a transcript line, used by the renderer to style it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,10 +158,11 @@ impl App {
             }
             AgentEvent::ToolStarted { name } => {
                 self.turn_tool_calls += 1;
+                self.active_tool = Some(name.clone());
                 self.transcript
                     .push(Entry::tool(format!("{name}(…) running…")));
             }
-            AgentEvent::ToolFinished { name, summary } => {
+            AgentEvent::ToolFinished { name, summary, image_path } => {
                 // Replace the most recent "running…" card for this tool, if any,
                 // so the card collapses into its result in place. The leading
                 // marker glyph is the renderer's job — the text carries none, or
@@ -177,6 +178,12 @@ impl App {
                 } else {
                     self.transcript
                         .push(Entry::tool(format!("{name} → {summary}")));
+                }
+                self.active_tool = None;
+                // A render tool returned a PNG: post an inline preview right after
+                // the collapsed card.
+                if let Some(path) = image_path {
+                    self.push_image(path, name);
                 }
             }
             AgentEvent::Applied { summary } => {
@@ -225,6 +232,19 @@ impl App {
         }
     }
 
+    /// Post an inline image preview pinned just after the current transcript
+    /// tail, so the renderer interleaves it in scroll order.
+    pub(super) fn push_image(&mut self, path: impl Into<String>, caption: impl Into<String>) {
+        let after = self.transcript.len();
+        self.images.push(ImageCell::new(after, path, caption));
+    }
+
+    /// The path of the most recently posted render preview, if any — what
+    /// `/preview` re-displays.
+    pub fn latest_render_path(&self) -> Option<String> {
+        self.images.last().map(|c| c.path.clone())
+    }
+
     /// Open the unwind picker over the agent's unwindable turns (newest-first
     /// prompt previews the shell just fetched). An empty list — fresh agent or
     /// everything behind a compaction barrier — just notes "nothing to unwind".
@@ -267,6 +287,9 @@ impl App {
             .nth(popped - 1);
         if let Some(at) = cut {
             self.transcript.truncate(at);
+            // Drop any image previews pinned past the cut so they don't dangle
+            // off the rolled-back transcript.
+            self.images.retain(|c| c.after <= at);
         }
         self.live_assistant = None;
         self.status.turn_count = self.status.turn_count.saturating_sub(popped);

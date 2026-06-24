@@ -30,6 +30,7 @@ mod transcript;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui_image::picker::Picker;
 
 use super::app::App;
 
@@ -38,8 +39,35 @@ use super::app::App;
 /// edge and none of them hugs the terminal edge (the Codex layout discipline).
 pub(super) const MARGIN: u16 = 2;
 
-/// Draw the whole cockpit.
+/// Everything the renderer needs that the testable [`App`] deliberately does not
+/// hold: the image [`Picker`] (terminal graphics capability + cell font size).
+///
+/// When `picker` is `None` — under the screenshot harness or a dumb terminal —
+/// inline images fall back to a stable text label, so SVG snapshots stay
+/// byte-stable and a graphics-less terminal never emits escape garbage.
+pub struct RenderCtx<'a> {
+    pub picker: Option<&'a Picker>,
+}
+
+impl RenderCtx<'_> {
+    /// A text-only context: images render as their label, never as graphics. Used
+    /// by the screenshot harness and the unit tests for byte-stable output.
+    #[cfg(test)]
+    pub fn text_only() -> Self {
+        Self { picker: None }
+    }
+}
+
+/// Draw the whole cockpit with no image-rendering capability (text-label
+/// previews). The screenshot harness and the unit tests use this.
+#[cfg(test)]
 pub fn draw(f: &mut Frame, app: &mut App) {
+    draw_with(f, app, &mut RenderCtx::text_only());
+}
+
+/// Draw the whole cockpit, rendering inline image previews through `ctx`'s
+/// [`Picker`] when one is present.
+pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
     let area = f.area();
 
     // Size the diff pane to its content (0 when nothing is pending).
@@ -48,8 +76,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .as_ref()
         .map(|d| composer::diff_height(d, area.width))
         .unwrap_or(0);
-    // The running indicator takes a row only while a turn is in flight.
-    let running_h = u16::from(app.running);
+    // The running indicator takes a row while a turn is in flight, plus a second
+    // detail row when a named tool is currently executing.
+    let running_h = if app.running {
+        1 + u16::from(app.active_tool.is_some())
+    } else {
+        0
+    };
     // The composer grows with a multi-line draft (capped), so a pasted or
     // Shift-Enter'd prompt stays visible instead of scrolling under the border.
     let input_h = composer::composer_height(app, area.height);
@@ -67,7 +100,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .split(area);
 
     chrome::draw_header(f, chunks[0], app);
-    transcript::draw_transcript(f, chunks[1], app);
+    transcript::draw_transcript(f, chunks[1], app, ctx);
     if app.pending.is_some() {
         composer::draw_diff(f, chunks[2], app);
     }
@@ -188,6 +221,7 @@ mod tests {
         a.update(Msg::Agent(AgentEvent::ToolFinished {
             name: "search_symbols".into(),
             summary: "\"STM32\" → 4 hits".into(),
+            image_path: None,
         }));
 
         let text = render_to_string(&mut a, 80, 24);
@@ -199,6 +233,30 @@ mod tests {
             text.contains("search_symbols") && text.contains("4 hits"),
             "tool card should render:\n{text}"
         );
+    }
+
+    #[test]
+    fn render_tool_posts_an_inline_image_cell_shown_as_a_label_in_text_mode() {
+        let mut a = app();
+        for c in "render the board".chars() {
+            a.update(Msg::Char(c));
+        }
+        a.update(Msg::Submit);
+        a.update(Msg::Agent(AgentEvent::ToolStarted {
+            name: "render_board".into(),
+        }));
+        // A render tool returns a PNG path: an inline image cell is posted.
+        a.update(Msg::Agent(AgentEvent::ToolFinished {
+            name: "render_board".into(),
+            summary: "routed view → ok".into(),
+            image_path: Some("/tmp/proj/.autopcb/renders/000.png".into()),
+        }));
+        assert_eq!(a.images.len(), 1, "an image cell was posted");
+        // In text-label mode (no picker, like the screenshot harness) the cell
+        // renders its stable label, never graphics.
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(text.contains("board preview"), "image label shows:\n{text}");
+        assert!(text.contains("000.png"), "label carries the path:\n{text}");
     }
 
     #[test]
@@ -251,6 +309,25 @@ mod tests {
         let text = render_to_string(&mut a, 80, 24);
         assert!(text.contains("working"), "running verb:\n{text}");
         assert!(text.contains("esc to interrupt"), "interrupt hint:\n{text}");
+    }
+
+    #[test]
+    fn running_row_shows_the_live_tool_detail_line() {
+        let mut a = app();
+        for c in "go".chars() {
+            a.update(Msg::Char(c));
+        }
+        a.update(Msg::Submit);
+        a.update(Msg::Agent(AgentEvent::ToolStarted { name: "route_board".into() }));
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(text.contains("route_board"), "active tool named under spinner:\n{text}");
+        // When the tool finishes, the detail row clears.
+        a.update(Msg::Agent(AgentEvent::ToolFinished {
+            name: "route_board".into(),
+            summary: "ok".into(),
+            image_path: None,
+        }));
+        assert!(a.active_tool.is_none(), "detail clears when the tool finishes");
     }
 
     #[test]

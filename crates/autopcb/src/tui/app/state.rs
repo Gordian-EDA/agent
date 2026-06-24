@@ -2,7 +2,7 @@
 //! helpers that bracket an in-flight turn (begin/end + the elapsed/token readouts
 //! the renderer shows).
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::{Entry, NoticeLevel, PendingDiff, TurnEndReason, UnwindPicker};
 
@@ -55,6 +55,10 @@ impl Status {
 pub struct App {
     /// The chat transcript (top pane), oldest first.
     pub transcript: Vec<Entry>,
+    /// Inline image previews, each pinned after a transcript entry (see
+    /// [`super::ImageCell`]). Kept parallel to `transcript` so the text model and
+    /// its tests stay free of the non-`PartialEq` image protocol state.
+    pub images: Vec<super::ImageCell>,
     /// Index into `transcript` of the assistant entry currently being streamed
     /// token-by-token (an in-progress `AssistantDelta` run), or `None` between
     /// streamed runs. The final `AssistantText` finalizes it in place; the
@@ -64,6 +68,12 @@ pub struct App {
     pub input: String,
     /// Cursor position in the input line, in **chars** (0 ..= char count).
     pub cursor: usize,
+    /// A prompt queued (via Tab) while a turn was running, auto-submitted when the
+    /// turn ends so the next instruction isn't dropped. `None` when nothing waits.
+    pub queued: Option<String>,
+    /// The full text of a large pasted block, stashed while the composer shows a
+    /// compact `[Pasted N chars]` placeholder; expanded back in on submit.
+    pub paste: Option<String>,
     /// Previously submitted prompts, oldest first.
     pub history: Vec<String>,
     /// While browsing history: the index being shown. `None` = live draft.
@@ -87,6 +97,13 @@ pub struct App {
     pub running: bool,
     /// When the in-flight turn started (drives the elapsed display).
     pub turn_started: Option<Instant>,
+    /// Total time the elapsed clock has been PAUSED this turn (while an approval
+    /// gate held the turn waiting on the user). Subtracted from the raw elapsed so
+    /// the working clock reflects model/tool time, not human deliberation.
+    pub paused_total: Duration,
+    /// When the current pause began, if a gate is open right now. `None` between
+    /// gates; folded into `paused_total` when the gate resolves.
+    pub paused_since: Option<Instant>,
     /// `total_output_tokens` snapshot at turn start, so the running line can show
     /// the output tokens streamed *this* turn ([`App::turn_output_tokens`]).
     pub turn_output_base: u64,
@@ -95,6 +112,9 @@ pub struct App {
     /// can report a count even when the turn was interrupted or errored — paths
     /// that never return an outcome.
     pub turn_tool_calls: usize,
+    /// The tool currently running, for the working row's detail line. Set on
+    /// `ToolStarted`, cleared on `ToolFinished` / turn end.
+    pub active_tool: Option<String>,
     /// Animation frame counter, advanced by [`super::Msg::Tick`] while running.
     pub spinner: usize,
     /// The unwind picker, while the user is choosing how far to roll back.
@@ -120,9 +140,12 @@ impl App {
         // so no seed entry is needed.
         Self {
             transcript: Vec::new(),
+            images: Vec::new(),
             live_assistant: None,
             input: String::new(),
             cursor: 0,
+            queued: None,
+            paste: None,
             history: Vec::new(),
             history_pos: None,
             draft: String::new(),
@@ -133,8 +156,11 @@ impl App {
             pending: None,
             running: false,
             turn_started: None,
+            paused_total: Duration::ZERO,
+            paused_since: None,
             turn_output_base: 0,
             turn_tool_calls: 0,
+            active_tool: None,
             spinner: 0,
             unwind: None,
             help: false,
@@ -156,9 +182,28 @@ impl App {
     pub(super) fn begin_turn(&mut self) {
         self.running = true;
         self.turn_started = Some(Instant::now());
+        self.paused_total = Duration::ZERO;
+        self.paused_since = None;
         self.turn_output_base = self.status.total_output_tokens;
         self.turn_tool_calls = 0;
+        self.active_tool = None;
         self.scroll = 0;
+    }
+
+    /// Freeze the elapsed clock: called when an approval gate opens, so human
+    /// deliberation isn't billed to the working time. Idempotent.
+    pub(super) fn pause_clock(&mut self) {
+        if self.paused_since.is_none() {
+            self.paused_since = Some(Instant::now());
+        }
+    }
+
+    /// Resume the elapsed clock: fold the just-ended pause into `paused_total`.
+    /// Idempotent (a no-op if the clock wasn't paused).
+    pub(super) fn resume_clock(&mut self) {
+        if let Some(since) = self.paused_since.take() {
+            self.paused_total += since.elapsed();
+        }
     }
 
     /// Tear a turn down and post its end indicator. The sole teardown point:
@@ -174,6 +219,8 @@ impl App {
         let calls = Self::count_phrase(self.turn_tool_calls, "tool call");
         self.running = false;
         self.turn_started = None;
+        self.paused_since = None;
+        self.active_tool = None;
         self.pending = None;
 
         // The level glyph is the renderer's job (it tints the whole notice as a
@@ -214,9 +261,18 @@ impl App {
         }
     }
 
-    /// Seconds the in-flight turn has been running, if any.
+    /// Seconds the in-flight turn has been actively running (with any
+    /// gate-open pause time subtracted), if a turn is in flight.
     pub fn turn_elapsed_secs(&self) -> Option<u64> {
-        self.turn_started.map(|t| t.elapsed().as_secs())
+        self.turn_started.map(|t| {
+            // Total wall time, minus the closed pauses, minus the pause in
+            // progress right now (if a gate is currently open).
+            let mut paused = self.paused_total;
+            if let Some(since) = self.paused_since {
+                paused += since.elapsed();
+            }
+            t.elapsed().saturating_sub(paused).as_secs()
+        })
     }
 
     /// Output tokens streamed during the current turn (for the running line).

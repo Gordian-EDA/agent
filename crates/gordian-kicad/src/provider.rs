@@ -274,29 +274,37 @@ impl ToolProvider for PcbTools {
 
 /// Turn a tool's `Result<Value>` into a [`ToolOutcome`]: a tool error becomes a
 /// structured `{error: …}` value (the model self-repairs), images are pulled out
-/// of the value via [`take_images`], and `apply` rides along for a gated tool.
+/// of the value via [`take_images`] (which also surfaces the render PNG's path for
+/// inline UI display), and `apply` rides along for a gated tool.
 fn into_outcome(result: Result<Value>, apply: Option<ApplyInfo>) -> ToolOutcome {
     match result {
         Ok(mut value) => {
-            let images = take_images(&mut value);
-            ToolOutcome { value, images, apply }
+            let (images, image_path) = take_images(&mut value);
+            ToolOutcome { value, images, image_path, apply }
         }
-        Err(e) => ToolOutcome { value: json!({ "error": e.to_string() }), images: Vec::new(), apply },
+        Err(e) => ToolOutcome {
+            value: json!({ "error": e.to_string() }),
+            images: Vec::new(),
+            image_path: None,
+            apply,
+        },
     }
 }
 
-/// Pull a `_image_path` out of a tool result: load + base64 the PNG, strip the key
-/// so the model's text view stays clean. An unreadable file degrades to "no image".
-fn take_images(value: &mut Value) -> Vec<ImageData> {
+/// Pull a `_image_path` out of a tool result: load + base64 the PNG for the model,
+/// strip the key so the model's text view stays clean, and return the path so a UI
+/// can show the same PNG inline. An unreadable file yields no [`ImageData`] but the
+/// path is still returned (the UI falls back to a text label).
+fn take_images(value: &mut Value) -> (Vec<ImageData>, Option<String>) {
     let Some(path) =
         value.get(IMAGE_PATH_KEY).and_then(Value::as_str).map(str::to_string)
     else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     if let Some(obj) = value.as_object_mut() {
         obj.remove(IMAGE_PATH_KEY);
     }
-    match std::fs::read(&path) {
+    let images = match std::fs::read(&path) {
         Ok(bytes) => vec![ImageData {
             format: "png".to_string(),
             base64: base64::engine::general_purpose::STANDARD.encode(bytes),
@@ -305,7 +313,8 @@ fn take_images(value: &mut Value) -> Vec<ImageData> {
             eprintln!("render image unreadable at {path}: {e}");
             Vec::new()
         }
-    }
+    };
+    (images, Some(path))
 }
 
 /// Whether an `apply_design` input intends to write (`commit: true`).

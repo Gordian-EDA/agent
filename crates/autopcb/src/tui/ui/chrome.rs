@@ -77,25 +77,45 @@ pub(super) fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 
 /// The running indicator that replaces the old transcript-title spinner: an
 /// animated frame, elapsed seconds, the output tokens streamed this turn, and
-/// the interrupt hint. Drawn only while a turn is in flight.
+/// the interrupt hint, plus a second detail row naming the tool now executing.
+/// Drawn only while a turn is in flight.
 pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
     let frame = SPINNER[app.spinner % SPINNER.len()];
     let secs = app.turn_elapsed_secs().unwrap_or(0);
     let dim = Style::default().fg(Color::DarkGray);
+    // While an approval gate holds the turn the verb says so, and the elapsed
+    // clock is already frozen (see `App::turn_elapsed_secs`); else it's "working".
+    let gated = app.pending.is_some();
+    let verb = if gated { "waiting for approval" } else { "working" };
     let mut spans = vec![
         Span::styled(
             format!("{frame} "),
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("working", Style::default().fg(Color::Yellow)),
+        Span::styled(verb, Style::default().fg(Color::Yellow)),
         Span::styled(format!(" · {secs}s"), dim),
     ];
     let toks = app.turn_output_tokens();
     if toks > 0 {
         spans.push(Span::styled(format!(" · ↓{} tok", fmt_tokens(toks)), dim));
     }
-    spans.push(Span::styled(" · esc to interrupt", dim));
-    f.render_widget(Paragraph::new(Line::from(spans)), body(area));
+    if !gated {
+        spans.push(Span::styled(" · esc to interrupt", dim));
+    }
+
+    let mut lines = vec![Line::from(spans)];
+    // The detail row names the tool now executing, so a long call reads as
+    // progress rather than a stall.
+    if let Some(tool) = &app.active_tool {
+        lines.push(Line::from(vec![
+            Span::styled("  ↳ ", dim),
+            Span::styled(
+                format!("{tool}…"),
+                Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
+            ),
+        ]));
+    }
+    f.render_widget(Paragraph::new(lines), body(area));
 }
 
 pub(super) fn draw_status(f: &mut Frame, area: Rect, app: &App) {

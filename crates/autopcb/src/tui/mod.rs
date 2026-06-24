@@ -45,8 +45,9 @@ use gordian_kicad::tools::PcbToolCtx;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyboardEnhancementFlags,
-    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -58,6 +59,7 @@ use kicad_cli_rs::env::KicadEnv;
 use kicad_sexpr::snapshot::SnapshotStore;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui_image::picker::Picker;
 use serde_json::Value;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::{Mutex, oneshot};
@@ -386,7 +388,14 @@ async fn event_loop(
     };
     let mut tick = tokio::time::interval(TICK);
 
-    terminal.draw(|f| ui::draw(f, app))?;
+    // One image picker for the whole session: it carries the terminal's graphics
+    // capability and cell font size. `None` (a dumb/piped terminal or tmux/Zellij)
+    // means inline renders fall back to a text label rather than corrupting
+    // scrollback with graphics escapes.
+    let picker = build_picker();
+    let mut ctx = ui::RenderCtx { picker: picker.as_ref() };
+
+    terminal.draw(|f| ui::draw_with(f, app, &mut ctx))?;
 
     loop {
         tokio::select! {
@@ -406,7 +415,11 @@ async fn event_loop(
                             _ => {}
                         }
                     }
-                    Some(Ok(_)) => {} // resize / paste: just redraw below
+                    Some(Ok(Event::Paste(text))) => {
+                        let action = app.update(Msg::Paste(text));
+                        shell.handle(app, action);
+                    }
+                    Some(Ok(_)) => {} // resize / focus: just redraw below
                     Some(Err(_)) | None => break,
                 }
             }
@@ -450,9 +463,25 @@ async fn event_loop(
             }
             break;
         }
-        terminal.draw(|f| ui::draw(f, app))?;
+        terminal.draw(|f| ui::draw_with(f, app, &mut ctx))?;
     }
     Ok(())
+}
+
+/// Build the session's image [`Picker`]: query the real terminal for its graphics
+/// protocol + cell size, falling back to half-block rendering on a dumb/piped
+/// terminal. Under tmux or Zellij we force half-blocks unconditionally — passthrough
+/// graphics escapes corrupt those multiplexers' scrollback — so a preview still
+/// shows, just as blocks. `None` is reserved for "no inline image at all" (none of
+/// these paths hit it today, but the renderer treats `None` as text-label mode).
+fn build_picker() -> Option<Picker> {
+    let multiplexed = std::env::var_os("TMUX").is_some()
+        || std::env::var("TERM").map(|t| t.starts_with("screen") || t.contains("tmux")).unwrap_or(false)
+        || std::env::var_os("ZELLIJ").is_some();
+    if multiplexed {
+        return Some(Picker::halfblocks());
+    }
+    Some(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()))
 }
 
 /// Enter raw mode + the alternate screen and build the ratatui terminal.
@@ -464,7 +493,7 @@ async fn event_loop(
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     if supports_keyboard_enhancement().unwrap_or(false) {
         execute!(
             stdout,
@@ -484,6 +513,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         LeaveAlternateScreen,
         DisableMouseCapture
     )?;

@@ -232,6 +232,7 @@ fn tool(app: &mut App, name: &str, summary: &str) {
     app.update(Msg::Agent(AgentEvent::ToolFinished {
         name: name.into(),
         summary: summary.into(),
+        image_path: None,
     }));
 }
 
@@ -277,12 +278,14 @@ fn tui_screenshots() {
     });
     shoot("02_apply_gate", 96, 32, &mut app);
 
-    // 3. A turn in flight (running indicator + spinner).
+    // 3. A turn in flight (running indicator + spinner) with the live tool-detail
+    //    row naming the call now executing.
     let mut app = App::new(status());
     seed_conversation(&mut app);
     app.running = true;
     app.spinner = 3;
     app.turn_tool_calls = 4;
+    app.active_tool = Some("route_board".into());
     shoot("03_running", 96, 32, &mut app);
 
     // 4. Empty / first-launch state.
@@ -359,4 +362,26 @@ fn tui_screenshots() {
     app.spinner = 2;
     app.turn_tool_calls = 1;
     shoot("09_streaming", 96, 32, &mut app);
+
+    // 10. An inline board render preview (the lead's ask). Under the screenshot
+    //     harness there is no image picker, so the cell renders its stable
+    //     text-label placeholder; the live terminal shows real graphics here.
+    let mut app = App::new(status());
+    push(&mut app, Speaker::User, "route the board and show me the result", NoticeLevel::Plain);
+    app.update(Msg::Agent(AgentEvent::ToolStarted { name: "route_board".into() }));
+    app.update(Msg::Agent(AgentEvent::ToolFinished {
+        name: "route_board".into(),
+        summary: "2-layer · 0 failed nets".into(),
+        image_path: None,
+    }));
+    app.update(Msg::Agent(AgentEvent::ToolStarted { name: "render_board".into() }));
+    app.update(Msg::Agent(AgentEvent::ToolFinished {
+        name: "render_board".into(),
+        summary: "routed view → ok".into(),
+        image_path: Some("/home/you/projects/buck/.autopcb/renders/003.png".into()),
+    }));
+    app.update(Msg::Agent(AgentEvent::AssistantText(
+        "Routed cleanly on two layers — preview above.".into(),
+    )));
+    shoot("10_preview", 96, 32, &mut app);
 }
