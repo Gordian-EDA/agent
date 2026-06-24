@@ -23,6 +23,39 @@
 //! Streaming reads the *assembled* tool calls and usage off genai's terminal
 //! [`StreamEnd`] event (`with_capture_tool_calls(true)` + `with_capture_usage`),
 //! so no client-side tool-call delta assembly is needed.
+//!
+//! ## Prompt caching
+//!
+//! A multi-call agent turn (up to ~90 model calls) re-sends the same large,
+//! unchanging prefix — the system prompt + the tool-def JSON — on every call.
+//! Without caching that whole prefix is re-billed each time. [`chat_options`]
+//! attaches a single request-level cache breakpoint via
+//! [`ChatOptions::with_cache_control`]; genai routes it per backend:
+//!
+//! - **Anthropic** (native, and the gateway when it proxies Anthropic via the
+//!   real Messages API): genai's Anthropic adapter auto-marks the *end of the
+//!   static prefix* — the last system block, which caches tools + system
+//!   together — with `cache_control: {type: "ephemeral"}`. The per-call-varying
+//!   messages stay after the breakpoint, uncached. This is the priority backend
+//!   and the one this breakpoint is shaped for.
+//! - **Gateway** (genai's OpenAI adapter, `AdapterKind::OpenAI`): the same
+//!   option maps to a top-level `prompt_cache_retention: "in_memory"` passthrough
+//!   flag (alongside `thread_identifier`). OpenAI-style endpoints cache the
+//!   common prefix automatically with no marker; the flag is the only knob the
+//!   OpenAI wire shape exposes. genai's OpenAI adapter *cannot* emit the raw
+//!   Anthropic `cache_control` content-block marker — so if the gateway proxies
+//!   Anthropic, caching there depends on the gateway translating the flag (or
+//!   caching by default), not on us injecting the Anthropic marker through this
+//!   adapter.
+//! - **Bedrock** (Converse): the option is carried through the same way and
+//!   Bedrock reports `cacheReadInputTokens` / `cacheWriteInputTokens` back.
+//!
+//! Cache usage rides back on the response: genai folds Anthropic's
+//! `cache_creation_input_tokens` / `cache_read_input_tokens` into
+//! `Usage::prompt_tokens_details`, surfaced here as
+//! [`Completion::cache_write_tokens`] / [`Completion::cache_read_tokens`] — a
+//! cache-write on the first call and a cache-read on the rest of the turn.
+//! `prompt_tokens` (our `input_tokens`) already includes both.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -32,8 +65,8 @@ use serde_json::json;
 
 use genai::adapter::AdapterKind;
 use genai::chat::{
-    ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent, ContentPart, MessageContent, StreamEnd,
-    Tool, ToolCall as GToolCall, ToolResponse,
+    CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent, ContentPart,
+    MessageContent, StreamEnd, Tool, ToolCall as GToolCall, ToolResponse, Usage,
 };
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, Headers, ModelIden, ServiceTarget};
@@ -130,7 +163,15 @@ impl GenaiProvider {
     }
 
     fn chat_options(&self) -> ChatOptions {
-        let mut opts = ChatOptions::default().with_max_tokens(self.max_tokens);
+        // One request-level cache breakpoint at the end of the stable prefix
+        // (system + tool defs). genai's Anthropic adapter turns this into a
+        // `cache_control: {type: "ephemeral"}` marker on the last system block —
+        // so the multi-KB prefix is billed once per turn, not once per call,
+        // and the per-call-varying messages after it stay uncached. The OpenAI
+        // gateway maps it to a `prompt_cache_retention` flag; Bedrock carries it
+        // through. See the module docs for the per-backend story.
+        let mut opts =
+            ChatOptions::default().with_max_tokens(self.max_tokens).with_cache_control(CacheControl::Ephemeral);
         // The respan gateway groups this thread's completions by a top-level
         // `thread_identifier`. genai's OpenAI adapter merges extra_body into the
         // request body top-level, so the id lands where the gateway expects it.
@@ -177,8 +218,17 @@ impl Provider for GenaiProvider {
             resp.usage.prompt_tokens,
             resp.usage.completion_tokens,
         );
+        let (cache_write_tokens, cache_read_tokens) = cache_tokens(&resp.usage);
 
-        Ok(Completion { text, tool_calls, stop_reason, input_tokens, output_tokens })
+        Ok(Completion {
+            text,
+            tool_calls,
+            stop_reason,
+            input_tokens,
+            output_tokens,
+            cache_write_tokens,
+            cache_read_tokens,
+        })
     }
 
     async fn stream<'a>(
@@ -254,6 +304,24 @@ fn from_genai_tool_call(tc: &GToolCall) -> ToolCall {
 /// genai reports token usage as `Option<i32>`; clamp negatives to 0 and widen.
 fn usage_tokens(prompt: Option<i32>, completion: Option<i32>) -> (u64, u64) {
     (prompt.unwrap_or(0).max(0) as u64, completion.unwrap_or(0).max(0) as u64)
+}
+
+/// Extract `(cache_write, cache_read)` token counts from genai's [`Usage`].
+///
+/// genai folds Anthropic's `cache_creation_input_tokens` /
+/// `cache_read_input_tokens` (and the Bedrock/OpenAI equivalents) into
+/// `prompt_tokens_details`. Absent when the backend reports no caching.
+fn cache_tokens(usage: &Usage) -> (u64, u64) {
+    usage
+        .prompt_tokens_details
+        .as_ref()
+        .map(|d| {
+            (
+                d.cache_creation_tokens.unwrap_or(0).max(0) as u64,
+                d.cached_tokens.unwrap_or(0).max(0) as u64,
+            )
+        })
+        .unwrap_or((0, 0))
 }
 
 /// Map Gordian messages onto genai's [`ChatMessage`] list.
@@ -335,7 +403,17 @@ fn stream_end_to_completion(end: StreamEnd, text: String) -> Completion {
         .as_ref()
         .map(|u| usage_tokens(u.prompt_tokens, u.completion_tokens))
         .unwrap_or((0, 0));
-    Completion { text, tool_calls, stop_reason, input_tokens, output_tokens }
+    let (cache_write_tokens, cache_read_tokens) =
+        end.captured_usage.as_ref().map(cache_tokens).unwrap_or((0, 0));
+    Completion {
+        text,
+        tool_calls,
+        stop_reason,
+        input_tokens,
+        output_tokens,
+        cache_write_tokens,
+        cache_read_tokens,
+    }
 }
 
 /// A fresh random id for a new thread (one conversation/session). Random — not
@@ -442,6 +520,54 @@ mod tests {
         assert_eq!(usage_tokens(Some(10), Some(1)), (10, 1));
         assert_eq!(usage_tokens(None, None), (0, 0));
         assert_eq!(usage_tokens(Some(-1), Some(-5)), (0, 0));
+    }
+
+    #[test]
+    fn chat_options_carry_the_ephemeral_cache_breakpoint() {
+        // For the cache-capable Anthropic backend, the request options must
+        // carry one ephemeral cache_control breakpoint — genai's Anthropic
+        // adapter turns this into the `cache_control: {type: "ephemeral"}` marker
+        // on the last system block (the end of the system + tools prefix).
+        let provider = GenaiProvider::anthropic(AnthropicConfig {
+            api_key: "k".to_string(),
+            model: "claude-opus-4-8".to_string(),
+        });
+        let opts = provider.chat_options();
+        assert_eq!(opts.cache_control, Some(CacheControl::Ephemeral));
+        // Serialized form is what genai consumes; the marker must be present.
+        let v = serde_json::to_value(&opts).unwrap();
+        assert_eq!(v.get("cache_control").and_then(Value::as_str), Some("Ephemeral"));
+        // Streaming reuses the same options, so it carries the breakpoint too.
+        assert_eq!(provider.stream_options().cache_control, Some(CacheControl::Ephemeral));
+    }
+
+    #[test]
+    fn cache_tokens_reads_creation_and_read_counts() {
+        use genai::chat::PromptTokensDetails;
+        let usage = Usage {
+            prompt_tokens: Some(1000),
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cache_creation_tokens: Some(800),
+                cached_tokens: Some(0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(cache_tokens(&usage), (800, 0), "first call: cache write");
+
+        let usage = Usage {
+            prompt_tokens: Some(1000),
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cache_creation_tokens: Some(0),
+                cached_tokens: Some(800),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(cache_tokens(&usage), (0, 800), "later call: cache read");
+
+        // No caching reported → zeros, not a panic.
+        assert_eq!(cache_tokens(&Usage::default()), (0, 0));
     }
 
     #[test]

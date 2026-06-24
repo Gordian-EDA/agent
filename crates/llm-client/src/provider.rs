@@ -127,6 +127,7 @@ mod tests {
                     stop_reason: "tool_use".into(),
                     input_tokens: 3,
                     output_tokens: 4,
+                    ..Default::default()
                 })),
             ];
             Ok(stream::iter(evs).boxed())

@@ -94,8 +94,17 @@ pub struct Completion {
     /// Raw stop reason from the provider (e.g. `end_turn`, `tool_use`).
     pub stop_reason: String,
     /// Prompt tokens the provider reports for this call (0 when absent).
-    /// This is the size of everything sent: system + history + tools.
+    /// This is the size of everything sent: system + history + tools. It
+    /// *includes* any [`cache_write_tokens`](Self::cache_write_tokens) and
+    /// [`cache_read_tokens`](Self::cache_read_tokens).
     pub input_tokens: u64,
     /// Generated tokens the provider reports for this call (0 when absent).
     pub output_tokens: u64,
+    /// Prompt tokens written to the cache on this call (the cache-write that the
+    /// first call of a turn pays for). 0 when the backend reports no caching.
+    pub cache_write_tokens: u64,
+    /// Prompt tokens served *from* the cache on this call — the unchanging
+    /// prefix that later calls in a turn no longer re-bill at full price. 0 when
+    /// the backend reports no caching.
+    pub cache_read_tokens: u64,
 }
