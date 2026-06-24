@@ -1080,6 +1080,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
+name = "negotiated-mesh"
+version = "0.1.0"
+dependencies = [
+ "drc-lint",
+ "grid-astar",
+ "pcb-model",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nng"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1158,6 +1170,7 @@ version = "0.1.0"
 dependencies = [
  "drc-lint",
  "grid-astar",
+ "negotiated-mesh",
  "pcb-model",
  "rayon",
  "serde",
