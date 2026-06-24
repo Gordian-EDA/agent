@@ -3,9 +3,11 @@
 //! geometry. The infer stage turns these into IR (frozen cells + reports);
 //! read-only over the placed Items.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
+use super::place::{Incidence, Item};
+use super::infer::is_ground;
 use super::infer::{best_decoupling_anchor, place_cc_pulldown, place_crystal, place_decoupling, place_i2c_pullup, PinSide};
 
 /// A circuit idiom recognized purely from connectivity + symbol pin geometry.

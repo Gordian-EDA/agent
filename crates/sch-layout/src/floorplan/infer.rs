@@ -12,6 +12,7 @@ use kicad_cli_rs::env::KicadEnv;
 
 use super::idiom;
 use super::*;
+use super::place::{gather, grid_from_layout, incidence, Incidence, Item};
 
 /// A deterministic baseline IR for designs without an LLM-produced one: rails
 /// from the design's power nets (ground-like → bottom, else top), no explicit
