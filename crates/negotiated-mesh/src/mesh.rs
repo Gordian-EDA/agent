@@ -255,8 +255,8 @@ impl CapacityMesh {
         self.leaves
             .iter()
             .min_by(|p, q| {
-                let dp = dist2(&p.rect.center(), &Point2 { x, y });
-                let dq = dist2(&q.rect.center(), &Point2 { x, y });
+                let dp = p.rect.center().dist2(&Point2 { x, y });
+                let dq = q.rect.center().dist2(&Point2 { x, y });
                 dp.partial_cmp(&dq).unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|l| l.id)
@@ -664,14 +664,6 @@ fn union_length(intervals: &mut [(f64, f64)]) -> f64 {
     }
     total += cur_hi - cur_lo;
     total
-}
-
-/// Squared euclidean distance between two points.
-#[inline]
-fn dist2(a: &Point2, b: &Point2) -> f64 {
-    let dx = a.x - b.x;
-    let dy = a.y - b.y;
-    dx * dx + dy * dy
 }
 
 #[cfg(test)]

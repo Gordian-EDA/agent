@@ -92,6 +92,23 @@ pub struct Point2 {
     pub y: f64,
 }
 
+impl Point2 {
+    /// Squared euclidean distance to `other` (cheaper than [`Point2::dist`] when
+    /// only comparing magnitudes).
+    #[inline]
+    pub fn dist2(&self, other: &Point2) -> f64 {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        dx * dx + dy * dy
+    }
+
+    /// Euclidean distance to `other` (mm).
+    #[inline]
+    pub fn dist(&self, other: &Point2) -> f64 {
+        self.dist2(other).sqrt()
+    }
+}
+
 // ── RouteProblem ─────────────────────────────────────────────────────────────
 
 /// A PCB routing problem, wire-compatible with tscircuit `SimpleRouteJson`.

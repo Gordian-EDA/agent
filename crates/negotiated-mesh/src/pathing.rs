@@ -568,7 +568,7 @@ impl<'a> Router<'a> {
             let c = rect_center(&self.mesh.leaves[leaf].rect);
             tree_centers
                 .iter()
-                .map(|t| euclid(&c, t))
+                .map(|t| c.dist(t))
                 .fold(f64::INFINITY, f64::min)
         };
 
@@ -816,12 +816,10 @@ impl<'a> Router<'a> {
     }
 
     /// The cost of crossing edge `ei` on `layer`, from `from` to `to`:
-    /// `euclid(centre_from, centre_to) × (1 + congestion + history)`.
+    /// `centre_from.dist(centre_to) × (1 + congestion + history)`.
     fn edge_cost(&self, ei: usize, layer: usize, from: LeafId, to: LeafId) -> f64 {
-        let dist = euclid(
-            &rect_center(&self.mesh.leaves[from].rect),
-            &rect_center(&self.mesh.leaves[to].rect),
-        );
+        let dist = rect_center(&self.mesh.leaves[from].rect)
+            .dist(&rect_center(&self.mesh.leaves[to].rect));
         let cap = self.mesh.edges[ei].capacity.get(layer).copied().unwrap_or(0);
         let usage = self.edge_usage[ei][layer];
         // If this net routes here it will add one unit: cost the *prospective*
@@ -960,13 +958,6 @@ fn rect_center(r: &crate::problem::Rect) -> Point2 {
         x: (r.min_x + r.max_x) / 2.0,
         y: (r.min_y + r.max_y) / 2.0,
     }
-}
-
-/// Euclidean distance between two points (mm).
-fn euclid(a: &Point2, b: &Point2) -> f64 {
-    let dx = a.x - b.x;
-    let dy = a.y - b.y;
-    (dx * dx + dy * dy).sqrt()
 }
 
 /// Connection indices in routing order: ascending bounding-box half-perimeter,
