@@ -40,10 +40,9 @@ pub(crate) use route::*;
 // this module's paths resolve unchanged.
 pub use sch_model::place::{PlaceProblem, PlacementEngine};
 
-// Re-export the layout vocabulary the submodules and `grid_tests` read, so a
-// `use super::*` (whose `super` is now this `place` module) resolves them exactly as
-// the pre-split module did through `floorplan`'s re-exports.
-pub use sch_model::ir::{Band, Cell, Flow, LayoutIr, Orient, Side};
+// `measure` reads `LayoutIr` through `super::*` (every other submodule imports the ir
+// types it uses directly); `super` is this `place` module, so this resolves verbatim.
+pub use sch_model::ir::LayoutIr;
 
 #[cfg(test)]
 mod grid_tests {
@@ -52,6 +51,7 @@ mod grid_tests {
     use indexmap::IndexMap;
     use kicad_sexpr::geometry::SymbolGeometry;
     use sch_model::geom::Dir;
+    use sch_model::ir::Side;
     use sch_model::item::Item;
 
     fn cells(names: &[&str]) -> Vec<Option<String>> {

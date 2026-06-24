@@ -14,7 +14,7 @@ use sch_model::item::{Incidence, Item};
 use sch_model::ir::Orient;
 use sch_model::place::{Crossings, PlaceProblem, PlaceResult, PlacementEngine};
 
-use sch_place_core::floorplan::place::{
+use sch_place_core::contract::{
     build_writer, item_rect, orient_angle, overlaps_any, rects_overlap, signal_anchor_centroid,
     supply_pin_target, MeasuringEngine, RawMetrics, Realizer, COL_GAP, GRID_KEY, ROW_GAP,
 };

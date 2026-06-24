@@ -21,13 +21,12 @@ use sch_model::place::{
     Crossings, EngineCaps, PlaceProblem, PlaceResult, PlacementEngine, Tier,
 };
 
-use sch_place_core::floorplan::place::{
-    align_idiom_clusters, align_led_chains, build_anchor_blocks, cluster_group, cohesion_targets,
-    decongest, body_overlap_count, build_writer, grid_order_viol, item_rect, multi_unit_siblings,
-    orient_angle, overlaps_any, rects_overlap, signal_anchor_centroid, supply_pin_target,
-    MeasuringEngine, RawMetrics, Realizer, COL_GAP, FAST_PINS, GRID_KEY, ROW_GAP,
+use sch_place_core::contract::{
+    align_idiom_clusters, align_led_chains, body_overlap_count, build_anchor_blocks, build_writer,
+    cluster_group, cohesion_targets, decongest, grid_order_viol, item_rect, multi_unit_siblings,
+    orient_angle, overlaps_any, pin_endpoint, rects_overlap, signal_anchor_centroid,
+    supply_pin_target, MeasuringEngine, RawMetrics, Realizer, COL_GAP, FAST_PINS, GRID_KEY, ROW_GAP,
 };
-use sch_place_core::write::pin_endpoint;
 
 /// Geometry coincidence tolerance (mm) — anneal's own copy of the shared 1e-6 epsilon.
 const EPS: f64 = 1e-6;
