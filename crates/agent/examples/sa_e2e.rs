@@ -34,7 +34,7 @@ fn render(env: &KicadEnv, provider: &RealSymbolProvider, name: &str) -> anyhow::
         Ok(s) => LayoutIr::from_json(&s)?,
         Err(_) => floorplan::infer_ir(env, &design),
     };
-    let out = floorplan::emit(env, &design, &ir)?;
+    let out = floorplan::emit_strategy(env, &design, &ir, Box::new(anneal_place::Anneal))?;
     Ok(out.layout_warnings.len())
 }
 

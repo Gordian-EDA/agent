@@ -15,4 +15,4 @@ mod infer;
 pub mod place;
 
 pub use infer::{baseline_ir, infer_ir};
-pub use place::{compose_writers, emit, emit_strategy, emit_writer};
+pub use place::{compose_writers, emit_strategy, emit_writer};

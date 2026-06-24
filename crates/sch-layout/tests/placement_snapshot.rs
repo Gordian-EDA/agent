@@ -46,7 +46,7 @@ fn render(env: &KicadEnv, provider: &RealSymbolProvider, name: &str) -> String {
         Ok(s) => LayoutIr::from_json(&s).unwrap(),
         Err(_) => floorplan::infer_ir(env, &design),
     };
-    floorplan::emit(env, &design, &ir).unwrap_or_else(|e| panic!("{name}: {e}")).sch
+    floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy)).unwrap_or_else(|e| panic!("{name}: {e}")).sch
 }
 
 #[test]

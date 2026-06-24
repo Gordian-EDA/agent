@@ -1,0 +1,11 @@
+[package]
+name = "greedy-place"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Free-tier greedy hill-climb schematic placement engine (implements sch-layout's PlacementEngine)."
+
+[dependencies]
+sch-layout = { path = "../sch-layout" }
+sch-model = { path = "../sch-model" }

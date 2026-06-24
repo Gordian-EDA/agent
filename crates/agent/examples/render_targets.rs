@@ -54,7 +54,7 @@ fn render_fixture(env: &KicadEnv, yaml_path: &std::path::Path, out: &std::path::
             Err(_) => sch_layout::floorplan::baseline_ir(&design),
         }
     };
-    let emit = sch_layout::floorplan::emit(env, &design, &ir)
+    let emit = sch_layout::floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy))
         .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
 
     let tmp = tempfile::tempdir()?;

@@ -22,5 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+greedy-place = { path = "../greedy-place" }
+anneal-place = { path = "../anneal-place" }
 kiutils_kicad.workspace = true
 tempfile.workspace = true

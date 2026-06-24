@@ -19,6 +19,7 @@ dependencies = [
  "circuit-lang",
  "dotenvy",
  "drc-lint",
+ "greedy-place",
  "grid-astar",
  "indexmap",
  "kicad-cli-rs",
@@ -601,6 +602,14 @@ dependencies = [
  "r-efi 6.0.0",
  "wasip2",
  "wasip3",
+]
+
+[[package]]
+name = "greedy-place"
+version = "0.1.0"
+dependencies = [
+ "sch-layout",
+ "sch-model",
 ]
 
 [[package]]
@@ -1770,8 +1779,10 @@ dependencies = [
 name = "sch-layout"
 version = "0.1.0"
 dependencies = [
+ "anneal-place",
  "circuit-graph",
  "circuit-lang",
+ "greedy-place",
  "indexmap",
  "kicad-cli-rs",
  "kicad-sexpr",

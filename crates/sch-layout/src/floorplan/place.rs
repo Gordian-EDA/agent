@@ -97,12 +97,6 @@ fn resolve_pins(comp: &Component, geom: &SymbolGeometry) -> Vec<(String, String,
 // ---------------------------------------------------------------------------
 
 /// Emit a complete `.kicad_sch` for `design` laid out per `ir`.
-/// Emit the schematic with the env-defaulted placement strategy (greedy unless
-/// `ANNEAL`/`LAYOUT_SEARCH=anneal`). The engine/test default.
-pub fn emit(env: &KicadEnv, design: &Design, ir: &LayoutIr) -> io::Result<EmitOutput> {
-    emit_strategy(env, design, ir, pick_engine())
-}
-
 /// Emit `design` laid out by an explicit `engine`. The agent passes the premium
 /// `anneal-place` engine here; the env-default entry [`emit`] uses Greedy. Keeping
 /// the concrete premium engine out of this crate is what lets `anneal-place` depend
@@ -2781,24 +2775,8 @@ pub trait PlacementEngine {
     fn place(&self, problem: &PlaceProblem, items: &mut [Item]);
 }
 
-/// Greedy hill-climb (free tier): local, strictly-cost-improving moves only over
-/// the seeded mm placement.
-struct Greedy;
-impl PlacementEngine for Greedy {
-    fn name(&self) -> &'static str {
-        "greedy"
-    }
-    fn place(&self, p: &PlaceProblem, items: &mut [Item]) {
-        refine_items(p.env, items, p.inc, p.ir, p.needs_flag);
-        // Own the continuous polish (moved out of emit), returning the FINAL placement.
-        // The free tier uses the ROUTED polish at EVERY size: it is the truthfulness-
-        // safe path (each move re-routes, so the cost sees a net merge / short — the
-        // router-free proxy polish does NOT, and greedy has no candidate pick to reject
-        // a mis-wire). Slow on a dense board, but only the premium anneal (fast lane) is
-        // latency-bound. References keep the exact refine→polish order → byte-identical.
-        polish(p.env, items, p.inc, p.ir, p.needs_flag);
-    }
-}
+// Greedy (free) lives in the `greedy-place` crate; Anneal (premium) in `anneal-place`.
+// This crate is engine-agnostic — the agent injects an engine via `emit_strategy`.
 
 
 
@@ -2823,19 +2801,6 @@ pub fn warning_count(
     }
 }
 
-
-/// Select the placement strategy. Free tier = `Greedy`; SA is opt-in (a later
-/// `Tier` enum from agent config wires the paid feature here). Honors
-/// `LAYOUT_SEARCH=greedy|anneal` and the `ANNEAL=1` / `GREEDY=1` aliases.
-/// Select the placement engine from the environment — the registry of built-in
-/// engines. `LAYOUT_SEARCH=anneal|greedy` is explicit; else `ANNEAL` opts into
-/// anneal unless `GREEDY` overrides. A new engine registers by adding an arm here.
-fn pick_engine() -> Box<dyn PlacementEngine> {
-    // The free engine. The premium `anneal-place` engine is injected by the agent
-    // via `emit_strategy`, so the core never names it (no sch-layout ⇄ anneal-place
-    // cycle).
-    Box::new(Greedy)
-}
 
 /// Greedy hill-climb over the satellites' mm positions/orientation (the seed is
 /// the IR grid projected to mm). Local moves — nudge a cell-step, swap a pair,

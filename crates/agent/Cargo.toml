@@ -28,6 +28,7 @@ pcb-place = { path = "../pcb-place" }
 pcb-svg = { path = "../pcb-svg" }
 sch-layout = { path = "../sch-layout" }
 anneal-place = { path = "../anneal-place" }
+greedy-place = { path = "../greedy-place" }
 indexmap.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

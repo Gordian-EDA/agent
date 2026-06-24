@@ -228,7 +228,7 @@ fn validate_fixture(
             Ok(s) => LayoutIr::from_json(&s).unwrap(),
             Err(_) => floorplan::baseline_ir(&design),
         };
-        let out = floorplan::emit(env, &design, &ir).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let out = floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy)).unwrap_or_else(|e| panic!("{name}: {e}"));
 
         // Readability invariant (tier-1 only): the reference fixtures emit with ZERO
         // layout warnings (no symbol/text overlap, no value-text smeared onto a
