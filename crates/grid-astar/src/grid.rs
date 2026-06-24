@@ -131,6 +131,14 @@ impl RouteGrid {
             grid.rasterize_obstacle(ob, inflation);
         }
 
+        // Pad-copper own-net relief: re-assert each owned pad's UN-inflated copper
+        // footprint as its own net (see [`Self::assert_pad_copper`]). This rescues a
+        // fine-pitch pad whose own body cells were collapsed to `BlockedAll` by a
+        // neighbour's *clearance halo* overlap — so the owning net can still seed and
+        // walk out along its own pad. Foreign clearance is preserved (the cell stays
+        // `Net(owner)`, which still blocks every other net).
+        grid.assert_pad_copper(&problem.obstacles);
+
         grid
     }
 
@@ -291,6 +299,25 @@ impl RouteGrid {
             Cell::Net(owner) if owner == conn => Cell::Net(conn),
             Cell::Net(_) => Cell::BlockedAll,
         };
+    }
+
+    /// Force `(layer, ix, iy)` to be owned by `conn`, OVERRIDING a `BlockedAll`
+    /// collapse (unlike [`Self::mark_net`], which leaves `BlockedAll` alone).
+    ///
+    /// Used only by the pre-routed escape stub, whose mm centre-line is DRC-legal by
+    /// construction (it is collinear with its own elongated pad). The grid cell may
+    /// read `BlockedAll` purely from the conservative box/grid-quantised halo of a
+    /// perpendicular neighbour; forcing it to `Net(conn)` lets the stub's own net
+    /// route through its legal corridor while still blocking every FOREIGN net there.
+    /// A two-net real-copper overlap is never forced here (the stub only touches its
+    /// own pad's centre-line), and `drop_violating_copper` is the final authority on
+    /// the emitted mm copper regardless.
+    pub fn force_mark_net(&mut self, layer: usize, ix: usize, iy: usize, conn: usize) {
+        if layer >= self.layer_count || ix >= self.nx || iy >= self.ny {
+            return;
+        }
+        let i = self.idx(layer, ix, iy);
+        self.cells[i] = Cell::Net(conn);
     }
 
     /// Mark `(layer, ix, iy)` and every cell within `radius_cells` of it (a
@@ -501,6 +528,87 @@ impl RouteGrid {
                 }
             }
         }
+    }
+
+    /// Re-assert every owned pad's **un-inflated** copper footprint as its own net,
+    /// undoing a `BlockedAll` collapse that a *neighbour's clearance halo* caused.
+    ///
+    /// The inflation pass ([`Self::rasterize_obstacle`]) reserves `clearance +
+    /// trace_half` around each pad and collapses two nets' overlapping halos to
+    /// [`Cell::BlockedAll`]. At fine pitch (a 0.5 mm-pitch QFP, a 0.8 mm BGA) that
+    /// halo overlap swallows a pad's OWN body cells, so the owning net cannot even
+    /// seed or step off its pad — yet a trace on its own copper is perfectly legal.
+    /// This pass walks each pad's real (un-inflated) rectangle and, where two
+    /// **different** pads' real copper do not actually overlap, sets the cell to
+    /// `Net(owner)`. Effects:
+    /// - Frees the cell **for the owner** (it can route off its pad).
+    /// - Still blocks **every other net** (`Net(owner)` is foreign to them), so the
+    ///   neighbour's clearance is preserved — this only relaxes the owner against
+    ///   its own copper, never opens a foreign clearance corridor.
+    /// A true keepout / off-board cell (a `BlockedAll` NOT covered by this pad's own
+    /// real copper) is untouched, and a genuine two-net copper overlap stays
+    /// `BlockedAll` (a real short the lint must see).
+    fn assert_pad_copper(&mut self, obstacles: &[crate::problem::Obstacle]) {
+        for ob in obstacles {
+            let Some(owner) = ob.connected_to.iter().find_map(|n| self.connection_index(n)) else {
+                continue; // unowned (keepout / foreign copper) — never relax
+            };
+            let hw = ob.width / 2.0;
+            let hh = ob.height / 2.0;
+            let (min_x, max_x) = (ob.center.x - hw, ob.center.x + hw);
+            let (min_y, max_y) = (ob.center.y - hh, ob.center.y + hh);
+            let (ix0, ix1) = cell_span(self.min_x, min_x, max_x, self.pitch, self.nx);
+            let (iy0, iy1) = cell_span(self.min_y, min_y, max_y, self.pitch, self.ny);
+            for layer_ref in &ob.layers {
+                let Some(layer) = layer_ref.index(self.layer_count as u32) else {
+                    continue;
+                };
+                let layer = layer as usize;
+                for ix in ix0..=ix1 {
+                    let cx = self.cell_center_x(ix);
+                    if cx < min_x || cx > max_x {
+                        continue;
+                    }
+                    for iy in iy0..=iy1 {
+                        let cy = self.cell_center_y(iy);
+                        if cy < min_y || cy > max_y {
+                            continue;
+                        }
+                        // Only rescue a cell the halo collapse blocked; never override a
+                        // cell that genuinely belongs to a DIFFERENT net's real copper
+                        // (that is a real short) or the owner's own (already free).
+                        let i = self.idx(layer, ix, iy);
+                        match self.cells[i] {
+                            Cell::BlockedAll if !self.foreign_pad_copper(obstacles, owner, layer, cx, cy) => {
+                                self.cells[i] = Cell::Net(owner);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Does any pad owned by a net OTHER than `owner` have un-inflated copper on
+    /// `layer` covering the point `(cx, cy)`? Used by [`Self::assert_pad_copper`] to
+    /// refuse to relax a cell where two pads' real copper genuinely overlap (a short).
+    fn foreign_pad_copper(
+        &self,
+        obstacles: &[crate::problem::Obstacle],
+        owner: usize,
+        layer: usize,
+        cx: f64,
+        cy: f64,
+    ) -> bool {
+        obstacles.iter().any(|ob| {
+            let other = ob.connected_to.iter().find_map(|n| self.connection_index(n));
+            other != Some(owner)
+                && other.is_some()
+                && ob.layers.iter().any(|l| l.index(self.layer_count as u32) == Some(layer as u32))
+                && (cx - ob.center.x).abs() <= ob.width / 2.0
+                && (cy - ob.center.y).abs() <= ob.height / 2.0
+        })
     }
 }
 

@@ -255,19 +255,21 @@ pub fn route_with(
         };
 
         // The routed tree starts as point 0's cell; each further point is
-        // routed to the nearest cell already in the tree.
+        // routed to the nearest cell already in the tree. A fine-pitch peripheral
+        // pad (a 0.5 mm QFP pin) whose grid cell is enclosed by neighbours' halos
+        // gets a radial ESCAPE STUB pre-routed along its own long axis out to open
+        // board, and the stub tip — not the over-blocked pad cell — seeds the tree.
+        let seed_pad = point_cell(&grid, &conn.points_to_connect[0], layer_count);
         let mut tree_cells: Vec<State> =
-            vec![point_cell(&grid, &conn.points_to_connect[0], layer_count)];
-        // Mark the seed cell (with its clearance halo) as this net's copper.
-        let seed = tree_cells[0];
-        grid.mark_net_halo(seed.layer, seed.ix, seed.iy, conn_idx, halo);
+            escape_cells(&mut grid, problem, conn_idx, &conn.points_to_connect[0], seed_pad, halo, &mut traces);
 
         let mut net_failed: Option<String> = None;
 
         for (pi, pt) in conn.points_to_connect.iter().enumerate().skip(1) {
-            let start = point_cell(&grid, pt, layer_count);
+            let start_pad = point_cell(&grid, pt, layer_count);
+            let starts = escape_cells(&mut grid, problem, conn_idx, pt, start_pad, halo, &mut traces);
             // A* from the new point's cell to the nearest cell of the tree.
-            let path = astar::search(&grid, conn_idx, &[start], &tree_cells, costs);
+            let path = astar::search(&grid, conn_idx, &starts, &tree_cells, costs);
             let Some(path) = path else {
                 net_failed = Some(format!(
                     "no grid path from point {pi} to the routed tree (congestion or enclosure)"
@@ -344,6 +346,187 @@ fn half_perimeter(conn: &crate::problem::Connection) -> f64 {
         max_y = max_y.max(p.y);
     }
     (max_x - min_x) + (max_y - min_y)
+}
+
+/// Entry cells for a terminal `pt` (already mapped to `pad_cell`), pre-routing a
+/// radial ESCAPE STUB for a fine-pitch peripheral pad whose own grid cell is
+/// enclosed by neighbours' clearance halos.
+///
+/// The pad cell is always returned, its clearance halo marked. When that cell can
+/// only reach a tiny region on its own layer (an enclosed fine-pitch pin) AND the
+/// pad is elongated (a QFP/SOIC-style radial pad), a straight stub is laid along
+/// the pad's LONG axis, outward, to the first grid cell in open board. The stub is
+/// authored in exact mm at the pad's true centre-line — sub-grid, so it is not
+/// distorted by the 0.2 mm grid quantisation that makes the maze router see the
+/// (genuinely legal) escape as blocked. The stub trace is emitted, its cells +
+/// halo are marked as the net's copper, and the stub-tip cell is returned as an
+/// extra entry so the maze router routes from open board, not the enclosed pad.
+///
+/// DRC safety: the stub is collinear with the pad (its own copper), so by
+/// construction it keeps full clearance from the perpendicular neighbours (their
+/// pads are ≥ pitch away laterally); and the final `drop_violating_copper` lint
+/// gates the whole solution, so a stub that ever grazed foreign copper would be
+/// dropped and the net reported failed — never shipped.
+fn escape_cells(
+    grid: &mut RouteGrid,
+    problem: &RouteProblem,
+    conn_idx: usize,
+    pt: &crate::problem::RoutePoint,
+    pad_cell: State,
+    halo: usize,
+    traces: &mut Vec<Trace>,
+) -> Vec<State> {
+    grid.mark_net_halo(pad_cell.layer, pad_cell.ix, pad_cell.iy, conn_idx, halo);
+    let mut cells = vec![pad_cell];
+
+    // Only an enclosed pad needs a stub. "Enclosed" = its own-layer free region is
+    // small (a handful of cells), which is exactly the fine-pitch-pin case.
+    if local_region(grid, conn_idx, pad_cell, 64) >= 64 {
+        return cells;
+    }
+    // Find the pad obstacle at this point: an owned obstacle covering pt. Need its
+    // long axis to know the escape direction.
+    let Some(pad) = problem.obstacles.iter().find(|ob| {
+        ob.connected_to.iter().any(|n| grid.connection_index(n) == Some(conn_idx))
+            && (pt.x - ob.center.x).abs() <= ob.width / 2.0 + 1e-6
+            && (pt.y - ob.center.y).abs() <= ob.height / 2.0 + 1e-6
+    }) else {
+        return cells;
+    };
+    // Elongated pads only (a square BGA ball has no escape axis — it needs a via,
+    // handled elsewhere). Require a clear long/short ratio so the axis is unambiguous.
+    let (long_is_x, long_half) = if pad.width >= pad.height * 1.5 {
+        (true, pad.width / 2.0)
+    } else if pad.height >= pad.width * 1.5 {
+        (false, pad.height / 2.0)
+    } else {
+        return cells;
+    };
+
+    // The stub runs out to the pad tip + a clearance margin so its end sits clear of
+    // the pad and into board. Try BOTH directions along the long axis; keep the one
+    // whose tip reaches the larger open region, tie-broken toward the nearer board
+    // edge (a peripheral pad escapes OUTWARD, away from the part body — which sits on
+    // the inner side and shows up as the smaller region).
+    let reach = long_half + problem.clearance + problem.min_trace_width / 2.0 + grid.pitch;
+    let mut best: Option<(State, usize, f64)> = None;
+    for sign in [1.0_f64, -1.0] {
+        let (tx, ty) = if long_is_x {
+            (pt.x + sign * reach, pt.y)
+        } else {
+            (pt.x, pt.y + sign * reach)
+        };
+        if tx < problem.bounds.min_x || tx > problem.bounds.max_x
+            || ty < problem.bounds.min_y || ty > problem.bounds.max_y
+        {
+            continue;
+        }
+        let (ix, iy) = grid.cell_of(tx, ty);
+        let tip = State { layer: pad_cell.layer, ix, iy };
+        if !grid.is_free_for(tip.layer, tip.ix, tip.iy, conn_idx) {
+            continue;
+        }
+        let region = local_region(grid, conn_idx, tip, 200);
+        // Distance from the tip to the NEAREST board edge along the escape axis:
+        // smaller = closer to the edge = the true outward direction.
+        let edge_dist = if long_is_x {
+            (tx - problem.bounds.min_x).min(problem.bounds.max_x - tx)
+        } else {
+            (ty - problem.bounds.min_y).min(problem.bounds.max_y - ty)
+        };
+        let better = match best {
+            None => true,
+            Some((_, r, e)) => region > r || (region == r && edge_dist < e),
+        };
+        if better {
+            best = Some((tip, region, edge_dist));
+        }
+    }
+    let Some((tip, region, _)) = best else {
+        return cells;
+    };
+    // The tip must actually reach open board (else the stub buys nothing).
+    if region < 32 {
+        return cells;
+    }
+    // Author the stub from the pad's exact centre (sub-grid, so the near-pad run is
+    // collinear with the pad and clears the perpendicular neighbours by construction)
+    // to the tip CELL centre, where the maze router takes over (so the stub end meets
+    // the routed path byte-exactly). The tip sits ~1 pad-length out in open board, so
+    // the half-pitch perpendicular snap there is harmless; `drop_violating_copper`
+    // gates the emitted mm regardless.
+    let start_mm = Point2 { x: pt.x, y: pt.y };
+    let tip_mm = Point2 { x: grid.cell_center_x(tip.ix), y: grid.cell_center_y(tip.iy) };
+    traces.push(Trace {
+        connection: problem.connections[conn_idx].name.clone(),
+        layer: layer_ref(pad_cell.layer, problem.layer_count.max(1) as usize),
+        width: problem.net_width(&problem.connections[conn_idx].name),
+        path: vec![start_mm, tip_mm],
+    });
+    mark_segment(grid, conn_idx, pad_cell, tip, halo);
+    cells.push(tip);
+    cells
+}
+
+/// Size of the connected free-for-`conn` region around `from` on its OWN layer
+/// (4-connectivity, no vias), capped at `cap`. A small count ⇒ the cell is
+/// enclosed. Cheap: a bounded flood that stops at `cap`.
+fn local_region(grid: &RouteGrid, conn: usize, from: State, cap: usize) -> usize {
+    if !grid.is_free_for(from.layer, from.ix, from.iy, conn) {
+        return 0;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack = vec![(from.ix, from.iy)];
+    seen.insert((from.ix, from.iy));
+    while let Some((ix, iy)) = stack.pop() {
+        if seen.len() >= cap {
+            break;
+        }
+        for (dx, dy) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
+            let nx = ix as isize + dx;
+            let ny = iy as isize + dy;
+            if nx < 0 || ny < 0 || nx >= grid.nx as isize || ny >= grid.ny as isize {
+                continue;
+            }
+            let (nx, ny) = (nx as usize, ny as usize);
+            if seen.contains(&(nx, ny)) || !grid.is_free_for(from.layer, nx, ny, conn) {
+                continue;
+            }
+            seen.insert((nx, ny));
+            stack.push((nx, ny));
+        }
+    }
+    seen.len()
+}
+
+/// Open the stub corridor `a`→`b` (same layer): FORCE each centre-line cell to
+/// `conn` (overriding the conservative halo collapse, since the stub centre-line is
+/// DRC-legal by construction) and mark the surrounding clearance `halo` so later
+/// foreign nets keep their distance. Bresenham line for the centre-line.
+fn mark_segment(grid: &mut RouteGrid, conn: usize, a: State, b: State, halo: usize) {
+    let (mut ix, mut iy) = (a.ix as isize, a.iy as isize);
+    let (tx, ty) = (b.ix as isize, b.iy as isize);
+    let (dx, dy) = ((tx - ix).abs(), (ty - iy).abs());
+    let (sx, sy) = (if tx >= ix { 1 } else { -1 }, if ty >= iy { 1 } else { -1 });
+    let mut err = dx - dy;
+    loop {
+        // Halo first (won't override BlockedAll), then force the centre-line cell
+        // so the corridor is genuinely open for this net.
+        grid.mark_net_halo(a.layer, ix as usize, iy as usize, conn, halo);
+        grid.force_mark_net(a.layer, ix as usize, iy as usize, conn);
+        if ix == tx && iy == ty {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 > -dy {
+            err -= dy;
+            ix += sx;
+        }
+        if e2 < dx {
+            err += dx;
+            iy += sy;
+        }
+    }
 }
 
 /// The grid cell + layer of a route point.
@@ -475,7 +658,75 @@ fn simplify(path: Vec<Point2>) -> Vec<Point2> {
 mod tests {
     use super::*;
     use crate::connectivity;
+    use crate::problem::{Bounds, Connection, Obstacle, RoutePoint};
     use std::path::Path;
+
+    /// A fine-pitch peripheral pad (a QFP pin) whose own grid cell is enclosed by its
+    /// neighbours' clearance halos must still escape via its radial stub: with the box
+    /// inflation alone the pin is walled in (own cell + every step out is BlockedAll),
+    /// and only the pad-copper relief + escape stub route it. Regression guard for the
+    /// LQFP-144 fix.
+    #[test]
+    fn enclosed_qfp_pin_escapes_via_its_radial_stub() {
+        // A left-edge QFP row: pads 1.475 (x) × 0.3 (y), pitch 0.5 in y, centres x=5.0.
+        // A package-body keepout sits to the +x (interior) side, so the only escape is
+        // -x toward open board. Each pin connects to a spread-out cap far to the left.
+        let mk_pad = |net: &str, cx: f64, cy: f64, w: f64, h: f64, owned: bool| Obstacle {
+            kind: "rect".into(),
+            layers: vec![LayerRef::top()],
+            center: Point2 { x: cx, y: cy },
+            width: w,
+            height: h,
+            connected_to: if owned { vec![net.into()] } else { vec![] },
+        };
+        let mut obstacles = vec![mk_pad("", 8.0, 7.0, 4.0, 6.0, false)]; // body keepout
+        let mut connections = Vec::new();
+        for i in 0..5 {
+            let cy = 5.5 + i as f64 * 0.5;
+            let net = format!("S{i}");
+            obstacles.push(mk_pad(&net, 5.0, cy, 1.475, 0.3, true));
+            let dest = (1.5, 1.0 + i as f64 * 1.5);
+            obstacles.push(mk_pad(&net, dest.0, dest.1, 0.5, 0.5, true));
+            connections.push(Connection {
+                name: net,
+                points_to_connect: vec![
+                    RoutePoint { x: 5.0, y: cy, layer: LayerRef::top() },
+                    RoutePoint { x: dest.0, y: dest.1, layer: LayerRef::top() },
+                ],
+            });
+        }
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles,
+            connections,
+            bounds: Bounds { min_x: 0.0, max_x: 10.0, min_y: 0.0, max_y: 12.0 },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+        };
+
+        // Without the stub these pins are unroutable (their own cell is BlockedAll);
+        // with it, at least one escapes — and the emitted copper is GEOMETRY-clean
+        // (reconcile drops any clearance/width/via/short violator before it ships).
+        let result = route(&problem);
+        let routed = problem.connections.len() - result.failed.len();
+        assert!(routed >= 1, "the escape stub must route at least one enclosed QFP pin");
+        let geom: Vec<_> = crate::lint::lint(&problem, &result.solution)
+            .into_iter()
+            .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
+            .collect();
+        assert!(geom.is_empty(), "QFP escape copper must be geometry-clean: {geom:?}");
+        // The partial-net rule: a failed net contributes no copper.
+        let failed_names: std::collections::BTreeSet<&str> =
+            result.failed.iter().map(|f| f.connection.as_str()).collect();
+        assert!(
+            result.solution.traces.iter().all(|t| !failed_names.contains(t.connection.as_str())),
+            "a failed net must not ship a stub/trace"
+        );
+    }
 
     #[test]
     fn plane_layers_are_the_centred_pair_for_every_even_stackup() {
