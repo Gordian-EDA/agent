@@ -10,3 +10,8 @@ pub mod provider;
 pub mod search;
 pub mod snapshot;
 pub mod symlib;
+
+/// KiCAD coordinate number formatting (shortest round-tripping decimal, `-0.0`
+/// collapsed to `0`). The single owner; re-exported here so synthesis and other
+/// emitters share one definition. See [`pcb::fmt_num`].
+pub use pcb::fmt_num;

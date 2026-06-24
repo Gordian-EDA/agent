@@ -580,7 +580,10 @@ fn copper_uuid(key: &str) -> String {
 /// Format an `f64` the way KiCAD writes coordinates: a bare minimal decimal with
 /// no trailing zeros (`10`, `8.9125`), and `-0.0` collapsed to `0`. Mirrors
 /// `sch_io::write::fmt_coord`'s negative-zero canonicalization.
-fn fmt_num(v: f64) -> String {
+///
+/// The single owner of KiCAD coordinate formatting; `pcb-synth` re-uses it via
+/// the [`crate::fmt_num`] re-export so synthesized boards stay byte-identical.
+pub fn fmt_num(v: f64) -> String {
     let v = if v == 0.0 { 0.0 } else { v };
     // Rust's `{}` for f64 already prints the shortest round-tripping decimal
     // with no trailing zeros (e.g. `10`, `8.9125`), which matches KiCAD.

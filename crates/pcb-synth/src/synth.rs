@@ -51,6 +51,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io;
 
+use kicad_sexpr::fmt_num;
 use pcb_place::placement::Placement;
 use pcb_model::{Bounds, Point2};
 
@@ -836,13 +837,6 @@ fn synth_uuid(key: &str) -> String {
     uuid::Uuid::new_v5(&SYNTH_NAMESPACE, key.as_bytes())
         .as_hyphenated()
         .to_string()
-}
-
-/// Format an `f64` the way KiCAD writes coordinates (shortest round-tripping
-/// decimal, `-0.0` collapsed to `0`). Mirrors `pcb::fmt_num`/`placefp::fmt_num`.
-fn fmt_num(v: f64) -> String {
-    let v = if v == 0.0 { 0.0 } else { v };
-    format!("{v}")
 }
 
 #[cfg(test)]
