@@ -97,8 +97,8 @@ fn main() {
         std::fs::write(&out, &png).expect("write png");
 
         println!(
-            "{stem}: router={:?} failed={} traces={} vias={} -> {}",
-            result.router,
+            "{stem}: router={} failed={} traces={} vias={} -> {}",
+            result.engine,
             result.failed.len(),
             result.solution.traces.len(),
             result.solution.vias.len(),

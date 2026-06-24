@@ -11,9 +11,12 @@
 //! Cell paths are converted to mm polylines, split at layer changes (a [`Via`]
 //! is emitted at each transition) and collinear runs are merged (a fresh copy
 //! of the simplify idea from `sch-io/src/wire.rs` — the crates stay
-//! decoupled). The result is a [`RouteResult`]: the [`RouteSolution`] plus a
-//! list of [`FailedNet`]s. A net that cannot be routed is reported, never
+//! decoupled). The result is the unified [`RouteResult`]: the [`RouteSolution`]
+//! plus a list of [`FailedNet`]s. A net that cannot be routed is reported, never
 //! silently dropped, and the router never panics.
+//!
+//! [`GridAStarRouter`] is the [`Router`] impl — the free-tier engine — wrapping
+//! the strict/lenient/rip-up portfolio behind the SDK trait.
 //!
 //! ## Design constants
 //!
@@ -24,10 +27,16 @@
 
 use crate::astar::{self, AStarCosts, State};
 use crate::grid::{self, RouteGrid};
-use crate::problem::{LayerRef, Point2, RouteProblem, RouteSolution, Trace, Via, ViaSpan};
+use crate::problem::{
+    Capabilities, LayerRef, Point2, RouteProblem, RouteResult, RouteSolution, Router, Trace, Via,
+    ViaSpan,
+};
 
 #[doc(inline)]
 pub use crate::problem::FailedNet;
+
+/// This engine's [`RouteResult::engine`] provenance tag.
+pub const ENGINE: &str = "naive";
 
 /// The tunable design constants for the router, in one place.
 ///
@@ -38,15 +47,6 @@ pub use crate::problem::FailedNet;
 pub struct DesignConstants {
     /// A* movement costs (bend, via), in grid-step units.
     pub costs: AStarCosts,
-}
-
-/// The outcome of [`route`]: the emitted copper plus any nets that failed.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RouteResult {
-    /// Emitted traces and vias for the nets that routed.
-    pub solution: RouteSolution,
-    /// Nets that could not be fully routed (deterministic order).
-    pub failed: Vec<FailedNet>,
 }
 
 /// The inner copper layers that carry a solid GND/VCC plane, CENTRED in the stack:
@@ -98,9 +98,9 @@ pub fn via_clear_radius_cells(problem: &RouteProblem) -> usize {
 /// Route `problem` with the default design constants, but with the via-barrel
 /// clearance radius derived from the design rules so the slice-1 router does not
 /// drop a via that overhangs a foreign pad/trace. It can still produce other
-/// congestion artifacts; [`crate::pipeline::route_auto`] reconciles connectivity
-/// and lints both engines, so a violating or phantom route never ships when a
-/// cleaner one exists.
+/// congestion artifacts; the selector (`negotiated-mesh`'s `select_best`)
+/// reconciles connectivity and lints both engines, so a violating or phantom
+/// route never ships when a cleaner one exists.
 pub fn route(problem: &RouteProblem) -> RouteResult {
     let costs = AStarCosts {
         via_clear_radius_cells: via_clear_radius_cells(problem),
@@ -120,7 +120,7 @@ fn route_iterated(problem: &RouteProblem, design: DesignConstants) -> RouteResul
     let mut best = route_with(problem, design, &empty);
     reconcile(problem, &mut best);
     let mut best_n = best.failed.len();
-    let mut best_w = failed_pad_weight(problem, &best);
+    let mut best_w = crate::problem::failed_pad_weight(problem, &best.failed);
     for _ in 0..3 {
         if best.failed.is_empty() {
             break;
@@ -130,7 +130,7 @@ fn route_iterated(problem: &RouteProblem, design: DesignConstants) -> RouteResul
         let mut cand = route_with(problem, design, &pri);
         reconcile(problem, &mut cand);
         let cn = cand.failed.len();
-        let cw = failed_pad_weight(problem, &cand);
+        let cw = crate::problem::failed_pad_weight(problem, &cand.failed);
         // PARETO improvement only: never worse on EITHER failed-net count or
         // unconnected-pad weight, and strictly better on at least one. The pad-weight
         // proxy is not exactly KiCAD's unconnected count, so requiring both metrics to
@@ -147,30 +147,13 @@ fn route_iterated(problem: &RouteProblem, design: DesignConstants) -> RouteResul
     best
 }
 
-/// Connectivity cost of a result: the number of PADS left unconnected (sum over failed
-/// nets of their pin count), not the net count — failing one 8-pin power net is worse
-/// than failing two 2-pin signals.
-fn failed_pad_weight(problem: &RouteProblem, result: &RouteResult) -> usize {
-    result
-        .failed
-        .iter()
-        .map(|f| {
-            problem
-                .connections
-                .iter()
-                .find(|c| c.name == f.connection)
-                .map(|c| c.points_to_connect.len().max(1))
-                .unwrap_or(1)
-        })
-        .sum()
-}
-
 /// The slice-1 router WITHOUT the via-barrel clearance scan (the original slice-1
 /// behaviour). On a board with room it routes more nets — including vias that are
 /// in fact DRC-clean — that the conservative scan would refuse. It may also drop a
-/// via too close to foreign copper, so it is NOT used alone: [`crate::pipeline::route_auto`]
-/// runs it alongside the strict [`route`] and the detailed router and keeps
-/// whichever the lint scores cleanest. The board picks the strictness it needs.
+/// via too close to foreign copper, so it is NOT used alone: [`GridAStarRouter`]
+/// runs it alongside the strict [`route`] and keeps whichever the lint scores
+/// cleanest, and the cross-engine selector lints both engines. The board picks the
+/// strictness it needs.
 pub fn route_lenient(problem: &RouteProblem) -> RouteResult {
     route_iterated(problem, DesignConstants::default())
 }
@@ -330,6 +313,7 @@ pub fn route_with(
     RouteResult {
         solution: RouteSolution { traces, vias },
         failed,
+        engine: ENGINE.to_owned(),
     }
 }
 
@@ -781,6 +765,67 @@ fn simplify(path: Vec<Point2>) -> Vec<Point2> {
         out.push(p);
     }
     out
+}
+
+// ── GridAStarRouter (the SDK Router impl) ───────────────────────────────────────
+
+/// The free-tier grid-A* [`Router`]: a sequential shortest-net-first A* per net
+/// with a rip-up retry, run in both a STRICT (via-barrel clearance scan) and a
+/// LENIENT (no scan) variant — the better of the two is returned as the engine's
+/// single result.
+///
+/// Both variants reconcile their copper through the DRC oracle before scoring, so
+/// the result is geometry-clean; the better variant is the one that leaves fewer
+/// unconnected pads (the lenient variant routes more on a board with room; the
+/// strict variant is needed where a via would overhang a foreign pad). Strict
+/// wins exact ties as the more conservative path.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GridAStarRouter;
+
+impl Router for GridAStarRouter {
+    fn name(&self) -> &'static str {
+        ENGINE
+    }
+
+    /// The always-correct baseline supports any board: it honours per-net widths,
+    /// custom outlines, inner-layer escape assignments, and any layer count.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            max_layers: u32::MAX,
+            honors_escape_layers: true,
+            honors_net_widths: true,
+            honors_outline: true,
+        }
+    }
+
+    fn route(&self, problem: &RouteProblem) -> RouteResult {
+        let strict = route(problem);
+        let lenient = route_lenient(problem);
+        if score(problem, &lenient) < score(problem, &strict) {
+            lenient
+        } else {
+            strict
+        }
+    }
+}
+
+/// `(unconnected-pad weight + geometry violations, geometry violations)` for a
+/// grid-router result — the strict-vs-lenient tiebreak key. Both variants are
+/// reconciled to geometry-clean copper, so `geom` is 0 in practice; it is kept in
+/// the key as the same robustness guard the cross-engine selector uses.
+fn score(problem: &RouteProblem, r: &RouteResult) -> (usize, usize) {
+    let geom = geometry_violations(problem, &r.solution);
+    (crate::problem::failed_pad_weight(problem, &r.failed) + geom, geom)
+}
+
+/// Count the GEOMETRY DRC violations of a solution (clearance / width / via /
+/// bounds / invalid layer) — excluding connectivity, which already correlates
+/// with the failed-net count. The router's own DRC authority.
+pub fn geometry_violations(problem: &RouteProblem, solution: &RouteSolution) -> usize {
+    crate::lint::lint(problem, solution)
+        .iter()
+        .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
+        .count()
 }
 
 #[cfg(test)]

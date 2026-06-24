@@ -12,10 +12,10 @@ use serde_json::{Value, json};
 use drc_lint::connectivity::Violation as ConnViolation;
 use drc_lint::lint::{DrcViolation, lint};
 use negotiated_mesh::pathing::global_route;
-use negotiated_mesh::pipeline::{RouterKind, metrics, route_auto};
+use negotiated_mesh::pipeline::route_auto;
 use pcb_place::placement::to_route_problem;
 use pcb_model::{
-    FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteSolution, Via, ViaSpan,
+    FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteResult, RouteSolution, Via, ViaSpan,
 };
 
 use crate::tools::PcbToolCtx;
@@ -283,7 +283,7 @@ pub fn route_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let stored = json!({
         "solution": result.solution,
         "failed": result.failed,
-        "router": result.router,
+        "router": result.engine,
         "planes": planes,
     });
     ctx.workspace().write_route(&serde_json::to_string_pretty(&stored)?)?;
@@ -294,15 +294,12 @@ pub fn route_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         .map(|f| json!({ "connection": f.connection, "reason": f.reason }))
         .collect();
 
-    let m = metrics(&result.solution);
+    let m = result.solution.metrics();
     let plane_net_set: std::collections::BTreeSet<String> =
         planes.iter().map(|(n, _)| n.clone()).collect();
     let split = lint_summary(&rp, &result.solution, &result.failed, &plane_net_set);
 
-    let router = match result.router {
-        RouterKind::Naive => "naive",
-        RouterKind::Detailed => "detailed",
-    };
+    let router = result.engine.as_str();
 
     let mut out = json!({
         "router": router,
@@ -394,8 +391,8 @@ pub fn route_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
 pub(super) struct StoredRoute {
     pub(super) solution: RouteSolution,
     pub(super) failed: Vec<FailedNet>,
-    // router field is present in the JSON but we only need it for the key;
-    // its value is a RouterKind enum that serde handles fine.
+    // The engine-provenance string persisted by `route_board`; kept so the stored
+    // JSON round-trips, but unused on read.
     #[allow(dead_code)]
     router: serde_json::Value,
     /// Power-plane assignment chosen at route time: (net name, copper layer index).
@@ -638,7 +635,7 @@ fn route_with_planes(
     rp: RouteProblem,
     planes: &[(String, u32)],
     rules: &DraftRules,
-) -> negotiated_mesh::pipeline::RouteResult {
+) -> RouteResult {
     // Inner-layer escape assignment for dense BGA fields, computed on the FULL stack —
     // each enclosed ball gets an inner signal layer to drop to (via-in-pad) so it escapes
     // where F/B are walled in. Empty on a 4-layer board (no inner signal layer) or a board
@@ -671,7 +668,7 @@ fn route_with_planes(
 /// Count of REAL failed nets in a finished plane route — the `<N plane stitching vias>`
 /// pseudo-failure is not a net, so it is excluded. Used to keep the better of {escape,
 /// no-escape}; the relative ordering of two routes of the SAME board is what matters.
-fn real_failed_count(r: &negotiated_mesh::pipeline::RouteResult) -> usize {
+fn real_failed_count(r: &RouteResult) -> usize {
     r.failed
         .iter()
         .filter(|f| !f.connection.contains("plane stitching"))
@@ -682,7 +679,7 @@ fn route_planes_core(
     mut rp: RouteProblem,
     planes: &[(String, u32)],
     rules: &DraftRules,
-) -> negotiated_mesh::pipeline::RouteResult {
+) -> RouteResult {
     let plane_names: std::collections::BTreeSet<String> =
         planes.iter().map(|(n, _)| n.clone()).collect();
     // net → its copper-plane layer index (1 = In1 …) for the HDI via-in-pad fallback below.
