@@ -1,6 +1,16 @@
 //! Sequential naive grid router: one A* per net, shortest-net-first.
 //!
-//! The slice-1 baseline. Nets are routed one at a time in a deterministic order
+//! Routes **8-way (octilinear)** by default: each net's A* may take 45° diagonal
+//! steps, so a corner-to-corner run is a direct 45° line rather than an orthogonal
+//! staircase. Diagonals are DRC-safe full-board because every diagonal step passes
+//! the swept-body clearance check ([`astar::diag_body_clear`]) — the 45° segment
+//! keeps its whole body clear of foreign copper, not just its cell centres — so two
+//! parallel diagonal runs one pitch apart can never dip under clearance. The strict
+//! ORTHOGONAL twin ([`route_orthogonal`]) is the [`GridAStarRouter`]'s per-board
+//! fallback for dense lattice-aligned via fields where a 45° run costs more lateral
+//! room than an axis-aligned one — so diagonals only ever ADD routed nets.
+//!
+//! Nets are routed one at a time in a deterministic order
 //! (ascending bounding-box half-perimeter, ties by name — short local nets
 //! first). Within a net, point 0 seeds a *routed tree*; each further point is
 //! A*-routed to the nearest cell already in that tree. Successful paths are
@@ -25,7 +35,7 @@
 //! so the grid and router agree) and the A* bend/via costs. Slice 1 keeps the
 //! spec defaults; later slices retune here.
 
-use crate::astar::{self, AStarCosts, State};
+use crate::astar::{self, AStarCosts, State, DIAG_COST};
 use crate::grid::{self, RouteGrid};
 use crate::problem::{
     Capabilities, LayerRef, Point2, RouteProblem, RouteResult, RouteSolution, Router, Trace, Via,
@@ -104,9 +114,39 @@ pub fn via_clear_radius_cells(problem: &RouteProblem) -> usize {
 pub fn route(problem: &RouteProblem) -> RouteResult {
     let costs = AStarCosts {
         via_clear_radius_cells: via_clear_radius_cells(problem),
+        diag: DIAG_COST, // 8-way: octilinear is the default (the per-net swept-body
+        // radius is set in `route_with`, keeping diagonals DRC-safe full-board)
         ..AStarCosts::default()
     };
     route_iterated(problem, DesignConstants { costs })
+}
+
+/// The strict ORTHOGONAL (4-way) naive route — `diag = u32::MAX`, so no diagonal is ever
+/// relaxed — with the via-barrel clearance scan (the orthogonal twin of [`route`]).
+///
+/// 8-way is the default everywhere ([`route`] / [`route_lenient`]) and wins the bulk-maze
+/// boards, but on a dense, lattice-aligned via field a 45° run consumes more lateral room
+/// than an axis-aligned one (the √2 geometry), so diagonals can leave a few escape nets
+/// unrouted that orthogonal routing threads. [`GridAStarRouter`]'s per-board arbiter runs
+/// this and [`route_orthogonal_lenient`] as the orthogonal fallback and keeps whichever
+/// scores best when the 8-way pass left faults, so the diagonal default can only ever ADD
+/// routed nets, never regress a via-field board. The placement [`crate::router`] ranker
+/// (`pcb-place`'s `GridAstarRanker`) also routes through this so the layout choice stays
+/// invariant to the routing diagonal default.
+pub fn route_orthogonal(problem: &RouteProblem) -> RouteResult {
+    let costs = AStarCosts {
+        via_clear_radius_cells: via_clear_radius_cells(problem),
+        ..AStarCosts::default() // diag = u32::MAX (orthogonal), diag_body_radius inert
+    };
+    route_iterated(problem, DesignConstants { costs })
+}
+
+/// The lenient ORTHOGONAL (4-way) naive route — orthogonal, WITHOUT the via-barrel
+/// clearance scan (the orthogonal twin of [`route_lenient`]). The other orthogonal
+/// candidate [`GridAStarRouter`]'s arbiter scores against [`route_orthogonal`]; a board
+/// whose orthogonal win needs the no-via-scan variant is not lost to a strict-only one.
+pub fn route_orthogonal_lenient(problem: &RouteProblem) -> RouteResult {
+    route_iterated(problem, DesignConstants::default()) // diag = u32::MAX, no via-scan
 }
 
 /// Route, then RIP-UP RETRY: if any nets failed, re-route from a fresh grid with those
@@ -147,15 +187,19 @@ fn route_iterated(problem: &RouteProblem, design: DesignConstants) -> RouteResul
     best
 }
 
-/// The slice-1 router WITHOUT the via-barrel clearance scan (the original slice-1
-/// behaviour). On a board with room it routes more nets — including vias that are
-/// in fact DRC-clean — that the conservative scan would refuse. It may also drop a
-/// via too close to foreign copper, so it is NOT used alone: [`GridAStarRouter`]
-/// runs it alongside the strict [`route`] and keeps whichever the lint scores
-/// cleanest, and the cross-engine selector lints both engines. The board picks the
-/// strictness it needs.
+/// The naive router WITHOUT the via-barrel clearance scan (a more permissive sibling of
+/// [`route`]). On a board with room it routes more nets — including vias that are in fact
+/// DRC-clean — that the conservative scan would refuse. It may also drop a via too close
+/// to foreign copper, so it is NOT used alone: [`GridAStarRouter`] runs it alongside the
+/// strict [`route`] and keeps whichever the lint scores cleanest, and the cross-engine
+/// selector lints both engines. The board picks the strictness it needs. Also 8-way
+/// (diagonals on), kept DRC-safe by the per-net swept-body radius set in `route_with`.
 pub fn route_lenient(problem: &RouteProblem) -> RouteResult {
-    route_iterated(problem, DesignConstants::default())
+    let costs = AStarCosts {
+        diag: DIAG_COST,
+        ..AStarCosts::default()
+    };
+    route_iterated(problem, DesignConstants { costs })
 }
 
 /// Make a slice-1 result DRC-honest: the lint is the authority. First drop any
@@ -248,8 +292,18 @@ pub fn route_with(
         } else {
             outer_mask | escape_layer.map_or(0, |l| 1u32 << l)
         };
+        // Swept-body radius for diagonal steps: the centre-to-centre keep-out a foreign
+        // min-width trace must respect, in cells (un-rounded f64 — `diag_body_clear` does
+        // the strict point-to-segment test). Same expression as `halo`, before the ceil,
+        // so a diagonal's body keeps exactly the clearance the cell halo enforces between
+        // centres. A wider foreign trace's extra half-width is covered by ITS own halo
+        // (this net's diagonal cells must clear that halo), so this radius need only bound
+        // the min-width foreign case. Inert when `design.costs.diag == u32::MAX`
+        // (orthogonal), since no diagonal is relaxed; non-zero keeps an 8-way caller DRC-safe.
+        let diag_body_radius_cells = (nw / 2.0 + problem.clearance + min_w / 2.0) / pitch;
         let costs = AStarCosts {
             trace_clear_radius_cells: (((nw - min_w) / 2.0 / pitch).ceil() as usize),
+            diag_body_radius_cells,
             layer_mask,
             ..design.costs
         };
@@ -738,9 +792,11 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
     }
 }
 
-/// Drop near-duplicate points and merge collinear runs. Fresh copy of the
-/// simplify idea in `sch-io/src/wire.rs`, adapted to [`Point2`] (the crates
-/// stay decoupled — no dependency between them).
+/// Drop near-duplicate points and merge collinear runs, **including 45° runs** so a
+/// straight diagonal staircase of cells collapses to two endpoints. Collinear iff the
+/// cross product of consecutive edge vectors is ~0 and the heading does not reverse —
+/// handling orthogonal and diagonal segments uniformly (the octilinear analog of the
+/// `sch-io/src/wire.rs` simplify idea; the crates stay decoupled).
 fn simplify(path: Vec<Point2>) -> Vec<Point2> {
     const EPS: f64 = 1e-9;
     let mut deduped: Vec<Point2> = Vec::with_capacity(path.len());
@@ -755,9 +811,11 @@ fn simplify(path: Vec<Point2>) -> Vec<Point2> {
         if out.len() >= 2 {
             let a = &out[out.len() - 2];
             let b = &out[out.len() - 1];
-            let collinear_x = (a.x - b.x).abs() < EPS && (b.x - p.x).abs() < EPS;
-            let collinear_y = (a.y - b.y).abs() < EPS && (b.y - p.y).abs() < EPS;
-            if collinear_x || collinear_y {
+            let v1 = (b.x - a.x, b.y - a.y);
+            let v2 = (p.x - b.x, p.y - b.y);
+            let cross = v1.0 * v2.1 - v1.1 * v2.0;
+            let dot = v1.0 * v2.0 + v1.1 * v2.1;
+            if cross.abs() < EPS && dot > 0.0 {
                 *out.last_mut().unwrap() = p;
                 continue;
             }
@@ -770,15 +828,23 @@ fn simplify(path: Vec<Point2>) -> Vec<Point2> {
 // ── GridAStarRouter (the SDK Router impl) ───────────────────────────────────────
 
 /// The free-tier grid-A* [`Router`]: a sequential shortest-net-first A* per net
-/// with a rip-up retry, run in both a STRICT (via-barrel clearance scan) and a
-/// LENIENT (no scan) variant — the better of the two is returned as the engine's
-/// single result.
+/// with a rip-up retry, run 8-way (octilinear) in both a STRICT (via-barrel
+/// clearance scan) and a LENIENT (no scan) variant — the better of the two is the
+/// 8-way candidate.
 ///
 /// Both variants reconcile their copper through the DRC oracle before scoring, so
 /// the result is geometry-clean; the better variant is the one that leaves fewer
 /// unconnected pads (the lenient variant routes more on a board with room; the
 /// strict variant is needed where a via would overhang a foreign pad). Strict
 /// wins exact ties as the more conservative path.
+///
+/// **Per-board diagonal arbiter.** 8-way wins the bulk-maze boards but can leave a
+/// few escape nets unrouted on a dense, lattice-aligned via field where a 45° run
+/// costs more lateral room than an axis-aligned one. When the 8-way candidate left
+/// faults, the router also runs the ORTHOGONAL pair ([`route_orthogonal`] /
+/// [`route_orthogonal_lenient`]) and keeps it only when it is STRICTLY better on
+/// `(score, failed-net count)` — so diagonals are a pure capability ADD, never a
+/// via-field regression. Paid only on a board the 8-way pass did not already ace.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GridAStarRouter;
 
@@ -801,10 +867,30 @@ impl Router for GridAStarRouter {
     fn route(&self, problem: &RouteProblem) -> RouteResult {
         let strict = route(problem);
         let lenient = route_lenient(problem);
-        if score(problem, &lenient) < score(problem, &strict) {
+        let diag = if score(problem, &lenient) < score(problem, &strict) {
             lenient
         } else {
             strict
+        };
+        // Arbiter key: primary the fault score (pad-weight + geom), then the FAILED-NET
+        // COUNT. The net-count tie-break is load-bearing: the pad-weight score can TIE
+        // when the diagonal route strands more, smaller nets that sum to the same pins as
+        // the orthogonal route's fewer, fatter ones — keeping the diagonal would then
+        // leave more nets unrouted (the metric the corpus reports), a regression.
+        let arb_key = |r: &RouteResult| (score(problem, r), r.failed.len());
+        if arb_key(&diag).0 .0 == 0 {
+            return diag; // the 8-way pass aced the board — skip the orthogonal fallback
+        }
+        // The ORTHOGONAL candidate: the better-scoring of its strict (via-scan) and lenient
+        // (no-scan) variants, by the SAME key. Keep it only when STRICTLY better on
+        // (score, net-count); a genuine tie keeps the neater 45° diagonal.
+        let os = route_orthogonal(problem);
+        let ol = route_orthogonal_lenient(problem);
+        let ortho = if arb_key(&ol) < arb_key(&os) { ol } else { os };
+        if arb_key(&ortho) < arb_key(&diag) {
+            ortho
+        } else {
+            diag
         }
     }
 }
@@ -834,6 +920,18 @@ mod tests {
     use crate::connectivity;
     use crate::problem::{Bounds, Connection, Obstacle, RoutePoint};
     use std::path::Path;
+
+    /// A rect pad owned by `connected_to`, centred at `center`, on `layers`.
+    fn pad(connected_to: &[&str], center: (f64, f64), w: f64, h: f64, layers: &[&str]) -> Obstacle {
+        Obstacle {
+            kind: "rect".to_owned(),
+            layers: layers.iter().map(|l| LayerRef((*l).to_owned())).collect(),
+            center: Point2 { x: center.0, y: center.1 },
+            width: w,
+            height: h,
+            connected_to: connected_to.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
 
     /// A fine-pitch peripheral pad (a QFP pin) whose own grid cell is enclosed by its
     /// neighbours' clearance halos must still escape via its radial stub: with the box
@@ -900,6 +998,108 @@ mod tests {
         assert!(
             result.solution.traces.iter().all(|t| !failed_names.contains(t.connection.as_str())),
             "a failed net must not ship a stub/trace"
+        );
+    }
+
+    /// The default naive router is 8-way: a corner-to-corner net must emit at least one
+    /// 45° diagonal segment (an orthogonal staircase has none). Guards the diag flip.
+    /// Pads sit at the route points so the trace ends inside its own copper (the
+    /// connectivity oracle joins a trace to a pad it lands in).
+    #[test]
+    fn default_route_is_octilinear() {
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![
+                pad(&["D"], (4.0, 4.0), 0.6, 0.6, &["top"]),
+                pad(&["D"], (14.0, 14.0), 0.6, 0.6, &["top"]),
+            ],
+            connections: vec![Connection {
+                name: "D".into(),
+                points_to_connect: vec![
+                    RoutePoint { x: 4.0, y: 4.0, layer: LayerRef::top() },
+                    RoutePoint { x: 14.0, y: 14.0, layer: LayerRef::top() },
+                ],
+            }],
+            bounds: Bounds { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 20.0 },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+        let r = route(&p);
+        assert!(r.failed.is_empty(), "corner-to-corner net must route: {:?}", r.failed);
+        let has_diag = r.solution.traces.iter().any(|t| {
+            t.path.windows(2).any(|w| {
+                (w[0].x - w[1].x).abs() > 1e-9 && (w[0].y - w[1].y).abs() > 1e-9
+            })
+        });
+        assert!(has_diag, "the 8-way default must emit a 45° diagonal segment");
+
+        // The orthogonal candidate (the per-board arbiter's via-field fallback) routes the
+        // SAME net with no diagonal segment at all.
+        let ro = route_orthogonal(&p);
+        assert!(ro.failed.is_empty(), "orthogonal must also route this net: {:?}", ro.failed);
+        let ortho_has_diag = ro.solution.traces.iter().any(|t| {
+            t.path.windows(2).any(|w| {
+                (w[0].x - w[1].x).abs() > 1e-9 && (w[0].y - w[1].y).abs() > 1e-9
+            })
+        });
+        assert!(!ortho_has_diag, "route_orthogonal must never emit a 45° diagonal");
+    }
+
+    /// Two adjacent nets that both want a parallel 45° diagonal corridor must emit
+    /// GEOMETRY-clean copper: the swept-body clearance check keeps two parallel
+    /// diagonals from dipping under clearance (the DRC short the orthogonal-staircase
+    /// model never risked, and the whole point of the diagonal-clearance fix). The
+    /// strict lint is the authority — a sub-clearance dip would fire ClearanceTraceTrace.
+    #[test]
+    fn parallel_diagonal_corridors_are_drc_clean() {
+        // Two nets routed from the lower-left toward the upper-right, their pads spaced
+        // so the natural route is two close parallel 45° diagonals. Pads at each point.
+        let mk = |net: &str, x0: f64, y0: f64, x1: f64, y1: f64| Connection {
+            name: net.into(),
+            points_to_connect: vec![
+                RoutePoint { x: x0, y: y0, layer: LayerRef::top() },
+                RoutePoint { x: x1, y: y1, layer: LayerRef::top() },
+            ],
+        };
+        let (ax0, ay0, ax1, ay1) = (3.0, 3.0, 13.0, 13.0);
+        let (bx0, by0, bx1, by1) = (3.6, 3.0, 13.6, 13.0);
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![
+                pad(&["A"], (ax0, ay0), 0.4, 0.4, &["top"]),
+                pad(&["A"], (ax1, ay1), 0.4, 0.4, &["top"]),
+                pad(&["B"], (bx0, by0), 0.4, 0.4, &["top"]),
+                pad(&["B"], (bx1, by1), 0.4, 0.4, &["top"]),
+            ],
+            connections: vec![mk("A", ax0, ay0, ax1, ay1), mk("B", bx0, by0, bx1, by1)],
+            bounds: Bounds { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 20.0 },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+        let r = route(&p);
+        // Whatever routes (the body check may force B onto a non-parallel route) must be
+        // geometry-clean — never a sub-clearance diagonal short.
+        let geom: Vec<_> = crate::lint::lint(&p, &r.solution)
+            .into_iter()
+            .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
+            .collect();
+        assert!(geom.is_empty(), "parallel-diagonal copper must be geometry-clean: {geom:?}");
+        // At least one net should have routed (the corridor is wide enough for one
+        // diagonal; the body check correctly refuses a sub-clearance parallel second).
+        assert!(
+            r.failed.len() < 2,
+            "at least one diagonal net must route cleanly, failed: {:?}",
+            r.failed
         );
     }
 

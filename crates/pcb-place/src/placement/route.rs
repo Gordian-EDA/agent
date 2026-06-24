@@ -114,8 +114,14 @@ impl RouteRanker for GridAstarRanker {
     /// routability matters for variant selection, so the slow capacity-mesh router
     /// on every candidate of a 70-part board is needlessly expensive (export
     /// re-routes with route_auto).
+    ///
+    /// Uses the ORTHOGONAL route deliberately: the ranker only needs a stable relative
+    /// routability proxy, and the orthogonal estimate keeps the placement choice
+    /// invariant to the router's 8-way diagonal default (the diagonal pass is a routing
+    /// improvement, not a placement signal — coupling it in would re-rank every board's
+    /// placement and drift the layout). Export's `route_auto` still routes 8-way.
     fn faults(&self, rp: &RouteProblem) -> (usize, u64) {
-        let routed = crate::router::route(rp);
+        let routed = crate::router::route_orthogonal(rp);
         let geom = crate::lint::lint(rp, &routed.solution)
             .iter()
             .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))

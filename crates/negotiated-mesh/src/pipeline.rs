@@ -195,15 +195,21 @@ pub fn select_best(problem: &RouteProblem, routers: &[&dyn Router]) -> RouteResu
 }
 
 /// Keep the incumbent? Routability is primary (fewer total faults wins outright);
-/// at EQUAL faults the incumbent (the earlier-injected, more battle-tested router)
-/// keeps its result unless it detours more than [`NAIVE_DETOUR_TOLERANCE`] longer
-/// than the challenger — the asymmetric tidiness tiebreak the in-house selector
-/// uses. Asymmetric in the incumbent's favour, so the selector is a left-fold in
+/// at EQUAL faults the FAILED-NET COUNT breaks the tie before tidiness (the naive
+/// route can strand more small nets that sum to the same pad weight, and the corpus
+/// reports net count — without this the diagonal's shorter wirelength would flip an
+/// equal-pad-weight tie toward the route that connects fewer nets); only at equal
+/// faults AND equal net count does the incumbent (the earlier-injected, more
+/// battle-tested router) keep its result unless it detours more than
+/// [`NAIVE_DETOUR_TOLERANCE`] longer than the challenger — the asymmetric tidiness
+/// tiebreak. Asymmetric in the incumbent's favour, so the selector is a left-fold in
 /// injection order, not a global argmin. The `_problem` arg matches the kernel
 /// selector's `better` signature (the rule is problem-independent here).
 fn better(_problem: &RouteProblem, incumbent: &RouteQuality, challenger: &RouteQuality) -> bool {
     if incumbent.faults() != challenger.faults() {
         incumbent.faults() < challenger.faults()
+    } else if incumbent.failed_nets != challenger.failed_nets {
+        incumbent.failed_nets < challenger.failed_nets
     } else {
         incumbent.wirelength <= challenger.wirelength * NAIVE_DETOUR_TOLERANCE
     }

@@ -169,8 +169,9 @@ pub fn failed_pad_weight(problem: &RouteProblem, failed: &[FailedNet]) -> usize 
 /// Shared by BOTH the generic selector ([`select`]) and an engine's internal
 /// rip-up retry, so the two never disagree on what "better" means. The
 /// [`fault_weight`](RouteQuality::fault_weight) + [`geom`](RouteQuality::geom)
-/// pair is the routability cost (lower is better); [`wirelength`](RouteQuality::wirelength)
-/// is the tidiness tiebreaker.
+/// pair is the routability cost (lower is better), then the
+/// [`failed_nets`](RouteQuality::failed_nets) count, then
+/// [`wirelength`](RouteQuality::wirelength) is the tidiness tiebreaker.
 ///
 /// `geom` (geometry DRC violations) is supplied by the caller because the DRC
 /// oracle lives in `drc-lint`, which depends on `pcb-model` — so this kernel
@@ -183,6 +184,12 @@ pub struct RouteQuality {
     /// Geometry DRC violations of the emitted copper (clearance / width / via /
     /// bounds — NOT connectivity). Caller-supplied; see the type docs.
     pub geom: usize,
+    /// Number of nets left unrouted (NOT pad-weighted). The tiebreak BEFORE
+    /// wirelength: an octilinear route can strand more, smaller nets that sum to the
+    /// same pad weight as another route's fewer, fatter ones — and the corpus reports
+    /// net count, so without this tiebreak the diagonal route's shorter wirelength
+    /// would flip an equal-pad-weight tie toward the route that connects FEWER nets.
+    pub failed_nets: usize,
     /// Total copper wirelength (mm) — the tidiness tiebreaker.
     pub wirelength: f64,
 }
@@ -194,6 +201,7 @@ impl RouteQuality {
         RouteQuality {
             fault_weight: failed_pad_weight(problem, &result.failed),
             geom,
+            failed_nets: result.failed.len(),
             wirelength: result.solution.metrics().wirelength,
         }
     }

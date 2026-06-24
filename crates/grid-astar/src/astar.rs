@@ -17,9 +17,15 @@
 //!   diagonal into `(ix±1, iy±1)` is allowed only when **both**
 //!   orthogonally-adjacent cells (`(ix±1, iy)` and `(ix, iy±1)`) are also free
 //!   for this connection, so the 45° corner keeps the full clearance two
-//!   abutting tracks would. Orthogonal-mode callers
-//!   ([`AStarCosts::default`], the finisher) set `diag = u32::MAX` and never
-//!   see diagonals — their behaviour is bit-identical to a 4-neighbour search.
+//!   abutting tracks would. A diagonal additionally passes a **swept-body
+//!   clearance** check ([`diag_body_clear`]) when
+//!   [`AStarCosts::diag_body_radius_cells`] is set: the 45° segment between the
+//!   two cell centres keeps its whole body clear of foreign copper, so two
+//!   parallel diagonal runs one pitch apart (perpendicular spacing `pitch/√2`)
+//!   can never dip under clearance — the corner guard alone protects only the
+//!   cell centres and the corner, not the segment body. Orthogonal-mode callers
+//!   ([`AStarCosts::default`]) set `diag = u32::MAX` and never see diagonals —
+//!   their behaviour is bit-identical to a 4-neighbour search.
 //! - **Via** — change layer in place, cost [`AStarCosts::via`]. Allowed only
 //!   where the cell is free for this connection on *every* layer (the
 //!   conservative through-via barrel check; correct for the v1 2-layer scope).
@@ -104,6 +110,25 @@ pub struct AStarCosts {
     /// via field and blows up runtime — measured). The plane mask still applies on top:
     /// a layer in this mask that is also a plane is never a routing destination.
     pub layer_mask: u32,
+    /// Swept-body clearance radius (grid cells) a DIAGONAL step must keep clear of foreign
+    /// copper along its whole 45° segment — the centre-to-centre keep-out
+    /// `(clearance + w_this/2 + min_w/2) / pitch`, as an `f64` for sub-cell precision.
+    /// `0.0` (the default, and every orthogonal caller) means no swept check.
+    ///
+    /// This closes the diagonal corner-cutting model's structural gap: the per-cell
+    /// occupancy + Euclidean corner guard protect cell *centres* and the 45° corner, but
+    /// NOT the swept body between two diagonal cell centres — two parallel 45° runs one
+    /// pitch apart sit only `pitch/√2` apart, well under clearance (a real DRC short). The
+    /// 8-way naive router (which marks Chebyshev keep-out halos, [`RouteGrid::mark_net_halo`])
+    /// sets this to the net's keep-out radius so a diagonal step is taken only when every
+    /// cell whose centre lies strictly within that radius of the segment is free for this
+    /// net — the discrete analog of KiCad's segment-to-segment clearance / FreeRouting's
+    /// trace-hull offset (see [`diag_body_clear`]). The detailed finisher closes the same
+    /// gap by MARKING each routed segment's full swept capsule into its grid
+    /// (`mark_segment_capsule`), so its later nets see the body through ordinary occupancy
+    /// and it leaves this `0.0`. Orthogonal callers leave it `0.0` (with `diag = u32::MAX`),
+    /// so no diagonal is ever relaxed and the field is inert.
+    pub diag_body_radius_cells: f64,
 }
 
 impl Default for AStarCosts {
@@ -120,6 +145,7 @@ impl Default for AStarCosts {
             plane_mask: 0,
             trace_clear_radius_cells: 0,
             layer_mask: 0,
+            diag_body_radius_cells: 0.0,
         }
     }
 }
@@ -327,14 +353,26 @@ pub fn search_bounded(
             {
                 continue;
             }
-            // Corner-cutting forbidden (diagonals only): a diagonal into
-            // `(ix+dx, iy+dy)` is allowed only when both bridging orthogonal
-            // cells are free for this connection, so the 45° corner keeps full
-            // clearance. Orthogonal moves are never subjected to this.
+            // Diagonal-only guards. (1) Corner-cutting forbidden: a diagonal into
+            // `(ix+dx, iy+dy)` is allowed only when both bridging orthogonal cells are
+            // free for this connection, so the 45° corner keeps full clearance.
+            // (2) Swept-body clearance: the segment between two diagonal cell centres
+            // must keep its whole 45° body clear of foreign copper — the per-cell
+            // occupancy + corner guard protect cell centres and the corner, but two
+            // parallel 45° runs one pitch apart dip to `pitch/√2` apart (a DRC short).
+            // Orthogonal moves are axis-aligned and already covered by the grid
+            // inflation / halo, so neither guard applies to them.
             if m.diagonal {
                 let side_x = grid.is_free_for(cur.layer, (cur.ix as isize + m.dx) as usize, cur.iy, conn);
                 let side_y = grid.is_free_for(cur.layer, cur.ix, (cur.iy as isize + m.dy) as usize, conn);
                 if !side_x || !side_y {
+                    continue;
+                }
+                if costs.diag_body_radius_cells > 0.0
+                    && !diag_body_clear(
+                        grid, conn, cur.layer, cur.ix, cur.iy, m.dx, m.dy, costs.diag_body_radius_cells,
+                    )
+                {
                     continue;
                 }
             }
@@ -393,6 +431,80 @@ pub fn search_bounded(
     }
 
     None
+}
+
+/// Is the swept body of a DIAGONAL step from cell `(ix, iy)` to `(ix+dx, iy+dy)` clear of
+/// foreign copper? `dx, dy ∈ {±1}`. Every cell on `layer` whose centre lies strictly
+/// within `radius_cells` (Euclidean, point-to-segment, in cell units) of the segment must
+/// be free for `conn`; a cell exactly `radius_cells` away is legal (it sits at the
+/// centre-to-centre clearance), matching the DRC `seg_seg` rule.
+///
+/// This is the grid analog of KiCad's segment-to-segment clearance (min centreline
+/// distance ≥ clearance + ½wₐ + ½w_b) and FreeRouting's trace-hull offset: the segment is
+/// a capsule of radius `radius_cells`, and no foreign-occupiable cell centre may fall
+/// inside it. With `radius_cells = (clearance + w_this/2 + min_w/2) / pitch`, any
+/// min-width foreign trace the grid could legally place then keeps full clearance from
+/// this diagonal's body — closing the gap where two parallel 45° runs one pitch apart
+/// (perpendicular spacing `pitch/√2`) would short. A WIDER-than-min foreign trace is kept
+/// clear by *its own* keep-out halo ([`RouteGrid::mark_net_halo`], sized to its width):
+/// its cells read non-free here, so the body scan excludes them too — this radius bounds
+/// the min-width case, the foreign halo covers the extra foreign half-width. Off-board
+/// reads block (copper may not poke past the edge); `conn`'s own copper reads free, so a
+/// route runs freely along itself.
+///
+/// The 8-way naive router calls this at search time (it marks Chebyshev halos, not the
+/// swept body); the detailed finisher closes the identical diagonal-body gap by marking
+/// each routed segment's capsule into its grid instead, so it does not call this.
+#[allow(clippy::too_many_arguments)] // flat grid-coordinate args mirror `is_free_for`
+pub fn diag_body_clear(
+    grid: &RouteGrid,
+    conn: usize,
+    layer: usize,
+    ix: usize,
+    iy: usize,
+    dx: isize,
+    dy: isize,
+    radius_cells: f64,
+) -> bool {
+    // Work in cell-offset space from `(ix, iy)`: the segment runs (0,0) → (dx, dy) and a
+    // candidate cell offset `(ox, oy)` has its centre at `(ox, oy)`. All distances scale
+    // uniformly with pitch, so comparing the offset point-to-segment distance against
+    // `radius_cells` is exact. Scan the Chebyshev box that bounds the capsule.
+    let r = radius_cells.ceil() as isize;
+    let thresh = radius_cells - 1e-9; // strictly-inside (exactly-at-clearance is legal)
+    let bx0 = dx.min(0) - r;
+    let bx1 = dx.max(0) + r;
+    let by0 = dy.min(0) - r;
+    let by1 = dy.max(0) + r;
+    for ox in bx0..=bx1 {
+        for oy in by0..=by1 {
+            if point_seg_dist_cells(ox as f64, oy as f64, dx as f64, dy as f64) >= thresh {
+                continue;
+            }
+            let hx = ix as isize + ox;
+            let hy = iy as isize + oy;
+            if hx < 0 || hy < 0 || hx >= grid.nx as isize || hy >= grid.ny as isize {
+                return false; // off-board: the diagonal body may not poke past the edge
+            }
+            if !grid.is_free_for(layer, hx as usize, hy as usize, conn) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Euclidean distance from point `(px, py)` to the segment `(0,0)→(sx, sy)` (cell units).
+fn point_seg_dist_cells(px: f64, py: f64, sx: f64, sy: f64) -> f64 {
+    let len2 = sx * sx + sy * sy;
+    let t = if len2 <= f64::EPSILON {
+        0.0
+    } else {
+        ((px * sx + py * sy) / len2).clamp(0.0, 1.0)
+    };
+    let qx = t * sx;
+    let qy = t * sy;
+    ((px - qx).powi(2) + (py - qy).powi(2)).sqrt()
 }
 
 /// Is the cell free for `conn` on *every* layer (through-via barrel check), and —
@@ -759,6 +871,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn diag_body_clear_geometry() {
+        // The swept-body predicate on a known fixture: a diagonal step (0,0)->(1,1)
+        // with radius 1.0 cell must reject when a foreign cell sits within 1.0 of the
+        // segment and accept when the only foreign copper is farther than 1.0 away.
+        let mut g = RouteGrid::build(&open_problem());
+        let a = g.connection_index("A").unwrap();
+        let b = g.connection_index("B").unwrap();
+        // The step runs (10,10)->(11,11). Cell (11,10) (offset (1,0)) is 1/√2 ≈ 0.707
+        // from that segment, < 1.0, so marking it foreign (B) must fail the body check.
+        g.mark_net(0, 11, 10, b);
+        assert!(
+            !diag_body_clear(&g, a, 0, 10, 10, 1, 1, 1.0),
+            "a foreign cell 0.707 from the diagonal body must fail the swept check"
+        );
+        // A foreign cell two cells away perpendicular (offset (2,0) → dist √2 ≈ 1.414 >
+        // 1.0) is outside the band, so the same step is clear.
+        let mut g2 = RouteGrid::build(&open_problem());
+        g2.mark_net(0, 12, 10, b);
+        assert!(
+            diag_body_clear(&g2, a, 0, 10, 10, 1, 1, 1.0),
+            "a foreign cell 1.414 from the diagonal body is outside the band → clear"
+        );
+    }
+
+    #[test]
+    fn parallel_diagonals_one_pitch_apart_are_rejected() {
+        // The core fix: net A routes a 45° diagonal; net B cannot route a PARALLEL
+        // diagonal one pitch away (perpendicular spacing pitch/√2, a DRC short) when
+        // A's swept-body radius is the min-width keep-out. We simulate A's copper as
+        // a marked diagonal staircase, then assert B's parallel diagonal step is
+        // refused by the body check at A's own occupancy (mirrored: B's step body
+        // must clear A's cells by the same radius).
+        let mut g = RouteGrid::build(&open_problem());
+        let a = g.connection_index("A").unwrap();
+        let b = g.connection_index("B").unwrap();
+        // A's diagonal cells (10,10),(11,11),(12,12) marked as A copper.
+        for i in 0..3 {
+            g.mark_net(0, 10 + i, 10 + i, a);
+        }
+        // B wants the parallel diagonal one pitch over: (11,10)->(12,11). With the
+        // min-width radius (pitch=0.2 → radius = (0.1+0.2+0.1)/0.2 = 2.0 cells), A's
+        // cells fall inside B's swept band, so the step is rejected.
+        let min_w_radius = 2.0;
+        assert!(
+            !diag_body_clear(&g, b, 0, 11, 10, 1, 1, min_w_radius),
+            "B's parallel diagonal one pitch from A must be rejected (would short)"
+        );
     }
 
     #[test]
