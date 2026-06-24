@@ -68,7 +68,7 @@ crates/
 
   agent/   agent-core (LLM loop + ToolCtx/registry + svg_to_png) · pcb-tools · sch-tools
            AI design + critic loop  [premium feature]
-  autopcb/ CLI + TUI shell
+  gordian/ CLI + TUI shell
 ```
 
 ## PCB <-> schematic symmetry (why one structure fits both)

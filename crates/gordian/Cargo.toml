@@ -1,10 +1,10 @@
 [package]
-name = "autopcb"
+name = "gordian"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CLI and TUI for the auto-pcb LLM agent that designs KiCAD schematics and PCBs."
+description = "CLI and TUI for the Gordian LLM agent that designs KiCAD schematics and PCBs."
 
 [dependencies]
 gordian-core = { path = "../gordian-core" }

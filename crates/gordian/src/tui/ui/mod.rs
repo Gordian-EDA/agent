@@ -5,7 +5,7 @@
 //! Layout (spec §11):
 //!
 //! ```text
-//! ┌─ auto-pcb ── design.kicad_sch ──────── [KiCAD ●] [auto OFF] ─┐
+//! ┌─ Gordian ── design.kicad_sch ──────── [KiCAD ●] [auto OFF] ─┐
 //! │ chat transcript (scrollable; tool cards collapsed)           │
 //! ├──────────────────────────────────────────────────────────────┤
 //! │ ◆ PROPOSED CHANGES  +U1 +R7  ~C2   nets 3→12   [a]pprove [r]…  │  (only when a diff is pending)

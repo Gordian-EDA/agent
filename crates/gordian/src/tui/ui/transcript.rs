@@ -253,7 +253,7 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
         Line::from(vec![Span::styled("    › ", caret), Span::styled(s, Style::default())])
     };
     let lines = vec![
-        Line::from(Span::styled("auto-pcb", accent)),
+        Line::from(Span::styled("Gordian", accent)),
         Line::from(Span::styled(
             "the schematic & PCB design copilot",
             dim,

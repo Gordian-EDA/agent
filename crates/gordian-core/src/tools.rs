@@ -137,7 +137,7 @@ impl PcbToolCtx {
     ///
     /// `project_dir` is created if it does not exist. The schematic itself need
     /// not exist yet — the agent's first `apply_design(commit:true)` writes it.
-    /// This is the constructor the headless `autopcb agent` subcommand uses.
+    /// This is the constructor the headless `gordian agent` subcommand uses.
     pub fn for_project(env: KicadEnv, project_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&project_dir)
             .with_context(|| format!("creating project dir {}", project_dir.display()))?;

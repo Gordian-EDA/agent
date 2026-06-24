@@ -1,11 +1,11 @@
-//! The `autopcb` CLI.
+//! The `gordian` CLI.
 //!
-//! - `autopcb` (no args) prints the version.
-//! - `autopcb agent [--project <dir>] "<prompt>"` runs ONE headless agent turn
+//! - `gordian` (no args) prints the version.
+//! - `gordian agent [--project <dir>] "<prompt>"` runs ONE headless agent turn
 //!   against real Bedrock + real KiCAD, auto-approving the write, and prints the
 //!   turn outcome plus the final ERC result. This is the CLI form of the
 //!   interactive copilot.
-//! - `autopcb tui [--project <dir>]` launches the ratatui copilot cockpit
+//! - `gordian tui [--project <dir>]` launches the ratatui copilot cockpit
 //!   (spec §11): a chat transcript, a proposed-changes apply-gate, and an input
 //!   line, driving the same agent interactively.
 
@@ -22,14 +22,14 @@ use kicad_cli_rs::cli::KicadCli;
 use kicad_cli_rs::env::KicadEnv;
 
 /// Default project directory when `--project` is omitted.
-const DEFAULT_PROJECT_DIR: &str = "autopcb-project";
+const DEFAULT_PROJECT_DIR: &str = "gordian-project";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     match args.first().map(String::as_str) {
         None => {
-            println!("auto-pcb {}", env!("CARGO_PKG_VERSION"));
+            println!("gordian {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         Some("agent") => match run_agent_command(&args[1..]) {
@@ -50,9 +50,9 @@ fn main() -> ExitCode {
             eprintln!("error: unknown command `{other}`");
             eprintln!(
                 "usage:\n  \
-                 autopcb                              print version\n  \
-                 autopcb agent [--project <dir>] \"<prompt>\"   run one agent turn\n  \
-                 autopcb tui [--project <dir>]                  launch the copilot cockpit"
+                 gordian                              print version\n  \
+                 gordian agent [--project <dir>] \"<prompt>\"   run one agent turn\n  \
+                 gordian tui [--project <dir>]                  launch the copilot cockpit"
             );
             ExitCode::FAILURE
         }
@@ -60,7 +60,7 @@ fn main() -> ExitCode {
 }
 
 /// Parse `tui` args into a project directory, defaulting to the current
-/// working directory when `--project` is omitted — so `autopcb tui` edits
+/// working directory when `--project` is omitted — so `gordian tui` edits
 /// `./design.kicad_sch` right where you launched it.
 fn parse_tui_args(args: &[String]) -> Result<PathBuf> {
     let mut project_dir: Option<PathBuf> = None;
@@ -83,7 +83,7 @@ fn parse_tui_args(args: &[String]) -> Result<PathBuf> {
     Ok(project_dir.unwrap_or_else(default_tui_project_dir))
 }
 
-/// The default project directory for `autopcb tui` with no `--project`: the
+/// The default project directory for `gordian tui` with no `--project`: the
 /// current working directory, so the schematic lands next to where the user
 /// launched the cockpit (never in a hidden tempdir).
 fn default_tui_project_dir() -> PathBuf {
@@ -153,7 +153,7 @@ fn parse_agent_args(args: &[String]) -> Result<AgentInvocation> {
     // With no --project flag, the first of two positionals is the project dir
     // and the second is the prompt (`agent <dir> "<prompt>"` form).
     let prompt = match (project_dir.is_some(), positionals.len()) {
-        (_, 0) => bail!("missing prompt: autopcb agent [--project <dir>] \"<prompt>\""),
+        (_, 0) => bail!("missing prompt: gordian agent [--project <dir>] \"<prompt>\""),
         (true, 1) => positionals.remove(0),
         (true, _) => bail!("unexpected extra arguments after the prompt"),
         (false, 1) => positionals.remove(0),

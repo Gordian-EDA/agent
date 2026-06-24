@@ -40,10 +40,10 @@ cargo build --release
 #   AWS_BEARER_TOKEN_BEDROCK=...   AWS_REGION=...   AGENT_PROVIDER=bedrock
 
 # Run one headless design turn:
-cargo run --release -p autopcb -- agent --project ./my_board "a 3.3V buck converter from 12V, 2A"
+cargo run --release -p gordian -- agent --project ./my_board "a 3.3V buck converter from 12V, 2A"
 
 # Or the interactive copilot (chat + apply-gate cockpit):
-cargo run --release -p autopcb -- tui --project ./my_board
+cargo run --release -p gordian -- tui --project ./my_board
 ```
 
 ## Architecture
@@ -52,7 +52,7 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 
 | Crate | Role |
 |-------|------|
-| `autopcb` | CLI + ratatui copilot TUI — the entry point |
+| `gordian` | CLI + ratatui copilot TUI — the entry point |
 | `llm-client` | Provider-agnostic LLM client: neutral message/tool types + the `Provider` trait (OpenAI / AWS Bedrock backends) |
 | `gordian-core` | The KiCAD agent: the turn loop + apply-gate, the schematic/PCB tools, prompts, review, and render — over any `llm-client` `Provider` |
 | `circuit-lang` | Parser, linter, and canonical emitter for the circuit markup language |

@@ -8,7 +8,7 @@
 //!
 //! The loop is built around ONE external seam — [`llm_client::Provider`], the LLM
 //! backend — plus the KiCAD tools it drives directly. The only decoupling that
-//! remains is this library vs. the [`autopcb`](../autopcb/index.html) CLI binary,
+//! remains is this library vs. the [`gordian`](../gordian/index.html) CLI binary,
 //! so a future web frontend reuses the lib. To build a working agent:
 //!
 //! ```ignore

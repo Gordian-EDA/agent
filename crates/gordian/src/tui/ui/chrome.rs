@@ -32,7 +32,7 @@ pub(super) fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     let mut spans = vec![
         // The brand carries the accent; everything else is metadata, so it dims.
         Span::styled(
-            "auto-pcb",
+            "Gordian",
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
         sep(),
