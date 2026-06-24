@@ -1,11 +1,19 @@
-//! The placement pipeline entry points + the routability oracle that picks among
-//! variants, and [`to_route_problem`] (the bridge from a placement to the router).
+//! The placement pipeline entry points + the built-in [`Placer`]s and the
+//! [`RouteRanker`] the routability oracle is wired from.
+//!
+//! [`to_route_problem`] (the bridge from a placement to the router) and the
+//! [`Placer`]/[`RouteRanker`]/[`RoutabilityOracle`] trait seam all live in the
+//! kernel ([`pcb_model::place`]); this module supplies the BUILT-IN implementations:
+//! [`LegalizingPlacer`] (force + legalize, the baseline + spring idioms),
+//! [`AnnealingPlacer`] (SA refine), [`FanoutPlacer`] (the structured radial
+//! fast-path), and [`GridAstarRanker`] (a grid-astar-backed default [`RouteRanker`]
+//! so the router stays injectable, not hardwired).
 
 use super::anneal::anneal_placement;
 use super::cost::{compute_hpwl, place_cost};
 use super::force::{force_layout, snap_caps_to_anchor_ring};
 use super::geometry::{
-    courtyard_margin, rotate_offset, rotated_copper_bbox, rotated_courtyard_half, snap_rotation,
+    courtyard_margin, rotated_copper_bbox, rotated_courtyard_half, snap_rotation,
 };
 use super::hints::{apply_grid_hints, unified_fanout_place};
 use super::legalize::{initial_grid, is_legal, legalize};
@@ -13,18 +21,21 @@ use super::model::{
     derive_nets, Placement, PlaceProblem, PlaceReport, PlaceResult, PlacementHints,
 };
 use super::pairs::decoupling_pairs;
-use crate::problem::{
-    Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem,
-};
-use std::collections::BTreeMap;
+use crate::problem::place::{Placer, RoutabilityOracle, RouteRanker};
+use crate::problem::{Point2, RouteProblem};
 
-/// Per-variant placement toggles, tried and selected by [`place_best`].
+/// [`to_route_problem`] now lives in the kernel ([`pcb_model::place`]) so a
+/// third-party placer can build a [`RouteProblem`] from its own placement without
+/// depending on `pcb-place`. Re-exported so callers are unchanged.
+pub use crate::problem::place::to_route_problem;
+
+/// Per-variant placement toggles a [`LegalizingPlacer`]/[`AnnealingPlacer`] carries.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct PlaceOpts {
     /// Pull each decoupling cap to hug its IC ([`super::pairs::decoupling_pairs`]) via
     /// the force spring, AND snap each cap to the nearest free ring slot around its
     /// anchor in the seed ([`snap_caps_to_anchor_ring`]). Off in the baseline, so
-    /// `place_best` keeps an unsnapped candidate to fall back to when snapping hurts
+    /// the oracle keeps an unsnapped candidate to fall back to when snapping hurts
     /// routability.
     pub(crate) decouple: bool,
     /// Bias edge-seeking by part aspect: a tall connector goes to a side edge so
@@ -37,20 +48,93 @@ pub(crate) struct PlaceOpts {
     pub(crate) anneal: bool,
 }
 
-/// Place `problem` and return the variant that ROUTES cleanest — the placement
-/// analog of [`crate::pipeline::route_auto`]. It runs the baseline placement plus
-/// idiom variants (decoupling co-placement, aspect-aware connector edges, both),
-/// routes each, and keeps whichever yields fewer routing faults (unrouted nets +
-/// geometry DRC violations), breaking ties by lower routed wirelength then HPWL.
-/// The baseline is always a candidate, so an idiom variant that does not actually
-/// help (e.g. one that scatters a board's power net) is automatically discarded —
-/// the oracle decides per board, so aggressive idioms can never regress a board
-/// they do not improve. The decouple idiom is where the cap-ring snap
-/// ([`snap_caps_to_anchor_ring`]) lives: the baseline runs UNSNAPPED and the
-/// `decouple` variant runs snapped, so the oracle picks snapped-vs-unsnapped per
-/// board (the snap tightens supply loops on some boards but hurts routability on
-/// others — having both as candidates lets the fault count decide).
-pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
+/// The force-directed-seed + spiral-legalize [`Placer`] — the always-legal baseline.
+/// With `PlaceOpts::default` it is the pure seed ([`LegalizingPlacer::baseline`]); the
+/// `decouple`/`aspect_edge` opts turn on the spring idioms (cap co-placement,
+/// aspect-aware connector edges) as extra oracle candidates. Never anneals.
+pub struct LegalizingPlacer {
+    pub(crate) opts: PlaceOpts,
+}
+
+impl LegalizingPlacer {
+    /// The baseline placer (pure force seed + legalize, no idioms).
+    pub fn baseline() -> Self {
+        Self { opts: PlaceOpts::default() }
+    }
+}
+
+impl Placer for LegalizingPlacer {
+    fn name(&self) -> &'static str {
+        "legalizing"
+    }
+    fn place(&self, problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
+        place_variant(problem, hints, self.opts)
+    }
+}
+
+/// The simulated-annealing-refine [`Placer`]: the force seed then [`anneal_placement`]
+/// (escape the springs' local minima, optimize the explicit layout cost). The
+/// oracle's main alternative to the baseline.
+pub struct AnnealingPlacer {
+    pub(crate) opts: PlaceOpts,
+}
+
+impl AnnealingPlacer {
+    /// The SA-refine placer, seeded from the baseline force layout.
+    pub fn new() -> Self {
+        Self { opts: PlaceOpts { anneal: true, aspect_edge: false, decouple: false } }
+    }
+}
+
+impl Default for AnnealingPlacer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Placer for AnnealingPlacer {
+    fn name(&self) -> &'static str {
+        "anneal"
+    }
+    fn place(&self, problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
+        place_variant(problem, hints, self.opts)
+    }
+}
+
+/// A [`RouteRanker`] backed by the FAST grid-astar router + the shared DRC lint —
+/// the built-in routability scorer the oracle uses by default. Lives here (not in
+/// the kernel) so the router stays INJECTABLE: a third party supplies its own
+/// `RouteRanker` to rank with its own router instead.
+pub struct GridAstarRanker;
+
+impl RouteRanker for GridAstarRanker {
+    /// `(faults, routed_wirelength)`: route with the fast naive router, count
+    /// unrouted nets + geometry DRC violations (Connectivity excluded — it is the
+    /// router's own unrouted signal, already counted in `failed`). Only relative
+    /// routability matters for variant selection, so the slow capacity-mesh router
+    /// on every candidate of a 70-part board is needlessly expensive (export
+    /// re-routes with route_auto).
+    fn faults(&self, rp: &RouteProblem) -> (usize, u64) {
+        let routed = crate::router::route(rp);
+        let geom = crate::lint::lint(rp, &routed.solution)
+            .iter()
+            .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
+            .count();
+        let wl: f64 = routed
+            .solution
+            .traces
+            .iter()
+            .flat_map(|t| t.path.windows(2).map(|w| w[0].dist(&w[1])))
+            .sum();
+        (routed.failed.len() + geom, (wl * 1000.0) as u64)
+    }
+}
+
+/// Build the routability oracle for THIS board: the baseline [`LegalizingPlacer`]
+/// (`placers[0]`, the exact-tie winner) plus the SA refine and, when they apply, the
+/// spring-idiom variants. The candidate set + order match the legacy `place_best`
+/// portfolio exactly, so the oracle's selection is byte-identical.
+fn board_oracle(problem: &PlaceProblem, hints: &PlacementHints) -> RoutabilityOracle {
     let has_decouple = !decoupling_pairs(problem).is_empty();
     let has_edge = !hints.edge_seek.is_empty();
 
@@ -58,57 +142,38 @@ pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult
     // The SA refinement subsumes the decouple/edge springs (its cost does
     // cohesion + edge-seek directly), so the annealed variant is the main
     // alternative; the spring variants stay as cheap extra candidates.
-    let mut opts = vec![PlaceOpts::default()];
-    opts.push(PlaceOpts { anneal: true, aspect_edge: has_edge, decouple: false });
+    let mut placers: Vec<Box<dyn Placer + Send + Sync>> =
+        vec![Box::new(LegalizingPlacer { opts: PlaceOpts::default() })];
+    placers.push(Box::new(AnnealingPlacer {
+        opts: PlaceOpts { anneal: true, aspect_edge: has_edge, decouple: false },
+    }));
     if has_decouple {
-        opts.push(PlaceOpts { decouple: true, aspect_edge: false, anneal: false });
+        placers.push(Box::new(LegalizingPlacer {
+            opts: PlaceOpts { decouple: true, aspect_edge: false, anneal: false },
+        }));
     }
     if has_edge {
-        opts.push(PlaceOpts { decouple: false, aspect_edge: true, anneal: false });
+        placers.push(Box::new(LegalizingPlacer {
+            opts: PlaceOpts { decouple: false, aspect_edge: true, anneal: false },
+        }));
     }
+    RoutabilityOracle::new(placers, Box::new(GridAstarRanker))
+}
 
-    let cost = |r: &PlaceResult| -> (usize, u64, u64) {
-        if !r.legal {
-            return (usize::MAX, u64::MAX, u64::MAX);
-        }
-        let rp = to_route_problem(problem, &r.placements);
-        // Rank variants with the FAST naive router — only relative routability
-        // matters here, and the slow capacity-mesh router on every variant of a
-        // 70-part board is needlessly expensive (export re-routes with route_auto).
-        let routed = crate::router::route(&rp);
-        let geom = crate::lint::lint(&rp, &routed.solution)
-            .iter()
-            .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
-            .count();
-        // PRIMARY: routing faults (an honest unrouted net + geometry violations) —
-        // a worse-routed layout is never chosen. SECONDARY: the layout cost (so the
-        // annealer's compaction / cohesion / silk-gap gains decide among equally-
-        // routable layouts). hpwl breaks final ties.
-        (
-            routed.failed.len() + geom,
-            (r.report.layout_cost * 1000.0) as u64,
-            (r.report.hpwl * 1000.0) as u64,
-        )
-    };
-
-    // Evaluate every variant IN PARALLEL — each is an independent, pure place+route
-    // (the SA seed is fixed, so a variant's result is deterministic regardless of
-    // thread/order). We then pick the lowest-cost; opts[0] is the baseline and wins
-    // exact ties via the index tie-break, preserving the previous baseline-first
-    // selection bit-for-bit. The slow part of a big board is these N variant
-    // place+rank-route passes, so fanning them across cores is the main speed lever.
-    use rayon::prelude::*;
-    let mut scored: Vec<(usize, (usize, u64, u64), PlaceResult)> = opts
-        .par_iter()
-        .enumerate()
-        .map(|(i, &o)| {
-            let r = place_variant(problem, hints, o);
-            let c = cost(&r);
-            (i, c, r)
-        })
-        .collect();
-    scored.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-    let mut best = scored.swap_remove(0).2;
+/// Place `problem` and return the variant that ROUTES cleanest — the placement
+/// analog of `route_auto`. It runs the baseline placement plus idiom variants
+/// (decoupling co-placement, aspect-aware connector edges), routes each via the
+/// injected [`GridAstarRanker`], and keeps whichever yields fewer routing faults
+/// (unrouted nets + geometry DRC violations), breaking ties by lower layout cost
+/// then HPWL. The baseline is always a candidate, so an idiom variant that does not
+/// actually help (e.g. one that scatters a board's power net) is automatically
+/// discarded — the [`RoutabilityOracle`] decides per board, so aggressive idioms can
+/// never regress a board they do not improve. The decouple idiom is where the
+/// cap-ring snap ([`snap_caps_to_anchor_ring`]) lives: the baseline runs UNSNAPPED
+/// and the `decouple` variant runs snapped, so the oracle picks snapped-vs-unsnapped
+/// per board.
+pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
+    let mut best = board_oracle(problem, hints).place(problem, hints);
     // Post-pass: seat mounting holes (corner_seek) at the board corners on the
     // WINNING placement. They carry no signal nets (GND-plane only), so moving
     // them never changes routing — which is why this must run AFTER the faults-
@@ -117,9 +182,40 @@ pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult
     best
 }
 
+/// The structured radial fan-out [`Placer`]: a board with a dominant fine-pitch IC
+/// gets the textbook layout (IC centred, decoupling caps + series resistors ringed
+/// in IC-pad order, connectors on the edges) via [`unified_fanout_place`],
+/// overlap-free by construction, then the oracle ([`place_best`]) seats the rest.
+/// When the fan-out doesn't apply (no dominant IC) or its result is illegal, it
+/// falls back to the oracle on the un-fanned board — so it is NEVER worse than the
+/// legalizing baseline. This is `place_board`'s built-in placer.
+pub struct FanoutPlacer;
+
+impl Placer for FanoutPlacer {
+    fn name(&self) -> &'static str {
+        "fanout"
+    }
+    fn place(&self, problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
+        // Stage 1 — structured fan-out fast-path.
+        let mut p = problem.clone();
+        let fanned = std::env::var("NO_UNIFIED").is_err() && unified_fanout_place(&mut p);
+        if !fanned {
+            apply_grid_hints(&mut p, hints);
+        }
+        let result = place_best(&p, hints);
+        // Stage 2 — optimize fallback when the fan-out couldn't seat legally.
+        if fanned && !result.legal {
+            let mut base = problem.clone();
+            apply_grid_hints(&mut base, hints);
+            return place_best(&base, hints);
+        }
+        result
+    }
+}
+
 /// THE PLACEMENT PIPELINE — the single visible entry the tool layer calls.
 ///
-/// All of force / anneal / fan-out are placement; this is the order they run in:
+/// All of force / anneal / fan-out are placement; this runs the [`FanoutPlacer`]:
 ///
 /// 1. **STRUCTURED fast-path** — [`unified_fanout_place`]: a board with a dominant
 ///    fine-pitch IC gets the textbook radial layout (IC centred, decoupling caps +
@@ -133,20 +229,7 @@ pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult
 /// `$NO_UNIFIED` forces stage 2 (pure `place_best`). Never worse than the legalizing
 /// baseline: a fan-out that can't seat legally is discarded in favour of `place_best`.
 pub fn place_board(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
-    // Stage 1 — structured fan-out fast-path.
-    let mut p = problem.clone();
-    let fanned = std::env::var("NO_UNIFIED").is_err() && unified_fanout_place(&mut p);
-    if !fanned {
-        apply_grid_hints(&mut p, hints);
-    }
-    let mut result = place_best(&p, hints);
-    // Stage 2 — optimize fallback when the fan-out couldn't seat legally.
-    if fanned && !result.legal {
-        let mut base = problem.clone();
-        apply_grid_hints(&mut base, hints);
-        result = place_best(&base, hints);
-    }
-    result
+    FanoutPlacer.place(problem, hints)
 }
 
 /// Move each `corner_seek` part to its nearest board CORNER that leaves the
@@ -305,7 +388,7 @@ pub(crate) fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts
     // 5. Verify legality by EXACT geometry — never trust the algorithm.
     let legal = is_legal(problem, &half, &copper_bbox, margin, &pos);
 
-    let hpwl = compute_hpwl(problem, &nets, &pos, &rotations);
+    let hpwl = compute_hpwl(problem, &nets, &pos);
     let pairs = decoupling_pairs(problem);
     let edge_idx: Vec<usize> = hints
         .edge_seek
@@ -323,99 +406,5 @@ pub(crate) fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts
             hpwl,
             layout_cost,
         },
-    }
-}
-
-/// Via geometry carried into the emitted [`RouteProblem`] (mirrors `problem.rs`
-/// defaults — the value the existing fixtures and oracle expect).
-const DEFAULT_VIA_DIAMETER: f64 = 0.6;
-const DEFAULT_VIA_DRILL: f64 = 0.3;
-
-/// Build a [`RouteProblem`] from a placement: every pad becomes a net-attributed
-/// obstacle (at its placed+rotated world position), and every multi-pin net
-/// becomes a [`Connection`] whose `points_to_connect` are the pad centers on the
-/// pad's layer. Board bounds and design rules are carried from the problem.
-///
-/// The emitted problem round-trips serde and is accepted by `route_auto` and the
-/// connectivity oracle unchanged (pads on nets, points on pads).
-pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> RouteProblem {
-    // Index placements by reference so we tolerate any order.
-    let place_by_ref: BTreeMap<&str, &Placement> =
-        placements.iter().map(|p| (p.reference.as_str(), p)).collect();
-
-    let mut obstacles: Vec<Obstacle> = Vec::new();
-    // Net → its pad world positions + layer (for connections). Deterministic order.
-    let mut net_points: BTreeMap<String, Vec<RoutePoint>> = BTreeMap::new();
-
-    for part in &problem.parts {
-        let Some(pl) = place_by_ref.get(part.reference.as_str()) else {
-            continue;
-        };
-        let rot = snap_rotation(pl.rotation);
-        for pad in &part.pads {
-            let off = rotate_offset(&pad.offset, rot);
-            let center = Point2 {
-                x: pl.at.x + off.x,
-                y: pl.at.y + off.y,
-            };
-            // Rotation swaps pad w/h for the quadrant cases.
-            let (w, h) = match rot {
-                90 | 270 => (pad.height, pad.width),
-                _ => (pad.width, pad.height),
-            };
-            let connected_to = pad.net.clone().into_iter().collect::<Vec<_>>();
-            obstacles.push(Obstacle {
-                kind: "rect".to_owned(),
-                layers: pad.layers.clone(),
-                center: center.clone(),
-                width: w,
-                height: h,
-                connected_to,
-            });
-            if let Some(net) = &pad.net {
-                // The connection point sits at the pad center on the pad's first
-                // copper layer (a thru-hole pad lists several; the route point
-                // anchors one — the via/oracle stitch the rest).
-                let layer = pad.layers.first().cloned().unwrap_or_else(LayerRef::top);
-                net_points
-                    .entry(net.clone())
-                    .or_default()
-                    .push(RoutePoint {
-                        x: center.x,
-                        y: center.y,
-                        layer,
-                    });
-            }
-        }
-    }
-
-    // Multi-pin nets → connections (single-pin nets have nothing to connect).
-    let connections: Vec<Connection> = net_points
-        .into_iter()
-        .filter(|(_, pts)| pts.len() >= 2)
-        .map(|(name, points_to_connect)| Connection {
-            name,
-            points_to_connect,
-        })
-        .collect();
-
-    RouteProblem {
-        layer_count: problem.layer_count,
-        min_trace_width: problem.min_trace_width,
-        obstacles,
-        connections,
-        bounds: problem.bounds.clone(),
-        clearance: problem.clearance,
-        // Via geometry: the defaults the existing fixtures use (problem.rs
-        // `default_via_diameter`/`default_via_drill`). v1 placement does not
-        // model via sizing, so it carries these constants.
-        via_diameter: DEFAULT_VIA_DIAMETER,
-        via_drill: DEFAULT_VIA_DRILL,
-        // Per-net widths are applied by the agent layer (route_board) after this, from
-        // the board's design rules; placement itself is width-agnostic.
-        net_widths: std::collections::BTreeMap::new(),
-        // Carry the custom outline so the router keeps copper inside the true shape.
-        outline: problem.outline.clone(),
-        escape_layers: Default::default(),
     }
 }

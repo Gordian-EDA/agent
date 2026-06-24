@@ -8,7 +8,7 @@ use super::model::{
     Edge, GroupHint, LockedAt, Part, PartPad, PlaceProblem, PlacementHints, Rect,
 };
 use super::pairs::series_pairs;
-use super::route::{place, place_variant, to_route_problem, PlaceOpts};
+use super::route::{place, place_board, place_variant, to_route_problem, PlaceOpts};
 use crate::connectivity;
 use crate::problem::{Bounds, LayerRef, Point2, RouteProblem};
 
@@ -810,4 +810,90 @@ fn empty_problem_is_legal() {
     assert!(res.legal);
     assert!(res.placements.is_empty());
     assert_eq!(res.report.hpwl, 0.0);
+}
+
+// ── oracle determinism: variant selection + final placement are byte-stable ──
+
+/// An IC-like anchor: `npads` pads, the first two on `pwr`/GND so a 2-pad cap on
+/// those nets pairs with it, the rest on this IC's own signal nets.
+fn ic8(reference: &str, pwr: &str) -> Part {
+    let pads = (0..8)
+        .map(|i| {
+            let net = match i {
+                0 => pwr.to_owned(),
+                1 => "GND".to_owned(),
+                _ => format!("{reference}_S{i}"),
+            };
+            PartPad {
+                number: format!("{}", i + 1),
+                offset: Point2 { x: (i as f64 - 4.0) * 0.5, y: 0.0 },
+                width: 0.3,
+                height: 0.3,
+                layers: top(),
+                net: Some(net),
+            }
+        })
+        .collect();
+    Part { reference: reference.into(), courtyard_w: 5.0, courtyard_h: 3.0, pads, locked: None }
+}
+
+/// THE BYTE-BEHAVIOR GUARD for the engine-SDK refactor: a board that exercises the
+/// FULL routability oracle — the baseline `LegalizingPlacer`, the `AnnealingPlacer`,
+/// the `decouple` variant (two ICs + bypass caps), and the edge variant (an
+/// edge-seeking connector). The pinned snapshot is the EXACT output of `place_board`
+/// at the pre-refactor commit (verified byte-for-byte against a worktree at that
+/// SHA), so any change to variant selection or final geometry trips this.
+#[test]
+fn oracle_placement_is_byte_identical_to_pre_refactor() {
+    let mut parts = vec![ic8("U1", "VCC1"), ic8("U2", "VCC2")];
+    for c in ["Ca0", "Ca1", "Ca2"] {
+        parts.push(r0603(c, Some("VCC1"), Some("GND")));
+    }
+    for c in ["Cb0", "Cb1", "Cb2"] {
+        parts.push(r0603(c, Some("VCC2"), Some("GND")));
+    }
+    parts.push(Part {
+        reference: "J1".into(),
+        courtyard_w: 2.54,
+        courtyard_h: 7.62,
+        pads: vec![
+            PartPad { number: "1".into(), offset: Point2 { x: 0.0, y: -2.54 }, width: 1.7, height: 1.7, layers: vec![LayerRef::top(), LayerRef::bottom()], net: Some("U1_S2".into()) },
+            PartPad { number: "2".into(), offset: Point2 { x: 0.0, y: 0.0 }, width: 1.7, height: 1.7, layers: vec![LayerRef::top(), LayerRef::bottom()], net: Some("U2_S2".into()) },
+            PartPad { number: "3".into(), offset: Point2 { x: 0.0, y: 2.54 }, width: 1.7, height: 1.7, layers: vec![LayerRef::top(), LayerRef::bottom()], net: Some("GND".into()) },
+        ],
+        locked: None,
+    });
+    parts.push(r0603("R1", Some("U1_S3"), Some("U2_S3")));
+    parts.push(r0603("R2", Some("U1_S4"), Some("U2_S4")));
+
+    let problem = PlaceProblem {
+        bounds: board(80.0, 50.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts,
+        outline: None,
+    };
+    let hints = PlacementHints {
+        groups: vec![GroupHint {
+            name: "conn".into(),
+            members: vec!["J1".into()],
+            region: None,
+            edge: Some(Edge::W),
+            grid: false,
+            surround: None,
+        }],
+        edge_seek: vec!["J1".into()],
+        corner_seek: vec![],
+    };
+
+    let res = place_board(&problem, &hints);
+    let got = serde_json::to_string(&res).unwrap();
+    const PINNED: &str = r#"{"placements":[{"reference":"U1","at":{"x":8.5,"y":13.5},"rotation":0},{"reference":"U2","at":{"x":14.0,"y":13.5},"rotation":0},{"reference":"Ca0","at":{"x":7.0,"y":9.5},"rotation":0},{"reference":"Ca1","at":{"x":10.5,"y":9.5},"rotation":0},{"reference":"Ca2","at":{"x":12.0,"y":7.5},"rotation":0},{"reference":"Cb0","at":{"x":14.0,"y":11.0},"rotation":0},{"reference":"Cb1","at":{"x":1.5,"y":8.5},"rotation":0},{"reference":"Cb2","at":{"x":8.0,"y":7.5},"rotation":0},{"reference":"J1","at":{"x":4.0,"y":13.5},"rotation":0},{"reference":"R1","at":{"x":15.5,"y":16.0},"rotation":0},{"reference":"R2","at":{"x":10.0,"y":16.0},"rotation":0}],"legal":true,"report":{"overlapsResolved":9,"outOfBoundsClamps":0,"hpwl":88.92999999999999,"layoutCost":518.962835441901}}"#;
+    assert_eq!(got, PINNED, "oracle placement drifted from the pre-refactor byte-for-byte snapshot");
+
+    // And it is reproducible (the oracle's parallel evaluation is order-independent).
+    let again = serde_json::to_string(&place_board(&problem, &hints)).unwrap();
+    assert_eq!(got, again, "place_board must be deterministic across runs");
 }

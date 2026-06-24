@@ -1,12 +1,16 @@
-//! The placement cost the annealer minimizes (and the [`crate::placement::place_best`]
-//! selection key), plus HPWL. The cost carries a SILK-GAP term so parts keep room for
-//! their reference designators (the recurring critic complaint).
+//! The placement cost the annealer minimizes (and the routability oracle's
+//! secondary selection key). The cost carries a SILK-GAP term so parts keep room
+//! for their reference designators (the recurring critic complaint). HPWL — the
+//! cheap quality number every engine reports — lives in the kernel
+//! ([`pcb_model::place::compute_hpwl`]) and is re-exported here.
 
 use super::geometry::{
-    courtyard_overlap, part_keepout_overlap, pad_world, rotate_offset,
+    courtyard_overlap, part_keepout_overlap, rotate_offset,
 };
 use super::model::{LogicalNet, PlaceProblem};
 use crate::problem::Point2;
+
+pub(crate) use crate::problem::place::compute_hpwl;
 
 /// SA cost weights (mm units), scaled like the schematic floorplan cost.
 pub(crate) const SA_OVERLAP_W: f64 = 1000.0; // hard: courtyard collision
@@ -138,33 +142,4 @@ pub(crate) fn place_cost(
         cost += SA_EDGE_W * dl.min(dr).min(dt).min(db).max(0.0);
     }
     cost
-}
-
-/// Half-perimeter wirelength over net bounding boxes (mm): for each multi-pin
-/// net, `(maxX-minX) + (maxY-minY)` of its pad world positions, summed.
-pub(crate) fn compute_hpwl(
-    problem: &PlaceProblem,
-    nets: &[LogicalNet],
-    pos: &[Point2],
-    _rot: &[i32],
-) -> f64 {
-    let mut total = 0.0;
-    for net in nets {
-        if net.pins.len() < 2 {
-            continue;
-        }
-        let mut min_x = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-        for pin in &net.pins {
-            let w = pad_world(problem, pos, pin);
-            min_x = min_x.min(w.x);
-            max_x = max_x.max(w.x);
-            min_y = min_y.min(w.y);
-            max_y = max_y.max(w.y);
-        }
-        total += (max_x - min_x) + (max_y - min_y);
-    }
-    total
 }

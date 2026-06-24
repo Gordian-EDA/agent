@@ -25,25 +25,35 @@
 //!   3. post-pass: corner seating for mounting holes (corner_seek).
 //! ```
 //!
+//! ## The engine-SDK seam
+//!
+//! The placement TRAIT seam — the [`Placer`] contract, the [`PlaceProblem`] it
+//! reads, the [`PlaceResult`] it returns, the [`RouteRanker`] evaluator, and the
+//! [`RoutabilityOracle`] selector — lives in the KERNEL ([`pcb_model::place`]) so a
+//! third party implements it against `pcb-model` ALONE. This crate supplies the
+//! BUILT-IN implementations: [`LegalizingPlacer`], [`AnnealingPlacer`],
+//! [`FanoutPlacer`], and the grid-astar-backed [`GridAstarRanker`]. The model types
+//! are re-exported VERBATIM so every external `pcb_place::placement::…` path resolves
+//! unchanged.
+//!
 //! ## Module layout
 //!
-//! - [`model`]   — the problem/result types and the derived-net model
-//!   ([`derive_nets`]; pads are the single canonical net source).
-//! - [`geometry`] — the shared scaffold: grid snap, courtyard overlap, rotation,
-//!   edge affinity, design constants.
-//! - [`pairs`]   — co-placement detection (decoupling caps / series taps).
+//! - [`model`]   — re-exports the kernel problem/result types + the derived-net model.
+//! - [`geometry`] — the engine-PRIVATE scaffold (grid snap, edge affinity), with the
+//!   shared kernel geometry re-exported.
+//! - [`pairs`]   — re-exports kernel co-placement detection + the engine-private glue.
 //! - [`hints`]   — hint-driven & structured LOCKING (grid, surround, edge-lock,
 //!   fan-out rings, the unified fan-out fast-path).
 //! - [`force`]   — the force-directed seed + the cap-to-anchor-ring snap.
-//! - [`cost`]    — the SA cost the annealer minimizes (and `place_best` selects on)
-//!   + HPWL.
+//! - [`cost`]    — the SA cost the annealer minimizes (and the oracle selects on);
+//!   re-exports the kernel HPWL.
 //! - [`anneal`]  — the SA driver + its deterministic `SaRng`.
-//! - [`legalize`] — the legalizer + the exact-geometry legality check.
+//! - [`legalize`] — the legalizer driver; re-exports the kernel legality check.
 //! - [`route`]   — the pipeline entries ([`place`], [`place_best`], [`place_board`])
-//!   and [`to_route_problem`].
+//!   + the built-in [`Placer`]s and the [`GridAstarRanker`].
 //!
-//! Routing for the ranking comes from `grid-astar`; DRC from `drc-lint`; shared
-//! geometry types from `pcb-model`.
+//! Routing for the ranking comes from `grid-astar`; DRC from `drc-lint`; the engine
+//! kernel + shared geometry from `pcb-model`.
 
 mod anneal;
 mod cost;
@@ -55,6 +65,12 @@ mod model;
 mod pairs;
 mod route;
 
+// The engine-SDK seam lives in the kernel — re-exported so a `pcb-place` caller can
+// reach the trait + oracle without a second `pcb_model::place` import.
+pub use crate::problem::place::{
+    compute_hpwl, is_legal, Capabilities, Placer, RouteRanker, RoutabilityOracle,
+};
+
 // Public surface — re-exported VERBATIM so every external `pcb_place::placement::…`
 // path resolves unchanged.
 pub use model::{
@@ -64,6 +80,7 @@ pub use model::{
 pub use pairs::{decoupling_pairs, series_fanout_order, series_pairs};
 pub use hints::{apply_edge_lock, apply_grid_hints, apply_surround, fan_out_rings, unified_fanout_place};
 pub use route::{place, place_best, place_board, to_route_problem};
+pub use route::{AnnealingPlacer, FanoutPlacer, GridAstarRanker, LegalizingPlacer};
 
 #[cfg(test)]
 mod tests;

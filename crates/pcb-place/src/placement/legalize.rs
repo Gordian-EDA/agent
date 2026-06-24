@@ -1,15 +1,19 @@
-//! Legalizer + the exact-geometry legality check.
+//! The legalizer (the spiral overlap-resolver + deterministic initial grid). The
+//! exact-geometry legality check ([`is_legal`]) lives in the kernel
+//! ([`pcb_model::place`]) so a third-party placer self-verifies with it; it is
+//! re-exported here.
 //!
 //! `legalize` snaps movable parts to the grid then resolves residual courtyard
 //! overlap by a deterministic nearest-free-cell spiral; `is_legal` then RE-VERIFIES
 //! the result in exact geometry — the algorithm's verdict is never trusted.
 
 use super::geometry::{
-    clamp_into_bounds, courtyard_overlap, fits_in_bounds, part_keepout_overlap, rect_overlap,
-    snap, PLACE_GRID, SPIRAL_MAX_RING, EDGE_CLEAR_PLACE_MM,
+    clamp_into_bounds, fits_in_bounds, rect_overlap, snap, PLACE_GRID, SPIRAL_MAX_RING,
 };
 use super::model::PlaceProblem;
 use crate::problem::Point2;
+
+pub(crate) use crate::problem::place::is_legal;
 
 /// Outcome counters from [`legalize`].
 pub(crate) struct LegalizeStats {
@@ -192,63 +196,4 @@ pub(crate) fn initial_grid(problem: &PlaceProblem, half: &[(f64, f64)]) -> Vec<P
         pos[i] = p;
     }
     pos
-}
-
-/// The placement analog of the lint: re-verify in exact geometry that no two
-/// courtyards overlap (with margin) and every part is in bounds. Never trusts
-/// the legalizer.
-pub(crate) fn is_legal(
-    problem: &PlaceProblem,
-    half: &[(f64, f64)],
-    copper_bbox: &[(f64, f64, f64, f64)],
-    margin: f64,
-    pos: &[Point2],
-) -> bool {
-    let n = problem.parts.len();
-    for i in 0..n {
-        if !fits_in_bounds(&pos[i], &problem.bounds, half[i]) {
-            return false;
-        }
-        // On a custom outline, a part's CENTRE must be inside the true polygon (keeps parts out
-        // of a star's concave notches the bbox alone allows), AND its PAD (copper) bounding box,
-        // grown by the edge clearance, must be inside too — a part's placed pads are copper the
-        // router never relocates, so an edge-seeking connector whose centre is inside but whose
-        // far pad overhangs the edge would otherwise ship a copper_edge_clearance fault. The
-        // COURTYARD may still overhang (only copper is constrained), preserving the mounting-hole
-        // -in-a-notch allowance.
-        if let Some(poly) = &problem.outline {
-            if !crate::problem::point_in_polygon(&pos[i], poly) {
-                return false;
-            }
-            let (xmin, ymin, xmax, ymax) = copper_bbox[i];
-            let ec = EDGE_CLEAR_PLACE_MM;
-            for (dx, dy) in [
-                (xmin - ec, ymin - ec),
-                (xmax + ec, ymin - ec),
-                (xmax + ec, ymax + ec),
-                (xmin - ec, ymax + ec),
-            ] {
-                let c = Point2 { x: pos[i].x + dx, y: pos[i].y + dy };
-                if !crate::problem::point_in_polygon(&c, poly) {
-                    return false;
-                }
-            }
-        }
-        // A part overlapping a signal-layer keep-out is illegal (its pads can't route).
-        for k in &problem.keepouts {
-            let (ox, oy) = part_keepout_overlap(&pos[i], half[i], k);
-            if ox > 1e-9 && oy > 1e-9 {
-                return false;
-            }
-        }
-        for j in (i + 1)..n {
-            let (ox, oy) = courtyard_overlap(pos, half, margin, i, j);
-            // Strictly-positive overlap on BOTH axes is a real courtyard
-            // collision. Touching exactly at the margin (overlap == 0) is legal.
-            if ox > 1e-9 && oy > 1e-9 {
-                return false;
-            }
-        }
-    }
-    true
 }

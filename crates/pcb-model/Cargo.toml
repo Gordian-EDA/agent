@@ -9,6 +9,7 @@ description = "Shared geometry + place/route problem & solution types for the PC
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 uuid = { workspace = true }
+rayon.workspace = true
 
 [dev-dependencies]
 serde_json = { workspace = true }
