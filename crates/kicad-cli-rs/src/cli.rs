@@ -238,6 +238,172 @@ impl KicadCli {
             )),
         }
     }
+
+    /// Run `kicad-cli pcb export gerbers` on `pcb`, writing one Gerber per copper
+    /// + technical layer into `out_dir`, and return the produced files.
+    ///
+    /// With no `--layers` KiCAD plots its default fabrication set (all enabled
+    /// copper layers plus the mask/silk/paste/edge technical layers) using the
+    /// board's own layer stack, so a 2- or 4-layer board each gets the right
+    /// number of `.gbr` files. We pass `--no-protel-ext` so the layers carry
+    /// descriptive KiCad extensions (`*.gbr`) instead of the legacy Protel ones
+    /// (`.gtl`/`.gbl`/…), which keeps the bundle self-describing. Returns the
+    /// sorted list of `*.gbr` files in `out_dir`; `Err` on execution failure
+    /// (binary missing, board failed to load) or if no Gerber was produced.
+    pub fn export_gerbers(&self, pcb: &Path, out_dir: &Path) -> io::Result<Vec<PathBuf>> {
+        std::fs::create_dir_all(out_dir)?;
+        let output = Command::new(&self.cli_path)
+            .args(["pcb", "export", "gerbers", "--no-protel-ext"])
+            .arg("--output")
+            .arg(out_dir)
+            .arg(pcb)
+            .output()?;
+        check_status(&output, "kicad-cli pcb export gerbers")?;
+        let gerbers = files_with_ext(out_dir, "gbr")?;
+        if gerbers.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no Gerber files produced in {}", out_dir.display()),
+            ));
+        }
+        Ok(gerbers)
+    }
+
+    /// Run `kicad-cli pcb export drill` on `pcb`, writing the Excellon drill
+    /// file(s) into `out_dir`, and return the produced files.
+    ///
+    /// The default format is Excellon (`.drl`). `--excellon-separate-th` emits
+    /// independent files for plated (PTH) and non-plated (NPTH) holes, which is
+    /// what fabs expect, and `--generate-map` adds a human-readable drill map
+    /// (`*-drl_map.pdf`) for the bundle. Returns the sorted list of `*.drl` files;
+    /// `Err` on execution failure or if no drill file was produced.
+    pub fn export_drill(&self, pcb: &Path, out_dir: &Path) -> io::Result<Vec<PathBuf>> {
+        std::fs::create_dir_all(out_dir)?;
+        let output = Command::new(&self.cli_path)
+            .args([
+                "pcb",
+                "export",
+                "drill",
+                "--format",
+                "excellon",
+                "--excellon-separate-th",
+                "--generate-map",
+            ])
+            .arg("--output")
+            // `drill` wants a directory and requires the trailing separator.
+            .arg(with_trailing_sep(out_dir))
+            .arg(pcb)
+            .output()?;
+        check_status(&output, "kicad-cli pcb export drill")?;
+        let drills = files_with_ext(out_dir, "drl")?;
+        if drills.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no drill files produced in {}", out_dir.display()),
+            ));
+        }
+        Ok(drills)
+    }
+
+    /// Run `kicad-cli pcb export pos` on `pcb`, writing the pick-and-place
+    /// (component position) file to `out_file`, and return it.
+    ///
+    /// CSV is emitted (machine-readable, the format every assembly house ingests)
+    /// covering `both` board sides, in mm. `Err` on execution failure or if the
+    /// file was not written.
+    pub fn export_pos(&self, pcb: &Path, out_file: &Path) -> io::Result<PathBuf> {
+        if let Some(parent) = out_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let output = Command::new(&self.cli_path)
+            .args(["pcb", "export", "pos", "--format", "csv", "--side", "both", "--units", "mm"])
+            .arg("--output")
+            .arg(out_file)
+            .arg(pcb)
+            .output()?;
+        check_status(&output, "kicad-cli pcb export pos")?;
+        if out_file.is_file() {
+            Ok(out_file.to_path_buf())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("position file not produced at {}", out_file.display()),
+            ))
+        }
+    }
+
+    /// Run `kicad-cli sch export bom` on `schematic`, writing the bill of
+    /// materials CSV to `out_file`, and return it.
+    ///
+    /// BOM is a SCHEMATIC export (`sch export bom`) — the PCB carries no value/
+    /// part metadata, only footprints — so a fab bundle needs the source
+    /// `.kicad_sch`. We take KiCAD's default grouped CSV (Reference/Value/
+    /// Footprint/Qty/DNP), grouped by value+footprint, and exclude do-not-populate
+    /// parts so the BOM reflects what is actually assembled. `Err` on execution
+    /// failure or if the file was not written.
+    pub fn export_bom(&self, schematic: &Path, out_file: &Path) -> io::Result<PathBuf> {
+        if let Some(parent) = out_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let output = Command::new(&self.cli_path)
+            .args(["sch", "export", "bom", "--group-by", "Value,Footprint", "--exclude-dnp"])
+            .arg("--output")
+            .arg(out_file)
+            .arg(schematic)
+            .output()?;
+        check_status(&output, "kicad-cli sch export bom")?;
+        if out_file.is_file() {
+            Ok(out_file.to_path_buf())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("BOM not produced at {}", out_file.display()),
+            ))
+        }
+    }
+}
+
+/// Fail with stderr (or a generic message) when a `kicad-cli` invocation exits
+/// nonzero. Shared by the plain (non-report) export wrappers, which — unlike ERC/
+/// DRC — have no JSON report to key success on, so the exit status IS the signal.
+fn check_status(output: &std::process::Output, what: &str) -> io::Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    let detail = if stderr.is_empty() {
+        format!("{what} failed")
+    } else {
+        format!("{what} failed: {stderr}")
+    };
+    Err(io::Error::new(io::ErrorKind::InvalidData, detail))
+}
+
+/// The sorted (lexicographic, deterministic regardless of fs order) absolute
+/// paths of files in `dir` whose extension equals `ext` (case-insensitive).
+fn files_with_ext(dir: &Path, ext: &str) -> io::Result<Vec<PathBuf>> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|x| x.to_str())
+                .map(|x| x.eq_ignore_ascii_case(ext))
+                .unwrap_or(false)
+        })
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
+/// `dir` with a guaranteed trailing path separator. `kicad-cli pcb export drill`
+/// treats its `--output` as a directory only when it ends in a separator;
+/// without one it writes a file literally named after the directory.
+fn with_trailing_sep(dir: &Path) -> PathBuf {
+    let mut s = dir.as_os_str().to_os_string();
+    s.push(std::path::MAIN_SEPARATOR_STR);
+    PathBuf::from(s)
 }
 
 /// A parsed `kicad-cli sch export netlist --format kicadxml` result: the
