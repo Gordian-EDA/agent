@@ -43,7 +43,7 @@
 //! reported as a [`FailedNet`] carrying the leaf id — never panicked, never
 //! silently dropped. The result is serializable and byte-stable across runs.
 
-use crate::astar::{self, AStarCosts, MoveSet, State};
+use crate::astar::{self, AStarCosts, State, DIAG_COST};
 use crate::crossing::{CellJob, CrossingAssignment, Terminal, TerminalKind};
 use crate::grid::{self, RouteGrid};
 use crate::mesh::{CapacityMesh, LeafId};
@@ -155,8 +155,11 @@ pub fn route_cells(
     // on every layer before placing a via (conservatively covers the Euclidean disc
     // the lint measures).
     let via_clear_radius_cells = (via_halo / pitch).ceil() as usize;
+    // Per-cell jobs route octilinearly (diagonals enabled): each job is confined
+    // to its leaf window and the corner guard + per-cell occupancy keep 45° runs
+    // legal.
     let costs = AStarCosts {
-        moves: MoveSet::Octilinear,
+        diag: DIAG_COST,
         via_clear_radius_cells,
         via: 60,
         ..AStarCosts::default()
@@ -325,11 +328,16 @@ pub fn route_cells(
         // can dip under clearance (the exact lint catches it). Orthogonal traces are
         // axis-aligned: two of them one track pitch apart stay exactly legal under
         // the same halo, and the saturated wall is crossed orthogonally anyway.
+        // `..costs` inherits the per-cell DIAG_COST, so `diag` MUST be set back to
+        // the `u32::MAX` orthogonal sentinel explicitly — the finisher's Euclidean
+        // cell-centre halo guards cell centres, not the diagonal segment bodies
+        // between parallel 45° runs (which would dip under clearance → DRC faults).
         let finish_costs = AStarCosts {
-            moves: MoveSet::Orthogonal,
+            diag: u32::MAX,
             via_clear_radius_cells: (via_halo / finish_pitch).ceil() as usize,
             ..costs
         };
+        debug_assert_eq!(finish_costs.diag, u32::MAX, "finisher must stay orthogonal");
         // Repair the failed nets in slice-1 net-rank order (lower half-perimeter
         // first — the short local nets that the per-cell pass laid around, matching
         // the order the global stage negotiated). Each net marks its copper before
@@ -1222,6 +1230,24 @@ mod tests {
                 "net {name} produced copper"
             );
         }
+    }
+
+    /// The hotspot-repair finisher must stay orthogonal: it builds `finish_costs`
+    /// with the `diag = u32::MAX` sentinel, guarded by a `debug_assert` that this
+    /// test (a debug build) makes live. `congested` exercises the finisher (its
+    /// per-cell pass leaves failures the finisher repairs), so a finisher that
+    /// drifted to octilinear (`diag = DIAG_COST`) would panic here. We also assert
+    /// the run completes — the finisher ran without tripping its own invariant.
+    #[test]
+    fn finisher_stays_orthogonal() {
+        let p = load("congested.json");
+        let r = crate::pipeline::route_detailed(&p);
+        // Either it repaired nets or reported honest failures; either way the
+        // finisher's `debug_assert_eq!(finish_costs.diag, u32::MAX)` held.
+        assert!(
+            r.failed.len() <= p.connections.len(),
+            "finisher produced a sane result"
+        );
     }
 
     /// Determinism: serialize twice, compare byte-for-byte.

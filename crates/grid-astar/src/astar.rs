@@ -1,18 +1,25 @@
 //! Grid A*: shortest net-aware path through a [`RouteGrid`] for one connection.
 //!
+//! One generic 8-way (KiCad `DIRECTION_45`-style) planar enumerator,
+//! [`MOVES8`], drives every search; orthogonal routing is the degenerate case
+//! where the 4 diagonals are masked off by an infinite cost — there is no
+//! separate code path.
+//!
 //! State is 3-D `(layer, ix, iy)`. Moves:
-//! - **Step** — to a 4-neighbour cell on the same layer, cost [`STEP_COST`],
-//!   plus [`bend_cost`](AStarCosts::bend) when the heading changes from the
-//!   move that entered the current cell (keeps routes straight).
-//! - **Diagonal step** — to one of the 4 diagonal neighbours on the same layer,
-//!   cost [`AStarCosts::diag`] (= `ceil(√2 × STEP_COST) = 2` in the integer cost
-//!   scale), enabled only when [`AStarCosts::moves`] is [`MoveSet::Octilinear`].
-//!   *Corner-cutting is forbidden*: a diagonal into `(ix±1, iy±1)` is allowed
-//!   only when **both** orthogonally-adjacent cells (`(ix±1, iy)` and
-//!   `(ix, iy±1)`) are also free for this connection, so the 45° corner keeps
-//!   the full clearance two abutting tracks would. Slice-1 callers default to
-//!   [`MoveSet::Orthogonal`] and never see diagonals — their behaviour is
-//!   bit-identical to before this move was added.
+//! - **Step** — to one of the 8 same-layer neighbours in [`MOVES8`]. An
+//!   orthogonal step costs [`STEP_COST`]; a diagonal step costs
+//!   [`AStarCosts::diag`] (= `ceil(√2 × STEP_COST) = 2` in the integer cost
+//!   scale). Either kind adds [`bend`](AStarCosts::bend) when the heading
+//!   changes from the move that entered the current cell (keeps routes
+//!   straight). Diagonals are *enabled* iff `costs.diag != u32::MAX`; the
+//!   sentinel `u32::MAX` ("diagonals disabled") is the orthogonal mode and is
+//!   pruned before any cost arithmetic. *Corner-cutting is forbidden*: a
+//!   diagonal into `(ix±1, iy±1)` is allowed only when **both**
+//!   orthogonally-adjacent cells (`(ix±1, iy)` and `(ix, iy±1)`) are also free
+//!   for this connection, so the 45° corner keeps the full clearance two
+//!   abutting tracks would. Orthogonal-mode callers
+//!   ([`AStarCosts::default`], the finisher) set `diag = u32::MAX` and never
+//!   see diagonals — their behaviour is bit-identical to a 4-neighbour search.
 //! - **Via** — change layer in place, cost [`AStarCosts::via`]. Allowed only
 //!   where the cell is free for this connection on *every* layer (the
 //!   conservative through-via barrel check; correct for the v1 2-layer scope).
@@ -46,17 +53,6 @@ pub const STEP_COST: u32 = 1;
 /// never under-counting.
 pub const DIAG_COST: u32 = 2;
 
-/// Which neighbour moves the planar search may use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MoveSet {
-    /// 4-neighbour (N/S/E/W) only — the slice-1 baseline. Bit-identical to the
-    /// router before diagonals existed.
-    Orthogonal,
-    /// 4 orthogonal + 4 diagonal neighbours (45° routing), corner-cutting
-    /// forbidden. Used by the per-cell detailed router ([`crate::detail`]).
-    Octilinear,
-}
-
 /// Tunable A* movement costs, in grid-step units.
 #[derive(Debug, Clone, Copy)]
 pub struct AStarCosts {
@@ -64,12 +60,14 @@ pub struct AStarCosts {
     pub bend: u32,
     /// Cost of a layer change (a via).
     pub via: u32,
-    /// Cost of a single diagonal step (only used when `moves` is
-    /// [`MoveSet::Octilinear`]). Defaults to [`DIAG_COST`].
+    /// Cost of a single diagonal step, **and** the diagonal enable switch. A
+    /// finite value (e.g. [`DIAG_COST`]) enables octilinear (8-way) routing; the
+    /// sentinel `u32::MAX` means "diagonals disabled" — orthogonal (4-way) mode,
+    /// where each diagonal move in [`MOVES8`] is pruned before any cost
+    /// arithmetic, so no diagonal edge is ever relaxed and the search is
+    /// bit-identical to a pure 4-neighbour A*. [`AStarCosts::default`] is
+    /// `u32::MAX` (orthogonal); the per-cell detailed router sets [`DIAG_COST`].
     pub diag: u32,
-    /// Which neighbour moves the planar search uses. Defaults to
-    /// [`MoveSet::Orthogonal`] so slice-1 callers are unchanged.
-    pub moves: MoveSet,
     /// Clearance radius (in grid cells) a via barrel must keep clear of foreign
     /// copper on *every* layer before the search may place a via at a cell. `0`
     /// (the default) means only the via cell itself is checked — bit-identical to
@@ -110,13 +108,13 @@ pub struct AStarCosts {
 
 impl Default for AStarCosts {
     fn default() -> Self {
-        // Per the design constants: via ≈ 25 grid steps, bend ≈ 2 steps. The
-        // default move set is orthogonal so the slice-1 router is unchanged.
+        // Per the design constants: via ≈ 25 grid steps, bend ≈ 2 steps.
+        // `diag = u32::MAX` disables diagonals (orthogonal mode), so the
+        // default router is a pure 4-neighbour search, unchanged from slice 1.
         Self {
             bend: 2,
             via: 25,
-            diag: DIAG_COST,
-            moves: MoveSet::Orthogonal,
+            diag: u32::MAX,
             via_clear_radius_cells: 0,
             allow_via: true,
             plane_mask: 0,
@@ -155,6 +153,35 @@ enum Heading {
     /// Arrived by a via (layer change) — the next planar step is not a bend.
     Via,
 }
+
+/// One same-layer neighbour move: the heading it arrives by, its cell delta,
+/// and whether it is a diagonal (`dx != 0 && dy != 0`, the grid analog of
+/// KiCad `DIRECTION_45::IsDiagonal`).
+struct Move8 {
+    dir: Heading,
+    dx: isize,
+    dy: isize,
+    diagonal: bool,
+}
+
+/// The 8 planar neighbour moves, **4 orthogonal then 4 diagonal**. This order
+/// is load-bearing: it is the exact visitation order of the former two-loop
+/// (orthogonal-then-diagonal) search and matches the [`Heading`] `Ord`, so the
+/// `(f, g, heading, state)` heap tie-break — and therefore the chosen path —
+/// is unchanged. Do **not** reorder or interleave. Orthogonal mode
+/// (`costs.diag == u32::MAX`) prunes the 4 diagonal entries before any cost
+/// arithmetic, leaving the 4 orthogonal entries visited exactly as a
+/// 4-neighbour search would.
+const MOVES8: [Move8; 8] = [
+    Move8 { dir: Heading::PlusX, dx: 1, dy: 0, diagonal: false },
+    Move8 { dir: Heading::MinusX, dx: -1, dy: 0, diagonal: false },
+    Move8 { dir: Heading::PlusY, dx: 0, dy: 1, diagonal: false },
+    Move8 { dir: Heading::MinusY, dx: 0, dy: -1, diagonal: false },
+    Move8 { dir: Heading::PlusXPlusY, dx: 1, dy: 1, diagonal: true },
+    Move8 { dir: Heading::PlusXMinusY, dx: 1, dy: -1, diagonal: true },
+    Move8 { dir: Heading::MinusXPlusY, dx: -1, dy: 1, diagonal: true },
+    Move8 { dir: Heading::MinusXMinusY, dx: -1, dy: -1, diagonal: true },
+];
 
 /// An inclusive cell-index rectangle the planar search may not leave. Used by the
 /// detailed router to confine a job's A* to its leaf window while the underlying
@@ -269,10 +296,17 @@ pub fn search_bounded(
         }
         let g_cur = g[cur_id];
 
-        // Orthogonal planar steps.
-        for (dir, dx, dy) in NEIGHBORS {
-            let nx = cur.ix as isize + dx;
-            let ny = cur.iy as isize + dy;
+        // Planar steps over the 8-way neighbourhood. Orthogonal cost STEP_COST;
+        // diagonal cost `costs.diag`, with `u32::MAX` disabling diagonals
+        // (orthogonal mode) — pruned here, before any bounds/clearance/relax, so
+        // a disabled diagonal never perturbs a g-score or the heap.
+        for m in &MOVES8 {
+            let base = if m.diagonal { costs.diag } else { STEP_COST };
+            if base == u32::MAX {
+                continue;
+            }
+            let nx = cur.ix as isize + m.dx;
+            let ny = cur.iy as isize + m.dy;
             if nx < 0 || ny < 0 || nx >= grid.nx as isize || ny >= grid.ny as isize {
                 continue;
             }
@@ -293,70 +327,26 @@ pub fn search_bounded(
             {
                 continue;
             }
-            let bend = if matches!(heading, Heading::None | Heading::Via) || heading == dir {
+            // Corner-cutting forbidden (diagonals only): a diagonal into
+            // `(ix+dx, iy+dy)` is allowed only when both bridging orthogonal
+            // cells are free for this connection, so the 45° corner keeps full
+            // clearance. Orthogonal moves are never subjected to this.
+            if m.diagonal {
+                let side_x = grid.is_free_for(cur.layer, (cur.ix as isize + m.dx) as usize, cur.iy, conn);
+                let side_y = grid.is_free_for(cur.layer, cur.ix, (cur.iy as isize + m.dy) as usize, conn);
+                if !side_x || !side_y {
+                    continue;
+                }
+            }
+            let bend = if matches!(heading, Heading::None | Heading::Via) || heading == m.dir {
                 0
             } else {
                 costs.bend
             };
-            let tentative = g_cur + STEP_COST + bend;
+            let tentative = g_cur.saturating_add(base).saturating_add(bend);
             relax(
-                next, tentative, dir, cur_id, &mut g, &mut came_from, &mut open, &heuristic, sid,
+                next, tentative, m.dir, cur_id, &mut g, &mut came_from, &mut open, &heuristic, sid,
             );
-        }
-
-        // Diagonal planar steps (octilinear search only). Corner-cutting is
-        // forbidden: a diagonal is allowed only when both orthogonally-adjacent
-        // cells are free for this connection, keeping the 45° corner clear.
-        if costs.moves == MoveSet::Octilinear {
-            for (dir, dx, dy) in DIAGONALS {
-                let nx = cur.ix as isize + dx;
-                let ny = cur.iy as isize + dy;
-                if nx < 0 || ny < 0 || nx >= grid.nx as isize || ny >= grid.ny as isize {
-                    continue;
-                }
-                if !in_bounds(nx as usize, ny as usize) {
-                    continue;
-                }
-                let next = State {
-                    layer: cur.layer,
-                    ix: nx as usize,
-                    iy: ny as usize,
-                };
-                if !grid.is_free_for(next.layer, next.ix, next.iy, conn) {
-                    continue;
-                }
-                if costs.trace_clear_radius_cells > 0
-                    && !planar_clear(grid, conn, next.layer, next.ix, next.iy, costs.trace_clear_radius_cells)
-                {
-                    continue;
-                }
-                // Both orthogonal neighbours bridging this diagonal must be free
-                // (no corner-cutting through a blocked orthogonal pair).
-                let side_x = grid.is_free_for(
-                    cur.layer,
-                    (cur.ix as isize + dx) as usize,
-                    cur.iy,
-                    conn,
-                );
-                let side_y = grid.is_free_for(
-                    cur.layer,
-                    cur.ix,
-                    (cur.iy as isize + dy) as usize,
-                    conn,
-                );
-                if !side_x || !side_y {
-                    continue;
-                }
-                let bend = if matches!(heading, Heading::None | Heading::Via) || heading == dir {
-                    0
-                } else {
-                    costs.bend
-                };
-                let tentative = g_cur + costs.diag + bend;
-                relax(
-                    next, tentative, dir, cur_id, &mut g, &mut came_from, &mut open, &heuristic, sid,
-                );
-            }
         }
 
         // Via: change layer in place, if the barrel — and its clearance halo — is
@@ -404,22 +394,6 @@ pub fn search_bounded(
 
     None
 }
-
-/// 4-neighbourhood as `(heading, dx, dy)`.
-const NEIGHBORS: [(Heading, isize, isize); 4] = [
-    (Heading::PlusX, 1, 0),
-    (Heading::MinusX, -1, 0),
-    (Heading::PlusY, 0, 1),
-    (Heading::MinusY, 0, -1),
-];
-
-/// 4 diagonal neighbours as `(heading, dx, dy)` (octilinear search only).
-const DIAGONALS: [(Heading, isize, isize); 4] = [
-    (Heading::PlusXPlusY, 1, 1),
-    (Heading::PlusXMinusY, 1, -1),
-    (Heading::MinusXPlusY, -1, 1),
-    (Heading::MinusXMinusY, -1, -1),
-];
 
 /// Is the cell free for `conn` on *every* layer (through-via barrel check), and —
 /// when `radius_cells > 0` — is every cell whose centre lies within `radius_cells`
@@ -709,7 +683,7 @@ mod tests {
         let (sx, sy) = g.cell_of(4.0, 4.0);
         let (tx, ty) = g.cell_of(14.0, 14.0);
         let costs = AStarCosts {
-            moves: MoveSet::Octilinear,
+            diag: DIAG_COST,
             ..AStarCosts::default()
         };
         let path = search(&g, a, &[st(0, sx, sy)], &[st(0, tx, ty)], costs)
@@ -756,7 +730,7 @@ mod tests {
         let g = RouteGrid::build(&p);
         let a = g.connection_index("A").unwrap();
         let costs = AStarCosts {
-            moves: MoveSet::Octilinear,
+            diag: DIAG_COST,
             ..AStarCosts::default()
         };
         let (bx, by) = g.cell_of(8.0, 8.0); // a blocked cell (keepout, inflated)
@@ -806,5 +780,22 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(run().unwrap(), first, "A* must be deterministic");
         }
+    }
+
+    #[test]
+    fn orthogonal_diag_disabled_equals_baseline() {
+        // Pin the EXACT orthogonal path on a fixed fixture. Guards the highest-risk
+        // line of the unification: `AStarCosts::default()` must keep `diag =
+        // u32::MAX` so the default search prunes every diagonal and stays a pure
+        // 4-neighbour A*. A straight horizontal run is the canonical baseline.
+        let g = RouteGrid::build(&open_problem());
+        let a = g.connection_index("A").unwrap();
+        assert_eq!(AStarCosts::default().diag, u32::MAX, "default must disable diagonals");
+        let (sx, sy) = g.cell_of(4.0, 10.0);
+        let (tx, ty) = g.cell_of(14.0, 10.0);
+        let path = search(&g, a, &[st(0, sx, sy)], &[st(0, tx, ty)], AStarCosts::default())
+            .expect("reachable");
+        let expected: Vec<State> = (sx..=tx).map(|ix| st(0, ix, sy)).collect();
+        assert_eq!(path, expected, "orthogonal default must yield the exact straight path");
     }
 }
