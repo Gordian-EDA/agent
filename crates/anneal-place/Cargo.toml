@@ -4,11 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Premium simulated-annealing schematic placement engine (implements sch-model's PlacementEngine over the sch-place-core scaffold)."
+description = "Premium simulated-annealing schematic placement engine (implements sch-model's PlacementEngine; scores through the injected PlacementCost, drives sch-place-core's env-free SA scaffold)."
 
 [dependencies]
-sch-place-core = { path = "../sch-place-core" }
 sch-model = { path = "../sch-model" }
-sch-io = { path = "../sch-io" }
-kicad-cli-rs = { path = "../kicad-cli-rs" }
+sch-place-core = { path = "../sch-place-core" }
 rayon.workspace = true

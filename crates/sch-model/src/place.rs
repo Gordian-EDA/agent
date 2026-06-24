@@ -100,7 +100,10 @@ impl Crossings {
 ///   win the pick — the engine ships its last finite best, and emits no artifact
 ///   for the failed unit. (The human REASON for the failure is the emit boundary's
 ///   job to surface; the scorer only makes the candidate lose.)
-pub trait PlacementCost {
+///
+/// `Send + Sync` so a parallel (rayon) engine can score candidates concurrently
+/// against one shared `&dyn PlacementCost`.
+pub trait PlacementCost: Send + Sync {
     /// The base (free-tier) routed cost of `items` — lower is better.
     fn cost(&self, items: &[Item]) -> f64;
 
