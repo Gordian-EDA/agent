@@ -19,7 +19,7 @@
 use std::fs;
 use std::io;
 
-use circuit_lang::SymbolProvider;
+use symbol_contract::SymbolProvider;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 

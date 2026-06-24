@@ -7,7 +7,7 @@ repository.workspace = true
 description = "KiCAD s-expr file & library access: .kicad_pcb + footprint/symbol libraries, geometry, fuzzy index."
 
 [dependencies]
-circuit-lang = { path = "../circuit-lang" }
+symbol-contract = { path = "../symbol-contract" }
 pcb-model = { path = "../pcb-model" }
 kicad-cli-rs = { path = "../kicad-cli-rs" }
 strsim.workspace = true
@@ -23,3 +23,6 @@ quick-xml.workspace = true
 
 [dev-dependencies]
 drc-lint = { path = "../drc-lint" }
+# DSL-integration tests only: drive `circuit_lang::compile` against the real
+# symbol provider. The library no longer depends on circuit-lang (see CB-3).
+circuit-lang = { path = "../circuit-lang" }

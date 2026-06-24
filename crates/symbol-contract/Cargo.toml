@@ -1,0 +1,10 @@
+[package]
+name = "symbol-contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure symbol-metadata contract (PinMeta/SymbolMeta/SymbolProvider) shared by circuit-lang and the KiCAD symbol-library reader."
+
+[dependencies]
+strsim.workspace = true
