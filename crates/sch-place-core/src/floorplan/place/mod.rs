@@ -8,6 +8,8 @@
 //! - [`score`] — the routed cost + its crossing/merge/short terms + geometry primitives.
 //! - [`cost_eval`] — `RoutedCost`, the concrete `PlacementCost` the engines score against.
 //! - [`route`] — the orthogonal elbow router + power-rail riser planning.
+//! - [`search`] — the PREMIUM simulated-annealing SEARCH (move-set + proxy costs),
+//!   the one home for the SA machinery; `anneal-place` is a thin engine over it.
 //!
 //! Placement is cost-driven (scoring a candidate routes the whole sheet), so the cost,
 //! the scaffold, and the router stay one (now sub-divided) module.
@@ -18,12 +20,14 @@ mod idioms;
 mod refine;
 mod score;
 mod route;
+mod search;
 
 pub use cost_eval::*;
 pub use emit::*;
 pub use idioms::*;
 pub use refine::*;
 pub use score::*;
+pub use search::*;
 // `route` is the orthogonal router — every item is crate-internal (none was `pub`
 // pre-split), so re-export it crate-visibly, not publicly.
 pub(crate) use route::*;

@@ -54,7 +54,6 @@ dependencies = [
 name = "anneal-place"
 version = "0.1.0"
 dependencies = [
- "rayon",
  "sch-model",
  "sch-place-core",
 ]
@@ -2933,6 +2932,7 @@ dependencies = [
  "indexmap 2.14.0",
  "kicad-cli-rs",
  "kicad-sexpr",
+ "rayon",
  "sch-io",
  "sch-model",
  "serde_json",

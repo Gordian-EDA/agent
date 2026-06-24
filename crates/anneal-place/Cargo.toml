@@ -4,9 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Premium simulated-annealing schematic placement engine (implements sch-model's PlacementEngine; scores through the injected PlacementCost, drives sch-place-core's env-free SA scaffold)."
+description = "Premium simulated-annealing schematic placement engine: a thin sch-model PlacementEngine that declares the premium tier and delegates the SA search to sch-place-core (scores through the injected PlacementCost)."
 
 [dependencies]
 sch-model = { path = "../sch-model" }
 sch-place-core = { path = "../sch-place-core" }
-rayon.workspace = true
