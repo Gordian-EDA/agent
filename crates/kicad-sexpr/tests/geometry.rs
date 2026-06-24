@@ -148,6 +148,6 @@ fn build_schematic(lib_id: &str, def: &str, g: &SymbolGeometry) -> String {
         ));
     }
     format!(
-        "(kicad_sch\n\t(version 20250114)\n\t(generator \"auto-pcb-test\")\n\t(generator_version \"0.1\")\n\t(uuid \"aaaaaaaa-0000-4000-8000-000000000099\")\n\t(paper \"A4\")\n\t(lib_symbols\n\t\t{def}\n\t)\n{labels}\t(symbol (lib_id \"{lib_id}\") (at {ix} {iy} 0) (unit 1) (exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no) (uuid \"bbbbbbbb-0000-4000-8000-000000000099\")\n\t\t(property \"Reference\" \"FB1\" (at 130 62 0) (effects (font (size 1.27 1.27))))\n\t\t(property \"Value\" \"X\" (at 130 65 0) (effects (font (size 1.27 1.27))))\n\t\t(instances (project \"t\" (path \"/aaaaaaaa-0000-4000-8000-000000000099\" (reference \"FB1\") (unit 1)))))\n\t(sheet_instances (path \"/\" (page \"1\"))))\n"
+        "(kicad_sch\n\t(version 20250114)\n\t(generator \"gordian-test\")\n\t(generator_version \"0.1\")\n\t(uuid \"aaaaaaaa-0000-4000-8000-000000000099\")\n\t(paper \"A4\")\n\t(lib_symbols\n\t\t{def}\n\t)\n{labels}\t(symbol (lib_id \"{lib_id}\") (at {ix} {iy} 0) (unit 1) (exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no) (uuid \"bbbbbbbb-0000-4000-8000-000000000099\")\n\t\t(property \"Reference\" \"FB1\" (at 130 62 0) (effects (font (size 1.27 1.27))))\n\t\t(property \"Value\" \"X\" (at 130 65 0) (effects (font (size 1.27 1.27))))\n\t\t(instances (project \"t\" (path \"/aaaaaaaa-0000-4000-8000-000000000099\" (reference \"FB1\") (unit 1)))))\n\t(sheet_instances (path \"/\" (page \"1\"))))\n"
     )
 }

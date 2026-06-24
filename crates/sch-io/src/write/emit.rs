@@ -77,7 +77,7 @@ impl SchematicWriter {
         let mut out = String::new();
         out.push_str("(kicad_sch\n");
         out.push_str("\t(version 20250114)\n");
-        out.push_str("\t(generator \"auto-pcb\")\n");
+        out.push_str("\t(generator \"gordian\")\n");
         out.push_str("\t(generator_version \"0.1\")\n");
         let _ = writeln!(out, "\t(uuid \"{root_uuid}\")");
         // Content-fit page: a custom `User` page just larger than the drawn

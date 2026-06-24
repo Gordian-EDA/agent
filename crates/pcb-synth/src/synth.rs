@@ -247,7 +247,7 @@ fn emit_kicad_v9(board: &BoardModel) -> io::Result<String> {
     let mut out = String::with_capacity(4096 + parts.len() * 1024);
     out.push_str("(kicad_pcb\n");
     out.push_str("\t(version 20241229)\n");
-    out.push_str("\t(generator \"autopcb\")\n");
+    out.push_str("\t(generator \"gordian\")\n");
     out.push_str("\t(generator_version \"9.0\")\n");
     out.push_str("\t(general\n\t\t(thickness 1.6)\n\t\t(legacy_teardrops no)\n\t)\n");
     out.push_str("\t(paper \"A4\")\n");
@@ -746,7 +746,7 @@ mod tests {
 
         // Write the synthesized board to a temp file and parse it back.
         let tmp = tempfile::Builder::new()
-            .prefix("autopcb-synth-")
+            .prefix("gordian-synth-")
             .suffix(".kicad_pcb")
             .tempfile()
             .unwrap();

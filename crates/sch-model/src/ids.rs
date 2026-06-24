@@ -3,7 +3,7 @@
 //! Byte-identical output for the same `Design` is required, so every
 //! UUID we emit is derived from stable content via UUIDv5 — never random.
 
-/// Fixed project namespace UUID for auto-pcb schematic identifiers
+/// Fixed project namespace UUID for gordian schematic identifiers
 /// (`6f6a4e2c-8b1d-5a3f-9c0e-1d2b3a4c5d6e`).
 ///
 /// Generated once and hardcoded so that `stable_uuid` is reproducible across

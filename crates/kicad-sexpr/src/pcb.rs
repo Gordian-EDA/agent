@@ -563,7 +563,7 @@ fn board_bounds(ast: &PcbAst) -> Bounds {
 // UUIDs, minimal number formatting), so identical input yields byte-identical
 // output.
 
-/// Fixed namespace UUID for auto-pcb **board** copper identifiers
+/// Fixed namespace UUID for gordian **board** copper identifiers
 /// (`5c1a7d4e-3f62-5b89-a0d1-2e3f4a5b6c7d`). Distinct from the schematic
 /// namespace in `sch-model/src/ids.rs` so a segment and a symbol never collide.
 /// Do not change: doing so would alter every emitted segment/via UUID.
@@ -767,7 +767,7 @@ pub fn write_solution(
     // staging-then-rename idiom used elsewhere in the bridge.
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = tempfile::Builder::new()
-        .prefix("autopcb-pcb-")
+        .prefix("gordian-pcb-")
         .suffix(".kicad_pcb")
         .tempfile_in(dir)?;
     std::fs::write(tmp.path(), spliced.as_bytes())?;

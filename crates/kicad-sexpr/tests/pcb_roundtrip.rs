@@ -19,7 +19,7 @@ const EPS: f64 = 1e-6;
 /// mutates the checked-in board. Returns the temp file (keep it alive) and path.
 fn fixture_copy() -> (tempfile::NamedTempFile, PathBuf) {
     let tmp = tempfile::Builder::new()
-        .prefix("autopcb-rt-")
+        .prefix("gordian-rt-")
         .suffix(".kicad_pcb")
         .tempfile()
         .expect("tempfile");
@@ -379,7 +379,7 @@ fn drc_unconnected_count_decreases_after_routing() {
 /// count. Panics on execution failure (the test is already gated on detect()).
 fn drc_unconnected_count(env: &kicad_cli_rs::env::KicadEnv, board: &std::path::Path) -> usize {
     let out = tempfile::Builder::new()
-        .prefix("autopcb-drc-")
+        .prefix("gordian-drc-")
         .suffix(".json")
         .tempfile()
         .unwrap();

@@ -397,12 +397,12 @@ fn build_dsn(ast: &PcbAst, board: &BoardProblem, layer_names: &[String]) -> Stri
     let planes = plane_assignment(ast, layer_names);
 
     // Header / parser.
-    out.push_str("(pcb autopcb\n");
+    out.push_str("(pcb gordian\n");
     out.push_str("  (parser\n");
     out.push_str("    (string_quote \")\n");
     out.push_str("    (space_in_quoted_tokens on)\n");
     out.push_str("    (host_cad \"KiCad's Pcbnew\")\n");
-    out.push_str("    (host_version \"autopcb\")\n");
+    out.push_str("    (host_version \"gordian\")\n");
     out.push_str("  )\n");
     out.push_str("  (resolution um 10)\n");
     out.push_str("  (unit um)\n");
@@ -1075,7 +1075,7 @@ pub fn freeroute_with(
 
     // Work in a temp dir alongside the board so paths are simple.
     let dir = tempfile::Builder::new()
-        .prefix("autopcb-freeroute-")
+        .prefix("gordian-freeroute-")
         .tempdir()?;
     let dsn = dir.path().join("board.dsn");
     let ses = dir.path().join("board.ses");
@@ -1404,7 +1404,7 @@ mod tests {
         export_dsn(board, &dsn).unwrap();
         let text = std::fs::read_to_string(&dsn).unwrap();
         for needle in [
-            "(pcb autopcb",
+            "(pcb gordian",
             "(resolution um 10)",
             "(structure",
             "(boundary",
