@@ -209,6 +209,7 @@ dependencies = [
  "indexmap",
  "saphyr",
  "saphyr-parser",
+ "sch-model",
  "strsim",
  "symbol-contract",
 ]

@@ -438,8 +438,9 @@ fn sanitize(pin: &str) -> String {
         .collect()
 }
 
-/// Union-find over pin nodes keyed by `(refdes, pin)`. `make` interns a
-/// node, `union` merges two, `find` returns a node's root (path-compressed).
+/// Union-find over pin nodes keyed by `(refdes, pin)`. `make` interns a node;
+/// the disjoint-set core (`find`/`union`) is `sch_model::union_find` over the
+/// interned `parent` slice (second-wins union, so a node's root is unchanged).
 #[derive(Default)]
 struct PinUnionFind {
     nodes: Vec<(String, String)>,
@@ -460,16 +461,11 @@ impl PinUnionFind {
                 nodes.len() - 1
             })
     }
-    fn find(&mut self, mut i: usize) -> usize {
-        while self.parent[i] != i {
-            self.parent[i] = self.parent[self.parent[i]];
-            i = self.parent[i];
-        }
-        i
+    fn find(&mut self, i: usize) -> usize {
+        sch_model::union_find::uf_find(&mut self.parent, i)
     }
     fn union(&mut self, i: usize, j: usize) {
-        let (ri, rj) = (self.find(i), self.find(j));
-        self.parent[ri] = rj;
+        sch_model::union_find::uf_union(&mut self.parent, i, j);
     }
 }
 

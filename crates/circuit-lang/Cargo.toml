@@ -8,6 +8,7 @@ description = "Parser, linter, and canonical emitter for the auto-pcb circuit ma
 
 [dependencies]
 symbol-contract = { path = "../symbol-contract" }
+sch-model = { path = "../sch-model" }
 saphyr.workspace = true
 saphyr-parser.workspace = true
 indexmap.workspace = true
