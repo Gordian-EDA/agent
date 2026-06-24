@@ -24,7 +24,7 @@ use kicad_sexpr::geometry::SymbolGeometry;
 use kicad_sexpr::provider::RealSymbolProvider;
 use serde::{Deserialize, Serialize};
 
-use crate::emit::SchematicWriter;
+use crate::write::SchematicWriter;
 use sch_model::geom::Dir;
 use sch_model::result::EmitOutput;
 
@@ -2257,7 +2257,7 @@ fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
         let osc_world = |net: &str| -> Option<[f64; 2]> {
             let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net))?.0.clone();
             let pg = items[ai].geom.pins.iter().find(|p| p.number == num)?;
-            Some(crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
+            Some(crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
         };
         let (Some(wa), Some(wb)) = (osc_world(&onets[0]), osc_world(&onets[1])) else {
             continue;
@@ -2268,7 +2268,7 @@ fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
         // still sticks out the SIDE). Classify by nearest edge of the IC's pin bbox.
         let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
         for pg in &items[ai].geom.pins {
-            let w = crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
+            let w = crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
             lo[0] = lo[0].min(w[0]);
             lo[1] = lo[1].min(w[1]);
             hi[0] = hi[0].max(w[0]);
@@ -2566,7 +2566,7 @@ fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool {
             .filter(|(_, _, n)| n.as_deref() == Some(vp.as_str()))
             .filter_map(|(num, _, _)| {
                 items[ai].geom.pins.iter().find(|p| &p.number == num).map(|pg| {
-                    crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror)
+                    crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror)
                 })
             })
             .collect();
@@ -2576,7 +2576,7 @@ fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool {
         // The anchor's pin bbox, to decide which edge the supply pins hug.
         let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
         for pg in &items[ai].geom.pins {
-            let w = crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
+            let w = crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
             lo[0] = lo[0].min(w[0]);
             lo[1] = lo[1].min(w[1]);
             hi[0] = hi[0].max(w[0]);
@@ -2841,7 +2841,7 @@ fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool {
         let osc_world = |net: &str| -> Option<[f64; 2]> {
             let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net))?.0.clone();
             let pg = items[ai].geom.pins.iter().find(|p| p.number == num)?;
-            Some(crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
+            Some(crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
         };
         let (Some(wa), Some(wb)) = (osc_world(&onets[0]), osc_world(&onets[1])) else {
             continue;
@@ -2852,7 +2852,7 @@ fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool {
         // classifier to align_idiom_clusters.
         let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
         for pg in &items[ai].geom.pins {
-            let w = crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
+            let w = crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
             lo[0] = lo[0].min(w[0]);
             lo[1] = lo[1].min(w[1]);
             hi[0] = hi[0].max(w[0]);
@@ -3099,12 +3099,12 @@ fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> bool {
         let pin_world = |net: &str| -> Option<[f64; 2]> {
             let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net))?.0.clone();
             let pg = items[ai].geom.pins.iter().find(|p| p.number == num)?;
-            Some(crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
+            Some(crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
         };
         // The IC's pin bbox (to classify which edge a phase pair hugs).
         let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
         for pg in &items[ai].geom.pins {
-            let w = crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
+            let w = crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
             lo[0] = lo[0].min(w[0]);
             lo[1] = lo[1].min(w[1]);
             hi[0] = hi[0].max(w[0]);
@@ -3120,7 +3120,7 @@ fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> bool {
             .pins
             .iter()
             .filter_map(|(_, _, n)| n.as_deref())
-            .map(|n| crate::textplace::text_width(n) + 2.54)
+            .map(|n| crate::label::text_width(n) + 2.54)
             .fold(0.0_f64, f64::max);
 
         // STAGE 1 — resolve each phase's {cap, diode} parts and its outward edge. The cap+diode of a
@@ -3294,7 +3294,7 @@ fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> bool {
                 .iter()
                 .filter_map(|s| {
                     items[s.ci].pins.iter().find_map(|(_, _, n)| {
-                        n.as_deref().filter(|n| *n != s.vb).map(crate::textplace::text_width)
+                        n.as_deref().filter(|n| *n != s.vb).map(crate::label::text_width)
                     })
                 })
                 .fold(0.0_f64, f64::max)
@@ -3457,7 +3457,7 @@ fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool {
         let pin_world = |net: &str| -> Option<[f64; 2]> {
             let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net))?.0.clone();
             let pg = items[ai].geom.pins.iter().find(|p| p.number == num)?;
-            Some(crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
+            Some(crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
         };
         let (Some(wa), Some(wb)) = (pin_world(&bnets[0]), pin_world(&bnets[1])) else {
             continue;
@@ -3467,7 +3467,7 @@ fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool {
         // their midpoint). Identical classifier to gather_crystal_cluster.
         let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
         for pg in &items[ai].geom.pins {
-            let w = crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
+            let w = crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
             lo[0] = lo[0].min(w[0]);
             lo[1] = lo[1].min(w[1]);
             hi[0] = hi[0].max(w[0]);
@@ -3634,7 +3634,7 @@ fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
     let pin_world = |ai: usize, net: &str| -> Option<[f64; 2]> {
         let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net))?.0.clone();
         let pg = items[ai].geom.pins.iter().find(|p| p.number == num)?;
-        Some(crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
+        Some(crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
     };
     let mut pullups: Vec<Pullup> = Vec::new();
     for ri in (0..items.len()).filter(|&i| {
@@ -3698,7 +3698,7 @@ fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
         let busmid = [(blo[0] + bhi[0]) / 2.0, (blo[1] + bhi[1]) / 2.0];
         let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
         for pg in &items[ai].geom.pins {
-            let w = crate::emit::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
+            let w = crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror);
             lo[0] = lo[0].min(w[0]);
             lo[1] = lo[1].min(w[1]);
             hi[0] = hi[0].max(w[0]);
@@ -3746,7 +3746,7 @@ fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
                 .geom
                 .pins
                 .iter()
-                .map(|pg| crate::emit::pin_endpoint(pg, [0.0, 0.0], probe.angle, probe.mirror)[1])
+                .map(|pg| crate::write::pin_endpoint(pg, [0.0, 0.0], probe.angle, probe.mirror)[1])
                 .collect();
             let (lo, hi) = ys.iter().fold((f64::MAX, f64::MIN), |(l, h), &v| (l.min(v), h.max(v)));
             hi - lo
@@ -3762,7 +3762,7 @@ fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
             let mut lo = [f64::MAX; 2];
             let mut hi = [f64::MIN; 2];
             for pg in &probe.geom.pins {
-                let w = crate::emit::pin_endpoint(pg, at, probe.angle, probe.mirror);
+                let w = crate::write::pin_endpoint(pg, at, probe.angle, probe.mirror);
                 lo[0] = lo[0].min(w[0]);
                 lo[1] = lo[1].min(w[1]);
                 hi[0] = hi[0].max(w[0]);
@@ -4174,7 +4174,7 @@ fn align_repeated_columns(
                             return None;
                         }
                         let pg = items[i].geom.pins.iter().find(|p| &p.number == num)?;
-                        let ep = crate::emit::pin_endpoint(
+                        let ep = crate::write::pin_endpoint(
                             pg,
                             items[i].at,
                             items[i].angle,
@@ -5081,7 +5081,7 @@ fn build_anchor_blocks(
 /// pin's live position under the anchor's placement). Used to pick the nearest
 /// supply pin for a decoupling cap's cohesion target.
 fn pin_world_dist(items: &[Item], j: usize, pgi: usize, from: [f64; 2]) -> f64 {
-    let p = crate::emit::pin_endpoint(&items[j].geom.pins[pgi], items[j].at, items[j].angle, items[j].mirror);
+    let p = crate::write::pin_endpoint(&items[j].geom.pins[pgi], items[j].at, items[j].angle, items[j].mirror);
     (p[0] - from[0]).abs() + (p[1] - from[1]).abs()
 }
 
@@ -5218,7 +5218,7 @@ fn proxy_cost(
     for (si, tgts) in cohesion {
         let (mut cx, mut cy) = (0.0f64, 0.0f64);
         for (j, pgi) in tgts {
-            let p = crate::emit::pin_endpoint(
+            let p = crate::write::pin_endpoint(
                 &items[*j].geom.pins[*pgi],
                 items[*j].at,
                 items[*j].angle,
@@ -5819,7 +5819,7 @@ fn magnet_proxy(
         // Live centroid of the target pins.
         let (mut tx, mut ty) = (0.0f64, 0.0f64);
         for &(j, pgi) in tgts {
-            let p = crate::emit::pin_endpoint(
+            let p = crate::write::pin_endpoint(
                 &items[j].geom.pins[pgi],
                 items[j].at,
                 items[j].angle,
@@ -7431,7 +7431,7 @@ fn route_signal(
     eps: &[([f64; 2], Dir)],
     port: Option<Side>,
     long_edge_span: Option<f64>,
-    scene: &mut crate::route::RouteScene,
+    scene: &mut crate::wire::RouteScene,
 ) -> io::Result<()> {
     // A single-pin port follows its pin's real direction (see effective_port_side):
     // a MOSFET gate faces left but the name heuristic would exit it right, onto the
@@ -7511,8 +7511,8 @@ fn route_signal(
         }
         r
     }
-    let mut paths: Vec<crate::route::Path> = Vec::new();
-    for (i, j) in crate::route::mst_edges(&pts) {
+    let mut paths: Vec<crate::wire::Path> = Vec::new();
+    for (i, j) in crate::wire::mst_edges(&pts) {
         let (a, da, b) = match (terms[i].1, terms[j].1) {
             (Some(d), _) => (pts[i], d, pts[j]),
             (None, Some(d)) => (pts[j], d, pts[i]),
@@ -7528,7 +7528,7 @@ fn route_signal(
                 continue;
             }
         }
-        if let Some(p) = crate::route::route_edge(a, da, b, net, scene) {
+        if let Some(p) = crate::wire::route_edge(a, da, b, net, scene) {
             // The DIRECT gap may be short while the only obstacle-free ROUTE is a sheet-wide DETOUR
             // (two ICs whose shared bus pins face opposite ways, so the wire wraps the perimeter — the
             // i2c_sensors U4 SCL case). A drawn perimeter wraparound reads far worse than the human
@@ -7638,7 +7638,7 @@ fn route_signal(
             }
             for band_y in bands {
                 let path = vec![pa, sa, [sa[0], band_y], [sb[0], band_y], sb, pb];
-                if crate::route::path_ok(&path, net, scene) {
+                if crate::wire::path_ok(&path, net, scene) {
                     for seg in path.windows(2) {
                         if (seg[0][0] - seg[1][0]).abs() > EPS || (seg[0][1] - seg[1][1]).abs() > EPS {
                             w.add_wire_on_net(seg[0], seg[1], net);
@@ -7688,7 +7688,7 @@ fn route_signal(
     for (a, b) in w.wire_segments_on_net(net) {
         all.push(vec![a, b]);
     }
-    for j in crate::route::junction_points(&all) {
+    for j in crate::wire::junction_points(&all) {
         w.add_junction(j);
     }
     // A terminal landing inside another same-net segment is a T-join.
@@ -7717,7 +7717,7 @@ fn route_local_tee(
     w: &mut SchematicWriter,
     net: &str,
     terms: &[([f64; 2], Option<Dir>)],
-    scene: &mut crate::route::RouteScene,
+    scene: &mut crate::wire::RouteScene,
 ) -> bool {
     const LOCAL: f64 = 30.48;
     let xs: Vec<f64> = terms.iter().map(|t| t.0[0]).collect();
@@ -7900,7 +7900,7 @@ fn ic_port_exit_override(
         if pg.name == "~" {
             continue;
         }
-        let extent = pg.length + NAME_OFFSET + crate::textplace::text_width(&pg.name);
+        let extent = pg.length + NAME_OFFSET + crate::label::text_width(&pg.name);
         if best.map(|(_, _, e)| extent > e).unwrap_or(true) {
             best = Some((tip, dir, extent));
         }
@@ -7931,7 +7931,7 @@ fn ic_port_exit_override(
 /// extend OUTWARD from the exit anchor along `side`; `BACK` covers the connecting
 /// vertex that reaches slightly back toward the wire. `HALF` is the text half-height.
 fn port_label_obstacle(at: [f64; 2], side: Side, net: &str) -> [f64; 4] {
-    let w = crate::textplace::text_width(net) + 2.54;
+    let w = crate::label::text_width(net) + 2.54;
     const BACK: f64 = 1.27;
     const HALF: f64 = 2.0;
     match side {

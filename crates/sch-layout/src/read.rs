@@ -1,4 +1,4 @@
-//! Lift: read a `.kicad_sch` back into canonical kernel YAML (spec §4).
+//! Read a `.kicad_sch` back into canonical kernel YAML — the inverse of `write` (spec §4).
 //!
 //! This closes the React data loop — emit writes a schematic; lift reads one
 //! back into the same kernel language the agent authored. Two sources are

@@ -1,7 +1,7 @@
 //! Integration tests for solved text positions in emitted documents.
 
 use kicad_cli_rs::env::KicadEnv;
-use sch_layout::emit::SchematicWriter;
+use sch_layout::write::SchematicWriter;
 
 fn detect_env() -> Option<KicadEnv> {
     match KicadEnv::detect() {

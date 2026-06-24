@@ -560,7 +560,7 @@ impl Agent {
             if !sch.exists() {
                 break;
             }
-            let Ok(netlist) = sch_layout::lift::lift(self.ctx.env(), sch) else {
+            let Ok(netlist) = sch_layout::read::lift(self.ctx.env(), sch) else {
                 break;
             };
             let (score, mut defects) =

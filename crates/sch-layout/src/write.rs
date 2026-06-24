@@ -180,7 +180,7 @@ struct SheetRect {
 }
 
 // `Dir`, `point_on_segment`, and `transform_offset` live in `sch_model::geom`
-// (shared with `route`/`textplace`); re-exported so `crate::emit::Dir` etc. and
+// (shared with `route`/`textplace`); re-exported so `crate::write::Dir` etc. and
 // the public API keep working.
 pub use sch_model::geom::{point_on_segment, transform_offset, Dir};
 
@@ -899,7 +899,7 @@ impl SchematicWriter {
     /// obstacle at the same position), so reconcile may run it early to lint
     /// solved geometry and `finish`'s own call is a harmless re-run.
     pub fn solve_text_positions(&mut self) {
-        use crate::textplace::{
+        use crate::label::{
             choose, label_box, pin_text_boxes, rotated_half_extents, text_width, wire_box,
             BBox, Movable, ObKind, Obstacle,
         };
@@ -1221,11 +1221,11 @@ impl SchematicWriter {
     /// foreign-anchor model as `retract_colliding_stubs` (power origins,
     /// no-connects, label anchors); wire segments carry their net (the power
     /// sentinel for unattributed stubs/risers).
-    pub fn route_scene(&self) -> crate::route::RouteScene {
-        use crate::textplace::rotated_half_extents;
+    pub fn route_scene(&self) -> crate::wire::RouteScene {
+        use crate::label::rotated_half_extents;
         const NC: &str = "\0no_connect";
         const PWR: &str = "\0power_wire";
-        let mut scene = crate::route::RouteScene {
+        let mut scene = crate::wire::RouteScene {
             solids: Vec::new(),
             points: Vec::new(),
             segments: Vec::new(),
@@ -1307,7 +1307,7 @@ impl SchematicWriter {
             .iter()
             .filter(|l| l.global)
             .map(|l| {
-                let w = crate::textplace::text_width(&l.net) + 2.54;
+                let w = crate::label::text_width(&l.net) + 2.54;
                 [l.at[0] - w, l.at[1] - 2.0, l.at[0] + w, l.at[1] + 2.0]
             })
             .collect()
@@ -1333,7 +1333,7 @@ impl SchematicWriter {
     /// subtracted (KiCAD's page origin is the top-left); the floorplan
     /// normalizes content to a small positive margin already.
     fn content_extent(&self) -> Option<[f64; 2]> {
-        use crate::textplace::{rotated_half_extents, text_width};
+        use crate::label::{rotated_half_extents, text_width};
         const PAGE_MARGIN: f64 = 12.7;
         let mut max_x = f64::MIN;
         let mut max_y = f64::MIN;
@@ -1519,7 +1519,7 @@ impl SchematicWriter {
     /// coordinate and be clipped off the content-fit page. Run last, after text is
     /// solved, so field positions move with their symbols.
     fn reframe(&mut self) {
-        use crate::textplace::{rotated_half_extents, text_width};
+        use crate::label::{rotated_half_extents, text_width};
         const M: f64 = 12.7;
         let (mut minx, mut miny) = (f64::MAX, f64::MAX);
         let mut lo = |x: f64, y: f64| {
@@ -2187,7 +2187,7 @@ impl SchematicWriter {
         &self,
         ignore_pairs: &std::collections::BTreeSet<(String, String)>,
     ) -> Vec<String> {
-        use crate::textplace::{label_box, pin_text_boxes, rotated_half_extents, text_width};
+        use crate::label::{label_box, pin_text_boxes, rotated_half_extents, text_width};
 
         /// What an item is, for exemption decisions.
         #[derive(Clone, Copy, PartialEq, Eq)]

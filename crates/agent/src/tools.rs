@@ -64,7 +64,7 @@ use kicad_sexpr::search::SymbolIndex;
 use kicad_sexpr::snapshot::SnapshotStore;
 
 use sch_layout::floorplan::{infer_ir, LayoutIr};
-use sch_layout::lift::lift;
+use sch_layout::read::lift;
 
 use crate::llm::ToolDef;
 

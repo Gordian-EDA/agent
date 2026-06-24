@@ -1,21 +1,25 @@
 //! `sch-layout` — the floorplan layout engine: turns a [`circuit_lang::Design`]
 //! into a real `.kicad_sch` file (and back), deterministically.
 //!
-//! This crate owns the engine:
+//! This crate owns the engine. Pipeline: **infer → place → wire → write** (and
+//! [`read`] to reverse it):
 //!
 //! - [`floorplan`] — the cost-scored placement + routing engine and its IR.
-//! - [`emit`] — the `SchematicWriter` that renders placements to `.kicad_sch`.
-//! - [`lift`] — recovering a `Design` view from an emitted schematic.
+//! - [`wire`] — the orthogonal elbow router (was `route`).
+//! - [`label`] — text/label placement solver (was `textplace`).
+//! - [`write`] — the `SchematicWriter` that renders placements to `.kicad_sch`
+//!   (was `emit`).
+//! - [`read`] — recovering a `Design` view from an emitted schematic (was `lift`).
 //!
 //! The shared vocabulary — geometry (`Dir`/segment math), grid snapping, ids, and
 //! the [`EmitOutput`] result types — lives in the `sch-model` crate, re-exported
 //! here for back-compat.
 
-pub mod emit;
 pub mod floorplan;
-pub mod lift;
-mod route;
-mod textplace;
+pub mod read;
+pub mod write;
+mod label;
+mod wire;
 
 pub use sch_model::{grid, ids};
 pub use sch_model::result::{
@@ -56,8 +60,8 @@ pub mod test_util {
         format!(
             "{}(at {} {} {}){}",
             &sch[..at_idx],
-            crate::emit::fmt_coord(new[0]),
-            crate::emit::fmt_coord(new[1]),
+            crate::write::fmt_coord(new[0]),
+            crate::write::fmt_coord(new[1]),
             angle,
             &sch[end..]
         )

@@ -283,7 +283,7 @@ pub fn compose_single_sheet(
     let groups = refine_blocks(&design.blocks);
     let cross_sheet = cross_sheet_nets(&groups);
 
-    let mut groups_w: Vec<(String, sch_layout::emit::SchematicWriter)> = Vec::new();
+    let mut groups_w: Vec<(String, sch_layout::write::SchematicWriter)> = Vec::new();
     for (gname, members) in groups {
         // A sub-design holding this group's block(s). Mark every cross-sheet net this group
         // touches as a PORT so the engine emits one global label per group for the hop and

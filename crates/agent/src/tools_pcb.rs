@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use circuit_lang::model::PinTarget;
-use sch_layout::lift::lift;
+use sch_layout::read::lift;
 
 use kicad_cli_rs::cli::{KicadCli, Violation};
 use kicad_sexpr::pcb::{read_problem, write_solution};
