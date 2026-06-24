@@ -50,6 +50,10 @@ pub enum Msg {
     /// Shift/Alt+Enter — insert a literal newline into the composer (a
     /// multi-line prompt) rather than submitting.
     Newline,
+    /// A bracketed-paste payload from the terminal. A large block is collapsed to
+    /// a `[Pasted N chars]` placeholder in the composer (the real text expands
+    /// back in on submit); a small one is inserted verbatim.
+    Paste(String),
     /// Esc — close help / reject a gate / clear input / cancel a turn / arm
     /// (then perform) a context unwind, in that order of precedence.
     Cancel,
@@ -231,12 +235,23 @@ impl App {
                 Action::None
             }
             Msg::Complete => {
-                if self.pending.is_none() {
+                if self.pending.is_some() {
+                    // The gate owns the keyboard.
+                } else if self.completion_view().is_some() {
+                    // A `/command` stem: Tab completes / cycles it.
                     self.complete_next();
+                } else if self.running && !self.input.trim().is_empty() {
+                    // A turn is in flight and there is a plain draft: Tab QUEUES it
+                    // (it can't be submitted now) so it isn't dropped.
+                    self.queue_input();
                 }
                 Action::None
             }
             Msg::Submit => self.submit(),
+            Msg::Paste(text) => {
+                self.paste_text(text);
+                Action::None
+            }
             Msg::Approve => self.resolve_pending(true),
             Msg::Reject => self.resolve_pending(false),
             Msg::ScrollUp => {
@@ -285,6 +300,12 @@ impl App {
             }
             Msg::TurnEnded(reason) => {
                 self.end_turn(reason);
+                // A message queued (via Tab) during the turn now runs.
+                if let Some(prompt) = self.queued.take() {
+                    self.input = prompt;
+                    self.cursor = self.char_len();
+                    return self.submit();
+                }
                 Action::None
             }
         }
@@ -338,7 +359,9 @@ impl App {
             self.completion_idx = None;
             return Action::None;
         }
-        let line = self.input.trim().to_string();
+        // Expand any `[Pasted N chars]` placeholder back to the real text before
+        // dispatch, so the model receives what was actually pasted.
+        let line = self.expanded_input().trim().to_string();
         if line.is_empty() {
             return Action::None;
         }

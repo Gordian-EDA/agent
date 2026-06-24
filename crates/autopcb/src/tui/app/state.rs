@@ -68,6 +68,12 @@ pub struct App {
     pub input: String,
     /// Cursor position in the input line, in **chars** (0 ..= char count).
     pub cursor: usize,
+    /// A prompt queued (via Tab) while a turn was running, auto-submitted when the
+    /// turn ends so the next instruction isn't dropped. `None` when nothing waits.
+    pub queued: Option<String>,
+    /// The full text of a large pasted block, stashed while the composer shows a
+    /// compact `[Pasted N chars]` placeholder; expanded back in on submit.
+    pub paste: Option<String>,
     /// Previously submitted prompts, oldest first.
     pub history: Vec<String>,
     /// While browsing history: the index being shown. `None` = live draft.
@@ -138,6 +144,8 @@ impl App {
             live_assistant: None,
             input: String::new(),
             cursor: 0,
+            queued: None,
+            paste: None,
             history: Vec::new(),
             history_pos: None,
             draft: String::new(),

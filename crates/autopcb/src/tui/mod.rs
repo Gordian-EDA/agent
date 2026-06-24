@@ -45,8 +45,9 @@ use gordian_kicad::tools::PcbToolCtx;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyboardEnhancementFlags,
-    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -414,7 +415,11 @@ async fn event_loop(
                             _ => {}
                         }
                     }
-                    Some(Ok(_)) => {} // resize / paste: just redraw below
+                    Some(Ok(Event::Paste(text))) => {
+                        let action = app.update(Msg::Paste(text));
+                        shell.handle(app, action);
+                    }
+                    Some(Ok(_)) => {} // resize / focus: just redraw below
                     Some(Err(_)) | None => break,
                 }
             }
@@ -488,7 +493,7 @@ fn build_picker() -> Option<Picker> {
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     if supports_keyboard_enhancement().unwrap_or(false) {
         execute!(
             stdout,
@@ -508,6 +513,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         LeaveAlternateScreen,
         DisableMouseCapture
     )?;

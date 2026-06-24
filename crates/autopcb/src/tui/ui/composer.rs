@@ -206,8 +206,10 @@ pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     if app.input.is_empty() {
-        let placeholder = if app.running {
-            "agent is working…"
+        let placeholder = if app.running && app.queued.is_some() {
+            "agent is working… · 1 message queued (sends when the turn ends)"
+        } else if app.running {
+            "agent is working… · Tab queues your next message"
         } else {
             "type a prompt — /help for commands, ⏎ sends · ⇧⏎ newline"
         };
