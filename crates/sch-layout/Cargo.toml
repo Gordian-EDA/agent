@@ -4,25 +4,18 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Deterministic schematic floorplan layout engine (Design to .kicad_sch)."
+description = "Deterministic schematic floorplan layout engine (Design to .kicad_sch): orchestrates the sch-place-core placement core and round-trips .kicad_sch."
 
 [dependencies]
+sch-place-core = { path = "../sch-place-core" }
 sch-model = { path = "../sch-model" }
 sch-io = { path = "../sch-io" }
-circuit-lang = { path = "../circuit-lang" }
-circuit-graph = { path = "../circuit-graph" }
-kicad-cli-rs = { path = "../kicad-cli-rs" }
-kicad-sexpr = { path = "../kicad-sexpr" }
-kiutils_kicad.workspace = true
-tempfile.workspace = true
-uuid.workspace = true
-indexmap.workspace = true
-rayon.workspace = true
-serde = { workspace = true }
-serde_json = { workspace = true }
 
 [dev-dependencies]
 greedy-place = { path = "../greedy-place" }
 anneal-place = { path = "../anneal-place" }
+circuit-lang = { path = "../circuit-lang" }
+kicad-cli-rs = { path = "../kicad-cli-rs" }
+kicad-sexpr = { path = "../kicad-sexpr" }
 kiutils_kicad.workspace = true
 tempfile.workspace = true

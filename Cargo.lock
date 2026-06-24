@@ -39,8 +39,8 @@ dependencies = [
  "kicad-cli-rs",
  "rayon",
  "sch-io",
- "sch-layout",
  "sch-model",
+ "sch-place-core",
 ]
 
 [[package]]
@@ -870,8 +870,8 @@ dependencies = [
 name = "greedy-place"
 version = "0.1.0"
 dependencies = [
- "sch-layout",
  "sch-model",
+ "sch-place-core",
 ]
 
 [[package]]
@@ -2363,20 +2363,15 @@ name = "sch-layout"
 version = "0.1.0"
 dependencies = [
  "anneal-place",
- "circuit-graph",
  "circuit-lang",
  "greedy-place",
- "indexmap 2.14.0",
  "kicad-cli-rs",
  "kicad-sexpr",
  "kiutils_kicad",
- "rayon",
  "sch-io",
  "sch-model",
- "serde",
- "serde_json",
+ "sch-place-core",
  "tempfile",
- "uuid",
 ]
 
 [[package]]
@@ -2389,6 +2384,20 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "sch-place-core"
+version = "0.1.0"
+dependencies = [
+ "circuit-graph",
+ "circuit-lang",
+ "indexmap 2.14.0",
+ "kicad-cli-rs",
+ "kicad-sexpr",
+ "sch-io",
+ "sch-model",
+ "serde_json",
 ]
 
 [[package]]

@@ -4,8 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Free-tier greedy hill-climb schematic placement engine (implements sch-layout's PlacementEngine)."
+description = "Free-tier greedy hill-climb schematic placement engine (implements sch-model's PlacementEngine over the sch-place-core scaffold)."
 
 [dependencies]
-sch-layout = { path = "../sch-layout" }
+sch-place-core = { path = "../sch-place-core" }
 sch-model = { path = "../sch-model" }

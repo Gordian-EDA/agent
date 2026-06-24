@@ -1,10 +1,12 @@
 //! `sch-layout` — the floorplan layout engine: turns a [`circuit_lang::Design`]
 //! into a real `.kicad_sch` file (and back), deterministically.
 //!
-//! This crate owns the engine. Pipeline: **infer → place → wire → write** (and
-//! [`read`] to reverse it):
+//! This crate orchestrates the engine and round-trips `.kicad_sch`. Pipeline:
+//! **infer → place → wire → write** (and [`read`] to reverse it):
 //!
-//! - [`floorplan`] — the cost-scored placement + routing engine and its IR.
+//! - [`floorplan`] — the cost-scored placement + routing engine and its IR. The
+//!   engine-agnostic core lives in the `sch-place-core` crate (so the placement
+//!   ENGINES can drive it without depending on this crate); re-exported here.
 //! - [`wire`] — the orthogonal elbow router.
 //! - [`label`] — text/label placement solver.
 //! - [`write`] — the `SchematicWriter` that renders placements to `.kicad_sch`.
@@ -14,7 +16,7 @@
 //! the [`EmitOutput`] result types — lives in the `sch-model` crate, re-exported
 //! here for back-compat.
 
-pub mod floorplan;
+pub use sch_place_core::floorplan;
 
 // The I/O layer (elbow router + text solver + SchematicWriter + reader) lives in the
 // `sch-io` crate; re-exported so the engine's `crate::wire` / `crate::write` /
