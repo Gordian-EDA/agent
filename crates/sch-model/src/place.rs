@@ -131,6 +131,18 @@ pub trait PlacementCost {
     /// length+junctions), so this is the gate that keeps a router-free search
     /// truthful.
     fn truthfulness_breaks(&self, items: &[Item]) -> usize;
+
+    /// OPTIONAL local-improve scaffold the evaluator MAY offer alongside scoring: a
+    /// greedy hill-climb of the satellites' positions/orientation over [`Self::cost`].
+    /// Defaulted to a no-op so a third-party evaluator that only scores need not
+    /// implement it (an engine that relies on it can query nothing — it simply gets
+    /// the seed back unchanged). The incumbent free engine drives ITS search entirely
+    /// through this hook, which lets `greedy-place` depend on `sch-model` alone.
+    fn refine(&self, _items: &mut [Item]) {}
+
+    /// OPTIONAL polish scaffold (see [`Self::refine`]): a routed align→compact→nudge
+    /// fixpoint, each step gated on [`Self::cost`]. Defaulted to a no-op.
+    fn polish(&self, _items: &mut [Item]) {}
 }
 
 /// The placement problem an engine works on: the connectivity (`inc`), the intent

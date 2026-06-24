@@ -15,6 +15,7 @@ use sch_model::ir::LayoutIr;
 use sch_model::item::{Incidence, Item};
 use sch_model::place::{Crossings, PlacementCost};
 
+use super::refine::{polish, refine_items};
 use super::score::{
     crossing_counts, premium_score_items, premium_score_with_w, score_items, truthfulness_breaks,
     warning_count,
@@ -40,6 +41,16 @@ impl<'a> RoutedCost<'a> {
         needs_flag: &'a BTreeSet<String>,
     ) -> Self {
         Self { env, inc, ir, needs_flag }
+    }
+
+    /// The captured scoring `env` — for sch-place-core's own scaffold, which still
+    /// threads a `KicadEnv` into `build_writer`/`pin_dirs` for the geometry helpers.
+    pub fn env(&self) -> &KicadEnv {
+        self.env
+    }
+    /// The captured ERC PWR_FLAG set (see [`RoutedCost::env`]).
+    pub fn needs_flag(&self) -> &BTreeSet<String> {
+        self.needs_flag
     }
 }
 
@@ -67,5 +78,13 @@ impl PlacementCost for RoutedCost<'_> {
 
     fn truthfulness_breaks(&self, items: &[Item]) -> usize {
         truthfulness_breaks(self.env, items, self.inc, self.ir, self.needs_flag)
+    }
+
+    fn refine(&self, items: &mut [Item]) {
+        refine_items(self.env, items, self.inc, self.ir, self.needs_flag);
+    }
+
+    fn polish(&self, items: &mut [Item]) {
+        polish(self.env, items, self.inc, self.ir, self.needs_flag);
     }
 }
