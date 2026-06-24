@@ -32,7 +32,7 @@ def render(yaml_path, out_dir, zone_file=None):
     if zone_file:
         env["ZONE_FILE"] = zone_file
     subprocess.run(
-        ["cargo", "run", "--release", "-p", "agent", "--example", "bench_corpus",
+        ["cargo", "run", "--release", "-p", "gordian-kicad", "--example", "bench_corpus",
          "--", "--out", out_dir, yaml_path],
         cwd=ROOT, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
     )

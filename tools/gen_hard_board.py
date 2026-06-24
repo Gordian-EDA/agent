@@ -4,7 +4,7 @@ cast of decoupling caps, series resistors, and break-out headers) for the
 board_harness stress tests. Writes a {bounds, parts:[...]} JSON the agent's
 create_board accepts.
 
-    python3 tools/gen_hard_board.py bga64   > crates/agent/examples/pcb_circuits/bga64-stress.json
+    python3 tools/gen_hard_board.py bga64   > crates/gordian-kicad/examples/pcb_circuits/bga64-stress.json
     python3 tools/gen_hard_board.py tqfp64  > .../tqfp64-stress.json
 """
 import json

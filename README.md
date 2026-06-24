@@ -53,13 +53,15 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | Crate | Role |
 |-------|------|
 | `autopcb` | CLI + ratatui copilot TUI — the entry point |
-| `agent` | Provider-agnostic LLM client (OpenAI / AWS Bedrock) + the agent loop and tool surface |
+| `llm-client` | Provider-agnostic LLM client: neutral message/tool types + the `Provider` trait (OpenAI / AWS Bedrock backends) |
+| `gordian-core` | Domain-agnostic agent core: the turn loop, the apply-gate, and the `ToolProvider` seam (no KiCAD/UI deps) |
+| `gordian-kicad` | The KiCAD domain — schematic/PCB tools, prompts, render — as a `gordian-core` `ToolProvider` |
 | `circuit-lang` | Parser, linter, and canonical emitter for the circuit markup language |
 | `circuit-graph` | Attributed circuit graph + a declarative idiom matcher |
-| `sch-layout` | Deterministic schematic floorplan engine (`Design` → `.kicad_sch`) |
-| `forceplace` | Force-directed 2-D component placement (Fruchterman–Reingold) |
-| `pcb-engine` | Deterministic copper autorouter + placement (force-layout, capacity-mesh routing, DRC lint) |
-| `kicad-bridge` | KiCAD file I/O — schematic/PCB synthesis, symbol/footprint library parsing |
+| `sch-layout` | Deterministic schematic floorplan engine (`Design` → `.kicad_sch`), over the `greedy-place`/`anneal-place` engines |
+| `grid-astar` / `pcb-place` / `negotiated-mesh` | Deterministic placement + grid-A\* escape + capacity-mesh copper routing |
+| `pcb-synth` / `pcb-svg` / `drc-lint` | `.kicad_pcb` synthesis, board render, and DRC lint |
+| `kicad-sexpr` / `kicad-cli-rs` / `kicad-ipc` / `specctra` | KiCAD file I/O, `kicad-cli` driver, live IPC session, Specctra DSN/SES |
 
 ## Testing
 
@@ -73,7 +75,7 @@ KiCAD libraries and assert **0 copper-error DRC faults** (unrouted nets are repo
 hidden):
 
 ```sh
-cargo run --release -p agent --example board_harness   # PCB place/route/DRC across all fixtures
+cargo run --release -p gordian-kicad --example board_harness   # PCB place/route/DRC across all fixtures
 ```
 
 ## Status
