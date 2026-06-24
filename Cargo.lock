@@ -1742,6 +1742,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sch-io"
+version = "0.1.0"
+dependencies = [
+ "circuit-lang",
+ "kicad-cli-rs",
+ "kicad-sexpr",
+ "kiutils_kicad",
+ "sch-model",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "sch-layout"
 version = "0.1.0"
 dependencies = [
@@ -1752,6 +1765,7 @@ dependencies = [
  "kicad-sexpr",
  "kiutils_kicad",
  "rayon",
+ "sch-io",
  "sch-model",
  "serde",
  "serde_json",

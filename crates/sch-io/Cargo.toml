@@ -1,26 +1,16 @@
 [package]
-name = "sch-layout"
+name = "sch-io"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Deterministic schematic floorplan layout engine (Design to .kicad_sch)."
+description = "Schematic I/O: the elbow wire router, label text solver, the SchematicWriter (Design+placement → .kicad_sch), and read (.kicad_sch → Design)."
 
 [dependencies]
 sch-model = { path = "../sch-model" }
-sch-io = { path = "../sch-io" }
 circuit-lang = { path = "../circuit-lang" }
-circuit-graph = { path = "../circuit-graph" }
 kicad-cli-rs = { path = "../kicad-cli-rs" }
 kicad-sexpr = { path = "../kicad-sexpr" }
 kiutils_kicad.workspace = true
-tempfile.workspace = true
 uuid.workspace = true
-indexmap.workspace = true
-rayon.workspace = true
-serde = { workspace = true }
-serde_json = { workspace = true }
-
-[dev-dependencies]
-kiutils_kicad.workspace = true
 tempfile.workspace = true

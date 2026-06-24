@@ -13,16 +13,16 @@
 //! determinism scrutiny.
 
 /// An axis-aligned bbox: `[min_x, min_y, max_x, max_y]` (sheet mm, y down).
-pub(crate) type BBox = [f64; 4];
+pub type BBox = [f64; 4];
 
 /// Whether two boxes overlap (open intervals: edge-touching is NOT overlap,
 /// matching the lint's `boxes_overlap` so solver and oracle agree).
-pub(crate) fn boxes_overlap(a: &BBox, b: &BBox) -> bool {
+pub fn boxes_overlap(a: &BBox, b: &BBox) -> bool {
     a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
 }
 
 /// Fixed geometry a movable must not collide with.
-pub(crate) enum ObKind {
+pub enum ObKind {
     /// A symbol body, exempted for text OWNED by that refdes (a label on its
     /// own pin endpoint legitimately sits inside its symbol's generous bbox).
     OwnExempt(String),
@@ -30,13 +30,13 @@ pub(crate) enum ObKind {
     Hard,
 }
 
-pub(crate) struct Obstacle {
+pub struct Obstacle {
     pub bbox: BBox,
     pub kind: ObKind,
 }
 
 /// One piece of movable text with its candidate boxes in preference order.
-pub(crate) struct Movable {
+pub struct Movable {
     /// Owning refdes, matched against [`ObKind::OwnExempt`].
     pub owner: Option<String>,
     /// Candidate bboxes, best-first. Never empty.
@@ -48,7 +48,7 @@ pub(crate) struct Movable {
 /// chosen box. Falls back to `(0, false)` when none is free — the caller
 /// decides the degradation (lint-flagged for fields/labels, hidden for
 /// optional text like repeated power-rail names).
-pub(crate) fn choose(obstacles: &[Obstacle], movables: &[Movable]) -> Vec<(usize, bool)> {
+pub fn choose(obstacles: &[Obstacle], movables: &[Movable]) -> Vec<(usize, bool)> {
     // Two text boxes that merely ABUT (share an edge, 0 gap) pass the strict-inequality
     // overlap test yet render as one run ("10kGND", "3V3GND"). Keep a small gap between
     // movable text boxes by testing a slightly GROWN candidate against already-placed text.
@@ -76,7 +76,7 @@ use kicad_sexpr::geometry::PinGeom;
 use sch_model::geom::{transform_offset, Dir};
 
 /// Estimated width of rendered text (mm): 1.1 mm/char at the 1.27 font.
-pub(crate) fn text_width(s: &str) -> f64 {
+pub fn text_width(s: &str) -> f64 {
     s.chars().count() as f64 * 1.1
 }
 
@@ -85,7 +85,7 @@ pub(crate) fn text_width(s: &str) -> f64 {
 /// KiCAD renders label text floating 0.4 mm off the anchor on the side away
 /// from the wire, so the box is offset by 0.4 mm perpendicular to the reading
 /// direction — a label sitting ON its own wire does not collide with it.
-pub(crate) fn label_box(at: [f64; 2], dir: Dir, width: f64) -> BBox {
+pub fn label_box(at: [f64; 2], dir: Dir, width: f64) -> BBox {
     const H: f64 = 1.6; // text height
     const OFF: f64 = 0.4; // standoff from the anchor/wire
     let [x, y] = at;
@@ -102,7 +102,7 @@ pub(crate) fn label_box(at: [f64; 2], dir: Dir, width: f64) -> BBox {
 /// box is returned then. The name starts just past the pin's body end and
 /// extends INTO the body along the pin direction; the number straddles the
 /// pin line midpoint.
-pub(crate) fn pin_text_boxes(
+pub fn pin_text_boxes(
     pin: &PinGeom,
     inst_at: [f64; 2],
     inst_angle: f64,
@@ -140,12 +140,12 @@ pub(crate) fn pin_text_boxes(
 }
 
 /// Sheet bbox from two transformed corner points (normalizes min/max).
-pub(crate) fn rect_from_corners(a: [f64; 2], b: [f64; 2]) -> BBox {
+pub fn rect_from_corners(a: [f64; 2], b: [f64; 2]) -> BBox {
     [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])]
 }
 
 /// Instance half-extents with the body rotation applied: 90/270 swaps w/h.
-pub(crate) fn rotated_half_extents(h: [f64; 2], angle: f64) -> [f64; 2] {
+pub fn rotated_half_extents(h: [f64; 2], angle: f64) -> [f64; 2] {
     let a = angle.rem_euclid(360.0);
     if (a - 90.0).abs() < 1e-9 || (a - 270.0).abs() < 1e-9 {
         [h[1], h[0]]
@@ -155,7 +155,7 @@ pub(crate) fn rotated_half_extents(h: [f64; 2], angle: f64) -> [f64; 2] {
 }
 
 /// Thin obstacle box around a wire segment (inflated 0.13 mm).
-pub(crate) fn wire_box(a: [f64; 2], b: [f64; 2]) -> BBox {
+pub fn wire_box(a: [f64; 2], b: [f64; 2]) -> BBox {
     [
         a[0].min(b[0]) - 0.13,
         a[1].min(b[1]) - 0.13,

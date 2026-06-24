@@ -47,7 +47,7 @@ const ROOT_SHEET_KEY: &str = "root";
 /// Horizontal text justification for a solved field position. `Center` is
 /// rendered by omitting the justify token (KiCAD's default is centered).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Justify {
+pub enum Justify {
     Left,
     Right,
     Center,
@@ -55,7 +55,7 @@ pub(crate) enum Justify {
 
 /// A solved field text anchor.
 #[derive(Clone, Copy)]
-pub(crate) struct TextPos {
+pub struct TextPos {
     pub at: [f64; 2],
     pub justify: Justify,
 }
@@ -1282,27 +1282,27 @@ impl SchematicWriter {
     }
 
     /// Junction-dot count (a routing-quality signal for the refinement scorer).
-    pub(crate) fn junction_count(&self) -> usize {
+    pub fn junction_count(&self) -> usize {
         self.junctions.len()
     }
 
     /// Junction-dot positions (for the scorer's merge check: a junction sitting
     /// on wires of two different nets fuses them).
-    pub(crate) fn junction_positions(&self) -> Vec<[f64; 2]> {
+    pub fn junction_positions(&self) -> Vec<[f64; 2]> {
         self.junctions.iter().map(|j| j.at).collect()
     }
 
     /// Count of plain (non-global) labels — i.e. signal-label fallbacks where the
     /// router could not wire a net. Port pentagons are `global` and excluded, so
     /// this is a direct "how many nets degraded to labels" signal.
-    pub(crate) fn signal_label_count(&self) -> usize {
+    pub fn signal_label_count(&self) -> usize {
         self.labels.iter().filter(|l| !l.global).count()
     }
 
     /// Bounding boxes of the global/port labels (the edge pentagons), for the
     /// refinement scorer to keep symbol bodies from colliding with a port label
     /// (the label is placed during routing, so it is not an `Item`).
-    pub(crate) fn cluster_label_boxes(&self) -> Vec<[f64; 4]> {
+    pub fn cluster_label_boxes(&self) -> Vec<[f64; 4]> {
         self.labels
             .iter()
             .filter(|l| l.global)
@@ -1315,7 +1315,7 @@ impl SchematicWriter {
 
     /// Every drawn wire segment with its net (`None` for unattributed power
     /// stubs). For the refinement scorer's crossing / length / short metrics.
-    pub(crate) fn wires_with_nets(&self) -> Vec<([f64; 2], [f64; 2], Option<String>)> {
+    pub fn wires_with_nets(&self) -> Vec<([f64; 2], [f64; 2], Option<String>)> {
         self.wires.iter().map(|w| (w.a, w.b, w.net.clone())).collect()
     }
 
@@ -1906,7 +1906,7 @@ pub fn quantize_dir(pin_angle: f64, inst_angle: f64, mirror: bool) -> Dir {
 /// spike's proven form. Angles are restricted to 0/90/180/270 in practice, so
 /// the sin/cos are exact (±1, 0) and the result stays on the grid; we still snap
 /// to absorb floating-point dust.
-pub(crate) fn pin_endpoint(pin: &PinGeom, inst_at: [f64; 2], inst_angle: f64, mirror: bool) -> [f64; 2] {
+pub fn pin_endpoint(pin: &PinGeom, inst_at: [f64; 2], inst_angle: f64, mirror: bool) -> [f64; 2] {
     let off = transform_offset(pin.at, inst_angle, mirror);
     snap_point([inst_at[0] + off[0], inst_at[1] + off[1]])
 }

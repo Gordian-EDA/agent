@@ -16,10 +16,11 @@
 //! here for back-compat.
 
 pub mod floorplan;
-pub mod read;
-pub mod write;
-mod label;
-mod wire;
+
+// The I/O layer (elbow router + text solver + SchematicWriter + reader) lives in the
+// `sch-io` crate; re-exported so the engine's `crate::wire` / `crate::write` /
+// `crate::label` / `crate::read` paths resolve unchanged.
+pub use sch_io::{label, read, wire, write};
 
 pub use sch_model::{grid, ids};
 pub use sch_model::result::{

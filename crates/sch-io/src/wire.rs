@@ -42,7 +42,7 @@ fn simplify(mut path: Path) -> Path {
 /// 2–4 point Manhattan elbow from `a` (leaving along `dir_a` for at least
 /// [`LEAD_MM`]) to `b`: straight when the lead axis lines up, else one L or
 /// one Z. Every segment is axis-aligned.
-pub(crate) fn elbow(a: Pt, dir_a: Dir, b: Pt) -> Path {
+pub fn elbow(a: Pt, dir_a: Dir, b: Pt) -> Path {
     let v = dir_a.vec();
     let lead = [a[0] + v[0] * LEAD_MM, a[1] + v[1] * LEAD_MM];
     let path = match dir_a {
@@ -109,7 +109,7 @@ fn seg_hits_rect(a: Pt, b: Pt, r: &[f64; 4]) -> bool {
 /// How two axis-aligned segments interact for routing purposes. Public to the
 /// crate so the refinement scorer can reuse it to detect net merges (two
 /// different-net segments that touch in a connecting way).
-pub(crate) fn segments_conflict(a1: Pt, a2: Pt, b1: Pt, b2: Pt) -> bool {
+pub fn segments_conflict(a1: Pt, a2: Pt, b1: Pt, b2: Pt) -> bool {
     let a_horiz = (a1[1] - a2[1]).abs() < EPS;
     let b_horiz = (b1[1] - b2[1]).abs() < EPS;
     if a_horiz == b_horiz {
@@ -148,7 +148,7 @@ pub(crate) fn segments_conflict(a1: Pt, a2: Pt, b1: Pt, b2: Pt) -> bool {
 
 /// Whether `path` can be drawn for `net` without entering a body, touching a
 /// foreign net's anchor point, or merging with a foreign net's segment.
-pub(crate) fn path_ok(path: &Path, net: &str, scene: &RouteScene) -> bool {
+pub fn path_ok(path: &Path, net: &str, scene: &RouteScene) -> bool {
     for w in path.windows(2) {
         let (a, b) = (w[0], w[1]);
         if scene.solids.iter().any(|r| seg_hits_rect(a, b, r)) {
