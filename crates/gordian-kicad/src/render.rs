@@ -5,7 +5,25 @@
 //! capped at `max_px` (callers pass ~1600: under Bedrock's request limits and
 //! near Claude's 1568 px vision sweet spot).
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
+use kicad_cli_rs::cli::KicadCli;
+use kicad_cli_rs::env::KicadEnv;
+
+use crate::tools::RENDER_MAX_PX;
+
+/// Render a committed `.kicad_sch` to PNG bytes at [`RENDER_MAX_PX`] — the image
+/// the in-loop vision LAYOUT critic looks at. Exports the schematic to an SVG in a
+/// throwaway temp dir, then rasterizes it. Errors propagate so the caller can
+/// degrade to a netlist-only review (the layout pass is best-effort).
+pub fn schematic_png(env: &KicadEnv, sch: &Path) -> Result<Vec<u8>> {
+    let tmp = tempfile::tempdir().context("temp dir for schematic SVG export")?;
+    let svg_path =
+        KicadCli::new(env).export_svg(sch, tmp.path()).context("exporting schematic SVG")?;
+    let svg = std::fs::read_to_string(&svg_path).context("reading exported SVG")?;
+    svg_to_png(&svg, RENDER_MAX_PX)
+}
 
 /// Render `svg` to PNG bytes, scaling so the long edge is `max_px` pixels.
 pub fn svg_to_png(svg: &str, max_px: u32) -> Result<Vec<u8>> {

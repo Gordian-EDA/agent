@@ -103,6 +103,31 @@ impl PcbTools {
         }
         Ok((score, defects))
     }
+
+    /// Render the committed schematic to PNG (on the blocking pool — it shells out
+    /// to `kicad-cli`), then run the in-loop VISION layout critic over it. Returns
+    /// `None` on ANY failure (no schematic, render error, vision call error) so the
+    /// caller degrades to netlist-only — the layout pass must never crash a turn.
+    async fn review_layout_schematic(
+        &self,
+        reviewer: &dyn Provider,
+        intent: &str,
+    ) -> Option<(f64, Vec<String>)> {
+        let ctx = Arc::clone(&self.ctx);
+        let png = tokio::task::spawn_blocking(move || {
+            crate::render::schematic_png(ctx.env(), ctx.sch_path())
+        })
+        .await
+        .ok()?
+        .ok()?;
+        let image = ImageData {
+            format: "png".to_string(),
+            base64: base64::engine::general_purpose::STANDARD.encode(png),
+        };
+        crate::review::review_layout(reviewer, intent, image, crate::review::LayoutKind::Schematic)
+            .await
+            .ok()
+    }
 }
 
 #[async_trait]
@@ -200,6 +225,21 @@ impl ToolProvider for PcbTools {
         tool_summary(&call.name, &call.input, result)
     }
 
+    /// The post-turn review of the committed schematic, in TWO complementary
+    /// planes UNIONED into one [`ReviewOutcome`]:
+    ///
+    /// 1. the NETLIST plane (electrical correctness + exact-math ERC), and
+    /// 2. the LAYOUT plane — an in-loop VISION critic that renders the committed
+    ///    `.kicad_sch` to PNG and judges READABILITY (decoupling-cap placement,
+    ///    sprawl, crossings, silk overlap, dog-legs) — the quality the netlist
+    ///    pass is structurally blind to.
+    ///
+    /// The two defect lists are deduped by their shared `- <target>:` prefix (so a
+    /// fault both planes name isn't fed twice) and the score is the lower of the
+    /// two (the loop should fix the worse problem first). The layout pass is
+    /// BEST-EFFORT: if the render fails or the vision call has no creds/flakes, it
+    /// contributes nothing and the review degrades to netlist-only — it never
+    /// crashes the turn.
     async fn review_committed(
         &self,
         intent: &str,
@@ -210,7 +250,24 @@ impl ToolProvider for PcbTools {
             return None;
         }
         let netlist = sch_layout::read::lift(self.ctx.env(), sch).ok()?;
-        let (score, defects) = self.review_netlist_with_erc(reviewer, intent, &netlist).await.ok()?;
+        let (mut score, mut defects) =
+            self.review_netlist_with_erc(reviewer, intent, &netlist).await.ok()?;
+
+        // Layout (vision) plane — best-effort, unioned in. A render or vision
+        // failure leaves the netlist-only result untouched. A `(0.0, [])` result
+        // means the vision pass produced no parseable verdict (no signal), so it
+        // must NOT drag the score to zero — skip it.
+        if let Some((layout_score, layout_defects)) =
+            self.review_layout_schematic(reviewer, intent).await
+            && !(layout_score == 0.0 && layout_defects.is_empty())
+        {
+            score = score.min(layout_score);
+            for d in layout_defects {
+                if !defects.iter().any(|e| crate::review::same_defect(e, &d)) {
+                    defects.push(d);
+                }
+            }
+        }
         Some(ReviewOutcome { score, defects })
     }
 }

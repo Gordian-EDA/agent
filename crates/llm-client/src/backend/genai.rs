@@ -347,7 +347,8 @@ fn to_genai_messages(messages: &[Message]) -> Vec<ChatMessage> {
                                 thought_signatures: None,
                             }));
                         }
-                        ContentBlock::ToolResult { .. } => {}
+                        // Images only ride user turns; an assistant-side image is meaningless.
+                        ContentBlock::ToolResult { .. } | ContentBlock::Image(_) => {}
                     }
                 }
                 out.push(ChatMessage::assistant(MessageContent::from_parts(parts)));
@@ -359,6 +360,12 @@ fn to_genai_messages(messages: &[Message]) -> Vec<ChatMessage> {
                 for b in &m.content {
                     match b {
                         ContentBlock::Text(t) => user_parts.push(ContentPart::from_text(t.clone())),
+                        // A standalone vision image (e.g. the layout critic's render).
+                        ContentBlock::Image(img) => user_parts.push(ContentPart::from_binary_base64(
+                            format!("image/{}", img.format),
+                            img.base64.clone(),
+                            None,
+                        )),
                         ContentBlock::ToolResult { tool_use_id, content, images } => {
                             tool_parts.push(ContentPart::ToolResponse(ToolResponse::new(
                                 tool_use_id.clone(),
@@ -482,6 +489,21 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(role_of(&out[0]), "Tool");
         assert_eq!(role_of(&out[1]), "User");
+    }
+
+    #[test]
+    fn standalone_user_image_maps_to_a_binary_part_in_the_user_turn() {
+        // The layout critic's path: a user message of [text, Image].
+        let messages = vec![Message::user_with_image(
+            "look at this render",
+            ImageData { format: "png".to_string(), base64: "aGVsbG8=".to_string() },
+        )];
+        let out = to_genai_messages(&messages);
+        assert_eq!(out.len(), 1, "one user turn, no trailing tool message");
+        assert_eq!(role_of(&out[0]), "User");
+        let body = serde_json::to_value(&out[0]).unwrap().to_string();
+        assert!(body.contains("image/png"), "image part carries its mime: {body}");
+        assert!(body.contains("aGVsbG8="), "base64 payload preserved: {body}");
     }
 
     #[test]

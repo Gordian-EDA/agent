@@ -29,7 +29,7 @@ pub use agent::{
     Agent, AgentEvent, Approvals, AutoApprove, ContextStats, StopReason, TurnOutcome,
     TurnOutcomeSummary,
 };
-pub use review::review;
+pub use review::{review, review_image};
 pub use tool::{
     ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome, ToolProvider,
 };

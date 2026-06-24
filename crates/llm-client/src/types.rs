@@ -26,6 +26,11 @@ pub struct ImageData {
 pub enum ContentBlock {
     /// Plain text.
     Text(String),
+    /// A standalone image in a user message (e.g. a rendered schematic/board the
+    /// model should LOOK at). Distinct from [`ContentBlock::ToolResult`]'s
+    /// attached images, which ride a finished tool call; this rides a plain
+    /// vision prompt — the path the layout critic uses.
+    Image(ImageData),
     /// A tool invocation the assistant requested.
     ToolUse {
         id: String,
@@ -63,6 +68,15 @@ impl Message {
         Self {
             role: Role::Assistant,
             content: vec![ContentBlock::Text(text.into())],
+        }
+    }
+
+    /// Build a user message that asks the model to look at an image: the prompt
+    /// text followed by the image itself. Used by the vision layout critic.
+    pub fn user_with_image(text: impl Into<String>, image: ImageData) -> Self {
+        Self {
+            role: Role::User,
+            content: vec![ContentBlock::Text(text.into()), ContentBlock::Image(image)],
         }
     }
 }
