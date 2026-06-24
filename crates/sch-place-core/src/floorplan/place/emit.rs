@@ -119,7 +119,7 @@ pub fn emit_strategy(
     env: &KicadEnv,
     design: &Design,
     ir: &LayoutIr,
-    engine: Box<dyn PlacementEngine>,
+    engine: Box<dyn MeasuringEngine>,
 ) -> io::Result<EmitOutput> {
     let (w, mut out) = prepare_writer(env, design, ir, engine)?;
     out.sch = w.finish();
@@ -136,7 +136,7 @@ pub(crate) fn prepare_writer(
     env: &KicadEnv,
     design: &Design,
     ir: &LayoutIr,
-    engine: Box<dyn PlacementEngine>,
+    engine: Box<dyn MeasuringEngine>,
 ) -> io::Result<(SchematicWriter, EmitOutput)> {
     let mut items = gather(env, design)?;
     // Seed each item's mirror flag from the IR (lifted onto Item so the search
@@ -167,18 +167,17 @@ pub(crate) fn prepare_writer(
     // re-polishes (which would re-add a seating pass the large-board pick had
     // deliberately rejected). Greedy keeps the exact refine→polish order, so the
     // reference snapshots stay byte-identical.
-    let cost = RoutedCost::new(env, &inc, ir, &needs_flag);
+    let realizer = Realizer::new(env, &inc, ir, &items);
     let problem = PlaceProblem {
         inc: &inc,
         ir,
         seed: SEARCH_SEED,
         options: place_options_from_env(),
-        cost: &cost,
     };
     if std::env::var("DEBUG_PLACE").is_ok() {
         eprintln!("[place] engine = {}", engine.name());
     }
-    let _report = engine.place(&problem, &mut items);
+    let _report = engine.place_measured(&realizer, &problem, &mut items);
     // Guarantee no body overlap: the cost-gated refine can leave two parts
     // touching when separating them would transiently raise routed cost (a local
     // minimum), so a final, unconditional relaxation pushes any remaining
@@ -308,16 +307,17 @@ pub(crate) fn prepare_writer(
     w.set_frame(true);
     w.prepare();
     let warnings = w.layout_warnings();
-    let (body_crossings, ic_crossings, wire_crossings) =
-        crossing_counts(env, &items, &inc, ir, &needs_flag);
+    // The shipped body/IC/wire crossing triple, for the diagnostic `EmitOutput` — the
+    // SAME `fan_risers=true` measure the engines pick on, via the measurement library.
+    let crossings = realizer.crossings(&items);
     Ok((
         w,
         EmitOutput {
             sch: String::new(),
             layout_warnings: warnings,
-            body_crossings,
-            ic_crossings,
-            wire_crossings,
+            body_crossings: crossings.body,
+            ic_crossings: crossings.ic,
+            wire_crossings: crossings.wire,
             detected_idioms: ir.idioms.clone(),
         },
     ))
@@ -333,7 +333,7 @@ pub fn emit_writer(
     env: &KicadEnv,
     design: &Design,
     ir: &LayoutIr,
-    engine: Box<dyn PlacementEngine>,
+    engine: Box<dyn MeasuringEngine>,
 ) -> io::Result<SchematicWriter> {
     Ok(prepare_writer(env, design, ir, engine)?.0)
 }

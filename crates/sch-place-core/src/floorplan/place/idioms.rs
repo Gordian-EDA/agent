@@ -5,7 +5,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use kicad_cli_rs::env::KicadEnv;
 use kicad_sexpr::geometry::SymbolGeometry;
 
 
@@ -2202,7 +2201,7 @@ pub fn orient_angle(geom: &SymbolGeometry, orient: Orient) -> f64 {
 }
 
 /// Quantization for comparing mm x's by grid cell (the 1.27 mm grid).
-pub(crate) const GRID_KEY: f64 = 1.27;
+pub const GRID_KEY: f64 = 1.27;
 
 
 
@@ -2418,73 +2417,3 @@ pub fn cohesion_targets(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> Vec<(
     out
 }
 
-
-/// Pin-alignment polish: slide each satellite onto the AXIS of the signal pin it
-/// wires to, so the connecting wire drops (or runs) straight instead of jogging
-/// out from a column centre — a vertical part aligns its x to the pin, a
-/// horizontal part its y. The coarse cell grid can only place a part at a column
-/// centre, so this sub-column offset is done here on raw positions, kept only
-/// when it lowers cost (a straighter, shorter wire) and overlaps nothing.
-pub(crate) fn align_to_pins(
-    env: &KicadEnv,
-    items: &mut [Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-    needs_flag: &BTreeSet<String>,
-) {
-    let Ok(w0) = build_writer(env, None, items, inc, ir, needs_flag, false) else { return };
-    // Per satellite: is it vertical, and where is its signal-pin target?
-    let mut plans: Vec<(usize, bool, [f64; 2])> = Vec::new();
-    for (si, s) in items.iter().enumerate() {
-        if s.geom.pins.len() != 2 {
-            continue;
-        }
-        let pos = |n: &str| w0.pin_dirs(env, &s.refdes, n).ok().and_then(|v| v.first().map(|x| x.0));
-        let (Some(p0), Some(p1)) = (pos(&s.geom.pins[0].number), pos(&s.geom.pins[1].number)) else {
-            continue;
-        };
-        let vertical = (p0[1] - p1[1]).abs() >= (p0[0] - p1[0]).abs();
-        if let Some(t) = signal_anchor_centroid(env, &w0, items, inc, ir, s, false) {
-            // A part touching a real IC SIGNAL pin aligns to it (a pull-up over its
-            // pin, a series element onto its pin row).
-            plans.push((si, vertical, t));
-        } else if let Some(t) = supply_pin_target(env, &w0, items, inc, ir, s) {
-            // A decoupling/bypass cap with no signal pin hugs the IC SUPPLY pin it
-            // bypasses, so it hangs right at that pin instead of drifting to a far
-            // frame column (decongest spreads a bank that all wants one pin x).
-            plans.push((si, vertical, t));
-        }
-    }
-    drop(w0);
-
-    let mut best = score_items(env, items, inc, ir, needs_flag);
-    for (si, vertical, target) in plans {
-        // Walk one grid step at a time TOWARD the pin axis, keeping the cheapest
-        // clear position found. Walking (not jumping) means that when the exact
-        // axis is taken — two pull-ups for adjacent IC pins want the same x — the
-        // part still slides as close as it can instead of staying put.
-        let axis = if vertical { 0 } else { 1 };
-        let orig = items[si].at;
-        let goal = crate::grid::snap(target[axis]);
-        let dir = (goal - orig[axis]).signum();
-        if dir == 0.0 {
-            continue;
-        }
-        let (mut best_pos, mut best_cost) = (orig, best);
-        let mut p = orig;
-        for _ in 0..24 {
-            p[axis] += dir * 1.27;
-            if (p[axis] - goal) * dir > EPS || overlaps_any(items, si, p) {
-                break;
-            }
-            items[si].at = p;
-            let c = score_items(env, items, inc, ir, needs_flag);
-            if c + 0.5 < best_cost {
-                best_cost = c;
-                best_pos = p;
-            }
-        }
-        items[si].at = best_pos;
-        best = best_cost;
-    }
-}

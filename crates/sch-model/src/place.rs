@@ -1,14 +1,21 @@
-//! The placement-engine SDK: the [`PlaceProblem`] an engine reads, the
-//! [`PlacementCost`] evaluator it scores against, and the [`PlacementEngine`]
-//! contract it implements. All of it lives here in the neutral kernel (`sch-model`)
-//! so a THIRD-PARTY engine can be written against `sch-model` ALONE — it never
-//! touches the incumbent layout crate (`sch-place-core`) nor any KiCAD CLI. An
-//! engine: depends on `sch-model`, `impl PlacementEngine for MyEngine`, reads the
-//! problem's items + [`PlaceOptions`], scores candidates via the injected
-//! `&dyn PlacementCost`, and returns a [`PlaceResult`].
+//! The placement-engine SDK: the [`PlaceProblem`] an engine reads and the
+//! [`PlacementEngine`] contract it implements. Both live in the neutral kernel
+//! (`sch-model`) so a THIRD-PARTY engine can be written against `sch-model` ALONE —
+//! it never touches the incumbent layout crate (`sch-place-core`) nor any KiCAD CLI.
 //!
-//! The PCB router/placer SDK uses the identical silhouette (`name`/`caps`/a
-//! self-contained result/an injected evaluator), so the two tiers stay symmetric.
+//! [`PlaceProblem`] describes ONLY the problem — the connectivity, the intent, a seed,
+//! the caller's [`PlaceOptions`] — and is SILENT on METHOD. It carries no cost, no
+//! evaluator, no objective, no search knob: a force-directed, analytical, ML, or
+//! constraint-solver placer has no cost-candidate loop, so baking one into the problem
+//! would be a category error. An engine reads the problem, writes final positions into
+//! the `items` slice, and returns a [`PlaceResult`]; *how* (cost-search, learned,
+//! template, portfolio) is the engine's own business.
+//!
+//! A measurement-based engine that CHOOSES to score routed sheets obtains its
+//! measurement machinery from `sch-place-core` (the routed-sheet realization library) —
+//! that is the engine's choice, reflected in its dependency on `sch-place-core`, never a
+//! field of the neutral problem here. An engine that does not measure depends on
+//! `sch-model` alone.
 
 use serde::{Deserialize, Serialize};
 
@@ -77,91 +84,18 @@ impl Crossings {
     }
 }
 
-/// The EVALUATOR an engine scores candidate placements against — the boundary that
-/// lets an engine avoid importing the incumbent layout crate. `sch-place-core`
-/// implements it ONCE (it owns the `KicadEnv` + the routed writer assembly the
-/// scoring needs) and the agent injects `&dyn PlacementCost` into the
-/// [`PlaceProblem`], exactly as it injects the `Box<dyn PlacementEngine>`.
-///
-/// An implementation captures the fixed-per-problem scoring state (the env, the
-/// connectivity, the intent IR, the ERC needs) so the only argument that varies
-/// across a candidate-scoring loop — the candidate geometry — is the lone method
-/// parameter.
-///
-/// ## Contract
-/// - **Deterministic given the candidate**: equal `items` ⇒ equal result.
-/// - **Never panics.** A unit that cannot be built or scored (e.g. the writer
-///   errors) is reported as a *saturated* failure, never `panic!`/`unwrap`: the
-///   GATING signals — [`Self::cost`] / [`Self::premium_cost`] return
-///   [`f64::INFINITY`], [`Self::warnings`] / [`Self::truthfulness_breaks`] return
-///   [`usize::MAX`] — so a failed unit is un-acceptable to any `min`-based search
-///   and can never win the pick (the engine ships its last finite best, emitting no
-///   artifact for the failed unit). [`Self::crossings`] is a DIAGNOSTIC tiebreaker
-///   only — never a primary gate — so an impl may report it as zero on an
-///   un-buildable unit (the incumbent does, matching its shipped `EmitOutput`
-///   counts). (The human REASON for the failure is the emit boundary's job to
-///   surface; the scorer only makes the candidate lose.)
-///
-/// `Send + Sync` so a parallel (rayon) engine can score candidates concurrently
-/// against one shared `&dyn PlacementCost`.
-pub trait PlacementCost: Send + Sync {
-    /// The base (free-tier) routed cost of `items` — lower is better.
-    fn cost(&self, items: &[Item]) -> f64;
-
-    /// The premium routed cost when the caller already has the shipped
-    /// [`Self::warnings`] count `warnings` (the candidate-pick's primary sort key).
-    /// Identical result to [`Self::premium_cost`] but skips one redundant
-    /// text-solve — use this in candidate-scoring loops, which already compute the
-    /// warning count. A faithful impl satisfies
-    /// `premium_cost(it) == premium_cost_with_warnings(it, warnings(it))`.
-    fn premium_cost_with_warnings(&self, items: &[Item], warnings: usize) -> f64;
-
-    /// The premium (paid-tier) routed cost of `items`. Defaulted in terms of
-    /// [`Self::premium_cost_with_warnings`] so a fresh evaluator need only write the
-    /// hot variant once.
-    fn premium_cost(&self, items: &[Item]) -> f64 {
-        self.premium_cost_with_warnings(items, self.warnings(items))
-    }
-
-    /// Readability warnings (overlapping symbol/label pairs) on the shipped sheet.
-    fn warnings(&self, items: &[Item]) -> usize;
-
-    /// The body / IC / wire crossing triple of the shipped sheet — a DIAGNOSTIC
-    /// tiebreaker among candidates that already built (never a primary gate), so an
-    /// un-buildable unit may report zero here (see the trait contract).
-    fn crossings(&self, items: &[Item]) -> Crossings;
-
-    /// Geometric TRUTHFULNESS breaks (net merges / shorts / foreign taps) — a HARD
-    /// count the candidate pick uses to REJECT any placement that mis-wires. The
-    /// readability [`Self::warnings`] do NOT detect a merge (a short can LOWER
-    /// length+junctions), so this is the gate that keeps a router-free search
-    /// truthful.
-    fn truthfulness_breaks(&self, items: &[Item]) -> usize;
-
-    /// OPTIONAL local-improve scaffold the evaluator MAY offer alongside scoring: a
-    /// greedy hill-climb of the satellites' positions/orientation over [`Self::cost`].
-    /// Defaulted to a no-op so a third-party evaluator that only scores need not
-    /// implement it (an engine that relies on it can query nothing — it simply gets
-    /// the seed back unchanged). The incumbent free engine drives ITS search entirely
-    /// through this hook, which lets `greedy-place` depend on `sch-model` alone.
-    fn refine(&self, _items: &mut [Item]) {}
-
-    /// OPTIONAL polish scaffold (see [`Self::refine`]): a routed align→compact→nudge
-    /// fixpoint, each step gated on [`Self::cost`]. Defaulted to a no-op.
-    fn polish(&self, _items: &mut [Item]) {}
-}
-
 /// The placement problem an engine works on: the connectivity (`inc`), the intent
-/// (`ir` — rails/frozen/zones), a `seed` for stochastic engines, the caller's
-/// [`PlaceOptions`], and the injected `cost` evaluator. It is SELF-SUFFICIENT — it
-/// carries no `KicadEnv` and no CLI handle: an engine scores candidates purely
-/// through `cost`, so it depends on `sch-model` alone.
+/// (`ir` — rails/frozen/zones/grid/groups, the DECLARATIVE constraints + hints), a
+/// `seed` for stochastic engines, and the caller's [`PlaceOptions`]. It describes the
+/// PROBLEM and nothing about METHOD — no cost, no evaluator, no objective, no search
+/// knob. The parts' geometry every engine needs to place at all lives on each [`Item`]
+/// (the slice the engine writes into); the connectivity + intent live here. It is
+/// SELF-SUFFICIENT against `sch-model` alone: no `KicadEnv`, no CLI handle, no scorer.
 pub struct PlaceProblem<'a> {
     pub inc: &'a Incidence,
     pub ir: &'a LayoutIr,
     pub seed: u64,
     pub options: PlaceOptions,
-    pub cost: &'a dyn PlacementCost,
 }
 
 /// What a [`PlacementEngine`] reports about the placement it just wrote into
@@ -189,14 +123,12 @@ pub struct PlaceResult {
 /// A schematic placement ENGINE: given the [`PlaceProblem`], write final positions
 /// into `items` AND return the [`PlaceResult`] describing them. The only contract
 /// is "produce a placement" — *how* (cost-search, learned, constraint, template,
-/// portfolio) is the engine's own business; the trait assumes nothing beyond the
-/// injected [`PlacementCost`].
+/// portfolio) is the engine's own business; the trait assumes nothing about method
+/// and the [`PlaceProblem`] carries no measurement machinery.
 ///
 /// ## Contract
-/// - **Deterministic given the [`PlaceProblem`].** No clock, no I/O beyond the
-///   injected `cost`; a fixed `seed` reproduces.
-/// - **Never panics.** A unit it cannot place reports through the result's counts;
-///   a failed candidate is rejected via its saturated cost (see [`PlacementCost`]),
+/// - **Deterministic given the [`PlaceProblem`].** No clock; a fixed `seed` reproduces.
+/// - **Never panics.** A unit it cannot place reports through the result's counts,
 ///   never by unwinding.
 /// - The returned [`PlaceResult`] describes the FINAL `items` it wrote — the
 ///   placement the caller will ship.
