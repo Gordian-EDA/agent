@@ -756,19 +756,11 @@ fn route_one_job(
     for (t, start) in terminals.iter().skip(1) {
         // First try confined to the leaf window (keeps routes cell-local). If that
         // fails — a saturated tiny leaf can wall a crossing off at the detailed
-        // pitch — the route must dip into a neighbour. Retry on a DILATED window
-        // (the leaf grown to reach into adjacent leaves) before paying for a full
-        // board search: a walled-off crossing almost always escapes within a leaf
-        // or two, and the unbounded fallback otherwise explores the whole board
-        // (most of this router's A* expansions came from it). Only if the dilated
-        // search also fails do we fall back UNCONFINED. Cross-cell clearance still
+        // pitch — retry UNCONFINED on the shared grid: the route may dip into a
+        // neighbouring leaf to get around foreign copper. Cross-cell clearance still
         // holds (the shared grid carries every net's halo), and the endpoint snap
         // keeps the stitching contract; only the locality relaxes.
         let path = astar::search_bounded(wgrid, conn_idx, &[*start], &tree_cells, costs, Some(bounds))
-            .or_else(|| {
-                let dilated = dilate_bounds(bounds, wgrid);
-                astar::search_bounded(wgrid, conn_idx, &[*start], &tree_cells, costs, Some(dilated))
-            })
             .or_else(|| astar::search_bounded(wgrid, conn_idx, &[*start], &tree_cells, costs, None))
             .ok_or_else(|| {
                 format!(
@@ -897,22 +889,6 @@ fn window_cell_bounds(grid: &RouteGrid, window: &Rect) -> astar::CellBounds {
         iy0: iy0.saturating_sub(1),
         ix1: (ix1 + 1).min(grid.nx.saturating_sub(1)),
         iy1: (iy1 + 1).min(grid.ny.saturating_sub(1)),
-    }
-}
-
-/// Grow a leaf's [`CellBounds`] to reach into its neighbouring leaves, clamped to
-/// the grid. The pad is the leaf's own extent (so the box roughly triples, one
-/// leaf over in each direction) bounded to a handful of cells either way — enough
-/// to let a walled-off crossing escape a saturated leaf without unbounding the A*
-/// to the whole board. Tried between the leaf-confined search and the full-board
-/// fallback in [`route_one_job`].
-fn dilate_bounds(b: astar::CellBounds, grid: &RouteGrid) -> astar::CellBounds {
-    let pad = (b.ix1 - b.ix0).max(b.iy1 - b.iy0).clamp(6, 24);
-    astar::CellBounds {
-        ix0: b.ix0.saturating_sub(pad),
-        iy0: b.iy0.saturating_sub(pad),
-        ix1: (b.ix1 + pad).min(grid.nx.saturating_sub(1)),
-        iy1: (b.iy1 + pad).min(grid.ny.saturating_sub(1)),
     }
 }
 
