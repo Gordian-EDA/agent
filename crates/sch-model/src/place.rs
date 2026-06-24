@@ -145,3 +145,76 @@ pub trait PlacementEngine {
     /// Write the final placement into `items` and return its diagnostics.
     fn place(&self, problem: &PlaceProblem, items: &mut [Item]) -> PlaceResult;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::item::Incidence;
+    use kicad_sexpr::geometry::SymbolGeometry;
+    use std::collections::BTreeMap;
+
+    /// THE INVARIANT CHECK. A trivial fixed-grid placer that IGNORES connectivity and
+    /// scores NOTHING: it lays parts on a lattice. It compiles + runs against `sch-model`
+    /// ALONE — no cost, no measurer, no `KicadEnv` — proving [`PlaceProblem`] encodes only
+    /// the problem and is silent on method. If `PlaceProblem` ever regrows a cost/evaluator
+    /// field, this engine stops compiling against `sch-model` alone and the test breaks.
+    struct FixedGrid {
+        cols: usize,
+        pitch: f64,
+    }
+
+    impl PlacementEngine for FixedGrid {
+        fn name(&self) -> &'static str {
+            "fixed-grid"
+        }
+        fn place(&self, _problem: &PlaceProblem, items: &mut [Item]) -> PlaceResult {
+            // Drop each part onto a lattice, in order. No connectivity, no cost, no routing.
+            for (i, it) in items.iter_mut().enumerate() {
+                let (c, r) = (i % self.cols, i / self.cols);
+                it.at = [c as f64 * self.pitch, r as f64 * self.pitch];
+                it.angle = 0.0;
+            }
+            PlaceResult {
+                engine: self.name().to_string(),
+                truthfulness_breaks: 0,
+                warnings: 0,
+                crossings: Crossings::default(),
+                cost: 0.0,
+            }
+        }
+    }
+
+    fn item(refdes: &str) -> Item {
+        Item {
+            refdes: refdes.into(),
+            part: "Device:R".into(),
+            value: String::new(),
+            footprint: None,
+            geom: SymbolGeometry { lib_id: "Device:R".into(), pins: Vec::new(), raw_definition: String::new() },
+            pins: Vec::new(),
+            at: [0.0, 0.0],
+            angle: 0.0,
+            unit: 1,
+            mirror: false,
+            frozen: false,
+        }
+    }
+
+    #[test]
+    fn trivial_fixed_grid_engine_runs_against_sch_model_alone() {
+        let inc: Incidence = BTreeMap::new();
+        let ir = LayoutIr::default();
+        let problem = PlaceProblem { inc: &inc, ir: &ir, seed: 0, options: PlaceOptions::default() };
+        let mut items = vec![item("R1"), item("R2"), item("R3"), item("R4"), item("R5")];
+
+        let engine = FixedGrid { cols: 2, pitch: 10.0 };
+        let report = engine.place(&problem, &mut items);
+
+        assert_eq!(report.engine, "fixed-grid");
+        assert_eq!(engine.caps().tier, Tier::Free);
+        // The lattice: R1=(0,0) R2=(10,0) R3=(0,10) R4=(10,10) R5=(0,20).
+        assert_eq!(items[0].at, [0.0, 0.0]);
+        assert_eq!(items[1].at, [10.0, 0.0]);
+        assert_eq!(items[4].at, [0.0, 20.0]);
+    }
+}
