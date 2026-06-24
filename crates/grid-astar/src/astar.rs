@@ -31,8 +31,21 @@
 //! `HashMap` leaks into the result.
 
 use crate::grid::RouteGrid;
+use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+
+thread_local! {
+    /// Per-thread A* scratch reused across [`search_bounded`] calls. The `g` and
+    /// `came_from` planes are the size of the whole board, so re-allocating and
+    /// zeroing them on every leg (there are thousands per dense board) dominated
+    /// the router's memory traffic. Instead we keep them allocated, and each call
+    /// records the cells it writes and resets only those on the way out — so the
+    /// per-call cost is proportional to the states EXPANDED, not the board area.
+    /// Invariant between calls: every entry is the unvisited sentinel
+    /// (`u32::MAX` / `usize::MAX`).
+    static ASTAR_SCRATCH: RefCell<(Vec<u32>, Vec<usize>)> = const { RefCell::new((Vec::new(), Vec::new())) };
+}
 
 /// Cost of one orthogonal grid step.
 pub const STEP_COST: u32 = 1;
@@ -213,9 +226,16 @@ pub fn search_bounded(
     let sid = |s: &State| s.layer * plane + s.iy * grid.nx + s.ix;
 
     // g-score per state index; u32::MAX == unvisited. came_from stores the
-    // predecessor state index (usize::MAX == none).
-    let mut g = vec![u32::MAX; n];
-    let mut came_from = vec![usize::MAX; n];
+    // predecessor state index (usize::MAX == none). Both come from the thread-local
+    // scratch (kept allocated across calls); `touched` records every index we write
+    // so we can restore the all-unvisited invariant cheaply on the way out.
+    let (mut g, mut came_from) =
+        ASTAR_SCRATCH.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    if g.len() < n {
+        g.resize(n, u32::MAX);
+        came_from.resize(n, usize::MAX);
+    }
+    let mut touched: Vec<usize> = Vec::new();
 
     // Heap entries: (f, g, heading, state). Reverse → min-heap by f, then by g,
     // then heading and state as total tie-breakers for determinism. Carrying g
@@ -246,10 +266,12 @@ pub fn search_bounded(
         if g[id] != 0 {
             g[id] = 0;
             came_from[id] = usize::MAX;
+            touched.push(id);
             open.push(Reverse((heuristic(s), 0, Heading::None, *s)));
         }
     }
 
+    let mut found: Option<Vec<State>> = None;
     while let Some(Reverse((_f, popped_g, heading, cur))) = open.pop() {
         let cur_id = sid(&cur);
         // Stale heap entry: a cheaper path to `cur` was already finalized.
@@ -257,7 +279,8 @@ pub fn search_bounded(
             continue;
         }
         if is_target(&cur) {
-            return Some(reconstruct(&came_from, cur, plane, grid.nx));
+            found = Some(reconstruct(&came_from, cur, plane, grid.nx));
+            break;
         }
         let g_cur = g[cur_id];
 
@@ -293,6 +316,7 @@ pub fn search_bounded(
             let tentative = g_cur + STEP_COST + bend;
             relax(
                 next, tentative, dir, cur_id, &mut g, &mut came_from, &mut open, &heuristic, sid,
+                &mut touched,
             );
         }
 
@@ -347,6 +371,7 @@ pub fn search_bounded(
                 let tentative = g_cur + costs.diag + bend;
                 relax(
                     next, tentative, dir, cur_id, &mut g, &mut came_from, &mut open, &heuristic, sid,
+                    &mut touched,
                 );
             }
         }
@@ -383,12 +408,20 @@ pub fn search_bounded(
                     &mut open,
                     &heuristic,
                     sid,
+                    &mut touched,
                 );
             }
         }
     }
 
-    None
+    // Restore the all-unvisited invariant over only the cells we touched, then
+    // hand the buffers back to the thread-local for the next call to reuse.
+    for &id in &touched {
+        g[id] = u32::MAX;
+        came_from[id] = usize::MAX;
+    }
+    ASTAR_SCRATCH.with(|s| *s.borrow_mut() = (g, came_from));
+    found
 }
 
 /// 4-neighbourhood as `(heading, dx, dy)`.
@@ -474,6 +507,7 @@ fn relax<H, S>(
     open: &mut BinaryHeap<Reverse<(u32, u32, Heading, State)>>,
     heuristic: &H,
     sid: S,
+    touched: &mut Vec<usize>,
 ) where
     H: Fn(&State) -> u32,
     S: Fn(&State) -> usize,
@@ -482,6 +516,7 @@ fn relax<H, S>(
     if tentative < g[id] {
         g[id] = tentative;
         came_from[id] = cur_id;
+        touched.push(id);
         let f = tentative.saturating_add(heuristic(&next));
         open.push(Reverse((f, tentative, arrive_dir, next)));
     }

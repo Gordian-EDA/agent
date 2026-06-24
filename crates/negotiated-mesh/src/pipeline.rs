@@ -158,23 +158,22 @@ pub fn route_detailed(problem: &RouteProblem) -> RouteResult {
     }
 }
 
-/// Route `problem`, automatically falling back to the slice-1 router.
+/// Route `problem` with the cheapest engine that fully routes it.
 ///
-/// Runs [`route_detailed`]; if it has zero failed nets, returns it (tagged
-/// [`RouterKind::Detailed`]). Otherwise also runs the always-correct slice-1
-/// router and returns whichever result has **fewer** failed nets — the naive
-/// router wins ties as the battle-tested fallback. The returned result's
-/// [`RouteResult::router`] records which engine won.
+/// Runs the always-correct slice-1 grid router FIRST. When it routes every net
+/// with zero geometry violations, the detailed engine can only differ in copper
+/// TIDINESS (a bounded wirelength detour), never in routability — so we keep the
+/// tidy orthogonal naive result and never pay for a detailed route. This is the
+/// common case (simple and medium boards) and is where the old "run both, always"
+/// path wasted ~all of its detailed-engine time.
+///
+/// Only when naive leaves an unrouted or geometry-violating net do we run
+/// [`route_detailed`] and keep the BETTER of the two. FAULTS are primary (never
+/// trade routability); at equal faults the orthogonal naive copper wins unless it
+/// detours more than [`NAIVE_DETOUR_TOLERANCE`] longer than the detailed route (in
+/// which case the detailed router's via-enabled direct routing is the cleaner
+/// result). [`RouteResult::router`] records which engine won.
 pub fn route_auto(problem: &RouteProblem) -> RouteResult {
-    let mut detailed = route_detailed(problem);
-    reconcile_connectivity(problem, &mut detailed.solution, &mut detailed.failed);
-
-    // Always also run the slice-1 router and keep the BETTER of the two. FAULTS
-    // are primary (never trade routability). At equal faults, prefer the slice-1
-    // router: its orthogonal copper reads cleaner than the detailed router's
-    // octilinear style on a board both can route — UNLESS the grid router pays a
-    // big DETOUR for it (much longer copper, e.g. it lacks the via the detailed
-    // router used to go direct), in which case the detailed result is cleaner.
     let strict = router::route(problem);
     let lenient = router::route_lenient(problem);
     let naive = if score(problem, &lenient) < score(problem, &strict) {
@@ -182,25 +181,39 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
     } else {
         strict
     };
-    let n_faults = failed_pad_weight(problem, &naive.failed) + geometry_violations(problem, &naive.solution);
-    let d_faults =
-        failed_pad_weight(problem, &detailed.failed) + geometry_violations(problem, &detailed.solution);
-    let use_naive = if n_faults != d_faults {
-        n_faults < d_faults
-    } else {
-        let nwl = metrics(&naive.solution).wirelength;
-        let dwl = metrics(&detailed.solution).wirelength;
-        // Tidy orthogonal naive wins unless it detours > the tolerance longer.
-        nwl <= dwl * NAIVE_DETOUR_TOLERANCE
-    };
-    let mut result = if use_naive {
+    let n_faults =
+        failed_pad_weight(problem, &naive.failed) + geometry_violations(problem, &naive.solution);
+
+    let mut result = if n_faults == 0 {
+        // Naive routed the whole board cleanly — the detailed engine cannot do
+        // better on routability, so skip it.
         RouteResult {
             solution: naive.solution,
             failed: naive.failed,
             router: RouterKind::Naive,
         }
     } else {
-        detailed
+        let mut detailed = route_detailed(problem);
+        reconcile_connectivity(problem, &mut detailed.solution, &mut detailed.failed);
+        let d_faults = failed_pad_weight(problem, &detailed.failed)
+            + geometry_violations(problem, &detailed.solution);
+        let use_naive = if n_faults != d_faults {
+            n_faults < d_faults
+        } else {
+            let nwl = metrics(&naive.solution).wirelength;
+            let dwl = metrics(&detailed.solution).wirelength;
+            // Tidy orthogonal naive wins unless it detours > the tolerance longer.
+            nwl <= dwl * NAIVE_DETOUR_TOLERANCE
+        };
+        if use_naive {
+            RouteResult {
+                solution: naive.solution,
+                failed: naive.failed,
+                router: RouterKind::Naive,
+            }
+        } else {
+            detailed
+        }
     };
     drop_redundant_thruhole_vias(problem, &mut result.solution);
     result
