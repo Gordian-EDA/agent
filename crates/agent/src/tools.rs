@@ -1,7 +1,7 @@
 //! The eleven-tool registry the agent drives (spec §10).
 //!
 //! Each tool is a thin, deterministic wrapper over logic that already lives in
-//! `circuit-lang`, `kicad-bridge`, and `sch-layout`. The registry exposes:
+//! `circuit-lang`, `kicad-sexpr`/`kicad-cli-rs`, and `sch-layout`. The registry exposes:
 //!
 //! - [`Tools::defs`] — the JSON-Schema [`ToolDef`]s handed to the LLM.
 //! - [`Tools::run`] — dispatch a tool by name with a JSON input, returning JSON

@@ -273,16 +273,18 @@ impl LlmClient for BedrockClient {
 /// message (with any attached images riding on a trailing `user` message, since
 /// OpenAI `tool` messages are text-only).
 /// A fresh random id for a new thread (one conversation/session). Random — not derived from
-/// time or content — so distinct threads never collide. Uses the OS-seeded RandomState (no extra
-/// deps); adequate for gateway thread-grouping, not for security.
+/// time or content — so distinct threads never collide. Adequate for gateway thread-grouping,
+/// not for security.
 fn random_thread_id() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    let rnd = |salt: u64| -> u64 {
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        h.write_u64(salt);
-        h.finish()
-    };
-    crate::multisheet::det_uuid(&format!("{:016x}{:016x}", rnd(1), rnd(2)))
+    let (a, b) = (fastrand::u64(..), fastrand::u64(..));
+    format!(
+        "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
+        (a & 0xffffffff) as u32,
+        ((a >> 32) & 0xffff) as u16,
+        ((a >> 48) & 0xfff) as u16,
+        (b & 0xfff) as u16,
+        (b >> 12) & 0xffffffffffff
+    )
 }
 
 pub struct OpenAiClient {

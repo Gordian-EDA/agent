@@ -12,13 +12,13 @@
 //! `draft.circuit.yaml`): a [`BoardDraft`] persisted as `.autopcb/board.json`.
 //! It carries the parts (reference, footprint lib_id, per-pad nets, optional
 //! locked position), board bounds, design rules, keepouts, placement hints, and
-//! the last placement. Tools mutate the draft; `place_board`/`route_board` (Task
-//! 2) read it. The LLM never emits trace coordinates — placement positions enter
-//! only via a part `lock` in the Board-DSL, snapped/legalized by the engine on place.
+//! the last placement. Tools mutate the draft; `place_board`/`route_board` read
+//! it. The LLM never emits trace coordinates — placement positions enter only via
+//! a part `lock`, snapped/legalized by the placer on place.
 //!
-//! The serde shape reuses pcb-engine types directly ([`PlacementHints`],
+//! The serde shape reuses `pcb-place` types directly ([`PlacementHints`],
 //! [`Placement`], [`LockedAt`], [`Rect`], [`LayerRef`]) so a draft round-trips
-//! straight into a `PlaceProblem` in Task 2 without a translation layer.
+//! straight into a `PlaceProblem` without a translation layer.
 
 use std::collections::BTreeMap;
 
@@ -73,7 +73,7 @@ pub struct BoardDraft {
     /// Rectangular keepouts (routing obstacles; v1 honored by route_board).
     #[serde(default)]
     pub keepouts: Vec<Keepout>,
-    /// LLM-authored placement hints (reused verbatim from pcb-engine).
+    /// LLM-authored placement hints (reused verbatim from `pcb-place`).
     #[serde(default)]
     pub hints: PlacementHints,
     /// The last placement produced by `place_board`, if any (set in Task 2).
@@ -162,7 +162,7 @@ pub struct DraftPart {
     #[serde(default)]
     pub pad_nets: BTreeMap<String, String>,
     /// If present, the part is pinned here and the engine never moves it
-    /// (reuses pcb-engine's [`LockedAt`]).
+    /// (reuses `pcb-place`'s [`LockedAt`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locked: Option<LockedAt>,
 }
@@ -173,7 +173,7 @@ pub struct DraftPart {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Keepout {
-    /// The keepout rectangle (mm), reusing pcb-engine's [`Rect`].
+    /// The keepout rectangle (mm), reusing `pcb-place`'s [`Rect`].
     pub rect: pcb_place::placement::Rect,
     /// Copper layers the keepout blocks ("top", "bottom", …).
     pub layers: Vec<LayerRef>,
@@ -1715,7 +1715,7 @@ fn assign_planes(draft: &BoardDraft) -> Vec<(String, u32)> {
     nets.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     // Up to 2 planes (GND/VCC), placed on the CENTRED plane layers for this stackup
     // (4-layer → In1,In2; 6-layer → In2,In3) so the other inner layers stay signal.
-    // Must match pcb_engine's `plane_mask_for`, or the router would route on a plane.
+    // Must match the router's `plane_layers`, or the router would route on a plane.
     let plane_idx = grid_astar::router::plane_layers(draft.rules.layer_count as usize);
     nets.into_iter()
         .take(plane_idx.len())
