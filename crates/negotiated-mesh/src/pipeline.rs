@@ -10,15 +10,15 @@
 //!
 //! [`route_detailed`] folds every stage's failures into one [`RouteResult`] with
 //! provenance in the reason string (`"global: …"`, `"assign: …"`, `"cell N: …"`),
-//! and stitches only the *fully successful* nets into copper. [`route_auto`] runs
-//! BOTH the detailed pipeline and the always-correct slice-1 router
-//! ([`crate::router::route`]) and keeps the better by a quality key
-//! (`faults, via_count, wirelength`): faults are primary (never trade
-//! routability), then the tidier copper wins — so the detailed router's
-//! capacity-aware routing is kept where it reduces faults, and the direct grid
-//! router is kept where it is neater on a board both can route. The naive router
-//! wins exact ties as the battle-tested path. A [`RouterKind`] tag records which
-//! engine produced the returned result.
+//! and stitches only the *fully successful* nets into copper. [`NegotiatedMeshRouter`]
+//! is the [`Router`] impl wrapping it. The generic selector [`select_best`] runs
+//! the offered [`Router`]s and keeps the best by a [`RouteQuality`] key (faults,
+//! then wirelength): faults are primary (never trade routability), then the tidier
+//! copper wins — so the detailed router's capacity-aware routing is kept where it
+//! reduces faults, and the direct grid router is kept where it is neater on a board
+//! both can route. The earlier-injected (baseline) router wins ties as the
+//! battle-tested path. [`RouteResult::engine`] records which engine produced the
+//! returned result.
 //!
 //! ## Stitching (the connectivity contract)
 //!
@@ -39,10 +39,15 @@
 use crate::crossing::assign_crossings;
 use crate::detail::{self, CellRoute, CellRouteResult};
 use crate::pathing::{global_route, GlobalRouteResult};
-use crate::problem::{FailedNet, LayerRef, Point2, RouteProblem, RouteSolution, Trace, Via, ViaSpan};
-use crate::router;
-use serde::{Deserialize, Serialize};
+use crate::problem::{
+    Capabilities, FailedNet, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult,
+    RouteSolution, Router, Trace, Via, ViaSpan,
+};
+use crate::router::{self, GridAStarRouter};
 use std::collections::BTreeMap;
+
+/// This engine's [`RouteResult::engine`] provenance tag.
+pub const ENGINE: &str = "detailed";
 
 /// Byte-exact coincidence epsilon. Stitching relies on the detailed stage having
 /// snapped shared endpoints to *identical* mm coordinates, so a near-zero
@@ -50,54 +55,13 @@ use std::collections::BTreeMap;
 /// silently bridged — the lint is the authority on connectivity).
 const JOIN_EPS: f64 = 1e-12;
 
-// ── provenance ─────────────────────────────────────────────────────────────────
-
-/// Which routing engine produced a [`RouteResult`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RouterKind {
-    /// The slice-1 sequential grid router ([`crate::router::route`]).
-    Naive,
-    /// The slice-3 detailed pipeline ([`route_detailed`]).
-    Detailed,
-}
-
-// ── metrics ────────────────────────────────────────────────────────────────────
-
-/// Comparable size/quality metrics for a [`RouteSolution`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RouteMetrics {
-    /// Total copper wirelength (mm): the sum of every trace polyline's length.
-    pub wirelength: f64,
-    /// Number of vias in the solution.
-    pub via_count: usize,
-    /// Number of trace polylines in the solution.
-    pub trace_count: usize,
-}
-
-/// Compute [`RouteMetrics`] for a solution (wirelength = Σ polyline lengths).
-pub fn metrics(solution: &RouteSolution) -> RouteMetrics {
-    let mut wirelength = 0.0;
-    for t in &solution.traces {
-        for w in t.path.windows(2) {
-            wirelength += w[1].dist(&w[0]);
-        }
-    }
-    RouteMetrics {
-        wirelength,
-        via_count: solution.vias.len(),
-        trace_count: solution.traces.len(),
-    }
-}
-
 // ── pipeline entry points ──────────────────────────────────────────────────────
 
 /// Route `problem` through the full detailed pipeline (global → assign → cell →
 /// stitch). Never panics; every stage's failures are folded into
 /// [`RouteResult::failed`] with provenance in the reason, and a net that fails at
 /// *any* stage contributes no copper to the returned solution. The result is
-/// tagged [`RouterKind::Detailed`].
+/// tagged with [`ENGINE`] (`"detailed"`).
 pub fn route_detailed(problem: &RouteProblem) -> RouteResult {
     let mut failed: Vec<FailedNet> = Vec::new();
     // A net failing anywhere drops its copper everywhere. Collected by name.
@@ -152,76 +116,117 @@ pub fn route_detailed(problem: &RouteProblem) -> RouteResult {
     RouteResult {
         solution,
         failed,
-        router: RouterKind::Detailed,
+        engine: ENGINE.to_owned(),
     }
 }
 
-/// Route `problem` with the cheapest engine that fully routes it.
-///
-/// Runs the always-correct slice-1 grid router FIRST. When it routes every net
-/// with zero geometry violations, the detailed engine can only differ in copper
-/// TIDINESS (a bounded wirelength detour), never in routability — so we keep the
-/// tidy orthogonal naive result and never pay for a detailed route. This is the
-/// common case (simple and medium boards) and is where the old "run both, always"
-/// path wasted ~all of its detailed-engine time.
-///
-/// Only when naive leaves an unrouted or geometry-violating net do we run
-/// [`route_detailed`] and keep the BETTER of the two. FAULTS are primary (never
-/// trade routability); at equal faults the orthogonal naive copper wins unless it
-/// detours more than [`NAIVE_DETOUR_TOLERANCE`] longer than the detailed route (in
-/// which case the detailed router's via-enabled direct routing is the cleaner
-/// result). [`RouteResult::router`] records which engine won.
-pub fn route_auto(problem: &RouteProblem) -> RouteResult {
-    let strict = router::route(problem);
-    let lenient = router::route_lenient(problem);
-    let naive = if score(problem, &lenient) < score(problem, &strict) {
-        lenient
-    } else {
-        strict
-    };
-    let n_faults =
-        failed_pad_weight(problem, &naive.failed) + geometry_violations(problem, &naive.solution);
+// ── NegotiatedMeshRouter (the SDK Router impl) ───────────────────────────────────
 
-    // A board with an inner-layer BGA escape assignment routes on the FULL stack with a
-    // per-net layer restriction the naive router honours (`escape_layers` + `layer_mask`).
-    // The detailed engine has no such restriction and would free-maze every net over all
-    // layers — the self-blocking, runtime-exploding behaviour the structured escape exists
-    // to avoid — so it is never run here; the naive structured result stands.
-    let skip_detailed = !problem.escape_layers.is_empty();
+/// The premium detailed [`Router`]: the negotiated-mesh pipeline ([`route_detailed`])
+/// behind the SDK trait, with its copper reconciled through the DRC oracle so the
+/// returned result is geometry-clean.
+///
+/// It DECLINES (`can_route` = `false`) a board carrying a per-net inner-layer escape
+/// assignment ([`RouteProblem::escape_layers`]): the detailed engine free-mazes every
+/// net over all layers and has no per-net layer restriction, so it would defeat the
+/// structured escape (self-blocking, runtime-exploding) the assignment exists to
+/// enable. On such a board only the grid router is offered, exactly as the old
+/// `skip_detailed` flag intended.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NegotiatedMeshRouter;
 
-    let mut result = if n_faults == 0 || skip_detailed {
-        // Naive routed the whole board cleanly — the detailed engine cannot do
-        // better on routability, so skip it.
-        RouteResult {
-            solution: naive.solution,
-            failed: naive.failed,
-            router: RouterKind::Naive,
+impl Router for NegotiatedMeshRouter {
+    fn name(&self) -> &'static str {
+        ENGINE
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            max_layers: u32::MAX,
+            // Cannot honour a per-net inner-layer escape restriction (free-mazes).
+            honors_escape_layers: false,
+            honors_net_widths: true,
+            honors_outline: true,
         }
-    } else {
+    }
+
+    fn route(&self, problem: &RouteProblem) -> RouteResult {
         let mut detailed = route_detailed(problem);
         reconcile_connectivity(problem, &mut detailed.solution, &mut detailed.failed);
-        let d_faults = failed_pad_weight(problem, &detailed.failed)
-            + geometry_violations(problem, &detailed.solution);
-        let use_naive = if n_faults != d_faults {
-            n_faults < d_faults
-        } else {
-            let nwl = metrics(&naive.solution).wirelength;
-            let dwl = metrics(&detailed.solution).wirelength;
-            // Tidy orthogonal naive wins unless it detours > the tolerance longer.
-            nwl <= dwl * NAIVE_DETOUR_TOLERANCE
-        };
-        if use_naive {
-            RouteResult {
-                solution: naive.solution,
-                failed: naive.failed,
-                router: RouterKind::Naive,
-            }
-        } else {
-            detailed
-        }
+        detailed
+    }
+}
+
+/// Route `problem` with the best of the offered `routers`.
+///
+/// The generic routing selector: it filters by [`Router::can_route`], runs each
+/// surviving router in injection order, and keeps the best by routability then
+/// tidiness ([`better`]). The FIRST router (the always-correct baseline the agent
+/// injects first) that routes with zero faults short-circuits the rest — the
+/// premium engine can then only differ in tidiness, never routability, so it is
+/// never paid for on a board the baseline already routes clean. The winner's
+/// redundant through-hole vias are dropped ([`drop_redundant_thruhole_vias`]).
+///
+/// `routers` is injected by the caller, mirroring `Box<dyn PlacementEngine>`:
+/// free tier = `[&GridAStarRouter]`; premium = `[&GridAStarRouter, &NegotiatedMeshRouter]`.
+/// The geometry-violation count each [`RouteQuality`] needs is computed here (via
+/// the DRC lint), since that oracle lives outside the `pcb-model` kernel. Returns
+/// an empty-solution result tagged `"none"` if no router can route the problem.
+pub fn select_best(problem: &RouteProblem, routers: &[&dyn Router]) -> RouteResult {
+    let quality = |r: &RouteResult| {
+        RouteQuality::of(problem, r, router::geometry_violations(problem, &r.solution))
     };
+
+    let mut best: Option<(RouteResult, RouteQuality)> = None;
+    for r in routers {
+        if !r.can_route(problem) {
+            continue;
+        }
+        let result = r.route(problem);
+        let q = quality(&result);
+        // Short-circuit: the first router to route cleanly wins — a later router can
+        // only differ in tidiness, never routability, so it is not worth running.
+        let clean = q.faults() == 0;
+        best = match best {
+            None => Some((result, q)),
+            Some((bi, bq)) if better(&bq, &q) => Some((bi, bq)),
+            Some(_) => Some((result, q)),
+        };
+        if clean {
+            break;
+        }
+    }
+
+    let mut result = best.map(|(r, _)| r).unwrap_or_else(|| RouteResult {
+        solution: RouteSolution { traces: vec![], vias: vec![] },
+        failed: vec![],
+        engine: "none".to_owned(),
+    });
     drop_redundant_thruhole_vias(problem, &mut result.solution);
     result
+}
+
+/// Keep the incumbent? Routability is primary (fewer total faults wins outright);
+/// at EQUAL faults the incumbent (the earlier-injected, more battle-tested router)
+/// keeps its result unless it detours more than [`NAIVE_DETOUR_TOLERANCE`] longer
+/// than the challenger — the asymmetric tidiness tiebreak the in-house selector
+/// uses. Asymmetric in the incumbent's favour, so the selector is a left-fold in
+/// injection order, not a global argmin.
+fn better(incumbent: &RouteQuality, challenger: &RouteQuality) -> bool {
+    if incumbent.faults() != challenger.faults() {
+        incumbent.faults() < challenger.faults()
+    } else {
+        incumbent.wirelength <= challenger.wirelength * NAIVE_DETOUR_TOLERANCE
+    }
+}
+
+/// Route `problem` with the premium portfolio: the free grid router plus the
+/// premium detailed router, selected by [`select_best`]. The convenience entry the
+/// agent's PCB tool uses; a free-tier caller injects only `[&GridAStarRouter]`.
+pub fn route_auto(problem: &RouteProblem) -> RouteResult {
+    let grid = GridAStarRouter;
+    let mesh = NegotiatedMeshRouter;
+    select_best(problem, &[&grid, &mesh])
 }
 
 /// Drop a via that sits inside a SAME-NET through-hole pad: the pad's barrel
@@ -247,34 +252,6 @@ fn drop_redundant_thruhole_vias(problem: &RouteProblem, solution: &mut RouteSolu
 /// than this factor longer than the detailed route (then the detailed router's
 /// via-enabled direct routing is the cleaner result).
 const NAIVE_DETOUR_TOLERANCE: f64 = 1.15;
-
-/// `(total DRC faults, geometry faults)` for choosing between slice-1 variants.
-fn key(failed: usize, geom: usize) -> (usize, usize) {
-    (failed + geom, geom)
-}
-
-/// Connectivity cost: PADS left unconnected (sum over failed nets of pin count), not the
-/// net count — failing one 8-pin power net is worse than two 2-pin signals. Keeps the
-/// variant choice consistent with the naive's pad-weighted rip-up retry so they never
-/// disagree (which previously let a fewer-nets-but-more-pads result win).
-fn failed_pad_weight(problem: &RouteProblem, failed: &[crate::problem::FailedNet]) -> usize {
-    failed
-        .iter()
-        .map(|f| {
-            problem
-                .connections
-                .iter()
-                .find(|c| c.name == f.connection)
-                .map(|c| c.points_to_connect.len().max(1))
-                .unwrap_or(1)
-        })
-        .sum()
-}
-
-/// [`key`] for a slice-1 candidate, weighted by unconnected pads.
-fn score(problem: &RouteProblem, r: &router::RouteResult) -> (usize, usize) {
-    key(failed_pad_weight(problem, &r.failed), geometry_violations(problem, &r.solution))
-}
 
 /// Make a routed result DRC-HONEST: the lint is the authority, not the router's
 /// own bookkeeping. First drop any net whose copper violates GEOMETRY (clearance
@@ -304,36 +281,6 @@ fn reconcile_connectivity(
         })
         .collect();
     failed.extend(new);
-}
-
-/// Count the *geometry* DRC violations of a solution — clearance, trace width,
-/// via clearance, out-of-bounds, invalid layer — excluding the connectivity
-/// lints, which already correlate with the failed-net count. This is the
-/// tiebreaker [`route_auto`] uses so a fully-routed-but-violating solution never
-/// beats a DRC-clean one.
-fn geometry_violations(problem: &RouteProblem, solution: &RouteSolution) -> usize {
-    crate::lint::lint(problem, solution)
-        .iter()
-        .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
-        .count()
-}
-
-/// The outcome of a pipeline route: copper, failures, and which engine produced
-/// it.
-///
-/// Mirrors [`crate::router::RouteResult`] (solution + failed) and adds the
-/// [`router`](RouteResult::router) provenance tag so callers and tests can see
-/// which engine produced the returned copper.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RouteResult {
-    /// Emitted traces and vias.
-    pub solution: RouteSolution,
-    /// Nets that could not be fully routed (deterministic order), with stage
-    /// provenance in each reason.
-    pub failed: Vec<FailedNet>,
-    /// Which engine produced this result.
-    pub router: RouterKind,
 }
 
 // ── stitching ──────────────────────────────────────────────────────────────────
@@ -658,7 +605,7 @@ mod tests {
     fn led_r_detailed_is_clean_and_lints_empty() {
         let p = load("led-r.json");
         let r = route_detailed(&p);
-        assert_eq!(r.router, RouterKind::Detailed);
+        assert_eq!(r.engine, ENGINE);
         assert!(
             r.failed.is_empty(),
             "led-r must route cleanly through route_detailed today: {:?}",
@@ -666,7 +613,7 @@ mod tests {
         );
         let vs = lint(&p, &r.solution);
         assert!(vs.is_empty(), "led-r detailed solution must lint CLEAN, got {vs:?}");
-        let m = metrics(&r.solution);
+        let m = r.solution.metrics();
         assert!(m.wirelength > 0.0, "led-r produced copper");
         assert!(m.trace_count > 0, "led-r has traces");
     }
@@ -681,7 +628,7 @@ mod tests {
         // clean end-to-end and lints empty.
         let p = load("quad.json");
         let r = route_detailed(&p);
-        assert_eq!(r.router, RouterKind::Detailed);
+        assert_eq!(r.engine, ENGINE);
         assert!(
             r.failed.is_empty(),
             "quad must route cleanly through route_detailed after the finisher: {:?}",
@@ -851,28 +798,4 @@ mod tests {
         assert!(joined.iter().all(|r| r.iter().any(|q| same_point(q, &pt(0.0, 0.0)))));
     }
 
-    #[test]
-    fn metrics_sum_polyline_lengths() {
-        let s = RouteSolution {
-            traces: vec![
-                Trace {
-                    connection: "A".to_owned(),
-                    layer: crate::problem::LayerRef::top(),
-                    width: 0.2,
-                    path: vec![pt(0.0, 0.0), pt(3.0, 0.0), pt(3.0, 4.0)],
-                },
-            ],
-            vias: vec![Via {
-                connection: "A".to_owned(),
-                at: pt(3.0, 0.0),
-                diameter: 0.6,
-                drill: 0.3,
-                span: ViaSpan::Through,
-            }],
-        };
-        let m = metrics(&s);
-        assert!((m.wirelength - 7.0).abs() < 1e-9, "3 + 4 = 7mm");
-        assert_eq!(m.via_count, 1);
-        assert_eq!(m.trace_count, 1);
-    }
 }
