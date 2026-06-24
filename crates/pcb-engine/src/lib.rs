@@ -7,15 +7,14 @@
 //! [`problem`] for back-compat ([`problem::RouteProblem`] / [`problem::RouteSolution`]).
 
 pub mod astar;
-pub mod connectivity;
 pub mod crossing;
 pub mod detail;
 pub mod grid;
-pub mod lint;
 pub mod mesh;
 pub mod pathing;
 pub mod pipeline;
 pub mod placement;
+pub use drc_lint::{connectivity, lint};
 pub use pcb_model as problem;
 pub mod router;
 pub mod svg;

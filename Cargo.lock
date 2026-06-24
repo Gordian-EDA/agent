@@ -335,6 +335,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
+name = "drc-lint"
+version = "0.1.0"
+dependencies = [
+ "pcb-model",
+ "serde",
+]
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1138,6 +1146,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 name = "pcb-engine"
 version = "0.1.0"
 dependencies = [
+ "drc-lint",
  "pcb-model",
  "rayon",
  "serde",

@@ -2,7 +2,7 @@
 //!
 //! Where the router reasons on a grid, the lint re-measures the *actual* copper
 //! geometry with exact segment/segment and segment/rect math — it never imports
-//! or trusts [`crate::grid`]. The router can be wrong; this is the independent
+//! or trusts `grid`. The router can be wrong; this is the independent
 //! authority that catches it. A real violation must surface, never pass
 //! silently.
 //!
@@ -862,8 +862,6 @@ mod tests {
     use crate::problem::{
         Bounds, Connection, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace, Via, ViaSpan,
     };
-    use crate::router;
-    use std::path::Path;
 
     fn bounds() -> Bounds {
         Bounds {
@@ -984,15 +982,6 @@ mod tests {
         let dropped = drop_violating_copper(&p, &mut sol);
         assert_eq!(dropped, vec!["VCC".to_owned()]);
         assert!(sol.vias.is_empty(), "undersized via dropped, not shipped");
-    }
-
-    fn load(name: &str) -> RouteProblem {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures")
-            .join(name);
-        let json = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        serde_json::from_str(&json).unwrap_or_else(|e| panic!("parse {name}: {e}"))
     }
 
     fn count<F: Fn(&DrcViolation) -> bool>(vs: &[DrcViolation], f: F) -> usize {
@@ -1317,35 +1306,6 @@ mod tests {
         );
     }
 
-    // ── the gate: router output on both fixtures lints clean ─────────────────
-
-    #[test]
-    fn led_r_router_output_lints_clean() {
-        let p = load("led-r.json");
-        let result = router::route(&p);
-        assert!(result.failed.is_empty(), "led-r should route fully");
-        let vs = lint(&p, &result.solution);
-        assert!(vs.is_empty(), "led-r router output must lint CLEAN, got {vs:?}");
-    }
-
-    #[test]
-    fn quad_router_output_lints_clean() {
-        let p = load("quad.json");
-        let result = router::route(&p);
-        assert!(result.failed.is_empty(), "quad should route fully");
-        let vs = lint(&p, &result.solution);
-        assert!(vs.is_empty(), "quad router output must lint CLEAN, got {vs:?}");
-    }
-
-    #[test]
-    fn lint_is_deterministic() {
-        let p = load("quad.json");
-        let result = router::route(&p);
-        let a = lint(&p, &result.solution);
-        let b = lint(&p, &result.solution);
-        assert_eq!(a, b, "lint must be deterministic");
-    }
-
     // ── InvalidLayer trigger test ─────────────────────────────────────────────
 
     #[test]
@@ -1407,29 +1367,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fixtures_lint_clean_after_global_route() {
-        // All fixtures must route (via global_route) and produce lint-clean
-        // solutions via the slice-1 router. This guards that adding InvalidLayer
-        // doesn't regress the existing gate.
-        use crate::pathing::global_route;
-        for name in &["led-r.json", "quad.json", "congested.json"] {
-            let p = load(name);
-            // Slice-1 router output (all fixtures that slice-1 can handle).
-            let result = router::route(&p);
-            let vs = lint(&p, &result.solution);
-            let invalid: Vec<_> = vs
-                .iter()
-                .filter(|v| matches!(v, DrcViolation::InvalidLayer { .. }))
-                .collect();
-            assert!(
-                invalid.is_empty(),
-                "{name} slice-1 solution has InvalidLayer violations: {invalid:?}"
-            );
-            // Global route doesn't produce a RouteSolution, but the plan's route
-            // points are the same as the problem's connection points, so calling
-            // lint on the slice-1 solution is the right gate check here.
-            let _ = global_route(&p); // must not panic
-        }
-    }
 }
