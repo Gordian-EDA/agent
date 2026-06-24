@@ -15,9 +15,9 @@
 
 use std::path::{Path, PathBuf};
 
-use pcb_engine::pipeline::route_auto;
-use pcb_engine::problem::RouteProblem;
-use pcb_engine::svg::render_svg;
+use negotiated_mesh::pipeline::route_auto;
+use pcb_model::RouteProblem;
+use pcb_svg::svg::render_svg;
 
 /// The fixtures shipped with `pcb-engine`, rendered when no argument is given.
 const DEFAULT_FIXTURES: &[&str] = &["led-r", "quad", "congested-relief"];

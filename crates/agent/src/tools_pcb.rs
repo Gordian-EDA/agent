@@ -35,15 +35,15 @@ use pcb_synth::placefp::{part_from_footprint, part_from_footprint_layers};
 use pcb_synth::synth::{
     plane_fill_rects, synthesize_board_full, synthesize_board_layers, SynthPart, ZoneSpec,
 };
-use pcb_engine::connectivity::Violation as ConnViolation;
-use pcb_engine::lint::{DrcViolation, lint};
-use pcb_engine::pathing::global_route;
-use pcb_engine::pipeline::{RouterKind, metrics, route_auto};
-use pcb_engine::placement::{
+use drc_lint::connectivity::Violation as ConnViolation;
+use drc_lint::lint::{DrcViolation, lint};
+use negotiated_mesh::pathing::global_route;
+use negotiated_mesh::pipeline::{RouterKind, metrics, route_auto};
+use pcb_place::placement::{
     GroupHint, LockedAt, Part, PlaceProblem, PlaceReport, PlaceResult, Placement, PlacementHints,
     Rect, to_route_problem,
 };
-use pcb_engine::problem::{
+use pcb_model::{
     Bounds, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteSolution, Via, ViaSpan,
 };
 
@@ -174,7 +174,7 @@ pub struct DraftPart {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Keepout {
     /// The keepout rectangle (mm), reusing pcb-engine's [`Rect`].
-    pub rect: pcb_engine::placement::Rect,
+    pub rect: pcb_place::placement::Rect,
     /// Copper layers the keepout blocks ("top", "bottom", …).
     pub layers: Vec<LayerRef>,
 }
@@ -506,7 +506,7 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
                     ));
                 }
                 Some((idx, _))
-                    if pcb_engine::router::plane_layers(layer_count as usize).contains(&idx) =>
+                    if grid_astar::router::plane_layers(layer_count as usize).contains(&idx) =>
                 {
                     return Err(format!(
                         "rules.pours[].layer '{layer}' is a GND/VCC PLANE on a {layer_count}-layer \
@@ -874,7 +874,7 @@ fn place_problem_from_draft(
     // Keep-outs that block a SIGNAL layer (top/bottom) are placement obstacles too:
     // a part dropped inside one has its pads trapped (no track can leave). Inner-only
     // (plane) keep-outs don't constrain placement, so they're excluded here.
-    let keepouts: Vec<pcb_engine::placement::Rect> = draft
+    let keepouts: Vec<pcb_place::placement::Rect> = draft
         .keepouts
         .iter()
         .filter(|k| {
@@ -1031,7 +1031,7 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     // The stages, the $NO_UNIFIED override, and the legality fallback all live in (and
     // are documented on) the single visible entry pcb_place::place_board. The agent
     // overrides any of this with the interactive geometry tools (move_part/route_track).
-    let result = pcb_engine::placement::place_board(&problem, &hints);
+    let result = pcb_place::placement::place_board(&problem, &hints);
 
     // Persist the placement into the draft so route_board / render_board / a
     // later get_board can read it without re-running the placer.
@@ -1046,7 +1046,7 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     // hint so the agent can ring them into a tidy decoupling cluster.
     let mut hint_suggestions: Vec<Value> = Vec::new();
     if result.legal {
-        let pairs = pcb_engine::placement::decoupling_pairs(&problem);
+        let pairs = pcb_place::placement::decoupling_pairs(&problem);
         let mut by_ic: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (cap, ic) in pairs {
             by_ic.entry(ic).or_default().push(cap);
@@ -1205,8 +1205,8 @@ fn parse_rect(v: &Value) -> std::result::Result<Rect, String> {
 }
 
 /// Parse an edge hint ("n"/"s"/"e"/"w", case-insensitive).
-fn parse_edge(v: &Value) -> std::result::Result<pcb_engine::placement::Edge, String> {
-    use pcb_engine::placement::Edge;
+fn parse_edge(v: &Value) -> std::result::Result<pcb_place::placement::Edge, String> {
+    use pcb_place::placement::Edge;
     let s = v
         .as_str()
         .ok_or_else(|| "edge must be a string \"n\"/\"s\"/\"e\"/\"w\"".to_string())?;
@@ -1337,7 +1337,7 @@ struct LintSplit {
 
 fn lint_summary(
     rp: &RouteProblem,
-    solution: &pcb_engine::problem::RouteSolution,
+    solution: &pcb_model::RouteSolution,
     failed: &[FailedNet],
     plane_nets: &std::collections::BTreeSet<String>,
 ) -> LintSplit {
@@ -1672,7 +1672,7 @@ fn assign_planes(draft: &BoardDraft) -> Vec<(String, u32)> {
     // Up to 2 planes (GND/VCC), placed on the CENTRED plane layers for this stackup
     // (4-layer → In1,In2; 6-layer → In2,In3) so the other inner layers stay signal.
     // Must match pcb_engine's `plane_mask_for`, or the router would route on a plane.
-    let plane_idx = pcb_engine::router::plane_layers(draft.rules.layer_count as usize);
+    let plane_idx = grid_astar::router::plane_layers(draft.rules.layer_count as usize);
     nets.into_iter()
         .take(plane_idx.len())
         .enumerate()
@@ -1706,8 +1706,8 @@ fn stitch_via_clears(
     at: &Point2,
     net: &str,
     obstacles: &[Obstacle],
-    vias: &[pcb_engine::problem::Via],
-    traces: &[pcb_engine::problem::Trace],
+    vias: &[pcb_model::Via],
+    traces: &[pcb_model::Trace],
     via_r: f64,
     via_drill: f64,
     clearance: f64,
@@ -1747,8 +1747,8 @@ fn fanout_seg_clears(
     b: &Point2,
     net: &str,
     obstacles: &[Obstacle],
-    vias: &[pcb_engine::problem::Via],
-    traces: &[pcb_engine::problem::Trace],
+    vias: &[pcb_model::Via],
+    traces: &[pcb_model::Trace],
     hw: f64,
     clearance: f64,
 ) -> bool {
@@ -1793,7 +1793,7 @@ fn route_with_planes(
     mut rp: RouteProblem,
     planes: &[(String, u32)],
     rules: &DraftRules,
-) -> pcb_engine::pipeline::RouteResult {
+) -> negotiated_mesh::pipeline::RouteResult {
     rp.layer_count = 2;
     let plane_names: std::collections::BTreeSet<String> =
         planes.iter().map(|(n, _)| n.clone()).collect();
@@ -1897,7 +1897,7 @@ fn route_with_planes(
                     && rp
                         .outline
                         .as_ref()
-                        .is_none_or(|poly| pcb_engine::problem::point_in_polygon(&cand, poly));
+                        .is_none_or(|poly| pcb_model::point_in_polygon(&cand, poly));
                 if in_board
                     && stitch_via_clears(
                         &cand, &net, &rp.obstacles, &result.solution.vias,
@@ -1908,7 +1908,7 @@ fn route_with_planes(
                         &result.solution.traces, tw / 2.0, clr,
                     )
                 {
-                    result.solution.traces.push(pcb_engine::problem::Trace {
+                    result.solution.traces.push(pcb_model::Trace {
                         connection: net.clone(),
                         layer: LayerRef::top(),
                         width: tw,
@@ -1983,7 +1983,7 @@ fn route_with_planes(
     // the net is reported honestly unrouted instead of shipping a fault. SAFE: a clean
     // board lints to zero so nothing is dropped (verified byte-for-byte on the 57-board
     // suite); only a would-fault config trades copper for an honest failure.
-    let dropped = pcb_engine::lint::drop_violating_copper(&rp, &mut result.solution);
+    let dropped = drc_lint::lint::drop_violating_copper(&rp, &mut result.solution);
     for net in dropped {
         if !result.failed.iter().any(|f| f.connection == net) {
             result.failed.push(FailedNet {
@@ -2317,7 +2317,7 @@ pub fn render_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
                     layout_cost: 0.0,
                 },
             };
-            pcb_engine::svg::render_placement(&problem, &draft.hints, &result)
+            pcb_svg::svg::render_placement(&problem, &draft.hints, &result)
         }
         "routed" => {
             // Need route.json.
@@ -2348,7 +2348,7 @@ pub fn render_board(input: Value, ctx: &ToolCtx) -> Result<Value> {
             };
             let mut rp = to_route_problem(&problem, &placements);
             inject_keepouts(&mut rp, &draft.keepouts);
-            pcb_engine::svg::render_svg(&rp, &stored.solution, &stored.failed)
+            pcb_svg::svg::render_svg(&rp, &stored.solution, &stored.failed)
         }
         // The match above is exhaustive over {"placed","routed"}; the `other`
         // arm returned early, so this branch is unreachable.

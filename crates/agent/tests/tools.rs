@@ -781,8 +781,8 @@ fn build_board_draft_unknown_footprint_errors_with_suggestions() {
 #[test]
 fn board_draft_round_trips_through_the_workspace() {
     use agent::tools_pcb::{BoardDraft, DraftPart, DraftRules};
-    use pcb_engine::placement::PlacementHints;
-    use pcb_engine::problem::Bounds;
+    use pcb_place::placement::PlacementHints;
+    use pcb_model::Bounds;
 
     let (ctx, _guard) = fixture_ctx();
     let mut pad_nets = std::collections::BTreeMap::new();

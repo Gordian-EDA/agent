@@ -8,7 +8,8 @@ description = "Synthesize a KiCAD .kicad_pcb (footprints, planes, zones, outline
 
 [dependencies]
 kicad-sexpr = { path = "../kicad-sexpr" }
-pcb-engine = { path = "../pcb-engine" }
+pcb-place = { path = "../pcb-place" }
+pcb-model = { path = "../pcb-model" }
 kiutils_kicad.workspace = true
 tempfile.workspace = true
 uuid.workspace = true

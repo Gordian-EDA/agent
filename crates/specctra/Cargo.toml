@@ -8,7 +8,7 @@ description = "Specctra .dsn/.ses codec bridging KiCAD boards and the Freeroutin
 
 [dependencies]
 kicad-sexpr = { path = "../kicad-sexpr" }
-pcb-engine = { path = "../pcb-engine" }
+pcb-model = { path = "../pcb-model" }
 kiutils_kicad.workspace = true
 kiutils_sexpr.workspace = true
 tempfile.workspace = true

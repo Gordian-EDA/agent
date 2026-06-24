@@ -8,7 +8,8 @@ description = "KiCAD s-expr file & library access: .kicad_pcb + footprint/symbol
 
 [dependencies]
 circuit-lang = { path = "../circuit-lang" }
-pcb-engine = { path = "../pcb-engine" }
+drc-lint = { path = "../drc-lint" }
+pcb-model = { path = "../pcb-model" }
 kicad-cli-rs = { path = "../kicad-cli-rs" }
 strsim.workspace = true
 fuzzy-matcher.workspace = true

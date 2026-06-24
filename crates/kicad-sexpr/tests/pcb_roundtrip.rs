@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use kicad_sexpr::pcb::{extract_copper, read_problem, write_solution};
-use pcb_engine::problem::{LayerRef, Point2, RouteSolution, Trace, Via, ViaSpan};
+use pcb_model::{LayerRef, Point2, RouteSolution, Trace, Via, ViaSpan};
 
 fn fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/two_res.kicad_pcb")
@@ -340,7 +340,7 @@ fn oracle_confirms_written_copper_connects_pads() {
     // "Solution as parsed back": map the board's segments/vias to traces/vias
     // with connection names via the net codes.
     let parsed = extract_copper(&path).unwrap();
-    let violations = pcb_engine::connectivity::check(&original_board.problem, &parsed);
+    let violations = drc_lint::connectivity::check(&original_board.problem, &parsed);
     assert!(
         violations.is_empty(),
         "hand-built routes must connect the pads, got {violations:?}"

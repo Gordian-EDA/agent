@@ -39,7 +39,7 @@ use std::time::Duration;
 
 use kiutils_kicad::{PcbAst, PcbFile, PcbFootprint, PcbPad};
 use kiutils_sexpr::{parse_one, Atom, Node};
-use pcb_engine::problem::{LayerRef, Point2, RouteSolution, Trace, Via, ViaSpan};
+use pcb_model::{LayerRef, Point2, RouteSolution, Trace, Via, ViaSpan};
 
 use kicad_sexpr::pcb::{read_problem, BoardProblem};
 
@@ -1359,12 +1359,12 @@ mod tests {
         std::fs::write(&p, ses).unwrap();
         // Minimal board (only the fields import_ses reads: via defaults).
         let board = BoardProblem {
-            problem: pcb_engine::problem::RouteProblem {
+            problem: pcb_model::RouteProblem {
                 layer_count: 2,
                 min_trace_width: 0.1,
                 obstacles: vec![],
                 connections: vec![],
-                bounds: pcb_engine::problem::Bounds {
+                bounds: pcb_model::Bounds {
                     min_x: 0.0,
                     max_x: 10.0,
                     min_y: 0.0,

@@ -1,4 +1,4 @@
-//! Reading a `.kicad_pcb` board into a [`pcb_engine::problem::RouteProblem`].
+//! Reading a `.kicad_pcb` board into a [`pcb_model::RouteProblem`].
 //!
 //! Backend: `kiutils_kicad`'s [`kiutils_kicad::PcbFile::read`], whose typed AST
 //! exposes `layers / nets / footprints / segments / vias / zones / graphics /
@@ -46,7 +46,7 @@ use std::io;
 use std::path::Path;
 
 use kiutils_kicad::{PcbAst, PcbFile, PcbFootprint, PcbPad};
-use pcb_engine::problem::{
+use pcb_model::{
     Bounds, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace,
     Via, ViaSpan,
 };
@@ -880,7 +880,7 @@ fn map_kiutils_err(e: kiutils_kicad::Error) -> io::Error {
 #[cfg(test)]
 mod via_render_tests {
     use super::*;
-    use pcb_engine::problem::{Bounds, Point2, RouteProblem, Via, ViaSpan};
+    use pcb_model::{Bounds, Point2, RouteProblem, Via, ViaSpan};
     use std::collections::BTreeMap;
 
     fn board_4layer() -> BoardProblem {

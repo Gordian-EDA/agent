@@ -51,8 +51,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io;
 
-use pcb_engine::placement::Placement;
-use pcb_engine::problem::{Bounds, Point2};
+use pcb_place::placement::Placement;
+use pcb_model::{Bounds, Point2};
 
 /// One part to synthesize onto the board: its board identity, the source
 /// `.kicad_mod` text, its pad→net wiring, and where the engine placed it.
@@ -848,7 +848,7 @@ fn fmt_num(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pcb_engine::problem::Point2;
+    use pcb_model::Point2;
     use std::path::PathBuf;
 
     #[test]
@@ -989,7 +989,7 @@ mod tests {
     #[test]
     fn synthesized_board_round_trips_through_read_problem_and_write_solution() {
         use kicad_sexpr::pcb::{extract_copper, read_problem, write_solution};
-        use pcb_engine::problem::{LayerRef, RouteSolution, Trace};
+        use pcb_model::{LayerRef, RouteSolution, Trace};
 
         let parts = vec![
             SynthPart {
@@ -1052,8 +1052,8 @@ mod tests {
                 layer: LayerRef::top(),
                 width: 0.25,
                 path: vec![
-                    pcb_engine::problem::Point2 { x: 9.175, y: 10.0 },
-                    pcb_engine::problem::Point2 { x: 20.9375, y: 10.0 },
+                    pcb_model::Point2 { x: 9.175, y: 10.0 },
+                    pcb_model::Point2 { x: 20.9375, y: 10.0 },
                 ],
             }],
             vias: Vec::new(),
