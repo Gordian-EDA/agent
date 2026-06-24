@@ -21,27 +21,9 @@ use sch_model::item::{Incidence, Item};
 use super::infer::anchor_tap;
 use sch_model::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net};
 
-/// Find the root of `x` in a disjoint-set forest, compressing the path to it.
-fn uf_find(parent: &mut [usize], x: usize) -> usize {
-    let mut r = x;
-    while parent[r] != r {
-        r = parent[r];
-    }
-    let mut c = x;
-    while parent[c] != r {
-        let next = parent[c];
-        parent[c] = r;
-        c = next;
-    }
-    r
-}
-
-/// Union the sets containing `a` and `b`; returns the surviving root.
-fn uf_union(parent: &mut [usize], a: usize, b: usize) -> usize {
-    let (ra, rb) = (uf_find(parent, a), uf_find(parent, b));
-    parent[ra] = rb;
-    rb
-}
+// The disjoint-set forest (over a caller-owned `parent` slice) lives in
+// `sch_model::union_find`, shared with circuit-lang's pin reconciler.
+use sch_model::union_find::{uf_find, uf_union};
 
 /// Compose every block's per-block `layout:` grid into one global relative seed:
 /// refdes → (grid col, grid row). Each gridded block occupies its own column band

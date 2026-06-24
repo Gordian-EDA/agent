@@ -10,3 +10,4 @@ pub mod ir;
 pub mod item;
 pub mod netclass;
 pub mod result;
+pub mod union_find;

@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 
 pub mod geom2d;
 pub mod hash;
+pub mod union_find;
 pub use hash::{fnv1a, uuid_v5};
+pub use union_find::UnionFind;
 
 // ── defaults for extension fields ────────────────────────────────────────────
 

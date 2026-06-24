@@ -332,44 +332,9 @@ fn via_touches(at: [f64; 2], radius: f64, other: &Shape) -> bool {
     }
 }
 
-// ── union-find ───────────────────────────────────────────────────────────────
-
-struct UnionFind {
-    parent: Vec<usize>,
-    rank: Vec<u8>,
-}
-
-impl UnionFind {
-    fn new(n: usize) -> Self {
-        Self {
-            parent: (0..n).collect(),
-            rank: vec![0; n],
-        }
-    }
-
-    fn find(&mut self, mut i: usize) -> usize {
-        while self.parent[i] != i {
-            self.parent[i] = self.parent[self.parent[i]]; // path halving
-            i = self.parent[i];
-        }
-        i
-    }
-
-    fn union(&mut self, a: usize, b: usize) {
-        let (ra, rb) = (self.find(a), self.find(b));
-        if ra == rb {
-            return;
-        }
-        match self.rank[ra].cmp(&self.rank[rb]) {
-            std::cmp::Ordering::Less => self.parent[ra] = rb,
-            std::cmp::Ordering::Greater => self.parent[rb] = ra,
-            std::cmp::Ordering::Equal => {
-                self.parent[rb] = ra;
-                self.rank[ra] += 1;
-            }
-        }
-    }
-}
+// The indexed disjoint-set forest lives in `pcb_model` (union by rank, path
+// halving), shared with any other PCB caller.
+use pcb_model::UnionFind;
 
 // ── violation extraction ─────────────────────────────────────────────────────
 
