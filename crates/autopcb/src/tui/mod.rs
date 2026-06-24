@@ -210,8 +210,14 @@ impl Shell {
         self.turn_task = Some(tokio::task::spawn_local(async move {
             let mut approvals = TuiApprovals { gate_tx };
             let mut agent = handle.lock().await;
+            // Route through the self-correction loop: after a turn that COMMITS a
+            // design change, an independent reviewer scores the netlist and feeds
+            // high-confidence defects into one follow-up fix turn. The reviewer is
+            // skipped on read-only/conversational turns (nothing applied). The
+            // user's prompt is the design intent the reviewer judges against;
+            // `Reviewed` events flow through `events_tx` to the transcript.
             let result = agent
-                .run_turn(&prompt, &mut approvals, Some(&events_tx))
+                .run_turn_reviewed(&prompt, &prompt, &mut approvals, Some(&events_tx), 1)
                 .await;
             let reason = match result {
                 Ok(o) => match o.stop_reason {

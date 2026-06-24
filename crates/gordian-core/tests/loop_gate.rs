@@ -27,6 +27,10 @@ struct MockToolProvider {
     /// Records (name, mode) of every `run` call, so a test can assert the gate
     /// previewed-then-committed (and never committed on rejection).
     runs: Arc<Mutex<Vec<(String, RunMode)>>>,
+    /// Scripted independent reviews, popped front-to-back by `review_committed`
+    /// (front = first round). Empty = nothing to review (`review_committed`
+    /// returns `None`), the default for the non-review tests.
+    reviews: Arc<Mutex<std::collections::VecDeque<ReviewOutcome>>>,
 }
 
 #[async_trait]
@@ -88,14 +92,14 @@ impl ToolProvider for MockToolProvider {
     }
 
     async fn review_committed(&self, _intent: &str, _r: &dyn Provider) -> Option<ReviewOutcome> {
-        None
+        self.reviews.lock().unwrap().pop_front()
     }
 }
 
 #[tokio::test]
 async fn gate_previews_then_commits_on_approve() {
     let runs = Arc::new(Mutex::new(Vec::new()));
-    let tools = MockToolProvider { runs: Arc::clone(&runs) };
+    let tools = MockToolProvider { runs: Arc::clone(&runs), ..Default::default() };
     let client = ScriptedClient::new(vec![
         tool_call("t1", "search", json!({})),
         tool_call("t2", "apply", json!({ "commit": true })),
@@ -125,7 +129,7 @@ async fn gate_previews_then_commits_on_approve() {
 #[tokio::test]
 async fn gate_rejects_and_never_commits() {
     let runs = Arc::new(Mutex::new(Vec::new()));
-    let tools = MockToolProvider { runs: Arc::clone(&runs) };
+    let tools = MockToolProvider { runs: Arc::clone(&runs), ..Default::default() };
     let client = ScriptedClient::new(vec![
         tool_call("t1", "apply", json!({ "commit": true })),
         final_text("ok then"),
@@ -150,7 +154,7 @@ async fn gate_skips_approval_when_preview_not_ready() {
     // diagnostics straight back with NO approval prompt and NO commit. A rejecting
     // approver proves approve() is never consulted.
     let runs = Arc::new(Mutex::new(Vec::new()));
-    let tools = MockToolProvider { runs: Arc::clone(&runs) };
+    let tools = MockToolProvider { runs: Arc::clone(&runs), ..Default::default() };
     let client = ScriptedClient::new(vec![
         tool_call("t1", "apply", json!({ "commit": true, "compiles": false })),
         final_text("will fix"),
@@ -306,4 +310,121 @@ async fn applied_event_carries_the_domain_summary() {
         }
     }
     assert_eq!(summary.as_deref(), Some("ERC 0 errors, 0 warnings"));
+}
+
+/// Drain a turn's events into the list of `Reviewed { round, defects }` it emitted.
+fn reviewed_rounds(rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentEvent>) -> Vec<(usize, Vec<String>)> {
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let AgentEvent::Reviewed { round, defects, .. } = ev {
+            out.push((round, defects));
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn reviewed_turn_feeds_a_defect_into_a_fix_turn_then_re_reviews_clean() {
+    use tokio::sync::mpsc::unbounded_channel;
+    use std::collections::VecDeque;
+
+    // Round 0 review finds a defect → one fix turn → round 1 review is clean.
+    let reviews = Arc::new(Mutex::new(VecDeque::from(vec![
+        ReviewOutcome { score: 6.0, defects: vec!["R1 has no pulldown".into()] },
+        ReviewOutcome { score: 9.0, defects: vec![] },
+    ])));
+    let tools = MockToolProvider { reviews: Arc::clone(&reviews), ..Default::default() };
+    let client = ScriptedClient::new(vec![
+        // Turn 1: author + commit.
+        tool_call("t1", "apply", json!({ "commit": true })),
+        final_text("first draft committed"),
+        // Fix turn (driven by the round-0 defect): re-commit.
+        tool_call("t2", "apply", json!({ "commit": true })),
+        final_text("defect fixed"),
+    ]);
+    let mut agent = Agent::new(Box::new(client), Box::new(tools), "sys");
+    let mut approvals = AutoApprove::yes();
+    let (tx, mut rx) = unbounded_channel();
+
+    let out = agent
+        .run_turn_reviewed("add a button", "add a button", &mut approvals, Some(&tx), 1)
+        .await
+        .unwrap();
+
+    // The loop ended on the fix turn's outcome.
+    assert!(out.applied);
+    assert_eq!(out.final_text, "defect fixed");
+    // Both review rounds were consumed (round 0 found a defect, round 1 clean).
+    assert!(reviews.lock().unwrap().is_empty(), "both scripted reviews consumed");
+
+    let rounds = reviewed_rounds(&mut rx);
+    assert_eq!(
+        rounds,
+        vec![
+            (0, vec!["R1 has no pulldown".to_string()]),
+            (1, vec![]),
+        ],
+        "round 0 emits the defect, round 1 emits the clean re-review: {rounds:?}"
+    );
+}
+
+#[tokio::test]
+async fn reviewed_turn_with_a_clean_first_review_runs_no_fix_turn() {
+    use tokio::sync::mpsc::unbounded_channel;
+    use std::collections::VecDeque;
+
+    // A single clean review: one Reviewed event, no fix turn (the script has no
+    // extra completions, so a spurious fix turn would exhaust it and panic).
+    let reviews = Arc::new(Mutex::new(VecDeque::from(vec![ReviewOutcome {
+        score: 10.0,
+        defects: vec![],
+    }])));
+    let tools = MockToolProvider { reviews: Arc::clone(&reviews), ..Default::default() };
+    let client = ScriptedClient::new(vec![
+        tool_call("t1", "apply", json!({ "commit": true })),
+        final_text("committed"),
+    ]);
+    let mut agent = Agent::new(Box::new(client), Box::new(tools), "sys");
+    let mut approvals = AutoApprove::yes();
+    let (tx, mut rx) = unbounded_channel();
+
+    let out = agent
+        .run_turn_reviewed("make it", "make it", &mut approvals, Some(&tx), 1)
+        .await
+        .unwrap();
+
+    assert!(out.applied);
+    assert_eq!(out.final_text, "committed");
+    let rounds = reviewed_rounds(&mut rx);
+    assert_eq!(rounds, vec![(0, vec![])], "one clean review, no fix turn: {rounds:?}");
+}
+
+#[tokio::test]
+async fn reviewed_turn_skips_review_when_nothing_committed() {
+    use tokio::sync::mpsc::unbounded_channel;
+    use std::collections::VecDeque;
+
+    // A read-only/conversational turn: no commit, so `review_committed` is never
+    // consulted (the scripted review stays queued) and no Reviewed event fires —
+    // the gate that keeps us from paying a reviewer call every turn.
+    let reviews = Arc::new(Mutex::new(VecDeque::from(vec![ReviewOutcome {
+        score: 1.0,
+        defects: vec!["should never surface".into()],
+    }])));
+    let tools = MockToolProvider { reviews: Arc::clone(&reviews), ..Default::default() };
+    // A pure-text answer: no authoring tool runs, so the turn commits nothing and
+    // is not nudged.
+    let client = ScriptedClient::new(vec![final_text("here's what i found")]);
+    let mut agent = Agent::new(Box::new(client), Box::new(tools), "sys");
+    let mut approvals = AutoApprove::yes();
+    let (tx, mut rx) = unbounded_channel();
+
+    let out = agent
+        .run_turn_reviewed("what parts?", "what parts?", &mut approvals, Some(&tx), 1)
+        .await
+        .unwrap();
+
+    assert!(!out.applied, "a read-only turn commits nothing");
+    assert!(reviewed_rounds(&mut rx).is_empty(), "no review on a non-applied turn");
+    assert_eq!(reviews.lock().unwrap().len(), 1, "the scripted review was never consumed");
 }

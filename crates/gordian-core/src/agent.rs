@@ -494,12 +494,16 @@ impl Agent {
         })
     }
 
-    /// Run a turn, then INDEPENDENTLY review the committed work (via the domain's
+    /// Run a turn, then — only if the turn actually COMMITTED a design change —
+    /// INDEPENDENTLY review the committed work (via the domain's
     /// [`ToolProvider::review_committed`]) and feed any high-confidence defects
     /// back as a fix turn, re-reviewing up to `max_fix` rounds. The reviewer is a
     /// fresh, history-free LLM call (unbiased). `intent` is the design goal. Emits
-    /// [`AgentEvent::Reviewed`] per round; returns the final turn's outcome. A
-    /// review that finds nothing to review ends the loop gracefully.
+    /// [`AgentEvent::Reviewed`] per round; returns the final turn's outcome.
+    ///
+    /// A read-only / conversational turn (nothing applied) skips review entirely,
+    /// so the extra reviewer LLM call is paid only on authoring turns. A review
+    /// that finds nothing to review ends the loop gracefully.
     pub async fn run_turn_reviewed(
         &mut self,
         user_msg: &str,
@@ -509,6 +513,11 @@ impl Agent {
         max_fix: usize,
     ) -> Result<TurnOutcome> {
         let mut outcome = self.run_turn(user_msg, approvals, events).await?;
+        // Gate: review only authoring/commit turns. Conversational and read-only
+        // turns commit nothing, so there is nothing to independently review.
+        if !outcome.applied {
+            return Ok(outcome);
+        }
         for round in 0..=max_fix {
             let Some(review) = self.tools.review_committed(intent, self.client.as_ref()).await
             else {

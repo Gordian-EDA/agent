@@ -14,7 +14,7 @@ mod tui;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use gordian_core::{Agent, AutoApprove};
+use gordian_core::{Agent, AgentEvent, AutoApprove};
 use gordian_kicad::PcbTools;
 use gordian_kicad::prompts::system_prompt;
 use gordian_kicad::tools::PcbToolCtx;
@@ -110,14 +110,25 @@ fn run_tui_command(args: &[String]) -> Result<()> {
     local.block_on(&runtime, tui::run(project_dir))
 }
 
-/// Parse `agent` args into `(project_dir, prompt)`.
+/// Parsed `agent` invocation: where to work, what to do, and whether the
+/// post-turn self-correction review runs after a committed change.
+struct AgentInvocation {
+    project_dir: PathBuf,
+    prompt: String,
+    /// Run the independent post-commit review→fix pass (default on; `--no-review`
+    /// turns it off). Read-only/conversational turns never trigger it regardless.
+    review: bool,
+}
+
+/// Parse `agent` args into an [`AgentInvocation`].
 ///
 /// Accepts both `agent --project <dir> "<prompt>"` and `agent <dir> "<prompt>"`,
-/// as well as `agent "<prompt>"` (default project dir). The prompt is the last
-/// remaining positional argument.
-fn parse_agent_args(args: &[String]) -> Result<(PathBuf, String)> {
+/// as well as `agent "<prompt>"` (default project dir), with an optional
+/// `--no-review` flag. The prompt is the last remaining positional argument.
+fn parse_agent_args(args: &[String]) -> Result<AgentInvocation> {
     let mut project_dir: Option<PathBuf> = None;
     let mut positionals: Vec<String> = Vec::new();
+    let mut review = true;
 
     let mut i = 0;
     while i < args.len() {
@@ -128,6 +139,10 @@ fn parse_agent_args(args: &[String]) -> Result<(PathBuf, String)> {
                     .context("--project requires a directory argument")?;
                 project_dir = Some(PathBuf::from(dir));
                 i += 2;
+            }
+            "--no-review" => {
+                review = false;
+                i += 1;
             }
             other => {
                 positionals.push(other.to_string());
@@ -151,12 +166,12 @@ fn parse_agent_args(args: &[String]) -> Result<(PathBuf, String)> {
     };
 
     let project_dir = project_dir.unwrap_or_else(|| PathBuf::from(DEFAULT_PROJECT_DIR));
-    Ok((project_dir, prompt))
+    Ok(AgentInvocation { project_dir, prompt, review })
 }
 
 /// Run the `agent` subcommand: one headless turn against real Bedrock + KiCAD.
 fn run_agent_command(args: &[String]) -> Result<()> {
-    let (project_dir, prompt) = parse_agent_args(args)?;
+    let AgentInvocation { project_dir, prompt, review } = parse_agent_args(args)?;
 
     // 1. Detect KiCAD (symbol libs + kicad-cli).
     let env = KicadEnv::detect().context(
@@ -185,14 +200,42 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     eprintln!("project: {}", project_dir.display());
     eprintln!("prompt:  {prompt}\n");
 
-    // 4. Run ONE agent turn, auto-approving the apply.
+    // 4. Run ONE agent turn, auto-approving the apply. By default it routes
+    //    through `run_turn_reviewed`: after a turn that COMMITS a design change,
+    //    an independent reviewer pass scores the netlist and feeds high-confidence
+    //    defects into a bounded follow-up fix turn. `--no-review` runs the plain
+    //    turn. A live events channel surfaces each `Reviewed` round to the log.
     let runtime = tokio::runtime::Runtime::new().context("starting the Tokio runtime")?;
     let mut agent = Agent::new(client, Box::new(PcbTools::new(ctx)), system_prompt());
     let mut approvals = AutoApprove::yes();
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
     let outcome = runtime
-        .block_on(agent.run_turn(&prompt, &mut approvals, None))
+        .block_on(async {
+            if review {
+                // intent == prompt: the design goal the reviewer judges against.
+                agent
+                    .run_turn_reviewed(&prompt, &prompt, &mut approvals, Some(&events_tx), 1)
+                    .await
+            } else {
+                agent.run_turn(&prompt, &mut approvals, None).await
+            }
+        })
         .context("running the agent turn")?;
+
+    // Drain and log any review rounds the self-correction pass emitted.
+    while let Ok(ev) = events_rx.try_recv() {
+        if let AgentEvent::Reviewed { round, score, defects } = ev {
+            eprintln!(
+                "review (round {round}): score {score}/10 — {}",
+                if defects.is_empty() {
+                    "no functional defects".to_string()
+                } else {
+                    format!("{} defect(s): {}", defects.len(), defects.join("; "))
+                }
+            );
+        }
+    }
 
     // 5. Report the outcome.
     println!("--- agent turn ---");
@@ -230,28 +273,37 @@ mod tests {
 
     #[test]
     fn parses_project_flag_and_prompt() {
-        let (dir, prompt) = parse_agent_args(&[
+        let inv = parse_agent_args(&[
             "--project".into(),
             "/tmp/demo".into(),
             "make a board".into(),
         ])
         .unwrap();
-        assert_eq!(dir, PathBuf::from("/tmp/demo"));
-        assert_eq!(prompt, "make a board");
+        assert_eq!(inv.project_dir, PathBuf::from("/tmp/demo"));
+        assert_eq!(inv.prompt, "make a board");
+        assert!(inv.review, "review defaults on");
     }
 
     #[test]
     fn parses_positional_dir_and_prompt() {
-        let (dir, prompt) = parse_agent_args(&["/tmp/demo".into(), "make a board".into()]).unwrap();
-        assert_eq!(dir, PathBuf::from("/tmp/demo"));
-        assert_eq!(prompt, "make a board");
+        let inv = parse_agent_args(&["/tmp/demo".into(), "make a board".into()]).unwrap();
+        assert_eq!(inv.project_dir, PathBuf::from("/tmp/demo"));
+        assert_eq!(inv.prompt, "make a board");
     }
 
     #[test]
     fn parses_prompt_only_with_default_dir() {
-        let (dir, prompt) = parse_agent_args(&["make a board".into()]).unwrap();
-        assert_eq!(dir, PathBuf::from(DEFAULT_PROJECT_DIR));
-        assert_eq!(prompt, "make a board");
+        let inv = parse_agent_args(&["make a board".into()]).unwrap();
+        assert_eq!(inv.project_dir, PathBuf::from(DEFAULT_PROJECT_DIR));
+        assert_eq!(inv.prompt, "make a board");
+    }
+
+    #[test]
+    fn no_review_flag_disables_review() {
+        let inv =
+            parse_agent_args(&["--no-review".into(), "make a board".into()]).unwrap();
+        assert_eq!(inv.prompt, "make a board");
+        assert!(!inv.review, "--no-review turns the post-commit review off");
     }
 
     #[test]
