@@ -281,6 +281,8 @@ impl Agent {
                 ContentBlock::Text(t) => t.len(),
                 ContentBlock::ToolUse { input, .. } => input.to_string().len(),
                 ContentBlock::ToolResult { content, .. } => content.len(),
+                // Base64 bytes aren't text tokens; don't inflate the proxy with them.
+                ContentBlock::Image(_) => 0,
             })
             .sum();
         ContextStats {

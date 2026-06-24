@@ -1345,13 +1345,7 @@ fn render_schematic(ctx: &PcbToolCtx) -> Result<Value> {
             "error": "no schematic yet — apply a design first",
         }));
     }
-    let tmp = tempfile::tempdir().context("creating temp dir for svg export")?;
-    let svg_path = KicadCli::new(&ctx.env)
-        .export_svg(&ctx.sch_path, tmp.path())
-        .context("exporting schematic SVG")?;
-    let svg = std::fs::read_to_string(&svg_path)?;
-    // `svg` is now fully in memory; `tmp` may safely drop at end of scope.
-    let png = crate::render::svg_to_png(&svg, RENDER_MAX_PX)?;
+    let png = crate::render::schematic_png(&ctx.env, &ctx.sch_path)?;
     let path = ctx.workspace().next_render_path()?;
     std::fs::write(&path, &png)
         .with_context(|| format!("writing {}", path.display()))?;

@@ -41,3 +41,6 @@ async-trait.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 rayon.workspace = true
+# Live smoke (#[ignore]'d): build the real provider from `.env` for the layout critic.
+llm-client = { path = "../llm-client" }
+base64 = { workspace = true }
