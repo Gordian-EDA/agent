@@ -2,8 +2,8 @@
 //!
 //! [`render_svg`] produces a standalone SVG string from a [`RouteProblem`],
 //! a [`RouteSolution`], and the optional list of nets that failed routing
-//! (from [`crate::router::RouteResult::failed`]). Pure string assembly — no
-//! external dependencies beyond the standard library.
+//! (a [`RouteResult::failed`](pcb_model::RouteResult::failed) slice). Pure string
+//! assembly — no external dependencies beyond the standard library.
 //!
 //! [`render_global_svg`] produces a standalone SVG from a [`RouteProblem`],
 //! a [`crate::mesh::CapacityMesh`], and a [`crate::pathing::GlobalRouteResult`]:

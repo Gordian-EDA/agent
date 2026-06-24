@@ -302,9 +302,10 @@ pub struct Bounds {
 
 /// A net a router could not fully connect, with a human-readable cause.
 ///
-/// Shared by the slice-1 grid router ([`crate::router`]) and the slice-2 global
-/// router ([`crate::pathing`]) so failure provenance has one type across stages.
-/// Serializable: the global router's congestion report carries these as data.
+/// The single failure-provenance type every [`Router`](crate::Router) reports in
+/// [`RouteResult::failed`](crate::RouteResult) — shared across the grid and
+/// negotiated-mesh engines so failures have one shape. Serializable: a router's
+/// congestion report carries these as data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FailedNet {

@@ -98,9 +98,9 @@ pub fn via_clear_radius_cells(problem: &RouteProblem) -> usize {
 /// Route `problem` with the default design constants, but with the via-barrel
 /// clearance radius derived from the design rules so the slice-1 router does not
 /// drop a via that overhangs a foreign pad/trace. It can still produce other
-/// congestion artifacts; [`crate::pipeline::route_auto`] reconciles connectivity
-/// and lints both engines, so a violating or phantom route never ships when a
-/// cleaner one exists.
+/// congestion artifacts; the selector (`negotiated-mesh`'s `select_best`)
+/// reconciles connectivity and lints both engines, so a violating or phantom
+/// route never ships when a cleaner one exists.
 pub fn route(problem: &RouteProblem) -> RouteResult {
     let costs = AStarCosts {
         via_clear_radius_cells: via_clear_radius_cells(problem),
@@ -150,9 +150,10 @@ fn route_iterated(problem: &RouteProblem, design: DesignConstants) -> RouteResul
 /// The slice-1 router WITHOUT the via-barrel clearance scan (the original slice-1
 /// behaviour). On a board with room it routes more nets — including vias that are
 /// in fact DRC-clean — that the conservative scan would refuse. It may also drop a
-/// via too close to foreign copper, so it is NOT used alone: [`crate::pipeline::route_auto`]
-/// runs it alongside the strict [`route`] and the detailed router and keeps
-/// whichever the lint scores cleanest. The board picks the strictness it needs.
+/// via too close to foreign copper, so it is NOT used alone: [`GridAStarRouter`]
+/// runs it alongside the strict [`route`] and keeps whichever the lint scores
+/// cleanest, and the cross-engine selector lints both engines. The board picks the
+/// strictness it needs.
 pub fn route_lenient(problem: &RouteProblem) -> RouteResult {
     route_iterated(problem, DesignConstants::default())
 }
