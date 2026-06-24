@@ -12,7 +12,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [0.1.0]
 
-Initial public version of **auto-pcb** — an LLM agent that designs KiCAD schematics and PCBs from
+Initial public version of **Gordian** — an LLM agent that designs KiCAD schematics and PCBs from
 natural-language prompts, orchestrating deterministic, oracle-gated layout and routing engines.
 
 ### Highlights
@@ -24,6 +24,6 @@ natural-language prompts, orchestrating deterministic, oracle-gated layout and r
   a deterministic copper autorouter (slice-1 grid ∨ capacity-mesh detailed), GND/VCC plane synthesis,
   HDI micro-via in-pad escape, and per-net trace widths — every board gated to **0 copper-error DRC
   faults** by an in-house lint plus `kicad-cli` DRC.
-- **Agent** (`agent` + `autopcb`): provider-agnostic LLM client (OpenAI / AWS Bedrock), a tool
+- **Agent** (`agent` + `gordian`): provider-agnostic LLM client (OpenAI / AWS Bedrock), a tool
   surface over the engines, pattern-aware failure triage, and a `resize_board` lever for the
   placement-convergence path. The model never emits coordinates.

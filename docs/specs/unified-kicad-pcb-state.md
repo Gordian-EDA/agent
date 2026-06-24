@@ -10,7 +10,7 @@ footprint round-trip that is dead end-to-end.
 
 - **Layer 1 — headless engine.** `derive_board → place_board → route_board →
   export_board` runs in pure Rust (`pcb_place`, `negotiated_mesh`, `pcb_synth`) over
-  a persisted draft `.autopcb/board.json` (`BoardDraft`) plus `.autopcb/route.json`.
+  a persisted draft `.gordian/board.json` (`BoardDraft`) plus `.gordian/route.json`.
   `export_board` synthesizes the `.kicad_pcb` *from scratch* out of the draft.
 - **Layer 2 — live KiCAD IPC.** `open_board` launches `xvfb-run pcbnew <file>`;
   `move_part` / `route_track` / `set_net_width` mutate the *running* document over the

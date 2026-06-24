@@ -1,5 +1,5 @@
 //! circuit-lang: parse, desugar, lint, and canonically emit the
-//! auto-pcb circuit markup language. Pure — no I/O.
+//! gordian circuit markup language. Pure — no I/O.
 
 pub mod canon;
 pub mod desugar;

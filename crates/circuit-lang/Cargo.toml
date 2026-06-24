@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Parser, linter, and canonical emitter for the auto-pcb circuit markup language."
+description = "Parser, linter, and canonical emitter for the gordian circuit markup language."
 
 [dependencies]
 symbol-contract = { path = "../symbol-contract" }

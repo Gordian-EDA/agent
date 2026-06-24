@@ -1,4 +1,4 @@
-# Contributing to auto-pcb
+# Contributing to Gordian
 
 Thanks for your interest! This document covers how to build, test, and submit changes.
 

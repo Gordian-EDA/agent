@@ -56,7 +56,7 @@ from the board-side assignment map.
 ## Where footprints are stored
 
 A board-side assignment map: `refdes → footprint lib_id`, persisted in
-`.autopcb/footprints.json` (sibling of `board.json`). Rationale:
+`.gordian/footprints.json` (sibling of `board.json`). Rationale:
 
 - Survives schematic re-emits (the schematic can't hold it — see the principle).
 - Lets `derive_board` be a pure read: connectivity (Design/netlist) ⨝ footprints (map).
@@ -68,7 +68,7 @@ A board-side assignment map: `refdes → footprint lib_id`, persisted in
 ### `assign_footprints`
 
 > Set the footprint for parts: a `refdes → lib_id` map. A plain board-side map writer over
-> `.autopcb/footprints.json` — **not** gated, and it does **not** read the `Design` or report
+> `.gordian/footprints.json` — **not** gated, and it does **not** read the `Design` or report
 > gaps (that's `derive_board`'s job). It is the canonical home for footprint selection: the
 > agent finds a `lib_id` with `search_footprints`, then sets it here. Kept deliberately simple
 > — footprint assignment is low-stakes (a trivially-overwritten map entry).
@@ -151,7 +151,7 @@ a gate before `export_board`, closing the "nothing verifies board ⟷ schematic"
 ```
 search_symbols → create_design(YAML)        part: only, no footprints (unchanged)
 apply_design(commit)            ── GATE ──   write .kicad_sch + ERC (Footprint stays "")
-search_footprints → assign_footprints        refdes → lib_id → .autopcb/footprints.json (not gated)
+search_footprints → assign_footprints        refdes → lib_id → .gordian/footprints.json (not gated)
 derive_board({bounds, rules})   ── GATE ──   parts+nets from Design, footprints from the map;
                                              reports any part still missing a footprint
 place_board → route_board → export_board

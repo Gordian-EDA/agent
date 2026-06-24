@@ -25,7 +25,7 @@ harness (scripted triage), plus a creds-gated live smoke.
   `require_str`-style arg handling, errors as `{"error": …, "suggestions": …}`
   values (recoverable) vs `bail!` (programmer error).
 - Board state follows the DRAFT pattern: a `BoardDraft` JSON persisted in
-  the workspace (`.autopcb/board.json`): parts (reference, footprint
+  the workspace (`.gordian/board.json`): parts (reference, footprint
   lib_id, per-pad nets, optional locked position/rotation), board bounds,
   design rules (clearance, min_trace_width, via sizes), keepouts, hints,
   and the last placement. Tools mutate the draft; `place_board`/
@@ -53,7 +53,7 @@ harness (scripted triage), plus a creds-gated live smoke.
       pad_nets: map pad# → net, locked: Option<{x,y,rotation}> }>,
       keepouts: Vec<{rect, layers}>, hints: PlacementHints (serde
       reuse from pcb-engine), last_placement: Option<Vec<Placement>>.
-      Persisted at `.autopcb/board.json` via the workspace (mirror the
+      Persisted at `.gordian/board.json` via the workspace (mirror the
       schematic draft's load/save conventions exactly).
 - [x] `ToolCtx`: lazy `FootprintIndex` (mirror the symbol index's
       OnceCell-or-equivalent pattern; building it scans 155 libs — do it
@@ -94,7 +94,7 @@ harness (scripted triage), plus a creds-gated live smoke.
 - [x] `route_board { }` — needs placement (else recoverable error);
       draft → PlaceProblem → to_route_problem (+ keepout obstacles) →
       `route_auto`; persist solution summary in workspace (full
-      RouteSolution JSON at `.autopcb/route.json` for export); return
+      RouteSolution JSON at `.gordian/route.json` for export); return
       { router, failed: [{connection, reason}], metrics {wirelength,
       vias, traces}, lint_summary (count by kind — should be 0; if not,
       THAT is surfaced loudly), congestion { iterations, hotspots } when

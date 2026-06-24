@@ -229,8 +229,8 @@ fixture):**
 **Slice-5 findings (2026-06-13, gate passed):**
 
 - Shipped the agent-facing PCB workflow: a `BoardDraft` persisted at
-  `.autopcb/board.json` (the schematic-draft pattern), the routed solution
-  at `.autopcb/route.json`, and the tool set in
+  `.gordian/board.json` (the schematic-draft pattern), the routed solution
+  at `.gordian/route.json`, and the tool set in
   `crates/agent/src/tools_pcb.rs` (search_footprints, get_footprint_info,
   create_board, get_board, place_board, set_placement_hints,
   set_constraints, move_part/unlock_part, route_board, render_board,
