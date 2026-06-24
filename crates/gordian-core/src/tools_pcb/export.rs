@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-use kicad_cli_rs::cli::{KicadCli, Violation};
+use kicad_cli::cli::{KicadCli, Violation};
 use kicad_sexpr::pcb::{read_problem, write_solution};
 use pcb_synth::synth::{
     plane_fill_rects, BoardModel, KeepoutZone, KicadV9Synth, NetClass, SynthPart, Synthesizer,

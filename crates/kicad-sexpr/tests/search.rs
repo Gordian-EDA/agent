@@ -1,4 +1,4 @@
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 use kicad_sexpr::search::SymbolIndex;
 
 #[test]

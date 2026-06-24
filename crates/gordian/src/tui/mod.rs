@@ -55,7 +55,7 @@ use crossterm::terminal::{
     supports_keyboard_enhancement,
 };
 use futures::StreamExt;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 use kicad_sexpr::snapshot::SnapshotStore;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;

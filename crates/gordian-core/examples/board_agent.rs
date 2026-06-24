@@ -15,8 +15,8 @@
 //! installed KiCAD (footprint library + `kicad-cli pcb drc`).
 
 use gordian_core::{Agent, AutoApprove};
-use kicad_cli_rs::cli::KicadCli;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::cli::KicadCli;
+use kicad_cli::env::KicadEnv;
 use tokio::sync::mpsc;
 
 #[tokio::main]

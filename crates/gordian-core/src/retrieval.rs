@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 use serde::Deserialize;
 
 /// Environment variable naming the corpus directory; overrides the default.
@@ -139,11 +139,6 @@ impl Corpus {
     /// Number of designs whose metadata parsed.
     pub fn len(&self) -> usize {
         self.designs.len()
-    }
-
-    /// The corpus directory, if one was found.
-    pub fn dir(&self) -> Option<&Path> {
-        self.dir.as_deref()
     }
 
     /// The `<id>.kicad_sch` path for a design id under this corpus.

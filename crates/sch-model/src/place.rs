@@ -1,7 +1,7 @@
 //! The placement-engine SDK: the [`PlaceProblem`] an engine reads and the
 //! [`PlacementEngine`] contract it implements. Both live in the neutral kernel
 //! (`sch-model`) so a THIRD-PARTY engine can be written against `sch-model` ALONE —
-//! it never touches the incumbent layout crate (`sch-place-core`) nor any KiCAD CLI.
+//! it never touches the incumbent layout crate (`sch-floorplan`) nor any KiCAD CLI.
 //!
 //! [`PlaceProblem`] describes ONLY the problem — the connectivity, the intent, a seed,
 //! the caller's [`PlaceOptions`] — and is SILENT on METHOD. It carries no cost, no
@@ -12,8 +12,8 @@
 //! template, portfolio) is the engine's own business.
 //!
 //! A measurement-based engine that CHOOSES to score routed sheets obtains its
-//! measurement machinery from `sch-place-core` (the routed-sheet realization library) —
-//! that is the engine's choice, reflected in its dependency on `sch-place-core`, never a
+//! measurement machinery from `sch-floorplan` (the routed-sheet realization library) —
+//! that is the engine's choice, reflected in its dependency on `sch-floorplan`, never a
 //! field of the neutral problem here. An engine that does not measure depends on
 //! `sch-model` alone.
 
@@ -22,34 +22,10 @@ use serde::{Deserialize, Serialize};
 use crate::ir::LayoutIr;
 use crate::item::{Incidence, Item};
 
-/// The billing/feature tier an engine belongs to. The engine SELECTOR compares
-/// this against the user's entitlement to decide whether an engine may run. New
-/// engines default to [`Tier::Free`] (fail-safe: a premium engine opts up
-/// explicitly).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Tier {
-    /// The always-available baseline (Greedy).
-    #[default]
-    Free,
-    /// Gated behind entitlement (the SA search, Anneal).
-    Premium,
-}
-
-/// What an engine OFFERS — the capability descriptor a selector queries before
-/// dispatch. Defaulted so a minimal engine need not implement [`PlacementEngine::caps`]
-/// (it then reads as the Free tier).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EngineCaps {
-    /// The tier this engine is gated to.
-    pub tier: Tier,
-}
-
 /// Caller-chosen knobs an engine reads from the [`PlaceProblem`]. Replaces the
 /// ad-hoc `std::env` flags the engines used to read directly (`DEBUG_SA_TIME`,
 /// `MULTISHEET_REFINE`, `MOTIF_TILE`) so the engine never touches the environment;
-/// the agent sets these fields, and `sch-place-core` derives them from the
+/// the agent sets these fields, and `sch-floorplan` derives them from the
 /// environment at problem construction.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -136,12 +112,6 @@ pub trait PlacementEngine {
     /// Open provenance: the engine's stable name (e.g. `"greedy"`, `"anneal"`).
     fn name(&self) -> &'static str;
 
-    /// What this engine offers, for the selector. Defaults to the Free tier;
-    /// premium engines override.
-    fn caps(&self) -> EngineCaps {
-        EngineCaps::default()
-    }
-
     /// Write the final placement into `items` and return its diagnostics.
     fn place(&self, problem: &PlaceProblem, items: &mut [Item]) -> PlaceResult;
 }
@@ -211,7 +181,6 @@ mod tests {
         let report = engine.place(&problem, &mut items);
 
         assert_eq!(report.engine, "fixed-grid");
-        assert_eq!(engine.caps().tier, Tier::Free);
         // The lattice: R1=(0,0) R2=(10,0) R3=(0,10) R4=(10,10) R5=(0,20).
         assert_eq!(items[0].at, [0.0, 0.0]);
         assert_eq!(items[1].at, [10.0, 0.0]);

@@ -1,5 +1,5 @@
 [package]
-name = "pcb-drc-core"
+name = "drc-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

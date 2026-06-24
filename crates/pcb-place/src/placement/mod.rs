@@ -67,9 +67,7 @@ mod route;
 
 // The engine-SDK seam lives in the kernel — re-exported so a `pcb-place` caller can
 // reach the trait + oracle without a second `pcb_model::place` import.
-pub use crate::problem::place::{
-    compute_hpwl, is_legal, Capabilities, Placer, RouteRanker, RoutabilityOracle,
-};
+pub use crate::problem::place::{compute_hpwl, is_legal, Placer, RouteRanker, RoutabilityOracle};
 
 // Public surface — re-exported VERBATIM so every external `pcb_place::placement::…`
 // path resolves unchanged.

@@ -6,9 +6,9 @@
 //! Usage: cargo run --release -p agent --example sa_e2e [name ...]
 
 use circuit_lang::SymbolProvider;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 use kicad_sexpr::provider::RealSymbolProvider;
-use sch_place_core::floorplan::{self, LayoutIr};
+use sch_floorplan::floorplan::{self, LayoutIr};
 
 const FIXTURES: &[&str] = &[
     "divider-filter",

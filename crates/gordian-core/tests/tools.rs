@@ -268,7 +268,7 @@ fn project_info_reports_paths_and_state() {
     assert_eq!(out["sch_exists"], serde_json::json!(true), "got: {out}");
 }
 
-/// The two-resistor fixture board, shared with `kicad-sexpr`/`kicad-cli-rs`.
+/// The two-resistor fixture board, shared with `kicad-sexpr`/`kicad-cli`.
 const TWO_RES_PCB: &str = include_str!("../../kicad-sexpr/tests/fixtures/two_res.kicad_pcb");
 
 #[test]

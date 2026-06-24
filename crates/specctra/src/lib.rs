@@ -4,9 +4,10 @@
 //! `tools/vendor/freerouting.jar`) speaks the Specctra interchange format: it
 //! reads a `.dsn` (the unrouted design — board outline, layers, placement, the
 //! per-footprint pad geometry library, and the netlist) and writes a `.ses`
-//! (the routed wires + vias). This module is the bridge: [`export_dsn`] turns a
-//! placed `.kicad_pcb` into a `.dsn`, [`import_ses`] parses the `.ses` back into
-//! geometry, and [`freeroute`] orchestrates the round-trip through the jar.
+//! (the routed wires + vias). This module is the bridge: [`export_dsn_with_rules`]
+//! turns a placed `.kicad_pcb` into a `.dsn`, [`import_ses`] parses the `.ses` back
+//! into geometry, and [`freeroute_with_rules`] orchestrates the round-trip through
+//! the jar.
 //!
 //! ## Why a dedicated exporter (vs. reusing [`kicad_sexpr::pcb::read_problem`])
 //!
@@ -296,19 +297,11 @@ pub fn write_net_settings(board_path: &Path, rules: RouteRules) -> io::Result<()
 }
 
 /// Read a placed `.kicad_pcb` at `board_path` and write a Specctra `.dsn` to
-/// `dsn_path` for Freerouting. The `.dsn` contains resolution/unit, the layer
-/// stack, the board boundary, default width/clearance rules, component placement,
-/// the footprint pad-image library, and the netlist. **No existing wiring is
-/// emitted** — Freerouting routes from scratch.
-///
-/// Uses the board's engine-default rules. To route against the board's true fine
-/// rules, use [`export_dsn_with_rules`].
-pub fn export_dsn(board_path: &Path, dsn_path: &Path) -> io::Result<()> {
-    let board = read_problem(board_path)?;
-    export_dsn_inner(board_path, dsn_path, &board)
-}
-
-/// [`export_dsn`] with explicit [`RouteRules`] overriding the board defaults.
+/// `dsn_path` for Freerouting, with explicit [`RouteRules`] overriding the board
+/// defaults. The `.dsn` contains resolution/unit, the layer stack, the board
+/// boundary, width/clearance rules, component placement, the footprint pad-image
+/// library, and the netlist. **No existing wiring is emitted** — Freerouting
+/// routes from scratch.
 pub fn export_dsn_with_rules(
     board_path: &Path,
     dsn_path: &Path,
@@ -328,7 +321,7 @@ fn export_dsn_inner(board_path: &Path, dsn_path: &Path, board: &BoardProblem) ->
 }
 
 /// The high-fanout power nets poured as planes for `board_path` (net name → KiCAD
-/// copper layer), exactly as [`export_dsn`] decides them. A caller writing the
+/// copper layer), exactly as [`export_dsn_with_rules`] decides them. A caller writing the
 /// routed board back uses this to lay down the matching plane zones (see
 /// [`write_plane_zones`]) so the poured power nets are actually connected in KiCAD.
 pub fn plane_nets(board_path: &Path) -> io::Result<BTreeMap<String, String>> {
@@ -1019,22 +1012,8 @@ fn jar_path() -> std::path::PathBuf {
         .join("tools/vendor/freerouting.jar")
 }
 
-/// Route a placed board end-to-end through Freerouting and return the geometry.
-///
-/// `export_dsn` → run the jar under `xvfb-run` (headless) → `import_ses`. The
-/// timeout is generous (dense BGAs take minutes). Errors are typed: a missing
-/// jar or `xvfb-run` is reported distinctly from a run/parse failure.
-///
-/// Routes against the board's engine-default rules; for fine boards pass the true
-/// rules via [`freeroute_with_rules`].
-pub fn freeroute(board_path: &Path) -> Result<RoutedGeometry, FreerouteError> {
-    let board = read_problem(board_path)?;
-    let rules = RouteRules::from_board(&board);
-    freeroute_with_rules(board_path, rules)
-}
-
-/// [`freeroute`] routing against explicit [`RouteRules`] (the board's true fine
-/// rules), with default passes/timeout.
+/// Route a placed board end-to-end through Freerouting against explicit
+/// [`RouteRules`] (the board's true fine rules), with default passes/timeout.
 ///
 /// Routing coverage is fixed in the first pass; further passes only *optimize*
 /// (shorten) the wiring, with diminishing returns. We cap at 10 passes — enough to
@@ -1047,7 +1026,7 @@ pub fn freeroute_with_rules(
     freeroute_with(board_path, rules, 10, Duration::from_secs(600))
 }
 
-/// [`freeroute`] with explicit rules, max-passes, and timeout (used by tests/tools).
+/// [`freeroute_with_rules`] with explicit max-passes and timeout (used by tests/tools).
 pub fn freeroute_with(
     board_path: &Path,
     rules: RouteRules,
@@ -1389,7 +1368,7 @@ mod tests {
         assert_eq!(geo.vias[0].at, Point2 { x: 15.0, y: 25.0 });
     }
 
-    /// If a placed harness board is present, `export_dsn` produces a structurally
+    /// If a placed harness board is present, `export_dsn_with_rules` produces a structurally
     /// valid `.dsn` (header, layers, boundary, placement, library, network). Skipped
     /// when the board is absent (CI without the harness).
     #[test]
@@ -1401,7 +1380,8 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let dsn = dir.path().join("b.dsn");
-        export_dsn(board, &dsn).unwrap();
+        let rules = RouteRules::from_board(&read_problem(board).unwrap());
+        export_dsn_with_rules(board, &dsn, rules).unwrap();
         let text = std::fs::read_to_string(&dsn).unwrap();
         for needle in [
             "(pcb gordian",

@@ -216,9 +216,6 @@ pub struct CongestionReport {
     /// Total residual overflow `sum(max(usage - capacity, 0))` across all edges
     /// and layers after the last pass. `0` ⇔ no edge is over capacity.
     pub final_overflow: u32,
-    /// Per-iteration total overflow, including the initial pass at index 0, so a
-    /// stalled negotiation (overflow not decreasing) is visible.
-    pub overflow_history: Vec<u32>,
     /// The most-loaded edges (top-N by load ratio), worst first.
     pub edge_hotspots: Vec<EdgeHotspot>,
     /// Nets that could not be routed at all (no path on the mesh), in
@@ -349,7 +346,6 @@ impl<'a> Router<'a> {
             self.route_net(pos, input);
         }
 
-        let mut overflow_history = vec![self.total_overflow()];
         let mut iterations = 0usize;
 
         // Negotiated rip-up & reroute.
@@ -384,8 +380,6 @@ impl<'a> Router<'a> {
             for &pos in &victims {
                 self.route_net(pos, &inputs[pos]);
             }
-
-            overflow_history.push(self.total_overflow());
         }
 
         let final_overflow = self.total_overflow();
@@ -395,7 +389,6 @@ impl<'a> Router<'a> {
         let report = CongestionReport {
             iterations,
             final_overflow,
-            overflow_history,
             edge_hotspots: self.hotspots(),
             unrouted: std::mem::take(&mut self.unrouted),
         };

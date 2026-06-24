@@ -9,8 +9,8 @@
 
 use std::path::PathBuf;
 
-use kicad_cli_rs::cli::KicadCli;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::cli::KicadCli;
+use kicad_cli::env::KicadEnv;
 
 /// The vendored two-resistor board, embedded so the test is self-contained.
 const TWO_RES: &str = include_str!("../../kicad-sexpr/tests/fixtures/two_res.kicad_pcb");

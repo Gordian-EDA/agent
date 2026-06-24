@@ -4,7 +4,7 @@
 //!
 //! This is the one-click bundle on top of [`export_board`](super::export_board):
 //! `export_board` writes (and DRC-checks) the `.kicad_pcb`; `export_fab` runs
-//! that board through the [`kicad_cli_rs`] fabrication wrappers. It is read-only
+//! that board through the [`kicad_cli`] fabrication wrappers. It is read-only
 //! over the design (it only reads the exported board) and never mutates the
 //! draft, so it is a `ReadOnly` tool.
 
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use kicad_cli_rs::cli::KicadCli;
+use kicad_cli::cli::KicadCli;
 
 use crate::tools::PcbToolCtx;
 

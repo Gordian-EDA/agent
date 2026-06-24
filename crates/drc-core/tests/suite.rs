@@ -1,4 +1,4 @@
-//! Engine-SDK guards for `pcb-drc-core`:
+//! Engine-SDK guards for `drc-core`:
 //!
 //! 1. The standard suite produces a KNOWN, exact finding set on a board with a
 //!    deliberate mix of violations — the byte-identical guard for the code-motion
@@ -9,10 +9,10 @@
 //!    appends a custom rule with no edit to the in-house set, and its findings
 //!    land last (after the standard ones).
 
-use pcb_drc_core::problem::{
+use drc_core::problem::{
     Bounds, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace,
 };
-use pcb_drc_core::{DrcCtx, DrcSuite, Finding, Rule};
+use drc_core::{DrcCtx, DrcSuite, Finding, Rule};
 
 fn bounds() -> Bounds {
     Bounds { min_x: 0.0, max_x: 100.0, min_y: 0.0, max_y: 100.0 }
@@ -113,7 +113,7 @@ fn standard_suite_is_deterministic() {
     assert_eq!(a, b, "identical input must give identical findings");
 }
 
-/// A third-party rule, depending only on `pcb-drc-core`. It flags any trace
+/// A third-party rule, depending only on `drc-core`. It flags any trace
 /// wider than a ceiling — a rule the in-house set does not have.
 struct MaxTraceWidthRule {
     ceiling: f64,
@@ -172,7 +172,7 @@ fn third_party_rule_appends_via_with() {
 #[test]
 fn collect_copper_is_public_and_shared() {
     let (p, s) = mixed_board();
-    let copper = pcb_drc_core::collect_copper(&p, &s);
+    let copper = drc_core::collect_copper(&p, &s);
     // Four traces, each a single segment, no obstacles, no vias.
     assert_eq!(copper.len(), 4);
     assert!(copper.iter().any(|c| c.owned_by("A")));

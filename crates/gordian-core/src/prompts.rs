@@ -11,7 +11,7 @@
 //! it never bloats the prompt.
 
 use crate::retrieval::Corpus;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 
 /// Cap on the few-shot reference YAML embedded in the system prompt (chars). A
 /// human schematic can lift to a multi-KB document; beyond this it stops being a

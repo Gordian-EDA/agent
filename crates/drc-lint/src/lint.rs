@@ -1,9 +1,9 @@
 //! Strict DRC lint: the precision oracle for an emitted [`RouteSolution`].
 //!
-//! This module is now a thin shim over [`pcb_drc_core::DrcSuite`]: [`lint`] runs
-//! the standard suite, and [`DrcViolation`] is [`pcb_drc_core::Finding`]. The
+//! This module is now a thin shim over [`drc_core::DrcSuite`]: [`lint`] runs
+//! the standard suite, and [`DrcViolation`] is [`drc_core::Finding`]. The
 //! geometry/connectivity rules themselves live in the engine kernel
-//! (`pcb-drc-core`); this crate keeps the historical entry points stable for the
+//! (`drc-core`); this crate keeps the historical entry points stable for the
 //! router, board harness, and route-quality scorers, and adds the two
 //! copper-dropping helpers built on top of the report.
 //!
@@ -27,11 +27,11 @@
 //!   in last so `lint` is the single one-stop report.
 
 use crate::problem::{RouteProblem, RouteSolution};
-use pcb_drc_core::DrcSuite;
+use drc_core::DrcSuite;
 
 /// A design-rule violation. Historical alias for the engine kernel's
-/// [`pcb_drc_core::Finding`]; the variants and serde shape are identical.
-pub use pcb_drc_core::Finding as DrcViolation;
+/// [`drc_core::Finding`]; the variants and serde shape are identical.
+pub use drc_core::Finding as DrcViolation;
 
 // ── public API ───────────────────────────────────────────────────────────────
 

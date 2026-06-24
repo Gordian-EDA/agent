@@ -1,8 +1,8 @@
 //! SPIKE (spec "day-one"): KiCAD power symbols drive nets by their Value.
 //! If this fails, STOP and re-design Phase 2's power-symbol approach.
 
-use kicad_cli_rs::cli::KicadCli;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::cli::KicadCli;
+use kicad_cli::env::KicadEnv;
 use sch_io::write::SchematicWriter;
 
 #[test]

@@ -1,7 +1,7 @@
 //! Acceptance tests for symbol-library parsing, encoding empirically
 //! validated ground truth from the installed KiCAD libraries.
 
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 use kicad_sexpr::symlib::SymbolLib;
 use symbol_contract::PinType;
 

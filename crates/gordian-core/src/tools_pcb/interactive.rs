@@ -9,7 +9,7 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use kicad_cli_rs::cli::KicadCli;
+use kicad_cli::cli::KicadCli;
 use kicad_ipc::proto::kiapi::board::types::BoardLayer;
 use kicad_ipc::{footprint_reference, Session};
 use kicad_sexpr::pcb::{read_problem, write_solution};

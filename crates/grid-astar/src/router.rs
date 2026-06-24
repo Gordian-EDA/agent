@@ -25,15 +25,14 @@
 //! plus a list of [`FailedNet`]s. A net that cannot be routed is reported, never
 //! silently dropped, and the router never panics.
 //!
-//! [`GridAStarRouter`] is the [`Router`] impl — the free-tier engine — wrapping
-//! the strict/lenient/rip-up portfolio behind the SDK trait.
+//! [`GridAStarRouter`] is the [`Router`] impl, wrapping the strict/lenient/rip-up
+//! portfolio behind the SDK trait.
 //!
 //! ## Design constants
 //!
-//! All tunables live here ([`DesignConstants`]) as the single tuning surface:
-//! the grid pitch and obstacle-inflation formulas (delegated to [`crate::grid`]
-//! so the grid and router agree) and the A* bend/via costs. Slice 1 keeps the
-//! spec defaults; later slices retune here.
+//! The tunables are the [`AStarCosts`] bend/via weights plus the grid pitch and
+//! obstacle-inflation formulas (delegated to [`crate::grid`] so the grid and
+//! router agree).
 
 use crate::astar::{self, AStarCosts, State, DIAG_COST};
 use crate::grid::{self, RouteGrid};
@@ -47,17 +46,6 @@ pub use crate::problem::FailedNet;
 
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "naive";
-
-/// The tunable design constants for the router, in one place.
-///
-/// Grid pitch and obstacle inflation are computed from the problem's design
-/// rules (see [`crate::grid::grid_pitch`] / [`crate::grid::obstacle_inflation`]);
-/// the A* costs are fixed step/bend/via weights.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DesignConstants {
-    /// A* movement costs (bend, via), in grid-step units.
-    pub costs: AStarCosts,
-}
 
 /// The inner copper layers that carry a solid GND/VCC plane, CENTRED in the stack:
 /// 4-layer → In1,In2 (`{1,2}`); 6-layer → In2,In3 (`{2,3}`, leaving In1/In4 as signal);
@@ -118,7 +106,7 @@ pub fn route(problem: &RouteProblem) -> RouteResult {
         // radius is set in `route_with`, keeping diagonals DRC-safe full-board)
         ..AStarCosts::default()
     };
-    route_iterated(problem, DesignConstants { costs })
+    route_iterated(problem, costs)
 }
 
 /// The strict ORTHOGONAL (4-way) naive route — `diag = u32::MAX`, so no diagonal is ever
@@ -138,7 +126,7 @@ pub fn route_orthogonal(problem: &RouteProblem) -> RouteResult {
         via_clear_radius_cells: via_clear_radius_cells(problem),
         ..AStarCosts::default() // diag = u32::MAX (orthogonal), diag_body_radius inert
     };
-    route_iterated(problem, DesignConstants { costs })
+    route_iterated(problem, costs)
 }
 
 /// The lenient ORTHOGONAL (4-way) naive route — orthogonal, WITHOUT the via-barrel
@@ -146,7 +134,7 @@ pub fn route_orthogonal(problem: &RouteProblem) -> RouteResult {
 /// candidate [`GridAStarRouter`]'s arbiter scores against [`route_orthogonal`]; a board
 /// whose orthogonal win needs the no-via-scan variant is not lost to a strict-only one.
 pub fn route_orthogonal_lenient(problem: &RouteProblem) -> RouteResult {
-    route_iterated(problem, DesignConstants::default()) // diag = u32::MAX, no via-scan
+    route_iterated(problem, AStarCosts::default()) // diag = u32::MAX, no via-scan
 }
 
 /// Route, then RIP-UP RETRY: if any nets failed, re-route from a fresh grid with those
@@ -155,9 +143,9 @@ pub fn route_orthogonal_lenient(problem: &RouteProblem) -> RouteResult {
 /// the first pass is the old behaviour and a worse retry is discarded — so a board can
 /// only gain routed nets, never lose them. This relieves the greedy router's corridor
 /// contention (e.g. a few more inner BGA balls escape) without a full rip-up engine.
-fn route_iterated(problem: &RouteProblem, design: DesignConstants) -> RouteResult {
+fn route_iterated(problem: &RouteProblem, costs: AStarCosts) -> RouteResult {
     let empty = std::collections::BTreeSet::new();
-    let mut best = route_with(problem, design, &empty);
+    let mut best = route_with(problem, costs, &empty);
     reconcile(problem, &mut best);
     let mut best_n = best.failed.len();
     let mut best_w = crate::problem::failed_pad_weight(problem, &best.failed);
@@ -167,7 +155,7 @@ fn route_iterated(problem: &RouteProblem, design: DesignConstants) -> RouteResul
         }
         let pri: std::collections::BTreeSet<String> =
             best.failed.iter().map(|f| f.connection.clone()).collect();
-        let mut cand = route_with(problem, design, &pri);
+        let mut cand = route_with(problem, costs, &pri);
         reconcile(problem, &mut cand);
         let cn = cand.failed.len();
         let cw = crate::problem::failed_pad_weight(problem, &cand.failed);
@@ -199,7 +187,7 @@ pub fn route_lenient(problem: &RouteProblem) -> RouteResult {
         diag: DIAG_COST,
         ..AStarCosts::default()
     };
-    route_iterated(problem, DesignConstants { costs })
+    route_iterated(problem, costs)
 }
 
 /// Make a slice-1 result DRC-honest: the lint is the authority. First drop any
@@ -229,7 +217,7 @@ fn reconcile(problem: &RouteProblem, result: &mut RouteResult) {
 /// net names to route first (empty = the default shortest-first order).
 pub fn route_with(
     problem: &RouteProblem,
-    design: DesignConstants,
+    costs: AStarCosts,
     priority: &std::collections::BTreeSet<String>,
 ) -> RouteResult {
     let mut grid = RouteGrid::build(problem);
@@ -240,11 +228,9 @@ pub fn route_with(
     // In2(plane) / B, so the inner two layers are planes; 2-layer has none. Without
     // this, an inner BGA ball escapes via the cheapest F→In1 hop onto the GND plane
     // and gets dropped as a short — no signal escapes at all.
-    let design = DesignConstants {
-        costs: AStarCosts {
-            plane_mask: plane_mask_for(layer_count),
-            ..design.costs
-        },
+    let costs = AStarCosts {
+        plane_mask: plane_mask_for(layer_count),
+        ..costs
     };
 
     // Clearance halo: when a net claims a cell, foreign nets must stay a full
@@ -298,14 +284,14 @@ pub fn route_with(
         // so a diagonal's body keeps exactly the clearance the cell halo enforces between
         // centres. A wider foreign trace's extra half-width is covered by ITS own halo
         // (this net's diagonal cells must clear that halo), so this radius need only bound
-        // the min-width foreign case. Inert when `design.costs.diag == u32::MAX`
+        // the min-width foreign case. Inert when `costs.diag == u32::MAX`
         // (orthogonal), since no diagonal is relaxed; non-zero keeps an 8-way caller DRC-safe.
         let diag_body_radius_cells = (nw / 2.0 + problem.clearance + min_w / 2.0) / pitch;
         let costs = AStarCosts {
             trace_clear_radius_cells: (((nw - min_w) / 2.0 / pitch).ceil() as usize),
             diag_body_radius_cells,
             layer_mask,
-            ..design.costs
+            ..costs
         };
 
         // The routed tree starts as point 0's cell; each further point is

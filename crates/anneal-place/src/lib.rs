@@ -1,13 +1,13 @@
-//! `anneal-place` — the premium simulated-annealing schematic placement engine. It OWNS
-//! its objective (the premium energy: the 16 terms under the straightness-amplified
-//! premium weights + the compaction/orientation boosts + the real-warning gate) and its
+//! `anneal-place` — the amplified simulated-annealing schematic placement engine. It OWNS
+//! its objective (the amplified energy: the 16 terms under the straightness-amplified
+//! weights + the compaction/orientation boosts + the real-warning gate) and its
 //! search (the SA move-set + proxy costs + multi-start + route-aware refinement). It is a
 //! MEASUREMENT-based engine: it builds + routes candidates to score them, so it calls
-//! `sch-place-core`'s measurement library ([`Realizer`]/[`RawMetrics`]) and the shared
+//! `sch-floorplan`'s measurement library ([`Realizer`]/[`RawMetrics`]) and the shared
 //! geometry/idiom primitives. A non-measuring engine would depend on `sch-model` alone;
-//! anneal depends on `sch-place-core` because it CHOSE to measure routed sheets.
+//! anneal depends on `sch-floorplan` because it CHOSE to measure routed sheets.
 //!
-//! The premium objective + the SA + the greedy-descent SEED candidate all live here. The
+//! The amplified objective + the SA + the greedy-descent SEED candidate all live here. The
 //! greedy refine/polish below is a COPY of the free engine's descent (the SA uses a
 //! greedy hill-climb as one multi-start candidate) — duplicated, not shared, so the two
 //! engines evolve independently. The weights/constants likewise are anneal's own copies.
@@ -17,11 +17,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use sch_model::item::{Incidence, Item};
 use sch_model::ir::{LayoutIr, Orient};
 use sch_model::netclass::is_power_net;
-use sch_model::place::{
-    Crossings, EngineCaps, PlaceProblem, PlaceResult, PlacementEngine, Tier,
-};
+use sch_model::place::{Crossings, PlaceProblem, PlaceResult, PlacementEngine};
 
-use sch_place_core::contract::{
+use sch_floorplan::contract::{
     align_idiom_clusters, align_led_chains, body_overlap_count, build_anchor_blocks, build_writer,
     cluster_group, cohesion_targets, decongest, grid_order_viol, item_rect, multi_unit_siblings,
     orient_angle, overlaps_any, pin_endpoint, rects_overlap, signal_anchor_centroid,
@@ -31,16 +29,13 @@ use sch_place_core::contract::{
 /// Geometry coincidence tolerance (mm) — anneal's own copy of the shared 1e-6 epsilon.
 const EPS: f64 = 1e-6;
 
-/// Simulated annealing (paid tier): a seeded refine→anneal AND a broad anneal from the
+/// Simulated annealing: a seeded refine→anneal AND a broad anneal from the
 /// raw seed, keeping whichever the objective prefers (today's multi-start best-of).
 pub struct Anneal;
 
 impl PlacementEngine for Anneal {
     fn name(&self) -> &'static str {
         "anneal"
-    }
-    fn caps(&self) -> EngineCaps {
-        EngineCaps { tier: Tier::Premium }
     }
     /// Pure-trait entry (no realizer supplied): the SA measures routed sheets, which the
     /// pure problem cannot do (it carries no `KicadEnv`), so production dispatch is via
@@ -64,20 +59,18 @@ impl MeasuringEngine for Anneal {
 }
 
 // ---------------------------------------------------------------------------
-// The premium OBJECTIVE — anneal's own energy. The 16 raw terms (from the shared
-// measurement library) under the premium weights, copied verbatim from the historical
-// `layout_cost(premium=true)` + `premium_score_items` so the SA acceptance trajectory and
-// the emitted placement stay byte-identical. The base-tier energy (`base_cost`) is also
-// anneal's own copy (the SA's free-base path minimises it); it coincides with the free
-// engine's objective today but is duplicated, not shared.
+// The amplified OBJECTIVE — anneal's own energy: the 16 raw terms (from the shared
+// measurement library) under the amplified weights. The base-tier energy (`base_cost`)
+// is the SA's free-base path; it coincides with the free engine's objective today but
+// is duplicated, not shared.
 // ---------------------------------------------------------------------------
 
 /// Cohesion pull on a multi-unit part's units (same refdes, no shared net). Anneal's own
 /// copy of the constant — the free engine carries its own; they are not shared.
 const SIB_COHESION: f64 = 3.0;
-/// Extra PREMIUM weight on a 1-rail leg orientation violation, on top of the base 12.
+/// Extra AMPLIFIED weight on a 1-rail leg orientation violation, on top of the base 12.
 const ORIENT_BOOST: f64 = 50.0;
-/// Extra PREMIUM weight on compactness (length+spread) so straightness can't win by
+/// Extra AMPLIFIED weight on compactness (length+spread) so straightness can't win by
 /// spreading parts into open space.
 const COMPACT_BOOST: f64 = 2.0;
 /// Weight on the whole-board bbox half-perimeter in `proxy_cost` (the dense fast-lane SA
@@ -86,8 +79,8 @@ const PROXY_SPREAD_W: f64 = 0.45;
 /// Weight on the LLM zone bias in `proxy_cost`.
 const ZBIAS_W: f64 = 0.8;
 
-/// The base (free-tier) routed energy of the 16 raw terms — anneal's own copy of the
-/// non-premium weighted combo. Used by the SA's `premium=false` path. Build failure
+/// The base routed energy of the 16 raw terms — anneal's own copy of the
+/// non-amplified weighted combo. Used by the SA's `amplified=false` path. Build failure
 /// (saturated length) ⇒ ∞.
 fn base_cost(m: &RawMetrics) -> f64 {
     if !m.length.is_finite() {
@@ -111,12 +104,10 @@ fn base_cost(m: &RawMetrics) -> f64 {
     base + multiunit
 }
 
-/// The PREMIUM straightness-amplified energy of the 16 raw terms — anneal's own copy of
-/// `layout_cost(premium=true)`. The `neat` multiplier is 3.0 (straighter wires), and a
-/// matching compaction boost + an orientation boost are ADDED outside the base sum (the
-/// exact expression tree is preserved so the chaotic SA acceptances don't shift). Build
-/// failure ⇒ ∞.
-fn premium_aes(m: &RawMetrics) -> f64 {
+/// The AMPLIFIED straightness energy of the 16 raw terms. The `neat` multiplier is 3.0
+/// (straighter wires), and a matching compaction boost + an orientation boost are ADDED
+/// outside the base sum. Build failure ⇒ ∞.
+fn amplified_energy(m: &RawMetrics) -> f64 {
     if !m.length.is_finite() {
         return f64::INFINITY;
     }
@@ -139,12 +130,12 @@ fn premium_aes(m: &RawMetrics) -> f64 {
         + ORIENT_BOOST * m.leg_viol as f64
 }
 
-/// The full premium objective: the straightness energy [`premium_aes`] plus — on boards
+/// The full amplified objective: the straightness energy [`amplified_energy`] plus — on boards
 /// small enough to afford the accurate per-move text solve (`pins <= 250 && nets <= 40`)
 /// — a heavy weight on the REAL post-solve warning count, so the SA directly minimises
-/// shipped warnings. Anneal's own copy of `premium_score_items`.
-fn premium_score(r: &Realizer, items: &[Item]) -> f64 {
-    let aes = premium_aes(&r.measure(items));
+/// shipped warnings. Anneal's own copy of `amplified_score_items`.
+fn amplified_score(r: &Realizer, items: &[Item]) -> f64 {
+    let aes = amplified_energy(&r.measure(items));
     if !aes.is_finite() {
         return f64::INFINITY;
     }
@@ -156,12 +147,12 @@ fn premium_score(r: &Realizer, items: &[Item]) -> f64 {
     }
 }
 
-/// [`premium_score`] when the caller ALREADY knows the shipped warning count `w` (the
+/// [`amplified_score`] when the caller ALREADY knows the shipped warning count `w` (the
 /// candidate pick computes it for the primary sort). Identical result, but skips the
 /// redundant second text-solving warning count. Anneal's own copy of
-/// `premium_score_with_w`.
-fn premium_score_with_w(r: &Realizer, items: &[Item], w: usize) -> f64 {
-    let aes = premium_aes(&r.measure(items));
+/// `amplified_score_with_w`.
+fn amplified_score_with_w(r: &Realizer, items: &[Item], w: usize) -> f64 {
+    let aes = amplified_energy(&r.measure(items));
     if !aes.is_finite() {
         return f64::INFINITY;
     }
@@ -454,7 +445,7 @@ fn snap(v: f64) -> f64 {
 }
 
 // ===========================================================================
-// The SA SEARCH — moved verbatim from the former sch-place-core search module, with the
+// The SA SEARCH — moved verbatim from the former sch-floorplan search module, with the
 // injected-cost calls rebound to anneal's own objective + the shared measurement library.
 // ===========================================================================
 
@@ -481,7 +472,7 @@ impl Rng {
     }
 }
 
-/// The premium SA search (paid tier): a seeded refine→anneal AND a broad anneal from
+/// The amplified SA search: a seeded refine→anneal AND a broad anneal from
 /// the raw seed, keeping whichever the cost prefers (today's multi-start best-of).
 /// Writes the final placement into `items` and returns its diagnostics under `engine`
 /// (the calling [`PlacementEngine`]'s name). Behaviour is byte-identical to the old
@@ -586,7 +577,7 @@ pub fn anneal_place(
                 // one wire (a merge), which warnings DON'T see — reject those here.
                 let b = r.truthfulness_breaks(cand);
                 let w = r.warnings(cand);
-                let c = premium_score_with_w(r, cand, w);
+                let c = amplified_score_with_w(r, cand, w);
                 (b, w, c)
             })
             .collect();
@@ -610,7 +601,7 @@ pub fn anneal_place(
         }
         // ROUTE-AWARE REFINEMENT (large boards). The proxy is crossing-BLIND, so the
         // fast-lane winner is sprawl-optimal but not crossing-optimal. Refine it with a
-        // bounded `anneal_items` whose objective is the TRUE routed cost (premium) — the
+        // bounded `anneal_items` whose objective is the TRUE routed cost (amplified) — the
         // only faithful crossing signal — which no cheap proxy could capture. Seeded
         // from the already-good winner, so its capped budget (≤750 routed iters, the
         // 420k/pins ceiling) is spent polishing, not exploring. Kept ONLY if it wins the
@@ -635,7 +626,7 @@ pub fn anneal_place(
             let b = r.truthfulness_breaks(&m);
             let w = r.warnings(&m);
             let cr = r.crossings(&m);
-            (b, w, cr.total(), premium_score_with_w(r, &m, w))
+            (b, w, cr.total(), amplified_score_with_w(r, &m, w))
         };
         let (bb, bw, bx, bc) = score(&candidates[best]);
         // SKIP the refinement when the winner is already clean (no breaks/warnings and
@@ -646,7 +637,7 @@ pub fn anneal_place(
         // crossings it often has CAP-SCATTER / long satellite runs (a 3V3 bulk cap marooned
         // far from the regulator output) — an HPWL/straightness defect the crossing-based skip
         // misses but the refinement's true routed-cost objective fixes (it's kept only if the
-        // premium score improves). Cheap on a small sheet. A big board still skips when clean.
+        // amplified score improves). Cheap on a small sheet. A big board still skips when clean.
         let small_forced = force_fast && pins <= FAST_PINS;
         if !small_forced && bb == 0 && bw == 0 && bx <= 6 {
             items.clone_from_slice(&candidates[best]);
@@ -655,7 +646,7 @@ pub fn anneal_place(
         // ROUTE-AWARE REFINEMENT. The proxy is crossing-BLIND, so the fast-lane winner is
         // sprawl-optimal but not crossing-optimal — and no cheap router-free crossing
         // proxy proved faithful (bbox/trunk-segment all failed). So refine the winner with
-        // the TRUE router: a bounded `anneal_items` (premium routed cost; iter-capped
+        // the TRUE router: a bounded `anneal_items` (amplified routed cost; iter-capped
         // 80..300 = 30k/pins so even a 173-pin board stays seconds) seeded from it. Kept
         // ONLY if it wins on real (finalised) crossings, so it is strictly additive — a
         // straighter-but-more-crossing result is rejected. Trades the ≤5s budget for fewer
@@ -740,15 +731,15 @@ fn report(engine: &str, r: &Realizer, items: &[Item]) -> PlaceResult {
         truthfulness_breaks: r.truthfulness_breaks(items),
         warnings,
         crossings: r.crossings(items),
-        cost: premium_score_with_w(r, items, warnings),
+        cost: amplified_score_with_w(r, items, warnings),
     }
 }
 /// The small-board placement search, extracted so the fast lane can run it as a RIVAL
 /// candidate for force_fast SMALL sub-sheets (the fast lane's locality proxy is
 /// crossing-worse than this on simple sheets — a split-supply power sheet sat at 4
 /// crossings via the fast lane vs 2 here). Greedy refine + four parallel anneals (A
-/// seeded, B broad, C premium, D locality), then pick the polished winner by
-/// (truthfulness, warnings, premium cost). Operates on a COPY of `seed`, returns the
+/// seeded, B broad, C amplified, D locality), then pick the polished winner by
+/// (truthfulness, warnings, amplified cost). Operates on a COPY of `seed`, returns the
 /// POLISHED winner. Behaviour is byte-identical to the old inline else-branch (the
 /// placement_snapshot verifies it for the references that take the small path).
 fn small_path_search(
@@ -785,7 +776,7 @@ fn small_path_search(
             || { let mut f = || anneal_items(r, &mut state_a, inc, ir, false, false, rng_seed, None); tic("A seeded", &mut f); },
             || {
                 rayon::join(
-                    || { let mut f = || anneal_items(r, &mut state_c, inc, ir, false, true, rng_seed ^ 0x9E3779B97F4A7C15, None); tic("C premium", &mut f); },
+                    || { let mut f = || anneal_items(r, &mut state_c, inc, ir, false, true, rng_seed ^ 0x9E3779B97F4A7C15, None); tic("C amplified", &mut f); },
                     || { let mut f = || anneal_locality(r, &mut state_d, inc, ir, rng_seed ^ 0x517CC1B727220A95); tic("D locality", &mut f); },
                 )
             },
@@ -802,7 +793,7 @@ fn small_path_search(
             decongest(&mut shipped);
             let b = r.truthfulness_breaks(&shipped);
             let w = r.warnings(&shipped);
-            let c = premium_score_with_w(r, &shipped, w);
+            let c = amplified_score_with_w(r, &shipped, w);
             (b, w, c, shipped)
         })
         .collect();
@@ -842,16 +833,16 @@ fn anneal_items(
     inc: &Incidence,
     ir: &LayoutIr,
     broad: bool,
-    premium: bool,
+    amplified: bool,
     seed: u64,
     iter_cap: Option<usize>,
 ) {
-    // The objective: free tier minimises the base routed cost; the premium run
+    // The objective: the base run minimises the base routed cost; the amplified run
     // optimises the richer (straighter) objective. Run as an EXTRA candidate so it
     // never displaces the base run's warning-free find — see `Anneal::search`.
     let objective = |items: &[Item]| {
-        if premium {
-            premium_score(r, items)
+        if amplified {
+            amplified_score(r, items)
         } else {
             base_cost(&r.measure(items))
         }
@@ -977,7 +968,7 @@ fn anneal_items(
     }
     items.clone_from_slice(&best_items);
 }
-/// A cheap, routing-FREE geometric proxy for [`layout_cost`] — the per-move objective
+/// A cheap, routing-FREE geometric proxy for the routed energy — the per-move objective
 /// of the locality-aware anneal. The correctness wall (body overlaps, authored-grid
 /// order) stays EXACT, never approximated; wirelength is the per-net bounding-box
 /// half-perimeter (HPWL) over incident item centres — the standard placement-SA inner
@@ -1119,7 +1110,7 @@ fn anneal_locality(
     let mut cur = proxy_cost(items, inc, ir, &cohesion);
     let mut proxy_best = cur;
     let mut proxy_best_items: Vec<Item> = items.to_vec();
-    let mut best_true = premium_score(r, items);
+    let mut best_true = amplified_score(r, items);
     let mut best_items: Vec<Item> = items.to_vec();
 
     for it in 0..iters {
@@ -1169,7 +1160,7 @@ fn anneal_locality(
                 // Pay the true routed cost only on a new proxy-best, throttled.
                 if it - last_verify >= verify_period {
                     last_verify = it;
-                    let tc = premium_score(r, items);
+                    let tc = amplified_score(r, items);
                     if tc < best_true {
                         best_true = tc;
                         best_items.clone_from_slice(items);
@@ -1184,7 +1175,7 @@ fn anneal_locality(
         }
     }
     // Always verify the final proxy-best against the true cost.
-    let tc = premium_score(r, &proxy_best_items);
+    let tc = amplified_score(r, &proxy_best_items);
     if tc < best_true {
         best_items.clone_from_slice(&proxy_best_items);
     }

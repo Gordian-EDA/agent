@@ -8,7 +8,7 @@ use std::io;
 
 use circuit_lang::model::{Component, Design, PinTarget};
 use circuit_lang::{find_pin, PinType, SymbolProvider};
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 use kicad_sexpr::geometry::SymbolGeometry;
 use kicad_sexpr::provider::RealSymbolProvider;
 
@@ -315,9 +315,7 @@ pub(crate) fn prepare_writer(
         EmitOutput {
             sch: String::new(),
             layout_warnings: warnings,
-            body_crossings: crossings.body,
-            ic_crossings: crossings.ic,
-            wire_crossings: crossings.wire,
+            crossings,
             detected_idioms: ir.idioms.clone(),
         },
     ))

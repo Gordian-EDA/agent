@@ -1,7 +1,7 @@
 //! The schematic + PCB tool registry the agent drives.
 //!
 //! Each tool is a thin, deterministic wrapper over logic that already lives in
-//! `circuit-lang`, `kicad-sexpr`/`kicad-cli-rs`, and `sch-place-core`/`sch-io`. The registry
+//! `circuit-lang`, `kicad-sexpr`/`kicad-cli`, and `sch-floorplan`/`sch-io`. The registry
 //! exposes two free functions, both driven directly by the [`crate::Agent`] loop:
 //!
 //! - [`tool_defs`] — the JSON-Schema [`ToolDef`]s handed to the LLM.
@@ -49,14 +49,14 @@ use serde_json::{Value, json};
 
 use circuit_lang::model::{Component, Design, PinTarget};
 use circuit_lang::{SymbolProvider, compile};
-use kicad_cli_rs::cli::KicadCli;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::cli::KicadCli;
+use kicad_cli::env::KicadEnv;
 use kicad_sexpr::footlib::FootprintIndex;
 use kicad_sexpr::provider::RealSymbolProvider;
 use kicad_sexpr::search::SymbolIndex;
 use kicad_sexpr::snapshot::SnapshotStore;
 
-use sch_place_core::floorplan::{infer_ir, LayoutIr};
+use sch_floorplan::floorplan::{infer_ir, LayoutIr};
 use sch_io::read::lift;
 
 use crate::ToolDef;
@@ -1023,7 +1023,7 @@ fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // Production uses the locality-aware ANNEAL search (strictly ≥ greedy via the
     // candidate pick) so generated boards get the premium placement, not the
     // env-defaulted greedy free tier.
-    let emitted = sch_place_core::floorplan::emit_strategy(&ctx.env, &design, &ir, Box::new(anneal_place::Anneal))
+    let emitted = sch_floorplan::floorplan::emit_strategy(&ctx.env, &design, &ir, Box::new(anneal_place::Anneal))
         .context("rendering schematic")?;
     let rendered = emitted.sch;
     let diff = design_diff(prior_design.as_ref(), &design);
@@ -1041,7 +1041,7 @@ fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             "diff": diff,
             "rendered_len": rendered.len(),
             "layout_warnings": emitted.layout_warnings,
-            "wire_through_body": emitted.body_crossings + emitted.ic_crossings,
+            "wire_through_body": emitted.crossings.body + emitted.crossings.ic,
             "detected_idioms": detected_idioms,
         }));
     }
@@ -1096,7 +1096,7 @@ fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         "diff": diff,
         "erc": { "errors": erc.error_count(), "warnings": erc.warning_count() },
         "layout_warnings": emitted.layout_warnings,
-        "wire_through_body": emitted.body_crossings + emitted.ic_crossings,
+        "wire_through_body": emitted.crossings.body + emitted.crossings.ic,
         "detected_idioms": detected_idioms,
     }))
 }

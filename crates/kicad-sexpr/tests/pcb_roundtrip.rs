@@ -352,7 +352,7 @@ fn oracle_confirms_written_copper_connects_pads() {
 /// expected on a hand-authored fixture and ignored). Gated on a KiCAD install.
 #[test]
 fn drc_unconnected_count_decreases_after_routing() {
-    use kicad_cli_rs::env::KicadEnv;
+    use kicad_cli::env::KicadEnv;
     let Some(env) = KicadEnv::detect() else {
         eprintln!("SKIP: no KiCAD installation detected");
         return;
@@ -377,7 +377,7 @@ fn drc_unconnected_count_decreases_after_routing() {
 
 /// Run `kicad-cli pcb drc --format json` and return the `unconnected_items`
 /// count. Panics on execution failure (the test is already gated on detect()).
-fn drc_unconnected_count(env: &kicad_cli_rs::env::KicadEnv, board: &std::path::Path) -> usize {
+fn drc_unconnected_count(env: &kicad_cli::env::KicadEnv, board: &std::path::Path) -> usize {
     let out = tempfile::Builder::new()
         .prefix("gordian-drc-")
         .suffix(".json")

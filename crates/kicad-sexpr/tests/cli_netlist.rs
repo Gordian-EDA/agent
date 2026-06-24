@@ -4,7 +4,7 @@
 //! the ERC tests), and exercise the netlist exporter — the connectivity oracle
 //! that Plan 3's "lift" (sch -> kernel YAML) consumes.
 
-use kicad_cli_rs::{cli::KicadCli, env::KicadEnv};
+use kicad_cli::{cli::KicadCli, env::KicadEnv};
 use std::path::Path;
 
 #[test]

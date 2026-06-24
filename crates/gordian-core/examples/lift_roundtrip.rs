@@ -5,7 +5,7 @@
 //! Exits nonzero if any lifted YAML fails to compile.
 
 use circuit_lang::SymbolProvider;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 use kicad_sexpr::provider::RealSymbolProvider;
 
 fn main() -> anyhow::Result<()> {

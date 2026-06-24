@@ -14,8 +14,8 @@
 
 use circuit_lang::model::{Block, Design, PinTarget};
 use indexmap::IndexMap;
-use kicad_cli_rs::cli::KicadCli;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::cli::KicadCli;
+use kicad_cli::env::KicadEnv;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -291,15 +291,15 @@ pub fn compose_single_sheet(
         let mut sub = design.clone();
         sub.blocks = members.into_iter().collect();
         mark_cross_sheet_ports(&mut sub, &cross_sheet);
-        let ir = sch_place_core::floorplan::infer_ir(env, &sub);
+        let ir = sch_floorplan::floorplan::infer_ir(env, &sub);
         // Lay out each group INDEPENDENTLY and keep its TYPED writer (not a rendered
         // string): the engine composer translates each group's items to its tile in mm
         // and folds them into one sheet — no string-level geometry math here.
-        let w = sch_place_core::floorplan::emit_writer(env, &sub, &ir, Box::new(anneal_place::Anneal))
+        let w = sch_floorplan::floorplan::emit_writer(env, &sub, &ir, Box::new(anneal_place::Anneal))
             .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
         groups_w.push((sanitize(&gname), w));
     }
-    let composed = sch_place_core::floorplan::compose_writers(groups_w, design.name.as_deref());
+    let composed = sch_floorplan::floorplan::compose_writers(groups_w, design.name.as_deref());
     let path = out_dir.join("root.kicad_sch");
     std::fs::write(&path, &composed)?;
     let _ = env; // reserved (validation hook); kept for signature symmetry

@@ -40,7 +40,6 @@ pub mod workspace;
 
 pub use agent::{
     Agent, AgentEvent, Approvals, AutoApprove, ContextStats, StopReason, TestBackend, TurnOutcome,
-    TurnOutcomeSummary,
 };
 pub use review::{review, review_image};
 pub use tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};

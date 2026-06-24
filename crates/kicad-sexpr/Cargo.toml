@@ -9,7 +9,7 @@ description = "KiCAD s-expr file & library access: .kicad_pcb + footprint/symbol
 [dependencies]
 symbol-contract = { path = "../symbol-contract" }
 pcb-model = { path = "../pcb-model" }
-kicad-cli-rs = { path = "../kicad-cli-rs" }
+kicad-cli = { path = "../kicad-cli" }
 strsim.workspace = true
 fuzzy-matcher.workspace = true
 elsa.workspace = true

@@ -113,19 +113,6 @@ impl Role {
     }
 }
 
-/// An abstract placement intent the host realizes geometrically. The matcher is
-/// pure (no mm / pins), so it only names *what* arrangement the idiom wants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlacementHint {
-    /// Hug the anchor's pins that carry the cluster's shared signal nets, members
-    /// flanking (crystal + load caps).
-    BesideAnchorPins,
-    /// A compact bank parked beside the anchor (decoupling).
-    BankNearAnchor,
-    /// Members chained in series outward from the driving pin (LED + resistor).
-    SeriesFromPin,
-}
-
 /// A complete idiom: roles + edges + how to place the result.
 #[derive(Debug, Clone)]
 pub struct Pattern {
@@ -135,7 +122,6 @@ pub struct Pattern {
     pub anchor_role: &'static str,
     pub roles: &'static [Role],
     pub edges: &'static [Edge],
-    pub hint: PlacementHint,
     /// Reject matches scoring below this similarity (1.0 = every role+edge bound).
     pub min_score: f64,
 }

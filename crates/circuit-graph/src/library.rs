@@ -6,7 +6,7 @@
 //! matcher in `matcher.rs` never changes.
 
 use crate::graph::NetKind;
-use crate::pattern::{Edge, NetMatch, NodePred, Pattern, PlacementHint, Role};
+use crate::pattern::{Edge, NetMatch, NodePred, Pattern, Role};
 
 const CRYSTAL_LIBS: &[&str] = &["Crystal", "Resonator", "Oscillator"];
 const CAP_LIBS: &[&str] = &["Device:C"];
@@ -49,7 +49,6 @@ pub static CRYSTAL: Pattern = Pattern {
     anchor_role: "anchor",
     roles: CRYSTAL_ROLES,
     edges: CRYSTAL_EDGES,
-    hint: PlacementHint::BesideAnchorPins,
     min_score: 1.0,
 };
 
@@ -79,7 +78,6 @@ pub static DECOUPLING: Pattern = Pattern {
     anchor_role: "anchor",
     roles: DECOUPLE_ROLES,
     edges: DECOUPLE_EDGES,
-    hint: PlacementHint::BankNearAnchor,
     min_score: 1.0,
 };
 
@@ -101,7 +99,6 @@ pub static RC_LOWPASS: Pattern = Pattern {
     anchor_role: "res",
     roles: RC_ROLES,
     edges: RC_EDGES,
-    hint: PlacementHint::SeriesFromPin,
     min_score: 1.0,
 };
 
@@ -119,7 +116,6 @@ pub static LED_INDICATOR: Pattern = Pattern {
     anchor_role: "led",
     roles: LED_ROLES,
     edges: LED_EDGES,
-    hint: PlacementHint::SeriesFromPin,
     min_score: 1.0,
 };
 
@@ -149,7 +145,6 @@ pub static CC_PULLDOWN: Pattern = Pattern {
     anchor_role: "anchor",
     roles: CC_PULLDOWN_ROLES,
     edges: CC_PULLDOWN_EDGES,
-    hint: PlacementHint::SeriesFromPin,
     min_score: 1.0,
 };
 
@@ -190,7 +185,6 @@ pub static I2C_PULLUP: Pattern = Pattern {
     anchor_role: "anchor",
     roles: I2C_PULLUP_ROLES,
     edges: I2C_PULLUP_EDGES,
-    hint: PlacementHint::SeriesFromPin,
     min_score: 1.0,
 };
 

@@ -1,5 +1,5 @@
 [package]
-name = "kicad-cli-rs"
+name = "kicad-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

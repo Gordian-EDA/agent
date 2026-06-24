@@ -37,7 +37,7 @@ crates/
   kicad/   SHARED interop — all publishable, no moat
     kicad-ipc        live board over the KiCAD 9 IPC API (NNG/prost + Session)
     kicad-sexpr      .kicad_pcb + .kicad_sym s-expr read/write (footprint + symbol)
-    kicad-cli-rs     typed wrapper over the kicad-cli binary (drc/erc/plot/export)
+    kicad-cli     typed wrapper over the kicad-cli binary (drc/erc/plot/export)
     specctra         Specctra .dsn/.ses codec
     kicad-lib-index  fuzzy footprint/symbol index (SkimMatcherV2)
 
@@ -83,7 +83,7 @@ crates/
 | read <- KiCAD | (kicad-sexpr) | sch-lift | kicad-sexpr |
 | library | (footprint) | (symbol) | kicad-sexpr + kicad-lib-index |
 | correctness | drc-lint | sch-erc | — |
-| live edit / CLI | — | — | kicad-ipc / kicad-cli-rs |
+| live edit / CLI | — | — | kicad-ipc / kicad-cli |
 | tools | pcb-tools | sch-tools | agent-core |
 
 ## Free / premium
@@ -94,7 +94,7 @@ a real baseline = free.** The free tier stands alone (it already does — schema
   `floorplan-anneal`, and the AI design/critic loop.
 - **Free:** everything else, incl. baselines `force-place`/`grid-astar`/`greedy-place`/
   `elbow-route` and the open `freerouting` (local).
-- **Publish:** `kicad-ipc`, `kicad-sexpr`, `specctra`, `kicad-cli-rs`, `drc-lint`,
+- **Publish:** `kicad-ipc`, `kicad-sexpr`, `specctra`, `kicad-cli`, `drc-lint`,
   `circuit-lang`.
 
 ## Traits (in pcb-model; the entitlement swap seam)
@@ -115,7 +115,7 @@ trait FreerouteBackend { fn run(&self, dsn: &str, o: &Opts) -> Result<Ses>; } //
 
 ## Migration sequence (phase 0-1 done & merged; pure moves behind re-exports, one gate/phase)
 1. **DONE** — delete `forceplace`; carve out `pcb-model`. *(merged to main)*
-2. **Shared interop** — `kicad-bridge` -> `kicad-sexpr` / `kicad-cli-rs` / `specctra` /
+2. **Shared interop** — `kicad-bridge` -> `kicad-sexpr` / `kicad-cli` / `specctra` /
    `kicad-lib-index`; delete `kicad-bridge`. (Unblocks both sides — do first.)
 3. **PCB engine** — `pcb-engine` -> `force-place`/`grid-astar`/`drc-lint`/`pcb-svg`
    (free) + `anneal-place`/`fanout-place`/`negotiated-mesh` (premium); selectors ->

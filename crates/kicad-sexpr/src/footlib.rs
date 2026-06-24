@@ -6,7 +6,7 @@
 //!
 //! KiCAD ships footprints as `*.pretty` **directories** of individual
 //! `.kicad_mod` files under the install's `footprints` share dir (the sibling
-//! of the `symbols` dir [`kicad_cli_rs::env`] already finds). We mirror `symlib`'s
+//! of the `symbols` dir [`kicad_cli::env`] already finds). We mirror `symlib`'s
 //! filesystem-scan approach — enumerate the `.pretty` dirs and the
 //! `.kicad_mod` files inside them — rather than parsing `fp-lib-table`, exactly
 //! as `symlib` scans `*.kicad_sym` files instead of `sym-lib-table`. (The
@@ -44,7 +44,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use serde::{Deserialize, Serialize};
 
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 
 /// Maximum levenshtein distance for a name to qualify as a "did-you-mean"
 /// suggestion. Mirrors [`crate::provider`]'s symbol-side constant.

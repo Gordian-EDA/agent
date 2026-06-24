@@ -5,7 +5,7 @@
 //! Usage: cargo run --release -p agent --example erc_check -- <design.yaml>
 
 use circuit_lang::SymbolProvider;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 use kicad_sexpr::provider::RealSymbolProvider;
 
 fn main() -> anyhow::Result<()> {

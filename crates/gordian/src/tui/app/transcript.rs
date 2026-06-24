@@ -225,7 +225,7 @@ impl App {
                 };
                 self.transcript.push(Entry::system(msg));
             }
-            AgentEvent::TurnDone(_) => {
+            AgentEvent::TurnDone => {
                 // Stop the spinner promptly, but leave `turn_started` for the
                 // upcoming `TurnEnded` to read the elapsed time from. `TurnEnded`
                 // owns the rest of teardown and is the sole indicator source, so

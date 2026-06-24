@@ -32,7 +32,7 @@ pub use update::{Action, Msg, TurnEndReason};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gordian_core::{AgentEvent, TurnOutcomeSummary};
+    use gordian_core::AgentEvent;
     use serde_json::{json, Value};
     use std::time::Instant;
 
@@ -746,11 +746,7 @@ mod tests {
         let mut a = app();
         a.running = true;
         a.turn_started = Some(Instant::now());
-        a.update(Msg::Agent(AgentEvent::TurnDone(TurnOutcomeSummary {
-            applied: true,
-            tool_calls_made: 3,
-            final_text: "done".into(),
-        })));
+        a.update(Msg::Agent(AgentEvent::TurnDone));
         assert!(!a.running, "spinner stops");
         assert!(
             a.turn_started.is_some(),
@@ -806,11 +802,7 @@ mod tests {
             let mut a = app();
             type_str(&mut a, "go");
             a.update(Msg::Submit);
-            let done = Msg::Agent(AgentEvent::TurnDone(TurnOutcomeSummary {
-                applied: false,
-                tool_calls_made: 0,
-                final_text: "ok".into(),
-            }));
+            let done = Msg::Agent(AgentEvent::TurnDone);
             if done_first {
                 a.update(done);
                 a.update(Msg::TurnEnded(TurnEndReason::Completed));
@@ -885,11 +877,7 @@ mod tests {
         let mut a = app();
         a.update(Msg::Agent(AgentEvent::AssistantDelta("partial".into())));
         assert!(a.live_assistant.is_some());
-        a.update(Msg::Agent(AgentEvent::TurnDone(TurnOutcomeSummary {
-            applied: false,
-            tool_calls_made: 0,
-            final_text: "partial".into(),
-        })));
+        a.update(Msg::Agent(AgentEvent::TurnDone));
         assert!(a.live_assistant.is_none(), "TurnDone closes the live entry");
     }
 }

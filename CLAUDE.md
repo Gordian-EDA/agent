@@ -49,12 +49,6 @@ While you are reading a source file, if anything not make sense to you, (e.g. an
 
 Do not think about backwards compatibilty or blast radius when you are refactoring. Make all your work complete and final.
 
-## Naming and Renaming
-
-You should always rename stuff to reduce confusion. Do not be afraid of a huge blast radius. If a name does not serve as a good introduction, go give it a new name.
-
-Good names: `kicad-ipc` `Point2`
-
 ## Code reuse and module structure
 
 Use subcrates to separate maintain surfaces: most of the subcrates should be suitable for different maintainers to work parallelly.

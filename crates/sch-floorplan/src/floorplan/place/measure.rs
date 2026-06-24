@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 
 use crate::write::SchematicWriter;
 use sch_model::item::{Incidence, Item};
@@ -38,7 +38,7 @@ use super::*;
 /// pipeline uses; the pure [`PlacementEngine`] trait (in `sch-model`) stays method-silent
 /// so a non-measuring engine — e.g. a fixed-grid placer — implements it against
 /// `sch-model` ALONE, never seeing a `Realizer`. A measuring engine still implements
-/// [`PlacementEngine`] (for `name`/`caps`); its [`PlacementEngine::place`] can simply
+/// [`PlacementEngine`] (for `name`); its [`PlacementEngine::place`] can simply
 /// delegate to [`MeasuringEngine::place_measured`] with a freshly built realizer when
 /// invoked without one.
 pub trait MeasuringEngine: PlacementEngine {
@@ -250,9 +250,8 @@ fn bodies_and_ic_rects(
     (bodies, ic_rects)
 }
 
-/// Read the raw 16 measurement terms off a built (`fan_risers=false`) writer. This is the
-/// term-extraction half of the former `layout_cost`, with the weighting removed: every
-/// quantity is computed EXACTLY as before, then returned raw for an engine to weight.
+/// Read the raw 16 measurement terms off a built (`fan_risers=false`) writer,
+/// returned unweighted for an engine to weight.
 pub fn raw_metrics(
     env: &KicadEnv,
     w: &SchematicWriter,

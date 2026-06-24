@@ -5,7 +5,7 @@
 //! Usage: cargo run --release -p agent --example commit_multisheet -- <draft.yaml> <out_dir>
 
 use circuit_lang::SymbolProvider;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 use kicad_sexpr::provider::RealSymbolProvider;
 
 fn main() -> anyhow::Result<()> {

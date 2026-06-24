@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use symbol_contract::{PinDir, PinMeta, PinType, SymbolMeta, SymbolProvider};
 use elsa::sync::FrozenMap;
 
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 use crate::symlib::SymbolLib;
 
 /// Maximum levenshtein distance for a name to qualify as a suggestion.

@@ -1,4 +1,4 @@
-//! `pcb-drc-core` — the pluggable-rule DRC engine SDK.
+//! `drc-core` — the pluggable-rule DRC engine SDK.
 //!
 //! A Gordian engine kernel: it depends only on [`pcb_model`] and exposes a
 //! composable design-rule check that a third party can extend without touching
@@ -27,7 +27,7 @@
 //!
 //! ## Adding a third-party rule
 //!
-//! Depend on `pcb-drc-core` alone, `impl Rule for MyRule`, then:
+//! Depend on `drc-core` alone, `impl Rule for MyRule`, then:
 //!
 //! ```ignore
 //! let findings = DrcSuite::standard()

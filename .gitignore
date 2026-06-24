@@ -9,9 +9,13 @@
 /.worktrees/
 
 design.kicad_sch
-*.kicad_sch
+design.kicad_pcb
+design.kicad_prl
+design.kicad_pro
+/.history
+
 # ...but the placement-snapshot regression baselines ARE tracked (they ARE the gate).
-!crates/sch-place-core/tests/snapshots/*.kicad_sch
+!crates/sch-floorplan/tests/snapshots/*.kicad_sch
 
 docs/validation/*.png
 

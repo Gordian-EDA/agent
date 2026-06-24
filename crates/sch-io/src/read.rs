@@ -57,8 +57,8 @@ use std::path::Path;
 
 use circuit_lang::canon::to_canonical_yaml;
 use circuit_lang::model::{Block, Component, Design, Origin, PinTarget};
-use kicad_cli_rs::cli::KicadCli;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::cli::KicadCli;
+use kicad_cli::env::KicadEnv;
 
 use sch_model::result::{AP_BLOCK, AP_INDEX, AP_PARENT, AP_ROLE, ROLE_AUTHORED};
 
@@ -88,7 +88,7 @@ pub fn lift(env: &KicadEnv, sch_path: &Path) -> io::Result<String> {
 /// Pure (no I/O): the connectivity oracle goes in, the kernel model comes out.
 /// Factored from [`lift`] so the block-grouping, identity, auto-NC-skipping, and
 /// net-name-stripping rules can be unit-tested without a KiCAD install.
-fn design_from_netlist(netlist: &kicad_cli_rs::cli::Netlist) -> Design {
+fn design_from_netlist(netlist: &kicad_cli::cli::Netlist) -> Design {
     let mut design = Design::default();
 
     // Phase 1: place every (real) component into its block, carrying identity.
@@ -187,7 +187,7 @@ fn design_from_netlist(netlist: &kicad_cli_rs::cli::Netlist) -> Design {
 /// [`Origin::Synthesized`] (re-sugared by canon); everything else — including
 /// the explicit `authored` sentinel and any tag-less older symbol — is
 /// [`Origin::Authored`].
-fn origin_of(comp: &kicad_cli_rs::cli::NetComp) -> Origin {
+fn origin_of(comp: &kicad_cli::cli::NetComp) -> Origin {
     let role = comp.properties.get(AP_ROLE).map(String::as_str);
     let parent = comp.properties.get(AP_PARENT).map(String::as_str);
     let index = comp
@@ -284,7 +284,7 @@ fn kernel_footprint(props: &std::collections::HashMap<String, String>) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kicad_cli_rs::cli::{NetComp, Netlist};
+    use kicad_cli::cli::{NetComp, Netlist};
 
     fn comp(reference: &str, value: &str, lib_id: &str, props: &[(&str, &str)]) -> NetComp {
         NetComp {
@@ -450,19 +450,19 @@ mod tests {
                 comp("X9", "", "Device:R", &[]), // no ap_block -> "main"
             ],
             nets: vec![
-                kicad_cli_rs::cli::Net {
+                kicad_cli::cli::Net {
                     name: "/A".into(),
                     nodes: vec![("R1".into(), "1".into())],
                 },
-                kicad_cli_rs::cli::Net {
+                kicad_cli::cli::Net {
                     name: "/B".into(),
                     nodes: vec![("R2".into(), "1".into())],
                 },
-                kicad_cli_rs::cli::Net {
+                kicad_cli::cli::Net {
                     name: "/GND".into(),
                     nodes: vec![("R1".into(), "2".into()), ("R2".into(), "2".into())],
                 },
-                kicad_cli_rs::cli::Net {
+                kicad_cli::cli::Net {
                     name: "unconnected-(X9-Pad1)".into(),
                     nodes: vec![("X9".into(), "1".into())],
                 },
@@ -500,7 +500,7 @@ mod tests {
                 comp("#FLG01", "PWR_FLAG", "power:PWR_FLAG", &[]),
                 comp("R1", "1k", "Device:R", &[("ap_block", "main")]),
             ],
-            nets: vec![kicad_cli_rs::cli::Net {
+            nets: vec![kicad_cli::cli::Net {
                 name: "/GND".into(),
                 nodes: vec![("#FLG01".into(), "1".into()), ("R1".into(), "2".into())],
             }],

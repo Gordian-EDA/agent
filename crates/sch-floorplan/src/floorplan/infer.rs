@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use circuit_lang::model::Design;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 
 
 use super::idiom;
@@ -424,7 +424,7 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
     // gridded part — anchors AND satellites. A gridded satellite SEEDS where the
     // grid's relative arrangement says, not where its tap would pull it (the grid
     // is the author's explicit intent; inference only fills the rest). The search
-    // then holds that relative order via the `grid_order` cost (see `layout_cost`).
+    // then holds that relative order via the `grid_order` cost.
     for (rd, b) in &authored {
         if let Some(cell) = place.get_mut(rd) {
             cell.col = b[0] * 5;

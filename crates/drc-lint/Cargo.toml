@@ -8,5 +8,5 @@ description = "In-house PCB DRC oracle: clearance/width/via geometry + connectiv
 
 [dependencies]
 pcb-model = { path = "../pcb-model" }
-pcb-drc-core = { path = "../pcb-drc-core" }
+drc-core = { path = "../drc-core" }
 serde = { workspace = true, features = ["derive"] }

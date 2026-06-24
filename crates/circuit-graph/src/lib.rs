@@ -11,13 +11,12 @@
 //!
 //! Design goals:
 //! - **Pure & testable.** No KiCAD, geometry, or I/O — just data in, matches out.
-//!   The host (`sch-place-core`) adapts its own structures into [`CircuitGraph`].
+//!   The host (`sch-floorplan`) adapts its own structures into [`CircuitGraph`].
 //! - **Extensible.** A new idiom is one [`pattern::Pattern`] value; the matcher is
 //!   generic and never changes.
 //! - **Robust.** Optional roles/edges yield a graph-similarity *score* so a
 //!   near-miss degrades gracefully instead of vanishing.
 
-pub mod derive;
 pub mod graph;
 pub mod library;
 pub mod matcher;
@@ -26,7 +25,7 @@ pub mod value;
 
 pub use graph::{CircuitGraph, NetKind, Node, Pin};
 pub use matcher::{find, find_all, Match};
-pub use pattern::{Edge, Mult, NetMatch, NodePred, Pattern, PlacementHint, Role, Target};
+pub use pattern::{Edge, Mult, NetMatch, NodePred, Pattern, Role, Target};
 
 #[cfg(test)]
 mod tests {

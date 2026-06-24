@@ -55,8 +55,8 @@ name = "anneal-place"
 version = "0.1.0"
 dependencies = [
  "rayon",
+ "sch-floorplan",
  "sch-model",
- "sch-place-core",
 ]
 
 [[package]]
@@ -620,10 +620,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
+name = "drc-core"
+version = "0.1.0"
+dependencies = [
+ "pcb-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "drc-lint"
 version = "0.1.0"
 dependencies = [
- "pcb-drc-core",
+ "drc-core",
  "pcb-model",
  "serde",
 ]
@@ -995,7 +1004,7 @@ dependencies = [
  "futures",
  "gordian-core",
  "image",
- "kicad-cli-rs",
+ "kicad-cli",
  "kicad-sexpr",
  "llm-client",
  "pulldown-cmark",
@@ -1021,7 +1030,7 @@ dependencies = [
  "greedy-place",
  "grid-astar",
  "indexmap 2.14.0",
- "kicad-cli-rs",
+ "kicad-cli",
  "kicad-ipc",
  "kicad-sexpr",
  "llm-client",
@@ -1031,8 +1040,8 @@ dependencies = [
  "pcb-synth",
  "rayon",
  "resvg",
+ "sch-floorplan",
  "sch-io",
- "sch-place-core",
  "serde",
  "serde_json",
  "specctra",
@@ -1044,8 +1053,8 @@ dependencies = [
 name = "greedy-place"
 version = "0.1.0"
 dependencies = [
+ "sch-floorplan",
  "sch-model",
- "sch-place-core",
 ]
 
 [[package]]
@@ -1580,7 +1589,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kicad-cli-rs"
+name = "kicad-cli"
 version = "0.1.0"
 dependencies = [
  "quick-xml",
@@ -1608,7 +1617,7 @@ dependencies = [
  "drc-lint",
  "elsa",
  "fuzzy-matcher",
- "kicad-cli-rs",
+ "kicad-cli",
  "kiutils_kicad",
  "kiutils_sexpr",
  "pcb-model",
@@ -2049,15 +2058,6 @@ name = "pastey"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
-
-[[package]]
-name = "pcb-drc-core"
-version = "0.1.0"
-dependencies = [
- "pcb-model",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "pcb-model"
@@ -2859,11 +2859,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "sch-floorplan"
+version = "0.1.0"
+dependencies = [
+ "circuit-graph",
+ "circuit-lang",
+ "greedy-place",
+ "indexmap 2.14.0",
+ "kicad-cli",
+ "kicad-sexpr",
+ "rayon",
+ "sch-io",
+ "sch-model",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "sch-io"
 version = "0.1.0"
 dependencies = [
  "circuit-lang",
- "kicad-cli-rs",
+ "kicad-cli",
  "kicad-sexpr",
  "kiutils_kicad",
  "sch-model",
@@ -2880,23 +2897,6 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
-]
-
-[[package]]
-name = "sch-place-core"
-version = "0.1.0"
-dependencies = [
- "circuit-graph",
- "circuit-lang",
- "greedy-place",
- "indexmap 2.14.0",
- "kicad-cli-rs",
- "kicad-sexpr",
- "rayon",
- "sch-io",
- "sch-model",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]

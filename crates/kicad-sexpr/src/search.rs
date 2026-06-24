@@ -23,7 +23,7 @@ use symbol_contract::SymbolProvider;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 use crate::provider::RealSymbolProvider;
 
 /// A search hit: a fully qualified `Lib:Name` id and its resolved pin count.

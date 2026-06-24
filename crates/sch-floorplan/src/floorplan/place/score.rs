@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use circuit_lang::model::Design;
 use circuit_lang::{find_pin, PinType, SymbolProvider};
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 use kicad_sexpr::provider::RealSymbolProvider;
 
 use crate::write::SchematicWriter;

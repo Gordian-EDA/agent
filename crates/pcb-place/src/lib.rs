@@ -33,6 +33,6 @@ pub use placement::{place_board, PlaceProblem, PlaceResult, PlacementHints};
 // The engine-SDK seam (kernel-homed): the trait a third party implements, the
 // oracle it drops into, and the built-in placers + route ranker.
 pub use placement::{
-    AnnealingPlacer, Capabilities, FanoutPlacer, GridAstarRanker, LegalizingPlacer, Placer,
-    RoutabilityOracle, RouteRanker,
+    AnnealingPlacer, FanoutPlacer, GridAstarRanker, LegalizingPlacer, Placer, RoutabilityOracle,
+    RouteRanker,
 };

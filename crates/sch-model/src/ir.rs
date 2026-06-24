@@ -1,6 +1,6 @@
 //! The Layout IR — the geometry-free "frame" the LLM emits: the global flow,
 //! which nets are rails (and their band), where the anchors (ICs) sit, which nets
-//! exit as ports. The engine (`sch-place-core`) turns this into exact millimetre
+//! exit as ports. The engine (`sch-floorplan`) turns this into exact millimetre
 //! placement; the LLM never sees a coordinate. This module is just the data
 //! vocabulary; the inference that *produces* an IR lives in the engine.
 

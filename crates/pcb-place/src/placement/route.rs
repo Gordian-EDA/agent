@@ -120,19 +120,13 @@ impl RouteRanker for GridAstarRanker {
     /// invariant to the router's 8-way diagonal default (the diagonal pass is a routing
     /// improvement, not a placement signal — coupling it in would re-rank every board's
     /// placement and drift the layout). Export's `route_auto` still routes 8-way.
-    fn faults(&self, rp: &RouteProblem) -> (usize, u64) {
+    fn faults(&self, rp: &RouteProblem) -> usize {
         let routed = crate::router::route_orthogonal(rp);
         let geom = crate::lint::lint(rp, &routed.solution)
             .iter()
             .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
             .count();
-        let wl: f64 = routed
-            .solution
-            .traces
-            .iter()
-            .flat_map(|t| t.path.windows(2).map(|w| w[0].dist(&w[1])))
-            .sum();
-        (routed.failed.len() + geom, (wl * 1000.0) as u64)
+        routed.failed.len() + geom
     }
 }
 

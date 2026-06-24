@@ -3,8 +3,8 @@
 //! Gated on a real KiCAD install (`KicadEnv::detect()` → SKIP-graceful); these
 //! RUN on the dev machine where KiCAD 10 and its symbol libraries are present.
 
-use kicad_cli_rs::cli::KicadCli;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::cli::KicadCli;
+use kicad_cli::env::KicadEnv;
 use kicad_sexpr::geometry::SymbolGeometry;
 
 #[test]

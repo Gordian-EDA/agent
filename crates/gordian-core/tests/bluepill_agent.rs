@@ -18,8 +18,8 @@
 use gordian_core::{Agent, AutoApprove};
 use gordian_core::prompts::system_prompt;
 use gordian_core::tools::PcbToolCtx;
-use kicad_cli_rs::cli::KicadCli;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::cli::KicadCli;
+use kicad_cli::env::KicadEnv;
 
 /// The EXACT founding prompt the whole project is organized around.
 const FOUNDING_PROMPT: &str = "Design me a bluepill-style STM32H7 dev board with USB and I2C pins";

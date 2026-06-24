@@ -1,6 +1,6 @@
 //! Shared emission types and identity-property keys.
 //!
-//! These live in `sch-model` so the floorplan engine (`sch-place-core`) and the
+//! These live in `sch-model` so the floorplan engine (`sch-floorplan`) and the
 //! round-trip reader (`sch-io::read`) can share them.
 
 /// Property key for the block a component belongs to.
@@ -12,9 +12,6 @@ pub const AP_ROLE: &str = "ap_role";
 pub const AP_PARENT: &str = "ap_parent";
 /// Property key for a synthesized component's index within `(parent, role)`.
 pub const AP_INDEX: &str = "ap_index";
-
-/// Property key recording the layout-revision a component was placed under.
-pub const AP_LAYOUT_REV: &str = "ap_layout_rev";
 
 /// The `ap_role` value written for authored components.
 pub const ROLE_AUTHORED: &str = "authored";
@@ -40,16 +37,10 @@ pub struct EmitOutput {
     /// One human-readable warning per overlapping symbol/label pair (empty when
     /// the layout is clean). A side-channel only: it does not alter `sch`.
     pub layout_warnings: Vec<String>,
-    /// Ground-truth count of wires that run THROUGH a 2-pin part's body
-    /// (transverse or collinear pass-through). Authoritative for the "wire through
-    /// a component" question — a vision critic systematically over-reports it.
-    pub body_crossings: usize,
-    /// Ground-truth count of wires routed through an IC (3+ pin) package body.
-    pub ic_crossings: usize,
-    /// Count of wire-wire CROSSINGS on the shipped sheet (two different-net segments
-    /// crossing). The objective signal behind the critic's "congested knot of crossings"
-    /// complaint — measurable where the VLM is noisy.
-    pub wire_crossings: usize,
+    /// The shipped sheet's body / IC / wire-crossing triple (ground truth, the same
+    /// `fan_risers=true` measure the engines pick on). A vision critic systematically
+    /// over-reports these, so they are the objective signal behind its complaints.
+    pub crossings: crate::place::Crossings,
     /// Idioms the engine recognized + co-placed (crystal, decoupling, feedback),
     /// surfaced to the agent loop via `apply_design`.
     pub detected_idioms: Vec<IdiomReport>,

@@ -93,17 +93,6 @@ impl Approvals for AutoApprove {
     }
 }
 
-/// A summary of one finished turn, carried in [`AgentEvent::TurnDone`].
-#[derive(Clone, Debug)]
-pub struct TurnOutcomeSummary {
-    /// Whether an approved write actually committed this turn.
-    pub applied: bool,
-    /// How many tool calls the loop executed.
-    pub tool_calls_made: usize,
-    /// The model's final text reply.
-    pub final_text: String,
-}
-
 /// Events the agent loop emits as it runs, for a live UI. Headless paths pass
 /// `None` and never see these.
 #[derive(Clone, Debug)]
@@ -142,7 +131,7 @@ pub enum AgentEvent {
     /// `compact` replaced the conversation history with a summary pair.
     Compacted { messages_before: usize, messages_after: usize },
     /// The turn finished.
-    TurnDone(TurnOutcomeSummary),
+    TurnDone,
     /// An independent review pass over the committed work completed (from
     /// [`Agent::run_turn_reviewed`]). `round` 0 is the first review.
     Reviewed { round: usize, score: f64, defects: Vec<String> },
@@ -502,14 +491,7 @@ impl Agent {
                     continue;
                 }
 
-                emit(
-                    events,
-                    AgentEvent::TurnDone(TurnOutcomeSummary {
-                        applied,
-                        tool_calls_made,
-                        final_text: final_text.clone(),
-                    }),
-                );
+                emit(events, AgentEvent::TurnDone);
                 return Ok(TurnOutcome {
                     applied,
                     final_text,
@@ -561,14 +543,7 @@ impl Agent {
         if final_text.is_empty() {
             final_text = "(agent reached its iteration limit without a final answer)".to_string();
         }
-        emit(
-            events,
-            AgentEvent::TurnDone(TurnOutcomeSummary {
-                applied,
-                tool_calls_made,
-                final_text: final_text.clone(),
-            }),
-        );
+        emit(events, AgentEvent::TurnDone);
         Ok(TurnOutcome {
             applied,
             final_text,

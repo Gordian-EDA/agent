@@ -7,8 +7,8 @@
 //! With no args, renders all four targets.
 
 use circuit_lang::SymbolProvider;
-use kicad_cli_rs::cli::KicadCli;
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::cli::KicadCli;
+use kicad_cli::env::KicadEnv;
 use kicad_sexpr::provider::RealSymbolProvider;
 
 const TARGETS: &[&str] =
@@ -46,15 +46,15 @@ fn render_fixture(env: &KicadEnv, yaml_path: &std::path::Path, out: &std::path::
 
     // INFER=1 → engine-inferred frame (no LLM/hand layout.json); else the sidecar.
     let ir = if std::env::var("INFER").is_ok() {
-        sch_place_core::floorplan::infer_ir(env, &design)
+        sch_floorplan::floorplan::infer_ir(env, &design)
     } else {
         let ir_path = yaml_path.to_string_lossy().replace(".circuit.yaml", ".layout.json");
         match std::fs::read_to_string(&ir_path) {
-            Ok(s) => sch_place_core::floorplan::LayoutIr::from_json(&s)?,
-            Err(_) => sch_place_core::floorplan::baseline_ir(&design),
+            Ok(s) => sch_floorplan::floorplan::LayoutIr::from_json(&s)?,
+            Err(_) => sch_floorplan::floorplan::baseline_ir(&design),
         }
     };
-    let emit = sch_place_core::floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy))
+    let emit = sch_floorplan::floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy))
         .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
 
     let tmp = tempfile::tempdir()?;
@@ -74,7 +74,7 @@ fn render_fixture(env: &KicadEnv, yaml_path: &std::path::Path, out: &std::path::
     for wmsg in &emit.layout_warnings {
         eprintln!("  WARN: {wmsg}");
     }
-    eprintln!("  body_crossings={} ic_crossings={}", emit.body_crossings, emit.ic_crossings);
+    eprintln!("  body_crossings={} ic_crossings={}", emit.crossings.body, emit.crossings.ic);
     for d in &emit.detected_idioms {
         eprintln!("  idiom {}: anchor={} parts={:?}", d.kind, d.anchor, d.parts);
     }

@@ -4,7 +4,7 @@
 
 use std::io;
 
-use kicad_cli_rs::env::KicadEnv;
+use kicad_cli::env::KicadEnv;
 use kicad_sexpr::geometry::{PinGeom, SymbolGeometry};
 
 use crate::grid::snap_point;

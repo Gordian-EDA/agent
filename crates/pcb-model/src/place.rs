@@ -701,32 +701,6 @@ pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> Rou
 
 // ── engine-SDK trait seam ────────────────────────────────────────────────────
 
-/// What a [`Placer`] OFFERS — the capability descriptor a selector queries before
-/// dispatch (never hardcoded out-of-band knowledge at the call site). Defaulted, so
-/// a minimal placer need not implement [`Placer::capabilities`].
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Capabilities {
-    /// The largest board (part count) the placer is willing to attempt. A selector
-    /// skips a placer whose limit a problem exceeds. `usize::MAX` = no limit (the
-    /// default — the built-in placers scale to any board they are handed).
-    pub max_parts: usize,
-    /// The placer honours [`PlacementHints`] (groups/regions/edges). A placer that
-    /// ignores hints declares `false`, and a selector can prefer a hint-aware one
-    /// when hints are present.
-    pub honors_hints: bool,
-    /// The placer keeps `locked` parts pinned at their [`LockedAt`] position. A
-    /// placer that cannot honour locks declares `false` (a selector then never hands
-    /// it a problem with pinned parts).
-    pub honors_locked: bool,
-}
-
-impl Default for Capabilities {
-    fn default() -> Self {
-        Self { max_parts: usize::MAX, honors_hints: true, honors_locked: true }
-    }
-}
-
 /// A PCB placement ENGINE: given a [`PlaceProblem`] and [`PlacementHints`], produce
 /// a [`PlaceResult`] (per-part placements + an honest legality verdict + a report).
 /// The only contract is "produce a placement"; *how* (force/anneal/fan-out, learned,
@@ -752,12 +726,6 @@ pub trait Placer {
     /// `"fanout"`, `"oracle"`).
     fn name(&self) -> &'static str;
 
-    /// What this placer offers, for the selector. Defaults to the unrestricted,
-    /// fully hint/lock-honouring descriptor.
-    fn capabilities(&self) -> Capabilities {
-        Capabilities::default()
-    }
-
     /// Place `problem` under `hints` and return the result.
     fn place(&self, problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult;
 }
@@ -770,16 +738,13 @@ pub trait Placer {
 /// with the fewest faults.
 ///
 /// ## Contract
-/// - **Deterministic given the [`RouteProblem`]**: equal input ⇒ equal `(faults,
-///   wirelength)`.
+/// - **Deterministic given the [`RouteProblem`]**: equal input ⇒ equal `faults`.
 /// - **Never panics.** An un-routable problem returns a high fault count, never
 ///   unwinds — so a bad candidate simply loses the ranking.
 pub trait RouteRanker {
-    /// The routability of `rp`: `(faults, routed_wirelength)`. `faults` is the
-    /// PRIMARY key (unrouted nets + geometry DRC violations — a worse-routed layout
-    /// is never chosen); the wirelength (mm, ×1000 as a `u64` for a total order)
-    /// breaks ties among equally-routable candidates. Lower is better on both.
-    fn faults(&self, rp: &RouteProblem) -> (usize, u64);
+    /// The routability of `rp`: the fault count (unrouted nets + geometry DRC
+    /// violations). A worse-routed layout is never chosen; lower is better.
+    fn faults(&self, rp: &RouteProblem) -> usize;
 }
 
 /// The routability oracle: a [`Placer`] that runs a portfolio of inner [`Placer`]s,
@@ -828,7 +793,7 @@ impl Placer for RoutabilityOracle {
                 return (usize::MAX, u64::MAX, u64::MAX);
             }
             let rp = to_route_problem(problem, &r.placements);
-            let (faults, _wl) = self.ranker.faults(&rp);
+            let faults = self.ranker.faults(&rp);
             (
                 faults,
                 (r.report.layout_cost * 1000.0) as u64,

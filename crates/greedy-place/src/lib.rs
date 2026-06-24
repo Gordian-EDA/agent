@@ -1,20 +1,20 @@
-//! `greedy-place` — the free-tier greedy hill-climb placement engine. It OWNS its
-//! objective (the free-tier weighted combo of the 16 routed-sheet terms) and its search
+//! `greedy-place` — the base greedy hill-climb placement engine. It OWNS its
+//! objective (the base weighted combo of the 16 routed-sheet terms) and its search
 //! (the routed `refine` hill-climb + the `polish` align→compact→nudge fixpoint). It is a
 //! MEASUREMENT-based engine: it builds + routes each candidate to score it, so it calls
-//! `sch-place-core`'s measurement library ([`Realizer`]/[`RawMetrics`]) and the shared
+//! `sch-floorplan`'s measurement library ([`Realizer`]/[`RawMetrics`]) and the shared
 //! geometry primitives. A non-measuring engine would depend on `sch-model` alone; greedy
-//! depends on `sch-place-core` precisely because it CHOSE to measure routed sheets.
+//! depends on `sch-floorplan` precisely because it CHOSE to measure routed sheets.
 //!
 //! The objective weights here are greedy's own. They COINCIDE today with the shared base
-//! of the premium engine's energy, but the two engines are independently evolvable — the
+//! of the amplified engine's energy, but the two engines are independently evolvable — the
 //! weights are copied, not factored into a shared type.
 
 use sch_model::item::{Incidence, Item};
 use sch_model::ir::Orient;
 use sch_model::place::{Crossings, PlaceProblem, PlaceResult, PlacementEngine};
 
-use sch_place_core::contract::{
+use sch_floorplan::contract::{
     build_writer, item_rect, orient_angle, overlaps_any, rects_overlap, signal_anchor_centroid,
     supply_pin_target, MeasuringEngine, RawMetrics, Realizer, COL_GAP, GRID_KEY, ROW_GAP,
 };
@@ -22,7 +22,7 @@ use sch_place_core::contract::{
 /// Geometry coincidence tolerance (mm) — greedy's own copy of the shared 1e-6 epsilon.
 const EPS: f64 = 1e-6;
 
-/// Greedy hill-climb (free tier): local, strictly-cost-improving moves only over
+/// Greedy hill-climb: local, strictly-cost-improving moves only over
 /// the seeded mm placement.
 pub struct Greedy;
 
@@ -54,7 +54,7 @@ impl PlacementEngine for Greedy {
 impl MeasuringEngine for Greedy {
     fn place_measured(&self, r: &Realizer, _p: &PlaceProblem, items: &mut [Item]) -> PlaceResult {
         refine_items(r, items);
-        // The free tier uses the ROUTED polish at EVERY size: it is the truthfulness-
+        // The base engine uses the ROUTED polish at EVERY size: it is the truthfulness-
         // safe path (each move re-routes, so the cost sees a net merge / short — the
         // router-free proxy polish does NOT, and greedy has no candidate pick to reject
         // a mis-wire). References keep the exact refine→polish order → byte-identical.
@@ -63,11 +63,9 @@ impl MeasuringEngine for Greedy {
     }
 }
 
-/// Greedy's free-tier OBJECTIVE: the 16 raw routed-sheet terms weighted into one scalar
-/// the hill-climb minimises. Copied verbatim from the historical `layout_cost`'s
-/// non-premium branch — the exact arithmetic expression tree is preserved (operand order
-/// + parenthesisation) so the emitted placement stays byte-identical. A build failure
-/// saturates the terms (length/spread → ∞), so the candidate is rejected.
+/// Greedy's base OBJECTIVE: the 16 raw routed-sheet terms weighted into one scalar
+/// the hill-climb minimises. A build failure saturates the terms (length/spread → ∞),
+/// so the candidate is rejected.
 fn greedy_cost(m: &RawMetrics) -> f64 {
     if !m.length.is_finite() {
         return f64::INFINITY;
@@ -91,7 +89,7 @@ fn greedy_cost(m: &RawMetrics) -> f64 {
 }
 
 /// Cohesion pull on a multi-unit part's units (same refdes, no shared net). Greedy's own
-/// copy of the constant — the premium engine carries its own; they are not shared.
+/// copy of the constant — the amplified engine carries its own; they are not shared.
 const SIB_COHESION: f64 = 3.0;
 
 /// Score `items` under greedy's objective by measuring the routed sheet.
