@@ -1763,6 +1763,7 @@ dependencies = [
 name = "sch-model"
 version = "0.1.0"
 dependencies = [
+ "kicad-sexpr",
  "serde",
  "serde_json",
  "uuid",

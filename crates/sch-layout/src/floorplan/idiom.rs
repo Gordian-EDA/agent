@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
-use super::place::{Incidence, Item};
+use sch_model::item::{Incidence, Item};
 use sch_model::netclass::{is_ground, PinSide};
 use super::infer::{best_decoupling_anchor, place_cc_pulldown, place_crystal, place_decoupling, place_i2c_pullup};
 

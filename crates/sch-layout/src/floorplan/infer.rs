@@ -13,7 +13,8 @@ use kicad_cli_rs::env::KicadEnv;
 use super::idiom;
 use super::*;
 use sch_model::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net, pin_side, PinSide};
-use super::place::{gather, grid_from_layout, incidence, Incidence, Item};
+use super::place::{gather, grid_from_layout, incidence};
+use sch_model::item::{Incidence, Item};
 
 /// A deterministic baseline IR for designs without an LLM-produced one: rails
 /// from the design's power nets (ground-like → bottom, else top), no explicit

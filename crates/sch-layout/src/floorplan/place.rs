@@ -17,6 +17,7 @@ use sch_model::geom::Dir;
 use sch_model::result::EmitOutput;
 
 use super::*;
+use sch_model::item::{Incidence, Item};
 use super::infer::anchor_tap;
 use sch_model::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net};
 
@@ -71,31 +72,6 @@ const ROW_GAP: f64 = 5.08; // 4 grid — vertical stack; tighter lets the rotati
 // unconventional), so keep the conventional spacing here.
 const MARGIN: f64 = 12.7;
 
-/// One placed component plus the data the compiler needs about it.
-#[derive(Clone)]
-pub(super) struct Item {
-    pub(super) refdes: String,
-    pub(super) part: String,
-    pub(super) value: String,
-    pub(super) geom: SymbolGeometry,
-    /// (pin number, pin name, net or None for NC). For a multi-unit part this
-    /// holds only the pins of THIS item's `unit` (each unit is its own Item).
-    pub(super) pins: Vec<(String, String, Option<String>)>,
-    pub(super) at: [f64; 2],
-    pub(super) angle: f64,
-    /// 1-based symbol unit this Item places. Single-unit parts are 1; a
-    /// multi-unit part (op-amp/FPGA) splits into one Item per used unit, all
-    /// sharing `refdes` but emitted as distinct `(unit N)` instances.
-    pub(super) unit: u8,
-    /// Whether this symbol is flipped left↔right. Seeded from `ir.mirror`; lifted
-    /// onto the Item (was read off `ir.mirror` at emit) so the placement search
-    /// can flip it as a move and the cost sees exactly what ships.
-    pub(super) mirror: bool,
-    /// Pinned by an idiom cluster (a crystal + its load caps): the placement search
-    /// must NOT move it, so the engine-recognized cohesive arrangement ships intact
-    /// instead of the cost dragging a load cap off toward the GND rail.
-    pub(super) frozen: bool,
-}
 
 /// Resolve a component's pins to (number, name, net) using geometry + the
 /// authored pin map (number first, then name — matching the emitter).
@@ -634,7 +610,6 @@ fn add_orphan_label_columns(w: &mut SchematicWriter, design: &Design, inc: &Inci
 }
 
 /// net -> list of (item index, pin number).
-pub(super) type Incidence = BTreeMap<String, Vec<(usize, String)>>;
 
 pub(super) fn incidence(items: &[Item]) -> Incidence {
     let mut inc: Incidence = BTreeMap::new();

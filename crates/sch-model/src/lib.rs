@@ -7,5 +7,6 @@ pub mod geom;
 pub mod grid;
 pub mod ids;
 pub mod ir;
+pub mod item;
 pub mod netclass;
 pub mod result;
