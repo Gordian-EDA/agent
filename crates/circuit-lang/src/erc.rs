@@ -1,11 +1,23 @@
-//! Deterministic, quantitative electrical checks — the exact-math layer UNDER the LLM review
+//! Deterministic electrical-rule checks — the structural + exact-math layer UNDER the LLM review
 //! ensemble (`agent::review`). The reviewer is strong on judgment but weak on arithmetic (it
 //! consistently missed a feedback-divider value error in the recall harness); these checks compute
 //! the numbers exactly where the netlist makes them unambiguous, so the two layers are complementary:
-//! deterministic where math is exact, LLM lenses where judgment is needed.
+//! deterministic where the netlist is unambiguous, LLM lenses where judgment is needed.
 //!
-//! FP-averse: every check only fires when the relevant values/voltages parse unambiguously AND the
-//! result is clearly out of range — a false deterministic defect would trigger a needless fix turn.
+//! Two families:
+//! * **Quantitative** — values/voltages must parse and the result be clearly out of range
+//!   (LED current, feedback-divider ratio).
+//! * **Topological** — the rules a senior reviewer runs first, from netlist shape alone: missing
+//!   decoupling on a large IC, an I2C/open-drain net with no pull-up, a floating control input, an
+//!   undriven rail, two outputs shorted together (plus dangling parts, crystal load caps, diode
+//!   polarity). Each reuses the decoupling-idiom IC→cap / rail grouping where it can.
+//!
+//! FP-averse is the governing constraint: every check fires ONLY on an unambiguous defect — a false
+//! positive would make the agent "fix" a correct design, which is worse than a miss. Each topological
+//! check therefore leans conservative (high IC-pin threshold for decoupling, exact `SDA`/`SCL` token
+//! match, name-driven input/output vocabularies, a power-flag gate for undriven rails) and is
+//! calibrated to produce ZERO findings on the known-good `docs/validation/*` corpus. The per-check
+//! rustdoc states the heuristic and its known limits.
 
 use crate::model::*;
 use std::collections::HashMap;
@@ -115,6 +127,50 @@ fn is_diode(c: &Component) -> bool {
     let p = c.part.to_uppercase();
     p.contains("LED") || p.contains("DIODE") || p.ends_with(":D") || p.contains(":D_")
 }
+fn is_connector(c: &Component) -> bool {
+    c.part.to_uppercase().contains("CONNECTOR")
+}
+/// A `power:*` library part — a net-flag symbol that *declares/sources* a rail
+/// (`power:+3V3`, `power:VCC`, `power:GND`). Treated as a rail source.
+fn is_power_symbol(c: &Component) -> bool {
+    c.part.to_ascii_lowercase().starts_with("power:")
+}
+fn is_regulator(c: &Component) -> bool {
+    let p = c.part.to_uppercase();
+    p.contains("REGULATOR") || p.contains("DCDC") || p.contains("DC-DC")
+}
+
+/// Total resolved pins on a component (the flat map plus all unit maps).
+fn pin_count(c: &Component) -> usize {
+    c.pins.len() + c.units.values().map(|u| u.len()).sum::<usize>()
+}
+
+/// Every (pin-key, net) pair on a component, across the flat map and all units.
+/// The key is the author-written pin reference (a number OR a symbol pin name), so
+/// name-based heuristics must tolerate both. `NoConnect` pins are dropped.
+fn pin_nets(c: &Component) -> impl Iterator<Item = (&str, &str)> {
+    c.pins
+        .iter()
+        .chain(c.units.values().flatten())
+        .filter_map(|(k, t)| match t {
+            PinTarget::Net(n) => Some((k.as_str(), n.as_str())),
+            PinTarget::NoConnect => None,
+        })
+}
+
+/// A 2-pin decoupling/bypass cap bridging `rail` and a ground net — the unit the
+/// decoupling idiom co-places beside its anchor IC.
+fn is_bypass_cap_on(it: &Item, rail: &str) -> bool {
+    is_cap(it.comp) && it.comp.pins.len() == 2 && it.nets.contains(&rail) && on_gnd(it)
+}
+
+/// Does `net` carry a pull-up — a 2-pin resistor from `net` to a *positive* rail?
+fn has_pullup_to_rail(net: &str, items: &[Item], net_items: &HashMap<&str, Vec<usize>>) -> bool {
+    net_items.get(net).into_iter().flatten().any(|&ri| {
+        let r = &items[ri];
+        is_resistor(r.comp) && r.nets.len() == 2 && rail_voltage(far(r, net)).is_some_and(|v| v > 0.0)
+    })
+}
 
 /// Run all deterministic quantitative checks, returning defect lines (same `- REFDES: ...` shape the
 /// LLM review emits, so the agent's run_turn_reviewed can union them).
@@ -139,8 +195,19 @@ pub fn erc_checks(d: &Design) -> Vec<String> {
     check_dangling(&items, &mut out);
     check_crystal(&items, &net_items, &mut out);
     check_polarity(&items, &net_items, &mut out);
+    check_missing_decoupling(&items, &net_items, &mut out);
+    check_missing_pullup(&items, &net_items, &mut out);
+    check_floating_input(&items, &net_items, &mut out);
+    check_undriven_rail(&items, &net_items, &mut out);
+    check_output_short(&items, &net_items, &mut out);
     out
 }
+
+/// Minimum pin count for the [`check_missing_decoupling`] anchor. Set high (caps the
+/// check to MCUs / FPGAs / large mixed-signal ICs) so simple ≤14-pin parts — a 555,
+/// an 8-pin op-amp, a level translator — are NOT required to carry a local bypass
+/// cap; those are the borderline cases where demanding decoupling produces noise.
+const DECOUPLE_MIN_PINS: usize = 16;
 
 /// A diode/LED installed BACKWARDS: by the KiCAD Device:LED/D convention the anode is pin 2 / "A",
 /// the cathode pin 1 / "K". Current can only flow anode→cathode, so the cathode must sit at a lower
@@ -329,6 +396,273 @@ fn check_fb_divider(items: &[Item], net_items: &HashMap<&str, Vec<usize>>, out: 
                 "- {}: feedback-divider ratio is wrong for a {:.2} V rail — Rtop/Rbot = {:.0}/{:.0} gives \
                  ~{:.1}-{:.1} V across standard references, not {:.2} V",
                 rd, tgt, rt, rb, lo, hi, tgt
+            ));
+        }
+    }
+}
+
+/// **missing-decoupling**: a large powered IC with no local bypass/decoupling cap on
+/// its supply. The anchor is a component with ≥ [`DECOUPLE_MIN_PINS`] pins that is
+/// neither a connector, a passive, a diode, nor a `power:*` flag — i.e. an MCU / FPGA /
+/// large mixed-signal chip. For each *positive* rail the anchor sits on, we look for a
+/// 2-pin cap that bridges that same rail and ground (the decoupling-idiom IC→cap
+/// grouping reused from the layout library: a bypass cap is a rail↔GND cap on a power
+/// net that also reaches the anchor). If a powered rail has none, we flag the IC.
+///
+/// FP-averse:
+/// * The high default pin threshold (16) excludes the ambiguous small-IC cases — a
+///   555, an 8-pin op-amp, a logic gate — where requiring local decoupling is opinion,
+///   not rule. It targets the chips where a senior reviewer *always* expects it.
+/// * Only rails whose voltage parses unambiguously (`rail_voltage > 0`) are checked, so
+///   a chip on an un-named/derived supply node is never faulted.
+/// * Grouping is by NET, not by source block, so a cap declared in a separate power
+///   block still counts for the IC it shares the rail with.
+///
+/// Known limits: doesn't judge cap *count* or value (one 100 nF satisfies a 100-ball
+/// FPGA here); a chip whose only supply is a non-parseable net name is skipped.
+fn check_missing_decoupling(items: &[Item], net_items: &HashMap<&str, Vec<usize>>, out: &mut Vec<String>) {
+    for ic in items {
+        let c = ic.comp;
+        if pin_count(c) < DECOUPLE_MIN_PINS
+            || is_connector(c)
+            || is_passive(c)
+            || is_diode(c)
+            || is_power_symbol(c)
+        {
+            continue;
+        }
+        let mut powered_rails: Vec<&str> = ic
+            .nets
+            .iter()
+            .copied()
+            .filter(|n| rail_voltage(n).is_some_and(|v| v > 0.0))
+            .collect();
+        powered_rails.sort();
+        powered_rails.dedup();
+        let undecoupled: Vec<&str> = powered_rails
+            .into_iter()
+            .filter(|&rail| {
+                !net_items
+                    .get(rail)
+                    .into_iter()
+                    .flatten()
+                    .any(|&ci| is_bypass_cap_on(&items[ci], rail))
+            })
+            .collect();
+        if !undecoupled.is_empty() {
+            out.push(format!(
+                "- {}: powered IC ({} pins) has no decoupling/bypass capacitor on rail {} — \
+                 add a local rail-to-GND bypass cap (e.g. 100nF) close to the supply pins",
+                ic.refdes,
+                pin_count(c),
+                undecoupled.join("/")
+            ));
+        }
+    }
+}
+
+/// **missing-pullup**: an I2C-style open-drain bus net (named `SDA`/`SCL`, with the
+/// usual decorations — `I2C1_SDA`, `SDA0`, `SCL_3V3`) carrying ≥2 connections but with
+/// no pull-up resistor to a positive rail. Open-drain buses can't idle high without an
+/// external pull-up, so this is a real functional defect.
+///
+/// FP-averse:
+/// * Net-name heuristic only fires on the unambiguous `SDA`/`SCL` token — separated by
+///   non-alphanumerics so `PSDA`/`MISCL` don't match — not on the broad `I2C`, because
+///   a power/ground or label net could incidentally contain it.
+/// * Requires the net to actually be used by ≥2 pins; a single-pin off-sheet port stub
+///   is left to the `single-pin-net` lint.
+/// * A pull-up is specifically a 2-pin resistor to a *positive* rail ([`has_pullup_to_rail`]),
+///   so a series/termination resistor to another signal doesn't count and, conversely,
+///   isn't mistaken for the bus needing one.
+///
+/// Known limits: open-drain pins NOT on an SDA/SCL-named net (a bare `~{INT}` or a
+/// generic open-collector output) aren't detected — pin electrical type isn't carried
+/// on the kernel `Design`, so the check stays conservative and name-driven.
+fn check_missing_pullup(items: &[Item], net_items: &HashMap<&str, Vec<usize>>, out: &mut Vec<String>) {
+    let is_i2c = |net: &str| {
+        let u = net.to_uppercase();
+        ["SDA", "SCL"].iter().any(|tok| {
+            u.match_indices(tok).any(|(i, _)| {
+                let before = u[..i].chars().next_back();
+                let after = u[i + tok.len()..].chars().next();
+                let edge = |c: Option<char>| c.is_none_or(|c| !c.is_ascii_alphanumeric());
+                edge(before) && edge(after)
+            })
+        })
+    };
+    let mut nets: Vec<&str> = net_items.keys().copied().filter(|n| is_i2c(n)).collect();
+    nets.sort();
+    for net in nets {
+        let degree = net_items.get(net).map_or(0, |v| v.len());
+        if degree < 2 {
+            continue;
+        }
+        if !has_pullup_to_rail(net, items, net_items) {
+            out.push(format!(
+                "- {net}: I2C/open-drain net has no pull-up resistor to a rail — an open-drain bus \
+                 cannot idle high; add a pull-up (typically 2.2k-10k to the bus rail)"
+            ));
+        }
+    }
+}
+
+/// **floating-input**: a net that touches exactly ONE pin (truly unconnected) on a
+/// multi-pin IC, where the pin name reads as an INPUT/control function. A logic input
+/// left floating picks up noise and latches randomly, so it must be driven, pulled, or
+/// explicitly marked no-connect.
+///
+/// FP-averse — this is the easiest check to make noisy, so it is deliberately narrow:
+/// * Net degree must be exactly 1. Explicit `NoConnect` pins are already dropped by
+///   [`pin_nets`]/`nets_of`, so an intentional NC never reaches here.
+/// * The owner must be a real IC (≥8 pins, not connector/passive/power) — a dangling
+///   2-pin passive is the `check_dangling` case, and a single-pin header/port pin is an
+///   intentional board I/O, not a floating input.
+/// * The pin NAME must match a conservative input/enable vocabulary (`EN`, `CE`, `OE`,
+///   `RST`/`RESET`, `nRST`, `CS`, `IN`, `A0`…); a bare numbered pin or an output/IO pin
+///   is NOT flagged, because we can't prove a numbered pin is an input without pin types.
+/// * Rails (`rail_voltage` parses) are skipped — a control pin tied straight to a rail
+///   is driven.
+///
+/// Known limits: only catches a floating input on a *named* control pin of a large IC;
+/// floating bidirectional/IO pins and floating numbered pins are intentionally missed
+/// to stay false-positive-free without pin electrical types.
+fn check_floating_input(items: &[Item], net_items: &HashMap<&str, Vec<usize>>, out: &mut Vec<String>) {
+    // Conservative control/enable-input vocabulary. A token matches when the pin name
+    // IS the token or extends it by ≤2 chars (e.g. `EN`, `EN1`, `CE0`, `nRST`) — never a
+    // long arbitrary name that merely starts with these letters.
+    let looks_input = |key: &str| {
+        let k = key.trim_start_matches(['~', '{', '/', '!', '#']).to_uppercase();
+        const TOKENS: &[&str] = &["EN", "CE", "OE", "CS", "RST", "RESET", "NRST", "MR", "SHDN"];
+        TOKENS.iter().any(|t| k.starts_with(t) && k.len() <= t.len() + 2)
+    };
+    let mut hits: Vec<String> = Vec::new();
+    for ic in items {
+        let c = ic.comp;
+        if pin_count(c) < 8 || is_connector(c) || is_passive(c) || is_power_symbol(c) {
+            continue;
+        }
+        for (key, net) in pin_nets(c) {
+            if rail_voltage(net).is_some() || !looks_input(key) {
+                continue;
+            }
+            if net_items.get(net).map_or(0, |v| v.len()) == 1 {
+                hits.push(format!(
+                    "- {}: input/control pin {} (net {}) is left floating — no driver and no pull \
+                     resistor; drive it, add a pull-up/down, or mark it no-connect",
+                    ic.refdes, key, net
+                ));
+            }
+        }
+    }
+    hits.sort();
+    out.extend(hits);
+}
+
+/// **undriven-rail**: a positive supply rail that parts *consume* but nothing *sources*.
+/// A source is a `power:*` flag declaring the rail, a connector pin (external supply
+/// entry), or a regulator that also touches a different rail (output of a converter).
+/// A rail with consumers but no source is a wiring gap — the parts have no power.
+///
+/// FP-averse:
+/// * **Gated** on the design actually using the `power:*` flag convention: if NO power
+///   symbol appears anywhere, the input is treated as a fragment and the check stays
+///   silent (a bare two-resistor divider snippet referencing `+5V` is not faulted).
+/// * Only rails whose voltage parses unambiguously and is > 0 are considered; ground and
+///   derived/oddly-named nodes are skipped.
+/// * Three independent, structural source signals (power flag / connector / regulator),
+///   so a rail sourced in *any* conventional way is never flagged. Every known-good
+///   design declares each rail with a `power:*` symbol, so the check is silent on them.
+/// * A regulator counts as a source for a rail only when it also touches a *second*
+///   distinct rail (its input) — a regulator that merely consumes a rail isn't mistaken
+///   for sourcing it.
+///
+/// Known limits: a rail sourced only by a transistor/ideal-switch with no parseable
+/// second rail, or by an off-sheet supply with no on-sheet flag, may be missed.
+fn check_undriven_rail(items: &[Item], net_items: &HashMap<&str, Vec<usize>>, out: &mut Vec<String>) {
+    if !items.iter().any(|it| is_power_symbol(it.comp)) {
+        return; // no power-flag convention in use → treat as a fragment, stay silent
+    }
+    let mut rails: Vec<&str> = net_items
+        .keys()
+        .copied()
+        .filter(|n| rail_voltage(n).is_some_and(|v| v > 0.0))
+        .collect();
+    rails.sort();
+    for rail in rails {
+        let consumers = net_items.get(rail).map_or(0, |v| v.len());
+        if consumers == 0 {
+            continue;
+        }
+        let sourced = net_items.get(rail).into_iter().flatten().any(|&i| {
+            let it = &items[i];
+            let c = it.comp;
+            is_power_symbol(c)
+                || is_connector(c)
+                || (is_regulator(c)
+                    && it.nets.iter().any(|&n| n != rail && rail_voltage(n).is_some_and(|v| v > 0.0)))
+        });
+        if !sourced {
+            out.push(format!(
+                "- {rail}: rail is consumed by parts but nothing sources it — no supply/regulator \
+                 output, connector, or power flag drives this net"
+            ));
+        }
+    }
+}
+
+/// **output-short**: two or more parts whose OUTPUT pins are tied to the same net — a
+/// driver conflict (two push-pull devices fighting to set the node). An output pin is
+/// recognised by its author-written pin NAME reading as a dedicated output: a regulator
+/// supply output (`VO`, `VOUT`) or a generic `OUT`-named pin.
+///
+/// FP-averse:
+/// * Output detection is by an unambiguous output-pin-NAME vocabulary, NOT by part kind:
+///   two regulators that merely share an *input* rail (a `VI`/`VIN` net) are never
+///   flagged, because only their `VO` pins count.
+/// * Open-drain / wired-or is explicitly excluded: any I2C-named net and any pin whose
+///   name carries an open-collector/open-drain marker (`OD`, `OC`) is skipped — those are
+///   *meant* to share a node.
+/// * Ground and the supply rails (`rail_voltage` parses) are excluded — many power-output
+///   pins legitimately tie to the same rail (that is how a rail is fed); a "short" there
+///   is the wrong frame and is covered by [`check_undriven_rail`] instead.
+/// * Distinct refdes only, so one part's two aliases of the same output pin don't
+///   self-trigger.
+///
+/// Known limits: outputs authored by pin *number* (no name) can't be recognised without
+/// pin electrical types — a numbered-pin output clash is missed. The check favours the
+/// unambiguous named-output short (two regulator `VO`s / two `OUT`s on one node).
+fn check_output_short(items: &[Item], net_items: &HashMap<&str, Vec<usize>>, out: &mut Vec<String>) {
+    let is_output_name = |key: &str| {
+        let k = key.trim_start_matches(['~', '{', '/']).to_uppercase();
+        if k.contains("OD") || k.contains("OC") {
+            return false; // open-drain / open-collector: wired-or is legal
+        }
+        k == "VO" || k.starts_with("VOUT") || k.starts_with("OUT")
+    };
+    let is_i2c_net = |net: &str| {
+        let u = net.to_uppercase();
+        u.contains("SDA") || u.contains("SCL") || u.contains("I2C")
+    };
+    let mut nets: Vec<&str> = net_items.keys().copied().collect();
+    nets.sort();
+    for net in nets {
+        if rail_voltage(net).is_some() || is_i2c_net(net) {
+            continue; // rails (incl. GND) and open-drain buses are legitimately multi-driver
+        }
+        let mut drivers: Vec<&str> = net_items[net]
+            .iter()
+            .map(|&i| &items[i])
+            .filter(|it| pin_nets(it.comp).any(|(k, n)| n == net && is_output_name(k)))
+            .map(|it| it.refdes)
+            .collect();
+        drivers.sort();
+        drivers.dedup();
+        if drivers.len() >= 2 {
+            out.push(format!(
+                "- {net}: multiple outputs ({}) tie to this net — driver conflict; only one \
+                 push-pull output may drive a node (use open-drain + pull-up for a shared bus)",
+                drivers.join("/")
             ));
         }
     }
@@ -560,5 +894,193 @@ blocks:
       R1: {part: Device:R, value: 330R, pins: {1: LED_K, 2: GND}}
 ");
         assert!(!erc_checks(&d).iter().any(|s| s.contains("BACKWARDS")), "{:?}", erc_checks(&d));
+    }
+
+    /// A 16-pin IC with VDD/VSS and 14 GPIOs to ground (enough pins to be a
+    /// decoupling anchor). Used as the body for the missing-/with-decoupling cases.
+    const IC16: &str = "
+      U1: {part: MCU:Generic, pins: {VDD: 3V3, VSS: GND,
+            P1: GND, P2: GND, P3: GND, P4: GND, P5: GND, P6: GND, P7: GND,
+            P8: GND, P9: GND, P10: GND, P11: GND, P12: GND, P13: GND, P14: GND}}";
+
+    #[test]
+    fn missing_decoupling_flagged() {
+        // 16-pin IC on +3V3 with NO rail-to-GND bypass cap → flagged.
+        let d = design(&format!("
+version: 1
+blocks:
+  main:
+    components:{IC16}
+      PWR1: {{part: power:+3V3, pins: {{1: '3V3'}}}}
+"));
+        assert!(
+            erc_checks(&d).iter().any(|s| s.contains("U1") && s.contains("decoupling")),
+            "{:?}", erc_checks(&d)
+        );
+    }
+
+    #[test]
+    fn decoupled_ic_not_flagged() {
+        // Same IC, now with a 100nF from its 3V3 rail to GND → no finding.
+        let d = design(&format!("
+version: 1
+blocks:
+  main:
+    components:{IC16}
+      C1: {{part: Device:C, value: 100nF, pins: {{1: '3V3', 2: GND}}}}
+      PWR1: {{part: power:+3V3, pins: {{1: '3V3'}}}}
+"));
+        assert!(
+            !erc_checks(&d).iter().any(|s| s.contains("decoupling")),
+            "{:?}", erc_checks(&d)
+        );
+    }
+
+    #[test]
+    fn small_ic_without_decoupling_not_flagged() {
+        // An 8-pin part is BELOW the anchor threshold — requiring decoupling on it would
+        // be noise (a 555/op-amp), so it must not fire.
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: Timer:NE555P, pins: {VCC: 9V, GND: GND, TR: T, THR: T, DIS: D, CV: C, R: 9V, Q: Q}}
+      PWR1: {part: power:VCC, pins: {1: 9V}}
+");
+        assert!(
+            !erc_checks(&d).iter().any(|s| s.contains("decoupling")),
+            "{:?}", erc_checks(&d)
+        );
+    }
+
+    #[test]
+    fn missing_pullup_flagged() {
+        // An I2C bus (SDA/SCL) driven by two parts but with no pull-up to a rail.
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: MCU:Generic, pins: {VDD: 3V3, VSS: GND, PB6: I2C1_SCL, PB7: I2C1_SDA}}
+      U2: {part: Sensor:Generic, pins: {SCL: I2C1_SCL, SDA: I2C1_SDA, VCC: 3V3, GND: GND}}
+");
+        let out = erc_checks(&d);
+        assert!(out.iter().any(|s| s.contains("I2C1_SDA") && s.contains("pull-up")), "{out:?}");
+        assert!(out.iter().any(|s| s.contains("I2C1_SCL") && s.contains("pull-up")), "{out:?}");
+    }
+
+    #[test]
+    fn pulled_up_i2c_not_flagged() {
+        // Same bus, now with 4.7k pull-ups to 3V3 → no finding.
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: MCU:Generic, pins: {VDD: 3V3, VSS: GND, PB6: I2C1_SCL, PB7: I2C1_SDA}}
+      U2: {part: Sensor:Generic, pins: {SCL: I2C1_SCL, SDA: I2C1_SDA, VCC: 3V3, GND: GND}}
+      R1: {part: Device:R, value: 4.7k, pins: {1: I2C1_SCL, 2: '3V3'}}
+      R2: {part: Device:R, value: 4.7k, pins: {1: I2C1_SDA, 2: '3V3'}}
+");
+        assert!(!erc_checks(&d).iter().any(|s| s.contains("pull-up")), "{:?}", erc_checks(&d));
+    }
+
+    #[test]
+    fn floating_input_flagged() {
+        // A reset input (NRST) on an 8-pin IC reaching nothing else → floating.
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: MCU:Generic, pins: {VDD: 3V3, VSS: GND, NRST: RESET_N,
+            PA0: A0, PA1: A1, PA2: A2, PA3: A3, PA4: A4}}
+");
+        assert!(
+            erc_checks(&d).iter().any(|s| s.contains("U1") && s.contains("floating")),
+            "{:?}", erc_checks(&d)
+        );
+    }
+
+    #[test]
+    fn driven_reset_not_flagged() {
+        // Same NRST, now pulled up to 3V3 by R1 (degree-2 net) → not floating.
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: MCU:Generic, pins: {VDD: 3V3, VSS: GND, NRST: RESET_N,
+            PA0: A0, PA1: A1, PA2: A2, PA3: A3, PA4: A4}}
+      R1: {part: Device:R, value: 10k, pins: {1: RESET_N, 2: '3V3'}}
+");
+        assert!(!erc_checks(&d).iter().any(|s| s.contains("floating")), "{:?}", erc_checks(&d));
+    }
+
+    #[test]
+    fn undriven_rail_flagged() {
+        // GND has a power flag (convention in use), but the +5V rail consumed by the
+        // IC has NO source — no power:+5V flag, connector, or regulator drives it.
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: MCU:Generic, pins: {VDD: '+5V', VSS: GND, PA0: A0, PA1: A1}}
+      G1: {part: power:GND, pins: {1: GND}}
+");
+        assert!(
+            erc_checks(&d).iter().any(|s| s.contains("+5V") && s.contains("sources it")),
+            "{:?}", erc_checks(&d)
+        );
+    }
+
+    #[test]
+    fn sourced_rail_not_flagged() {
+        // Same, with a power:+5V flag declaring the rail → sourced, no finding.
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: MCU:Generic, pins: {VDD: '+5V', VSS: GND, PA0: A0, PA1: A1}}
+      PWR1: {part: power:+5V, pins: {1: '+5V'}}
+      G1: {part: power:GND, pins: {1: GND}}
+");
+        assert!(!erc_checks(&d).iter().any(|s| s.contains("sources it")), "{:?}", erc_checks(&d));
+    }
+
+    #[test]
+    fn output_short_flagged() {
+        // Two distinct regulators tie their outputs to the same VOUT node → conflict.
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: Regulator_Linear:Reg1, pins: {VI: VIN, VO: VOUT, GND: GND}}
+      U2: {part: Regulator_Linear:Reg2, pins: {VI: VIN, VO: VOUT, GND: GND}}
+      PWR1: {part: power:GND, pins: {1: GND}}
+");
+        assert!(
+            erc_checks(&d).iter().any(|s| s.contains("VOUT") && s.contains("driver conflict")),
+            "{:?}", erc_checks(&d)
+        );
+    }
+
+    #[test]
+    fn single_regulator_output_not_flagged() {
+        // One regulator driving VOUT → no conflict.
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: Regulator_Linear:Reg1, pins: {VI: VIN, VO: VOUT, GND: GND}}
+      C1: {part: Device:C, value: 10uF, pins: {1: VOUT, 2: GND}}
+      PWR1: {part: power:GND, pins: {1: GND}}
+");
+        assert!(!erc_checks(&d).iter().any(|s| s.contains("driver conflict")), "{:?}", erc_checks(&d));
     }
 }
