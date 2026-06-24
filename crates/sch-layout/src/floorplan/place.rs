@@ -172,7 +172,7 @@ fn prepare_writer(
     // touching when separating them would transiently raise routed cost (a local
     // minimum), so a final, unconditional relaxation pushes any remaining
     // overlaps apart. Cheap a frame may be, the shipped sheet never collides.
-    problem.legalize(&mut items);
+    decongest(&mut items);
     // Snap each frozen idiom cluster to its IC's ACTUAL pin positions in mm. The
     // coarse grid (IC = one cell, but renders tall) packs a cluster's cells OUTSIDE
     // the body, leaving long dog-legs to the pins; this aligns the crystal beside its
@@ -2981,39 +2981,12 @@ const SEARCH_SEED: u64 = 0xD1B54A32D192ED03;
 /// lane; the `> FAST_PINS` test keeps uart itself routed, hence byte-identical.)
 pub const FAST_PINS: usize = 34;
 
-/// One placement-search strategy over the coarse cells. `Greedy` and `Anneal` are
-/// swappable COUNTERPARTS (owner: SA is the paid tier, possibly with a richer
-/// cost). `cells` is IN = the seed frame (`assign_cells`), OUT = the chosen
-/// placement; `seed` drives any randomness so the result is reproducible.
-/// The placement problem an engine works on: the scoring `env`, the connectivity
-/// (`inc`), the intent (`ir` — rails/frozen/zones), the ERC `needs_flag` set, and a
-/// `seed` for stochastic engines. It bundles what the placement primitives used to
-/// thread by hand. A cost-based engine evaluates placements against it; a learned or
-/// template engine may only read it. `legalize` is the one shared, cost-free repair.
-pub struct PlaceProblem<'a> {
-    pub env: &'a KicadEnv,
-    pub inc: &'a Incidence,
-    pub ir: &'a LayoutIr,
-    pub needs_flag: &'a BTreeSet<String>,
-    pub seed: u64,
-}
-
-impl PlaceProblem<'_> {
-    /// Geometric overlap repair (cost-free) — usable by any engine.
-    pub(crate) fn legalize(&self, items: &mut [Item]) {
-        decongest(items);
-    }
-}
-
-/// A schematic placement ENGINE: given the [`PlaceProblem`], write final positions
-/// into `items`. The only contract is "produce a placement" — *how* (cost-search,
-/// learned, constraint, template, portfolio) is the engine's own business, so the
-/// trait assumes nothing (no cost, no move-set). Greedy/Anneal happen to be
-/// cost-based and keep their cost private; a future engine need not be.
-pub trait PlacementEngine {
-    fn name(&self) -> &'static str;
-    fn place(&self, problem: &PlaceProblem, items: &mut [Item]);
-}
+// The placement-engine boundary — `PlaceProblem` (what an engine reads) and the
+// `PlacementEngine` trait (what it implements) — lives in `sch_model::place`, so the
+// engine crates depend on the shared vocabulary, not on this layout engine. Re-exported
+// so this module's `PlaceProblem`/`PlacementEngine` paths (and the engines' globs)
+// resolve unchanged.
+pub use sch_model::place::{PlaceProblem, PlacementEngine};
 
 // Greedy (free) lives in the `greedy-place` crate; Anneal (premium) in `anneal-place`.
 // This crate is engine-agnostic — the agent injects an engine via `emit_strategy`.

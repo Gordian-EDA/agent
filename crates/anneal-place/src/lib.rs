@@ -1,6 +1,6 @@
 //! `anneal-place` — the premium simulated-annealing schematic placement engine.
 //!
-//! Implements sch-layout's `PlacementEngine` trait (the free build defaults to
+//! Implements `sch_model::place::PlacementEngine` (the free build defaults to
 //! Greedy). Runs a multi-start SA with a router-free locality proxy over the place
 //! scaffold (cost/refine/polish/cohesion/anchor) exposed by `sch-layout`.
 
@@ -8,9 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use kicad_cli_rs::env::KicadEnv;
 
-// Glob the place-engine interface (PlaceProblem, PlacementEngine, the cost/scaffold
-// fns + tuning consts). It's the engine's working surface; per-item lists would churn
-// every iteration.
+// The engine boundary (PlaceProblem + the PlacementEngine trait) is `sch_model::place`;
+// the cost/scaffold fns + tuning consts are sch-layout's working surface, globbed here
+// since per-item lists would churn every iteration.
+use sch_model::place::{PlaceProblem, PlacementEngine};
 use sch_layout::floorplan::place::*;
 use sch_model::ir::{LayoutIr, Orient};
 use sch_model::item::{Incidence, Item};
