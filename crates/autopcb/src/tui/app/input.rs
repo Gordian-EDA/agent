@@ -40,6 +40,10 @@ pub const COMMANDS: &[CommandSpec] = &[
         desc: "summarize the conversation to shrink context",
     },
     CommandSpec {
+        name: "/preview",
+        desc: "show the latest board/schematic render inline",
+    },
+    CommandSpec {
         name: "/quit",
         desc: "exit",
     },

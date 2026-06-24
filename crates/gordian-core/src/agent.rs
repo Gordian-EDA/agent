@@ -116,7 +116,13 @@ pub enum AgentEvent {
     /// A tool call is about to run.
     ToolStarted { name: String },
     /// A tool call finished; `summary` is a short one-line digest for a card.
-    ToolFinished { name: String, summary: String },
+    /// `image_path` carries the on-disk PNG a render tool produced (if any), so a
+    /// UI can display it inline; it is `None` for every non-render tool.
+    ToolFinished {
+        name: String,
+        summary: String,
+        image_path: Option<String>,
+    },
     /// An approved gated write committed; `summary` is the domain's one-line
     /// post-write digest (e.g. ERC counts).
     Applied { summary: String },
@@ -450,13 +456,14 @@ impl Agent {
                     did_authoring_work = true;
                 }
                 emit(events, AgentEvent::ToolStarted { name: call.name.clone() });
-                let (content, images) =
+                let (content, images, image_path) =
                     self.run_tool_call(call, gated_commit, approvals, &mut applied, events).await;
                 emit(
                     events,
                     AgentEvent::ToolFinished {
                         name: call.name.clone(),
                         summary: self.tool_summary(call, &content),
+                        image_path,
                     },
                 );
                 result_blocks.push(ContentBlock::ToolResult {
@@ -540,9 +547,10 @@ impl Agent {
         Ok(outcome)
     }
 
-    /// Execute one tool call, returning the JSON-stringified result and any images
-    /// to feed back. A gated-commit call is routed through the apply-gate; every
-    /// other call runs once in [`RunMode::Normal`].
+    /// Execute one tool call, returning the JSON-stringified result, any images to
+    /// feed back, and the render PNG's on-disk path (for inline UI display). A
+    /// gated-commit call is routed through the apply-gate; every other call runs
+    /// once in [`RunMode::Normal`].
     async fn run_tool_call(
         &self,
         call: &ToolCall,
@@ -550,12 +558,12 @@ impl Agent {
         approvals: &mut dyn Approvals,
         applied: &mut bool,
         events: Events<'_>,
-    ) -> (String, Vec<ImageData>) {
+    ) -> (String, Vec<ImageData>, Option<String>) {
         if gated_commit {
             return self.gated_apply(call, approvals, applied, events).await;
         }
         let outcome = self.tools.run(call, RunMode::Normal, self.client.as_ref()).await;
-        (outcome.value.to_string(), outcome.images)
+        (outcome.value.to_string(), outcome.images, outcome.image_path)
     }
 
     /// The apply-gate: preview to get the diff, ask for approval, and only then
@@ -566,7 +574,7 @@ impl Agent {
         approvals: &mut dyn Approvals,
         applied: &mut bool,
         events: Events<'_>,
-    ) -> (String, Vec<ImageData>) {
+    ) -> (String, Vec<ImageData>, Option<String>) {
         // 1. Preview (no write) to get the diff.
         let preview = self.tools.run(call, RunMode::Preview, self.client.as_ref()).await;
         let preview_apply = preview.apply.clone().unwrap_or_default();
@@ -575,7 +583,7 @@ impl Agent {
         // nothing to approve — return the diagnostics straight back so the model
         // self-repairs.
         if !preview_apply.ready {
-            return (preview.value.to_string(), preview.images);
+            return (preview.value.to_string(), preview.images, preview.image_path);
         }
 
         // 2. Human apply-gate on the preview value.
@@ -586,7 +594,7 @@ impl Agent {
                 "rejected": true,
                 "note": "user rejected the proposed change; nothing was written",
             });
-            return (rejected.to_string(), Vec::new());
+            return (rejected.to_string(), Vec::new(), None);
         }
 
         // 3. Approved → commit (the real write).
@@ -595,7 +603,7 @@ impl Agent {
             *applied = true;
             emit(events, AgentEvent::Applied { summary: summary.clone() });
         }
-        (committed.value.to_string(), committed.images)
+        (committed.value.to_string(), committed.images, committed.image_path)
     }
 
     /// A short one-liner for a finished tool call, for a collapsed UI card.

@@ -74,18 +74,18 @@ impl ToolProvider for MockToolProvider {
                     } else {
                         json!({ "ok": false, "errors": 1, "diagnostics": ["bad part"] })
                     },
-                    images: Vec::new(),
                     apply: Some(ApplyInfo { ready: compiles, ..Default::default() }),
+                    ..Default::default()
                 }
             }
             ("apply", RunMode::Commit) => ToolOutcome {
                 value: json!({ "ok": true, "written": true }),
-                images: Vec::new(),
                 apply: Some(ApplyInfo {
                     ready: true,
                     committed: true,
                     summary: "ERC 0 errors, 0 warnings".into(),
                 }),
+                ..Default::default()
             },
             _ => ToolOutcome::plain(json!({ "ok": true })),
         }

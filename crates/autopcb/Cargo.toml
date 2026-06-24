@@ -18,6 +18,8 @@ tokio.workspace = true
 serde_json.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+ratatui-image = { version = "9.0.0", default-features = false, features = ["crossterm", "image-defaults"] }
+image = "0.25"
 futures.workspace = true
 async-trait.workspace = true
 pulldown-cmark.workspace = true

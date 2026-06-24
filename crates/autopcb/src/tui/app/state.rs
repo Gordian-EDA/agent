@@ -55,6 +55,10 @@ impl Status {
 pub struct App {
     /// The chat transcript (top pane), oldest first.
     pub transcript: Vec<Entry>,
+    /// Inline image previews, each pinned after a transcript entry (see
+    /// [`super::ImageCell`]). Kept parallel to `transcript` so the text model and
+    /// its tests stay free of the non-`PartialEq` image protocol state.
+    pub images: Vec<super::ImageCell>,
     /// Index into `transcript` of the assistant entry currently being streamed
     /// token-by-token (an in-progress `AssistantDelta` run), or `None` between
     /// streamed runs. The final `AssistantText` finalizes it in place; the
@@ -120,6 +124,7 @@ impl App {
         // so no seed entry is needed.
         Self {
             transcript: Vec::new(),
+            images: Vec::new(),
             live_assistant: None,
             input: String::new(),
             cursor: 0,

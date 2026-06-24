@@ -17,11 +17,13 @@
 //! agent-event / unwind writers; [`input`] holds the composer (commands +
 //! completion + line editing); [`update`] holds the [`Msg`]→[`Action`] reducer.
 
+mod image_cell;
 mod input;
 mod state;
 mod transcript;
 mod update;
 
+pub use image_cell::{ImageCell, ImageState};
 pub use input::*;
 pub use state::{App, Status};
 pub use transcript::{Entry, NoticeLevel, PendingDiff, Speaker, UnwindPicker};
@@ -645,6 +647,7 @@ mod tests {
         a.update(Msg::Agent(AgentEvent::ToolFinished {
             name: "search_symbols".into(),
             summary: "\"STM32\" → 4 hits".into(),
+            image_path: None,
         }));
         // The running placeholder is replaced in place by the finished card.
         let cards: Vec<&Entry> = a

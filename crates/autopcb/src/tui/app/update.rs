@@ -387,11 +387,21 @@ impl App {
             }
             "/clear" => {
                 self.transcript.clear();
+                self.images.clear();
                 self.live_assistant = None;
                 self.scroll = 0;
                 Action::ClearContext
             }
             "/context" => Action::ShowContext,
+            "/preview" => {
+                match self.latest_render_path() {
+                    Some(path) => self.push_image(path, "preview"),
+                    None => self
+                        .transcript
+                        .push(Entry::system("no render yet — ask me to render the board first")),
+                }
+                Action::None
+            }
             "/compact" => {
                 if self.running {
                     self.transcript
