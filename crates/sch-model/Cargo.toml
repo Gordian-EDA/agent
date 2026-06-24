@@ -8,4 +8,5 @@ description = "Shared schematic vocabulary: geometry (Dir/segment math), grid sn
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 uuid.workspace = true
