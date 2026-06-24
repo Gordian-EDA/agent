@@ -89,7 +89,7 @@ impl Kicad {
         Ok(Self {
             socket,
             token: String::new(),
-            client_name: format!("auto-pcb-agent-{}", std::process::id()),
+            client_name: format!("gordian-agent-{}", std::process::id()),
             board_doc: None,
         })
     }

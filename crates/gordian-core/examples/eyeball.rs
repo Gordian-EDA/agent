@@ -11,7 +11,7 @@
 //!
 //! Legend: red = top-layer copper, blue = bottom layer, magenta rings = vias,
 //! orange crosses = nets the router could not complete. PNGs land in
-//! `$TMPDIR/autopcb-eyeball/`.
+//! `$TMPDIR/gordian-eyeball/`.
 
 use std::path::{Path, PathBuf};
 
@@ -68,7 +68,7 @@ fn main() {
         args
     };
 
-    let out_dir = std::env::temp_dir().join("autopcb-eyeball");
+    let out_dir = std::env::temp_dir().join("gordian-eyeball");
     std::fs::create_dir_all(&out_dir).expect("create output dir");
 
     for target in &targets {

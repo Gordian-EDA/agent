@@ -43,7 +43,7 @@ impl KicadCli {
     /// missing, or the schematic failed to load), surfacing stderr.
     pub fn erc(&self, schematic: &Path) -> io::Result<ErcReport> {
         let out = tempfile::Builder::new()
-            .prefix("autopcb-erc-")
+            .prefix("gordian-erc-")
             .suffix(".json")
             .tempfile()?;
 
@@ -91,7 +91,7 @@ impl KicadCli {
     /// missing connections — which together are the slice-1 acceptance gate.
     pub fn drc(&self, pcb: &Path) -> io::Result<DrcReport> {
         let out = tempfile::Builder::new()
-            .prefix("autopcb-drc-")
+            .prefix("gordian-drc-")
             .suffix(".json")
             .tempfile()?;
 
@@ -142,7 +142,7 @@ impl KicadCli {
     /// schematic failed to load, or unreadable/unparseable output).
     pub fn netlist(&self, schematic: &Path) -> io::Result<Netlist> {
         let out = tempfile::Builder::new()
-            .prefix("autopcb-netlist-")
+            .prefix("gordian-netlist-")
             .suffix(".xml")
             .tempfile()?;
 
