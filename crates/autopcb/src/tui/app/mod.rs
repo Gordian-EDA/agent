@@ -620,6 +620,21 @@ mod tests {
     }
 
     #[test]
+    fn the_elapsed_clock_pauses_while_a_gate_is_open() {
+        let mut a = app();
+        type_str(&mut a, "go");
+        a.update(Msg::Submit);
+        assert!(a.paused_since.is_none(), "no pause before a gate");
+        // Opening the gate freezes the clock; resolving it resumes and banks the
+        // paused span.
+        a.update(Msg::PendingDiff(dry_run_json()));
+        assert!(a.paused_since.is_some(), "gate open → clock frozen");
+        a.update(Msg::Char('a'));
+        assert!(a.paused_since.is_none(), "resolved → clock running again");
+        assert!(a.paused_total >= std::time::Duration::ZERO, "the pause was banked");
+    }
+
+    #[test]
     fn other_chars_do_not_leak_into_input_while_gate_open() {
         let mut a = app();
         a.update(Msg::PendingDiff(dry_run_json()));

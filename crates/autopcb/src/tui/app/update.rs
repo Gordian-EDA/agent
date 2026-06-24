@@ -278,6 +278,9 @@ impl App {
             }
             Msg::PendingDiff(v) => {
                 self.pending = Some(PendingDiff::from_dry_run(&v));
+                // The turn is now blocked on the user — stop billing the elapsed
+                // clock for human deliberation.
+                self.pause_clock();
                 Action::None
             }
             Msg::TurnEnded(reason) => {
@@ -435,6 +438,8 @@ impl App {
         if self.pending.take().is_none() {
             return Action::None;
         }
+        // The turn resumes — restart the elapsed clock from where it froze.
+        self.resume_clock();
         let note = if approve { "approved" } else { "rejected" };
         self.transcript
             .push(Entry::system(format!("change {note}")));

@@ -158,6 +158,7 @@ impl App {
             }
             AgentEvent::ToolStarted { name } => {
                 self.turn_tool_calls += 1;
+                self.active_tool = Some(name.clone());
                 self.transcript
                     .push(Entry::tool(format!("{name}(…) running…")));
             }
@@ -178,6 +179,7 @@ impl App {
                     self.transcript
                         .push(Entry::tool(format!("{name} → {summary}")));
                 }
+                self.active_tool = None;
                 // A render tool returned a PNG: post an inline preview right after
                 // the collapsed card.
                 if let Some(path) = image_path {

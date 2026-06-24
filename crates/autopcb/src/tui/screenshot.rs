@@ -278,12 +278,14 @@ fn tui_screenshots() {
     });
     shoot("02_apply_gate", 96, 32, &mut app);
 
-    // 3. A turn in flight (running indicator + spinner).
+    // 3. A turn in flight (running indicator + spinner) with the live tool-detail
+    //    row naming the call now executing.
     let mut app = App::new(status());
     seed_conversation(&mut app);
     app.running = true;
     app.spinner = 3;
     app.turn_tool_calls = 4;
+    app.active_tool = Some("route_board".into());
     shoot("03_running", 96, 32, &mut app);
 
     // 4. Empty / first-launch state.

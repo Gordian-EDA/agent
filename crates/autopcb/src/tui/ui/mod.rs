@@ -76,8 +76,13 @@ pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
         .as_ref()
         .map(|d| composer::diff_height(d, area.width))
         .unwrap_or(0);
-    // The running indicator takes a row only while a turn is in flight.
-    let running_h = u16::from(app.running);
+    // The running indicator takes a row while a turn is in flight, plus a second
+    // detail row when a named tool is currently executing.
+    let running_h = if app.running {
+        1 + u16::from(app.active_tool.is_some())
+    } else {
+        0
+    };
     // The composer grows with a multi-line draft (capped), so a pasted or
     // Shift-Enter'd prompt stays visible instead of scrolling under the border.
     let input_h = composer::composer_height(app, area.height);
@@ -304,6 +309,25 @@ mod tests {
         let text = render_to_string(&mut a, 80, 24);
         assert!(text.contains("working"), "running verb:\n{text}");
         assert!(text.contains("esc to interrupt"), "interrupt hint:\n{text}");
+    }
+
+    #[test]
+    fn running_row_shows_the_live_tool_detail_line() {
+        let mut a = app();
+        for c in "go".chars() {
+            a.update(Msg::Char(c));
+        }
+        a.update(Msg::Submit);
+        a.update(Msg::Agent(AgentEvent::ToolStarted { name: "route_board".into() }));
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(text.contains("route_board"), "active tool named under spinner:\n{text}");
+        // When the tool finishes, the detail row clears.
+        a.update(Msg::Agent(AgentEvent::ToolFinished {
+            name: "route_board".into(),
+            summary: "ok".into(),
+            image_path: None,
+        }));
+        assert!(a.active_tool.is_none(), "detail clears when the tool finishes");
     }
 
     #[test]
