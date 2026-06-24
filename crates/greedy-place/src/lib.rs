@@ -1,9 +1,9 @@
 //! `greedy-place` — the free-tier greedy hill-climb placement engine. Implements
 //! `sch_model::place::PlacementEngine`: a seeded refine→polish over the place scaffold.
-//! The engine-agnostic core lives in `sch-layout`; this and `anneal-place` are the
+//! The engine-agnostic core lives in `sch-place-core`; this and `anneal-place` are the
 //! pluggable engines the agent selects between.
 
-use sch_layout::floorplan::place::{polish, refine_items};
+use sch_place_core::floorplan::place::{polish, refine_items};
 use sch_model::item::Item;
 use sch_model::place::{PlaceProblem, PlacementEngine};
 
