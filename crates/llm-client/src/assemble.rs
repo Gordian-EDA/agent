@@ -67,16 +67,16 @@ impl ToolCallAssembler {
     pub fn openai_delta(&mut self, delta: &Value) {
         let index = delta.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
         let slot = self.slot(index);
-        if let Some(id) = delta.get("id").and_then(Value::as_str) {
-            if !id.is_empty() {
-                slot.id = id.to_string();
-            }
+        if let Some(id) = delta.get("id").and_then(Value::as_str)
+            && !id.is_empty()
+        {
+            slot.id = id.to_string();
         }
         if let Some(func) = delta.get("function") {
-            if let Some(name) = func.get("name").and_then(Value::as_str) {
-                if !name.is_empty() {
-                    slot.name = name.to_string();
-                }
+            if let Some(name) = func.get("name").and_then(Value::as_str)
+                && !name.is_empty()
+            {
+                slot.name = name.to_string();
             }
             match func.get("arguments") {
                 Some(Value::String(s)) => slot.arg_str.push_str(s),
