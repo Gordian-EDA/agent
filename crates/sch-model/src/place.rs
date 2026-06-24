@@ -58,8 +58,7 @@ pub struct PlaceOptions {
 
 /// The three "a wire runs through something" counts of a placement as it would
 /// SHIP. They are NOT interchangeable, so they are named rather than a positional
-/// triple (mirrors `crate::result::EmitOutput`'s `*_crossings` fields). A failed
-/// (un-buildable) unit reports all three as [`usize::MAX`].
+/// triple (mirrors `crate::result::EmitOutput`'s `*_crossings` fields).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Crossings {
@@ -92,14 +91,16 @@ impl Crossings {
 /// ## Contract
 /// - **Deterministic given the candidate**: equal `items` ⇒ equal result.
 /// - **Never panics.** A unit that cannot be built or scored (e.g. the writer
-///   errors) is reported as a *saturated* failure, never `panic!`/`unwrap`:
-///   [`Self::cost`] / [`Self::premium_cost`] return [`f64::INFINITY`];
-///   [`Self::warnings`] / [`Self::truthfulness_breaks`] return [`usize::MAX`];
-///   [`Self::crossings`] returns all-[`usize::MAX`]. A saturated cost makes the
-///   candidate un-acceptable to any `min`-based search, so a failed unit can never
-///   win the pick — the engine ships its last finite best, and emits no artifact
-///   for the failed unit. (The human REASON for the failure is the emit boundary's
-///   job to surface; the scorer only makes the candidate lose.)
+///   errors) is reported as a *saturated* failure, never `panic!`/`unwrap`: the
+///   GATING signals — [`Self::cost`] / [`Self::premium_cost`] return
+///   [`f64::INFINITY`], [`Self::warnings`] / [`Self::truthfulness_breaks`] return
+///   [`usize::MAX`] — so a failed unit is un-acceptable to any `min`-based search
+///   and can never win the pick (the engine ships its last finite best, emitting no
+///   artifact for the failed unit). [`Self::crossings`] is a DIAGNOSTIC tiebreaker
+///   only — never a primary gate — so an impl may report it as zero on an
+///   un-buildable unit (the incumbent does, matching its shipped `EmitOutput`
+///   counts). (The human REASON for the failure is the emit boundary's job to
+///   surface; the scorer only makes the candidate lose.)
 ///
 /// `Send + Sync` so a parallel (rayon) engine can score candidates concurrently
 /// against one shared `&dyn PlacementCost`.
@@ -125,7 +126,9 @@ pub trait PlacementCost: Send + Sync {
     /// Readability warnings (overlapping symbol/label pairs) on the shipped sheet.
     fn warnings(&self, items: &[Item]) -> usize;
 
-    /// The body / IC / wire crossing triple of the shipped sheet.
+    /// The body / IC / wire crossing triple of the shipped sheet — a DIAGNOSTIC
+    /// tiebreaker among candidates that already built (never a primary gate), so an
+    /// un-buildable unit may report zero here (see the trait contract).
     fn crossings(&self, items: &[Item]) -> Crossings;
 
     /// Geometric TRUTHFULNESS breaks (net merges / shorts / foreign taps) — a HARD

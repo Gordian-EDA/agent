@@ -42,16 +42,6 @@ impl<'a> RoutedCost<'a> {
     ) -> Self {
         Self { env, inc, ir, needs_flag }
     }
-
-    /// The captured scoring `env` — for sch-place-core's own scaffold, which still
-    /// threads a `KicadEnv` into `build_writer`/`pin_dirs` for the geometry helpers.
-    pub fn env(&self) -> &KicadEnv {
-        self.env
-    }
-    /// The captured ERC PWR_FLAG set (see [`RoutedCost::env`]).
-    pub fn needs_flag(&self) -> &BTreeSet<String> {
-        self.needs_flag
-    }
 }
 
 impl PlacementCost for RoutedCost<'_> {
