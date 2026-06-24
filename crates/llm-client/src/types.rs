@@ -12,15 +12,6 @@ pub enum Role {
     Assistant,
 }
 
-impl Role {
-    pub(crate) fn as_wire(self) -> &'static str {
-        match self {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-        }
-    }
-}
-
 /// An image attached to a tool result, already base64-encoded for the wire.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageData {
