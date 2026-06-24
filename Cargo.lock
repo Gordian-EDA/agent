@@ -1197,6 +1197,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -1802,6 +1803,7 @@ name = "sch-model"
 version = "0.1.0"
 dependencies = [
  "kicad-sexpr",
+ "pcb-model",
  "serde",
  "serde_json",
  "uuid",

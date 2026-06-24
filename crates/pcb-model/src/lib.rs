@@ -11,6 +11,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod hash;
+pub use hash::{fnv1a, uuid_v5};
+
 // ── defaults for extension fields ────────────────────────────────────────────
 
 fn default_clearance() -> f64 {

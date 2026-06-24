@@ -19,9 +19,7 @@ const NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x6f6a_4e2c_8b1d_5a3f_9c0e_1
 /// (with overwhelming probability) differing UUIDs.
 pub fn stable_uuid(kind: &str, key: &str) -> String {
     let name = format!("{kind}:{key}");
-    uuid::Uuid::new_v5(&NAMESPACE, name.as_bytes())
-        .as_hyphenated()
-        .to_string()
+    pcb_model::uuid_v5(NAMESPACE, name.as_bytes())
 }
 
 #[cfg(test)]

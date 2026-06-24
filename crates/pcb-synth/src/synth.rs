@@ -834,9 +834,7 @@ const SYNTH_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x7b2e_91c0_4d3a_5e6f_
 
 /// Content-derived UUID for a synthesized board element.
 fn synth_uuid(key: &str) -> String {
-    uuid::Uuid::new_v5(&SYNTH_NAMESPACE, key.as_bytes())
-        .as_hyphenated()
-        .to_string()
+    pcb_model::uuid_v5(SYNTH_NAMESPACE, key.as_bytes())
 }
 
 #[cfg(test)]

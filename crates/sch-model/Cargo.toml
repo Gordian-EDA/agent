@@ -10,4 +10,5 @@ description = "Shared schematic vocabulary: geometry (Dir/segment math), grid sn
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 uuid.workspace = true
+pcb-model = { path = "../pcb-model" }
 kicad-sexpr = { path = "../kicad-sexpr" }
