@@ -73,7 +73,7 @@ pub(crate) fn choose(obstacles: &[Obstacle], movables: &[Movable]) -> Vec<(usize
 
 use kicad_sexpr::geometry::PinGeom;
 
-use crate::emit::{transform_offset, Dir};
+use sch_model::geom::{transform_offset, Dir};
 
 /// Estimated width of rendered text (mm): 1.1 mm/char at the 1.27 font.
 pub(crate) fn text_width(s: &str) -> f64 {

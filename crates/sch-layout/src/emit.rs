@@ -179,26 +179,10 @@ struct SheetRect {
     uuid_key: String,
 }
 
-/// A pin's outward direction on the sheet, quantized to the four axes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Dir {
-    East,
-    West,
-    North,
-    South,
-}
-
-impl Dir {
-    /// Sheet-space unit vector (sheet Y grows downward, so North is -y).
-    pub fn vec(self) -> [f64; 2] {
-        match self {
-            Dir::East => [1.0, 0.0],
-            Dir::West => [-1.0, 0.0],
-            Dir::North => [0.0, -1.0],
-            Dir::South => [0.0, 1.0],
-        }
-    }
-}
+// `Dir`, `point_on_segment`, and `transform_offset` live in `sch_model::geom`
+// (shared with `route`/`textplace`); re-exported so `crate::emit::Dir` etc. and
+// the public API keep working.
+pub use sch_model::geom::{point_on_segment, transform_offset, Dir};
 
 /// One `(no_connect …)` marker emitted at a pin's sheet-space endpoint.
 ///
@@ -1895,18 +1879,6 @@ pub fn quantize_dir(pin_angle: f64, inst_angle: f64, mirror: bool) -> Dir {
     }
 }
 
-pub(crate) fn transform_offset(local: [f64; 2], angle: f64, mirror: bool) -> [f64; 2] {
-    let (mut x, y) = (local[0], local[1]);
-    if mirror {
-        x = -x;
-    }
-    let phi = angle.to_radians();
-    let (s, c) = phi.sin_cos();
-    let rx = x * c - y * s;
-    let ry = x * s + y * c;
-    [rx, -ry]
-}
-
 /// Compute the sheet-space connection endpoint of a pin on a placed instance.
 ///
 /// ## What "connection endpoint" means
@@ -1937,32 +1909,6 @@ pub(crate) fn transform_offset(local: [f64; 2], angle: f64, mirror: bool) -> [f6
 pub(crate) fn pin_endpoint(pin: &PinGeom, inst_at: [f64; 2], inst_angle: f64, mirror: bool) -> [f64; 2] {
     let off = transform_offset(pin.at, inst_angle, mirror);
     snap_point([inst_at[0] + off[0], inst_at[1] + off[1]])
-}
-
-/// Whether point `p` lies on the axis-aligned segment `a`–`b` (endpoints
-/// included), within grid-snap floating-point dust.
-///
-/// All stub/power wires are horizontal or vertical, so the test reduces to: `p`
-/// is collinear with the segment's constant axis and within its varying-axis
-/// span. Endpoints count as "on" — a stub end meeting a foreign wire's endpoint
-/// is just as much a connection as meeting its middle.
-pub fn point_on_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> bool {
-    const EPS: f64 = 1e-6;
-    let within = |v: f64, lo: f64, hi: f64| v >= lo - EPS && v <= hi + EPS;
-    if (a[0] - b[0]).abs() < EPS {
-        // Vertical segment: x constant.
-        (p[0] - a[0]).abs() < EPS && within(p[1], a[1].min(b[1]), a[1].max(b[1]))
-    } else if (a[1] - b[1]).abs() < EPS {
-        // Horizontal segment: y constant.
-        (p[1] - a[1]).abs() < EPS && within(p[0], a[0].min(b[0]), a[0].max(b[0]))
-    } else {
-        // Non-axis-aligned (should not occur for our wires): fall back to the
-        // collinearity + bounding-box test.
-        let cross = (p[0] - a[0]) * (b[1] - a[1]) - (p[1] - a[1]) * (b[0] - a[0]);
-        cross.abs() < EPS
-            && within(p[0], a[0].min(b[0]), a[0].max(b[0]))
-            && within(p[1], a[1].min(b[1]), a[1].max(b[1]))
-    }
 }
 
 /// Render one net-name label at a pin endpoint into a `(label …)` block.

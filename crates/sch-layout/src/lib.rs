@@ -1,27 +1,24 @@
 //! `sch-layout` — the floorplan layout engine: turns a [`circuit_lang::Design`]
 //! into a real `.kicad_sch` file (and back), deterministically.
 //!
-//! This crate owns:
+//! This crate owns the engine:
 //!
 //! - [`floorplan`] — the cost-scored placement + routing engine and its IR.
 //! - [`emit`] — the `SchematicWriter` that renders placements to `.kicad_sch`.
-//! - [`grid`] — snapping coordinates onto KiCAD's 1.27 mm schematic grid.
-//! - [`ids`] — content-derived (UUIDv5) identifiers for byte-stable output.
 //! - [`lift`] — recovering a `Design` view from an emitted schematic.
 //!
-//! The shared emission type [`EmitOutput`] and the `ap_*` identity-property keys
-//! live in [`output`] and are re-exported here.
+//! The shared vocabulary — geometry (`Dir`/segment math), grid snapping, ids, and
+//! the [`EmitOutput`] result types — lives in the `sch-model` crate, re-exported
+//! here for back-compat.
 
 pub mod emit;
 pub mod floorplan;
-pub mod grid;
-pub mod ids;
 pub mod lift;
-mod output;
 mod route;
 mod textplace;
 
-pub use output::{
+pub use sch_model::{grid, ids};
+pub use sch_model::result::{
     AP_BLOCK, AP_INDEX, AP_LAYOUT_REV, AP_PARENT, AP_ROLE, EmitOutput, IdiomReport, ROLE_AUTHORED,
 };
 

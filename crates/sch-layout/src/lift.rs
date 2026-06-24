@@ -57,7 +57,7 @@ use circuit_lang::model::{Block, Component, Design, Origin, PinTarget};
 use kicad_cli_rs::cli::KicadCli;
 use kicad_cli_rs::env::KicadEnv;
 
-use crate::output::{AP_BLOCK, AP_INDEX, AP_PARENT, AP_ROLE, ROLE_AUTHORED};
+use sch_model::result::{AP_BLOCK, AP_INDEX, AP_PARENT, AP_ROLE, ROLE_AUTHORED};
 
 /// Block a component lands in when it carries no `ap_block` tag (e.g. a symbol
 /// authored by hand or by an older emitter). Mirrors the kernel default.

@@ -24,8 +24,9 @@ use kicad_sexpr::geometry::SymbolGeometry;
 use kicad_sexpr::provider::RealSymbolProvider;
 use serde::{Deserialize, Serialize};
 
-use crate::emit::{Dir, SchematicWriter};
-use crate::output::EmitOutput;
+use crate::emit::SchematicWriter;
+use sch_model::geom::Dir;
+use sch_model::result::EmitOutput;
 
 // ---------------------------------------------------------------------------
 // The Layout IR — the four-key language the subagent emits.
@@ -125,7 +126,7 @@ pub struct LayoutIr {
     /// the agent via `EmitOutput.detected_idioms`. `#[serde(default)]` so existing
     /// sidecar `layout.json` files (which never carry it) still deserialize.
     #[serde(default)]
-    pub idioms: Vec<crate::output::IdiomReport>,
+    pub idioms: Vec<sch_model::result::IdiomReport>,
     /// Refdes the placement search must NOT move — an idiom cluster's members,
     /// pinned so their recognized arrangement ships intact.
     #[serde(default)]
@@ -436,7 +437,7 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         &items, &inc, &anchors, &sats, &rails, &pin_meta, &anchor_col, &anchor_row,
     );
     let mut placed: BTreeSet<String> = BTreeSet::new();
-    let mut idiom_reports: Vec<crate::output::IdiomReport> = Vec::new();
+    let mut idiom_reports: Vec<sch_model::result::IdiomReport> = Vec::new();
     for idiom in &detected {
         // If the author gridded the anchor or any member, their grid wins — skip.
         let gridded = std::iter::once(&items[idiom.anchor].refdes)
@@ -451,7 +452,7 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
                 placed.insert(rd.clone());
             }
         }
-        idiom_reports.push(crate::output::IdiomReport {
+        idiom_reports.push(sch_model::result::IdiomReport {
             kind: idiom.kind.to_string(),
             anchor: items[idiom.anchor].refdes.clone(),
             parts: idiom.cells.iter().map(|(rd, _)| rd.clone()).collect(),
@@ -713,7 +714,7 @@ fn series_orient(
 }
 
 /// A circuit idiom recognized purely from connectivity + symbol pin geometry.
-/// `infer_ir` turns it into an [`crate::output::IdiomReport`] for the LLM. A FROZEN
+/// `infer_ir` turns it into an [`sch_model::result::IdiomReport`] for the LLM. A FROZEN
 /// idiom also seeds its cells into `place` and pins its members; a REPORT-ONLY idiom
 /// (`!freeze`) lets the members flow through normal placement and is instead tidied by
 /// an mm post-pass in `emit` (e.g. a GPIO LED's resistor snapped below it).
@@ -6180,13 +6181,13 @@ fn count_body_crossings(
                 let p = [w1[0], a[1]];
                 (
                     p[0] > a[0].min(b[0]) + EPS && p[0] < a[0].max(b[0]) - EPS,
-                    crate::emit::point_on_segment(p, *w1, *w2),
+                    sch_model::geom::point_on_segment(p, *w1, *w2),
                 )
             } else {
                 let p = [a[0], w1[1]];
                 (
                     p[1] > a[1].min(b[1]) + EPS && p[1] < a[1].max(b[1]) - EPS,
-                    crate::emit::point_on_segment(p, *w1, *w2),
+                    sch_model::geom::point_on_segment(p, *w1, *w2),
                 )
             };
             if interior && on_wire {
@@ -6345,7 +6346,7 @@ fn count_corners(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
 fn count_foreign_taps(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
     let strict_interior = |p: [f64; 2], a: [f64; 2], b: [f64; 2]| {
         let is_end = |q: [f64; 2]| near(p, q);
-        !is_end(a) && !is_end(b) && crate::emit::point_on_segment(p, a, b)
+        !is_end(a) && !is_end(b) && sch_model::geom::point_on_segment(p, a, b)
     };
     let mut n = 0;
     for (a1, a2, an) in wires {
@@ -7059,7 +7060,7 @@ fn count_merges(
         let mut nets: BTreeSet<&str> = BTreeSet::new();
         for (a, b, wn) in wires {
             if let Some(net) = wn {
-                if crate::emit::point_on_segment(jp, *a, *b) {
+                if sch_model::geom::point_on_segment(jp, *a, *b) {
                     nets.insert(net.as_str());
                 }
             }
@@ -7154,7 +7155,7 @@ fn diagnose_shorts(
                     }
                     let how = if near(ep, *a) || near(ep, *b) {
                         "ENDPOINT"
-                    } else if crate::emit::point_on_segment(ep, *a, *b) {
+                    } else if sch_model::geom::point_on_segment(ep, *a, *b) {
                         "INTERIOR"
                     } else {
                         continue;
@@ -7190,7 +7191,7 @@ fn diagnose_shorts(
         let mut nets: BTreeSet<&str> = BTreeSet::new();
         for (a, b, wn) in &wires {
             if let Some(net) = wn {
-                if crate::emit::point_on_segment(jp, *a, *b) {
+                if sch_model::geom::point_on_segment(jp, *a, *b) {
                     nets.insert(net.as_str());
                 }
             }
@@ -7227,7 +7228,7 @@ fn count_shorts(
                     // A pin coinciding with a foreign wire's endpoint, OR landing
                     // on its interior (KiCAD connects a pin to a wire it touches),
                     // is a short on a different net.
-                    if near(ep, *a) || near(ep, *b) || crate::emit::point_on_segment(ep, *a, *b) {
+                    if near(ep, *a) || near(ep, *b) || sch_model::geom::point_on_segment(ep, *a, *b) {
                         n += 1;
                     }
                 }
@@ -7694,7 +7695,7 @@ fn route_signal(
     for (p, _) in &terms {
         let interior = w.wire_segments_on_net(net).iter().any(|(a, b)| {
             let ends = near(*p, *a) || near(*p, *b);
-            !ends && crate::emit::point_on_segment(*p, *a, *b)
+            !ends && sch_model::geom::point_on_segment(*p, *a, *b)
         });
         if interior {
             w.add_junction(*p);

@@ -9,7 +9,7 @@
 //! by construction; a failed route falls back to label connectivity at the
 //! call site — never an error.
 
-use crate::emit::Dir;
+use sch_model::geom::Dir;
 
 pub type Pt = [f64; 2];
 
@@ -132,8 +132,8 @@ pub(crate) fn segments_conflict(a1: Pt, a2: Pt, b1: Pt, b2: Pt) -> bool {
         // Perpendicular: candidate crossing point.
         let (h1, h2, v1, v2) = if a_horiz { (a1, a2, b1, b2) } else { (b1, b2, a1, a2) };
         let p = [v1[0], h1[1]];
-        let on_h = crate::emit::point_on_segment(p, h1, h2);
-        let on_v = crate::emit::point_on_segment(p, v1, v2);
+        let on_h = sch_model::geom::point_on_segment(p, h1, h2);
+        let on_v = sch_model::geom::point_on_segment(p, v1, v2);
         if !(on_h && on_v) {
             return false;
         }
@@ -157,7 +157,7 @@ pub(crate) fn path_ok(path: &Path, net: &str, scene: &RouteScene) -> bool {
         if scene
             .points
             .iter()
-            .any(|(p, n)| n != net && crate::emit::point_on_segment(*p, a, b))
+            .any(|(p, n)| n != net && sch_model::geom::point_on_segment(*p, a, b))
         {
             return false;
         }
