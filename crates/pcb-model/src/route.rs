@@ -208,15 +208,20 @@ impl RouteQuality {
 // ── generic selector ─────────────────────────────────────────────────────────
 
 /// Route `problem` with the best of the offered `routers`, ranking each by a
-/// caller-supplied [`RouteQuality`].
+/// caller-supplied [`RouteQuality`]. The generic routing selector every tier
+/// reuses (the agent injects the routers it offers — baseline first).
 ///
 /// A LEFT-FOLD in injection order, not a global argmin: the first router that
 /// `can_route` the problem is the incumbent, and each later candidate replaces it
-/// only when `better(incumbent, challenger)` says so. The fold (rather than a
-/// total order) is deliberate — the routability-then-tidiness rule the in-house
-/// selector uses is asymmetric (the incumbent wins ties, and tolerates a bounded
-/// tidiness detour), which is not a transitive total order. The agent injects
-/// routers in PREFERENCE order (the always-correct baseline first).
+/// only when `better(incumbent, challenger)` is `false`. The fold (rather than a
+/// total order) is deliberate — the routability-then-tidiness rule is asymmetric
+/// (the incumbent wins ties, and tolerates a bounded tidiness detour), which is
+/// not a transitive total order. The agent injects routers in PREFERENCE order
+/// (the always-correct baseline first).
+///
+/// `done` short-circuits the fold: once a router's quality satisfies it (the
+/// baseline routed cleanly, say), the remaining routers can only differ in
+/// tidiness, never routability, so they are not run — keeping the incumbent.
 ///
 /// `quality` scores a result (the caller computes its geometry-violation count,
 /// since DRC lives outside this kernel). `better(problem, incumbent, challenger)`
@@ -227,6 +232,7 @@ pub fn select<'a>(
     routers: &[&'a dyn Router],
     quality: &dyn Fn(&RouteResult) -> RouteQuality,
     better: &dyn Fn(&RouteProblem, &RouteQuality, &RouteQuality) -> bool,
+    done: &dyn Fn(&RouteQuality) -> bool,
 ) -> Option<RouteResult> {
     let mut best: Option<(RouteResult, RouteQuality)> = None;
     for r in routers {
@@ -235,16 +241,15 @@ pub fn select<'a>(
         }
         let result = r.route(problem);
         let q = quality(&result);
+        let stop = done(&q);
         best = match best {
             None => Some((result, q)),
-            Some((bi, bq)) => {
-                if better(problem, &bq, &q) {
-                    Some((bi, bq))
-                } else {
-                    Some((result, q))
-                }
-            }
+            Some((bi, bq)) if better(problem, &bq, &q) => Some((bi, bq)),
+            Some(_) => Some((result, q)),
         };
+        if stop {
+            break;
+        }
     }
     best.map(|(r, _)| r)
 }
@@ -397,12 +402,13 @@ mod tests {
         let routers: Vec<&dyn Router> = vec![&toy];
         let q = |r: &RouteResult| RouteQuality::of(&p, r, 0);
         let better = |_: &RouteProblem, bi: &RouteQuality, ch: &RouteQuality| bi.faults() <= ch.faults();
-        let r = select(&p, &routers, &q, &better).unwrap();
+        let done = |q: &RouteQuality| q.faults() == 0;
+        let r = select(&p, &routers, &q, &better, &done).unwrap();
         assert_eq!(r.engine, "toy");
         assert!(r.failed.is_empty());
         // A 4-layer board is out of the toy's capability range → no router routes it.
         let p4 = empty_problem(4);
         let q4 = |r: &RouteResult| RouteQuality::of(&p4, r, 0);
-        assert!(select(&p4, &routers, &q4, &better).is_none());
+        assert!(select(&p4, &routers, &q4, &better, &done).is_none());
     }
 }

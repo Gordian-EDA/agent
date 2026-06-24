@@ -146,6 +146,10 @@ impl Router for NegotiatedMeshRouter {
             // Cannot honour a per-net inner-layer escape restriction (free-mazes).
             honors_escape_layers: false,
             honors_net_widths: true,
+            // The detailed engine routes within the rectangular `bounds`; like the
+            // grid router it does not carve a concave custom outline, so a clearance
+            // to a true outline edge is the DRC oracle's / the agent's concern, not
+            // a reason to decline the board.
             honors_outline: true,
         }
     }
@@ -157,47 +161,31 @@ impl Router for NegotiatedMeshRouter {
     }
 }
 
-/// Route `problem` with the best of the offered `routers`.
+/// Route `problem` with the best of the offered `routers` via the generic kernel
+/// selector [`pcb_model::select`](crate::problem::select).
 ///
-/// The generic routing selector: it filters by [`Router::can_route`], runs each
-/// surviving router in injection order, and keeps the best by routability then
-/// tidiness ([`better`]). The FIRST router (the always-correct baseline the agent
-/// injects first) that routes with zero faults short-circuits the rest — the
-/// premium engine can then only differ in tidiness, never routability, so it is
-/// never paid for on a board the baseline already routes clean. The winner's
-/// redundant through-hole vias are dropped ([`drop_redundant_thruhole_vias`]).
+/// The PCB instantiation of the kernel selector: it supplies the DRC-aware
+/// [`RouteQuality`] scorer (the geometry-violation count lives outside the kernel),
+/// the routability-then-tidiness [`better`] rule, and the clean-route
+/// short-circuit. The selector filters by [`Router::can_route`], runs each
+/// surviving router in injection order, and keeps the best — the FIRST router (the
+/// always-correct baseline the agent injects first) that routes with zero faults
+/// short-circuits the rest, so the premium engine is never paid for on a board the
+/// baseline already routes clean. The winner's redundant through-hole vias are then
+/// dropped ([`drop_redundant_thruhole_vias`]).
 ///
 /// `routers` is injected by the caller, mirroring `Box<dyn PlacementEngine>`:
 /// free tier = `[&GridAStarRouter]`; premium = `[&GridAStarRouter, &NegotiatedMeshRouter]`.
-/// The geometry-violation count each [`RouteQuality`] needs is computed here (via
-/// the DRC lint), since that oracle lives outside the `pcb-model` kernel. Returns
-/// an empty-solution result tagged `"none"` if no router can route the problem.
+/// Returns an empty-solution result tagged `"none"` if no router can route the
+/// problem (never for a non-empty list containing the always-routable baseline).
 pub fn select_best(problem: &RouteProblem, routers: &[&dyn Router]) -> RouteResult {
     let quality = |r: &RouteResult| {
         RouteQuality::of(problem, r, router::geometry_violations(problem, &r.solution))
     };
-
-    let mut best: Option<(RouteResult, RouteQuality)> = None;
-    for r in routers {
-        if !r.can_route(problem) {
-            continue;
-        }
-        let result = r.route(problem);
-        let q = quality(&result);
-        // Short-circuit: the first router to route cleanly wins — a later router can
-        // only differ in tidiness, never routability, so it is not worth running.
-        let clean = q.faults() == 0;
-        best = match best {
-            None => Some((result, q)),
-            Some((bi, bq)) if better(&bq, &q) => Some((bi, bq)),
-            Some(_) => Some((result, q)),
-        };
-        if clean {
-            break;
-        }
-    }
-
-    let mut result = best.map(|(r, _)| r).unwrap_or_else(|| RouteResult {
+    let mut result = crate::problem::select(problem, routers, &quality, &better, &|q| {
+        q.faults() == 0
+    })
+    .unwrap_or_else(|| RouteResult {
         solution: RouteSolution { traces: vec![], vias: vec![] },
         failed: vec![],
         engine: "none".to_owned(),
@@ -211,8 +199,9 @@ pub fn select_best(problem: &RouteProblem, routers: &[&dyn Router]) -> RouteResu
 /// keeps its result unless it detours more than [`NAIVE_DETOUR_TOLERANCE`] longer
 /// than the challenger — the asymmetric tidiness tiebreak the in-house selector
 /// uses. Asymmetric in the incumbent's favour, so the selector is a left-fold in
-/// injection order, not a global argmin.
-fn better(incumbent: &RouteQuality, challenger: &RouteQuality) -> bool {
+/// injection order, not a global argmin. The `_problem` arg matches the kernel
+/// selector's `better` signature (the rule is problem-independent here).
+fn better(_problem: &RouteProblem, incumbent: &RouteQuality, challenger: &RouteQuality) -> bool {
     if incumbent.faults() != challenger.faults() {
         incumbent.faults() < challenger.faults()
     } else {
