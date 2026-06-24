@@ -82,6 +82,40 @@ impl LayerRef {
             _ => None,
         }
     }
+
+    /// Resolve a pour/zone layer string to its `(zero-based index, KiCAD layer
+    /// name)` on an `lc`-layer board — the inverse pairing the synthesizer needs
+    /// to emit a `(layer "InN.Cu")` from a layer request.
+    ///
+    /// Accepts both the engine vocabulary (`"top"`, `"bottom"`, `"innerN"`) and
+    /// the KiCAD names (`"F.Cu"`, `"B.Cu"`, `"InN.Cu"`):
+    /// - `"top"` / `"F.Cu"` → `(0, "F.Cu")`
+    /// - `"bottom"` / `"B.Cu"` → `(lc-1, "B.Cu")`
+    /// - `"innerN"` / `"InN.Cu"` → `(N, "InN.Cu")` for `0 < N < lc-1`
+    ///
+    /// Returns `None` for an out-of-range or unparseable layer (e.g. `"inner3"`
+    /// on a 2-layer board). Deterministic; never panics.
+    pub fn resolve(layer: &str, lc: u32) -> Option<(u32, String)> {
+        let idx = match layer {
+            "top" | "F.Cu" => 0,
+            "bottom" | "B.Cu" => lc.checked_sub(1)?,
+            other => other
+                .strip_prefix("inner")
+                .or_else(|| other.strip_prefix("In").and_then(|s| s.strip_suffix(".Cu")))
+                .and_then(|n| n.parse::<u32>().ok())?,
+        };
+        if idx >= lc {
+            return None;
+        }
+        let name = if idx == 0 {
+            "F.Cu".to_string()
+        } else if idx == lc - 1 {
+            "B.Cu".to_string()
+        } else {
+            format!("In{idx}.Cu")
+        };
+        Some((idx, name))
+    }
 }
 
 // ── Point2 ───────────────────────────────────────────────────────────────────
@@ -423,5 +457,20 @@ mod tests {
         assert!(r.contains(&Point2 { x: 0.0, y: 10.0 }), "boundary is inside");
         assert!(!r.contains(&Point2 { x: 11.0, y: 5.0 }));
         assert_eq!(r.center(), Point2 { x: 5.0, y: 5.0 });
+    }
+
+    #[test]
+    fn layer_ref_resolve_maps_index_and_name() {
+        // Engine vocabulary and KiCAD names both resolve, on a 6-layer board.
+        assert_eq!(LayerRef::resolve("top", 6), Some((0, "F.Cu".into())));
+        assert_eq!(LayerRef::resolve("F.Cu", 6), Some((0, "F.Cu".into())));
+        assert_eq!(LayerRef::resolve("bottom", 6), Some((5, "B.Cu".into())));
+        assert_eq!(LayerRef::resolve("B.Cu", 6), Some((5, "B.Cu".into())));
+        assert_eq!(LayerRef::resolve("inner1", 6), Some((1, "In1.Cu".into())));
+        assert_eq!(LayerRef::resolve("In4.Cu", 6), Some((4, "In4.Cu".into())));
+        // Out of range / unparseable / degenerate stackup → None.
+        assert_eq!(LayerRef::resolve("inner3", 2), None);
+        assert_eq!(LayerRef::resolve("nope", 4), None);
+        assert_eq!(LayerRef::resolve("bottom", 0), None);
     }
 }

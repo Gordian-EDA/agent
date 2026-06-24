@@ -162,31 +162,13 @@ const PLANE_ANTIPAD_MARGIN_MM: f64 = 0.15;
 const ZONE_MIN_THICKNESS_CAP_MM: f64 = 0.25;
 
 /// Map a pour layer string to its (copper-layer index, KiCAD layer name) on an
-/// `lc`-layer board: `top`/`F.Cu` → 0, `bottom`/`B.Cu` → lc-1, `innerN`/`InN.Cu` → N.
-/// Returns `None` for an out-of-range or unparseable layer. (A pour on a GND/VCC PLANE
-/// layer is resolvable here but rejected at `create_board` — a plane is already full
-/// copper.) This is what lets a GND fill sit on an inner SIGNAL layer (In1/In4 on a
-/// 6-layer board) for shielding / impedance reference, not just top/bottom.
+/// `lc`-layer board — see [`pcb_model::LayerRef::resolve`]. (A pour on a GND/VCC
+/// PLANE layer is resolvable here but rejected at `create_board` — a plane is
+/// already full copper.) This is what lets a GND fill sit on an inner SIGNAL layer
+/// (In1/In4 on a 6-layer board) for shielding / impedance reference, not just
+/// top/bottom.
 pub(super) fn resolve_pour_layer(layer: &str, lc: u32) -> Option<(u32, String)> {
-    let idx = match layer {
-        "top" | "F.Cu" => 0,
-        "bottom" | "B.Cu" => lc.saturating_sub(1),
-        other => other
-            .strip_prefix("inner")
-            .or_else(|| other.strip_prefix("In").and_then(|s| s.strip_suffix(".Cu")))
-            .and_then(|n| n.parse::<u32>().ok())?,
-    };
-    if idx >= lc {
-        return None;
-    }
-    let kname = if idx == 0 {
-        "F.Cu".to_string()
-    } else if idx == lc - 1 {
-        "B.Cu".to_string()
-    } else {
-        format!("In{idx}.Cu")
-    };
-    Some((idx, kname))
+    pcb_model::LayerRef::resolve(layer, lc)
 }
 
 /// Build copper-POUR zones on SIGNAL layers (top/bottom) for the requested nets — a
