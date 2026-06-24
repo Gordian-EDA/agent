@@ -54,6 +54,7 @@ dependencies = [
 name = "anneal-place"
 version = "0.1.0"
 dependencies = [
+ "rayon",
  "sch-model",
  "sch-place-core",
 ]
@@ -1059,6 +1060,7 @@ name = "greedy-place"
 version = "0.1.0"
 dependencies = [
  "sch-model",
+ "sch-place-core",
 ]
 
 [[package]]

@@ -1,7 +1,10 @@
-//! `place::score` — the cost the placement engines minimise: the routed `layout_cost`
-//! and its `count_*` neatness/truthfulness terms (crossings, corners, merges, shorts,
-//! congestion), the `warning_count`/`crossing_counts` summaries, and the geometry
-//! primitives (`item_rect`, `rects_overlap`, `body_overlap_count`).
+//! `place::score` — the routed-sheet COUNT/geometry primitives an engine measures
+//! against: the `count_*` neatness/truthfulness terms (crossings, corners, merges,
+//! shorts, congestion, body-crossings), the orientation/spine/stray/grid-order
+//! classifiers, and the geometry primitives (`item_rect`, `rects_overlap`,
+//! `body_overlap_count`). The MEASUREMENT library [`super::measure`] assembles these
+//! into the raw 16 terms; each ENGINE then weights them into its own objective. This
+//! module bakes in NO weights and NO `premium` policy — those are engine-owned.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,88 +22,6 @@ use sch_model::netclass::is_ground;
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
 // `sch_model::union_find`, shared with circuit-lang's pin reconciler.
 use sch_model::ir::LayoutIr;
-
-/// Layout-warning count of `items` as they would SHIP — build the writer and run
-/// the same finalize (`prepare`: split wires, solve text, reframe) the real emit
-/// does, then count. Used only to pick among the SA's final candidates (a handful
-/// of calls), never per-move, so the text-solve cost is affordable here.
-pub fn warning_count(
-    env: &KicadEnv,
-    items: &[Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-    needs_flag: &BTreeSet<String>,
-) -> usize {
-    match build_writer(env, None, items, inc, ir, needs_flag, true) {
-        Ok(mut w) => {
-            w.set_frame(true);
-            w.prepare();
-            w.layout_warnings().len()
-        }
-        Err(_) => usize::MAX,
-    }
-}
-
-
-
-/// Weight on the whole-board bbox half-perimeter in `proxy_cost` (the dense fast-lane SA
-/// inner loop). Raised from the original 0.45: with DISTRIBUTED power the clusters share
-/// few inter-cluster wires, so `hpwl` keeps each net locally tight but nothing pulls the
-/// clusters TOGETHER — they float apart, leaving 2-3x the human whitespace-per-part
-/// (measured: ours sprawl 37-80 vs human ~23). A stronger global spread pull packs the
-/// clusters in. `proxy_cost` is only reached on the dense fast lane (`pins > FAST_PINS`),
-/// so every ≤34-pin reference/snapshot stays byte-identical regardless of this value.
-/// Override via `PROXY_SPREAD_W` is NOT read here (hot path) — sweep by editing this const.
-pub const PROXY_SPREAD_W: f64 = 0.45;
-
-
-/// Build and score the schematic for `items` exactly as placed (no cell layout).
-/// Used by the pin-alignment pass, which nudges raw positions.
-pub fn score_items(
-    env: &KicadEnv,
-    items: &[Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-    needs_flag: &BTreeSet<String>,
-) -> f64 {
-    match build_writer(env, None, items, inc, ir, needs_flag, false) {
-        Ok(w) => layout_cost(env, &w, items, inc, ir, false),
-        Err(_) => f64::INFINITY,
-    }
-}
-
-/// PREMIUM-tier cost. The paid SA pays for the ACCURATE objective the free tier
-/// can't afford: the REAL post-solve lint warning count (`warning_count` =
-/// build + text-solve + count), heavily weighted, so the SA directly minimises the
-/// shipped warnings — not a cheap pre-solve proxy, which diverges from the truth
-/// (the solver fixes much of the pre-solve crowding; minimising the proxy lands
-/// WORSE — measured). Then the straightness-weighted routed cost
-/// (`layout_cost(premium=true)`) breaks ties toward a tidier sheet. This is what
-/// the SA explores; the shipped finalize uses the base cost, same metric both tiers.
-pub fn premium_score_items(
-    env: &KicadEnv,
-    items: &[Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-    needs_flag: &BTreeSet<String>,
-) -> f64 {
-    let aes = match build_writer(env, None, items, inc, ir, needs_flag, false) {
-        Ok(w) => layout_cost(env, &w, items, inc, ir, true),
-        Err(_) => return f64::INFINITY,
-    };
-    // The accurate objective costs a per-move text solve + reroute; on dense boards
-    // (selfrepair's 88 nets, bga's 671 pins) that runs into MANY minutes per emit, so
-    // there the premium falls back to the straightness cost alone — still additive,
-    // just without the warning-minimisation that drove oneshot (186 pins / 23 nets,
-    // affordable) to 0. The cheap base eval the free tier uses scales fine; only this
-    // accurate variant needs the guard.
-    let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
-    if pins <= 250 && inc.len() <= 40 {
-        10_000.0 * warning_count(env, items, inc, ir, needs_flag) as f64 + aes
-    } else {
-        aes
-    }
-}
 
 /// An item's body rect at position `at`. Uses the FULL `approx_size` (which
 /// already pads 2.54 mm/side) so the placement overlap check reserves room for
@@ -155,7 +76,7 @@ pub fn body_overlap_count(items: &[Item]) -> usize {
 /// the existing parallel-proximity check never catches it (it is a crossing, not
 /// a hug). A lead leaving a pin is collinear with / starts at the body endpoint,
 /// so it is excluded.
-pub(crate) fn count_body_crossings(
+pub fn count_body_crossings(
     bodies: &[([f64; 2], [f64; 2])],
     wires: &[([f64; 2], [f64; 2], Option<String>)],
 ) -> usize {
@@ -199,7 +120,7 @@ pub(crate) fn count_body_crossings(
 /// approaching from that pin's side (the NE555's GND pin dropping through the LED to
 /// the ground rail). A series part's own leads STOP at a pin — never span beyond
 /// both — so this never fires on a correctly-drawn in-line resistor/cap.
-pub(crate) fn count_collinear_body_crossings(
+pub fn count_collinear_body_crossings(
     bodies: &[([f64; 2], [f64; 2])],
     wires: &[([f64; 2], [f64; 2], Option<String>)],
 ) -> usize {
@@ -238,7 +159,7 @@ pub(crate) fn count_collinear_body_crossings(
 /// (pin-tip bbox shrunk inward past the pin stubs) so a wire legitimately
 /// attaching at a pin tip and routing OUTWARD never counts; only a segment with a
 /// portion strictly inside the rect does.
-pub(crate) fn count_ic_body_crossings(
+pub fn count_ic_body_crossings(
     ic_rects: &[[f64; 4]],
     wires: &[([f64; 2], [f64; 2], Option<String>)],
 ) -> usize {
@@ -276,7 +197,7 @@ pub(crate) fn count_ic_body_crossings(
 /// drawn body — exactly what a dense vertical-cap column produces. The part's OWN
 /// leads attach at the pin ENDS (outside the central body span), so a correctly
 /// drawn in-line part never fires.
-pub(crate) fn count_parallel_body_crossings(
+pub fn count_parallel_body_crossings(
     bodies: &[([f64; 2], [f64; 2])],
     wires: &[([f64; 2], [f64; 2], Option<String>)],
 ) -> usize {
@@ -317,7 +238,7 @@ pub(crate) fn count_parallel_body_crossings(
 /// straight runs along rails — the single term that most separates a clean
 /// reference layout from a compact-but-jiggly diagonal staircase. A ≥3-way meet
 /// (a junction/tap) is not a corner and is excluded by the exact-two test.
-pub(crate) fn count_corners(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
+pub fn count_corners(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
     // (net, point) -> orientations of the segments ending there (true = horizontal).
     let mut at: BTreeMap<(String, u64, u64), Vec<bool>> = BTreeMap::new();
     for (a, b, n) in wires {
@@ -353,410 +274,6 @@ pub fn count_foreign_taps(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usi
         }
     }
     n
-}
-
-/// Weighted aesthetic cost of a built schematic. Label fallbacks and shorts
-/// dominate (they are correctness/quality failures); then visual wire crossings,
-/// then junction dots, with total wire length as a light tiebreaker.
-pub fn layout_cost(
-    env: &KicadEnv,
-    w: &SchematicWriter,
-    items: &[Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-    premium: bool,
-) -> f64 {
-    let fallbacks = w.signal_label_count();
-    let junctions = w.junction_count();
-    let wires = w.wires_with_nets();
-    let length: f64 =
-        wires.iter().map(|(a, b, _)| (a[0] - b[0]).abs() + (a[1] - b[1]).abs()).sum();
-    let crossings = count_crossings(&wires);
-    let corners = count_corners(&wires);
-    let merges = count_merges(&wires, &w.junction_positions())
-        + count_shorts(env, w, items, inc, &wires)
-        + count_foreign_taps(&wires);
-    // Two symbols whose bodies collide is never acceptable; a heavy (but
-    // below-merge) wall lets the climb escape an overlapping seed yet never move
-    // INTO an overlap, so the final layout is overlap-free even from a poor frame.
-    // Symbol-vs-port-label collisions count here too (the annealer likes to slide
-    // a decoupling cap onto the TXD1/RXD1 edge pentagons).
-    let label_boxes = w.cluster_label_boxes();
-    let overlaps = body_overlap_count(items)
-        + items
-            .iter()
-            .filter(|it| {
-                let r = item_rect(it, it.at);
-                label_boxes.iter().any(|b| rects_overlap(r, *b))
-            })
-            .count();
-    // Each 2-pin part's BODY AXIS (its pin-to-pin line) joins the closeness check
-    // as an obstacle, so "a foreign wire hugging a resistor's body" is the same
-    // parallel-proximity test as "a wire hugging a wire" — one rule, no rect math.
-    // A series part's own wire lies ON its axis (distance 0) and is ignored.
-    let bodies: Vec<([f64; 2], [f64; 2])> = items
-        .iter()
-        .filter(|i| i.geom.pins.len() == 2)
-        .filter_map(|it| {
-            let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
-            match (w.pin_dirs(env, &it.refdes, n0), w.pin_dirs(env, &it.refdes, n1)) {
-                (Ok(d0), Ok(d1)) => match (d0.first(), d1.first()) {
-                    (Some((a, _)), Some((b, _))) => Some((*a, *b)),
-                    _ => None,
-                },
-                _ => None,
-            }
-        })
-        .collect();
-    let congestion = count_congestion(&w.junction_positions()) + count_close_wires(&wires, &bodies);
-    // IC (3+ pin) body interiors: pin-tip bbox shrunk inward past the pin stubs so
-    // a wire attaching at a pin tip and routing outward is not a crossing. A
-    // foreign wire drawn across the package box IS (the SN74 VCCA→GND-rail riser).
-    let ic_rects: Vec<[f64; 4]> = items
-        .iter()
-        .filter(|it| it.geom.pins.len() >= 3)
-        .filter_map(|it| {
-            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-            let mut any = false;
-            for pg in &it.geom.pins {
-                if let Ok(d) = w.pin_dirs(env, &it.refdes, &pg.number)
-                    && let Some((p, _)) = d.first() {
-                        lo[0] = lo[0].min(p[0]);
-                        lo[1] = lo[1].min(p[1]);
-                        hi[0] = hi[0].max(p[0]);
-                        hi[1] = hi[1].max(p[1]);
-                        any = true;
-                    }
-            }
-            // Shrink 2.0 mm/side: past the pin-stub roots, onto the body rectangle.
-            any.then(|| [lo[0] + 2.0, lo[1] + 2.0, hi[0] - 2.0, hi[1] - 2.0])
-        })
-        .collect();
-    let body_cross = count_body_crossings(&bodies, &wires)
-        + count_collinear_body_crossings(&bodies, &wires)
-        + count_parallel_body_crossings(&bodies, &wires)
-        + count_ic_body_crossings(&ic_rects, &wires);
-    let stray = count_stray(env, w, items, inc, ir);
-    // Orientation convention: a draughtsman runs a 2-pin part VERTICAL when it
-    // bridges a rail and an internal node (a pull-up/down, a divider leg, a
-    // decoupling cap between two rails), and HORIZONTAL when it sits in the signal
-    // flow (between two signals, or feeding a rail from/ to a board port — a series
-    // resistor, an input fuse). Penalising the wrong axis stops the router's
-    // length-minimisation from flopping a series resistor vertical into an L-jog.
-    let mut orient_viol = 0usize;
-    let mut leg_viol = 0usize;
-    for it in items.iter().filter(|i| i.geom.pins.len() == 2) {
-        // Classify by how many of its nets are rails (NOT by port presence — a
-        // divider leg like [OUT, GND] touches a port AND a rail yet is still a
-        // vertical rail-to-node leg, not a series element):
-        //   0 rails → series in the signal flow → horizontal;
-        //   2 rails → spans two rails (decoupling) → vertical;
-        //   1 rail  → AMBIGUOUS (a pull/leg is vertical, an input fuse feeding the
-        //             rail is horizontal) → impose no preference, let length/frame decide.
-        let rail_count = it
-            .pins
-            .iter()
-            .filter(|(_, _, n)| n.as_deref().is_some_and(|n| ir.rails.contains_key(n)))
-            .count();
-        let prefer_vertical: Option<bool> = match rail_count {
-            // No rail → a series element in the signal flow → HORIZONTAL. (Tried
-            // relaxing this to "let corners decide" so the 555 timing chain
-            // DIS→R2→THR could stack vertically — it badly REGRESSED uart, whose
-            // series-termination R13/R15/R20 immediately flopped vertical into a
-            // tall L-jogged tower. The horizontal prior is load-bearing; keep it.)
-            0 => Some(false),
-            // Two rails → spans the rails (decoupling) → vertical.
-            2 => Some(true),
-            // One rail → distinguish a BOARD-EDGE FEED (an input fuse / series part
-            // whose non-rail net is a degree-1 port stub, e.g. F1 on 5V_BUS) which
-            // runs HORIZONTAL into the rail, from a LEG whose non-rail net is a
-            // shared internal node (a divider leg, pull-up — degree ≥2) which hangs
-            // VERTICAL. Length/frame alone left F1 vertical; this fixes it without
-            // flipping the divider's R8 (its OUT node is degree-3).
-            _ => {
-                let nonrail = it
-                    .pins
-                    .iter()
-                    .filter_map(|(_, _, n)| n.as_deref())
-                    .find(|n| !ir.rails.contains_key(*n));
-                let degree = nonrail.and_then(|n| inc.get(n)).map_or(0, |p| p.len());
-                Some(degree >= 2)
-            }
-        };
-        let Some(prefer_vertical) = prefer_vertical else { continue };
-        let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
-        if let (Ok(d0), Ok(d1)) = (w.pin_dirs(env, &it.refdes, n0), w.pin_dirs(env, &it.refdes, n1))
-            && let (Some((a, _)), Some((b, _))) = (d0.first(), d1.first()) {
-                let horizontal = (a[0] - b[0]).abs() > (a[1] - b[1]).abs();
-                if prefer_vertical == horizontal {
-                    orient_viol += 1;
-                    // A 1-rail LEG (pull-up/down: prefer vertical, degree≥2 node) is
-                    // the RELIABLE branch — track it apart so the premium boost can
-                    // bite it without touching the heuristic 0-rail "series→horizontal"
-                    // rule, which the uart's legitimately-vertical 62R terminators trip.
-                    if rail_count == 1 {
-                        leg_viol += 1;
-                    }
-                } else if rail_count == 1 && prefer_vertical {
-                    // Correctly-VERTICAL 1-rail leg: also enforce the up/down DIRECTION.
-                    // The rail pin must sit on its band side — V+ UP (smaller y), GND
-                    // DOWN — so the power symbol hangs the right way; a flipped leg (a
-                    // +3V3 pull-up with the rail symbol at the BOTTOM) reads upside down.
-                    let net_of =
-                        |pn: &str| it.pins.iter().find(|(p, _, _)| p == pn).and_then(|(_, _, n)| n.as_deref());
-                    let n0_rail = net_of(n0).is_some_and(|n| ir.rails.contains_key(n));
-                    let rail = if n0_rail { net_of(n0) } else { net_of(n1) };
-                    if let Some(rn) = rail {
-                        let (rail_pos, other_pos) = if n0_rail { (a, b) } else { (b, a) };
-                        let rail_up = rail_pos[1] < other_pos[1] - EPS;
-                        if is_ground(rn) == rail_up {
-                            leg_viol += 1;
-                        }
-                    }
-                }
-            }
-    }
-    // Spine collinearity: two VERTICAL 2-pin legs that share a non-rail node and
-    // whose FAR ends are each a rail form a divider / totem-pole spine
-    // (VCC→R7→node→R8→GND). A draughtsman draws them in ONE column. Length-min
-    // alone slides the shared node sideways toward a port to shave a stub, which
-    // breaks the spine (the divider's R8 gets banished to its own column). Penalise
-    // a spine pair whose bodies are not in the same column (cross-axis offset > 1
-    // grid). Narrow by construction: parallel decoupling caps share RAILS not a
-    // node, and a series part with a non-rail far end (555 R2) is not a spine leg,
-    // so neither is touched.
-    let legs: Vec<(usize, Vec<&str>, bool)> = items
-        .iter()
-        .enumerate()
-        .filter(|(_, it)| it.geom.pins.len() == 2)
-        .map(|(i, it)| {
-            let nets: Vec<&str> = it.pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
-            let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
-            let vertical = match (w.pin_dirs(env, &it.refdes, n0), w.pin_dirs(env, &it.refdes, n1)) {
-                (Ok(d0), Ok(d1)) => match (d0.first(), d1.first()) {
-                    (Some((a, _)), Some((b, _))) => (a[1] - b[1]).abs() > (a[0] - b[0]).abs(),
-                    _ => false,
-                },
-                _ => false,
-            };
-            (i, nets, vertical)
-        })
-        .collect();
-    // Are these two legs a series SPINE? They must share a non-rail node AND each
-    // run to a rail, and those two far rails must DIFFER — one pulls the node up
-    // (VCC), the other down (GND). Two legs to the SAME rail (R8 and C3 both
-    // OUT→GND) are PARALLEL drops, not a spine, and must NOT be forced collinear
-    // (they'd overlap). Distinct far rails select exactly the divider/totem case.
-    let is_spine = |a: &[&str], b: &[&str]| -> bool {
-        let is_rail = |n: &str| ir.rails.contains_key(n);
-        let Some(node) = a.iter().copied().find(|n| b.contains(n) && !is_rail(n)) else {
-            return false;
-        };
-        let ra = a.iter().copied().find(|n| *n != node && is_rail(n));
-        let rb = b.iter().copied().find(|n| *n != node && is_rail(n));
-        matches!((ra, rb), (Some(x), Some(y)) if x != y)
-    };
-    let mut spine_viol = 0usize;
-    for a in 0..legs.len() {
-        for b in (a + 1)..legs.len() {
-            let (ia, na, va) = (legs[a].0, &legs[a].1, legs[a].2);
-            let (ib, nb, vb) = (legs[b].0, &legs[b].1, legs[b].2);
-            // A capacitor is a SHUNT tap, never a through-path spine leg: it hangs
-            // to the side so the resistive divider / indicator chain reads straight
-            // (R7 over R8, not R7 over the filter cap C3). Exclude cap legs.
-            let cap = |i: usize| items[i].refdes.starts_with('C');
-            // Penalise ANY cross-axis offset, not just >1 grid: a spine should be
-            // EXACTLY collinear. The looser >1.27 tolerance let the free per-axis
-            // nudge slide a leg one grid off the spine (a visible jog) at no cost.
-            if va && vb && !cap(ia) && !cap(ib) && is_spine(na, nb)
-                && (items[ia].at[0] - items[ib].at[0]).abs() > EPS
-            {
-                spine_viol += 1;
-            }
-        }
-    }
-
-    // Compactness: the bounding-box half-perimeter of all part bodies. Length
-    // alone rewards short wires but tolerates a part flung into open space if its
-    // own wire stays short; this penalises the wasted-whitespace spread directly
-    // (the #1 visual complaint), pulling the whole drawing tight.
-    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-    for it in items {
-        let r = item_rect(it, it.at);
-        lo[0] = lo[0].min(r[0]);
-        lo[1] = lo[1].min(r[1]);
-        hi[0] = hi[0].max(r[2]);
-        hi[1] = hi[1].max(r[3]);
-    }
-    let spread = if lo[0].is_finite() { (hi[0] - lo[0]) + (hi[1] - lo[1]) } else { 0.0 };
-    // The author's per-block `layout:` relative ordering. Weighted JUST BELOW the
-    // body-overlap wall (so it never forces a collision) but ABOVE every routing /
-    // aesthetic term, so the grid is "relatively rigid": the search holds gridded
-    // parts in their authored left/right + top/bottom order even when flipping one
-    // across its anchor would shave a long wire — exact positions stay free, only
-    // the order is held. Empty grid (sidecar / no `layout:`) ⇒ zero, so tuned
-    // references are untouched.
-    let grid_order = grid_order_viol(items, ir);
-    // Merges/shorts are hard correctness failures (a rail-to-rail short lowers
-    // length+junctions, so without this the hill-climb would happily create
-    // one); fallbacks degrade a wire to a label; then crossings; then CONGESTION
-    // (junction dots packed against each other — the "dot knot" / wires-collapse-
-    // into-a-resistor look, which length-minimisation otherwise rewards); then
-    // junctions and length. The big coefficients keep correctness off the table.
-    // Correctness + convention terms (identical for both tiers): a layout that
-    // shorts, overlaps, drops a label to a fallback, breaks the authored grid, or
-    // runs a wire through a body is wrong regardless of price.
-    let correctness = 2000.0 * merges as f64
-        + 1500.0 * overlaps as f64
-        + 1000.0 * fallbacks as f64
-        + 1200.0 * grid_order as f64
-        + 30.0 * body_cross as f64
-        + 12.0 * orient_viol as f64
-        + 10.0 * spine_viol as f64;
-    // STRAIGHTNESS / neatness terms — the PREMIUM (paid SA) tier weighs these ~3x
-    // to push past the local minimum the free greedy tier accepts: straighter wires
-    // (fewer corners/crossings) and less dot-knot congestion. Crucially this does
-    // NOT scale the COMPACTNESS terms (spread/stray/length): packing tighter trades
-    // against text-collision warnings the routed cost is blind to (it has no text
-    // solve), so a premium that squeezed harder would ship a tidier-but-colliding
-    // sheet — observed as mixed-signal regressing 0→1. Neatness is safe; tightness
-    // is not, until the cost can see the lint's text collisions.
-    let neat = if premium { 3.0 } else { 1.0 };
-    let base = correctness
-        + neat * (5.0 * crossings as f64 + 7.0 * congestion as f64 + 7.0 * corners as f64)
-        + 1.0 * junctions as f64
-        + 0.5 * stray
-        + 0.15 * length
-        + 0.45 * spread;
-    // MULTI-UNIT COHESION. A multi-unit part's units (op-amp A/B + its V+/V- power unit)
-    // share a refdes but NO net, so length-min lets them drift apart — scattering the part
-    // and its decoupling across the sheet. Penalise the bounding-box spread of same-refdes
-    // items so the units cluster as one IC. ZERO for single-unit parts (every refdes is one
-    // item), so `base + 0.0 == base` keeps the free path bit-identical and references
-    // unchanged; added OUTSIDE `base` (never re-parenthesising it) per the note above.
-    let mut by_refdes: BTreeMap<&str, [f64; 4]> = BTreeMap::new();
-    for it in items {
-        let e = by_refdes.entry(&it.refdes).or_insert([f64::MAX, f64::MAX, f64::MIN, f64::MIN]);
-        e[0] = e[0].min(it.at[0]); e[1] = e[1].min(it.at[1]);
-        e[2] = e[2].max(it.at[0]); e[3] = e[3].max(it.at[1]);
-    }
-    let sib_spread: f64 = by_refdes.values().map(|e| (e[2] - e[0]) + (e[3] - e[1])).sum();
-    let multiunit = SIB_COHESION * sib_spread;
-    // PREMIUM compaction boost. The neat terms above amplify STRAIGHTNESS ~3x; left
-    // unbalanced, the paid SA straightens a wire by flinging its part into open space
-    // — the "straight but sprawled" look EVERY visual review flagged as the #1 defect.
-    // ADD a matching compaction pull so premium packs as hard as it straightens. This
-    // is ADDED, never folded into the base sum: re-parenthesising the base shifts its
-    // last bits and flips the chaotic SA acceptances (a measured mixed-signal 0->1
-    // regression), so the free path (premium=false) must stay bit-identical. Safe to
-    // push hard: on affordable boards premium_score_items scores the REAL per-move
-    // warning_count, so an over-tight text/wire collision is rejected mid-search; on
-    // big boards the final candidate pick (fewest real warnings, greedy always a
-    // candidate) caps it — premium can never ship more warnings than greedy.
-    if premium {
-        base + multiunit + COMPACT_BOOST * (0.15 * length + 0.45 * spread)
-            + ORIENT_BOOST * leg_viol as f64
-    } else {
-        base + multiunit
-    }
-    // NB: a premium body-cross BOOST was tried and dropped — on the uart (the only
-    // reference that ships crossings) body_xing stayed at 2 from boost 0 to 1000:
-    // the SA's move set can't reach a crossing-free layout and the crossings come
-    // from the ROUTER drawing through a body, not from placement, so a heavier
-    // placement penalty only inflates cost. A real fix belongs in route-around logic.
-}
-
-/// Extra PREMIUM-tier weight on orientation violations, on TOP of the shared base
-/// (12). A 1-rail leg (pull-up/down) or 2-rail decoupling tap wants to be VERTICAL;
-/// in an IC-LESS circuit the base 12 loses to length/spread and the SA ships a
-/// HORIZONTAL pull-up, which drags the rail's power-symbol label alongside the part's
-/// value text ("10k 3V3" — the collision the user flagged). The paid tier prices the
-/// violation hard enough to flip it. Premium-only so the free path stays bit-identical
-/// (snapshot unchanged). Bites ONLY rail_count=1 leg violations (`leg_viol`): the
-/// references ship 0 of those in their final layouts, and the uart's vertical 62R
-/// series terminators are rail_count=0 so they're untouched — verified the uart's
-/// premium winner is unchanged at boost 0..200, while a synthetic IC-less pull-up
-/// flips horizontal→vertical at 50.
-pub(crate) const ORIENT_BOOST: f64 = 50.0;
-
-/// Extra weight the PREMIUM tier puts on compactness (length+spread), on TOP of the
-/// base 1x, so the paid SA's straightness pull (`neat`=3x) can't win by spreading
-/// parts into open space (the "straight but sprawled" defect every visual review
-/// flagged). 2.0 → premium compaction ~3x, matching the straightness amplification.
-/// Swept on the four reference fixtures: it tightens the two loosest (555 130→121,
-/// uart 165→157 shipped-bbox half-perimeter) with NO warning regression, and stays
-/// clear of the over-tight edge (boost 4 destabilises uart). Only the premium branch
-/// of `layout_cost` reads it, so the free path stays bit-identical.
-pub(crate) const COMPACT_BOOST: f64 = 2.0;
-
-/// Cohesion pull on a multi-unit part's units (same refdes, no shared net): penalises
-/// their bounding-box spread so an op-amp's A/B/power units cluster as one IC instead of
-/// drifting apart and scattering the part's decoupling. ZERO on single-unit boards (one
-/// item per refdes → zero spread), so the free path + all single-unit references stay
-/// bit-identical. Both cost tiers read it (clustering is a correctness-of-organisation
-/// pull, not a premium nicety).
-pub(crate) const SIB_COHESION: f64 = 3.0;
-
-/// Ground truth behind the visual "a wire runs through a part" complaint:
-/// `(2-pin transverse + collinear body crossings, IC body crossings)` for a placed
-/// item set. Mirrors the obstacle extraction in [`layout_cost`] (kept separate so the
-/// hot cost path stays untouched). Surfaced on [`EmitOutput`] (`body_crossings` /
-/// `ic_crossings`) — authoritative for grounding a vision critic, which over-reports
-/// wire-through-body on correctly-drawn series parts and op-amp triangles.
-pub fn crossing_counts(
-    env: &KicadEnv,
-    items: &[Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-    needs_flag: &BTreeSet<String>,
-) -> (usize, usize, usize) {
-    // Measure the SHIPPED geometry (`fan_risers = true`): the finalize riser jog
-    // clears trunk-through-body crossings, so the reported count must reflect the
-    // jogged sheet, not the raw per-move one.
-    let Ok(w) = build_writer(env, None, items, inc, ir, needs_flag, true) else {
-        return (0, 0, 0);
-    };
-    let wires = w.wires_with_nets();
-    let bodies: Vec<([f64; 2], [f64; 2])> = items
-        .iter()
-        .filter(|i| i.geom.pins.len() == 2)
-        .filter_map(|it| {
-            let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
-            match (w.pin_dirs(env, &it.refdes, n0), w.pin_dirs(env, &it.refdes, n1)) {
-                (Ok(d0), Ok(d1)) => match (d0.first(), d1.first()) {
-                    (Some((a, _)), Some((b, _))) => Some((*a, *b)),
-                    _ => None,
-                },
-                _ => None,
-            }
-        })
-        .collect();
-    let ic_rects: Vec<[f64; 4]> = items
-        .iter()
-        .filter(|it| it.geom.pins.len() >= 3)
-        .filter_map(|it| {
-            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-            let mut any = false;
-            for pg in &it.geom.pins {
-                if let Ok(d) = w.pin_dirs(env, &it.refdes, &pg.number)
-                    && let Some((p, _)) = d.first() {
-                        lo[0] = lo[0].min(p[0]);
-                        lo[1] = lo[1].min(p[1]);
-                        hi[0] = hi[0].max(p[0]);
-                        hi[1] = hi[1].max(p[1]);
-                        any = true;
-                    }
-            }
-            any.then(|| [lo[0] + 2.0, lo[1] + 2.0, hi[0] - 2.0, hi[1] - 2.0])
-        })
-        .collect();
-    (
-        count_body_crossings(&bodies, &wires)
-            + count_collinear_body_crossings(&bodies, &wires)
-            + count_parallel_body_crossings(&bodies, &wires),
-        count_ic_body_crossings(&ic_rects, &wires),
-        count_crossings(&wires),
-    )
 }
 
 /// Violations of the author's per-block `layout:` relative ordering (`ir.grid`).
@@ -804,7 +321,7 @@ pub fn grid_order_viol(items: &[Item], ir: &LayoutIr) -> usize {
 /// rails) falls back to its rail anchor pins (→ the IC power pin). This stops a
 /// satellite drifting across the chip to dodge a spacing penalty. A part with no
 /// anchor pin at all (e.g. an IC-less divider) contributes nothing.
-pub(crate) fn count_stray(
+pub fn count_stray(
     env: &KicadEnv,
     w: &SchematicWriter,
     items: &[Item],
@@ -827,7 +344,7 @@ pub(crate) fn count_stray(
 /// rails) falls back to its rail anchor pins (→ the IC power pin) — wanted for
 /// the gentle stray pull, but NOT for hard pin-alignment (which would snap every
 /// decoupling cap onto one power pin and cram them). `None` if no anchor applies.
-pub(crate) fn signal_anchor_centroid(
+pub fn signal_anchor_centroid(
     env: &KicadEnv,
     w: &SchematicWriter,
     items: &[Item],
@@ -870,7 +387,7 @@ pub(crate) fn signal_anchor_centroid(
 /// (the relevant IC when several share the rail). `None` if the cap touches no
 /// non-ground rail with an IC pin (e.g. a pure rail-to-rail divider leg, left to
 /// the rail spread).
-pub(crate) fn supply_pin_target(
+pub fn supply_pin_target(
     env: &KicadEnv,
     w: &SchematicWriter,
     items: &[Item],
@@ -974,7 +491,7 @@ pub(crate) fn parallel_too_close(a1: [f64; 2], a2: [f64; 2], b1: [f64; 2], b2: [
 /// Cramped-spacing count: parallel wires hugging each other (1-grid cutoff) AND
 /// wires hugging a 2-pin part's body axis (wider 1.5-grid cutoff — see
 /// [`parallel_too_close`]). One rule covers wire-vs-wire and wire-vs-body.
-pub(crate) fn count_close_wires(
+pub fn count_close_wires(
     wires: &[([f64; 2], [f64; 2], Option<String>)],
     bodies: &[([f64; 2], [f64; 2])],
 ) -> usize {
@@ -1004,7 +521,7 @@ pub(crate) fn count_close_wires(
 /// the cramped node a human would spread out (e.g. a pull-up's tap landing right
 /// on a series resistor's pin). Unavoidable IC-pin-spacing pairs add a constant
 /// baseline that does not bias the search; only the avoidable cramming varies.
-pub(crate) fn count_congestion(junctions: &[[f64; 2]]) -> usize {
+pub fn count_congestion(junctions: &[[f64; 2]]) -> usize {
     const TIGHT: f64 = 3.81;
     let mut n = 0;
     for i in 0..junctions.len() {
@@ -1082,7 +599,7 @@ pub(crate) fn collinear_overlap(a1: [f64; 2], a2: [f64; 2], b1: [f64; 2], b2: [f
 /// Visual wire crossings: pairs of different-net segments, one horizontal and
 /// one vertical, intersecting at a point interior to both (KiCAD draws no
 /// junction there — the wires just cross over).
-pub(crate) fn count_crossings(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
+pub fn count_crossings(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
     let horiz = |a: &[f64; 2], b: &[f64; 2]| (a[1] - b[1]).abs() < EPS;
     let vert = |a: &[f64; 2], b: &[f64; 2]| (a[0] - b[0]).abs() < EPS;
     let interior = |v: f64, lo: f64, hi: f64| v > lo + EPS && v < hi - EPS;
@@ -1222,54 +739,4 @@ pub fn count_shorts(
         }
     }
     n
-}
-
-/// Geometric TRUTHFULNESS breaks (net merges / shorts / foreign taps) of a placement
-/// as it would SHIP — the same checks `layout_cost` prices, returned as a hard count
-/// so the candidate pick can REJECT any layout that mis-wires. Critical: the
-/// readability `warning_count` does NOT detect a merge (a rail-to-rail short actually
-/// LOWERS length+junctions), so a placement move that strands two nets onto one wire
-/// would otherwise be shipped as a fewest-warning candidate — the documented
-/// dense-board truthfulness failure. Gating the pick on this makes the router-free
-/// fast lane truthfulness-safe without a full netlist extraction.
-pub fn truthfulness_breaks(
-    env: &KicadEnv,
-    items: &[Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-    needs_flag: &BTreeSet<String>,
-) -> usize {
-    match build_writer(env, None, items, inc, ir, needs_flag, true) {
-        Ok(w) => {
-            let wires = w.wires_with_nets();
-            count_merges(&wires, &w.junction_positions())
-                + count_shorts(env, &w, items, inc, &wires)
-                + count_foreign_taps(&wires)
-        }
-        Err(_) => usize::MAX,
-    }
-}
-
-/// `premium_score_items` when the caller ALREADY knows the shipped warning count
-/// `w` (the candidate pick computes it for the primary sort). Identical result, but
-/// skips the redundant second text-solving `warning_count` — the candidate
-/// evaluation was paying for two full text solves per candidate.
-pub fn premium_score_with_w(
-    env: &KicadEnv,
-    items: &[Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-    needs_flag: &BTreeSet<String>,
-    w: usize,
-) -> f64 {
-    let aes = match build_writer(env, None, items, inc, ir, needs_flag, false) {
-        Ok(wr) => layout_cost(env, &wr, items, inc, ir, true),
-        Err(_) => return f64::INFINITY,
-    };
-    let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
-    if pins <= 250 && inc.len() <= 40 {
-        10_000.0 * w as f64 + aes
-    } else {
-        aes
-    }
 }

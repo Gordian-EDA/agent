@@ -1,42 +1,43 @@
-//! place — the IR → millimetre engine, split into cohesive submodules that share one
-//! flat namespace (re-exported below so every `floorplan::place::…` path and the
-//! placement engines' glob import resolve verbatim):
+//! place — the IR → millimetre realization, split into cohesive submodules that share one
+//! flat namespace (re-exported below so every `floorplan::place::…` path resolves
+//! verbatim):
 //!
 //! - [`emit`] — gather + grid seed + engine orchestration + `SchematicWriter` assembly.
 //! - [`idioms`] — circuit-idiom gather/align + the anchor-block/cohesion helpers.
-//! - [`refine`] — the greedy/polish scaffold + overlap relaxers the engines drive.
-//! - [`score`] — the routed cost + its crossing/merge/short terms + geometry primitives.
-//! - [`cost_eval`] — `RoutedCost`, the concrete `PlacementCost` the engines score against.
+//! - [`refine`] — the overlap relaxers (`decongest`/`normalize`/keepout passes) the emit
+//!   finalize and the engines drive.
+//! - [`score`] — the routed `count_*` crossing/merge/short terms + the geometry primitives
+//!   the [`measure`] library reads off a built sheet.
+//! - [`measure`] — the MEASUREMENT library: [`Realizer`] (build+route+read raw counts) +
+//!   [`RawMetrics`] (the weight-free 16 terms) + the [`MeasuringEngine`] dispatch. A
+//!   measurement-based engine CALLS this because IT chose measurement; the OBJECTIVE
+//!   (the weights) and the SEARCH live in the engine crates, not here.
 //! - [`route`] — the orthogonal elbow router + power-rail riser planning.
-//! - [`search`] — the PREMIUM simulated-annealing SEARCH (move-set + proxy costs),
-//!   the one home for the SA machinery; `anneal-place` is a thin engine over it.
 //!
-//! Placement is cost-driven (scoring a candidate routes the whole sheet), so the cost,
-//! the scaffold, and the router stay one (now sub-divided) module.
+//! Realizing a sheet is heavy + non-algorithmic (how to draw and measure), so it lives
+//! here as a shared library; the cost weights and the search are engine-owned method.
 
-mod cost_eval;
 mod emit;
 mod idioms;
+mod measure;
 mod refine;
 mod score;
 mod route;
-mod search;
 
-pub use cost_eval::*;
 pub use emit::*;
 pub use idioms::*;
+pub use measure::*;
 pub use refine::*;
 pub use score::*;
-pub use search::*;
 // `route` is the orthogonal router — every item is crate-internal (none was `pub`
 // pre-split), so re-export it crate-visibly, not publicly.
 pub(crate) use route::*;
 
-// The placement-engine boundary — `PlaceProblem` (what an engine reads) and the
+// The pure placement-problem boundary — `PlaceProblem` (what an engine reads) and the
 // `PlacementEngine` trait (what it implements) — lives in `sch_model::place`, so the
-// engine crates depend only on the shared vocabulary, not this layout module. Re-export
-// it here so this module's `PlaceProblem`/`PlacementEngine` paths (and the engines' globs)
-// resolve unchanged.
+// engine crates depend on the shared vocabulary. The measurement-aware `MeasuringEngine`
+// dispatch lives in [`measure`] alongside `Realizer`. Re-export the pure boundary here so
+// this module's paths resolve unchanged.
 pub use sch_model::place::{PlaceProblem, PlacementEngine};
 
 // Re-export the layout vocabulary the submodules and `grid_tests` read, so a

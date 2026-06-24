@@ -905,7 +905,7 @@ pub(crate) fn assign_rail_levels(
     out
 }
 
-pub(crate) const EPS: f64 = 1e-6;
+pub const EPS: f64 = 1e-6;
 
 /// A side (E/W) pin leads OUTWARD this far before its riser climbs to the rail,
 /// so the riser never runs up the IC edge past the other pins on that side.
