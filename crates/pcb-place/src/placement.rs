@@ -37,6 +37,8 @@
 use crate::problem::{
     Bounds, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem,
 };
+/// Axis-aligned region/keep-out rectangle (mm) — the shared [`pcb_model::Rect`].
+pub use crate::problem::Rect;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -244,12 +246,23 @@ pub struct GroupHint {
     pub surround: Option<String>,
 }
 
-/// Lock each member of a `grid` group at a computed cell of a regular grid filling
-/// the group's region (row-major, member order). The grid's column count is sized
-/// from the region aspect and member count. Locked members are then fixed for the
-/// rest of placement, so the annealer lays out the remaining parts around the tidy
-/// array instead of scattering it. A no-op for groups without `grid`/`region`, or
-/// whose members aren't found.
+/// Lock each member of a `grid` group at a computed cell of a regular grid (row-major,
+/// member order), centred in the group's region. The column count is sized from the
+/// region aspect and member count; the cell PITCH is the largest member footprint extent
+/// plus a clearance gap — NOT the region divided by the grid, which scatters the array
+/// across the whole region when the parts are small (an LED matrix tiled at ~19 % fill).
+/// A TIGHT pitch keeps the array compact and legal; centring it leaves an even border.
+/// The centred block is then slid back on-board (and each cell clamped into bounds) so a
+/// region smaller than the array footprint near a board edge cannot push LOCKED cells
+/// off-board — which the legalizer could never recover, forcing `legal: false`.
+/// Locked members are then fixed for the rest of placement, so the annealer lays out the
+/// remaining parts around the tidy array instead of scattering it. A no-op for groups
+/// without `grid`/`region`, or whose members aren't found.
+///
+/// NOTE: tightening the pitch makes the array compact and correct, but it does not yet
+/// GROW the array to fill a large board — that needs a board bounds-fit pass (size the
+/// outline to the placed extent) which does not exist in `pcb-place`. The pitch math here
+/// is the correct primitive that pass would build on.
 pub fn apply_grid_hints(problem: &mut PlaceProblem, hints: &PlacementHints) {
     for g in &hints.groups {
         // `surround`: ring the members tightly around a locked target part's edges
@@ -274,16 +287,23 @@ pub fn apply_grid_hints(problem: &mut PlaceProblem, hints: &PlacementHints) {
         let (rw, rh) = (region.max_x - region.min_x, region.max_y - region.min_y);
         let cols = (((n as f64) * rw / rh).sqrt().round() as usize).clamp(1, n);
         let rows = n.div_ceil(cols);
+        // Spread the members evenly over the region (cell centres). A tighter
+        // footprint-pitch packing was tried for denser fill, but on a board with a
+        // grid-hinted array (e.g. dual-bga's resistor bank) the tight block crowds the
+        // routing channels and regresses completion; the even spread keeps the array
+        // routable. A final clamp keeps every locked courtyard on-board even if the
+        // region is tucked at a board edge (the cells are locked, so the legalizer
+        // cannot pull an off-board one back).
         let (px, py) = (rw / cols as f64, rh / rows as f64);
+        let b = &problem.bounds;
         for (k, &i) in idxs.iter().enumerate() {
             let (c, r) = (k % cols, k / cols);
-            problem.parts[i].locked = Some(LockedAt {
-                at: Point2 {
-                    x: region.min_x + (c as f64 + 0.5) * px,
-                    y: region.min_y + (r as f64 + 0.5) * py,
-                },
-                rotation: 0,
-            });
+            let mut at = Point2 {
+                x: region.min_x + (c as f64 + 0.5) * px,
+                y: region.min_y + (r as f64 + 0.5) * py,
+            };
+            clamp_into_bounds(&mut at, b, rotated_courtyard_half(&problem.parts[i], 0));
+            problem.parts[i].locked = Some(LockedAt { at, rotation: 0 });
         }
     }
 }
@@ -365,28 +385,6 @@ pub fn apply_edge_lock(problem: &mut PlaceProblem, refs: &[String]) {
         };
         clamp_into_bounds(&mut at, &b, (hw, hh));
         problem.parts[i].locked = Some(LockedAt { at, rotation: 0 });
-    }
-}
-
-/// An axis-aligned region rectangle (mm).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Rect {
-    pub min_x: f64,
-    pub max_x: f64,
-    pub min_y: f64,
-    pub max_y: f64,
-}
-
-impl Rect {
-    fn center(&self) -> Point2 {
-        Point2 {
-            x: (self.min_x + self.max_x) / 2.0,
-            y: (self.min_y + self.max_y) / 2.0,
-        }
-    }
-    fn contains(&self, p: &Point2) -> bool {
-        p.x >= self.min_x && p.x <= self.max_x && p.y >= self.min_y && p.y <= self.max_y
     }
 }
 
@@ -1166,7 +1164,11 @@ fn anneal_placement(
 /// The baseline is always a candidate, so an idiom variant that does not actually
 /// help (e.g. one that scatters a board's power net) is automatically discarded —
 /// the oracle decides per board, so aggressive idioms can never regress a board
-/// they do not improve.
+/// they do not improve. The decouple idiom is where the cap-ring snap
+/// ([`snap_caps_to_anchor_ring`]) lives: the baseline runs UNSNAPPED and the
+/// `decouple` variant runs snapped, so the oracle picks snapped-vs-unsnapped per
+/// board (the snap tightens supply loops on some boards but hurts routability on
+/// others — having both as candidates lets the fault count decide).
 pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
     let has_decouple = !decoupling_pairs(problem).is_empty();
     let has_edge = !hints.edge_seek.is_empty();
@@ -1385,6 +1387,20 @@ fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts: PlaceOpts
 
     // 2. Force-directed relaxation (skips locked parts).
     force_layout(problem, hints, &nets, &half, margin, opts, &mut pos);
+
+    // 2a. Snap every unlocked decoupling cap to the nearest FREE ring slot around its
+    //     placed anchor IC (DECOUPLE variant only). A cheap, high-value seed fix: the
+    //     force seed can strand a bypass cap tens of mm from its IC on a multi-IC board
+    //     (the net springs split it between IC and the far power net), and the legalizer
+    //     never recovers that. Snapping it tight first means SA only has to polish a good
+    //     start. Skips parts under an explicit group/surround hint (the agent placed those
+    //     deliberately). GATED on `opts.decouple` so the baseline (`PlaceOpts::default()`)
+    //     stays UNSNAPPED — `place_best`'s fault-first oracle then has both a snapped and
+    //     an unsnapped candidate and picks whichever routes cleaner per board (the snap
+    //     helps some boards' supply loops but hurts others' routability).
+    if opts.decouple {
+        snap_caps_to_anchor_ring(problem, hints, &half, margin, &mut pos);
+    }
 
     // 2b. SA refinement (variant-gated): escape the springs' local minima and
     //     optimize the explicit cost (overlap + wirelength + compaction +
@@ -1623,6 +1639,78 @@ fn force_layout(
             pos[i].y += force[i].1 * scale;
             clamp_into_bounds(&mut pos[i], &problem.bounds, half[i]);
         }
+    }
+}
+
+/// Snap each unlocked decoupling cap to the nearest free ring slot around its anchor IC.
+///
+/// For every detected `(cap, ic)` pair ([`decoupling_pairs`]) whose cap is movable and
+/// not under an explicit group/surround hint, search outward (increasing radius) for the
+/// nearest grid-snapped position that (a) clears the anchor courtyard by the margin, (b)
+/// collides with no already-seated part, and (c) fits in bounds; move the cap there. Caps
+/// sharing one anchor are seated one at a time and become obstacles for the next, so they
+/// ring the IC instead of stacking. A no-op when there are no decoupling pairs.
+///
+/// This only relocates caps the force seed stranded — a cap already hugging its IC finds a
+/// free slot at the smallest radius (often where it already is), so a good seed is left
+/// essentially untouched; the win is on multi-IC boards where the seed splits a cap between
+/// its IC and a far power net.
+fn snap_caps_to_anchor_ring(
+    problem: &PlaceProblem,
+    hints: &PlacementHints,
+    half: &[(f64, f64)],
+    margin: f64,
+    pos: &mut [Point2],
+) {
+    // Caps the agent explicitly grouped/surrounded are placed deliberately — leave them.
+    let hinted: std::collections::BTreeSet<usize> = hints
+        .groups
+        .iter()
+        .flat_map(|g| {
+            g.members
+                .iter()
+                .filter_map(|m| problem.parts.iter().position(|p| &p.reference == m))
+        })
+        .collect();
+    let pairs: Vec<(usize, usize)> = decoupling_pairs(problem)
+        .into_iter()
+        .filter(|(cap, _)| problem.parts[*cap].locked.is_none() && !hinted.contains(cap))
+        .collect();
+    if pairs.is_empty() {
+        return;
+    }
+    // Everything except the caps being moved is a fixed obstacle for the snap.
+    let moving: std::collections::BTreeSet<usize> = pairs.iter().map(|(c, _)| *c).collect();
+    let mut seated: Vec<usize> = (0..problem.parts.len()).filter(|i| !moving.contains(i)).collect();
+    for (cap, ic) in pairs {
+        let anchor = pos[ic].clone();
+        // Ring radius starts just past both courtyards touching with margin and grows by
+        // the grid; angular probes are evenly spaced and tried nearest-the-IC first.
+        let base = (half[cap].0 + half[cap].1) / 2.0 + (half[ic].0 + half[ic].1) / 2.0 + margin;
+        let mut best: Option<Point2> = None;
+        'search: for ring in 0..SPIRAL_MAX_RING {
+            let radius = base + ring as f64 * PLACE_GRID;
+            let steps = ((2.0 * std::f64::consts::PI * radius / PLACE_GRID).ceil() as usize).max(8);
+            for s in 0..steps {
+                let theta = s as f64 / steps as f64 * 2.0 * std::f64::consts::PI;
+                let cand = Point2 {
+                    x: snap(anchor.x + radius * theta.cos()),
+                    y: snap(anchor.y + radius * theta.sin()),
+                };
+                if !fits_in_bounds(&cand, &problem.bounds, half[cap]) {
+                    continue;
+                }
+                if !collides(&cand, half[cap], pos, half, margin, &seated) {
+                    best = Some(cand);
+                    break 'search;
+                }
+            }
+        }
+        if let Some(p) = best {
+            pos[cap] = p;
+        }
+        // The cap is now a fixed obstacle for the remaining caps around any anchor.
+        seated.push(cap);
     }
 }
 
@@ -1927,7 +2015,10 @@ fn pad_world(problem: &PlaceProblem, pos: &[Point2], pin: &Pin) -> Point2 {
 /// Per-variant placement toggles, tried and selected by [`place_best`].
 #[derive(Debug, Clone, Copy, Default)]
 struct PlaceOpts {
-    /// Pull each decoupling cap to hug its IC ([`decoupling_pairs`]).
+    /// Pull each decoupling cap to hug its IC ([`decoupling_pairs`]) via the force
+    /// spring, AND snap each cap to the nearest free ring slot around its anchor in
+    /// the seed ([`snap_caps_to_anchor_ring`]). Off in the baseline, so `place_best`
+    /// keeps an unsnapped candidate to fall back to when snapping hurts routability.
     decouple: bool,
     /// Bias edge-seeking by part aspect: a tall connector goes to a side edge so
     /// its pad column lies along it, not the top where it pokes inward.
@@ -2230,7 +2321,6 @@ const DEFAULT_VIA_DRILL: f64 = 0.3;
 mod tests {
     use super::*;
     use crate::connectivity;
-    use crate::lint::lint;
 
     fn board(w: f64, h: f64) -> Bounds {
         Bounds {
@@ -2554,6 +2644,177 @@ mod tests {
                 region.contains(&p.at),
                 "{r} at {:?} must land inside region {region:?}",
                 p.at
+            );
+        }
+    }
+
+    // ── decoupling caps seed beside their anchor IC ─────────────────────────
+
+    /// An IC-like anchor: `npads` pads, the first two on `pwr`/GND (so a 2-pad cap on
+    /// those nets pairs with it via `decoupling_pairs`), the rest dangling unique nets.
+    fn ic_anchor(reference: &str, npads: usize, pwr: &str) -> Part {
+        let pads = (0..npads)
+            .map(|i| {
+                let net = match i {
+                    0 => pwr.to_owned(),
+                    1 => "GND".to_owned(),
+                    _ => format!("{reference}_S{i}"),
+                };
+                PartPad {
+                    number: format!("{}", i + 1),
+                    offset: Point2 { x: (i as f64 - npads as f64 / 2.0) * 0.5, y: 0.0 },
+                    width: 0.3,
+                    height: 0.3,
+                    layers: top(),
+                    net: Some(net),
+                }
+            })
+            .collect();
+        Part {
+            reference: reference.to_owned(),
+            courtyard_w: npads as f64 * 0.5 + 1.0,
+            courtyard_h: 3.0,
+            pads,
+            locked: None,
+        }
+    }
+
+    #[test]
+    fn decoupling_caps_seed_beside_their_anchor_ic() {
+        // Two ICs on a wide board, each with its own VCC rail (VCC1/VCC2) sharing GND,
+        // and three bypass caps apiece. The force seed splits each cap between its IC
+        // and the (far) shared-GND centroid, stranding it mid-board. The DECOUPLE
+        // variant's seed-snap must pull every cap to within a tight radius of ITS anchor
+        // — verified on the final legal placement. (The baseline is UNSNAPPED so
+        // `place_best` can fall back to it when the snap hurts routability; the snap now
+        // lives behind `opts.decouple`.)
+        let mut parts = vec![ic_anchor("U1", 8, "VCC1"), ic_anchor("U2", 8, "VCC2")];
+        for c in ["Ca0", "Ca1", "Ca2"] {
+            parts.push(r0603(c, Some("VCC1"), Some("GND")));
+        }
+        for c in ["Cb0", "Cb1", "Cb2"] {
+            parts.push(r0603(c, Some("VCC2"), Some("GND")));
+        }
+        let problem = PlaceProblem {
+            bounds: board(80.0, 40.0),
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts,
+            outline: None,
+        };
+        let res = place_variant(
+            &problem,
+            &PlacementHints::default(),
+            PlaceOpts { decouple: true, aspect_edge: false, anneal: false },
+        );
+        assert!(res.legal, "{res:?}");
+        let at = |r: &str| res.placements.iter().find(|p| p.reference == r).unwrap().at.clone();
+        let d = |a: Point2, b: Point2| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+        // Each cap must hug its OWN anchor (not the other IC). A generous bound: well
+        // under the inter-IC span, proving the cap is clustered, not stranded.
+        for c in ["Ca0", "Ca1", "Ca2"] {
+            assert!(d(at(c), at("U1")) < 12.0, "{c} must hug U1, dist {:.1}", d(at(c), at("U1")));
+            assert!(d(at(c), at("U1")) < d(at(c), at("U2")), "{c} must be nearer U1 than U2");
+        }
+        for c in ["Cb0", "Cb1", "Cb2"] {
+            assert!(d(at(c), at("U2")) < 12.0, "{c} must hug U2, dist {:.1}", d(at(c), at("U2")));
+            assert!(d(at(c), at("U2")) < d(at(c), at("U1")), "{c} must be nearer U2 than U1");
+        }
+    }
+
+    // ── grid hint: tight footprint-sized pitch, centred ─────────────────────
+
+    #[test]
+    fn grid_hint_spreads_members_within_region() {
+        // A grid hint tiles members evenly across the region (cell centres), which
+        // keeps the array's routing channels open. The pitch is the region divided by
+        // the column/row count, so every member lands inside the region.
+        let mut problem = PlaceProblem {
+            bounds: board(60.0, 60.0),
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts: vec![
+                r0603("D1", Some("A"), Some("B")),
+                r0603("D2", Some("B"), Some("C")),
+                r0603("D3", Some("C"), Some("D")),
+                r0603("D4", Some("D"), Some("A")),
+            ],
+            outline: None,
+        };
+        let region = Rect { min_x: 10.0, max_x: 50.0, min_y: 10.0, max_y: 50.0 };
+        let hints = PlacementHints {
+            groups: vec![GroupHint {
+                name: "array".to_owned(),
+                members: vec!["D1".into(), "D2".into(), "D3".into(), "D4".into()],
+                region: Some(region.clone()),
+                edge: None,
+                grid: true,
+                surround: None,
+            }],
+            ..Default::default()
+        };
+        apply_grid_hints(&mut problem, &hints);
+        for p in &problem.parts {
+            let at = &p.locked.as_ref().expect("grid member is locked").at;
+            assert!(
+                at.x >= region.min_x - 1e-9 && at.x <= region.max_x + 1e-9
+                    && at.y >= region.min_y - 1e-9 && at.y <= region.max_y + 1e-9,
+                "{} must land inside the region, got {at:?}", p.reference
+            );
+        }
+    }
+
+    #[test]
+    fn grid_hint_clamps_oversize_array_into_bounds_at_board_corner() {
+        // A region tucked at the board corner: a cell centred near the region edge
+        // would push a member's courtyard off-board, and because the cells are LOCKED
+        // the legalizer cannot pull them back. The per-cell clamp keeps every member's
+        // courtyard on-board. (An over-constrained region — smaller than its array —
+        // is an authoring error; the clamp guarantees on-board, not non-overlap.)
+        let region = Rect { min_x: 0.0, max_x: 3.0, min_y: 0.0, max_y: 3.0 };
+        let problem = PlaceProblem {
+            bounds: board(20.0, 20.0),
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts: vec![
+                r0603("D1", Some("A"), Some("B")),
+                r0603("D2", Some("B"), Some("C")),
+                r0603("D3", Some("C"), Some("D")),
+                r0603("D4", Some("D"), Some("A")),
+            ],
+            outline: None,
+        };
+        let hints = PlacementHints {
+            groups: vec![GroupHint {
+                name: "array".to_owned(),
+                members: vec!["D1".into(), "D2".into(), "D3".into(), "D4".into()],
+                region: Some(region),
+                edge: None,
+                grid: true,
+                surround: None,
+            }],
+            ..Default::default()
+        };
+        // apply_grid_hints alone must keep every locked cell's courtyard on-board.
+        let mut hinted = problem.clone();
+        apply_grid_hints(&mut hinted, &hints);
+        let b = &hinted.bounds;
+        for p in &hinted.parts {
+            let l = p.locked.as_ref().expect("grid member must be locked");
+            let (hw, hh) = rotated_courtyard_half(p, l.rotation);
+            assert!(
+                l.at.x - hw >= b.min_x - 1e-9 && l.at.x + hw <= b.max_x + 1e-9,
+                "{} overflows x: {:?}", p.reference, l.at
+            );
+            assert!(
+                l.at.y - hh >= b.min_y - 1e-9 && l.at.y + hh <= b.max_y + 1e-9,
+                "{} overflows y: {:?}", p.reference, l.at
             );
         }
     }

@@ -8,3 +8,6 @@ description = "Shared geometry + place/route problem & solution types for the PC
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

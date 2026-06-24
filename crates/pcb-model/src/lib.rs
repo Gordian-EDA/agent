@@ -298,7 +298,7 @@ pub struct Via {
 
 /// An axis-aligned rectangle in board mm (y-down), `[min, max]` per axis.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Rect {
     pub min_x: f64,
     pub min_y: f64,
@@ -325,6 +325,11 @@ impl Rect {
             x: (self.min_x + self.max_x) / 2.0,
             y: (self.min_y + self.max_y) / 2.0,
         }
+    }
+    /// Is `p` inside (or on the boundary of) this rect?
+    #[inline]
+    pub fn contains(&self, p: &Point2) -> bool {
+        p.x >= self.min_x && p.x <= self.max_x && p.y >= self.min_y && p.y <= self.max_y
     }
     /// Does this rect overlap `other` with positive area?
     #[inline]
@@ -357,5 +362,34 @@ impl Rect {
             && other.min_y <= self.min_y
             && other.max_y >= self.max_y;
         !covers
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Rect` is the single shared region/keep-out type (pcb-place reuses it). External
+    /// JSON (agent keepouts) carries it by camelCase NAME, so deserialization is
+    /// field-order-independent — this guards the de-duplication against any future
+    /// reshuffle of the struct's field declaration order.
+    #[test]
+    fn rect_round_trips_camel_case_order_independent() {
+        let r = Rect { min_x: 1.0, min_y: 2.0, max_x: 3.0, max_y: 4.0 };
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(json, r#"{"minX":1.0,"minY":2.0,"maxX":3.0,"maxY":4.0}"#);
+        assert_eq!(serde_json::from_str::<Rect>(&json).unwrap(), r);
+        // Keys in any order parse the same (name-based, not positional).
+        let shuffled = r#"{"maxX":3.0,"minX":1.0,"maxY":4.0,"minY":2.0}"#;
+        assert_eq!(serde_json::from_str::<Rect>(shuffled).unwrap(), r);
+    }
+
+    #[test]
+    fn rect_contains_includes_boundary() {
+        let r = Rect { min_x: 0.0, min_y: 0.0, max_x: 10.0, max_y: 10.0 };
+        assert!(r.contains(&Point2 { x: 5.0, y: 5.0 }));
+        assert!(r.contains(&Point2 { x: 0.0, y: 10.0 }), "boundary is inside");
+        assert!(!r.contains(&Point2 { x: 11.0, y: 5.0 }));
+        assert_eq!(r.center(), Point2 { x: 5.0, y: 5.0 });
     }
 }
