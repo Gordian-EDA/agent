@@ -506,12 +506,17 @@ fn resolve_pins(d: &mut Design, raw: Vec<RawPin>, diags: &mut Diagnostics) {
             continue;
         }
         let i = uf.make(&rp.refdes, &rp.pin);
-        // pin-ref? "<REFDES>.<pin>" where REFDES exists
-        let is_ref = rp
+        // pin-ref? "<REFDES>.<pin>" where REFDES is refdes-shaped and exists.
+        // A dotted target whose left side is not a refdes (e.g. a net literally
+        // named `3.3V`) is a plain net name, not a pin-ref.
+        let is_ref = rp.target.split_once('.').is_some_and(|(r, _)| {
+            crate::parse::looks_like_refdes(r) && comp_block.contains_key(r)
+        });
+        let dotted_pinref = rp
             .target
             .split_once('.')
-            .is_some_and(|(r, _)| comp_block.contains_key(r));
-        if rp.target.contains('.') && !is_ref {
+            .is_some_and(|(r, _)| crate::parse::looks_like_refdes(r));
+        if dotted_pinref && !is_ref {
             diags.push(
                 Diagnostic::error(
                     "bad-pin-ref",
@@ -876,6 +881,34 @@ blocks:
             PinTarget::Net("3V3".into())
         );
         assert_eq!(main.components["U1"].pins["EN"], PinTarget::NoConnect);
+    }
+
+    #[test]
+    fn dotted_net_name_is_not_a_pin_ref() {
+        // A net literally named `3.3V` has a non-refdes left segment (`3`), so it
+        // is a plain net name, not a `U1.5`-style pin-ref. It must compile and
+        // survive a canonical round-trip.
+        let src = "
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: R, value: 10k, between: ['3.3V', OUT]}
+      R2: {part: R, value: 20k, between: [OUT, GND]}
+";
+        let (d, diags) = run(src);
+        assert!(!diags.has_errors(), "{:?}", diags);
+        assert_eq!(
+            d.blocks["main"].components["R1"].pins["1"],
+            PinTarget::Net("3.3V".into())
+        );
+        let canon = crate::canon::to_canonical_yaml(&d);
+        let (d2, diags2) = run(&canon);
+        assert!(!diags2.has_errors(), "{:?}", diags2);
+        assert_eq!(
+            d2.blocks["main"].components["R1"].pins["1"],
+            PinTarget::Net("3.3V".into())
+        );
     }
 
     #[test]

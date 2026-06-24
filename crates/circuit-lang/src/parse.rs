@@ -33,6 +33,20 @@ fn suggest(key: &str, allowed: &[&str]) -> Option<String> {
         .map(|(_, a)| a.to_string())
 }
 
+/// Strict `[A-Z]+[0-9]+`: an uppercase-letter prefix followed by a digit
+/// suffix, with nothing interleaved (e.g. `U1`, `R10`). Shared by the
+/// refdes validator here and the pin-ref detector in `desugar`.
+pub fn looks_like_refdes(s: &str) -> bool {
+    match s.find(|c: char| c.is_ascii_digit()) {
+        Some(i) if i > 0 => {
+            let (prefix, suffix) = s.split_at(i);
+            prefix.chars().all(|c| c.is_ascii_uppercase())
+                && suffix.chars().all(|c| c.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
 impl Parser<'_> {
     fn err(&mut self, code: &'static str, msg: String, span: Span) {
         self.diags
@@ -275,20 +289,7 @@ impl Parser<'_> {
             && let Some(cm) = self.map_node(cn, "components")
         {
             for ((refdes, rspan), cnode) in cm {
-                // Strict `[A-Z]+[0-9]+`: split at the first ASCII digit; the
-                // prefix must be a non-empty run of uppercase letters and the
-                // suffix a non-empty run of digits, with nothing interleaved.
-                let split = refdes.find(|c: char| c.is_ascii_digit());
-                let ok = match split {
-                    Some(i) if i > 0 => {
-                        let (prefix, suffix) = refdes.split_at(i);
-                        prefix.chars().all(|c| c.is_ascii_uppercase())
-                            && !suffix.is_empty()
-                            && suffix.chars().all(|c| c.is_ascii_digit())
-                    }
-                    _ => false,
-                };
-                if !ok {
+                if !looks_like_refdes(refdes) {
                     self.err(
                         "bad-refdes",
                         format!("`{refdes}` is not a valid refdes (expected e.g. U1, R10)"),

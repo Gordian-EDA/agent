@@ -142,35 +142,56 @@ pub fn erc_checks(d: &Design) -> Vec<String> {
     out
 }
 
-/// A diode/LED installed BACKWARDS: by the KiCAD Device:LED/D convention the anode is pin 2 / "A".
-/// If that anode pin reaches ground through a series resistor, it is sitting on the cathode (return)
-/// side — current can't flow anode→cathode, so the part is reversed. Covers the common indicator
-/// topology (supply → anode → LED → cathode → R → GND); FP-averse (the anode is normally the driven
-/// / supply side, not ground-through-a-resistor).
+/// A diode/LED installed BACKWARDS: by the KiCAD Device:LED/D convention the anode is pin 2 / "A",
+/// the cathode pin 1 / "K". Current can only flow anode→cathode, so the cathode must sit at a lower
+/// potential than the anode. We flag two unambiguous reversals:
+///
+/// * anode directly on a 0 V rail **and** the cathode on a positive rail — the part is fed backwards
+///   (high side on the cathode). Anode-on-GND alone is NOT enough: a negative-going clamp/protection
+///   diode (anode→GND, cathode→signal) or a negative-rail indicator is perfectly legitimate, so we
+///   only fire when the cathode reaches a *positive* rail (`rail_voltage(cathode) > 0`).
+/// * anode reaches ground through a series resistor (the cathode/return side) — the classic indicator
+///   topology wired in reverse (supply → anode → LED → cathode → R → GND).
+///
+/// FP-averse: each branch needs an unambiguous rail on the relevant pin.
 fn check_polarity(items: &[Item], net_items: &HashMap<&str, Vec<usize>>, out: &mut Vec<String>) {
+    let pin_net = |it: &Item, pred: &dyn Fn(&str) -> bool| -> Option<String> {
+        it.comp.pins.iter().find_map(|(k, t)| {
+            if pred(&k.to_uppercase())
+                && let PinTarget::Net(n) = t
+            {
+                Some(n.clone())
+            } else {
+                None
+            }
+        })
+    };
     for it in items {
         if !is_diode(it.comp) {
             continue;
         }
-        let anode = it.comp.pins.iter().find_map(|(k, t)| {
-            let ku = k.to_uppercase();
-            if (ku == "2" || ku == "A" || k == "+")
-                && let PinTarget::Net(n) = t
-            {
-                Some(n.as_str())
-            } else {
-                None
-            }
-        });
-        let Some(an) = anode else { continue };
-        let reversed = net_items.get(an).into_iter().flatten().any(|&ri| {
+        let Some(an) = pin_net(it, &|ku| ku == "2" || ku == "A" || ku == "+") else {
+            continue;
+        };
+        let cathode = pin_net(it, &|ku| ku == "1" || ku == "K" || ku == "-");
+        let anode_on_gnd_cathode_positive = rail_voltage(&an) == Some(0.0)
+            && cathode
+                .as_deref()
+                .and_then(rail_voltage)
+                .is_some_and(|v| v > 0.0);
+        let anode_through_resistor_to_gnd = net_items.get(an.as_str()).into_iter().flatten().any(|&ri| {
             let r = &items[ri];
-            is_resistor(r.comp) && r.nets.len() == 2 && rail_voltage(far(r, an)) == Some(0.0)
+            is_resistor(r.comp) && r.nets.len() == 2 && rail_voltage(far(r, &an)) == Some(0.0)
         });
+        let reversed = anode_on_gnd_cathode_positive || anode_through_resistor_to_gnd;
         if reversed {
+            let how = if anode_on_gnd_cathode_positive {
+                "ties to ground while its cathode sits on a positive rail"
+            } else {
+                "reaches ground through a series resistor (the cathode/return side)"
+            };
             out.push(format!(
-                "- {}: appears installed BACKWARDS — its anode reaches ground through a series \
-                 resistor (the cathode/return side); a diode/LED conducts anode→cathode",
+                "- {}: appears installed BACKWARDS — its anode {how}; a diode/LED conducts anode→cathode",
                 it.refdes
             ));
         }
@@ -373,28 +394,32 @@ blocks:
 
     #[test]
     fn led_overcurrent_flagged() {
-        // 5V rail, 22R series, red LED → (5-1.8)/22 ≈ 145 mA: excessive.
+        // 5V rail, 22R series, red LED → (5-1.8)/22 ≈ 145 mA: excessive. Forward-biased so this
+        // models a real overcurrent LED and doesn't also trip the polarity check: anode (pin 2 / A)
+        // driven from +5V through R, cathode (pin 1 / K) → GND.
         let d = design("
 version: 1
 blocks:
   main:
     components:
-      D1: {part: Device:LED, pins: {1: LED_A, 2: GND}}
+      D1: {part: Device:LED, pins: {1: GND, 2: LED_A}}
       R1: {part: Device:R, value: 22R, pins: {1: '+5V', 2: LED_A}}
 ");
         let out = erc_checks(&d);
         assert!(out.iter().any(|s| s.contains("D1") && s.contains("excessive")), "{out:?}");
+        assert!(!out.iter().any(|s| s.contains("BACKWARDS")), "{out:?}");
     }
 
     #[test]
     fn sane_led_not_flagged() {
-        // 5V, 330R → ~10 mA: fine.
+        // 5V, 330R → ~10 mA: fine. Forward-biased: anode (pin 2 / A) driven from
+        // +5V through R, cathode (pin 1 / K) to GND.
         let d = design("
 version: 1
 blocks:
   main:
     components:
-      D1: {part: Device:LED, pins: {1: LED_A, 2: GND}}
+      D1: {part: Device:LED, pins: {1: GND, 2: LED_A}}
       R1: {part: Device:R, value: 330R, pins: {1: '+5V', 2: LED_A}}
 ");
         assert!(erc_checks(&d).is_empty(), "{:?}", erc_checks(&d));
@@ -492,6 +517,35 @@ blocks:
       R1: {part: Device:R, value: 330R, pins: {1: LED_K, 2: GND}}
 ");
         assert!(erc_checks(&d).iter().any(|s| s.contains("D1") && s.contains("BACKWARDS")), "{:?}", erc_checks(&d));
+    }
+
+    #[test]
+    fn reversed_led_anode_on_gnd_flagged() {
+        // anode (pin 2) tied DIRECTLY to GND while the cathode (pin 1) sits on a positive rail
+        // (+5V) ⇒ fed backwards, no current path anode→cathode.
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      D1: {part: Device:LED, pins: {1: '+5V', 2: GND}}
+");
+        assert!(erc_checks(&d).iter().any(|s| s.contains("D1") && s.contains("BACKWARDS")), "{:?}", erc_checks(&d));
+    }
+
+    #[test]
+    fn clamp_diode_anode_on_gnd_not_flagged() {
+        // Legitimate negative-going clamp/protection diode: anode (pin 2) → GND, cathode (pin 1) →
+        // a signal net (not a positive rail). It conducts when the signal swings below ground, so it
+        // is NOT backwards and must not be flagged.
+        let d = design("
+version: 1
+blocks:
+  main:
+    components:
+      D1: {part: Device:D, pins: {1: SIG, 2: GND}}
+");
+        assert!(!erc_checks(&d).iter().any(|s| s.contains("BACKWARDS")), "{:?}", erc_checks(&d));
     }
 
     #[test]

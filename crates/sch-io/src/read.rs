@@ -40,10 +40,13 @@
 //!    wrote. The netlist node carries only the pin **number**, so lift always
 //!    keys by number. The *connectivity* (which pin on which part joins which
 //!    net) is identical — only the spelling of the key differs.
-//! 2. **Net names.** KiCAD prefixes sheet-local net names with `/` and
-//!    auto-names otherwise-unnamed nets; we strip the leading `/`, but a net the
-//!    kernel left unnamed (e.g. a `between` pin-ref synthesis) may come back
-//!    under KiCAD's chosen name. The net *partition* is identical.
+//! 2. **Net names.** An author net name survives the round-trip only when the
+//!    schematic carries it on a *label or power symbol* — those are the names
+//!    KiCAD writes into the netlist. A name the kernel attached merely by naming
+//!    a pin target (e.g. a `between` pin-ref synthesis, or a plain `pin: NET`
+//!    with no label) is not in the netlist, so it comes back under KiCAD's
+//!    chosen auto-name. KiCAD prefixes sheet-local names with `/`, which we
+//!    strip. In every case the net *partition* is identical.
 //!
 //! Both are erased by the netlist, not by lift; the lifted Design is the unique
 //! sparse kernel model consistent with the schematic's connectivity.
@@ -167,12 +170,13 @@ fn design_from_netlist(netlist: &kicad_cli_rs::cli::Netlist) -> Design {
         }
     }
 
-    // Net attributes (`power:` the author's power-net list, `class:` from the
-    // `nets:` block) and the design `name:` are author declarations the kernel
-    // does NOT encode into the schematic — emit writes neither a power list nor
-    // net classes — so they cannot be recovered here and are intentionally
-    // absent from the lifted YAML. Connectivity and component identity, which
-    // ARE in the schematic, round-trip fully.
+    // Per-net `class:` attributes (declared under the `nets:` block) and the
+    // design `name:` are author declarations the kernel does NOT encode into the
+    // schematic — emit writes no net classes — so they cannot be recovered here
+    // and are intentionally absent from the lifted YAML. (Power nets carry no
+    // such attribute: they are derived from the power-symbol components, which DO
+    // round-trip.) Connectivity and component identity, which ARE in the
+    // schematic, round-trip fully.
 
     design
 }

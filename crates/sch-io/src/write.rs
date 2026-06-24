@@ -185,8 +185,8 @@ struct SheetRect {
 }
 
 // `Dir`, `point_on_segment`, and `transform_offset` live in `sch_model::geom`
-// (shared with `route`/`textplace`); re-exported so `crate::write::Dir` etc. and
-// the public API keep working.
+// (shared with the `label`/`wire` modules); re-exported so `crate::write::Dir`
+// etc. and the public API keep working.
 pub use sch_model::geom::{point_on_segment, transform_offset, Dir};
 
 /// One `(no_connect …)` marker emitted at a pin's sheet-space endpoint.
@@ -248,6 +248,17 @@ pub struct SchematicWriter {
     /// path except the `MULTISHEET_REFINE` low-side case, so the single-sheet
     /// reference snapshots stay byte-identical.
     fields_above: BTreeSet<String>,
+}
+
+/// What [`SchematicWriter::solve_text_positions`] mutates once the greedy solver
+/// has picked a candidate for the parallel [`crate::label::Movable`].
+enum Apply {
+    /// labels[i]: candidate 1 retracts onto the pin endpoint.
+    StubLabel(usize),
+    /// instances[i]: per-candidate (Reference, Value) anchors.
+    Fields(usize, Vec<(TextPos, TextPos)>),
+    /// instances[i]: per-candidate Value anchor (power rail name).
+    PowerVal(usize, Vec<TextPos>),
 }
 
 impl SchematicWriter {
@@ -882,41 +893,68 @@ impl SchematicWriter {
     }
 
     /// Assign collision-free positions to all movable text via the greedy
-    /// candidate solver in `textplace.rs`.
+    /// candidate solver [`crate::label::choose`].
     ///
-    /// **Obstacles:** symbol bodies (angle-aware extents, exempt for text
-    /// owned by that refdes), pin name/number text, wires, no-connect markers,
-    /// and fixed (stub-less) labels.
-    ///
-    /// **Movables, most-constrained first:**
-    /// 1. *Stub signal labels* (2 candidates): stay at the stub end, or
-    ///    retract onto the always-safe pin endpoint keeping the outward dir
-    ///    (the stub wire is dropped when retraction wins).
-    /// 2. *Reference+Value field pairs* (4 candidates): right / left / above /
-    ///    below of the body; wide bodies (rotated passives) prefer
-    ///    above/below. The first candidate of an unrotated symbol reproduces
-    ///    the legacy fixed right-of-body offsets, so an uncrowded sheet keeps
-    ///    its conventional look.
-    /// 3. *Power-symbol Values* (rail names; 3 candidates): beyond the symbol
-    ///    tip (above for up-pointing rails, below for down-pointing), else
-    ///    right / left — so adjacent rails never merge their names.
+    /// Builds the obstacle scene ([`Self::build_obstacles`]) then the movables
+    /// in most-constrained-first order — stub signal labels
+    /// ([`Self::stub_label_movables`]) ahead of the refdes-ordered field/power
+    /// pass ([`Self::field_movables`]) — solves, and applies each pick.
     ///
     /// Idempotent: every assignment is recomputed from scratch on each call
     /// (a retract-chosen label has no stub on the re-run and becomes a fixed
     /// obstacle at the same position), so reconcile may run it early to lint
     /// solved geometry and `finish`'s own call is a harmless re-run.
     pub fn solve_text_positions(&mut self) {
-        use crate::label::{
-            choose, label_box, pin_text_boxes, rotated_half_extents, text_width, wire_box,
-            BBox, Movable, ObKind, Obstacle,
-        };
-        // Round a candidate coordinate to 0.01 mm: field anchors are derived
-        // from float sums (position + extents) and would otherwise render as
-        // 107.94999999999999-style noise. Determinism is unaffected (same
-        // inputs, same rounding).
-        let r2 = |v: f64| (v * 100.0).round() / 100.0;
+        use crate::label::choose;
 
-        // ---- Obstacles ----
+        let obstacles = self.build_obstacles();
+        let (mut movables, mut applies) = self.stub_label_movables();
+        let (field_movables, field_applies) = self.field_movables();
+        movables.extend(field_movables);
+        applies.extend(field_applies);
+
+        let picks = choose(&obstacles, &movables);
+        for (apply, (pick, fits)) in applies.into_iter().zip(picks) {
+            match apply {
+                Apply::StubLabel(i) => {
+                    if pick == 1 {
+                        let pin_at = self.labels[i].stub.unwrap().pin_at;
+                        let end = self.labels[i].at;
+                        // Drop the stub wire retract_colliding_stubs
+                        // materialized (content-derived key).
+                        let a = snap_point(pin_at);
+                        let b = snap_point(end);
+                        let key = format!("{}:{}:{}:{}", a[0], a[1], b[0], b[1]);
+                        self.wires.retain(|w| w.uuid_key != key);
+                        self.labels[i].at = pin_at;
+                        self.labels[i].stub = None;
+                    }
+                }
+                Apply::Fields(i, cands) => {
+                    let (r, v) = cands[pick];
+                    self.instances[i].ref_pos = Some(r);
+                    self.instances[i].val_pos = Some(v);
+                }
+                Apply::PowerVal(i, cands) => {
+                    // A rail name with no free spot is OPTIONAL text: hide it
+                    // rather than smear it over a sibling. Greedy order means
+                    // the first symbol of a tight same-rail run shows the
+                    // name and the rest hide — the conventional tidy look.
+                    self.instances[i].val_pos = Some(cands[pick]);
+                    self.instances[i].val_hidden = !fits;
+                }
+            }
+        }
+    }
+
+    /// Everything solved text must avoid: symbol bodies (angle-aware, exempt
+    /// for their own refdes), pin name/number text, wires, no-connect markers,
+    /// and fixed (stub-less) labels.
+    fn build_obstacles(&self) -> Vec<crate::label::Obstacle> {
+        use crate::label::{
+            label_box, pin_text_boxes, rotated_half_extents, text_width, wire_box, ObKind,
+            Obstacle,
+        };
         let mut obstacles: Vec<Obstacle> = Vec::new();
         for inst in &self.instances {
             let h = rotated_half_extents(inst.half_extents, inst.angle);
@@ -959,21 +997,17 @@ impl SchematicWriter {
                 });
             }
         }
+        obstacles
+    }
 
-        // ---- Movables ----
-        // What to mutate for each movable, parallel to `movables`.
-        enum Apply {
-            /// labels[i]: candidate 1 retracts onto the pin endpoint.
-            StubLabel(usize),
-            /// instances[i]: per-candidate (Reference, Value) anchors.
-            Fields(usize, Vec<(TextPos, TextPos)>),
-            /// instances[i]: per-candidate Value anchor (power rail name).
-            PowerVal(usize, Vec<TextPos>),
-        }
+    /// Stub signal labels (most constrained, solved first), in deterministic
+    /// uuid_key order. Each has two candidates: stay at the stub end, or retract
+    /// onto the always-safe pin endpoint keeping the outward direction (the stub
+    /// wire is dropped when retraction wins).
+    fn stub_label_movables(&self) -> (Vec<crate::label::Movable>, Vec<Apply>) {
+        use crate::label::{label_box, text_width, Movable};
         let mut movables: Vec<Movable> = Vec::new();
         let mut applies: Vec<Apply> = Vec::new();
-
-        // 1. Stub labels, deterministic uuid_key order (most constrained).
         let mut stub_idx: Vec<usize> = (0..self.labels.len())
             .filter(|&i| self.labels[i].stub.is_some())
             .collect();
@@ -991,232 +1025,231 @@ impl SchematicWriter {
             });
             applies.push(Apply::StubLabel(i));
         }
+        (movables, applies)
+    }
 
-        // 2./3. Fields and power values, deterministic refdes order.
+    /// Reference+Value field pairs and power-symbol rail names, in deterministic
+    /// refdes order (one shared pass, so greedy solve order is stable). Each
+    /// instance dispatches to [`Self::power_value_movable`] (power symbols) or
+    /// [`Self::field_pair_movable`] (everything else).
+    fn field_movables(&self) -> (Vec<crate::label::Movable>, Vec<Apply>) {
+        let mut movables = Vec::new();
+        let mut applies = Vec::new();
         let mut order: Vec<usize> = (0..self.instances.len()).collect();
         order.sort_by(|&a, &b| self.instances[a].refdes.cmp(&self.instances[b].refdes));
         for &i in &order {
-            let inst = &self.instances[i];
-            let h = rotated_half_extents(inst.half_extents, inst.angle);
-            let (cx, cy) = (inst.at[0], inst.at[1]);
-            let (minx, miny, maxx, maxy) = (cx - h[0], cy - h[1], cx + h[0], cy + h[1]);
-            let vw = text_width(&inst.value);
-
-            if inst.refdes.starts_with('#') {
-                // Power symbol: the Value IS the rail name. PWR_FLAG hides
-                // its Value, so there is nothing to place.
-                if inst.lib_id == "power:PWR_FLAG" {
-                    continue;
-                }
-                let above = (
-                    TextPos { at: [r2(cx), r2(miny - 0.64)], justify: Justify::Center },
-                    [cx - vw / 2.0, miny - 2.24, cx + vw / 2.0, miny - 0.64] as BBox,
-                );
-                let below = (
-                    TextPos { at: [r2(cx), r2(maxy + 2.24)], justify: Justify::Center },
-                    [cx - vw / 2.0, maxy + 0.64, cx + vw / 2.0, maxy + 2.24],
-                );
-                let right = (
-                    TextPos { at: [r2(maxx + 0.64), r2(cy + 0.8)], justify: Justify::Left },
-                    [maxx + 0.64, cy - 0.8, maxx + 0.64 + vw, cy + 0.8],
-                );
-                let left = (
-                    TextPos { at: [r2(minx - 0.64), r2(cy + 0.8)], justify: Justify::Right },
-                    [minx - 0.64 - vw, cy - 0.8, minx - 0.64, cy + 0.8],
-                );
-                // A 180-rotated power symbol points down (GND family): the
-                // name goes below the graphic; otherwise above.
-                let cands = if inst.angle == 180.0 {
-                    vec![below, right, left]
-                } else {
-                    vec![above, right, left]
-                };
-                movables.push(Movable {
-                    owner: Some(inst.refdes.clone()),
-                    candidates: cands.iter().map(|c| c.1).collect(),
-                });
-                applies.push(Apply::PowerVal(i, cands.into_iter().map(|c| c.0).collect()));
-                continue;
-            }
-
-            let rw = text_width(&inst.refdes);
-            let wmax = rw.max(vw);
-            // Each candidate: (ref anchor, val anchor, union bbox). Text is
-            // bottom-anchored and 1.6 tall, so a line anchored at Y occupies
-            // [Y-1.6, Y].
-            let right = (
-                TextPos { at: [r2(maxx + 1.27), r2(cy - 1.27)], justify: Justify::Left },
-                TextPos { at: [r2(maxx + 1.27), r2(cy + 1.27)], justify: Justify::Left },
-                [maxx + 1.27, cy - 2.87, maxx + 1.27 + wmax, cy + 1.27] as BBox,
-            );
-            let left = (
-                TextPos { at: [r2(minx - 1.27), r2(cy - 1.27)], justify: Justify::Right },
-                TextPos { at: [r2(minx - 1.27), r2(cy + 1.27)], justify: Justify::Right },
-                [minx - 1.27 - wmax, cy - 2.87, minx - 1.27, cy + 1.27],
-            );
-            let above = (
-                TextPos { at: [r2(cx), r2(miny - 3.18)], justify: Justify::Center },
-                TextPos { at: [r2(cx), r2(miny - 0.64)], justify: Justify::Center },
-                [cx - wmax / 2.0, miny - 4.78, cx + wmax / 2.0, miny - 0.64],
-            );
-            let below = (
-                TextPos { at: [r2(cx), r2(maxy + 2.24)], justify: Justify::Center },
-                TextPos { at: [r2(cx), r2(maxy + 4.78)], justify: Justify::Center },
-                [cx - wmax / 2.0, maxy + 0.64, cx + wmax / 2.0, maxy + 4.78],
-            );
-            // Corner fallbacks for crowded symbols (an IC whose four sides all
-            // carry labels/power): the field pair tucks against a body corner.
-            let above_left = (
-                TextPos { at: [r2(minx), r2(miny - 3.18)], justify: Justify::Left },
-                TextPos { at: [r2(minx), r2(miny - 0.64)], justify: Justify::Left },
-                [minx, miny - 4.78, minx + wmax, miny - 0.64] as BBox,
-            );
-            let above_right = (
-                TextPos { at: [r2(maxx), r2(miny - 3.18)], justify: Justify::Right },
-                TextPos { at: [r2(maxx), r2(miny - 0.64)], justify: Justify::Right },
-                [maxx - wmax, miny - 4.78, maxx, miny - 0.64],
-            );
-            let below_left = (
-                TextPos { at: [r2(minx), r2(maxy + 2.24)], justify: Justify::Left },
-                TextPos { at: [r2(minx), r2(maxy + 4.78)], justify: Justify::Left },
-                [minx, maxy + 0.64, minx + wmax, maxy + 4.78],
-            );
-            let below_right = (
-                TextPos { at: [r2(maxx), r2(maxy + 2.24)], justify: Justify::Right },
-                TextPos { at: [r2(maxx), r2(maxy + 4.78)], justify: Justify::Right },
-                [maxx - wmax, maxy + 0.64, maxx, maxy + 4.78],
-            );
-            // Last-resort FAR bands (pushed ~5 mm further out): when a body is
-            // ringed by packed neighbours — a tight decoupling cluster on a dense
-            // board — every near spot is blocked and the solver would fall onto a
-            // sibling's label/field. A far band clears it (the text reads a touch
-            // detached but never overlaps). Appended LAST for both ICs and passives,
-            // so a part with any near free spot is unaffected.
-            let above_far = (
-                TextPos { at: [r2(cx), r2(miny - 8.18)], justify: Justify::Center },
-                TextPos { at: [r2(cx), r2(miny - 5.64)], justify: Justify::Center },
-                [cx - wmax / 2.0, miny - 9.78, cx + wmax / 2.0, miny - 5.64] as BBox,
-            );
-            let below_far = (
-                TextPos { at: [r2(cx), r2(maxy + 5.64)], justify: Justify::Center },
-                TextPos { at: [r2(cx), r2(maxy + 8.18)], justify: Justify::Center },
-                [cx - wmax / 2.0, maxy + 5.64, cx + wmax / 2.0, maxy + 9.78],
-            );
-            // Multi-pin parts (ICs) carry refdes+value on a HORIZONTAL band
-            // (above/below the body), the reference convention — a long MPN
-            // ("SN74LVC2T45DCUR") on a band clears the horizontal series
-            // neighbours (R15/R13) it would smear onto placed to the side. Such a
-            // wide value rarely fits any fully-clear gap, so the solver falls back
-            // to candidate 0; that candidate must be the band/corner clear of this
-            // IC's OWN pin text (the artifact the lint catches and the eye reads
-            // as broken). We therefore stable-sort the band candidates by how many
-            // of the IC's pin-text boxes they hit: MCP1703 (GND exits bottom) →
-            // above wins; SN74 (VCC top, GND bottom-centre) → below-left/right
-            // win, dodging the centre GND drop. Passives keep the KiCAD
-            // convention: wide (rotated) bodies prefer above/below, tall prefer
-            // right/left.
-            let is_ic =
-                self.sym_pins.get(&inst.lib_id).is_some_and(|p| p.len() >= 3);
-            let cands = if is_ic {
-                let pin_boxes: Vec<BBox> = self
-                    .sym_pins
-                    .get(&inst.lib_id)
-                    .map(|pins| {
-                        pins.iter()
-                            .flat_map(|pg| pin_text_boxes(pg, inst.at, inst.angle, inst.mirror))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let hits = |c: &(TextPos, TextPos, BBox)| {
-                    pin_boxes.iter().filter(|pb| boxes_overlap(&c.2, pb)).count()
-                };
-                let mut bands =
-                    vec![below, above, below_left, below_right, above_left, above_right];
-                bands.sort_by_key(hits);
-                // Far bands (detached but clear of the body's OWN pins) BEFORE right/left: on a crowded
-                // IC whose every near band is blocked by a decoupling cap, right/left sit at the body
-                // edge ON the side pins, so the refdes/value smears across the pin stubs (the
-                // TPA3116 / driver-IC "value over pins 16/17" defect). A slightly-detached far band
-                // reads far better than text over the pins; right/left stay the genuine last resort.
-                // Multi-sheet sub-sheets only (where the dense power-IC sheets live) so the single-sheet
-                // reference snapshots stay byte-identical.
-                if std::env::var("MULTISHEET_REFINE").is_ok() {
-                    bands.push(above_far);
-                    bands.push(below_far);
-                    bands.push(right);
-                    bands.push(left);
-                } else {
-                    bands.push(right);
-                    bands.push(left);
-                    bands.push(above_far);
-                    bands.push(below_far);
-                }
-                bands
-            } else if h[0] > h[1] {
-                vec![
-                    above, below, right, left, above_left, above_right, below_left, below_right,
-                    above_far, below_far,
-                ]
+            let pair = if self.instances[i].refdes.starts_with('#') {
+                self.power_value_movable(i)
             } else {
-                vec![
-                    right, left, above, below, above_left, above_right, below_left, below_right,
-                    above_far, below_far,
-                ]
+                Some(self.field_pair_movable(i))
             };
-            // A flagged low-side FET (its down-facing source pin hangs a rotated
-            // SHUNT port label) prefers its fields ABOVE the body: stable-partition
-            // the candidate list so every above-the-body band comes first, before
-            // the solver's first-fit reaches a below-body spot that would crowd the
-            // port label's vertical strip. Stable so the existing tie-break order
-            // within "above" and within "the rest" is preserved.
-            let cands = if self.fields_above.contains(&inst.refdes) {
-                let (mut up, mut rest): (Vec<_>, Vec<_>) =
-                    cands.into_iter().partition(|c| c.2[3] <= cy);
-                up.append(&mut rest);
-                up
-            } else {
-                cands
-            };
-            movables.push(Movable {
-                owner: Some(inst.refdes.clone()),
-                candidates: cands.iter().map(|c| c.2).collect(),
-            });
-            applies.push(Apply::Fields(i, cands.into_iter().map(|c| (c.0, c.1)).collect()));
-        }
-
-        // ---- Solve and apply ----
-        let picks = choose(&obstacles, &movables);
-        for (apply, (pick, fits)) in applies.into_iter().zip(picks) {
-            match apply {
-                Apply::StubLabel(i) => {
-                    if pick == 1 {
-                        let pin_at = self.labels[i].stub.unwrap().pin_at;
-                        let end = self.labels[i].at;
-                        // Drop the stub wire retract_colliding_stubs
-                        // materialized (content-derived key).
-                        let a = snap_point(pin_at);
-                        let b = snap_point(end);
-                        let key = format!("{}:{}:{}:{}", a[0], a[1], b[0], b[1]);
-                        self.wires.retain(|w| w.uuid_key != key);
-                        self.labels[i].at = pin_at;
-                        self.labels[i].stub = None;
-                    }
-                }
-                Apply::Fields(i, cands) => {
-                    let (r, v) = cands[pick];
-                    self.instances[i].ref_pos = Some(r);
-                    self.instances[i].val_pos = Some(v);
-                }
-                Apply::PowerVal(i, cands) => {
-                    // A rail name with no free spot is OPTIONAL text: hide it
-                    // rather than smear it over a sibling. Greedy order means
-                    // the first symbol of a tight same-rail run shows the
-                    // name and the rest hide — the conventional tidy look.
-                    self.instances[i].val_pos = Some(cands[pick]);
-                    self.instances[i].val_hidden = !fits;
-                }
+            if let Some((m, a)) = pair {
+                movables.push(m);
+                applies.push(a);
             }
         }
+        (movables, applies)
+    }
+
+    /// Power-symbol Value (the rail name): beyond the symbol tip (below for
+    /// down-pointing GND-family rails, above otherwise), else right / left — so
+    /// adjacent rails never merge their names. `None` for `power:PWR_FLAG`,
+    /// whose Value is hidden and has nothing to place.
+    fn power_value_movable(&self, i: usize) -> Option<(crate::label::Movable, Apply)> {
+        use crate::label::{rotated_half_extents, text_width, BBox, Movable};
+        let r2 = |v: f64| (v * 100.0).round() / 100.0;
+        let inst = &self.instances[i];
+        if inst.lib_id == "power:PWR_FLAG" {
+            return None;
+        }
+        let h = rotated_half_extents(inst.half_extents, inst.angle);
+        let (cx, cy) = (inst.at[0], inst.at[1]);
+        let (minx, miny, maxx, maxy) = (cx - h[0], cy - h[1], cx + h[0], cy + h[1]);
+        let vw = text_width(&inst.value);
+        let above = (
+            TextPos { at: [r2(cx), r2(miny - 0.64)], justify: Justify::Center },
+            [cx - vw / 2.0, miny - 2.24, cx + vw / 2.0, miny - 0.64] as BBox,
+        );
+        let below = (
+            TextPos { at: [r2(cx), r2(maxy + 2.24)], justify: Justify::Center },
+            [cx - vw / 2.0, maxy + 0.64, cx + vw / 2.0, maxy + 2.24],
+        );
+        let right = (
+            TextPos { at: [r2(maxx + 0.64), r2(cy + 0.8)], justify: Justify::Left },
+            [maxx + 0.64, cy - 0.8, maxx + 0.64 + vw, cy + 0.8],
+        );
+        let left = (
+            TextPos { at: [r2(minx - 0.64), r2(cy + 0.8)], justify: Justify::Right },
+            [minx - 0.64 - vw, cy - 0.8, minx - 0.64, cy + 0.8],
+        );
+        // A 180-rotated power symbol points down (GND family): the
+        // name goes below the graphic; otherwise above.
+        let cands = if inst.angle == 180.0 {
+            vec![below, right, left]
+        } else {
+            vec![above, right, left]
+        };
+        let movable = Movable {
+            owner: Some(inst.refdes.clone()),
+            candidates: cands.iter().map(|c| c.1).collect(),
+        };
+        Some((movable, Apply::PowerVal(i, cands.into_iter().map(|c| c.0).collect())))
+    }
+
+    /// Reference+Value field pair for a non-power instance: right / left / above
+    /// / below of the body, with corner and far-band fallbacks for crowded
+    /// symbols. Wide (rotated passive) bodies prefer above/below; ICs carry the
+    /// pair on the horizontal band least overlapping their own pin text.
+    fn field_pair_movable(&self, i: usize) -> (crate::label::Movable, Apply) {
+        use crate::label::{pin_text_boxes, rotated_half_extents, text_width, BBox, Movable};
+        let r2 = |v: f64| (v * 100.0).round() / 100.0;
+        let inst = &self.instances[i];
+        let h = rotated_half_extents(inst.half_extents, inst.angle);
+        let (cx, cy) = (inst.at[0], inst.at[1]);
+        let (minx, miny, maxx, maxy) = (cx - h[0], cy - h[1], cx + h[0], cy + h[1]);
+        let vw = text_width(&inst.value);
+        let rw = text_width(&inst.refdes);
+        let wmax = rw.max(vw);
+        // Each candidate: (ref anchor, val anchor, union bbox). Text is
+        // bottom-anchored and 1.6 tall, so a line anchored at Y occupies
+        // [Y-1.6, Y].
+        let right = (
+            TextPos { at: [r2(maxx + 1.27), r2(cy - 1.27)], justify: Justify::Left },
+            TextPos { at: [r2(maxx + 1.27), r2(cy + 1.27)], justify: Justify::Left },
+            [maxx + 1.27, cy - 2.87, maxx + 1.27 + wmax, cy + 1.27] as BBox,
+        );
+        let left = (
+            TextPos { at: [r2(minx - 1.27), r2(cy - 1.27)], justify: Justify::Right },
+            TextPos { at: [r2(minx - 1.27), r2(cy + 1.27)], justify: Justify::Right },
+            [minx - 1.27 - wmax, cy - 2.87, minx - 1.27, cy + 1.27],
+        );
+        let above = (
+            TextPos { at: [r2(cx), r2(miny - 3.18)], justify: Justify::Center },
+            TextPos { at: [r2(cx), r2(miny - 0.64)], justify: Justify::Center },
+            [cx - wmax / 2.0, miny - 4.78, cx + wmax / 2.0, miny - 0.64],
+        );
+        let below = (
+            TextPos { at: [r2(cx), r2(maxy + 2.24)], justify: Justify::Center },
+            TextPos { at: [r2(cx), r2(maxy + 4.78)], justify: Justify::Center },
+            [cx - wmax / 2.0, maxy + 0.64, cx + wmax / 2.0, maxy + 4.78],
+        );
+        // Corner fallbacks for crowded symbols (an IC whose four sides all
+        // carry labels/power): the field pair tucks against a body corner.
+        let above_left = (
+            TextPos { at: [r2(minx), r2(miny - 3.18)], justify: Justify::Left },
+            TextPos { at: [r2(minx), r2(miny - 0.64)], justify: Justify::Left },
+            [minx, miny - 4.78, minx + wmax, miny - 0.64] as BBox,
+        );
+        let above_right = (
+            TextPos { at: [r2(maxx), r2(miny - 3.18)], justify: Justify::Right },
+            TextPos { at: [r2(maxx), r2(miny - 0.64)], justify: Justify::Right },
+            [maxx - wmax, miny - 4.78, maxx, miny - 0.64],
+        );
+        let below_left = (
+            TextPos { at: [r2(minx), r2(maxy + 2.24)], justify: Justify::Left },
+            TextPos { at: [r2(minx), r2(maxy + 4.78)], justify: Justify::Left },
+            [minx, maxy + 0.64, minx + wmax, maxy + 4.78],
+        );
+        let below_right = (
+            TextPos { at: [r2(maxx), r2(maxy + 2.24)], justify: Justify::Right },
+            TextPos { at: [r2(maxx), r2(maxy + 4.78)], justify: Justify::Right },
+            [maxx - wmax, maxy + 0.64, maxx, maxy + 4.78],
+        );
+        // Last-resort FAR bands (pushed ~5 mm further out): when a body is
+        // ringed by packed neighbours — a tight decoupling cluster on a dense
+        // board — every near spot is blocked and the solver would fall onto a
+        // sibling's label/field. A far band clears it (the text reads a touch
+        // detached but never overlaps). Appended LAST for both ICs and passives,
+        // so a part with any near free spot is unaffected.
+        let above_far = (
+            TextPos { at: [r2(cx), r2(miny - 8.18)], justify: Justify::Center },
+            TextPos { at: [r2(cx), r2(miny - 5.64)], justify: Justify::Center },
+            [cx - wmax / 2.0, miny - 9.78, cx + wmax / 2.0, miny - 5.64] as BBox,
+        );
+        let below_far = (
+            TextPos { at: [r2(cx), r2(maxy + 5.64)], justify: Justify::Center },
+            TextPos { at: [r2(cx), r2(maxy + 8.18)], justify: Justify::Center },
+            [cx - wmax / 2.0, maxy + 5.64, cx + wmax / 2.0, maxy + 9.78],
+        );
+        // Multi-pin parts (ICs) carry refdes+value on a HORIZONTAL band
+        // (above/below the body), the reference convention — a long MPN
+        // ("SN74LVC2T45DCUR") on a band clears the horizontal series
+        // neighbours (R15/R13) it would smear onto placed to the side. Such a
+        // wide value rarely fits any fully-clear gap, so the solver falls back
+        // to candidate 0; that candidate must be the band/corner clear of this
+        // IC's OWN pin text (the artifact the lint catches and the eye reads
+        // as broken). We therefore stable-sort the band candidates by how many
+        // of the IC's pin-text boxes they hit: MCP1703 (GND exits bottom) →
+        // above wins; SN74 (VCC top, GND bottom-centre) → below-left/right
+        // win, dodging the centre GND drop. Passives keep the KiCAD
+        // convention: wide (rotated) bodies prefer above/below, tall prefer
+        // right/left.
+        let is_ic = self.sym_pins.get(&inst.lib_id).is_some_and(|p| p.len() >= 3);
+        let cands = if is_ic {
+            let pin_boxes: Vec<BBox> = self
+                .sym_pins
+                .get(&inst.lib_id)
+                .map(|pins| {
+                    pins.iter()
+                        .flat_map(|pg| pin_text_boxes(pg, inst.at, inst.angle, inst.mirror))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let hits = |c: &(TextPos, TextPos, BBox)| {
+                pin_boxes.iter().filter(|pb| boxes_overlap(&c.2, pb)).count()
+            };
+            let mut bands =
+                vec![below, above, below_left, below_right, above_left, above_right];
+            bands.sort_by_key(hits);
+            // Far bands (detached but clear of the body's OWN pins) BEFORE right/left: on a crowded
+            // IC whose every near band is blocked by a decoupling cap, right/left sit at the body
+            // edge ON the side pins, so the refdes/value smears across the pin stubs (the
+            // TPA3116 / driver-IC "value over pins 16/17" defect). A slightly-detached far band
+            // reads far better than text over the pins; right/left stay the genuine last resort.
+            // Multi-sheet sub-sheets only (where the dense power-IC sheets live) so the single-sheet
+            // reference snapshots stay byte-identical.
+            if std::env::var("MULTISHEET_REFINE").is_ok() {
+                bands.push(above_far);
+                bands.push(below_far);
+                bands.push(right);
+                bands.push(left);
+            } else {
+                bands.push(right);
+                bands.push(left);
+                bands.push(above_far);
+                bands.push(below_far);
+            }
+            bands
+        } else if h[0] > h[1] {
+            vec![
+                above, below, right, left, above_left, above_right, below_left, below_right,
+                above_far, below_far,
+            ]
+        } else {
+            vec![
+                right, left, above, below, above_left, above_right, below_left, below_right,
+                above_far, below_far,
+            ]
+        };
+        // A flagged low-side FET (its down-facing source pin hangs a rotated
+        // SHUNT port label) prefers its fields ABOVE the body: stable-partition
+        // the candidate list so every above-the-body band comes first, before
+        // the solver's first-fit reaches a below-body spot that would crowd the
+        // port label's vertical strip. Stable so the existing tie-break order
+        // within "above" and within "the rest" is preserved.
+        let cands = if self.fields_above.contains(&inst.refdes) {
+            let (mut up, mut rest): (Vec<_>, Vec<_>) =
+                cands.into_iter().partition(|c| c.2[3] <= cy);
+            up.append(&mut rest);
+            up
+        } else {
+            cands
+        };
+        let movable = Movable {
+            owner: Some(inst.refdes.clone()),
+            candidates: cands.iter().map(|c| c.2).collect(),
+        };
+        (movable, Apply::Fields(i, cands.into_iter().map(|c| (c.0, c.1)).collect()))
     }
 
     /// Build the routing obstacle scene from everything placed so far.
@@ -1805,17 +1838,22 @@ impl SchematicWriter {
 
 /// Escape a free-form string for embedding inside a double-quoted S-expr atom.
 ///
-/// KiCAD S-expressions quote string atoms with `"`; a literal backslash or
-/// double-quote in the payload must be escaped or the document fails to parse.
-/// Order matters: escape backslash first, then the quote, so the backslash we
-/// add in front of a quote is not itself doubled.
+/// KiCAD S-expressions quote string atoms with `"`; a literal backslash,
+/// double-quote, or control character (newline, carriage return, tab) in the
+/// payload must be escaped or the document fails to parse. Order matters:
+/// escape backslash first so the backslashes we add for the other cases are
+/// not themselves doubled.
 ///
 /// Apply this to every LLM-/user-derived string written as `"…"` (e.g. the
 /// component value). Do **not** apply it to the verbatim `raw_definition`
 /// splice (already valid KiCAD output) or to internally generated tokens
 /// (uuids, validated lib_ids).
 fn escape_sexpr_string(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 /// Format a snapped coordinate, canonicalizing `-0.0` to `0.0`.
@@ -2133,7 +2171,7 @@ fn field_anchors(inst: &Instance) -> (TextPos, TextPos) {
 }
 
 /// Bbox of a rendered field text line: bottom-anchored, 1.6 mm tall, width
-/// per `textplace::text_width`, extending per its justification.
+/// per [`crate::label::text_width`], extending per its justification.
 fn field_box(at: [f64; 2], j: Justify, width: f64) -> BBox {
     match j {
         Justify::Left => [at[0], at[1] - 1.6, at[0] + width, at[1]],
@@ -2457,6 +2495,17 @@ mod tests {
         assert_eq!(escape_sexpr_string("\\\""), "\\\\\\\"");
     }
 
+    #[test]
+    fn escape_sexpr_string_control_chars() {
+        // Newline, carriage return and tab map to their two-char escapes.
+        assert_eq!(escape_sexpr_string("a\nb"), "a\\nb");
+        assert_eq!(escape_sexpr_string("a\rb"), "a\\rb");
+        assert_eq!(escape_sexpr_string("a\tb"), "a\\tb");
+        // A literal backslash-n stays distinct: `\` is doubled, the `n` is left
+        // alone, so it cannot be confused with an escaped newline.
+        assert_eq!(escape_sexpr_string("a\\nb"), "a\\\\nb");
+    }
+
     /// A PinGeom with only the fields the endpoint transform reads.
     fn pin_at(x: f64, y: f64) -> PinGeom {
         PinGeom {
@@ -2514,7 +2563,7 @@ mod tests {
     }
 
     #[test]
-    fn reemit_is_byte_identical() {
+    fn reemit_is_deterministic() {
         let Some(env) = detect_env() else { return };
 
         let build = || {
@@ -2526,7 +2575,7 @@ mod tests {
             w.finish()
         };
 
-        assert_eq!(build(), build(), "re-emit must be byte-identical");
+        assert_eq!(build(), build(), "re-emit must be deterministic");
     }
 
     #[test]
