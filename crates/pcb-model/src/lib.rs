@@ -11,6 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod geom2d;
 pub mod hash;
 pub use hash::{fnv1a, uuid_v5};
 
