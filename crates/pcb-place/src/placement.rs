@@ -1234,6 +1234,38 @@ pub fn place_best(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult
     best
 }
 
+/// THE PLACEMENT PIPELINE — the single visible entry the tool layer calls.
+///
+/// All of force / anneal / fan-out are placement; this is the order they run in:
+///
+/// 1. **STRUCTURED fast-path** — [`unified_fanout_place`]: a board with a dominant
+///    fine-pitch IC gets the textbook radial layout (IC centred, decoupling caps +
+///    series resistors ringed in IC-pad order, connectors on the edges), overlap-free
+///    by construction.
+/// 2. **OPTIMIZE fallback** — [`place_best`]: when the fan-out doesn't apply (no
+///    dominant IC) or can't seat legally, run the cost-optimized search — a
+///    force-directed seed, optionally simulated-annealing-refined, plus idiom
+///    variants, each routed and the most routable kept.
+///
+/// `$NO_UNIFIED` forces stage 2 (pure `place_best`). Never worse than the legalizing
+/// baseline: a fan-out that can't seat legally is discarded in favour of `place_best`.
+pub fn place_board(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
+    // Stage 1 — structured fan-out fast-path.
+    let mut p = problem.clone();
+    let fanned = std::env::var("NO_UNIFIED").is_err() && unified_fanout_place(&mut p);
+    if !fanned {
+        apply_grid_hints(&mut p, hints);
+    }
+    let mut result = place_best(&p, hints);
+    // Stage 2 — optimize fallback when the fan-out couldn't seat legally.
+    if fanned && !result.legal {
+        let mut base = problem.clone();
+        apply_grid_hints(&mut base, hints);
+        result = place_best(&base, hints);
+    }
+    result
+}
+
 /// Move each `corner_seek` part to its nearest board CORNER that leaves the
 /// placement legal (greedy, nearest-first; a corner already taken by another
 /// such part or overlapping a component is skipped). A no-op when there are no
@@ -2199,7 +2231,6 @@ mod tests {
     use super::*;
     use crate::connectivity;
     use crate::lint::lint;
-    use crate::pipeline::route_auto;
 
     fn board(w: f64, h: f64) -> Bounds {
         Bounds {
@@ -2745,40 +2776,9 @@ mod tests {
         );
     }
 
-    // ── integration smoke: place → to_route_problem → route_auto → lint clean ─
-
-    #[test]
-    fn integration_two_part_board_routes_clean() {
-        // A trivial 2-resistor board sharing two nets. Place it, hand it to the
-        // production router, and assert the copper lints clean (no failed nets,
-        // empty lint) — the placement→routing handoff end to end.
-        let problem = PlaceProblem {
-            bounds: board(30.0, 20.0),
-            clearance: 0.2,
-            layer_count: 2,
-            min_trace_width: 0.25,
-            keepouts: vec![],
-            parts: vec![
-                r0603("R1", Some("SIG"), Some("GND")),
-                r0603("R2", Some("SIG"), Some("GND")),
-            ],
-            outline: None,
-        };
-        let res = place(&problem, &PlacementHints::default());
-        assert!(res.legal, "placement legal: {res:?}");
-        let rp = to_route_problem(&problem, &res.placements);
-        let routed = route_auto(&rp);
-        assert!(
-            routed.failed.is_empty(),
-            "the placed board must route with zero failed nets: {:?}",
-            routed.failed
-        );
-        let violations = lint(&rp, &routed.solution);
-        assert!(
-            violations.is_empty(),
-            "the placed+routed board must lint clean: {violations:?}"
-        );
-    }
+    // (place→route→lint integration is covered end-to-end by board_harness across
+    // all 77 circuits; a duplicate single-board smoke here would only pull the
+    // negotiated-mesh router into pcb-place's dev-deps.)
 
     // ── HPWL is reported and sane ────────────────────────────────────────────
 

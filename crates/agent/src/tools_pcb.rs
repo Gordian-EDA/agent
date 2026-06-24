@@ -41,7 +41,7 @@ use pcb_engine::pathing::global_route;
 use pcb_engine::pipeline::{RouterKind, metrics, route_auto};
 use pcb_engine::placement::{
     GroupHint, LockedAt, Part, PlaceProblem, PlaceReport, PlaceResult, Placement, PlacementHints,
-    Rect, place_best, to_route_problem,
+    Rect, to_route_problem,
 };
 use pcb_engine::problem::{
     Bounds, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteSolution, Via, ViaSpan,
@@ -982,7 +982,7 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
         }));
     };
 
-    let mut problem = match place_problem_from_draft(&draft, ctx) {
+    let problem = match place_problem_from_draft(&draft, ctx) {
         Ok(p) => p,
         Err(msg) => return Ok(json!({ "error": msg })),
     };
@@ -1027,28 +1027,11 @@ pub fn place_board(_input: Value, ctx: &ToolCtx) -> Result<Value> {
     // by construction, with bounds sized to fit. Escapes route radially (short,
     // parallel) and the board is compact. Falls back to cap-ring auto-surround when
     // there's no clear dominant IC.
-    // DEFAULT placer: unified radial FAN-OUT (IC centred; decoupling caps then series
-    // resistors fanned in IC-pad order on density-aware concentric rings; connectors
-    // rotated flat on opposite edges) — neat AND compact. Validated 8/10 (place=9
-    // routi=8 board=8 silks=9) on a dense 8-layer TQFP64. It places everything
-    // overlap-free by construction and sizes bounds to fit; if it can't seat a given
-    // board legally it returns false (or the result is illegal) and we FALL BACK to
-    // the legalizing place_best, so we're never worse than the 70/71-legal baseline.
-    // $NO_UNIFIED forces pure place_best. The agent overrides any of this with the
-    // interactive geometry tools (move_part/route_track/…).
-    let base_problem = problem.clone();
-    let unified = std::env::var("NO_UNIFIED").is_err()
-        && pcb_engine::placement::unified_fanout_place(&mut problem);
-    if !unified {
-        pcb_engine::placement::apply_grid_hints(&mut problem, &hints);
-    }
-    let mut result = place_best(&problem, &hints);
-    if unified && !result.legal {
-        // Fan-out couldn't seat this board → revert to the clean legalizing placer.
-        problem = base_problem;
-        pcb_engine::placement::apply_grid_hints(&mut problem, &hints);
-        result = place_best(&problem, &hints);
-    }
+    // Run the placement PIPELINE — structured fan-out fast-path → optimize fallback.
+    // The stages, the $NO_UNIFIED override, and the legality fallback all live in (and
+    // are documented on) the single visible entry pcb_place::place_board. The agent
+    // overrides any of this with the interactive geometry tools (move_part/route_track).
+    let result = pcb_engine::placement::place_board(&problem, &hints);
 
     // Persist the placement into the draft so route_board / render_board / a
     // later get_board can read it without re-running the placer.
