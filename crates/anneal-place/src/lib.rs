@@ -403,6 +403,7 @@ fn anneal_items(
     // (an IC and its decoupling/crystal/tap parts) as one rigid group — the GLOBAL
     // structural move a per-part LOCAL search can't reach.
     let blocks = build_anchor_blocks(items, inc, &anchors, &sats, ir);
+    let siblings = multi_unit_siblings(items, &anchors);
     let orients = [Orient::Up, Orient::Down, Orient::Left, Orient::Right];
     let mut rng = Rng(seed);
 
@@ -486,10 +487,7 @@ fn anneal_items(
             let i = anchors[rng.below(anchors.len())];
             let new = relocate(&mut rng, items[i].at, 1);
             let d = [new[0] - items[i].at[0], new[1] - items[i].at[1]];
-            let mut group = vec![i];
-            if let Some(b) = blocks.get(&i) {
-                group.extend(b.iter().copied());
-            }
+            let group = cluster_group(i, &blocks, &siblings);
             undo = group.iter().map(|&k| (k, items[k].at, items[k].angle)).collect();
             for &k in &group {
                 items[k].at =
@@ -621,6 +619,7 @@ fn anneal_locality(
         return;
     }
     let blocks = build_anchor_blocks(items, inc, &anchors, &sats, ir);
+    let siblings = multi_unit_siblings(items, &anchors);
     let cohesion = cohesion_targets(items, inc, ir);
     let orients = [Orient::Up, Orient::Down, Orient::Left, Orient::Right];
     let mut rng = Rng(seed);
@@ -688,10 +687,7 @@ fn anneal_locality(
             let i = anchors[rng.below(anchors.len())];
             let new = relocate(&mut rng, items[i].at, radius);
             let d = [new[0] - items[i].at[0], new[1] - items[i].at[1]];
-            let mut group = vec![i];
-            if let Some(b) = blocks.get(&i) {
-                group.extend(b.iter().copied());
-            }
+            let group = cluster_group(i, &blocks, &siblings);
             undo = group.iter().map(|&k| (k, items[k].at, items[k].angle)).collect();
             for &k in &group {
                 items[k].at =

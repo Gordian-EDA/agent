@@ -212,6 +212,18 @@ fn prepare_writer(
     if align_rail_cap_rows(&mut items, ir) {
         decongest(&mut items);
     }
+    // A BANKED multi-unit IC's (an FPGA's) decoupling bank floats free (rail-label connected) and
+    // the search scatters it across the empty sheet. Collect it into one compact grid beside the
+    // IC's bank column. Overlap-safe and no-op when there is no banked IC, so single-IC boards are
+    // untouched; a follow-up decongest tidies anything the relocated block now abuts.
+    {
+        let anchors: Vec<usize> =
+            (0..items.len()).filter(|&i| items[i].geom.pins.len() >= 3).collect();
+        let banked: Vec<usize> = multi_unit_siblings(&items, &anchors).into_keys().collect();
+        if gather_banked_decoupling(&mut items, ir, &banked) {
+            decongest(&mut items);
+        }
+    }
 
     let mut w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
     // PORT-LABEL KEEPOUT (multi-sheet sub-sheets only): an indicator satellite (LED-chain resistor)
@@ -1248,6 +1260,180 @@ fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool {
         items[i].angle = angle;
     }
     moved
+}
+
+/// GATHER a BANKED multi-unit IC's free-floating decoupling bank into one compact, aligned grid
+/// of vertical caps (V+ up / GND down — the praised convention) seated in the clear space just
+/// LEFT of the IC's bank column, vertically centred on it.
+///
+/// A banked symbol (an FPGA's U3A..U3E) renders as a tall narrow stack and its bypass caps
+/// connect only by RAIL LABELS (distributed power), so they have no wire pulling them anywhere —
+/// the search scatters the whole bank to the far edge and across the empty middle (the BGA "vast
+/// empty space / decoupling on the opposite edge" defect). `align_rail_cap_rows` skips them (on
+/// IC nets) and `gather_decoupling_bank` would try to hug the IC's narrow side edge, stacking the
+/// caps' wide right-side value labels into an overprinted mess. This instead lays them as a tidy
+/// standalone block in the open space beside the stack — distributed look preserved, near the IC.
+///
+/// `banked` are the IC's unit item indices (from [`multi_unit_siblings`]). Self-contained and
+/// OVERLAP-SAFE: it commits only when every proposed cap position introduces NO new overlap
+/// against any other item — there is no follow-up repair (a decongest would re-scatter the bank).
+/// No-op (returns false) when there is no banked IC or no clean placement, so it never regresses.
+fn gather_banked_decoupling(items: &mut [Item], ir: &LayoutIr, banked: &[usize]) -> bool {
+    if banked.is_empty() {
+        return false;
+    }
+    let snap = sch_model::grid::snap;
+    let is_rail = |n: &str| is_power_net(n) || ir.rails.contains_key(n);
+    let is_vp = |n: &str| is_rail(n) && !is_ground(n) && !is_neg_supply(n);
+
+    let ic_refdes: BTreeSet<&str> = banked.iter().map(|&i| items[i].refdes.as_str()).collect();
+    // The rails the banked IC's units actually carry — only caps on these are its decoupling.
+    let ic_rails: BTreeSet<String> = banked
+        .iter()
+        .flat_map(|&i| items[i].pins.iter())
+        .filter_map(|(_, _, n)| n.as_deref())
+        .filter(|n| is_rail(n))
+        .map(|n| n.to_string())
+        .collect();
+    // Caps the engine FROZE as this IC's decoupling idiom: those are recognized as the IC's
+    // bypass bank but `align_idiom_clusters` only re-seats CRYSTAL idioms, so a frozen decoupling
+    // bank is stranded wherever the seed left it. We re-seat it here, overriding the freeze for
+    // these caps (we are the pass that gives the recognized bank its coherent home).
+    let frozen_bank: BTreeSet<&str> = ir
+        .idioms
+        .iter()
+        .filter(|d| d.kind == "decoupling" && ic_refdes.contains(d.anchor.as_str()))
+        .flat_map(|d| d.parts.iter().map(|s| s.as_str()))
+        .collect();
+
+    // The bank: pure V+↔GND bypass caps whose BOTH rails the IC carries (so a regulator's own
+    // input cap, on a rail the FPGA never sees, is excluded). A cap frozen as THIS IC's
+    // decoupling idiom is admitted even though frozen — we re-seat the recognized bank.
+    let mut bank: Vec<usize> = (0..items.len())
+        .filter(|&i| {
+            let it = &items[i];
+            let claimed = frozen_bank.contains(it.refdes.as_str());
+            if (it.frozen && !claimed) || !it.refdes.starts_with('C') || it.geom.pins.len() != 2 {
+                return false;
+            }
+            let nets: Vec<&str> = it.pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+            nets.len() == 2
+                && nets.iter().all(|n| ic_rails.contains(*n))
+                && nets.iter().any(|n| is_vp(n))
+                && nets.iter().any(|n| is_ground(n))
+        })
+        .collect();
+    if bank.len() < 3 {
+        return false;
+    }
+
+    // The IC's bank column: bbox of its unit bodies.
+    let (mut ic_lo, mut ic_hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+    for &i in banked {
+        let r = item_rect(&items[i], items[i].at);
+        ic_lo[0] = ic_lo[0].min(r[0]);
+        ic_lo[1] = ic_lo[1].min(r[1]);
+        ic_hi[0] = ic_hi[0].max(r[2]);
+        ic_hi[1] = ic_hi[1].max(r[3]);
+    }
+
+    // Orient every cap vertical with its V+ pin UP, GND down (KiCAD draws fields to the right).
+    let cap_angle = |i: usize| -> f64 {
+        let p1_is_vp =
+            items[i].pins.first().and_then(|(_, _, n)| n.as_deref()).is_some_and(is_vp);
+        // orient_angle takes the desired pin1→pin2 direction; V+ up ⇒ pin1→pin2 points down when
+        // pin1 is V+, up otherwise.
+        orient_angle(&items[i].geom, if p1_is_vp { Orient::Down } else { Orient::Up })
+    };
+    let new_angle: BTreeMap<usize, f64> = bank.iter().map(|&i| (i, cap_angle(i))).collect();
+    let cell_w = bank
+        .iter()
+        .map(|&i| {
+            let mut p = items[i].clone();
+            p.angle = new_angle[&i];
+            let r = item_rect(&p, [0.0, 0.0]);
+            r[2] - r[0]
+        })
+        .fold(0.0_f64, f64::max);
+    let cell_h = bank
+        .iter()
+        .map(|&i| {
+            let mut p = items[i].clone();
+            p.angle = new_angle[&i];
+            let r = item_rect(&p, [0.0, 0.0]);
+            r[3] - r[1]
+        })
+        .fold(0.0_f64, f64::max);
+    let xpitch = snap(cell_w + 2.54);
+    let ypitch = snap(cell_h + 2.54);
+
+    // Grid: a near-square block, caps grouped by their V+ rail then index for a tidy look.
+    let vp_of = |i: usize| -> String {
+        items[i]
+            .pins
+            .iter()
+            .find_map(|(_, _, n)| n.as_deref().filter(|x| is_vp(x)))
+            .unwrap_or("")
+            .to_string()
+    };
+    bank.sort_by(|&a, &b| vp_of(a).cmp(&vp_of(b)).then(a.cmp(&b)));
+    let n = bank.len();
+    let ncol = (n as f64).sqrt().ceil() as usize;
+    let nrow = n.div_ceil(ncol);
+    // Block placed in the gap LEFT of the IC column, one xpitch off its left body edge, growing
+    // leftward; vertically centred on the IC stack.
+    let block_w = ncol as f64 * xpitch;
+    let block_h = nrow as f64 * ypitch;
+    let right_x = ic_lo[0] - xpitch;
+    let x0 = right_x - block_w + xpitch / 2.0;
+    let y0 = (ic_lo[1] + ic_hi[1]) / 2.0 - block_h / 2.0 + ypitch / 2.0;
+    let targets: Vec<[f64; 2]> = (0..n)
+        .map(|k| {
+            let col = k % ncol;
+            let row = k / ncol;
+            [snap(x0 + col as f64 * xpitch), snap(y0 + row as f64 * ypitch)]
+        })
+        .collect();
+
+    // No-op guard: already a tidy block at the target?
+    if bank.iter().zip(&targets).all(|(&i, t)| {
+        (items[i].at[0] - t[0]).abs() < 1.27
+            && (items[i].at[1] - t[1]).abs() < 1.27
+            && (items[i].angle - new_angle[&i]).abs() < 0.5
+    }) {
+        return false;
+    }
+
+    // OVERLAP-SAFETY against the whole sheet (no follow-up decongest).
+    let proposed: BTreeMap<usize, [f64; 2]> =
+        bank.iter().copied().zip(targets.iter().copied()).collect();
+    let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> [f64; 4] {
+        let mut probe = items[idx].clone();
+        probe.angle = angle;
+        item_rect(&probe, at)
+    };
+    let at_new = |idx: usize| -> [f64; 4] {
+        match proposed.get(&idx) {
+            Some(&at) => rect_at(idx, at, new_angle[&idx]),
+            None => item_rect(&items[idx], items[idx].at),
+        }
+    };
+    let at_now = |idx: usize| item_rect(&items[idx], items[idx].at);
+    for &c in &bank {
+        for other in 0..items.len() {
+            if other == c {
+                continue;
+            }
+            if rects_overlap(at_new(c), at_new(other)) && !rects_overlap(at_now(c), at_now(other)) {
+                return false;
+            }
+        }
+    }
+    for (&i, &at) in &proposed {
+        items[i].at = at;
+        items[i].angle = new_angle[&i];
+    }
+    true
 }
 
 /// GATHER a scattered crystal cluster back beside its MCU's oscillator pins (the "crystal load cap
@@ -3025,6 +3211,68 @@ pub fn build_anchor_blocks(
     blocks
 }
 
+/// Number of sibling units below which a multi-unit symbol is NOT bound rigidly.
+const MULTI_UNIT_RIGID_MIN: usize = 3;
+
+/// Per-unit symbol-pin count above which a multi-unit symbol counts as genuinely BANKED.
+/// A dual/quad op-amp's units are tiny (an MCP6002 unit's symbol has 8 pins) and the
+/// existing per-anchor path already places them well, so binding them rigidly only
+/// perturbs a tuned layout (measured: it traded op-amp crossings the wrong way). A
+/// banked IC's units are large (an iCE40 bank's symbol has ~120 pins); only those sprawl
+/// and benefit from travelling as one block. 32 cleanly separates the two regimes.
+const MULTI_UNIT_BANKED_PINS: usize = 32;
+
+/// Map each anchor of a heavily-BANKED multi-unit symbol to its sibling anchor units:
+/// same refdes, ≥[`MULTI_UNIT_RIGID_MIN`] units, each unit a LARGE body
+/// (≥[`MULTI_UNIT_BANKED_PINS`] symbol pins). The banks of one such symbol (an FPGA's
+/// U3A..U3E) are SEPARATE anchors sharing no signal nets, so the per-anchor cluster jump
+/// carries each bank alone and they drift to opposite edges — the BGA sprawl. The jump
+/// consults this so it can carry the whole symbol rigidly, keeping the seeded adjacent
+/// vertical stack together. Empty for single-unit and small multi-unit refdes (op-amps,
+/// every other board), so the jump degrades to the old single-anchor move there.
+pub fn multi_unit_siblings(items: &[Item], anchors: &[usize]) -> BTreeMap<usize, Vec<usize>> {
+    let mut by_refdes: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for &i in anchors {
+        by_refdes.entry(items[i].refdes.as_str()).or_default().push(i);
+    }
+    let banked = |g: &[usize]| {
+        g.len() >= MULTI_UNIT_RIGID_MIN
+            && g.iter().all(|&i| items[i].geom.pins.len() >= MULTI_UNIT_BANKED_PINS)
+    };
+    let mut m: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for group in by_refdes.values().filter(|g| banked(g)) {
+        for &i in group {
+            m.insert(i, group.iter().copied().filter(|&j| j != i).collect());
+        }
+    }
+    m
+}
+
+/// The rigid set a cluster jump on anchor `i` carries: `i`, its satellite block, and —
+/// for a banked multi-unit symbol — every sibling unit plus each sibling's own block, so
+/// the whole symbol slides as one (deduped, sorted).
+pub fn cluster_group(
+    i: usize,
+    blocks: &BTreeMap<usize, Vec<usize>>,
+    siblings: &BTreeMap<usize, Vec<usize>>,
+) -> Vec<usize> {
+    let mut group = vec![i];
+    if let Some(b) = blocks.get(&i) {
+        group.extend(b.iter().copied());
+    }
+    if let Some(sibs) = siblings.get(&i) {
+        for &s in sibs {
+            group.push(s);
+            if let Some(b) = blocks.get(&s) {
+                group.extend(b.iter().copied());
+            }
+        }
+    }
+    group.sort_unstable();
+    group.dedup();
+    group
+}
+
 /// For each satellite, the anchor PINS it should hug: its SIGNAL-net anchor pins
 /// (a pull-up belongs by the pin it pulls, not by the rail), falling back to its
 /// rail-net anchor pins only when it touches no signal anchor (a decoupling cap on
@@ -3045,6 +3293,13 @@ fn pin_world_dist(items: &[Item], j: usize, pgi: usize, from: [f64; 2]) -> f64 {
 
 pub fn cohesion_targets(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> Vec<(usize, Vec<(usize, usize)>)> {
     let is_anchor = |i: usize| items[i].geom.pins.len() >= 3;
+    // A BANKED multi-unit IC (FPGA) is the dominant consumer of its rails, but it shares those
+    // rails with the regulators that feed it — so "nearest supply pin" parks the FPGA's own
+    // decoupling bank beside a regulator (the "decoupling on the opposite edge" defect). Bias a
+    // pure bypass cap that reaches a banked IC toward the IC's own supply pins. Empty (no-op) on
+    // every board without a banked symbol, so single-IC layouts are untouched.
+    let anchor_idxs: Vec<usize> = (0..items.len()).filter(|&i| is_anchor(i)).collect();
+    let banked: BTreeSet<usize> = multi_unit_siblings(items, &anchor_idxs).into_keys().collect();
     let mut out = Vec::new();
     for si in 0..items.len() {
         if items[si].geom.pins.len() >= 3 || items[si].frozen {
@@ -3086,6 +3341,11 @@ pub fn cohesion_targets(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> Vec<(
             // supply pin banks each cap tight to the IC it bypasses (mirrors
             // `supply_pin_target`, but router-free for the proxy).
             let pool = if !supply.is_empty() { &supply } else { &gnd };
+            // If this cap's V+ rail reaches a BANKED IC, hug THAT IC's supply pins (it is the
+            // real decoupling target) rather than a regulator that merely sources the rail.
+            let banked_pool: Vec<(usize, usize)> =
+                pool.iter().copied().filter(|&(j, _)| banked.contains(&j)).collect();
+            let pool: &[(usize, usize)] = if banked_pool.is_empty() { pool } else { &banked_pool };
             let at = items[si].at;
             let nearest = pool.iter().copied().min_by(|&(ja, pa), &(jb, pb)| {
                 let da = pin_world_dist(items, ja, pa, at);
