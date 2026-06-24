@@ -6,17 +6,20 @@
 //! - [`idioms`] — circuit-idiom gather/align + the anchor-block/cohesion helpers.
 //! - [`refine`] — the greedy/polish scaffold + overlap relaxers the engines drive.
 //! - [`score`] — the routed cost + its crossing/merge/short terms + geometry primitives.
+//! - [`cost_eval`] — `RoutedCost`, the concrete `PlacementCost` the engines score against.
 //! - [`route`] — the orthogonal elbow router + power-rail riser planning.
 //!
 //! Placement is cost-driven (scoring a candidate routes the whole sheet), so the cost,
 //! the scaffold, and the router stay one (now sub-divided) module.
 
+mod cost_eval;
 mod emit;
 mod idioms;
 mod refine;
 mod score;
 mod route;
 
+pub use cost_eval::*;
 pub use emit::*;
 pub use idioms::*;
 pub use refine::*;

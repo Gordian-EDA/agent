@@ -12,4 +12,3 @@ serde_json.workspace = true
 uuid.workspace = true
 pcb-model = { path = "../pcb-model" }
 kicad-sexpr = { path = "../kicad-sexpr" }
-kicad-cli-rs = { path = "../kicad-cli-rs" }

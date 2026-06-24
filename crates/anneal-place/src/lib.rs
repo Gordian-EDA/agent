@@ -1,18 +1,23 @@
 //! `anneal-place` — the premium simulated-annealing schematic placement engine.
 //!
 //! Implements `sch_model::place::PlacementEngine` (the free build defaults to
-//! Greedy). Runs a multi-start SA with a router-free locality proxy over the place
-//! scaffold (cost/refine/polish/cohesion/anchor) exposed by `sch-place-core`.
+//! Greedy). Runs a multi-start SA whose SCORING goes entirely through the injected
+//! `sch_model::place::PlacementCost` — the engine never imports the incumbent
+//! crate's scorers nor a KiCAD CLI. It still drives sch-place-core's ENV-FREE
+//! move-set + geometry helpers (cohesion/anchor/idiom-align/decongest); pulling
+//! that ~600-line SA scaffold behind the trait is the deferred follow-up, so the
+//! `sch-place-core` dep remains for it (no longer for scoring).
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use kicad_cli_rs::env::KicadEnv;
-
-// The engine boundary (PlaceProblem + the PlacementEngine trait) is `sch_model::place`;
-// the cost/scaffold fns + tuning consts are sch-place-core's working surface, globbed
-// here since per-item lists would churn every iteration.
-use sch_model::place::{PlaceProblem, PlacementEngine};
+// Scoring is reached through the injected `PlacementCost` (so the engine never
+// imports the incumbent crate's scorers nor a KiCAD CLI); the ENV-FREE move-set +
+// geometry helpers + tuning consts are sch-place-core's working surface, globbed
+// here since per-item lists would churn every iteration. (The remaining
+// sch-place-core dep is the deferred SA-scaffold move — see the crate docstring.)
+use sch_model::place::{Crossings, EngineCaps, PlaceProblem, PlaceResult, PlacementCost, PlacementEngine, Tier};
 use sch_place_core::floorplan::place::*;
+use sch_place_core::write::pin_endpoint;
 use sch_model::ir::{LayoutIr, Orient};
 use sch_model::item::{Incidence, Item};
 use sch_model::netclass::is_power_net;
@@ -47,16 +52,19 @@ impl PlacementEngine for Anneal {
     fn name(&self) -> &'static str {
         "anneal"
     }
-    fn place(&self, p: &PlaceProblem, items: &mut [Item]) {
-        let (env, inc, ir, needs_flag, seed) = (p.env, p.inc, p.ir, p.needs_flag, p.seed);
+    fn caps(&self) -> EngineCaps {
+        EngineCaps { tier: Tier::Premium }
+    }
+    fn place(&self, p: &PlaceProblem, items: &mut [Item]) -> PlaceResult {
+        let (cost, inc, ir, seed) = (p.cost, p.inc, p.ir, p.seed);
         use rayon::prelude::*;
-        let timed_top = std::env::var("DEBUG_SA_TIME").is_ok();
+        let timed_top = p.options.debug_timing;
 
         // A group with no placed items (e.g. a sub-sheet holding only power/label
         // declarations, which `gather` skips) has nothing to search — and the fast
         // lane's `30_000 / pins` would divide by zero. Bail out cleanly.
         if items.is_empty() {
-            return;
+            return report(self.name(), cost, items);
         }
 
         // FAST LANE (large boards): the tuned routed paths below route the whole sheet
@@ -91,7 +99,7 @@ impl PlacementEngine for Anneal {
             }
             signal_ports >= 6
         };
-        let force_fast = port_heavy || std::env::var("MULTISHEET_REFINE").is_ok();
+        let force_fast = port_heavy || p.options.force_fast;
         if pins > FAST_PINS || force_fast {
             let raw: Vec<Item> = items.to_vec();
             // Diverse proxy-anneal starts; fewer for very large boards (each candidate
@@ -105,7 +113,7 @@ impl PlacementEngine for Anneal {
                 .par_iter()
                 .map(|&s| {
                     let mut st = raw.clone();
-                    anneal_locality(env, &mut st, inc, ir, needs_flag, s);
+                    anneal_locality(cost, &mut st, inc, ir, s);
                     st
                 })
                 .collect();
@@ -140,9 +148,9 @@ impl PlacementEngine for Anneal {
                 .map(|cand| {
                     // TRUTHFULNESS first: a magnet/gravity move can strand two nets onto
                     // one wire (a merge), which warnings DON'T see — reject those here.
-                    let b = truthfulness_breaks(env, cand, inc, ir, needs_flag);
-                    let w = warning_count(env, cand, inc, ir, needs_flag);
-                    let c = premium_score_with_w(env, cand, inc, ir, needs_flag, w);
+                    let b = cost.truthfulness_breaks(cand);
+                    let w = cost.warnings(cand);
+                    let c = cost.premium_cost_with_warnings(cand, w);
                     (b, w, c)
                 })
                 .collect();
@@ -188,10 +196,10 @@ impl PlacementEngine for Anneal {
                 if align_led_chains(&mut m, inc, ir) {
                     decongest(&mut m);
                 }
-                let b = truthfulness_breaks(env, &m, inc, ir, needs_flag);
-                let w = warning_count(env, &m, inc, ir, needs_flag);
-                let (bx, ix, wx) = crossing_counts(env, &m, inc, ir, needs_flag);
-                (b, w, bx + ix + wx, premium_score_with_w(env, &m, inc, ir, needs_flag, w))
+                let b = cost.truthfulness_breaks(&m);
+                let w = cost.warnings(&m);
+                let cr = cost.crossings(&m);
+                (b, w, cr.total(), cost.premium_cost_with_warnings(&m, w))
             };
             let (bb, bw, bx, bc) = score(&candidates[best]);
             // SKIP the refinement when the winner is already clean (no breaks/warnings and
@@ -206,7 +214,7 @@ impl PlacementEngine for Anneal {
             let small_forced = force_fast && pins <= FAST_PINS;
             if !small_forced && bb == 0 && bw == 0 && bx <= 6 {
                 items.clone_from_slice(&candidates[best]);
-                return;
+                return report(self.name(), cost, items);
             }
             // ROUTE-AWARE REFINEMENT. The proxy is crossing-BLIND, so the fast-lane winner is
             // sprawl-optimal but not crossing-optimal — and no cheap router-free crossing
@@ -219,7 +227,7 @@ impl PlacementEngine for Anneal {
             let mut refined = candidates[best].clone();
             let t_ref = std::time::Instant::now();
             let ref_cap = (30_000 / pins).clamp(80, 300);
-            anneal_items(env, &mut refined, inc, ir, needs_flag, false, true, seed ^ 0x5EF1, Some(ref_cap));
+            anneal_items(cost, &mut refined, inc, ir, false, true, seed ^ 0x5EF1, Some(ref_cap));
             decongest(&mut refined);
             let (rb, rw, rx, rc) = score(&refined);
             let refined_wins = (rb, rw, rx).cmp(&(bb, bw, bx)) == std::cmp::Ordering::Less
@@ -239,16 +247,14 @@ impl PlacementEngine for Anneal {
             // (Validated NEUTRAL-or-better on motordrv: critic 6=6, convention dim +1, channels
             // visibly tiled; kept opt-in pending multi-board validation since layout-forcing can
             // hurt the critic in ways warnings don't catch — see the grid experiment.)
-            if std::env::var("MOTIF_TILE").is_ok() {
+            if p.options.motif_tile {
                 let mut cand = fast_final.clone();
                 if align_repeated_motifs(&mut cand, inc, ir) {
                     decongest(&mut cand);
                     let before =
-                        (truthfulness_breaks(env, &fast_final, inc, ir, needs_flag),
-                         warning_count(env, &fast_final, inc, ir, needs_flag));
+                        (cost.truthfulness_breaks(&fast_final), cost.warnings(&fast_final));
                     let after =
-                        (truthfulness_breaks(env, &cand, inc, ir, needs_flag),
-                         warning_count(env, &cand, inc, ir, needs_flag));
+                        (cost.truthfulness_breaks(&cand), cost.warnings(&cand));
                     if after <= before {
                         fast_final = cand;
                     }
@@ -260,7 +266,7 @@ impl PlacementEngine for Anneal {
             // `score` — so a congested sheet still gets the fast lane's refinement (io 16→13) while a
             // simple sheet gets the small path's cleaner routing. Cheap: only for force_fast smalls.
             if small_forced {
-                let sp = small_path_search(env, &bases[0], inc, ir, needs_flag, seed);
+                let sp = small_path_search(cost, &bases[0], inc, ir, seed, timed_top);
                 let (fb, fw, fx, fc) = score(&fast_final);
                 let (sb, sw, sx, sc) = score(&sp);
                 let sp_wins = (sb, sw, sx).cmp(&(fb, fw, fx)) == std::cmp::Ordering::Less
@@ -269,14 +275,37 @@ impl PlacementEngine for Anneal {
             } else {
                 items.clone_from_slice(&fast_final);
             }
-            return;
+            return report(self.name(), cost, items);
         }
 
         // Small board: greedy + four parallel anneals, pick the polished winner.
         // Extracted to small_path_search so the force_fast fast lane can run it as a
         // rival candidate; this call reproduces the old inline behaviour exactly.
-        let r = small_path_search(env, items, inc, ir, needs_flag, seed);
+        let r = small_path_search(cost, items, inc, ir, seed, timed_top);
         items.clone_from_slice(&r);
+        report(self.name(), cost, items)
+    }
+}
+
+/// Measure the FINAL placement against the injected cost, for the diagnostic
+/// [`PlaceResult`]. Empty placements report all-zero.
+fn report(engine: &str, cost: &dyn PlacementCost, items: &[Item]) -> PlaceResult {
+    if items.is_empty() {
+        return PlaceResult {
+            engine: engine.to_string(),
+            truthfulness_breaks: 0,
+            warnings: 0,
+            crossings: Crossings::default(),
+            cost: 0.0,
+        };
+    }
+    let warnings = cost.warnings(items);
+    PlaceResult {
+        engine: engine.to_string(),
+        truthfulness_breaks: cost.truthfulness_breaks(items),
+        warnings,
+        crossings: cost.crossings(items),
+        cost: cost.premium_cost_with_warnings(items, warnings),
     }
 }
 /// The small-board placement search, extracted so the fast lane can run it as a RIVAL
@@ -288,17 +317,16 @@ impl PlacementEngine for Anneal {
 /// POLISHED winner. Behaviour is byte-identical to the old inline else-branch (the
 /// placement_snapshot verifies it for the references that take the small path).
 fn small_path_search(
-    env: &KicadEnv,
+    cost: &dyn PlacementCost,
     seed: &[Item],
     inc: &Incidence,
     ir: &LayoutIr,
-    needs_flag: &BTreeSet<String>,
     rng_seed: u64,
+    timed: bool,
 ) -> Vec<Item> {
     use rayon::prelude::*;
     let mut work: Vec<Item> = seed.to_vec();
     let seed_state: Vec<Item> = work.clone();
-    let timed = std::env::var("DEBUG_SA_TIME").is_ok();
     let tic = |label: &str, f: &mut dyn FnMut()| {
         let t0 = std::time::Instant::now();
         f();
@@ -312,18 +340,18 @@ fn small_path_search(
     let mut state_d: Vec<Item> = Vec::new();
     let mut greedy_state: Vec<Item> = Vec::new();
     rayon::scope(|s| {
-        s.spawn(|_| { let mut f = || anneal_items(env, &mut state_b, inc, ir, needs_flag, true, false, rng_seed, None); tic("B broad", &mut f); });
-        { let mut f = || refine_items(env, &mut work, inc, ir, needs_flag); tic("greedy", &mut f); }
+        s.spawn(|_| { let mut f = || anneal_items(cost, &mut state_b, inc, ir, true, false, rng_seed, None); tic("B broad", &mut f); });
+        { let mut f = || cost.refine(&mut work); tic("greedy", &mut f); }
         greedy_state = work.to_vec();
         state_a = greedy_state.clone();
         state_c = greedy_state.clone();
         state_d = greedy_state.clone();
         rayon::join(
-            || { let mut f = || anneal_items(env, &mut state_a, inc, ir, needs_flag, false, false, rng_seed, None); tic("A seeded", &mut f); },
+            || { let mut f = || anneal_items(cost, &mut state_a, inc, ir, false, false, rng_seed, None); tic("A seeded", &mut f); },
             || {
                 rayon::join(
-                    || { let mut f = || anneal_items(env, &mut state_c, inc, ir, needs_flag, false, true, rng_seed ^ 0x9E3779B97F4A7C15, None); tic("C premium", &mut f); },
-                    || { let mut f = || anneal_locality(env, &mut state_d, inc, ir, needs_flag, rng_seed ^ 0x517CC1B727220A95); tic("D locality", &mut f); },
+                    || { let mut f = || anneal_items(cost, &mut state_c, inc, ir, false, true, rng_seed ^ 0x9E3779B97F4A7C15, None); tic("C premium", &mut f); },
+                    || { let mut f = || anneal_locality(cost, &mut state_d, inc, ir, rng_seed ^ 0x517CC1B727220A95); tic("D locality", &mut f); },
                 )
             },
         );
@@ -335,11 +363,11 @@ fn small_path_search(
         .par_iter()
         .map(|cand| {
             let mut shipped = cand.clone();
-            polish(env, &mut shipped, inc, ir, needs_flag);
+            cost.polish(&mut shipped);
             decongest(&mut shipped);
-            let b = truthfulness_breaks(env, &shipped, inc, ir, needs_flag);
-            let w = warning_count(env, &shipped, inc, ir, needs_flag);
-            let c = premium_score_with_w(env, &shipped, inc, ir, needs_flag, w);
+            let b = cost.truthfulness_breaks(&shipped);
+            let w = cost.warnings(&shipped);
+            let c = cost.premium_cost_with_warnings(&shipped, w);
             (b, w, c, shipped)
         })
         .collect();
@@ -374,11 +402,10 @@ fn small_path_search(
 /// longer (a wider global search from the raw seed). ANCHORS are mobile here: an
 /// anchor nudge frees a whole block to slide.
 fn anneal_items(
-    env: &KicadEnv,
+    cost: &dyn PlacementCost,
     items: &mut [Item],
     inc: &Incidence,
     ir: &LayoutIr,
-    needs_flag: &BTreeSet<String>,
     broad: bool,
     premium: bool,
     seed: u64,
@@ -387,11 +414,11 @@ fn anneal_items(
     // The objective: free tier minimises the base routed cost; the premium run
     // optimises the richer (straighter) objective. Run as an EXTRA candidate so it
     // never displaces the base run's warning-free find — see `Anneal::search`.
-    let cost = |env: &KicadEnv, items: &[Item], inc: &Incidence, ir: &LayoutIr, nf: &BTreeSet<String>| {
+    let objective = |items: &[Item]| {
         if premium {
-            premium_score_items(env, items, inc, ir, nf)
+            cost.premium_cost(items)
         } else {
-            score_items(env, items, inc, ir, nf)
+            cost.cost(items)
         }
     };
     let sats: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen).collect();
@@ -408,7 +435,7 @@ fn anneal_items(
     let orients = [Orient::Up, Orient::Down, Orient::Left, Orient::Right];
     let mut rng = Rng(seed);
 
-    let mut cur = cost(env, items, inc, ir, needs_flag);
+    let mut cur = objective(items);
     let mut best_items: Vec<Item> = items.to_vec();
     let mut best = cur;
 
@@ -498,7 +525,7 @@ fn anneal_items(
             continue;
         }
 
-        let c = cost(env, items, inc, ir, needs_flag);
+        let c = objective(items);
         let d = c - cur;
         if d < 0.0 || rng.unit() < (-d / t).exp() {
             cur = c;
@@ -560,7 +587,7 @@ fn proxy_cost(
     for (si, tgts) in cohesion {
         let (mut cx, mut cy) = (0.0f64, 0.0f64);
         for (j, pgi) in tgts {
-            let p = sch_io::write::pin_endpoint(
+            let p = pin_endpoint(
                 &items[*j].geom.pins[*pgi],
                 items[*j].at,
                 items[*j].angle,
@@ -606,11 +633,10 @@ fn proxy_cost(
 /// `Anneal::search`: the pick ships it only if it beats the tuned paths on the true
 /// cost, so it is purely additive and never regresses a tuned fixture.
 fn anneal_locality(
-    env: &KicadEnv,
+    cost: &dyn PlacementCost,
     items: &mut [Item],
     inc: &Incidence,
     ir: &LayoutIr,
-    needs_flag: &BTreeSet<String>,
     seed: u64,
 ) {
     let sats: Vec<usize> =
@@ -658,7 +684,7 @@ fn anneal_locality(
     let mut cur = proxy_cost(items, inc, ir, &cohesion);
     let mut proxy_best = cur;
     let mut proxy_best_items: Vec<Item> = items.to_vec();
-    let mut best_true = premium_score_items(env, items, inc, ir, needs_flag);
+    let mut best_true = cost.premium_cost(items);
     let mut best_items: Vec<Item> = items.to_vec();
 
     for it in 0..iters {
@@ -708,7 +734,7 @@ fn anneal_locality(
                 // Pay the true routed cost only on a new proxy-best, throttled.
                 if it - last_verify >= verify_period {
                     last_verify = it;
-                    let tc = premium_score_items(env, items, inc, ir, needs_flag);
+                    let tc = cost.premium_cost(items);
                     if tc < best_true {
                         best_true = tc;
                         best_items.clone_from_slice(items);
@@ -723,7 +749,7 @@ fn anneal_locality(
         }
     }
     // Always verify the final proxy-best against the true cost.
-    let tc = premium_score_items(env, &proxy_best_items, inc, ir, needs_flag);
+    let tc = cost.premium_cost(&proxy_best_items);
     if tc < best_true {
         best_items.clone_from_slice(&proxy_best_items);
     }
@@ -810,7 +836,7 @@ fn magnet_proxy(
         // Live centroid of the target pins.
         let (mut tx, mut ty) = (0.0f64, 0.0f64);
         for &(j, pgi) in tgts {
-            let p = sch_io::write::pin_endpoint(
+            let p = pin_endpoint(
                 &items[j].geom.pins[pgi],
                 items[j].at,
                 items[j].angle,
@@ -1009,32 +1035,6 @@ fn align_repeated_motifs(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) -> 
     }
     changed
 }
-/// Geometric TRUTHFULNESS breaks (net merges / shorts / foreign taps) of a placement
-/// as it would SHIP — the same checks `layout_cost` prices, returned as a hard count
-/// so the candidate pick can REJECT any layout that mis-wires. Critical: the
-/// readability `warning_count` does NOT detect a merge (a rail-to-rail short actually
-/// LOWERS length+junctions), so a placement move (the proxy magnet/gravity) that
-/// strands two nets onto one wire would otherwise be shipped as a fewest-warning
-/// candidate — the documented dense-board truthfulness failure. Gating the pick on
-/// this makes the router-free fast lane truthfulness-safe without a full netlist
-/// extraction.
-fn truthfulness_breaks(
-    env: &KicadEnv,
-    items: &[Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-    needs_flag: &BTreeSet<String>,
-) -> usize {
-    match build_writer(env, None, items, inc, ir, needs_flag, true) {
-        Ok(w) => {
-            let wires = w.wires_with_nets();
-            count_merges(&wires, &w.junction_positions())
-                + count_shorts(env, &w, items, inc, &wires)
-                + count_foreign_taps(&wires)
-        }
-        Err(_) => usize::MAX,
-    }
-}
 /// Weight on the LLM zone bias in `proxy_cost`. Raised from the original 0.8: at 0.8 the
 /// soft pull lost to spread/hpwl/cohere and the engine effectively ignored the LLM's
 /// coarse signal-flow/cluster plan (measured: zoned sprawl ≈ unzoned). A stronger pull
@@ -1042,26 +1042,3 @@ fn truthfulness_breaks(
 /// direction + functional grouping — the local force-layout can't discover). ZERO effect
 /// when `ir.zone` is empty (every reference/snapshot path), so byte-identity holds.
 const ZBIAS_W: f64 = 0.8;
-/// `premium_score_items` when the caller ALREADY knows the shipped warning count
-/// `w` (the candidate pick computes it for the primary sort). Identical result,
-/// but skips the redundant second text-solving `warning_count` — the candidate
-/// evaluation was paying for two full text solves per candidate.
-fn premium_score_with_w(
-    env: &KicadEnv,
-    items: &[Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-    needs_flag: &BTreeSet<String>,
-    w: usize,
-) -> f64 {
-    let aes = match build_writer(env, None, items, inc, ir, needs_flag, false) {
-        Ok(wr) => layout_cost(env, &wr, items, inc, ir, true),
-        Err(_) => return f64::INFINITY,
-    };
-    let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
-    if pins <= 250 && inc.len() <= 40 {
-        10_000.0 * w as f64 + aes
-    } else {
-        aes
-    }
-}
