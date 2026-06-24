@@ -1,5 +1,5 @@
 //! Strict walker: yaml::Node -> SurfaceDesign. Unknown keys are errors
-//! with did-you-mean suggestions (spec §5.3.6).
+//! with did-you-mean suggestions.
 
 use crate::diag::{Diagnostic, Diagnostics, Span};
 use crate::surface::*;

@@ -5,7 +5,7 @@ pub type NetName = String;
 pub type BlockName = String;
 
 /// Kernel design — post-desugar. This is the ONLY thing the
-/// validator, reconciler, and lift operate on (spec §5 layering).
+/// validator, reconciler, and lift operate on.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Design {
     pub name: Option<String>,
@@ -42,7 +42,7 @@ pub struct Component {
     pub footprint: Option<String>,
     pub dnp: bool,
     pub props: IndexMap<String, String>,
-    /// Component-level pin map; resolves across units (spec §5.2).
+    /// Component-level pin map; resolves across units.
     pub pins: IndexMap<String, PinTarget>,
     /// Multi-unit parts: unit letter -> pin map.
     pub units: IndexMap<String, IndexMap<String, PinTarget>>,
@@ -70,7 +70,7 @@ pub enum PinTarget {
     NoConnect,
 }
 
-/// Identity for reconciliation (spec §7): authored components match by
+/// Identity for reconciliation: authored components match by
 /// refdes; sugar-synthesized ones by (parent, role, index) — carried
 /// into the sch file as ap_parent/ap_role/ap_index properties.
 #[derive(Debug, Clone, PartialEq, Eq)]

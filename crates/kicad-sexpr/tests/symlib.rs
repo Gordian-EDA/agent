@@ -1,9 +1,9 @@
 //! Acceptance tests for symbol-library parsing, encoding empirically
 //! validated ground truth from the installed KiCAD libraries.
 
-use circuit_lang::PinType;
 use kicad_cli_rs::env::KicadEnv;
 use kicad_sexpr::symlib::SymbolLib;
+use symbol_contract::PinType;
 
 fn lib(name: &str) -> Option<SymbolLib> {
     let env = KicadEnv::detect()?;

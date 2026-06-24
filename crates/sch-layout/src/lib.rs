@@ -5,11 +5,10 @@
 //! [`read`] to reverse it):
 //!
 //! - [`floorplan`] — the cost-scored placement + routing engine and its IR.
-//! - [`wire`] — the orthogonal elbow router (was `route`).
-//! - [`label`] — text/label placement solver (was `textplace`).
-//! - [`write`] — the `SchematicWriter` that renders placements to `.kicad_sch`
-//!   (was `emit`).
-//! - [`read`] — recovering a `Design` view from an emitted schematic (was `lift`).
+//! - [`wire`] — the orthogonal elbow router.
+//! - [`label`] — text/label placement solver.
+//! - [`write`] — the `SchematicWriter` that renders placements to `.kicad_sch`.
+//! - [`read`] — recovering a `Design` view from an emitted schematic.
 //!
 //! The shared vocabulary — geometry (`Dir`/segment math), grid snapping, ids, and
 //! the [`EmitOutput`] result types — lives in the `sch-model` crate, re-exported

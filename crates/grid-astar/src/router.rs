@@ -10,7 +10,7 @@
 //!
 //! Cell paths are converted to mm polylines, split at layer changes (a [`Via`]
 //! is emitted at each transition) and collinear runs are merged (a fresh copy
-//! of the simplify idea from `sch-engine/route.rs` — the crates stay
+//! of the simplify idea from `sch-io/src/wire.rs` — the crates stay
 //! decoupled). The result is a [`RouteResult`]: the [`RouteSolution`] plus a
 //! list of [`FailedNet`]s. A net that cannot be routed is reported, never
 //! silently dropped, and the router never panics.
@@ -755,7 +755,7 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
 }
 
 /// Drop near-duplicate points and merge collinear runs. Fresh copy of the
-/// simplify idea in `sch-engine/route.rs`, adapted to [`Point2`] (the crates
+/// simplify idea in `sch-io/src/wire.rs`, adapted to [`Point2`] (the crates
 /// stay decoupled — no dependency between them).
 fn simplify(path: Vec<Point2>) -> Vec<Point2> {
     const EPS: f64 = 1e-9;

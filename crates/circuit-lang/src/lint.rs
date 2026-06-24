@@ -1,4 +1,4 @@
-//! Semantic lints over the kernel model (spec §6).
+//! Semantic lints over the kernel model.
 
 use crate::diag::{Diagnostic, Diagnostics};
 use crate::model::*;

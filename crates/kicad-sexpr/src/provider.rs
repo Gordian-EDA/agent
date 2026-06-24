@@ -1,4 +1,4 @@
-//! Production [`circuit_lang::SymbolProvider`] backed by the installed
+//! Production [`symbol_contract::SymbolProvider`] backed by the installed
 //! KiCAD symbol libraries.
 //!
 //! Libraries are loaded lazily, one `.kicad_sym` file per referenced lib,
@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use circuit_lang::{PinDir, PinMeta, PinType, SymbolMeta, SymbolProvider};
+use symbol_contract::{PinDir, PinMeta, PinType, SymbolMeta, SymbolProvider};
 use elsa::sync::FrozenMap;
 
 use kicad_cli_rs::env::KicadEnv;

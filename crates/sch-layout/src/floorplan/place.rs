@@ -21,27 +21,9 @@ use sch_model::item::{Incidence, Item};
 use super::infer::anchor_tap;
 use sch_model::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net};
 
-/// Find the root of `x` in a disjoint-set forest, compressing the path to it.
-fn uf_find(parent: &mut [usize], x: usize) -> usize {
-    let mut r = x;
-    while parent[r] != r {
-        r = parent[r];
-    }
-    let mut c = x;
-    while parent[c] != r {
-        let next = parent[c];
-        parent[c] = r;
-        c = next;
-    }
-    r
-}
-
-/// Union the sets containing `a` and `b`; returns the surviving root.
-fn uf_union(parent: &mut [usize], a: usize, b: usize) -> usize {
-    let (ra, rb) = (uf_find(parent, a), uf_find(parent, b));
-    parent[ra] = rb;
-    rb
-}
+// The disjoint-set forest (over a caller-owned `parent` slice) lives in
+// `sch_model::union_find`, shared with circuit-lang's pin reconciler.
+use sch_model::union_find::{uf_find, uf_union};
 
 /// Compose every block's per-block `layout:` grid into one global relative seed:
 /// refdes → (grid col, grid row). Each gridded block occupies its own column band
@@ -190,7 +172,7 @@ fn prepare_writer(
     // touching when separating them would transiently raise routed cost (a local
     // minimum), so a final, unconditional relaxation pushes any remaining
     // overlaps apart. Cheap a frame may be, the shipped sheet never collides.
-    problem.legalize(&mut items);
+    decongest(&mut items);
     // Snap each frozen idiom cluster to its IC's ACTUAL pin positions in mm. The
     // coarse grid (IC = one cell, but renders tall) packs a cluster's cells OUTSIDE
     // the body, leaving long dog-legs to the pins; this aligns the crystal beside its
@@ -2999,39 +2981,12 @@ const SEARCH_SEED: u64 = 0xD1B54A32D192ED03;
 /// lane; the `> FAST_PINS` test keeps uart itself routed, hence byte-identical.)
 pub const FAST_PINS: usize = 34;
 
-/// One placement-search strategy over the coarse cells. `Greedy` and `Anneal` are
-/// swappable COUNTERPARTS (owner: SA is the paid tier, possibly with a richer
-/// cost). `cells` is IN = the seed frame (`assign_cells`), OUT = the chosen
-/// placement; `seed` drives any randomness so the result is reproducible.
-/// The placement problem an engine works on: the scoring `env`, the connectivity
-/// (`inc`), the intent (`ir` — rails/frozen/zones), the ERC `needs_flag` set, and a
-/// `seed` for stochastic engines. It bundles what the placement primitives used to
-/// thread by hand. A cost-based engine evaluates placements against it; a learned or
-/// template engine may only read it. `legalize` is the one shared, cost-free repair.
-pub struct PlaceProblem<'a> {
-    pub env: &'a KicadEnv,
-    pub inc: &'a Incidence,
-    pub ir: &'a LayoutIr,
-    pub needs_flag: &'a BTreeSet<String>,
-    pub seed: u64,
-}
-
-impl PlaceProblem<'_> {
-    /// Geometric overlap repair (cost-free) — usable by any engine.
-    pub(crate) fn legalize(&self, items: &mut [Item]) {
-        decongest(items);
-    }
-}
-
-/// A schematic placement ENGINE: given the [`PlaceProblem`], write final positions
-/// into `items`. The only contract is "produce a placement" — *how* (cost-search,
-/// learned, constraint, template, portfolio) is the engine's own business, so the
-/// trait assumes nothing (no cost, no move-set). Greedy/Anneal happen to be
-/// cost-based and keep their cost private; a future engine need not be.
-pub trait PlacementEngine {
-    fn name(&self) -> &'static str;
-    fn place(&self, problem: &PlaceProblem, items: &mut [Item]);
-}
+// The placement-engine boundary — `PlaceProblem` (what an engine reads) and the
+// `PlacementEngine` trait (what it implements) — lives in `sch_model::place`, so the
+// engine crates depend on the shared vocabulary, not on this layout engine. Re-exported
+// so this module's `PlaceProblem`/`PlacementEngine` paths (and the engines' globs)
+// resolve unchanged.
+pub use sch_model::place::{PlaceProblem, PlacementEngine};
 
 // Greedy (free) lives in the `greedy-place` crate; Anneal (premium) in `anneal-place`.
 // This crate is engine-agnostic — the agent injects an engine via `emit_strategy`.
@@ -5590,7 +5545,7 @@ fn ic_port_exit_override(
     eps: &[([f64; 2], Dir)],
     name_side: Side,
 ) -> Option<(Side, [f64; 2])> {
-    const NAME_OFFSET: f64 = 0.508; // KiCAD default pin-name offset (matches textplace)
+    const NAME_OFFSET: f64 = 0.508; // KiCAD default pin-name offset (matches the `label` solver)
     let snap = crate::grid::snap;
     // Map the net's pins (same flatten order `wire()` used to build `eps`) back to
     // their (item, pin) so we can read each IC pin's geometry + name.

@@ -81,9 +81,7 @@ pub fn metrics(solution: &RouteSolution) -> RouteMetrics {
     let mut wirelength = 0.0;
     for t in &solution.traces {
         for w in t.path.windows(2) {
-            let dx = w[1].x - w[0].x;
-            let dy = w[1].y - w[0].y;
-            wirelength += (dx * dx + dy * dy).sqrt();
+            wirelength += w[1].dist(&w[0]);
         }
     }
     RouteMetrics {

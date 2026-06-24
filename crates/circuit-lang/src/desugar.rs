@@ -1,4 +1,4 @@
-//! Sugar -> kernel lowering (spec §5.5). The reconciler and lints see
+//! Sugar -> kernel lowering. The reconciler and lints see
 //! only the output of this pass.
 
 use crate::diag::{Diagnostic, Diagnostics};
@@ -7,7 +7,7 @@ use crate::provider::SymbolProvider;
 use crate::surface::*;
 use indexmap::IndexMap;
 
-/// Closed alias table (spec §5.5) — exactly these five.
+/// Closed alias table — exactly these five.
 fn alias(part: &str) -> String {
     match part {
         "R" => "Device:R".into(),
@@ -222,7 +222,7 @@ fn lower_block_layout(sb: &SurfaceBlock, diags: &mut Diagnostics) -> LayoutGrid 
 
 /// Final desugar pass: for every component whose symbol is known, any physical
 /// pin not covered by an author key and whose `etype` is not `PowerInput`
-/// becomes an explicit `nc` (spec §5.3.5). A net-mapped pin, an explicit `nc`,
+/// becomes an explicit `nc`. A net-mapped pin, an explicit `nc`,
 /// or a stacked name covering the pin all count as coverage; power-input pins
 /// are skipped (lint.rs already errors when they are left unconnected).
 /// Markers are keyed by pin number and inserted in symbol pin order, so the
@@ -404,7 +404,7 @@ fn apply_two_pin(
         }
         let ((a, aspan), (b, bspan)) = sc.between.take().unwrap();
         // Map `between` args by numeric pin NUMBER, not library order: first arg →
-        // lowest-numbered pin, second arg → highest (spec §5.5). Fall back to
+        // lowest-numbered pin, second arg → highest. Fall back to
         // string order for non-numeric pin numbers.
         let mut ordered: Vec<&crate::provider::PinMeta> = meta.pins.iter().collect();
         ordered.sort_by(
@@ -438,8 +438,9 @@ fn sanitize(pin: &str) -> String {
         .collect()
 }
 
-/// Union-find over pin nodes keyed by `(refdes, pin)`. `make` interns a
-/// node, `union` merges two, `find` returns a node's root (path-compressed).
+/// Union-find over pin nodes keyed by `(refdes, pin)`. `make` interns a node;
+/// the disjoint-set core (`find`/`union`) is `sch_model::union_find` over the
+/// interned `parent` slice (second-wins union, so a node's root is unchanged).
 #[derive(Default)]
 struct PinUnionFind {
     nodes: Vec<(String, String)>,
@@ -460,16 +461,11 @@ impl PinUnionFind {
                 nodes.len() - 1
             })
     }
-    fn find(&mut self, mut i: usize) -> usize {
-        while self.parent[i] != i {
-            self.parent[i] = self.parent[self.parent[i]];
-            i = self.parent[i];
-        }
-        i
+    fn find(&mut self, i: usize) -> usize {
+        sch_model::union_find::uf_find(&mut self.parent, i)
     }
     fn union(&mut self, i: usize, j: usize) {
-        let (ri, rj) = (self.find(i), self.find(j));
-        self.parent[ri] = rj;
+        sch_model::union_find::uf_union(&mut self.parent, i, j);
     }
 }
 

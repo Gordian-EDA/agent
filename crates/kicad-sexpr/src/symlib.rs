@@ -1,4 +1,4 @@
-//! Parsing of `.kicad_sym` symbol libraries into `circuit_lang::SymbolMeta`.
+//! Parsing of `.kicad_sym` symbol libraries into `symbol_contract::SymbolMeta`.
 //!
 //! Backend: `kiutils_kicad`. Its AST nests `<NAME>_<unit>_<bodystyle>`
 //! sub-symbol blocks inside the parent [`kiutils_kicad::Symbol`] as `units`,
@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
 
-use circuit_lang::{PinDir, PinMeta, PinType, SymbolMeta};
+use symbol_contract::{PinDir, PinMeta, PinType, SymbolMeta};
 use kiutils_kicad::{SymPin, Symbol, SymbolLibFile};
 
 /// A loaded `.kicad_sym` library: symbol name → merged, extends-resolved

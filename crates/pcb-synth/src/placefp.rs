@@ -38,6 +38,7 @@ use kiutils_kicad::PcbFile;
 use pcb_place::placement::{Part, Placement, PartPad};
 use pcb_model::{LayerRef, Point2};
 
+use kicad_sexpr::fmt_num;
 use kicad_sexpr::footlib::{BBox, Footprint, FootprintPad, PadTechnology};
 
 /// Build a placement [`Part`] from a parsed [`Footprint`].
@@ -391,13 +392,6 @@ fn footprint_reference(block: &str) -> Option<String> {
     let i = block.find(key)? + key.len();
     let j = block[i..].find('"')?;
     Some(block[i..i + j].to_owned())
-}
-
-/// Format an `f64` the way KiCAD writes coordinates (shortest round-tripping
-/// decimal, `-0.0` collapsed to `0`). Mirrors `pcb::fmt_num`.
-fn fmt_num(v: f64) -> String {
-    let v = if v == 0.0 { 0.0 } else { v };
-    format!("{v}")
 }
 
 fn map_kiutils_err(e: kiutils_kicad::Error) -> io::Error {
