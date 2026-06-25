@@ -224,23 +224,13 @@ fn pad_bbox(pads: &[FootprintPad]) -> Option<BBox> {
 /// folded into the enclosing AABB).
 fn pad_aabb(pad: &FootprintPad) -> BBox {
     let [cx, cy] = pad.at;
-    let (hw, hh) = rotated_aabb_half(pad.size[0], pad.size[1], pad.rotation);
+    let (hw, hh) = geom::rotated_aabb_half(pad.size[0], pad.size[1], pad.rotation);
     BBox {
         min_x: cx - hw,
         min_y: cy - hh,
         max_x: cx + hw,
         max_y: cy + hh,
     }
-}
-
-/// Axis-aligned half-extents of a `w × h` rectangle rotated `deg` degrees —
-/// identical formula to `footlib`/`pcb`.
-fn rotated_aabb_half(w: f64, h: f64, deg: f64) -> (f64, f64) {
-    let theta = deg.to_radians();
-    let (s, c) = theta.sin_cos();
-    let hw = (w / 2.0 * c).abs() + (h / 2.0 * s).abs();
-    let hh = (w / 2.0 * s).abs() + (h / 2.0 * c).abs();
-    (hw, hh)
 }
 
 // ── move_footprints: re-seat a template board to an engine placement ─────────
@@ -425,7 +415,7 @@ mod tests {
         let hw = part.courtyard_w / 2.0;
         let hh = part.courtyard_h / 2.0;
         for pad in &part.pads {
-            let (phw, phh) = rotated_aabb_half(pad.width, pad.height, 0.0);
+            let (phw, phh) = geom::rotated_aabb_half(pad.width, pad.height, 0.0);
             assert!(
                 pad.offset.x.abs() + phw <= hw + 1e-9 && pad.offset.y.abs() + phh <= hh + 1e-9,
                 "pad {} at {:?} (±{phw:.3},±{phh:.3}) escapes courtyard ±({hw:.3},{hh:.3})",

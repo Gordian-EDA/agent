@@ -335,7 +335,7 @@ pub fn render_placement(
             continue;
         };
         for pad in &part.pads {
-            let off = rotate_offset(&pad.offset, pl.rotation);
+            let off = pad.offset.rotate(pl.rotation as f64);
             let (pw, ph) = match pl.rotation.rem_euclid(360) {
                 90 | 270 => (pad.height, pad.width),
                 _ => (pad.width, pad.height),
@@ -360,18 +360,6 @@ pub fn render_placement(
 
     w.push_str("</svg>\n");
     o
-}
-
-/// Rotate a pad offset by a quadrant rotation (degrees, y-down) — the same
-/// convention `pcb_place::placement` uses for pad world positions.
-fn rotate_offset(off: &Point2, rot: i32) -> Point2 {
-    // KiCAD footprint-rotation convention (matches placement::rotate_offset).
-    match rot.rem_euclid(360) {
-        90 => Point2 { x: off.y, y: -off.x },
-        180 => Point2 { x: -off.x, y: -off.y },
-        270 => Point2 { x: -off.y, y: off.x },
-        _ => Point2 { x: off.x, y: off.y },
-    }
 }
 
 /// A stable, readable `#rrggbb` colour derived from a net name (FNV-1a hash →

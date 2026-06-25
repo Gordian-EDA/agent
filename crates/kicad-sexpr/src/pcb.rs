@@ -163,7 +163,7 @@ pub fn read_board(path: &Path) -> io::Result<ImportedBoard> {
             continue;
         }
         let [x, y] = fp.at.unwrap_or([0.0, 0.0]);
-        let rotation = snap_quadrant(fp.rotation.unwrap_or(0.0));
+        let rotation = geom::snap_quadrant(fp.rotation.unwrap_or(0.0)) as i32;
         let pads = fp
             .pads
             .iter()
@@ -191,12 +191,6 @@ pub fn read_board(path: &Path) -> io::Result<ImportedBoard> {
         bounds,
         parts,
     })
-}
-
-/// Snap a file angle (any degrees, CCW) to the nearest 0/90/180/270 quadrant.
-fn snap_quadrant(deg: f64) -> i32 {
-    let q = ((deg / 90.0).round() as i32).rem_euclid(4);
-    q * 90
 }
 
 // ── layers ───────────────────────────────────────────────────────────────────
@@ -321,30 +315,11 @@ fn pad_layer(pad: &PcbPad, layer_names: &[String]) -> LayerRef {
 fn pad_center(fp: &PcbFootprint, pad: &PcbPad) -> Point2 {
     let [fx, fy] = fp.at.unwrap_or([0.0, 0.0]);
     let [dx, dy] = pad.at.unwrap_or([0.0, 0.0]);
-    let (rx, ry) = rotate_offset(dx, dy, fp.rotation.unwrap_or(0.0));
+    let r = Point2::new(dx, dy).rotate(fp.rotation.unwrap_or(0.0));
     Point2 {
-        x: fx + rx,
-        y: fy + ry,
+        x: fx + r.x,
+        y: fy + r.y,
     }
-}
-
-/// Rotate offset `(dx, dy)` by a CCW angle `deg` in KiCAD's y-down world.
-///
-/// `x' = dx·cosθ + dy·sinθ`, `y' = -dx·sinθ + dy·cosθ`.
-fn rotate_offset(dx: f64, dy: f64, deg: f64) -> (f64, f64) {
-    let theta = deg.to_radians();
-    let (s, c) = theta.sin_cos();
-    (dx * c + dy * s, -dx * s + dy * c)
-}
-
-/// Axis-aligned bounding half-extents of a `w × h` rectangle rotated by `deg`.
-/// Returns `(half_width, half_height)` of the enclosing AABB.
-fn rotated_aabb_half(w: f64, h: f64, deg: f64) -> (f64, f64) {
-    let theta = deg.to_radians();
-    let (s, c) = theta.sin_cos();
-    let hw = (w / 2.0 * c).abs() + (h / 2.0 * s).abs();
-    let hh = (w / 2.0 * s).abs() + (h / 2.0 * c).abs();
-    (hw, hh)
 }
 
 // ── obstacles ────────────────────────────────────────────────────────────────
@@ -450,7 +425,7 @@ fn pad_obstacle(
     }
     // The pad's stored rotation is its total rotation in board space.
     let rot = pad.rotation.unwrap_or_else(|| fp.rotation.unwrap_or(0.0));
-    let (hw, hh) = rotated_aabb_half(w, h, rot);
+    let (hw, hh) = geom::rotated_aabb_half(w, h, rot);
 
     let layers = pad_obstacle_layers(pad, layer_names);
     let connected_to = pad

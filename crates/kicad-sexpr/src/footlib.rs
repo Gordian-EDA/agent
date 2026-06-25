@@ -300,18 +300,8 @@ fn pad_detail(pad: &kiutils_kicad::FpPad) -> FootprintPad {
 fn pad_corners(pad: &FootprintPad) -> [[f64; 2]; 2] {
     let [cx, cy] = pad.at;
     let [w, h] = pad.size;
-    let (hw, hh) = rotated_aabb_half(w, h, pad.rotation);
+    let (hw, hh) = geom::rotated_aabb_half(w, h, pad.rotation);
     [[cx - hw, cy - hh], [cx + hw, cy + hh]]
-}
-
-/// Axis-aligned half-extents of a `w × h` rectangle rotated `deg` degrees.
-/// Identical formula to [`crate::pcb`]'s `rotated_aabb_half`.
-fn rotated_aabb_half(w: f64, h: f64, deg: f64) -> (f64, f64) {
-    let theta = deg.to_radians();
-    let (s, c) = theta.sin_cos();
-    let hw = (w / 2.0 * c).abs() + (h / 2.0 * s).abs();
-    let hh = (w / 2.0 * s).abs() + (h / 2.0 * c).abs();
-    (hw, hh)
 }
 
 /// All defined geometry points of a graphic (`start`/`end`/`center`/`at`).
