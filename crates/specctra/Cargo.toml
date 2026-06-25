@@ -9,6 +9,7 @@ description = "Specctra .ses codec for Freerouting routed geometry."
 [dependencies]
 pcb-model = { path = "../pcb-model" }
 kiutils_sexpr.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

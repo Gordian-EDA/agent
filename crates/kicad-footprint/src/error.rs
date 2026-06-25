@@ -14,20 +14,25 @@ use crate::id::FootprintId;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// What went wrong while reading a footprint library.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A library nickname was empty or contained a `:` separator.
+    #[error("invalid library id `{value}`")]
     InvalidLibraryId { value: String },
     /// A `Nickname:Name` id was malformed (no separator, empty half, …).
+    #[error("invalid footprint id `{value}`")]
     InvalidFootprintId { value: String },
     /// The id is well-formed but no such footprint is indexed.
+    #[error("unknown footprint `{id}`")]
     NotFound { id: FootprintId },
     /// A filesystem error, tagged with the path it happened on.
+    #[error("{}: {source}", .path.display())]
     Io {
         path: PathBuf,
         source: std::io::Error,
     },
     /// The `.kicad_mod` text could not be parsed into a footprint.
+    #[error("{}: {message}", .path.display())]
     Parse { path: PathBuf, message: String },
 }
 
@@ -48,26 +53,5 @@ impl Error {
     /// Whether this is a [`Error::Parse`] (malformed footprint content).
     pub fn is_parse(&self) -> bool {
         matches!(self, Error::Parse { .. })
-    }
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::InvalidLibraryId { value } => write!(f, "invalid library id `{value}`"),
-            Error::InvalidFootprintId { value } => write!(f, "invalid footprint id `{value}`"),
-            Error::NotFound { id } => write!(f, "unknown footprint `{id}`"),
-            Error::Io { path, source } => write!(f, "{}: {source}", path.display()),
-            Error::Parse { path, message } => write!(f, "{}: {message}", path.display()),
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Io { source, .. } => Some(source),
-            _ => None,
-        }
     }
 }

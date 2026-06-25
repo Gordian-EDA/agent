@@ -14,6 +14,7 @@ use pcb_place::placement::{Edge, GroupHint, LockedAt, PlacementHints, Rect};
 
 use crate::tools::PcbToolCtx;
 
+use super::fmt_num;
 use super::seed::{BoardSeed, BoardSeedPart, BoardSeedRules, Keepout, PourSpec};
 
 // ── derive_board ──────────────────────────────────────────────────────────────
@@ -342,7 +343,7 @@ fn seed_net_classes(
         let key = if (width - rules.min_trace_width).abs() < geom::EPS {
             "Default".to_owned()
         } else {
-            format!("Width_{}", kicad_sexpr::fmt_num(width).replace('.', "_"))
+            format!("Width_{}", fmt_num(width).replace('.', "_"))
         };
         by_width
             .entry(key)
@@ -358,7 +359,7 @@ fn seed_net_classes(
             description: if name == "Default" {
                 "default board routing rules".to_owned()
             } else {
-                format!("{}mm trace-width nets", kicad_sexpr::fmt_num(trace_width))
+                format!("{}mm trace-width nets", fmt_num(trace_width))
             },
             name,
             clearance: rules.clearance,
@@ -470,26 +471,10 @@ impl<'a> SeedBoardWriter<'a> {
                 "\t(net_class \"{}\" \"{}\"",
                 class.name, class.description
             );
-            let _ = writeln!(
-                out,
-                "\t\t(clearance {})",
-                kicad_sexpr::fmt_num(class.clearance)
-            );
-            let _ = writeln!(
-                out,
-                "\t\t(trace_width {})",
-                kicad_sexpr::fmt_num(class.trace_width)
-            );
-            let _ = writeln!(
-                out,
-                "\t\t(via_dia {})",
-                kicad_sexpr::fmt_num(class.via_diameter)
-            );
-            let _ = writeln!(
-                out,
-                "\t\t(via_drill {})",
-                kicad_sexpr::fmt_num(class.via_drill)
-            );
+            let _ = writeln!(out, "\t\t(clearance {})", fmt_num(class.clearance));
+            let _ = writeln!(out, "\t\t(trace_width {})", fmt_num(class.trace_width));
+            let _ = writeln!(out, "\t\t(via_dia {})", fmt_num(class.via_diameter));
+            let _ = writeln!(out, "\t\t(via_drill {})", fmt_num(class.via_drill));
             for member in members {
                 let _ = writeln!(out, "\t\t(add_net \"{member}\")");
             }
@@ -503,8 +488,8 @@ impl<'a> SeedBoardWriter<'a> {
             for idx in 0..points.len() {
                 let a = points[idx];
                 let b = points[(idx + 1) % points.len()];
-                let (x0, y0) = (kicad_sexpr::fmt_num(a.x), kicad_sexpr::fmt_num(a.y));
-                let (x1, y1) = (kicad_sexpr::fmt_num(b.x), kicad_sexpr::fmt_num(b.y));
+                let (x0, y0) = (fmt_num(a.x), fmt_num(a.y));
+                let (x1, y1) = (fmt_num(b.x), fmt_num(b.y));
                 let uuid = seed_uuid(&format!("edge:{x0}:{y0}:{x1}:{y1}"));
                 let _ = write!(
                     out,
@@ -515,14 +500,8 @@ impl<'a> SeedBoardWriter<'a> {
             }
             return;
         }
-        let (x0, y0) = (
-            kicad_sexpr::fmt_num(self.bounds.min_x),
-            kicad_sexpr::fmt_num(self.bounds.min_y),
-        );
-        let (x1, y1) = (
-            kicad_sexpr::fmt_num(self.bounds.max_x),
-            kicad_sexpr::fmt_num(self.bounds.max_y),
-        );
+        let (x0, y0) = (fmt_num(self.bounds.min_x), fmt_num(self.bounds.min_y));
+        let (x1, y1) = (fmt_num(self.bounds.max_x), fmt_num(self.bounds.max_y));
         let uuid = seed_uuid(&format!("edge:{x0}:{y0}:{x1}:{y1}"));
         let _ = write!(
             out,
@@ -599,15 +578,15 @@ fn emit_seed_footprint(
         let _ = writeln!(
             out,
             "\t\t(at {} {})",
-            kicad_sexpr::fmt_num(part.at.x),
-            kicad_sexpr::fmt_num(part.at.y)
+            fmt_num(part.at.x),
+            fmt_num(part.at.y)
         );
     } else {
         let _ = writeln!(
             out,
             "\t\t(at {} {} {})",
-            kicad_sexpr::fmt_num(part.at.x),
-            kicad_sexpr::fmt_num(part.at.y),
+            fmt_num(part.at.x),
+            fmt_num(part.at.y),
             rot
         );
     }
@@ -828,8 +807,8 @@ fn cap_font_size(body: &str, max: f64) -> String {
     format!(
         "{}(size {} {}){}",
         &body[..start],
-        kicad_sexpr::fmt_num(w),
-        kicad_sexpr::fmt_num(h),
+        fmt_num(w),
+        fmt_num(h),
         &body[open + rel_close + 1..]
     )
 }
@@ -854,7 +833,7 @@ fn bump_pad_rotation(node: &str, fp_rot: i32) -> String {
     let replacement = if new_rot == 0.0 {
         format!("(at {x} {y}")
     } else {
-        format!("(at {x} {y} {})", kicad_sexpr::fmt_num(new_rot))
+        format!("(at {x} {y} {})", fmt_num(new_rot))
     };
     let mut out = String::with_capacity(node.len() + 8);
     out.push_str(&node[..at_pos]);

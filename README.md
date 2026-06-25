@@ -59,7 +59,7 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | `sch-floorplan` / `sch-io` / `sch-place` | Deterministic schematic floorplan core (`Design` → `.kicad_sch` and back), over the `greedy-place`/`anneal-place` engines, with the shared model + I/O layers |
 | `grid-astar` / `pcb-place` / `negotiated-mesh` | Deterministic placement + grid-A\* escape + capacity-mesh copper routing |
 | `drc-lint` | PCB DRC lint |
-| `kicad-sexpr` / `kicad-cli` / `kicad-ipc` / `specctra` | KiCAD file I/O, `kicad-cli` driver, live IPC session, Specctra DSN/SES |
+| `kicad-cli` / `kicad-ipc` / `specctra` | KiCAD file I/O, `kicad-cli` driver, live IPC session, Specctra DSN/SES |
 
 ## Testing
 

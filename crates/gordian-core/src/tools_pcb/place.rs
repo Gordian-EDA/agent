@@ -13,6 +13,8 @@ use pcb_place::placement::{LockedAt, Part, PlaceProblem, Placement, PlacementHin
 
 use crate::tools::PcbToolCtx;
 
+use super::fmt_num;
+
 fn part_from_footprint_layers(
     footprint: &Footprint,
     reference: &str,
@@ -518,10 +520,10 @@ fn patch_footprint_at(text: &str, mv: &FootprintMove) -> std::result::Result<Str
             };
             let at_start = start + at_rel.0;
             let at_end = start + at_rel.1;
-            let x = kicad_sexpr::fmt_num(mv.x_nm as f64 / 1_000_000.0);
-            let y = kicad_sexpr::fmt_num(mv.y_nm as f64 / 1_000_000.0);
+            let x = fmt_num(mv.x_nm as f64 / 1_000_000.0);
+            let y = fmt_num(mv.y_nm as f64 / 1_000_000.0);
             let replacement = match mv.rotation_deg {
-                Some(rot) => format!("\t\t(at {x} {y} {})", kicad_sexpr::fmt_num(rot)),
+                Some(rot) => format!("\t\t(at {x} {y} {})", fmt_num(rot)),
                 None => format!("\t\t(at {x} {y})"),
             };
             let mut out = String::with_capacity(text.len() + replacement.len());

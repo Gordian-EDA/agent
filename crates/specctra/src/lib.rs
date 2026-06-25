@@ -99,29 +99,14 @@ impl RoutedGeometry {
 }
 
 /// What can go wrong importing a Specctra session.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SpecctraError {
     /// I/O reading the `.ses`.
-    Io(io::Error),
+    #[error("io error: {0}")]
+    Io(#[from] io::Error),
     /// The `.ses` could not be parsed.
+    #[error("could not parse .ses: {0}")]
     Parse(String),
-}
-
-impl std::fmt::Display for SpecctraError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SpecctraError::Io(e) => write!(f, "io error: {e}"),
-            SpecctraError::Parse(s) => write!(f, "could not parse .ses: {s}"),
-        }
-    }
-}
-
-impl std::error::Error for SpecctraError {}
-
-impl From<io::Error> for SpecctraError {
-    fn from(e: io::Error) -> Self {
-        SpecctraError::Io(e)
-    }
 }
 
 /// Backwards-compatible name for session import errors.

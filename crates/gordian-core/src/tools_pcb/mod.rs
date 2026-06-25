@@ -44,6 +44,11 @@ mod render;
 mod route;
 mod seed;
 
+pub(super) fn fmt_num(v: f64) -> String {
+    let v = if v == 0.0 { 0.0 } else { v };
+    format!("{v}")
+}
+
 pub use create::{build_seed_board, derive_board};
 pub use export::check_board;
 pub use fab::export_fab;

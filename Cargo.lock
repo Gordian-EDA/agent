@@ -1039,7 +1039,6 @@ dependencies = [
  "kicad-env",
  "kicad-footprint",
  "kicad-ipc",
- "kicad-sexpr",
  "kicad-symbol",
  "negotiated-mesh",
  "pcb-model",
@@ -1626,6 +1625,7 @@ dependencies = [
  "serde",
  "strsim",
  "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1640,10 +1640,6 @@ dependencies = [
  "prost-types",
  "thiserror 2.0.18",
 ]
-
-[[package]]
-name = "kicad-sexpr"
-version = "0.1.0"
 
 [[package]]
 name = "kicad-symbol"
@@ -3169,6 +3165,7 @@ dependencies = [
  "kiutils_sexpr",
  "pcb-model",
  "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
