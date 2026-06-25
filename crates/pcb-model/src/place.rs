@@ -455,18 +455,12 @@ pub fn compute_hpwl(problem: &PlaceProblem, nets: &[LogicalNet], pos: &[Point2])
         if net.pins.len() < 2 {
             continue;
         }
-        let mut min_x = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-        for pin in &net.pins {
-            let w = pad_world(problem, pos, pin);
-            min_x = min_x.min(w.x);
-            max_x = max_x.max(w.x);
-            min_y = min_y.min(w.y);
-            max_y = max_y.max(w.y);
-        }
-        total += (max_x - min_x) + (max_y - min_y);
+        let pts: Vec<Point2> = net
+            .pins
+            .iter()
+            .map(|pin| pad_world(problem, pos, pin))
+            .collect();
+        total += Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter());
     }
     total
 }

@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use geom::EPS;
+use geom::{EPS, Point2, Rect};
 use sch_place::ir::{LayoutIr, Orient};
 use sch_place::item::{Incidence, Item};
 use sch_place::netclass::is_power_net;
@@ -1055,30 +1055,12 @@ fn proxy_cost(
     let grid_order = grid_order_viol(items, ir);
     let mut hpwl = 0.0;
     for pins in inc.values() {
-        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-        for (i, _) in pins {
-            let at = items[*i].at;
-            lo[0] = lo[0].min(at[0]);
-            lo[1] = lo[1].min(at[1]);
-            hi[0] = hi[0].max(at[0]);
-            hi[1] = hi[1].max(at[1]);
-        }
-        if hi[0] >= lo[0] {
-            hpwl += (hi[0] - lo[0]) + (hi[1] - lo[1]);
-        }
+        let pts: Vec<Point2> = pins.iter().map(|(i, _)| Point2::from(items[*i].at)).collect();
+        hpwl += Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter());
     }
-    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-    for it in items {
-        lo[0] = lo[0].min(it.at[0]);
-        lo[1] = lo[1].min(it.at[1]);
-        hi[0] = hi[0].max(it.at[0]);
-        hi[1] = hi[1].max(it.at[1]);
-    }
-    let spread = if hi[0] >= lo[0] {
-        (hi[0] - lo[0]) + (hi[1] - lo[1])
-    } else {
-        0.0
-    };
+    let item_pts: Vec<Point2> = items.iter().map(|it| Point2::from(it.at)).collect();
+    let item_bbox = Rect::bounding(&item_pts);
+    let spread = item_bbox.map_or(0.0, |r| r.half_perimeter());
     let mut cohere = 0.0;
     for (si, tgts) in cohesion {
         let (mut cx, mut cy) = (0.0f64, 0.0f64);
@@ -1102,12 +1084,16 @@ fn proxy_cost(
     // LLM where local geometry demands — the LLM only steers the rough arrangement.
     // Empty `ir.zone` (every existing path) ⇒ 0 ⇒ this is a no-op.
     let mut zbias = 0.0;
-    if !ir.zone.is_empty() && hi[0] > lo[0] && hi[1] > lo[1] {
-        let (bw, bh) = (hi[0] - lo[0], hi[1] - lo[1]);
+    if let Some(bbox) = item_bbox
+        && !ir.zone.is_empty()
+        && bbox.width() > 0.0
+        && bbox.height() > 0.0
+    {
+        let (bw, bh) = (bbox.width(), bbox.height());
         for it in items {
             if let Some([tx, ty]) = ir.zone.get(&it.refdes) {
-                let fx = (it.at[0] - lo[0]) / bw;
-                let fy = (it.at[1] - lo[1]) / bh;
+                let fx = (it.at[0] - bbox.min_x) / bw;
+                let fy = (it.at[1] - bbox.min_y) / bh;
                 zbias += (fx - tx).abs() * bw + (fy - ty).abs() * bh;
             }
         }
@@ -1296,8 +1282,7 @@ fn polish_proxy(items: &mut [Item], inc: &Incidence, ir: &LayoutIr, magnet: bool
             for (axis, dir) in [(0usize, 1.0), (0, -1.0), (1, 1.0), (1, -1.0)] {
                 let mut p = orig;
                 p[axis] += dir * 1.27;
-                let r = item_rect(&items[i], p);
-                let pad = [r[0] - 1.27, r[1] - 1.27, r[2] + 1.27, r[3] + 1.27];
+                let pad = item_rect(&items[i], p).inflate(1.27);
                 if items
                     .iter()
                     .enumerate()
