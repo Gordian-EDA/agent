@@ -38,22 +38,17 @@
 
 use crate::crossing::assign_crossings;
 use crate::detail::{self, CellRoute, CellRouteResult};
-use crate::pathing::{global_route, GlobalRouteResult};
+use crate::pathing::{GlobalRouteResult, global_route};
 use crate::problem::{
     Capabilities, FailedNet, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult,
     RouteSolution, Router, Trace, Via, ViaSpan,
 };
 use crate::router::{self, GridAStarRouter};
+use geom::JOIN_EPS;
 use std::collections::BTreeMap;
 
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "detailed";
-
-/// Byte-exact coincidence epsilon. Stitching relies on the detailed stage having
-/// snapped shared endpoints to *identical* mm coordinates, so a near-zero
-/// tolerance is all that is needed (and is correct: a genuine gap must not be
-/// silently bridged — the lint is the authority on connectivity).
-const JOIN_EPS: f64 = 1e-12;
 
 // ── pipeline entry points ──────────────────────────────────────────────────────
 
@@ -74,7 +69,12 @@ pub fn route_detailed(problem: &RouteProblem) -> RouteResult {
         // pseudo-failure if any edge is over capacity (the overflow is not
         // attributable to one net, so it is reported as a board-level fault).
         for u in &global.report.unrouted {
-            fail(&mut failed, &mut failed_names, &u.connection, format!("global: {}", u.reason));
+            fail(
+                &mut failed,
+                &mut failed_names,
+                &u.connection,
+                format!("global: {}", u.reason),
+            );
         }
         if global.report.final_overflow > 0 {
             failed.push(FailedNet {
@@ -106,7 +106,12 @@ pub fn route_detailed(problem: &RouteProblem) -> RouteResult {
     for f in &cells.failed {
         // route_cells already prefixes the reason with "cell N: …"; keep that
         // provenance and mark the net as failed so its copper is dropped.
-        fail(&mut failed, &mut failed_names, &f.connection, f.reason.clone());
+        fail(
+            &mut failed,
+            &mut failed_names,
+            &f.connection,
+            f.reason.clone(),
+        );
     }
 
     // 4. Stitch the SUCCESSFUL nets' cell copper into a board solution. A net
@@ -180,16 +185,22 @@ impl Router for NegotiatedMeshRouter {
 /// problem (never for a non-empty list containing the always-routable baseline).
 pub fn select_best(problem: &RouteProblem, routers: &[&dyn Router]) -> RouteResult {
     let quality = |r: &RouteResult| {
-        RouteQuality::of(problem, r, router::geometry_violations(problem, &r.solution))
+        RouteQuality::of(
+            problem,
+            r,
+            router::geometry_violations(problem, &r.solution),
+        )
     };
-    let mut result = crate::problem::select(problem, routers, &quality, &better, &|q| {
-        q.faults() == 0
-    })
-    .unwrap_or_else(|| RouteResult {
-        solution: RouteSolution { traces: vec![], vias: vec![] },
-        failed: vec![],
-        engine: "none".to_owned(),
-    });
+    let mut result =
+        crate::problem::select(problem, routers, &quality, &better, &|q| q.faults() == 0)
+            .unwrap_or_else(|| RouteResult {
+                solution: RouteSolution {
+                    traces: vec![],
+                    vias: vec![],
+                },
+                failed: vec![],
+                engine: "none".to_owned(),
+            });
     drop_redundant_thruhole_vias(problem, &mut result.solution);
     result
 }
@@ -271,8 +282,9 @@ fn reconcile_connectivity(
         .filter(|name| !known.contains(name.as_str()) && seen.insert(name.clone()))
         .map(|name| FailedNet {
             connection: name,
-            reason: "DRC oracle: net dropped — could not be routed cleanly (clearance/connectivity)"
-                .to_string(),
+            reason:
+                "DRC oracle: net dropped — could not be routed cleanly (clearance/connectivity)"
+                    .to_string(),
         })
         .collect();
     failed.extend(new);
@@ -350,7 +362,9 @@ fn stitch(
             let mut layers: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
             for t in &traces {
                 if t.connection == connection
-                    && t.path.windows(2).any(|w| geom::Segment::new(w[0], w[1]).dist_to_point(at) < TOUCH)
+                    && t.path
+                        .windows(2)
+                        .any(|w| geom::Segment::new(w[0], w[1]).dist_to_point(at) < TOUCH)
                 {
                     layers.insert(t.layer.0.as_str());
                 }
@@ -594,7 +608,10 @@ mod tests {
             r.failed
         );
         let vs = lint(&p, &r.solution);
-        assert!(vs.is_empty(), "led-r detailed solution must lint CLEAN, got {vs:?}");
+        assert!(
+            vs.is_empty(),
+            "led-r detailed solution must lint CLEAN, got {vs:?}"
+        );
         let m = r.solution.metrics();
         assert!(m.wirelength > 0.0, "led-r produced copper");
         assert!(m.trace_count > 0, "led-r has traces");
@@ -617,7 +634,10 @@ mod tests {
             r.failed
         );
         let vs = lint(&p, &r.solution);
-        assert!(vs.is_empty(), "quad detailed solution must lint CLEAN, got {vs:?}");
+        assert!(
+            vs.is_empty(),
+            "quad detailed solution must lint CLEAN, got {vs:?}"
+        );
     }
 
     #[test]
@@ -629,9 +649,16 @@ mod tests {
         // router wins (the provenance is a quality outcome, not a fixed promise).
         let p = load("quad.json");
         let r = route_auto(&p);
-        assert!(r.failed.is_empty(), "route_auto routes quad cleanly: {:?}", r.failed);
+        assert!(
+            r.failed.is_empty(),
+            "route_auto routes quad cleanly: {:?}",
+            r.failed
+        );
         let vs = lint(&p, &r.solution);
-        assert!(vs.is_empty(), "quad route_auto solution must lint CLEAN, got {vs:?}");
+        assert!(
+            vs.is_empty(),
+            "quad route_auto solution must lint CLEAN, got {vs:?}"
+        );
     }
 
     // ── congested: the per-net finisher repairs most of the wall, but the wall is
@@ -662,7 +689,10 @@ mod tests {
         // clean (the lint shows only Connectivity from the dropped failed nets, no
         // clearance/via violation).
         assert!(
-            detailed.failed.iter().all(|f| f.reason.contains("finisher")),
+            detailed
+                .failed
+                .iter()
+                .all(|f| f.reason.contains("finisher")),
             "every congested residual must carry finisher provenance: {:?}",
             detailed.failed
         );
@@ -777,7 +807,10 @@ mod tests {
             "a degree-3 junction keeps all three runs separate (shared vertex)"
         );
         // Every run still touches the junction.
-        assert!(joined.iter().all(|r| r.iter().any(|q| same_point(q, &pt(0.0, 0.0)))));
+        assert!(
+            joined
+                .iter()
+                .all(|r| r.iter().any(|q| same_point(q, &pt(0.0, 0.0))))
+        );
     }
-
 }

@@ -1,19 +1,18 @@
-//! Live KiCAD-board views used while `.kicad_pcb` is the PCB source of truth.
+//! Live KiCAD-board views used while KiCAD IPC is the PCB source of truth.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use kicad_sexpr::pcb::{BoardProblem, extract_copper, read_board, read_problem};
-use pcb_model::RouteSolution;
+use kicad_ipc::snapshot::{ImportedBoard, IpcBoardSnapshot};
 use pcb_place::placement::Placement;
 
 use crate::tools::PcbToolCtx;
 
-use super::draft::{BoardDraft, DraftPart, DraftRules};
-
 /// Save the active KiCAD board and return its project PCB path.
 pub fn save_live_board(ctx: &PcbToolCtx) -> std::result::Result<PathBuf, String> {
     let path = ctx.pcb_path();
+    if !path.exists() {
+        return Err("no board exists yet — run derive_board first".to_owned());
+    }
     ctx.kicad()
         .with_session(&path, |session| session.kicad().save())
         .map_err(|e| format!("could not open/save live KiCAD board: {e}"))?;
@@ -21,28 +20,47 @@ pub fn save_live_board(ctx: &PcbToolCtx) -> std::result::Result<PathBuf, String>
 }
 
 /// Read the active board as a routing problem.
-pub fn board_problem(ctx: &PcbToolCtx) -> std::result::Result<BoardProblem, String> {
-    let path = save_live_board(ctx)?;
-    read_problem(&path).map_err(|e| format!("could not read saved KiCAD board: {e}"))
+pub fn board_problem(ctx: &PcbToolCtx) -> std::result::Result<IpcBoardSnapshot, String> {
+    read_snapshot(ctx)
 }
 
-/// Extract existing copper from the active board.
-pub fn copper_solution(ctx: &PcbToolCtx) -> std::result::Result<RouteSolution, String> {
-    let path = save_live_board(ctx)?;
-    extract_copper(&path).map_err(|e| format!("could not read routed copper: {e}"))
+fn read_snapshot(ctx: &PcbToolCtx) -> std::result::Result<IpcBoardSnapshot, String> {
+    let path = ctx.pcb_path();
+    if !path.exists() {
+        return Err("no board exists yet — run derive_board first".to_owned());
+    }
+    let mut last_ready_err = None;
+    for _ in 0..6 {
+        match ctx
+            .kicad()
+            .with_session(&path, |session| session.kicad().board_snapshot())
+        {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(err) if err.is_transient_api_ready_error() => {
+                last_ready_err = Some(err);
+                std::thread::sleep(std::time::Duration::from_millis(750));
+            }
+            Err(err) if err.is_transport_timeout() => {
+                ctx.close_kicad_session();
+                return ctx
+                    .kicad()
+                    .with_session(&path, |session| session.kicad().board_snapshot())
+                    .map_err(|retry| format!("could not read live KiCAD board over IPC: {retry}"));
+            }
+            Err(err) => return Err(format!("could not read live KiCAD board over IPC: {err}")),
+        }
+    }
+    if let Some(err) = last_ready_err {
+        Err(format!("could not read live KiCAD board over IPC: {err}"))
+    } else {
+        ctx.kicad()
+            .with_session(&path, |session| session.kicad().board_snapshot())
+            .map_err(|err| format!("could not read live KiCAD board over IPC: {err}"))
+    }
 }
 
-/// Build the transient board model the placer consumes from the active KiCAD board.
-///
-/// Sidecar PCB state is intentionally ignored. Rules are recovered only to the fidelity currently exposed by
-/// `kicad-sexpr::read_board`/`read_problem`; richer rule read-back is a follow-up item.
-pub fn draft_from_live(ctx: &PcbToolCtx) -> std::result::Result<BoardDraft, String> {
-    let path = save_live_board(ctx)?;
-    let imported =
-        read_board(&path).map_err(|e| format!("could not read saved KiCAD board: {e}"))?;
-    let problem =
-        read_problem(&path).map_err(|e| format!("could not read saved KiCAD board: {e}"))?;
-    let placements = imported
+pub(super) fn imported_placements(board: &ImportedBoard) -> Vec<Placement> {
+    board
         .parts
         .iter()
         .map(|p| Placement {
@@ -50,40 +68,11 @@ pub fn draft_from_live(ctx: &PcbToolCtx) -> std::result::Result<BoardDraft, Stri
             at: p.at.clone(),
             rotation: p.rotation as f64,
         })
-        .collect::<Vec<_>>();
-    let last_placement = (!is_seed_placement(&imported.bounds, &placements)).then_some(placements);
-    let parts = imported
-        .parts
-        .into_iter()
-        .map(|p| DraftPart {
-            reference: p.reference,
-            footprint: p.lib_id,
-            pad_nets: p
-                .pads
-                .into_iter()
-                .filter_map(|(pad, net)| net.map(|n| (pad, n)))
-                .collect::<BTreeMap<_, _>>(),
-            locked: None,
-        })
-        .collect();
-    Ok(BoardDraft {
-        bounds: imported.bounds,
-        rules: DraftRules {
-            clearance: problem.problem.clearance,
-            min_trace_width: problem.problem.min_trace_width,
-            via_diameter: problem.problem.via_diameter,
-            via_drill: problem.problem.via_drill,
-            layer_count: problem.problem.layer_count,
-            net_widths: problem.problem.net_widths,
-            ..Default::default()
-        },
-        parts,
-        keepouts: Vec::new(),
-        hints: Default::default(),
-        last_placement,
-        last_place_illegal: false,
-        outline: None,
-    })
+        .collect()
+}
+
+pub(super) fn is_seed_imported_board(board: &ImportedBoard) -> bool {
+    is_seed_placement(&board.bounds, &imported_placements(board))
 }
 
 fn is_seed_placement(bounds: &pcb_model::Rect, placements: &[Placement]) -> bool {
@@ -102,7 +91,9 @@ fn is_seed_placement(bounds: &pcb_model::Rect, placements: &[Placement]) -> bool
     coords.iter().enumerate().all(|(idx, (x, y, rotation))| {
         let expected_x = bounds.min_x + 2.0 + 2.54 * idx as f64;
         let expected_y = bounds.min_y + 2.0;
-        (x - expected_x).abs() < 1e-6 && (y - expected_y).abs() < 1e-6 && rotation.abs() < 1e-6
+        (x - expected_x).abs() < geom::EPS
+            && (y - expected_y).abs() < geom::EPS
+            && rotation.abs() < geom::EPS
     })
 }
 

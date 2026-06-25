@@ -36,14 +36,20 @@ fn cap_anchor_dist(
     cap: usize,
     ic: usize,
 ) -> f64 {
-    let cap_nets: Vec<&str> =
-        problem.parts[cap].pads.iter().filter_map(|p| p.net.as_deref()).collect();
+    let cap_nets: Vec<&str> = problem.parts[cap]
+        .pads
+        .iter()
+        .filter_map(|p| p.net.as_deref())
+        .collect();
     let mut best = f64::MAX;
     for pad in &problem.parts[ic].pads {
         if pad.net.as_deref().is_some_and(|nn| cap_nets.contains(&nn)) {
             let off = pad.offset.rotate(rotations[ic]);
-            let (px, py) = (pos[ic].x + off.x, pos[ic].y + off.y);
-            best = best.min(((pos[cap].x - px).powi(2) + (pos[cap].y - py).powi(2)).sqrt());
+            let pad_pos = Point2 {
+                x: pos[ic].x + off.x,
+                y: pos[ic].y + off.y,
+            };
+            best = best.min(pos[cap].dist(pad_pos));
         }
     }
     if best.is_finite() { best } else { 0.0 }

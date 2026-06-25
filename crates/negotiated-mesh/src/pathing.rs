@@ -357,7 +357,11 @@ impl<'a> Router<'a> {
             let mut overflowed_edges: BTreeSet<usize> = BTreeSet::new();
             for (ei, usage) in self.edge_usage.iter().enumerate() {
                 for (layer, &u) in usage.iter().enumerate() {
-                    let cap = self.mesh.edges[ei].capacity.get(layer).copied().unwrap_or(0);
+                    let cap = self.mesh.edges[ei]
+                        .capacity
+                        .get(layer)
+                        .copied()
+                        .unwrap_or(0);
                     if u > cap {
                         self.edge_history[ei][layer] += HISTORY_INCREMENT;
                         overflowed_edges.insert(ei);
@@ -555,10 +559,10 @@ impl<'a> Router<'a> {
         // Precompute tree leaf centres for the heuristic (nearest target centre).
         let tree_centers: Vec<Point2> = tree
             .iter()
-            .map(|&(_, leaf)| rect_center(&self.mesh.leaves[leaf].rect))
+            .map(|&(_, leaf)| self.mesh.leaves[leaf].rect.center())
             .collect();
         let heuristic = |leaf: LeafId| -> f64 {
-            let c = rect_center(&self.mesh.leaves[leaf].rect);
+            let c = self.mesh.leaves[leaf].rect.center();
             tree_centers
                 .iter()
                 .map(|t| c.dist(*t))
@@ -620,7 +624,12 @@ impl<'a> Router<'a> {
                 // the owning net must be able to cross into/out of its pad.
                 let own_edge = own_leaves.contains(&item.leaf) || own_leaves.contains(&nb);
                 if !own_edge
-                    && self.mesh.edges[ei].capacity.get(item.layer).copied().unwrap_or(0) == 0
+                    && self.mesh.edges[ei]
+                        .capacity
+                        .get(item.layer)
+                        .copied()
+                        .unwrap_or(0)
+                        == 0
                 {
                     continue;
                 }
@@ -739,7 +748,7 @@ impl<'a> Router<'a> {
             steps.push(CellStep {
                 leaf,
                 layer,
-                center: rect_center(&self.mesh.leaves[leaf].rect),
+                center: self.mesh.leaves[leaf].rect.center(),
                 via,
                 exit,
             });
@@ -800,8 +809,8 @@ impl<'a> Router<'a> {
             }
         }
         // Defensive fallback.
-        let ca = rect_center(ra);
-        let cb = rect_center(rb);
+        let ca = ra.center();
+        let cb = rb.center();
         Point2 {
             x: (ca.x + cb.x) / 2.0,
             y: (ca.y + cb.y) / 2.0,
@@ -811,9 +820,15 @@ impl<'a> Router<'a> {
     /// The cost of crossing edge `ei` on `layer`, from `from` to `to`:
     /// `centre_from.dist(centre_to) × (1 + congestion + history)`.
     fn edge_cost(&self, ei: usize, layer: usize, from: LeafId, to: LeafId) -> f64 {
-        let dist = rect_center(&self.mesh.leaves[from].rect)
-            .dist(rect_center(&self.mesh.leaves[to].rect));
-        let cap = self.mesh.edges[ei].capacity.get(layer).copied().unwrap_or(0);
+        let dist = self.mesh.leaves[from]
+            .rect
+            .center()
+            .dist(self.mesh.leaves[to].rect.center());
+        let cap = self.mesh.edges[ei]
+            .capacity
+            .get(layer)
+            .copied()
+            .unwrap_or(0);
         let usage = self.edge_usage[ei][layer];
         // If this net routes here it will add one unit: cost the *prospective*
         // load so a net avoids saturating an already-full edge.
@@ -848,7 +863,11 @@ impl<'a> Router<'a> {
         let mut total = 0u32;
         for (ei, usage) in self.edge_usage.iter().enumerate() {
             for (layer, &u) in usage.iter().enumerate() {
-                let cap = self.mesh.edges[ei].capacity.get(layer).copied().unwrap_or(0);
+                let cap = self.mesh.edges[ei]
+                    .capacity
+                    .get(layer)
+                    .copied()
+                    .unwrap_or(0);
                 total += u.saturating_sub(cap);
             }
         }
@@ -865,7 +884,11 @@ impl<'a> Router<'a> {
                 if u == 0 {
                     continue;
                 }
-                let cap = self.mesh.edges[ei].capacity.get(layer).copied().unwrap_or(0);
+                let cap = self.mesh.edges[ei]
+                    .capacity
+                    .get(layer)
+                    .copied()
+                    .unwrap_or(0);
                 let load = u as f64 / (cap.max(1) as f64);
                 match best {
                     Some((_, _, _, bl)) if bl >= load => {}
@@ -886,11 +909,7 @@ impl<'a> Router<'a> {
             }
         }
         // Rank by load desc, tie-break by edge index asc (deterministic).
-        spots.sort_by(|p, q| {
-            q.load
-                .total_cmp(&p.load)
-                .then_with(|| p.edge.cmp(&q.edge))
-        });
+        spots.sort_by(|p, q| q.load.total_cmp(&p.load).then_with(|| p.edge.cmp(&q.edge)));
         spots.truncate(HOTSPOT_TOP_N);
         spots
     }
@@ -944,15 +963,6 @@ fn congestion_penalty(usage: u32, capacity: u32) -> f64 {
     load * load * CONGESTION_K
 }
 
-/// Centre point of a mesh [`Rect`] (mm). `Rect`'s fields are public, so pathing
-/// computes this without touching the mesh API surface.
-fn rect_center(r: &crate::problem::Rect) -> Point2 {
-    Point2 {
-        x: (r.min_x + r.max_x) / 2.0,
-        y: (r.min_y + r.max_y) / 2.0,
-    }
-}
-
 /// Connection indices in routing order: ascending bounding-box half-perimeter,
 /// ties by name. The slice-1 order ([`crate::router`]), reproduced so pathing
 /// does not depend on the router's internals.
@@ -961,30 +971,32 @@ fn net_order(problem: &RouteProblem) -> Vec<usize> {
     order.sort_by(|&a, &b| {
         let ka = half_perimeter(&problem.connections[a]);
         let kb = half_perimeter(&problem.connections[b]);
-        ka.total_cmp(&kb)
-            .then_with(|| problem.connections[a].name.cmp(&problem.connections[b].name))
+        ka.total_cmp(&kb).then_with(|| {
+            problem.connections[a]
+                .name
+                .cmp(&problem.connections[b].name)
+        })
     });
     order
 }
 
 /// Half-perimeter (width + height) of a connection's point bounding box.
 fn half_perimeter(conn: &crate::problem::Connection) -> f64 {
-    let pts: Vec<geom::Point2> =
-        conn.points_to_connect.iter().map(|p| geom::Point2::new(p.x, p.y)).collect();
+    let pts: Vec<geom::Point2> = conn
+        .points_to_connect
+        .iter()
+        .map(|p| geom::Point2::new(p.x, p.y))
+        .collect();
     geom::Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{Rect, Connection, LayerRef, Obstacle, RoutePoint};
+    use crate::problem::{Connection, LayerRef, Obstacle, Rect, RoutePoint};
     use std::path::Path;
 
-    fn base(
-        bounds: Rect,
-        obstacles: Vec<Obstacle>,
-        connections: Vec<Connection>,
-    ) -> RouteProblem {
+    fn base(bounds: Rect, obstacles: Vec<Obstacle>, connections: Vec<Connection>) -> RouteProblem {
         RouteProblem {
             layer_count: 2,
             min_trace_width: 0.2,
@@ -1090,7 +1102,11 @@ mod tests {
             vec![conn("N", &[(2.0, 8.0, "top"), (14.0, 8.0, "top")])],
         );
         let r = global_route(&p);
-        assert!(r.is_feasible(), "open board must be feasible: {:?}", r.report);
+        assert!(
+            r.is_feasible(),
+            "open board must be feasible: {:?}",
+            r.report
+        );
         assert_eq!(r.plan.nets.len(), 1);
         assert_eq!(r.plan.nets[0].paths.len(), 1, "2-point net = 1 path");
         assert_plan_consistent(&p, &r);
@@ -1114,7 +1130,10 @@ mod tests {
             ],
             vec![
                 conn("A", &[(2.0, chan_y, "top"), (22.0, chan_y, "top")]),
-                conn("B", &[(2.0, chan_y + 0.4, "top"), (22.0, chan_y + 0.4, "top")]),
+                conn(
+                    "B",
+                    &[(2.0, chan_y + 0.4, "top"), (22.0, chan_y + 0.4, "top")],
+                ),
             ],
         );
         let r = global_route(&p);
@@ -1171,10 +1190,7 @@ mod tests {
         let mut conns = Vec::new();
         for i in 0..6 {
             let y = chan_y - 0.4 + i as f64 * 0.16;
-            conns.push(conn(
-                &format!("N{i}"),
-                &[(2.0, y, "top"), (22.0, y, "top")],
-            ));
+            conns.push(conn(&format!("N{i}"), &[(2.0, y, "top"), (22.0, y, "top")]));
         }
         // A wall on both layers with a single tiny gap (~one track) at chan_y.
         let p = base(
@@ -1190,7 +1206,10 @@ mod tests {
         // The board cannot carry 6 nets through a one-track gap on 2 layers, so it
         // is infeasible and that is visible. Whichever way it manifests (overflow
         // or unrouted), the run terminated (iterations ≤ cap).
-        assert!(!r.is_feasible(), "6 nets through a 1-track gap is infeasible");
+        assert!(
+            !r.is_feasible(),
+            "6 nets through a 1-track gap is infeasible"
+        );
         assert!(r.report.iterations <= MAX_ITERATIONS, "respects the cap");
         if r.report.final_overflow > 0 {
             assert!(
@@ -1257,7 +1276,11 @@ mod tests {
             )],
         );
         let r = global_route(&p);
-        assert!(r.is_feasible(), "open 3-point net is feasible: {:?}", r.report);
+        assert!(
+            r.is_feasible(),
+            "open 3-point net is feasible: {:?}",
+            r.report
+        );
         assert_eq!(r.plan.nets[0].paths.len(), 2, "3-point net grows 2 paths");
         assert_plan_consistent(&p, &r);
     }

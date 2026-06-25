@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod place;
 pub mod route;
-pub use route::{
-    failed_pad_weight, select, Capabilities, RouteMetrics, RouteQuality, RouteResult, Router,
-};
 pub use geom::union_find::UnionFind;
 pub use geom::{Point2, Rect, Segment};
+pub use route::{
+    Capabilities, RouteMetrics, RouteQuality, RouteResult, Router, failed_pad_weight, select,
+};
 
 // ── defaults for extension fields ────────────────────────────────────────────
 
@@ -197,17 +197,7 @@ pub fn dist_to_polygon_edge(pt: &Point2, poly: &[Point2]) -> f64 {
     let mut best = f64::INFINITY;
     let mut j = n - 1;
     for i in 0..n {
-        let (a, b) = (&poly[j], &poly[i]);
-        let (dx, dy) = (b.x - a.x, b.y - a.y);
-        let len2 = dx * dx + dy * dy;
-        let t = if len2 > 0.0 {
-            (((pt.x - a.x) * dx + (pt.y - a.y) * dy) / len2).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let (cx, cy) = (a.x + t * dx, a.y + t * dy);
-        let d = ((pt.x - cx).powi(2) + (pt.y - cy).powi(2)).sqrt();
-        best = best.min(d);
+        best = best.min(Segment::new(poly[j], poly[i]).dist_to_point(*pt));
         j = i;
     }
     best
@@ -216,12 +206,18 @@ pub fn dist_to_polygon_edge(pt: &Point2, poly: &[Point2]) -> f64 {
 impl RouteProblem {
     /// Trace width to emit for `net`: its per-net override, else the board minimum.
     pub fn net_width(&self, net: &str) -> f64 {
-        self.net_widths.get(net).copied().unwrap_or(self.min_trace_width)
+        self.net_widths
+            .get(net)
+            .copied()
+            .unwrap_or(self.min_trace_width)
     }
     /// The widest trace any net may use — clearance/inflation are sized to this so a fat
     /// power trace never violates spacing. Defaults to `min_trace_width`.
     pub fn max_route_width(&self) -> f64 {
-        self.net_widths.values().copied().fold(self.min_trace_width, f64::max)
+        self.net_widths
+            .values()
+            .copied()
+            .fold(self.min_trace_width, f64::max)
     }
 }
 

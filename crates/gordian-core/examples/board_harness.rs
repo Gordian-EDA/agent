@@ -58,7 +58,7 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
     if let Some(outline) = spec.get("outline") {
         board["outline"] = outline.clone();
     }
-    let created = gordian_core::tools_pcb::build_board_draft(board, &ctx).unwrap();
+    let created = gordian_core::tools_pcb::build_seed_board(board, &ctx).unwrap();
     if created["ok"] != json!(true) {
         return json!({ "name": name, "stage": "create", "result": created });
     }

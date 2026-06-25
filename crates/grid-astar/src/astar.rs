@@ -199,14 +199,54 @@ struct Move8 {
 /// arithmetic, leaving the 4 orthogonal entries visited exactly as a
 /// 4-neighbour search would.
 const MOVES8: [Move8; 8] = [
-    Move8 { dir: Heading::PlusX, dx: 1, dy: 0, diagonal: false },
-    Move8 { dir: Heading::MinusX, dx: -1, dy: 0, diagonal: false },
-    Move8 { dir: Heading::PlusY, dx: 0, dy: 1, diagonal: false },
-    Move8 { dir: Heading::MinusY, dx: 0, dy: -1, diagonal: false },
-    Move8 { dir: Heading::PlusXPlusY, dx: 1, dy: 1, diagonal: true },
-    Move8 { dir: Heading::PlusXMinusY, dx: 1, dy: -1, diagonal: true },
-    Move8 { dir: Heading::MinusXPlusY, dx: -1, dy: 1, diagonal: true },
-    Move8 { dir: Heading::MinusXMinusY, dx: -1, dy: -1, diagonal: true },
+    Move8 {
+        dir: Heading::PlusX,
+        dx: 1,
+        dy: 0,
+        diagonal: false,
+    },
+    Move8 {
+        dir: Heading::MinusX,
+        dx: -1,
+        dy: 0,
+        diagonal: false,
+    },
+    Move8 {
+        dir: Heading::PlusY,
+        dx: 0,
+        dy: 1,
+        diagonal: false,
+    },
+    Move8 {
+        dir: Heading::MinusY,
+        dx: 0,
+        dy: -1,
+        diagonal: false,
+    },
+    Move8 {
+        dir: Heading::PlusXPlusY,
+        dx: 1,
+        dy: 1,
+        diagonal: true,
+    },
+    Move8 {
+        dir: Heading::PlusXMinusY,
+        dx: 1,
+        dy: -1,
+        diagonal: true,
+    },
+    Move8 {
+        dir: Heading::MinusXPlusY,
+        dx: -1,
+        dy: 1,
+        diagonal: true,
+    },
+    Move8 {
+        dir: Heading::MinusXMinusY,
+        dx: -1,
+        dy: -1,
+        diagonal: true,
+    },
 ];
 
 /// An inclusive cell-index rectangle the planar search may not leave. Used by the
@@ -349,7 +389,14 @@ pub fn search_bounded(
             }
             // A wider-than-min net keeps its extra half-width clear of foreign copper.
             if costs.trace_clear_radius_cells > 0
-                && !planar_clear(grid, conn, next.layer, next.ix, next.iy, costs.trace_clear_radius_cells)
+                && !planar_clear(
+                    grid,
+                    conn,
+                    next.layer,
+                    next.ix,
+                    next.iy,
+                    costs.trace_clear_radius_cells,
+                )
             {
                 continue;
             }
@@ -363,14 +410,23 @@ pub fn search_bounded(
             // Orthogonal moves are axis-aligned and already covered by the grid
             // inflation / halo, so neither guard applies to them.
             if m.diagonal {
-                let side_x = grid.is_free_for(cur.layer, (cur.ix as isize + m.dx) as usize, cur.iy, conn);
-                let side_y = grid.is_free_for(cur.layer, cur.ix, (cur.iy as isize + m.dy) as usize, conn);
+                let side_x =
+                    grid.is_free_for(cur.layer, (cur.ix as isize + m.dx) as usize, cur.iy, conn);
+                let side_y =
+                    grid.is_free_for(cur.layer, cur.ix, (cur.iy as isize + m.dy) as usize, conn);
                 if !side_x || !side_y {
                     continue;
                 }
                 if costs.diag_body_radius_cells > 0.0
                     && !diag_body_clear(
-                        grid, conn, cur.layer, cur.ix, cur.iy, m.dx, m.dy, costs.diag_body_radius_cells,
+                        grid,
+                        conn,
+                        cur.layer,
+                        cur.ix,
+                        cur.iy,
+                        m.dx,
+                        m.dy,
+                        costs.diag_body_radius_cells,
                     )
                 {
                     continue;
@@ -383,7 +439,15 @@ pub fn search_bounded(
             };
             let tentative = g_cur.saturating_add(base).saturating_add(bend);
             relax(
-                next, tentative, m.dir, cur_id, &mut g, &mut came_from, &mut open, &heuristic, sid,
+                next,
+                tentative,
+                m.dir,
+                cur_id,
+                &mut g,
+                &mut came_from,
+                &mut open,
+                &heuristic,
+                sid,
             );
         }
 
@@ -476,9 +540,13 @@ pub fn diag_body_clear(
     let bx1 = dx.max(0) + r;
     let by0 = dy.min(0) - r;
     let by1 = dy.max(0) + r;
+    let body = geom::Segment::new(
+        geom::Point2::new(0.0, 0.0),
+        geom::Point2::new(dx as f64, dy as f64),
+    );
     for ox in bx0..=bx1 {
         for oy in by0..=by1 {
-            if point_seg_dist_cells(ox as f64, oy as f64, dx as f64, dy as f64) >= thresh {
+            if body.dist_to_point(geom::Point2::new(ox as f64, oy as f64)) >= thresh {
                 continue;
             }
             let hx = ix as isize + ox;
@@ -494,19 +562,6 @@ pub fn diag_body_clear(
     true
 }
 
-/// Euclidean distance from point `(px, py)` to the segment `(0,0)→(sx, sy)` (cell units).
-fn point_seg_dist_cells(px: f64, py: f64, sx: f64, sy: f64) -> f64 {
-    let len2 = sx * sx + sy * sy;
-    let t = if len2 <= f64::EPSILON {
-        0.0
-    } else {
-        ((px * sx + py * sy) / len2).clamp(0.0, 1.0)
-    };
-    let qx = t * sx;
-    let qy = t * sy;
-    ((px - qx).powi(2) + (py - qy).powi(2)).sqrt()
-}
-
 /// Is the cell free for `conn` on *every* layer (through-via barrel check), and —
 /// when `radius_cells > 0` — is every cell whose centre lies within `radius_cells`
 /// (Euclidean) also free for `conn` on every layer? The Euclidean disc (not a
@@ -518,7 +573,14 @@ fn point_seg_dist_cells(px: f64, py: f64, sx: f64, sy: f64) -> f64 {
 /// keep its extra half-width clear of foreign copper on its OWN layer (a trace lives on
 /// one layer, unlike a through via). Off-board reads blocked — fat copper may not poke
 /// past the edge. `conn`'s own copper reads free, so a trace runs freely along itself.
-fn planar_clear(grid: &RouteGrid, conn: usize, layer: usize, ix: usize, iy: usize, radius_cells: usize) -> bool {
+fn planar_clear(
+    grid: &RouteGrid,
+    conn: usize,
+    layer: usize,
+    ix: usize,
+    iy: usize,
+    radius_cells: usize,
+) -> bool {
     let r = radius_cells as isize;
     let r2 = (radius_cells * radius_cells) as isize;
     for dy in -r..=r {
@@ -539,7 +601,13 @@ fn planar_clear(grid: &RouteGrid, conn: usize, layer: usize, ix: usize, iy: usiz
     true
 }
 
-fn via_barrel_clear(grid: &RouteGrid, conn: usize, ix: usize, iy: usize, radius_cells: usize) -> bool {
+fn via_barrel_clear(
+    grid: &RouteGrid,
+    conn: usize,
+    ix: usize,
+    iy: usize,
+    radius_cells: usize,
+) -> bool {
     let r = radius_cells as isize;
     let r2 = (radius_cells * radius_cells) as isize;
     for dy in -r..=r {
@@ -714,7 +782,10 @@ mod tests {
         // No cell of the path may be blocked for A.
         assert!(path.iter().all(|s| g.is_free_for(s.layer, s.ix, s.iy, a)));
         // It deviated from the straight line (touched a different row).
-        assert!(path.iter().any(|s| s.iy != sy), "expected a vertical detour");
+        assert!(
+            path.iter().any(|s| s.iy != sy),
+            "expected a vertical detour"
+        );
     }
 
     #[test]
@@ -728,7 +799,8 @@ mod tests {
             max_y: 20.0,
         };
         // Top-layer wall spanning the entire height, blocking all of column ~10.
-        p.obstacles.push(pad(&[], (10.0, 10.0), 0.6, 22.0, &["top"]));
+        p.obstacles
+            .push(pad(&[], (10.0, 10.0), 0.6, 22.0, &["top"]));
         let g = RouteGrid::build(&p);
         let a = g.connection_index("A").unwrap();
         let (sx, sy) = g.cell_of(4.0, 10.0);
@@ -742,7 +814,10 @@ mod tests {
         )
         .expect("reachable via the bottom layer");
         // It must use the bottom layer at some point (a via hop happened).
-        assert!(path.iter().any(|s| s.layer == 1), "expected a via to layer 1");
+        assert!(
+            path.iter().any(|s| s.layer == 1),
+            "expected a via to layer 1"
+        );
         assert!(path.iter().all(|s| g.is_free_for(s.layer, s.ix, s.iy, a)));
     }
 
@@ -756,14 +831,16 @@ mod tests {
         let a = g.connection_index("A").unwrap();
         let (sx, sy) = g.cell_of(4.0, 10.0);
         let (tx, ty) = g.cell_of(16.0, 10.0);
-        assert!(search(
-            &g,
-            a,
-            &[st(0, sx, sy)],
-            &[st(0, tx, ty)],
-            AStarCosts::default()
-        )
-        .is_none());
+        assert!(
+            search(
+                &g,
+                a,
+                &[st(0, sx, sy)],
+                &[st(0, tx, ty)],
+                AStarCosts::default()
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -798,15 +875,18 @@ mod tests {
             diag: DIAG_COST,
             ..AStarCosts::default()
         };
-        let path = search(&g, a, &[st(0, sx, sy)], &[st(0, tx, ty)], costs)
-            .expect("reachable diagonally");
+        let path =
+            search(&g, a, &[st(0, sx, sy)], &[st(0, tx, ty)], costs).expect("reachable diagonally");
         assert_eq!(path.first(), Some(&st(0, sx, sy)));
         assert_eq!(path.last(), Some(&st(0, tx, ty)));
         // At least one step moves diagonally (both coordinates change together).
         let has_diagonal = path
             .windows(2)
             .any(|w| w[0].ix != w[1].ix && w[0].iy != w[1].iy);
-        assert!(has_diagonal, "octilinear search must use a 45° diagonal step");
+        assert!(
+            has_diagonal,
+            "octilinear search must use a 45° diagonal step"
+        );
     }
 
     #[test]
@@ -817,8 +897,14 @@ mod tests {
         let a = g.connection_index("A").unwrap();
         let (sx, sy) = g.cell_of(4.0, 4.0);
         let (tx, ty) = g.cell_of(14.0, 14.0);
-        let path = search(&g, a, &[st(0, sx, sy)], &[st(0, tx, ty)], AStarCosts::default())
-            .expect("reachable orthogonally");
+        let path = search(
+            &g,
+            a,
+            &[st(0, sx, sy)],
+            &[st(0, tx, ty)],
+            AStarCosts::default(),
+        )
+        .expect("reachable orthogonally");
         assert!(
             path.windows(2)
                 .all(|w| (w[0].ix == w[1].ix) || (w[0].iy == w[1].iy)),
@@ -837,8 +923,7 @@ mod tests {
         // A blocking keepout column just right of the start, leaving a diagonal
         // gap at its corner. Place a small keepout so that the cell directly to
         // the +x of a key cell is blocked while the diagonal cell is free.
-        p.obstacles
-            .push(pad(&[], (8.0, 8.0), 0.6, 0.6, &["top"]));
+        p.obstacles.push(pad(&[], (8.0, 8.0), 0.6, 0.6, &["top"]));
         let g = RouteGrid::build(&p);
         let a = g.connection_index("A").unwrap();
         let costs = AStarCosts {
@@ -952,12 +1037,25 @@ mod tests {
         // 4-neighbour A*. A straight horizontal run is the canonical baseline.
         let g = RouteGrid::build(&open_problem());
         let a = g.connection_index("A").unwrap();
-        assert_eq!(AStarCosts::default().diag, u32::MAX, "default must disable diagonals");
+        assert_eq!(
+            AStarCosts::default().diag,
+            u32::MAX,
+            "default must disable diagonals"
+        );
         let (sx, sy) = g.cell_of(4.0, 10.0);
         let (tx, ty) = g.cell_of(14.0, 10.0);
-        let path = search(&g, a, &[st(0, sx, sy)], &[st(0, tx, ty)], AStarCosts::default())
-            .expect("reachable");
+        let path = search(
+            &g,
+            a,
+            &[st(0, sx, sy)],
+            &[st(0, tx, ty)],
+            AStarCosts::default(),
+        )
+        .expect("reachable");
         let expected: Vec<State> = (sx..=tx).map(|ix| st(0, ix, sy)).collect();
-        assert_eq!(path, expected, "orthogonal default must yield the exact straight path");
+        assert_eq!(
+            path, expected,
+            "orthogonal default must yield the exact straight path"
+        );
     }
 }

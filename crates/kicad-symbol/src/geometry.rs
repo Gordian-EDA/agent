@@ -37,7 +37,7 @@
 use std::io;
 use std::path::PathBuf;
 
-use geom::Point2;
+use geom::{Point2, Rect};
 use kiutils_kicad::{SymPin, Symbol, SymbolLibFile};
 use kiutils_sexpr::{Atom, Node, parse_one};
 
@@ -101,7 +101,10 @@ impl SymbolGeometry {
     /// (`"Lib:Name"`) from the detected KiCAD symbol libraries. Memoized per
     /// thread by (symbol dir, lib_id).
     pub fn load(env: &KicadEnv, lib_id: &str) -> io::Result<SymbolGeometry> {
-        let key = (env.symbol_dir.to_string_lossy().into_owned(), lib_id.to_string());
+        let key = (
+            env.symbol_dir.to_string_lossy().into_owned(),
+            lib_id.to_string(),
+        );
         if let Some(g) = GEOM_CACHE.with(|c| c.borrow().get(&key).cloned()) {
             return Ok(g);
         }
@@ -160,16 +163,12 @@ impl SymbolGeometry {
     /// KiCAD symbol). Floors at 5.08 mm and pads 2.54 mm per side so even a
     /// bare two-pin passive gets a sane footprint.
     pub fn approx_size(&self) -> Point2 {
-        let (mut min_x, mut max_x, mut min_y, mut max_y) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-        for p in &self.pins {
-            min_x = min_x.min(p.at.x);
-            max_x = max_x.max(p.at.x);
-            min_y = min_y.min(p.at.y);
-            max_y = max_y.max(p.at.y);
-        }
+        let mut points: Vec<Point2> = self.pins.iter().map(|p| p.at).collect();
+        points.push(Point2::new(0.0, 0.0));
+        let bounds = Rect::bounding(&points).unwrap_or_else(|| Rect::new(0.0, 0.0, 0.0, 0.0));
         Point2::new(
-            (max_x - min_x).max(5.08) + 5.08,
-            (max_y - min_y).max(5.08) + 5.08,
+            bounds.width().max(5.08) + 5.08,
+            bounds.height().max(5.08) + 5.08,
         )
     }
 }

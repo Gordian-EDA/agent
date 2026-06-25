@@ -54,7 +54,7 @@ pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> [f64; 4] {
 }
 
 pub fn rects_overlap(a: [f64; 4], b: [f64; 4]) -> bool {
-    a[0] < b[2] - EPS && b[0] < a[2] - EPS && a[1] < b[3] - EPS && b[1] < a[3] - EPS
+    ::geom::Rect::from(a).overlaps(&::geom::Rect::from(b))
 }
 
 /// Count pairs of items whose bodies overlap — the hard "never let two symbols
@@ -99,13 +99,13 @@ pub fn count_body_crossings(
                 let p = [w1[0], a[1]];
                 (
                     p[0] > a[0].min(b[0]) + EPS && p[0] < a[0].max(b[0]) - EPS,
-                    sch_place::geom::point_on_segment(p, *w1, *w2),
+                    ::geom::Segment::new((*w1).into(), (*w2).into()).contains_point(p.into()),
                 )
             } else {
                 let p = [a[0], w1[1]];
                 (
                     p[1] > a[1].min(b[1]) + EPS && p[1] < a[1].max(b[1]) - EPS,
-                    sch_place::geom::point_on_segment(p, *w1, *w2),
+                    ::geom::Segment::new((*w1).into(), (*w2).into()).contains_point(p.into()),
                 )
             };
             if interior && on_wire {
@@ -266,7 +266,9 @@ pub fn count_corners(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
 pub fn count_foreign_taps(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
     let strict_interior = |p: [f64; 2], a: [f64; 2], b: [f64; 2]| {
         let is_end = |q: [f64; 2]| near(p, q);
-        !is_end(a) && !is_end(b) && sch_place::geom::point_on_segment(p, a, b)
+        !is_end(a)
+            && !is_end(b)
+            && ::geom::Segment::new(a.into(), b.into()).contains_point(p.into())
     };
     let mut n = 0;
     for (a1, a2, an) in wires {
@@ -583,7 +585,7 @@ pub fn count_merges(
         let mut nets: BTreeSet<&str> = BTreeSet::new();
         for (a, b, wn) in wires {
             if let Some(net) = wn
-                && sch_place::geom::point_on_segment(jp, *a, *b)
+                && ::geom::Segment::new((*a).into(), (*b).into()).contains_point(jp.into())
             {
                 nets.insert(net.as_str());
             }
@@ -680,7 +682,9 @@ pub(crate) fn diagnose_shorts(
                     }
                     let how = if near(ep, *a) || near(ep, *b) {
                         "ENDPOINT"
-                    } else if sch_place::geom::point_on_segment(ep, *a, *b) {
+                    } else if ::geom::Segment::new((*a).into(), (*b).into())
+                        .contains_point(ep.into())
+                    {
                         "INTERIOR"
                     } else {
                         continue;
@@ -716,7 +720,7 @@ pub(crate) fn diagnose_shorts(
         let mut nets: BTreeSet<&str> = BTreeSet::new();
         for (a, b, wn) in &wires {
             if let Some(net) = wn
-                && sch_place::geom::point_on_segment(jp, *a, *b)
+                && ::geom::Segment::new((*a).into(), (*b).into()).contains_point(jp.into())
             {
                 nets.insert(net.as_str());
             }
@@ -755,7 +759,9 @@ pub fn count_shorts(
                     // A pin coinciding with a foreign wire's endpoint, OR landing
                     // on its interior (KiCAD connects a pin to a wire it touches),
                     // is a short on a different net.
-                    if near(ep, *a) || near(ep, *b) || sch_place::geom::point_on_segment(ep, *a, *b)
+                    if near(ep, *a)
+                        || near(ep, *b)
+                        || ::geom::Segment::new((*a).into(), (*b).into()).contains_point(ep.into())
                     {
                         n += 1;
                     }

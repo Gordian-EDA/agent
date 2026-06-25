@@ -674,20 +674,17 @@ pub fn tool_defs() -> Vec<Tool> {
                             }
                         },
                         "rules": { "type": "object",
-                            "description": "Optional: {layers: 2|4} seeds the copper layer count." },
-                        "overwrite": { "type": "boolean", "description": "Replace an existing board draft." }
+                            "description": "Optional: {layers: 2|4} seeds the copper layer count." }
                     }
                 }),
             },
             Def {
                 name: "get_board".into(),
-                description: "Return the current board draft (parts as \
-                    reference/footprint/lock + a pad_count — the full per-pad net map you \
-                    passed to derive_board is summarized, not echoed) plus a derived \
-                    summary: part count, net count, the per-net pin counts, the keepout \
-                    count, and whether the board has been placed / routed yet. Use this to \
-                    inspect board state before placing or routing, or to confirm a \
-                    derive_board / triage edit took effect."
+                description: "Return the current live KiCAD board (parts as \
+                    reference/footprint/position + pad_count) plus a derived summary: \
+                    part count, net count, per-net pin counts, and whether the board \
+                    has been placed / routed yet. Use this to inspect board state before \
+                    placing or routing, or to confirm a derive_board / IPC edit took effect."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
@@ -695,13 +692,13 @@ pub fn tool_defs() -> Vec<Tool> {
                 name: "place_board".into(),
                 description: "Place the current board: turn every part's footprint \
                     + design rules + any locked positions into a placement problem, \
-                    apply the stored placement hints, and run the deterministic \
-                    placer. The placement is persisted to the board draft (route_board \
-                    and render_board read it). Returns legal (true iff no courtyard \
+                    apply automatic placement hints, and run the deterministic \
+                    placer. The placement is written to the live KiCAD board over IPC \
+                    (route_board and render_board read that board). Returns legal (true iff no courtyard \
                     overlap and all parts in bounds), the HPWL wirelength metric, how \
                     many overlaps the legalizer resolved / parts it clamped, and the \
-                    per-part positions [{reference, x, y, rotation}]. NOTE: keepouts do \
-                    NOT affect placement in v1 — they only block ROUTING (route_board). \
+                    per-part positions [{reference, x, y, rotation}]. Routing obstacles \
+                    are read from the live KiCAD board when route_board runs. \
                     Run derive_board first; an unplaceable (too-tight) board returns \
                     legal=false with a note on how to relax it."
                     .into(),
@@ -710,10 +707,10 @@ pub fn tool_defs() -> Vec<Tool> {
             Def {
                 name: "route_board".into(),
                 description: "Route the placed board: build the routing problem from \
-                    the placement, add the keepouts as blocking obstacles, and run the \
-                    auto-router (detailed pipeline with a naive fallback). Requires a \
-                    placement — run place_board first (else a recoverable error). The \
-                    full solution is persisted for export; the result returns: router \
+                    the live KiCAD board and run the auto-router (detailed pipeline \
+                    with a naive fallback). Requires a placement — run place_board first \
+                    (else a recoverable error). Routed copper is written back over IPC; \
+                    the result returns: router \
                     (\"detailed\"/\"naive\"), failed nets [{connection, reason}] with \
                     stage provenance (global:/assign:/cell:/finisher:), metrics \
                     (wirelength, vias, traces), and lint_summary (DRC violation counts \
@@ -727,13 +724,10 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "autoroute".into(),
-                description: "Auto-route the exported board with the FREEROUTING autorouter — the \
-                    heavy-duty assist for dense boards (BGA/QFP fan-out) the in-house route_board \
-                    can't escape. Routes from scratch at the board's design rules, writes the \
-                    routed copper back to the .kicad_pcb, and reports copper DRC + unconnected \
-                    counts. Requires a placed board (derive_board → place_board → autoroute). \
-                    Use this instead of route_board when route_board \
-                    leaves many nets failed on a dense board; then open_board to inspect/refine."
+                description: "Disabled for the IPC-only PCB flow. Freerouting must be \
+                    reconnected to read the live KiCAD IPC board and write routed copper \
+                    back through IPC before this tool can modify a board. Use route_board \
+                    for routing until that integration exists."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },

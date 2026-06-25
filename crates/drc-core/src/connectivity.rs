@@ -46,12 +46,10 @@
 //! between single-net copper are still reported.
 
 use crate::problem::{LayerRef, RouteProblem, RouteSolution};
+use geom::EPS;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-
-/// Geometric slop, mm. Distances within this of a threshold count as touching.
-const EPS: f64 = 1e-6;
 
 /// A connectivity defect in a [`RouteSolution`] relative to its problem.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -314,7 +312,8 @@ fn touches(x: &Element, y: &Element) -> bool {
         (Pad { min, max, layers }, Point { at, layer })
         | (Point { at, layer }, Pad { min, max, layers }) => {
             layers.contains(layer)
-                && geom::Rect::new(min[0], min[1], max[0], max[1]).dist_to_point((*at).into()) <= EPS
+                && geom::Rect::new(min[0], min[1], max[0], max[1]).dist_to_point((*at).into())
+                    <= EPS
         }
 
         (
@@ -517,7 +516,8 @@ impl NameGroups {
 mod tests {
     use super::*;
     use crate::problem::{
-        Connection, Obstacle, Point2, Rect, RoutePoint, RouteProblem, RouteSolution, Trace, Via, ViaSpan,
+        Connection, Obstacle, Point2, Rect, RoutePoint, RouteProblem, RouteSolution, Trace, Via,
+        ViaSpan,
     };
 
     fn bounds() -> Rect {

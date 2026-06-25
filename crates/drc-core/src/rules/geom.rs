@@ -1,15 +1,12 @@
 //! Geometry helpers shared by the clearance and bounds rules.
 //!
-//! The point/segment/rect distance kernel lives in [`pcb_model::geom2d`] (shared
-//! with the connectivity oracle); only the board-relative helpers (overshoot,
-//! polygon-edge gap, ownership) live here.
+//! The point/segment/rect distance kernel lives in `geom`; only board-relative
+//! helpers live here.
 
 use crate::ctx::CopperItem;
 use crate::problem::RouteProblem;
 
-/// Geometric slop, mm. A gap is only a violation when it falls short of the
-/// required clearance by more than this.
-pub(crate) const EPS: f64 = 1e-6;
+pub(crate) use geom::EPS;
 
 /// How far a disc of `radius` centred at `p` pokes past the nearest board edge
 /// (positive = outside), plus the point itself. Zero or negative = inside.

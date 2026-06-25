@@ -9,7 +9,7 @@
 //! by construction; a failed route falls back to label connectivity at the
 //! call site — never an error.
 
-use geom::{Point2, Rect, Segment};
+use geom::{EPS, Point2, Rect, Segment};
 use sch_place::geom::Dir;
 
 /// Minimum lead length out of a pin before the first turn, mm.
@@ -17,14 +17,14 @@ const LEAD_MM: f64 = 2.54;
 
 /// Drop zero-length segments and merge collinear runs.
 fn simplify(mut path: Vec<Point2>) -> Vec<Point2> {
-    path.dedup_by(|a, b| (a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9);
+    path.dedup_by(|a, b| (a.x - b.x).abs() < EPS && (a.y - b.y).abs() < EPS);
     let mut out: Vec<Point2> = Vec::with_capacity(path.len());
     for p in path {
         if out.len() >= 2 {
             let a = out[out.len() - 2];
             let b = out[out.len() - 1];
-            let collinear_x = (a.x - b.x).abs() < 1e-9 && (b.x - p.x).abs() < 1e-9;
-            let collinear_y = (a.y - b.y).abs() < 1e-9 && (b.y - p.y).abs() < 1e-9;
+            let collinear_x = (a.x - b.x).abs() < EPS && (b.x - p.x).abs() < EPS;
+            let collinear_y = (a.y - b.y).abs() < EPS && (b.y - p.y).abs() < EPS;
             if collinear_x || collinear_y {
                 *out.last_mut().unwrap() = p;
                 continue;
@@ -92,8 +92,6 @@ pub struct RouteScene {
     pub label_solids: Vec<(Rect, String)>,
 }
 
-const EPS: f64 = 1e-6;
-
 /// Whether an axis-aligned segment passes through a solid rect (open
 /// intervals: running flush along a rect edge is tolerated).
 fn seg_hits_rect(a: Point2, b: Point2, r: &Rect) -> bool {
@@ -126,7 +124,11 @@ pub fn segments_conflict(a1: Point2, a2: Point2, b1: Point2, b2: Point2) -> bool
         }
     } else {
         // Perpendicular: candidate crossing point.
-        let (h1, h2, v1, v2) = if a_horiz { (a1, a2, b1, b2) } else { (b1, b2, a1, a2) };
+        let (h1, h2, v1, v2) = if a_horiz {
+            (a1, a2, b1, b2)
+        } else {
+            (b1, b2, a1, a2)
+        };
         let p = Point2::new(v1.x, h1.y);
         let on_h = Segment::new(h1, h2).contains_point(p);
         let on_v = Segment::new(v1, v2).contains_point(p);
@@ -306,7 +308,10 @@ pub fn route_edge(
                 if !lead_ok(x1, 0.0) {
                     continue;
                 }
-                consider(vec![a, Point2::new(x1, a.y), Point2::new(x1, b.y), b], &mut best);
+                consider(
+                    vec![a, Point2::new(x1, a.y), Point2::new(x1, b.y), b],
+                    &mut best,
+                );
                 for &y1 in &ys {
                     consider(
                         vec![
@@ -326,7 +331,10 @@ pub fn route_edge(
                 if !lead_ok(0.0, y1) {
                     continue;
                 }
-                consider(vec![a, Point2::new(a.x, y1), Point2::new(b.x, y1), b], &mut best);
+                consider(
+                    vec![a, Point2::new(a.x, y1), Point2::new(b.x, y1), b],
+                    &mut best,
+                );
                 for &x1 in &xs {
                     consider(
                         vec![
@@ -412,7 +420,7 @@ mod tests {
     fn assert_axis_aligned(path: &[Point2]) {
         for w in path.windows(2) {
             assert!(
-                (w[0].x - w[1].x).abs() < 1e-9 || (w[0].y - w[1].y).abs() < 1e-9,
+                (w[0].x - w[1].x).abs() < EPS || (w[0].y - w[1].y).abs() < EPS,
                 "segment not axis-aligned: {w:?}"
             );
         }
@@ -430,7 +438,11 @@ mod tests {
         let p = elbow(Point2::new(0.0, 0.0), Dir::East, Point2::new(10.0, -5.0));
         assert_eq!(
             p,
-            vec![Point2::new(0.0, 0.0), Point2::new(10.0, 0.0), Point2::new(10.0, -5.0)]
+            vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(10.0, 0.0),
+                Point2::new(10.0, -5.0)
+            ]
         );
         assert_axis_aligned(&p);
     }
@@ -458,7 +470,10 @@ mod tests {
     ) -> RouteScene {
         RouteScene {
             solids,
-            points: points.into_iter().map(|(p, n)| (p, n.to_string())).collect(),
+            points: points
+                .into_iter()
+                .map(|(p, n)| (p, n.to_string()))
+                .collect(),
             segments: segments
                 .into_iter()
                 .map(|(a, b, n)| (a, b, n.to_string()))
@@ -469,7 +484,11 @@ mod tests {
 
     #[test]
     fn mst_connects_collinear_terminals_without_redundancy() {
-        let t = [Point2::new(0.0, 0.0), Point2::new(10.0, 0.0), Point2::new(20.0, 0.0)];
+        let t = [
+            Point2::new(0.0, 0.0),
+            Point2::new(10.0, 0.0),
+            Point2::new(20.0, 0.0),
+        ];
         let edges = mst_edges(&t);
         assert_eq!(edges.len(), 2);
         // Adjacent pairs, never the redundant 0-2 long edge.
@@ -484,7 +503,11 @@ mod tests {
         // not (2 ends).
         let paths = vec![
             vec![Point2::new(0.0, 0.0), Point2::new(10.0, 0.0)],
-            vec![Point2::new(5.0, -5.0), Point2::new(5.0, 0.0), Point2::new(8.0, 0.0)],
+            vec![
+                Point2::new(5.0, -5.0),
+                Point2::new(5.0, 0.0),
+                Point2::new(8.0, 0.0),
+            ],
         ];
         // ...but if the drop TERMINATES on the run, the run is split at the
         // tap in real emission. Model that split:
@@ -500,9 +523,18 @@ mod tests {
     #[test]
     fn route_edge_clear_field_returns_elbow() {
         let s = scene(vec![], vec![], vec![]);
-        let p = route_edge(Point2::new(0.0, 0.0), Dir::East, Point2::new(10.0, -5.0), "A", &s)
-            .unwrap();
-        assert_eq!(p, elbow(Point2::new(0.0, 0.0), Dir::East, Point2::new(10.0, -5.0)));
+        let p = route_edge(
+            Point2::new(0.0, 0.0),
+            Dir::East,
+            Point2::new(10.0, -5.0),
+            "A",
+            &s,
+        )
+        .unwrap();
+        assert_eq!(
+            p,
+            elbow(Point2::new(0.0, 0.0), Dir::East, Point2::new(10.0, -5.0))
+        );
     }
 
     #[test]
@@ -510,15 +542,28 @@ mod tests {
         // Block the straight east run with a body; the route must detour and
         // stay valid.
         let s = scene(vec![Rect::new(4.0, -2.0, 6.0, 2.0)], vec![], vec![]);
-        let p = route_edge(Point2::new(0.0, 0.0), Dir::East, Point2::new(12.7, 0.0), "A", &s)
-            .unwrap();
+        let p = route_edge(
+            Point2::new(0.0, 0.0),
+            Dir::East,
+            Point2::new(12.7, 0.0),
+            "A",
+            &s,
+        )
+        .unwrap();
         assert!(path_ok(&p, "A", &s));
         assert_eq!(p.first(), Some(&Point2::new(0.0, 0.0)));
         assert_eq!(p.last(), Some(&Point2::new(12.7, 0.0)));
         // Deterministic.
         assert_eq!(
             p,
-            route_edge(Point2::new(0.0, 0.0), Dir::East, Point2::new(12.7, 0.0), "A", &s).unwrap()
+            route_edge(
+                Point2::new(0.0, 0.0),
+                Dir::East,
+                Point2::new(12.7, 0.0),
+                "A",
+                &s
+            )
+            .unwrap()
         );
     }
 
@@ -533,11 +578,24 @@ mod tests {
         assert!(path_ok(&straight, "VIN", &s));
         // route_edge: a foreign net detours and stays valid; the owner gets the
         // straight elbow (its own pennant never blocks it).
-        let foreign = route_edge(Point2::new(0.0, 0.0), Dir::East, Point2::new(12.0, 0.0), "FB", &s)
-            .unwrap();
+        let foreign = route_edge(
+            Point2::new(0.0, 0.0),
+            Dir::East,
+            Point2::new(12.0, 0.0),
+            "FB",
+            &s,
+        )
+        .unwrap();
         assert!(path_ok(&foreign, "FB", &s));
         assert_eq!(
-            route_edge(Point2::new(0.0, 0.0), Dir::East, Point2::new(12.0, 0.0), "VIN", &s).unwrap(),
+            route_edge(
+                Point2::new(0.0, 0.0),
+                Dir::East,
+                Point2::new(12.0, 0.0),
+                "VIN",
+                &s
+            )
+            .unwrap(),
             elbow(Point2::new(0.0, 0.0), Dir::East, Point2::new(12.0, 0.0))
         );
     }
@@ -555,10 +613,19 @@ mod tests {
         assert!(!path_ok(&straight, "FB", &s));
         assert!(!path_ok(&straight, "GND", &s));
         // A foreign run detours and stays valid (the glyph never sits on the wire).
-        let routed = route_edge(Point2::new(0.0, 0.0), Dir::East, Point2::new(12.0, 0.0), "FB", &s)
-            .unwrap();
+        let routed = route_edge(
+            Point2::new(0.0, 0.0),
+            Dir::East,
+            Point2::new(12.0, 0.0),
+            "FB",
+            &s,
+        )
+        .unwrap();
         assert!(path_ok(&routed, "FB", &s));
-        assert_ne!(routed, elbow(Point2::new(0.0, 0.0), Dir::East, Point2::new(12.0, 0.0)));
+        assert_ne!(
+            routed,
+            elbow(Point2::new(0.0, 0.0), Dir::East, Point2::new(12.0, 0.0))
+        );
     }
 
     #[test]
@@ -575,7 +642,14 @@ mod tests {
             vec![],
         );
         assert!(
-            route_edge(Point2::new(0.0, 0.0), Dir::East, Point2::new(30.0, 0.0), "A", &s).is_none()
+            route_edge(
+                Point2::new(0.0, 0.0),
+                Dir::East,
+                Point2::new(30.0, 0.0),
+                "A",
+                &s
+            )
+            .is_none()
         );
     }
 
@@ -597,7 +671,10 @@ mod tests {
             vec![],
         );
         let p = vec![Point2::new(0.0, 0.0), Point2::new(10.0, 0.0)];
-        assert!(!path_ok(&p, "A", &s), "foreign point on the wire merges nets");
+        assert!(
+            !path_ok(&p, "A", &s),
+            "foreign point on the wire merges nets"
+        );
         let s2 = scene(vec![], vec![(Point2::new(7.0, 0.0), "A")], vec![]);
         assert!(path_ok(&p, "A", &s2), "own-net point is a deliberate join");
     }
@@ -682,7 +759,11 @@ mod tests {
         let p = elbow(Point2::new(0.0, 10.0), Dir::North, Point2::new(6.0, 2.0));
         assert_eq!(
             p,
-            vec![Point2::new(0.0, 10.0), Point2::new(0.0, 2.0), Point2::new(6.0, 2.0)]
+            vec![
+                Point2::new(0.0, 10.0),
+                Point2::new(0.0, 2.0),
+                Point2::new(6.0, 2.0)
+            ]
         );
         assert_axis_aligned(&p);
     }

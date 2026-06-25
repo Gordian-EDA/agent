@@ -1,7 +1,7 @@
 //! Cardinal directions + axis-aligned segment math, shared across schematic
 //! placement, wiring, and emit.
 
-use crate::point::Point2;
+use crate::{EPS, point::Point2};
 
 /// A pin's outward direction on the sheet, quantized to the four axes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +41,6 @@ pub fn transform_offset(local: Point2, angle: f64, mirror: bool) -> Point2 {
 }
 
 pub fn point_on_segment(p: Point2, a: Point2, b: Point2) -> bool {
-    const EPS: f64 = 1e-6;
     let cross = (p.y - a.y) * (b.x - a.x) - (p.x - a.x) * (b.y - a.y);
     if cross.abs() > EPS {
         return false;

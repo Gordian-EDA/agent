@@ -293,25 +293,22 @@ pub fn courtyard_margin(clearance: f64) -> f64 {
 
 /// Courtyard half-extents after a quadrant rotation (90/270 swap w/h).
 pub fn rotated_courtyard_half(part: &Part, rot: f64) -> (f64, f64) {
-    let (w, h) = (part.courtyard_w / 2.0, part.courtyard_h / 2.0);
-    match geom::snap_quadrant(rot) as i32 {
-        90 | 270 => (h, w),
-        _ => (w, h),
-    }
+    geom::rotated_aabb_half(part.courtyard_w, part.courtyard_h, rot)
 }
 
 /// Half-extents of the part's PAD (copper) bounding box after a quadrant rotation. Bounds ONLY
 /// the copper — so the outline check can keep pads inside the board while a part's courtyard
 /// (its non-copper margin) is still free to overhang a notch (the mounting-hole allowance).
 pub fn rotated_copper_bbox(part: &Part, rot: f64) -> (f64, f64, f64, f64) {
-    let (mut xmin, mut ymin, mut xmax, mut ymax) =
-        (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    let (mut xmin, mut ymin, mut xmax, mut ymax) = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
     for pad in &part.pads {
         let off = pad.offset.rotate(rot);
-        let (pw, ph) = match geom::snap_quadrant(rot) as i32 {
-            90 | 270 => (pad.height / 2.0, pad.width / 2.0),
-            _ => (pad.width / 2.0, pad.height / 2.0),
-        };
+        let (pw, ph) = geom::rotated_aabb_half(pad.width, pad.height, rot);
         // TRUE (asymmetric) bbox relative to the part origin — a connector's pads are OFF-CENTRE
         // (origin at pin 1, not the courtyard centre), so a symmetric centre±max|offset| box would
         // be ~2× too large on the empty side and FALSE-REJECT a connector that actually clears the
@@ -331,7 +328,11 @@ pub fn rotated_copper_bbox(part: &Part, rot: f64) -> (f64, f64, f64, f64) {
 /// World position of a pin's pad center given current part positions.
 pub fn pad_world(problem: &PlaceProblem, pos: &[Point2], pin: &Pin) -> Point2 {
     let part = &problem.parts[pin.part];
-    let rot = part.locked.as_ref().map(|l| geom::snap_quadrant(l.rotation)).unwrap_or(0.0);
+    let rot = part
+        .locked
+        .as_ref()
+        .map(|l| geom::snap_quadrant(l.rotation))
+        .unwrap_or(0.0);
     let off = part.pads[pin.pad].offset.rotate(rot);
     Point2 {
         x: pos[pin.part].x + off.x,
@@ -417,7 +418,10 @@ pub fn is_legal(
                 (xmax + ec, ymax + ec),
                 (xmin - ec, ymax + ec),
             ] {
-                let c = Point2 { x: pos[i].x + dx, y: pos[i].y + dy };
+                let c = Point2 {
+                    x: pos[i].x + dx,
+                    y: pos[i].y + dy,
+                };
                 if !crate::point_in_polygon(&c, poly) {
                     return false;
                 }
@@ -535,7 +539,9 @@ pub fn series_pairs(problem: &PlaceProblem) -> Vec<(usize, usize)> {
         let mut best: Option<usize> = None;
         let mut best_pads = 0usize;
         for pad in &small.pads {
-            let Some(net) = pad.net.as_deref() else { continue };
+            let Some(net) = pad.net.as_deref() else {
+                continue;
+            };
             let pins = &net_pins[net];
             // 2-pin net: exactly this part's pad + one other pin.
             if pins.len() != 2 {
@@ -565,13 +571,19 @@ pub fn series_fanout_order(problem: &PlaceProblem, ic: usize, parts: &[usize]) -
     let mut with_angle: Vec<(f64, String)> = parts
         .iter()
         .filter_map(|&p| {
-            let p_nets: std::collections::BTreeSet<&str> =
-                problem.parts[p].pads.iter().filter_map(|pp| pp.net.as_deref()).collect();
+            let p_nets: std::collections::BTreeSet<&str> = problem.parts[p]
+                .pads
+                .iter()
+                .filter_map(|pp| pp.net.as_deref())
+                .collect();
             // The IC pad sharing this part's 2-pin net → its angle around the IC.
             problem.parts[ic].pads.iter().find_map(|pad| {
                 let n = pad.net.as_deref()?;
                 p_nets.contains(n).then(|| {
-                    (pad.offset.y.atan2(pad.offset.x), problem.parts[p].reference.clone())
+                    (
+                        pad.offset.y.atan2(pad.offset.x),
+                        problem.parts[p].reference.clone(),
+                    )
                 })
             })
         })
@@ -597,8 +609,10 @@ const DEFAULT_VIA_DRILL: f64 = 0.3;
 /// (the placement oracle's router) consumes exactly this.
 pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> RouteProblem {
     // Index placements by reference so we tolerate any order.
-    let place_by_ref: BTreeMap<&str, &Placement> =
-        placements.iter().map(|p| (p.reference.as_str(), p)).collect();
+    let place_by_ref: BTreeMap<&str, &Placement> = placements
+        .iter()
+        .map(|p| (p.reference.as_str(), p))
+        .collect();
 
     let mut obstacles: Vec<Obstacle> = Vec::new();
     // Net → its pad world positions + layer (for connections). Deterministic order.
@@ -634,14 +648,11 @@ pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> Rou
                 // copper layer (a thru-hole pad lists several; the route point
                 // anchors one — the via/oracle stitch the rest).
                 let layer = pad.layers.first().cloned().unwrap_or_else(LayerRef::top);
-                net_points
-                    .entry(net.clone())
-                    .or_default()
-                    .push(RoutePoint {
-                        x: center.x,
-                        y: center.y,
-                        layer,
-                    });
+                net_points.entry(net.clone()).or_default().push(RoutePoint {
+                    x: center.x,
+                    y: center.y,
+                    layer,
+                });
             }
         }
     }

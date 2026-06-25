@@ -1,8 +1,4 @@
-//! Board-construction tools and the input parsers they share: `derive_board`
-//! (seed the draft from the committed schematic) and `build_board_draft` (the
-//! internal builder the deterministic test harnesses call). Footprint
-//! resolution, design-rule / bounds / keepout / group parsing, and validation
-//! all live here.
+//! Board-construction tools and shared input parsers.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -17,7 +13,7 @@ use pcb_place::placement::{Edge, GroupHint, LockedAt, PlacementHints, Rect};
 
 use crate::tools::PcbToolCtx;
 
-use super::draft::{BoardDraft, DraftPart, DraftRules, Keepout, PourSpec};
+use super::seed::{BoardSeed, BoardSeedPart, BoardSeedRules, Keepout, PourSpec};
 
 // ── derive_board ──────────────────────────────────────────────────────────────
 
@@ -34,6 +30,7 @@ struct SeedPart {
     reference: String,
     footprint: String,
     pad_nets: BTreeMap<String, String>,
+    locked: Option<LockedAt>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,8 +56,8 @@ impl Default for SeedRules {
     }
 }
 
-impl From<&DraftRules> for SeedRules {
-    fn from(rules: &DraftRules) -> Self {
+impl From<&BoardSeedRules> for SeedRules {
+    fn from(rules: &BoardSeedRules) -> Self {
         Self {
             clearance: rules.clearance,
             min_trace_width: rules.min_trace_width,
@@ -137,6 +134,7 @@ pub fn derive_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             pad_nets: pad_nets_by_ref
                 .remove(&component.reference)
                 .unwrap_or_default(),
+            locked: None,
         });
     }
 
@@ -211,31 +209,34 @@ fn write_seed_board(spec: &BoardSeedSpec, ctx: &PcbToolCtx) -> std::result::Resu
             lib_id: dp.footprint.clone(),
             source,
             pad_nets: dp.pad_nets.clone(),
-            at: Point2 { x, y },
-            rotation: 0.0,
+            at: dp.locked.as_ref().map(|l| l.at).unwrap_or(Point2 { x, y }),
+            rotation: dp.locked.as_ref().map(|l| l.rotation).unwrap_or(0.0),
+            locked: dp.locked.is_some(),
         });
         x += 2.54;
     }
-    let text = emit_seed_board(&parts, &spec.bounds, &spec.rules, spec.outline.as_deref())
+    let text = SeedBoardWriter::new(&parts, &spec.bounds, &spec.rules, spec.outline.as_deref())
+        .emit()
         .map_err(|e| format!("board synthesis failed: {e}"))?;
     std::fs::write(ctx.pcb_path(), text)
         .map_err(|e| format!("could not write {}: {e}", ctx.pcb_path().display()))
 }
 
-fn write_initial_board(draft: &BoardDraft, ctx: &PcbToolCtx) -> std::result::Result<(), String> {
+fn write_initial_board(seed: &BoardSeed, ctx: &PcbToolCtx) -> std::result::Result<(), String> {
     let spec = BoardSeedSpec {
-        bounds: draft.bounds.clone(),
-        rules: SeedRules::from(&draft.rules),
-        parts: draft
+        bounds: seed.bounds.clone(),
+        rules: SeedRules::from(&seed.rules),
+        parts: seed
             .parts
             .iter()
             .map(|part| SeedPart {
                 reference: part.reference.clone(),
                 footprint: part.footprint.clone(),
                 pad_nets: part.pad_nets.clone(),
+                locked: part.locked.clone(),
             })
             .collect(),
-        outline: draft.outline.clone(),
+        outline: seed.outline.clone(),
     };
     write_seed_board(&spec, ctx)
 }
@@ -248,6 +249,7 @@ struct SeedFootprint {
     pad_nets: BTreeMap<String, String>,
     at: Point2,
     rotation: f64,
+    locked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -273,7 +275,7 @@ fn seed_net_classes(
             .get(&net)
             .copied()
             .unwrap_or(rules.min_trace_width);
-        let key = if (width - rules.min_trace_width).abs() < 1e-9 {
+        let key = if (width - rules.min_trace_width).abs() < geom::EPS {
             "Default".to_owned()
         } else {
             format!("Width_{}", kicad_sexpr::fmt_num(width).replace('.', "_"))
@@ -305,35 +307,171 @@ fn seed_net_classes(
     net_classes
 }
 
-fn emit_seed_board(
-    parts: &[SeedFootprint],
-    bounds: &Rect,
-    rules: &SeedRules,
-    outline: Option<&[Point2]>,
-) -> io::Result<String> {
-    let net_codes = seed_net_codes(parts);
-    let net_classes = seed_net_classes(rules, net_codes.keys().cloned());
-    let mut out = String::with_capacity(4096 + parts.len() * 1024);
-    out.push_str("(kicad_pcb\n");
-    out.push_str("\t(version 20241229)\n");
-    out.push_str("\t(generator \"gordian\")\n");
-    out.push_str("\t(generator_version \"0.1\")\n");
-    out.push_str("\t(general\n\t\t(thickness 1.6)\n\t\t(legacy_teardrops no)\n\t)\n");
-    out.push_str("\t(paper \"A4\")\n");
-    push_seed_layers(&mut out, rules.layer_count);
-    out.push_str(
-        "\t(setup\n\t\t(pad_to_mask_clearance 0)\n\
-         \t\t(allow_soldermask_bridges_in_footprints no)\n\
-         \t\t(aux_axis_origin 0 0)\n\t\t(grid_origin 0 0)\n\t)\n",
-    );
-    push_seed_nets(&mut out, &net_codes);
-    push_seed_net_classes(&mut out, &net_classes, &net_codes);
-    push_seed_edge_cuts(&mut out, bounds, outline);
-    for part in parts {
-        out.push_str(&emit_seed_footprint(part, &net_codes)?);
+struct SeedBoardWriter<'a> {
+    parts: &'a [SeedFootprint],
+    bounds: &'a Rect,
+    rules: &'a SeedRules,
+    outline: Option<&'a [Point2]>,
+    net_codes: BTreeMap<String, i32>,
+    net_classes: Vec<SeedNetClass>,
+}
+
+impl<'a> SeedBoardWriter<'a> {
+    fn new(
+        parts: &'a [SeedFootprint],
+        bounds: &'a Rect,
+        rules: &'a SeedRules,
+        outline: Option<&'a [Point2]>,
+    ) -> Self {
+        let net_codes = seed_net_codes(parts);
+        let net_classes = seed_net_classes(rules, net_codes.keys().cloned());
+        Self {
+            parts,
+            bounds,
+            rules,
+            outline,
+            net_codes,
+            net_classes,
+        }
     }
-    out.push_str(")\n");
-    Ok(out)
+
+    fn emit(&self) -> io::Result<String> {
+        let mut out = String::with_capacity(4096 + self.parts.len() * 1024);
+        out.push_str("(kicad_pcb\n");
+        out.push_str("\t(version 20241229)\n");
+        out.push_str("\t(generator \"gordian\")\n");
+        out.push_str("\t(generator_version \"0.1\")\n");
+        out.push_str("\t(general\n\t\t(thickness 1.6)\n\t\t(legacy_teardrops no)\n\t)\n");
+        out.push_str("\t(paper \"A4\")\n");
+        self.push_layers(&mut out);
+        out.push_str(
+            "\t(setup\n\t\t(pad_to_mask_clearance 0)\n\
+             \t\t(allow_soldermask_bridges_in_footprints no)\n\
+             \t\t(aux_axis_origin 0 0)\n\t\t(grid_origin 0 0)\n\t)\n",
+        );
+        self.push_nets(&mut out);
+        self.push_net_classes(&mut out);
+        self.push_edge_cuts(&mut out);
+        for part in self.parts {
+            out.push_str(&self.emit_footprint(part)?);
+        }
+        out.push_str(")\n");
+        Ok(out)
+    }
+
+    fn push_layers(&self, out: &mut String) {
+        out.push_str("\t(layers\n");
+        out.push_str("\t\t(0 \"F.Cu\" signal)\n");
+        if self.rules.layer_count >= 4 {
+            for i in 1..=(self.rules.layer_count - 2) {
+                let _ = writeln!(out, "\t\t({i} \"In{i}.Cu\" signal)");
+            }
+            let _ = writeln!(out, "\t\t({} \"B.Cu\" signal)", self.rules.layer_count - 1);
+        } else {
+            out.push_str("\t\t(2 \"B.Cu\" signal)\n");
+        }
+        out.push_str("\t\t(36 \"B.SilkS\" user \"B.Silkscreen\")\n");
+        out.push_str("\t\t(37 \"F.SilkS\" user \"F.Silkscreen\")\n");
+        out.push_str("\t\t(38 \"B.Mask\" user)\n");
+        out.push_str("\t\t(39 \"F.Mask\" user)\n");
+        out.push_str("\t\t(44 \"Edge.Cuts\" user)\n");
+        out.push_str("\t)\n");
+    }
+
+    fn push_nets(&self, out: &mut String) {
+        out.push_str("\t(net 0 \"\")\n");
+        let mut by_code: Vec<_> = self
+            .net_codes
+            .iter()
+            .map(|(name, code)| (code, name))
+            .collect();
+        by_code.sort();
+        for (code, name) in by_code {
+            let _ = writeln!(out, "\t(net {code} \"{name}\")");
+        }
+    }
+
+    fn push_net_classes(&self, out: &mut String) {
+        for class in &self.net_classes {
+            let members: Vec<_> = class
+                .members
+                .iter()
+                .filter(|net| self.net_codes.contains_key(*net))
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let _ = writeln!(
+                out,
+                "\t(net_class \"{}\" \"{}\"",
+                class.name, class.description
+            );
+            let _ = writeln!(
+                out,
+                "\t\t(clearance {})",
+                kicad_sexpr::fmt_num(class.clearance)
+            );
+            let _ = writeln!(
+                out,
+                "\t\t(trace_width {})",
+                kicad_sexpr::fmt_num(class.trace_width)
+            );
+            let _ = writeln!(
+                out,
+                "\t\t(via_dia {})",
+                kicad_sexpr::fmt_num(class.via_diameter)
+            );
+            let _ = writeln!(
+                out,
+                "\t\t(via_drill {})",
+                kicad_sexpr::fmt_num(class.via_drill)
+            );
+            for member in members {
+                let _ = writeln!(out, "\t\t(add_net \"{member}\")");
+            }
+            out.push_str("\t)\n");
+        }
+    }
+
+    fn push_edge_cuts(&self, out: &mut String) {
+        if let Some(points) = self.outline
+            && points.len() >= 3
+        {
+            for idx in 0..points.len() {
+                let a = points[idx];
+                let b = points[(idx + 1) % points.len()];
+                let (x0, y0) = (kicad_sexpr::fmt_num(a.x), kicad_sexpr::fmt_num(a.y));
+                let (x1, y1) = (kicad_sexpr::fmt_num(b.x), kicad_sexpr::fmt_num(b.y));
+                let uuid = seed_uuid(&format!("edge:{x0}:{y0}:{x1}:{y1}"));
+                let _ = write!(
+                    out,
+                    "\t(gr_line\n\t\t(start {x0} {y0})\n\t\t(end {x1} {y1})\n\
+                     \t\t(stroke\n\t\t\t(width 0.1)\n\t\t\t(type default)\n\t\t)\n\
+                     \t\t(layer \"Edge.Cuts\")\n\t\t(uuid \"{uuid}\")\n\t)\n"
+                );
+            }
+            return;
+        }
+        let (x0, y0) = (
+            kicad_sexpr::fmt_num(self.bounds.min_x),
+            kicad_sexpr::fmt_num(self.bounds.min_y),
+        );
+        let (x1, y1) = (
+            kicad_sexpr::fmt_num(self.bounds.max_x),
+            kicad_sexpr::fmt_num(self.bounds.max_y),
+        );
+        let uuid = seed_uuid(&format!("edge:{x0}:{y0}:{x1}:{y1}"));
+        let _ = write!(
+            out,
+            "\t(gr_rect\n\t\t(start {x0} {y0})\n\t\t(end {x1} {y1})\n\
+             \t\t(stroke\n\t\t\t(width 0.1)\n\t\t\t(type default)\n\t\t)\n\
+             \t\t(fill no)\n\t\t(layer \"Edge.Cuts\")\n\t\t(uuid \"{uuid}\")\n\t)\n"
+        );
+    }
+
+    fn emit_footprint(&self, part: &SeedFootprint) -> io::Result<String> {
+        emit_seed_footprint(part, &self.net_codes)
+    }
 }
 
 fn seed_net_codes(parts: &[SeedFootprint]) -> BTreeMap<String, i32> {
@@ -350,116 +488,6 @@ fn seed_net_codes(parts: &[SeedFootprint]) -> BTreeMap<String, i32> {
         .enumerate()
         .map(|(idx, net)| (net, idx as i32 + 1))
         .collect()
-}
-
-fn push_seed_layers(out: &mut String, layer_count: u32) {
-    out.push_str("\t(layers\n");
-    out.push_str("\t\t(0 \"F.Cu\" signal)\n");
-    if layer_count >= 4 {
-        for i in 1..=(layer_count - 2) {
-            let _ = writeln!(out, "\t\t({i} \"In{i}.Cu\" signal)");
-        }
-        let _ = writeln!(out, "\t\t({} \"B.Cu\" signal)", layer_count - 1);
-    } else {
-        out.push_str("\t\t(2 \"B.Cu\" signal)\n");
-    }
-    out.push_str("\t\t(36 \"B.SilkS\" user \"B.Silkscreen\")\n");
-    out.push_str("\t\t(37 \"F.SilkS\" user \"F.Silkscreen\")\n");
-    out.push_str("\t\t(38 \"B.Mask\" user)\n");
-    out.push_str("\t\t(39 \"F.Mask\" user)\n");
-    out.push_str("\t\t(44 \"Edge.Cuts\" user)\n");
-    out.push_str("\t)\n");
-}
-
-fn push_seed_nets(out: &mut String, net_codes: &BTreeMap<String, i32>) {
-    out.push_str("\t(net 0 \"\")\n");
-    let mut by_code: Vec<_> = net_codes.iter().map(|(name, code)| (code, name)).collect();
-    by_code.sort();
-    for (code, name) in by_code {
-        let _ = writeln!(out, "\t(net {code} \"{name}\")");
-    }
-}
-
-fn push_seed_net_classes(
-    out: &mut String,
-    classes: &[SeedNetClass],
-    net_codes: &BTreeMap<String, i32>,
-) {
-    for class in classes {
-        let members: Vec<_> = class
-            .members
-            .iter()
-            .filter(|net| net_codes.contains_key(*net))
-            .collect();
-        if members.is_empty() {
-            continue;
-        }
-        let _ = writeln!(
-            out,
-            "\t(net_class \"{}\" \"{}\"",
-            class.name, class.description
-        );
-        let _ = writeln!(
-            out,
-            "\t\t(clearance {})",
-            kicad_sexpr::fmt_num(class.clearance)
-        );
-        let _ = writeln!(
-            out,
-            "\t\t(trace_width {})",
-            kicad_sexpr::fmt_num(class.trace_width)
-        );
-        let _ = writeln!(
-            out,
-            "\t\t(via_dia {})",
-            kicad_sexpr::fmt_num(class.via_diameter)
-        );
-        let _ = writeln!(
-            out,
-            "\t\t(via_drill {})",
-            kicad_sexpr::fmt_num(class.via_drill)
-        );
-        for member in members {
-            let _ = writeln!(out, "\t\t(add_net \"{member}\")");
-        }
-        out.push_str("\t)\n");
-    }
-}
-
-fn push_seed_edge_cuts(out: &mut String, bounds: &Rect, outline: Option<&[Point2]>) {
-    if let Some(points) = outline
-        && points.len() >= 3
-    {
-        for idx in 0..points.len() {
-            let a = points[idx];
-            let b = points[(idx + 1) % points.len()];
-            let (x0, y0) = (kicad_sexpr::fmt_num(a.x), kicad_sexpr::fmt_num(a.y));
-            let (x1, y1) = (kicad_sexpr::fmt_num(b.x), kicad_sexpr::fmt_num(b.y));
-            let uuid = seed_uuid(&format!("edge:{x0}:{y0}:{x1}:{y1}"));
-            let _ = write!(
-                out,
-                "\t(gr_line\n\t\t(start {x0} {y0})\n\t\t(end {x1} {y1})\n\
-                 \t\t(stroke\n\t\t\t(width 0.1)\n\t\t\t(type default)\n\t\t)\n\
-                 \t\t(layer \"Edge.Cuts\")\n\t\t(uuid \"{uuid}\")\n\t)\n"
-            );
-        }
-        return;
-    }
-    let (x0, y0) = (
-        kicad_sexpr::fmt_num(bounds.min_x),
-        kicad_sexpr::fmt_num(bounds.min_y),
-    );
-    let (x1, y1) = (
-        kicad_sexpr::fmt_num(bounds.max_x),
-        kicad_sexpr::fmt_num(bounds.max_y),
-    );
-    let uuid = seed_uuid(&format!("edge:{x0}:{y0}:{x1}:{y1}"));
-    let _ = write!(
-        out,
-        "\t(gr_rect\n\t\t(start {x0} {y0})\n\t\t(end {x1} {y1})\n\
-         \t\t(stroke\n\t\t\t(width 0.1)\n\t\t\t(type default)\n\t\t)\n\
-         \t\t(fill no)\n\t\t(layer \"Edge.Cuts\")\n\t\t(uuid \"{uuid}\")\n\t)\n"
-    );
 }
 
 fn emit_seed_footprint(
@@ -495,6 +523,9 @@ fn emit_seed_footprint(
 
     let mut out = String::with_capacity(body.len() + 256);
     let _ = writeln!(out, "\t(footprint \"{}\"", part.lib_id);
+    if part.locked {
+        out.push_str("\t\t(locked yes)\n");
+    }
     out.push_str("\t\t(layer \"F.Cu\")\n");
     let _ = writeln!(
         out,
@@ -785,7 +816,7 @@ fn seed_uuid(key: &str) -> String {
     )
 }
 
-// ── create_board ─────────────────────────────────────────────────────────────
+// ── seed input parsing ───────────────────────────────────────────────────────
 
 /// Read one required `f64` field from a JSON object, returning a model-readable
 /// error message string on failure.
@@ -810,14 +841,13 @@ fn parse_bounds(v: Option<&Value>) -> std::result::Result<Rect, String> {
     })
 }
 
-/// Parse optional `rules` from snake_case model input; an absent/null `rules`
-/// yields the engine defaults ([`DraftRules::default`]).
+/// Parse optional `rules` from snake_case model input.
 fn parse_seed_rules(v: Option<&Value>) -> std::result::Result<SeedRules, String> {
     parse_rules(v).map(|rules| SeedRules::from(&rules))
 }
 
-fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
-    let d = DraftRules::default();
+fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String> {
+    let d = BoardSeedRules::default();
     let obj = match v {
         None | Some(Value::Null) => return Ok(d),
         Some(obj) => obj,
@@ -915,7 +945,7 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
             });
         }
     }
-    Ok(DraftRules {
+    Ok(BoardSeedRules {
         clearance: num("clearance", d.clearance),
         min_trace_width: num("min_trace_width", d.min_trace_width),
         via_diameter,
@@ -932,15 +962,12 @@ const KICAD_MIN_VIA_DIAMETER: f64 = 0.5;
 const KICAD_MIN_VIA_DRILL: f64 = 0.3;
 const KICAD_MIN_ANNULAR: f64 = 0.1;
 
-/// Parse one part JSON into a validated [`DraftPart`] for [`build_board_draft`]: footprint
-/// resolution, intrinsic pad-clearance rejection, and lock parsing. Returns the error-shaped
-/// `Value` on any problem so the caller can return it directly (the model then fixes just
-/// that part).
-fn parse_draft_part(
+/// Parse one part JSON into a validated [`BoardSeedPart`].
+fn parse_seed_part(
     pj: &Value,
     index: &kicad_sexpr::footlib::FootprintIndex,
     clearance: f64,
-) -> std::result::Result<DraftPart, Value> {
+) -> std::result::Result<BoardSeedPart, Value> {
     let reference = pj
         .get("reference")
         .and_then(Value::as_str)
@@ -995,7 +1022,7 @@ fn parse_draft_part(
             }
         }
     };
-    Ok(DraftPart {
+    Ok(BoardSeedPart {
         reference,
         footprint,
         pad_nets,
@@ -1003,12 +1030,11 @@ fn parse_draft_part(
     })
 }
 
-/// Build the working KiCAD board from a `{bounds, parts, rules?, outline?,
-/// overwrite?}` spec. **Internal builder — NOT an agent tool.** The agent reaches the board
-/// only through [`derive_board`], which assembles this spec from the committed schematic + the
-/// footprint map. Also called directly by the deterministic test harnesses (board_harness /
-/// pcb_gate / board_artifact) that build boards from standalone JSON, no schematic.
-pub fn build_board_draft(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+/// Build the first KiCAD board from a `{bounds, parts, rules?, outline?}` spec.
+///
+/// Internal builder, not an agent tool. [`derive_board`] is the normal path; the
+/// deterministic harnesses call this directly with standalone JSON specs.
+pub fn build_seed_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // Optional custom OUTLINE (polygon points, mm) — circle/square/star/any shape. When
     // given, `bounds` is its bounding box (placement/routing extent) and the polygon
     // becomes the Edge.Cuts at export (the render then shows the true shape).
@@ -1035,12 +1061,7 @@ pub fn build_board_draft(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         }
     };
     let bounds = match &outline {
-        Some(o) => Rect {
-            min_x: o.iter().map(|p| p.x).fold(f64::INFINITY, f64::min),
-            max_x: o.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max),
-            min_y: o.iter().map(|p| p.y).fold(f64::INFINITY, f64::min),
-            max_y: o.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max),
-        },
+        Some(o) => Rect::bounding(o).expect("outline parser requires at least three points"),
         None => match parse_bounds(input.get("bounds")) {
             Ok(b) => b,
             Err(msg) => return Ok(json!({ "error": msg })),
@@ -1059,13 +1080,13 @@ pub fn build_board_draft(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     };
 
     let index = ctx.footprint_index()?;
-    let mut parts: Vec<DraftPart> = Vec::with_capacity(parts_json.len());
+    let mut parts: Vec<BoardSeedPart> = Vec::with_capacity(parts_json.len());
 
     // Resolve every footprint up front; a single unknown lib_id is a recoverable
     // error with suggestions (mirrors get_footprint_info), so the model can fix
     // exactly that part rather than re-sending the whole board.
     for pj in parts_json {
-        match parse_draft_part(pj, index, rules.clearance) {
+        match parse_seed_part(pj, index, rules.clearance) {
             Ok(p) => parts.push(p),
             Err(e) => return Ok(e),
         }
@@ -1081,12 +1102,7 @@ pub fn build_board_draft(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         }
     }
 
-    // Build the placement Parts via placefp (reuse, don't fork) so the
-    // enclosing-courtyard rule and layer mapping are applied once. We don't keep
-    // the Parts here — Task 2 rebuilds them at place time — but building them now
-    // surfaces any footprint we can't turn into a part, and lets us derive the
-    // net pin counts for the ≥2-pin warning from the SAME geometry place/route
-    // will see.
+    // Keep single-pin nets as warnings: they are valid, but there is nothing to route.
     let net_pins = net_pin_counts(&parts, ctx);
 
     // Nets with < 2 pins have nothing to connect — surface as warnings (not
@@ -1099,32 +1115,29 @@ pub fn build_board_draft(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         })
         .collect();
 
-    let draft = BoardDraft {
+    let seed = BoardSeed {
         bounds,
         rules,
         parts,
         keepouts: Vec::new(),
         hints: PlacementHints::default(),
-        last_placement: None,
-        last_place_illegal: false,
         outline,
     };
-    if let Err(msg) = write_initial_board(&draft, ctx) {
+    if let Err(msg) = write_initial_board(&seed, ctx) {
         return Ok(json!({ "error": msg }));
     }
 
     Ok(json!({
         "ok": true,
         "board_written": true,
-        "part_count": draft.parts.len(),
+        "part_count": seed.parts.len(),
         "net_count": net_pins.len(),
         "warnings": warnings,
     }))
 }
 
-/// Pin count per net across the draft. A pad whose number is absent from
-/// `pad_nets` contributes no pin.
-pub(super) fn net_pin_counts(parts: &[DraftPart], ctx: &PcbToolCtx) -> BTreeMap<String, usize> {
+/// Pin count per net across seed parts.
+pub(super) fn net_pin_counts(parts: &[BoardSeedPart], ctx: &PcbToolCtx) -> BTreeMap<String, usize> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let _ = ctx;
     for p in parts {
@@ -1156,7 +1169,7 @@ fn axis_aligned_rotation(rot: f64) -> std::result::Result<f64, String> {
 }
 
 /// Parse one group hint from snake_case model input, validating its members
-/// against the draft's known references. Returns the engine [`GroupHint`] on
+/// against known references. Returns the engine [`GroupHint`] on
 /// success or a model-readable error string.
 pub(super) fn parse_group_hint(
     v: &Value,
@@ -1269,10 +1282,10 @@ pub(super) fn parse_keepout(
         return Err(format!("{ctxstr}: rect is degenerate (min must be < max)"));
     }
     // Within bounds (a keepout outside the board is almost certainly a mistake).
-    if rect.min_x < bounds.min_x - 1e-9
-        || rect.max_x > bounds.max_x + 1e-9
-        || rect.min_y < bounds.min_y - 1e-9
-        || rect.max_y > bounds.max_y + 1e-9
+    if rect.min_x < bounds.min_x - geom::EPS
+        || rect.max_x > bounds.max_x + geom::EPS
+        || rect.min_y < bounds.min_y - geom::EPS
+        || rect.max_y > bounds.max_y + geom::EPS
     {
         return Err(format!(
             "{ctxstr}: rect [{},{}]x[{},{}] is outside the board bounds [{},{}]x[{},{}]",

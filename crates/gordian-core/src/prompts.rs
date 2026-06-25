@@ -304,9 +304,9 @@ KiCAD board, with the deterministic engine as your ASSIST for the bulk work.
 3. `place_board()` — the engine legalizes a floorplan (the AUTOPLACE assist). `render_board()`
    to SEE it. `route_board()` — the in-house router (the fast AUTOROUTE assist); returns the
    failed nets + metrics + `lint_summary` (expected zero; non-zero = an engine bug to report
-   verbatim, not triage). On a DENSE board (BGA/QFP fan-out) where route_board leaves many nets
-   failed, `autoroute()` runs the heavy-duty FREEROUTING autorouter instead.
-   A few honest unrouted nets are acceptable.
+   verbatim, not triage). If a dense board leaves many nets failed, enlarge the outline,
+   add layers, or inspect/refine the live board over IPC. `autoroute()` is disabled until
+   Freerouting is reconnected to the IPC-only flow. A few honest unrouted nets are acceptable.
 4. `check_board()` — saves the live `.kicad_pcb` and runs DRC (KiCAD ≥ 8).
 5. `open_board()` — warm or inspect the global KiCAD session. From here you EDIT THE REAL
    BOARD interactively over IPC — this is where you apply engineering judgement the engine

@@ -4,11 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "KiCAD s-expr PCB-side file & library access: .kicad_pcb + footprint .kicad_mod libraries, with a fuzzy footprint index."
+description = "KiCAD footprint .kicad_mod library access with a fuzzy footprint index."
 
 [dependencies]
 geom = { path = "../geom" }
-pcb-model = { path = "../pcb-model" }
 kicad-cli = { path = "../kicad-cli" }
 strsim.workspace = true
 fuzzy-matcher.workspace = true
@@ -16,12 +15,9 @@ serde.workspace = true
 serde_json.workspace = true
 kiutils_kicad.workspace = true
 kiutils_sexpr.workspace = true
-tempfile.workspace = true
-uuid.workspace = true
-quick-xml.workspace = true
 
 [dev-dependencies]
-drc-lint = { path = "../drc-lint" }
+tempfile.workspace = true
 # DSL-integration tests only: drive `circuit_lang::compile` against the real
 # symbol provider. The library no longer depends on circuit-lang (see CB-3).
 circuit-lang = { path = "../circuit-lang" }

@@ -7,9 +7,11 @@ repository.workspace = true
 description = "Native Rust client for the KiCAD IPC API (protobuf over NNG) — read and edit a live KiCAD board."
 
 [dependencies]
+geom = { path = "../geom" }
+nng = "1.0"
+pcb-model = { path = "../pcb-model" }
 prost = "0.13"
 prost-types = "0.13"
-nng = "1.0"
 thiserror.workspace = true
 
 [build-dependencies]

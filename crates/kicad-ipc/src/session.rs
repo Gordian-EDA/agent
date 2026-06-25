@@ -161,6 +161,7 @@ impl Session {
 
         let mut kicad = Kicad::connect()?;
         kicad.open_board_path(board)?;
+        std::thread::sleep(Duration::from_millis(1_500));
         Ok(Self {
             child: Some(child),
             kicad,

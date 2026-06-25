@@ -4,11 +4,12 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
+use pcb_place::placement::PlacementHints;
 use pcb_place::placement::{PlaceReport, PlaceResult};
 
 use crate::tools::PcbToolCtx;
 
-use super::place::place_problem_from_draft;
+use super::place::place_problem_from_snapshot;
 
 /// Render the board to a PNG using the placement or routed SVG, save under
 /// `.gordian/renders/`, and attach via `IMAGE_PATH_KEY`.
@@ -16,14 +17,11 @@ use super::place::place_problem_from_draft;
 /// `view` may be `"placed"` or `"routed"`. When omitted the default is
 /// `"routed"` when the live board has copper, `"placed"` otherwise.
 pub fn render_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
-    let draft = match super::active::draft_from_live(ctx) {
-        Ok(draft) => draft,
-        Err(err) => return Ok(json!({ "error": err })),
-    };
-
     // ── resolve view ─────────────────────────────────────────────────────────
-    let has_route = super::active::copper_solution(ctx)
-        .map(|s| !s.traces.is_empty() || !s.vias.is_empty())
+    let board = super::active::board_problem(ctx).ok();
+    let has_route = board
+        .as_ref()
+        .map(|b| !b.copper.traces.is_empty() || !b.copper.vias.is_empty())
         .unwrap_or(false);
     let view_str = input.get("view").and_then(Value::as_str);
     let view = match view_str {
@@ -48,21 +46,24 @@ pub fn render_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // ── generate SVG ─────────────────────────────────────────────────────────
     let svg = match view {
         "placed" => {
-            // Need a last_placement in the draft.
-            let Some(placements) = draft.last_placement.clone() else {
+            let board = match board {
+                Some(board) => board,
+                None => match super::active::board_problem(ctx) {
+                    Ok(board) => board,
+                    Err(err) => return Ok(json!({ "error": err })),
+                },
+            };
+            if super::active::is_seed_imported_board(&board.imported) {
                 return Ok(json!({
                     "error": "board has not been placed yet — run place_board first, \
                               then render_board",
                 }));
-            };
-            let problem = match place_problem_from_draft(&draft, ctx) {
+            }
+            let problem = match place_problem_from_snapshot(&board, ctx) {
                 Ok(p) => p,
                 Err(msg) => return Ok(json!({ "error": msg })),
             };
-            // Reconstruct a minimal PlaceResult from the stored placements.
-            // render_placement uses .placements to look up part positions, and
-            // problem.parts for courtyard/pad geometry. legal/report are not
-            // used by the renderer — any zero-default values are fine.
+            let placements = super::active::imported_placements(&board.imported);
             let result = PlaceResult {
                 placements,
                 legal: true,
@@ -73,34 +74,27 @@ pub fn render_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
                     layout_cost: 0.0,
                 },
             };
-            super::engine_svg::render_placement(&problem, &draft.hints, &result)
+            super::engine_svg::render_placement(&problem, &PlacementHints::default(), &result)
         }
         "routed" => {
-            let solution = match super::active::copper_solution(ctx) {
-                Ok(solution) if !solution.traces.is_empty() || !solution.vias.is_empty() => {
-                    solution
-                }
-                Ok(_) => {
-                    return Ok(json!({
-                        "error": "board has no routed copper yet — run route_board first, then render_board",
-                    }));
-                }
-                Err(err) => {
-                    return Ok(json!({ "error": err }));
-                }
+            let board = match board {
+                Some(board) => board,
+                None => match super::active::board_problem(ctx) {
+                    Ok(board) => board,
+                    Err(err) => return Ok(json!({ "error": err })),
+                },
             };
-            let board = match super::active::board_problem(ctx) {
-                Ok(board) => board,
-                Err(err) => {
-                    return Ok(json!({ "error": err }));
-                }
-            };
-            if board.problem.connections.is_empty() {
+            if board.copper.traces.is_empty() && board.copper.vias.is_empty() {
                 return Ok(json!({
-                    "error": "board has no routeable nets — derive/place the board first",
+                    "error": "board has no routed copper yet — run route_board first, then render_board",
                 }));
             }
-            super::engine_svg::render_svg(&board.problem, &solution, &[])
+            if board.problem.connections.is_empty() {
+                return Ok(json!({
+                "error": "board has no routeable nets — derive/place the board first",
+                }));
+            }
+            super::engine_svg::render_svg(&board.problem, &board.copper, &[])
         }
         // The match above is exhaustive over {"placed","routed"}; the `other`
         // arm returned early, so this branch is unreachable.

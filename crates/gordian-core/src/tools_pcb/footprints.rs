@@ -4,6 +4,8 @@
 
 use serde_json::{Value, json};
 
+use geom::Point2;
+
 use crate::tools::{PcbToolCtx, require_str};
 
 /// Default number of footprint-search hits returned when `limit` is omitted.
@@ -48,8 +50,8 @@ pub fn get_footprint_info(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Valu
             let mut min_pitch = f64::INFINITY;
             for (i, a) in fp.pads.iter().enumerate() {
                 for b in &fp.pads[i + 1..] {
-                    let d = ((a.at[0] - b.at[0]).powi(2) + (a.at[1] - b.at[1]).powi(2)).sqrt();
-                    if d > 1e-6 && d < min_pitch {
+                    let d = Point2::new(a.at[0], a.at[1]).dist(Point2::new(b.at[0], b.at[1]));
+                    if d > geom::EPS && d < min_pitch {
                         min_pitch = d;
                     }
                 }
@@ -121,7 +123,7 @@ fn bbox_json(b: &kicad_sexpr::footlib::BBox) -> Value {
 /// Return the circuit-YAML edit needed to assign a footprint.
 ///
 /// Footprint assignment belongs to the schematic/circuit YAML, not PCB state. This helper is
-/// deliberately stateless: it does not read a board draft, inspect the schematic, or write files.
+/// deliberately stateless: it does not read board state, inspect the schematic, or write files.
 pub fn assign_footprint(input: Value, _ctx: &PcbToolCtx) -> anyhow::Result<Value> {
     let reference = require_str(&input, "reference")?;
     let footprint = require_str(&input, "footprint")?;

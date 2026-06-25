@@ -311,39 +311,3 @@ pub(super) fn justify_token(j: Justify) -> &'static str {
         Justify::Center => "",
     }
 }
-
-/// Whether two axis-aligned boxes overlap (open intervals, so edge-touching is
-/// not a collision — symbols flush against a frame don't trip the lint).
-pub(super) fn boxes_overlap(a: &Rect, b: &Rect) -> bool {
-    // Tolerance matches `floorplan::rects_overlap`: a shared edge (and the
-    // sub-micron float jitter around one) is a TOUCH between padded bboxes — real
-    // clearance, not a collision — so it must NOT be flagged. Without this, two
-    // collinear/adjacent parts whose padded boxes meet (a divider's R7/R8 spine,
-    // a pull-up just above a wide IC) trip a phantom overlap warning.
-    const EPS: f64 = 1e-6;
-    a.min_x < b.max_x - EPS
-        && b.min_x < a.max_x - EPS
-        && a.min_y < b.max_y - EPS
-        && b.min_y < a.max_y - EPS
-}
-
-pub(super) fn point_on_segment(
-    p: impl Into<Point2>,
-    a: impl Into<Point2>,
-    b: impl Into<Point2>,
-) -> bool {
-    const EPS: f64 = 1e-6;
-    let p = p.into();
-    let a = a.into();
-    let b = b.into();
-    let cross = (p.y - a.y) * (b.x - a.x) - (p.x - a.x) * (b.y - a.y);
-    if cross.abs() > EPS {
-        return false;
-    }
-    let dot = (p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y);
-    if dot < -EPS {
-        return false;
-    }
-    let len2 = (b.x - a.x).powi(2) + (b.y - a.y).powi(2);
-    dot <= len2 + EPS
-}

@@ -13,40 +13,14 @@ use kicad_ipc::proto::kiapi::board::types::{
     PadStackType, Track as KiTrack, UnconnectedLayerRemoval, Via as KiVia, ViaType,
 };
 use kicad_ipc::proto::kiapi::common::types::{Distance, Vector2};
+use kicad_ipc::snapshot::ImportedPart;
 use negotiated_mesh::pathing::global_route;
 use negotiated_mesh::pipeline::route_auto;
-use pcb_model::{FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteSolution, ViaSpan};
+use pcb_model::{FailedNet, LayerRef, Point2, RouteProblem, RouteSolution, ViaSpan};
 
 use crate::tools::PcbToolCtx;
 
-use super::draft::Keepout;
-
 // ── route_board ──────────────────────────────────────────────────────────────
-
-/// Inject the draft's keepouts into a [`RouteProblem`] as BLOCKED_ALL obstacles.
-///
-/// We extend the engine's `to_route_problem` output at the agent layer (rather
-/// than forking `to_route_problem`): each keepout becomes an [`Obstacle`] with an
-/// EMPTY `connected_to`, which the lint/router treat as unowned copper — blocking
-/// EVERY net on the listed layers. A keepout rect maps to a centered rect
-/// obstacle per the rect's geometry.
-pub(super) fn inject_keepouts(rp: &mut RouteProblem, keepouts: &[Keepout]) {
-    for ko in keepouts {
-        let center = Point2 {
-            x: (ko.rect.min_x + ko.rect.max_x) / 2.0,
-            y: (ko.rect.min_y + ko.rect.max_y) / 2.0,
-        };
-        rp.obstacles.push(Obstacle {
-            kind: "rect".to_owned(),
-            layers: ko.layers.clone(),
-            center,
-            width: ko.rect.max_x - ko.rect.min_x,
-            height: ko.rect.max_y - ko.rect.min_y,
-            // No owner ⇒ blocks all nets (a true keepout).
-            connected_to: Vec::new(),
-        });
-    }
-}
 
 /// A `lint_summary` for a routed solution, split into two buckets.
 ///
@@ -160,7 +134,7 @@ fn congestion_json(rp: &RouteProblem) -> Value {
 /// Plane-stitch pseudo-failures ("<N plane stitching vias>") are not net names, so they don't match
 /// any pad and are naturally excluded.
 fn escape_bottleneck(
-    parts: &[super::draft::DraftPart],
+    parts: &[ImportedPart],
     failed: &[FailedNet],
 ) -> Option<(String, String, usize, usize)> {
     let failed_nets: std::collections::BTreeSet<&str> =
@@ -169,12 +143,13 @@ fn escape_bottleneck(
     let mut total = 0usize;
     for p in parts {
         let c = p
-            .pad_nets
-            .values()
-            .filter(|n| failed_nets.contains(n.as_str()))
+            .pads
+            .iter()
+            .filter_map(|(_, net)| net.as_deref())
+            .filter(|net| failed_nets.contains(net))
             .count();
         if c > 0 {
-            per_part.push((p.reference.clone(), p.footprint.clone(), c));
+            per_part.push((p.reference.clone(), p.lib_id.clone(), c));
             total += c;
         }
     }
@@ -191,24 +166,12 @@ pub fn route_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
 }
 
 fn route_live_board(ctx: &PcbToolCtx) -> std::result::Result<Value, String> {
-    let path = ctx.pcb_path();
-    ctx.kicad()
-        .with_session(&path, |session| session.kicad().save())
-        .map_err(|e| format!("could not open/save live KiCAD board: {e}"))?;
-    let draft = super::active::draft_from_live(ctx)?;
-    if draft.last_placement.is_none() {
+    let board = super::active::board_problem(ctx)?;
+    if is_seed_placement(&board.imported.bounds, &board.imported.parts) {
         return Err("board has only the initial seed-row footprint positions — run place_board before route_board".to_owned());
     }
-    let board = super::active::board_problem(ctx)?;
 
-    let existing = ctx
-        .kicad()
-        .with_session(&path, |session| {
-            let tracks = session.kicad().tracks()?;
-            let vias = session.kicad().vias()?;
-            Ok((tracks.len(), vias.len()))
-        })
-        .map_err(|e| format!("could not inspect live KiCAD copper: {e}"))?;
+    let existing = (board.copper.traces.len(), board.copper.vias.len());
     if existing.0 > 0 || existing.1 > 0 {
         return Err(format!(
             "live board already has {} tracks and {} vias; refusing to replace copper until generated-item tagging is implemented",
@@ -216,8 +179,7 @@ fn route_live_board(ctx: &PcbToolCtx) -> std::result::Result<Value, String> {
         ));
     }
 
-    let mut rp = board.problem.clone();
-    inject_keepouts(&mut rp, &draft.keepouts);
+    let rp = board.problem.clone();
     let result = route_auto(&rp);
     let split = lint_summary(&rp, &result.solution, &result.failed, &Default::default());
     if split.real > 0 {
@@ -227,23 +189,7 @@ fn route_live_board(ctx: &PcbToolCtx) -> std::result::Result<Value, String> {
         ));
     }
 
-    ctx.kicad()
-        .with_session(&path, |session| {
-            let nets: BTreeMap<String, KiNet> = session
-                .kicad()
-                .net_list()?
-                .into_iter()
-                .map(|n| (n.name.clone(), n))
-                .collect();
-            let items = route_items_for_ipc(&rp, &result.solution, &board.layer_names, &nets)
-                .map_err(|e| {
-                    kicad_ipc::Error::Spawn(format!("could not build IPC route items: {e}"))
-                })?;
-            session
-                .kicad()
-                .commit("route board", |k| k.create_items(items))?;
-            session.kicad().save()
-        })
+    write_route(ctx, &rp, &result.solution, &board.layer_names)
         .map_err(|e| format!("could not write route to live KiCAD board: {e}"))?;
 
     let failed: Vec<Value> = result
@@ -256,7 +202,7 @@ fn route_live_board(ctx: &PcbToolCtx) -> std::result::Result<Value, String> {
     } else {
         congestion_json(&rp)
     };
-    let escape = escape_bottleneck(&draft.parts, &result.failed).map(
+    let escape = escape_bottleneck(&board.imported.parts, &result.failed).map(
         |(reference, footprint, pins_on_part, total_failed_pins)| {
             json!({
                 "reference": reference,
@@ -280,11 +226,93 @@ fn route_live_board(ctx: &PcbToolCtx) -> std::result::Result<Value, String> {
         "congestion": congestion,
         "escape_bottleneck": escape,
         "note": if result.failed.is_empty() {
-            "routed live KiCAD board cleanly and saved it"
+            "routed live KiCAD board cleanly"
         } else {
-            "routed live KiCAD board with honest failed nets and saved routed copper"
+            "routed live KiCAD board with honest failed nets"
         },
     }))
+}
+
+fn write_route(
+    ctx: &PcbToolCtx,
+    rp: &RouteProblem,
+    solution: &RouteSolution,
+    layer_names: &[String],
+) -> std::result::Result<(), kicad_ipc::Error> {
+    let path = ctx.pcb_path();
+    match write_route_once(ctx, &path, rp, solution, layer_names) {
+        Ok(()) => Ok(()),
+        Err(err) if err.is_transient_api_ready_error() => {
+            std::thread::sleep(std::time::Duration::from_millis(750));
+            write_route_once(ctx, &path, rp, solution, layer_names)
+        }
+        Err(err) if err.is_transport_timeout() => {
+            ctx.close_kicad_session();
+            if route_is_written(ctx, solution)? {
+                return Ok(());
+            }
+            write_route_once(ctx, &path, rp, solution, layer_names)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn write_route_once(
+    ctx: &PcbToolCtx,
+    path: &std::path::Path,
+    rp: &RouteProblem,
+    solution: &RouteSolution,
+    layer_names: &[String],
+) -> std::result::Result<(), kicad_ipc::Error> {
+    ctx.kicad().with_session(path, |session| {
+        let nets: BTreeMap<String, KiNet> = session
+            .kicad()
+            .net_list()?
+            .into_iter()
+            .map(|n| (n.name.clone(), n))
+            .collect();
+        let items = route_items_for_ipc(rp, solution, layer_names, &nets).map_err(|e| {
+            kicad_ipc::Error::Spawn(format!("could not build IPC route items: {e}"))
+        })?;
+        session
+            .kicad()
+            .commit("route board", |k| k.create_items(items))
+    })
+}
+
+fn route_is_written(
+    ctx: &PcbToolCtx,
+    solution: &RouteSolution,
+) -> std::result::Result<bool, kicad_ipc::Error> {
+    let path = ctx.pcb_path();
+    let snapshot = ctx
+        .kicad()
+        .with_session(&path, |session| session.kicad().board_snapshot())?;
+    Ok(snapshot.copper.traces.len() >= solution.traces.len()
+        && snapshot.copper.vias.len() >= solution.vias.len()
+        && (!solution.traces.is_empty() || !solution.vias.is_empty()))
+}
+
+fn is_seed_placement(bounds: &pcb_model::Rect, parts: &[ImportedPart]) -> bool {
+    if parts.is_empty() {
+        return false;
+    }
+    let mut coords: Vec<_> = parts
+        .iter()
+        .map(|p| (p.at.x, p.at.y, p.rotation as f64))
+        .collect();
+    coords.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    coords.iter().enumerate().all(|(idx, (x, y, rotation))| {
+        let expected_x = bounds.min_x + 2.0 + 2.54 * idx as f64;
+        let expected_y = bounds.min_y + 2.0;
+        (x - expected_x).abs() < geom::EPS
+            && (y - expected_y).abs() < geom::EPS
+            && rotation.abs() < geom::EPS
+    })
 }
 
 fn route_items_for_ipc(
@@ -456,19 +484,19 @@ fn board_layer_by_index(index: u32, layer_names: &[String]) -> BoardLayer {
 
 #[cfg(test)]
 mod escape_bottleneck_tests {
-    use super::super::draft::DraftPart;
     use super::*;
-    use std::collections::BTreeMap;
 
-    fn part(reference: &str, footprint: &str, nets: &[(&str, &str)]) -> DraftPart {
-        DraftPart {
+    fn part(reference: &str, footprint: &str, nets: &[(&str, &str)]) -> ImportedPart {
+        ImportedPart {
             reference: reference.to_owned(),
-            footprint: footprint.to_owned(),
-            pad_nets: nets
+            lib_id: footprint.to_owned(),
+            at: Point2 { x: 0.0, y: 0.0 },
+            rotation: 0,
+            locked: false,
+            pads: nets
                 .iter()
-                .map(|(p, n)| (p.to_string(), n.to_string()))
-                .collect::<BTreeMap<_, _>>(),
-            locked: None,
+                .map(|(p, n)| (p.to_string(), Some(n.to_string())))
+                .collect(),
         }
     }
     fn failed(nets: &[&str]) -> Vec<FailedNet> {

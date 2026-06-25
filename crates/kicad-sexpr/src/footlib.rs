@@ -22,10 +22,7 @@
 //!
 //! `.kicad_mod` parsing is **native** via [`kiutils_kicad::FootprintFile`]
 //! (no hand-rolled s-expr extraction): its [`kiutils_kicad::FootprintAst`]
-//! exposes `pads` and `graphics` typed exactly like the board-side
-//! [`kiutils_kicad::PcbFootprint`]/[`kiutils_kicad::PcbPad`] in [`crate::pcb`],
-//! so the parsed data is shaped to serve the same placement/write-back
-//! consumers.
+//! exposes `pads` and `graphics` as typed footprint geometry.
 //!
 //! ## Search
 //!
@@ -42,6 +39,7 @@ use std::sync::Mutex;
 
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
+use geom::{Point2, Rect};
 use serde::{Deserialize, Serialize};
 
 use kicad_cli::env::KicadEnv;
@@ -99,22 +97,25 @@ impl BBox {
         self.max_y - self.min_y
     }
 
-    fn from_points(pts: &[[f64; 2]]) -> Option<Self> {
-        let mut it = pts.iter();
-        let &[x0, y0] = it.next()?;
-        let mut b = BBox {
-            min_x: x0,
-            min_y: y0,
-            max_x: x0,
-            max_y: y0,
-        };
-        for &[x, y] in it {
-            b.min_x = b.min_x.min(x);
-            b.min_y = b.min_y.min(y);
-            b.max_x = b.max_x.max(x);
-            b.max_y = b.max_y.max(y);
+    fn from_points(pts: &[Point2]) -> Option<Self> {
+        Rect::bounding(pts).map(Into::into)
+    }
+}
+
+impl From<Rect> for BBox {
+    fn from(r: Rect) -> Self {
+        BBox {
+            min_x: r.min_x,
+            min_y: r.min_y,
+            max_x: r.max_x,
+            max_y: r.max_y,
         }
-        Some(b)
+    }
+}
+
+impl From<BBox> for Rect {
+    fn from(b: BBox) -> Self {
+        Rect::new(b.min_x, b.min_y, b.max_x, b.max_y)
     }
 }
 
@@ -134,8 +135,7 @@ pub enum CourtyardSource {
 /// One pad of a footprint, reference-designator-agnostic — i.e. as the library
 /// defines it, before placement assigns nets/positions on a board. Offsets are
 /// in the footprint's own unrotated frame, matching [`kiutils_kicad::PcbPad`]
-/// so placement can translate/rotate them onto a board exactly like
-/// [`crate::pcb`] already does.
+/// so placement can translate/rotate them onto a board.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FootprintPad {
     /// Pad number/name as a string (`"1"`, `"A1"`, `"GND"`); may repeat.
@@ -285,8 +285,7 @@ pub(crate) fn matching_paren(s: &str, open: usize) -> Option<usize> {
     None
 }
 
-/// Translate one [`kiutils_kicad::FpPad`] into a [`FootprintPad`], defaulting
-/// missing geometry to zero the way [`crate::pcb`] does for board pads.
+/// Translate one [`kiutils_kicad::FpPad`] into a [`FootprintPad`].
 fn pad_detail(pad: &kiutils_kicad::FpPad) -> FootprintPad {
     let technology = match pad.pad_type.as_deref() {
         Some("smd") => PadTechnology::Smd,
@@ -307,20 +306,20 @@ fn pad_detail(pad: &kiutils_kicad::FpPad) -> FootprintPad {
 }
 
 /// Corner points of a pad's axis-aligned copper rectangle in the footprint
-/// frame (local pad rotation folded in via an enclosing AABB, matching
-/// [`crate::pcb`]'s v1 conservatism).
-fn pad_corners(pad: &FootprintPad) -> [[f64; 2]; 2] {
+/// frame with local pad rotation folded into an enclosing AABB.
+fn pad_corners(pad: &FootprintPad) -> [Point2; 2] {
     let [cx, cy] = pad.at;
     let [w, h] = pad.size;
     let (hw, hh) = geom::rotated_aabb_half(w, h, pad.rotation);
-    [[cx - hw, cy - hh], [cx + hw, cy + hh]]
+    [Point2::new(cx - hw, cy - hh), Point2::new(cx + hw, cy + hh)]
 }
 
 /// All defined geometry points of a graphic (`start`/`end`/`center`/`at`).
-fn graphic_points(g: &kiutils_kicad::FpGraphic) -> Vec<[f64; 2]> {
-    let mut pts: Vec<[f64; 2]> = [g.start, g.end, g.center, g.at]
+fn graphic_points(g: &kiutils_kicad::FpGraphic) -> Vec<Point2> {
+    let mut pts: Vec<Point2> = [g.start, g.end, g.center, g.at]
         .into_iter()
         .flatten()
+        .map(Point2::from)
         .collect();
     // An `fp_arc` bulges BEYOND its endpoints, but kiutils 0.3 drops the `(mid)`
     // apex — so a rounded courtyard (a crystal's curved end, a round connector)
@@ -332,10 +331,11 @@ fn graphic_points(g: &kiutils_kicad::FpGraphic) -> Vec<[f64; 2]> {
     if g.token == "fp_arc"
         && let (Some(s), Some(e)) = (g.start, g.end)
     {
-        let mid = [(s[0] + e[0]) / 2.0, (s[1] + e[1]) / 2.0];
-        let r = ((s[0] - e[0]).powi(2) + (s[1] - e[1]).powi(2)).sqrt() / 2.0;
-        pts.push([mid[0] - r, mid[1] - r]);
-        pts.push([mid[0] + r, mid[1] + r]);
+        let chord = geom::Segment::new(s.into(), e.into());
+        let mid = chord.midpoint();
+        let r = chord.length() / 2.0;
+        pts.push(Point2::new(mid.x - r, mid.y - r));
+        pts.push(Point2::new(mid.x + r, mid.y + r));
     }
     // An `fp_circle` ((center) + an `(end)` point on the circumference) bounds a
     // disc of that radius — but only the two stored points would be read, missing
@@ -345,9 +345,10 @@ fn graphic_points(g: &kiutils_kicad::FpGraphic) -> Vec<[f64; 2]> {
     if g.token == "fp_circle"
         && let (Some(c), Some(e)) = (g.center.or(g.start), g.end)
     {
-        let r = ((c[0] - e[0]).powi(2) + (c[1] - e[1]).powi(2)).sqrt();
-        pts.push([c[0] - r, c[1] - r]);
-        pts.push([c[0] + r, c[1] + r]);
+        let center = Point2::from(c);
+        let r = center.dist(e.into());
+        pts.push(Point2::new(center.x - r, center.y - r));
+        pts.push(Point2::new(center.x + r, center.y + r));
     }
     pts
 }
@@ -360,7 +361,7 @@ fn courtyard_bbox(
     ast: &kiutils_kicad::FootprintAst,
     pads: &[FootprintPad],
 ) -> (BBox, CourtyardSource) {
-    let mut crtyd: Vec<[f64; 2]> = Vec::new();
+    let mut crtyd: Vec<Point2> = Vec::new();
     for g in &ast.graphics {
         if matches!(g.layer.as_deref(), Some("F.CrtYd") | Some("B.CrtYd")) {
             crtyd.extend(graphic_points(g));
@@ -371,7 +372,7 @@ fn courtyard_bbox(
     }
 
     // Fallback: pad corners + silkscreen graphic points.
-    let mut pts: Vec<[f64; 2]> = Vec::new();
+    let mut pts: Vec<Point2> = Vec::new();
     for pad in pads {
         pts.extend(pad_corners(pad));
     }
@@ -388,7 +389,7 @@ fn courtyard_bbox(
 
 /// Overall bbox over every pad rectangle and every graphic point.
 fn overall_bbox(ast: &kiutils_kicad::FootprintAst, pads: &[FootprintPad]) -> Option<BBox> {
-    let mut pts: Vec<[f64; 2]> = Vec::new();
+    let mut pts: Vec<Point2> = Vec::new();
     for pad in pads {
         pts.extend(pad_corners(pad));
     }

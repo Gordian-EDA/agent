@@ -301,11 +301,7 @@ pub fn render_placement(
         let Some(pl) = place_by_ref.get(part.reference.as_str()) else {
             continue;
         };
-        // Rotation swaps the courtyard extents for the quadrant cases.
-        let (hw, hh) = match geom::snap_quadrant(pl.rotation) as i32 {
-            90 | 270 => (part.courtyard_h / 2.0, part.courtyard_w / 2.0),
-            _ => (part.courtyard_w / 2.0, part.courtyard_h / 2.0),
-        };
+        let (hw, hh) = geom::rotated_aabb_half(part.courtyard_w, part.courtyard_h, pl.rotation);
         writeln!(
             w,
             "  <rect x=\"{x:.6}\" y=\"{y:.6}\" width=\"{cw:.6}\" height=\"{ch:.6}\" \
@@ -336,10 +332,8 @@ pub fn render_placement(
         };
         for pad in &part.pads {
             let off = pad.offset.rotate(pl.rotation);
-            let (pw, ph) = match geom::snap_quadrant(pl.rotation) as i32 {
-                90 | 270 => (pad.height, pad.width),
-                _ => (pad.width, pad.height),
-            };
+            let (pw, ph) = geom::rotated_aabb_half(pad.width, pad.height, pl.rotation);
+            let (pw, ph) = (pw * 2.0, ph * 2.0);
             let cx = pl.at.x + off.x;
             let cy = pl.at.y + off.y;
             let fill = pad

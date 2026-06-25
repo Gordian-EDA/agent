@@ -14,12 +14,6 @@
 
 use geom::{Point2, Rect};
 
-/// Whether two boxes overlap (open intervals: edge-touching is NOT overlap,
-/// matching the lint's `boxes_overlap` so solver and oracle agree).
-pub fn boxes_overlap(a: &Rect, b: &Rect) -> bool {
-    a.min_x < b.max_x && b.min_x < a.max_x && a.min_y < b.max_y && b.min_y < a.max_y
-}
-
 /// Fixed geometry a movable must not collide with.
 pub enum ObKind {
     /// A symbol body, exempted for text OWNED by that refdes (a label on its
@@ -59,8 +53,8 @@ pub fn choose(obstacles: &[Obstacle], movables: &[Movable]) -> Vec<(usize, bool)
         let free = |b: &Rect| {
             obstacles.iter().all(|o| match &o.kind {
                 ObKind::OwnExempt(r) if Some(r) == m.owner.as_ref() => true,
-                _ => !boxes_overlap(b, &o.bbox),
-            }) && placed.iter().all(|p| !boxes_overlap(&grow(b), p))
+                _ => b.intersection(&o.bbox).is_none(),
+            }) && placed.iter().all(|p| grow(b).intersection(p).is_none())
         };
         let pick = m.candidates.iter().position(free);
         let idx = pick.unwrap_or(0);
@@ -126,7 +120,7 @@ pub fn pin_text_boxes(
         let end = Point2::new(start.x + w * u.x, start.y + w * u.y);
         let c1 = Point2::new(start.x - 0.8 * p.x, start.y - 0.8 * p.y);
         let c2 = Point2::new(end.x + 0.8 * p.x, end.y + 0.8 * p.y);
-        boxes.push(rect_from_corners(to_sheet(c1), to_sheet(c2)));
+        boxes.push(Rect::from_points(to_sheet(c1), to_sheet(c2)));
     }
     // Number text straddles the pin line midpoint.
     let mid = Point2::new(
@@ -135,23 +129,14 @@ pub fn pin_text_boxes(
     );
     let c1 = Point2::new(mid.x - 1.1 * u.x - 0.8 * p.x, mid.y - 1.1 * u.y - 0.8 * p.y);
     let c2 = Point2::new(mid.x + 1.1 * u.x + 0.8 * p.x, mid.y + 1.1 * u.y + 0.8 * p.y);
-    boxes.push(rect_from_corners(to_sheet(c1), to_sheet(c2)));
+    boxes.push(Rect::from_points(to_sheet(c1), to_sheet(c2)));
     boxes
-}
-
-/// Sheet bbox from two transformed corner points (normalizes min/max).
-pub fn rect_from_corners(a: Point2, b: Point2) -> Rect {
-    Rect::from_points(a, b)
 }
 
 /// Instance half-extents with the body rotation applied: 90/270 swaps w/h.
 pub fn rotated_half_extents(h: Point2, angle: f64) -> Point2 {
-    let a = angle.rem_euclid(360.0);
-    if (a - 90.0).abs() < 1e-9 || (a - 270.0).abs() < 1e-9 {
-        Point2::new(h.y, h.x)
-    } else {
-        h
-    }
+    let (hw, hh) = geom::rotated_aabb_half(h.x * 2.0, h.y * 2.0, angle);
+    Point2::new(hw, hh)
 }
 
 /// Thin obstacle box around a wire segment (inflated 0.13 mm).
@@ -320,21 +305,31 @@ mod tests {
 
     #[test]
     fn rotated_half_extents_swaps_at_90() {
-        assert_eq!(
+        let assert_close = |got: Point2, want: Point2| {
+            assert!(
+                (got.x - want.x).abs() < geom::EPS,
+                "got {got:?}, want {want:?}"
+            );
+            assert!(
+                (got.y - want.y).abs() < geom::EPS,
+                "got {got:?}, want {want:?}"
+            );
+        };
+        assert_close(
             rotated_half_extents(Point2::new(3.0, 1.0), 0.0),
-            Point2::new(3.0, 1.0)
+            Point2::new(3.0, 1.0),
         );
-        assert_eq!(
+        assert_close(
             rotated_half_extents(Point2::new(3.0, 1.0), 90.0),
-            Point2::new(1.0, 3.0)
+            Point2::new(1.0, 3.0),
         );
-        assert_eq!(
+        assert_close(
             rotated_half_extents(Point2::new(3.0, 1.0), 180.0),
-            Point2::new(3.0, 1.0)
+            Point2::new(3.0, 1.0),
         );
-        assert_eq!(
+        assert_close(
             rotated_half_extents(Point2::new(3.0, 1.0), 270.0),
-            Point2::new(1.0, 3.0)
+            Point2::new(1.0, 3.0),
         );
     }
 }

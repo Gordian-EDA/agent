@@ -46,8 +46,8 @@ fn main() {
               "pad_nets": { "1": "VIN", "2": "GND" } }
         ]
     });
-    let r = gordian_core::tools_pcb::build_board_draft(board, &ctx).unwrap();
-    println!("build_board_draft: ok={}", r["ok"]);
+    let r = gordian_core::tools_pcb::build_seed_board(board, &ctx).unwrap();
+    println!("build_seed_board: ok={}", r["ok"]);
     let r = run_tool("place_board", json!({}), &ctx).unwrap();
     println!("place_board: legal={} hpwl={}", r["legal"], r["hpwl"]);
     let r = run_tool("route_board", json!({}), &ctx).unwrap();

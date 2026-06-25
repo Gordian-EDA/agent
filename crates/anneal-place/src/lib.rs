@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use geom::EPS;
 use sch_place::ir::{LayoutIr, Orient};
 use sch_place::item::{Incidence, Item};
 use sch_place::netclass::is_power_net;
@@ -26,9 +27,6 @@ use sch_floorplan::contract::{
     orient_angle, overlaps_any, pin_endpoint, rects_overlap, signal_anchor_centroid,
     supply_pin_target,
 };
-
-/// Geometry coincidence tolerance (mm) — anneal's own copy of the shared 1e-6 epsilon.
-const EPS: f64 = 1e-6;
 
 /// Simulated annealing: a seeded refine→anneal AND a broad anneal from the
 /// raw seed, keeping whichever the objective prefers (today's multi-start best-of).

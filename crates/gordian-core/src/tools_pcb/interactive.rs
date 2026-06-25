@@ -4,20 +4,16 @@
 //! `open_board` launches or inspects the live KiCAD session and the geometry
 //! tools edit the REAL board over IPC. This is where the LLM directly controls
 //! geometry (the engine is the assist that produced the starting point).
-//! `autoroute` (Freerouting) is the heavy-duty routing assist for dense boards.
 
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use kicad_cli::cli::KicadCli;
 use kicad_ipc::footprint_reference;
 use kicad_ipc::proto::kiapi::board::types::BoardLayer;
-use kicad_sexpr::pcb::{extract_copper, read_problem, write_solution};
 
 use crate::tools::{PcbToolCtx, require_str};
 
 use super::create::req_num;
-use super::export::is_non_copper;
 
 fn ipc_err(e: kicad_ipc::Error) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
@@ -42,14 +38,6 @@ fn parse_copper_layer(name: &str) -> std::result::Result<BoardLayer, String> {
             ));
         }
     })
-}
-
-fn existing_copper_counts(
-    board_path: &std::path::Path,
-) -> std::result::Result<(usize, usize), String> {
-    extract_copper(board_path)
-        .map(|solution| (solution.traces.len(), solution.vias.len()))
-        .map_err(|e| format!("could not inspect existing copper: {e}"))
 }
 
 /// Open the project board in a live headless KiCAD for interactive editing.
@@ -179,10 +167,7 @@ pub fn set_net_width(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     }
 }
 
-/// Auto-route the active board with the Freerouting autorouter (the heavy-duty
-/// assist for dense boards the in-house router can't escape). Routes from scratch
-/// at the board's design rules, writes the routed copper back to the project
-/// `.kicad_pcb`, and reports DRC. Requires a derived and placed board.
+/// Freerouting is disabled until its DSN export path consumes the live IPC board.
 pub fn autoroute(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let board_path = ctx.pcb_path();
     if !board_path.exists() {
@@ -190,78 +175,12 @@ pub fn autoroute(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             json!({ "error": "no .kicad_pcb — run derive_board then place_board before autoroute" }),
         );
     }
-    match existing_copper_counts(&board_path) {
-        Ok((tracks, vias)) if tracks > 0 || vias > 0 => {
-            return Ok(json!({
-                "error": format!(
-                    "board already has {tracks} tracks and {vias} vias; autoroute refuses to append copper until generated-item tagging is implemented"
-                )
-            }));
-        }
-        Ok(_) => {}
-        Err(e) => return Ok(json!({ "error": e })),
-    }
-    let problem = match read_problem(&board_path) {
-        Ok(p) => p,
-        Err(e) => return Ok(json!({ "error": format!("could not read the board: {e}") })),
-    };
-    let rules = specctra::RouteRules::from_board(&problem);
-    let geo = match specctra::freeroute_with_rules(&board_path, rules) {
-        Ok(g) => g,
-        Err(e) => return Ok(json!({ "error": format!("freerouting failed: {e}") })),
-    };
-    let (wires, vias) = (geo.wires.len(), geo.vias.len());
-    let solution = geo.to_solution(&problem);
-    if let Err(e) = write_solution(&board_path, &solution, &problem) {
-        return Ok(json!({ "error": format!("could not write the routed board: {e}") }));
-    }
-    let _ = specctra::write_net_settings(&board_path, rules);
-
-    // DRC via KiCAD (the external authority); copper faults only.
-    let mut copper_violations = None;
-    let mut unconnected = None;
-    if let Ok(report) = KicadCli::new(ctx.env()).drc(&board_path) {
-        copper_violations = Some(
-            report
-                .violations
-                .iter()
-                .filter(|v| !is_non_copper(v))
-                .count(),
-        );
-        unconnected = Some(report.unconnected_items.len());
-    }
     Ok(json!({
-        "ok": true,
-        "router": "freerouting",
-        "wires": wires,
-        "vias": vias,
-        "copper_violations": copper_violations,
-        "unconnected_items": unconnected,
-        "note": "routed with Freerouting and written to the board. open_board to inspect/refine, \
-                 or render_board. A few honest unconnected nets on a dense board are acceptable.",
+        "error": "autoroute is disabled until Freerouting consumes the live KiCAD IPC board and writes routed copper back through IPC. Use route_board for the IPC-only PCB flow."
     }))
 }
 
 /// Save the live KiCAD board to disk if a session is open. Returns whether it saved.
 pub fn save_session_if_open(ctx: &PcbToolCtx) -> Result<bool> {
     ctx.kicad().save_if_open().map_err(ipc_err)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn existing_copper_counts_detects_segments_without_kicad() {
-        let board = include_str!("../../../kicad-sexpr/tests/fixtures/two_res.kicad_pcb")
-            .replace(
-                "\n)",
-                "\n\t(segment\n\t\t(start 1 1)\n\t\t(end 2 1)\n\t\t(width 0.25)\n\t\t(layer \"F.Cu\")\n\t\t(net 1)\n\t\t(uuid \"11111111-2222-3333-4444-555555555555\")\n\t)\n)",
-            );
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("board.kicad_pcb");
-        std::fs::write(&path, board).unwrap();
-
-        assert_eq!(existing_copper_counts(&path).unwrap(), (1, 0));
-    }
 }

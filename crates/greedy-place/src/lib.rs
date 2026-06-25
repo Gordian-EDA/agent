@@ -10,6 +10,7 @@
 //! of the amplified engine's energy, but the two engines are independently evolvable — the
 //! weights are copied, not factored into a shared type.
 
+use geom::EPS;
 use sch_place::ir::Orient;
 use sch_place::item::{Incidence, Item};
 use sch_place::place::{Crossings, PlaceProblem, PlaceResult};
@@ -18,9 +19,6 @@ use sch_floorplan::contract::{
     COL_GAP, GRID_KEY, PlacementEngine, ROW_GAP, RawMetrics, Realizer, build_writer, item_rect,
     orient_angle, overlaps_any, rects_overlap, signal_anchor_centroid, supply_pin_target,
 };
-
-/// Geometry coincidence tolerance (mm) — greedy's own copy of the shared 1e-6 epsilon.
-const EPS: f64 = 1e-6;
 
 /// Greedy hill-climb: local, strictly-cost-improving moves only over
 /// the seeded mm placement.

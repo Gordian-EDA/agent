@@ -13,7 +13,7 @@ use kicad_cli::cli::KicadCli;
 use kicad_cli::env::KicadEnv;
 
 /// The vendored two-resistor board, embedded so the test is self-contained.
-const TWO_RES: &str = include_str!("../../kicad-sexpr/tests/fixtures/two_res.kicad_pcb");
+const TWO_RES: &str = include_str!("fixtures/two_res.kicad_pcb");
 
 /// Write the fixture into a fresh tempdir and return `(tempdir, board_path)`.
 /// The `TempDir` must stay alive for the board to exist.

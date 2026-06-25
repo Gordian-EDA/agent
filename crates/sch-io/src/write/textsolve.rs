@@ -9,14 +9,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use geom::Point2;
+use geom::{EPS, Point2, Segment};
 
 use crate::grid::snap_point;
 
-use super::{
-    BBox, Justify, SchematicWriter, TextPos, Wire, boxes_overlap, field_anchors, field_box,
-    point_on_segment,
-};
+use super::{BBox, Justify, SchematicWriter, TextPos, Wire, field_anchors, field_box};
 
 /// What [`SchematicWriter::solve_text_positions`] mutates once the greedy solver
 /// has picked a candidate for the parallel [`crate::label::Movable`].
@@ -153,10 +150,10 @@ impl SchematicWriter {
                 .is_some_and(|nets| nets.iter().any(|n| *n != net));
             let end_on_seg = segments
                 .iter()
-                .any(|(a, b, n)| *n != net && point_on_segment(end, *a, *b));
+                .any(|(a, b, n)| *n != net && Segment::new(*a, *b).contains_point(end));
             let seg_thru_point = points.iter().any(|(&(xb, yb), nets)| {
                 let p = Point2::new(f64::from_bits(xb), f64::from_bits(yb));
-                nets.iter().any(|n| *n != net) && point_on_segment(p, pin_at, end)
+                nets.iter().any(|n| *n != net) && Segment::new(pin_at, end).contains_point(p)
             });
 
             if end_on_point || end_on_seg || seg_thru_point {
@@ -571,10 +568,7 @@ impl SchematicWriter {
                 })
                 .unwrap_or_default();
             let hits = |c: &(TextPos, TextPos, BBox)| {
-                pin_boxes
-                    .iter()
-                    .filter(|pb| boxes_overlap(&c.2, pb))
-                    .count()
+                pin_boxes.iter().filter(|pb| c.2.overlaps(pb)).count()
             };
             let mut bands = vec![
                 below,
@@ -670,7 +664,6 @@ impl SchematicWriter {
     /// merged): the router already forbids a foreign endpoint on our wire, so any
     /// interior node is a same-net tap.
     fn split_wires_at_nodes(&mut self) {
-        const EPS: f64 = 1e-6;
         let same = |p: Point2, q: Point2| (p[0] - q[0]).abs() < EPS && (p[1] - q[1]).abs() < EPS;
         // Candidate split points: every junction position + every wire endpoint.
         let mut pts: Vec<Point2> = self.junctions.iter().map(|j| j.at).collect();
@@ -693,7 +686,7 @@ impl SchematicWriter {
                 let mut best: Option<Point2> = None;
                 let mut best_d = f64::INFINITY;
                 for &p in &pts {
-                    if same(p, w.a) || same(p, w.b) || !point_on_segment(p, w.a, w.b) {
+                    if same(p, w.a) || same(p, w.b) || !Segment::new(w.a, w.b).contains_point(p) {
                         continue;
                     }
                     let d = (p[0] - w.a[0]).abs() + (p[1] - w.a[1]).abs();
@@ -772,7 +765,7 @@ impl SchematicWriter {
         // `minx`/`miny` include off-grid text extents, so an unsnapped shift would
         // knock the whole sheet off the 1.27 mm grid.
         let (dx, dy) = (crate::grid::snap(M - minx), crate::grid::snap(M - miny));
-        if dx.abs() < 1e-9 && dy.abs() < 1e-9 {
+        if dx.abs() < EPS && dy.abs() < EPS {
             return;
         }
         self.translate(dx, dy);
@@ -953,7 +946,6 @@ impl SchematicWriter {
         // the eye most often misses — and the soft cost term alone can be OVERRUN (a
         // rigid `layout:` grid forcing a part to the far side of its anchor), so it
         // must LINT too, not just nudge the search.
-        const BODY_EPS: f64 = 1e-6;
         const BODY_INSET: f64 = 2.0; // shrink the pin-tip bbox onto the body rectangle
         for inst in &self.instances {
             if inst.refdes.starts_with('#') {
@@ -979,23 +971,19 @@ impl SchematicWriter {
                 hi[0] - BODY_INSET,
                 hi[1] - BODY_INSET,
             ];
-            if r[2] - r[0] < BODY_EPS || r[3] - r[1] < BODY_EPS {
+            if r[2] - r[0] < EPS || r[3] - r[1] < EPS {
                 continue;
             }
             for wire in &self.wires {
                 let (w1, w2) = (wire.a, wire.b);
-                let cross = if (w1[0] - w2[0]).abs() < BODY_EPS {
+                let cross = if (w1[0] - w2[0]).abs() < EPS {
                     let x = w1[0];
                     let (ylo, yhi) = (w1[1].min(w2[1]), w1[1].max(w2[1]));
-                    r[0] + BODY_EPS < x
-                        && x < r[2] - BODY_EPS
-                        && ylo.max(r[1]) < yhi.min(r[3]) - BODY_EPS
+                    r[0] + EPS < x && x < r[2] - EPS && ylo.max(r[1]) < yhi.min(r[3]) - EPS
                 } else {
                     let y = w1[1];
                     let (xlo, xhi) = (w1[0].min(w2[0]), w1[0].max(w2[0]));
-                    r[1] + BODY_EPS < y
-                        && y < r[3] - BODY_EPS
-                        && xlo.max(r[0]) < xhi.min(r[2]) - BODY_EPS
+                    r[1] + EPS < y && y < r[3] - EPS && xlo.max(r[0]) < xhi.min(r[2]) - EPS
                 };
                 if cross {
                     warnings.push(format!("wire crosses body of {}", inst.refdes));
@@ -1022,7 +1010,7 @@ impl SchematicWriter {
                 if ignore_pairs.contains(&pair) {
                     continue;
                 }
-                if boxes_overlap(&items[i].1, &items[j].1) {
+                if items[i].1.overlaps(&items[j].1) {
                     warnings.push(format!("{} overlaps {}", items[i].0, items[j].0));
                 }
             }

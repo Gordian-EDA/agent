@@ -1,27 +1,24 @@
-//! Placement: the read-only `get_board` summary, the draft→`PlaceProblem`
-//! bridge, the auto edge-affinity plumbing, and the `place_board` handler.
+//! Placement over the live KiCAD IPC board.
 
 use std::collections::BTreeMap;
 
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use kicad_ipc::FootprintMove;
+use kicad_ipc::{FootprintMove, snapshot::IpcBoardSnapshot};
 use kicad_sexpr::footlib::{BBox, Footprint, FootprintPad, PadTechnology};
 use pcb_model::LayerRef;
 use pcb_model::place::PartPad;
-use pcb_place::placement::{Part, PlaceProblem, Placement, Rect};
+use pcb_place::placement::{LockedAt, Part, PlaceProblem, Placement, PlacementHints, Rect};
 
 use crate::tools::PcbToolCtx;
-
-use super::create::net_pin_counts;
-use super::draft::BoardDraft;
 
 fn part_from_footprint_layers(
     footprint: &Footprint,
     reference: &str,
     net_map: &BTreeMap<String, String>,
     layer_count: u32,
+    locked: Option<LockedAt>,
 ) -> Part {
     let pads = footprint
         .pads
@@ -34,7 +31,7 @@ fn part_from_footprint_layers(
         courtyard_w,
         courtyard_h,
         pads,
-        locked: None,
+        locked,
     }
 }
 
@@ -124,114 +121,117 @@ fn pad_aabb(pad: &FootprintPad) -> BBox {
 // ── get_board ────────────────────────────────────────────────────────────────
 
 pub fn get_board(ctx: &PcbToolCtx) -> Result<Value> {
-    let draft = match super::active::draft_from_live(ctx) {
-        Ok(draft) => draft,
+    let board = match super::active::board_problem(ctx) {
+        Ok(board) => board,
         Err(err) => return Ok(json!({ "error": err })),
     };
 
-    let net_pins = net_pin_counts(&draft.parts, ctx);
+    let net_pins = snapshot_net_pin_counts(&board);
     let nets: Vec<Value> = net_pins
         .iter()
         .map(|(name, &pins)| json!({ "name": name, "pins": pins }))
         .collect();
 
-    let placed = draft.last_placement.is_some();
-    // Routed state is read from the active KiCAD board.
-    let routed = ctx
-        .kicad()
-        .with_session(&ctx.pcb_path(), |session| {
-            Ok(session.kicad().tracks()?.len() > 0)
+    let placed = !super::active::is_seed_imported_board(&board.imported);
+    let routed = !board.copper.traces.is_empty() || !board.copper.vias.is_empty();
+    let parts: Vec<Value> = board
+        .imported
+        .parts
+        .iter()
+        .map(|part| {
+            json!({
+                "reference": part.reference,
+                "footprint": part.lib_id,
+                "x": part.at.x,
+                "y": part.at.y,
+                "rotation": part.rotation,
+                "pad_count": part.pads.iter().filter(|(_, net)| net.is_some()).count(),
+            })
         })
-        .unwrap_or(false);
-
-    // Lean draft view: each part's pad→net map is exactly what the model itself passed to
-    // create_board, so echoing it back on every get_board call only re-bloats the context
-    // (43–64% of a dense BGA board's draft, re-sent each turn). Replace it with a pad_count;
-    // the per-net pin SUMMARY below carries the connectivity view the model actually inspects.
-    let mut draft_json = serde_json::to_value(&draft)?;
-    if let Some(parts) = draft_json.get_mut("parts").and_then(Value::as_array_mut) {
-        for part in parts {
-            if let Some(obj) = part.as_object_mut() {
-                let n = obj
-                    .get("pad_nets")
-                    .and_then(Value::as_object)
-                    .map_or(0, serde_json::Map::len);
-                obj.remove("pad_nets");
-                obj.insert("pad_count".into(), json!(n));
-            }
-        }
-    }
+        .collect();
+    let board_json = json!({
+        "bounds": board.imported.bounds,
+        "outline": board.problem.outline,
+        "rules": {
+            "clearance": board.problem.clearance,
+            "minTraceWidth": board.problem.min_trace_width,
+            "viaDiameter": board.problem.via_diameter,
+            "viaDrill": board.problem.via_drill,
+            "layerCount": board.problem.layer_count,
+            "netWidths": board.problem.net_widths,
+        },
+        "parts": parts,
+    });
 
     Ok(json!({
-        "draft": draft_json,
+        "board": board_json,
         "summary": {
-            "part_count": draft.parts.len(),
+            "part_count": board.imported.parts.len(),
             "net_count": net_pins.len(),
             "nets": nets,
-            "keepout_count": draft.keepouts.len(),
+            "keepout_count": 0,
             "placed": placed,
             "routed": routed,
         },
     }))
 }
 
-// ── draft → engine problem ───────────────────────────────────────────────────
+fn snapshot_net_pin_counts(board: &IpcBoardSnapshot) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for part in &board.imported.parts {
+        for (_, net) in &part.pads {
+            if let Some(net) = net {
+                *counts.entry(net.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
 
-/// Build the [`PlaceProblem`] the placement/routing engine consumes from a
-/// board draft. Every part's footprint is resolved through
-/// [`part_from_footprint_layers`] (the SAME geometry `create_board` validated and the
-/// net-pin counts derive from), then the draft's `locked` position is applied so
-/// the placer pins it. Design rules ride along as the problem's clearance /
-/// trace width / layer count.
-///
-/// Keepouts are deliberately NOT carried here: in v1 they affect ROUTING only
-/// (they become BLOCKED obstacles in [`route_board`](super::route::route_board)), never placement no-go
-/// regions. An unresolvable footprint (e.g. the index lost a lib between
-/// `create_board` and now) is returned as an `Err(lib_id)` so the caller can
-/// surface a recoverable error naming the part.
-pub(super) fn place_problem_from_draft(
-    draft: &BoardDraft,
+// ── IPC snapshot to engine problem ───────────────────────────────────────────
+
+pub(super) fn place_problem_from_snapshot(
+    board: &IpcBoardSnapshot,
     ctx: &PcbToolCtx,
 ) -> std::result::Result<PlaceProblem, String> {
     let index = ctx
         .footprint_index()
         .map_err(|e| format!("footprint index unavailable: {e}"))?;
-    let mut parts: Vec<Part> = Vec::with_capacity(draft.parts.len());
-    for dp in &draft.parts {
-        let Some(fp) = index.footprint(&dp.footprint) else {
+    let mut parts: Vec<Part> = Vec::with_capacity(board.imported.parts.len());
+    for imported in &board.imported.parts {
+        let Some(fp) = index.footprint(&imported.lib_id) else {
             return Err(format!(
-                "part {}: footprint `{}` is no longer resolvable — re-create the board",
-                dp.reference, dp.footprint
+                "part {}: footprint `{}` is no longer resolvable",
+                imported.reference, imported.lib_id
             ));
         };
-        let mut part =
-            part_from_footprint_layers(&fp, &dp.reference, &dp.pad_nets, draft.rules.layer_count);
-        // A DSL part `lock` pins the part for the placer (carried through here).
-        part.locked = dp.locked.clone();
-        parts.push(part);
+        parts.push(part_from_footprint_layers(
+            &fp,
+            &imported.reference,
+            &pad_net_map(&imported.pads),
+            board.problem.layer_count,
+            imported.locked.then_some(LockedAt {
+                at: imported.at,
+                rotation: imported.rotation as f64,
+            }),
+        ));
     }
-    // Keep-outs that block a SIGNAL layer (top/bottom) are placement obstacles too:
-    // a part dropped inside one has its pads trapped (no track can leave). Inner-only
-    // (plane) keep-outs don't constrain placement, so they're excluded here.
-    let keepouts: Vec<Rect> = draft
-        .keepouts
-        .iter()
-        .filter(|k| {
-            k.layers
-                .iter()
-                .any(|l| *l == LayerRef::top() || *l == LayerRef::bottom())
-        })
-        .map(|k| k.rect.clone())
-        .collect();
+
     Ok(PlaceProblem {
-        bounds: routing_bounds(draft),
-        clearance: draft.rules.clearance,
-        layer_count: draft.rules.layer_count,
-        min_trace_width: draft.rules.min_trace_width,
+        bounds: routing_bounds(&board.problem.bounds, board.problem.outline.as_deref()),
+        clearance: board.problem.clearance,
+        layer_count: board.problem.layer_count,
+        min_trace_width: board.problem.min_trace_width,
         parts,
-        keepouts,
-        outline: draft.outline.clone(),
+        keepouts: Vec::new(),
+        outline: board.problem.outline.clone(),
     })
+}
+
+fn pad_net_map(pads: &[(String, Option<String>)]) -> BTreeMap<String, String> {
+    pads.iter()
+        .filter_map(|(pad, net)| net.as_ref().map(|net| (pad.clone(), net.clone())))
+        .collect()
 }
 
 /// KiCAD's copper-to-board-edge clearance (its default). Copper closer than this to the
@@ -246,25 +246,23 @@ const EDGE_CLEAR_MM: f64 = 0.5;
 /// clearance so place + route keep copper off the edge; the exported Edge.Cuts stays the user's
 /// real outline. (Inset the bbox; the lint also checks distance to the outline POLYGON edges,
 /// catching the non-bbox edges of a non-rectangular outline.)
-fn routing_bounds(draft: &BoardDraft) -> Rect {
-    if draft.outline.is_none() {
-        return draft.bounds.clone();
+fn routing_bounds(bounds: &Rect, outline: Option<&[pcb_model::Point2]>) -> Rect {
+    if outline.is_none() {
+        return bounds.clone();
     }
-    let b = &draft.bounds;
     // Never invert a small board: clamp the inset so min stays < max.
     let inset = EDGE_CLEAR_MM
-        .min((b.max_x - b.min_x) / 2.0 - 0.1)
-        .min((b.max_y - b.min_y) / 2.0 - 0.1);
+        .min((bounds.max_x - bounds.min_x) / 2.0 - 0.1)
+        .min((bounds.max_y - bounds.min_y) / 2.0 - 0.1);
     Rect {
-        min_x: b.min_x + inset,
-        max_x: b.max_x - inset,
-        min_y: b.min_y + inset,
-        max_y: b.max_y - inset,
+        min_x: bounds.min_x + inset,
+        max_x: bounds.max_x - inset,
+        min_y: bounds.min_y + inset,
+        max_y: bounds.max_y - inset,
     }
 }
 
-/// JSON shape for one placed part, returned by `place_board` (and reused as the
-/// model's view of `last_placement`).
+/// JSON shape for one placed part returned by `place_board`.
 fn placement_json(p: &Placement) -> Value {
     json!({
         "reference": p.reference,
@@ -300,12 +298,12 @@ fn is_mounting_hole(footprint: &str) -> bool {
 }
 
 pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
-    let draft = match super::active::draft_from_live(ctx) {
-        Ok(draft) => draft,
+    let board = match super::active::board_problem(ctx) {
+        Ok(board) => board,
         Err(live_err) => return Ok(json!({ "error": live_err })),
     };
 
-    let problem = match place_problem_from_draft(&draft, ctx) {
+    let problem = match place_problem_from_snapshot(&board, ctx) {
         Ok(p) => p,
         Err(msg) => return Ok(json!({ "error": msg })),
     };
@@ -314,14 +312,14 @@ pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // they land at the perimeter (where a cable or the enclosure reaches them),
     // not stranded in the interior with copper wrapping around them. Skip any
     // part the model already steered with an explicit group `edge` hint.
-    let mut hints = draft.hints.clone();
+    let mut hints = PlacementHints::default();
     let explicitly_edged: std::collections::BTreeSet<&str> = hints
         .groups
         .iter()
         .filter(|g| g.edge.is_some())
         .flat_map(|g| g.members.iter().map(String::as_str))
         .collect();
-    for p in &draft.parts {
+    for p in &board.imported.parts {
         if explicitly_edged.contains(p.reference.as_str()) {
             continue;
         }
@@ -329,16 +327,14 @@ pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         // edge-seek (so any hole the corner post-pass can't seat — a corner taken
         // or blocked by a part — falls back to the perimeter, not the interior).
         // Other connectors/headers edge-seek (a cable/enclosure reaches the edge).
-        if is_mounting_hole(&p.footprint) {
+        if is_mounting_hole(&p.lib_id) {
             if !hints.corner_seek.contains(&p.reference) {
                 hints.corner_seek.push(p.reference.clone());
             }
             if !hints.edge_seek.contains(&p.reference) {
                 hints.edge_seek.push(p.reference.clone());
             }
-        } else if is_connector(&p.footprint, &p.reference)
-            && !hints.edge_seek.contains(&p.reference)
-        {
+        } else if is_connector(&p.lib_id, &p.reference) && !hints.edge_seek.contains(&p.reference) {
             hints.edge_seek.push(p.reference.clone());
         }
     }
@@ -356,21 +352,30 @@ pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // overrides any of this with the interactive geometry tools (move_part/route_track).
     let result = pcb_place::placement::place_board(&problem, &hints);
 
-    let moves: Vec<FootprintMove> = result
-        .placements
-        .iter()
-        .map(|p| FootprintMove {
-            reference: p.reference.clone(),
-            x_nm: (p.at.x * 1_000_000.0).round() as i64,
-            y_nm: (p.at.y * 1_000_000.0).round() as i64,
-            rotation_deg: Some(p.rotation as f64),
-        })
-        .collect();
-    if let Err(e) = ctx.kicad().with_session(&ctx.pcb_path(), |session| {
-        session.kicad().move_footprints(&moves)?;
-        session.kicad().save()
-    }) {
-        return Ok(json!({ "error": format!("could not write placement to KiCAD: {e}") }));
+    if result.legal {
+        let locked_refs: std::collections::BTreeSet<&str> = board
+            .imported
+            .parts
+            .iter()
+            .filter(|p| p.locked)
+            .map(|p| p.reference.as_str())
+            .collect();
+        let moves: Vec<FootprintMove> = result
+            .placements
+            .iter()
+            .filter(|p| !locked_refs.contains(p.reference.as_str()))
+            .map(|p| FootprintMove {
+                reference: p.reference.clone(),
+                x_nm: (p.at.x * 1_000_000.0).round() as i64,
+                y_nm: (p.at.y * 1_000_000.0).round() as i64,
+                rotation_deg: Some(p.rotation as f64),
+            })
+            .collect();
+        if !moves.is_empty()
+            && let Err(e) = write_placement(ctx, &moves)
+        {
+            return Ok(json!({ "error": format!("could not write placement to KiCAD: {e}") }));
+        }
     }
     let positions: Vec<Value> = result.placements.iter().map(placement_json).collect();
 
@@ -398,7 +403,7 @@ pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
                     "note": format!(
                         "{ic_ref} has {} decoupling caps the placer scattered. For a tidy ring, \
                          add a `place.groups` entry to the DSL — {{<name>: {{members: [<the caps>], \
-                         surround: {ic_ref}}}}} — and design_board again, then place_board.",
+                         surround: {ic_ref}}}}} — then apply_design, derive_board, and place_board.",
                         caps.len()
                     ),
                 }));
@@ -457,8 +462,8 @@ pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
              Call route_board next, or render_board to see it."
         } else {
             "placement is NOT legal — the board is too tight for these parts. The fix is more \
-             room, not rearrangement: enlarge `board.outline` in the DSL to at least \
-             suggested_min_bounds_mm and design_board again, then re-run place_board. \
+             room, not rearrangement: enlarge the board outline or derive_board bounds to at least \
+             suggested_min_bounds_mm, derive_board again, then re-run place_board. \
              Locking/nudging parts won't help when the board is simply too small for the courtyards."
         },
     });
@@ -469,4 +474,71 @@ pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         out["hint_suggestions"] = Value::Array(hint_suggestions);
     }
     Ok(out)
+}
+
+fn write_placement(
+    ctx: &PcbToolCtx,
+    moves: &[FootprintMove],
+) -> std::result::Result<(), kicad_ipc::Error> {
+    let path = ctx.pcb_path();
+    match write_placement_once(ctx, &path, moves) {
+        Ok(()) => {
+            if placement_is_written(ctx, moves)? {
+                Ok(())
+            } else {
+                write_placement_once(ctx, &path, moves)?;
+                placement_is_written(ctx, moves)?
+                    .then_some(())
+                    .ok_or_else(|| {
+                        kicad_ipc::Error::NotFound(
+                            "placement write did not update live footprint positions".to_owned(),
+                        )
+                    })
+            }
+        }
+        Err(err) if err.is_transient_api_ready_error() => {
+            std::thread::sleep(std::time::Duration::from_millis(750));
+            write_placement_once(ctx, &path, moves)
+        }
+        Err(err) if err.is_transport_timeout() => {
+            ctx.close_kicad_session();
+            if placement_is_written(ctx, moves)? {
+                return Ok(());
+            }
+            write_placement_once(ctx, &path, moves)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn write_placement_once(
+    ctx: &PcbToolCtx,
+    path: &std::path::Path,
+    moves: &[FootprintMove],
+) -> std::result::Result<(), kicad_ipc::Error> {
+    ctx.kicad()
+        .with_session(path, |session| session.kicad().move_footprints(moves))
+}
+
+fn placement_is_written(
+    ctx: &PcbToolCtx,
+    moves: &[FootprintMove],
+) -> std::result::Result<bool, kicad_ipc::Error> {
+    let path = ctx.pcb_path();
+    let targets: BTreeMap<&str, &FootprintMove> =
+        moves.iter().map(|m| (m.reference.as_str(), m)).collect();
+    let snapshot = ctx
+        .kicad()
+        .with_session(&path, |session| session.kicad().board_snapshot())?;
+    Ok(snapshot.imported.parts.iter().all(|part| {
+        let Some(target) = targets.get(part.reference.as_str()) else {
+            return true;
+        };
+        let tx = target.x_nm as f64 / 1_000_000.0;
+        let ty = target.y_nm as f64 / 1_000_000.0;
+        let rotation = target.rotation_deg.unwrap_or(part.rotation as f64);
+        (part.at.x - tx).abs() < 1e-3
+            && (part.at.y - ty).abs() < 1e-3
+            && (part.rotation as f64 - rotation).abs() < 1e-3
+    }))
 }

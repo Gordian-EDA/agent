@@ -12,6 +12,7 @@ pub mod proto {
 }
 
 pub mod session;
+pub mod snapshot;
 pub use session::{Session, SessionManager};
 
 use std::time::Duration;
@@ -55,6 +56,18 @@ pub enum Error {
     LaunchTimeout,
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("unsupported KiCAD IPC operation: {0}")]
+    Unsupported(String),
+}
+
+impl Error {
+    pub fn is_transient_api_ready_error(&self) -> bool {
+        matches!(self, Error::Api { code, .. } if *code == AS_NOT_READY || *code == AS_BUSY)
+    }
+
+    pub fn is_transport_timeout(&self) -> bool {
+        matches!(self, Error::Nng(err) if err.to_string().contains("Timed out"))
+    }
 }
 
 /// A connection to a running KiCAD instance's IPC API server.
@@ -161,12 +174,29 @@ impl Kicad {
         let v = r.version.unwrap_or_default();
         Ok((v.major, v.minor, v.patch, v.full_version))
     }
+
+    fn ensure_footprint_update_supported(&mut self) -> Result<(), Error> {
+        let (major, minor, patch, full) = self.version()?;
+        if !footprint_update_supported(major, minor, patch) {
+            return Err(Error::Unsupported(format!(
+                "KiCAD {full} has unstable IPC FootprintInstance UpdateItems; \
+                 footprint placement requires KiCAD 9.0.3+ or KiCAD 10"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn footprint_update_supported(major: u32, minor: u32, patch: u32) -> bool {
+    !(major == 9 && minor == 0 && patch <= 2)
 }
 
 // ── Board read / edit ────────────────────────────────────────────────────────
 
-use proto::kiapi::board::commands::RefillZones;
-use proto::kiapi::board::types::{FootprintInstance, Pad, Track, Via, Zone};
+use proto::kiapi::board::commands::{
+    BoardEnabledLayersResponse, GetBoardEnabledLayers, RefillZones,
+};
+use proto::kiapi::board::types::{BoardGraphicShape, FootprintInstance, Track, Via, Zone};
 use proto::kiapi::common::commands::{
     BeginCommit, BeginCommitResponse, CommitAction, CreateItems, CreateItemsResponse, DeleteItems,
     DeleteItemsResponse, EndCommit, GetItems, GetItemsResponse, GetOpenDocuments,
@@ -284,6 +314,23 @@ impl Kicad {
             .collect()
     }
 
+    /// All board drawing shapes, including `Edge.Cuts`.
+    pub fn board_shapes(&mut self) -> Result<Vec<BoardGraphicShape>, Error> {
+        self.get_items(&[KiCadObjectType::KotPcbShape])?
+            .into_iter()
+            .map(|a| {
+                a.to_msg::<BoardGraphicShape>()
+                    .map_err(|_| Error::TypeMismatch("BoardGraphicShape"))
+            })
+            .collect()
+    }
+
+    /// Enabled board layers, including the authoritative copper-layer count.
+    pub fn enabled_layers(&mut self) -> Result<BoardEnabledLayersResponse, Error> {
+        let board = Some(self.board_doc.clone().ok_or(Error::NoBoard)?);
+        self.call(&GetBoardEnabledLayers { board })
+    }
+
     /// Create new board items (tracks, vias, zones, ...). Pack each with
     /// `prost_types::Any::from_msg(&item)`.
     pub fn create_items(&mut self, items: Vec<prost_types::Any>) -> Result<(), Error> {
@@ -324,6 +371,12 @@ impl Kicad {
             header: Some(header),
             items,
         })?;
+        if resp.status != proto::kiapi::common::types::ItemRequestStatus::IrsOk as i32 {
+            return Err(Error::Item {
+                code: resp.status,
+                message: "update items request failed".to_owned(),
+            });
+        }
         for r in &resp.updated_items {
             check_item_status(&r.status)?;
         }
@@ -402,8 +455,10 @@ impl Kicad {
 
 // ── Nets & net classes (design rules: "wide copper for power") ───────────────
 
-use proto::kiapi::board::commands::{GetNets, NetsResponse};
-use proto::kiapi::common::commands::SetNetClasses;
+use proto::kiapi::board::commands::{
+    GetNetClassForNets, GetNets, NetClassForNetsResponse, NetsResponse,
+};
+use proto::kiapi::common::commands::{GetNetClasses, NetClassesResponse, SetNetClasses};
 use proto::kiapi::common::project::{NetClass, NetClassBoardSettings, NetClassType};
 use proto::kiapi::common::types::{Distance, MapMergeMode};
 
@@ -416,6 +471,21 @@ impl Kicad {
             netclass_filter: vec![],
         })?;
         Ok(resp.nets.into_iter().map(|n| n.name).collect())
+    }
+
+    /// All explicit project net classes known to KiCAD.
+    pub fn net_classes(&mut self) -> Result<Vec<NetClass>, Error> {
+        let resp: NetClassesResponse = self.call(&GetNetClasses {})?;
+        Ok(resp.net_classes)
+    }
+
+    /// Effective net classes for the provided board nets after KiCAD's class merge.
+    pub fn net_classes_for_nets(
+        &mut self,
+        nets: Vec<proto::kiapi::board::types::Net>,
+    ) -> Result<std::collections::BTreeMap<String, NetClass>, Error> {
+        let resp: NetClassForNetsResponse = self.call(&GetNetClassForNets { net: nets })?;
+        Ok(resp.classes.into_iter().collect())
     }
 
     /// Define (or update, by name) a net class with a given track width + clearance
@@ -493,22 +563,20 @@ impl Kicad {
         y_nm: i64,
         rotation_deg: Option<f64>,
     ) -> Result<(), Error> {
-        let mut fp = self
+        self.ensure_footprint_update_supported()?;
+        let fp = self
             .footprints()?
             .into_iter()
             .find(|f| footprint_reference(f) == reference)
             .ok_or_else(|| Error::NotFound(format!("footprint {reference}")))?;
-        let old = fp.position.clone().unwrap_or_default();
-        translate_footprint_pads(&mut fp, x_nm - old.x_nm, y_nm - old.y_nm)?;
-        fp.position = Some(Vector2 { x_nm, y_nm });
-        if let Some(deg) = rotation_deg {
-            fp.orientation = Some(Angle { value_degrees: deg });
-        }
+        let update = footprint_position_update(&fp, x_nm, y_nm, rotation_deg)?;
+        let mask = if rotation_deg.is_some() {
+            &["position", "orientation"][..]
+        } else {
+            &["position"][..]
+        };
         self.commit(&format!("move {reference}"), |k| {
-            k.update_items_masked(
-                &["position", "orientation"],
-                vec![prost_types::Any::from_msg(&fp)?],
-            )
+            k.update_items_masked(mask, vec![prost_types::Any::from_msg(&update)?])
         })
     }
 
@@ -517,38 +585,30 @@ impl Kicad {
         if moves.is_empty() {
             return Ok(());
         }
+        self.ensure_footprint_update_supported()?;
         let by_ref: std::collections::BTreeMap<&str, &FootprintMove> =
             moves.iter().map(|m| (m.reference.as_str(), m)).collect();
-        let mut updates = Vec::new();
-        for mut fp in self.footprints()? {
+        let mut position_updates = Vec::new();
+        let mut rotation_updates = Vec::new();
+        let mut found_refs = std::collections::BTreeSet::new();
+        for fp in self.footprints()? {
             let reference = footprint_reference(&fp);
             let Some(mv) = by_ref.get(reference.as_str()) else {
                 continue;
             };
-            let old = fp.position.clone().unwrap_or_default();
-            translate_footprint_pads(&mut fp, mv.x_nm - old.x_nm, mv.y_nm - old.y_nm)?;
-            fp.position = Some(Vector2 {
-                x_nm: mv.x_nm,
-                y_nm: mv.y_nm,
-            });
-            if let Some(deg) = mv.rotation_deg {
-                fp.orientation = Some(Angle { value_degrees: deg });
+            found_refs.insert(reference);
+            let update = footprint_position_update(&fp, mv.x_nm, mv.y_nm, mv.rotation_deg)?;
+            if mv.rotation_deg.is_some() {
+                rotation_updates.push(prost_types::Any::from_msg(&update)?);
+            } else {
+                position_updates.push(prost_types::Any::from_msg(&update)?);
             }
-            updates.push(prost_types::Any::from_msg(&fp)?);
         }
-        if updates.len() != moves.len() {
-            let found: std::collections::BTreeSet<String> = updates
-                .iter()
-                .filter_map(|any| {
-                    any.to_msg::<FootprintInstance>()
-                        .ok()
-                        .map(|fp| footprint_reference(&fp))
-                })
-                .collect();
+        if found_refs.len() != moves.len() {
             let missing: Vec<&str> = moves
                 .iter()
                 .map(|m| m.reference.as_str())
-                .filter(|r| !found.contains(*r))
+                .filter(|r| !found_refs.contains(*r))
                 .collect();
             return Err(Error::NotFound(format!(
                 "footprint(s) {}",
@@ -556,7 +616,13 @@ impl Kicad {
             )));
         }
         self.commit("place board", |k| {
-            k.update_items_masked(&["position", "orientation"], updates)
+            if !position_updates.is_empty() {
+                k.update_items_masked(&["position"], position_updates)?;
+            }
+            if !rotation_updates.is_empty() {
+                k.update_items_masked(&["position", "orientation"], rotation_updates)?;
+            }
+            Ok(())
         })
     }
 
@@ -594,28 +660,22 @@ impl Kicad {
     }
 }
 
-fn translate_footprint_pads(
-    fp: &mut FootprintInstance,
-    dx_nm: i64,
-    dy_nm: i64,
-) -> Result<(), Error> {
-    if dx_nm == 0 && dy_nm == 0 {
-        return Ok(());
-    }
-    let Some(definition) = fp.definition.as_mut() else {
-        return Ok(());
-    };
-    for item in &mut definition.items {
-        let Ok(mut pad) = item.to_msg::<Pad>() else {
-            continue;
-        };
-        if let Some(position) = pad.position.as_mut() {
-            position.x_nm += dx_nm;
-            position.y_nm += dy_nm;
-        }
-        *item = prost_types::Any::from_msg(&pad)?;
-    }
-    Ok(())
+fn footprint_position_update(
+    source: &FootprintInstance,
+    x_nm: i64,
+    y_nm: i64,
+    rotation_deg: Option<f64>,
+) -> Result<FootprintInstance, Error> {
+    let id = source
+        .id
+        .clone()
+        .ok_or_else(|| Error::NotFound(format!("footprint {} id", footprint_reference(source))))?;
+    Ok(FootprintInstance {
+        id: Some(id),
+        position: Some(Vector2 { x_nm, y_nm }),
+        orientation: rotation_deg.map(|deg| Angle { value_degrees: deg }),
+        ..Default::default()
+    })
 }
 
 fn document_matches_board(
@@ -671,6 +731,14 @@ mod tests {
     use proto::kiapi::board::types::{Track, Via, Zone};
     use proto::kiapi::common::types::document_specifier::Identifier;
     use proto::kiapi::common::types::{DocumentSpecifier, DocumentType, Kiid, ProjectSpecifier};
+
+    #[test]
+    fn footprint_updates_gate_known_unstable_kicad_902() {
+        assert!(!footprint_update_supported(9, 0, 0));
+        assert!(!footprint_update_supported(9, 0, 2));
+        assert!(footprint_update_supported(9, 0, 3));
+        assert!(footprint_update_supported(10, 0, 0));
+    }
 
     #[test]
     fn extracts_item_id_from_packed_track() {

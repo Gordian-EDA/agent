@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Premium simulated-annealing schematic placement engine: implements sch-floorplan's PlacementEngine and OWNS its objective (the premium energy + warning gate) and its search (the SA move-set + proxy costs + multi-start), over sch-floorplan's routed-sheet measurement library."
 
 [dependencies]
+geom = { path = "../geom" }
 sch-place = { path = "../sch-place" }
 sch-floorplan = { path = "../sch-floorplan" }
 rayon.workspace = true

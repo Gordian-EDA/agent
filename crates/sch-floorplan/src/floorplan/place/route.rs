@@ -376,9 +376,7 @@ pub(crate) fn route_signal(
             let v = dir.vec();
             let end = [ep[0] + v[0] * STUB_MM, ep[1] + v[1] * STUB_MM];
             let bx = crate::label::label_box(end, *dir, crate::label::text_width(net));
-            !obstacles
-                .iter()
-                .any(|r| crate::label::boxes_overlap(&bx, r))
+            !obstacles.iter().any(|r| bx.intersection(r).is_some())
         })
     };
     // Whether each terminal could carry a body-clear net label (a virtual port exit,
@@ -610,7 +608,7 @@ pub(crate) fn route_signal(
     for (p, _) in &terms {
         let interior = w.wire_segments_on_net(net).iter().any(|(a, b)| {
             let ends = near(*p, *a) || near(*p, *b);
-            !ends && sch_place::geom::point_on_segment(*p, *a, *b)
+            !ends && ::geom::Segment::new((*a).into(), (*b).into()).contains_point((*p).into())
         });
         if interior {
             w.add_junction(*p);
@@ -909,7 +907,7 @@ pub(crate) fn dir_toward(a: impl Into<::geom::Point2>, b: impl Into<::geom::Poin
 pub(crate) fn near(p: impl Into<::geom::Point2>, q: impl Into<::geom::Point2>) -> bool {
     let p = p.into();
     let q = q.into();
-    (p[0] - q[0]).abs() < 1e-6 && (p[1] - q[1]).abs() < 1e-6
+    (p[0] - q[0]).abs() < EPS && (p[1] - q[1]).abs() < EPS
 }
 
 /// Assign each drawn rail (≥3 pins) a y. Rails in a band share a base y, but
@@ -1019,7 +1017,7 @@ pub(crate) fn assign_rail_levels(
     out
 }
 
-pub const EPS: f64 = 1e-6;
+pub use ::geom::EPS;
 
 /// A side (E/W) pin leads OUTWARD this far before its riser climbs to the rail,
 /// so the riser never runs up the IC edge past the other pins on that side.
@@ -1345,7 +1343,7 @@ pub(crate) fn emit_rail(
     let span_hi = attaches.iter().copied().fold(f64::MIN, f64::max);
     w.add_wire_on_net([span_lo, rail_y], [span_hi, rail_y], net);
     for ((ep, _dir), &ax) in eps.iter().zip(&attaches) {
-        if (ax - ep[0]).abs() > 1e-6 {
+        if (ax - ep[0]).abs() > EPS {
             w.add_wire_on_net(*ep, [ax, ep[1]], net); // lead out
         }
         w.add_wire_on_net([ax, ep[1]], [ax, rail_y], net); // riser
