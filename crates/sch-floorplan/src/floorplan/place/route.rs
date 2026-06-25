@@ -179,7 +179,7 @@ pub(crate) fn wire(
                 .unwrap_or((side, port_exit_point(eps, side)));
             scene
                 .label_solids
-                .push((port_label_obstacle(at, side, net).into(), net.clone()));
+                .push((port_label_obstacle(at, side, net), net.clone()));
         }
     }
 
@@ -877,17 +877,17 @@ pub(crate) fn ic_port_exit_override(
 /// (a wire drawn across someone else's edge tag). Directional: the pennant + text
 /// extend OUTWARD from the exit anchor along `side`; `BACK` covers the connecting
 /// vertex that reaches slightly back toward the wire. `HALF` is the text half-height.
-pub(crate) fn port_label_obstacle(at: [f64; 2], side: Side, net: &str) -> [f64; 4] {
+pub(crate) fn port_label_obstacle(at: [f64; 2], side: Side, net: &str) -> ::geom::Rect {
     let w = crate::label::text_width(net) + 2.54;
     const BACK: f64 = 1.27;
     const HALF: f64 = 2.0;
     match side {
-        Side::Left => [at[0] - w, at[1] - HALF, at[0] + BACK, at[1] + HALF],
-        Side::Right => [at[0] - BACK, at[1] - HALF, at[0] + w, at[1] + HALF],
+        Side::Left => ::geom::Rect::new(at[0] - w, at[1] - HALF, at[0] + BACK, at[1] + HALF),
+        Side::Right => ::geom::Rect::new(at[0] - BACK, at[1] - HALF, at[0] + w, at[1] + HALF),
         // Top/Bottom pennants render rotated: text runs along y, so the long extent
         // is vertical and the cross-extent is the text height.
-        Side::Top => [at[0] - HALF, at[1] - w, at[0] + HALF, at[1] + BACK],
-        Side::Bottom => [at[0] - HALF, at[1] - BACK, at[0] + HALF, at[1] + w],
+        Side::Top => ::geom::Rect::new(at[0] - HALF, at[1] - w, at[0] + HALF, at[1] + BACK),
+        Side::Bottom => ::geom::Rect::new(at[0] - HALF, at[1] - BACK, at[0] + HALF, at[1] + w),
     }
 }
 

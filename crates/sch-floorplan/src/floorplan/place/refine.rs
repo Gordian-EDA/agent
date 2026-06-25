@@ -148,7 +148,7 @@ pub(crate) fn collapse_empty_bands(items: &mut [Item]) -> bool {
 pub(crate) fn decongest_off_labels(
     items: &mut [Item],
     inc: &Incidence,
-    keepouts: &[([f64; 4], String)],
+    keepouts: &[(::geom::Rect, String)],
 ) {
     let item_nets: Vec<Vec<String>> = (0..items.len())
         .map(|i| {
@@ -235,7 +235,7 @@ pub(crate) fn port_label_keepouts(
     items: &[Item],
     inc: &Incidence,
     ir: &LayoutIr,
-) -> io::Result<Vec<([f64; 4], String)>> {
+) -> io::Result<Vec<(::geom::Rect, String)>> {
     let mut ks = Vec::new();
     for (net, side) in &ir.ports {
         let Some(pins) = inc.get(net) else { continue };
