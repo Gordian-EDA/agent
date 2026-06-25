@@ -97,7 +97,7 @@ impl SymbolTable {
     }
 
     /// A table over a detected KiCAD installation's symbol directory.
-    pub fn from_env(env: &kicad_cli::env::KicadEnv) -> Self {
+    pub fn from_env(env: &kicad_env::KicadEnv) -> Self {
         Self::from_symbol_dir(env.symbol_dir.clone())
     }
 

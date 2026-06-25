@@ -8,7 +8,7 @@ use std::io;
 
 use circuit_lang::model::{Component, Design, PinTarget};
 use circuit_lang::{PinType, find_pin};
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::SymbolGeometry;
 

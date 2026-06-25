@@ -9,6 +9,7 @@ description = "CLI and TUI for the Gordian LLM agent that designs KiCAD schemati
 [dependencies]
 gordian-core = { path = "../gordian-core" }
 kicad-cli = { path = "../kicad-cli" }
+kicad-env = { path = "../kicad-env" }
 
 anyhow.workspace = true
 tokio.workspace = true

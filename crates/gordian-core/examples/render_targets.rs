@@ -7,7 +7,7 @@
 //! With no args, renders all four targets.
 
 use kicad_cli::cli::KicadCli;
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;
 
 const TARGETS: &[&str] =

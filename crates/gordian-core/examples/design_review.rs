@@ -8,7 +8,7 @@
 
 use gordian_core::{Agent, AgentEvent, AutoApprove};
 use kicad_cli::cli::KicadCli;
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use tokio::sync::mpsc;
 
 #[tokio::main]

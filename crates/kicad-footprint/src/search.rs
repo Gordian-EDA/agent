@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 
 use crate::Footprint;
 use crate::discover::{discover_libraries, footprint_dir};

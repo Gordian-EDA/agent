@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use kicad_cli::{cli::KicadCli, env::KicadEnv};
+use kicad_cli::cli::KicadCli;
+use kicad_env::KicadEnv;
 
 #[test]
 fn netlist_export_runs_and_parses() {

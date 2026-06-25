@@ -347,7 +347,7 @@ version = "0.1.0"
 dependencies = [
  "geom",
  "indexmap 2.14.0",
- "kicad-cli",
+ "kicad-env",
  "kicad-symbol",
  "saphyr",
  "saphyr-parser",
@@ -1008,6 +1008,7 @@ dependencies = [
  "gordian-core",
  "image",
  "kicad-cli",
+ "kicad-env",
  "pulldown-cmark",
  "ratatui",
  "ratatui-image",
@@ -1035,6 +1036,7 @@ dependencies = [
  "grid-astar",
  "indexmap 2.14.0",
  "kicad-cli",
+ "kicad-env",
  "kicad-footprint",
  "kicad-ipc",
  "kicad-sexpr",
@@ -1599,9 +1601,17 @@ dependencies = [
 name = "kicad-cli"
 version = "0.1.0"
 dependencies = [
+ "kicad-env",
  "quick-xml",
  "serde",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "kicad-env"
+version = "0.1.0"
+dependencies = [
  "tempfile",
 ]
 
@@ -1611,7 +1621,7 @@ version = "0.1.0"
 dependencies = [
  "fuzzy-matcher",
  "geom",
- "kicad-cli",
+ "kicad-env",
  "kiutils_kicad",
  "serde",
  "strsim",
@@ -1642,6 +1652,7 @@ dependencies = [
  "fuzzy-matcher",
  "geom",
  "kicad-cli",
+ "kicad-env",
  "kiutils_kicad",
  "kiutils_sexpr",
  "strsim",
@@ -2863,6 +2874,7 @@ dependencies = [
  "greedy-place",
  "indexmap 2.14.0",
  "kicad-cli",
+ "kicad-env",
  "kicad-symbol",
  "rayon",
  "sch-io",
@@ -2878,6 +2890,7 @@ dependencies = [
  "circuit-lang",
  "geom",
  "kicad-cli",
+ "kicad-env",
  "kicad-symbol",
  "kiutils_kicad",
  "sch-place",

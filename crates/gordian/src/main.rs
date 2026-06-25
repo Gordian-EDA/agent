@@ -19,7 +19,7 @@ use gordian_core::prompts::system_prompt_with_reference;
 use gordian_core::tools::PcbToolCtx;
 use anyhow::{Context, Result, bail};
 use kicad_cli::cli::KicadCli;
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 
 /// Default project directory when `--project` is omitted.
 const DEFAULT_PROJECT_DIR: &str = "gordian-project";

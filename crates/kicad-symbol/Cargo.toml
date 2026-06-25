@@ -8,11 +8,12 @@ description = "KiCAD symbol vocabulary + library reader: .kicad_sym parsing, pin
 
 [dependencies]
 geom = { path = "../geom" }
-kicad-cli = { path = "../kicad-cli" }
+kicad-env = { path = "../kicad-env" }
 kiutils_kicad.workspace = true
 kiutils_sexpr.workspace = true
 fuzzy-matcher.workspace = true
 strsim.workspace = true
 
 [dev-dependencies]
+kicad-cli = { path = "../kicad-cli" }
 tempfile.workspace = true

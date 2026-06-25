@@ -2,7 +2,7 @@
 //! `circuit_lang::compile` through a real [`SymbolTable`] (skipped when no KiCAD
 //! install is detected).
 
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;
 
 #[test]

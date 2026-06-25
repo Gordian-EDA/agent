@@ -4,7 +4,7 @@
 //! Usage: cargo run --release -p agent --example lift_roundtrip -- <file.kicad_sch> [...]
 //! Exits nonzero if any lifted YAML fails to compile.
 
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;
 
 fn main() -> anyhow::Result<()> {

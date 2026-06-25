@@ -1,15 +1,11 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 
-/// The `footprints` share directory for a [`KicadEnv`]: the sibling of its
-/// `symbol_dir` (`.../share/kicad/symbols` -> `.../share/kicad/footprints`).
+/// The `footprints` share directory for a [`KicadEnv`].
 pub(crate) fn footprint_dir(env: &KicadEnv) -> PathBuf {
-    env.symbol_dir
-        .parent()
-        .map(|p| p.join("footprints"))
-        .unwrap_or_else(|| PathBuf::from("footprints"))
+    env.footprint_dir.clone()
 }
 
 /// Enumerate the `Nickname -> .pretty path` of every installed footprint

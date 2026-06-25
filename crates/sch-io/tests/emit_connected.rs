@@ -5,7 +5,7 @@
 //! detected; runs against KiCAD 10 here.
 
 use kicad_cli::cli::KicadCli;
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use sch_io::write::SchematicWriter;
 
 #[test]

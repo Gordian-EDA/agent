@@ -2,7 +2,7 @@
 //! validated ground truth from the installed KiCAD libraries. Everything is
 //! exercised through the public [`SymbolTable`] oracle.
 
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use kicad_symbol::{PinType, SymbolTable};
 
 /// A table over the installed KiCAD symbol directory, or `None` to SKIP.

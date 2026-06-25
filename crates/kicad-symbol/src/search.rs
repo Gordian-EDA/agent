@@ -24,7 +24,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::SymbolTable;
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 
 /// A search hit: a fully qualified `Lib:Name` id and its resolved pin count.
 #[derive(Debug, Clone, PartialEq, Eq)]

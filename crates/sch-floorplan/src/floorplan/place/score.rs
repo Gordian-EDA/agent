@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use circuit_lang::model::Design;
 use circuit_lang::{PinType, find_pin};
 use geom::EPS;
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;
 
 use crate::write::SchematicWriter;

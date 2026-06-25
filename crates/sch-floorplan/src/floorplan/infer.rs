@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use circuit_lang::model::Design;
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 
 use super::idiom;
 use super::place::{gather, grid_from_layout, incidence};

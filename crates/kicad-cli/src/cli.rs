@@ -18,6 +18,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use kicad_env::KicadEnv;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use serde::Deserialize;
@@ -29,7 +30,7 @@ pub struct KicadCli {
 
 impl KicadCli {
     /// Build a CLI wrapper from a discovered environment.
-    pub fn new(env: &crate::env::KicadEnv) -> Self {
+    pub fn new(env: &KicadEnv) -> Self {
         Self {
             cli_path: env.cli_path.clone(),
         }
@@ -192,9 +193,12 @@ impl KicadCli {
     ) -> io::Result<PathBuf> {
         std::fs::create_dir_all(out_dir)?;
         let mut cmd = Command::new(&self.cli_path);
-        cmd.args(["sch", "export", "svg"]).arg("--output").arg(out_dir);
+        cmd.args(["sch", "export", "svg"])
+            .arg("--output")
+            .arg(out_dir);
         if exclude_sheet {
-            cmd.arg("--exclude-drawing-sheet").arg("--no-background-color");
+            cmd.arg("--exclude-drawing-sheet")
+                .arg("--no-background-color");
         }
         let output = cmd.arg(schematic).output()?;
         if !output.status.success() {
@@ -316,7 +320,9 @@ impl KicadCli {
             std::fs::create_dir_all(parent)?;
         }
         let output = Command::new(&self.cli_path)
-            .args(["pcb", "export", "pos", "--format", "csv", "--side", "both", "--units", "mm"])
+            .args([
+                "pcb", "export", "pos", "--format", "csv", "--side", "both", "--units", "mm",
+            ])
             .arg("--output")
             .arg(out_file)
             .arg(pcb)
@@ -346,7 +352,14 @@ impl KicadCli {
             std::fs::create_dir_all(parent)?;
         }
         let output = Command::new(&self.cli_path)
-            .args(["sch", "export", "bom", "--group-by", "Value,Footprint", "--exclude-dnp"])
+            .args([
+                "sch",
+                "export",
+                "bom",
+                "--group-by",
+                "Value,Footprint",
+                "--exclude-dnp",
+            ])
             .arg("--output")
             .arg(out_file)
             .arg(schematic)
@@ -681,7 +694,10 @@ impl DrcReport {
     /// honest failure — but the copper it DOES emit must be fault-free, so this
     /// count must always be 0.
     pub fn copper_error_count(&self) -> usize {
-        self.violations.iter().filter(|v| v.severity == "error").count()
+        self.violations
+            .iter()
+            .filter(|v| v.severity == "error")
+            .count()
     }
 
     fn count_severity(&self, severity: &str) -> usize {

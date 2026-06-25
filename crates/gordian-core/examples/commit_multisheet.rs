@@ -4,7 +4,7 @@
 //!
 //! Usage: cargo run --release -p agent --example commit_multisheet -- <draft.yaml> <out_dir>
 
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;
 
 fn main() -> anyhow::Result<()> {

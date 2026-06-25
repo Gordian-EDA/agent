@@ -51,7 +51,7 @@ use crate::history::SnapshotStore;
 use circuit_lang::compile;
 use circuit_lang::model::{Component, Design, PinTarget};
 use kicad_cli::cli::KicadCli;
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use kicad_footprint::FootprintIndex;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::search::SymbolIndex;

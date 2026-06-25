@@ -5,7 +5,7 @@
 //!
 //! Usage: cargo run --release -p agent --example sa_e2e [name ...]
 
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan::{self, LayoutIr};
 

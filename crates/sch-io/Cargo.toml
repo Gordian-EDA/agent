@@ -11,6 +11,7 @@ geom = { path = "../geom" }
 sch-place = { path = "../sch-place" }
 circuit-lang = { path = "../circuit-lang" }
 kicad-cli = { path = "../kicad-cli" }
+kicad-env = { path = "../kicad-env" }
 kicad-symbol = { path = "../kicad-symbol" }
 kiutils_kicad.workspace = true
 uuid.workspace = true

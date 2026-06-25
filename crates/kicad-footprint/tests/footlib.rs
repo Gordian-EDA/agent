@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use kicad_footprint::{CourtyardSource, Footprint, FootprintIndex, PadTechnology};
 
 fn fixtures() -> PathBuf {

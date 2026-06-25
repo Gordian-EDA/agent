@@ -7,7 +7,7 @@
 
 use std::io;
 
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 
 use crate::write::SchematicWriter;
 use geom::Dir;

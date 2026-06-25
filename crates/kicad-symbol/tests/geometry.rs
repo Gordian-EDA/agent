@@ -4,7 +4,7 @@
 //! RUN on the dev machine where KiCAD 10 and its symbol libraries are present.
 
 use kicad_cli::cli::KicadCli;
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use kicad_symbol::geometry::SymbolGeometry;
 
 #[test]

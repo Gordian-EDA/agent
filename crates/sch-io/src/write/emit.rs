@@ -439,7 +439,7 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kicad_cli::env::KicadEnv;
+    use kicad_env::KicadEnv;
 
     /// `add_symbol` needs a real symbol library to resolve geometry, so these
     /// tests SKIP-gracefully when no KiCAD environment is detected.

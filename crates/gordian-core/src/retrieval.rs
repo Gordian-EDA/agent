@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use serde::Deserialize;
 
 /// Environment variable naming the corpus directory; overrides the default.

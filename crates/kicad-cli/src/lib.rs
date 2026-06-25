@@ -1,7 +1,8 @@
-//! Typed wrapper over the `kicad-cli` binary plus KiCAD environment discovery.
+//! Typed wrapper over the `kicad-cli` binary.
 //!
-//! `env` locates the KiCAD install + library tables; `cli` shells out to
-//! `kicad-cli` for DRC/ERC/plot/export and parses its output.
+//! `cli` shells out to `kicad-cli` for DRC/ERC/plot/export and parses its
+//! output. `env` is a compatibility re-export of the standalone `kicad-env`
+//! crate.
 
 pub mod cli;
 pub mod env;

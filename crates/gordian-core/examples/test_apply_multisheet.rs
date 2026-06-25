@@ -3,7 +3,7 @@
 //! multi-sheet root. Usage: cargo run -p agent --example test_apply_multisheet -- <draft.yaml>
 
 use gordian_core::tools::{PcbToolCtx, run_tool};
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use serde_json::json;
 
 fn main() -> anyhow::Result<()> {

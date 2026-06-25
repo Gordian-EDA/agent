@@ -58,7 +58,7 @@ use std::path::Path;
 use circuit_lang::canon::to_canonical_yaml;
 use circuit_lang::model::{Block, Component, Design, Origin, PinTarget};
 use kicad_cli::cli::KicadCli;
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 
 use sch_place::result::{AP_BLOCK, AP_INDEX, AP_PARENT, AP_ROLE, ROLE_AUTHORED};
 

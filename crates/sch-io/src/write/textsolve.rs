@@ -1024,7 +1024,7 @@ impl SchematicWriter {
 mod tests {
     use super::*;
     use crate::write::Dir;
-    use kicad_cli::env::KicadEnv;
+    use kicad_env::KicadEnv;
 
     /// `add_symbol` needs a real symbol library to resolve geometry, so these
     /// tests SKIP-gracefully when no KiCAD environment is detected.

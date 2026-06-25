@@ -11,7 +11,7 @@ sch-place = { path = "../sch-place" }
 sch-io = { path = "../sch-io" }
 circuit-lang = { path = "../circuit-lang" }
 circuit-graph = { path = "../circuit-graph" }
-kicad-cli = { path = "../kicad-cli" }
+kicad-env = { path = "../kicad-env" }
 kicad-symbol = { path = "../kicad-symbol" }
 geom = { path = "../geom" }
 indexmap.workspace = true
@@ -20,4 +20,5 @@ rayon.workspace = true
 
 [dev-dependencies]
 greedy-place = { path = "../greedy-place" }
+kicad-cli = { path = "../kicad-cli" }
 tempfile.workspace = true

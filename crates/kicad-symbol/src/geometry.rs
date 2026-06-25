@@ -41,7 +41,7 @@ use geom::{Point2, Rect};
 use kiutils_kicad::{SymPin, Symbol, SymbolLibFile};
 use kiutils_sexpr::{Atom, Node, parse_one};
 
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 
 /// Local geometry of a single symbol pin, in symbol coordinates.
 ///

@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{EPS, Point2, Rect};
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 
 use crate::write::SchematicWriter;
 use sch_place::item::{Incidence, Item};

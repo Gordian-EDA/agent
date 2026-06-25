@@ -5,7 +5,7 @@
 use std::io;
 
 use geom::{Point2, Rect};
-use kicad_cli::env::KicadEnv;
+use kicad_env::KicadEnv;
 use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
 
 use geom::grid::snap_point;
