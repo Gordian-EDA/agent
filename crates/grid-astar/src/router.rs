@@ -904,7 +904,7 @@ pub fn geometry_violations(problem: &RouteProblem, solution: &RouteSolution) -> 
 mod tests {
     use super::*;
     use crate::connectivity;
-    use crate::problem::{Bounds, Connection, Obstacle, RoutePoint};
+    use crate::problem::{Rect, Connection, Obstacle, RoutePoint};
     use std::path::Path;
 
     /// A rect pad owned by `connected_to`, centred at `center`, on `layers`.
@@ -958,7 +958,7 @@ mod tests {
             min_trace_width: 0.2,
             obstacles,
             connections,
-            bounds: Bounds { min_x: 0.0, max_x: 10.0, min_y: 0.0, max_y: 12.0 },
+            bounds: Rect { min_x: 0.0, max_x: 10.0, min_y: 0.0, max_y: 12.0 },
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
@@ -1007,7 +1007,7 @@ mod tests {
                     RoutePoint { x: 14.0, y: 14.0, layer: LayerRef::top() },
                 ],
             }],
-            bounds: Bounds { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 20.0 },
+            bounds: Rect { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 20.0 },
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
@@ -1064,7 +1064,7 @@ mod tests {
                 pad(&["B"], (bx1, by1), 0.4, 0.4, &["top"]),
             ],
             connections: vec![mk("A", ax0, ay0, ax1, ay1), mk("B", bx0, by0, bx1, by1)],
-            bounds: Bounds { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 20.0 },
+            bounds: Rect { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 20.0 },
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
@@ -1136,7 +1136,7 @@ mod tests {
             min_trace_width: 0.2,
             obstacles,
             connections,
-            bounds: Bounds { min_x: 0.0, max_x: 16.0, min_y: 0.0, max_y: 16.0 },
+            bounds: Rect { min_x: 0.0, max_x: 16.0, min_y: 0.0, max_y: 16.0 },
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
@@ -1203,7 +1203,7 @@ mod tests {
             min_trace_width: 0.2,
             obstacles,
             connections,
-            bounds: Bounds { min_x: 0.0, max_x: 16.0, min_y: 0.0, max_y: 16.0 },
+            bounds: Rect { min_x: 0.0, max_x: 16.0, min_y: 0.0, max_y: 16.0 },
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,

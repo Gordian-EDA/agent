@@ -6,7 +6,7 @@
 use std::fmt::Write as _;
 
 use kicad_sexpr::fmt_num;
-use pcb_model::{Bounds, Point2};
+use pcb_model::{Point2, Rect};
 
 use crate::ids::synth_uuid;
 
@@ -119,7 +119,7 @@ pub fn push_zone(out: &mut String, net_code: i32, z: &ZoneSpec, idx: usize) {
 /// keep-outs active there. This is how a power net's many pins are joined without
 /// routing each one — the lever a BGA's power balls need.
 pub fn plane_fill_rects(
-    bounds: &Bounds,
+    bounds: &Rect,
     edge_margin: f64,
     keepouts: &[(Point2, f64, f64)],
     outline: Option<&[Point2]>,
@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn plane_fill_empty_is_single_inset_rect() {
-        let b = Bounds { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 10.0 };
+        let b = Rect { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 10.0 };
         let rects = plane_fill_rects(&b, 0.5, &[], None);
         assert_eq!(rects.len(), 1);
         assert_eq!(rects[0], [0.5, 0.5, 19.5, 9.5]);
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn plane_fill_carves_keepouts_and_stays_in_bounds() {
-        let b = Bounds { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 20.0 };
+        let b = Rect { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 20.0 };
         let ko = (Point2 { x: 10.0, y: 10.0 }, 0.65, 0.65);
         let rects = plane_fill_rects(&b, 0.5, &[ko], None);
         assert!(rects.len() > 1, "a central keep-out must split the fill");

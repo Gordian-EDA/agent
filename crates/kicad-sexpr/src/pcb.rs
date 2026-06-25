@@ -47,7 +47,7 @@ use std::path::Path;
 
 use kiutils_kicad::{PcbAst, PcbFile, PcbFootprint, PcbPad};
 use pcb_model::{
-    Bounds, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace,
+    Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem, RouteSolution, Trace,
     Via, ViaSpan,
 };
 
@@ -119,7 +119,7 @@ pub struct ImportedBoard {
     pub layer_count: u32,
     /// Edge.Cuts bounding box (mm). v1 recovers the bbox; a non-rectangular
     /// outline is not yet reconstructed as a polygon.
-    pub bounds: Bounds,
+    pub bounds: Rect,
     pub parts: Vec<ImportedPart>,
 }
 
@@ -515,7 +515,7 @@ fn net_name(ast: &PcbAst, code: Option<i32>) -> Option<String> {
 
 /// Board outline bounding box: the bbox over every `Edge.Cuts` graphic's
 /// `start`/`end`/`center` points. Falls back to a zero box if absent.
-fn board_bounds(ast: &PcbAst) -> Bounds {
+fn board_bounds(ast: &PcbAst) -> Rect {
     let mut pts: Vec<[f64; 2]> = Vec::new();
     for g in &ast.graphics {
         if g.layer.as_deref() != Some("Edge.Cuts") {
@@ -527,7 +527,7 @@ fn board_bounds(ast: &PcbAst) -> Bounds {
     }
 
     if pts.is_empty() {
-        return Bounds {
+        return Rect {
             min_x: 0.0,
             max_x: 0.0,
             min_y: 0.0,
@@ -544,7 +544,7 @@ fn board_bounds(ast: &PcbAst) -> Bounds {
         min_y = min_y.min(y);
         max_y = max_y.max(y);
     }
-    Bounds {
+    Rect {
         min_x,
         max_x,
         min_y,
@@ -884,7 +884,7 @@ fn map_kiutils_err(e: kiutils_kicad::Error) -> io::Error {
 #[cfg(test)]
 mod via_render_tests {
     use super::*;
-    use pcb_model::{Bounds, Point2, RouteProblem, Via, ViaSpan};
+    use pcb_model::{Point2, Rect, RouteProblem, Via, ViaSpan};
     use std::collections::BTreeMap;
 
     fn board_4layer() -> BoardProblem {
@@ -893,7 +893,7 @@ mod via_render_tests {
             min_trace_width: 0.2,
             obstacles: vec![],
             connections: vec![],
-            bounds: Bounds { min_x: 0.0, max_x: 10.0, min_y: 0.0, max_y: 10.0 },
+            bounds: Rect { min_x: 0.0, max_x: 10.0, min_y: 0.0, max_y: 10.0 },
             clearance: 0.15,
             via_diameter: 0.5,
             via_drill: 0.3,

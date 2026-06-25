@@ -14,8 +14,7 @@
 //! so the two tiers stay symmetric. The evaluator here is the [`RouteRanker`] (the
 //! placement oracle's router).
 
-use crate::{Bounds, LayerRef, Point2, Rect};
-use crate::{Connection, Obstacle, RoutePoint, RouteProblem};
+use crate::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -31,7 +30,7 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlaceProblem {
     /// Board outline (mm, y-down).
-    pub bounds: Bounds,
+    pub bounds: Rect,
     /// Copper-to-copper clearance (mm); also floors the courtyard margin.
     #[serde(default = "default_clearance")]
     pub clearance: f64,
@@ -292,12 +291,6 @@ pub fn courtyard_margin(clearance: f64) -> f64 {
     clearance.max(COURTYARD_MARGIN_MIN)
 }
 
-/// Snap an arbitrary rotation (degrees) to the nearest quadrant in 0/90/180/270.
-pub fn snap_rotation(deg: i32) -> i32 {
-    let r = deg.rem_euclid(360);
-    (((r + 45) / 90) * 90) % 360
-}
-
 /// Courtyard half-extents after a quadrant rotation (90/270 swap w/h).
 pub fn rotated_courtyard_half(part: &Part, rot: i32) -> (f64, f64) {
     let (w, h) = (part.courtyard_w / 2.0, part.courtyard_h / 2.0);
@@ -314,7 +307,7 @@ pub fn rotated_copper_bbox(part: &Part, rot: i32) -> (f64, f64, f64, f64) {
     let (mut xmin, mut ymin, mut xmax, mut ymax) =
         (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
     for pad in &part.pads {
-        let off = rotate_offset(&pad.offset, rot);
+        let off = pad.offset.rotate(rot as f64);
         let (pw, ph) = match rot.rem_euclid(360) {
             90 | 270 => (pad.height / 2.0, pad.width / 2.0),
             _ => (pad.width / 2.0, pad.height / 2.0),
@@ -335,26 +328,11 @@ pub fn rotated_copper_bbox(part: &Part, rot: i32) -> (f64, f64, f64, f64) {
     }
 }
 
-/// A pad offset rotated by a quadrant (degrees), y-down.
-pub fn rotate_offset(off: &Point2, rot: i32) -> Point2 {
-    // KiCAD footprint-rotation convention (y-down board coords): a pad's local
-    // offset under a footprint rotated by `rot` lands at these world offsets.
-    // Verified against kicad-cli: a 270° footprint maps local (x,y) → (-y, x).
-    // (The 90 and 270 cases were previously swapped, which placed the engine's
-    // routing targets on the WRONG physical pad for any rotated part → shorts.)
-    match rot.rem_euclid(360) {
-        90 => Point2 { x: off.y, y: -off.x },
-        180 => Point2 { x: -off.x, y: -off.y },
-        270 => Point2 { x: -off.y, y: off.x },
-        _ => off.clone(),
-    }
-}
-
 /// World position of a pin's pad center given current part positions.
 pub fn pad_world(problem: &PlaceProblem, pos: &[Point2], pin: &Pin) -> Point2 {
     let part = &problem.parts[pin.part];
-    let rot = part.locked.as_ref().map(|l| snap_rotation(l.rotation)).unwrap_or(0);
-    let off = rotate_offset(&part.pads[pin.pad].offset, rot);
+    let rot = part.locked.as_ref().map(|l| geom::snap_quadrant(l.rotation as f64)).unwrap_or(0.0);
+    let off = part.pads[pin.pad].offset.rotate(rot);
     Point2 {
         x: pos[pin.part].x + off.x,
         y: pos[pin.part].y + off.y,
@@ -390,7 +368,7 @@ pub fn courtyard_overlap(
 }
 
 /// Does a part's courtyard fit fully within `bounds`?
-pub fn fits_in_bounds(p: &Point2, b: &Bounds, h: (f64, f64)) -> bool {
+pub fn fits_in_bounds(p: &Point2, b: &Rect, h: (f64, f64)) -> bool {
     p.x - h.0 >= b.min_x - 1e-9
         && p.x + h.0 <= b.max_x + 1e-9
         && p.y - h.1 >= b.min_y - 1e-9
@@ -630,9 +608,9 @@ pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> Rou
         let Some(pl) = place_by_ref.get(part.reference.as_str()) else {
             continue;
         };
-        let rot = snap_rotation(pl.rotation);
+        let rot = geom::snap_quadrant(pl.rotation as f64) as i32;
         for pad in &part.pads {
-            let off = rotate_offset(&pad.offset, rot);
+            let off = pad.offset.rotate(rot as f64);
             let center = Point2 {
                 x: pl.at.x + off.x,
                 y: pl.at.y + off.y,
@@ -646,7 +624,7 @@ pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> Rou
             obstacles.push(Obstacle {
                 kind: "rect".to_owned(),
                 layers: pad.layers.clone(),
-                center: center.clone(),
+                center,
                 width: w,
                 height: h,
                 connected_to,
@@ -683,7 +661,7 @@ pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> Rou
         min_trace_width: problem.min_trace_width,
         obstacles,
         connections,
-        bounds: problem.bounds.clone(),
+        bounds: problem.bounds,
         clearance: problem.clearance,
         // Via geometry: the defaults the existing fixtures use. v1 placement does
         // not model via sizing, so it carries these constants.

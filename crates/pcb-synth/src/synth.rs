@@ -60,7 +60,7 @@ use std::io;
 
 use kicad_sexpr::fmt_num;
 use pcb_model::place::Placement;
-use pcb_model::{Bounds, Point2};
+use pcb_model::{Point2, Rect};
 
 use crate::ids::synth_uuid;
 use crate::sexpr::{
@@ -125,7 +125,7 @@ pub struct BoardModel {
     /// The placed parts, in emit order.
     pub parts: Vec<SynthPart>,
     /// Board extents (also the default rectangular `Edge.Cuts`).
-    pub bounds: Bounds,
+    pub bounds: Rect,
     /// Copper layer count (2 or 4 — the engine's supported stackups).
     pub layer_count: u32,
     /// Copper-plane / signal-pour zones, emitted before the board close.
@@ -142,7 +142,7 @@ impl BoardModel {
     /// A board of `parts` on `bounds` with `layer_count` copper layers and no
     /// zones / keep-outs / custom outline / net classes. Set those fields after
     /// construction for a fuller board.
-    pub fn new(parts: Vec<SynthPart>, bounds: Bounds, layer_count: u32) -> Self {
+    pub fn new(parts: Vec<SynthPart>, bounds: Rect, layer_count: u32) -> Self {
         Self {
             parts,
             bounds,
@@ -193,7 +193,7 @@ impl Synthesizer for KicadV9Synth {
 
 /// Synthesize a complete 2-layer `.kicad_pcb` from `parts` on a board of
 /// `bounds`. Convenience over [`KicadV9Synth`] + [`BoardModel`].
-pub fn synthesize_board(parts: &[SynthPart], bounds: &Bounds) -> io::Result<String> {
+pub fn synthesize_board(parts: &[SynthPart], bounds: &Rect) -> io::Result<String> {
     synthesize_board_layers(parts, bounds, 2)
 }
 
@@ -207,7 +207,7 @@ pub fn synthesize_board(parts: &[SynthPart], bounds: &Bounds) -> io::Result<Stri
 /// non-axis-aligned rotation is requested.
 pub fn synthesize_board_layers(
     parts: &[SynthPart],
-    bounds: &Bounds,
+    bounds: &Rect,
     layer_count: u32,
 ) -> io::Result<String> {
     KicadV9Synth.emit(&BoardModel::new(parts.to_vec(), bounds.clone(), layer_count))
@@ -219,7 +219,7 @@ pub fn synthesize_board_layers(
 /// board close. Each zone's net must be one of the parts' nets.
 pub fn synthesize_board_full(
     parts: &[SynthPart],
-    bounds: &Bounds,
+    bounds: &Rect,
     layer_count: u32,
     zones: &[ZoneSpec],
     keepouts: &[KeepoutZone],
@@ -360,7 +360,7 @@ fn push_net_classes(out: &mut String, classes: &[NetClass], net_codes: &BTreeMap
 /// Emit the board outline on `Edge.Cuts`. With `outline = Some(pts)` (≥3 points) the
 /// outline is that closed polygon (one `gr_line` per edge) — circle (many points),
 /// square, star, any custom shape. Otherwise the `bounds` rectangle (the default).
-fn push_edge_cuts(out: &mut String, bounds: &Bounds, outline: Option<&[Point2]>) {
+fn push_edge_cuts(out: &mut String, bounds: &Rect, outline: Option<&[Point2]>) {
     if let Some(pts) = outline
         && pts.len() >= 3 {
             for i in 0..pts.len() {
@@ -623,7 +623,7 @@ mod tests {
                 placement: place("U1", 20.0, 10.0, 0),
             },
         ];
-        let bounds = Bounds { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
+        let bounds = Rect { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
         let board = synthesize_board(&parts, &bounds).unwrap();
 
         // Silkscreen survives so the board renders like a real PCB: the layer
@@ -669,7 +669,7 @@ mod tests {
             pad_nets: nets(&[("1", "VOUT"), ("2", "GND")]),
             placement: place("R1", 10.0, 10.0, 0),
         }];
-        let bounds = Bounds { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
+        let bounds = Rect { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
         let classes = vec![
             NetClass {
                 name: "Power".into(),
@@ -741,7 +741,7 @@ mod tests {
                 placement: place("U1", 20.0, 10.0, 0),
             },
         ];
-        let bounds = Bounds { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
+        let bounds = Rect { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
         let board = synthesize_board(&parts, &bounds).unwrap();
 
         // Write the synthesized board to a temp file and parse it back.
@@ -753,7 +753,7 @@ mod tests {
         std::fs::write(tmp.path(), board.as_bytes()).unwrap();
         let bp = read_problem(tmp.path()).expect("read_problem on synthesized board");
 
-        // Bounds came through.
+        // Rect came through.
         assert_eq!(bp.problem.bounds, bounds);
         // Net codes exist for every named net.
         for n in ["GND", "VIN", "VOUT"] {

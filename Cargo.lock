@@ -624,6 +624,7 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 name = "drc-core"
 version = "0.1.0"
 dependencies = [
+ "geom",
  "pcb-model",
  "serde",
  "serde_json",
@@ -2073,6 +2074,7 @@ name = "pcb-place"
 version = "0.1.0"
 dependencies = [
  "drc-lint",
+ "geom",
  "grid-astar",
  "pcb-model",
  "rayon",

@@ -4,9 +4,7 @@
 //! cheap quality number every engine reports — lives in the kernel
 //! ([`pcb_model::place::compute_hpwl`]) and is re-exported here.
 
-use super::geometry::{
-    courtyard_overlap, part_keepout_overlap, rotate_offset,
-};
+use super::geometry::{courtyard_overlap, part_keepout_overlap};
 use super::model::{LogicalNet, PlaceProblem};
 use crate::problem::Point2;
 
@@ -43,7 +41,7 @@ fn cap_anchor_dist(
     let mut best = f64::MAX;
     for pad in &problem.parts[ic].pads {
         if pad.net.as_deref().is_some_and(|nn| cap_nets.contains(&nn)) {
-            let off = rotate_offset(&pad.offset, rotations[ic]);
+            let off = pad.offset.rotate(rotations[ic] as f64);
             let (px, py) = (pos[ic].x + off.x, pos[ic].y + off.y);
             best = best.min(((pos[cap].x - px).powi(2) + (pos[cap].y - py).powi(2)).sqrt());
         }

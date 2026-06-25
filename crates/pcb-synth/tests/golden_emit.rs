@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::io;
 
 use pcb_model::place::Placement;
-use pcb_model::{Bounds, Point2};
+use pcb_model::{Point2, Rect};
 use pcb_synth::synth::{
     plane_fill_rects, synthesize_board_full, BoardModel, KeepoutZone, NetClass, SynthPart,
     Synthesizer, ZoneSpec,
@@ -48,7 +48,7 @@ fn golden_board() -> String {
             placement: place("U1", 20.0, 10.0, 0),
         },
     ];
-    let bounds = Bounds { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
+    let bounds = Rect { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
     let zones = vec![ZoneSpec {
         net_name: "GND".into(),
         layer_name: "In1.Cu".into(),
@@ -118,7 +118,7 @@ fn third_party_synthesizer_consumes_the_same_model() {
         pad_nets: nets(&[("1", "VOUT"), ("2", "GND")]),
         placement: place("R1", 10.0, 10.0, 0),
     }];
-    let model = BoardModel::new(parts, Bounds { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 }, 2);
+    let model = BoardModel::new(parts, Rect { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 }, 2);
     let out = SummaryDumper.emit(&model).unwrap();
     assert_eq!(out, "parts=1 layers=2 zones=0 nets_classes=0");
     assert_eq!(SummaryDumper.name(), "summary");

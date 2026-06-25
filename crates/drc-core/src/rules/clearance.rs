@@ -11,8 +11,6 @@ use crate::problem::LayerRef;
 use crate::rules::geom::{EPS, share_owner};
 use crate::{DrcCtx, Finding, Rule};
 
-use pcb_model::geom2d::{dist, point_rect_dist, point_seg_dist, seg_rect_dist, seg_seg_dist};
-
 /// Flags any foreign copper pair whose edges are closer than `problem.clearance`.
 pub struct PairClearanceRule;
 
@@ -69,7 +67,10 @@ fn pair_clearance(x: &CopperItem, y: &CopperItem, clearance: f64) -> Option<Find
             if l1 != l2 || share_owner(x, y) {
                 return None;
             }
-            let gap = seg_seg_dist(*a1, *b1, *a2, *b2) - w1 - w2;
+            let gap = geom::Segment::new((*a1).into(), (*b1).into())
+                .dist_to_segment(geom::Segment::new((*a2).into(), (*b2).into()))
+                - w1
+                - w2;
             if gap + EPS < clearance {
                 Some(Finding::ClearanceTraceTrace {
                     a: x.first_owner(),
@@ -145,7 +146,9 @@ fn trace_obstacle(
     if !layers.contains(layer) || rect.owned_by(&conn) {
         return None;
     }
-    let gap = seg_rect_dist(a, b, min, max) - half_w;
+    let gap = geom::Segment::new(a.into(), b.into())
+        .dist_to_rect(&geom::Rect::new(min[0], min[1], max[0], max[1]))
+        - half_w;
     if gap + EPS < clearance {
         Some(Finding::ClearanceTraceObstacle {
             connection: conn,
@@ -175,11 +178,17 @@ fn via_pair(
     }
     let conn = via.first_owner();
     let (edge_dist, other_owners) = match &other.geom {
-        CopperGeom::Segment { a, b, half_w, .. } => {
-            (point_seg_dist(at, *a, *b) - half_w, other.owners.clone())
+        CopperGeom::Segment { a, b, half_w, .. } => (
+            geom::Segment::new((*a).into(), (*b).into()).dist_to_point(at.into()) - half_w,
+            other.owners.clone(),
+        ),
+        CopperGeom::Rect { min, max, .. } => (
+            geom::Rect::new(min[0], min[1], max[0], max[1]).dist_to_point(at.into()),
+            other.owners.clone(),
+        ),
+        CopperGeom::Via { at: p, radius: r2 } => {
+            (geom::Point2::from(at).dist((*p).into()) - r2, other.owners.clone())
         }
-        CopperGeom::Rect { min, max, .. } => (point_rect_dist(at, *min, *max), other.owners.clone()),
-        CopperGeom::Via { at: p, radius: r2 } => (dist(at, *p) - r2, other.owners.clone()),
     };
     let gap = edge_dist - radius;
     if gap + EPS < clearance {

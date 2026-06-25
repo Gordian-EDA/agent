@@ -255,8 +255,8 @@ impl CapacityMesh {
         self.leaves
             .iter()
             .min_by(|p, q| {
-                let dp = p.rect.center().dist2(&Point2 { x, y });
-                let dq = q.rect.center().dist2(&Point2 { x, y });
+                let dp = p.rect.center().dist2(Point2 { x, y });
+                let dq = q.rect.center().dist2(Point2 { x, y });
                 dp.partial_cmp(&dq).unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|l| l.id)
@@ -669,7 +669,7 @@ fn union_length(intervals: &mut [(f64, f64)]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{Bounds, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem};
+    use crate::problem::{Rect, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem};
     use std::path::Path;
 
     fn base(obstacles: Vec<Obstacle>, connections: Vec<Connection>) -> RouteProblem {
@@ -678,7 +678,7 @@ mod tests {
             min_trace_width: 0.2,
             obstacles,
             connections,
-            bounds: Bounds {
+            bounds: Rect {
                 min_x: 0.0,
                 max_x: 16.0,
                 min_y: 0.0,

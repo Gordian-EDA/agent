@@ -138,12 +138,12 @@ mod tests {
     use super::*;
     use crate::connectivity::Violation;
     use crate::problem::{
-        Bounds, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace, Via,
+        Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem, RouteSolution, Trace, Via,
         ViaSpan,
     };
 
-    fn bounds() -> Bounds {
-        Bounds {
+    fn bounds() -> Rect {
+        Rect {
             min_x: 0.0,
             max_x: 100.0,
             min_y: 0.0,

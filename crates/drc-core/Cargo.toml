@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Pluggable-rule DRC engine SDK for PCB routing: a Rule trait, a composable DrcSuite, and the shared DrcCtx + copper collection rules read."
 
 [dependencies]
+geom = { path = "../geom" }
 pcb-model = { path = "../pcb-model" }
 serde = { workspace = true, features = ["derive"] }
 

@@ -611,7 +611,7 @@ fn reconstruct(came_from: &[usize], goal: State, plane: usize, nx: usize) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{Bounds, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem};
+    use crate::problem::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem};
 
     /// A wide-open board with two connections so cell tags exist for tests.
     fn open_problem() -> RouteProblem {
@@ -623,7 +623,7 @@ mod tests {
                 conn("A", &[(2.0, 2.0, "top")]),
                 conn("B", &[(2.0, 4.0, "top")]),
             ],
-            bounds: Bounds {
+            bounds: Rect {
                 min_x: 0.0,
                 max_x: 20.0,
                 min_y: 0.0,
@@ -721,7 +721,7 @@ mod tests {
     fn via_hop_when_a_layer_is_fully_walled() {
         // A full-height wall on the top layer forces a hop to the bottom layer.
         let mut p = open_problem();
-        p.bounds = Bounds {
+        p.bounds = Rect {
             min_x: 0.0,
             max_x: 20.0,
             min_y: 0.0,

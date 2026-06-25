@@ -913,7 +913,7 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
 mod tests {
     use super::*;
     use crate::pathing::global_route;
-    use crate::problem::{Bounds, Connection, Obstacle, RoutePoint};
+    use crate::problem::{Rect, Connection, Obstacle, RoutePoint};
     use std::path::Path;
 
     fn load(name: &str) -> RouteProblem {
@@ -953,7 +953,7 @@ mod tests {
         }
     }
 
-    fn base(bounds: Bounds, obstacles: Vec<Obstacle>, connections: Vec<Connection>) -> RouteProblem {
+    fn base(bounds: Rect, obstacles: Vec<Obstacle>, connections: Vec<Connection>) -> RouteProblem {
         RouteProblem {
             layer_count: 2,
             min_trace_width: 0.2,
@@ -969,8 +969,8 @@ mod tests {
         }
     }
 
-    fn bounds(w: f64, h: f64) -> Bounds {
-        Bounds {
+    fn bounds(w: f64, h: f64) -> Rect {
+        Rect {
             min_x: 0.0,
             max_x: w,
             min_y: 0.0,

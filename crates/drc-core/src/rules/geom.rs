@@ -11,8 +11,6 @@ use crate::problem::RouteProblem;
 /// required clearance by more than this.
 pub(crate) const EPS: f64 = 1e-6;
 
-use pcb_model::geom2d::seg_seg_dist;
-
 /// How far a disc of `radius` centred at `p` pokes past the nearest board edge
 /// (positive = outside), plus the point itself. Zero or negative = inside.
 pub(crate) fn point_overshoot(p: [f64; 2], radius: f64, problem: &RouteProblem) -> (f64, [f64; 2]) {
@@ -31,9 +29,10 @@ pub(crate) fn poly_edge_gap(p: [f64; 2], q: [f64; 2], poly: &[[f64; 2]]) -> f64 
     if n < 2 {
         return f64::INFINITY;
     }
+    let pq = geom::Segment::new(p.into(), q.into());
     let mut best = f64::INFINITY;
     for i in 0..n {
-        let g = seg_seg_dist(p, q, poly[i], poly[(i + 1) % n]);
+        let g = pq.dist_to_segment(geom::Segment::new(poly[i].into(), poly[(i + 1) % n].into()));
         if g < best {
             best = g;
         }

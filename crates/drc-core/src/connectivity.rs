@@ -257,7 +257,12 @@ fn touches(x: &Element, y: &Element) -> bool {
                 half_w: w2,
                 layer: l2,
             },
-        ) => l1 == l2 && seg_seg_dist(*a1, *b1, *a2, *b2) <= w1 + w2 + EPS,
+        ) => {
+            l1 == l2
+                && geom::Segment::new((*a1).into(), (*b1).into())
+                    .dist_to_segment(geom::Segment::new((*a2).into(), (*b2).into()))
+                    <= w1 + w2 + EPS
+        }
 
         (
             Segment {
@@ -276,7 +281,12 @@ fn touches(x: &Element, y: &Element) -> bool {
                 half_w,
                 layer,
             },
-        ) => layers.contains(layer) && seg_rect_dist(*a, *b, *min, *max) <= half_w + EPS,
+        ) => {
+            layers.contains(layer)
+                && geom::Segment::new((*a).into(), (*b).into())
+                    .dist_to_rect(&geom::Rect::new(min[0], min[1], max[0], max[1]))
+                    <= half_w + EPS
+        }
 
         (
             Segment {
@@ -295,11 +305,16 @@ fn touches(x: &Element, y: &Element) -> bool {
                 half_w,
                 layer,
             },
-        ) => layer == pl && point_seg_dist(*at, *a, *b) <= half_w + EPS,
+        ) => {
+            layer == pl
+                && geom::Segment::new((*a).into(), (*b).into()).dist_to_point((*at).into())
+                    <= half_w + EPS
+        }
 
         (Pad { min, max, layers }, Point { at, layer })
         | (Point { at, layer }, Pad { min, max, layers }) => {
-            layers.contains(layer) && point_rect_dist(*at, *min, *max) <= EPS
+            layers.contains(layer)
+                && geom::Rect::new(min[0], min[1], max[0], max[1]).dist_to_point((*at).into()) <= EPS
         }
 
         (
@@ -313,7 +328,12 @@ fn touches(x: &Element, y: &Element) -> bool {
                 max: mx2,
                 layers: l2,
             },
-        ) => l1.iter().any(|l| l2.contains(l)) && rect_rect_dist(*mn1, *mx1, *mn2, *mx2) <= EPS,
+        ) => {
+            l1.iter().any(|l| l2.contains(l))
+                && geom::Rect::new(mn1[0], mn1[1], mx1[0], mx1[1])
+                    .dist_to_rect(&geom::Rect::new(mn2[0], mn2[1], mx2[0], mx2[1]))
+                    <= EPS
+        }
 
         // point ↔ point: zero-size anchors never touch each other directly;
         // they are only ever joined through real copper.
@@ -325,10 +345,17 @@ fn touches(x: &Element, y: &Element) -> bool {
 /// disc reaches the other element's fattened body.
 fn via_touches(at: [f64; 2], radius: f64, other: &Shape) -> bool {
     match other {
-        Shape::Segment { a, b, half_w, .. } => point_seg_dist(at, *a, *b) <= radius + half_w + EPS,
-        Shape::Pad { min, max, .. } => point_rect_dist(at, *min, *max) <= radius + EPS,
-        Shape::Point { at: p, .. } => dist(at, *p) <= radius + EPS,
-        Shape::Via { at: p, radius: r2 } => dist(at, *p) <= radius + r2 + EPS,
+        Shape::Segment { a, b, half_w, .. } => {
+            geom::Segment::new((*a).into(), (*b).into()).dist_to_point(at.into())
+                <= radius + half_w + EPS
+        }
+        Shape::Pad { min, max, .. } => {
+            geom::Rect::new(min[0], min[1], max[0], max[1]).dist_to_point(at.into()) <= radius + EPS
+        }
+        Shape::Point { at: p, .. } => geom::Point2::from(at).dist((*p).into()) <= radius + EPS,
+        Shape::Via { at: p, radius: r2 } => {
+            geom::Point2::from(at).dist((*p).into()) <= radius + r2 + EPS
+        }
     }
 }
 
@@ -484,30 +511,17 @@ impl NameGroups {
     }
 }
 
-// ── geometry primitives ──────────────────────────────────────────────────────
-
-// The point/segment/rect distance kernel lives in `pcb_model::geom2d` (shared
-// with the clearance lint). Only the rect-rect helper is local to connectivity.
-use pcb_model::geom2d::{dist, point_rect_dist, point_seg_dist, seg_rect_dist, seg_seg_dist};
-
-/// Rect-rect distance (axis-aligned); 0 when they overlap or touch.
-fn rect_rect_dist(mn1: [f64; 2], mx1: [f64; 2], mn2: [f64; 2], mx2: [f64; 2]) -> f64 {
-    let dx = (mn1[0] - mx2[0]).max(0.0).max(mn2[0] - mx1[0]);
-    let dy = (mn1[1] - mx2[1]).max(0.0).max(mn2[1] - mx1[1]);
-    (dx * dx + dy * dy).sqrt()
-}
-
 // ── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::problem::{
-        Bounds, Connection, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace, Via, ViaSpan,
+        Connection, Obstacle, Point2, Rect, RoutePoint, RouteProblem, RouteSolution, Trace, Via, ViaSpan,
     };
 
-    fn bounds() -> Bounds {
-        Bounds {
+    fn bounds() -> Rect {
+        Rect {
             min_x: -100.0,
             max_x: 100.0,
             min_y: -100.0,

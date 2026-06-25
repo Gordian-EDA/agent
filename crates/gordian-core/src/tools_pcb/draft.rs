@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use pcb_place::placement::{LockedAt, PlacementHints, Placement};
-use pcb_model::{Bounds, Point2};
+use pcb_model::{Point2, Rect};
 
 use crate::tools::PcbToolCtx;
 
@@ -25,7 +25,7 @@ use super::create::{parse_group_hint, parse_keepout};
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BoardDraft {
     /// Board outline (mm, y-down) — the placement/routing extent.
-    pub bounds: Bounds,
+    pub bounds: Rect,
     /// Board-level design rules (clearance, trace width, via geometry).
     #[serde(default)]
     pub rules: DraftRules,

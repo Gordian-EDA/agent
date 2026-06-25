@@ -5,7 +5,7 @@
 use super::geometry::{clamp_into_bounds, rotated_courtyard_half};
 use super::model::{LockedAt, Part, PlaceProblem, PlacementHints};
 use super::pairs::{decoupling_pairs, series_fanout_order, series_pairs};
-use crate::problem::{Bounds, Point2};
+use crate::problem::{Point2, Rect};
 
 /// Lock each member of a `grid` group at a computed cell of a regular grid (row-major,
 /// member order), centred in the group's region. The column count is sized from the
@@ -411,7 +411,7 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
             l.at.y += dy;
         }
     }
-    problem.bounds = Bounds {
+    problem.bounds = Rect {
         min_x: 0.0,
         min_y: 0.0,
         max_x: (mxx - mnx) + 2.0 * margin,

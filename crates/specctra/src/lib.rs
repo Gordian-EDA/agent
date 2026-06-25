@@ -1326,7 +1326,7 @@ mod tests {
                 min_trace_width: 0.1,
                 obstacles: vec![],
                 connections: vec![],
-                bounds: pcb_model::Bounds {
+                bounds: pcb_model::Rect {
                     min_x: 0.0,
                     max_x: 10.0,
                     min_y: 0.0,

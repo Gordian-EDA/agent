@@ -14,7 +14,7 @@ use pcb_synth::synth::{
     plane_fill_rects, BoardModel, KeepoutZone, KicadV9Synth, NetClass, SynthPart, Synthesizer,
     ZoneSpec,
 };
-use pcb_model::{Bounds, Point2, RouteProblem, RouteSolution};
+use pcb_model::{Point2, Rect, RouteProblem, RouteSolution};
 use pcb_place::placement::Placement;
 
 use crate::tools::PcbToolCtx;
@@ -81,7 +81,7 @@ fn plane_zones(
     planes: &[(String, u32)],
     board: &RouteProblem,
     solution: &RouteSolution,
-    bounds: &Bounds,
+    bounds: &Rect,
     rules: &DraftRules,
     user_keepouts: &[Keepout],
     outline: Option<&[Point2]>,
@@ -183,7 +183,7 @@ fn pour_zones(
     pours: &[PourSpec],
     board: &RouteProblem,
     solution: &RouteSolution,
-    bounds: &Bounds,
+    bounds: &Rect,
     rules: &DraftRules,
     user_keepouts: &[Keepout],
     outline: Option<&[Point2]>,
@@ -355,10 +355,10 @@ const BOARD_EDGE_MARGIN_MM: f64 = 1.0;
 fn content_bounds(
     problem: &RouteProblem,
     solution: &RouteSolution,
-    budget: &Bounds,
+    budget: &Rect,
     keepouts: &[Keepout],
     margin: f64,
-) -> Bounds {
+) -> Rect {
     let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
     let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
     let mut acc = |x0: f64, y0: f64, x1: f64, y1: f64| {
@@ -395,7 +395,7 @@ fn content_bounds(
     if !min_x.is_finite() {
         return budget.clone();
     }
-    Bounds {
+    Rect {
         min_x: min_x - margin,
         max_x: max_x + margin,
         min_y: min_y - margin,

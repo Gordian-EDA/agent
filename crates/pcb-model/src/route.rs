@@ -54,7 +54,7 @@ impl RouteSolution {
         let mut wirelength = 0.0;
         for t in &self.traces {
             for w in t.path.windows(2) {
-                wirelength += w[1].dist(&w[0]);
+                wirelength += w[1].dist(w[0]);
             }
         }
         RouteMetrics {
@@ -282,8 +282,7 @@ pub fn trace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Bounds, Connection, LayerRef, Point2, RoutePoint, RouteSolution, Trace, Via, ViaSpan};
-    use std::collections::BTreeMap;
+    use crate::{Connection, LayerRef, Point2, Rect, RoutePoint, RouteSolution, Trace, Via, ViaSpan};
 
     fn empty_problem(layer_count: u32) -> RouteProblem {
         RouteProblem {
@@ -291,7 +290,7 @@ mod tests {
             min_trace_width: 0.2,
             obstacles: vec![],
             connections: vec![],
-            bounds: Bounds { min_x: 0.0, max_x: 10.0, min_y: 0.0, max_y: 10.0 },
+            bounds: Rect { min_x: 0.0, max_x: 10.0, min_y: 0.0, max_y: 10.0 },
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,

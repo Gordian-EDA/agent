@@ -7,6 +7,7 @@ repository.workspace = true
 description = "PCB placement engine: force-directed seed + simulated-annealing + radial fan-out over a shared legalizer."
 
 [dependencies]
+geom = { path = "../geom" }
 pcb-model = { path = "../pcb-model" }
 drc-lint = { path = "../drc-lint" }
 grid-astar = { path = "../grid-astar" }

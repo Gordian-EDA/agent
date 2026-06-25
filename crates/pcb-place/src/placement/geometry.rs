@@ -7,12 +7,12 @@
 //! `super::geometry::…` path resolves unchanged.
 
 use super::model::Edge;
-use crate::problem::{Bounds, Point2};
+use crate::problem::{Point2, Rect};
 
 // Shared (kernel) geometry — re-exported VERBATIM.
 pub(crate) use crate::problem::place::{
     courtyard_margin, courtyard_overlap, fits_in_bounds, pad_world, part_keepout_overlap,
-    rect_overlap, rotate_offset, rotated_copper_bbox, rotated_courtyard_half, snap_rotation,
+    rect_overlap, rotated_copper_bbox, rotated_courtyard_half,
 };
 
 // ── engine-private design constants ──────────────────────────────────────────
@@ -38,7 +38,7 @@ pub(crate) fn snap(v: f64) -> f64 {
 
 /// Clamp a part origin so its courtyard fits in bounds (best effort: if the part
 /// is wider than the board, it is centered on that axis).
-pub(crate) fn clamp_into_bounds(p: &mut Point2, b: &Bounds, h: (f64, f64)) {
+pub(crate) fn clamp_into_bounds(p: &mut Point2, b: &Rect, h: (f64, f64)) {
     let (lo_x, hi_x) = (b.min_x + h.0, b.max_x - h.0);
     let (lo_y, hi_y) = (b.min_y + h.1, b.max_y - h.1);
     p.x = if lo_x <= hi_x {
@@ -69,7 +69,7 @@ pub(crate) fn sign_nonzero(v: f64) -> f64 {
 /// prefers the nearer SIDE edge (E/W) — its long axis then runs along the edge;
 /// a wider part prefers the nearer top/bottom (N/S). Square parts fall back to
 /// the overall nearest edge.
-pub(crate) fn aspect_edge(p: &Point2, b: &Bounds, w: f64, h: f64) -> Edge {
+pub(crate) fn aspect_edge(p: &Point2, b: &Rect, w: f64, h: f64) -> Edge {
     if h > w {
         if p.x - b.min_x <= b.max_x - p.x { Edge::W } else { Edge::E }
     } else if w > h {
@@ -80,7 +80,7 @@ pub(crate) fn aspect_edge(p: &Point2, b: &Bounds, w: f64, h: f64) -> Edge {
 }
 
 /// The board edge nearest to `p`. Ties break in N, S, W, E order (deterministic).
-pub(crate) fn nearest_edge(p: &Point2, b: &Bounds) -> Edge {
+pub(crate) fn nearest_edge(p: &Point2, b: &Rect) -> Edge {
     let d_n = p.y - b.min_y;
     let d_s = b.max_y - p.y;
     let d_w = p.x - b.min_x;
@@ -98,7 +98,7 @@ pub(crate) fn nearest_edge(p: &Point2, b: &Bounds) -> Edge {
 
 /// The pull target for an edge hint: a point on the edge band line, keeping the
 /// part's other coordinate where it is (only the edge-normal coordinate matters).
-pub(crate) fn edge_target(edge: Edge, b: &Bounds, h: (f64, f64)) -> f64 {
+pub(crate) fn edge_target(edge: Edge, b: &Rect, h: (f64, f64)) -> f64 {
     match edge {
         Edge::N => b.min_y + h.1 + EDGE_BAND.min((b.max_y - b.min_y) / 2.0),
         Edge::S => b.max_y - h.1 - EDGE_BAND.min((b.max_y - b.min_y) / 2.0),

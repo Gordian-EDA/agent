@@ -561,7 +561,7 @@ impl<'a> Router<'a> {
             let c = rect_center(&self.mesh.leaves[leaf].rect);
             tree_centers
                 .iter()
-                .map(|t| c.dist(t))
+                .map(|t| c.dist(*t))
                 .fold(f64::INFINITY, f64::min)
         };
 
@@ -812,7 +812,7 @@ impl<'a> Router<'a> {
     /// `centre_from.dist(centre_to) × (1 + congestion + history)`.
     fn edge_cost(&self, ei: usize, layer: usize, from: LeafId, to: LeafId) -> f64 {
         let dist = rect_center(&self.mesh.leaves[from].rect)
-            .dist(&rect_center(&self.mesh.leaves[to].rect));
+            .dist(rect_center(&self.mesh.leaves[to].rect));
         let cap = self.mesh.edges[ei].capacity.get(layer).copied().unwrap_or(0);
         let usage = self.edge_usage[ei][layer];
         // If this net routes here it will add one unit: cost the *prospective*
@@ -987,11 +987,11 @@ fn half_perimeter(conn: &crate::problem::Connection) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{Bounds, Connection, LayerRef, Obstacle, RoutePoint};
+    use crate::problem::{Rect, Connection, LayerRef, Obstacle, RoutePoint};
     use std::path::Path;
 
     fn base(
-        bounds: Bounds,
+        bounds: Rect,
         obstacles: Vec<Obstacle>,
         connections: Vec<Connection>,
     ) -> RouteProblem {
@@ -1010,8 +1010,8 @@ mod tests {
         }
     }
 
-    fn bounds(w: f64, h: f64) -> Bounds {
-        Bounds {
+    fn bounds(w: f64, h: f64) -> Rect {
+        Rect {
             min_x: 0.0,
             max_x: w,
             min_y: 0.0,

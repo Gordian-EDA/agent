@@ -11,13 +11,13 @@
 
 use serde::{Deserialize, Serialize};
 
-pub mod geom2d;
 pub mod place;
 pub mod route;
 pub use route::{
     failed_pad_weight, select, Capabilities, RouteMetrics, RouteQuality, RouteResult, Router,
 };
 pub use geom::union_find::UnionFind;
+pub use geom::{Point2, Rect, Segment};
 
 // ── defaults for extension fields ────────────────────────────────────────────
 
@@ -120,33 +120,6 @@ impl LayerRef {
     }
 }
 
-// ── Point2 ───────────────────────────────────────────────────────────────────
-
-/// A 2-D point in millimetres, y-down (KiCAD PCB convention).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Point2 {
-    pub x: f64,
-    pub y: f64,
-}
-
-impl Point2 {
-    /// Squared euclidean distance to `other` (cheaper than [`Point2::dist`] when
-    /// only comparing magnitudes).
-    #[inline]
-    pub fn dist2(&self, other: &Point2) -> f64 {
-        let dx = self.x - other.x;
-        let dy = self.y - other.y;
-        dx * dx + dy * dy
-    }
-
-    /// Euclidean distance to `other` (mm).
-    #[inline]
-    pub fn dist(&self, other: &Point2) -> f64 {
-        self.dist2(other).sqrt()
-    }
-}
-
 // ── RouteProblem ─────────────────────────────────────────────────────────────
 
 /// A PCB routing problem, wire-compatible with tscircuit `SimpleRouteJson`.
@@ -160,7 +133,7 @@ pub struct RouteProblem {
     pub min_trace_width: f64,
     pub obstacles: Vec<Obstacle>,
     pub connections: Vec<Connection>,
-    pub bounds: Bounds,
+    pub bounds: Rect,
     // ---- extensions (absent from upstream SimpleRouteJson fixtures) ----------
     #[serde(default = "default_clearance")]
     pub clearance: f64,
@@ -285,16 +258,6 @@ pub struct RoutePoint {
     pub layer: LayerRef,
 }
 
-/// Board outline bounding box (mm).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Bounds {
-    pub min_x: f64,
-    pub max_x: f64,
-    pub min_y: f64,
-    pub max_y: f64,
-}
-
 // ── FailedNet ────────────────────────────────────────────────────────────────
 
 /// A net a router could not fully connect, with a human-readable cause.
@@ -365,102 +328,9 @@ pub struct Via {
     pub span: ViaSpan,
 }
 
-/// An axis-aligned rectangle in board mm (y-down), `[min, max]` per axis.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Rect {
-    pub min_x: f64,
-    pub min_y: f64,
-    pub max_x: f64,
-    pub max_y: f64,
-}
-
-impl Rect {
-    #[inline]
-    pub fn width(&self) -> f64 {
-        self.max_x - self.min_x
-    }
-    #[inline]
-    pub fn height(&self) -> f64 {
-        self.max_y - self.min_y
-    }
-    #[inline]
-    pub fn area(&self) -> f64 {
-        self.width() * self.height()
-    }
-    #[inline]
-    pub fn center(&self) -> Point2 {
-        Point2 {
-            x: (self.min_x + self.max_x) / 2.0,
-            y: (self.min_y + self.max_y) / 2.0,
-        }
-    }
-    /// Is `p` inside (or on the boundary of) this rect?
-    #[inline]
-    pub fn contains(&self, p: &Point2) -> bool {
-        p.x >= self.min_x && p.x <= self.max_x && p.y >= self.min_y && p.y <= self.max_y
-    }
-    /// Does this rect overlap `other` with positive area?
-    #[inline]
-    pub fn overlaps(&self, other: &Rect) -> bool {
-        self.min_x < other.max_x
-            && self.max_x > other.min_x
-            && self.min_y < other.max_y
-            && self.max_y > other.min_y
-    }
-    /// The overlap rectangle with `other`, or `None` if they do not overlap.
-    pub fn intersection(&self, other: &Rect) -> Option<Rect> {
-        let min_x = self.min_x.max(other.min_x);
-        let max_x = self.max_x.min(other.max_x);
-        let min_y = self.min_y.max(other.min_y);
-        let max_y = self.max_y.min(other.max_y);
-        if min_x < max_x && min_y < max_y {
-            Some(Rect { min_x, min_y, max_x, max_y })
-        } else {
-            None
-        }
-    }
-    /// Does the *boundary* of `other` cross the interior of `self`? True when the
-    /// rects overlap but `other` does not wholly contain `self`.
-    pub fn boundary_crosses(&self, other: &Rect) -> bool {
-        if !self.overlaps(other) {
-            return false;
-        }
-        let covers = other.min_x <= self.min_x
-            && other.max_x >= self.max_x
-            && other.min_y <= self.min_y
-            && other.max_y >= self.max_y;
-        !covers
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `Rect` is the single shared region/keep-out type (pcb-place reuses it). External
-    /// JSON (agent keepouts) carries it by camelCase NAME, so deserialization is
-    /// field-order-independent — this guards the de-duplication against any future
-    /// reshuffle of the struct's field declaration order.
-    #[test]
-    fn rect_round_trips_camel_case_order_independent() {
-        let r = Rect { min_x: 1.0, min_y: 2.0, max_x: 3.0, max_y: 4.0 };
-        let json = serde_json::to_string(&r).unwrap();
-        assert_eq!(json, r#"{"minX":1.0,"minY":2.0,"maxX":3.0,"maxY":4.0}"#);
-        assert_eq!(serde_json::from_str::<Rect>(&json).unwrap(), r);
-        // Keys in any order parse the same (name-based, not positional).
-        let shuffled = r#"{"maxX":3.0,"minX":1.0,"maxY":4.0,"minY":2.0}"#;
-        assert_eq!(serde_json::from_str::<Rect>(shuffled).unwrap(), r);
-    }
-
-    #[test]
-    fn rect_contains_includes_boundary() {
-        let r = Rect { min_x: 0.0, min_y: 0.0, max_x: 10.0, max_y: 10.0 };
-        assert!(r.contains(&Point2 { x: 5.0, y: 5.0 }));
-        assert!(r.contains(&Point2 { x: 0.0, y: 10.0 }), "boundary is inside");
-        assert!(!r.contains(&Point2 { x: 11.0, y: 5.0 }));
-        assert_eq!(r.center(), Point2 { x: 5.0, y: 5.0 });
-    }
 
     #[test]
     fn layer_ref_resolve_maps_index_and_name() {

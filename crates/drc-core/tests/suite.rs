@@ -10,12 +10,12 @@
 //!    land last (after the standard ones).
 
 use drc_core::problem::{
-    Bounds, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem, RouteSolution, Trace,
+    Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem, RouteSolution, Trace,
 };
 use drc_core::{DrcCtx, DrcSuite, Finding, Rule};
 
-fn bounds() -> Bounds {
-    Bounds { min_x: 0.0, max_x: 100.0, min_y: 0.0, max_y: 100.0 }
+fn bounds() -> Rect {
+    Rect { min_x: 0.0, max_x: 100.0, min_y: 0.0, max_y: 100.0 }
 }
 
 fn problem(connections: Vec<Connection>, obstacles: Vec<Obstacle>) -> RouteProblem {

@@ -464,7 +464,7 @@ impl RouteGrid {
     /// of the four `bounds` edges), on every layer. Used by [`Self::build_window`]
     /// so a sub-window blocks only physical board edges, not the artificial
     /// window edges introduced by per-cell decomposition.
-    fn block_true_board_edge(&mut self, inflation: f64, bounds: &crate::problem::Bounds) {
+    fn block_true_board_edge(&mut self, inflation: f64, bounds: &crate::problem::Rect) {
         for ix in 0..self.nx {
             for iy in 0..self.ny {
                 let cx = self.cell_center_x(ix);
@@ -654,7 +654,7 @@ fn combine(existing: Cell, incoming: Cell) -> Cell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{Bounds, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem};
+    use crate::problem::{Rect, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem};
 
     fn problem(obstacles: Vec<Obstacle>) -> RouteProblem {
         RouteProblem {
@@ -665,7 +665,7 @@ mod tests {
                 conn("SIG", &[(1.0, 1.0, "top")]),
                 conn("GND", &[(9.0, 9.0, "top")]),
             ],
-            bounds: Bounds {
+            bounds: Rect {
                 min_x: 0.0,
                 max_x: 10.0,
                 min_y: 0.0,

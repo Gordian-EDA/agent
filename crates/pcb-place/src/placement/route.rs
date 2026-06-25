@@ -12,9 +12,7 @@
 use super::anneal::anneal_placement;
 use super::cost::{compute_hpwl, place_cost};
 use super::force::{force_layout, snap_caps_to_anchor_ring};
-use super::geometry::{
-    courtyard_margin, rotated_copper_bbox, rotated_courtyard_half, snap_rotation,
-};
+use super::geometry::{courtyard_margin, rotated_copper_bbox, rotated_courtyard_half};
 use super::hints::{apply_grid_hints, unified_fanout_place};
 use super::legalize::{initial_grid, is_legal, legalize};
 use super::model::{
@@ -323,7 +321,7 @@ pub(crate) fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts
     let rotations: Vec<i32> = problem
         .parts
         .iter()
-        .map(|p| p.locked.as_ref().map(|l| snap_rotation(l.rotation)).unwrap_or(0))
+        .map(|p| p.locked.as_ref().map(|l| geom::snap_quadrant(l.rotation as f64) as i32).unwrap_or(0))
         .collect();
 
     // Rotated courtyard half-extents per part (rotation only swaps w/h here).

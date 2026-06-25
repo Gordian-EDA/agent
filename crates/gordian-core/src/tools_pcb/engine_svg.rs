@@ -27,14 +27,14 @@
 use std::fmt::Write as _;
 
 use grid_astar::router::FailedNet;
-use pcb_model::{Bounds, LayerRef, Point2, RouteProblem, RouteSolution};
+use pcb_model::{LayerRef, Point2, Rect, RouteProblem, RouteSolution};
 use pcb_place::placement::{PlaceProblem, PlaceResult, Placement, PlacementHints};
 
 /// Emit the board boundary: the custom polygon `outline` when present (>= 3 pts),
 /// else the `bounds` rectangle. So a circle / hexagon / any custom-shaped board
 /// shows its TRUE shape in the render — the agent's eyes for iterating on a custom
 /// outline — instead of a misleading bounding-box square.
-fn push_board_outline(w: &mut String, bounds: &Bounds, outline: Option<&[Point2]>) {
+fn push_board_outline(w: &mut String, bounds: &Rect, outline: Option<&[Point2]>) {
     w.push_str("  <!-- board outline -->\n");
     if let Some(poly) = outline
         && poly.len() >= 3

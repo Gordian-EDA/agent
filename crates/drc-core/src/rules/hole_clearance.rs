@@ -12,8 +12,6 @@
 use crate::rules::geom::EPS;
 use crate::{DrcCtx, Finding, Rule};
 
-use pcb_model::geom2d::{dist, point_seg_dist};
-
 /// KiCAD's drill-edge (hole) clearance, mm.
 const HOLE_CLEAR: f64 = 0.25;
 
@@ -36,7 +34,7 @@ impl Rule for HoleClearanceRule {
             let aat = [a.at.x, a.at.y];
             // drill ↔ drill: a mechanical (drill-bit) rule, independent of net.
             for b in &solution.vias[vi + 1..] {
-                let gap = dist(aat, [b.at.x, b.at.y]) - ar - b.drill / 2.0;
+                let gap = a.at.dist(b.at) - ar - b.drill / 2.0;
                 if gap + EPS < HOLE_CLEAR {
                     out.push(Finding::ClearanceViaAny {
                         connection: a.connection.clone(),
@@ -54,7 +52,7 @@ impl Rule for HoleClearanceRule {
                 }
                 let hw = t.width / 2.0;
                 if t.path.windows(2).any(|w| {
-                    point_seg_dist(aat, [w[0].x, w[0].y], [w[1].x, w[1].y]) - hw - ar + EPS < HOLE_CLEAR
+                    geom::Segment::new(w[0], w[1]).dist_to_point(a.at) - hw - ar + EPS < HOLE_CLEAR
                 }) {
                     out.push(Finding::ClearanceViaAny {
                         connection: a.connection.clone(),

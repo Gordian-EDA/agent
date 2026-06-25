@@ -14,7 +14,7 @@ use sch_io::read::lift;
 
 use pcb_synth::placefp::part_from_footprint;
 use pcb_place::placement::{Edge, GroupHint, LockedAt, PlacementHints, Rect};
-use pcb_model::{Bounds, LayerRef, Point2};
+use pcb_model::{LayerRef, Point2};
 
 use crate::tools::PcbToolCtx;
 
@@ -83,7 +83,7 @@ pub fn derive_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             Err(e) => return Ok(json!({ "error": e })),
         }
     } else {
-        Bounds { min_x: 0.0, min_y: 0.0, max_x: 50.0, max_y: 40.0 }
+        Rect { min_x: 0.0, min_y: 0.0, max_x: 50.0, max_y: 40.0 }
     };
     let layer_count = input
         .get("rules")
@@ -128,13 +128,13 @@ pub(super) fn req_num(obj: &Value, key: &str, ctx: &str) -> std::result::Result<
 }
 
 /// Parse the board `bounds` from snake_case model input into the engine's
-/// [`Bounds`] (whose serde is camelCase, so we read fields explicitly rather than
+/// [`Rect`] (whose serde is camelCase, so we read fields explicitly rather than
 /// deserializing directly — the tool API stays snake_case like the others).
-fn parse_bounds(v: Option<&Value>) -> std::result::Result<Bounds, String> {
+fn parse_bounds(v: Option<&Value>) -> std::result::Result<Rect, String> {
     let Some(obj) = v else {
         return Err("missing required `bounds` ({min_x, max_x, min_y, max_y} in mm)".into());
     };
-    Ok(Bounds {
+    Ok(Rect {
         min_x: req_num(obj, "min_x", "bounds")?,
         max_x: req_num(obj, "max_x", "bounds")?,
         min_y: req_num(obj, "min_y", "bounds")?,
@@ -360,7 +360,7 @@ pub fn build_board_draft(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         }
     };
     let bounds = match &outline {
-        Some(o) => Bounds {
+        Some(o) => Rect {
             min_x: o.iter().map(|p| p.x).fold(f64::INFINITY, f64::min),
             max_x: o.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max),
             min_y: o.iter().map(|p| p.y).fold(f64::INFINITY, f64::min),
@@ -580,7 +580,7 @@ fn parse_edge(v: &Value) -> std::result::Result<Edge, String> {
 /// known copper layers, then return the engine [`Keepout`].
 pub(super) fn parse_keepout(
     v: &Value,
-    bounds: &Bounds,
+    bounds: &Rect,
     layer_count: u32,
     idx: usize,
 ) -> std::result::Result<Keepout, String> {

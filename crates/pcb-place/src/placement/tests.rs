@@ -1,6 +1,5 @@
 use super::geometry::{
-    courtyard_margin, rotate_offset, rotated_copper_bbox, rotated_courtyard_half, EDGE_BAND,
-    PLACE_GRID,
+    courtyard_margin, rotated_copper_bbox, rotated_courtyard_half, EDGE_BAND, PLACE_GRID,
 };
 use super::hints::apply_grid_hints;
 use super::legalize::is_legal;
@@ -10,10 +9,10 @@ use super::model::{
 use super::pairs::series_pairs;
 use super::route::{place, place_board, place_variant, to_route_problem, PlaceOpts};
 use crate::connectivity;
-use crate::problem::{Bounds, LayerRef, Point2, RouteProblem};
+use crate::problem::{LayerRef, Point2, RouteProblem};
 
-fn board(w: f64, h: f64) -> Bounds {
-    Bounds {
+fn board(w: f64, h: f64) -> Rect {
+    Rect {
         min_x: 0.0,
         max_x: w,
         min_y: 0.0,
@@ -331,7 +330,7 @@ fn group_with_region_lands_members_inside() {
     for r in ["R1", "R2"] {
         let p = res.placements.iter().find(|p| p.reference == r).unwrap();
         assert!(
-            region.contains(&p.at),
+            region.contains(p.at),
             "{r} at {:?} must land inside region {region:?}",
             p.at
         );
@@ -786,12 +785,12 @@ fn rotate_offset_matches_kicad_convention() {
     // Verified against kicad-cli: a SOIC-8 pad at local (-2.475, 1.905) under a
     // footprint rotated 270° lands at world offset (-1.905, -2.475). The two
     // 90/270 directions must not be swapped, or routing targets the wrong pad.
-    let p = rotate_offset(&Point2 { x: -2.475, y: 1.905 }, 270);
+    let p = Point2::new(-2.475, 1.905).rotate(270.0);
     assert!((p.x - -1.905).abs() < 1e-9 && (p.y - -2.475).abs() < 1e-9, "{p:?}");
     // 90 is the inverse; 180 negates; 0 is identity.
-    let q = rotate_offset(&Point2 { x: -2.475, y: 1.905 }, 90);
+    let q = Point2::new(-2.475, 1.905).rotate(90.0);
     assert!((q.x - 1.905).abs() < 1e-9 && (q.y - 2.475).abs() < 1e-9, "{q:?}");
-    let r = rotate_offset(&Point2 { x: 1.0, y: 2.0 }, 180);
+    let r = Point2::new(1.0, 2.0).rotate(180.0);
     assert!((r.x - -1.0).abs() < 1e-9 && (r.y - -2.0).abs() < 1e-9, "{r:?}");
 }
 

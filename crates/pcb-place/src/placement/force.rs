@@ -160,7 +160,7 @@ pub(crate) fn force_layout(
                 for &m in members {
                     // Only pull when outside the region (containment, not a
                     // constant inward bias that fights net springs).
-                    if !region.contains(&pos[m]) {
+                    if !region.contains(pos[m]) {
                         force[m].0 += REGION_PULL_K * (c.x - pos[m].x);
                         force[m].1 += REGION_PULL_K * (c.y - pos[m].y);
                     }

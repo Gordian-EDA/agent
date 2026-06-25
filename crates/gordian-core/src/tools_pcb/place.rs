@@ -7,7 +7,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use pcb_place::placement::{Part, PlaceProblem, Placement, Rect};
-use pcb_model::{Bounds, LayerRef, RouteProblem};
+use pcb_model::{LayerRef, RouteProblem};
 use pcb_synth::placefp::part_from_footprint_layers;
 
 use crate::tools::PcbToolCtx;
@@ -137,14 +137,14 @@ const EDGE_CLEAR_MM: f64 = 0.5;
 /// clearance so place + route keep copper off the edge; the exported Edge.Cuts stays the user's
 /// real outline. (Inset the bbox; the lint also checks distance to the outline POLYGON edges,
 /// catching the non-bbox edges of a non-rectangular outline.)
-fn routing_bounds(draft: &BoardDraft) -> Bounds {
+fn routing_bounds(draft: &BoardDraft) -> Rect {
     if draft.outline.is_none() {
         return draft.bounds.clone();
     }
     let b = &draft.bounds;
     // Never invert a small board: clamp the inset so min stays < max.
     let inset = EDGE_CLEAR_MM.min((b.max_x - b.min_x) / 2.0 - 0.1).min((b.max_y - b.min_y) / 2.0 - 0.1);
-    Bounds {
+    Rect {
         min_x: b.min_x + inset,
         max_x: b.max_x - inset,
         min_y: b.min_y + inset,
