@@ -45,20 +45,7 @@ pub fn sanitize(name: &str) -> String {
     name.chars().map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
 }
 
-/// Union-find root with path-halving.
-fn uf_find(parent: &mut [usize], x: usize) -> usize {
-    let mut r = x;
-    while parent[r] != r {
-        r = parent[r];
-    }
-    let mut c = x;
-    while parent[c] != r {
-        let n = parent[c];
-        parent[c] = r;
-        c = n;
-    }
-    r
-}
+use geom::union_find::{uf_find, uf_union};
 
 /// The non-GND nets a block touches (component- and unit-level pins). A net shared by ≥2
 /// blocks is a cross-block PORT; GND/VSS are excluded (every sheet carries them, so they'd
@@ -138,8 +125,7 @@ fn split_block(bname: &str, block: &Block) -> Vec<(String, Block)> {
             continue;
         }
         for w in ids.windows(2) {
-            let (a, b) = (uf_find(&mut parent, w[0]), uf_find(&mut parent, w[1]));
-            parent[a] = b;
+            uf_union(&mut parent, w[0], w[1]);
         }
     }
     let mut comps: BTreeMap<usize, Vec<usize>> = BTreeMap::new();

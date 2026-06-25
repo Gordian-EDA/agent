@@ -14,11 +14,10 @@ use serde::{Deserialize, Serialize};
 pub mod geom2d;
 pub mod place;
 pub mod route;
-pub mod union_find;
 pub use route::{
     failed_pad_weight, select, Capabilities, RouteMetrics, RouteQuality, RouteResult, Router,
 };
-pub use union_find::UnionFind;
+pub use geom::union_find::UnionFind;
 
 // ── defaults for extension fields ────────────────────────────────────────────
 

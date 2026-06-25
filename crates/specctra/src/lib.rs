@@ -40,7 +40,7 @@ use std::time::Duration;
 
 use kiutils_kicad::{PcbAst, PcbFile, PcbFootprint, PcbPad};
 use kiutils_sexpr::{parse_one, Atom, Node};
-use pcb_model::{LayerRef, Point2, RouteSolution, Trace, Via, ViaSpan};
+use pcb_model::{Point2, RouteSolution, Trace, Via, ViaSpan};
 
 use kicad_sexpr::pcb::{read_problem, BoardProblem};
 
@@ -103,7 +103,7 @@ impl RoutedGeometry {
             .filter(|w| w.path.len() >= 2)
             .map(|w| Trace {
                 connection: w.net.clone(),
-                layer: layer_ref_for(&w.layer, &board.layer_names),
+                layer: kicad_sexpr::pcb::layer_ref_for(&w.layer, &board.layer_names),
                 width: w.width_mm,
                 path: w.path.clone(),
             })
@@ -120,21 +120,6 @@ impl RoutedGeometry {
             })
             .collect();
         RouteSolution { traces, vias }
-    }
-}
-
-/// Map a KiCAD copper layer name to the engine [`LayerRef`] for `layer_names`
-/// (`F.Cu` → top, `B.Cu` → bottom, inners → `inner{idx}`). Mirrors the private
-/// helper in [`kicad_sexpr::pcb`]; duplicated here to keep that module's surface intact.
-fn layer_ref_for(kicad_layer: &str, layer_names: &[String]) -> LayerRef {
-    if kicad_layer == "F.Cu" {
-        LayerRef::top()
-    } else if kicad_layer == "B.Cu" {
-        LayerRef::bottom()
-    } else if let Some(idx) = layer_names.iter().position(|n| n == kicad_layer) {
-        LayerRef(format!("inner{idx}"))
-    } else {
-        LayerRef::top()
     }
 }
 

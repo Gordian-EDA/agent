@@ -231,8 +231,10 @@ fn copper_order(name: &str) -> i64 {
 }
 
 /// Map a KiCAD copper layer name to the engine's [`LayerRef`] for this board.
-/// `F.Cu` → `top`, `B.Cu` → `bottom`, otherwise the name passes through.
-fn layer_ref_for(kicad_layer: &str, layer_names: &[String]) -> LayerRef {
+/// `F.Cu` → `top`, `B.Cu` → `bottom`, an inner copper layer → `inner{idx}`,
+/// otherwise the name passes through. The single source of truth for the
+/// KiCAD-layer → engine-layer mapping (`specctra` calls it too).
+pub fn layer_ref_for(kicad_layer: &str, layer_names: &[String]) -> LayerRef {
     if kicad_layer == "F.Cu" {
         LayerRef::top()
     } else if kicad_layer == "B.Cu" {
