@@ -9,7 +9,7 @@
 //! by construction; a failed route falls back to label connectivity at the
 //! call site — never an error.
 
-use geom::{EPS, Point2, Polyline, Rect, Segment};
+use geom::{Point2, Polyline, Rect, Segment, EPS};
 use sch_place::geom::Dir;
 
 /// Minimum lead length out of a pin before the first turn, mm.
@@ -72,14 +72,6 @@ pub struct RouteScene {
     pub label_solids: Vec<(Rect, String)>,
 }
 
-/// Whether an axis-aligned segment passes through a solid rect (open
-/// intervals: running flush along a rect edge is tolerated).
-fn seg_hits_rect(a: Point2, b: Point2, r: &Rect) -> bool {
-    let (lo_x, hi_x) = (a.x.min(b.x), a.x.max(b.x));
-    let (lo_y, hi_y) = (a.y.min(b.y), a.y.max(b.y));
-    lo_x < r.max_x - EPS && r.min_x + EPS < hi_x && lo_y < r.max_y - EPS && r.min_y + EPS < hi_y
-}
-
 /// How two axis-aligned segments interact for routing purposes. Public to the
 /// crate so the refinement scorer can reuse it to detect net merges (two
 /// different-net segments that touch in a connecting way).
@@ -129,13 +121,18 @@ pub fn segments_conflict(a1: Point2, a2: Point2, b1: Point2, b2: Point2) -> bool
 pub fn path_ok(path: &[Point2], net: &str, scene: &RouteScene) -> bool {
     for w in path.windows(2) {
         let (a, b) = (w[0], w[1]);
-        if scene.solids.iter().any(|r| seg_hits_rect(a, b, r)) {
+        let seg = Segment::new(a, b);
+        if scene
+            .solids
+            .iter()
+            .any(|r| seg.axis_aligned_hits_rect_interior(r))
+        {
             return false;
         }
         if scene
             .points
             .iter()
-            .any(|(p, n)| n != net && Segment::new(a, b).contains_point(*p))
+            .any(|(p, n)| n != net && seg.contains_point(*p))
         {
             return false;
         }
@@ -149,7 +146,7 @@ pub fn path_ok(path: &[Point2], net: &str, scene: &RouteScene) -> bool {
         if scene
             .label_solids
             .iter()
-            .any(|(r, n)| n != net && seg_hits_rect(a, b, r))
+            .any(|(r, n)| n != net && seg.axis_aligned_hits_rect_interior(r))
         {
             return false;
         }
@@ -617,16 +614,14 @@ mod tests {
             vec![],
             vec![],
         );
-        assert!(
-            route_edge(
-                Point2::new(0.0, 0.0),
-                Dir::East,
-                Point2::new(30.0, 0.0),
-                "A",
-                &s
-            )
-            .is_none()
-        );
+        assert!(route_edge(
+            Point2::new(0.0, 0.0),
+            Dir::East,
+            Point2::new(30.0, 0.0),
+            "A",
+            &s
+        )
+        .is_none());
     }
 
     #[test]

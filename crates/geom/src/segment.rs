@@ -101,6 +101,20 @@ impl Segment {
         }
         best
     }
+
+    /// Whether an axis-aligned segment crosses a rect's open interior.
+    /// Running flush along a rect edge is not a hit.
+    pub fn axis_aligned_hits_rect_interior(&self, r: &Rect) -> bool {
+        let horizontal = (self.a.y - self.b.y).abs() < EPS;
+        let vertical = (self.a.x - self.b.x).abs() < EPS;
+        if !(horizontal || vertical) {
+            return false;
+        }
+
+        let (lo_x, hi_x) = (self.a.x.min(self.b.x), self.a.x.max(self.b.x));
+        let (lo_y, hi_y) = (self.a.y.min(self.b.y), self.a.y.max(self.b.y));
+        lo_x < r.max_x - EPS && r.min_x + EPS < hi_x && lo_y < r.max_y - EPS && r.min_y + EPS < hi_y
+    }
 }
 
 #[cfg(test)]
@@ -144,5 +158,19 @@ mod tests {
         assert!((outside.dist_to_rect(&r) - 3.0).abs() < 1e-9);
         let through = Segment::new(Point2::new(-1.0, 5.0), Point2::new(11.0, 5.0));
         assert_eq!(through.dist_to_rect(&r), 0.0);
+    }
+
+    #[test]
+    fn axis_aligned_rect_interior_hit_tolerates_flush_edges() {
+        let r = Rect::new(4.0, -2.0, 6.0, 2.0);
+        let through = Segment::new(Point2::new(0.0, 0.0), Point2::new(10.0, 0.0));
+        let flush = Segment::new(Point2::new(0.0, -2.0), Point2::new(10.0, -2.0));
+        let outside = Segment::new(Point2::new(0.0, -3.0), Point2::new(10.0, -3.0));
+        let diagonal = Segment::new(Point2::new(0.0, 0.0), Point2::new(10.0, 10.0));
+
+        assert!(through.axis_aligned_hits_rect_interior(&r));
+        assert!(!flush.axis_aligned_hits_rect_interior(&r));
+        assert!(!outside.axis_aligned_hits_rect_interior(&r));
+        assert!(!diagonal.axis_aligned_hits_rect_interior(&r));
     }
 }
