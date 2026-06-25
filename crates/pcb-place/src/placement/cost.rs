@@ -4,9 +4,8 @@
 //! cheap quality number every engine reports — lives in the kernel
 //! ([`pcb_model::place::compute_hpwl`]) and is re-exported here.
 
-use super::geometry::{courtyard_overlap, part_keepout_overlap};
 use super::model::{LogicalNet, PlaceProblem};
-use crate::problem::Point2;
+use crate::problem::{Point2, Rect};
 
 pub(crate) use crate::problem::place::compute_hpwl;
 
@@ -74,12 +73,19 @@ pub(crate) fn place_cost(
 
     // Pairwise courtyard overlap (hard) + a soft silk gap so refdes don't crowd.
     for i in 0..n {
+        let courtyard_i = Rect::from_center_half(pos[i], half[i]);
         for j in (i + 1)..n {
-            let (ox, oy) = courtyard_overlap(pos, half, margin, i, j);
+            let courtyard_j = Rect::from_center_half(pos[j], half[j]);
+            let (ox, oy) = courtyard_i
+                .inflate(margin / 2.0)
+                .axis_penetration(&courtyard_j.inflate(margin / 2.0));
             if ox > 0.0 && oy > 0.0 {
                 cost += SA_OVERLAP_W * ox.min(oy);
             } else {
-                let (sx, sy) = courtyard_overlap(pos, half, margin + 2.0 * SA_SILK_GAP, i, j);
+                let silk = (margin + 2.0 * SA_SILK_GAP) / 2.0;
+                let (sx, sy) = courtyard_i
+                    .inflate(silk)
+                    .axis_penetration(&courtyard_j.inflate(silk));
                 if sx > 0.0 && sy > 0.0 {
                     cost += SA_SILK_W * sx.min(sy);
                 }
@@ -99,8 +105,9 @@ pub(crate) fn place_cost(
     // Keep-out overlap (hard): a part inside a signal-layer keep-out has trapped
     // pads. Penalize the penetration depth so the SA pushes parts clear.
     for i in 0..n {
+        let courtyard = Rect::from_center_half(pos[i], half[i]);
         for k in &problem.keepouts {
-            let (ox, oy) = part_keepout_overlap(&pos[i], half[i], k);
+            let (ox, oy) = courtyard.axis_penetration(k);
             if ox > 0.0 && oy > 0.0 {
                 cost += SA_KEEPOUT_W * ox.min(oy);
             }

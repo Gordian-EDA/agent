@@ -7,11 +7,9 @@
 //! overlap by a deterministic nearest-free-cell spiral; `is_legal` then RE-VERIFIES
 //! the result in exact geometry — the algorithm's verdict is never trusted.
 
-use super::geometry::{
-    clamp_into_bounds, fits_in_bounds, rect_axis_penetration, snap, PLACE_GRID, SPIRAL_MAX_RING,
-};
+use super::geometry::{PLACE_GRID, SPIRAL_MAX_RING, clamp_into_bounds, snap};
 use super::model::PlaceProblem;
-use crate::problem::Point2;
+use crate::problem::{Point2, Rect};
 
 pub(crate) use crate::problem::place::is_legal;
 
@@ -132,7 +130,10 @@ fn spiral_free_cell(
             };
             // Must fit in bounds without clamping (clamping would move it off
             // the probed cell and could re-collide).
-            if !fits_in_bounds(&cand, &problem.bounds, half[i]) {
+            if !problem
+                .bounds
+                .contains_rect_eps(&Rect::from_center_half(cand, half[i]), 1e-9)
+            {
                 continue;
             }
             if !collides(&cand, half[i], pos, half, margin, placed) {
@@ -154,7 +155,9 @@ pub(crate) fn collides(
     placed: &[usize],
 ) -> bool {
     placed.iter().any(|&j| {
-        let (ox, oy) = rect_axis_penetration(cand, cand_half, &pos[j], half[j], margin);
+        let a = Rect::from_center_half(*cand, cand_half).inflate(margin / 2.0);
+        let b = Rect::from_center_half(pos[j], half[j]).inflate(margin / 2.0);
+        let (ox, oy) = a.axis_penetration(&b);
         ox > 0.0 && oy > 0.0
     })
 }
@@ -174,11 +177,10 @@ pub(crate) fn initial_grid(problem: &PlaceProblem, half: &[(f64, f64)]) -> Vec<P
     order.sort_by(|&a, &b| problem.parts[a].reference.cmp(&problem.parts[b].reference));
 
     // Cell pitch = largest courtyard extent + a margin, snapped to the grid.
-    let max_half = half
-        .iter()
-        .map(|(w, h)| w.max(*h))
-        .fold(0.0_f64, f64::max);
-    let pitch = snap((max_half * 2.0 + super::geometry::courtyard_margin(problem.clearance)).max(PLACE_GRID)) + PLACE_GRID;
+    let max_half = half.iter().map(|(w, h)| w.max(*h)).fold(0.0_f64, f64::max);
+    let pitch = snap(
+        (max_half * 2.0 + super::geometry::courtyard_margin(problem.clearance)).max(PLACE_GRID),
+    ) + PLACE_GRID;
 
     let cols = (n as f64).sqrt().ceil().max(1.0) as usize;
     let b = &problem.bounds;

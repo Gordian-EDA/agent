@@ -4,14 +4,14 @@
 //! cap onto the nearest free ring slot around its anchor before the annealer runs.
 
 use super::geometry::{
-    aspect_edge, clamp_into_bounds, courtyard_overlap, edge_delta, edge_target, fits_in_bounds,
-    nearest_edge, pad_world, sign_nonzero, snap, PLACE_GRID, SPIRAL_MAX_RING,
+    PLACE_GRID, SPIRAL_MAX_RING, aspect_edge, clamp_into_bounds, edge_delta, edge_target,
+    nearest_edge, pad_world, sign_nonzero, snap,
 };
 use super::legalize::collides;
 use super::model::{LogicalNet, PlaceProblem, PlacementHints};
 use super::pairs::decoupling_pairs;
 use super::route::PlaceOpts;
-use crate::problem::Point2;
+use crate::problem::{Point2, Rect};
 
 /// Force-directed iteration count.
 const FORCE_ITERS: usize = 200;
@@ -187,7 +187,12 @@ pub(crate) fn force_layout(
             // edge, instead of the nearest edge overall (often the top) where the
             // column pokes into the interior. Wide parts prefer a top/bottom edge.
             let edge = if opts.aspect_edge {
-                aspect_edge(&pos[m], &problem.bounds, problem.parts[m].courtyard_w, problem.parts[m].courtyard_h)
+                aspect_edge(
+                    &pos[m],
+                    &problem.bounds,
+                    problem.parts[m].courtyard_w,
+                    problem.parts[m].courtyard_h,
+                )
             } else {
                 nearest_edge(&pos[m], &problem.bounds)
             };
@@ -209,8 +214,10 @@ pub(crate) fn force_layout(
         // (e) Short-range courtyard repulsion: only on margin-inflated overlap.
         //     O(n^2) but n is tiny and this is short-range (zero outside overlap).
         for i in 0..n {
+            let courtyard_i = Rect::from_center_half(pos[i], half[i]).inflate(margin / 2.0);
             for j in (i + 1)..n {
-                let (ox, oy) = courtyard_overlap(pos, half, margin, i, j);
+                let courtyard_j = Rect::from_center_half(pos[j], half[j]).inflate(margin / 2.0);
+                let (ox, oy) = courtyard_i.axis_penetration(&courtyard_j);
                 if ox > 0.0 && oy > 0.0 {
                     // Push apart along the axis of least penetration (the cheap
                     // separating move), proportional to penetration.
@@ -280,7 +287,9 @@ pub(crate) fn snap_caps_to_anchor_ring(
     }
     // Everything except the caps being moved is a fixed obstacle for the snap.
     let moving: std::collections::BTreeSet<usize> = pairs.iter().map(|(c, _)| *c).collect();
-    let mut seated: Vec<usize> = (0..problem.parts.len()).filter(|i| !moving.contains(i)).collect();
+    let mut seated: Vec<usize> = (0..problem.parts.len())
+        .filter(|i| !moving.contains(i))
+        .collect();
     for (cap, ic) in pairs {
         let anchor = pos[ic].clone();
         // Ring radius starts just past both courtyards touching with margin and grows by
@@ -296,7 +305,10 @@ pub(crate) fn snap_caps_to_anchor_ring(
                     x: snap(anchor.x + radius * theta.cos()),
                     y: snap(anchor.y + radius * theta.sin()),
                 };
-                if !fits_in_bounds(&cand, &problem.bounds, half[cap]) {
+                if !problem
+                    .bounds
+                    .contains_rect_eps(&Rect::from_center_half(cand, half[cap]), 1e-9)
+                {
                     continue;
                 }
                 if !collides(&cand, half[cap], pos, half, margin, &seated) {

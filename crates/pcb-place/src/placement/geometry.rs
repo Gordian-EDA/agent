@@ -1,18 +1,12 @@
 //! The engine-PRIVATE geometry scaffold: grid snapping, bounds clamping, and edge
 //! affinity — the helpers only the search drivers (force/legalize/anneal) need.
-//!
-//! The PURE placement geometry the SDK shares with a third-party placer (quadrant
-//! rotation, centered-rect overlap, bounds fit, courtyard margin) now lives in the
-//! kernel ([`pcb_model::place`]) and is re-exported here so every internal
-//! `super::geometry::…` path resolves unchanged.
 
 use super::model::Edge;
 use crate::problem::{Point2, Rect};
 
-// Shared (kernel) geometry — re-exported VERBATIM.
+// Shared placement geometry.
 pub(crate) use crate::problem::place::{
-    courtyard_margin, courtyard_overlap, fits_in_bounds, pad_world, part_keepout_overlap,
-    rect_axis_penetration, rotated_copper_bbox, rotated_courtyard_half,
+    courtyard_margin, pad_world, rotated_copper_bbox, rotated_courtyard_half,
 };
 
 // ── engine-private design constants ──────────────────────────────────────────
@@ -56,11 +50,7 @@ pub(crate) fn clamp_into_bounds(p: &mut Point2, b: &Rect, h: (f64, f64)) {
 /// A deterministic non-zero sign: +1 for ≥ 0, -1 for < 0 (so coincident parts
 /// still get a fixed separating direction).
 pub(crate) fn sign_nonzero(v: f64) -> f64 {
-    if v < 0.0 {
-        -1.0
-    } else {
-        1.0
-    }
+    if v < 0.0 { -1.0 } else { 1.0 }
 }
 
 // ── edge affinity (search-only) ──────────────────────────────────────────────
@@ -71,9 +61,17 @@ pub(crate) fn sign_nonzero(v: f64) -> f64 {
 /// the overall nearest edge.
 pub(crate) fn aspect_edge(p: &Point2, b: &Rect, w: f64, h: f64) -> Edge {
     if h > w {
-        if p.x - b.min_x <= b.max_x - p.x { Edge::W } else { Edge::E }
+        if p.x - b.min_x <= b.max_x - p.x {
+            Edge::W
+        } else {
+            Edge::E
+        }
     } else if w > h {
-        if p.y - b.min_y <= b.max_y - p.y { Edge::N } else { Edge::S }
+        if p.y - b.min_y <= b.max_y - p.y {
+            Edge::N
+        } else {
+            Edge::S
+        }
     } else {
         nearest_edge(p, b)
     }

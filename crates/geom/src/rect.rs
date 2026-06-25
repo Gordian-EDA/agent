@@ -76,6 +76,17 @@ impl Rect {
         }
     }
 
+    /// Rect from a center point and half-extents.
+    #[inline]
+    pub fn from_center_half(center: Point2, half: (f64, f64)) -> Self {
+        Self::new(
+            center.x - half.0,
+            center.y - half.1,
+            center.x + half.0,
+            center.y + half.1,
+        )
+    }
+
     /// Tight bounding box of a point set, or `None` if empty. The canonical
     /// "bbox of points" constructor (used by [`crate::Polyline::bbox`] too).
     pub fn bounding(points: &[Point2]) -> Option<Rect> {
@@ -136,6 +147,27 @@ impl Rect {
         p.x >= self.min_x && p.x <= self.max_x && p.y >= self.min_y && p.y <= self.max_y
     }
 
+    /// Does this rect contain all of `other`, with `eps` slack on each edge?
+    #[inline]
+    pub fn contains_rect_eps(&self, other: &Rect, eps: f64) -> bool {
+        other.min_x >= self.min_x - eps
+            && other.max_x <= self.max_x + eps
+            && other.min_y >= self.min_y - eps
+            && other.max_y <= self.max_y + eps
+    }
+
+    /// How far a disc of `radius` centered at `p` extends past this rect.
+    ///
+    /// Returns `0.0` when the disc is fully inside or touching the boundary.
+    #[inline]
+    pub fn disc_overshoot(&self, p: Point2, radius: f64) -> f64 {
+        let left = (self.min_x - (p.x - radius)).max(0.0);
+        let right = ((p.x + radius) - self.max_x).max(0.0);
+        let top = (self.min_y - (p.y - radius)).max(0.0);
+        let bottom = ((p.y + radius) - self.max_y).max(0.0);
+        left.max(right).max(top).max(bottom)
+    }
+
     /// Do the rects overlap with positive area? Open + `EPS`-eased: a shared
     /// edge (within float dust) is NOT an overlap. The single boolean overlap
     /// predicate for the whole workspace.
@@ -164,6 +196,15 @@ impl Rect {
     /// Positive overlap width and height, or `None` when no area overlaps.
     pub fn overlap_size(&self, other: &Rect) -> Option<(f64, f64)> {
         self.intersection(other).map(|r| (r.width(), r.height()))
+    }
+
+    /// Per-axis overlap depth; positive on an axis means overlap, zero means
+    /// touching, negative means separation.
+    pub fn axis_penetration(&self, other: &Rect) -> (f64, f64) {
+        (
+            self.max_x.min(other.max_x) - self.min_x.max(other.min_x),
+            self.max_y.min(other.max_y) - self.min_y.max(other.min_y),
+        )
     }
 
     /// Positive-length boundary shared with an abutting rect.
@@ -339,10 +380,40 @@ mod tests {
     }
 
     #[test]
+    fn centered_rect_contains_and_penetration() {
+        let bounds = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let r = Rect::from_center_half(Point2::new(5.0, 5.0), (2.0, 1.0));
+        assert_eq!(r, Rect::new(3.0, 4.0, 7.0, 6.0));
+        assert!(bounds.contains_rect_eps(&r, 1e-9));
+        assert!(!bounds.contains_rect_eps(
+            &Rect::from_center_half(Point2::new(9.0, 5.0), (2.0, 1.0)),
+            1e-9
+        ));
+
+        let inflated_a = r.inflate(0.5);
+        let inflated_b = Rect::from_center_half(Point2::new(8.0, 5.0), (1.0, 1.0)).inflate(0.5);
+        assert_eq!(inflated_a.axis_penetration(&inflated_b), (1.0, 3.0));
+        assert_eq!(
+            r.axis_penetration(&Rect::new(8.0, 0.0, 9.0, 1.0)),
+            (-1.0, -3.0)
+        );
+    }
+
+    #[test]
     fn dist_to_point_zero_inside() {
         let r = Rect::new(0.0, 0.0, 10.0, 10.0);
         assert_eq!(r.dist_to_point(Point2::new(5.0, 5.0)), 0.0);
         assert!((r.dist_to_point(Point2::new(13.0, 5.0)) - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn disc_overshoot_reports_axis_boundary_excess() {
+        let r = Rect::new(0.0, 0.0, 10.0, 10.0);
+
+        assert_eq!(r.disc_overshoot(Point2::new(5.0, 5.0), 2.0), 0.0);
+        assert_eq!(r.disc_overshoot(Point2::new(1.0, 5.0), 1.0), 0.0);
+        assert_eq!(r.disc_overshoot(Point2::new(0.5, 5.0), 1.0), 0.5);
+        assert_eq!(r.disc_overshoot(Point2::new(11.0, -2.0), 0.25), 2.25);
     }
 
     #[test]

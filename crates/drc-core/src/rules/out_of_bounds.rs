@@ -6,7 +6,7 @@
 
 use crate::ctx::{CopperGeom, CopperItem};
 use crate::problem::RouteProblem;
-use crate::rules::geom::{EPS, point_overshoot};
+use crate::rules::geom::EPS;
 use crate::{DrcCtx, Finding, Rule};
 
 /// Flags any trace or via whose copper extent (segment fattened by its
@@ -36,17 +36,13 @@ fn out_of_bounds(item: &CopperItem, problem: &RouteProblem) -> Option<Finding> {
         CopperGeom::Segment {
             a, b: bb, half_w, ..
         } => {
-            let o_a = point_overshoot(*a, *half_w, problem);
-            let o_b = point_overshoot(*bb, *half_w, problem);
-            let (over, at) = if o_a.0 >= o_b.0 {
-                (o_a.0, *a)
-            } else {
-                (o_b.0, *bb)
-            };
+            let o_a = problem.bounds.disc_overshoot((*a).into(), *half_w);
+            let o_b = problem.bounds.disc_overshoot((*bb).into(), *half_w);
+            let (over, at) = if o_a >= o_b { (o_a, *a) } else { (o_b, *bb) };
             (over, at, item.first_owner())
         }
         CopperGeom::Via { at, radius } => {
-            let (over, _) = point_overshoot(*at, *radius, problem);
+            let over = problem.bounds.disc_overshoot((*at).into(), *radius);
             (over, *at, item.first_owner())
         }
         CopperGeom::Rect { .. } => return None,

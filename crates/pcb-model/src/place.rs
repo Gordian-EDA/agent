@@ -340,50 +340,6 @@ pub fn pad_world(problem: &PlaceProblem, pos: &[Point2], pin: &Pin) -> Point2 {
     }
 }
 
-/// Per-axis penetration depth `(ox, oy)` of two centered rects, each inflated by
-/// `margin/2` per side so the required *gap* between courtyards is `margin`. A
-/// clearance METRIC, not a boolean: `> 0` on BOTH axes ⇒ overlapping.
-pub fn rect_axis_penetration(
-    ci: &Point2,
-    hi: (f64, f64),
-    cj: &Point2,
-    hj: (f64, f64),
-    margin: f64,
-) -> (f64, f64) {
-    let m = margin / 2.0;
-    let ox = (hi.0 + m + hj.0 + m) - (ci.x - cj.x).abs();
-    let oy = (hi.1 + m + hj.1 + m) - (ci.y - cj.y).abs();
-    (ox, oy)
-}
-
-/// Margin-inflated overlap of two parts' courtyards, per axis (mm; >0 on both
-/// axes ⇒ overlapping).
-pub fn courtyard_overlap(
-    pos: &[Point2],
-    half: &[(f64, f64)],
-    margin: f64,
-    i: usize,
-    j: usize,
-) -> (f64, f64) {
-    rect_axis_penetration(&pos[i], half[i], &pos[j], half[j], margin)
-}
-
-/// Does a part's courtyard fit fully within `bounds`?
-pub fn fits_in_bounds(p: &Point2, b: &Rect, h: (f64, f64)) -> bool {
-    p.x - h.0 >= b.min_x - 1e-9
-        && p.x + h.0 <= b.max_x + 1e-9
-        && p.y - h.1 >= b.min_y - 1e-9
-        && p.y + h.1 <= b.max_y + 1e-9
-}
-
-/// Overlap `(ox, oy)` of a part's courtyard (centre `p`, half-extents `h`) with a
-/// keep-out rect; both strictly positive means the part intrudes into the keep-out.
-pub fn part_keepout_overlap(p: &Point2, h: (f64, f64), k: &Rect) -> (f64, f64) {
-    let ox = (p.x + h.0).min(k.max_x) - (p.x - h.0).max(k.min_x);
-    let oy = (p.y + h.1).min(k.max_y) - (p.y - h.1).max(k.min_y);
-    (ox, oy)
-}
-
 /// The placement analog of the lint: re-verify in exact geometry that no two
 /// courtyards overlap (with margin) and every part is in bounds. Never trusts
 /// the algorithm — a placer calls this to set [`PlaceResult::legal`] HONESTLY.
@@ -396,7 +352,8 @@ pub fn is_legal(
 ) -> bool {
     let n = problem.parts.len();
     for i in 0..n {
-        if !fits_in_bounds(&pos[i], &problem.bounds, half[i]) {
+        let courtyard = Rect::from_center_half(pos[i], half[i]);
+        if !problem.bounds.contains_rect_eps(&courtyard, 1e-9) {
             return false;
         }
         // On a custom outline, a part's CENTRE must be inside the true polygon (keeps parts out
@@ -429,13 +386,16 @@ pub fn is_legal(
         }
         // A part overlapping a signal-layer keep-out is illegal (its pads can't route).
         for k in &problem.keepouts {
-            let (ox, oy) = part_keepout_overlap(&pos[i], half[i], k);
+            let (ox, oy) = courtyard.axis_penetration(k);
             if ox > 1e-9 && oy > 1e-9 {
                 return false;
             }
         }
         for j in (i + 1)..n {
-            let (ox, oy) = courtyard_overlap(pos, half, margin, i, j);
+            let other = Rect::from_center_half(pos[j], half[j]);
+            let (ox, oy) = courtyard
+                .inflate(margin / 2.0)
+                .axis_penetration(&other.inflate(margin / 2.0));
             // Strictly-positive overlap on BOTH axes is a real courtyard
             // collision. Touching exactly at the margin (overlap == 0) is legal.
             if ox > 1e-9 && oy > 1e-9 {
