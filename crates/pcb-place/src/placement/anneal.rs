@@ -47,7 +47,7 @@ pub(crate) fn anneal_placement(
     nets: &[LogicalNet],
     half: &[(f64, f64)],
     margin: f64,
-    rotations: &[i32],
+    rotations: &[f64],
     pos: &mut [Point2],
 ) {
     let n = problem.parts.len();

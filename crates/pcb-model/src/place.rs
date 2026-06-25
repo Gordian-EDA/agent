@@ -111,9 +111,9 @@ pub struct PartPad {
 pub struct LockedAt {
     /// Absolute part-origin position (mm).
     pub at: Point2,
-    /// Rotation in degrees (0/90/180/270; other values are snapped).
+    /// Rotation in degrees, CCW (0/90/180/270; other values are snapped).
     #[serde(default)]
-    pub rotation: i32,
+    pub rotation: f64,
 }
 
 // ── hints ──────────────────────────────────────────────────────────────────────
@@ -207,8 +207,8 @@ pub struct Placement {
     pub reference: String,
     /// Final part-origin position (mm).
     pub at: Point2,
-    /// Final rotation (degrees; 0/90/180/270).
-    pub rotation: i32,
+    /// Final rotation (degrees, CCW; 0/90/180/270).
+    pub rotation: f64,
 }
 
 /// Placement diagnostics: how much legalization happened and the HPWL metric.
@@ -292,9 +292,9 @@ pub fn courtyard_margin(clearance: f64) -> f64 {
 }
 
 /// Courtyard half-extents after a quadrant rotation (90/270 swap w/h).
-pub fn rotated_courtyard_half(part: &Part, rot: i32) -> (f64, f64) {
+pub fn rotated_courtyard_half(part: &Part, rot: f64) -> (f64, f64) {
     let (w, h) = (part.courtyard_w / 2.0, part.courtyard_h / 2.0);
-    match rot {
+    match geom::snap_quadrant(rot) as i32 {
         90 | 270 => (h, w),
         _ => (w, h),
     }
@@ -303,12 +303,12 @@ pub fn rotated_courtyard_half(part: &Part, rot: i32) -> (f64, f64) {
 /// Half-extents of the part's PAD (copper) bounding box after a quadrant rotation. Bounds ONLY
 /// the copper — so the outline check can keep pads inside the board while a part's courtyard
 /// (its non-copper margin) is still free to overhang a notch (the mounting-hole allowance).
-pub fn rotated_copper_bbox(part: &Part, rot: i32) -> (f64, f64, f64, f64) {
+pub fn rotated_copper_bbox(part: &Part, rot: f64) -> (f64, f64, f64, f64) {
     let (mut xmin, mut ymin, mut xmax, mut ymax) =
         (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
     for pad in &part.pads {
-        let off = pad.offset.rotate(rot as f64);
-        let (pw, ph) = match rot.rem_euclid(360) {
+        let off = pad.offset.rotate(rot);
+        let (pw, ph) = match geom::snap_quadrant(rot) as i32 {
             90 | 270 => (pad.height / 2.0, pad.width / 2.0),
             _ => (pad.width / 2.0, pad.height / 2.0),
         };
@@ -331,7 +331,7 @@ pub fn rotated_copper_bbox(part: &Part, rot: i32) -> (f64, f64, f64, f64) {
 /// World position of a pin's pad center given current part positions.
 pub fn pad_world(problem: &PlaceProblem, pos: &[Point2], pin: &Pin) -> Point2 {
     let part = &problem.parts[pin.part];
-    let rot = part.locked.as_ref().map(|l| geom::snap_quadrant(l.rotation as f64)).unwrap_or(0.0);
+    let rot = part.locked.as_ref().map(|l| geom::snap_quadrant(l.rotation)).unwrap_or(0.0);
     let off = part.pads[pin.pad].offset.rotate(rot);
     Point2 {
         x: pos[pin.part].x + off.x,
@@ -608,7 +608,7 @@ pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> Rou
         let Some(pl) = place_by_ref.get(part.reference.as_str()) else {
             continue;
         };
-        let rot = geom::snap_quadrant(pl.rotation as f64) as i32;
+        let rot = geom::snap_quadrant(pl.rotation) as i32;
         for pad in &part.pads {
             let off = pad.offset.rotate(rot as f64);
             let center = Point2 {

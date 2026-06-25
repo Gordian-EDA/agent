@@ -248,7 +248,7 @@ fn seat_corner_seek_parts(problem: &PlaceProblem, hints: &PlacementHints, best: 
         return;
     }
     let margin = courtyard_margin(problem.clearance);
-    let rots: Vec<i32> = best.placements.iter().map(|p| p.rotation).collect();
+    let rots: Vec<f64> = best.placements.iter().map(|p| p.rotation).collect();
     let half: Vec<(f64, f64)> = problem
         .parts
         .iter()
@@ -318,10 +318,10 @@ pub(crate) fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts
     // Rotation is fixed per part for v1: locked parts use their locked rotation
     // (snapped to a quadrant); everyone else stays at 0. The engine never
     // auto-rotates.
-    let rotations: Vec<i32> = problem
+    let rotations: Vec<f64> = problem
         .parts
         .iter()
-        .map(|p| p.locked.as_ref().map(|l| geom::snap_quadrant(l.rotation as f64) as i32).unwrap_or(0))
+        .map(|p| p.locked.as_ref().map(|l| geom::snap_quadrant(l.rotation)).unwrap_or(0.0))
         .collect();
 
     // Rotated courtyard half-extents per part (rotation only swaps w/h here).

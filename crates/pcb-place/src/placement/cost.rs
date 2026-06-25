@@ -32,7 +32,7 @@ pub(crate) const SA_SILK_GAP: f64 = 1.0;
 fn cap_anchor_dist(
     problem: &PlaceProblem,
     pos: &[Point2],
-    rotations: &[i32],
+    rotations: &[f64],
     cap: usize,
     ic: usize,
 ) -> f64 {
@@ -41,7 +41,7 @@ fn cap_anchor_dist(
     let mut best = f64::MAX;
     for pad in &problem.parts[ic].pads {
         if pad.net.as_deref().is_some_and(|nn| cap_nets.contains(&nn)) {
-            let off = pad.offset.rotate(rotations[ic] as f64);
+            let off = pad.offset.rotate(rotations[ic]);
             let (px, py) = (pos[ic].x + off.x, pos[ic].y + off.y);
             best = best.min(((pos[cap].x - px).powi(2) + (pos[cap].y - py).powi(2)).sqrt());
         }
@@ -58,7 +58,7 @@ pub(crate) fn place_cost(
     nets: &[LogicalNet],
     half: &[(f64, f64)],
     margin: f64,
-    rotations: &[i32],
+    rotations: &[f64],
     pairs: &[(usize, usize)],
     edge_idx: &[usize],
     pos: &[Point2],

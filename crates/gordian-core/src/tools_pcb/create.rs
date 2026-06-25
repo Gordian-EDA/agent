@@ -309,7 +309,7 @@ fn parse_draft_part(
             let at = l.get("at").unwrap_or(l);
             match (at.get("x").and_then(Value::as_f64), at.get("y").and_then(Value::as_f64)) {
                 (Some(x), Some(y)) => {
-                    let raw = l.get("rotation").and_then(Value::as_i64).unwrap_or(0) as i32;
+                    let raw = l.get("rotation").and_then(Value::as_f64).unwrap_or(0.0);
                     let rotation = axis_aligned_rotation(raw)
                         .map_err(|e| json!({ "error": format!("part {reference}: {e}") }))?;
                     Some(LockedAt { at: Point2 { x, y }, rotation })
@@ -474,10 +474,11 @@ pub(super) fn net_pin_counts(parts: &[DraftPart], ctx: &PcbToolCtx) -> BTreeMap<
 /// agent surface) fails fast with a clear message, instead of routing to wrong pad
 /// positions (`rotate_offset` is identity for non-axis angles) and failing late at
 /// export.
-fn axis_aligned_rotation(rot: i32) -> std::result::Result<i32, String> {
-    let r = rot.rem_euclid(360);
-    if matches!(r, 0 | 90 | 180 | 270) {
-        Ok(r)
+fn axis_aligned_rotation(rot: f64) -> std::result::Result<f64, String> {
+    let r = rot.rem_euclid(360.0);
+    let snapped = geom::snap_quadrant(r);
+    if (snapped - r).abs() <= geom::EPS {
+        Ok(snapped)
     } else {
         Err(format!(
             "rotation {rot}° is not supported — use 0, 90, 180, or 270 \

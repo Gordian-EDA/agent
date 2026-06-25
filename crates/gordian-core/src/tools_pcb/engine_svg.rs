@@ -302,7 +302,7 @@ pub fn render_placement(
             continue;
         };
         // Rotation swaps the courtyard extents for the quadrant cases.
-        let (hw, hh) = match pl.rotation.rem_euclid(360) {
+        let (hw, hh) = match geom::snap_quadrant(pl.rotation) as i32 {
             90 | 270 => (part.courtyard_h / 2.0, part.courtyard_w / 2.0),
             _ => (part.courtyard_w / 2.0, part.courtyard_h / 2.0),
         };
@@ -335,8 +335,8 @@ pub fn render_placement(
             continue;
         };
         for pad in &part.pads {
-            let off = pad.offset.rotate(pl.rotation as f64);
-            let (pw, ph) = match pl.rotation.rem_euclid(360) {
+            let off = pad.offset.rotate(pl.rotation);
+            let (pw, ph) = match geom::snap_quadrant(pl.rotation) as i32 {
                 90 | 270 => (pad.height, pad.width),
                 _ => (pad.width, pad.height),
             };

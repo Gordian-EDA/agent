@@ -58,7 +58,7 @@ fn r0603(reference: &str, pad1_net: Option<&str>, pad2_net: Option<&str>) -> Par
     }
 }
 
-fn place_at(p: &mut Part, x: f64, y: f64, rotation: i32) {
+fn place_at(p: &mut Part, x: f64, y: f64, rotation: f64) {
     p.locked = Some(LockedAt {
         at: Point2 { x, y },
         rotation,
@@ -153,7 +153,7 @@ fn series_pairs_fires_only_for_a_2pin_tap_to_a_dense_anchor() {
 #[test]
 fn locked_part_does_not_move() {
     let mut locked = r0603("R1", Some("A"), Some("B"));
-    place_at(&mut locked, 7.5, 12.0, 90);
+    place_at(&mut locked, 7.5, 12.0, 90.0);
     let problem = PlaceProblem {
         bounds: board(30.0, 20.0),
         clearance: 0.2,
@@ -170,7 +170,7 @@ fn locked_part_does_not_move() {
     let res = place(&problem, &PlacementHints::default());
     let r1 = res.placements.iter().find(|p| p.reference == "R1").unwrap();
     assert_eq!(r1.at, Point2 { x: 7.5, y: 12.0 }, "locked R1 must stay put");
-    assert_eq!(r1.rotation, 90, "locked rotation preserved");
+    assert_eq!(r1.rotation, 90.0, "locked rotation preserved");
     assert!(res.legal, "board with a locked part still legal: {res:?}");
 }
 
@@ -212,13 +212,13 @@ fn locked_anchor_with_unlocked_caps_does_not_move() {
         ],
         locked: None,
     };
-    place_at(&mut ic, 4.0, 10.0, 0);
+    place_at(&mut ic, 4.0, 10.0, 0.0);
     // A LOCKED sink on U1's OUT net, pinned far to the right: the only way the
     // annealer can shorten the OUT net is to block-shift the (locked) U1 cluster
     // rightward — which it must NOT do. (Both ends locked → the net length is
     // fixed and the lock wins.)
     let mut sink = r0603("R3", Some("OUT"), Some("GND"));
-    place_at(&mut sink, 26.0, 10.0, 0);
+    place_at(&mut sink, 26.0, 10.0, 0.0);
     let problem = PlaceProblem {
         bounds: board(30.0, 20.0),
         clearance: 0.2,
@@ -605,7 +605,7 @@ fn all_at_one_point_resolves_to_no_overlap() {
         .map(|p| (p.courtyard_w / 2.0, p.courtyard_h / 2.0))
         .collect();
     let copper_bbox: Vec<(f64, f64, f64, f64)> =
-        problem.parts.iter().map(|p| rotated_copper_bbox(p, 0)).collect();
+        problem.parts.iter().map(|p| rotated_copper_bbox(p, 0.0)).collect();
     let pos: Vec<Point2> = res.placements.iter().map(|p| p.at.clone()).collect();
     assert!(is_legal(&problem, &half, &copper_bbox, courtyard_margin(0.2), &pos));
 }
@@ -630,8 +630,8 @@ fn is_legal_rejects_pad_overhang_on_custom_outline() {
             Point2 { x: 5.0, y: 15.0 },
         ]),
     };
-    let half = vec![rotated_courtyard_half(&problem.parts[0], 0)];
-    let copper_bbox = vec![rotated_copper_bbox(&problem.parts[0], 0)];
+    let half = vec![rotated_courtyard_half(&problem.parts[0], 0.0)];
+    let copper_bbox = vec![rotated_copper_bbox(&problem.parts[0], 0.0)];
     let margin = courtyard_margin(0.2);
     // Centred: copper (±1.225) + 0.5 clearance sits well inside the square → legal.
     assert!(is_legal(&problem, &half, &copper_bbox, margin, &[Point2 { x: 10.0, y: 10.0 }]));
@@ -657,7 +657,7 @@ fn is_legal_uses_asymmetric_copper_bbox_for_off_centre_pads() {
         locked: None,
     };
     // Asymmetric bbox: +x only, nothing on −x.
-    let bb = rotated_copper_bbox(&off_centre, 0);
+    let bb = rotated_copper_bbox(&off_centre, 0.0);
     assert!((bb.0 - 1.5).abs() < 1e-9 && (bb.2 - 4.5).abs() < 1e-9, "x bbox 1.5..4.5, got {bb:?}");
     let problem = PlaceProblem {
         bounds: board(20.0, 20.0),
@@ -673,7 +673,7 @@ fn is_legal_uses_asymmetric_copper_bbox_for_off_centre_pads() {
             Point2 { x: 5.0, y: 15.0 },
         ]),
     };
-    let half = vec![rotated_courtyard_half(&problem.parts[0], 0)];
+    let half = vec![rotated_courtyard_half(&problem.parts[0], 0.0)];
     let copper_bbox = vec![bb];
     let margin = courtyard_margin(0.2);
     // At x=8 the real copper is 9.5..12.5 (+0.5 → 9..13, inside the 5..15 square) → LEGAL.
@@ -889,7 +889,7 @@ fn oracle_placement_is_byte_identical_to_pre_refactor() {
 
     let res = place_board(&problem, &hints);
     let got = serde_json::to_string(&res).unwrap();
-    const PINNED: &str = r#"{"placements":[{"reference":"U1","at":{"x":8.5,"y":13.5},"rotation":0},{"reference":"U2","at":{"x":14.0,"y":13.5},"rotation":0},{"reference":"Ca0","at":{"x":7.0,"y":9.5},"rotation":0},{"reference":"Ca1","at":{"x":10.5,"y":9.5},"rotation":0},{"reference":"Ca2","at":{"x":12.0,"y":7.5},"rotation":0},{"reference":"Cb0","at":{"x":14.0,"y":11.0},"rotation":0},{"reference":"Cb1","at":{"x":1.5,"y":8.5},"rotation":0},{"reference":"Cb2","at":{"x":8.0,"y":7.5},"rotation":0},{"reference":"J1","at":{"x":4.0,"y":13.5},"rotation":0},{"reference":"R1","at":{"x":15.5,"y":16.0},"rotation":0},{"reference":"R2","at":{"x":10.0,"y":16.0},"rotation":0}],"legal":true,"report":{"overlapsResolved":9,"outOfBoundsClamps":0,"hpwl":88.92999999999999,"layoutCost":518.962835441901}}"#;
+    const PINNED: &str = r#"{"placements":[{"reference":"U1","at":{"x":8.5,"y":13.5},"rotation":0.0},{"reference":"U2","at":{"x":14.0,"y":13.5},"rotation":0.0},{"reference":"Ca0","at":{"x":7.0,"y":9.5},"rotation":0.0},{"reference":"Ca1","at":{"x":10.5,"y":9.5},"rotation":0.0},{"reference":"Ca2","at":{"x":12.0,"y":7.5},"rotation":0.0},{"reference":"Cb0","at":{"x":14.0,"y":11.0},"rotation":0.0},{"reference":"Cb1","at":{"x":1.5,"y":8.5},"rotation":0.0},{"reference":"Cb2","at":{"x":8.0,"y":7.5},"rotation":0.0},{"reference":"J1","at":{"x":4.0,"y":13.5},"rotation":0.0},{"reference":"R1","at":{"x":15.5,"y":16.0},"rotation":0.0},{"reference":"R2","at":{"x":10.0,"y":16.0},"rotation":0.0}],"legal":true,"report":{"overlapsResolved":9,"outOfBoundsClamps":0,"hpwl":88.92999999999999,"layoutCost":518.962835441901}}"#;
     assert_eq!(got, PINNED, "oracle placement drifted from the pre-refactor byte-for-byte snapshot");
 
     // And it is reproducible (the oracle's parallel evaluation is order-independent).

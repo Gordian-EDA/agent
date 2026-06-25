@@ -362,7 +362,7 @@ fn rewrite_one_block(block: &str, by_ref: &BTreeMap<&str, &Placement>) -> io::Re
             .find('\n')
             .unwrap_or(block.len() - line_start);
 
-    let rot = pl.rotation.rem_euclid(360);
+    let rot = geom::snap_quadrant(pl.rotation) as i32;
     let at_line = if rot == 0 {
         format!("\t\t(at {} {})", fmt_num(pl.at.x), fmt_num(pl.at.y))
     } else {

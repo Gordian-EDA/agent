@@ -404,14 +404,15 @@ fn synth_footprint(part: &SynthPart, net_codes: &BTreeMap<String, i32>) -> io::R
     // Footprint rotation: KiCAD CCW degrees, normalized to [0,360). v1 placer
     // emits only axis-aligned angles; reject anything else rather than emit
     // wrong pad geometry.
-    let rot = part.placement.rotation.rem_euclid(360);
-    if !matches!(rot, 0 | 90 | 180 | 270) {
+    let norm = part.placement.rotation.rem_euclid(360.0);
+    let rot = geom::snap_quadrant(norm) as i32;
+    if (rot as f64 - norm).abs() > geom::EPS {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "part {}: rotation {rot}° is not supported — synthesis handles \
+                "part {}: rotation {}° is not supported — synthesis handles \
                  0/90/180/270 only (the engine emits axis-aligned placements)",
-                part.reference
+                part.reference, part.placement.rotation
             ),
         ));
     }
@@ -593,7 +594,7 @@ mod tests {
         std::fs::read_to_string(p).unwrap()
     }
 
-    fn place(reference: &str, x: f64, y: f64, rot: i32) -> Placement {
+    fn place(reference: &str, x: f64, y: f64, rot: f64) -> Placement {
         Placement {
             reference: reference.to_owned(),
             at: Point2 { x, y },
@@ -613,14 +614,14 @@ mod tests {
                 lib_id: "Resistor_SMD:R_0603_1608Metric".into(),
                 source: fixture("R_0603_1608Metric.kicad_mod"),
                 pad_nets: nets(&[("1", "VOUT"), ("2", "GND")]),
-                placement: place("R1", 10.0, 10.0, 0),
+                placement: place("R1", 10.0, 10.0, 0.0),
             },
             SynthPart {
                 reference: "U1".into(),
                 lib_id: "Package_TO_SOT_SMD:SOT-23".into(),
                 source: fixture("SOT-23.kicad_mod"),
                 pad_nets: nets(&[("1", "VIN"), ("2", "GND"), ("3", "VOUT")]),
-                placement: place("U1", 20.0, 10.0, 0),
+                placement: place("U1", 20.0, 10.0, 0.0),
             },
         ];
         let bounds = Rect { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
@@ -667,7 +668,7 @@ mod tests {
             lib_id: "Resistor_SMD:R_0603_1608Metric".into(),
             source: fixture("R_0603_1608Metric.kicad_mod"),
             pad_nets: nets(&[("1", "VOUT"), ("2", "GND")]),
-            placement: place("R1", 10.0, 10.0, 0),
+            placement: place("R1", 10.0, 10.0, 0.0),
         }];
         let bounds = Rect { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
         let classes = vec![
@@ -731,14 +732,14 @@ mod tests {
                 lib_id: "Resistor_SMD:R_0603_1608Metric".into(),
                 source: fixture("R_0603_1608Metric.kicad_mod"),
                 pad_nets: nets(&[("1", "VOUT"), ("2", "GND")]),
-                placement: place("R1", 10.0, 10.0, 0),
+                placement: place("R1", 10.0, 10.0, 0.0),
             },
             SynthPart {
                 reference: "U1".into(),
                 lib_id: "Package_TO_SOT_SMD:SOT-23".into(),
                 source: fixture("SOT-23.kicad_mod"),
                 pad_nets: nets(&[("1", "VIN"), ("2", "GND"), ("3", "VOUT")]),
-                placement: place("U1", 20.0, 10.0, 0),
+                placement: place("U1", 20.0, 10.0, 0.0),
             },
         ];
         let bounds = Rect { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };

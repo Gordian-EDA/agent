@@ -25,7 +25,7 @@ fn nets(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
 }
 
-fn place(reference: &str, x: f64, y: f64, rot: i32) -> Placement {
+fn place(reference: &str, x: f64, y: f64, rot: f64) -> Placement {
     Placement { reference: reference.to_owned(), at: Point2 { x, y }, rotation: rot }
 }
 
@@ -38,14 +38,14 @@ fn golden_board() -> String {
             lib_id: "Resistor_SMD:R_0603_1608Metric".into(),
             source: fixture("R_0603_1608Metric.kicad_mod"),
             pad_nets: nets(&[("1", "VOUT"), ("2", "GND")]),
-            placement: place("R1", 10.0, 10.0, 90),
+            placement: place("R1", 10.0, 10.0, 90.0),
         },
         SynthPart {
             reference: "U1".into(),
             lib_id: "Package_TO_SOT_SMD:SOT-23".into(),
             source: fixture("SOT-23.kicad_mod"),
             pad_nets: nets(&[("1", "VIN"), ("2", "GND"), ("3", "VOUT")]),
-            placement: place("U1", 20.0, 10.0, 0),
+            placement: place("U1", 20.0, 10.0, 0.0),
         },
     ];
     let bounds = Rect { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 };
@@ -116,7 +116,7 @@ fn third_party_synthesizer_consumes_the_same_model() {
         lib_id: "Resistor_SMD:R_0603_1608Metric".into(),
         source: fixture("R_0603_1608Metric.kicad_mod"),
         pad_nets: nets(&[("1", "VOUT"), ("2", "GND")]),
-        placement: place("R1", 10.0, 10.0, 0),
+        placement: place("R1", 10.0, 10.0, 0.0),
     }];
     let model = BoardModel::new(parts, Rect { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 }, 2);
     let out = SummaryDumper.emit(&model).unwrap();

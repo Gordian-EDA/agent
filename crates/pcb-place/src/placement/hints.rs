@@ -63,8 +63,8 @@ pub fn apply_grid_hints(problem: &mut PlaceProblem, hints: &PlacementHints) {
                 x: region.min_x + (c as f64 + 0.5) * px,
                 y: region.min_y + (r as f64 + 0.5) * py,
             };
-            clamp_into_bounds(&mut at, b, rotated_courtyard_half(&problem.parts[i], 0));
-            problem.parts[i].locked = Some(LockedAt { at, rotation: 0 });
+            clamp_into_bounds(&mut at, b, rotated_courtyard_half(&problem.parts[i], 0.0));
+            problem.parts[i].locked = Some(LockedAt { at, rotation: 0.0 });
         }
     }
 }
@@ -105,7 +105,7 @@ pub fn apply_surround(problem: &mut PlaceProblem, members: &[String], target: &s
         } else {
             Point2 { x: cx - hw - gap - chw, y: cy + hh - (pos - 4.0 * hw - 2.0 * hh) } // left, B→T
         };
-        problem.parts[i].locked = Some(LockedAt { at, rotation: 0 });
+        problem.parts[i].locked = Some(LockedAt { at, rotation: 0.0 });
     }
 }
 
@@ -145,7 +145,7 @@ pub fn apply_edge_lock(problem: &mut PlaceProblem, refs: &[String]) {
             Point2 { x: b.min_x + hw, y: b.max_y - (t - 2.0 * w - h) } // left edge, B→T
         };
         clamp_into_bounds(&mut at, &b, (hw, hh));
-        problem.parts[i].locked = Some(LockedAt { at, rotation: 0 });
+        problem.parts[i].locked = Some(LockedAt { at, rotation: 0.0 });
     }
 }
 
@@ -191,7 +191,7 @@ pub fn fan_out_rings(
             } else {
                 Point2 { x: cx - ihw, y: cy + ihh - (pos - 4.0 * ihw - 2.0 * ihh) }
             };
-            problem.parts[i].locked = Some(LockedAt { at, rotation: 0 });
+            problem.parts[i].locked = Some(LockedAt { at, rotation: 0.0 });
         }
         k += n;
         ring += 1;
@@ -275,7 +275,7 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
     }
 
     let (ihw, ihh) = (problem.parts[ic].courtyard_w / 2.0, problem.parts[ic].courtyard_h / 2.0);
-    problem.parts[ic].locked = Some(LockedAt { at: Point2 { x: 0.0, y: 0.0 }, rotation: 0 });
+    problem.parts[ic].locked = Some(LockedAt { at: Point2 { x: 0.0, y: 0.0 }, rotation: 0.0 });
 
     // Concentric rings: caps (innermost), then pad-ordered resistors, then others.
     let mut ring_order = caps.clone();
@@ -293,7 +293,7 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
         for j in 0..m {
             let i = ring_order[k + j];
             let pos = (j as f64 + 0.5) / m as f64 * perim;
-            problem.parts[i].locked = Some(LockedAt { at: ring_pos(0.0, 0.0, rw, rh, pos), rotation: 0 });
+            problem.parts[i].locked = Some(LockedAt { at: ring_pos(0.0, 0.0, rw, rh, pos), rotation: 0.0 });
         }
         max_extent = max_extent.max(rw.max(rh));
         k += m;
@@ -327,7 +327,7 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
             let (cw, ch) = (problem.parts[i].courtyard_w, problem.parts[i].courtyard_h);
             let l = cw.max(ch);
             let horizontal_edge = side == 0 || side == 2;
-            let rot = if (cw >= ch) == horizontal_edge { 0 } else { 90 };
+            let rot = if (cw >= ch) == horizontal_edge { 0.0 } else { 90.0 };
             cur += l / 2.0;
             let along = cur;
             cur += l / 2.0 + 2.0;
@@ -346,8 +346,8 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
     // Nudge each connector OUTWARD (away from centre) until it clears every ring part
     // — the frame estimate can under-clear a connector whose courtyard exceeds the
     // short-dim guess. Locked ring parts don't move; the connector slides out.
-    let chalf = |p: &Part, rot: i32| -> (f64, f64) {
-        if rot == 90 || rot == 270 {
+    let chalf = |p: &Part, rot: f64| -> (f64, f64) {
+        if matches!(geom::snap_quadrant(rot) as i32, 90 | 270) {
             (p.courtyard_h / 2.0, p.courtyard_w / 2.0)
         } else {
             (p.courtyard_w / 2.0, p.courtyard_h / 2.0)
@@ -393,7 +393,7 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
     for p in &problem.parts {
         if let Some(l) = &p.locked {
             // Rotation-aware extent: a 90/270° part swaps w/h.
-            let (phw, phh) = if l.rotation == 90 || l.rotation == 270 {
+            let (phw, phh) = if matches!(geom::snap_quadrant(l.rotation) as i32, 90 | 270) {
                 (p.courtyard_h / 2.0, p.courtyard_w / 2.0)
             } else {
                 (p.courtyard_w / 2.0, p.courtyard_h / 2.0)
@@ -418,8 +418,8 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
         max_y: (mxy - mny) + 2.0 * margin,
     };
     if std::env::var("FANOUT_DEBUG").is_ok() {
-        let rh = |p: &Part, r: i32| {
-            if r == 90 || r == 270 {
+        let rh = |p: &Part, r: f64| {
+            if matches!(geom::snap_quadrant(r) as i32, 90 | 270) {
                 (p.courtyard_h / 2.0, p.courtyard_w / 2.0)
             } else {
                 (p.courtyard_w / 2.0, p.courtyard_h / 2.0)
