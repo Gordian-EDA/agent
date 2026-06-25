@@ -218,7 +218,7 @@ pub(super) fn place_problem_from_snapshot(
     }
 
     Ok(PlaceProblem {
-        bounds: routing_bounds(&board.problem.bounds, board.problem.outline.as_deref()),
+        bounds: routing_bounds(&board.problem.bounds, board.problem.outline.as_ref()),
         clearance: board.problem.clearance,
         layer_count: board.problem.layer_count,
         min_trace_width: board.problem.min_trace_width,
@@ -246,7 +246,7 @@ const EDGE_CLEAR_MM: f64 = 0.5;
 /// clearance so place + route keep copper off the edge; the exported Edge.Cuts stays the user's
 /// real outline. (Inset the bbox; the lint also checks distance to the outline POLYGON edges,
 /// catching the non-bbox edges of a non-rectangular outline.)
-fn routing_bounds(bounds: &Rect, outline: Option<&[pcb_model::Point2]>) -> Rect {
+fn routing_bounds(bounds: &Rect, outline: Option<&pcb_model::Polygon>) -> Rect {
     if outline.is_none() {
         return bounds.clone();
     }

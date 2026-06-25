@@ -33,11 +33,11 @@ impl Rule for BoardEdgeClearanceRule {
             let (gap, half, at) = match &item.geom {
                 CopperGeom::Via { at, radius } => {
                     let seg = geom::Segment::new((*at).into(), (*at).into());
-                    (geom::segment_dist_to_polygon_edge(seg, poly), *radius, *at)
+                    (poly.segment_dist_to_edge(seg), *radius, *at)
                 }
                 CopperGeom::Segment { a, b, half_w, .. } => {
                     let seg = geom::Segment::new((*a).into(), (*b).into());
-                    (geom::segment_dist_to_polygon_edge(seg, poly), *half_w, *a)
+                    (poly.segment_dist_to_edge(seg), *half_w, *a)
                 }
                 CopperGeom::Rect { .. } => continue,
             };

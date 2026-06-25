@@ -16,8 +16,8 @@ use crate::{
     },
 };
 use pcb_model::{
-    Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem, RouteSolution, Trace,
-    Via as ModelVia, ViaSpan,
+    Connection, LayerRef, Obstacle, Point2, Polygon, Rect, RoutePoint, RouteProblem, RouteSolution,
+    Trace, Via as ModelVia, ViaSpan,
     place::{LockedAt, Part, PartPad, PlaceProblem},
 };
 
@@ -140,6 +140,7 @@ impl Kicad {
         };
         let outline = edge_cuts_outline(&shapes)
             .ok_or_else(|| Error::NotFound("Edge.Cuts board outline from KiCAD IPC".to_owned()))?;
+        let outline = Polygon::new(outline).map_err(Error::Unsupported)?;
         let rules = match (self.net_classes(), self.net_classes_for_nets(nets.clone())) {
             (Ok(net_classes), Ok(effective)) => board_rules(net_classes, effective)?,
             (Err(err), _) | (_, Err(err)) if is_unimplemented(&err) => default_rules(),
@@ -201,7 +202,7 @@ fn snapshot_from_items_with_context(
     zones: Vec<Zone>,
     nets: Vec<Net>,
     layer_names: Vec<String>,
-    outline: Option<Vec<Point2>>,
+    outline: Option<Polygon>,
     rules: BoardRules,
 ) -> IpcBoardSnapshot {
     let copper = copper_from_ipc(&tracks, &vias, &layer_names);
@@ -215,7 +216,7 @@ fn snapshot_from_items_with_context(
 
 struct SnapshotBuilder {
     layer_names: Vec<String>,
-    outline: Option<Vec<Point2>>,
+    outline: Option<Polygon>,
     rules: BoardRules,
     obstacles: Vec<Obstacle>,
     net_points: BTreeMap<String, Vec<RoutePoint>>,
@@ -223,7 +224,7 @@ struct SnapshotBuilder {
 }
 
 impl SnapshotBuilder {
-    fn new(layer_names: Vec<String>, outline: Option<Vec<Point2>>, rules: BoardRules) -> Self {
+    fn new(layer_names: Vec<String>, outline: Option<Polygon>, rules: BoardRules) -> Self {
         Self {
             layer_names,
             outline,
@@ -390,8 +391,8 @@ impl SnapshotBuilder {
         let layer_count = self.layer_names.len().max(2) as u32;
         let bounds = self
             .outline
-            .as_deref()
-            .and_then(Rect::bounding)
+            .as_ref()
+            .map(Polygon::bbox)
             .or_else(|| bounds_from_obstacles(&self.obstacles))
             .unwrap_or(Rect {
                 min_x: 0.0,
@@ -1136,6 +1137,7 @@ mod tests {
             edge_segment((0.0, 50.0), (0.0, 0.0)),
         ])
         .expect("outline");
+        let outline = Polygon::new(outline).unwrap();
         let snapshot = snapshot_from_items_with_context(
             Vec::new(),
             Vec::new(),
@@ -1156,6 +1158,6 @@ mod tests {
         assert_eq!(snapshot.problem.bounds.min_y, 0.0);
         assert_eq!(snapshot.problem.bounds.max_x, 100.0);
         assert_eq!(snapshot.problem.bounds.max_y, 50.0);
-        assert_eq!(snapshot.problem.outline.as_ref().unwrap().len(), 4);
+        assert_eq!(snapshot.problem.outline.as_ref().unwrap().points().len(), 4);
     }
 }

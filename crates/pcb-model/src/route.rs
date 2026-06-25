@@ -282,7 +282,9 @@ pub fn trace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Connection, LayerRef, Point2, Rect, RoutePoint, RouteSolution, Trace, Via, ViaSpan};
+    use crate::{
+        Connection, LayerRef, Point2, Polygon, Rect, RoutePoint, RouteSolution, Trace, Via, ViaSpan,
+    };
 
     fn empty_problem(layer_count: u32) -> RouteProblem {
         RouteProblem {
@@ -290,7 +292,12 @@ mod tests {
             min_trace_width: 0.2,
             obstacles: vec![],
             connections: vec![],
-            bounds: Rect { min_x: 0.0, max_x: 10.0, min_y: 0.0, max_y: 10.0 },
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 10.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
@@ -347,13 +354,23 @@ mod tests {
         p.layer_count = 2;
         assert!(limited.can_route(&p));
         p.escape_layers.insert("S".into(), 1);
-        assert!(!limited.can_route(&p), "escape_layers needs honors_escape_layers");
+        assert!(
+            !limited.can_route(&p),
+            "escape_layers needs honors_escape_layers"
+        );
         assert!(full.can_route(&p));
         let mut p = empty_problem(2);
         p.net_widths.insert("P".into(), 0.5);
         assert!(!limited.can_route(&p));
         let mut p = empty_problem(2);
-        p.outline = Some(vec![]);
+        p.outline = Some(
+            Polygon::new(vec![
+                Point2 { x: 0.0, y: 0.0 },
+                Point2 { x: 1.0, y: 0.0 },
+                Point2 { x: 0.0, y: 1.0 },
+            ])
+            .unwrap(),
+        );
         assert!(!limited.can_route(&p));
     }
 
@@ -391,7 +408,14 @@ mod tests {
                     });
                 }
             }
-            RouteResult { solution: RouteSolution { traces, vias: vec![] }, failed, engine: self.name().into() }
+            RouteResult {
+                solution: RouteSolution {
+                    traces,
+                    vias: vec![],
+                },
+                failed,
+                engine: self.name().into(),
+            }
         }
     }
 
@@ -401,14 +425,23 @@ mod tests {
         p.connections = vec![Connection {
             name: "N".into(),
             points_to_connect: vec![
-                RoutePoint { x: 0.0, y: 0.0, layer: LayerRef::top() },
-                RoutePoint { x: 5.0, y: 0.0, layer: LayerRef::top() },
+                RoutePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    layer: LayerRef::top(),
+                },
+                RoutePoint {
+                    x: 5.0,
+                    y: 0.0,
+                    layer: LayerRef::top(),
+                },
             ],
         }];
         let toy = ToyRouter;
         let routers: Vec<&dyn Router> = vec![&toy];
         let q = |r: &RouteResult| RouteQuality::of(&p, r, 0);
-        let better = |_: &RouteProblem, bi: &RouteQuality, ch: &RouteQuality| bi.faults() <= ch.faults();
+        let better =
+            |_: &RouteProblem, bi: &RouteQuality, ch: &RouteQuality| bi.faults() <= ch.faults();
         let done = |q: &RouteQuality| q.faults() == 0;
         let r = select(&p, &routers, &q, &better, &done).unwrap();
         assert_eq!(r.engine, "toy");

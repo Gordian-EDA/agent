@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use pcb_model::{Point2, Rect};
+use pcb_model::{Polygon, Rect};
 use pcb_place::placement::{LockedAt, PlacementHints};
 
 use super::create::{parse_group_hint, parse_keepout};
@@ -28,7 +28,7 @@ pub struct BoardSeed {
     pub hints: PlacementHints,
     /// Optional closed Edge.Cuts polygon in millimetres.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outline: Option<Vec<Point2>>,
+    pub outline: Option<Polygon>,
 }
 
 /// Board-level design rules for the initial board.

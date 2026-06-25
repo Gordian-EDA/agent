@@ -27,19 +27,18 @@
 use std::fmt::Write as _;
 
 use grid_astar::router::FailedNet;
-use pcb_model::{LayerRef, Point2, Rect, RouteProblem, RouteSolution};
+use pcb_model::{LayerRef, Polygon, Rect, RouteProblem, RouteSolution};
 use pcb_place::placement::{PlaceProblem, PlaceResult, Placement, PlacementHints};
 
 /// Emit the board boundary: the custom polygon `outline` when present (>= 3 pts),
 /// else the `bounds` rectangle. So a circle / hexagon / any custom-shaped board
 /// shows its TRUE shape in the render — the agent's eyes for iterating on a custom
 /// outline — instead of a misleading bounding-box square.
-fn push_board_outline(w: &mut String, bounds: &Rect, outline: Option<&[Point2]>) {
+fn push_board_outline(w: &mut String, bounds: &Rect, outline: Option<&Polygon>) {
     w.push_str("  <!-- board outline -->\n");
-    if let Some(poly) = outline
-        && poly.len() >= 3
-    {
+    if let Some(poly) = outline {
         let pts: String = poly
+            .points()
             .iter()
             .map(|p| format!("{:.4},{:.4}", p.x, p.y))
             .collect::<Vec<_>>()
@@ -101,7 +100,7 @@ pub fn render_svg(
     .unwrap();
 
     // Board outline -----------------------------------------------------------
-    push_board_outline(w, b, problem.outline.as_deref());
+    push_board_outline(w, b, problem.outline.as_ref());
 
     // Obstacles / pads --------------------------------------------------------
     w.push_str("  <!-- obstacles / pads -->\n");
@@ -269,7 +268,7 @@ pub fn render_placement(
     .unwrap();
 
     // Board outline -----------------------------------------------------------
-    push_board_outline(w, b, problem.outline.as_deref());
+    push_board_outline(w, b, problem.outline.as_ref());
 
     // Region-hint rectangles (dashed) -----------------------------------------
     w.push_str("  <!-- region hints -->\n");

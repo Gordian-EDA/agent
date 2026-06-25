@@ -138,7 +138,7 @@ mod tests {
     use super::*;
     use crate::connectivity::Violation;
     use crate::problem::{
-        Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem, RouteSolution, Trace, Via,
+        Connection, LayerRef, Obstacle, Point2, Polygon, Rect, RoutePoint, RouteProblem, RouteSolution, Trace, Via,
         ViaSpan,
     };
 
@@ -459,12 +459,15 @@ mod tests {
         // catches it — mirroring KiCAD's copper-to-edge rule. via at (5.3,10) is 0.3mm from the
         // x=5 edge; with the 0.3mm via radius the copper touches the edge → violation.
         let mut p = problem(vec![conn("NET", &[(5.3, 10.0, "top")])], vec![]);
-        p.outline = Some(vec![
-            Point2 { x: 5.0, y: 5.0 },
-            Point2 { x: 15.0, y: 5.0 },
-            Point2 { x: 15.0, y: 15.0 },
-            Point2 { x: 5.0, y: 15.0 },
-        ]);
+        p.outline = Some(
+            Polygon::new(vec![
+                Point2 { x: 5.0, y: 5.0 },
+                Point2 { x: 15.0, y: 5.0 },
+                Point2 { x: 15.0, y: 15.0 },
+                Point2 { x: 5.0, y: 15.0 },
+            ])
+            .unwrap(),
+        );
         let near = RouteSolution { traces: vec![], vias: vec![via("NET", (5.3, 10.0))] };
         assert!(
             lint(&p, &near).iter().any(|v| matches!(v, DrcViolation::OutOfBounds { .. })),

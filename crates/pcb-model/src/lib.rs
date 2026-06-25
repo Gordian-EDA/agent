@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 pub mod place;
 pub mod route;
 pub use geom::union_find::UnionFind;
-pub use geom::{Point2, Rect, Segment};
+pub use geom::{Point2, Polygon, Rect, Segment};
 pub use route::{
     Capabilities, RouteMetrics, RouteQuality, RouteResult, Router, failed_pad_weight, select,
 };
@@ -153,7 +153,7 @@ pub struct RouteProblem {
     /// edge) — so concave shapes (a star) route inside the TRUE outline, not just its
     /// bounding box. None = the rectangular `bounds`.
     #[serde(default)]
-    pub outline: Option<Vec<Point2>>,
+    pub outline: Option<Polygon>,
     /// Inner-layer escape assignment: net → the inner SIGNAL copper layer that net's
     /// ENCLOSED fine-pitch ball must drop to (via-in-pad) and route out on. The agent
     /// computes this for dense BGA fields (by ring/quadrant depth) so each escape layer

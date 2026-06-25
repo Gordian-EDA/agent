@@ -29,7 +29,7 @@
 //! single-owner pads, so this is exact for them; the DRC lint (a later task) is
 //! the precision authority regardless.
 
-use crate::problem::{Point2, RouteProblem};
+use crate::problem::{Point2, Polygon, RouteProblem};
 use std::collections::BTreeMap;
 
 /// Minimum grid pitch, mm. Keeps the grid from exploding on tiny design rules.
@@ -427,11 +427,14 @@ impl RouteGrid {
     /// Block every cell whose centre is OUTSIDE `poly`, or within `inflation` of a
     /// polygon edge (copper-to-edge clearance), on every layer. This is the board-edge
     /// keep-out for a custom (possibly concave) outline.
-    fn block_outside_polygon(&mut self, poly: &[Point2], inflation: f64) {
+    fn block_outside_polygon(&mut self, poly: &Polygon, inflation: f64) {
         for ix in 0..self.nx {
             for iy in 0..self.ny {
-                let pt = Point2 { x: self.cell_center_x(ix), y: self.cell_center_y(iy) };
-                if !geom::point_in_polygon(pt, poly) || geom::dist_to_polygon_edge(pt, poly) < inflation {
+                let pt = Point2 {
+                    x: self.cell_center_x(ix),
+                    y: self.cell_center_y(iy),
+                };
+                if !poly.contains_point(pt) || poly.dist_to_edge(pt) < inflation {
                     for layer in 0..self.layer_count {
                         let i = self.idx(layer, ix, iy);
                         self.cells[i] = Cell::BlockedAll;

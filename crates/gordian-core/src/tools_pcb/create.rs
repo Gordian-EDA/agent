@@ -8,7 +8,7 @@ use anyhow::Result;
 use kicad_cli::cli::KicadCli;
 use serde_json::{Value, json};
 
-use pcb_model::{LayerRef, Point2};
+use pcb_model::{LayerRef, Point2, Polygon};
 use pcb_place::placement::{Edge, GroupHint, LockedAt, PlacementHints, Rect};
 
 use crate::tools::PcbToolCtx;
@@ -22,7 +22,7 @@ struct BoardSeedSpec {
     bounds: Rect,
     rules: SeedRules,
     parts: Vec<SeedPart>,
-    outline: Option<Vec<Point2>>,
+    outline: Option<Polygon>,
 }
 
 #[derive(Debug, Clone)]
@@ -215,7 +215,7 @@ fn write_seed_board(spec: &BoardSeedSpec, ctx: &PcbToolCtx) -> std::result::Resu
         });
         x += 2.54;
     }
-    let text = SeedBoardWriter::new(&parts, &spec.bounds, &spec.rules, spec.outline.as_deref())
+    let text = SeedBoardWriter::new(&parts, &spec.bounds, &spec.rules, spec.outline.as_ref())
         .emit()
         .map_err(|e| format!("board synthesis failed: {e}"))?;
     std::fs::write(ctx.pcb_path(), text)
@@ -311,7 +311,7 @@ struct SeedBoardWriter<'a> {
     parts: &'a [SeedFootprint],
     bounds: &'a Rect,
     rules: &'a SeedRules,
-    outline: Option<&'a [Point2]>,
+    outline: Option<&'a Polygon>,
     net_codes: BTreeMap<String, i32>,
     net_classes: Vec<SeedNetClass>,
 }
@@ -321,7 +321,7 @@ impl<'a> SeedBoardWriter<'a> {
         parts: &'a [SeedFootprint],
         bounds: &'a Rect,
         rules: &'a SeedRules,
-        outline: Option<&'a [Point2]>,
+        outline: Option<&'a Polygon>,
     ) -> Self {
         let net_codes = seed_net_codes(parts);
         let net_classes = seed_net_classes(rules, net_codes.keys().cloned());
@@ -434,9 +434,8 @@ impl<'a> SeedBoardWriter<'a> {
     }
 
     fn push_edge_cuts(&self, out: &mut String) {
-        if let Some(points) = self.outline
-            && points.len() >= 3
-        {
+        if let Some(polygon) = self.outline {
+            let points = polygon.points();
             for idx in 0..points.len() {
                 let a = points[idx];
                 let b = points[(idx + 1) % points.len()];
@@ -1038,7 +1037,7 @@ pub fn build_seed_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // Optional custom OUTLINE (polygon points, mm) — circle/square/star/any shape. When
     // given, `bounds` is its bounding box (placement/routing extent) and the polygon
     // becomes the Edge.Cuts at export (the render then shows the true shape).
-    let outline: Option<Vec<Point2>> = match input.get("outline") {
+    let outline: Option<Polygon> = match input.get("outline") {
         None | Some(Value::Null) => None,
         Some(o) => {
             let arr = match o.as_array() {
@@ -1057,11 +1056,14 @@ pub fn build_seed_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
                     _ => return Ok(json!({ "error": "outline point must be a [x, y] pair" })),
                 }
             }
-            Some(pts)
+            match Polygon::new(pts) {
+                Ok(poly) => Some(poly),
+                Err(msg) => return Ok(json!({ "error": msg })),
+            }
         }
     };
     let bounds = match &outline {
-        Some(o) => Rect::bounding(o).expect("outline parser requires at least three points"),
+        Some(o) => o.bbox(),
         None => match parse_bounds(input.get("bounds")) {
             Ok(b) => b,
             Err(msg) => return Ok(json!({ "error": msg })),

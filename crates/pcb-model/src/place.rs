@@ -14,7 +14,7 @@
 //! so the two tiers stay symmetric. The evaluator here is the [`RouteRanker`] (the
 //! placement oracle's router).
 
-use crate::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem};
+use crate::{Connection, LayerRef, Obstacle, Point2, Polygon, Rect, RoutePoint, RouteProblem};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -52,7 +52,7 @@ pub struct PlaceProblem {
     /// its courtyard falls outside the polygon — so concave shapes (a star) keep parts
     /// inside the TRUE outline, not just its bounding box. Carried into the [`RouteProblem`].
     #[serde(default)]
-    pub outline: Option<Vec<Point2>>,
+    pub outline: Option<Polygon>,
 }
 
 fn default_clearance() -> f64 {
@@ -407,7 +407,7 @@ pub fn is_legal(
         // COURTYARD may still overhang (only copper is constrained), preserving the mounting-hole
         // -in-a-notch allowance.
         if let Some(poly) = &problem.outline {
-            if !geom::point_in_polygon(pos[i], poly) {
+            if !poly.contains_point(pos[i]) {
                 return false;
             }
             let (xmin, ymin, xmax, ymax) = copper_bbox[i];
@@ -422,7 +422,7 @@ pub fn is_legal(
                     x: pos[i].x + dx,
                     y: pos[i].y + dy,
                 };
-                if !geom::point_in_polygon(c, poly) {
+                if !poly.contains_point(c) {
                     return false;
                 }
             }

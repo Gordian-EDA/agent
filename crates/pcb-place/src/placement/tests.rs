@@ -9,7 +9,7 @@ use super::model::{
 use super::pairs::series_pairs;
 use super::route::{place, place_board, place_variant, to_route_problem, PlaceOpts};
 use crate::connectivity;
-use crate::problem::{LayerRef, Point2, RouteProblem};
+use crate::problem::{LayerRef, Point2, Polygon, RouteProblem};
 
 fn board(w: f64, h: f64) -> Rect {
     Rect {
@@ -22,6 +22,16 @@ fn board(w: f64, h: f64) -> Rect {
 
 fn top() -> Vec<LayerRef> {
     vec![LayerRef::top()]
+}
+
+fn square_outline() -> Polygon {
+    Polygon::new(vec![
+        Point2 { x: 5.0, y: 5.0 },
+        Point2 { x: 15.0, y: 5.0 },
+        Point2 { x: 15.0, y: 15.0 },
+        Point2 { x: 5.0, y: 15.0 },
+    ])
+    .unwrap()
 }
 
 /// An R_0603-ish 2-pad part (crib numbers from the vendored footprint:
@@ -623,12 +633,7 @@ fn is_legal_rejects_pad_overhang_on_custom_outline() {
         keepouts: vec![],
         parts: vec![r0603("R1", Some("A"), Some("B"))],
         // A 5..15 square outline.
-        outline: Some(vec![
-            Point2 { x: 5.0, y: 5.0 },
-            Point2 { x: 15.0, y: 5.0 },
-            Point2 { x: 15.0, y: 15.0 },
-            Point2 { x: 5.0, y: 15.0 },
-        ]),
+        outline: Some(square_outline()),
     };
     let half = vec![rotated_courtyard_half(&problem.parts[0], 0.0)];
     let copper_bbox = vec![rotated_copper_bbox(&problem.parts[0], 0.0)];
@@ -666,12 +671,7 @@ fn is_legal_uses_asymmetric_copper_bbox_for_off_centre_pads() {
         min_trace_width: 0.2,
         keepouts: vec![],
         parts: vec![off_centre],
-        outline: Some(vec![
-            Point2 { x: 5.0, y: 5.0 },
-            Point2 { x: 15.0, y: 5.0 },
-            Point2 { x: 15.0, y: 15.0 },
-            Point2 { x: 5.0, y: 15.0 },
-        ]),
+        outline: Some(square_outline()),
     };
     let half = vec![rotated_courtyard_half(&problem.parts[0], 0.0)];
     let copper_bbox = vec![bb];
