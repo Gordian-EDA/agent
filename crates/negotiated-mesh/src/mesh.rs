@@ -39,6 +39,7 @@
 //! determinism tests serialize the mesh twice and compare byte-for-byte.
 
 use crate::problem::{Point2, Rect, RouteProblem};
+use geom::{BoundaryAxis, SharedBoundary};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -490,22 +491,14 @@ fn build_edges(
         for j in (i + 1)..leaves.len() {
             let a = &leaves[i];
             let b = &leaves[j];
-            if let Some(shared) = shared_boundary(&a.rect, &b.rect) {
-                let (axis, lo, hi, coord) = shared;
-                let shared_len = hi - lo;
+            if let Some(shared) = a.rect.shared_boundary(&b.rect) {
+                let shared_len = shared.len();
                 if shared_len <= 1e-12 {
                     continue;
                 }
                 let capacity = (0..layer_count)
                     .map(|layer| {
-                        edge_capacity(
-                            axis,
-                            lo,
-                            hi,
-                            coord,
-                            track_pitch,
-                            &per_layer_obstacles[layer],
-                        )
+                        edge_capacity(shared, track_pitch, &per_layer_obstacles[layer])
                     })
                     .collect();
                 edges.push(MeshEdge {
@@ -521,80 +514,33 @@ fn build_edges(
     edges
 }
 
-/// Which axis a shared boundary runs along.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Axis {
-    /// Shared edge is vertical (leaves are left/right neighbours); `coord` is x,
-    /// the segment spans `[lo, hi]` in y.
-    Vertical,
-    /// Shared edge is horizontal (leaves are top/bottom neighbours); `coord` is
-    /// y, the segment spans `[lo, hi]` in x.
-    Horizontal,
-}
-
-/// If two leaf rects abut along a shared edge with positive overlap length,
-/// return `(axis, lo, hi, coord)` of the shared segment; else `None`.
-fn shared_boundary(a: &Rect, b: &Rect) -> Option<(Axis, f64, f64, f64)> {
-    const EPS: f64 = 1e-9;
-    // Vertical shared edge: a's right == b's left (or vice versa), y-spans overlap.
-    let touch_v = |left: &Rect, right: &Rect| -> Option<(Axis, f64, f64, f64)> {
-        if (left.max_x - right.min_x).abs() < EPS {
-            let lo = left.min_y.max(right.min_y);
-            let hi = left.max_y.min(right.max_y);
-            if hi - lo > EPS {
-                return Some((Axis::Vertical, lo, hi, left.max_x));
-            }
-        }
-        None
-    };
-    // Horizontal shared edge: a's bottom == b's top (y-down), x-spans overlap.
-    let touch_h = |top: &Rect, bottom: &Rect| -> Option<(Axis, f64, f64, f64)> {
-        if (top.max_y - bottom.min_y).abs() < EPS {
-            let lo = top.min_x.max(bottom.min_x);
-            let hi = top.max_x.min(bottom.max_x);
-            if hi - lo > EPS {
-                return Some((Axis::Horizontal, lo, hi, top.max_y));
-            }
-        }
-        None
-    };
-    touch_v(a, b)
-        .or_else(|| touch_v(b, a))
-        .or_else(|| touch_h(a, b))
-        .or_else(|| touch_h(b, a))
-}
-
 /// Per-layer crossing capacity of a shared boundary segment:
 /// `floor(shared_len / track_pitch)` minus the obstacle-covered portion of that
 /// segment (a track cannot cross where foreign copper or a keepout sits on the
 /// boundary). Coverage is the union length of obstacle spans projected onto the
 /// segment; the result is `floor(free_len / track_pitch)`.
 fn edge_capacity(
-    axis: Axis,
-    lo: f64,
-    hi: f64,
-    coord: f64,
+    boundary: SharedBoundary,
     track_pitch: f64,
     obstacles: &[LayerObstacle],
 ) -> u32 {
-    if track_pitch <= 0.0 || hi - lo <= 0.0 {
+    if track_pitch <= 0.0 || boundary.len() <= 0.0 {
         return 0;
     }
-    // Collect the covered sub-intervals of [lo, hi] where an obstacle straddles
-    // the boundary line `coord`.
+    // Collect the covered sub-intervals where an obstacle straddles the boundary.
     let mut covered: Vec<(f64, f64)> = Vec::new();
     for ob in obstacles {
         let r = &ob.rect;
-        let (on_line, seg_lo, seg_hi) = match axis {
-            Axis::Vertical => (
-                r.min_x <= coord && coord <= r.max_x,
-                r.min_y.max(lo),
-                r.max_y.min(hi),
+        let (on_line, seg_lo, seg_hi) = match boundary.axis {
+            BoundaryAxis::Vertical => (
+                r.min_x <= boundary.coord && boundary.coord <= r.max_x,
+                r.min_y.max(boundary.lo),
+                r.max_y.min(boundary.hi),
             ),
-            Axis::Horizontal => (
-                r.min_y <= coord && coord <= r.max_y,
-                r.min_x.max(lo),
-                r.max_x.min(hi),
+            BoundaryAxis::Horizontal => (
+                r.min_y <= boundary.coord && boundary.coord <= r.max_y,
+                r.min_x.max(boundary.lo),
+                r.max_x.min(boundary.hi),
             ),
         };
         if on_line && seg_hi > seg_lo {
@@ -602,7 +548,7 @@ fn edge_capacity(
         }
     }
     let covered_len = union_length(&mut covered);
-    let free_len = (hi - lo - covered_len).max(0.0);
+    let free_len = (boundary.len() - covered_len).max(0.0);
     (free_len / track_pitch).floor().max(0.0) as u32
 }
 
@@ -815,7 +761,7 @@ mod tests {
             let ra = &mesh.leaves[e.a].rect;
             let rb = &mesh.leaves[e.b].rect;
             assert!(
-                shared_boundary(ra, rb).is_some(),
+                ra.shared_boundary(rb).is_some(),
                 "edge {}-{} must share a boundary",
                 e.a,
                 e.b

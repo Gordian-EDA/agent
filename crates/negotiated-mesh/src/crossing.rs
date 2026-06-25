@@ -61,13 +61,14 @@ use crate::mesh::{CapacityMesh, LeafId};
 use crate::problem::Rect;
 use crate::pathing::GlobalPlan;
 use crate::problem::{LayerRef, Point2, RouteProblem};
+use geom::{BoundaryAxis, SharedBoundary, STRICT_EPS};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 // ── design constants ─────────────────────────────────────────────────────────
 
 /// Geometric slop (mm) for "on the boundary" / interval comparisons.
-const EPS: f64 = 1e-9;
+const EPS: f64 = STRICT_EPS;
 
 /// How many detailed-grid rings the via-site spiral searches before giving up.
 /// At the detailed pitch a leaf is at most a handful of pitches across, so a
@@ -235,7 +236,10 @@ pub fn assign_crossings(
 
     for ((edge, layer), mut group) in uses {
         let e = &mesh.edges[edge];
-        let Some(boundary) = shared_boundary(&mesh.leaves[e.a].rect, &mesh.leaves[e.b].rect) else {
+        let Some(boundary) = mesh.leaves[e.a]
+            .rect
+            .shared_boundary(&mesh.leaves[e.b].rect)
+        else {
             // Defensive: a plan edge must join abutting leaves. If not, skip —
             // the lint will catch any resulting disconnect; we do not panic.
             continue;
@@ -451,12 +455,12 @@ impl CrossingUse {
     /// The along-boundary coordinate the net "wants" to cross at: the mean of the
     /// two adjacent cell centres projected onto the boundary axis. Ordering nets
     /// by this minimises intra-cell crossing tangle.
-    fn projection(&self, axis: Axis) -> f64 {
+    fn projection(&self, axis: BoundaryAxis) -> f64 {
         match axis {
             // Vertical boundary varies in y; project the cell centres' y.
-            Axis::Vertical => (self.exit_center.y + self.entry_center.y) / 2.0,
+            BoundaryAxis::Vertical => (self.exit_center.y + self.entry_center.y) / 2.0,
             // Horizontal boundary varies in x; project the cell centres' x.
-            Axis::Horizontal => (self.exit_center.x + self.entry_center.x) / 2.0,
+            BoundaryAxis::Horizontal => (self.exit_center.x + self.entry_center.x) / 2.0,
         }
     }
 }
@@ -483,90 +487,13 @@ impl JobAcc {
     }
 }
 
-/// Which axis a shared boundary runs along (mirrors `mesh`'s private `Axis`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Axis {
-    /// Vertical boundary: constant x (`coord`), the segment spans `[lo, hi]` in y.
-    Vertical,
-    /// Horizontal boundary: constant y (`coord`), the segment spans `[lo, hi]` in x.
-    Horizontal,
-}
-
-/// A shared boundary segment between two leaves.
-struct Boundary {
-    axis: Axis,
-    /// The fixed coordinate (x for vertical, y for horizontal).
-    coord: f64,
-    /// Segment span along the varying axis, `lo < hi`.
-    lo: f64,
-    hi: f64,
-}
-
-impl Boundary {
-    /// The point on the boundary at along-axis coordinate `t`.
-    fn point_at(&self, t: f64) -> Point2 {
-        match self.axis {
-            Axis::Vertical => Point2 {
-                x: self.coord,
-                y: t,
-            },
-            Axis::Horizontal => Point2 {
-                x: t,
-                y: self.coord,
-            },
-        }
-    }
-}
-
-/// Recompute the shared boundary segment between two abutting leaf rects.
-/// Mirrors `mesh::shared_boundary` (which is private), returning the axis, fixed
-/// coordinate, and `[lo, hi]` span. `None` if the rects do not abut.
-fn shared_boundary(a: &Rect, b: &Rect) -> Option<Boundary> {
-    // Vertical: a's right == b's left (or vice versa), y-spans overlap.
-    let touch_v = |left: &Rect, right: &Rect| -> Option<Boundary> {
-        if (left.max_x - right.min_x).abs() < EPS {
-            let lo = left.min_y.max(right.min_y);
-            let hi = left.max_y.min(right.max_y);
-            if hi - lo > EPS {
-                return Some(Boundary {
-                    axis: Axis::Vertical,
-                    coord: left.max_x,
-                    lo,
-                    hi,
-                });
-            }
-        }
-        None
-    };
-    // Horizontal: a's bottom == b's top (y-down), x-spans overlap.
-    let touch_h = |top: &Rect, bottom: &Rect| -> Option<Boundary> {
-        if (top.max_y - bottom.min_y).abs() < EPS {
-            let lo = top.min_x.max(bottom.min_x);
-            let hi = top.max_x.min(bottom.max_x);
-            if hi - lo > EPS {
-                return Some(Boundary {
-                    axis: Axis::Horizontal,
-                    coord: top.max_y,
-                    lo,
-                    hi,
-                });
-            }
-        }
-        None
-    };
-    touch_v(a, b)
-        .or_else(|| touch_v(b, a))
-        .or_else(|| touch_h(a, b))
-        .or_else(|| touch_h(b, a))
-}
-
 /// The usable (unblocked) sub-intervals `[lo, hi]` of a boundary on `layer`: the
 /// full span minus the obstacle-covered portions that straddle the boundary
 /// line. Mirrors `mesh::edge_capacity`'s coverage logic, but keeps the gaps.
 fn usable_intervals(
     problem: &RouteProblem,
     mesh: &CapacityMesh,
-    boundary: &Boundary,
+    boundary: &SharedBoundary,
     layer: usize,
 ) -> Vec<(f64, f64)> {
     let layer_count = mesh.layer_count.max(1);
@@ -586,12 +513,12 @@ fn usable_intervals(
         let (min_x, max_x) = (ob.center.x - hw, ob.center.x + hw);
         let (min_y, max_y) = (ob.center.y - hh, ob.center.y + hh);
         let (on_line, seg_lo, seg_hi) = match boundary.axis {
-            Axis::Vertical => (
+            BoundaryAxis::Vertical => (
                 min_x <= boundary.coord && boundary.coord <= max_x,
                 min_y.max(boundary.lo),
                 max_y.min(boundary.hi),
             ),
-            Axis::Horizontal => (
+            BoundaryAxis::Horizontal => (
                 min_y <= boundary.coord && boundary.coord <= max_y,
                 min_x.max(boundary.lo),
                 max_x.min(boundary.hi),
@@ -760,7 +687,7 @@ fn distribute(caps: &[usize], n: usize) -> Vec<usize> {
 /// Fallback slot placement when the boundary overflows: spread `n` points evenly
 /// across the *full* boundary span (so every crossing still gets *a* point), even
 /// though the overflow has already been flagged.
-fn place_slots_fallback(boundary: &Boundary, n: usize) -> Vec<f64> {
+fn place_slots_fallback(boundary: &SharedBoundary, n: usize) -> Vec<f64> {
     if n == 0 {
         return Vec::new();
     }
@@ -1003,11 +930,13 @@ mod tests {
         let mut per_boundary: BTreeMap<(usize, usize), Vec<f64>> = BTreeMap::new();
         for x in &a.crossings {
             let e = &mesh.edges[x.edge];
-            let b = shared_boundary(&mesh.leaves[e.a].rect, &mesh.leaves[e.b].rect)
+            let b = mesh.leaves[e.a]
+                .rect
+                .shared_boundary(&mesh.leaves[e.b].rect)
                 .expect("plan edge joins abutting leaves");
             let on = match b.axis {
-                Axis::Vertical => (x.at.x - b.coord).abs() < 1e-9 && x.at.y >= b.lo - 1e-9 && x.at.y <= b.hi + 1e-9,
-                Axis::Horizontal => (x.at.y - b.coord).abs() < 1e-9 && x.at.x >= b.lo - 1e-9 && x.at.x <= b.hi + 1e-9,
+                BoundaryAxis::Vertical => (x.at.x - b.coord).abs() < EPS && x.at.y >= b.lo - EPS && x.at.y <= b.hi + EPS,
+                BoundaryAxis::Horizontal => (x.at.y - b.coord).abs() < EPS && x.at.x >= b.lo - EPS && x.at.x <= b.hi + EPS,
             };
             assert!(
                 on,
@@ -1015,8 +944,8 @@ mod tests {
                 x.connection, x.edge, x.at, b.axis, b.coord, b.lo, b.hi
             );
             let t = match b.axis {
-                Axis::Vertical => x.at.y,
-                Axis::Horizontal => x.at.x,
+                BoundaryAxis::Vertical => x.at.y,
+                BoundaryAxis::Horizontal => x.at.x,
             };
             per_boundary.entry((x.edge, x.layer)).or_default().push(t);
         }
@@ -1196,4 +1125,3 @@ mod tests {
         ));
     }
 }
-

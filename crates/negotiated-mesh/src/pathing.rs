@@ -776,39 +776,9 @@ impl<'a> Router<'a> {
     fn shared_midpoint(&self, a: LeafId, b: LeafId) -> Point2 {
         let ra = &self.mesh.leaves[a].rect;
         let rb = &self.mesh.leaves[b].rect;
-        // Overlap interval on the shared axis.
-        let overlap_y = (ra.min_y.max(rb.min_y), ra.max_y.min(rb.max_y));
-        let overlap_x = (ra.min_x.max(rb.min_x), ra.max_x.min(rb.max_x));
-        const EPS: f64 = 1e-9;
-        // Vertical shared edge: x coordinates touch.
-        if (ra.max_x - rb.min_x).abs() < EPS || (rb.max_x - ra.min_x).abs() < EPS {
-            let x = if (ra.max_x - rb.min_x).abs() < EPS {
-                ra.max_x
-            } else {
-                rb.max_x
-            };
-            if overlap_y.1 > overlap_y.0 {
-                return Point2 {
-                    x,
-                    y: (overlap_y.0 + overlap_y.1) / 2.0,
-                };
-            }
+        if let Some(shared) = ra.shared_boundary(rb) {
+            return shared.midpoint();
         }
-        // Horizontal shared edge: y coordinates touch.
-        if (ra.max_y - rb.min_y).abs() < EPS || (rb.max_y - ra.min_y).abs() < EPS {
-            let y = if (ra.max_y - rb.min_y).abs() < EPS {
-                ra.max_y
-            } else {
-                rb.max_y
-            };
-            if overlap_x.1 > overlap_x.0 {
-                return Point2 {
-                    x: (overlap_x.0 + overlap_x.1) / 2.0,
-                    y,
-                };
-            }
-        }
-        // Defensive fallback.
         let ca = ra.center();
         let cb = rb.center();
         Point2 {

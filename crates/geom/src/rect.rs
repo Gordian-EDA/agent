@@ -3,9 +3,45 @@
 use serde::{Deserialize, Serialize};
 use std::ops::Index;
 
-use crate::consts::EPS;
+use crate::consts::{EPS, STRICT_EPS};
 use crate::point::Point2;
 use crate::segment::Segment;
+
+/// Axis direction of a shared rectangle boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundaryAxis {
+    Vertical,
+    Horizontal,
+}
+
+/// Positive-length boundary segment shared by two abutting rectangles.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SharedBoundary {
+    pub axis: BoundaryAxis,
+    pub coord: f64,
+    pub lo: f64,
+    pub hi: f64,
+}
+
+impl SharedBoundary {
+    #[inline]
+    pub fn len(&self) -> f64 {
+        self.hi - self.lo
+    }
+
+    #[inline]
+    pub fn point_at(&self, t: f64) -> Point2 {
+        match self.axis {
+            BoundaryAxis::Vertical => Point2::new(self.coord, t),
+            BoundaryAxis::Horizontal => Point2::new(t, self.coord),
+        }
+    }
+
+    #[inline]
+    pub fn midpoint(&self) -> Point2 {
+        self.point_at((self.lo + self.hi) / 2.0)
+    }
+}
 
 /// An axis-aligned rectangle in mm, y-down, `[min, max]` per axis. The single
 /// rect/bounds/bbox type across the workspace.
@@ -125,6 +161,44 @@ impl Rect {
         })
     }
 
+    /// Positive-length boundary shared with an abutting rect.
+    pub fn shared_boundary(&self, other: &Rect) -> Option<SharedBoundary> {
+        let touch_v = |left: &Rect, right: &Rect| -> Option<SharedBoundary> {
+            if (left.max_x - right.min_x).abs() < STRICT_EPS {
+                let lo = left.min_y.max(right.min_y);
+                let hi = left.max_y.min(right.max_y);
+                if hi - lo > STRICT_EPS {
+                    return Some(SharedBoundary {
+                        axis: BoundaryAxis::Vertical,
+                        coord: left.max_x,
+                        lo,
+                        hi,
+                    });
+                }
+            }
+            None
+        };
+        let touch_h = |top: &Rect, bottom: &Rect| -> Option<SharedBoundary> {
+            if (top.max_y - bottom.min_y).abs() < STRICT_EPS {
+                let lo = top.min_x.max(bottom.min_x);
+                let hi = top.max_x.min(bottom.max_x);
+                if hi - lo > STRICT_EPS {
+                    return Some(SharedBoundary {
+                        axis: BoundaryAxis::Horizontal,
+                        coord: top.max_y,
+                        lo,
+                        hi,
+                    });
+                }
+            }
+            None
+        };
+        touch_v(self, other)
+            .or_else(|| touch_v(other, self))
+            .or_else(|| touch_h(self, other))
+            .or_else(|| touch_h(other, self))
+    }
+
     /// Does the boundary of `other` cross the interior of `self`?
     pub fn boundary_crosses(&self, other: &Rect) -> bool {
         if !self.overlaps(other) {
@@ -208,6 +282,47 @@ mod tests {
         assert!(!a.overlaps(&edge));
         let inside = Rect::new(1.0, 1.0, 3.0, 3.0);
         assert!(a.overlaps(&inside));
+    }
+
+    #[test]
+    fn shared_boundary_vertical() {
+        let a = Rect::new(0.0, 0.0, 2.0, 4.0);
+        let b = Rect::new(2.0, 1.0, 5.0, 3.0);
+        let shared = a.shared_boundary(&b).unwrap();
+        assert_eq!(
+            shared,
+            SharedBoundary {
+                axis: BoundaryAxis::Vertical,
+                coord: 2.0,
+                lo: 1.0,
+                hi: 3.0,
+            }
+        );
+        assert_eq!(shared.len(), 2.0);
+        assert_eq!(shared.midpoint(), Point2::new(2.0, 2.0));
+    }
+
+    #[test]
+    fn shared_boundary_horizontal() {
+        let a = Rect::new(0.0, 0.0, 4.0, 2.0);
+        let b = Rect::new(1.0, 2.0, 3.0, 5.0);
+        let shared = a.shared_boundary(&b).unwrap();
+        assert_eq!(shared.axis, BoundaryAxis::Horizontal);
+        assert_eq!(shared.coord, 2.0);
+        assert_eq!(shared.lo, 1.0);
+        assert_eq!(shared.hi, 3.0);
+        assert_eq!(shared.point_at(1.5), Point2::new(1.5, 2.0));
+    }
+
+    #[test]
+    fn shared_boundary_requires_positive_overlap() {
+        let a = Rect::new(0.0, 0.0, 2.0, 2.0);
+        let corner = Rect::new(2.0, 2.0, 4.0, 4.0);
+        let gap = Rect::new(2.01, 0.0, 4.0, 2.0);
+        let overlap = Rect::new(1.5, 0.0, 4.0, 2.0);
+        assert!(a.shared_boundary(&corner).is_none());
+        assert!(a.shared_boundary(&gap).is_none());
+        assert!(a.shared_boundary(&overlap).is_none());
     }
 
     #[test]

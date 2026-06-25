@@ -23,10 +23,10 @@ pub mod shape;
 pub mod union_find;
 
 pub use angle::{rotated_aabb_half, snap_quadrant};
-pub use consts::{EPS, JOIN_EPS};
+pub use consts::{EPS, JOIN_EPS, STRICT_EPS};
 pub use point::Point2;
 pub use polygon::{dist_to_polygon_edge, point_in_polygon, segment_dist_to_polygon_edge};
 pub use polyline::Polyline;
-pub use rect::Rect;
+pub use rect::{BoundaryAxis, Rect, SharedBoundary};
 pub use segment::Segment;
 pub use shape::Dir;
