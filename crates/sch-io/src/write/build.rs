@@ -628,13 +628,13 @@ impl SchematicWriter {
     /// Bounding boxes of the global/port labels (the edge pentagons), for the
     /// refinement scorer to keep symbol bodies from colliding with a port label
     /// (the label is placed during routing, so it is not an `Item`).
-    pub fn cluster_label_boxes(&self) -> Vec<[f64; 4]> {
+    pub fn cluster_label_boxes(&self) -> Vec<Rect> {
         self.labels
             .iter()
             .filter(|l| l.global)
             .map(|l| {
                 let w = crate::label::text_width(&l.net) + 2.54;
-                [l.at[0] - w, l.at[1] - 2.0, l.at[0] + w, l.at[1] + 2.0]
+                Rect::new(l.at[0] - w, l.at[1] - 2.0, l.at[0] + w, l.at[1] + 2.0)
             })
             .collect()
     }
