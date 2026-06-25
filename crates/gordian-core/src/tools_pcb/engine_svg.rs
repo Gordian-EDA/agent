@@ -378,7 +378,7 @@ fn rotate_offset(off: &Point2, rot: i32) -> Point2 {
 /// hue-ish channel spread). Deterministic so the same net always renders the
 /// same colour across boards.
 fn net_color(net: &str) -> String {
-    let h = pcb_model::fnv1a(net.as_bytes());
+    let h = geom::hash::fnv1a(net.as_bytes());
     // Spread the hash into three mid-range channels (0x40..=0xbf) so colours
     // stay distinct and legible on a white board (never too pale/dark).
     let chan = |shift: u32| 0x40 + ((h >> shift) & 0x7f) as u8;

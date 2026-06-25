@@ -98,9 +98,7 @@ pub struct PlaceResult {
 
 /// A schematic placement ENGINE: given the [`PlaceProblem`], write final positions
 /// into `items` AND return the [`PlaceResult`] describing them. The only contract
-/// is "produce a placement" — *how* (cost-search, learned, constraint, template,
-/// portfolio) is the engine's own business; the trait assumes nothing about method
-/// and the [`PlaceProblem`] carries no measurement machinery.
+/// is "produce a placement"; *how* is the engine's own business (see the module doc).
 ///
 /// ## Contract
 /// - **Deterministic given the [`PlaceProblem`].** No clock; a fixed `seed` reproduces.

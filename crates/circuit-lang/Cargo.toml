@@ -8,7 +8,7 @@ description = "Parser, linter, and canonical emitter for the gordian circuit mar
 
 [dependencies]
 symbol-contract = { path = "../symbol-contract" }
-sch-model = { path = "../sch-model" }
+geom = { path = "../geom" }
 saphyr.workspace = true
 saphyr-parser.workspace = true
 indexmap.workspace = true

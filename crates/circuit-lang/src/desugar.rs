@@ -439,7 +439,7 @@ fn sanitize(pin: &str) -> String {
 }
 
 /// Union-find over pin nodes keyed by `(refdes, pin)`. `make` interns a node;
-/// the disjoint-set core (`find`/`union`) is `sch_model::union_find` over the
+/// the disjoint-set core (`find`/`union`) is `geom::union_find` over the
 /// interned `parent` slice (second-wins union, so a node's root is unchanged).
 #[derive(Default)]
 struct PinUnionFind {
@@ -462,10 +462,10 @@ impl PinUnionFind {
             })
     }
     fn find(&mut self, i: usize) -> usize {
-        sch_model::union_find::uf_find(&mut self.parent, i)
+        geom::union_find::uf_find(&mut self.parent, i)
     }
     fn union(&mut self, i: usize, j: usize) {
-        sch_model::union_find::uf_union(&mut self.parent, i, j);
+        geom::union_find::uf_union(&mut self.parent, i, j);
     }
 }
 

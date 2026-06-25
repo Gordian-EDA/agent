@@ -1,5 +1,5 @@
-//! Shared schematic geometry vocabulary: cardinal directions + axis-aligned
-//! segment math, used across `place`, `wire`, and `write`.
+//! Cardinal directions + axis-aligned segment math, shared across schematic
+//! placement, wiring, and emit.
 
 /// A pin's outward direction on the sheet, quantized to the four axes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

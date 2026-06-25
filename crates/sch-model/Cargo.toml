@@ -4,11 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared schematic vocabulary: geometry (Dir/segment math), grid snapping, deterministic ids, and the emit result types."
+description = "Shared schematic vocabulary: the layout IR, placeable items, the placement SDK, netclass, and emit result types."
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-uuid.workspace = true
-pcb-model = { path = "../pcb-model" }
+geom = { path = "../geom" }
 kicad-sexpr = { path = "../kicad-sexpr" }

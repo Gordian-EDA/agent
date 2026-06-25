@@ -1,9 +1,9 @@
 //! Disjoint-set forest over a caller-owned `parent` slice.
 //!
-//! The schematic side keys maps by the *specific* representative a set collapses
-//! to (net naming, cluster roots), so the union rule is fixed: `union(a, b)`
-//! always makes `find(b)`'s root the survivor. Compression strategy is internal
-//! and never changes which root `find` returns.
+//! Callers key maps by the *specific* representative a set collapses to (net
+//! naming, cluster roots), so the union rule is fixed: `union(a, b)` always
+//! makes `find(b)`'s root the survivor. Compression strategy is internal and
+//! never changes which root `find` returns.
 
 /// Root of `x` in the disjoint-set forest, compressing the path to it.
 pub fn uf_find(parent: &mut [usize], x: usize) -> usize {

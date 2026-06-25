@@ -17,6 +17,7 @@ kicad-ipc = { path = "../kicad-ipc" }
 drc-lint = { path = "../drc-lint" }
 grid-astar = { path = "../grid-astar" }
 negotiated-mesh = { path = "../negotiated-mesh" }
+geom = { path = "../geom" }
 pcb-model = { path = "../pcb-model" }
 pcb-place = { path = "../pcb-place" }
 sch-floorplan = { path = "../sch-floorplan" }

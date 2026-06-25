@@ -572,7 +572,7 @@ const PCB_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x5c1a_7d4e_3f62_5b89_a0
 /// Content-derived UUID for emitted copper. The same `key` always yields the
 /// same canonical hyphenated UUID (byte-identical re-emit).
 fn copper_uuid(key: &str) -> String {
-    pcb_model::uuid_v5(PCB_NAMESPACE, key.as_bytes())
+    geom::hash::uuid_v5(PCB_NAMESPACE, key.as_bytes())
 }
 
 /// Format an `f64` the way KiCAD writes coordinates: a bare minimal decimal with

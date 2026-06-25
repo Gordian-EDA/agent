@@ -1,0 +1,10 @@
+[package]
+name = "geom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Leaf math utilities: 2D shape/segment helpers, KiCAD grid snapping, deterministic content ids, disjoint-set, and stable hashing."
+
+[dependencies]
+uuid.workspace = true

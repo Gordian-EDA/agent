@@ -12,11 +12,9 @@
 use serde::{Deserialize, Serialize};
 
 pub mod geom2d;
-pub mod hash;
 pub mod place;
 pub mod route;
 pub mod union_find;
-pub use hash::{fnv1a, uuid_v5};
 pub use route::{
     failed_pad_weight, select, Capabilities, RouteMetrics, RouteQuality, RouteResult, Router,
 };

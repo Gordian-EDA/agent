@@ -6,8 +6,7 @@
 //! an RC filter — are small **idioms** worth recognising so a layout engine can
 //! co-place them. This crate models the graph ([`CircuitGraph`]) and matches it
 //! against a **library of declarative patterns** ([`library`]) with an attributed
-//! subgraph-similarity algorithm ([`matcher`]). Idioms can also be **derived** from
-//! an existing design ([`mod@derive`]).
+//! subgraph-similarity algorithm ([`matcher`]).
 //!
 //! Design goals:
 //! - **Pure & testable.** No KiCAD, geometry, or I/O — just data in, matches out.
@@ -239,23 +238,5 @@ mod tests {
         ];
         let g2 = CircuitGraph::new(mcu, kind_of);
         assert!(find(&g2, &library::I2C_PULLUP).is_empty(), "control pull-ups on a large MCU don't match");
-    }
-
-    #[test]
-    fn derive_from_example_reproduces_a_matchable_sketch() {
-        let g = stm32_graph();
-        let d = derive::derive(&g, "U1", 1).expect("derive around U1");
-        // The seed is the anchor; the crystal and load caps appear as roles.
-        assert!(d.roles.contains_key("anchor"));
-        let families: std::collections::BTreeSet<_> =
-            d.roles.values().map(|r| r.lib_family.clone()).collect();
-        assert!(families.contains("Device:Crystal"), "derived roles include the crystal: {families:?}");
-        assert!(families.contains("Device:C"), "derived roles include a load cap");
-        // At least one ground rail edge was extracted.
-        assert!(
-            d.edges.iter().any(|(_, b, k)| b == "GND" && *k == NetKind::Ground),
-            "derived a ground rail edge: {:?}",
-            d.edges
-        );
     }
 }
