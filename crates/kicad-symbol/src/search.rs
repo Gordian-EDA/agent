@@ -1,8 +1,8 @@
 //! Fast cross-library symbol search — backs the agent's `search_symbols`
 //! anti-hallucination tool.
 //!
-//! [`SymbolIndex::build`] scans symbol *names only* across every
-//! `*.kicad_sym` in the environment's symbol directory. Libraries are not
+//! [`SymbolIndex::build`] scans symbol *names only* across every KiCad 9 flat
+//! `*.kicad_sym` or KiCad 10 split `*.kicad_symdir` library. Libraries are not
 //! parsed into ASTs at build time; instead the raw s-expression text is
 //! walked once per file, tracking paren depth (string-literal aware), and
 //! `(symbol "NAME"` blocks at depth 1 — direct children of
@@ -18,12 +18,13 @@
 
 use std::fs;
 use std::io;
+use std::path::{Path, PathBuf};
 
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
-use kicad_cli::env::KicadEnv;
 use crate::SymbolTable;
+use kicad_cli::env::KicadEnv;
 
 /// A search hit: a fully qualified `Lib:Name` id and its resolved pin count.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,31 +47,23 @@ pub struct SymbolIndex {
 }
 
 impl SymbolIndex {
-    /// Scan all `*.kicad_sym` files under the environment's symbol directory
+    /// Scan all KiCad symbol libraries under the environment's symbol directory
     /// and index their top-level symbol names. Names only — no AST parsing.
     pub fn build(env: &KicadEnv) -> io::Result<SymbolIndex> {
         let mut entries = Vec::new();
-        let mut lib_paths: Vec<_> = fs::read_dir(&env.symbol_dir)?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "kicad_sym"))
-            .collect();
-        lib_paths.sort(); // deterministic order, stable tie-breaks
-
-        for path in lib_paths {
-            let Some(lib) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            // A single unreadable lib must not take down the whole index.
-            let Ok(text) = fs::read_to_string(&path) else {
-                continue;
-            };
-            for name in top_level_symbol_names(&text) {
-                let lib_id = format!("{lib}:{name}");
-                entries.push(Entry {
-                    normalized: normalize(&lib_id),
-                    lib_id,
-                });
+        for lib in discover_libraries(&env.symbol_dir)? {
+            for path in lib.symbol_files() {
+                // A single unreadable file must not take down the whole index.
+                let Ok(text) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                for name in top_level_symbol_names(&text) {
+                    let lib_id = format!("{}:{name}", lib.name);
+                    entries.push(Entry {
+                        normalized: normalize(&lib_id),
+                        lib_id,
+                    });
+                }
             }
         }
 
@@ -103,14 +96,63 @@ impl SymbolIndex {
             .into_iter()
             .map(|i| {
                 let lib_id = self.entries[i].lib_id.clone();
-                let pin_count = self
-                    .table
-                    .symbol(&lib_id)
-                    .map_or(0, |meta| meta.pins.len());
+                let pin_count = self.table.symbol(&lib_id).map_or(0, |meta| meta.pins.len());
                 Hit { lib_id, pin_count }
             })
             .collect()
     }
+}
+
+struct SymbolLibrary {
+    name: String,
+    path: PathBuf,
+    split: bool,
+}
+
+impl SymbolLibrary {
+    fn symbol_files(&self) -> Vec<PathBuf> {
+        if !self.split {
+            return vec![self.path.clone()];
+        }
+        let Ok(entries) = fs::read_dir(&self.path) else {
+            return Vec::new();
+        };
+        let mut paths: Vec<_> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "kicad_sym"))
+            .collect();
+        paths.sort();
+        paths
+    }
+}
+
+fn discover_libraries(symbol_dir: &Path) -> io::Result<Vec<SymbolLibrary>> {
+    let mut libs: Vec<_> = fs::read_dir(symbol_dir)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "kicad_sym") {
+                let name = path.file_stem()?.to_str()?.to_string();
+                return Some(SymbolLibrary {
+                    name,
+                    path,
+                    split: false,
+                });
+            }
+            if path.extension().is_some_and(|ext| ext == "kicad_symdir") && path.is_dir() {
+                let name = path.file_stem()?.to_str()?.to_string();
+                return Some(SymbolLibrary {
+                    name,
+                    path,
+                    split: true,
+                });
+            }
+            None
+        })
+        .collect();
+    libs.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+    Ok(libs)
 }
 
 /// Rank `entries` against an already-normalized `needle`, returning the indices
@@ -133,7 +175,12 @@ fn rank(entries: &[Entry], needle: &str, n: usize) -> Vec<usize> {
         .collect();
     fuzzy.sort_by(|&(sa, ia), &(sb, ib)| {
         sb.cmp(&sa)
-            .then_with(|| entries[ia].normalized.len().cmp(&entries[ib].normalized.len()))
+            .then_with(|| {
+                entries[ia]
+                    .normalized
+                    .len()
+                    .cmp(&entries[ib].normalized.len())
+            })
             .then_with(|| entries[ia].lib_id.cmp(&entries[ib].lib_id))
     });
 
@@ -148,7 +195,12 @@ fn rank(entries: &[Entry], needle: &str, n: usize) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter(|(i, _)| !taken.contains(i))
-        .map(|(i, e)| (1.0 - strsim::normalized_levenshtein(needle, &e.normalized), i))
+        .map(|(i, e)| {
+            (
+                1.0 - strsim::normalized_levenshtein(needle, &e.normalized),
+                i,
+            )
+        })
         .collect();
     rest.sort_by(|&(da, ia), &(db, ib)| {
         da.partial_cmp(&db)
@@ -289,8 +341,8 @@ mod tests {
             "(kicad_symbol_lib (symbol \"R\"))",
         )
         .expect("write lib");
-        let index =
-            SymbolIndex::build(&KicadEnv::with_symbol_dir(dir.path().to_path_buf())).expect("build");
+        let index = SymbolIndex::build(&KicadEnv::with_symbol_dir(dir.path().to_path_buf()))
+            .expect("build");
 
         assert_eq!(index.entries.len(), 1);
         assert_eq!(index.entries[0].lib_id, "Device:R");
@@ -301,6 +353,25 @@ mod tests {
     }
 
     #[test]
+    fn build_indexes_split_symbol_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lib = dir.path().join("Device.kicad_symdir");
+        std::fs::create_dir(&lib).expect("symbol dir");
+        std::fs::write(lib.join("R.kicad_sym"), "(kicad_symbol_lib (symbol \"R\"))")
+            .expect("write split symbol");
+        std::fs::write(lib.join("C.kicad_sym"), "(kicad_symbol_lib (symbol \"C\"))")
+            .expect("write split symbol");
+
+        let index = SymbolIndex::build(&KicadEnv::with_symbol_dir(dir.path().to_path_buf()))
+            .expect("build");
+        let lib_ids: std::collections::BTreeSet<_> =
+            index.entries.iter().map(|e| e.lib_id.as_str()).collect();
+
+        assert!(lib_ids.contains("Device:R"), "{lib_ids:?}");
+        assert!(lib_ids.contains("Device:C"), "{lib_ids:?}");
+    }
+
+    #[test]
     fn empty_normalized_query_returns_no_hits() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -308,8 +379,8 @@ mod tests {
             "(kicad_symbol_lib (symbol \"R\"))",
         )
         .expect("write lib");
-        let index =
-            SymbolIndex::build(&KicadEnv::with_symbol_dir(dir.path().to_path_buf())).expect("build");
+        let index = SymbolIndex::build(&KicadEnv::with_symbol_dir(dir.path().to_path_buf()))
+            .expect("build");
 
         assert!(
             index.search("@@@", 5).is_empty(),

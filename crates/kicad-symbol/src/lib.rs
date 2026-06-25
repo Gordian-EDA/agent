@@ -69,8 +69,9 @@ const SUGGEST_LIMIT: usize = 3;
 /// The single concrete symbol oracle: resolves `Lib:Name` ids to pin metadata.
 ///
 /// Backed either by the installed KiCAD symbol libraries ([`SymbolTable::from_env`]
-/// / [`from_symbol_dir`](SymbolTable::from_symbol_dir)) — each `.kicad_sym` parsed
-/// once on first reference and cached — or by an in-memory fixture set for tests
+/// / [`from_symbol_dir`](SymbolTable::from_symbol_dir)) — each KiCad 9 flat
+/// `.kicad_sym` or KiCad 10 split `.kicad_symdir` library is parsed once on
+/// first reference and cached — or by an in-memory fixture set for tests
 /// ([`mock`](SymbolTable::mock) / [`with_basics`](SymbolTable::with_basics)).
 ///
 /// `Send + Sync` (the only interior mutability is the `Mutex`'d library cache),
@@ -87,7 +88,7 @@ pub struct SymbolTable {
 }
 
 impl SymbolTable {
-    /// A table over the `.kicad_sym` files in `symbol_dir`.
+    /// A table over KiCad symbol libraries in `symbol_dir`.
     pub fn from_symbol_dir(symbol_dir: PathBuf) -> Self {
         Self {
             symbol_dir: Some(symbol_dir),
@@ -133,8 +134,14 @@ impl SymbolTable {
         for id in ["Device:R", "Device:C", "Device:L"] {
             t.mock_add(id, vec![("1", "~", Passive, 1), ("2", "~", Passive, 1)]);
         }
-        t.mock_add("Device:D", vec![("1", "K", Passive, 1), ("2", "A", Passive, 1)]);
-        t.mock_add("Device:LED", vec![("1", "K", Passive, 1), ("2", "A", Passive, 1)]);
+        t.mock_add(
+            "Device:D",
+            vec![("1", "K", Passive, 1), ("2", "A", Passive, 1)],
+        );
+        t.mock_add(
+            "Device:LED",
+            vec![("1", "K", Passive, 1), ("2", "A", Passive, 1)],
+        );
         for (id, net) in [
             ("power:GND", "GND"),
             ("power:VCC", "VCC"),
@@ -198,14 +205,29 @@ impl SymbolTable {
 
     /// Run `f` against the parsed library `lib`, loading it on first reference.
     /// `None` if there is no symbol directory, or the library is missing/unparsable.
-    fn with_lib<R>(&self, lib: &str, f: impl FnOnce(&HashMap<String, SymbolMeta>) -> R) -> Option<R> {
+    fn with_lib<R>(
+        &self,
+        lib: &str,
+        f: impl FnOnce(&HashMap<String, SymbolMeta>) -> R,
+    ) -> Option<R> {
         let dir = self.symbol_dir.as_ref()?;
         let mut libs = self.libs.lock().expect("symbol lib cache poisoned");
         let slot = libs
             .entry(lib.to_string())
-            .or_insert_with(|| symlib::read_lib(&dir.join(format!("{lib}.kicad_sym"))).ok());
+            .or_insert_with(|| read_symbol_library(dir, lib).ok());
         slot.as_ref().map(f)
     }
+}
+
+fn read_symbol_library(
+    dir: &std::path::Path,
+    lib: &str,
+) -> std::io::Result<HashMap<String, SymbolMeta>> {
+    let flat = dir.join(format!("{lib}.kicad_sym"));
+    if flat.is_file() {
+        return symlib::read_lib(&flat);
+    }
+    symlib::read_lib_dir(&dir.join(format!("{lib}.kicad_symdir")))
 }
 
 /// Suggestions over an in-memory fixture set: closest full `Lib:Name` keys,
@@ -214,7 +236,12 @@ impl SymbolTable {
 fn suggest_inline(inline: &HashMap<String, SymbolMeta>, lib_id: &str) -> Vec<String> {
     let mut hits: Vec<(usize, &String)> = inline
         .keys()
-        .map(|k| (strsim::levenshtein(&lib_id.to_lowercase(), &k.to_lowercase()), k))
+        .map(|k| {
+            (
+                strsim::levenshtein(&lib_id.to_lowercase(), &k.to_lowercase()),
+                k,
+            )
+        })
         .filter(|(d, _)| *d <= 3)
         .collect();
     hits.sort();

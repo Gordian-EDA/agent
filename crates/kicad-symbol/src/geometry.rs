@@ -35,7 +35,7 @@
 //! `(extends)` form yields zero nodes.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use geom::{Point2, Rect};
 use kiutils_kicad::{SymPin, Symbol, SymbolLibFile};
@@ -122,17 +122,13 @@ impl SymbolGeometry {
             )
         })?;
 
-        let path: PathBuf = env.symbol_dir.join(format!("{lib}.kicad_sym"));
-        let text = std::fs::read_to_string(&path)?;
-
-        // Typed AST: pins, units, and the `extends` target per symbol.
-        let doc = SymbolLibFile::read(&path).map_err(map_kiutils_err)?;
-        let symbols = &doc.ast().symbols;
+        let library = load_symbol_library(&env.symbol_dir, lib)?;
+        let symbols = &library.symbols;
 
         let sym = find_symbol(symbols, name).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("symbol {name:?} not in {}", path.display()),
+                format!("symbol {name:?} not in {}", library.source),
             )
         })?;
 
@@ -144,7 +140,7 @@ impl SymbolGeometry {
 
         // Raw definition: the parent body's block, retargeted to `lib_id` and
         // (when derived) with nested sub-block prefixes rewritten.
-        let raw_definition = build_definition(&text, lib_id, name, body)?;
+        let raw_definition = build_definition(&library.texts, lib_id, name, body)?;
 
         Ok(SymbolGeometry {
             lib_id: lib_id.to_string(),
@@ -171,6 +167,51 @@ impl SymbolGeometry {
             bounds.height().max(5.08) + 5.08,
         )
     }
+}
+
+struct LoadedSymbolLibrary {
+    symbols: Vec<Symbol>,
+    texts: Vec<String>,
+    source: String,
+}
+
+fn load_symbol_library(symbol_dir: &Path, lib: &str) -> io::Result<LoadedSymbolLibrary> {
+    let flat = symbol_dir.join(format!("{lib}.kicad_sym"));
+    if flat.is_file() {
+        return load_symbol_files(vec![flat], lib);
+    }
+
+    let split = symbol_dir.join(format!("{lib}.kicad_symdir"));
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&split)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "kicad_sym"))
+        .collect();
+    paths.sort();
+    load_symbol_files(paths, lib)
+}
+
+fn load_symbol_files(paths: Vec<PathBuf>, lib: &str) -> io::Result<LoadedSymbolLibrary> {
+    let mut symbols = Vec::new();
+    let mut texts = Vec::new();
+    let source = if paths.len() == 1 {
+        paths[0].display().to_string()
+    } else {
+        format!("{lib}.kicad_symdir")
+    };
+
+    for path in paths {
+        let text = std::fs::read_to_string(&path)?;
+        let doc = SymbolLibFile::read(&path).map_err(map_kiutils_err)?;
+        symbols.extend(doc.ast().symbols.iter().cloned());
+        texts.push(text);
+    }
+
+    Ok(LoadedSymbolLibrary {
+        symbols,
+        texts,
+        source,
+    })
 }
 
 /// Find a top-level symbol by its bare name.
@@ -256,10 +297,10 @@ fn unit_number(block_name: &str) -> Option<u8> {
 ///
 /// `body` is the symbol that owns the geometry (the derived symbol itself when
 /// it has its own body, else the resolved parent). We slice the parent body's
-/// balanced block out of the original `.kicad_sym` text via the CST span, then
+/// balanced block out of the original symbol-library text via the CST span, then
 /// rewrite names so the block is valid inside `(lib_symbols)`.
 fn build_definition(
-    text: &str,
+    texts: &[String],
     lib_id: &str,
     requested_name: &str,
     body: &Symbol,
@@ -269,12 +310,15 @@ fn build_definition(
         .as_deref()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "symbol body has no name"))?;
 
-    let block = symbol_block(text, body_name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("could not locate (symbol {body_name:?} …) block in source"),
-        )
-    })?;
+    let block = texts
+        .iter()
+        .find_map(|text| symbol_block(text, body_name))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("could not locate (symbol {body_name:?} …) block in source"),
+            )
+        })?;
 
     // 1) Retarget the top-level name atom to the fully-qualified lib_id.
     let mut out = replace_top_name(&block, body_name, lib_id);

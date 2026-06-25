@@ -33,7 +33,9 @@ fn approx_size_scales_with_symbol() {
         eprintln!("SKIP: no KiCAD install detected");
         return;
     };
-    let r = SymbolGeometry::load(&env, "Device:R").unwrap().approx_size();
+    let r = SymbolGeometry::load(&env, "Device:R")
+        .unwrap()
+        .approx_size();
     assert!(r.y > r.x, "R is taller than wide: {r:?}");
     assert!(r.y <= 15.0, "passive stays small: {r:?}");
 }
@@ -63,6 +65,51 @@ fn multi_unit_symbol_carries_unit_identity() {
         g.pins.iter().all(|p| p.unit >= 1),
         "all pins must carry a 1-based unit"
     );
+}
+
+#[test]
+fn split_symbol_dir_geometry_resolves_extends() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = dir.path().join("Device.kicad_symdir");
+    std::fs::create_dir(&lib).unwrap();
+    std::fs::write(
+        lib.join("Base.kicad_sym"),
+        r#"(kicad_symbol_lib
+	(version 20251024)
+	(generator "test")
+	(symbol "Base"
+		(symbol "Base_1_1"
+			(pin passive line (at 0 3.81 270) (length 1.27)
+				(name "A" (effects (font (size 1.27 1.27))))
+				(number "1" (effects (font (size 1.27 1.27)))))
+		)
+	)
+)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("Alias.kicad_sym"),
+        r#"(kicad_symbol_lib
+	(version 20251024)
+	(generator "test")
+	(symbol "Alias"
+		(extends "Base")
+	)
+)
+"#,
+    )
+    .unwrap();
+
+    let env = KicadEnv::with_symbol_dir(dir.path().to_path_buf());
+    let g = SymbolGeometry::load(&env, "Device:Alias").unwrap();
+
+    assert_eq!(g.pins.len(), 1);
+    assert_eq!(g.pins[0].number, "1");
+    assert_eq!(g.pins[0].name, "A");
+    assert!(g.definition_sexpr().contains("\"Device:Alias\""));
+    assert!(!g.definition_sexpr().contains("(extends"));
+    assert!(!g.definition_sexpr().contains("(symbol \"Base_"));
 }
 
 #[test]

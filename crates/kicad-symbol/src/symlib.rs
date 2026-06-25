@@ -7,12 +7,12 @@
 //! via a visited set) and unit-number extraction from the sub-block names
 //! on top.
 //!
-//! [`read_lib`] is the only entry point; [`crate::SymbolTable`] owns the
-//! per-library cache and the `Lib:Name` lookup/suggest layer on top.
+//! [`read_lib`] and [`read_lib_dir`] are the entry points; [`crate::SymbolTable`]
+//! owns the per-library cache and the `Lib:Name` lookup/suggest layer on top.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{PinDir, PinMeta, PinType, SymbolMeta};
 use kiutils_kicad::{SymPin, Symbol, SymbolLibFile};
@@ -20,31 +20,59 @@ use kiutils_kicad::{SymPin, Symbol, SymbolLibFile};
 /// Load and fully resolve one `.kicad_sym` file into `bare name → SymbolMeta`
 /// (extends chains followed, multi-unit pins merged, sub-blocks hidden).
 pub(crate) fn read_lib(path: &Path) -> io::Result<HashMap<String, SymbolMeta>> {
-    let doc = SymbolLibFile::read(path).map_err(|e| match e {
-        kiutils_kicad::Error::Io(io) => io,
-        other => io::Error::new(io::ErrorKind::InvalidData, other.to_string()),
-    })?;
+    let mut reader = LibReader::default();
+    reader.add_file(path)?;
+    Ok(reader.finish())
+}
 
-    // First pass: own pins + extends target per top-level symbol.
-    let raw: HashMap<String, (Vec<PinMeta>, Option<String>)> = doc
-        .ast()
-        .symbols
-        .iter()
-        .filter_map(|sym| {
+/// Load a KiCad 10 split library directory (`Foo.kicad_symdir`) as one logical
+/// library so `extends` chains can resolve across sibling symbol files.
+pub(crate) fn read_lib_dir(path: &Path) -> io::Result<HashMap<String, SymbolMeta>> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(path)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "kicad_sym"))
+        .collect();
+    paths.sort();
+
+    let mut reader = LibReader::default();
+    for path in paths {
+        reader.add_file(&path)?;
+    }
+    Ok(reader.finish())
+}
+
+#[derive(Default)]
+struct LibReader {
+    raw: HashMap<String, (Vec<PinMeta>, Option<String>)>,
+}
+
+impl LibReader {
+    fn add_file(&mut self, path: &Path) -> io::Result<()> {
+        let doc = SymbolLibFile::read(path).map_err(|e| match e {
+            kiutils_kicad::Error::Io(io) => io,
+            other => io::Error::new(io::ErrorKind::InvalidData, other.to_string()),
+        })?;
+
+        // First pass: own pins + extends target per top-level symbol.
+        self.raw.extend(doc.ast().symbols.iter().filter_map(|sym| {
             let name = sym.name.clone()?;
             let pins = own_pins(sym);
             Some((name, (pins, sym.extends.clone())))
-        })
-        .collect();
+        }));
+        Ok(())
+    }
 
-    // Second pass: resolve extends chains.
-    Ok(raw
-        .keys()
-        .map(|name| {
-            let pins = resolve_pins(&raw, name, &mut HashSet::new());
-            (name.clone(), SymbolMeta { pins })
-        })
-        .collect())
+    fn finish(self) -> HashMap<String, SymbolMeta> {
+        // Second pass: resolve extends chains.
+        self.raw
+            .keys()
+            .map(|name| {
+                let pins = resolve_pins(&self.raw, name, &mut HashSet::new());
+                (name.clone(), SymbolMeta { pins })
+            })
+            .collect()
+    }
 }
 
 /// Pins owned by a symbol: direct pins plus pins of all

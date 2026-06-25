@@ -92,7 +92,11 @@ fn deep_extends_chain_resolves_inline() {
     std::fs::write(dir.path().join("deep.kicad_sym"), lib_text).unwrap();
     let t = SymbolTable::from_symbol_dir(dir.path().to_path_buf());
     let a = t.symbol("deep:A").unwrap();
-    assert_eq!(a.pins.len(), 3, "A inherits E's 3 pins through the depth-4 extends chain");
+    assert_eq!(
+        a.pins.len(),
+        3,
+        "A inherits E's 3 pins through the depth-4 extends chain"
+    );
     let names: std::collections::BTreeSet<_> = a.pins.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, ["GND", "VI", "VO"].into_iter().collect());
 }
@@ -133,6 +137,47 @@ fn missing_extends_parent_keeps_own_pins() {
     std::fs::write(dir.path().join("orphan.kicad_sym"), lib_text).unwrap();
     let t = SymbolTable::from_symbol_dir(dir.path().to_path_buf());
     assert!(t.symbol("orphan:Orphan").unwrap().pins.is_empty());
+}
+
+#[test]
+fn split_symbol_dir_resolves_extends_across_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = dir.path().join("Device.kicad_symdir");
+    std::fs::create_dir(&lib).unwrap();
+    std::fs::write(
+        lib.join("Base.kicad_sym"),
+        r#"(kicad_symbol_lib
+	(version 20251024)
+	(generator "test")
+	(symbol "Base"
+		(symbol "Base_1_1"
+			(pin passive line (at 0 0 0) (length 2.54)
+				(name "A" (effects (font (size 1.27 1.27))))
+				(number "1" (effects (font (size 1.27 1.27)))))
+		)
+	)
+)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("Alias.kicad_sym"),
+        r#"(kicad_symbol_lib
+	(version 20251024)
+	(generator "test")
+	(symbol "Alias"
+		(extends "Base")
+	)
+)
+"#,
+    )
+    .unwrap();
+
+    let t = SymbolTable::from_symbol_dir(dir.path().to_path_buf());
+    let alias = t.symbol("Device:Alias").unwrap();
+    assert_eq!(alias.pins.len(), 1);
+    assert_eq!(alias.pins[0].number, "1");
+    assert_eq!(alias.pins[0].name, "A");
 }
 
 #[test]

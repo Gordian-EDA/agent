@@ -9,31 +9,11 @@
 //! by construction; a failed route falls back to label connectivity at the
 //! call site — never an error.
 
-use geom::{EPS, Point2, Rect, Segment};
+use geom::{EPS, Point2, Polyline, Rect, Segment};
 use sch_place::geom::Dir;
 
 /// Minimum lead length out of a pin before the first turn, mm.
 const LEAD_MM: f64 = 2.54;
-
-/// Drop zero-length segments and merge collinear runs.
-fn simplify(mut path: Vec<Point2>) -> Vec<Point2> {
-    path.dedup_by(|a, b| (a.x - b.x).abs() < EPS && (a.y - b.y).abs() < EPS);
-    let mut out: Vec<Point2> = Vec::with_capacity(path.len());
-    for p in path {
-        if out.len() >= 2 {
-            let a = out[out.len() - 2];
-            let b = out[out.len() - 1];
-            let collinear_x = (a.x - b.x).abs() < EPS && (b.x - p.x).abs() < EPS;
-            let collinear_y = (a.y - b.y).abs() < EPS && (b.y - p.y).abs() < EPS;
-            if collinear_x || collinear_y {
-                *out.last_mut().unwrap() = p;
-                continue;
-            }
-        }
-        out.push(p);
-    }
-    out
-}
 
 /// 2–4 point Manhattan elbow from `a` (leaving along `dir_a` for at least
 /// [`LEAD_MM`]) to `b`: straight when the lead axis lines up, else one L or
@@ -68,7 +48,7 @@ pub fn elbow(a: Point2, dir_a: Dir, b: Point2) -> Vec<Point2> {
             }
         }
     };
-    simplify(path)
+    Polyline::new(path).simplify().into_points()
 }
 
 /// Routing obstacles, all coordinates sheet mm.
@@ -291,7 +271,7 @@ pub fn route_edge(
 
     let mut best: Option<(f64, usize, Vec<Point2>)> = None;
     let consider = |raw: Vec<Point2>, best: &mut Option<(f64, usize, Vec<Point2>)>| {
-        let p = simplify(raw);
+        let p = Polyline::new(raw).simplify().into_points();
         if p.len() < 2 || !path_ok(&p, net, scene) {
             return;
         }
