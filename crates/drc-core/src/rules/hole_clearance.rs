@@ -31,7 +31,6 @@ impl Rule for HoleClearanceRule {
 
         for (vi, a) in solution.vias.iter().enumerate() {
             let ar = a.drill / 2.0;
-            let aat = [a.at.x, a.at.y];
             // drill ↔ drill: a mechanical (drill-bit) rule, independent of net.
             for b in &solution.vias[vi + 1..] {
                 let gap = a.at.dist(b.at) - ar - b.drill / 2.0;
@@ -41,7 +40,7 @@ impl Rule for HoleClearanceRule {
                         other_owners: vec![b.connection.clone()],
                         gap,
                         required: HOLE_CLEAR,
-                        at: aat,
+                        at: a.at,
                     });
                 }
             }
@@ -59,7 +58,7 @@ impl Rule for HoleClearanceRule {
                         other_owners: vec![t.connection.clone()],
                         gap: 0.0,
                         required: HOLE_CLEAR,
-                        at: aat,
+                        at: a.at,
                     });
                 }
             }
@@ -82,7 +81,7 @@ impl Rule for HoleClearanceRule {
                         other_owners: ob.connected_to.clone(),
                         gap,
                         required: HOLE_CLEAR,
-                        at: aat,
+                        at: a.at,
                     });
                 }
             }

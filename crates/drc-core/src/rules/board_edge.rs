@@ -44,7 +44,7 @@ impl Rule for BoardEdgeClearanceRule {
                 out.push(Finding::OutOfBounds {
                     connection: item.first_owner(),
                     overshoot: (EDGE_CLEAR + half - gap).max(0.0),
-                    at: at.into(),
+                    at,
                 });
             }
         }

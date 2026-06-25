@@ -82,9 +82,8 @@ fn mixed_board() -> (RouteProblem, RouteSolution) {
     (p, s)
 }
 
-/// The KEY byte-identical guard: the standard suite reproduces the EXACT,
-/// ORDERED finding set the legacy hardcoded `lint()` produced — trace-width,
-/// then pairwise clearance, then connectivity folded in last.
+/// The standard suite preserves the ordered finding set: trace-width, then
+/// pairwise clearance, then connectivity folded in last.
 #[test]
 fn standard_suite_reproduces_known_finding_set() {
     let (p, s) = mixed_board();
@@ -96,7 +95,7 @@ fn standard_suite_reproduces_known_finding_set() {
         // (1) trace-width: THIN before connectivity, in trace order.
         { "kind": "traceWidthBelowMin", "connection": "THIN", "layer": "top", "width": 0.10, "required": 0.25 },
         // (3) pairwise clearance: A↔B parallel traces, edge gap 0.05 < 0.2.
-        { "kind": "clearanceTraceTrace", "a": "A", "b": "B", "layer": "top", "gap": 0.05000000000000071, "required": 0.2, "at": [10.0, 10.0] },
+        { "kind": "clearanceTraceTrace", "a": "A", "b": "B", "layer": "top", "gap": 0.05000000000000071, "required": 0.2, "at": { "x": 10.0, "y": 10.0 } },
         // (4) connectivity folded in last: GAP's point #2 stranded.
         { "kind": "connectivity", "violation": { "kind": "unconnected", "connection": "GAP", "point_index": 2 } },
     ]);

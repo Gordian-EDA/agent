@@ -73,7 +73,7 @@ fn pair_clearance(x: &CopperItem, y: &CopperItem, clearance: f64) -> Option<Find
                     layer: l1.0.clone(),
                     gap,
                     required: clearance,
-                    at: s1.a.into(),
+                    at: s1.a,
                 })
             } else {
                 None
@@ -133,7 +133,7 @@ fn trace_obstacle(
             layer: layer.0.clone(),
             gap,
             required: clearance,
-            at: bounds.center().into(),
+            at: bounds.center(),
         })
     } else {
         None
@@ -168,7 +168,7 @@ fn via_pair(
             other_owners,
             gap,
             required: clearance,
-            at: at.into(),
+            at,
         })
     } else {
         None

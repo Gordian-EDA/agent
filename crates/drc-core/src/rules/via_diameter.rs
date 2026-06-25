@@ -34,7 +34,7 @@ impl Rule for ViaDiameterRule {
                     connection: v.connection.clone(),
                     diameter: v.diameter,
                     required,
-                    at: [v.at.x, v.at.y],
+                    at: v.at,
                 });
             }
         }

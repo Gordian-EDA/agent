@@ -55,7 +55,7 @@ fn out_of_bounds(item: &CopperItem, problem: &RouteProblem) -> Option<Finding> {
         Some(Finding::OutOfBounds {
             connection: owner,
             overshoot,
-            at: at.into(),
+            at,
         })
     } else {
         None

@@ -44,7 +44,7 @@ pub mod rules;
 pub use connectivity::Violation;
 pub use ctx::{CopperGeom, CopperItem, DrcCtx, collect_copper};
 
-use problem::{RouteProblem, RouteSolution};
+use problem::{Point2, RouteProblem, RouteSolution};
 use serde::Serialize;
 
 /// A single design-rule violation in a [`RouteSolution`] relative to its problem.
@@ -70,7 +70,7 @@ pub enum Finding {
         required: f64,
         /// A point on the offending pair (closest-approach-ish; the first
         /// segment's nearest endpoint), for debugging.
-        at: [f64; 2],
+        at: Point2,
     },
     /// A trace is too close to a foreign or unowned (keepout) obstacle.
     ClearanceTraceObstacle {
@@ -85,7 +85,7 @@ pub enum Finding {
         /// Required clearance, mm.
         required: f64,
         /// The obstacle centre, for debugging.
-        at: [f64; 2],
+        at: Point2,
     },
     /// A via is too close to copper that is not its own connection.
     ClearanceViaAny {
@@ -98,7 +98,7 @@ pub enum Finding {
         /// Required clearance, mm.
         required: f64,
         /// The via position, for debugging.
-        at: [f64; 2],
+        at: Point2,
     },
     /// A trace is narrower than the minimum trace width.
     TraceWidthBelowMin {
@@ -118,7 +118,7 @@ pub enum Finding {
         /// How far past the nearest board edge the copper extends, mm.
         overshoot: f64,
         /// The offending copper location, for debugging.
-        at: [f64; 2],
+        at: Point2,
     },
     /// A trace or route point references a layer name that does not exist on
     /// this board (i.e. `layer.index(layer_count)` returns `None`). This is the
@@ -146,7 +146,7 @@ pub enum Finding {
         /// Required minimum diameter for this via type, mm.
         required: f64,
         /// The via position, for debugging.
-        at: [f64; 2],
+        at: Point2,
     },
     /// A connectivity defect from the connectivity oracle, folded in.
     Connectivity {
