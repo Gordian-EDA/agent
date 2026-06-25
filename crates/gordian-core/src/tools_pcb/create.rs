@@ -714,12 +714,16 @@ fn pad_number(node: &str) -> Option<String> {
 
 fn inject_before_close(node: &str, insertion: &str) -> Option<String> {
     let close = node.rfind(')')?;
+    let close_line_start = node[..close].rfind('\n').map(|p| p + 1).unwrap_or(close);
+    let close_indent = &node[close_line_start..close];
     let indent = child_indent(node);
     let mut out = String::with_capacity(node.len() + insertion.len() + indent.len() + 2);
-    out.push_str(&node[..close]);
-    out.push_str(insertion);
+    out.push_str(node[..close].trim_end());
     out.push('\n');
     out.push_str(&indent);
+    out.push_str(insertion);
+    out.push('\n');
+    out.push_str(close_indent);
     out.push_str(&node[close..]);
     Some(out)
 }

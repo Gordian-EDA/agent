@@ -55,6 +55,7 @@ impl SessionManager {
     }
 
     pub fn open(&self, board: &Path) -> Result<(), Error> {
+        remove_board_lock(board);
         let mut session = self
             .session
             .lock()
@@ -83,6 +84,7 @@ impl SessionManager {
         board: &Path,
         f: impl FnOnce(&mut Session) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        remove_board_lock(board);
         let mut session = self
             .session
             .lock()
@@ -120,6 +122,9 @@ impl SessionManager {
 
     pub fn close(&self) {
         if let Ok(mut session) = self.session.lock() {
+            if let Some(existing) = session.as_ref() {
+                remove_board_lock(&existing.board);
+            }
             *session = None;
         }
     }
@@ -133,7 +138,8 @@ impl SessionManager {
 }
 
 impl Session {
-    /// Launch a headless KiCAD (`xvfb-run pcbnew <board>`), wait for the IPC
+    /// Launch a headless KiCAD (`xvfb-run env -u WAYLAND_DISPLAY GDK_BACKEND=x11 pcbnew <board>`),
+    /// wait for the IPC
     /// socket, connect, and open the board. The board file must exist.
     pub fn launch_headless(board: &Path) -> Result<Self, Error> {
         if !board.exists() {
@@ -142,14 +148,21 @@ impl Session {
                 board.display()
             )));
         }
+        remove_board_lock(board);
         ensure_api_enabled();
         // A killed prior instance can leave a stale socket → ConnectionRefused.
         let _ = std::fs::remove_file(SOCKET_FILE);
 
+        let launch_cwd = board.parent().unwrap_or_else(|| Path::new("/tmp"));
         let child = Command::new("xvfb-run")
             .arg("-a")
+            .arg("env")
+            .arg("-u")
+            .arg("WAYLAND_DISPLAY")
+            .arg("GDK_BACKEND=x11")
             .arg("pcbnew")
             .arg(board)
+            .current_dir(launch_cwd)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -214,6 +227,16 @@ impl Drop for Session {
             let _ = child.wait();
             let _ = std::fs::remove_file(SOCKET_FILE);
         }
+    }
+}
+
+fn remove_board_lock(board: &Path) {
+    let Some(name) = board.file_name().and_then(|s| s.to_str()) else {
+        return;
+    };
+    let lock = board.with_file_name(format!("~{name}.lck"));
+    if lock.exists() {
+        let _ = std::fs::remove_file(lock);
     }
 }
 

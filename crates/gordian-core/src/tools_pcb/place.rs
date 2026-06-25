@@ -484,64 +484,118 @@ fn write_placement(
     moves: &[FootprintMove],
 ) -> std::result::Result<(), kicad_ipc::Error> {
     let path = ctx.pcb_path();
-    match write_placement_once(ctx, &path, moves) {
-        Ok(()) => {
-            if placement_is_written(ctx, moves)? {
-                Ok(())
-            } else {
-                write_placement_once(ctx, &path, moves)?;
-                placement_is_written(ctx, moves)?
-                    .then_some(())
-                    .ok_or_else(|| {
-                        kicad_ipc::Error::NotFound(
-                            "placement write did not update live footprint positions".to_owned(),
-                        )
-                    })
-            }
-        }
-        Err(err) if err.is_transient_api_ready_error() => {
-            std::thread::sleep(std::time::Duration::from_millis(750));
-            write_placement_once(ctx, &path, moves)
-        }
-        Err(err) if err.is_transport_timeout() => {
-            ctx.close_kicad_session();
-            if placement_is_written(ctx, moves)? {
-                return Ok(());
-            }
-            write_placement_once(ctx, &path, moves)
-        }
-        Err(err) => Err(err),
-    }
+    write_placement_file(&path, moves).map_err(kicad_ipc::Error::Spawn)?;
+    // The placement was written outside KiCAD IPC because some KiCAD 10 IPC
+    // FootprintInstance updates can save back empty footprint definitions even
+    // with a field mask. Force the next board read to reopen the updated file.
+    ctx.close_kicad_session();
+    Ok(())
 }
 
-fn write_placement_once(
-    ctx: &PcbToolCtx,
+fn write_placement_file(
     path: &std::path::Path,
     moves: &[FootprintMove],
-) -> std::result::Result<(), kicad_ipc::Error> {
-    ctx.kicad()
-        .with_session(path, |session| session.kicad().move_footprints(moves))
+) -> std::result::Result<(), String> {
+    let mut text = std::fs::read_to_string(path)
+        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    for mv in moves {
+        text = patch_footprint_at(&text, mv)?;
+    }
+    std::fs::write(path, text).map_err(|e| format!("could not write {}: {e}", path.display()))
 }
 
-fn placement_is_written(
-    ctx: &PcbToolCtx,
-    moves: &[FootprintMove],
-) -> std::result::Result<bool, kicad_ipc::Error> {
-    let path = ctx.pcb_path();
-    let targets: BTreeMap<&str, &FootprintMove> =
-        moves.iter().map(|m| (m.reference.as_str(), m)).collect();
-    let snapshot = ctx
-        .kicad()
-        .with_session(&path, |session| session.kicad().board_snapshot())?;
-    Ok(snapshot.imported.parts.iter().all(|part| {
-        let Some(target) = targets.get(part.reference.as_str()) else {
-            return true;
+fn patch_footprint_at(text: &str, mv: &FootprintMove) -> std::result::Result<String, String> {
+    let mut scan = 0usize;
+    while let Some(rel) = text[scan..].find("(footprint ") {
+        let start = scan + rel;
+        let Some(end) = matching_close(text, start) else {
+            return Err("malformed board: footprint has no closing paren".to_owned());
         };
-        let tx = target.x_nm as f64 / 1_000_000.0;
-        let ty = target.y_nm as f64 / 1_000_000.0;
-        let rotation = target.rotation_deg.unwrap_or(part.rotation as f64);
-        (part.at.x - tx).abs() < 1e-3
-            && (part.at.y - ty).abs() < 1e-3
-            && (part.rotation as f64 - rotation).abs() < 1e-3
-    }))
+        let fp = &text[start..=end];
+        if footprint_has_reference(fp, &mv.reference) {
+            let Some(at_rel) = top_level_node(fp, "at") else {
+                return Err(format!("footprint {} has no top-level at", mv.reference));
+            };
+            let at_start = start + at_rel.0;
+            let at_end = start + at_rel.1;
+            let x = kicad_sexpr::fmt_num(mv.x_nm as f64 / 1_000_000.0);
+            let y = kicad_sexpr::fmt_num(mv.y_nm as f64 / 1_000_000.0);
+            let replacement = match mv.rotation_deg {
+                Some(rot) => format!("\t\t(at {x} {y} {})", kicad_sexpr::fmt_num(rot)),
+                None => format!("\t\t(at {x} {y})"),
+            };
+            let mut out = String::with_capacity(text.len() + replacement.len());
+            out.push_str(&text[..at_start]);
+            out.push_str(&replacement);
+            out.push_str(&text[at_end + 1..]);
+            return Ok(out);
+        }
+        scan = end + 1;
+    }
+    Err(format!(
+        "footprint {} not found in board file",
+        mv.reference
+    ))
+}
+
+fn footprint_has_reference(fp: &str, reference: &str) -> bool {
+    let needle = format!("(property \"Reference\" \"{reference}\"");
+    fp.contains(&needle)
+}
+
+fn top_level_node(s: &str, head: &str) -> Option<(usize, usize)> {
+    let mut idx = s.find('\n').map(|p| p + 1).unwrap_or(0);
+    while idx < s.len() {
+        let rel = s[idx..].find('(')?;
+        let start = idx + rel;
+        let end = matching_close(s, start)?;
+        if node_head(&s[start..=end]) == head {
+            return Some((start, end));
+        }
+        idx = end + 1;
+    }
+    None
+}
+
+fn node_head(node: &str) -> &str {
+    let rest = node.strip_prefix('(').unwrap_or(node);
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+fn matching_close(s: &str, open: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut idx = open;
+    while idx < bytes.len() {
+        let b = bytes[idx];
+        if in_string {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    None
 }

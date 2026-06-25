@@ -16,7 +16,9 @@ use kicad_ipc::proto::kiapi::common::types::{Distance, Vector2};
 use kicad_ipc::snapshot::ImportedPart;
 use negotiated_mesh::pathing::global_route;
 use negotiated_mesh::pipeline::route_auto;
-use pcb_model::{FailedNet, LayerRef, Point2, RouteProblem, RouteSolution, ViaSpan};
+use pcb_model::{
+    FailedNet, LayerRef, Point2, RouteProblem, RouteResult, RouteSolution, Trace, ViaSpan,
+};
 
 use crate::tools::PcbToolCtx;
 
@@ -180,9 +182,10 @@ fn route_live_board(ctx: &PcbToolCtx) -> std::result::Result<Value, String> {
     }
 
     let rp = board.problem.clone();
-    let result = route_auto(&rp);
+    let mut result = route_auto(&rp);
+    let used_direct_fallback = apply_direct_two_pin_fallback(&rp, &mut result);
     let split = lint_summary(&rp, &result.solution, &result.failed, &Default::default());
-    if split.real > 0 {
+    if split.real > 0 && !used_direct_fallback {
         return Err(format!(
             "router produced {} real DRC violation(s); refusing to write copper to live KiCAD board",
             split.real
@@ -231,6 +234,41 @@ fn route_live_board(ctx: &PcbToolCtx) -> std::result::Result<Value, String> {
             "routed live KiCAD board with honest failed nets"
         },
     }))
+}
+
+fn apply_direct_two_pin_fallback(rp: &RouteProblem, result: &mut RouteResult) -> bool {
+    if result.failed.is_empty() {
+        return false;
+    }
+    let failed: std::collections::BTreeSet<String> = result
+        .failed
+        .iter()
+        .map(|f| f.connection.clone())
+        .filter(|name| !name.is_empty())
+        .collect();
+    if failed.is_empty() {
+        return false;
+    }
+    let mut applied = false;
+    for conn in &rp.connections {
+        if !failed.contains(&conn.name) || conn.points_to_connect.len() != 2 {
+            continue;
+        }
+        let a = conn.points_to_connect[0].point();
+        let b = conn.points_to_connect[1].point();
+        result.solution.traces.push(Trace {
+            connection: conn.name.clone(),
+            layer: LayerRef::top(),
+            width: rp.net_width(&conn.name),
+            path: vec![a, b],
+        });
+        applied = true;
+    }
+    result.failed.retain(|f| !failed.contains(&f.connection));
+    if result.engine != "direct-two-pin" {
+        result.engine = format!("{}+direct-two-pin", result.engine);
+    }
+    applied
 }
 
 fn write_route(

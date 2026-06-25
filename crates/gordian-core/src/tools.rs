@@ -569,11 +569,11 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "assign_footprint".into(),
-                description: "Stateless helper for assigning a footprint in circuit YAML. It does \
-                    not read or write PCB state; it returns the edit_design instruction needed to \
-                    set the component's schematic footprint field. Find lib_ids with \
-                    search_footprints / get_footprint_info — never guess. After editing and \
-                    apply_design, run derive_board to sync the PCB."
+                description: "Assign a real footprint lib_id to one component in the working \
+                    circuit-YAML draft. This validates the footprint id, edits the draft's \
+                    footprint field directly, and returns compile diagnostics. Find lib_ids \
+                    with search_footprints / get_footprint_info — never guess. After this \
+                    succeeds, call apply_design(commit=true), then derive_board to sync the PCB."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -917,7 +917,7 @@ fn pin_type_str(t: circuit_lang::PinType) -> &'static str {
 
 // ── 3. get_design ──────────────────────────────────────────────────────────
 
-fn current_sch_text(ctx: &PcbToolCtx) -> Option<String> {
+pub(crate) fn current_sch_text(ctx: &PcbToolCtx) -> Option<String> {
     std::fs::read_to_string(&ctx.sch_path).ok()
 }
 
@@ -958,7 +958,7 @@ fn validate_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
 }
 
 /// Build the `{ok, diagnostics, errors, warnings}` report a compile yields.
-fn compile_report(diags: &circuit_lang::Diagnostics) -> Value {
+pub(crate) fn compile_report(diags: &circuit_lang::Diagnostics) -> Value {
     use circuit_lang::Severity;
     let strings: Vec<String> = diags.0.iter().map(|d| d.to_string()).collect();
     let errors = diags

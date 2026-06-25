@@ -69,6 +69,10 @@ async fn main() -> anyhow::Result<()> {
 
     let mut approvals = AutoApprove::yes();
     let outcome = agent.run_turn(&prompt, &mut approvals, Some(&tx)).await?;
+    if let Err(e) = gordian_core::tools_pcb::save_session_if_open(agent.ctx()) {
+        eprintln!("warning: could not save live KiCAD session before closing: {e}");
+    }
+    agent.ctx().close_kicad_session();
     drop(tx);
     let (tin, tout) = printer.await.unwrap_or((0, 0));
 
@@ -89,6 +93,22 @@ async fn main() -> anyhow::Result<()> {
     let pro = pcb_path.with_extension("kicad_pro");
     if pro.exists() {
         std::fs::copy(&pro, std::path::Path::new(&out).with_extension("kicad_pro")).ok();
+    }
+    let fab = tmp.path().join("fab");
+    if fab.is_dir() {
+        let fab_out = std::path::Path::new(&out).with_extension("fab");
+        if fab_out.exists() {
+            std::fs::remove_dir_all(&fab_out).ok();
+        }
+        std::fs::create_dir_all(&fab_out)?;
+        for entry in std::fs::read_dir(&fab)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                std::fs::copy(&path, fab_out.join(entry.file_name())).ok();
+            }
+        }
+        eprintln!("fab bundle copied: {}", fab_out.display());
     }
 
     match KicadCli::new(&env).drc(std::path::Path::new(&out)) {

@@ -746,26 +746,11 @@ fn infer_layer_names(
 }
 
 fn pad_world(fp: &FootprintInstance, pad: &Pad) -> Point2 {
-    let origin = fp
-        .position
+    pad.position
         .as_ref()
         .map(point)
-        .unwrap_or(Point2 { x: 0.0, y: 0.0 });
-    let offset = pad
-        .position
-        .as_ref()
-        .map(point)
-        .unwrap_or(Point2 { x: 0.0, y: 0.0 });
-    let rotation = fp
-        .orientation
-        .as_ref()
-        .map(|a| a.value_degrees)
-        .unwrap_or(0.0);
-    let rotated = offset.rotate(rotation);
-    Point2 {
-        x: origin.x + rotated.x,
-        y: origin.y + rotated.y,
-    }
+        .or_else(|| fp.position.as_ref().map(point))
+        .unwrap_or(Point2 { x: 0.0, y: 0.0 })
 }
 
 fn pad_size(pad: &Pad) -> (f64, f64) {
@@ -900,8 +885,7 @@ fn net_codes(nets: &[Net]) -> BTreeMap<String, i32> {
 }
 
 fn net_name(net: &Net) -> Option<String> {
-    let code = net.code.as_ref().map(|c| c.value).unwrap_or(0);
-    (code != 0 && !net.name.is_empty()).then(|| net.name.clone())
+    (!net.name.is_empty()).then(|| net.name.clone())
 }
 
 fn layer_ref_for_i32(layer: i32, layer_names: &[String]) -> LayerRef {

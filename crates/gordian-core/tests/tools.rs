@@ -690,6 +690,60 @@ fn search_footprints_finds_vendored_fixture() {
 }
 
 #[test]
+fn assign_footprint_edits_the_working_draft() {
+    let (ctx, _guard) = fixture_ctx();
+    let yaml = "\
+version: 1
+blocks:
+  main:
+    components:
+      R1:
+        part: R
+        between: [A, B]
+";
+    let created = run_tool(
+        "create_design",
+        serde_json::json!({ "yaml": yaml, "overwrite": true }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(
+        created["draft_written"],
+        serde_json::json!(true),
+        "create draft: {created}"
+    );
+
+    let assigned = run_tool(
+        "assign_footprint",
+        serde_json::json!({
+            "reference": "R1",
+            "footprint": "Fixtures:R_0603_1608Metric",
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(
+        assigned["draft_written"],
+        serde_json::json!(true),
+        "assign footprint: {assigned}"
+    );
+    assert_eq!(
+        assigned["next_step"],
+        serde_json::json!(
+            "call apply_design with commit=true to write the updated schematic, then call derive_board again"
+        )
+    );
+    let draft = ctx
+        .workspace()
+        .read_draft()
+        .expect("draft after assignment");
+    assert!(
+        draft.contains("footprint: \"Fixtures:R_0603_1608Metric\""),
+        "draft was not edited:\n{draft}"
+    );
+}
+
+#[test]
 #[ignore = "live KiCAD IPC: derive_board opens the project board through the session manager"]
 fn derive_board_seeds_board_from_schematic_then_assign_footprint() {
     // Needs a real KiCAD env (lift runs kicad-cli + resolves real footprints).

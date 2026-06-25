@@ -183,7 +183,10 @@ block; top-level `layout:` is rejected):
 
 0. Choose NEW vs EDIT. NEW: author the full YAML with `create_design(yaml)`.
    EDIT: call `get_design()` first and build on the current schematic.
-1. `search_symbols(query)` before every real part lib_id; never guess.
+1. `search_symbols(query)` before every real non-alias part lib_id; never guess.
+   For commodity `R`/`C`/`L`/`D`/`LED`, use the built-in aliases directly and do
+   not waste tool calls searching for them. Once a search returns a valid id, reuse
+   it; do not repeat the same lookup.
 2. `get_symbol_info(lib_id)` before wiring nontrivial or multi-power-pin parts.
 3. `validate_design(yaml)` until `ok:true` and 0 errors.
 4. `review_design(intent)` on the complete draft; fix high-confidence defects.
@@ -205,8 +208,13 @@ placement, layers, trace width, and route shape matter directly.
 ## Flow
 
 1. `search_footprints(query)` and `get_footprint_info(lib_id)`; NEVER guess a footprint lib_id.
+   For a NEW design, put the selected `footprint:` fields in the initial YAML
+   before the first `apply_design` so `derive_board` will not bounce on missing
+   footprints. Reuse valid footprint hits; do not repeat the same search.
 2. `derive_board({bounds?, rules?})` from the committed schematic. Use generous
-   bounds; set missing footprints with `assign_footprint(reference, footprint)`.
+   bounds. If it reports `missing_footprints`, call `assign_footprint(reference,
+   footprint)` for each missing part; that edits the draft directly. Then call
+   `apply_design(commit:true)` once, and `derive_board` again.
 3. `place_board()` then `render_board()` to inspect placement.
 4. `route_board()`; use failed nets/metrics to decide whether to enlarge,
    add layers, or refine manually. `autoroute()` is disabled in this flow.

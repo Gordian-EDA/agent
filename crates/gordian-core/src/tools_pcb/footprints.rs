@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use kicad_footprint::{FootprintId, SearchQuery};
 
-use crate::tools::{PcbToolCtx, require_str};
+use crate::tools::{PcbToolCtx, compile_report, current_sch_text, require_str};
 
 /// Default number of footprint-search hits returned when `limit` is omitted.
 /// Mirrors `tools::DEFAULT_SEARCH_LIMIT` for the symbol side.
@@ -107,24 +107,241 @@ fn bbox_json(b: &geom::Rect) -> Value {
     })
 }
 
-/// Return the circuit-YAML edit needed to assign a footprint.
+/// Assign a footprint in the working circuit-YAML draft.
 ///
-/// Footprint assignment belongs to the schematic/circuit YAML, not PCB state. This helper is
-/// deliberately stateless: it does not read board state, inspect the schematic, or write files.
-pub fn assign_footprint(input: Value, _ctx: &PcbToolCtx) -> anyhow::Result<Value> {
+/// Footprint assignment belongs to the schematic/circuit YAML, not PCB state.
+/// Earlier this helper returned only prose instructions, which live models often
+/// treated as a completed state change and then looped on derive_board. It now
+/// performs the draft edit directly and returns the normal compile report.
+pub fn assign_footprint(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Value> {
     let reference = require_str(&input, "reference")?;
     let footprint = require_str(&input, "footprint")?;
-    Ok(json!({
-        "ok": true,
-        "reference": reference,
-        "footprint": footprint,
-        "edit_design": {
-            "instruction": format!(
-                "Set the circuit YAML component `{reference}` footprint field to `{footprint}`. \
-                 Do not edit PCB files directly; after apply_design, run derive_board to sync the PCB."
-            ),
-            "yaml_field": "footprint",
-            "value": footprint,
+    let catalog = ctx.footprint_catalog()?;
+    let id = match FootprintId::parse(&footprint) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(json!({ "error": format!("invalid footprint id `{footprint}`") }));
         }
-    }))
+    };
+    if let Err(e) = catalog.footprint(&id) {
+        if e.is_not_found() {
+            return Ok(json!({
+                "error": format!("unknown footprint `{footprint}`"),
+                "suggestions": catalog.suggest(&id).iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+            }));
+        }
+        return Ok(json!({
+            "error": format!("footprint `{footprint}` could not be read: {e}"),
+        }));
+    }
+
+    let Some(draft) = ctx.workspace().read_draft() else {
+        return Ok(json!({
+            "error": "no draft exists — call get_design (seeds a draft from the current schematic) or create_design first",
+        }));
+    };
+    let (edited, edit_kind) = match patch_footprint(&draft, &reference, &footprint) {
+        Ok(patched) => patched,
+        Err(msg) => return Ok(json!({ "error": msg })),
+    };
+    ctx.workspace()
+        .write_draft(&edited, current_sch_text(ctx).as_deref())?;
+
+    let mut report = compile_report(&circuit_lang::compile(&edited, ctx.provider()).diagnostics);
+    report["draft_written"] = json!(true);
+    report["reference"] = json!(reference);
+    report["footprint"] = json!(footprint);
+    report["edit"] = json!(edit_kind);
+    report["next_step"] = json!(
+        "call apply_design with commit=true to write the updated schematic, then call derive_board again"
+    );
+    Ok(report)
+}
+
+fn patch_footprint(
+    draft: &str,
+    reference: &str,
+    footprint: &str,
+) -> Result<(String, &'static str), String> {
+    let mut lines: Vec<String> = draft.lines().map(str::to_owned).collect();
+    let had_trailing_newline = draft.ends_with('\n');
+    let target = format!("{reference}:");
+    for i in 0..lines.len() {
+        let line = &lines[i];
+        let trimmed = line.trim_start();
+        if let Some(target_pos) = line.find(&target)
+            && line[target_pos..].contains('{')
+            && line[target_pos..].contains('}')
+        {
+            let (line, kind) = patch_inline_component(line, target_pos, footprint)?;
+            lines[i] = line;
+            return Ok((join_lines(lines, had_trailing_newline), kind));
+        }
+        if !trimmed.starts_with(&target) {
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        let child_indent = " ".repeat(indent + 2);
+        let mut end = i + 1;
+        while end < lines.len() {
+            let next = &lines[end];
+            let next_trimmed = next.trim_start();
+            if !next_trimmed.is_empty()
+                && next.len() - next_trimmed.len() <= indent
+                && next_trimmed.ends_with(':')
+            {
+                break;
+            }
+            end += 1;
+        }
+        for line in lines.iter_mut().take(end).skip(i + 1) {
+            if line.trim_start().starts_with("footprint:") {
+                let existing_indent = line.len() - line.trim_start().len();
+                *line = format!(
+                    "{}footprint: {}",
+                    " ".repeat(existing_indent),
+                    yaml_string(footprint)
+                );
+                return Ok((join_lines(lines, had_trailing_newline), "updated"));
+            }
+        }
+        lines.insert(
+            i + 1,
+            format!("{child_indent}footprint: {}", yaml_string(footprint)),
+        );
+        return Ok((join_lines(lines, had_trailing_newline), "inserted"));
+    }
+    Err(format!(
+        "component `{reference}` was not found in the working draft"
+    ))
+}
+
+fn patch_inline_component(
+    line: &str,
+    target_pos: usize,
+    footprint: &str,
+) -> Result<(String, &'static str), String> {
+    let open = line[target_pos..]
+        .find('{')
+        .map(|p| target_pos + p)
+        .ok_or_else(|| "inline component map has no opening `{`".to_string())?;
+    let close = matching_brace(line, open)
+        .ok_or_else(|| "inline component map has no matching `}`".to_string())?;
+    let body_start = open + 1;
+    let body = &line[body_start..close];
+    let value = format!("footprint: {}", yaml_string(footprint));
+    if let Some(rel_pos) = body.find("footprint:") {
+        let pos = body_start + rel_pos;
+        let after = pos + "footprint:".len();
+        let rel_end = line[after..close]
+            .find([',', '}'])
+            .ok_or_else(|| "inline component footprint field is malformed".to_string())?;
+        let end = after + rel_end;
+        let mut out = String::new();
+        out.push_str(&line[..pos]);
+        out.push_str(&value);
+        out.push_str(&line[end..]);
+        return Ok((out, "updated"));
+    }
+    let before = line[..close].trim_end();
+    let sep = if before.ends_with('{') { "" } else { "," };
+    Ok((
+        format!("{before}{sep} {value}{}", &line[close..]),
+        "inserted",
+    ))
+}
+
+fn matching_brace(s: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_quote = false;
+    let mut escape = false;
+    for (offset, ch) in s[open..].char_indices() {
+        if in_quote {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_quote = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_quote = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(open + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn yaml_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn join_lines(lines: Vec<String>, trailing_newline: bool) -> String {
+    let mut out = lines.join("\n");
+    if trailing_newline {
+        out.push('\n');
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn patch_footprint_inserts_into_inline_component() {
+        let draft = "version: 1\nblocks: {main: {components: {R1: {part: R, between: [A, B]}}}}\n";
+        let (patched, kind) = patch_footprint(draft, "R1", "Fixtures:R_0603_1608Metric").unwrap();
+        assert_eq!(kind, "inserted");
+        assert!(
+            patched.contains(
+                "R1: {part: R, between: [A, B], footprint: \"Fixtures:R_0603_1608Metric\"}"
+            )
+        );
+    }
+
+    #[test]
+    fn patch_footprint_updates_block_component() {
+        let draft = "\
+version: 1
+blocks:
+  main:
+    components:
+      R1:
+        part: R
+        footprint: \"Old:Footprint\"
+        between: [A, B]
+";
+        let (patched, kind) = patch_footprint(draft, "R1", "Fixtures:R_0603_1608Metric").unwrap();
+        assert_eq!(kind, "updated");
+        assert!(patched.contains("        footprint: \"Fixtures:R_0603_1608Metric\"\n"));
+        assert!(!patched.contains("Old:Footprint"));
+    }
+
+    #[test]
+    fn patch_footprint_inserts_into_block_component() {
+        let draft = "\
+version: 1
+blocks:
+  main:
+    components:
+      R1:
+        part: R
+        between: [A, B]
+";
+        let (patched, kind) = patch_footprint(draft, "R1", "Fixtures:R_0603_1608Metric").unwrap();
+        assert_eq!(kind, "inserted");
+        assert!(patched.contains(
+            "      R1:\n        footprint: \"Fixtures:R_0603_1608Metric\"\n        part: R"
+        ));
+    }
 }
