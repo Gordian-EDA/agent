@@ -1,24 +1,30 @@
 //! The single [`Provider`] backend, built on the [`genai`] crate.
 //!
-//! [`GenaiProvider`] serves all three configured backends behind one
-//! implementation — the OpenAI-compatible gateway, the native Anthropic
-//! Messages API, and AWS Bedrock (Converse) — by forcing genai's adapter,
-//! endpoint, and auth through a [`ServiceTargetResolver`]. genai owns the wire
-//! serialization; this module only maps Gordian's neutral conversation types
+//! [`GenaiProvider`] is provider-agnostic: genai picks the wire adapter from the
+//! model name and reads each provider's standard API key itself, so any
+//! genai-supported provider works BYOK with nothing but a key + a model id. This
+//! module only maps Gordian's neutral conversation types
 //! ([`Message`]/[`ContentBlock`]/[`ToolDef`]) onto genai's and back.
+//!
+//! [`from_env`] needs only `AGENT_MODEL`: genai picks the adapter from the model
+//! name (or a `namespace::model` prefix) and reads the provider's standard key
+//! itself — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
+//! `BEDROCK_API_KEY` (`bedrock_api::…`), `OPEN_ROUTER_API_KEY` (`open_router::…`),
+//! and so on.
+//!
+//! The *one* thing genai cannot infer from env is an arbitrary private
+//! OpenAI-compatible base URL (a self-hosted server or in-house gateway). Set
+//! `OPENAI_BASE_URL` and that endpoint is wired via a [`ServiceTargetResolver`]
+//! (OpenAI adapter forced + bearer key injected); otherwise genai's default
+//! client handles everything.
 //!
 //! ## Load-bearing quirks
 //!
-//! - **Gateway `thread_identifier`** — the respan gateway groups a thread's
-//!   completions by a top-level `thread_identifier` field. genai's OpenAI
-//!   adapter merges [`ChatOptions::with_extra_body`] into the request body
-//!   top-level, so the id rides there (gateway backend only).
 //! - **Assistant `content: ""`-not-null and object-or-string tool arguments**
 //!   are handled natively by genai's OpenAI adapter — no workaround needed.
 //! - **Tool-result images** ride a trailing `user` turn: genai's
 //!   [`ToolResponse`] is text-only, so an image attached to a tool result is
-//!   emitted as a binary [`ContentPart`] on a following user message — the same
-//!   behavior the hand-rolled OpenAI client had.
+//!   emitted as a binary [`ContentPart`] on a following user message.
 //!
 //! Streaming reads the *assembled* tool calls and usage off genai's terminal
 //! [`StreamEnd`] event (`with_capture_tool_calls(true)` + `with_capture_usage`),
@@ -28,40 +34,19 @@
 //!
 //! A multi-call agent turn (up to ~90 model calls) re-sends the same large,
 //! unchanging prefix — the system prompt + the tool-def JSON — on every call.
-//! Without caching that whole prefix is re-billed each time. [`chat_options`]
-//! attaches a single request-level cache breakpoint via
-//! [`ChatOptions::with_cache_control`]; genai routes it per backend:
-//!
-//! - **Anthropic** (native, and the gateway when it proxies Anthropic via the
-//!   real Messages API): genai's Anthropic adapter auto-marks the *end of the
-//!   static prefix* — the last system block, which caches tools + system
-//!   together — with `cache_control: {type: "ephemeral"}`. The per-call-varying
-//!   messages stay after the breakpoint, uncached. This is the priority backend
-//!   and the one this breakpoint is shaped for.
-//! - **Gateway** (genai's OpenAI adapter, `AdapterKind::OpenAI`): the same
-//!   option maps to a top-level `prompt_cache_retention: "in_memory"` passthrough
-//!   flag (alongside `thread_identifier`). OpenAI-style endpoints cache the
-//!   common prefix automatically with no marker; the flag is the only knob the
-//!   OpenAI wire shape exposes. genai's OpenAI adapter *cannot* emit the raw
-//!   Anthropic `cache_control` content-block marker — so if the gateway proxies
-//!   Anthropic, caching there depends on the gateway translating the flag (or
-//!   caching by default), not on us injecting the Anthropic marker through this
-//!   adapter.
-//! - **Bedrock** (Converse): the option is carried through the same way and
-//!   Bedrock reports `cacheReadInputTokens` / `cacheWriteInputTokens` back.
-//!
-//! Cache usage rides back on the response: genai folds Anthropic's
-//! `cache_creation_input_tokens` / `cache_read_input_tokens` into
-//! `Usage::prompt_tokens_details`, surfaced here as
-//! [`Completion::cache_write_tokens`] / [`Completion::cache_read_tokens`] — a
-//! cache-write on the first call and a cache-read on the rest of the turn.
-//! `prompt_tokens` (our `input_tokens`) already includes both.
+//! [`GenaiProvider::chat_options`] attaches one request-level cache breakpoint
+//! via [`ChatOptions::with_cache_control`]; genai routes it per backend (the
+//! Anthropic adapter marks the end of the static prefix `ephemeral`; the OpenAI
+//! adapter maps it to a `prompt_cache_retention` flag; Bedrock carries it
+//! through). Cache usage rides back on the response: genai folds the providers'
+//! `cache_creation` / `cache_read` counts into `Usage::prompt_tokens_details`,
+//! surfaced here as [`Completion::cache_write_tokens`] /
+//! [`Completion::cache_read_tokens`].
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream;
-use serde_json::json;
 
 use genai::adapter::AdapterKind;
 use genai::chat::{
@@ -71,114 +56,85 @@ use genai::chat::{
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, Headers, ModelIden, ServiceTarget};
 
-use crate::config::{AnthropicConfig, BedrockConfig, OpenAiConfig};
-use crate::provider::{EventStream, Provider, StreamEvent};
-use crate::types::{Completion, ContentBlock, Message, Role, ToolCall, ToolDef};
+use super::provider::{EventStream, Provider, StreamEvent};
+use super::types::{Completion, ContentBlock, Message, Role, ToolCall, ToolDef};
 
-/// Which configured backend a [`GenaiProvider`] is wired to. Selects the genai
-/// adapter and the request quirks (only the gateway carries `thread_identifier`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Backend {
-    Gateway,
-    Anthropic,
-    Bedrock,
-}
-
-/// One [`Provider`] over genai, serving any of the three backends. Holds the
-/// configured genai [`Client`] (with its [`ServiceTargetResolver`] baked in),
-/// the model id, the request `max_tokens`, and a per-thread identifier for the
-/// gateway's `thread_identifier` grouping.
+/// One [`Provider`] over genai. genai owns the wire format; this holds the
+/// configured [`Client`], the model id, and the request `max_tokens`.
 pub struct GenaiProvider {
     client: Client,
     model: String,
-    backend: Backend,
     max_tokens: u32,
-    thread_id: String,
+}
+
+/// Build the configured provider from the environment / local `.env`, boxed
+/// behind [`Provider`] so callers stay provider-agnostic. Requires `AGENT_MODEL`;
+/// see the module docs for how the (rare) custom-endpoint case is wired.
+pub fn from_env() -> Result<Box<dyn Provider>> {
+    let _ = dotenvy::dotenv();
+    let model = agent_model()?;
+    let client = match std::env::var("OPENAI_BASE_URL") {
+        // Arbitrary OpenAI-compatible endpoint (private gateway / self-host): the
+        // one thing genai can't infer from env.
+        Ok(base_url) => {
+            let key = std::env::var("OPENAI_API_KEY")
+                .context("OPENAI_BASE_URL is set but OPENAI_API_KEY is missing")?;
+            openai_compatible_client(base_url, key)
+        }
+        // Everything else: genai detects the adapter from the model name and
+        // reads the provider's standard key.
+        Err(_) => Client::default(),
+    };
+    Ok(Box::new(GenaiProvider { client, model, max_tokens: 16384 }))
+}
+
+/// A coarse `(source, model)` label for status display, computed WITHOUT
+/// requiring valid credentials (so a UI can show the configured model even when
+/// keys — or `AGENT_MODEL` — are missing).
+pub fn provider_status() -> (String, String) {
+    let _ = dotenvy::dotenv();
+    let model = std::env::var("AGENT_MODEL").unwrap_or_else(|_| "(AGENT_MODEL unset)".to_string());
+    let source = if std::env::var("OPENAI_BASE_URL").is_ok() { "gateway" } else { "direct" };
+    (source.to_string(), model)
+}
+
+/// The required model id. genai resolves the provider from it.
+fn agent_model() -> Result<String> {
+    std::env::var("AGENT_MODEL").context(
+        "AGENT_MODEL not set — the model id genai routes by, e.g. `claude-sonnet-4-6`, `gpt-4o`, \
+         or a namespaced `bedrock_api::anthropic.claude-...` / `open_router::openai/gpt-4.1`",
+    )
+}
+
+/// A genai client for a custom OpenAI-compatible endpoint: the base URL override
+/// and a plain bearer header are injected via a [`ServiceTargetResolver`], and
+/// the OpenAI adapter is forced.
+fn openai_compatible_client(base_url: String, key: String) -> Client {
+    let base = base_url.trim_end_matches('/').to_string();
+    let resolver = ServiceTargetResolver::from_resolver_fn(
+        move |target: ServiceTarget| -> genai::resolver::Result<ServiceTarget> {
+            let ServiceTarget { model, .. } = target;
+            let model = ModelIden::new(AdapterKind::OpenAI, model.model_name);
+            let endpoint = Endpoint::from_owned(format!("{base}/"));
+            let headers = Headers::from([("Authorization", format!("Bearer {key}"))]);
+            let auth = AuthData::RequestOverride {
+                url: format!("{base}/chat/completions"),
+                headers,
+            };
+            Ok(ServiceTarget { endpoint, auth, model })
+        },
+    );
+    Client::builder().with_service_target_resolver(resolver).build()
 }
 
 impl GenaiProvider {
-    /// Build the gateway-backed provider. The base_url override and the custom
-    /// bearer header are injected via a [`ServiceTargetResolver`]:
-    /// [`AuthData::RequestOverride`] is genai's escape hatch for arbitrary auth
-    /// headers — here a plain bearer key, with the `/chat/completions` URL fixed.
-    pub fn gateway(config: OpenAiConfig) -> Self {
-        let key = config.api_key.clone();
-        let base = config.base_url.trim_end_matches('/').to_string();
-        let resolver = ServiceTargetResolver::from_resolver_fn(
-            move |target: ServiceTarget| -> genai::resolver::Result<ServiceTarget> {
-                let ServiceTarget { model, .. } = target;
-                let model = ModelIden::new(AdapterKind::OpenAI, model.model_name);
-                let endpoint = Endpoint::from_owned(format!("{base}/"));
-                let headers = Headers::from([("Authorization", format!("Bearer {key}"))]);
-                let auth = AuthData::RequestOverride {
-                    url: format!("{base}/chat/completions"),
-                    headers,
-                };
-                Ok(ServiceTarget { endpoint, auth, model })
-            },
-        );
-        Self::with_resolver(resolver, config.model, Backend::Gateway)
-    }
-
-    /// Build the native-Anthropic provider over genai's Anthropic adapter,
-    /// injecting the API key explicitly.
-    pub fn anthropic(config: AnthropicConfig) -> Self {
-        let key = config.api_key.clone();
-        let resolver = ServiceTargetResolver::from_resolver_fn(
-            move |target: ServiceTarget| -> genai::resolver::Result<ServiceTarget> {
-                let ServiceTarget { endpoint, model, .. } = target;
-                let model = ModelIden::new(AdapterKind::Anthropic, model.model_name);
-                Ok(ServiceTarget { endpoint, auth: AuthData::from_single(key.clone()), model })
-            },
-        );
-        Self::with_resolver(resolver, config.model, Backend::Anthropic)
-    }
-
-    /// Build the AWS Bedrock provider over genai's `BedrockApiAdapter`
-    /// ([`AdapterKind::BedrockApi`]) — bearer-token Converse, no AWS SDK / SigV4.
-    pub fn bedrock(config: BedrockConfig) -> Self {
-        let token = config.bearer_token.clone();
-        let endpoint_url = config.endpoint();
-        let resolver = ServiceTargetResolver::from_resolver_fn(
-            move |target: ServiceTarget| -> genai::resolver::Result<ServiceTarget> {
-                let ServiceTarget { model, .. } = target;
-                let model = ModelIden::new(AdapterKind::BedrockApi, model.model_name);
-                let endpoint = Endpoint::from_owned(endpoint_url.clone());
-                Ok(ServiceTarget {
-                    endpoint,
-                    auth: AuthData::from_single(token.clone()),
-                    model,
-                })
-            },
-        );
-        Self::with_resolver(resolver, config.model, Backend::Bedrock)
-    }
-
-    fn with_resolver(resolver: ServiceTargetResolver, model: String, backend: Backend) -> Self {
-        let client = Client::builder().with_service_target_resolver(resolver).build();
-        // 16k, not 4k: a single create_design carries the whole circuit YAML, which for a large
-        // board exceeds 4k tokens and gets TRUNCATED — the truncated args then fail to parse and
-        // the yaml silently vanishes. The configured models allow >= 16k.
-        Self { client, model, backend, max_tokens: 16384, thread_id: random_thread_id() }
-    }
-
     fn chat_options(&self) -> ChatOptions {
         // One request-level cache breakpoint at the end of the stable prefix
-        // (system + tool defs). genai's Anthropic adapter turns this into a
-        // `cache_control: {type: "ephemeral"}` marker on the last system block —
-        // so the multi-KB prefix is billed once per turn, not once per call,
-        // and the per-call-varying messages after it stay uncached. The OpenAI
-        // gateway maps it to a `prompt_cache_retention` flag; Bedrock carries it
-        // through. See the module docs for the per-backend story.
-        let mut opts =
-            ChatOptions::default().with_max_tokens(self.max_tokens).with_cache_control(CacheControl::Ephemeral);
-        // The respan gateway groups this thread's completions by a top-level
-        // `thread_identifier`. genai's OpenAI adapter merges extra_body into the
-        // request body top-level, so the id lands where the gateway expects it.
-        if self.backend == Backend::Gateway {
-            opts = opts.with_extra_body(json!({ "thread_identifier": self.thread_id }));
-        }
-        opts
+        // (system + tool defs): the multi-KB prefix is billed once per turn, not
+        // once per call. genai routes it per adapter.
+        ChatOptions::default()
+            .with_max_tokens(self.max_tokens)
+            .with_cache_control(CacheControl::Ephemeral)
     }
 
     fn stream_options(&self) -> ChatOptions {
@@ -214,10 +170,8 @@ impl Provider for GenaiProvider {
         let text = resp.texts().join("");
         let tool_calls = resp.tool_calls().into_iter().map(from_genai_tool_call).collect();
         let stop_reason = resp.stop_reason.as_ref().map(|s| s.raw().to_string()).unwrap_or_default();
-        let (input_tokens, output_tokens) = usage_tokens(
-            resp.usage.prompt_tokens,
-            resp.usage.completion_tokens,
-        );
+        let (input_tokens, output_tokens) =
+            usage_tokens(resp.usage.prompt_tokens, resp.usage.completion_tokens);
         let (cache_write_tokens, cache_read_tokens) = cache_tokens(&resp.usage);
 
         Ok(Completion {
@@ -247,10 +201,6 @@ impl Provider for GenaiProvider {
         // neutral stream surfaces tool calls only on the final `Completed`.
         let events = stream::unfold(StreamState::Running(resp.stream, String::new()), step);
         Ok(events.boxed())
-    }
-
-    fn new_thread(&mut self) {
-        self.thread_id = random_thread_id();
     }
 }
 
@@ -308,7 +258,7 @@ fn usage_tokens(prompt: Option<i32>, completion: Option<i32>) -> (u64, u64) {
 
 /// Extract `(cache_write, cache_read)` token counts from genai's [`Usage`].
 ///
-/// genai folds Anthropic's `cache_creation_input_tokens` /
+/// genai folds the providers' `cache_creation_input_tokens` /
 /// `cache_read_input_tokens` (and the Bedrock/OpenAI equivalents) into
 /// `prompt_tokens_details`. Absent when the backend reports no caching.
 fn cache_tokens(usage: &Usage) -> (u64, u64) {
@@ -329,7 +279,7 @@ fn cache_tokens(usage: &Usage) -> (u64, u64) {
 /// A user turn carrying tool results expands into a `tool` message (one
 /// [`ToolResponse`] per result) plus — for any images those results attached —
 /// a trailing `user` message of binary parts, since genai's `ToolResponse` is
-/// text-only. This reproduces the load-bearing behavior of the prior client.
+/// text-only.
 fn to_genai_messages(messages: &[Message]) -> Vec<ChatMessage> {
     let mut out: Vec<ChatMessage> = Vec::new();
     for m in messages {
@@ -423,26 +373,11 @@ fn stream_end_to_completion(end: StreamEnd, text: String) -> Completion {
     }
 }
 
-/// A fresh random id for a new thread (one conversation/session). Random — not
-/// derived from time or content — so distinct threads never collide. Adequate
-/// for the gateway's thread-grouping; not a security token.
-fn random_thread_id() -> String {
-    let (a, b) = (fastrand::u64(..), fastrand::u64(..));
-    format!(
-        "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
-        (a & 0xffffffff) as u32,
-        ((a >> 32) & 0xffff) as u16,
-        ((a >> 48) & 0xfff) as u16,
-        (b & 0xfff) as u16,
-        (b >> 12) & 0xffffffffffff
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ImageData;
-    use serde_json::Value;
+    use crate::llm::types::ImageData;
+    use serde_json::{Value, json};
 
     /// The serialized role label of a genai message (`User`/`Assistant`/`Tool`/
     /// `System` — genai serializes the variant name verbatim).
@@ -464,7 +399,6 @@ mod tests {
         let out = to_genai_messages(&messages);
         assert_eq!(out.len(), 1);
         assert_eq!(role_of(&out[0]), "Assistant");
-        // The genai ToolCall round-trips back to our neutral ToolCall shape.
         let v = serde_json::to_value(&out[0]).unwrap();
         let body = v.to_string();
         assert!(body.contains("apply_design"), "tool name preserved: {body}");
@@ -493,7 +427,6 @@ mod tests {
 
     #[test]
     fn standalone_user_image_maps_to_a_binary_part_in_the_user_turn() {
-        // The layout critic's path: a user message of [text, Image].
         let messages = vec![Message::user_with_image(
             "look at this render",
             ImageData { format: "png".to_string(), base64: "aGVsbG8=".to_string() },
@@ -516,10 +449,7 @@ mod tests {
         let g = to_genai_tool(&tool);
         let v = serde_json::to_value(&g).unwrap();
         assert_eq!(v.get("name").and_then(Value::as_str), Some("get_design"));
-        assert_eq!(
-            v.get("description").and_then(Value::as_str),
-            Some("fetch the current design")
-        );
+        assert_eq!(v.get("description").and_then(Value::as_str), Some("fetch the current design"));
         assert_eq!(v["schema"]["type"], "object");
     }
 
@@ -546,17 +476,10 @@ mod tests {
 
     #[test]
     fn chat_options_carry_the_ephemeral_cache_breakpoint() {
-        // For the cache-capable Anthropic backend, the request options must
-        // carry one ephemeral cache_control breakpoint — genai's Anthropic
-        // adapter turns this into the `cache_control: {type: "ephemeral"}` marker
-        // on the last system block (the end of the system + tools prefix).
-        let provider = GenaiProvider::anthropic(AnthropicConfig {
-            api_key: "k".to_string(),
-            model: "claude-opus-4-8".to_string(),
-        });
+        let provider =
+            GenaiProvider { client: Client::default(), model: "m".to_string(), max_tokens: 16384 };
         let opts = provider.chat_options();
         assert_eq!(opts.cache_control, Some(CacheControl::Ephemeral));
-        // Serialized form is what genai consumes; the marker must be present.
         let v = serde_json::to_value(&opts).unwrap();
         assert_eq!(v.get("cache_control").and_then(Value::as_str), Some("Ephemeral"));
         // Streaming reuses the same options, so it carries the breakpoint too.
@@ -588,20 +511,8 @@ mod tests {
         };
         assert_eq!(cache_tokens(&usage), (0, 800), "later call: cache read");
 
-        // No caching reported → zeros, not a panic.
         assert_eq!(cache_tokens(&Usage::default()), (0, 0));
     }
-
-    #[test]
-    fn thread_id_is_random_and_uuid_shaped() {
-        let a = random_thread_id();
-        let b = random_thread_id();
-        assert_ne!(a, b, "distinct threads get distinct ids");
-        assert_eq!(a.len(), 36, "uuid-shaped");
-        assert_eq!(a.matches('-').count(), 4);
-    }
-
-    use genai::chat::{MessageContent, Usage};
 
     fn stream_end(
         content: Option<MessageContent>,
@@ -623,24 +534,17 @@ mod tests {
 
     #[test]
     fn text_completion_lifts_to_neutral_completion_with_tokens() {
-        let end = stream_end(
-            Some(MessageContent::from_text("42")),
-            Some("end_turn"),
-            Some(10),
-            Some(1),
-        );
+        let end =
+            stream_end(Some(MessageContent::from_text("42")), Some("end_turn"), Some(10), Some(1));
         let c = stream_end_to_completion(end, "42".to_string());
         assert_eq!(c.text, "42");
         assert!(c.tool_calls.is_empty());
-        // StopReason::raw() preserves the wire string verbatim.
         assert_eq!(c.stop_reason, "end_turn");
         assert_eq!((c.input_tokens, c.output_tokens), (10, 1));
     }
 
     #[test]
     fn tool_call_completion_extracts_object_form_arguments() {
-        // genai keeps tool arguments as a structured Value (object form here),
-        // which lifts straight onto our neutral ToolCall.input.
         let call = GToolCall {
             call_id: "call_xyz".to_string(),
             fn_name: "create_design".to_string(),
@@ -658,7 +562,6 @@ mod tests {
 
     #[test]
     fn missing_usage_and_stop_reason_default_to_zero_and_empty() {
-        // No captured content, usage, or stop reason — a degenerate End.
         let c = stream_end_to_completion(StreamEnd::default(), String::new());
         assert_eq!(c.text, "");
         assert!(c.tool_calls.is_empty());

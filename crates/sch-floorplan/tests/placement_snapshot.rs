@@ -10,7 +10,7 @@
 //! placement the oracle can't see.
 
 use kicad_cli::env::KicadEnv;
-use kicad_symbol::provider::RealSymbolProvider;
+use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan::{self, LayoutIr};
 use std::path::{Path, PathBuf};
 
@@ -37,7 +37,7 @@ fn snap_path(name: &str) -> PathBuf {
 
 /// Render a fixture exactly as production would: sidecar IR if present, else the
 /// connectivity-inferred frame.
-fn render(env: &KicadEnv, provider: &RealSymbolProvider, name: &str) -> String {
+fn render(env: &KicadEnv, provider: &SymbolTable, name: &str) -> String {
     let src = std::fs::read_to_string(doc(name, "circuit.yaml")).unwrap();
     let result = circuit_lang::compile(&src, provider);
     assert!(!result.diagnostics.has_errors(), "{name}: {:#?}", result.diagnostics);
@@ -55,7 +55,7 @@ fn placement_snapshots_match() {
         eprintln!("no KiCAD environment; skipping placement snapshots");
         return;
     };
-    let provider = RealSymbolProvider::new(env.clone());
+    let provider = SymbolTable::from_env(&env);
     let bless = std::env::var("UPDATE_SNAPSHOTS").is_ok();
     let mut problems = Vec::new();
     for name in TARGETS {
@@ -85,7 +85,7 @@ fn placement_snapshots_match() {
 #[test]
 fn emit_is_deterministic() {
     let Some(env) = KicadEnv::detect() else { return };
-    let provider = RealSymbolProvider::new(env.clone());
+    let provider = SymbolTable::from_env(&env);
     // Emit twice with the same (default) strategy + fixed seed; must be identical.
     // Trivial for the deterministic greedy default today, but this is the guard
     // that catches accidental nondeterminism the moment randomized SA moves land.

@@ -10,7 +10,6 @@ description = "KiCAD symbol vocabulary + library reader: .kicad_sym parsing, pin
 kicad-cli = { path = "../kicad-cli" }
 kiutils_kicad.workspace = true
 kiutils_sexpr.workspace = true
-elsa.workspace = true
 fuzzy-matcher.workspace = true
 strsim.workspace = true
 

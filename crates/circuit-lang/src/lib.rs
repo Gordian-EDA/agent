@@ -14,7 +14,7 @@ mod yaml;
 
 pub use diag::{Diagnostic, Diagnostics, Severity, Span};
 pub use model::Design;
-pub use provider::{find_pin, MockSymbolProvider, PinDir, PinMeta, PinType, SymbolMeta, SymbolProvider};
+pub use provider::{find_pin, PinDir, PinMeta, PinType, SymbolMeta, SymbolTable};
 
 pub struct CompileResult {
     /// Some only when there are no errors (warnings allowed).
@@ -23,7 +23,7 @@ pub struct CompileResult {
 }
 
 /// Full gauntlet, pure half: parse -> desugar -> lint.
-pub fn compile(src: &str, provider: &dyn SymbolProvider) -> CompileResult {
+pub fn compile(src: &str, provider: &SymbolTable) -> CompileResult {
     let (surface, mut diagnostics) = parse::parse_str(src);
     let design = surface.map(|s| {
         let (d, ds) = desugar::desugar(&s, provider);

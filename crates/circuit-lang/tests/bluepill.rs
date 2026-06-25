@@ -1,9 +1,9 @@
-use circuit_lang::{MockSymbolProvider, PinType, compile};
+use circuit_lang::{SymbolTable, PinType, compile};
 
-fn provider() -> MockSymbolProvider {
+fn provider() -> SymbolTable {
     use PinType::*;
-    let mut p = MockSymbolProvider::with_basics();
-    p.add(
+    let mut p = SymbolTable::with_basics();
+    p.mock_add(
         "Regulator_Linear:AMS1117-3.3",
         vec![
             ("1", "GND", PowerInput, 1),
@@ -11,7 +11,7 @@ fn provider() -> MockSymbolProvider {
             ("3", "VI", PowerInput, 1),
         ],
     );
-    p.add(
+    p.mock_add(
         "Connector:USB_C_Receptacle_USB2.0",
         vec![
             ("A1", "GND", Passive, 1),
@@ -25,7 +25,7 @@ fn provider() -> MockSymbolProvider {
             ("S1", "SHIELD", Passive, 1),
         ],
     );
-    p.add(
+    p.mock_add(
         "MCU_ST_STM32H7:STM32H743VITx",
         vec![
             ("17", "VDD", PowerInput, 1),
@@ -39,7 +39,7 @@ fn provider() -> MockSymbolProvider {
             ("14", "NRST", Other, 1),
         ],
     );
-    p.add(
+    p.mock_add(
         "Connector_Generic:Conn_01x10",
         vec![
             ("1", "Pin_1", Passive, 1),

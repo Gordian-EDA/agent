@@ -5,9 +5,8 @@
 //!
 //! Usage: cargo run --release -p agent --example sa_e2e [name ...]
 
-use circuit_lang::SymbolProvider;
 use kicad_cli::env::KicadEnv;
-use kicad_symbol::provider::RealSymbolProvider;
+use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan::{self, LayoutIr};
 
 const FIXTURES: &[&str] = &[
@@ -23,10 +22,10 @@ const FIXTURES: &[&str] = &[
     "bga-fpga-ice40",
 ];
 
-fn render(env: &KicadEnv, provider: &RealSymbolProvider, name: &str) -> anyhow::Result<usize> {
+fn render(env: &KicadEnv, provider: &SymbolTable, name: &str) -> anyhow::Result<usize> {
     let dir = std::path::Path::new("docs/validation");
     let src = std::fs::read_to_string(dir.join(format!("{name}.circuit.yaml")))?;
-    let result = circuit_lang::compile(&src, provider as &dyn SymbolProvider);
+    let result = circuit_lang::compile(&src, provider);
     let design = result
         .design
         .ok_or_else(|| anyhow::anyhow!("compile failed: {name}"))?;
@@ -40,7 +39,7 @@ fn render(env: &KicadEnv, provider: &RealSymbolProvider, name: &str) -> anyhow::
 
 fn main() -> anyhow::Result<()> {
     let env = KicadEnv::detect().expect("no KiCAD environment");
-    let provider = RealSymbolProvider::new(env.clone());
+    let provider = SymbolTable::from_env(&env);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let names: Vec<&str> = if args.is_empty() {
         FIXTURES.to_vec()

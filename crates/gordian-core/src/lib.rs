@@ -6,15 +6,16 @@
 //! ([`multisheet`]), the SVG→PNG [`render`], the netlist + vision [`review`]
 //! mechanics, the [`prompts`] system prompt, and the design [`retrieval`] corpus.
 //!
-//! The loop is built around ONE external seam — [`llm_client::Provider`], the LLM
-//! backend — plus the KiCAD tools it drives directly. The only decoupling that
-//! remains is this library vs. the [`gordian`](../gordian/index.html) CLI binary,
-//! so a future web frontend reuses the lib. To build a working agent:
+//! The loop is built around ONE external seam — [`Provider`], the LLM backend
+//! (see the [`llm`] module) — plus the KiCAD tools it drives directly. The only
+//! decoupling that remains is this library vs. the
+//! [`gordian`](../gordian/index.html) CLI binary, so a future web frontend
+//! reuses the lib. To build a working agent:
 //!
 //! ```ignore
 //! let ctx = gordian_core::tools::PcbToolCtx::for_project(env, project_dir)?;
 //! let agent = gordian_core::Agent::new(
-//!     llm_client::from_env()?,
+//!     gordian_core::from_env()?,
 //!     ctx,
 //!     gordian_core::prompts::system_prompt(),
 //! );
@@ -25,6 +26,7 @@
 //! [`PcbToolCtx`].
 
 mod agent;
+pub mod llm;
 pub mod multisheet;
 pub mod prompts;
 pub mod render;
@@ -45,6 +47,7 @@ pub use review::{review, review_image};
 pub use tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
 
 // Re-export the LLM seam so callers can build on `gordian_core::*` alone.
-pub use llm_client::{
-    Completion, ContentBlock, ImageData, Message, Provider, Role, ToolCall, ToolDef,
+pub use llm::{
+    Completion, ContentBlock, ImageData, Message, Provider, Role, ToolCall, ToolDef, from_env,
+    provider_status,
 };

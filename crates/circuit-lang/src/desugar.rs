@@ -3,7 +3,7 @@
 
 use crate::diag::{Diagnostic, Diagnostics};
 use crate::model::*;
-use crate::provider::SymbolProvider;
+use crate::provider::SymbolTable;
 use crate::surface::*;
 use indexmap::IndexMap;
 
@@ -19,7 +19,7 @@ fn alias(part: &str) -> String {
     }
 }
 
-pub fn desugar(s: &SurfaceDesign, provider: &dyn SymbolProvider) -> (Design, Diagnostics) {
+pub fn desugar(s: &SurfaceDesign, provider: &SymbolTable) -> (Design, Diagnostics) {
     let mut diags = Diagnostics::default();
     let mut d = Design {
         name: s.name.clone(),
@@ -227,7 +227,7 @@ fn lower_block_layout(sb: &SurfaceBlock, diags: &mut Diagnostics) -> LayoutGrid 
 /// are skipped (lint.rs already errors when they are left unconnected).
 /// Markers are keyed by pin number and inserted in symbol pin order, so the
 /// pass is deterministic and idempotent across a canonical round-trip.
-fn materialize_auto_nc(d: &mut Design, provider: &dyn SymbolProvider) {
+fn materialize_auto_nc(d: &mut Design, provider: &SymbolTable) {
     for block in d.blocks.values_mut() {
         for comp in block.components.values_mut() {
             let Some(meta) = provider.symbol(&comp.part) else {
@@ -289,7 +289,7 @@ struct RawPin {
 fn apply_two_pin(
     refdes: &str,
     sc: &mut SurfaceComponent,
-    provider: &dyn SymbolProvider,
+    provider: &SymbolTable,
     diags: &mut Diagnostics,
 ) {
     let has_between = sc.between.is_some();
@@ -714,7 +714,7 @@ fn write_pin(d: &mut Design, rp: &RawPin, target: PinTarget) {
 fn synth_decouple(
     d: &mut Design,
     s: &SurfaceDesign,
-    provider: &dyn SymbolProvider,
+    provider: &SymbolTable,
     diags: &mut Diagnostics,
 ) {
     for (bname, sb) in &s.blocks {
@@ -729,7 +729,7 @@ fn synth_decouple(
             // name); fall back to the raw key only when the symbol is unknown.
             let meta = provider.symbol(&comp.part);
             let resolved_name = |key: &str| -> String {
-                let Some(meta) = meta else {
+                let Some(meta) = &meta else {
                     return key.to_string();
                 };
                 if let Some(pm) = meta.pins.iter().find(|p| p.number == key) {
@@ -812,13 +812,13 @@ fn synth_decouple(
 mod tests {
     use super::*;
     use crate::parse::parse_str;
-    use crate::provider::MockSymbolProvider;
+    use crate::provider::SymbolTable;
 
     pub(crate) fn run(src: &str) -> (crate::model::Design, crate::diag::Diagnostics) {
         let (s, mut diags) = parse_str(src);
         let (d, ds) = desugar(
             &s.expect("parse failed"),
-            &MockSymbolProvider::with_basics(),
+            &SymbolTable::with_basics(),
         );
         diags.extend(ds);
         (d, diags)
@@ -925,9 +925,9 @@ blocks:
     #[test]
     fn between_assigns_by_numeric_pin_order() {
         // symbol whose library lists pins out of numeric order: index0=number "2", index1=number "1"
-        use crate::provider::{MockSymbolProvider, PinType};
-        let mut p = MockSymbolProvider::with_basics();
-        p.add(
+        use crate::provider::{SymbolTable, PinType};
+        let mut p = SymbolTable::with_basics();
+        p.mock_add(
             "My:Weird",
             vec![
                 ("2", "~", PinType::Passive, 1),
@@ -1180,9 +1180,9 @@ blocks:
 
     #[test]
     fn decouple_resolves_power_pins_by_number() {
-        use crate::provider::{MockSymbolProvider, PinType};
-        let mut p = MockSymbolProvider::with_basics();
-        p.add(
+        use crate::provider::{SymbolTable, PinType};
+        let mut p = SymbolTable::with_basics();
+        p.mock_add(
             "M:CPU",
             vec![
                 ("1", "VDD", PinType::PowerInput, 1),
@@ -1214,9 +1214,9 @@ blocks:
 
     #[test]
     fn unmentioned_non_power_pins_become_no_connect() {
-        use crate::provider::{MockSymbolProvider, PinType};
-        let mut p = MockSymbolProvider::with_basics();
-        p.add(
+        use crate::provider::{SymbolTable, PinType};
+        let mut p = SymbolTable::with_basics();
+        p.mock_add(
             "M:Chip",
             vec![
                 ("1", "PA0", PinType::Other, 1),
@@ -1243,9 +1243,9 @@ blocks:
 
     #[test]
     fn auto_nc_is_idempotent_through_canon() {
-        use crate::provider::{MockSymbolProvider, PinType};
-        let mut p = MockSymbolProvider::with_basics();
-        p.add(
+        use crate::provider::{SymbolTable, PinType};
+        let mut p = SymbolTable::with_basics();
+        p.mock_add(
             "M:Chip",
             vec![
                 ("1", "PA0", PinType::Other, 1),

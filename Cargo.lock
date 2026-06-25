@@ -1014,7 +1014,6 @@ dependencies = [
  "image",
  "kicad-cli",
  "kicad-sexpr",
- "llm-client",
  "pulldown-cmark",
  "ratatui",
  "ratatui-image",
@@ -1032,9 +1031,11 @@ dependencies = [
  "base64",
  "circuit-lang",
  "directories",
+ "dotenvy",
  "drc-lint",
  "futures",
  "fuzzy-matcher",
+ "genai",
  "geom",
  "greedy-place",
  "grid-astar",
@@ -1043,7 +1044,6 @@ dependencies = [
  "kicad-ipc",
  "kicad-sexpr",
  "kicad-symbol",
- "llm-client",
  "negotiated-mesh",
  "pcb-model",
  "pcb-place",
@@ -1645,7 +1645,6 @@ dependencies = [
 name = "kicad-symbol"
 version = "0.1.0"
 dependencies = [
- "elsa",
  "fuzzy-matcher",
  "kicad-cli",
  "kiutils_kicad",
@@ -1740,21 +1739,6 @@ name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
-
-[[package]]
-name = "llm-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "dotenvy",
- "fastrand",
- "futures",
- "genai",
- "serde",
- "serde_json",
- "tokio",
-]
 
 [[package]]
 name = "lock_api"

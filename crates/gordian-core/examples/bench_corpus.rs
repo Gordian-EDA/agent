@@ -5,15 +5,14 @@
 //!
 //! Usage: cargo run --release -p agent --example bench_corpus -- [--out DIR] FILE.circuit.yaml ...
 
-use circuit_lang::SymbolProvider;
 use kicad_cli::cli::KicadCli;
 use kicad_cli::env::KicadEnv;
-use kicad_symbol::provider::RealSymbolProvider;
+use kicad_symbol::SymbolTable;
 use std::path::{Path, PathBuf};
 
 fn main() -> anyhow::Result<()> {
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let provider = RealSymbolProvider::new(env.clone());
+    let provider = SymbolTable::from_env(&env);
 
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut out_dir = PathBuf::from("/tmp/bench");
@@ -55,13 +54,13 @@ fn main() -> anyhow::Result<()> {
 #[allow(clippy::type_complexity)] // example harness: a flat metrics tuple is clearer than a one-off struct
 fn bench_one(
     env: &KicadEnv,
-    provider: &RealSymbolProvider,
+    provider: &SymbolTable,
     yaml_path: &Path,
     out_dir: &Path,
     stem: &str,
 ) -> anyhow::Result<(usize, usize, usize, usize, usize, usize, usize, f64)> {
     let src = std::fs::read_to_string(yaml_path)?;
-    let result = circuit_lang::compile(&src, provider as &dyn SymbolProvider);
+    let result = circuit_lang::compile(&src, provider);
     let design = result.design.ok_or_else(|| {
         let errs: Vec<String> = result.diagnostics.0.iter().map(|d| d.message.clone()).collect();
         anyhow::anyhow!("compile produced no design: {}", errs.join("; "))

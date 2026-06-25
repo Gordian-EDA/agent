@@ -33,7 +33,7 @@ async fn bluepill_founding_prompt_yields_erc_clean_schematic() {
         return;
     };
     // SKIP gracefully if no LLM credentials are configured.
-    let client = match llm_client::from_env() {
+    let client = match gordian_core::from_env() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("SKIP: no LLM client ({e})");

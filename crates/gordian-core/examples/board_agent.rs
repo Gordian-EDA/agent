@@ -29,14 +29,14 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let (provider, model) = llm_client::config::provider_status();
+    let (provider, model) = gordian_core::provider_status();
     eprintln!("provider={provider} model={model}\nprompt: {prompt}\n");
 
     let tmp = tempfile::tempdir()?;
     let ctx = gordian_core::tools::PcbToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
     let pcb_path = ctx.pcb_path();
 
-    let client = llm_client::from_env()?;
+    let client = gordian_core::from_env()?;
     let mut agent = Agent::new(client, ctx, gordian_core::prompts::system_prompt());
 
     // Stream the tool calls so the run is visible while it works.

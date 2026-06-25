@@ -1,16 +1,16 @@
 //! The vendor-neutral [`Provider`] trait and its streaming surface.
 //!
 //! A [`Provider`] runs one completion against a conversation in either of two
-//! shapes: await the whole [`Completion`] ([`Provider::complete`]) or consume it
-//! incrementally as [`StreamEvent`]s ([`Provider::stream`]). Both are required —
-//! every backend speaks both shapes directly (the genai backend streams via SSE
-//! and blocks via one request; the scripted test double replays either).
+//! shapes: await the whole [`Completion`] ([`Provider::complete`], required) or
+//! consume it incrementally as [`StreamEvent`]s ([`Provider::stream`]). A
+//! streaming backend overrides `stream` to emit live deltas; everything else
+//! gets the default, which wraps `complete` into one terminal `Completed` event.
 
 use std::pin::Pin;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::stream::Stream;
+use futures::stream::{self, Stream, StreamExt};
 
 use super::types::{Completion, Message, ToolDef};
 
@@ -42,16 +42,16 @@ pub trait Provider: Send + Sync {
 
     /// Run one completion as an incremental [`StreamEvent`] stream: live text
     /// deltas, then a terminal `Completed` carrying the assembled tool calls,
-    /// stop reason, and usage.
+    /// stop reason, and usage. The default wraps [`Provider::complete`] into a
+    /// single `Completed` event (no live deltas); a streaming backend overrides
+    /// this to emit `TextDelta`s as they arrive.
     async fn stream<'a>(
         &'a self,
         system: &'a str,
         messages: &'a [Message],
         tools: &'a [ToolDef],
-    ) -> Result<EventStream<'a>>;
-
-    /// Start a new thread (a fresh conversation/session, e.g. on `/clear`):
-    /// regenerate any per-thread state such as the request `thread_identifier`.
-    /// Default: no-op.
-    fn new_thread(&mut self) {}
+    ) -> Result<EventStream<'a>> {
+        let completion = self.complete(system, messages, tools).await?;
+        Ok(stream::once(async move { Ok(StreamEvent::Completed(completion)) }).boxed())
+    }
 }

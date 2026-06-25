@@ -4,13 +4,12 @@
 //! Usage: cargo run --release -p agent --example lift_roundtrip -- <file.kicad_sch> [...]
 //! Exits nonzero if any lifted YAML fails to compile.
 
-use circuit_lang::SymbolProvider;
 use kicad_cli::env::KicadEnv;
-use kicad_symbol::provider::RealSymbolProvider;
+use kicad_symbol::SymbolTable;
 
 fn main() -> anyhow::Result<()> {
     let env = KicadEnv::detect().expect("no KiCAD environment");
-    let provider = RealSymbolProvider::new(env.clone());
+    let provider = SymbolTable::from_env(&env);
     let mut bad = 0;
     for path in std::env::args().skip(1) {
         let yaml = match sch_io::read::lift(&env, std::path::Path::new(&path)) {
@@ -21,7 +20,7 @@ fn main() -> anyhow::Result<()> {
                 continue;
             }
         };
-        let result = circuit_lang::compile(&yaml, &provider as &dyn SymbolProvider);
+        let result = circuit_lang::compile(&yaml, &provider);
         let errs: Vec<String> = result
             .diagnostics
             .0

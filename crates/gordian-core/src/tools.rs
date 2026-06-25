@@ -48,11 +48,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use circuit_lang::model::{Component, Design, PinTarget};
-use circuit_lang::{SymbolProvider, compile};
+use circuit_lang::compile;
 use kicad_cli::cli::KicadCli;
 use kicad_cli::env::KicadEnv;
 use kicad_sexpr::footlib::FootprintIndex;
-use kicad_symbol::provider::RealSymbolProvider;
+use kicad_symbol::SymbolTable;
 use kicad_symbol::search::SymbolIndex;
 use kicad_sexpr::snapshot::SnapshotStore;
 
@@ -77,7 +77,7 @@ pub struct PcbToolCtx {
     /// Path to the project's `.kicad_sch` (may not exist yet).
     sch_path: PathBuf,
     /// Symbol provider over the installed libraries (memoizes lookups).
-    provider: RealSymbolProvider,
+    provider: SymbolTable,
     /// Per-write history / undo store.
     snapshots: SnapshotStore,
     /// Cross-library name index, built on first `search_symbols` and reused.
@@ -116,7 +116,7 @@ impl PcbToolCtx {
             .with_context(|| format!("opening snapshot store in {}", project_dir.display()))?;
         let workspace = crate::workspace::Workspace::for_project(&project_dir)
             .with_context(|| format!("opening .gordian workspace in {}", project_dir.display()))?;
-        let provider = RealSymbolProvider::new(env.clone());
+        let provider = SymbolTable::from_env(&env);
         Ok(Self {
             env,
             project_dir,
@@ -155,7 +155,7 @@ impl PcbToolCtx {
         let sch_path = project_dir.join("project.kicad_sch");
         let snapshots = SnapshotStore::for_project(&project_dir).ok()?;
         let workspace = crate::workspace::Workspace::for_project(&project_dir).ok()?;
-        let provider = RealSymbolProvider::new(env.clone());
+        let provider = SymbolTable::from_env(&env);
         Some(Self {
             env,
             project_dir,
@@ -191,7 +191,7 @@ impl PcbToolCtx {
         let sch_path = project_dir.join("project.kicad_sch");
         let snapshots = SnapshotStore::for_project(&project_dir).ok()?;
         let workspace = crate::workspace::Workspace::for_project(&project_dir).ok()?;
-        let provider = RealSymbolProvider::new(env.clone());
+        let provider = SymbolTable::from_env(&env);
         Some(Self {
             env,
             project_dir,
@@ -238,7 +238,7 @@ impl PcbToolCtx {
     }
 
     /// The symbol provider over the installed libraries.
-    pub fn provider(&self) -> &RealSymbolProvider {
+    pub fn provider(&self) -> &SymbolTable {
         &self.provider
     }
 

@@ -6,10 +6,9 @@
 //! Usage: cargo run --release -p agent --example render_targets [name ...]
 //! With no args, renders all four targets.
 
-use circuit_lang::SymbolProvider;
 use kicad_cli::cli::KicadCli;
 use kicad_cli::env::KicadEnv;
-use kicad_symbol::provider::RealSymbolProvider;
+use kicad_symbol::SymbolTable;
 
 const TARGETS: &[&str] =
     &["divider-filter", "mcp1703-power-entry", "555-blinker", "uart-level-translator"];
@@ -37,8 +36,8 @@ fn main() -> anyhow::Result<()> {
 
 fn render_fixture(env: &KicadEnv, yaml_path: &std::path::Path, out: &std::path::Path) -> anyhow::Result<()> {
     let src = std::fs::read_to_string(yaml_path)?;
-    let provider = RealSymbolProvider::new(env.clone());
-    let result = circuit_lang::compile(&src, &provider as &dyn SymbolProvider);
+    let provider = SymbolTable::from_env(&env);
+    let result = circuit_lang::compile(&src, &provider);
     let design = result.design.ok_or_else(|| {
         let errs: Vec<String> = result.diagnostics.0.iter().map(|d| d.message.clone()).collect();
         anyhow::anyhow!("compile produced no design: {}", errs.join("; "))

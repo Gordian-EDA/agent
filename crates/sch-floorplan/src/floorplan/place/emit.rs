@@ -7,10 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use circuit_lang::model::{Component, Design, PinTarget};
-use circuit_lang::{find_pin, PinType, SymbolProvider};
+use circuit_lang::{find_pin, PinType};
 use kicad_cli::env::KicadEnv;
 use kicad_symbol::geometry::SymbolGeometry;
-use kicad_symbol::provider::RealSymbolProvider;
+use kicad_symbol::SymbolTable;
 
 use crate::write::SchematicWriter;
 use sch_model::geom::Dir;
@@ -526,7 +526,7 @@ pub fn build_writer(
 /// say). KiCAD flags an undriven power-input pin as an error, so each such net
 /// gets exactly one flag.
 pub(crate) fn compute_needs_flag(env: &KicadEnv, items: &[Item], ir: &LayoutIr) -> BTreeSet<String> {
-    let provider = RealSymbolProvider::new(env.clone());
+    let provider = SymbolTable::from_env(env);
     let (mut driven, mut power_input) = (BTreeSet::new(), BTreeSet::new());
     for it in items {
         let Some(meta) = provider.symbol(&it.part) else { continue };

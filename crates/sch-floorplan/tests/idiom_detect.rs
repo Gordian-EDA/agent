@@ -3,11 +3,11 @@
 //! them on `LayoutIr.idioms`, pinning their members in `LayoutIr.frozen`.
 
 use kicad_cli::env::KicadEnv;
-use kicad_symbol::provider::RealSymbolProvider;
+use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan;
 use std::path::Path;
 
-fn compile_fixture(provider: &RealSymbolProvider, name: &str) -> circuit_lang::Design {
+fn compile_fixture(provider: &SymbolTable, name: &str) -> circuit_lang::Design {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../docs/validation/{name}.circuit.yaml"));
     let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
     let result = circuit_lang::compile(&src, provider);
@@ -21,7 +21,7 @@ fn infer_ir_recognizes_crystal_and_decoupling_idioms() {
         eprintln!("no KiCAD environment; skipping idiom detection test");
         return;
     };
-    let provider = RealSymbolProvider::new(env.clone());
+    let provider = SymbolTable::from_env(&env);
     let design = compile_fixture(&provider, "idiom-stm32");
     let ir = floorplan::infer_ir(&env, &design);
 
@@ -80,7 +80,7 @@ fn decoupling_bank_survives_a_shared_rail_to_a_second_ic() {
         eprintln!("no KiCAD environment; skipping idiom detection test");
         return;
     };
-    let provider = RealSymbolProvider::new(env.clone());
+    let provider = SymbolTable::from_env(&env);
     let design = compile_fixture(&provider, "idiom-stm32-ldo");
     let ir = floorplan::infer_ir(&env, &design);
 

@@ -6,6 +6,9 @@
 //! symbols. We add `extends` chain resolution (arbitrary depth, cycle-safe
 //! via a visited set) and unit-number extraction from the sub-block names
 //! on top.
+//!
+//! [`read_lib`] is the only entry point; [`crate::SymbolTable`] owns the
+//! per-library cache and the `Lib:Name` lookup/suggest layer on top.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -14,54 +17,34 @@ use std::path::Path;
 use crate::{PinDir, PinMeta, PinType, SymbolMeta};
 use kiutils_kicad::{SymPin, Symbol, SymbolLibFile};
 
-/// A loaded `.kicad_sym` library: symbol name → merged, extends-resolved
-/// pin metadata.
-#[derive(Debug, Clone)]
-pub struct SymbolLib {
-    symbols: HashMap<String, SymbolMeta>,
-}
+/// Load and fully resolve one `.kicad_sym` file into `bare name → SymbolMeta`
+/// (extends chains followed, multi-unit pins merged, sub-blocks hidden).
+pub(crate) fn read_lib(path: &Path) -> io::Result<HashMap<String, SymbolMeta>> {
+    let doc = SymbolLibFile::read(path).map_err(|e| match e {
+        kiutils_kicad::Error::Io(io) => io,
+        other => io::Error::new(io::ErrorKind::InvalidData, other.to_string()),
+    })?;
 
-impl SymbolLib {
-    /// Load and fully resolve a symbol library file.
-    pub fn load(path: &Path) -> io::Result<SymbolLib> {
-        let doc = SymbolLibFile::read(path).map_err(|e| match e {
-            kiutils_kicad::Error::Io(io) => io,
-            other => io::Error::new(io::ErrorKind::InvalidData, other.to_string()),
-        })?;
+    // First pass: own pins + extends target per top-level symbol.
+    let raw: HashMap<String, (Vec<PinMeta>, Option<String>)> = doc
+        .ast()
+        .symbols
+        .iter()
+        .filter_map(|sym| {
+            let name = sym.name.clone()?;
+            let pins = own_pins(sym);
+            Some((name, (pins, sym.extends.clone())))
+        })
+        .collect();
 
-        // First pass: own pins + extends target per top-level symbol.
-        let raw: HashMap<String, (Vec<PinMeta>, Option<String>)> = doc
-            .ast()
-            .symbols
-            .iter()
-            .filter_map(|sym| {
-                let name = sym.name.clone()?;
-                let pins = own_pins(sym);
-                Some((name, (pins, sym.extends.clone())))
-            })
-            .collect();
-
-        // Second pass: resolve extends chains.
-        let symbols = raw
-            .keys()
-            .map(|name| {
-                let pins = resolve_pins(&raw, name, &mut HashSet::new());
-                (name.clone(), SymbolMeta { pins })
-            })
-            .collect();
-
-        Ok(SymbolLib { symbols })
-    }
-
-    /// Look up a symbol by its bare name (no `Lib:` prefix).
-    pub fn symbol(&self, name: &str) -> Option<&SymbolMeta> {
-        self.symbols.get(name)
-    }
-
-    /// Names of all top-level symbols in the library.
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.symbols.keys().map(String::as_str)
-    }
+    // Second pass: resolve extends chains.
+    Ok(raw
+        .keys()
+        .map(|name| {
+            let pins = resolve_pins(&raw, name, &mut HashSet::new());
+            (name.clone(), SymbolMeta { pins })
+        })
+        .collect())
 }
 
 /// Pins owned by a symbol: direct pins plus pins of all

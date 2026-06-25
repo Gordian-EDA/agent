@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let (provider, model) = llm_client::config::provider_status();
+    let (provider, model) = gordian_core::provider_status();
     eprintln!("provider={provider} model={model}\nprompt: {prompt}\n");
 
     // Fresh throwaway project for this run.
@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     // YAML below is FLAT; this draft keeps the block structure.
     let draft_path = tmp.path().join(".gordian/draft.circuit.yaml");
 
-    let client = llm_client::from_env()?;
+    let client = gordian_core::from_env()?;
     let mut agent = Agent::new(client, ctx, gordian_core::prompts::system_prompt());
 
     // Stream events so the run's tool calls are visible while it works.

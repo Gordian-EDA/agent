@@ -208,7 +208,7 @@ async fn live_layout_review_smoke() {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
-    let Ok(client) = llm_client::from_env() else {
+    let Ok(client) = gordian_core::from_env() else {
         eprintln!("SKIP: no LLM creds (.env) for the live layout-review smoke");
         return;
     };

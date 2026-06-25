@@ -10,7 +10,7 @@
 //! sit one level deeper and are skipped by construction.
 //!
 //! Pin counts are resolved lazily: only the symbols actually returned by
-//! [`SymbolIndex::search`] are parsed, via [`RealSymbolProvider`].
+//! [`SymbolIndex::search`] are parsed, via [`SymbolTable`].
 //!
 //! Ranking uses `fuzzy-matcher`'s `SkimMatcherV2` (fzf-style subsequence
 //! scoring) — the project's standard fuzzy matcher; reuse it rather than adding
@@ -19,12 +19,11 @@
 use std::fs;
 use std::io;
 
-use crate::SymbolProvider;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 use kicad_cli::env::KicadEnv;
-use crate::provider::RealSymbolProvider;
+use crate::SymbolTable;
 
 /// A search hit: a fully qualified `Lib:Name` id and its resolved pin count.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +42,7 @@ struct Entry {
 /// Name index over every symbol in every installed library.
 pub struct SymbolIndex {
     entries: Vec<Entry>,
-    provider: RealSymbolProvider,
+    table: SymbolTable,
 }
 
 impl SymbolIndex {
@@ -77,7 +76,7 @@ impl SymbolIndex {
 
         Ok(SymbolIndex {
             entries,
-            provider: RealSymbolProvider::new(env.clone()),
+            table: SymbolTable::from_env(env),
         })
     }
 
@@ -105,7 +104,7 @@ impl SymbolIndex {
             .map(|i| {
                 let lib_id = self.entries[i].lib_id.clone();
                 let pin_count = self
-                    .provider
+                    .table
                     .symbol(&lib_id)
                     .map_or(0, |meta| meta.pins.len());
                 Hit { lib_id, pin_count }

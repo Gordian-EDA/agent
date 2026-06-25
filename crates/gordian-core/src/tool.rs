@@ -13,7 +13,7 @@
 //! The KiCAD-concrete classifiers and the commit-forcing / `ApplyInfo`-lifting body
 //! live in [`crate::agent`] alongside the loop they serve.
 
-use llm_client::ImageData;
+use crate::llm::ImageData;
 use serde_json::Value;
 
 /// How a tool affects the world — the loop's dispatch discriminator.

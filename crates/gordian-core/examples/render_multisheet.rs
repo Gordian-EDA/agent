@@ -12,10 +12,9 @@
 //!
 //! Usage: cargo run --release -p agent --example render_multisheet -- <draft.yaml> <out_dir>
 
-use circuit_lang::SymbolProvider;
 use kicad_cli::cli::KicadCli;
 use kicad_cli::env::KicadEnv;
-use kicad_symbol::provider::RealSymbolProvider;
+use kicad_symbol::SymbolTable;
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -24,9 +23,9 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&out_dir)?;
 
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let provider = RealSymbolProvider::new(env.clone());
+    let provider = SymbolTable::from_env(&env);
     let src = std::fs::read_to_string(&yaml)?;
-    let result = circuit_lang::compile(&src, &provider as &dyn SymbolProvider);
+    let result = circuit_lang::compile(&src, &provider);
     let design = result.design.ok_or_else(|| {
         let errs: Vec<String> = result.diagnostics.0.iter().map(|d| d.message.clone()).collect();
         anyhow::anyhow!("compile produced no design: {}", errs.join("; "))

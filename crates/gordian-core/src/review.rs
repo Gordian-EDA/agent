@@ -13,7 +13,7 @@
 //! degrades to `(0.0, [])` (conservative — nothing actionable).
 
 use anyhow::Result;
-use llm_client::{ImageData, Message, Provider};
+use crate::llm::{ImageData, Message, Provider};
 use serde_json::Value;
 
 /// One independent NETLIST review pass, generalized: the DOMAIN passes the review
@@ -38,7 +38,7 @@ pub async fn review(
 /// passes the vision-critic `system` prompt (e.g. the ported schematic/PCB critic)
 /// and the `lenses`; `prompt` is the textual framing that rides alongside the
 /// image (intended circuit + "reason first, then FINAL_JSON"). The `image` is
-/// attached as a [`llm_client::ContentBlock::Image`] so the genai backend sends
+/// attached as a [`crate::llm::ContentBlock::Image`] so the genai backend sends
 /// it. Returns the same `(lowest score, union of high-confidence defects)` shape,
 /// degrading to `(0.0, [])` on a total parse failure — so a flaky vision call
 /// never poisons the union with phantom defects.

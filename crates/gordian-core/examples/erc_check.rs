@@ -4,16 +4,15 @@
 //!
 //! Usage: cargo run --release -p agent --example erc_check -- <design.yaml>
 
-use circuit_lang::SymbolProvider;
 use kicad_cli::env::KicadEnv;
-use kicad_symbol::provider::RealSymbolProvider;
+use kicad_symbol::SymbolTable;
 
 fn main() -> anyhow::Result<()> {
     let path = std::env::args().nth(1).expect("usage: erc_check <design.yaml>");
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let provider = RealSymbolProvider::new(env);
+    let provider = SymbolTable::from_env(&env);
     let src = std::fs::read_to_string(&path)?;
-    let design = circuit_lang::compile(&src, &provider as &dyn SymbolProvider)
+    let design = circuit_lang::compile(&src, &provider)
         .design
         .ok_or_else(|| anyhow::anyhow!("compile produced no design"))?;
     let defects = circuit_lang::erc::erc_checks(&design);

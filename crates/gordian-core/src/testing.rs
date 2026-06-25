@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
-use llm_client::{Completion, EventStream, Message, Provider, StreamEvent, ToolCall, ToolDef};
+use crate::llm::{Completion, EventStream, Message, Provider, StreamEvent, ToolCall, ToolDef};
 
 /// A [`Provider`] that replays a fixed script of completions, one per call, and
 /// records the conversation it was shown.

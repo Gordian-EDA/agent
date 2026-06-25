@@ -4,7 +4,7 @@
 //! JSON, never through the schematic). See docs/specs/unified-kicad-pcb-state.md §1.
 
 use kicad_cli::env::KicadEnv;
-use kicad_symbol::provider::RealSymbolProvider;
+use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan;
 use sch_io::read::lift;
 
@@ -14,7 +14,7 @@ fn footprint_survives_emit_then_lift() {
         eprintln!("no KiCAD environment — skipping footprint round-trip test");
         return;
     };
-    let provider = RealSymbolProvider::new(env.clone());
+    let provider = SymbolTable::from_env(&env);
 
     // Minimal design: one capacitor carrying a footprint assignment.
     let yaml = r#"

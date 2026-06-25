@@ -1,6 +1,5 @@
 use kicad_cli::env::KicadEnv;
-use kicad_symbol::provider::RealSymbolProvider;
-use kicad_symbol::SymbolProvider;
+use kicad_symbol::SymbolTable;
 
 #[test]
 fn unknown_part_gets_real_suggestions() {
@@ -8,14 +7,14 @@ fn unknown_part_gets_real_suggestions() {
         eprintln!("SKIP");
         return;
     };
-    let provider = RealSymbolProvider::new(env);
+    let table = SymbolTable::from_env(&env);
     // stale KiCAD-8-era name an LLM will emit (validated failure mode)
     assert!(
-        provider
+        table
             .symbol("Connector:USB_C_Receptacle_USB2.0")
             .is_none()
     );
-    let sugg = provider.suggest("Connector:USB_C_Receptacle_USB2.0");
+    let sugg = table.suggest("Connector:USB_C_Receptacle_USB2.0");
     assert!(
         sugg.iter()
             .any(|s| s.contains("USB_C_Receptacle_USB2.0_16P")

@@ -4,17 +4,16 @@
 //!
 //! Usage: cargo run --release -p agent --example commit_multisheet -- <draft.yaml> <out_dir>
 
-use circuit_lang::SymbolProvider;
 use kicad_cli::env::KicadEnv;
-use kicad_symbol::provider::RealSymbolProvider;
+use kicad_symbol::SymbolTable;
 
 fn main() -> anyhow::Result<()> {
     let yaml = std::env::args().nth(1).expect("usage: commit_multisheet <draft.yaml> <out_dir>");
     let out = std::env::args().nth(2).expect("usage: commit_multisheet <draft.yaml> <out_dir>");
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let provider = RealSymbolProvider::new(env.clone());
+    let provider = SymbolTable::from_env(&env);
     let src = std::fs::read_to_string(&yaml)?;
-    let result = circuit_lang::compile(&src, &provider as &dyn SymbolProvider);
+    let result = circuit_lang::compile(&src, &provider);
     let design = result.design.ok_or_else(|| anyhow::anyhow!("compile produced no design"))?;
     let n_blocks = design.blocks.values().filter(|b| !b.components.is_empty()).count();
     let n_parts: usize = design.blocks.values().map(|b| b.components.len()).sum();

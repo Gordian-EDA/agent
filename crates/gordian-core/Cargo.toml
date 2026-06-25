@@ -4,10 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The Gordian KiCAD agent: the turn loop + human apply-gate, the schematic/PCB tools, prompts, review and render — over any llm-client Provider."
+description = "The Gordian KiCAD agent: the turn loop + human apply-gate, the schematic/PCB tools, prompts, review and render — over a genai-backed, provider-agnostic LLM client."
 
 [dependencies]
-llm-client = { path = "../llm-client" }
 circuit-lang = { path = "../circuit-lang" }
 kicad-cli = { path = "../kicad-cli" }
 kicad-sexpr = { path = "../kicad-sexpr" }
@@ -28,6 +27,8 @@ greedy-place = { path = "../greedy-place" }
 
 anyhow.workspace = true
 async-trait.workspace = true
+genai = "=0.7.0-beta.6"
+dotenvy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true

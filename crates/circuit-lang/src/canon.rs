@@ -209,7 +209,7 @@ mod tests {
     use super::*;
     use crate::desugar::desugar;
     use crate::parse::parse_str;
-    use crate::provider::MockSymbolProvider;
+    use crate::provider::SymbolTable;
 
     const SRC: &str = "
 version: 1
@@ -224,7 +224,7 @@ blocks:
 ";
 
     fn compile(src: &str) -> crate::model::Design {
-        let p = MockSymbolProvider::with_basics();
+        let p = SymbolTable::with_basics();
         let (s, diags) = parse_str(src);
         assert!(!diags.has_errors(), "{diags:?}");
         // M:CPU unknown to provider — between only needs Device:R; ok here
@@ -287,9 +287,9 @@ nets:
     #[test]
     fn decouple_multivalue_round_trip_is_model_stable() {
         // compile() lives in lib.rs; use parse+desugar here with a provider exposing VDD/VSS by name.
-        use crate::provider::{MockSymbolProvider, PinType};
-        let mut p = MockSymbolProvider::with_basics();
-        p.add(
+        use crate::provider::{SymbolTable, PinType};
+        let mut p = SymbolTable::with_basics();
+        p.mock_add(
             "M:CPU",
             vec![
                 ("VDD", "VDD", PinType::PowerInput, 1),

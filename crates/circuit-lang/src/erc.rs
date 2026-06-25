@@ -673,10 +673,10 @@ mod tests {
     use super::*;
     use crate::desugar::desugar;
     use crate::parse::parse_str;
-    use crate::provider::MockSymbolProvider;
+    use crate::provider::SymbolTable;
 
     fn design(src: &str) -> Design {
-        let p = MockSymbolProvider::with_basics();
+        let p = SymbolTable::with_basics();
         let (s, _) = parse_str(src);
         let (d, _) = desugar(&s.unwrap(), &p);
         d

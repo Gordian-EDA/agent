@@ -110,9 +110,9 @@ pub async fn run(project_dir: PathBuf) -> Result<()> {
 
     // 2. Build the agent if we have both KiCAD and credentials; otherwise launch
     //    a "degraded" UI that explains what's missing (so `tui` never panics).
-    let (provider, model) = llm_client::config::provider_status();
+    let (provider, model) = gordian_core::provider_status();
 
-    let agent_handle: Option<SharedAgent> = match (&env, llm_client::from_env()) {
+    let agent_handle: Option<SharedAgent> = match (&env, gordian_core::from_env()) {
         (Some(env), Ok(client)) => {
             let ctx = PcbToolCtx::for_project(env.clone(), project_dir.clone())
                 .context("building the tool context for the project")?;

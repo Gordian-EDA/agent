@@ -39,7 +39,7 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
-use llm_client::{
+use crate::llm::{
     Completion, ContentBlock, ImageData, Message, Provider, Role, StreamEvent, ToolCall,
 };
 
@@ -166,7 +166,7 @@ fn emit(events: Events<'_>, ev: AgentEvent) {
 /// concatenated deltas when the backend didn't fill it. Errors if the stream
 /// ends without a `Completed` event (a malformed / truncated stream).
 async fn stream_completion(
-    mut events_stream: llm_client::EventStream<'_>,
+    mut events_stream: crate::llm::EventStream<'_>,
     ui: Events<'_>,
 ) -> Result<Completion> {
     let mut text = String::new();
@@ -312,12 +312,10 @@ impl Agent {
     }
 
     /// Drop the entire conversation history (a fresh start; project files
-    /// untouched). Begins a NEW thread/session, so the LLM client regenerates its
-    /// `thread_identifier`.
+    /// untouched).
     pub fn clear_history(&mut self) {
         self.history.clear();
         self.turn_starts.clear();
-        self.client.new_thread();
     }
 
     /// Unwind the most recent user turn. Returns `false` when there is nothing to

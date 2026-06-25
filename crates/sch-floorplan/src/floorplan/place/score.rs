@@ -9,9 +9,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use circuit_lang::model::Design;
-use circuit_lang::{find_pin, PinType, SymbolProvider};
+use circuit_lang::{find_pin, PinType};
 use kicad_cli::env::KicadEnv;
-use kicad_symbol::provider::RealSymbolProvider;
+use kicad_symbol::SymbolTable;
 
 use crate::write::SchematicWriter;
 
@@ -437,7 +437,7 @@ pub(crate) fn driven_rail_drivers(
     inc: &Incidence,
     ir: &LayoutIr,
 ) -> BTreeMap<String, [f64; 2]> {
-    let provider = RealSymbolProvider::new(env.clone());
+    let provider = SymbolTable::from_env(env);
     let mut out: BTreeMap<String, [f64; 2]> = BTreeMap::new();
     for (net, pins) in inc {
         if !ir.rails.contains_key(net) || is_ground(net) {

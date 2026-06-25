@@ -2,9 +2,9 @@
 
 use crate::diag::{Diagnostic, Diagnostics};
 use crate::model::*;
-use crate::provider::{PinType, SymbolProvider};
+use crate::provider::{PinType, SymbolTable};
 
-pub fn lint(d: &Design, provider: &dyn SymbolProvider) -> Diagnostics {
+pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
     let mut diags = Diagnostics::default();
     let mut net_pins: indexmap::IndexMap<&str, Vec<String>> = indexmap::IndexMap::new();
     // Net-sanity: nets carrying a crystal/oscillator pin, and nets carrying a
@@ -207,12 +207,12 @@ mod tests {
     use super::*;
     use crate::desugar::desugar;
     use crate::parse::parse_str;
-    use crate::provider::{MockSymbolProvider, PinType};
+    use crate::provider::{SymbolTable, PinType};
 
-    fn provider() -> MockSymbolProvider {
+    fn provider() -> SymbolTable {
         use PinType::*;
-        let mut p = MockSymbolProvider::with_basics();
-        p.add(
+        let mut p = SymbolTable::with_basics();
+        p.mock_add(
             "M:CPU",
             vec![
                 ("1", "VDD", PowerInput, 1),
@@ -223,7 +223,7 @@ mod tests {
                 ("6", "NRST", Other, 1),
             ],
         );
-        p.add("Device:Crystal", vec![("1", "1", Other, 1), ("2", "2", Other, 1)]);
+        p.mock_add("Device:Crystal", vec![("1", "1", Other, 1), ("2", "2", Other, 1)]);
         p
     }
 

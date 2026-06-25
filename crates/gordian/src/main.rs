@@ -183,11 +183,11 @@ fn run_agent_command(args: &[String]) -> Result<()> {
         env.symbol_dir.display()
     );
 
-    // 2. Build the LLM client from the environment / local .env (OpenAI-compatible
-    //    when OPENAI_API_KEY is set, else AWS Bedrock).
-    let client = llm_client::from_env().context(
-        "could not build the LLM client — set OPENAI_API_KEY + OPENAI_BASE_URL (or \
-         AWS_BEARER_TOKEN_BEDROCK) in the environment or a local .env file",
+    // 2. Build the LLM client from the environment / local .env (BYOK: any
+    //    genai-supported provider via its standard key + AGENT_MODEL; see .env.example).
+    let client = gordian_core::from_env().context(
+        "could not build the LLM client — set a provider key (e.g. ANTHROPIC_API_KEY / \
+         OPENAI_API_KEY) and AGENT_MODEL in the environment or a local .env file (see .env.example)",
     )?;
 
     // 3. Tool context over the real project directory. `apply_design` derives

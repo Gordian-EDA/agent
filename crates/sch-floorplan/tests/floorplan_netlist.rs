@@ -24,10 +24,9 @@ use std::sync::Mutex;
 /// serialize, but each is the same ~8 min either way — correctness over parallelism.)
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-use circuit_lang::provider::SymbolProvider;
 use kicad_cli::cli::{KicadCli, Netlist};
 use kicad_cli::env::KicadEnv;
-use kicad_symbol::provider::RealSymbolProvider;
+use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan::{self, LayoutIr};
 
 /// TIER 1 — the hand-tuned reference targets. Held to the FULL bar: electrically
@@ -59,7 +58,7 @@ fn doc(name: &str, ext: &str) -> std::path::PathBuf {
 
 /// The YAML keys pins by NAME; the KiCAD netlist reports pins by NUMBER. Resolve
 /// the authored token (number-first then name, `find_pin` order) and compare.
-fn nl_pin_matches(provider: &RealSymbolProvider, lib_id: &str, authored: &str, nl_pin: &str) -> bool {
+fn nl_pin_matches(provider: &SymbolTable, lib_id: &str, authored: &str, nl_pin: &str) -> bool {
     if authored == nl_pin {
         return true;
     }
@@ -74,7 +73,7 @@ fn floorplan_reference_fixtures_emit_truthful_netlists() {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
-    let provider = RealSymbolProvider::new(env.clone());
+    let provider = SymbolTable::from_env(&env);
     for name in REFERENCE_FIXTURES {
         validate_fixture(&env, &provider, name, /* strict_warnings */ true);
     }
@@ -127,7 +126,7 @@ fn run_challenge_fixtures() {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
-    let provider = RealSymbolProvider::new(env.clone());
+    let provider = SymbolTable::from_env(&env);
     // Collect EVERY fixture's verdict (don't stop at the first failure) so one run
     // reports the full coverage picture across all hard circuit classes. A fixture
     // that panics on a real truthfulness/ERC defect is recorded; the test fails at
@@ -214,7 +213,7 @@ const TOLERATED_ERC_KINDS: &[&str] = &[
 /// layout warnings (tier-1 readability bar).
 fn validate_fixture(
     env: &KicadEnv,
-    provider: &RealSymbolProvider,
+    provider: &SymbolTable,
     name: &str,
     strict_warnings: bool,
 ) {
