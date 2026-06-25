@@ -16,12 +16,12 @@ use kicad_symbol::SymbolTable;
 use crate::write::SchematicWriter;
 
 use super::*;
-use sch_model::item::{Incidence, Item};
-use sch_model::netclass::is_ground;
+use sch_place::item::{Incidence, Item};
+use sch_place::netclass::is_ground;
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `sch_model::union_find`, shared with circuit-lang's pin reconciler.
-use sch_model::ir::LayoutIr;
+// `sch_place::union_find`, shared with circuit-lang's pin reconciler.
+use sch_place::ir::LayoutIr;
 
 /// An item's body rect at position `at`. Uses the FULL `approx_size` (which
 /// already pads 2.54 mm/side) so the placement overlap check reserves room for
@@ -95,13 +95,13 @@ pub fn count_body_crossings(
                 let p = [w1[0], a[1]];
                 (
                     p[0] > a[0].min(b[0]) + EPS && p[0] < a[0].max(b[0]) - EPS,
-                    sch_model::geom::point_on_segment(p, *w1, *w2),
+                    sch_place::geom::point_on_segment(p, *w1, *w2),
                 )
             } else {
                 let p = [a[0], w1[1]];
                 (
                     p[1] > a[1].min(b[1]) + EPS && p[1] < a[1].max(b[1]) - EPS,
-                    sch_model::geom::point_on_segment(p, *w1, *w2),
+                    sch_place::geom::point_on_segment(p, *w1, *w2),
                 )
             };
             if interior && on_wire {
@@ -260,7 +260,7 @@ pub fn count_corners(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
 pub fn count_foreign_taps(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
     let strict_interior = |p: [f64; 2], a: [f64; 2], b: [f64; 2]| {
         let is_end = |q: [f64; 2]| near(p, q);
-        !is_end(a) && !is_end(b) && sch_model::geom::point_on_segment(p, a, b)
+        !is_end(a) && !is_end(b) && sch_place::geom::point_on_segment(p, a, b)
     };
     let mut n = 0;
     for (a1, a2, an) in wires {
@@ -565,7 +565,7 @@ pub fn count_merges(
         let mut nets: BTreeSet<&str> = BTreeSet::new();
         for (a, b, wn) in wires {
             if let Some(net) = wn
-                && sch_model::geom::point_on_segment(jp, *a, *b) {
+                && sch_place::geom::point_on_segment(jp, *a, *b) {
                     nets.insert(net.as_str());
                 }
         }
@@ -659,7 +659,7 @@ pub(crate) fn diagnose_shorts(
                     }
                     let how = if near(ep, *a) || near(ep, *b) {
                         "ENDPOINT"
-                    } else if sch_model::geom::point_on_segment(ep, *a, *b) {
+                    } else if sch_place::geom::point_on_segment(ep, *a, *b) {
                         "INTERIOR"
                     } else {
                         continue;
@@ -695,7 +695,7 @@ pub(crate) fn diagnose_shorts(
         let mut nets: BTreeSet<&str> = BTreeSet::new();
         for (a, b, wn) in &wires {
             if let Some(net) = wn
-                && sch_model::geom::point_on_segment(jp, *a, *b) {
+                && sch_place::geom::point_on_segment(jp, *a, *b) {
                     nets.insert(net.as_str());
                 }
         }
@@ -731,7 +731,7 @@ pub fn count_shorts(
                     // A pin coinciding with a foreign wire's endpoint, OR landing
                     // on its interior (KiCAD connects a pin to a wire it touches),
                     // is a short on a different net.
-                    if near(ep, *a) || near(ep, *b) || sch_model::geom::point_on_segment(ep, *a, *b) {
+                    if near(ep, *a) || near(ep, *b) || sch_place::geom::point_on_segment(ep, *a, *b) {
                         n += 1;
                     }
                 }

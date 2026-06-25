@@ -1,6 +1,6 @@
 //! The placement-engine SDK: the [`PlaceProblem`] an engine reads and the
 //! [`PlacementEngine`] contract it implements. Both live in the neutral kernel
-//! (`sch-model`) so a THIRD-PARTY engine can be written against `sch-model` ALONE —
+//! (`sch-place`) so a THIRD-PARTY engine can be written against `sch-place` ALONE —
 //! it never touches the incumbent layout crate (`sch-floorplan`) nor any KiCAD CLI.
 //!
 //! [`PlaceProblem`] describes ONLY the problem — the connectivity, the intent, a seed,
@@ -15,7 +15,7 @@
 //! measurement machinery from `sch-floorplan` (the routed-sheet realization library) —
 //! that is the engine's choice, reflected in its dependency on `sch-floorplan`, never a
 //! field of the neutral problem here. An engine that does not measure depends on
-//! `sch-model` alone.
+//! `sch-place` alone.
 
 use serde::{Deserialize, Serialize};
 
@@ -66,7 +66,7 @@ impl Crossings {
 /// PROBLEM and nothing about METHOD — no cost, no evaluator, no objective, no search
 /// knob. The parts' geometry every engine needs to place at all lives on each [`Item`]
 /// (the slice the engine writes into); the connectivity + intent live here. It is
-/// SELF-SUFFICIENT against `sch-model` alone: no `KicadEnv`, no CLI handle, no scorer.
+/// SELF-SUFFICIENT against `sch-place` alone: no `KicadEnv`, no CLI handle, no scorer.
 pub struct PlaceProblem<'a> {
     pub inc: &'a Incidence,
     pub ir: &'a LayoutIr,
@@ -122,10 +122,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     /// THE INVARIANT CHECK. A trivial fixed-grid placer that IGNORES connectivity and
-    /// scores NOTHING: it lays parts on a lattice. It compiles + runs against `sch-model`
+    /// scores NOTHING: it lays parts on a lattice. It compiles + runs against `sch-place`
     /// ALONE — no cost, no measurer, no `KicadEnv` — proving [`PlaceProblem`] encodes only
     /// the problem and is silent on method. If `PlaceProblem` ever regrows a cost/evaluator
-    /// field, this engine stops compiling against `sch-model` alone and the test breaks.
+    /// field, this engine stops compiling against `sch-place` alone and the test breaks.
     struct FixedGrid {
         cols: usize,
         pitch: f64,
@@ -169,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn trivial_fixed_grid_engine_runs_against_sch_model_alone() {
+    fn trivial_fixed_grid_engine_runs_against_sch_place_alone() {
         let inc: Incidence = BTreeMap::new();
         let ir = LayoutIr::default();
         let problem = PlaceProblem { inc: &inc, ir: &ir, seed: 0, options: PlaceOptions::default() };

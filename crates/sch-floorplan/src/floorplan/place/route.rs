@@ -8,16 +8,16 @@ use std::io;
 use kicad_cli::env::KicadEnv;
 
 use crate::write::SchematicWriter;
-use sch_model::geom::Dir;
+use sch_place::geom::Dir;
 
 use super::*;
-use sch_model::item::{Incidence, Item};
-use sch_model::netclass::{is_connector_like, is_ground};
+use sch_place::item::{Incidence, Item};
+use sch_place::netclass::{is_connector_like, is_ground};
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `sch_model::union_find`, shared with circuit-lang's pin reconciler.
-use sch_model::union_find::{uf_find, uf_union};
-use sch_model::ir::{Band, LayoutIr, Side};
+// `sch_place::union_find`, shared with circuit-lang's pin reconciler.
+use sch_place::union_find::{uf_find, uf_union};
+use sch_place::ir::{Band, LayoutIr, Side};
 
 
 // ---------------------------------------------------------------------------
@@ -539,7 +539,7 @@ pub(crate) fn route_signal(
     for (p, _) in &terms {
         let interior = w.wire_segments_on_net(net).iter().any(|(a, b)| {
             let ends = near(*p, *a) || near(*p, *b);
-            !ends && sch_model::geom::point_on_segment(*p, *a, *b)
+            !ends && sch_place::geom::point_on_segment(*p, *a, *b)
         });
         if interior {
             w.add_junction(*p);

@@ -200,10 +200,10 @@ pub(super) struct SheetRect {
     pub(super) uuid_key: String,
 }
 
-// `Dir`, `point_on_segment`, and `transform_offset` live in `sch_model::geom`
+// `Dir`, `point_on_segment`, and `transform_offset` live in `sch_place::geom`
 // (shared with the `label`/`wire` modules); re-exported so `crate::write::Dir`
 // etc. and the public API keep working.
-pub use sch_model::geom::{point_on_segment, transform_offset, Dir};
+pub use sch_place::geom::{point_on_segment, transform_offset, Dir};
 
 /// One `(no_connect …)` marker emitted at a pin's sheet-space endpoint.
 ///

@@ -7,10 +7,10 @@
 //!
 //! `wire` and `write` are mutually coupled (the writer hands the router a `RouteScene`;
 //! the router fills the writer), so they share one crate rather than a forced split.
-//! Geometry/grid/ids vocabulary comes from `sch-model` (re-exported for the modules'
+//! Geometry/grid/ids vocabulary comes from `sch-place` (re-exported for the modules'
 //! `crate::grid` / `crate::ids` paths).
 
-pub use sch_model::{grid, ids};
+pub use sch_place::{grid, ids};
 
 pub mod label;
 pub mod read;

@@ -19,11 +19,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use kicad_cli::env::KicadEnv;
 
 use crate::write::SchematicWriter;
-use sch_model::item::{Incidence, Item};
-use sch_model::netclass::is_ground;
-use sch_model::place::Crossings;
+use sch_place::item::{Incidence, Item};
+use sch_place::netclass::is_ground;
+use sch_place::place::Crossings;
 
-use sch_model::place::{PlaceProblem, PlaceResult, PlacementEngine};
+use sch_place::place::{PlaceProblem, PlaceResult, PlacementEngine};
 
 use super::score::{
     count_body_crossings, count_close_wires, count_collinear_body_crossings,
@@ -35,9 +35,9 @@ use super::*;
 
 /// A measurement-based placement engine: one that CHOSE to score routed sheets, so it
 /// receives a [`Realizer`] to measure against. This is the dispatch the routed-sheet emit
-/// pipeline uses; the pure [`PlacementEngine`] trait (in `sch-model`) stays method-silent
+/// pipeline uses; the pure [`PlacementEngine`] trait (in `sch-place`) stays method-silent
 /// so a non-measuring engine — e.g. a fixed-grid placer — implements it against
-/// `sch-model` ALONE, never seeing a `Realizer`. A measuring engine still implements
+/// `sch-place` ALONE, never seeing a `Realizer`. A measuring engine still implements
 /// [`PlacementEngine`] (for `name`); its [`PlacementEngine::place`] can simply
 /// delegate to [`MeasuringEngine::place_measured`] with a freshly built realizer when
 /// invoked without one.

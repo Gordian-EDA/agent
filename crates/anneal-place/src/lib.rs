@@ -4,7 +4,7 @@
 //! search (the SA move-set + proxy costs + multi-start + route-aware refinement). It is a
 //! MEASUREMENT-based engine: it builds + routes candidates to score them, so it calls
 //! `sch-floorplan`'s measurement library ([`Realizer`]/[`RawMetrics`]) and the shared
-//! geometry/idiom primitives. A non-measuring engine would depend on `sch-model` alone;
+//! geometry/idiom primitives. A non-measuring engine would depend on `sch-place` alone;
 //! anneal depends on `sch-floorplan` because it CHOSE to measure routed sheets.
 //!
 //! The amplified objective + the SA + the greedy-descent SEED candidate all live here. The
@@ -14,10 +14,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use sch_model::item::{Incidence, Item};
-use sch_model::ir::{LayoutIr, Orient};
-use sch_model::netclass::is_power_net;
-use sch_model::place::{Crossings, PlaceProblem, PlaceResult, PlacementEngine};
+use sch_place::item::{Incidence, Item};
+use sch_place::ir::{LayoutIr, Orient};
+use sch_place::netclass::is_power_net;
+use sch_place::place::{Crossings, PlaceProblem, PlaceResult, PlacementEngine};
 
 use sch_floorplan::contract::{
     align_idiom_clusters, align_led_chains, body_overlap_count, build_anchor_blocks, build_writer,
@@ -441,7 +441,7 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
 
 /// Grid snap — the engine works on the 1.27 mm grid like the seed.
 fn snap(v: f64) -> f64 {
-    sch_model::grid::snap(v)
+    sch_place::grid::snap(v)
 }
 
 // ===========================================================================
@@ -898,8 +898,8 @@ fn anneal_items(
     // One grid cell-step in x/y for the relocation moves.
     let relocate = |rng: &mut Rng, at: [f64; 2], n: i32| -> [f64; 2] {
         [
-            sch_model::grid::snap(at[0] + rng.step(n) as f64 * COL_GAP),
-            sch_model::grid::snap(at[1] + rng.step(n) as f64 * ROW_GAP),
+            sch_place::grid::snap(at[0] + rng.step(n) as f64 * COL_GAP),
+            sch_place::grid::snap(at[1] + rng.step(n) as f64 * ROW_GAP),
         ]
     };
     // NB: no "exit early once `best` plateaus for N iters" rule. Measured the largest
@@ -945,7 +945,7 @@ fn anneal_items(
             undo = group.iter().map(|&k| (k, items[k].at, items[k].angle)).collect();
             for &k in &group {
                 items[k].at =
-                    [sch_model::grid::snap(items[k].at[0] + d[0]), sch_model::grid::snap(items[k].at[1] + d[1])];
+                    [sch_place::grid::snap(items[k].at[0] + d[0]), sch_place::grid::snap(items[k].at[1] + d[1])];
             }
         } else {
             continue;
@@ -1078,8 +1078,8 @@ fn anneal_locality(
     let mut rng = Rng(seed);
     let relocate = |rng: &mut Rng, at: [f64; 2], n: i32| -> [f64; 2] {
         [
-            sch_model::grid::snap(at[0] + rng.step(n) as f64 * COL_GAP),
-            sch_model::grid::snap(at[1] + rng.step(n) as f64 * ROW_GAP),
+            sch_place::grid::snap(at[0] + rng.step(n) as f64 * COL_GAP),
+            sch_place::grid::snap(at[1] + rng.step(n) as f64 * ROW_GAP),
         ]
     };
     // Board extent in cells — the hot cluster-jump radius.
@@ -1144,7 +1144,7 @@ fn anneal_locality(
             undo = group.iter().map(|&k| (k, items[k].at, items[k].angle)).collect();
             for &k in &group {
                 items[k].at =
-                    [sch_model::grid::snap(items[k].at[0] + d[0]), sch_model::grid::snap(items[k].at[1] + d[1])];
+                    [sch_place::grid::snap(items[k].at[0] + d[0]), sch_place::grid::snap(items[k].at[1] + d[1])];
             }
         } else {
             continue;
@@ -1279,8 +1279,8 @@ fn magnet_proxy(
         for dy in -2..=2 {
             for dx in -2..=2 {
                 let p = [
-                    sch_model::grid::snap(t[0] + dx as f64 * COL_GAP),
-                    sch_model::grid::snap(t[1] + dy as f64 * ROW_GAP),
+                    sch_place::grid::snap(t[0] + dx as f64 * COL_GAP),
+                    sch_place::grid::snap(t[1] + dy as f64 * ROW_GAP),
                 ];
                 let r = item_rect(&items[si], p);
                 let pad = [r[0] - 1.27, r[1] - 1.27, r[2] + 1.27, r[3] + 1.27];
@@ -1440,8 +1440,8 @@ fn align_repeated_motifs(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) -> 
         for (idx, &ai) in g.iter().enumerate() {
             let (col, row) = (idx % cols, idx / cols);
             let bb = blk_bbox(items, ai);
-            let dx = sch_model::grid::snap(origin[0] + col as f64 * pitch_x - bb[0]);
-            let dy = sch_model::grid::snap(origin[1] + row as f64 * pitch_y - bb[1]);
+            let dx = sch_place::grid::snap(origin[0] + col as f64 * pitch_x - bb[0]);
+            let dy = sch_place::grid::snap(origin[1] + row as f64 * pitch_y - bb[1]);
             if dx != 0.0 || dy != 0.0 {
                 let mut grp = vec![ai];
                 if let Some(b) = blocks.get(&ai) {

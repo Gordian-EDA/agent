@@ -6,12 +6,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
-use sch_model::item::{Incidence, Item};
-use sch_model::netclass::{is_ground, PinSide};
+use sch_place::item::{Incidence, Item};
+use sch_place::netclass::{is_ground, PinSide};
 use super::infer::{best_decoupling_anchor, place_cc_pulldown, place_crystal, place_decoupling, place_i2c_pullup};
 
 /// A circuit idiom recognized purely from connectivity + symbol pin geometry.
-/// `infer_ir` turns it into an [`sch_model::result::IdiomReport`] for the LLM. A FROZEN
+/// `infer_ir` turns it into an [`sch_place::result::IdiomReport`] for the LLM. A FROZEN
 /// idiom also seeds its cells into `place` and pins its members; a REPORT-ONLY idiom
 /// (`!freeze`) lets the members flow through normal placement and is instead tidied by
 /// an mm post-pass in `emit` (e.g. a GPIO LED's resistor snapped below it).

@@ -9,13 +9,13 @@ use kicad_symbol::geometry::SymbolGeometry;
 
 
 use super::*;
-use sch_model::item::{Incidence, Item};
-use sch_model::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net};
+use sch_place::item::{Incidence, Item};
+use sch_place::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net};
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `sch_model::union_find`, shared with circuit-lang's pin reconciler.
-use sch_model::union_find::{uf_find, uf_union};
-use sch_model::ir::{LayoutIr, Orient};
+// `sch_place::union_find`, shared with circuit-lang's pin reconciler.
+use sch_place::union_find::{uf_find, uf_union};
+use sch_place::ir::{LayoutIr, Orient};
 use super::super::infer::anchor_tap;
 
 
@@ -562,7 +562,7 @@ pub(crate) fn gather_banked_decoupling(items: &mut [Item], ir: &LayoutIr, banked
     if banked.is_empty() {
         return false;
     }
-    let snap = sch_model::grid::snap;
+    let snap = sch_place::grid::snap;
     let is_rail = |n: &str| is_power_net(n) || ir.rails.contains_key(n);
     let is_vp = |n: &str| is_rail(n) && !is_ground(n) && !is_neg_supply(n);
 

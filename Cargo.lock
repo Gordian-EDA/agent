@@ -56,7 +56,7 @@ version = "0.1.0"
 dependencies = [
  "rayon",
  "sch-floorplan",
- "sch-model",
+ "sch-place",
 ]
 
 [[package]]
@@ -1064,7 +1064,7 @@ name = "greedy-place"
 version = "0.1.0"
 dependencies = [
  "sch-floorplan",
- "sch-model",
+ "sch-place",
 ]
 
 [[package]]
@@ -2879,7 +2879,7 @@ dependencies = [
  "kicad-symbol",
  "rayon",
  "sch-io",
- "sch-model",
+ "sch-place",
  "serde_json",
  "tempfile",
 ]
@@ -2892,13 +2892,13 @@ dependencies = [
  "kicad-cli",
  "kicad-symbol",
  "kiutils_kicad",
- "sch-model",
+ "sch-place",
  "tempfile",
  "uuid",
 ]
 
 [[package]]
-name = "sch-model"
+name = "sch-place"
 version = "0.1.0"
 dependencies = [
  "geom",

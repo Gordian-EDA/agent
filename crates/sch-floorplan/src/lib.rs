@@ -4,7 +4,7 @@
 //! Owns the [`floorplan`] pipeline: **infer → place → wire → write**. It is
 //! engine-agnostic by design — the placement ENGINES (`greedy-place`,
 //! `anneal-place`) depend on this core and drive it through the
-//! [`sch_model::place`] boundary, never the reverse. The cost a placement engine
+//! [`sch_place::place`] boundary, never the reverse. The cost a placement engine
 //! minimises *is* a routed-sheet score, so the cost/scaffold and the router/writer
 //! assembly stay together here.
 //!
@@ -17,7 +17,7 @@
 //!   `place`-internal rename never touches an engine crate. See the module docs.
 //!
 //! The shared vocabulary (geometry, grid, ids, the IR types, the
-//! [`sch_model::place`] engine boundary) lives in `sch-model`; the elbow router +
+//! [`sch_place::place`] engine boundary) lives in `sch-place`; the elbow router +
 //! text solver + `SchematicWriter` + reader live in `sch-io`. The
 //! `crate::{write,wire,label,read,grid,ids}` re-exports below let the `floorplan`
 //! module reach those I/O modules through plain `crate::` paths.
@@ -30,4 +30,4 @@ pub mod floorplan;
 // `crate::label` / `crate::read` paths resolve unchanged.
 pub use sch_io::{label, read, wire, write};
 
-pub use sch_model::{grid, ids};
+pub use sch_place::{grid, ids};

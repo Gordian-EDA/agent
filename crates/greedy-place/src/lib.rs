@@ -3,16 +3,16 @@
 //! (the routed `refine` hill-climb + the `polish` align→compact→nudge fixpoint). It is a
 //! MEASUREMENT-based engine: it builds + routes each candidate to score it, so it calls
 //! `sch-floorplan`'s measurement library ([`Realizer`]/[`RawMetrics`]) and the shared
-//! geometry primitives. A non-measuring engine would depend on `sch-model` alone; greedy
+//! geometry primitives. A non-measuring engine would depend on `sch-place` alone; greedy
 //! depends on `sch-floorplan` precisely because it CHOSE to measure routed sheets.
 //!
 //! The objective weights here are greedy's own. They COINCIDE today with the shared base
 //! of the amplified engine's energy, but the two engines are independently evolvable — the
 //! weights are copied, not factored into a shared type.
 
-use sch_model::item::{Incidence, Item};
-use sch_model::ir::Orient;
-use sch_model::place::{Crossings, PlaceProblem, PlaceResult, PlacementEngine};
+use sch_place::item::{Incidence, Item};
+use sch_place::ir::Orient;
+use sch_place::place::{Crossings, PlaceProblem, PlaceResult, PlacementEngine};
 
 use sch_floorplan::contract::{
     build_writer, item_rect, orient_angle, overlaps_any, rects_overlap, signal_anchor_centroid,
@@ -428,5 +428,5 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
 
 /// Grid snap — the engine works on the 1.27 mm grid like the seed.
 fn snap(v: f64) -> f64 {
-    sch_model::grid::snap(v)
+    sch_place::grid::snap(v)
 }

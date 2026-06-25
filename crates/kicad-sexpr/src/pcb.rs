@@ -565,7 +565,7 @@ fn board_bounds(ast: &PcbAst) -> Bounds {
 
 /// Fixed namespace UUID for gordian **board** copper identifiers
 /// (`5c1a7d4e-3f62-5b89-a0d1-2e3f4a5b6c7d`). Distinct from the schematic
-/// namespace in `sch-model/src/ids.rs` so a segment and a symbol never collide.
+/// namespace in `geom::ids` so a segment and a symbol never collide.
 /// Do not change: doing so would alter every emitted segment/via UUID.
 const PCB_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x5c1a_7d4e_3f62_5b89_a0d1_2e3f_4a5b_6c7d);
 

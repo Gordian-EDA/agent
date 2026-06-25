@@ -10,14 +10,14 @@ use std::io;
 use kicad_cli::env::KicadEnv;
 
 use crate::write::SchematicWriter;
-use sch_model::geom::Dir;
+use sch_place::geom::Dir;
 
 use super::*;
-use sch_model::item::{Incidence, Item};
+use sch_place::item::{Incidence, Item};
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `sch_model::union_find`, shared with circuit-lang's pin reconciler.
-use sch_model::ir::LayoutIr;
+// `sch_place::union_find`, shared with circuit-lang's pin reconciler.
+use sch_place::ir::LayoutIr;
 
 /// Default deterministic seed for the placement search (a stochastic engine's PRNG).
 /// Threaded into the `PlaceProblem` by emit so a search is reproducible by seed.

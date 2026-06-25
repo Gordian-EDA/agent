@@ -1,6 +1,6 @@
 //! Shared emission types and identity-property keys.
 //!
-//! These live in `sch-model` so the floorplan engine (`sch-floorplan`) and the
+//! These live in `sch-place` so the floorplan engine (`sch-floorplan`) and the
 //! round-trip reader (`sch-io::read`) can share them.
 
 /// Property key for the block a component belongs to.

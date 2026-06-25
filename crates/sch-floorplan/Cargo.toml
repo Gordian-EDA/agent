@@ -7,7 +7,7 @@ repository.workspace = true
 description = "The engine-agnostic schematic placement core: gather, IR inference, cost scoring, the scaffold (refine/polish/idiom-gather) the placement engines drive, the premium SA search, and the routed writer assembly."
 
 [dependencies]
-sch-model = { path = "../sch-model" }
+sch-place = { path = "../sch-place" }
 sch-io = { path = "../sch-io" }
 circuit-lang = { path = "../circuit-lang" }
 circuit-graph = { path = "../circuit-graph" }

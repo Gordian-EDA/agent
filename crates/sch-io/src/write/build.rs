@@ -14,7 +14,7 @@ use super::{
     Wire,
 };
 
-// `transform_offset` is re-exported through `super` from `sch_model::geom`.
+// `transform_offset` is re-exported through `super` from `sch_place::geom`.
 use super::transform_offset;
 
 impl SchematicWriter {

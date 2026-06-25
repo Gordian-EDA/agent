@@ -12,9 +12,9 @@ use kicad_cli::env::KicadEnv;
 
 use super::idiom;
 use super::*;
-use sch_model::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net, pin_side, PinSide};
+use sch_place::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net, pin_side, PinSide};
 use super::place::{gather, grid_from_layout, incidence};
-use sch_model::item::{Incidence, Item};
+use sch_place::item::{Incidence, Item};
 
 /// A deterministic baseline IR for designs without an LLM-produced one: rails
 /// from the design's power nets (ground-like → bottom, else top), no explicit
@@ -219,7 +219,7 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         &items, &inc, &anchors, &sats, &rails, &pin_meta, &anchor_col, &anchor_row,
     );
     let mut placed: BTreeSet<String> = BTreeSet::new();
-    let mut idiom_reports: Vec<sch_model::result::IdiomReport> = Vec::new();
+    let mut idiom_reports: Vec<sch_place::result::IdiomReport> = Vec::new();
     for idiom in &detected {
         // If the author gridded the anchor or any member, their grid wins — skip.
         let gridded = std::iter::once(&items[idiom.anchor].refdes)
@@ -234,7 +234,7 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
                 placed.insert(rd.clone());
             }
         }
-        idiom_reports.push(sch_model::result::IdiomReport {
+        idiom_reports.push(sch_place::result::IdiomReport {
             kind: idiom.kind.to_string(),
             anchor: items[idiom.anchor].refdes.clone(),
             parts: idiom.cells.iter().map(|(rd, _)| rd.clone()).collect(),

@@ -34,15 +34,15 @@ pub use score::*;
 pub(crate) use route::*;
 
 // The pure placement-problem boundary — `PlaceProblem` (what an engine reads) and the
-// `PlacementEngine` trait (what it implements) — lives in `sch_model::place`, so the
+// `PlacementEngine` trait (what it implements) — lives in `sch_place::place`, so the
 // engine crates depend on the shared vocabulary. The measurement-aware `MeasuringEngine`
 // dispatch lives in [`measure`] alongside `Realizer`. Re-export the pure boundary here so
 // this module's paths resolve unchanged.
-pub use sch_model::place::{PlaceProblem, PlacementEngine};
+pub use sch_place::place::{PlaceProblem, PlacementEngine};
 
 // `measure` reads `LayoutIr` through `super::*` (every other submodule imports the ir
 // types it uses directly); `super` is this `place` module, so this resolves verbatim.
-pub use sch_model::ir::LayoutIr;
+pub use sch_place::ir::LayoutIr;
 
 #[cfg(test)]
 mod grid_tests {
@@ -50,9 +50,9 @@ mod grid_tests {
     use circuit_lang::model::{Block, Component, Design, LayoutGrid};
     use indexmap::IndexMap;
     use kicad_symbol::geometry::SymbolGeometry;
-    use sch_model::geom::Dir;
-    use sch_model::ir::Side;
-    use sch_model::item::Item;
+    use sch_place::geom::Dir;
+    use sch_place::ir::Side;
+    use sch_place::item::Item;
 
     fn cells(names: &[&str]) -> Vec<Option<String>> {
         names

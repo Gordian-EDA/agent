@@ -13,22 +13,22 @@ use kicad_symbol::geometry::SymbolGeometry;
 use kicad_symbol::SymbolTable;
 
 use crate::write::SchematicWriter;
-use sch_model::geom::Dir;
-use sch_model::result::EmitOutput;
+use sch_place::geom::Dir;
+use sch_place::result::EmitOutput;
 
 use super::*;
-use sch_model::item::{Incidence, Item};
+use sch_place::item::{Incidence, Item};
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `sch_model::union_find`, shared with circuit-lang's pin reconciler.
-use sch_model::ir::{Cell, LayoutIr, Orient};
+// `sch_place::union_find`, shared with circuit-lang's pin reconciler.
+use sch_place::ir::{Cell, LayoutIr, Orient};
 
 /// Read the engine [`PlaceOptions`] from the environment at problem construction —
 /// the env coupling stays here at the composition root, so the engines themselves
 /// never touch `std::env`. (Other `MULTISHEET_REFINE` reads scattered through this
 /// crate steer non-engine layout passes and stay as direct env reads.)
-fn place_options_from_env() -> sch_model::place::PlaceOptions {
-    sch_model::place::PlaceOptions {
+fn place_options_from_env() -> sch_place::place::PlaceOptions {
+    sch_place::place::PlaceOptions {
         debug_timing: std::env::var("DEBUG_SA_TIME").is_ok(),
         force_fast: std::env::var("MULTISHEET_REFINE").is_ok(),
         motif_tile: std::env::var("MOTIF_TILE").is_ok(),

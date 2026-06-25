@@ -4,8 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Free-tier greedy hill-climb schematic placement engine: implements sch-model's PlacementEngine and OWNS its objective (the free-tier weighted combo) and its search (refine/polish), calling sch-floorplan's measurement library because it CHOSE a measurement-based method."
+description = "Free-tier greedy hill-climb schematic placement engine: implements sch-place's PlacementEngine and OWNS its objective (the free-tier weighted combo) and its search (refine/polish), calling sch-floorplan's measurement library because it CHOSE a measurement-based method."
 
 [dependencies]
-sch-model = { path = "../sch-model" }
+sch-place = { path = "../sch-place" }
 sch-floorplan = { path = "../sch-floorplan" }
