@@ -52,20 +52,17 @@ pub struct CopperItem {
 pub enum CopperGeom {
     /// A trace segment fattened by `half_w` on a single layer.
     Segment {
-        a: [f64; 2],
-        b: [f64; 2],
+        segment: geom::Segment,
         half_w: f64,
         layer: LayerRef,
     },
     /// An axis-aligned obstacle rectangle on a set of layers (half-width 0).
     Rect {
-        min: [f64; 2],
-        max: [f64; 2],
-        center: [f64; 2],
+        rect: geom::Rect,
         layers: Vec<LayerRef>,
     },
     /// A through via: a disc of `radius` present on every layer.
-    Via { at: [f64; 2], radius: f64 },
+    Via { at: geom::Point2, radius: f64 },
 }
 
 impl CopperItem {
@@ -98,9 +95,7 @@ pub fn collect_copper(problem: &RouteProblem, solution: &RouteSolution) -> Vec<C
         items.push(CopperItem {
             owners: ob.connected_to.clone(),
             geom: CopperGeom::Rect {
-                min: [ob.center.x - hw, ob.center.y - hh],
-                max: [ob.center.x + hw, ob.center.y + hh],
-                center: [ob.center.x, ob.center.y],
+                rect: geom::Rect::from_center_half(ob.center.into(), (hw, hh)),
                 layers: ob.layers.clone(),
             },
         });
@@ -110,23 +105,22 @@ pub fn collect_copper(problem: &RouteProblem, solution: &RouteSolution) -> Vec<C
     // trace becomes a zero-length segment (a fat point) so it is still checked.
     for trace in &solution.traces {
         let half_w = trace.width / 2.0;
-        let push_seg = |items: &mut Vec<CopperItem>, a: [f64; 2], b: [f64; 2]| {
+        let push_seg = |items: &mut Vec<CopperItem>, a: geom::Point2, b: geom::Point2| {
             items.push(CopperItem {
                 owners: vec![trace.connection.clone()],
                 geom: CopperGeom::Segment {
-                    a,
-                    b,
+                    segment: geom::Segment::new(a, b),
                     half_w,
                     layer: trace.layer.clone(),
                 },
             });
         };
         if trace.path.len() == 1 {
-            let p = &trace.path[0];
-            push_seg(&mut items, [p.x, p.y], [p.x, p.y]);
+            let p = geom::Point2::from(trace.path[0]);
+            push_seg(&mut items, p, p);
         }
         for w in trace.path.windows(2) {
-            push_seg(&mut items, [w[0].x, w[0].y], [w[1].x, w[1].y]);
+            push_seg(&mut items, w[0].into(), w[1].into());
         }
     }
 
@@ -135,7 +129,7 @@ pub fn collect_copper(problem: &RouteProblem, solution: &RouteSolution) -> Vec<C
         items.push(CopperItem {
             owners: vec![via.connection.clone()],
             geom: CopperGeom::Via {
-                at: [via.at.x, via.at.y],
+                at: via.at.into(),
                 radius: via.diameter / 2.0,
             },
         });

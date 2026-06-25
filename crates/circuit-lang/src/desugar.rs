@@ -143,7 +143,8 @@ fn mark_label_nets(d: &mut Design) {
 /// (block then component order; global counter for cross-block uniqueness), so the
 /// canonical round-trip stays a fixpoint and `compile(canon(d)) == d` holds.
 fn reannotate_decouple_caps(d: &mut Design) {
-    let is_dec = |c: &Component| matches!(&c.origin, Origin::Synthesized { role, .. } if role == "decouple");
+    let is_dec =
+        |c: &Component| matches!(&c.origin, Origin::Synthesized { role, .. } if role == "decouple");
     let mut next = 1 + d
         .blocks
         .values()
@@ -206,9 +207,7 @@ fn lower_block_layout(sb: &SurfaceBlock, diags: &mut Diagnostics) -> LayoutGrid 
                         diags.push(
                             Diagnostic::error(
                                 "unknown-layout-cell",
-                                format!(
-                                    "layout cell `{name}` is not a refdes in this block"
-                                ),
+                                format!("layout cell `{name}` is not a refdes in this block"),
                             )
                             .with_span(*span),
                         );
@@ -462,10 +461,10 @@ impl PinUnionFind {
             })
     }
     fn find(&mut self, i: usize) -> usize {
-        geom::union_find::uf_find(&mut self.parent, i)
+        geom::uf_find(&mut self.parent, i)
     }
     fn union(&mut self, i: usize, j: usize) {
-        geom::union_find::uf_union(&mut self.parent, i, j);
+        geom::uf_union(&mut self.parent, i, j);
     }
 }
 
@@ -505,9 +504,10 @@ fn resolve_pins(d: &mut Design, raw: Vec<RawPin>, diags: &mut Diagnostics) {
         // pin-ref? "<REFDES>.<pin>" where REFDES is refdes-shaped and exists.
         // A dotted target whose left side is not a refdes (e.g. a net literally
         // named `3.3V`) is a plain net name, not a pin-ref.
-        let is_ref = rp.target.split_once('.').is_some_and(|(r, _)| {
-            crate::parse::looks_like_refdes(r) && comp_block.contains_key(r)
-        });
+        let is_ref = rp
+            .target
+            .split_once('.')
+            .is_some_and(|(r, _)| crate::parse::looks_like_refdes(r) && comp_block.contains_key(r));
         let dotted_pinref = rp
             .target
             .split_once('.')
@@ -816,10 +816,7 @@ mod tests {
 
     pub(crate) fn run(src: &str) -> (crate::model::Design, crate::diag::Diagnostics) {
         let (s, mut diags) = parse_str(src);
-        let (d, ds) = desugar(
-            &s.expect("parse failed"),
-            &SymbolTable::with_basics(),
-        );
+        let (d, ds) = desugar(&s.expect("parse failed"), &SymbolTable::with_basics());
         diags.extend(ds);
         (d, diags)
     }
@@ -847,9 +844,15 @@ blocks:
         assert_eq!(d.blocks["io"].components["LBL1"].part, "label:global");
         // Re-derive on the canonical round-trip: port flag is recomputed, not stored.
         let canon = crate::canon::to_canonical_yaml(&d);
-        assert!(canon.contains("label:global"), "label component survives canon");
+        assert!(
+            canon.contains("label:global"),
+            "label component survives canon"
+        );
         let (d2, _) = run(&canon);
-        assert!(d2.nets["OUT"].port, "port re-derived after canon round-trip");
+        assert!(
+            d2.nets["OUT"].port,
+            "port re-derived after canon round-trip"
+        );
     }
 
     #[test]
@@ -925,7 +928,7 @@ blocks:
     #[test]
     fn between_assigns_by_numeric_pin_order() {
         // symbol whose library lists pins out of numeric order: index0=number "2", index1=number "1"
-        use crate::provider::{SymbolTable, PinType};
+        use crate::provider::{PinType, SymbolTable};
         let mut p = SymbolTable::with_basics();
         p.mock_add(
             "My:Weird",
@@ -1180,7 +1183,7 @@ blocks:
 
     #[test]
     fn decouple_resolves_power_pins_by_number() {
-        use crate::provider::{SymbolTable, PinType};
+        use crate::provider::{PinType, SymbolTable};
         let mut p = SymbolTable::with_basics();
         p.mock_add(
             "M:CPU",
@@ -1214,7 +1217,7 @@ blocks:
 
     #[test]
     fn unmentioned_non_power_pins_become_no_connect() {
-        use crate::provider::{SymbolTable, PinType};
+        use crate::provider::{PinType, SymbolTable};
         let mut p = SymbolTable::with_basics();
         p.mock_add(
             "M:Chip",
@@ -1243,7 +1246,7 @@ blocks:
 
     #[test]
     fn auto_nc_is_idempotent_through_canon() {
-        use crate::provider::{SymbolTable, PinType};
+        use crate::provider::{PinType, SymbolTable};
         let mut p = SymbolTable::with_basics();
         p.mock_add(
             "M:Chip",

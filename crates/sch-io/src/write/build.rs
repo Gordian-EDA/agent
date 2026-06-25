@@ -4,11 +4,9 @@
 
 use std::io;
 
-use geom::{Point2, Rect};
+use geom::{GRID_50_MIL, Point2, Rect};
 use kicad_env::KicadEnv;
 use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
-
-use geom::grid::snap_point;
 
 use super::{
     Dir, Instance, Junction, NoConnect, PinLabel, SchematicWriter, SheetRect, SheetText, Stub, Wire,
@@ -98,7 +96,7 @@ impl SchematicWriter {
             refdes: refdes.to_string(),
             value: value.to_string(),
             footprint: footprint.map(str::to_string),
-            at: snap_point(at),
+            at: GRID_50_MIL.snap_point(at),
             angle,
             mirror: false,
             extra_props: extra_props.to_vec(),
@@ -197,9 +195,10 @@ impl SchematicWriter {
     ) -> io::Result<()> {
         const STUB_MM: f64 = 3.81;
         for (idx, (ep, dir)) in self.pin_dirs(env, refdes, pin)?.into_iter().enumerate() {
-            let ep = snap_point(ep);
+            let ep = GRID_50_MIL.snap_point(ep);
             let v = dir.vec();
-            let end = snap_point(Point2::new(ep.x + v.x * STUB_MM, ep.y + v.y * STUB_MM));
+            let end =
+                GRID_50_MIL.snap_point(Point2::new(ep.x + v.x * STUB_MM, ep.y + v.y * STUB_MM));
             self.labels.push(PinLabel {
                 net: net.to_string(),
                 at: end,
@@ -268,8 +267,8 @@ impl SchematicWriter {
     }
 
     fn push_wire(&mut self, a: Point2, b: Point2, net: Option<String>) {
-        let a = snap_point(a);
-        let b = snap_point(b);
+        let a = GRID_50_MIL.snap_point(a);
+        let b = GRID_50_MIL.snap_point(b);
         if a == b {
             return;
         }
@@ -293,7 +292,7 @@ impl SchematicWriter {
     /// keyed on `cluster:{net}:{x}:{y}` (position-derived) and carries no stub —
     /// it sits directly on the cluster wire it labels.
     pub fn add_cluster_label(&mut self, net: &str, at: impl Into<Point2>, dir: Dir, global: bool) {
-        let at = snap_point(at.into());
+        let at = GRID_50_MIL.snap_point(at.into());
         self.labels.push(PinLabel {
             net: net.to_string(),
             at,
@@ -306,7 +305,7 @@ impl SchematicWriter {
 
     /// Add a junction dot at a wire join. Deduplicated by position.
     pub fn add_junction(&mut self, at: impl Into<Point2>) {
-        let at = snap_point(at.into());
+        let at = GRID_50_MIL.snap_point(at.into());
         let uuid_key = format!("{}:{}", at.x, at.y);
         if self.junctions.iter().any(|j| j.uuid_key == uuid_key) {
             return;
@@ -330,7 +329,7 @@ impl SchematicWriter {
     ) {
         self.texts.push(SheetText {
             text: text.to_string(),
-            at: snap_point(at.into()),
+            at: GRID_50_MIL.snap_point(at.into()),
             size,
             bold,
             uuid_key: key.to_string(),
@@ -340,8 +339,8 @@ impl SchematicWriter {
     /// Add a graphic rectangle (no fill, dashed) to the sheet.
     pub fn add_rect(&mut self, start: impl Into<Point2>, end: impl Into<Point2>, key: &str) {
         self.rects.push(SheetRect {
-            start: snap_point(start.into()),
-            end: snap_point(end.into()),
+            start: GRID_50_MIL.snap_point(start.into()),
+            end: GRID_50_MIL.snap_point(end.into()),
             uuid_key: key.to_string(),
         });
     }
@@ -856,7 +855,9 @@ pub fn pin_endpoint(
 ) -> [f64; 2] {
     let inst_at = inst_at.into();
     let off = pin.at.transform_offset(inst_angle, mirror);
-    snap_point(Point2::new(inst_at.x + off[0], inst_at.y + off[1])).into()
+    GRID_50_MIL
+        .snap_point(Point2::new(inst_at.x + off[0], inst_at.y + off[1]))
+        .into()
 }
 
 #[cfg(test)]

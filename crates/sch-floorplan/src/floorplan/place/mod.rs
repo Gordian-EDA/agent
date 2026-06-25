@@ -258,18 +258,18 @@ mod grid_tests {
         let west = [([20.0, 0.0], Dir::West)];
         assert_eq!(
             port_exit_point(&west, Side::Left),
-            [geom::grid::snap(20.0 - 2.54), 0.0]
+            [geom::GRID_50_MIL.snap(20.0 - 2.54), 0.0]
         );
         let east = [([20.0, 0.0], Dir::East)];
         assert_eq!(
             port_exit_point(&east, Side::Right),
-            [geom::grid::snap(20.0 + 2.54), 0.0]
+            [geom::GRID_50_MIL.snap(20.0 + 2.54), 0.0]
         );
         // A multi-pin port keeps the longer reach so it clears the last pin.
         let two = [([20.0, 0.0], Dir::East), ([24.0, 0.0], Dir::East)];
         assert_eq!(
             port_exit_point(&two, Side::Right),
-            [geom::grid::snap(24.0 + 7.62), 0.0]
+            [geom::GRID_50_MIL.snap(24.0 + 7.62), 0.0]
         );
     }
 }

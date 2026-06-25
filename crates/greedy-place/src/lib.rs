@@ -17,7 +17,7 @@ use sch_place::place::{Crossings, PlaceProblem, PlaceResult};
 
 use sch_floorplan::contract::{
     COL_GAP, GRID_KEY, PlacementEngine, ROW_GAP, RawMetrics, Realizer, build_writer, item_rect,
-    orient_angle, overlaps_any, rects_overlap, signal_anchor_centroid, supply_pin_target,
+    orient_angle, overlaps_any, signal_anchor_centroid, supply_pin_target,
 };
 
 /// Greedy hill-climb: local, strictly-cost-improving moves only over
@@ -68,6 +68,7 @@ fn greedy_cost(m: &RawMetrics) -> f64 {
 /// Cohesion pull on a multi-unit part's units (same refdes, no shared net). Greedy's own
 /// copy of the constant — the amplified engine carries its own; they are not shared.
 const SIB_COHESION: f64 = 3.0;
+const GRID_STEP: f64 = geom::GRID_50_MIL.pitch();
 
 /// Score `items` under greedy's objective by measuring the routed sheet.
 fn cost(r: &Realizer, items: &[Item]) -> f64 {
@@ -121,8 +122,8 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
             ] {
                 let prev = items[i].at;
                 items[i].at = [
-                    geom::grid::snap(prev[0] + d[0]),
-                    geom::grid::snap(prev[1] + d[1]),
+                    geom::GRID_50_MIL.snap(prev[0] + d[0]),
+                    geom::GRID_50_MIL.snap(prev[1] + d[1]),
                 ]
                 .into();
                 let c = cost(r, items);
@@ -174,7 +175,7 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
         // side of its IC migrates over (the wire then drops straight).
         for &i in &satellites {
             if let Some(ax) = anchor_x(items, r.incidence(), i) {
-                let nx = geom::grid::snap(2.0 * ax - items[i].at[0]);
+                let nx = geom::GRID_50_MIL.snap(2.0 * ax - items[i].at[0]);
                 if (nx - items[i].at[0]).abs() > EPS {
                     let prev = items[i].at;
                     items[i].at = [nx, prev[1]].into();
@@ -243,16 +244,15 @@ fn compact(r: &Realizer, items: &mut [Item]) {
                 }
                 let orig = items[i].at;
                 let mut p = orig;
-                p[axis] += dir * 1.27;
+                p[axis] += dir * GRID_STEP;
                 // Keep a full grid of clearance (compaction must not pack two parts
                 // into a touch the readability lint flags even when the bare body
                 // rects technically clear).
-                let rr = item_rect(&items[i], p);
-                let a = [rr[0] - 1.27, rr[1] - 1.27, rr[2] + 1.27, rr[3] + 1.27];
+                let a = item_rect(&items[i], p).inflate(GRID_STEP);
                 if items
                     .iter()
                     .enumerate()
-                    .any(|(j, it)| j != i && rects_overlap(a, item_rect(it, it.at)))
+                    .any(|(j, it)| j != i && a.overlaps(&item_rect(it, it.at)))
                 {
                     continue;
                 }
@@ -319,15 +319,14 @@ fn free_nudge(r: &Realizer, items: &mut [Item]) {
             let (mut best_pos, mut best_cost) = (orig, best);
             for (axis, dir) in [(0usize, 1.0), (0, -1.0), (1, 1.0), (1, -1.0)] {
                 let mut p = orig;
-                p[axis] += dir * 1.27;
+                p[axis] += dir * GRID_STEP;
                 // Keep a full grid of clearance, as `compact` does, so a free nudge
                 // never packs two parts into a touch the readability lint flags.
-                let rr = item_rect(&items[i], p);
-                let pad = [rr[0] - 1.27, rr[1] - 1.27, rr[2] + 1.27, rr[3] + 1.27];
+                let pad = item_rect(&items[i], p).inflate(GRID_STEP);
                 if items
                     .iter()
                     .enumerate()
-                    .any(|(j, it)| j != i && rects_overlap(pad, item_rect(it, it.at)))
+                    .any(|(j, it)| j != i && pad.overlaps(&item_rect(it, it.at)))
                 {
                     continue;
                 }
@@ -400,7 +399,7 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
         // part still slides as close as it can instead of staying put.
         let axis = if vertical { 0 } else { 1 };
         let orig = items[si].at;
-        let goal = geom::grid::snap(target[axis]);
+        let goal = geom::GRID_50_MIL.snap(target[axis]);
         let dir = (goal - orig[axis]).signum();
         if dir == 0.0 {
             continue;
@@ -408,7 +407,7 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
         let (mut best_pos, mut best_cost) = (orig, best);
         let mut p = orig;
         for _ in 0..24 {
-            p[axis] += dir * 1.27;
+            p[axis] += dir * GRID_STEP;
             if (p[axis] - goal) * dir > EPS || overlaps_any(items, si, p) {
                 break;
             }

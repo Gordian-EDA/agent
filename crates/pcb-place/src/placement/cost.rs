@@ -96,9 +96,8 @@ pub(crate) fn place_cost(
     // Out-of-bounds (hard).
     let b = &problem.bounds;
     for i in 0..n {
-        let h = half[i];
-        let dx = (b.min_x - (pos[i].x - h.0)).max(0.0) + ((pos[i].x + h.0) - b.max_x).max(0.0);
-        let dy = (b.min_y - (pos[i].y - h.1)).max(0.0) + ((pos[i].y + h.1) - b.max_y).max(0.0);
+        let courtyard = Rect::from_center_half(pos[i], half[i]);
+        let (dx, dy) = b.containment_overshoot(&courtyard);
         cost += SA_BOUNDS_W * (dx + dy);
     }
 

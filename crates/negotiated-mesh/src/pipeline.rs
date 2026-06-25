@@ -448,16 +448,8 @@ fn join_polylines(mut polys: Vec<Vec<Point2>>) -> Vec<Vec<Point2>> {
 
     // Deterministic output order: by first point, then last point.
     polys.sort_by(|a, b| {
-        a[0]
-            .sort_key()
-            .partial_cmp(&b[0].sort_key())
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                (*a.last().unwrap())
-                    .sort_key()
-                    .partial_cmp(&(*b.last().unwrap()).sort_key())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        a[0].cmp_xy(b[0])
+            .then_with(|| (*a.last().unwrap()).cmp_xy(*b.last().unwrap()))
     });
     polys
 }
@@ -467,7 +459,9 @@ fn join_polylines(mut polys: Vec<Vec<Point2>>) -> Vec<Vec<Point2>> {
 fn endpoint_degree(polys: &[Vec<Point2>]) -> BTreeMap<(i64, i64), usize> {
     let mut degree: BTreeMap<(i64, i64), usize> = BTreeMap::new();
     for p in polys {
-        *degree.entry(p[0].quantized_key(POINT_KEY_SCALE)).or_insert(0) += 1;
+        *degree
+            .entry(p[0].quantized_key(POINT_KEY_SCALE))
+            .or_insert(0) += 1;
         *degree
             .entry((*p.last().unwrap()).quantized_key(POINT_KEY_SCALE))
             .or_insert(0) += 1;
@@ -490,8 +484,13 @@ fn try_join(
 
     // A shared point is only joinable when exactly two ends meet there (degree
     // 2). At a T-junction the degree is ≥ 3 and we must not merge.
-    let deg2 =
-        |p: &Point2| degree.get(&(*p).quantized_key(POINT_KEY_SCALE)).copied().unwrap_or(0) == 2;
+    let deg2 = |p: &Point2| {
+        degree
+            .get(&(*p).quantized_key(POINT_KEY_SCALE))
+            .copied()
+            .unwrap_or(0)
+            == 2
+    };
 
     // Four ways the two runs can abut. Pick the one whose shared point is degree
     // 2; concatenate dropping the duplicated shared point.

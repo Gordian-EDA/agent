@@ -323,7 +323,7 @@ pub fn raw_metrics(
             .iter()
             .filter(|it| {
                 let r = item_rect(it, it.at);
-                label_boxes.iter().any(|b| rects_overlap(r, *b))
+                label_boxes.iter().any(|b| r.overlaps(b))
             })
             .count();
     let (bodies, ic_rects) = bodies_and_ic_rects(env, w, items);

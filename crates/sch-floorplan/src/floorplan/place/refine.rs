@@ -44,7 +44,7 @@ pub fn overlaps_any(items: &[Item], si: usize, at: impl Into<::geom::Point2>) ->
     items
         .iter()
         .enumerate()
-        .any(|(j, it)| j != si && rects_overlap(a, item_rect(it, it.at)))
+        .any(|(j, it)| j != si && a.overlaps(&item_rect(it, it.at)))
 }
 
 /// Final overlap relaxation (deterministic): push any two overlapping bodies
@@ -64,7 +64,7 @@ pub fn decongest(items: &mut [Item]) {
                     item_rect(&items[i], items[i].at),
                     item_rect(&items[j], items[j].at),
                 );
-                if rects_overlap(a, b) {
+                if a.overlaps(&b) {
                     hit = Some((i, j, a, b));
                     break 'scan;
                 }
@@ -76,7 +76,8 @@ pub fn decongest(items: &mut [Item]) {
         };
         let axis = if pen_x <= pen_y { 0 } else { 1 };
         let pen = if axis == 0 { pen_x } else { pen_y };
-        let push = ((pen / 1.27).ceil() * 1.27).max(1.27);
+        let grid = geom::GRID_50_MIL;
+        let push = grid.snap_up(pen).max(grid.pitch());
         // Move j away from i along `axis` (deterministic by the +side of i).
         let dir = if items[j].at[axis] >= items[i].at[axis] {
             1.0
@@ -88,7 +89,7 @@ pub fn decongest(items: &mut [Item]) {
             (false, true) => items[i].at[axis] -= dir * push,
             (true, false) => items[j].at[axis] += dir * push,
             _ => {
-                let half = (push / 2.0 / 1.27).ceil() * 1.27;
+                let half = grid.snap_up(push / 2.0);
                 items[i].at[axis] -= dir * half;
                 items[j].at[axis] += dir * half;
             }
@@ -131,7 +132,7 @@ pub(crate) fn collapse_empty_bands(items: &mut [Item]) -> bool {
         }
         for it in items.iter_mut() {
             if it.at[1] > top {
-                it.at[1] = geom::grid::snap(it.at[1] - dy);
+                it.at[1] = geom::GRID_50_MIL.snap(it.at[1] - dy);
             }
         }
         any = true;
@@ -169,7 +170,7 @@ pub(crate) fn decongest_off_labels(
                     item_rect(&items[i], items[i].at),
                     item_rect(&items[j], items[j].at),
                 );
-                if rects_overlap(a, b) {
+                if a.overlaps(&b) {
                     part_hit = Some((i, j, a, b));
                     break 'scan;
                 }
@@ -181,7 +182,8 @@ pub(crate) fn decongest_off_labels(
             };
             let axis = if pen_x <= pen_y { 0 } else { 1 };
             let pen = if axis == 0 { pen_x } else { pen_y };
-            let push = ((pen / 1.27).ceil() * 1.27).max(1.27);
+            let grid = geom::GRID_50_MIL;
+            let push = grid.snap_up(pen).max(grid.pitch());
             let dir = if items[j].at[axis] >= items[i].at[axis] {
                 1.0
             } else {
@@ -192,7 +194,7 @@ pub(crate) fn decongest_off_labels(
                 (false, true) => items[i].at[axis] -= dir * push,
                 (true, false) => items[j].at[axis] += dir * push,
                 _ => {
-                    let half = (push / 2.0 / 1.27).ceil() * 1.27;
+                    let half = grid.snap_up(push / 2.0);
                     items[i].at[axis] -= dir * half;
                     items[j].at[axis] += dir * half;
                 }
@@ -208,7 +210,7 @@ pub(crate) fn decongest_off_labels(
             }
             let a = item_rect(&items[i], items[i].at);
             for (bx, net) in keepouts {
-                if !item_nets[i].contains(net) && rects_overlap(a, *bx) {
+                if !item_nets[i].contains(net) && a.overlaps(bx) {
                     lab_hit = Some((i, a, *bx));
                     break 'scan2;
                 }
@@ -220,11 +222,12 @@ pub(crate) fn decongest_off_labels(
         };
         let axis = if pen_x <= pen_y { 0 } else { 1 };
         let pen = if axis == 0 { pen_x } else { pen_y };
-        let push = ((pen / 1.27).ceil() * 1.27).max(1.27);
+        let grid = geom::GRID_50_MIL;
+        let push = grid.snap_up(pen).max(grid.pitch());
         let ci = a.center()[axis];
         let cb = b.center()[axis];
         let dir = if ci >= cb { 1.0 } else { -1.0 };
-        items[i].at[axis] = geom::grid::snap(items[i].at[axis] + dir * push);
+        items[i].at[axis] = geom::GRID_50_MIL.snap(items[i].at[axis] + dir * push);
     }
 }
 

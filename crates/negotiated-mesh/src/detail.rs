@@ -43,7 +43,7 @@
 //! reported as a [`FailedNet`] carrying the leaf id — never panicked, never
 //! silently dropped. The result is serializable and byte-stable across runs.
 
-use crate::astar::{self, AStarCosts, State, DIAG_COST};
+use crate::astar::{self, AStarCosts, DIAG_COST, State};
 use crate::crossing::{CellJob, CrossingAssignment, Terminal, TerminalKind};
 use crate::grid::{self, RouteGrid};
 use crate::mesh::{CapacityMesh, LeafId};
@@ -146,10 +146,8 @@ pub fn route_cells(
     // to a foreign trace's centreline is `via_radius + clearance + trace
     // half-width`, again widened by the snap displacement and marked on every layer
     // (the barrel is through-hole).
-    let via_halo = problem.via_diameter / 2.0
-        + problem.clearance
-        + problem.min_trace_width / 2.0
-        + snap_disp;
+    let via_halo =
+        problem.via_diameter / 2.0 + problem.clearance + problem.min_trace_width / 2.0 + snap_disp;
     // A spontaneous mid-path via must keep its barrel clear of foreign copper by
     // the via clearance, so the search checks a Chebyshev halo of this many cells
     // on every layer before placing a via (conservatively covers the Euclidean disc
@@ -215,7 +213,7 @@ pub fn route_cells(
 
     for job in ordered_jobs {
         let leaf_rect = &mesh.leaves[job.leaf].rect;
-        let window = inflate_clamp(leaf_rect, track_pitch, problem);
+        let window = leaf_rect.inflate_clamped_to(track_pitch, &problem.bounds);
         match route_one_job(job, &mut grid, &window, layer_count, halo, via_halo, costs) {
             Ok(route) => cell_routes.push(route),
             Err(reason) => failed.push(FailedNet {
@@ -342,7 +340,10 @@ pub fn route_cells(
         // octilinear: assert diagonals are ON (and routable) rather than the old
         // orthogonal-only sentinel.
         debug_assert_ne!(finish_costs.diag, u32::MAX, "finisher routes octilinearly");
-        debug_assert_eq!(finish_costs.diag, DIAG_COST, "finisher uses the octilinear diagonal cost");
+        debug_assert_eq!(
+            finish_costs.diag, DIAG_COST,
+            "finisher uses the octilinear diagonal cost"
+        );
         // Repair the failed nets in slice-1 net-rank order (lower half-perimeter
         // first — the short local nets that the per-cell pass laid around, matching
         // the order the global stage negotiated). Each net marks its copper before
@@ -350,7 +351,14 @@ pub fn route_cells(
         let order = finisher_order(&failed_names, &net_rank);
         let mut g = base_grid.clone();
         let (routes, finisher_fail) = run_finisher_pass(
-            problem, &mut g, &order, &lanes, layer_count, finish_halo, via_halo, finish_costs,
+            problem,
+            &mut g,
+            &order,
+            &lanes,
+            layer_count,
+            finish_halo,
+            via_halo,
+            finish_costs,
         );
 
         cell_routes.extend(routes);
@@ -423,8 +431,15 @@ fn run_finisher_pass(
         for (wps, allow_via) in attempts {
             let attempt_costs = AStarCosts { allow_via, ..costs };
             let mut trial = grid.clone();
-            match finish_net(conn, wps, &mut trial, layer_count, finish_halo, via_halo, attempt_costs)
-            {
+            match finish_net(
+                conn,
+                wps,
+                &mut trial,
+                layer_count,
+                finish_halo,
+                via_halo,
+                attempt_costs,
+            ) {
                 Ok(route) => {
                     committed = Some((trial, route));
                     break;
@@ -673,12 +688,20 @@ fn finish_net(
                 }
                 let (ix, iy) = (ix as usize, iy as usize);
                 if grid.is_free_for(w.layer, ix, iy, conn_idx) {
-                    targets.push(State { layer: w.layer, ix, iy });
+                    targets.push(State {
+                        layer: w.layer,
+                        ix,
+                        iy,
+                    });
                 }
             }
         }
         if targets.is_empty() {
-            targets.push(State { layer: w.layer, ix: cx, iy: cy });
+            targets.push(State {
+                layer: w.layer,
+                ix: cx,
+                iy: cy,
+            });
         }
         route_leg(grid, &mut tree_cells, &targets, "an assigned crossing")?;
     }
@@ -814,7 +837,8 @@ fn route_one_job(
     // centre with the terminal's exact mm coordinate.
     let mut snap: BTreeMap<(usize, usize, usize), Point2> = BTreeMap::new();
     for (t, s) in &terminals {
-        snap.entry((s.layer, s.ix, s.iy)).or_insert_with(|| t.at.clone());
+        snap.entry((s.layer, s.ix, s.iy))
+            .or_insert_with(|| t.at.clone());
     }
 
     {
@@ -839,14 +863,21 @@ fn route_one_job(
         // neighbouring leaf to get around foreign copper. Cross-cell clearance still
         // holds (the shared grid carries every net's halo), and the endpoint snap
         // keeps the stitching contract; only the locality relaxes.
-        let path = astar::search_bounded(wgrid, conn_idx, &[*start], &tree_cells, costs, Some(bounds))
-            .or_else(|| astar::search_bounded(wgrid, conn_idx, &[*start], &tree_cells, costs, None))
-            .ok_or_else(|| {
-                format!(
-                    "no in-cell path for terminal {:?} at ({:.4},{:.4}) (congestion or enclosure)",
-                    t.kind, t.at.x, t.at.y
-                )
-            })?;
+        let path = astar::search_bounded(
+            wgrid,
+            conn_idx,
+            &[*start],
+            &tree_cells,
+            costs,
+            Some(bounds),
+        )
+        .or_else(|| astar::search_bounded(wgrid, conn_idx, &[*start], &tree_cells, costs, None))
+        .ok_or_else(|| {
+            format!(
+                "no in-cell path for terminal {:?} at ({:.4},{:.4}) (congestion or enclosure)",
+                t.kind, t.at.x, t.at.y
+            )
+        })?;
 
         // Mark copper + clearance capsule (diagonal-safe) and fold the path into
         // the tree.
@@ -923,12 +954,7 @@ fn emit_path(
 }
 
 /// Push a simplified (collinear-merged) trace if it has ≥ 2 distinct points.
-fn push_trace(
-    traces: &mut Vec<CellTrace>,
-    layer: usize,
-    layer_count: usize,
-    points: Vec<Point2>,
-) {
+fn push_trace(traces: &mut Vec<CellTrace>, layer: usize, layer_count: usize, points: Vec<Point2>) {
     let simplified = simplify(points);
     if simplified.len() < 2 {
         return;
@@ -970,18 +996,6 @@ fn window_cell_bounds(grid: &RouteGrid, window: &Rect) -> astar::CellBounds {
     }
 }
 
-/// Inflate a leaf rect by one track pitch and clamp to the board bounds — the
-/// per-cell routing window (see [`RouteGrid::build_window`]).
-fn inflate_clamp(rect: &Rect, track_pitch: f64, problem: &RouteProblem) -> Rect {
-    let b = &problem.bounds;
-    Rect {
-        min_x: (rect.min_x - track_pitch).max(b.min_x),
-        min_y: (rect.min_y - track_pitch).max(b.min_y),
-        max_x: (rect.max_x + track_pitch).min(b.max_x),
-        max_y: (rect.max_y + track_pitch).min(b.max_y),
-    }
-}
-
 /// The grid cell + layer of a terminal.
 fn terminal_cell(grid: &RouteGrid, t: &Terminal, layer_count: usize) -> State {
     let layer = t
@@ -994,7 +1008,11 @@ fn terminal_cell(grid: &RouteGrid, t: &Terminal, layer_count: usize) -> State {
 }
 
 /// The grid cell + layer of a connection route point (the finisher's terminals).
-fn route_point_cell(grid: &RouteGrid, pt: &crate::problem::RoutePoint, layer_count: usize) -> State {
+fn route_point_cell(
+    grid: &RouteGrid,
+    pt: &crate::problem::RoutePoint,
+    layer_count: usize,
+) -> State {
     let layer = pt
         .layer
         .index(layer_count as u32)
@@ -1015,18 +1033,27 @@ fn net_rank(problem: &RouteProblem) -> BTreeMap<String, usize> {
         let kb = half_perimeter(&problem.connections[b]);
         ka.partial_cmp(&kb)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| problem.connections[a].name.cmp(&problem.connections[b].name))
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            })
     });
     let mut rank: BTreeMap<String, usize> = BTreeMap::new();
     for (r, ci) in order.into_iter().enumerate() {
-        rank.entry(problem.connections[ci].name.clone()).or_insert(r);
+        rank.entry(problem.connections[ci].name.clone())
+            .or_insert(r);
     }
     rank
 }
 
 /// Half-perimeter (width + height) of a connection's point bounding box.
 fn half_perimeter(conn: &crate::problem::Connection) -> f64 {
-    let pts: Vec<Point2> = conn.points_to_connect.iter().map(|p| Point2::new(p.x, p.y)).collect();
+    let pts: Vec<Point2> = conn
+        .points_to_connect
+        .iter()
+        .map(|p| Point2::new(p.x, p.y))
+        .collect();
     geom::Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter())
 }
 
@@ -1139,8 +1166,7 @@ mod tests {
         // Endpoint exactness: at least one trace endpoint equals a terminal
         // (pad/crossing) exactly — both pads are at y=4.
         let on_pad = |q: &Point2| {
-            ((q.x - 2.0).abs() < 1e-12 || (q.x - 18.0).abs() < 1e-12)
-                && (q.y - 4.0).abs() < 1e-12
+            ((q.x - 2.0).abs() < 1e-12 || (q.x - 18.0).abs() < 1e-12) && (q.y - 4.0).abs() < 1e-12
         };
         let hits_pad = r.cell_routes.iter().any(|cr| {
             cr.traces.iter().any(|t| {
@@ -1235,10 +1261,7 @@ mod tests {
         let mut connections = Vec::new();
         for i in 0..4 {
             let y = 3.0 + i as f64 * 2.0;
-            connections.push(conn(
-                &format!("N{i}"),
-                &[(3.0, y, "top"), (13.0, y, "top")],
-            ));
+            connections.push(conn(&format!("N{i}"), &[(3.0, y, "top"), (13.0, y, "top")]));
         }
         let p = base(bounds(16.0, 12.0), vec![], connections);
         let (_mesh, r) = run(&p);
@@ -1288,11 +1311,21 @@ mod tests {
         let plan = global_route(&p).plan;
         let a = assign_crossings(&p, &mesh, &plan);
         let r = route_cells(&p, &mesh, &a);
-        assert!(r.is_clean(), "quad must route clean through the finisher: {:?}", r.failed);
+        assert!(
+            r.is_clean(),
+            "quad must route clean through the finisher: {:?}",
+            r.failed
+        );
         // Finisher routes carry the synthetic leaf id usize::MAX.
-        let finisher: Vec<&CellRoute> =
-            r.cell_routes.iter().filter(|cr| cr.leaf == usize::MAX).collect();
-        assert!(!finisher.is_empty(), "the finisher must have repaired at least one net");
+        let finisher: Vec<&CellRoute> = r
+            .cell_routes
+            .iter()
+            .filter(|cr| cr.leaf == usize::MAX)
+            .collect();
+        assert!(
+            !finisher.is_empty(),
+            "the finisher must have repaired at least one net"
+        );
         let has_45 = finisher.iter().any(|cr| {
             cr.traces.iter().any(|t| {
                 t.points.windows(2).any(|w| {
@@ -1302,12 +1335,18 @@ mod tests {
                 })
             })
         });
-        assert!(has_45, "the finisher must emit a 45° diagonal segment (the win)");
+        assert!(
+            has_45,
+            "the finisher must emit a 45° diagonal segment (the win)"
+        );
         // The whole detailed solution (per-cell + finisher copper) lints CLEAN: the
         // capsule MARK kept the diagonal finisher runs the full clearance apart.
         let r = crate::pipeline::route_detailed(&p);
         let vs = crate::lint::lint(&p, &r.solution);
-        assert!(vs.is_empty(), "finisher diagonals must lint clean, got {vs:?}");
+        assert!(
+            vs.is_empty(),
+            "finisher diagonals must lint clean, got {vs:?}"
+        );
     }
 
     /// Determinism: serialize twice, compare byte-for-byte.
@@ -1337,7 +1376,11 @@ mod tests {
         let plan = global_route(&p).plan;
         let a = assign_crossings(&p, &mesh, &plan);
         let r = route_cells(&p, &mesh, &a);
-        assert!(r.is_clean(), "led-r must route cell-by-cell: {:?}", r.failed);
+        assert!(
+            r.is_clean(),
+            "led-r must route cell-by-cell: {:?}",
+            r.failed
+        );
         for x in &a.crossings {
             let appears = r
                 .cell_routes
@@ -1347,9 +1390,8 @@ mod tests {
                 .any(|t| {
                     let f = &t.points[0];
                     let l = &t.points[t.points.len() - 1];
-                    let eq = |q: &Point2| {
-                        (q.x - x.at.x).abs() < 1e-12 && (q.y - x.at.y).abs() < 1e-12
-                    };
+                    let eq =
+                        |q: &Point2| (q.x - x.at.x).abs() < 1e-12 && (q.y - x.at.y).abs() < 1e-12;
                     eq(f) || eq(l)
                 });
             assert!(
@@ -1423,7 +1465,11 @@ mod tests {
                     f.reason
                 );
             }
-            assert!(r.is_clean(), "{name}: detailed stage must be clean: {:?}", r.failed);
+            assert!(
+                r.is_clean(),
+                "{name}: detailed stage must be clean: {:?}",
+                r.failed
+            );
             assert!(
                 !r.cell_routes.is_empty(),
                 "{name}: produced at least one cell route"

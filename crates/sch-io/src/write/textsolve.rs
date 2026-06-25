@@ -9,11 +9,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use geom::{EPS, Point2, Segment};
+use geom::{EPS, GRID_50_MIL, Point2, Rect, Segment};
 
-use geom::grid::snap_point;
-
-use super::{BBox, Justify, SchematicWriter, TextPos, Wire, field_anchors, field_box};
+use super::{Justify, SchematicWriter, TextPos, Wire, field_anchors, field_box};
 
 /// What [`SchematicWriter::solve_text_positions`] mutates once the greedy solver
 /// has picked a candidate for the parallel [`crate::label::Movable`].
@@ -77,7 +75,7 @@ impl SchematicWriter {
         const PWR: &str = "\0power_wire";
 
         let bits = |p: Point2| {
-            let p = snap_point(p);
+            let p = GRID_50_MIL.snap_point(p);
             (p[0].to_bits(), p[1].to_bits())
         };
 
@@ -204,8 +202,8 @@ impl SchematicWriter {
                         let end = self.labels[i].at;
                         // Drop the stub wire retract_colliding_stubs
                         // materialized (content-derived key).
-                        let a = snap_point(pin_at);
-                        let b = snap_point(end);
+                        let a = GRID_50_MIL.snap_point(pin_at);
+                        let b = GRID_50_MIL.snap_point(end);
                         let key = format!("{}:{}:{}:{}", a[0], a[1], b[0], b[1]);
                         self.wires.retain(|w| w.uuid_key != key);
                         self.labels[i].at = pin_at;
@@ -558,7 +556,7 @@ impl SchematicWriter {
             .get(&inst.lib_id)
             .is_some_and(|p| p.len() >= 3);
         let cands = if is_ic {
-            let pin_boxes: Vec<BBox> = self
+            let pin_boxes: Vec<Rect> = self
                 .sym_pins
                 .get(&inst.lib_id)
                 .map(|pins| {
@@ -567,7 +565,7 @@ impl SchematicWriter {
                         .collect()
                 })
                 .unwrap_or_default();
-            let hits = |c: &(TextPos, TextPos, BBox)| {
+            let hits = |c: &(TextPos, TextPos, Rect)| {
                 pin_boxes.iter().filter(|pb| c.2.overlaps(pb)).count()
             };
             let mut bands = vec![
@@ -764,7 +762,10 @@ impl SchematicWriter {
         // grid-multiple shift keeps it grid-aligned (KiCAD ERCs off-grid endpoints).
         // `minx`/`miny` include off-grid text extents, so an unsnapped shift would
         // knock the whole sheet off the 1.27 mm grid.
-        let (dx, dy) = (geom::grid::snap(M - minx), geom::grid::snap(M - miny));
+        let (dx, dy) = (
+            geom::GRID_50_MIL.snap(M - minx),
+            geom::GRID_50_MIL.snap(M - miny),
+        );
         if dx.abs() < EPS && dy.abs() < EPS {
             return;
         }
@@ -871,7 +872,7 @@ impl SchematicWriter {
         // `"<refdes>:<pin>:<net>:<idx>"` uuid_key (substring before the first
         // ':'); a power-flag/cluster label without a real refdes prefix simply
         // won't match any symbol's refdes, which is harmless.
-        let mut items: Vec<(String, BBox, String, Kind)> = Vec::new();
+        let mut items: Vec<(String, Rect, String, Kind)> = Vec::new();
         for inst in &self.instances {
             if inst.refdes.starts_with('#') {
                 // Power/flag graphics are exempt as bodies (they legitimately

@@ -4,8 +4,8 @@
 //! cap onto the nearest free ring slot around its anchor before the annealer runs.
 
 use super::geometry::{
-    PLACE_GRID, SPIRAL_MAX_RING, aspect_edge, clamp_into_bounds, edge_delta, edge_target,
-    nearest_edge, pad_world, sign_nonzero, snap,
+    PLACE_GRID, PLACEMENT_GRID, SPIRAL_MAX_RING, aspect_edge, edge_delta, edge_target,
+    nearest_edge, pad_world, sign_nonzero,
 };
 use super::legalize::collides;
 use super::model::{LogicalNet, PlaceProblem, PlacementHints};
@@ -243,7 +243,7 @@ pub(crate) fn force_layout(
             }
             pos[i].x += force[i].0 * scale;
             pos[i].y += force[i].1 * scale;
-            clamp_into_bounds(&mut pos[i], &problem.bounds, half[i]);
+            pos[i] = problem.bounds.clamp_center_for_half(pos[i], half[i]);
         }
     }
 }
@@ -302,8 +302,8 @@ pub(crate) fn snap_caps_to_anchor_ring(
             for s in 0..steps {
                 let theta = s as f64 / steps as f64 * 2.0 * std::f64::consts::PI;
                 let cand = Point2 {
-                    x: snap(anchor.x + radius * theta.cos()),
-                    y: snap(anchor.y + radius * theta.sin()),
+                    x: PLACEMENT_GRID.snap(anchor.x + radius * theta.cos()),
+                    y: PLACEMENT_GRID.snap(anchor.y + radius * theta.sin()),
                 };
                 if !problem
                     .bounds

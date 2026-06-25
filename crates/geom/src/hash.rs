@@ -3,7 +3,7 @@
 /// UUIDv5 of `key` under `namespace`, in canonical hyphenated lowercase form.
 ///
 /// Deterministic across machines and process runs — the basis for every
-/// content-derived identifier we emit (see [`crate::ids`]).
+/// content-derived identifier we emit (see [`crate::stable_uuid`]).
 pub fn uuid_v5(namespace: uuid::Uuid, key: &[u8]) -> String {
     uuid::Uuid::new_v5(&namespace, key)
         .as_hyphenated()

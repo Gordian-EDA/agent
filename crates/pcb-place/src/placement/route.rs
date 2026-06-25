@@ -16,11 +16,11 @@ use super::geometry::{courtyard_margin, rotated_copper_bbox, rotated_courtyard_h
 use super::hints::{apply_grid_hints, unified_fanout_place};
 use super::legalize::{initial_grid, is_legal, legalize};
 use super::model::{
-    derive_nets, Placement, PlaceProblem, PlaceReport, PlaceResult, PlacementHints,
+    PlaceProblem, PlaceReport, PlaceResult, Placement, PlacementHints, derive_nets,
 };
 use super::pairs::decoupling_pairs;
 use crate::problem::place::{Placer, RoutabilityOracle, RouteRanker};
-use crate::problem::{Point2, RouteProblem};
+use crate::problem::{Point2, Rect, RouteProblem};
 
 /// [`to_route_problem`] now lives in the kernel ([`pcb_model::place`]) so a
 /// third-party placer can build a [`RouteProblem`] from its own placement without
@@ -57,7 +57,9 @@ pub struct LegalizingPlacer {
 impl LegalizingPlacer {
     /// The baseline placer (pure force seed + legalize, no idioms).
     pub fn baseline() -> Self {
-        Self { opts: PlaceOpts::default() }
+        Self {
+            opts: PlaceOpts::default(),
+        }
     }
 }
 
@@ -80,7 +82,13 @@ pub struct AnnealingPlacer {
 impl AnnealingPlacer {
     /// The SA-refine placer, seeded from the baseline force layout.
     pub fn new() -> Self {
-        Self { opts: PlaceOpts { anneal: true, aspect_edge: false, decouple: false } }
+        Self {
+            opts: PlaceOpts {
+                anneal: true,
+                aspect_edge: false,
+                decouple: false,
+            },
+        }
     }
 }
 
@@ -140,19 +148,32 @@ fn board_oracle(problem: &PlaceProblem, hints: &PlacementHints) -> RoutabilityOr
     // The SA refinement subsumes the decouple/edge springs (its cost does
     // cohesion + edge-seek directly), so the annealed variant is the main
     // alternative; the spring variants stay as cheap extra candidates.
-    let mut placers: Vec<Box<dyn Placer + Send + Sync>> =
-        vec![Box::new(LegalizingPlacer { opts: PlaceOpts::default() })];
+    let mut placers: Vec<Box<dyn Placer + Send + Sync>> = vec![Box::new(LegalizingPlacer {
+        opts: PlaceOpts::default(),
+    })];
     placers.push(Box::new(AnnealingPlacer {
-        opts: PlaceOpts { anneal: true, aspect_edge: has_edge, decouple: false },
+        opts: PlaceOpts {
+            anneal: true,
+            aspect_edge: has_edge,
+            decouple: false,
+        },
     }));
     if has_decouple {
         placers.push(Box::new(LegalizingPlacer {
-            opts: PlaceOpts { decouple: true, aspect_edge: false, anneal: false },
+            opts: PlaceOpts {
+                decouple: true,
+                aspect_edge: false,
+                anneal: false,
+            },
         }));
     }
     if has_edge {
         placers.push(Box::new(LegalizingPlacer {
-            opts: PlaceOpts { decouple: false, aspect_edge: true, anneal: false },
+            opts: PlaceOpts {
+                decouple: false,
+                aspect_edge: true,
+                anneal: false,
+            },
         }));
     }
     RoutabilityOracle::new(placers, Box::new(GridAstarRanker))
@@ -255,7 +276,7 @@ fn seat_corner_seek_parts(problem: &PlaceProblem, hints: &PlacementHints, best: 
         .zip(&rots)
         .map(|(p, &r)| rotated_courtyard_half(p, r))
         .collect();
-    let copper_bbox: Vec<(f64, f64, f64, f64)> = problem
+    let copper_bbox: Vec<Rect> = problem
         .parts
         .iter()
         .zip(&rots)
@@ -274,8 +295,16 @@ fn seat_corner_seek_parts(problem: &PlaceProblem, hints: &PlacementHints, best: 
         let h = half[i];
         // Inset each corner by this part's half so it sits fully on-board.
         let inset = |c: (f64, f64)| Point2 {
-            x: if c.0 == b.min_x { b.min_x + h.0 } else { b.max_x - h.0 },
-            y: if c.1 == b.min_y { b.min_y + h.1 } else { b.max_y - h.1 },
+            x: if c.0 == b.min_x {
+                b.min_x + h.0
+            } else {
+                b.max_x - h.0
+            },
+            y: if c.1 == b.min_y {
+                b.min_y + h.1
+            } else {
+                b.max_y - h.1
+            },
         };
         let mut order: Vec<usize> = (0..4).collect();
         let d = |c: (f64, f64)| (pos[i].x - c.0).powi(2) + (pos[i].y - c.1).powi(2);
@@ -310,7 +339,11 @@ pub fn place(problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
 }
 
 /// [`place`] with a specific set of idiom variant toggles.
-pub(crate) fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts: PlaceOpts) -> PlaceResult {
+pub(crate) fn place_variant(
+    problem: &PlaceProblem,
+    hints: &PlacementHints,
+    opts: PlaceOpts,
+) -> PlaceResult {
     let n = problem.parts.len();
     let nets = derive_nets(problem);
     let margin = courtyard_margin(problem.clearance);
@@ -321,7 +354,12 @@ pub(crate) fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts
     let rotations: Vec<f64> = problem
         .parts
         .iter()
-        .map(|p| p.locked.as_ref().map(|l| geom::snap_quadrant(l.rotation)).unwrap_or(0.0))
+        .map(|p| {
+            p.locked
+                .as_ref()
+                .map(|l| geom::snap_quadrant(l.rotation))
+                .unwrap_or(0.0)
+        })
         .collect();
 
     // Rotated courtyard half-extents per part (rotation only swaps w/h here).
@@ -331,7 +369,7 @@ pub(crate) fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts
         .zip(&rotations)
         .map(|(p, &rot)| rotated_courtyard_half(p, rot))
         .collect();
-    let copper_bbox: Vec<(f64, f64, f64, f64)> = problem
+    let copper_bbox: Vec<Rect> = problem
         .parts
         .iter()
         .zip(&rotations)
@@ -393,7 +431,9 @@ pub(crate) fn place_variant(problem: &PlaceProblem, hints: &PlacementHints, opts
         .iter()
         .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
         .collect();
-    let layout_cost = place_cost(problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos);
+    let layout_cost = place_cost(
+        problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+    );
 
     PlaceResult {
         placements,

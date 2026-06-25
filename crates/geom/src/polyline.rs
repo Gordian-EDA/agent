@@ -37,10 +37,7 @@ impl Polyline {
         self.bbox().map_or(0.0, |r| r.half_perimeter())
     }
 
-    /// Dedup consecutive coincident points and merge collinear runs (orthogonal
-    /// AND 45°) that keep heading — a straight diagonal staircase collapses to its
-    /// endpoints, but a reversal (`A→B→A`) is preserved. The single polyline
-    /// simplifier for routed copper/wire paths.
+    /// Dedup consecutive coincident points and merge forward collinear runs.
     pub fn simplify(self) -> Polyline {
         let mut deduped: Vec<Point2> = Vec::with_capacity(self.0.len());
         for p in self.0 {
@@ -86,7 +83,11 @@ mod tests {
         let out = Polyline::new(path).simplify().into_points();
         assert_eq!(
             out,
-            vec![Point2::new(0.0, 0.0), Point2::new(2.0, 0.0), Point2::new(2.0, 1.0)]
+            vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(2.0, 0.0),
+                Point2::new(2.0, 1.0)
+            ]
         );
     }
 

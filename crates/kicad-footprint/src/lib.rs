@@ -10,4 +10,4 @@ mod search;
 mod types;
 
 pub use search::{FootprintHit, FootprintIndex};
-pub use types::{BBox, CourtyardSource, Footprint, FootprintPad, PadTechnology};
+pub use types::{CourtyardSource, Footprint, FootprintPad, PadTechnology};

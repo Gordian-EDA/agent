@@ -39,8 +39,11 @@ impl Polygon {
             .map(move |(i, a)| Segment::new(a, self.0[(i + 1) % n]))
     }
 
-    /// Is `pt` inside this polygon by the even-odd rule?
+    /// Is `pt` inside or on this polygon?
     pub fn contains_point(&self, pt: Point2) -> bool {
+        if self.edges().any(|edge| edge.contains_point(pt)) {
+            return true;
+        }
         let mut inside = false;
         let mut j = self.0.len() - 1;
         for i in 0..self.0.len() {
@@ -114,6 +117,7 @@ mod tests {
     fn contains_points_by_even_odd_rule() {
         let poly = square();
         assert!(poly.contains_point(Point2::new(5.0, 5.0)));
+        assert!(poly.contains_point(Point2::new(10.0, 5.0)));
         assert!(!poly.contains_point(Point2::new(15.0, 5.0)));
     }
 

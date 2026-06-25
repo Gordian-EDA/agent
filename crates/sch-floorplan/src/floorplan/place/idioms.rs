@@ -14,7 +14,7 @@ use sch_place::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
 // `geom::union_find`, shared with circuit-lang's pin reconciler.
 use super::super::infer::anchor_tap;
-use geom::union_find::{uf_find, uf_union};
+use geom::{uf_find, uf_union};
 use sch_place::ir::{LayoutIr, Orient};
 
 /// each load cap two gaps out, level with its osc pin. Returns true if it moved
@@ -22,7 +22,7 @@ use sch_place::ir::{LayoutIr, Orient};
 /// the placement search has already finished around them and won't undo this.
 pub fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
     const GAP: f64 = 7.62;
-    let snap = geom::grid::snap;
+    let snap = |v| geom::GRID_50_MIL.snap(v);
     // (item, position, optional forced angle). The crystal gets a forced angle so its pins
     // run TOWARD the IC (along `dir`); the anneal otherwise leaves it on the perpendicular
     // axis, which forces both 3-pin OSC nets to wrap around the body → route-fail → a bridging
@@ -180,7 +180,7 @@ pub fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
 /// Returns true if it moved anything.
 pub fn align_led_chains(items: &mut [Item], _inc: &Incidence, ir: &LayoutIr) -> bool {
     const DROP: f64 = 10.16; // LED half + gap + resistor half, on grid.
-    let snap = geom::grid::snap;
+    let snap = |v| geom::GRID_50_MIL.snap(v);
     let mut moves: Vec<(usize, [f64; 2], f64)> = Vec::new();
     for idiom in &ir.idioms {
         if idiom.kind != "led_indicator" {
@@ -345,7 +345,7 @@ pub(crate) fn align_rail_cap_rows(items: &mut [Item], ir: &LayoutIr) -> bool {
     // A net is a "rail" if it's a recognized power token OR the engine treats it as a rail (covers
     // board-specific names like VM/VSW that is_power_net's token list misses).
     let is_rail = |n: &str| is_power_net(n) || ir.rails.contains_key(n);
-    let snap = geom::grid::snap;
+    let snap = |v| geom::GRID_50_MIL.snap(v);
     const PITCH: f64 = 12.7; // cap body + value/refdes label width, on grid (7.62 packed the labels
     // tight enough that the follow-up decongest scattered the whole row back out)
     // The exact set of caps `gather_decoupling_bank` will re-seat — only THESE may be deferred from the
@@ -379,7 +379,10 @@ pub(crate) fn align_rail_cap_rows(items: &mut [Item], ir: &LayoutIr) -> bool {
             .iter()
             .map(|&i| items[i].at[1])
             .fold(f64::MAX, f64::min);
-        if idxs.iter().all(|&i| (items[i].at[1] - row_y).abs() < 1.27) {
+        if idxs
+            .iter()
+            .all(|&i| (items[i].at[1] - row_y).abs() < GRID_KEY)
+        {
             continue; // already a row
         }
         let mut sorted = idxs.clone();
@@ -423,7 +426,7 @@ pub(crate) fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool 
     if std::env::var("MULTISHEET_REFINE").is_err() {
         return false;
     }
-    let snap = geom::grid::snap;
+    let snap = |v| geom::GRID_50_MIL.snap(v);
     let is_rail = |n: &str| is_power_net(n) || ir.rails.contains_key(n);
     // A positive supply net (the rail whose pins the bank hugs): a power net that is neither ground
     // nor a negative supply.
@@ -607,8 +610,8 @@ pub(crate) fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool 
         let _ = nrow;
         // No-op guard: skip if the bank is already at the proposed row with the right orientation.
         if sorted.iter().zip(&targets).all(|(&i, t)| {
-            (items[i].at[0] - t[0]).abs() < 1.27
-                && (items[i].at[1] - t[1]).abs() < 1.27
+            (items[i].at[0] - t[0]).abs() < GRID_KEY
+                && (items[i].at[1] - t[1]).abs() < GRID_KEY
                 && (items[i].angle - new_angle[&i]).abs() < 0.5
         }) {
             continue;
@@ -640,9 +643,7 @@ pub(crate) fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool 
                 if other == c {
                     continue;
                 }
-                if rects_overlap(at_new(c), at_new(other))
-                    && !rects_overlap(at_now(c), at_now(other))
-                {
+                if at_new(c).overlaps(&at_new(other)) && !at_now(c).overlaps(&at_now(other)) {
                     ok = false;
                     break 'check;
                 }
@@ -687,7 +688,7 @@ pub(crate) fn gather_banked_decoupling(
     if banked.is_empty() {
         return false;
     }
-    let snap = geom::grid::snap;
+    let snap = |v| geom::GRID_50_MIL.snap(v);
     let is_rail = |n: &str| is_power_net(n) || ir.rails.contains_key(n);
     let is_vp = |n: &str| is_rail(n) && !is_ground(n) && !is_neg_supply(n);
 
@@ -815,8 +816,8 @@ pub(crate) fn gather_banked_decoupling(
 
     // No-op guard: already a tidy block at the target?
     if bank.iter().zip(&targets).all(|(&i, t)| {
-        (items[i].at[0] - t[0]).abs() < 1.27
-            && (items[i].at[1] - t[1]).abs() < 1.27
+        (items[i].at[0] - t[0]).abs() < GRID_KEY
+            && (items[i].at[1] - t[1]).abs() < GRID_KEY
             && (items[i].angle - new_angle[&i]).abs() < 0.5
     }) {
         return false;
@@ -842,7 +843,7 @@ pub(crate) fn gather_banked_decoupling(
             if other == c {
                 continue;
             }
-            if rects_overlap(at_new(c), at_new(other)) && !rects_overlap(at_now(c), at_now(other)) {
+            if at_new(c).overlaps(&at_new(other)) && !at_now(c).overlaps(&at_now(other)) {
                 return false;
             }
         }
@@ -880,7 +881,7 @@ pub(crate) fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool
     if std::env::var("MULTISHEET_REFINE").is_err() {
         return false;
     }
-    let snap = geom::grid::snap;
+    let snap = |v| geom::GRID_50_MIL.snap(v);
     const GAP: f64 = 7.62;
     let is_crystal = |it: &Item| {
         it.geom.pins.len() == 2
@@ -1083,8 +1084,8 @@ pub(crate) fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool
         ];
         // No-op guard: skip if the cluster already sits at the proposed geometry.
         if proposed.iter().all(|&(i, at, ang)| {
-            (items[i].at[0] - at[0]).abs() < 1.27
-                && (items[i].at[1] - at[1]).abs() < 1.27
+            (items[i].at[0] - at[0]).abs() < GRID_KEY
+                && (items[i].at[1] - at[1]).abs() < GRID_KEY
                 && (items[i].angle - ang).abs() < 0.5
         }) {
             continue;
@@ -1114,9 +1115,7 @@ pub(crate) fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool
                 if other == c {
                     continue;
                 }
-                if rects_overlap(at_new(c), at_new(other))
-                    && !rects_overlap(at_now(c), at_now(other))
-                {
+                if at_new(c).overlaps(&at_new(other)) && !at_now(c).overlaps(&at_now(other)) {
                     ok = false;
                     break 'check;
                 }
@@ -1161,7 +1160,7 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
     if std::env::var("MULTISHEET_REFINE").is_err() {
         return false;
     }
-    let snap = geom::grid::snap;
+    let snap = |v| geom::GRID_50_MIL.snap(v);
     const GAP: f64 = 7.62;
 
     // A 2-pin part's net set (filters None). Used to match the bridging cap / feeding diode.
@@ -1491,8 +1490,8 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
         }
         // No-op guard: if the stack already sits at the proposal, just claim and move on.
         if proposed.iter().all(|&(i, at, ang)| {
-            (items[i].at[0] - at[0]).abs() < 1.27
-                && (items[i].at[1] - at[1]).abs() < 1.27
+            (items[i].at[0] - at[0]).abs() < GRID_KEY
+                && (items[i].at[1] - at[1]).abs() < GRID_KEY
                 && (items[i].angle - ang).abs() < 0.5
         }) {
             for &(i, _, _) in &proposed {
@@ -1533,9 +1532,7 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
                 if other == c {
                     continue;
                 }
-                if rects_overlap(at_new(c), at_new(other))
-                    && !rects_overlap(at_now(c), at_now(other))
-                {
+                if at_new(c).overlaps(&at_new(other)) && !at_now(c).overlaps(&at_now(other)) {
                     ok = false;
                     break 'check;
                 }
@@ -1587,7 +1584,7 @@ pub(crate) fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool
     if std::env::var("MULTISHEET_REFINE").is_err() {
         return false;
     }
-    let snap = geom::grid::snap;
+    let snap = |v| geom::GRID_50_MIL.snap(v);
     const GAP: f64 = 5.08; // bridged-pin edge → bridge part, on grid (short stub each side)
 
     // A net is PURELY LOCAL iff the author did not mark it a port (cross-sheet) AND it is not a
@@ -1756,8 +1753,7 @@ pub(crate) fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool
             let r = rect_at(ri, at, res_angle);
             (0..items.len()).all(|other| {
                 other == ri
-                    || !(rects_overlap(r, settled(other))
-                        && !rects_overlap(settled(ri), settled(other)))
+                    || !(r.overlaps(&settled(other)) && !settled(ri).overlaps(&settled(other)))
             })
         };
         // SWEEP a small ladder of seats and take the FIRST overlap-free one (the way a human nudges the
@@ -1775,8 +1771,8 @@ pub(crate) fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool
                     [snap(lane), snap(depth)]
                 };
                 // No-op: if this seat is where the part already sits, it's already good — stop.
-                if (items[ri].at[0] - at[0]).abs() < 1.27
-                    && (items[ri].at[1] - at[1]).abs() < 1.27
+                if (items[ri].at[0] - at[0]).abs() < GRID_KEY
+                    && (items[ri].at[1] - at[1]).abs() < GRID_KEY
                     && (items[ri].angle - res_angle).abs() < 0.5
                 {
                     break 'seat;
@@ -1823,7 +1819,7 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
     if std::env::var("MULTISHEET_REFINE").is_err() {
         return false;
     }
-    let snap = geom::grid::snap;
+    let snap = |v| geom::GRID_50_MIL.snap(v);
     const GAP: f64 = 5.08; // IC bus-pin edge → pull-up's near (bus) pin, on grid (short stub)
 
     // A pull-up bridges a power RAIL and a non-power BUS SIGNAL that the author marked a cross-sheet
@@ -2096,14 +2092,14 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
                     let r = rect_at(ri, at, res_angle);
                     // Against prior group seats (TIGHT — column packs close) AND the rest of the sheet
                     // (conservative; pre-existing overlaps aren't ours to relitigate).
-                    if placed.iter().any(|pr| rects_overlap(tight_at(at), *pr)) {
+                    if placed.iter().any(|pr| tight_at(at).overlaps(pr)) {
                         all_ok = false;
                         break;
                     }
                     let clash = (0..items.len()).find(|&other| {
                         !group_set.contains(&other)
-                            && rects_overlap(r, settled(other))
-                            && !rects_overlap(settled(ri), settled(other))
+                            && r.overlaps(&settled(other))
+                            && !settled(ri).overlaps(&settled(other))
                     });
                     if clash.is_some() {
                         all_ok = false;
@@ -2122,8 +2118,8 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
         // No-op short-circuit: if every member already sits at its chosen seat + orientation, skip (no churn).
         if ok
             && seats.iter().all(|&(ri, at, ang)| {
-                (items[ri].at[0] - at[0]).abs() < 1.27
-                    && (items[ri].at[1] - at[1]).abs() < 1.27
+                (items[ri].at[0] - at[0]).abs() < GRID_KEY
+                    && (items[ri].at[1] - at[1]).abs() < GRID_KEY
                     && (items[ri].angle - ang).abs() < 0.5
             })
         {
@@ -2168,7 +2164,7 @@ pub(crate) fn align_repeated_columns(
     if std::env::var("MULTISHEET_REFINE").is_err() {
         return false;
     }
-    let snap = geom::grid::snap;
+    let snap = |v| geom::GRID_50_MIL.snap(v);
     let is_rail = |n: &str| is_power_net(n) || ir.rails.contains_key(n);
     // A "spine" is one instance of the repeated block: a MULTI-PIN ANCHOR (≥3 pins — same definition the
     // engine uses for `anchors`). Three half-bridges = six IRLZ44N FETs (3-pin). We deliberately do NOT
@@ -2367,7 +2363,7 @@ pub(crate) fn align_repeated_columns(
         }
         // No-op guard: skip if already grid-aligned (every member within a grid cell of its target).
         if proposed.iter().all(|(&i, at)| {
-            (items[i].at[0] - at[0]).abs() < 1.27 && (items[i].at[1] - at[1]).abs() < 1.27
+            (items[i].at[0] - at[0]).abs() < GRID_KEY && (items[i].at[1] - at[1]).abs() < GRID_KEY
         }) {
             continue;
         }
@@ -2389,7 +2385,7 @@ pub(crate) fn align_repeated_columns(
                 if a >= b {
                     continue;
                 }
-                if rects_overlap(new_at(a), new_at(b)) && !rects_overlap(now_at(a), now_at(b)) {
+                if new_at(a).overlaps(&new_at(b)) && !now_at(a).overlaps(&now_at(b)) {
                     ok = false;
                     break 'check;
                 }
@@ -2488,8 +2484,8 @@ pub fn orient_angle(geom: &SymbolGeometry, orient: Orient) -> f64 {
     0.0
 }
 
-/// Quantization for comparing mm x's by grid cell (the 1.27 mm grid).
-pub const GRID_KEY: f64 = 1.27;
+/// Quantization for comparing coordinates by grid cell.
+pub const GRID_KEY: f64 = geom::GRID_50_MIL.pitch();
 
 /// Each anchor's cluster: the satellites that tap it + the idiom members it anchors,
 /// the rigid group the block move slides. Built once; includes frozen members so a

@@ -34,15 +34,19 @@ impl Rule for OutOfBoundsRule {
 fn out_of_bounds(item: &CopperItem, problem: &RouteProblem) -> Option<Finding> {
     let (overshoot, at, owner) = match &item.geom {
         CopperGeom::Segment {
-            a, b: bb, half_w, ..
+            segment, half_w, ..
         } => {
-            let o_a = problem.bounds.disc_overshoot((*a).into(), *half_w);
-            let o_b = problem.bounds.disc_overshoot((*bb).into(), *half_w);
-            let (over, at) = if o_a >= o_b { (o_a, *a) } else { (o_b, *bb) };
+            let o_a = problem.bounds.disc_overshoot(segment.a, *half_w);
+            let o_b = problem.bounds.disc_overshoot(segment.b, *half_w);
+            let (over, at) = if o_a >= o_b {
+                (o_a, segment.a)
+            } else {
+                (o_b, segment.b)
+            };
             (over, at, item.first_owner())
         }
         CopperGeom::Via { at, radius } => {
-            let over = problem.bounds.disc_overshoot((*at).into(), *radius);
+            let over = problem.bounds.disc_overshoot(*at, *radius);
             (over, *at, item.first_owner())
         }
         CopperGeom::Rect { .. } => return None,
@@ -51,7 +55,7 @@ fn out_of_bounds(item: &CopperItem, problem: &RouteProblem) -> Option<Finding> {
         Some(Finding::OutOfBounds {
             connection: owner,
             overshoot,
-            at,
+            at: at.into(),
         })
     } else {
         None

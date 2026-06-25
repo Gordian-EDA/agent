@@ -109,7 +109,7 @@ fn courtyard_source_str(s: kicad_footprint::CourtyardSource) -> &'static str {
     }
 }
 
-fn bbox_json(b: &kicad_footprint::BBox) -> Value {
+fn bbox_json(b: &geom::Rect) -> Value {
     json!({
         "min_x": b.min_x,
         "min_y": b.min_y,

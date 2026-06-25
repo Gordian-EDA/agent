@@ -1,7 +1,7 @@
 //! Deterministic, content-derived identifiers.
 //!
 //! Byte-identical output for the same input is required, so every UUID we emit
-//! is derived from stable content via UUIDv5 ([`crate::hash::uuid_v5`]) — never
+//! is derived from stable content via UUIDv5 ([`crate::uuid_v5`]) — never
 //! random.
 
 /// Fixed project namespace UUID for gordian schematic identifiers
@@ -20,7 +20,7 @@ const NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0x6f6a_4e2c_8b1d_5a3f_9c0e_1
 /// (with overwhelming probability) differing UUIDs.
 pub fn stable_uuid(kind: &str, key: &str) -> String {
     let name = format!("{kind}:{key}");
-    crate::hash::uuid_v5(NAMESPACE, name.as_bytes())
+    crate::uuid_v5(NAMESPACE, name.as_bytes())
 }
 
 #[cfg(test)]

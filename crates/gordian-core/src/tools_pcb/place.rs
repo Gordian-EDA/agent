@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use kicad_footprint::{BBox, Footprint, FootprintPad, PadTechnology};
+use kicad_footprint::{Footprint, FootprintPad, PadTechnology};
 use kicad_ipc::{FootprintMove, snapshot::IpcBoardSnapshot};
 use pcb_model::LayerRef;
 use pcb_model::place::PartPad;
@@ -86,14 +86,14 @@ fn enclosing_courtyard(footprint: &Footprint) -> (f64, f64) {
     (hw * 2.0, hh * 2.0)
 }
 
-fn abs_half(b: &BBox) -> (f64, f64) {
+fn abs_half(b: &Rect) -> (f64, f64) {
     (
         b.min_x.abs().max(b.max_x.abs()),
         b.min_y.abs().max(b.max_y.abs()),
     )
 }
 
-fn pad_bbox(pads: &[FootprintPad]) -> Option<BBox> {
+fn pad_bbox(pads: &[FootprintPad]) -> Option<Rect> {
     let mut it = pads.iter();
     let first = it.next()?;
     let mut bbox = pad_aabb(first);
@@ -107,15 +107,10 @@ fn pad_bbox(pads: &[FootprintPad]) -> Option<BBox> {
     Some(bbox)
 }
 
-fn pad_aabb(pad: &FootprintPad) -> BBox {
+fn pad_aabb(pad: &FootprintPad) -> Rect {
     let [cx, cy] = pad.at;
     let (hw, hh) = geom::rotated_aabb_half(pad.size[0], pad.size[1], pad.rotation);
-    BBox {
-        min_x: cx - hw,
-        min_y: cy - hh,
-        max_x: cx + hw,
-        max_y: cy + hh,
-    }
+    Rect::new(cx - hw, cy - hh, cx + hw, cy + hh)
 }
 
 // ── get_board ────────────────────────────────────────────────────────────────

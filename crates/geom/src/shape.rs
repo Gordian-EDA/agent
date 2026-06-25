@@ -1,8 +1,8 @@
-//! Cardinal directions shared across schematic placement, wiring, and emit.
+//! Cardinal directions in y-down coordinates.
 
 use crate::point::Point2;
 
-/// A pin's outward direction on the sheet, quantized to the four axes.
+/// One of the four axis directions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dir {
     East,
@@ -12,7 +12,7 @@ pub enum Dir {
 }
 
 impl Dir {
-    /// Sheet-space unit vector (sheet Y grows downward, so North is -y).
+    /// Unit vector, with north as negative y.
     pub fn vec(self) -> Point2 {
         match self {
             Dir::East => Point2::new(1.0, 0.0),

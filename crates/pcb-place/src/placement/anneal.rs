@@ -8,7 +8,7 @@
 //! is already near-legal and the final `legalize` only nudges.
 
 use super::cost::place_cost;
-use super::geometry::{clamp_into_bounds, snap};
+use super::geometry::PLACEMENT_GRID;
 use super::model::{LogicalNet, PlaceProblem, PlacementHints};
 use super::pairs::coplacement_pairs;
 use crate::problem::Point2;
@@ -27,7 +27,11 @@ impl SaRng {
         z ^ (z >> 31)
     }
     pub(crate) fn below(&mut self, n: usize) -> usize {
-        if n == 0 { 0 } else { (self.next_u64() % n as u64) as usize }
+        if n == 0 {
+            0
+        } else {
+            (self.next_u64() % n as u64) as usize
+        }
     }
     pub(crate) fn unit(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64)
@@ -51,8 +55,9 @@ pub(crate) fn anneal_placement(
     pos: &mut [Point2],
 ) {
     let n = problem.parts.len();
-    let movable: Vec<usize> =
-        (0..n).filter(|&i| problem.parts[i].locked.is_none()).collect();
+    let movable: Vec<usize> = (0..n)
+        .filter(|&i| problem.parts[i].locked.is_none())
+        .collect();
     if movable.len() < 2 {
         return;
     }
@@ -75,7 +80,8 @@ pub(crate) fn anneal_placement(
     let mut rng = SaRng(SA_SEED);
     let iters = (250 * movable.len()).clamp(1000, 8000);
     let t0 = 8.0;
-    let cost_of = |p: &[Point2]| place_cost(problem, nets, half, margin, rotations, &pairs, &edge_idx, p);
+    let cost_of =
+        |p: &[Point2]| place_cost(problem, nets, half, margin, rotations, &pairs, &edge_idx, p);
     let mut cost = cost_of(pos);
 
     let mut restore: Vec<(usize, Point2)> = Vec::with_capacity(8);
@@ -88,9 +94,9 @@ pub(crate) fn anneal_placement(
             let k = movable[rng.below(movable.len())];
             restore.push((k, pos[k].clone()));
             let amp = 0.5 + 5.0 * (t / t0);
-            pos[k].x = snap(pos[k].x + rng.range(-amp, amp));
-            pos[k].y = snap(pos[k].y + rng.range(-amp, amp));
-            clamp_into_bounds(&mut pos[k], &problem.bounds, half[k]);
+            pos[k].x = PLACEMENT_GRID.snap(pos[k].x + rng.range(-amp, amp));
+            pos[k].y = PLACEMENT_GRID.snap(pos[k].y + rng.range(-amp, amp));
+            pos[k] = problem.bounds.clamp_center_for_half(pos[k], half[k]);
         } else if kind < 9 || anchors.is_empty() {
             // Swap two parts.
             let a = movable[rng.below(movable.len())];
@@ -101,8 +107,8 @@ pub(crate) fn anneal_placement(
             restore.push((a, pos[a].clone()));
             restore.push((b, pos[b].clone()));
             pos.swap(a, b);
-            clamp_into_bounds(&mut pos[a], &problem.bounds, half[a]);
-            clamp_into_bounds(&mut pos[b], &problem.bounds, half[b]);
+            pos[a] = problem.bounds.clamp_center_for_half(pos[a], half[a]);
+            pos[b] = problem.bounds.clamp_center_for_half(pos[b], half[b]);
         } else {
             // Shift a whole decoupling cluster (anchor + caps) rigidly.
             let ic = anchors[rng.below(anchors.len())];
@@ -112,9 +118,9 @@ pub(crate) fn anneal_placement(
             members.extend(clusters.get(&ic).into_iter().flatten().copied());
             for &m in &members {
                 restore.push((m, pos[m].clone()));
-                pos[m].x = snap(pos[m].x + dx);
-                pos[m].y = snap(pos[m].y + dy);
-                clamp_into_bounds(&mut pos[m], &problem.bounds, half[m]);
+                pos[m].x = PLACEMENT_GRID.snap(pos[m].x + dx);
+                pos[m].y = PLACEMENT_GRID.snap(pos[m].y + dy);
+                pos[m] = problem.bounds.clamp_center_for_half(pos[m], half[m]);
             }
         }
         let new_cost = cost_of(pos);

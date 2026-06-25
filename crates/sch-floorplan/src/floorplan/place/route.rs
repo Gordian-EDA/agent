@@ -16,7 +16,7 @@ use sch_place::netclass::{is_connector_like, is_ground};
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
 // `geom::union_find`, shared with circuit-lang's pin reconciler.
-use geom::union_find::{uf_find, uf_union};
+use geom::{uf_find, uf_union};
 use sch_place::ir::{Band, LayoutIr, Side};
 
 // ---------------------------------------------------------------------------
@@ -498,10 +498,10 @@ pub(crate) fn route_signal(
         let lead = 2.54;
         let stub = |p: ::geom::Point2, d: Option<Dir>| -> ::geom::Point2 {
             match d {
-                Some(Dir::East) => [geom::grid::snap(p[0] + lead), p[1]].into(),
-                Some(Dir::West) => [geom::grid::snap(p[0] - lead), p[1]].into(),
-                Some(Dir::North) => [p[0], geom::grid::snap(p[1] - lead)].into(),
-                Some(Dir::South) => [p[0], geom::grid::snap(p[1] + lead)].into(),
+                Some(Dir::East) => [geom::GRID_50_MIL.snap(p[0] + lead), p[1]].into(),
+                Some(Dir::West) => [geom::GRID_50_MIL.snap(p[0] - lead), p[1]].into(),
+                Some(Dir::North) => [p[0], geom::GRID_50_MIL.snap(p[1] - lead)].into(),
+                Some(Dir::South) => [p[0], geom::GRID_50_MIL.snap(p[1] + lead)].into(),
                 None => p,
             }
         };
@@ -527,8 +527,9 @@ pub(crate) fn route_signal(
             // follower loop drops under), then ABOVE.
             let mut bands: Vec<f64> = Vec::new();
             for step in 1..=6 {
-                bands.push(geom::grid::snap(by_hi + 1.27 * step as f64));
-                bands.push(geom::grid::snap(by_lo - 1.27 * step as f64));
+                let pitch = geom::GRID_50_MIL.pitch();
+                bands.push(geom::GRID_50_MIL.snap(by_hi + pitch * step as f64));
+                bands.push(geom::GRID_50_MIL.snap(by_lo - pitch * step as f64));
             }
             for band_y in bands {
                 let path = vec![
@@ -663,7 +664,7 @@ pub(crate) fn route_local_tee(
     };
     let horizontal = (max_x - min_x) >= (max_y - min_y);
     if horizontal {
-        let ty = geom::grid::snap(median(ys));
+        let ty = geom::GRID_50_MIL.snap(median(ys));
         w.add_wire_on_net([min_x, ty], [max_x, ty], net);
         scene
             .segments
@@ -677,7 +678,7 @@ pub(crate) fn route_local_tee(
             }
         }
     } else {
-        let tx = geom::grid::snap(median(xs));
+        let tx = geom::GRID_50_MIL.snap(median(xs));
         w.add_wire_on_net([tx, min_y], [tx, max_y], net);
         scene
             .segments
@@ -720,7 +721,7 @@ pub(crate) fn port_exit_point(eps: &[([f64; 2], Dir)], side: Side) -> [f64; 2] {
                 .max_by(|a, b| a.0[0].total_cmp(&b.0[0]))
                 .map(|t| t.0[1])
                 .unwrap_or(min_y);
-            [geom::grid::snap(max_x + reach), y]
+            [geom::GRID_50_MIL.snap(max_x + reach), y]
         }
         Side::Left => {
             let y = eps
@@ -728,7 +729,7 @@ pub(crate) fn port_exit_point(eps: &[([f64; 2], Dir)], side: Side) -> [f64; 2] {
                 .min_by(|a, b| a.0[0].total_cmp(&b.0[0]))
                 .map(|t| t.0[1])
                 .unwrap_or(min_y);
-            [geom::grid::snap(min_x - reach), y]
+            [geom::GRID_50_MIL.snap(min_x - reach), y]
         }
         Side::Top => {
             let x = eps
@@ -736,7 +737,7 @@ pub(crate) fn port_exit_point(eps: &[([f64; 2], Dir)], side: Side) -> [f64; 2] {
                 .min_by(|a, b| a.0[1].total_cmp(&b.0[1]))
                 .map(|t| t.0[0])
                 .unwrap_or(min_x);
-            [x, geom::grid::snap(min_y - reach)]
+            [x, geom::GRID_50_MIL.snap(min_y - reach)]
         }
         Side::Bottom => {
             let x = eps
@@ -744,7 +745,7 @@ pub(crate) fn port_exit_point(eps: &[([f64; 2], Dir)], side: Side) -> [f64; 2] {
                 .max_by(|a, b| a.0[1].total_cmp(&b.0[1]))
                 .map(|t| t.0[0])
                 .unwrap_or(max_x);
-            [x, geom::grid::snap(max_y + reach)]
+            [x, geom::GRID_50_MIL.snap(max_y + reach)]
         }
     }
 }
@@ -801,7 +802,7 @@ pub(crate) fn ic_port_exit_override(
     name_side: Side,
 ) -> Option<(Side, [f64; 2])> {
     const NAME_OFFSET: f64 = 0.508; // KiCAD default pin-name offset (matches the `label` solver)
-    let snap = geom::grid::snap;
+    let snap = |v| geom::GRID_50_MIL.snap(v);
     // Map the net's pins (same flatten order `wire()` used to build `eps`) back to
     // their (item, pin) so we can read each IC pin's geometry + name.
     let mut pin_of: Vec<Option<(usize, String)>> = vec![None; eps.len()];
@@ -880,7 +881,7 @@ pub(crate) fn ic_port_exit_override(
 /// vertex that reaches slightly back toward the wire. `HALF` is the text half-height.
 pub(crate) fn port_label_obstacle(at: [f64; 2], side: Side, net: &str) -> ::geom::Rect {
     let w = crate::label::text_width(net) + 2.54;
-    const BACK: f64 = 1.27;
+    const BACK: f64 = geom::GRID_50_MIL.pitch();
     const HALF: f64 = 2.0;
     match side {
         Side::Left => ::geom::Rect::new(at[0] - w, at[1] - HALF, at[0] + BACK, at[1] + HALF),
@@ -1019,7 +1020,7 @@ pub(crate) const RAIL_LEAD: f64 = 2.54;
 /// Lane width used to fan colliding rail risers off a shared column. Half the
 /// 2.54 BGA pitch, so an offset riser sits in the gutter between two ball columns
 /// rather than landing on a neighbouring pin.
-pub(crate) const RAIL_LANE: f64 = 1.27;
+pub(crate) const RAIL_LANE: f64 = geom::GRID_50_MIL.pitch();
 
 /// The x a pin's vertical riser sits at, before any anti-collision offset: side
 /// pins lead out, top/bottom pins climb straight up. Must match `emit_rail`.

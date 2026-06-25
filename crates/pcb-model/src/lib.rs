@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod place;
 pub mod route;
-pub use geom::union_find::UnionFind;
+pub use geom::UnionFind;
 pub use geom::{Point2, Polygon, Rect, Segment};
 pub use route::{
     Capabilities, RouteMetrics, RouteQuality, RouteResult, Router, failed_pad_weight, select,

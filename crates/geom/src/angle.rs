@@ -1,5 +1,4 @@
-//! Angle / rotated-extent helpers with no single-shape owner. Point rotation is
-//! [`crate::Point2::rotate`]; the symbol→sheet transform is [`crate::Point2::transform`].
+//! Angle and rotated-extent helpers.
 
 /// Half-extents (hw, hh) of a `w × h` rectangle rotated by `deg`.
 #[inline]

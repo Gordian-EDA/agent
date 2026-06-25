@@ -32,20 +32,19 @@ impl Rule for BoardEdgeClearanceRule {
         for item in &ctx.copper {
             let (gap, half, at) = match &item.geom {
                 CopperGeom::Via { at, radius } => {
-                    let seg = geom::Segment::new((*at).into(), (*at).into());
+                    let seg = geom::Segment::new(*at, *at);
                     (poly.segment_dist_to_edge(seg), *radius, *at)
                 }
-                CopperGeom::Segment { a, b, half_w, .. } => {
-                    let seg = geom::Segment::new((*a).into(), (*b).into());
-                    (poly.segment_dist_to_edge(seg), *half_w, *a)
-                }
+                CopperGeom::Segment {
+                    segment, half_w, ..
+                } => (poly.segment_dist_to_edge(*segment), *half_w, segment.a),
                 CopperGeom::Rect { .. } => continue,
             };
             if gap < EDGE_CLEAR + half - EPS {
                 out.push(Finding::OutOfBounds {
                     connection: item.first_owner(),
                     overshoot: (EDGE_CLEAR + half - gap).max(0.0),
-                    at,
+                    at: at.into(),
                 });
             }
         }

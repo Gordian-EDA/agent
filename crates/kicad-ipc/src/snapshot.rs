@@ -295,14 +295,14 @@ impl SnapshotBuilder {
                 let center = pad_world(fp, &pad);
                 let layers = pad_layers(&pad, &self.layer_names);
                 let (width, height) = pad_size(&pad);
-                let (width, height) = rotated_size(width, height, pad_angle(fp, &pad));
+                let (half_w, half_h) = geom::rotated_aabb_half(width, height, pad_angle(fp, &pad));
                 let net = pad.net.as_ref().and_then(net_name);
                 self.obstacles.push(Obstacle {
                     kind: format!("pad:{reference}"),
                     layers: layers.clone(),
                     center,
-                    width,
-                    height,
+                    width: half_w * 2.0,
+                    height: half_h * 2.0,
                     connected_to: net.clone().into_iter().collect(),
                 });
                 if let Some(net) = &net {
@@ -819,11 +819,6 @@ fn pad_angle(fp: &FootprintInstance, pad: &Pad) -> f64 {
             .and_then(|s| s.angle.as_ref())
             .map(|a| a.value_degrees)
             .unwrap_or(0.0)
-}
-
-fn rotated_size(width: f64, height: f64, rotation: f64) -> (f64, f64) {
-    let (hw, hh) = geom::rotated_aabb_half(width, height, rotation);
-    (hw * 2.0, hh * 2.0)
 }
 
 fn pad_layers(pad: &Pad, layer_names: &[String]) -> Vec<LayerRef> {

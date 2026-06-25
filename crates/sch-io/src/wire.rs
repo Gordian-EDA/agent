@@ -72,50 +72,6 @@ pub struct RouteScene {
     pub label_solids: Vec<(Rect, String)>,
 }
 
-/// How two axis-aligned segments interact for routing purposes. Public to the
-/// crate so the refinement scorer can reuse it to detect net merges (two
-/// different-net segments that touch in a connecting way).
-pub fn segments_conflict(a1: Point2, a2: Point2, b1: Point2, b2: Point2) -> bool {
-    let a_horiz = (a1.y - a2.y).abs() < EPS;
-    let b_horiz = (b1.y - b2.y).abs() < EPS;
-    if a_horiz == b_horiz {
-        // Parallel: conflict only when collinear AND the spans overlap
-        // (closed — endpoint touch already merges).
-        if a_horiz {
-            (a1.y - b1.y).abs() < EPS && {
-                let (alo, ahi) = (a1.x.min(a2.x), a1.x.max(a2.x));
-                let (blo, bhi) = (b1.x.min(b2.x), b1.x.max(b2.x));
-                alo <= bhi + EPS && blo <= ahi + EPS
-            }
-        } else {
-            (a1.x - b1.x).abs() < EPS && {
-                let (alo, ahi) = (a1.y.min(a2.y), a1.y.max(a2.y));
-                let (blo, bhi) = (b1.y.min(b2.y), b1.y.max(b2.y));
-                alo <= bhi + EPS && blo <= ahi + EPS
-            }
-        }
-    } else {
-        // Perpendicular: candidate crossing point.
-        let (h1, h2, v1, v2) = if a_horiz {
-            (a1, a2, b1, b2)
-        } else {
-            (b1, b2, a1, a2)
-        };
-        let p = Point2::new(v1.x, h1.y);
-        let on_h = Segment::new(h1, h2).contains_point(p);
-        let on_v = Segment::new(v1, v2).contains_point(p);
-        if !(on_h && on_v) {
-            return false;
-        }
-        // Touch at an ENDPOINT of either segment is a T/corner join -> merge.
-        let is_end = |q: Point2, s1: Point2, s2: Point2| {
-            ((q.x - s1.x).abs() < EPS && (q.y - s1.y).abs() < EPS)
-                || ((q.x - s2.x).abs() < EPS && (q.y - s2.y).abs() < EPS)
-        };
-        is_end(p, h1, h2) || is_end(p, v1, v2)
-    }
-}
-
 /// Whether `path` can be drawn for `net` without entering a body, touching a
 /// foreign net's anchor point, or merging with a foreign net's segment.
 pub fn path_ok(path: &[Point2], net: &str, scene: &RouteScene) -> bool {
@@ -139,7 +95,7 @@ pub fn path_ok(path: &[Point2], net: &str, scene: &RouteScene) -> bool {
         if scene
             .segments
             .iter()
-            .any(|(s1, s2, n)| n != net && segments_conflict(a, b, *s1, *s2))
+            .any(|(s1, s2, n)| n != net && seg.axis_aligned_connects(Segment::new(*s1, *s2)))
         {
             return false;
         }
@@ -161,27 +117,14 @@ pub fn path_ok(path: &[Point2], net: &str, scene: &RouteScene) -> bool {
 /// by the router's wire-vs-label decision: a crossing-heavy hop is better named
 /// (the human idiom) than drawn as a literal wire that reads as spaghetti.
 pub fn path_crossings(path: &[Point2], net: &str, scene: &RouteScene) -> usize {
-    let horiz = |a: &Point2, b: &Point2| (a.y - b.y).abs() < EPS;
-    let vert = |a: &Point2, b: &Point2| (a.x - b.x).abs() < EPS;
-    let interior = |v: f64, lo: f64, hi: f64| v > lo + EPS && v < hi - EPS;
     let mut n = 0;
     for w in path.windows(2) {
-        let (a1, a2) = (w[0], w[1]);
+        let seg = Segment::new(w[0], w[1]);
         for (b1, b2, bn) in &scene.segments {
             if bn == net {
                 continue; // same net: a deliberate join, not a crossing
             }
-            let (h, v) = if horiz(&a1, &a2) && vert(b1, b2) {
-                ((a1, a2), (*b1, *b2))
-            } else if vert(&a1, &a2) && horiz(b1, b2) {
-                ((*b1, *b2), (a1, a2))
-            } else {
-                continue; // parallel
-            };
-            let (hy, vx) = (h.0.y, v.0.x);
-            let (hx_lo, hx_hi) = (h.0.x.min(h.1.x), h.0.x.max(h.1.x));
-            let (vy_lo, vy_hi) = (v.0.y.min(v.1.y), v.0.y.max(v.1.y));
-            if interior(vx, hx_lo, hx_hi) && interior(hy, vy_lo, vy_hi) {
+            if seg.axis_aligned_crosses_interior(Segment::new(*b1, *b2)) {
                 n += 1;
             }
         }
@@ -219,16 +162,14 @@ pub fn route_edge(
     // Candidate detour coordinates: obstacle edges +- clearance (snapped AWAY
     // from the edge so snapping never re-enters the obstacle), the lead
     // coordinates, terminal coordinates, and the midline (snapped nearest).
-    let snap_dn = |v: f64| (v / 1.27).floor() * 1.27;
-    let snap_up = |v: f64| (v / 1.27).ceil() * 1.27;
-    let snap_nr = |v: f64| (v / 1.27).round() * 1.27;
+    let grid = geom::GRID_50_MIL;
     let mut xs: Vec<f64> = Vec::new();
     let mut ys: Vec<f64> = Vec::new();
     for r in &scene.solids {
-        xs.push(snap_dn(r.min_x - CLEAR_MM));
-        xs.push(snap_up(r.max_x + CLEAR_MM));
-        ys.push(snap_dn(r.min_y - CLEAR_MM));
-        ys.push(snap_up(r.max_y + CLEAR_MM));
+        xs.push(grid.snap_down(r.min_x - CLEAR_MM));
+        xs.push(grid.snap_up(r.max_x + CLEAR_MM));
+        ys.push(grid.snap_down(r.min_y - CLEAR_MM));
+        ys.push(grid.snap_up(r.max_y + CLEAR_MM));
     }
     // Detour lanes around foreign port-label boxes too, so a wire skirts a
     // pennant instead of being rejected and falling back to a bare label.
@@ -236,13 +177,13 @@ pub fn route_edge(
         if n == net {
             continue;
         }
-        xs.push(snap_dn(r.min_x - CLEAR_MM));
-        xs.push(snap_up(r.max_x + CLEAR_MM));
-        ys.push(snap_dn(r.min_y - CLEAR_MM));
-        ys.push(snap_up(r.max_y + CLEAR_MM));
+        xs.push(grid.snap_down(r.min_x - CLEAR_MM));
+        xs.push(grid.snap_up(r.max_x + CLEAR_MM));
+        ys.push(grid.snap_down(r.min_y - CLEAR_MM));
+        ys.push(grid.snap_up(r.max_y + CLEAR_MM));
     }
-    xs.push(snap_nr((a.x + b.x) / 2.0));
-    ys.push(snap_nr((a.y + b.y) / 2.0));
+    xs.push(grid.snap((a.x + b.x) / 2.0));
+    ys.push(grid.snap((a.y + b.y) / 2.0));
     xs.push(a.x + LEAD_MM);
     xs.push(a.x - LEAD_MM);
     ys.push(a.y + LEAD_MM);

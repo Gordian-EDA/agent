@@ -7,7 +7,7 @@
 //! overlap by a deterministic nearest-free-cell spiral; `is_legal` then RE-VERIFIES
 //! the result in exact geometry — the algorithm's verdict is never trusted.
 
-use super::geometry::{PLACE_GRID, SPIRAL_MAX_RING, clamp_into_bounds, snap};
+use super::geometry::{PLACE_GRID, PLACEMENT_GRID, SPIRAL_MAX_RING};
 use super::model::PlaceProblem;
 use crate::problem::{Point2, Rect};
 
@@ -40,9 +40,9 @@ pub(crate) fn legalize(
             continue;
         }
         let before = pos[i].clone();
-        pos[i].x = snap(pos[i].x);
-        pos[i].y = snap(pos[i].y);
-        clamp_into_bounds(&mut pos[i], &problem.bounds, half[i]);
+        pos[i].x = PLACEMENT_GRID.snap(pos[i].x);
+        pos[i].y = PLACEMENT_GRID.snap(pos[i].y);
+        pos[i] = problem.bounds.clamp_center_for_half(pos[i], half[i]);
         if (pos[i].x - before.x).abs() > PLACE_GRID || (pos[i].y - before.y).abs() > PLACE_GRID {
             // A real bounds clamp (more than a snap's worth of motion).
             out_of_bounds_clamps += 1;
@@ -125,8 +125,8 @@ fn spiral_free_cell(
         cells.sort_by_key(|&(dx, dy)| (dx * dx + dy * dy, dy, dx));
         for (dx, dy) in cells {
             let cand = Point2 {
-                x: snap(origin.x + dx as f64 * PLACE_GRID),
-                y: snap(origin.y + dy as f64 * PLACE_GRID),
+                x: PLACEMENT_GRID.snap(origin.x + dx as f64 * PLACE_GRID),
+                y: PLACEMENT_GRID.snap(origin.y + dy as f64 * PLACE_GRID),
             };
             // Must fit in bounds without clamping (clamping would move it off
             // the probed cell and could re-collide).
@@ -178,7 +178,7 @@ pub(crate) fn initial_grid(problem: &PlaceProblem, half: &[(f64, f64)]) -> Vec<P
 
     // Cell pitch = largest courtyard extent + a margin, snapped to the grid.
     let max_half = half.iter().map(|(w, h)| w.max(*h)).fold(0.0_f64, f64::max);
-    let pitch = snap(
+    let pitch = PLACEMENT_GRID.snap(
         (max_half * 2.0 + super::geometry::courtyard_margin(problem.clearance)).max(PLACE_GRID),
     ) + PLACE_GRID;
 
@@ -194,7 +194,7 @@ pub(crate) fn initial_grid(problem: &PlaceProblem, half: &[(f64, f64)]) -> Vec<P
             x: x0 + c as f64 * pitch,
             y: y0 + r as f64 * pitch,
         };
-        clamp_into_bounds(&mut p, b, half[i]);
+        p = b.clamp_center_for_half(p, half[i]);
         pos[i] = p;
     }
     pos

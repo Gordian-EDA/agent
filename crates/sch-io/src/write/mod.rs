@@ -24,8 +24,8 @@
 //!   does not match the document's `(uuid …)`, the component is not annotated
 //!   and drops out of the netlist. So the writer computes the root uuid once
 //!   and threads it into every instance.
-//! - **Determinism.** Every uuid comes from [`geom::ids::stable_uuid`] and
-//!   positions are snapped via [`geom::grid::snap_point`], so re-emitting the
+//! - **Determinism.** Every uuid comes from [`geom::stable_uuid`] and
+//!   positions are snapped via [`geom::GRID_50_MIL.snap_point`], so re-emitting the
 //!   same placements yields byte-identical output (spec §5.1).
 //!
 //! ## Module layout
@@ -200,8 +200,6 @@ pub(super) struct SheetRect {
     pub(super) end: Point2,
     pub(super) uuid_key: String,
 }
-
-pub(super) type BBox = Rect;
 
 /// One `(no_connect …)` marker emitted at a pin's sheet-space endpoint.
 ///

@@ -2,7 +2,7 @@
 //! the unified radial fan-out fast-path. These all LOCK parts at computed cells so
 //! later stages lay out the rest around a tidy, overlap-free-by-construction core.
 
-use super::geometry::{clamp_into_bounds, rotated_courtyard_half};
+use super::geometry::rotated_courtyard_half;
 use super::model::{LockedAt, Part, PlaceProblem, PlacementHints};
 use super::pairs::{decoupling_pairs, series_fanout_order, series_pairs};
 use crate::problem::{Point2, Rect};
@@ -63,7 +63,7 @@ pub fn apply_grid_hints(problem: &mut PlaceProblem, hints: &PlacementHints) {
                 x: region.min_x + (c as f64 + 0.5) * px,
                 y: region.min_y + (r as f64 + 0.5) * py,
             };
-            clamp_into_bounds(&mut at, b, rotated_courtyard_half(&problem.parts[i], 0.0));
+            at = b.clamp_center_for_half(at, rotated_courtyard_half(&problem.parts[i], 0.0));
             problem.parts[i].locked = Some(LockedAt { at, rotation: 0.0 });
         }
     }
@@ -77,10 +77,17 @@ pub fn apply_grid_hints(problem: &mut PlaceProblem, hints: &PlacementHints) {
 /// target must already be locked (the agent fixes the IC first) so its centre is known.
 /// A no-op otherwise.
 pub fn apply_surround(problem: &mut PlaceProblem, members: &[String], target: &str, gap: f64) {
-    let Some(ti) = problem.parts.iter().position(|p| p.reference == target) else { return };
-    let Some(loc) = problem.parts[ti].locked.clone() else { return };
+    let Some(ti) = problem.parts.iter().position(|p| p.reference == target) else {
+        return;
+    };
+    let Some(loc) = problem.parts[ti].locked.clone() else {
+        return;
+    };
     let (cx, cy) = (loc.at.x, loc.at.y);
-    let (hw, hh) = (problem.parts[ti].courtyard_w / 2.0, problem.parts[ti].courtyard_h / 2.0);
+    let (hw, hh) = (
+        problem.parts[ti].courtyard_w / 2.0,
+        problem.parts[ti].courtyard_h / 2.0,
+    );
     let idxs: Vec<usize> = members
         .iter()
         .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
@@ -94,16 +101,31 @@ pub fn apply_surround(problem: &mut PlaceProblem, members: &[String], target: &s
     // (2hw) → left (2hh). Place member k at arc position (k+0.5)/n of the perimeter.
     let perim = 4.0 * (hw + hh);
     for (k, &i) in idxs.iter().enumerate() {
-        let (chw, chh) = (problem.parts[i].courtyard_w / 2.0, problem.parts[i].courtyard_h / 2.0);
+        let (chw, chh) = (
+            problem.parts[i].courtyard_w / 2.0,
+            problem.parts[i].courtyard_h / 2.0,
+        );
         let pos = (k as f64 + 0.5) / n as f64 * perim;
         let at = if pos < 2.0 * hw {
-            Point2 { x: cx - hw + pos, y: cy - hh - gap - chh } // top, L→R
+            Point2 {
+                x: cx - hw + pos,
+                y: cy - hh - gap - chh,
+            } // top, L→R
         } else if pos < 2.0 * hw + 2.0 * hh {
-            Point2 { x: cx + hw + gap + chw, y: cy - hh + (pos - 2.0 * hw) } // right, T→B
+            Point2 {
+                x: cx + hw + gap + chw,
+                y: cy - hh + (pos - 2.0 * hw),
+            } // right, T→B
         } else if pos < 4.0 * hw + 2.0 * hh {
-            Point2 { x: cx + hw - (pos - 2.0 * hw - 2.0 * hh), y: cy + hh + gap + chh } // bottom, R→L
+            Point2 {
+                x: cx + hw - (pos - 2.0 * hw - 2.0 * hh),
+                y: cy + hh + gap + chh,
+            } // bottom, R→L
         } else {
-            Point2 { x: cx - hw - gap - chw, y: cy + hh - (pos - 4.0 * hw - 2.0 * hh) } // left, B→T
+            Point2 {
+                x: cx - hw - gap - chw,
+                y: cy + hh - (pos - 4.0 * hw - 2.0 * hh),
+            } // left, B→T
         };
         problem.parts[i].locked = Some(LockedAt { at, rotation: 0.0 });
     }
@@ -133,18 +155,33 @@ pub fn apply_edge_lock(problem: &mut PlaceProblem, refs: &[String]) {
     let (w, h) = (b.max_x - b.min_x, b.max_y - b.min_y);
     let perim = 2.0 * (w + h);
     for (k, &i) in idxs.iter().enumerate() {
-        let (hw, hh) = (problem.parts[i].courtyard_w / 2.0, problem.parts[i].courtyard_h / 2.0);
+        let (hw, hh) = (
+            problem.parts[i].courtyard_w / 2.0,
+            problem.parts[i].courtyard_h / 2.0,
+        );
         let t = (k as f64 + 0.5) / n as f64 * perim;
         let mut at = if t < w {
-            Point2 { x: b.min_x + t, y: b.min_y + hh } // top edge, L→R
+            Point2 {
+                x: b.min_x + t,
+                y: b.min_y + hh,
+            } // top edge, L→R
         } else if t < w + h {
-            Point2 { x: b.max_x - hw, y: b.min_y + (t - w) } // right edge, T→B
+            Point2 {
+                x: b.max_x - hw,
+                y: b.min_y + (t - w),
+            } // right edge, T→B
         } else if t < 2.0 * w + h {
-            Point2 { x: b.max_x - (t - w - h), y: b.max_y - hh } // bottom edge, R→L
+            Point2 {
+                x: b.max_x - (t - w - h),
+                y: b.max_y - hh,
+            } // bottom edge, R→L
         } else {
-            Point2 { x: b.min_x + hw, y: b.max_y - (t - 2.0 * w - h) } // left edge, B→T
+            Point2 {
+                x: b.min_x + hw,
+                y: b.max_y - (t - 2.0 * w - h),
+            } // left edge, B→T
         };
-        clamp_into_bounds(&mut at, &b, (hw, hh));
+        at = b.clamp_center_for_half(at, (hw, hh));
         problem.parts[i].locked = Some(LockedAt { at, rotation: 0.0 });
     }
 }
@@ -163,9 +200,14 @@ pub fn fan_out_rings(
     start_gap: f64,
     spacing: f64,
 ) {
-    let Some(loc) = problem.parts[ic].locked.clone() else { return };
+    let Some(loc) = problem.parts[ic].locked.clone() else {
+        return;
+    };
     let (cx, cy) = (loc.at.x, loc.at.y);
-    let (hw, hh) = (problem.parts[ic].courtyard_w / 2.0, problem.parts[ic].courtyard_h / 2.0);
+    let (hw, hh) = (
+        problem.parts[ic].courtyard_w / 2.0,
+        problem.parts[ic].courtyard_h / 2.0,
+    );
     let idxs: Vec<usize> = ordered
         .iter()
         .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
@@ -183,13 +225,25 @@ pub fn fan_out_rings(
             let i = idxs[k + j];
             let pos = (j as f64 + 0.5) / n as f64 * perim;
             let at = if pos < 2.0 * ihw {
-                Point2 { x: cx - ihw + pos, y: cy - ihh }
+                Point2 {
+                    x: cx - ihw + pos,
+                    y: cy - ihh,
+                }
             } else if pos < 2.0 * ihw + 2.0 * ihh {
-                Point2 { x: cx + ihw, y: cy - ihh + (pos - 2.0 * ihw) }
+                Point2 {
+                    x: cx + ihw,
+                    y: cy - ihh + (pos - 2.0 * ihw),
+                }
             } else if pos < 4.0 * ihw + 2.0 * ihh {
-                Point2 { x: cx + ihw - (pos - 2.0 * ihw - 2.0 * ihh), y: cy + ihh }
+                Point2 {
+                    x: cx + ihw - (pos - 2.0 * ihw - 2.0 * ihh),
+                    y: cy + ihh,
+                }
             } else {
-                Point2 { x: cx - ihw, y: cy + ihh - (pos - 4.0 * ihw - 2.0 * ihh) }
+                Point2 {
+                    x: cx - ihw,
+                    y: cy + ihh - (pos - 4.0 * ihw - 2.0 * ihh),
+                }
             };
             problem.parts[i].locked = Some(LockedAt { at, rotation: 0.0 });
         }
@@ -202,13 +256,25 @@ pub fn fan_out_rings(
 /// position `pos` ∈ [0, 4(rw+rh)), walking top→right→bottom→left.
 fn ring_pos(cx: f64, cy: f64, rw: f64, rh: f64, pos: f64) -> Point2 {
     if pos < 2.0 * rw {
-        Point2 { x: cx - rw + pos, y: cy - rh }
+        Point2 {
+            x: cx - rw + pos,
+            y: cy - rh,
+        }
     } else if pos < 2.0 * rw + 2.0 * rh {
-        Point2 { x: cx + rw, y: cy - rh + (pos - 2.0 * rw) }
+        Point2 {
+            x: cx + rw,
+            y: cy - rh + (pos - 2.0 * rw),
+        }
     } else if pos < 4.0 * rw + 2.0 * rh {
-        Point2 { x: cx + rw - (pos - 2.0 * rw - 2.0 * rh), y: cy + rh }
+        Point2 {
+            x: cx + rw - (pos - 2.0 * rw - 2.0 * rh),
+            y: cy + rh,
+        }
     } else {
-        Point2 { x: cx - rw, y: cy + rh - (pos - 4.0 * rw - 2.0 * rh) }
+        Point2 {
+            x: cx - rw,
+            y: cy + rh - (pos - 4.0 * rw - 2.0 * rh),
+        }
     }
 }
 
@@ -234,7 +300,10 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
     // decoupling cap to decoupling_pairs — exclude J/P/H refs so connectors go to the
     // edge frame, not the inner cap ring.
     let is_connector = |i: usize| {
-        matches!(problem.parts[i].reference.chars().next(), Some('J') | Some('P') | Some('H'))
+        matches!(
+            problem.parts[i].reference.chars().next(),
+            Some('J') | Some('P') | Some('H')
+        )
     };
     let caps: Vec<usize> = decoupling_pairs(problem)
         .iter()
@@ -274,8 +343,14 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
         }
     }
 
-    let (ihw, ihh) = (problem.parts[ic].courtyard_w / 2.0, problem.parts[ic].courtyard_h / 2.0);
-    problem.parts[ic].locked = Some(LockedAt { at: Point2 { x: 0.0, y: 0.0 }, rotation: 0.0 });
+    let (ihw, ihh) = (
+        problem.parts[ic].courtyard_w / 2.0,
+        problem.parts[ic].courtyard_h / 2.0,
+    );
+    problem.parts[ic].locked = Some(LockedAt {
+        at: Point2 { x: 0.0, y: 0.0 },
+        rotation: 0.0,
+    });
 
     // Concentric rings: caps (innermost), then pad-ordered resistors, then others.
     let mut ring_order = caps.clone();
@@ -293,7 +368,10 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
         for j in 0..m {
             let i = ring_order[k + j];
             let pos = (j as f64 + 0.5) / m as f64 * perim;
-            problem.parts[i].locked = Some(LockedAt { at: ring_pos(0.0, 0.0, rw, rh, pos), rotation: 0.0 });
+            problem.parts[i].locked = Some(LockedAt {
+                at: ring_pos(0.0, 0.0, rw, rh, pos),
+                rotation: 0.0,
+            });
         }
         max_extent = max_extent.max(rw.max(rh));
         k += m;
@@ -305,7 +383,12 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
     // dim. The frame sits just the short half-extent beyond the rings → compact.
     let conn_out = connectors
         .iter()
-        .map(|&i| problem.parts[i].courtyard_w.min(problem.parts[i].courtyard_h) / 2.0)
+        .map(|&i| {
+            problem.parts[i]
+                .courtyard_w
+                .min(problem.parts[i].courtyard_h)
+                / 2.0
+        })
         .fold(0.0_f64, f64::max);
     let frame = max_extent + conn_out + 3.0;
     // Group connectors per side, then CENTRE each side's run on its edge so none sit
@@ -319,7 +402,12 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
     for (side, group) in by_side.iter().enumerate() {
         let total: f64 = group
             .iter()
-            .map(|&i| problem.parts[i].courtyard_w.max(problem.parts[i].courtyard_h) + 2.0)
+            .map(|&i| {
+                problem.parts[i]
+                    .courtyard_w
+                    .max(problem.parts[i].courtyard_h)
+                    + 2.0
+            })
             .sum::<f64>()
             - 2.0;
         let mut cur = -total / 2.0;
@@ -327,16 +415,26 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
             let (cw, ch) = (problem.parts[i].courtyard_w, problem.parts[i].courtyard_h);
             let l = cw.max(ch);
             let horizontal_edge = side == 0 || side == 2;
-            let rot = if (cw >= ch) == horizontal_edge { 0.0 } else { 90.0 };
+            let rot = if (cw >= ch) == horizontal_edge {
+                0.0
+            } else {
+                90.0
+            };
             cur += l / 2.0;
             let along = cur;
             cur += l / 2.0 + 2.0;
             problem.parts[i].locked = Some(LockedAt {
                 at: match side {
-                    0 => Point2 { x: along, y: -frame },
+                    0 => Point2 {
+                        x: along,
+                        y: -frame,
+                    },
                     1 => Point2 { x: frame, y: along },
                     2 => Point2 { x: along, y: frame },
-                    _ => Point2 { x: -frame, y: along },
+                    _ => Point2 {
+                        x: -frame,
+                        y: along,
+                    },
                 },
                 rotation: rot,
             });
@@ -365,7 +463,9 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
                 if j == i {
                     return false;
                 }
-                let Some(lj) = &problem.parts[j].locked else { return false };
+                let Some(lj) = &problem.parts[j].locked else {
+                    return false;
+                };
                 let (jhw, jhh) = chalf(&problem.parts[j], lj.rotation);
                 (ix - lj.at.x).abs() < ihw + jhw && (iy - lj.at.y).abs() < ihh + jhh
             });
@@ -383,7 +483,10 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
             steps += 1;
         }
         if std::env::var("FANOUT_DEBUG").is_ok() {
-            eprintln!("[nudge] {} pushed {steps} steps", problem.parts[i].reference);
+            eprintln!(
+                "[nudge] {} pushed {steps} steps",
+                problem.parts[i].reference
+            );
         }
     }
 
@@ -428,7 +531,9 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
         for a in 0..problem.parts.len() {
             for b in (a + 1)..problem.parts.len() {
                 let (pa, pb) = (&problem.parts[a], &problem.parts[b]);
-                let (Some(la), Some(lb)) = (&pa.locked, &pb.locked) else { continue };
+                let (Some(la), Some(lb)) = (&pa.locked, &pb.locked) else {
+                    continue;
+                };
                 let (ahw, ahh) = rh(pa, la.rotation);
                 let (bhw, bhh) = rh(pb, lb.rotation);
                 if (la.at.x - lb.at.x).abs() < ahw + bhw && (la.at.y - lb.at.y).abs() < ahh + bhh {

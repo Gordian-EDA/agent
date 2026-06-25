@@ -479,8 +479,8 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
         let [tx, ty] = tiles[i];
         let [tw, th] = sizes[i];
         let (dx, dy) = (
-            geom::grid::snap(tx + TILE_MARGIN - M),
-            geom::grid::snap(ty + TILE_MARGIN - M),
+            geom::GRID_50_MIL.snap(tx + TILE_MARGIN - M),
+            geom::GRID_50_MIL.snap(ty + TILE_MARGIN - M),
         );
         w.translate(dx, dy);
         // Frame: a dashed box hugging the tile's content + a bold name above it.
@@ -828,8 +828,8 @@ pub(crate) fn apply_cells(items: &mut [Item], cells: &[Cell]) {
 
     for ((it, c), &angle) in items.iter_mut().zip(cells).zip(&angles) {
         it.at = [
-            geom::grid::snap(col_x[&c.col]),
-            geom::grid::snap(row_y[&c.row]),
+            geom::GRID_50_MIL.snap(col_x[&c.col]),
+            geom::GRID_50_MIL.snap(row_y[&c.row]),
         ]
         .into();
         it.angle = angle;

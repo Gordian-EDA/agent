@@ -42,10 +42,18 @@ pub fn det_uuid(seed: &str) -> String {
 
 /// Sanitize a block name into a filename stem.
 pub fn sanitize(name: &str) -> String {
-    name.chars().map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
-use geom::union_find::{uf_find, uf_union};
+use geom::{uf_find, uf_union};
 
 /// The non-GND nets a block touches (component- and unit-level pins). A net shared by ≥2
 /// blocks is a cross-block PORT; GND/VSS are excluded (every sheet carries them, so they'd
@@ -138,7 +146,11 @@ fn split_block(bname: &str, block: &Block) -> Vec<(String, Block)> {
         return vec![(bname.to_string(), block.clone())]; // one tightly-coupled component — don't split
     }
     // Bin-pack components into ceil(parts/TARGET) groups, largest component to the smallest group.
-    let ngroups = block.components.len().div_ceil(TARGET).clamp(2, comp_list.len());
+    let ngroups = block
+        .components
+        .len()
+        .div_ceil(TARGET)
+        .clamp(2, comp_list.len());
     let mut order: Vec<usize> = (0..comp_list.len()).collect();
     order.sort_by_key(|&ci| std::cmp::Reverse(comp_list[ci].len()));
     let mut groups_idx: Vec<Vec<usize>> = vec![Vec::new(); ngroups];
@@ -164,7 +176,8 @@ fn split_block(bname: &str, block: &Block) -> Vec<(String, Block)> {
         sub.components = IndexMap::new();
         for &ri in ris {
             let rd = &refs[ri];
-            sub.components.insert(rd.clone(), block.components[rd].clone());
+            sub.components
+                .insert(rd.clone(), block.components[rd].clone());
         }
         out.push((format!("{bname}_{g}"), sub));
     }
@@ -198,8 +211,10 @@ pub fn refine_blocks(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
 
     // ── MERGE ── fold each tiny, non-port-rich block into its strongest neighbour.
     let bnames: Vec<String> = eff.keys().cloned().collect();
-    let bnets: HashMap<String, HashSet<String>> =
-        bnames.iter().map(|n| (n.clone(), block_nets(&eff[n]))).collect();
+    let bnets: HashMap<String, HashSet<String>> = bnames
+        .iter()
+        .map(|n| (n.clone(), block_nets(&eff[n])))
+        .collect();
     let bsize = |n: &str| eff[n].components.len();
     // A net shared by ≥2 blocks is a cross-block PORT.
     let mut net_blocks: HashMap<String, usize> = HashMap::new();
@@ -209,7 +224,11 @@ pub fn refine_blocks(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
         }
     }
     let port_rich = |n: &str| {
-        bnets[n].iter().filter(|net| net_blocks.get(*net).copied().unwrap_or(0) >= 2).count() >= 5
+        bnets[n]
+            .iter()
+            .filter(|net| net_blocks.get(*net).copied().unwrap_or(0) >= 2)
+            .count()
+            >= 5
     };
     let mut merge_into: HashMap<String, String> = HashMap::new();
     for n in &bnames {
@@ -242,7 +261,10 @@ pub fn refine_blocks(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
     groups
         .into_iter()
         .map(|(name, members)| {
-            let blocks = members.into_iter().map(|m| (m.clone(), eff[&m].clone())).collect();
+            let blocks = members
+                .into_iter()
+                .map(|m| (m.clone(), eff[&m].clone()))
+                .collect();
             (name, blocks)
         })
         .collect()
@@ -281,8 +303,9 @@ pub fn compose_single_sheet(
         // Lay out each group INDEPENDENTLY and keep its TYPED writer (not a rendered
         // string): the engine composer translates each group's items to its tile in mm
         // and folds them into one sheet — no string-level geometry math here.
-        let w = sch_floorplan::floorplan::emit_writer(env, &sub, &ir, Box::new(anneal_place::Anneal))
-            .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
+        let w =
+            sch_floorplan::floorplan::emit_writer(env, &sub, &ir, Box::new(anneal_place::Anneal))
+                .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
         groups_w.push((sanitize(&gname), w));
     }
     let composed = sch_floorplan::floorplan::compose_writers(groups_w, design.name.as_deref());
@@ -309,7 +332,11 @@ pub fn cross_sheet_nets(groups: &[SheetGroup]) -> HashSet<String> {
             *net_groups.entry(net).or_default() += 1;
         }
     }
-    net_groups.into_iter().filter(|(_, c)| *c >= 2).map(|(n, _)| n).collect()
+    net_groups
+        .into_iter()
+        .filter(|(_, c)| *c >= 2)
+        .map(|(n, _)| n)
+        .collect()
 }
 
 /// Mark every cross-sheet net (see [`cross_sheet_nets`]) that `sub` touches as a PORT, so
@@ -317,8 +344,12 @@ pub fn cross_sheet_nets(groups: &[SheetGroup]) -> HashSet<String> {
 /// are inert (`infer_ir` never makes a power net a port), and connectivity is unchanged: a local
 /// wire + one global label is electrically identical to a label on each local pin.
 pub fn mark_cross_sheet_ports(sub: &mut Design, cross_sheet: &HashSet<String>) {
-    let touched: HashSet<String> =
-        sub.blocks.values().flat_map(block_nets).filter(|n| cross_sheet.contains(n)).collect();
+    let touched: HashSet<String> = sub
+        .blocks
+        .values()
+        .flat_map(block_nets)
+        .filter(|n| cross_sheet.contains(n))
+        .collect();
     for net in touched {
         sub.nets.entry(net).or_default().port = true;
     }

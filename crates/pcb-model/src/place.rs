@@ -299,7 +299,7 @@ pub fn rotated_courtyard_half(part: &Part, rot: f64) -> (f64, f64) {
 /// Half-extents of the part's PAD (copper) bounding box after a quadrant rotation. Bounds ONLY
 /// the copper — so the outline check can keep pads inside the board while a part's courtyard
 /// (its non-copper margin) is still free to overhang a notch (the mounting-hole allowance).
-pub fn rotated_copper_bbox(part: &Part, rot: f64) -> (f64, f64, f64, f64) {
+pub fn rotated_copper_bbox(part: &Part, rot: f64) -> Rect {
     let (mut xmin, mut ymin, mut xmax, mut ymax) = (
         f64::INFINITY,
         f64::INFINITY,
@@ -319,9 +319,9 @@ pub fn rotated_copper_bbox(part: &Part, rot: f64) -> (f64, f64, f64, f64) {
         ymax = ymax.max(off.y + ph);
     }
     if xmin > xmax {
-        (0.0, 0.0, 0.0, 0.0) // no pads
+        Rect::zero()
     } else {
-        (xmin, ymin, xmax, ymax)
+        Rect::new(xmin, ymin, xmax, ymax)
     }
 }
 
@@ -346,7 +346,7 @@ pub fn pad_world(problem: &PlaceProblem, pos: &[Point2], pin: &Pin) -> Point2 {
 pub fn is_legal(
     problem: &PlaceProblem,
     half: &[(f64, f64)],
-    copper_bbox: &[(f64, f64, f64, f64)],
+    copper_bbox: &[Rect],
     margin: f64,
     pos: &[Point2],
 ) -> bool {
@@ -367,13 +367,13 @@ pub fn is_legal(
             if !poly.contains_point(pos[i]) {
                 return false;
             }
-            let (xmin, ymin, xmax, ymax) = copper_bbox[i];
+            let copper = copper_bbox[i];
             let ec = EDGE_CLEAR_PLACE_MM;
             for (dx, dy) in [
-                (xmin - ec, ymin - ec),
-                (xmax + ec, ymin - ec),
-                (xmax + ec, ymax + ec),
-                (xmin - ec, ymax + ec),
+                (copper.min_x - ec, copper.min_y - ec),
+                (copper.max_x + ec, copper.min_y - ec),
+                (copper.max_x + ec, copper.max_y + ec),
+                (copper.min_x - ec, copper.max_y + ec),
             ] {
                 let c = Point2 {
                     x: pos[i].x + dx,

@@ -1,13 +1,11 @@
 use super::geometry::{
-    courtyard_margin, rotated_copper_bbox, rotated_courtyard_half, EDGE_BAND, PLACE_GRID,
+    EDGE_BAND, PLACE_GRID, courtyard_margin, rotated_copper_bbox, rotated_courtyard_half,
 };
 use super::hints::apply_grid_hints;
 use super::legalize::is_legal;
-use super::model::{
-    Edge, GroupHint, LockedAt, Part, PartPad, PlaceProblem, PlacementHints, Rect,
-};
+use super::model::{Edge, GroupHint, LockedAt, Part, PartPad, PlaceProblem, PlacementHints, Rect};
 use super::pairs::series_pairs;
-use super::route::{place, place_board, place_variant, to_route_problem, PlaceOpts};
+use super::route::{PlaceOpts, place, place_board, place_variant, to_route_problem};
 use crate::connectivity;
 use crate::problem::{LayerRef, Point2, Polygon, RouteProblem};
 
@@ -111,7 +109,10 @@ fn dense_anchor(reference: &str, npads: usize) -> Part {
     let pads = (0..npads)
         .map(|i| PartPad {
             number: format!("P{i}"),
-            offset: Point2 { x: i as f64 * 0.5, y: 0.0 },
+            offset: Point2 {
+                x: i as f64 * 0.5,
+                y: 0.0,
+            },
             width: 0.3,
             height: 0.3,
             layers: top(),
@@ -361,7 +362,10 @@ fn ic_anchor(reference: &str, npads: usize, pwr: &str) -> Part {
             };
             PartPad {
                 number: format!("{}", i + 1),
-                offset: Point2 { x: (i as f64 - npads as f64 / 2.0) * 0.5, y: 0.0 },
+                offset: Point2 {
+                    x: (i as f64 - npads as f64 / 2.0) * 0.5,
+                    y: 0.0,
+                },
                 width: 0.3,
                 height: 0.3,
                 layers: top(),
@@ -406,20 +410,45 @@ fn decoupling_caps_seed_beside_their_anchor_ic() {
     let res = place_variant(
         &problem,
         &PlacementHints::default(),
-        PlaceOpts { decouple: true, aspect_edge: false, anneal: false },
+        PlaceOpts {
+            decouple: true,
+            aspect_edge: false,
+            anneal: false,
+        },
     );
     assert!(res.legal, "{res:?}");
-    let at = |r: &str| res.placements.iter().find(|p| p.reference == r).unwrap().at.clone();
+    let at = |r: &str| {
+        res.placements
+            .iter()
+            .find(|p| p.reference == r)
+            .unwrap()
+            .at
+            .clone()
+    };
     let d = |a: Point2, b: Point2| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
     // Each cap must hug its OWN anchor (not the other IC). A generous bound: well
     // under the inter-IC span, proving the cap is clustered, not stranded.
     for c in ["Ca0", "Ca1", "Ca2"] {
-        assert!(d(at(c), at("U1")) < 12.0, "{c} must hug U1, dist {:.1}", d(at(c), at("U1")));
-        assert!(d(at(c), at("U1")) < d(at(c), at("U2")), "{c} must be nearer U1 than U2");
+        assert!(
+            d(at(c), at("U1")) < 12.0,
+            "{c} must hug U1, dist {:.1}",
+            d(at(c), at("U1"))
+        );
+        assert!(
+            d(at(c), at("U1")) < d(at(c), at("U2")),
+            "{c} must be nearer U1 than U2"
+        );
     }
     for c in ["Cb0", "Cb1", "Cb2"] {
-        assert!(d(at(c), at("U2")) < 12.0, "{c} must hug U2, dist {:.1}", d(at(c), at("U2")));
-        assert!(d(at(c), at("U2")) < d(at(c), at("U1")), "{c} must be nearer U2 than U1");
+        assert!(
+            d(at(c), at("U2")) < 12.0,
+            "{c} must hug U2, dist {:.1}",
+            d(at(c), at("U2"))
+        );
+        assert!(
+            d(at(c), at("U2")) < d(at(c), at("U1")),
+            "{c} must be nearer U2 than U1"
+        );
     }
 }
 
@@ -444,7 +473,12 @@ fn grid_hint_spreads_members_within_region() {
         ],
         outline: None,
     };
-    let region = Rect { min_x: 10.0, max_x: 50.0, min_y: 10.0, max_y: 50.0 };
+    let region = Rect {
+        min_x: 10.0,
+        max_x: 50.0,
+        min_y: 10.0,
+        max_y: 50.0,
+    };
     let hints = PlacementHints {
         groups: vec![GroupHint {
             name: "array".to_owned(),
@@ -460,9 +494,12 @@ fn grid_hint_spreads_members_within_region() {
     for p in &problem.parts {
         let at = &p.locked.as_ref().expect("grid member is locked").at;
         assert!(
-            at.x >= region.min_x - 1e-9 && at.x <= region.max_x + 1e-9
-                && at.y >= region.min_y - 1e-9 && at.y <= region.max_y + 1e-9,
-            "{} must land inside the region, got {at:?}", p.reference
+            at.x >= region.min_x - 1e-9
+                && at.x <= region.max_x + 1e-9
+                && at.y >= region.min_y - 1e-9
+                && at.y <= region.max_y + 1e-9,
+            "{} must land inside the region, got {at:?}",
+            p.reference
         );
     }
 }
@@ -474,7 +511,12 @@ fn grid_hint_clamps_oversize_array_into_bounds_at_board_corner() {
     // the legalizer cannot pull them back. The per-cell clamp keeps every member's
     // courtyard on-board. (An over-constrained region — smaller than its array —
     // is an authoring error; the clamp guarantees on-board, not non-overlap.)
-    let region = Rect { min_x: 0.0, max_x: 3.0, min_y: 0.0, max_y: 3.0 };
+    let region = Rect {
+        min_x: 0.0,
+        max_x: 3.0,
+        min_y: 0.0,
+        max_y: 3.0,
+    };
     let problem = PlaceProblem {
         bounds: board(20.0, 20.0),
         clearance: 0.2,
@@ -509,11 +551,15 @@ fn grid_hint_clamps_oversize_array_into_bounds_at_board_corner() {
         let (hw, hh) = rotated_courtyard_half(p, l.rotation);
         assert!(
             l.at.x - hw >= b.min_x - 1e-9 && l.at.x + hw <= b.max_x + 1e-9,
-            "{} overflows x: {:?}", p.reference, l.at
+            "{} overflows x: {:?}",
+            p.reference,
+            l.at
         );
         assert!(
             l.at.y - hh >= b.min_y - 1e-9 && l.at.y + hh <= b.max_y + 1e-9,
-            "{} overflows y: {:?}", p.reference, l.at
+            "{} overflows y: {:?}",
+            p.reference,
+            l.at
         );
     }
 }
@@ -614,10 +660,19 @@ fn all_at_one_point_resolves_to_no_overlap() {
         .iter()
         .map(|p| (p.courtyard_w / 2.0, p.courtyard_h / 2.0))
         .collect();
-    let copper_bbox: Vec<(f64, f64, f64, f64)> =
-        problem.parts.iter().map(|p| rotated_copper_bbox(p, 0.0)).collect();
+    let copper_bbox: Vec<Rect> = problem
+        .parts
+        .iter()
+        .map(|p| rotated_copper_bbox(p, 0.0))
+        .collect();
     let pos: Vec<Point2> = res.placements.iter().map(|p| p.at.clone()).collect();
-    assert!(is_legal(&problem, &half, &copper_bbox, courtyard_margin(0.2), &pos));
+    assert!(is_legal(
+        &problem,
+        &half,
+        &copper_bbox,
+        courtyard_margin(0.2),
+        &pos
+    ));
 }
 
 #[test]
@@ -639,10 +694,22 @@ fn is_legal_rejects_pad_overhang_on_custom_outline() {
     let copper_bbox = vec![rotated_copper_bbox(&problem.parts[0], 0.0)];
     let margin = courtyard_margin(0.2);
     // Centred: copper (±1.225) + 0.5 clearance sits well inside the square → legal.
-    assert!(is_legal(&problem, &half, &copper_bbox, margin, &[Point2 { x: 10.0, y: 10.0 }]));
+    assert!(is_legal(
+        &problem,
+        &half,
+        &copper_bbox,
+        margin,
+        &[Point2 { x: 10.0, y: 10.0 }]
+    ));
     // Near the right edge: centre x=14.4 is inside the polygon, but copper reaches
     // 14.4 + 1.225 = 15.6 > 15 → overhangs → illegal (the centre-only check missed this).
-    assert!(!is_legal(&problem, &half, &copper_bbox, margin, &[Point2 { x: 14.4, y: 10.0 }]));
+    assert!(!is_legal(
+        &problem,
+        &half,
+        &copper_bbox,
+        margin,
+        &[Point2 { x: 14.4, y: 10.0 }]
+    ));
 }
 
 #[test]
@@ -656,14 +723,31 @@ fn is_legal_uses_asymmetric_copper_bbox_for_off_centre_pads() {
         courtyard_w: 6.0,
         courtyard_h: 2.0,
         pads: vec![
-            PartPad { number: "1".to_owned(), offset: Point2 { x: 2.0, y: 0.0 }, width: 1.0, height: 1.0, layers: top(), net: Some("A".to_owned()) },
-            PartPad { number: "2".to_owned(), offset: Point2 { x: 4.0, y: 0.0 }, width: 1.0, height: 1.0, layers: top(), net: Some("B".to_owned()) },
+            PartPad {
+                number: "1".to_owned(),
+                offset: Point2 { x: 2.0, y: 0.0 },
+                width: 1.0,
+                height: 1.0,
+                layers: top(),
+                net: Some("A".to_owned()),
+            },
+            PartPad {
+                number: "2".to_owned(),
+                offset: Point2 { x: 4.0, y: 0.0 },
+                width: 1.0,
+                height: 1.0,
+                layers: top(),
+                net: Some("B".to_owned()),
+            },
         ],
         locked: None,
     };
     // Asymmetric bbox: +x only, nothing on −x.
     let bb = rotated_copper_bbox(&off_centre, 0.0);
-    assert!((bb.0 - 1.5).abs() < 1e-9 && (bb.2 - 4.5).abs() < 1e-9, "x bbox 1.5..4.5, got {bb:?}");
+    assert!(
+        (bb.min_x - 1.5).abs() < 1e-9 && (bb.max_x - 4.5).abs() < 1e-9,
+        "x bbox 1.5..4.5, got {bb:?}"
+    );
     let problem = PlaceProblem {
         bounds: board(20.0, 20.0),
         clearance: 0.2,
@@ -678,7 +762,13 @@ fn is_legal_uses_asymmetric_copper_bbox_for_off_centre_pads() {
     let margin = courtyard_margin(0.2);
     // At x=8 the real copper is 9.5..12.5 (+0.5 → 9..13, inside the 5..15 square) → LEGAL.
     // A symmetric ±4.5 box would reach x=3 (<5) and wrongly reject. This is the regression guard.
-    assert!(is_legal(&problem, &half, &copper_bbox, margin, &[Point2 { x: 8.0, y: 10.0 }]));
+    assert!(is_legal(
+        &problem,
+        &half,
+        &copper_bbox,
+        margin,
+        &[Point2 { x: 8.0, y: 10.0 }]
+    ));
 }
 
 // ── to_route_problem: parseable + connectivity oracle accepts pads/points ─
@@ -708,7 +798,10 @@ fn to_route_problem_round_trips_and_oracle_accepts_geometry() {
 
     // Multi-pin nets became connections (SIG and GND each have 2 pins).
     let names: Vec<&str> = rp.connections.iter().map(|c| c.name.as_str()).collect();
-    assert!(names.contains(&"SIG") && names.contains(&"GND"), "{names:?}");
+    assert!(
+        names.contains(&"SIG") && names.contains(&"GND"),
+        "{names:?}"
+    );
 
     // Every connection point must sit on a pad of its net: feed an EMPTY
     // solution to the connectivity oracle. With no copper, multi-pin nets are
@@ -721,7 +814,8 @@ fn to_route_problem_round_trips_and_oracle_accepts_geometry() {
     };
     let v = connectivity::check(&rp, &empty);
     assert!(
-        v.iter().all(|x| matches!(x, connectivity::Violation::Unconnected { .. })),
+        v.iter()
+            .all(|x| matches!(x, connectivity::Violation::Unconnected { .. })),
         "no copper: only Unconnected expected, got {v:?}"
     );
 }
@@ -750,7 +844,10 @@ fn hpwl_is_reported_and_nonnegative() {
     assert!(res.report.hpwl >= 0.0, "HPWL must be non-negative");
     // Net "B" is the only 2-pin net; its HPWL is the pad-center bbox half-perim,
     // strictly positive once the two parts are apart.
-    assert!(res.report.hpwl > 0.0, "two connected parts give positive HPWL");
+    assert!(
+        res.report.hpwl > 0.0,
+        "two connected parts give positive HPWL"
+    );
 }
 
 // ── never panics on an impossible board ─────────────────────────────────
@@ -775,7 +872,11 @@ fn impossible_board_returns_not_legal_without_panic() {
     };
     let res = place(&problem, &PlacementHints::default());
     assert!(!res.legal, "an impossible board must report legal:false");
-    assert_eq!(res.placements.len(), 3, "still returns a placement per part");
+    assert_eq!(
+        res.placements.len(),
+        3,
+        "still returns a placement per part"
+    );
 }
 
 // ── empty problem is trivially legal ────────────────────────────────────
@@ -786,12 +887,21 @@ fn rotate_offset_matches_kicad_convention() {
     // footprint rotated 270° lands at world offset (-1.905, -2.475). The two
     // 90/270 directions must not be swapped, or routing targets the wrong pad.
     let p = Point2::new(-2.475, 1.905).rotate(270.0);
-    assert!((p.x - -1.905).abs() < 1e-9 && (p.y - -2.475).abs() < 1e-9, "{p:?}");
+    assert!(
+        (p.x - -1.905).abs() < 1e-9 && (p.y - -2.475).abs() < 1e-9,
+        "{p:?}"
+    );
     // 90 is the inverse; 180 negates; 0 is identity.
     let q = Point2::new(-2.475, 1.905).rotate(90.0);
-    assert!((q.x - 1.905).abs() < 1e-9 && (q.y - 2.475).abs() < 1e-9, "{q:?}");
+    assert!(
+        (q.x - 1.905).abs() < 1e-9 && (q.y - 2.475).abs() < 1e-9,
+        "{q:?}"
+    );
     let r = Point2::new(1.0, 2.0).rotate(180.0);
-    assert!((r.x - -1.0).abs() < 1e-9 && (r.y - -2.0).abs() < 1e-9, "{r:?}");
+    assert!(
+        (r.x - -1.0).abs() < 1e-9 && (r.y - -2.0).abs() < 1e-9,
+        "{r:?}"
+    );
 }
 
 #[test]
@@ -825,7 +935,10 @@ fn ic8(reference: &str, pwr: &str) -> Part {
             };
             PartPad {
                 number: format!("{}", i + 1),
-                offset: Point2 { x: (i as f64 - 4.0) * 0.5, y: 0.0 },
+                offset: Point2 {
+                    x: (i as f64 - 4.0) * 0.5,
+                    y: 0.0,
+                },
                 width: 0.3,
                 height: 0.3,
                 layers: top(),
@@ -833,7 +946,13 @@ fn ic8(reference: &str, pwr: &str) -> Part {
             }
         })
         .collect();
-    Part { reference: reference.into(), courtyard_w: 5.0, courtyard_h: 3.0, pads, locked: None }
+    Part {
+        reference: reference.into(),
+        courtyard_w: 5.0,
+        courtyard_h: 3.0,
+        pads,
+        locked: None,
+    }
 }
 
 /// THE BYTE-BEHAVIOR GUARD for the engine-SDK refactor: a board that exercises the
@@ -856,9 +975,30 @@ fn oracle_placement_is_byte_identical_to_pre_refactor() {
         courtyard_w: 2.54,
         courtyard_h: 7.62,
         pads: vec![
-            PartPad { number: "1".into(), offset: Point2 { x: 0.0, y: -2.54 }, width: 1.7, height: 1.7, layers: vec![LayerRef::top(), LayerRef::bottom()], net: Some("U1_S2".into()) },
-            PartPad { number: "2".into(), offset: Point2 { x: 0.0, y: 0.0 }, width: 1.7, height: 1.7, layers: vec![LayerRef::top(), LayerRef::bottom()], net: Some("U2_S2".into()) },
-            PartPad { number: "3".into(), offset: Point2 { x: 0.0, y: 2.54 }, width: 1.7, height: 1.7, layers: vec![LayerRef::top(), LayerRef::bottom()], net: Some("GND".into()) },
+            PartPad {
+                number: "1".into(),
+                offset: Point2 { x: 0.0, y: -2.54 },
+                width: 1.7,
+                height: 1.7,
+                layers: vec![LayerRef::top(), LayerRef::bottom()],
+                net: Some("U1_S2".into()),
+            },
+            PartPad {
+                number: "2".into(),
+                offset: Point2 { x: 0.0, y: 0.0 },
+                width: 1.7,
+                height: 1.7,
+                layers: vec![LayerRef::top(), LayerRef::bottom()],
+                net: Some("U2_S2".into()),
+            },
+            PartPad {
+                number: "3".into(),
+                offset: Point2 { x: 0.0, y: 2.54 },
+                width: 1.7,
+                height: 1.7,
+                layers: vec![LayerRef::top(), LayerRef::bottom()],
+                net: Some("GND".into()),
+            },
         ],
         locked: None,
     });
@@ -890,7 +1030,10 @@ fn oracle_placement_is_byte_identical_to_pre_refactor() {
     let res = place_board(&problem, &hints);
     let got = serde_json::to_string(&res).unwrap();
     const PINNED: &str = r#"{"placements":[{"reference":"U1","at":{"x":8.5,"y":13.5},"rotation":0.0},{"reference":"U2","at":{"x":14.0,"y":13.5},"rotation":0.0},{"reference":"Ca0","at":{"x":7.0,"y":9.5},"rotation":0.0},{"reference":"Ca1","at":{"x":10.5,"y":9.5},"rotation":0.0},{"reference":"Ca2","at":{"x":12.0,"y":7.5},"rotation":0.0},{"reference":"Cb0","at":{"x":14.0,"y":11.0},"rotation":0.0},{"reference":"Cb1","at":{"x":1.5,"y":8.5},"rotation":0.0},{"reference":"Cb2","at":{"x":8.0,"y":7.5},"rotation":0.0},{"reference":"J1","at":{"x":4.0,"y":13.5},"rotation":0.0},{"reference":"R1","at":{"x":15.5,"y":16.0},"rotation":0.0},{"reference":"R2","at":{"x":10.0,"y":16.0},"rotation":0.0}],"legal":true,"report":{"overlapsResolved":9,"outOfBoundsClamps":0,"hpwl":88.92999999999999,"layoutCost":518.962835441901}}"#;
-    assert_eq!(got, PINNED, "oracle placement drifted from the pre-refactor byte-for-byte snapshot");
+    assert_eq!(
+        got, PINNED,
+        "oracle placement drifted from the pre-refactor byte-for-byte snapshot"
+    );
 
     // And it is reproducible (the oracle's parallel evaluation is order-independent).
     let again = serde_json::to_string(&place_board(&problem, &hints)).unwrap();

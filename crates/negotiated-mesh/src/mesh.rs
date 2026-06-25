@@ -46,7 +46,6 @@ use std::collections::BTreeMap;
 /// A leaf cell's stable identifier (depth-first tree-path order, 0-based).
 pub type LeafId = usize;
 
-
 /// A flattened obstacle footprint on a single layer: its rectangle plus which
 /// connections own it (empty ⇒ keepout / foreign copper that blocks everyone).
 #[derive(Debug, Clone)]
@@ -218,7 +217,14 @@ impl CapacityMesh {
             .iter()
             .enumerate()
             .map(|(id, &(rect, depth))| {
-                build_leaf(id, rect, depth, layer_count, track_pitch, &per_layer_obstacles)
+                build_leaf(
+                    id,
+                    rect,
+                    depth,
+                    layer_count,
+                    track_pitch,
+                    &per_layer_obstacles,
+                )
             })
             .collect();
 
@@ -332,8 +338,7 @@ fn flatten_obstacles(
 /// Recursively build the quadtree: subdivide while some obstacle boundary
 /// crosses the cell and depth < max_depth. Children in NW, NE, SW, SE order.
 fn build_node(rect: Rect, depth: u32, max_depth: u32, obstacle_rects: &[Rect]) -> Node {
-    let should_split = depth < max_depth
-        && obstacle_rects.iter().any(|o| rect.boundary_crosses(o));
+    let should_split = depth < max_depth && obstacle_rects.iter().any(|o| rect.boundary_crosses(o));
     if !should_split {
         return Node::Leaf { rect, depth };
     }
@@ -444,7 +449,7 @@ fn build_leaf(
         // Union area of keepout coverage (rect union via row-free axis-aligned
         // accumulation; fixtures' keepouts are disjoint so the simple bound is
         // exact, and an over-count only lowers capacity — conservative).
-        let keepout_area = rect_union_area(&keepout_spans);
+        let keepout_area = Rect::union_area(&keepout_spans);
 
         let free_fraction = if leaf_area > 0.0 {
             (1.0 - keepout_area / leaf_area).clamp(0.0, 1.0)
@@ -497,9 +502,7 @@ fn build_edges(
                     continue;
                 }
                 let capacity = (0..layer_count)
-                    .map(|layer| {
-                        edge_capacity(shared, track_pitch, &per_layer_obstacles[layer])
-                    })
+                    .map(|layer| edge_capacity(shared, track_pitch, &per_layer_obstacles[layer]))
                     .collect();
                 edges.push(MeshEdge {
                     a: a.id,
@@ -519,11 +522,7 @@ fn build_edges(
 /// segment (a track cannot cross where foreign copper or a keepout sits on the
 /// boundary). Coverage is the union length of obstacle spans projected onto the
 /// segment; the result is `floor(free_len / track_pitch)`.
-fn edge_capacity(
-    boundary: SharedBoundary,
-    track_pitch: f64,
-    obstacles: &[LayerObstacle],
-) -> u32 {
+fn edge_capacity(boundary: SharedBoundary, track_pitch: f64, obstacles: &[LayerObstacle]) -> u32 {
     if track_pitch <= 0.0 || boundary.len() <= 0.0 {
         return 0;
     }
@@ -552,45 +551,6 @@ fn edge_capacity(
     (free_len / track_pitch).floor().max(0.0) as u32
 }
 
-/// Area of the union of axis-aligned rectangles (mm²), via coordinate
-/// compression. Exact, and `0` for an empty set. Used for keepout coverage,
-/// where the rect count per leaf is tiny.
-fn rect_union_area(rects: &[Rect]) -> f64 {
-    if rects.is_empty() {
-        return 0.0;
-    }
-    let mut xs: Vec<f64> = Vec::with_capacity(rects.len() * 2);
-    let mut ys: Vec<f64> = Vec::with_capacity(rects.len() * 2);
-    for r in rects {
-        xs.push(r.min_x);
-        xs.push(r.max_x);
-        ys.push(r.min_y);
-        ys.push(r.max_y);
-    }
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    xs.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
-    ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    ys.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
-
-    let mut area = 0.0;
-    for xi in 0..xs.len().saturating_sub(1) {
-        let (x0, x1) = (xs[xi], xs[xi + 1]);
-        let cx = (x0 + x1) / 2.0;
-        for yi in 0..ys.len().saturating_sub(1) {
-            let (y0, y1) = (ys[yi], ys[yi + 1]);
-            let cy = (y0 + y1) / 2.0;
-            // The cell is covered iff its center lies in any rect.
-            if rects
-                .iter()
-                .any(|r| cx >= r.min_x && cx <= r.max_x && cy >= r.min_y && cy <= r.max_y)
-            {
-                area += (x1 - x0) * (y1 - y0);
-            }
-        }
-    }
-    area
-}
-
 /// Total length covered by a set of 1-D intervals (their union), mm.
 fn union_length(intervals: &mut [(f64, f64)]) -> f64 {
     if intervals.is_empty() {
@@ -615,7 +575,7 @@ fn union_length(intervals: &mut [(f64, f64)]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{Rect, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem};
+    use crate::problem::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem};
     use std::path::Path;
 
     fn base(obstacles: Vec<Obstacle>, connections: Vec<Connection>) -> RouteProblem {
@@ -711,10 +671,7 @@ mod tests {
     #[test]
     fn central_obstacle_forces_subdivision_and_cuts_capacity() {
         // A keepout in the middle: its boundary crosses the root, forcing splits.
-        let p = base(
-            vec![pad(&[], (8.0, 8.0), 2.0, 2.0, &["top"])],
-            vec![],
-        );
+        let p = base(vec![pad(&[], (8.0, 8.0), 2.0, 2.0, &["top"])], vec![]);
         let mesh = CapacityMesh::build(&p);
         assert!(
             mesh.leaves.len() > 1,
@@ -723,17 +680,20 @@ mod tests {
         );
         // Some top-layer leaf must have its capacity cut by the keepout.
         let cut = mesh.leaves.iter().any(|l| {
-            l.layers[0].free_fraction < 1.0 - 1e-9 && l.rect.overlaps(&Rect {
-                min_x: 7.0,
-                min_y: 7.0,
-                max_x: 9.0,
-                max_y: 9.0,
-            })
+            l.layers[0].free_fraction < 1.0 - 1e-9
+                && l.rect.overlaps(&Rect {
+                    min_x: 7.0,
+                    min_y: 7.0,
+                    max_x: 9.0,
+                    max_y: 9.0,
+                })
         });
         assert!(cut, "the keepout must reduce some leaf's free fraction");
         // The bottom layer (no obstacle) stays fully free everywhere.
         assert!(
-            mesh.leaves.iter().all(|l| (l.layers[1].free_fraction - 1.0).abs() < 1e-9),
+            mesh.leaves
+                .iter()
+                .all(|l| (l.layers[1].free_fraction - 1.0).abs() < 1e-9),
             "bottom layer has no obstacle, stays free"
         );
         assert_tiles_bounds(&mesh);
@@ -743,10 +703,7 @@ mod tests {
     fn t_junction_adjacency_is_correct() {
         // One off-center small obstacle makes one quadrant refine while its
         // siblings stay big: a big leaf borders several small ones (T-junction).
-        let p = base(
-            vec![pad(&[], (4.0, 4.0), 1.0, 1.0, &["top"])],
-            vec![],
-        );
+        let p = base(vec![pad(&[], (4.0, 4.0), 1.0, 1.0, &["top"])], vec![]);
         let mesh = CapacityMesh::build(&p);
         assert!(mesh.leaves.len() > 4, "obstacle forces nested refinement");
         assert_tiles_bounds(&mesh);
@@ -852,15 +809,17 @@ mod tests {
 
     #[test]
     fn cell_at_locates_points_in_one_leaf() {
-        let p = base(
-            vec![pad(&[], (8.0, 8.0), 2.0, 2.0, &["top"])],
-            vec![],
-        );
+        let p = base(vec![pad(&[], (8.0, 8.0), 2.0, 2.0, &["top"])], vec![]);
         let mesh = CapacityMesh::build(&p);
         // Every leaf's center resolves back to that leaf.
         for leaf in &mesh.leaves {
             let c = leaf.rect.center();
-            assert_eq!(mesh.cell_at(&c), leaf.id, "center of leaf {} round-trips", leaf.id);
+            assert_eq!(
+                mesh.cell_at(&c),
+                leaf.id,
+                "center of leaf {} round-trips",
+                leaf.id
+            );
         }
         // Corners of the board resolve to in-range leaves.
         let _ = mesh.cell_at(&Point2 { x: 0.0, y: 0.0 });
@@ -889,14 +848,21 @@ mod tests {
         let layer_count = p.layer_count.max(1) as usize;
 
         assert_tiles_bounds(&mesh);
-        assert!(mesh.leaves.len() > 1, "{name} has obstacles, must subdivide");
+        assert!(
+            mesh.leaves.len() > 1,
+            "{name} has obstacles, must subdivide"
+        );
         assert!(!mesh.edges.is_empty(), "{name} must have adjacency edges");
 
         // Leaf ids are dense and ordered.
         for (i, leaf) in mesh.leaves.iter().enumerate() {
             assert_eq!(leaf.id, i, "leaf id == index");
             assert_eq!(leaf.layers.len(), layer_count, "per-layer capacity vector");
-            assert_eq!(leaf.blocking.len(), layer_count, "per-layer blocking vector");
+            assert_eq!(
+                leaf.blocking.len(),
+                layer_count,
+                "per-layer blocking vector"
+            );
         }
         // Edges reference valid leaves and have per-layer capacity vectors.
         for e in &mesh.edges {

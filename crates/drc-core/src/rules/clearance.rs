@@ -52,14 +52,12 @@ fn pair_clearance(x: &CopperItem, y: &CopperItem, clearance: f64) -> Option<Find
         // Trace ↔ trace: same layer, different connection.
         (
             Segment {
-                a: a1,
-                b: b1,
+                segment: s1,
                 half_w: w1,
                 layer: l1,
             },
             Segment {
-                a: a2,
-                b: b2,
+                segment: s2,
                 half_w: w2,
                 layer: l2,
             },
@@ -67,10 +65,7 @@ fn pair_clearance(x: &CopperItem, y: &CopperItem, clearance: f64) -> Option<Find
             if l1 != l2 || share_owner(x, y) {
                 return None;
             }
-            let gap = geom::Segment::new((*a1).into(), (*b1).into())
-                .dist_to_segment(geom::Segment::new((*a2).into(), (*b2).into()))
-                - w1
-                - w2;
+            let gap = s1.dist_to_segment(*s2) - w1 - w2;
             if gap + EPS < clearance {
                 Some(Finding::ClearanceTraceTrace {
                     a: x.first_owner(),
@@ -78,7 +73,7 @@ fn pair_clearance(x: &CopperItem, y: &CopperItem, clearance: f64) -> Option<Find
                     layer: l1.0.clone(),
                     gap,
                     required: clearance,
-                    at: *a1,
+                    at: s1.a.into(),
                 })
             } else {
                 None
@@ -88,32 +83,20 @@ fn pair_clearance(x: &CopperItem, y: &CopperItem, clearance: f64) -> Option<Find
         // Trace ↔ obstacle.
         (
             Segment {
-                a,
-                b,
+                segment,
                 half_w,
                 layer,
             },
-            Rect {
-                min,
-                max,
-                center,
-                layers,
-            },
-        ) => trace_obstacle(x, y, *a, *b, *half_w, layer, *min, *max, *center, layers, clearance),
+            Rect { rect, layers },
+        ) => trace_obstacle(x, y, *segment, *half_w, layer, rect, layers, clearance),
         (
-            Rect {
-                min,
-                max,
-                center,
-                layers,
-            },
+            Rect { rect, layers },
             Segment {
-                a,
-                b,
+                segment,
                 half_w,
                 layer,
             },
-        ) => trace_obstacle(y, x, *a, *b, *half_w, layer, *min, *max, *center, layers, clearance),
+        ) => trace_obstacle(y, x, *segment, *half_w, layer, rect, layers, clearance),
 
         // Obstacle ↔ obstacle: both are board inputs, not router output. We do
         // not lint pre-existing pad/keepout overlaps.
@@ -126,17 +109,13 @@ fn pair_clearance(x: &CopperItem, y: &CopperItem, clearance: f64) -> Option<Find
 
 /// Trace-segment (`seg`) against an obstacle rect, with `seg` as the trace
 /// item and `rect` as the obstacle item.
-#[allow(clippy::too_many_arguments)]
 fn trace_obstacle(
     seg: &CopperItem,
     rect: &CopperItem,
-    a: [f64; 2],
-    b: [f64; 2],
+    segment: geom::Segment,
     half_w: f64,
     layer: &LayerRef,
-    min: [f64; 2],
-    max: [f64; 2],
-    center: [f64; 2],
+    bounds: &geom::Rect,
     layers: &[LayerRef],
     clearance: f64,
 ) -> Option<Finding> {
@@ -146,9 +125,7 @@ fn trace_obstacle(
     if !layers.contains(layer) || rect.owned_by(&conn) {
         return None;
     }
-    let gap = geom::Segment::new(a.into(), b.into())
-        .dist_to_rect(&geom::Rect::new(min[0], min[1], max[0], max[1]))
-        - half_w;
+    let gap = segment.dist_to_rect(bounds) - half_w;
     if gap + EPS < clearance {
         Some(Finding::ClearanceTraceObstacle {
             connection: conn,
@@ -156,7 +133,7 @@ fn trace_obstacle(
             layer: layer.0.clone(),
             gap,
             required: clearance,
-            at: center,
+            at: bounds.center().into(),
         })
     } else {
         None
@@ -168,7 +145,7 @@ fn trace_obstacle(
 /// [`Finding::ClearanceViaAny`] when too close to foreign copper.
 fn via_pair(
     via: &CopperItem,
-    at: [f64; 2],
+    at: geom::Point2,
     radius: f64,
     other: &CopperItem,
     clearance: f64,
@@ -178,17 +155,11 @@ fn via_pair(
     }
     let conn = via.first_owner();
     let (edge_dist, other_owners) = match &other.geom {
-        CopperGeom::Segment { a, b, half_w, .. } => (
-            geom::Segment::new((*a).into(), (*b).into()).dist_to_point(at.into()) - half_w,
-            other.owners.clone(),
-        ),
-        CopperGeom::Rect { min, max, .. } => (
-            geom::Rect::new(min[0], min[1], max[0], max[1]).dist_to_point(at.into()),
-            other.owners.clone(),
-        ),
-        CopperGeom::Via { at: p, radius: r2 } => {
-            (geom::Point2::from(at).dist((*p).into()) - r2, other.owners.clone())
-        }
+        CopperGeom::Segment {
+            segment, half_w, ..
+        } => (segment.dist_to_point(at) - half_w, other.owners.clone()),
+        CopperGeom::Rect { rect, .. } => (rect.dist_to_point(at), other.owners.clone()),
+        CopperGeom::Via { at: p, radius: r2 } => (at.dist(*p) - r2, other.owners.clone()),
     };
     let gap = edge_dist - radius;
     if gap + EPS < clearance {
@@ -197,7 +168,7 @@ fn via_pair(
             other_owners,
             gap,
             required: clearance,
-            at,
+            at: at.into(),
         })
     } else {
         None

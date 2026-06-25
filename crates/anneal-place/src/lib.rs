@@ -24,8 +24,7 @@ use sch_floorplan::contract::{
     COL_GAP, FAST_PINS, GRID_KEY, PlacementEngine, ROW_GAP, RawMetrics, Realizer,
     align_idiom_clusters, align_led_chains, body_overlap_count, build_anchor_blocks, build_writer,
     cluster_group, cohesion_targets, decongest, grid_order_viol, item_rect, multi_unit_siblings,
-    orient_angle, overlaps_any, pin_endpoint, rects_overlap, signal_anchor_centroid,
-    supply_pin_target,
+    orient_angle, overlaps_any, pin_endpoint, signal_anchor_centroid, supply_pin_target,
 };
 
 /// Simulated annealing: a seeded refine→anneal AND a broad anneal from the
@@ -52,6 +51,7 @@ impl PlacementEngine for Anneal {
 /// Cohesion pull on a multi-unit part's units (same refdes, no shared net). Anneal's own
 /// copy of the constant — the free engine carries its own; they are not shared.
 const SIB_COHESION: f64 = 3.0;
+const GRID_STEP: f64 = geom::GRID_50_MIL.pitch();
 /// Extra AMPLIFIED weight on a 1-rail leg orientation violation, on top of the base 12.
 const ORIENT_BOOST: f64 = 50.0;
 /// Extra AMPLIFIED weight on compactness (length+spread) so straightness can't win by
@@ -186,8 +186,8 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
             ] {
                 let prev = items[i].at;
                 items[i].at = [
-                    geom::grid::snap(prev[0] + d[0]),
-                    geom::grid::snap(prev[1] + d[1]),
+                    geom::GRID_50_MIL.snap(prev[0] + d[0]),
+                    geom::GRID_50_MIL.snap(prev[1] + d[1]),
                 ]
                 .into();
                 let c = greedy_score(r, items);
@@ -234,7 +234,7 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
         }
         for &i in &satellites {
             if let Some(ax) = anchor_x(items, r.incidence(), i) {
-                let nx = geom::grid::snap(2.0 * ax - items[i].at[0]);
+                let nx = geom::GRID_50_MIL.snap(2.0 * ax - items[i].at[0]);
                 if (nx - items[i].at[0]).abs() > EPS {
                     let prev = items[i].at;
                     items[i].at = [nx, prev[1]].into();
@@ -297,13 +297,12 @@ fn compact(r: &Realizer, items: &mut [Item]) {
                 }
                 let orig = items[i].at;
                 let mut p = orig;
-                p[axis] += dir * 1.27;
-                let rr = item_rect(&items[i], p);
-                let a = [rr[0] - 1.27, rr[1] - 1.27, rr[2] + 1.27, rr[3] + 1.27];
+                p[axis] += dir * GRID_STEP;
+                let a = item_rect(&items[i], p).inflate(GRID_STEP);
                 if items
                     .iter()
                     .enumerate()
-                    .any(|(j, it)| j != i && rects_overlap(a, item_rect(it, it.at)))
+                    .any(|(j, it)| j != i && a.overlaps(&item_rect(it, it.at)))
                 {
                     continue;
                 }
@@ -356,13 +355,12 @@ fn free_nudge(r: &Realizer, items: &mut [Item]) {
             let (mut best_pos, mut best_cost) = (orig, best);
             for (axis, dir) in [(0usize, 1.0), (0, -1.0), (1, 1.0), (1, -1.0)] {
                 let mut p = orig;
-                p[axis] += dir * 1.27;
-                let rr = item_rect(&items[i], p);
-                let pad = [rr[0] - 1.27, rr[1] - 1.27, rr[2] + 1.27, rr[3] + 1.27];
+                p[axis] += dir * GRID_STEP;
+                let pad = item_rect(&items[i], p).inflate(GRID_STEP);
                 if items
                     .iter()
                     .enumerate()
-                    .any(|(j, it)| j != i && rects_overlap(pad, item_rect(it, it.at)))
+                    .any(|(j, it)| j != i && pad.overlaps(&item_rect(it, it.at)))
                 {
                     continue;
                 }
@@ -421,7 +419,7 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
     for (si, vertical, target) in plans {
         let axis = if vertical { 0 } else { 1 };
         let orig = items[si].at;
-        let goal = geom::grid::snap(target[axis]);
+        let goal = geom::GRID_50_MIL.snap(target[axis]);
         let dir = (goal - orig[axis]).signum();
         if dir == 0.0 {
             continue;
@@ -429,7 +427,7 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
         let (mut best_pos, mut best_cost) = (orig, best);
         let mut p = orig;
         for _ in 0..24 {
-            p[axis] += dir * 1.27;
+            p[axis] += dir * GRID_STEP;
             if (p[axis] - goal) * dir > EPS || overlaps_any(items, si, p) {
                 break;
             }
@@ -954,8 +952,8 @@ fn anneal_items(
     // One grid cell-step in x/y for the relocation moves.
     let relocate = |rng: &mut Rng, at: [f64; 2], n: i32| -> [f64; 2] {
         [
-            geom::grid::snap(at[0] + rng.step(n) as f64 * COL_GAP),
-            geom::grid::snap(at[1] + rng.step(n) as f64 * ROW_GAP),
+            geom::GRID_50_MIL.snap(at[0] + rng.step(n) as f64 * COL_GAP),
+            geom::GRID_50_MIL.snap(at[1] + rng.step(n) as f64 * ROW_GAP),
         ]
     };
     // NB: no "exit early once `best` plateaus for N iters" rule. Measured the largest
@@ -1007,8 +1005,8 @@ fn anneal_items(
                 .collect();
             for &k in &group {
                 items[k].at = [
-                    geom::grid::snap(items[k].at[0] + d[0]),
-                    geom::grid::snap(items[k].at[1] + d[1]),
+                    geom::GRID_50_MIL.snap(items[k].at[0] + d[0]),
+                    geom::GRID_50_MIL.snap(items[k].at[1] + d[1]),
                 ]
                 .into();
             }
@@ -1133,8 +1131,8 @@ fn anneal_locality(r: &Realizer, items: &mut [Item], inc: &Incidence, ir: &Layou
     let mut rng = Rng(seed);
     let relocate = |rng: &mut Rng, at: [f64; 2], n: i32| -> [f64; 2] {
         [
-            geom::grid::snap(at[0] + rng.step(n) as f64 * COL_GAP),
-            geom::grid::snap(at[1] + rng.step(n) as f64 * ROW_GAP),
+            geom::GRID_50_MIL.snap(at[0] + rng.step(n) as f64 * COL_GAP),
+            geom::GRID_50_MIL.snap(at[1] + rng.step(n) as f64 * ROW_GAP),
         ]
     };
     // Board extent in cells — the hot cluster-jump radius.
@@ -1211,8 +1209,8 @@ fn anneal_locality(r: &Realizer, items: &mut [Item], inc: &Incidence, ir: &Layou
                 .collect();
             for &k in &group {
                 items[k].at = [
-                    geom::grid::snap(items[k].at[0] + d[0]),
-                    geom::grid::snap(items[k].at[1] + d[1]),
+                    geom::GRID_50_MIL.snap(items[k].at[0] + d[0]),
+                    geom::GRID_50_MIL.snap(items[k].at[1] + d[1]),
                 ]
                 .into();
             }
@@ -1283,12 +1281,12 @@ fn polish_proxy(items: &mut [Item], inc: &Incidence, ir: &LayoutIr, magnet: bool
             let (mut best_pos, mut best_cost) = (orig, best);
             for (axis, dir) in [(0usize, 1.0), (0, -1.0), (1, 1.0), (1, -1.0)] {
                 let mut p = orig;
-                p[axis] += dir * 1.27;
-                let pad = item_rect(&items[i], p).inflate(1.27);
+                p[axis] += dir * GRID_STEP;
+                let pad = item_rect(&items[i], p).inflate(GRID_STEP);
                 if items
                     .iter()
                     .enumerate()
-                    .any(|(j, it)| j != i && rects_overlap(pad, item_rect(it, it.at)))
+                    .any(|(j, it)| j != i && pad.overlaps(&item_rect(it, it.at)))
                 {
                     continue;
                 }
@@ -1349,15 +1347,14 @@ fn magnet_proxy(
         for dy in -2..=2 {
             for dx in -2..=2 {
                 let p = [
-                    geom::grid::snap(t[0] + dx as f64 * COL_GAP),
-                    geom::grid::snap(t[1] + dy as f64 * ROW_GAP),
+                    geom::GRID_50_MIL.snap(t[0] + dx as f64 * COL_GAP),
+                    geom::GRID_50_MIL.snap(t[1] + dy as f64 * ROW_GAP),
                 ];
-                let r = item_rect(&items[si], p);
-                let pad = [r[0] - 1.27, r[1] - 1.27, r[2] + 1.27, r[3] + 1.27];
+                let pad = item_rect(&items[si], p).inflate(GRID_STEP);
                 if items
                     .iter()
                     .enumerate()
-                    .any(|(j, it)| j != si && rects_overlap(pad, item_rect(it, it.at)))
+                    .any(|(j, it)| j != si && pad.overlaps(&item_rect(it, it.at)))
                 {
                     continue;
                 }
@@ -1419,7 +1416,7 @@ fn block_gravity_proxy(
                     continue;
                 }
                 let mut delta = [0.0; 2];
-                delta[axis] = dir * 1.27;
+                delta[axis] = dir * GRID_STEP;
                 // Tentatively slide the whole group; reject if any moved member's
                 // padded rect now overlaps a NON-group part.
                 // Keep a generous inter-module GUTTER (not just the body-clearance
@@ -1431,10 +1428,9 @@ fn block_gravity_proxy(
                 const G: f64 = 5.08;
                 let collide = group.iter().any(|&k| {
                     let np = [items[k].at[0] + delta[0], items[k].at[1] + delta[1]];
-                    let r = item_rect(&items[k], np);
-                    let pad = [r[0] - G, r[1] - G, r[2] + G, r[3] + G];
+                    let pad = item_rect(&items[k], np).inflate(G);
                     items.iter().enumerate().any(|(j, it)| {
-                        !in_group.contains(&j) && rects_overlap(pad, item_rect(it, it.at))
+                        !in_group.contains(&j) && pad.overlaps(&item_rect(it, it.at))
                     })
                 });
                 if collide {
@@ -1529,8 +1525,8 @@ fn align_repeated_motifs(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) -> 
         for (idx, &ai) in g.iter().enumerate() {
             let (col, row) = (idx % cols, idx / cols);
             let bb = blk_bbox(items, ai);
-            let dx = geom::grid::snap(origin.min_x + col as f64 * pitch_x - bb.min_x);
-            let dy = geom::grid::snap(origin.min_y + row as f64 * pitch_y - bb.min_y);
+            let dx = geom::GRID_50_MIL.snap(origin.min_x + col as f64 * pitch_x - bb.min_x);
+            let dy = geom::GRID_50_MIL.snap(origin.min_y + row as f64 * pitch_y - bb.min_y);
             if dx != 0.0 || dy != 0.0 {
                 let mut grp = vec![ai];
                 if let Some(b) = blocks.get(&ai) {

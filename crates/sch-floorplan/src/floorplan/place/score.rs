@@ -1,8 +1,8 @@
 //! `place::score` — the routed-sheet COUNT/geometry primitives an engine measures
 //! against: the `count_*` neatness/truthfulness terms (crossings, corners, merges,
 //! shorts, congestion, body-crossings), the orientation/spine/stray/grid-order
-//! classifiers, and the geometry primitives (`item_rect`, `rects_overlap`,
-//! `body_overlap_count`). The MEASUREMENT library [`super::measure`] assembles these
+//! classifiers, and the geometry primitives (`item_rect`, `body_overlap_count`).
+//! The MEASUREMENT library [`super::measure`] assembles these
 //! into the raw 16 terms; each ENGINE then weights them into its own objective. This
 //! module bakes in NO weights and NO `premium` policy — those are engine-owned.
 
@@ -34,7 +34,8 @@ pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> ::geom::Rect {
     let s = it.geom.approx_size();
     let quarter = ((it.angle / 90.0).round() as i64).rem_euclid(2) == 1;
     let (w, h) = if quarter { (s[1], s[0]) } else { (s[0], s[1]) };
-    let (hw, hh) = ((w / 2.0).max(1.27), (h / 2.0).max(1.27));
+    let grid = geom::GRID_50_MIL.pitch();
+    let (hw, hh) = ((w / 2.0).max(grid), (h / 2.0).max(grid));
     let mut r = ::geom::Rect::new(at[0] - hw, at[1] - hh, at[0] + hw, at[1] + hh);
     // Reserve the side-mounted refdes/value text footprint so a tight pack leaves
     // it collision-free — the readability lint flags text-over-body, so the climb
@@ -47,16 +48,10 @@ pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> ::geom::Rect {
             r.max_y += 2.0; // value line below
         } else {
             let chars = it.value.chars().count().max(it.refdes.chars().count()) as f64;
-            r.max_x += chars * 1.1 + 1.27; // field stack to the right
+            r.max_x += chars * 1.1 + grid; // field stack to the right
         }
     }
     r
-}
-
-pub fn rects_overlap(a: impl Into<::geom::Rect>, b: impl Into<::geom::Rect>) -> bool {
-    let a = a.into();
-    let b = b.into();
-    a.overlaps(&b)
 }
 
 /// Count pairs of items whose bodies overlap — the hard "never let two symbols
@@ -65,10 +60,7 @@ pub fn body_overlap_count(items: &[Item]) -> usize {
     let mut n = 0;
     for i in 0..items.len() {
         for j in (i + 1)..items.len() {
-            if rects_overlap(
-                item_rect(&items[i], items[i].at),
-                item_rect(&items[j], items[j].at),
-            ) {
+            if item_rect(&items[i], items[i].at).overlaps(&item_rect(&items[j], items[j].at)) {
                 n += 1;
             }
         }
@@ -175,19 +167,7 @@ pub fn count_ic_body_crossings(
             continue;
         }
         for (w1, w2, _) in wires {
-            // Wires are axis-aligned; a zero-width interval can't be tested as a
-            // 2-D box overlap, so split by orientation: the constant coordinate
-            // must be strictly inside the rect, the spanning interval must overlap.
-            let cross = if (w1[0] - w2[0]).abs() < EPS {
-                let x = w1[0];
-                let (ylo, yhi) = (w1[1].min(w2[1]), w1[1].max(w2[1]));
-                r.min_x + EPS < x && x < r.max_x - EPS && ylo.max(r.min_y) < yhi.min(r.max_y) - EPS
-            } else {
-                let y = w1[1];
-                let (xlo, xhi) = (w1[0].min(w2[0]), w1[0].max(w2[0]));
-                r.min_y + EPS < y && y < r.max_y - EPS && xlo.max(r.min_x) < xhi.min(r.max_x) - EPS
-            };
-            if cross {
+            if ::geom::Segment::new((*w1).into(), (*w2).into()).axis_aligned_hits_rect_interior(r) {
                 n += 1;
             }
         }
@@ -559,7 +539,7 @@ pub fn count_congestion(junctions: &[[f64; 2]]) -> usize {
 /// Net merges KiCAD would actually make: two DIFFERENT-net wires that (a)
 /// collinear-overlap, or (b) both pass through a junction dot. KiCAD does NOT
 /// fuse a wire end (or pin) landing on another wire's interior without a
-/// junction, so — unlike the router's stricter `segments_conflict` — those near
+/// junction, so — unlike the router's stricter connecting-touch test — those near
 /// misses are excluded here, else the scorer chases phantom shorts on a layout
 /// ERC calls clean.
 pub fn count_merges(
@@ -604,9 +584,6 @@ pub fn count_merges(
 /// one vertical, intersecting at a point interior to both (KiCAD draws no
 /// junction there — the wires just cross over).
 pub fn count_crossings(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
-    let horiz = |a: &[f64; 2], b: &[f64; 2]| (a[1] - b[1]).abs() < EPS;
-    let vert = |a: &[f64; 2], b: &[f64; 2]| (a[0] - b[0]).abs() < EPS;
-    let interior = |v: f64, lo: f64, hi: f64| v > lo + EPS && v < hi - EPS;
     let mut n = 0;
     for i in 0..wires.len() {
         for j in (i + 1)..wires.len() {
@@ -615,17 +592,9 @@ pub fn count_crossings(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize 
             if an == bn {
                 continue; // same net: a deliberate join, not a crossing
             }
-            let (h, v) = if horiz(a1, a2) && vert(b1, b2) {
-                ((a1, a2), (b1, b2))
-            } else if vert(a1, a2) && horiz(b1, b2) {
-                ((b1, b2), (a1, a2))
-            } else {
-                continue; // parallel (collinear overlap is a same/foreign issue, not a crossing)
-            };
-            let (hy, vx) = (h.0[1], v.0[0]);
-            let (hx_lo, hx_hi) = (h.0[0].min(h.1[0]), h.0[0].max(h.1[0]));
-            let (vy_lo, vy_hi) = (v.0[1].min(v.1[1]), v.0[1].max(v.1[1]));
-            if interior(vx, hx_lo, hx_hi) && interior(hy, vy_lo, vy_hi) {
+            if ::geom::Segment::new((*a1).into(), (*a2).into())
+                .axis_aligned_crosses_interior(::geom::Segment::new((*b1).into(), (*b2).into()))
+            {
                 n += 1;
             }
         }

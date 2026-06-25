@@ -1,4 +1,4 @@
-use geom::{Point2, Rect};
+use geom::Rect;
 use serde::{Deserialize, Serialize};
 
 /// Through-hole vs. surface-mount, derived from a pad's KiCAD `pad_type`.
@@ -14,57 +14,6 @@ pub enum PadTechnology {
     /// `connect` or anything else KiCAD may add — treated conservatively as
     /// surface copper by consumers that must pick.
     Other,
-}
-
-/// A 2-D axis-aligned bounding box in the footprint's own frame, millimetres,
-/// KiCAD y-down.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct BBox {
-    pub min_x: f64,
-    pub min_y: f64,
-    pub max_x: f64,
-    pub max_y: f64,
-}
-
-impl BBox {
-    /// A degenerate box at the origin.
-    pub fn zero() -> Self {
-        BBox {
-            min_x: 0.0,
-            min_y: 0.0,
-            max_x: 0.0,
-            max_y: 0.0,
-        }
-    }
-
-    pub fn width(&self) -> f64 {
-        self.max_x - self.min_x
-    }
-
-    pub fn height(&self) -> f64 {
-        self.max_y - self.min_y
-    }
-
-    pub(crate) fn from_points(pts: &[Point2]) -> Option<Self> {
-        Rect::bounding(pts).map(Into::into)
-    }
-}
-
-impl From<Rect> for BBox {
-    fn from(r: Rect) -> Self {
-        BBox {
-            min_x: r.min_x,
-            min_y: r.min_y,
-            max_x: r.max_x,
-            max_y: r.max_y,
-        }
-    }
-}
-
-impl From<BBox> for Rect {
-    fn from(b: BBox) -> Self {
-        Rect::new(b.min_x, b.min_y, b.max_x, b.max_y)
-    }
 }
 
 /// How the courtyard bbox was obtained.
@@ -107,12 +56,12 @@ pub struct Footprint {
     pub descr: Option<String>,
     /// Reference-designator-agnostic pad list.
     pub pads: Vec<FootprintPad>,
-    /// Courtyard bounding box (placement keep-out).
-    pub courtyard: BBox,
+    /// Courtyard bounding box in the footprint frame.
+    pub courtyard: Rect,
     /// How [`Self::courtyard`] was derived.
     pub courtyard_source: CourtyardSource,
-    /// Overall bounding box over every pad and graphic element.
-    pub bbox: BBox,
+    /// Overall bounding box over pads and graphics.
+    pub bbox: Rect,
 }
 
 impl Footprint {

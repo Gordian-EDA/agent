@@ -104,6 +104,45 @@ impl Segment {
         }
     }
 
+    /// Do two axis-aligned segments touch in a way that creates a connection?
+    ///
+    /// Collinear endpoint touches count. Perpendicular strict crossings do not;
+    /// perpendicular endpoint touches do.
+    pub fn axis_aligned_connects(&self, other: Segment) -> bool {
+        let self_h = self.is_horizontal();
+        let other_h = other.is_horizontal();
+        let self_v = self.is_vertical();
+        let other_v = other.is_vertical();
+        if self_h == other_h {
+            return self.axis_aligned_collinear_closed_overlap(other);
+        }
+        if !(self_h || self_v) || !(other_h || other_v) {
+            return false;
+        }
+        let (h, v) = if self_h {
+            (*self, other)
+        } else {
+            (other, *self)
+        };
+        let p = Point2::new(v.a.x, h.a.y);
+        h.contains_point(p) && v.contains_point(p) && (h.endpoint_eq(p) || v.endpoint_eq(p))
+    }
+
+    /// Do two axis-aligned segments cross at a point interior to both?
+    pub fn axis_aligned_crosses_interior(&self, other: Segment) -> bool {
+        let (h, v) = if self.is_horizontal() && other.is_vertical() {
+            (*self, other)
+        } else if self.is_vertical() && other.is_horizontal() {
+            (other, *self)
+        } else {
+            return false;
+        };
+        let (hy, vx) = (h.a.y, v.a.x);
+        let (hx_lo, hx_hi) = (h.a.x.min(h.b.x), h.a.x.max(h.b.x));
+        let (vy_lo, vy_hi) = (v.a.y.min(v.b.y), v.a.y.max(v.b.y));
+        vx > hx_lo + EPS && vx < hx_hi - EPS && hy > vy_lo + EPS && hy < vy_hi - EPS
+    }
+
     /// Min distance to an axis-aligned rect; 0 if it enters/touches the rect.
     pub fn dist_to_rect(&self, r: &Rect) -> f64 {
         if r.dist_to_point(self.a) <= EPS || r.dist_to_point(self.b) <= EPS {
@@ -134,6 +173,34 @@ impl Segment {
         let (lo_x, hi_x) = (self.a.x.min(self.b.x), self.a.x.max(self.b.x));
         let (lo_y, hi_y) = (self.a.y.min(self.b.y), self.a.y.max(self.b.y));
         lo_x < r.max_x - EPS && r.min_x + EPS < hi_x && lo_y < r.max_y - EPS && r.min_y + EPS < hi_y
+    }
+
+    #[inline]
+    fn is_horizontal(&self) -> bool {
+        (self.a.y - self.b.y).abs() < EPS
+    }
+
+    #[inline]
+    fn is_vertical(&self) -> bool {
+        (self.a.x - self.b.x).abs() < EPS
+    }
+
+    fn endpoint_eq(&self, p: Point2) -> bool {
+        self.a.near_eq(p, EPS) || self.b.near_eq(p, EPS)
+    }
+
+    fn axis_aligned_collinear_closed_overlap(&self, other: Segment) -> bool {
+        if self.is_horizontal() && other.is_horizontal() && (self.a.y - other.a.y).abs() < EPS {
+            let (alo, ahi) = (self.a.x.min(self.b.x), self.a.x.max(self.b.x));
+            let (blo, bhi) = (other.a.x.min(other.b.x), other.a.x.max(other.b.x));
+            alo <= bhi + EPS && blo <= ahi + EPS
+        } else if self.is_vertical() && other.is_vertical() && (self.a.x - other.a.x).abs() < EPS {
+            let (alo, ahi) = (self.a.y.min(self.b.y), self.a.y.max(self.b.y));
+            let (blo, bhi) = (other.a.y.min(other.b.y), other.a.y.max(other.b.y));
+            alo <= bhi + EPS && blo <= ahi + EPS
+        } else {
+            false
+        }
     }
 }
 
@@ -183,6 +250,28 @@ mod tests {
         assert!(!a.axis_aligned_collinear_overlap(touches));
         assert!(!a.axis_aligned_collinear_overlap(crosses));
         assert!(!a.axis_aligned_collinear_overlap(parallel));
+    }
+
+    #[test]
+    fn axis_aligned_connects_keeps_endpoint_touch_semantics() {
+        let h = Segment::new(Point2::new(0.0, 0.0), Point2::new(4.0, 0.0));
+        let endpoint = Segment::new(Point2::new(4.0, 0.0), Point2::new(4.0, 3.0));
+        let crossing = Segment::new(Point2::new(2.0, -1.0), Point2::new(2.0, 1.0));
+        let collinear_touch = Segment::new(Point2::new(4.0, 0.0), Point2::new(5.0, 0.0));
+
+        assert!(h.axis_aligned_connects(endpoint));
+        assert!(!h.axis_aligned_connects(crossing));
+        assert!(h.axis_aligned_connects(collinear_touch));
+    }
+
+    #[test]
+    fn axis_aligned_crosses_interior_rejects_touches() {
+        let h = Segment::new(Point2::new(0.0, 0.0), Point2::new(4.0, 0.0));
+        let crossing = Segment::new(Point2::new(2.0, -1.0), Point2::new(2.0, 1.0));
+        let endpoint = Segment::new(Point2::new(4.0, -1.0), Point2::new(4.0, 1.0));
+
+        assert!(h.axis_aligned_crosses_interior(crossing));
+        assert!(!h.axis_aligned_crosses_interior(endpoint));
     }
 
     #[test]

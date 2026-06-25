@@ -65,6 +65,11 @@ impl Rect {
         }
     }
 
+    #[inline]
+    pub const fn zero() -> Self {
+        Self::new(0.0, 0.0, 0.0, 0.0)
+    }
+
     /// Normalized bbox from two arbitrary corner points.
     #[inline]
     pub fn from_points(a: Point2, b: Point2) -> Self {
@@ -130,6 +135,29 @@ impl Rect {
         )
     }
 
+    /// Clamp a centered rectangle's center so its half-extents fit in `self`.
+    ///
+    /// If the half-extents are wider than `self` on an axis, that axis is
+    /// centered in `self`.
+    #[inline]
+    pub fn clamp_center_for_half(&self, center: Point2, half: (f64, f64)) -> Point2 {
+        let (lo_x, hi_x) = (self.min_x + half.0, self.max_x - half.0);
+        let (lo_y, hi_y) = (self.min_y + half.1, self.max_y - half.1);
+        let bounds_center = self.center();
+        Point2::new(
+            if lo_x <= hi_x {
+                center.x.clamp(lo_x, hi_x)
+            } else {
+                bounds_center.x
+            },
+            if lo_y <= hi_y {
+                center.y.clamp(lo_y, hi_y)
+            } else {
+                bounds_center.y
+            },
+        )
+    }
+
     /// Inflate by `m` on every side (negative shrinks).
     #[inline]
     pub fn inflate(&self, m: f64) -> Rect {
@@ -139,6 +167,21 @@ impl Rect {
             self.max_x + m,
             self.max_y + m,
         )
+    }
+
+    #[inline]
+    pub fn clamped_to(&self, bounds: &Rect) -> Rect {
+        Rect::new(
+            self.min_x.max(bounds.min_x),
+            self.min_y.max(bounds.min_y),
+            self.max_x.min(bounds.max_x),
+            self.max_y.min(bounds.max_y),
+        )
+    }
+
+    #[inline]
+    pub fn inflate_clamped_to(&self, m: f64, bounds: &Rect) -> Rect {
+        self.inflate(m).clamped_to(bounds)
     }
 
     /// Is `p` inside or on the boundary?
@@ -154,6 +197,15 @@ impl Rect {
             && other.max_x <= self.max_x + eps
             && other.min_y >= self.min_y - eps
             && other.max_y <= self.max_y + eps
+    }
+
+    /// Per-axis distance `other` extends outside `self`.
+    #[inline]
+    pub fn containment_overshoot(&self, other: &Rect) -> (f64, f64) {
+        (
+            (self.min_x - other.min_x).max(0.0) + (other.max_x - self.max_x).max(0.0),
+            (self.min_y - other.min_y).max(0.0) + (other.max_y - self.max_y).max(0.0),
+        )
     }
 
     /// How far a disc of `radius` centered at `p` extends past this rect.
@@ -181,11 +233,14 @@ impl Rect {
 
     /// The overlap rectangle, or `None` when they do not overlap.
     pub fn intersection(&self, other: &Rect) -> Option<Rect> {
+        if !self.overlaps(other) {
+            return None;
+        }
         let min_x = self.min_x.max(other.min_x);
         let max_x = self.max_x.min(other.max_x);
         let min_y = self.min_y.max(other.min_y);
         let max_y = self.max_y.min(other.max_y);
-        (min_x < max_x && min_y < max_y).then_some(Rect {
+        Some(Rect {
             min_x,
             min_y,
             max_x,
@@ -281,6 +336,39 @@ impl Rect {
     pub fn dist_to_segment(&self, s: Segment) -> f64 {
         s.dist_to_rect(self)
     }
+
+    /// Area of the union of axis-aligned rectangles.
+    pub fn union_area(rects: &[Rect]) -> f64 {
+        if rects.is_empty() {
+            return 0.0;
+        }
+        let mut xs: Vec<f64> = Vec::with_capacity(rects.len() * 2);
+        let mut ys: Vec<f64> = Vec::with_capacity(rects.len() * 2);
+        for r in rects {
+            xs.push(r.min_x);
+            xs.push(r.max_x);
+            ys.push(r.min_y);
+            ys.push(r.max_y);
+        }
+        xs.sort_by(|a, b| a.total_cmp(b));
+        xs.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+        ys.sort_by(|a, b| a.total_cmp(b));
+        ys.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+
+        let mut area = 0.0;
+        for xi in 0..xs.len().saturating_sub(1) {
+            let (x0, x1) = (xs[xi], xs[xi + 1]);
+            let cx = (x0 + x1) / 2.0;
+            for yi in 0..ys.len().saturating_sub(1) {
+                let (y0, y1) = (ys[yi], ys[yi + 1]);
+                let cy = (y0 + y1) / 2.0;
+                if rects.iter().any(|r| r.contains(Point2::new(cx, cy))) {
+                    area += (x1 - x0) * (y1 - y0);
+                }
+            }
+        }
+        area
+    }
 }
 
 impl From<[f64; 4]> for Rect {
@@ -326,8 +414,50 @@ mod tests {
         let a = Rect::new(0.0, 0.0, 2.0, 2.0);
         let edge = Rect::new(2.0, 0.0, 4.0, 2.0); // shares the x=2 edge
         assert!(!a.overlaps(&edge));
+        assert!(a.intersection(&edge).is_none());
         let inside = Rect::new(1.0, 1.0, 3.0, 3.0);
         assert!(a.overlaps(&inside));
+        assert_eq!(a.intersection(&inside), Some(Rect::new(1.0, 1.0, 2.0, 2.0)));
+    }
+
+    #[test]
+    fn clamps_center_for_half_extents() {
+        let bounds = Rect::new(0.0, 0.0, 10.0, 6.0);
+        assert_eq!(
+            bounds.clamp_center_for_half(Point2::new(-5.0, 20.0), (2.0, 1.0)),
+            Point2::new(2.0, 5.0)
+        );
+        assert_eq!(
+            bounds.clamp_center_for_half(Point2::new(8.0, 3.0), (6.0, 1.0)),
+            Point2::new(5.0, 3.0)
+        );
+    }
+
+    #[test]
+    fn containment_overshoot_sums_outside_edges() {
+        let bounds = Rect::new(0.0, 0.0, 10.0, 10.0);
+        assert_eq!(
+            bounds.containment_overshoot(&Rect::new(-1.0, 2.0, 12.0, 9.0)),
+            (3.0, 0.0)
+        );
+        assert_eq!(
+            bounds.containment_overshoot(&Rect::new(1.0, 2.0, 3.0, 4.0)),
+            (0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn clamps_inflated_rect_to_bounds() {
+        let r = Rect::new(2.0, 3.0, 5.0, 7.0);
+        let b = Rect::new(0.0, 0.0, 6.0, 6.0);
+        assert_eq!(r.inflate_clamped_to(2.0, &b), Rect::new(0.0, 1.0, 6.0, 6.0));
+    }
+
+    #[test]
+    fn union_area_counts_overlaps_once() {
+        let rects = [Rect::new(0.0, 0.0, 2.0, 2.0), Rect::new(1.0, 0.0, 3.0, 2.0)];
+        assert_eq!(Rect::union_area(&rects), 6.0);
+        assert_eq!(Rect::union_area(&[]), 0.0);
     }
 
     #[test]

@@ -132,21 +132,19 @@ enum Shape {
     /// A fattened segment on one layer: endpoints + half-width. A zero-length
     /// segment is a fat point.
     Segment {
-        a: [f64; 2],
-        b: [f64; 2],
+        segment: geom::Segment,
         half_w: f64,
         layer: LayerRef,
     },
     /// An axis-aligned pad rectangle present on a set of layers.
     Pad {
-        min: [f64; 2],
-        max: [f64; 2],
+        rect: geom::Rect,
         layers: Vec<LayerRef>,
     },
     /// A zero-size copper anchor (a `points_to_connect`) on one layer.
-    Point { at: [f64; 2], layer: LayerRef },
+    Point { at: geom::Point2, layer: LayerRef },
     /// A through via: a disc that stitches every layer at its position.
-    Via { at: [f64; 2], radius: f64 },
+    Via { at: geom::Point2, radius: f64 },
 }
 
 fn build_elements(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Element> {
@@ -163,8 +161,7 @@ fn build_elements(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Eleme
             owners: ob.connected_to.clone(),
             shared_pad: ob.connected_to.len() > 1,
             shape: Shape::Pad {
-                min: [ob.center.x - hw, ob.center.y - hh],
-                max: [ob.center.x + hw, ob.center.y + hh],
+                rect: geom::Rect::from_center_half(ob.center.into(), (hw, hh)),
                 layers: ob.layers.clone(),
             },
         });
@@ -180,8 +177,7 @@ fn build_elements(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Eleme
                 owners: vec![trace.connection.clone()],
                 shared_pad: false,
                 shape: Shape::Segment {
-                    a: [p.x, p.y],
-                    b: [p.x, p.y],
+                    segment: geom::Segment::new((*p).into(), (*p).into()),
                     half_w,
                     layer: trace.layer.clone(),
                 },
@@ -192,8 +188,7 @@ fn build_elements(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Eleme
                 owners: vec![trace.connection.clone()],
                 shared_pad: false,
                 shape: Shape::Segment {
-                    a: [w[0].x, w[0].y],
-                    b: [w[1].x, w[1].y],
+                    segment: geom::Segment::new(w[0].into(), w[1].into()),
                     half_w,
                     layer: trace.layer.clone(),
                 },
@@ -207,7 +202,7 @@ fn build_elements(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Eleme
             owners: vec![via.connection.clone()],
             shared_pad: false,
             shape: Shape::Via {
-                at: [via.at.x, via.at.y],
+                at: via.at.into(),
                 radius: via.diameter / 2.0,
             },
         });
@@ -220,7 +215,7 @@ fn build_elements(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Eleme
                 owners: vec![conn.name.clone()],
                 shared_pad: false,
                 shape: Shape::Point {
-                    at: [p.x, p.y],
+                    at: geom::Point2::new(p.x, p.y),
                     layer: p.layer.clone(),
                 },
             });
@@ -244,52 +239,37 @@ fn touches(x: &Element, y: &Element) -> bool {
 
         (
             Segment {
-                a: a1,
-                b: b1,
+                segment: s1,
                 half_w: w1,
                 layer: l1,
             },
             Segment {
-                a: a2,
-                b: b2,
+                segment: s2,
                 half_w: w2,
                 layer: l2,
             },
-        ) => {
-            l1 == l2
-                && geom::Segment::new((*a1).into(), (*b1).into())
-                    .dist_to_segment(geom::Segment::new((*a2).into(), (*b2).into()))
-                    <= w1 + w2 + EPS
-        }
+        ) => l1 == l2 && s1.dist_to_segment(*s2) <= w1 + w2 + EPS,
 
         (
             Segment {
-                a,
-                b,
+                segment,
                 half_w,
                 layer,
             },
-            Pad { min, max, layers },
+            Pad { rect, layers },
         )
         | (
-            Pad { min, max, layers },
+            Pad { rect, layers },
             Segment {
-                a,
-                b,
+                segment,
                 half_w,
                 layer,
             },
-        ) => {
-            layers.contains(layer)
-                && geom::Segment::new((*a).into(), (*b).into())
-                    .dist_to_rect(&geom::Rect::new(min[0], min[1], max[0], max[1]))
-                    <= half_w + EPS
-        }
+        ) => layers.contains(layer) && segment.dist_to_rect(rect) <= half_w + EPS,
 
         (
             Segment {
-                a,
-                b,
+                segment,
                 half_w,
                 layer,
             },
@@ -298,41 +278,27 @@ fn touches(x: &Element, y: &Element) -> bool {
         | (
             Point { at, layer: pl },
             Segment {
-                a,
-                b,
+                segment,
                 half_w,
                 layer,
             },
-        ) => {
-            layer == pl
-                && geom::Segment::new((*a).into(), (*b).into()).dist_to_point((*at).into())
-                    <= half_w + EPS
-        }
+        ) => layer == pl && segment.dist_to_point(*at) <= half_w + EPS,
 
-        (Pad { min, max, layers }, Point { at, layer })
-        | (Point { at, layer }, Pad { min, max, layers }) => {
-            layers.contains(layer)
-                && geom::Rect::new(min[0], min[1], max[0], max[1]).dist_to_point((*at).into())
-                    <= EPS
+        (Pad { rect, layers }, Point { at, layer })
+        | (Point { at, layer }, Pad { rect, layers }) => {
+            layers.contains(layer) && rect.dist_to_point(*at) <= EPS
         }
 
         (
             Pad {
-                min: mn1,
-                max: mx1,
+                rect: r1,
                 layers: l1,
             },
             Pad {
-                min: mn2,
-                max: mx2,
+                rect: r2,
                 layers: l2,
             },
-        ) => {
-            l1.iter().any(|l| l2.contains(l))
-                && geom::Rect::new(mn1[0], mn1[1], mx1[0], mx1[1])
-                    .dist_to_rect(&geom::Rect::new(mn2[0], mn2[1], mx2[0], mx2[1]))
-                    <= EPS
-        }
+        ) => l1.iter().any(|l| l2.contains(l)) && r1.dist_to_rect(r2) <= EPS,
 
         // point ↔ point: zero-size anchors never touch each other directly;
         // they are only ever joined through real copper.
@@ -342,19 +308,14 @@ fn touches(x: &Element, y: &Element) -> bool {
 
 /// A through via at `at` with `radius` touches `other` on any layer when the
 /// disc reaches the other element's fattened body.
-fn via_touches(at: [f64; 2], radius: f64, other: &Shape) -> bool {
+fn via_touches(at: geom::Point2, radius: f64, other: &Shape) -> bool {
     match other {
-        Shape::Segment { a, b, half_w, .. } => {
-            geom::Segment::new((*a).into(), (*b).into()).dist_to_point(at.into())
-                <= radius + half_w + EPS
-        }
-        Shape::Pad { min, max, .. } => {
-            geom::Rect::new(min[0], min[1], max[0], max[1]).dist_to_point(at.into()) <= radius + EPS
-        }
-        Shape::Point { at: p, .. } => geom::Point2::from(at).dist((*p).into()) <= radius + EPS,
-        Shape::Via { at: p, radius: r2 } => {
-            geom::Point2::from(at).dist((*p).into()) <= radius + r2 + EPS
-        }
+        Shape::Segment {
+            segment, half_w, ..
+        } => segment.dist_to_point(at) <= radius + half_w + EPS,
+        Shape::Pad { rect, .. } => rect.dist_to_point(at) <= radius + EPS,
+        Shape::Point { at: p, .. } => at.dist(*p) <= radius + EPS,
+        Shape::Via { at: p, radius: r2 } => at.dist(*p) <= radius + r2 + EPS,
     }
 }
 

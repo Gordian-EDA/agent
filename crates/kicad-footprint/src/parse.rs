@@ -3,7 +3,7 @@ use std::path::Path;
 
 use geom::{Point2, Rect};
 
-use crate::{BBox, CourtyardSource, Footprint, FootprintPad, PadTechnology};
+use crate::{CourtyardSource, Footprint, FootprintPad, PadTechnology};
 
 impl Footprint {
     /// Parse a single `.kicad_mod` file into a [`Footprint`].
@@ -32,7 +32,7 @@ impl Footprint {
             }
         }
         let (courtyard, courtyard_source) = courtyard_bbox(ast, &pads);
-        let bbox = overall_bbox(ast, &pads).unwrap_or_else(BBox::zero);
+        let bbox = overall_bbox(ast, &pads).unwrap_or_else(Rect::zero);
 
         Ok(Footprint {
             name,
@@ -157,14 +157,14 @@ fn graphic_points(g: &kiutils_kicad::FpGraphic) -> Vec<Point2> {
 fn courtyard_bbox(
     ast: &kiutils_kicad::FootprintAst,
     pads: &[FootprintPad],
-) -> (BBox, CourtyardSource) {
+) -> (Rect, CourtyardSource) {
     let mut crtyd: Vec<Point2> = Vec::new();
     for g in &ast.graphics {
         if matches!(g.layer.as_deref(), Some("F.CrtYd") | Some("B.CrtYd")) {
             crtyd.extend(graphic_points(g));
         }
     }
-    if let Some(b) = BBox::from_points(&crtyd) {
+    if let Some(b) = Rect::bounding(&crtyd) {
         return (b, CourtyardSource::Crtyd);
     }
 
@@ -178,12 +178,12 @@ fn courtyard_bbox(
         }
     }
     (
-        BBox::from_points(&pts).unwrap_or_else(BBox::zero),
+        Rect::bounding(&pts).unwrap_or_else(Rect::zero),
         CourtyardSource::PadSilkFallback,
     )
 }
 
-fn overall_bbox(ast: &kiutils_kicad::FootprintAst, pads: &[FootprintPad]) -> Option<BBox> {
+fn overall_bbox(ast: &kiutils_kicad::FootprintAst, pads: &[FootprintPad]) -> Option<Rect> {
     let mut pts: Vec<Point2> = Vec::new();
     for pad in pads {
         pts.extend(pad_corners(pad));
@@ -191,7 +191,7 @@ fn overall_bbox(ast: &kiutils_kicad::FootprintAst, pads: &[FootprintPad]) -> Opt
     for g in &ast.graphics {
         pts.extend(graphic_points(g));
     }
-    BBox::from_points(&pts)
+    Rect::bounding(&pts)
 }
 
 fn map_kiutils_err(e: kiutils_kicad::Error) -> io::Error {

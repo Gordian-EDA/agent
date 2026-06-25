@@ -1,5 +1,4 @@
-//! The engine-PRIVATE geometry scaffold: grid snapping, bounds clamping, and edge
-//! affinity — the helpers only the search drivers (force/legalize/anneal) need.
+//! Engine-private placement geometry constants and edge affinity.
 
 use super::model::Edge;
 use crate::problem::{Point2, Rect};
@@ -13,6 +12,7 @@ pub(crate) use crate::problem::place::{
 
 /// Legalizer snap grid (mm). Placed positions land on multiples of this.
 pub(crate) const PLACE_GRID: f64 = 0.5;
+pub(crate) const PLACEMENT_GRID: geom::Grid = geom::Grid::new(PLACE_GRID);
 
 /// How deep the edge "band" extends from the board edge (mm) for edge affinity:
 /// a part whose courtyard half-extent fits within this of the edge counts as
@@ -22,30 +22,6 @@ pub(crate) const EDGE_BAND: f64 = 2.0;
 /// Spiral search cap: how many grid rings the legalizer probes before giving up
 /// on a part (→ `legal: false`). Generous; a real board seats in a few rings.
 pub(crate) const SPIRAL_MAX_RING: i64 = 400;
-
-// ── grid / bounds (search-only) ──────────────────────────────────────────────
-
-/// Snap a coordinate to the placement grid.
-pub(crate) fn snap(v: f64) -> f64 {
-    (v / PLACE_GRID).round() * PLACE_GRID
-}
-
-/// Clamp a part origin so its courtyard fits in bounds (best effort: if the part
-/// is wider than the board, it is centered on that axis).
-pub(crate) fn clamp_into_bounds(p: &mut Point2, b: &Rect, h: (f64, f64)) {
-    let (lo_x, hi_x) = (b.min_x + h.0, b.max_x - h.0);
-    let (lo_y, hi_y) = (b.min_y + h.1, b.max_y - h.1);
-    p.x = if lo_x <= hi_x {
-        p.x.clamp(lo_x, hi_x)
-    } else {
-        (b.min_x + b.max_x) / 2.0
-    };
-    p.y = if lo_y <= hi_y {
-        p.y.clamp(lo_y, hi_y)
-    } else {
-        (b.min_y + b.max_y) / 2.0
-    };
-}
 
 /// A deterministic non-zero sign: +1 for ≥ 0, -1 for < 0 (so coincident parts
 /// still get a fixed separating direction).

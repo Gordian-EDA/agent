@@ -21,8 +21,8 @@
 //!   geometric proxy needs to reason about wiring without re-routing.
 //! - **Layout geometry / scaffold** — the engine-independent realization helpers both
 //!   engines need to propose and finalize a candidate: the writer builder
-//!   [`build_writer`], the body-rect primitives [`item_rect`] / [`rects_overlap`] /
-//!   [`overlaps_any`] / [`body_overlap_count`], the orientation map [`orient_angle`], the
+//!   [`build_writer`], the body-rect primitive [`item_rect`], [`overlaps_any`],
+//!   [`body_overlap_count`], the orientation map [`orient_angle`], the
 //!   anchor-pin targets [`signal_anchor_centroid`] / [`supply_pin_target`], the
 //!   authored-order check [`grid_order_viol`], the overlap relaxer [`decongest`], the idiom
 //!   re-seating passes ([`align_idiom_clusters`] / [`align_led_chains`]) and the
@@ -31,10 +31,10 @@
 //!   [`COL_GAP`] / [`ROW_GAP`] / [`GRID_KEY`] / [`FAST_PINS`].
 
 pub use crate::floorplan::place::{
+    COL_GAP, FAST_PINS, GRID_KEY, PlacementEngine, ROW_GAP, RawMetrics, Realizer,
     align_idiom_clusters, align_led_chains, body_overlap_count, build_anchor_blocks, build_writer,
     cluster_group, cohesion_targets, decongest, grid_order_viol, item_rect, multi_unit_siblings,
-    orient_angle, overlaps_any, rects_overlap, signal_anchor_centroid, supply_pin_target,
-    PlacementEngine, RawMetrics, Realizer, COL_GAP, FAST_PINS, GRID_KEY, ROW_GAP,
+    orient_angle, overlaps_any, signal_anchor_centroid, supply_pin_target,
 };
 
 pub use sch_io::write::pin_endpoint;
