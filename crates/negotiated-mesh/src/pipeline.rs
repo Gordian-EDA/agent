@@ -349,7 +349,7 @@ fn stitch(
         for at in nc.vias {
             if vias
                 .iter()
-                .any(|v| v.connection == connection && same_point(&v.at, &at))
+                .any(|v| v.connection == connection && v.at.near_eq(at, JOIN_EPS))
             {
                 continue;
             }
@@ -448,12 +448,14 @@ fn join_polylines(mut polys: Vec<Vec<Point2>>) -> Vec<Vec<Point2>> {
 
     // Deterministic output order: by first point, then last point.
     polys.sort_by(|a, b| {
-        point_key(&a[0])
-            .partial_cmp(&point_key(&b[0]))
+        a[0]
+            .sort_key()
+            .partial_cmp(&b[0].sort_key())
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| {
-                point_key(a.last().unwrap())
-                    .partial_cmp(&point_key(b.last().unwrap()))
+                (*a.last().unwrap())
+                    .sort_key()
+                    .partial_cmp(&(*b.last().unwrap()).sort_key())
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
     });
@@ -465,8 +467,10 @@ fn join_polylines(mut polys: Vec<Vec<Point2>>) -> Vec<Vec<Point2>> {
 fn endpoint_degree(polys: &[Vec<Point2>]) -> BTreeMap<(i64, i64), usize> {
     let mut degree: BTreeMap<(i64, i64), usize> = BTreeMap::new();
     for p in polys {
-        *degree.entry(quant(&p[0])).or_insert(0) += 1;
-        *degree.entry(quant(p.last().unwrap())).or_insert(0) += 1;
+        *degree.entry(p[0].quantized_key(POINT_KEY_SCALE)).or_insert(0) += 1;
+        *degree
+            .entry((*p.last().unwrap()).quantized_key(POINT_KEY_SCALE))
+            .or_insert(0) += 1;
     }
     degree
 }
@@ -486,29 +490,30 @@ fn try_join(
 
     // A shared point is only joinable when exactly two ends meet there (degree
     // 2). At a T-junction the degree is ≥ 3 and we must not merge.
-    let deg2 = |p: &Point2| degree.get(&quant(p)).copied().unwrap_or(0) == 2;
+    let deg2 =
+        |p: &Point2| degree.get(&(*p).quantized_key(POINT_KEY_SCALE)).copied().unwrap_or(0) == 2;
 
     // Four ways the two runs can abut. Pick the one whose shared point is degree
     // 2; concatenate dropping the duplicated shared point.
-    if same_point(a1, b0) && deg2(a1) {
+    if (*a1).near_eq(*b0, JOIN_EPS) && deg2(a1) {
         // a … a1 == b0 … b1
         let mut out = a.to_vec();
         out.extend_from_slice(&b[1..]);
         return Some(out);
     }
-    if same_point(a1, b1) && deg2(a1) {
+    if (*a1).near_eq(*b1, JOIN_EPS) && deg2(a1) {
         // a … a1 == b1 … b0  (reverse b)
         let mut out = a.to_vec();
         out.extend(b.iter().rev().skip(1).cloned());
         return Some(out);
     }
-    if same_point(a0, b1) && deg2(a0) {
+    if (*a0).near_eq(*b1, JOIN_EPS) && deg2(a0) {
         // b0 … b1 == a0 … a1
         let mut out = b.to_vec();
         out.extend_from_slice(&a[1..]);
         return Some(out);
     }
-    if same_point(a0, b0) && deg2(a0) {
+    if (*a0).near_eq(*b0, JOIN_EPS) && deg2(a0) {
         // a1 … a0 == b0 … b1  (reverse a)
         let mut out: Vec<Point2> = a.iter().rev().cloned().collect();
         out.extend_from_slice(&b[1..]);
@@ -517,23 +522,8 @@ fn try_join(
     None
 }
 
-/// Are two points byte-exactly (within [`JOIN_EPS`]) the same?
-fn same_point(a: &Point2, b: &Point2) -> bool {
-    (a.x - b.x).abs() < JOIN_EPS && (a.y - b.y).abs() < JOIN_EPS
-}
-
-/// Quantise a point to an integer key so byte-exact-equal points collide in a
-/// `BTreeMap`. The detailed stage emits identical bytes for shared endpoints, so
-/// a fine quantum (1e9 ⇒ ~1 nm) keeps distinct points distinct while collapsing
-/// the deliberately-identical ones.
-fn quant(p: &Point2) -> (i64, i64) {
-    ((p.x * 1e9).round() as i64, (p.y * 1e9).round() as i64)
-}
-
-/// A total-ordering sort key for a point (x then y).
-fn point_key(p: &Point2) -> (f64, f64) {
-    (p.x, p.y)
-}
+/// Fine endpoint quantum: 1e9 is roughly 1 nm in board millimetres.
+const POINT_KEY_SCALE: f64 = 1e9;
 
 // ── failure folding helpers ────────────────────────────────────────────────────
 
@@ -810,7 +800,7 @@ mod tests {
         assert!(
             joined
                 .iter()
-                .all(|r| r.iter().any(|q| same_point(q, &pt(0.0, 0.0))))
+                .all(|r| r.iter().any(|q| (*q).near_eq(pt(0.0, 0.0), JOIN_EPS)))
         );
     }
 }

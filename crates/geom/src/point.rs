@@ -37,6 +37,24 @@ impl Point2 {
         (self.x - other.x).abs() + (self.y - other.y).abs()
     }
 
+    /// Coordinate-wise epsilon equality.
+    #[inline]
+    pub fn near_eq(self, other: Point2, eps: f64) -> bool {
+        (self.x - other.x).abs() <= eps && (self.y - other.y).abs() <= eps
+    }
+
+    /// Round-scaled integer key for deterministic coordinate maps.
+    #[inline]
+    pub fn quantized_key(self, scale: f64) -> (i64, i64) {
+        ((self.x * scale).round() as i64, (self.y * scale).round() as i64)
+    }
+
+    /// Plain `(x, y)` tuple for deterministic coordinate sorting.
+    #[inline]
+    pub fn sort_key(self) -> (f64, f64) {
+        (self.x, self.y)
+    }
+
     /// Orientation determinant of `(self, a, b)`: >0 ccw, <0 cw, 0 collinear.
     #[inline]
     pub fn orient(self, a: Point2, b: Point2) -> f64 {
@@ -161,6 +179,18 @@ mod tests {
             Point2::new(1.0, -2.0).manhattan(Point2::new(4.0, 3.0)),
             8.0
         );
+    }
+
+    #[test]
+    fn near_eq_is_coordinate_wise() {
+        let p = Point2::new(1.0, 2.0);
+        assert!(p.near_eq(Point2::new(1.001, 1.999), 0.001));
+        assert!(!p.near_eq(Point2::new(1.002, 2.0), 0.001));
+    }
+
+    #[test]
+    fn quantized_key_rounds_scaled_coordinates() {
+        assert_eq!(Point2::new(1.2344, -2.3456).quantized_key(1000.0), (1234, -2346));
     }
 
     #[test]

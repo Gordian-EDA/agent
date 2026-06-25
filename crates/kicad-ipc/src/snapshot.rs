@@ -701,9 +701,9 @@ fn chain_segments(segments: &[(Point2, Point2)]) -> Option<Vec<Point2>> {
         let tail = *chain.last()?;
         let Some((idx, next, reverse)) =
             unused.iter().enumerate().find_map(|(idx, (start, end))| {
-                if same_point(tail, *start) {
+                if tail.near_eq(*start, geom::EPS) {
                     Some((idx, *end, false))
-                } else if same_point(tail, *end) {
+                } else if tail.near_eq(*end, geom::EPS) {
                     Some((idx, *start, true))
                 } else {
                     None
@@ -714,16 +714,12 @@ fn chain_segments(segments: &[(Point2, Point2)]) -> Option<Vec<Point2>> {
         };
         let _ = reverse;
         unused.remove(idx);
-        if same_point(next, chain[0]) {
+        if next.near_eq(chain[0], geom::EPS) {
             break;
         }
         chain.push(next);
     }
     (chain.len() >= 3 && unused.is_empty()).then_some(chain)
-}
-
-fn same_point(a: Point2, b: Point2) -> bool {
-    (a.x - b.x).abs() <= geom::EPS && (a.y - b.y).abs() <= geom::EPS
 }
 
 fn infer_layer_names(
