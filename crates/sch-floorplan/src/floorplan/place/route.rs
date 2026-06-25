@@ -8,15 +8,12 @@ use std::io;
 use kicad_env::KicadEnv;
 
 use crate::write::SchematicWriter;
-use geom::{Dir, EPS};
+use geom::{Dir, EPS, ParentForest};
 
 use super::*;
 use sch_place::item::{Incidence, Item};
 use sch_place::netclass::{is_connector_like, is_ground};
 
-// The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `geom::union_find`, shared with circuit-lang's pin reconciler.
-use geom::{uf_find, uf_union};
 use sch_place::ir::{Band, LayoutIr, Side};
 
 // ---------------------------------------------------------------------------
@@ -393,6 +390,7 @@ pub(crate) fn route_signal(
     // scene immediately so later edges detour around it (partial progress, never
     // the old all-or-nothing that label-bombed the whole net on one bad edge).
     let mut parent: Vec<usize> = (0..terms.len()).collect();
+    let mut uf = ParentForest::new(&mut parent);
     let mut paths: Vec<Vec<::geom::Point2>> = Vec::new();
     for (i, j) in crate::wire::mst_edges(&pts) {
         let (a, da, b) = match (terms[i].1, terms[j].1) {
@@ -446,7 +444,7 @@ pub(crate) fn route_signal(
                 scene.segments.push((seg[0], seg[1], net.to_string()));
             }
             paths.push(p);
-            uf_union(&mut parent, i, j);
+            uf.union_to(i, j);
         }
     }
 
@@ -458,11 +456,11 @@ pub(crate) fn route_signal(
     // only fires when the route genuinely failed, so cleanly-routed references stay byte-identical.
     if eps.len() == 1
         && let Some(pi) = port_idx
-        && uf_find(&mut parent, 0) != uf_find(&mut parent, pi)
+        && uf.find(0) != uf.find(pi)
     {
         w.add_wire_on_net(pts[0], pts[pi], net);
         scene.segments.push((pts[0], pts[pi], net.to_string()));
-        uf_union(&mut parent, 0, pi);
+        uf.union_to(0, pi);
     }
 
     // MULTI-PIN PORT whose local pins the MST couldn't join (an op-amp follower's OUT↔IN-
@@ -506,7 +504,7 @@ pub(crate) fn route_signal(
             }
         };
         for k in 1..eps.len() {
-            if uf_find(&mut parent, 0) == uf_find(&mut parent, k) {
+            if uf.find(0) == uf.find(k) {
                 continue; // already joined to pin 0's component by the MST
             }
             // Don't force an OVERHEAD detour across a long-haul gap: that recreates the very sheet-wide
@@ -549,7 +547,7 @@ pub(crate) fn route_signal(
                             scene.segments.push((seg[0], seg[1], net.to_string()));
                         }
                     }
-                    uf_union(&mut parent, 0, k);
+                    uf.union_to(0, k);
                     break;
                 }
             }
@@ -571,7 +569,7 @@ pub(crate) fn route_signal(
     let mut roots: BTreeMap<usize, Option<(usize, String)>> = BTreeMap::new();
     let mut score: BTreeMap<usize, (bool, std::cmp::Reverse<usize>)> = BTreeMap::new();
     for k in 0..terms.len() {
-        let r = uf_find(&mut parent, k);
+        let r = uf.find(k);
         let slot = roots.entry(r).or_insert(None);
         let Some(pin) = &term_pin[k] else { continue };
         let cand = (term_label_clear[k], std::cmp::Reverse(pin_count(pin.0)));
@@ -580,7 +578,7 @@ pub(crate) fn route_signal(
             score.insert(r, cand);
         }
     }
-    let port_root = port_idx.map(|pi| uf_find(&mut parent, pi));
+    let port_root = port_idx.map(|pi| uf.find(pi));
     if roots.len() > 1 {
         for (root, pin) in &roots {
             if Some(*root) == port_root {

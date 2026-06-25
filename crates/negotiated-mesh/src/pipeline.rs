@@ -27,8 +27,8 @@
 //! Stitching therefore joins cell-local polylines **by exact coordinate
 //! identity**: per net, per layer, two polylines that share a byte-identical
 //! endpoint where exactly two polyline-ends meet are concatenated into one
-//! continuous run; the joined run is re-`simplify`d (the 45°-aware merge from
-//! [`crate::detail`]) so a straight crossing collapses to a single segment. Where
+//! continuous run; the joined run is simplified with [`geom::Polyline`] so a
+//! straight crossing collapses to a single segment. Where
 //! **three or more** polyline-ends meet at one point — a T-junction in a
 //! multi-point net — the polylines are left meeting at the shared vertex (KiCAD
 //! and the connectivity oracle treat a shared vertex as connected), never forced
@@ -326,7 +326,7 @@ fn stitch(
         // Traces: join + simplify per layer (layers in BTreeMap key order).
         for (layer, polylines) in nc.by_layer {
             for poly in join_polylines(polylines) {
-                let simplified = detail::simplify(poly);
+                let simplified = geom::Polyline::new(poly).simplify().into_points();
                 if simplified.len() < 2 {
                     continue;
                 }
@@ -758,7 +758,9 @@ mod tests {
         ];
         let joined = join_polylines(polys);
         assert_eq!(joined.len(), 1, "two abutting runs join into one");
-        let simplified = detail::simplify(joined.into_iter().next().unwrap());
+        let simplified = geom::Polyline::new(joined.into_iter().next().unwrap())
+            .simplify()
+            .into_points();
         assert_eq!(
             simplified,
             vec![pt(0.0, 0.0), pt(10.0, 0.0)],

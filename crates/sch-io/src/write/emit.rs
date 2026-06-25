@@ -21,7 +21,7 @@ impl SchematicWriter {
     /// subtracted (KiCAD's page origin is the top-left); the floorplan
     /// normalizes content to a small positive margin already.
     fn content_extent(&self) -> Option<[f64; 2]> {
-        use crate::label::{rotated_half_extents, text_width};
+        use crate::label::text_width;
         const PAGE_MARGIN: f64 = 12.7;
         let mut max_x = f64::MIN;
         let mut max_y = f64::MIN;
@@ -30,7 +30,7 @@ impl SchematicWriter {
             max_y = max_y.max(y);
         };
         for i in &self.instances {
-            let h = rotated_half_extents(i.half_extents, i.angle);
+            let h = i.half_extents.rotated_half_extents(i.angle);
             acc(i.at[0] + h[0], i.at[1] + h[1]);
             for p in [i.ref_pos, i.val_pos].into_iter().flatten() {
                 acc(p.at[0] + 5.0, p.at[1]);

@@ -300,15 +300,16 @@ pub fn render_placement(
         let Some(pl) = place_by_ref.get(part.reference.as_str()) else {
             continue;
         };
-        let (hw, hh) = geom::rotated_aabb_half(part.courtyard_w, part.courtyard_h, pl.rotation);
+        let half = pcb_model::Point2::new(part.courtyard_w / 2.0, part.courtyard_h / 2.0)
+            .rotated_half_extents(pl.rotation);
         writeln!(
             w,
             "  <rect x=\"{x:.6}\" y=\"{y:.6}\" width=\"{cw:.6}\" height=\"{ch:.6}\" \
              fill=\"none\" stroke=\"#888\" stroke-width=\"0.08\"/>",
-            x = pl.at.x - hw,
-            y = pl.at.y - hh,
-            cw = hw * 2.0,
-            ch = hh * 2.0
+            x = pl.at.x - half.x,
+            y = pl.at.y - half.y,
+            cw = half.x * 2.0,
+            ch = half.y * 2.0
         )
         .unwrap();
         // Reference text, centred on the part origin.
@@ -331,8 +332,9 @@ pub fn render_placement(
         };
         for pad in &part.pads {
             let off = pad.offset.rotate(pl.rotation);
-            let (pw, ph) = geom::rotated_aabb_half(pad.width, pad.height, pl.rotation);
-            let (pw, ph) = (pw * 2.0, ph * 2.0);
+            let half = pcb_model::Point2::new(pad.width / 2.0, pad.height / 2.0)
+                .rotated_half_extents(pl.rotation);
+            let (pw, ph) = (half.x * 2.0, half.y * 2.0);
             let cx = pl.at.x + off.x;
             let cy = pl.at.y + off.y;
             let fill = pad

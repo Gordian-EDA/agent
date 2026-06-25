@@ -1,33 +1,40 @@
-//! Disjoint-set forests, in two shapes for two call styles:
-//!
-//! - The free [`uf_find`] / [`uf_union`] functions over a **caller-owned**
-//!   `parent` slice, for callers that grow the set dynamically or already hold a
-//!   `Vec<usize>` (the schematic pin reconciler, block splitting). The union rule
-//!   is fixed: `union(a, b)` always makes `find(b)`'s root the survivor, because
-//!   callers key maps by the specific representative a set collapses to.
-//! - The owning [`UnionFind`] struct (union by rank, path-halving) for callers
-//!   that want a self-contained forest of a known size (the DRC copper-net oracle).
+//! Disjoint-set forests.
 
-/// Root of `x` in the disjoint-set forest, compressing the path to it.
-pub fn uf_find(parent: &mut [usize], x: usize) -> usize {
-    let mut r = x;
-    while parent[r] != r {
-        r = parent[r];
-    }
-    let mut c = x;
-    while parent[c] != r {
-        let next = parent[c];
-        parent[c] = r;
-        c = next;
-    }
-    r
+/// Union-find view over a caller-owned parent slice.
+///
+/// `union_to(a, b)` keeps `b`'s root as the representative; schematic callers
+/// rely on that stable survivor when they key maps by root.
+pub struct ParentForest<'a> {
+    parent: &'a mut [usize],
 }
 
-/// Union the sets containing `a` and `b`; returns the surviving root (`b`'s).
-pub fn uf_union(parent: &mut [usize], a: usize, b: usize) -> usize {
-    let (ra, rb) = (uf_find(parent, a), uf_find(parent, b));
-    parent[ra] = rb;
-    rb
+impl<'a> ParentForest<'a> {
+    pub fn new(parent: &'a mut [usize]) -> Self {
+        Self { parent }
+    }
+
+    /// Root of `x`, compressing the path to it.
+    pub fn find(&mut self, x: usize) -> usize {
+        let mut r = x;
+        while self.parent[r] != r {
+            r = self.parent[r];
+        }
+        let mut c = x;
+        while self.parent[c] != r {
+            let next = self.parent[c];
+            self.parent[c] = r;
+            c = next;
+        }
+        r
+    }
+
+    /// Merge the set containing `a` into the set containing `b`.
+    pub fn union_to(&mut self, a: usize, b: usize) -> usize {
+        let ra = self.find(a);
+        let rb = self.find(b);
+        self.parent[ra] = rb;
+        rb
+    }
 }
 
 /// Union-find over `0..n`, union by rank with path-halving on `find`.

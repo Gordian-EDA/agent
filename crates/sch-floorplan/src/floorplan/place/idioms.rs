@@ -11,10 +11,8 @@ use super::*;
 use sch_place::item::{Incidence, Item};
 use sch_place::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net};
 
-// The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `geom::union_find`, shared with circuit-lang's pin reconciler.
 use super::super::infer::anchor_tap;
-use geom::{uf_find, uf_union};
+use geom::ParentForest;
 use sch_place::ir::{LayoutIr, Orient};
 
 /// each load cap two gaps out, level with its osc pin. Returns true if it moved
@@ -2203,6 +2201,7 @@ pub(crate) fn align_repeated_columns(
         // repeated UNIT generically from connectivity, not from refdes arithmetic.
         let n = members.len();
         let mut parent: Vec<usize> = (0..n).collect();
+        let mut uf = ParentForest::new(&mut parent);
         // net -> first member (local index) seen carrying it; only signal nets join copies.
         let mut net_owner: BTreeMap<String, usize> = BTreeMap::new();
         for (k, &i) in members.iter().enumerate() {
@@ -2212,7 +2211,7 @@ pub(crate) fn align_repeated_columns(
                     continue;
                 }
                 if let Some(&other) = net_owner.get(net) {
-                    uf_union(&mut parent, k, other);
+                    uf.union_to(k, other);
                 } else {
                     net_owner.insert(net.clone(), k);
                 }
@@ -2221,7 +2220,7 @@ pub(crate) fn align_repeated_columns(
         // Collect columns: root -> member item indices.
         let mut cols_map: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for k in 0..n {
-            let r = uf_find(&mut parent, k);
+            let r = uf.find(k);
             cols_map.entry(r).or_default().push(members[k]);
         }
         // Need ≥3 columns for this to be a "repeated columns" motif.

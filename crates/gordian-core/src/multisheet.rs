@@ -53,7 +53,7 @@ pub fn sanitize(name: &str) -> String {
         .collect()
 }
 
-use geom::{uf_find, uf_union};
+use geom::ParentForest;
 
 /// The non-GND nets a block touches (component- and unit-level pins). A net shared by ≥2
 /// blocks is a cross-block PORT; GND/VSS are excluded (every sheet carries them, so they'd
@@ -128,17 +128,18 @@ fn split_block(bname: &str, block: &Block) -> Vec<(String, Block)> {
     }
     // Union parts that share a LOW-degree (point-to-point signal) net; skip rails/buses.
     let mut parent: Vec<usize> = (0..refs.len()).collect();
+    let mut uf = ParentForest::new(&mut parent);
     for ids in net_refs.values() {
         if ids.len() > RAIL_DEG {
             continue;
         }
         for w in ids.windows(2) {
-            uf_union(&mut parent, w[0], w[1]);
+            uf.union_to(w[0], w[1]);
         }
     }
     let mut comps: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for i in 0..refs.len() {
-        let r = uf_find(&mut parent, i);
+        let r = uf.find(i);
         comps.entry(r).or_default().push(i);
     }
     let comp_list: Vec<Vec<usize>> = comps.into_values().collect();

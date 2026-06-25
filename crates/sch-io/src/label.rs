@@ -133,12 +133,6 @@ pub fn pin_text_boxes(
     boxes
 }
 
-/// Instance half-extents with the body rotation applied: 90/270 swaps w/h.
-pub fn rotated_half_extents(h: Point2, angle: f64) -> Point2 {
-    let (hw, hh) = geom::rotated_aabb_half(h.x * 2.0, h.y * 2.0, angle);
-    Point2::new(hw, hh)
-}
-
 /// Thin obstacle box around a wire segment (inflated 0.13 mm).
 pub fn wire_box(a: Point2, b: Point2) -> Rect {
     Rect::from_points(a, b).inflate(0.13)
@@ -301,35 +295,5 @@ mod tests {
         };
         let boxes = pin_text_boxes(&pin, Point2::new(50.0, 50.0), 0.0, false);
         assert_eq!(boxes.len(), 1);
-    }
-
-    #[test]
-    fn rotated_half_extents_swaps_at_90() {
-        let assert_close = |got: Point2, want: Point2| {
-            assert!(
-                (got.x - want.x).abs() < geom::EPS,
-                "got {got:?}, want {want:?}"
-            );
-            assert!(
-                (got.y - want.y).abs() < geom::EPS,
-                "got {got:?}, want {want:?}"
-            );
-        };
-        assert_close(
-            rotated_half_extents(Point2::new(3.0, 1.0), 0.0),
-            Point2::new(3.0, 1.0),
-        );
-        assert_close(
-            rotated_half_extents(Point2::new(3.0, 1.0), 90.0),
-            Point2::new(1.0, 3.0),
-        );
-        assert_close(
-            rotated_half_extents(Point2::new(3.0, 1.0), 180.0),
-            Point2::new(3.0, 1.0),
-        );
-        assert_close(
-            rotated_half_extents(Point2::new(3.0, 1.0), 270.0),
-            Point2::new(1.0, 3.0),
-        );
     }
 }

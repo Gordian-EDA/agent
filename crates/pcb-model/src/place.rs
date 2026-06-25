@@ -293,7 +293,8 @@ pub fn courtyard_margin(clearance: f64) -> f64 {
 
 /// Courtyard half-extents after a quadrant rotation (90/270 swap w/h).
 pub fn rotated_courtyard_half(part: &Part, rot: f64) -> (f64, f64) {
-    geom::rotated_aabb_half(part.courtyard_w, part.courtyard_h, rot)
+    let h = Point2::new(part.courtyard_w / 2.0, part.courtyard_h / 2.0).rotated_half_extents(rot);
+    (h.x, h.y)
 }
 
 /// Half-extents of the part's PAD (copper) bounding box after a quadrant rotation. Bounds ONLY
@@ -308,15 +309,15 @@ pub fn rotated_copper_bbox(part: &Part, rot: f64) -> Rect {
     );
     for pad in &part.pads {
         let off = pad.offset.rotate(rot);
-        let (pw, ph) = geom::rotated_aabb_half(pad.width, pad.height, rot);
+        let half = Point2::new(pad.width / 2.0, pad.height / 2.0).rotated_half_extents(rot);
         // TRUE (asymmetric) bbox relative to the part origin — a connector's pads are OFF-CENTRE
         // (origin at pin 1, not the courtyard centre), so a symmetric centre±max|offset| box would
         // be ~2× too large on the empty side and FALSE-REJECT a connector that actually clears the
         // edge. Track real min/max so the outline check is exact.
-        xmin = xmin.min(off.x - pw);
-        xmax = xmax.max(off.x + pw);
-        ymin = ymin.min(off.y - ph);
-        ymax = ymax.max(off.y + ph);
+        xmin = xmin.min(off.x - half.x);
+        xmax = xmax.max(off.x + half.x);
+        ymin = ymin.min(off.y - half.y);
+        ymax = ymax.max(off.y + half.y);
     }
     if xmin > xmax {
         Rect::zero()

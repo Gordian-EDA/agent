@@ -524,11 +524,7 @@ pub fn count_congestion(junctions: &[[f64; 2]]) -> usize {
     let mut n = 0;
     for i in 0..junctions.len() {
         for j in (i + 1)..junctions.len() {
-            let (dx, dy) = (
-                junctions[i][0] - junctions[j][0],
-                junctions[i][1] - junctions[j][1],
-            );
-            if dx.hypot(dy) < TIGHT - EPS {
+            if ::geom::Point2::from(junctions[i]).dist(junctions[j].into()) < TIGHT - EPS {
                 n += 1;
             }
         }

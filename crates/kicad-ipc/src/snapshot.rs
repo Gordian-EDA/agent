@@ -295,14 +295,15 @@ impl SnapshotBuilder {
                 let center = pad_world(fp, &pad);
                 let layers = pad_layers(&pad, &self.layer_names);
                 let (width, height) = pad_size(&pad);
-                let (half_w, half_h) = geom::rotated_aabb_half(width, height, pad_angle(fp, &pad));
+                let half = Point2::new(width / 2.0, height / 2.0)
+                    .rotated_half_extents(pad_angle(fp, &pad));
                 let net = pad.net.as_ref().and_then(net_name);
                 self.obstacles.push(Obstacle {
                     kind: format!("pad:{reference}"),
                     layers: layers.clone(),
                     center,
-                    width: half_w * 2.0,
-                    height: half_h * 2.0,
+                    width: half.x * 2.0,
+                    height: half.y * 2.0,
                     connected_to: net.clone().into_iter().collect(),
                 });
                 if let Some(net) = &net {

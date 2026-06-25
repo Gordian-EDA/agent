@@ -231,12 +231,10 @@ impl SchematicWriter {
     /// for their own refdes), pin name/number text, wires, no-connect markers,
     /// and fixed (stub-less) labels.
     fn build_obstacles(&self) -> Vec<crate::label::Obstacle> {
-        use crate::label::{
-            ObKind, Obstacle, label_box, pin_text_boxes, rotated_half_extents, text_width, wire_box,
-        };
+        use crate::label::{ObKind, Obstacle, label_box, pin_text_boxes, text_width, wire_box};
         let mut obstacles: Vec<Obstacle> = Vec::new();
         for inst in &self.instances {
-            let h = rotated_half_extents(inst.half_extents, inst.angle);
+            let h = inst.half_extents.rotated_half_extents(inst.angle);
             obstacles.push(Obstacle {
                 bbox: [
                     inst.at[0] - h[0],
@@ -348,13 +346,13 @@ impl SchematicWriter {
     /// adjacent rails never merge their names. `None` for `power:PWR_FLAG`,
     /// whose Value is hidden and has nothing to place.
     fn power_value_movable(&self, i: usize) -> Option<(crate::label::Movable, Apply)> {
-        use crate::label::{Movable, rotated_half_extents, text_width};
+        use crate::label::{Movable, text_width};
         let r2 = |v: f64| (v * 100.0).round() / 100.0;
         let inst = &self.instances[i];
         if inst.lib_id == "power:PWR_FLAG" {
             return None;
         }
-        let h = rotated_half_extents(inst.half_extents, inst.angle);
+        let h = inst.half_extents.rotated_half_extents(inst.angle);
         let (cx, cy) = (inst.at[0], inst.at[1]);
         let (minx, miny, maxx, maxy) = (cx - h[0], cy - h[1], cx + h[0], cy + h[1]);
         let vw = text_width(&inst.value);
@@ -408,10 +406,10 @@ impl SchematicWriter {
     /// symbols. Wide (rotated passive) bodies prefer above/below; ICs carry the
     /// pair on the horizontal band least overlapping their own pin text.
     fn field_pair_movable(&self, i: usize) -> (crate::label::Movable, Apply) {
-        use crate::label::{Movable, pin_text_boxes, rotated_half_extents, text_width};
+        use crate::label::{Movable, pin_text_boxes, text_width};
         let r2 = |v: f64| (v * 100.0).round() / 100.0;
         let inst = &self.instances[i];
-        let h = rotated_half_extents(inst.half_extents, inst.angle);
+        let h = inst.half_extents.rotated_half_extents(inst.angle);
         let (cx, cy) = (inst.at[0], inst.at[1]);
         let (minx, miny, maxx, maxy) = (cx - h[0], cy - h[1], cx + h[0], cy + h[1]);
         let vw = text_width(&inst.value);
@@ -720,7 +718,7 @@ impl SchematicWriter {
     /// coordinate and be clipped off the content-fit page. Run last, after text is
     /// solved, so field positions move with their symbols.
     fn reframe(&mut self) {
-        use crate::label::{rotated_half_extents, text_width};
+        use crate::label::text_width;
         const M: f64 = 12.7;
         let (mut minx, mut miny) = (f64::MAX, f64::MAX);
         let mut lo = |x: f64, y: f64| {
@@ -728,7 +726,7 @@ impl SchematicWriter {
             miny = miny.min(y);
         };
         for i in &self.instances {
-            let h = rotated_half_extents(i.half_extents, i.angle);
+            let h = i.half_extents.rotated_half_extents(i.angle);
             lo(i.at[0] - h[0], i.at[1] - h[1]);
             for p in [i.ref_pos, i.val_pos].into_iter().flatten() {
                 lo(p.at[0] - 5.0, p.at[1] - 1.6);
@@ -851,7 +849,7 @@ impl SchematicWriter {
         &self,
         ignore_pairs: &std::collections::BTreeSet<(String, String)>,
     ) -> Vec<String> {
-        use crate::label::{label_box, pin_text_boxes, rotated_half_extents, text_width};
+        use crate::label::{label_box, pin_text_boxes, text_width};
 
         /// What an item is, for exemption decisions.
         #[derive(Clone, Copy, PartialEq, Eq)]
@@ -890,7 +888,7 @@ impl SchematicWriter {
                 }
                 continue;
             }
-            let h = rotated_half_extents(inst.half_extents, inst.angle);
+            let h = inst.half_extents.rotated_half_extents(inst.angle);
             items.push((
                 format!("symbol {}", inst.refdes),
                 [

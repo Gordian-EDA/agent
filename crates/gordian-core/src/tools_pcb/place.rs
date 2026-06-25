@@ -109,8 +109,9 @@ fn pad_bbox(pads: &[FootprintPad]) -> Option<Rect> {
 
 fn pad_aabb(pad: &FootprintPad) -> Rect {
     let [cx, cy] = pad.at;
-    let (hw, hh) = geom::rotated_aabb_half(pad.size[0], pad.size[1], pad.rotation);
-    Rect::new(cx - hw, cy - hh, cx + hw, cy + hh)
+    let half =
+        geom::Point2::new(pad.size[0] / 2.0, pad.size[1] / 2.0).rotated_half_extents(pad.rotation);
+    Rect::new(cx - half.x, cy - half.y, cx + half.x, cy + half.y)
 }
 
 // ── get_board ────────────────────────────────────────────────────────────────

@@ -955,7 +955,7 @@ fn emit_path(
 
 /// Push a simplified (collinear-merged) trace if it has ≥ 2 distinct points.
 fn push_trace(traces: &mut Vec<CellTrace>, layer: usize, layer_count: usize, points: Vec<Point2>) {
-    let simplified = simplify(points);
+    let simplified = geom::Polyline::new(points).simplify().into_points();
     if simplified.len() < 2 {
         return;
     }
@@ -1068,13 +1068,6 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
     } else {
         LayerRef(format!("inner{layer}"))
     }
-}
-
-/// Drop near-duplicate points and merge collinear runs (orthogonal AND 45°). Thin
-/// wrapper over [`geom::Polyline::simplify`]; shared with [`crate::pipeline`],
-/// which re-runs it over per-net polylines stitched across cells.
-pub(crate) fn simplify(path: Vec<Point2>) -> Vec<Point2> {
-    geom::Polyline::new(path).simplify().into_points()
 }
 
 #[cfg(test)]

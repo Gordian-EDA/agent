@@ -899,7 +899,7 @@ pub(super) fn place_crystal(
             return None;
         };
         // The two osc pins must be a close pair (consecutive pins of one port).
-        if (paa[0] - pba[0]).hypot(paa[1] - pba[1]) > 12.7 {
+        if ::geom::Point2::from(paa).dist(pba.into()) > 12.7 {
             return None;
         }
         let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);

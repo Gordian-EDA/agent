@@ -73,6 +73,16 @@ impl Point2 {
         Point2::new(self.x * c + self.y * s, -self.x * s + self.y * c)
     }
 
+    /// Axis-aligned half-extents after rotating these half-extents by `deg`.
+    #[inline]
+    pub fn rotated_half_extents(self, deg: f64) -> Point2 {
+        let (s, c) = deg.to_radians().sin_cos();
+        Point2::new(
+            (self.x * c).abs() + (self.y * s).abs(),
+            (self.x * s).abs() + (self.y * c).abs(),
+        )
+    }
+
     /// Mirror on x, rotate, then flip y.
     #[inline]
     pub fn transform_offset(self, deg: f64, mirror: bool) -> Point2 {
@@ -152,6 +162,25 @@ mod tests {
         assert_eq!(p, Point2::new(1.0, -2.0));
         let q = Point2::new(1.0, 2.0).transform_offset(90.0, true);
         assert!((q.x - -2.0).abs() < 1e-9 && (q.y - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rotated_half_extents_swap_at_quadrants() {
+        let assert_close = |got: Point2, want: Point2| {
+            assert!(got.near_eq(want, 1e-9), "got {got:?}, want {want:?}");
+        };
+        assert_close(
+            Point2::new(3.0, 1.0).rotated_half_extents(0.0),
+            Point2::new(3.0, 1.0),
+        );
+        assert_close(
+            Point2::new(3.0, 1.0).rotated_half_extents(90.0),
+            Point2::new(1.0, 3.0),
+        );
+        assert_close(
+            Point2::new(3.0, 1.0).rotated_half_extents(180.0),
+            Point2::new(3.0, 1.0),
+        );
     }
 
     #[test]

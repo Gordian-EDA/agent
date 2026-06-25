@@ -124,8 +124,11 @@ fn pad_detail(pad: &kiutils_kicad::FpPad) -> FootprintPad {
 fn pad_corners(pad: &FootprintPad) -> [Point2; 2] {
     let [cx, cy] = pad.at;
     let [w, h] = pad.size;
-    let (hw, hh) = geom::rotated_aabb_half(w, h, pad.rotation);
-    [Point2::new(cx - hw, cy - hh), Point2::new(cx + hw, cy + hh)]
+    let half = Point2::new(w / 2.0, h / 2.0).rotated_half_extents(pad.rotation);
+    [
+        Point2::new(cx - half.x, cy - half.y),
+        Point2::new(cx + half.x, cy + half.y),
+    ]
 }
 
 fn graphic_points(g: &kiutils_kicad::FpGraphic) -> Vec<Point2> {

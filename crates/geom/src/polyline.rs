@@ -7,7 +7,7 @@ use crate::rect::Rect;
 /// An ordered polyline (mm, y-down): a routed copper/wire path or a net's
 /// terminal set. Owns simplification and bbox queries.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Polyline(pub Vec<Point2>);
+pub struct Polyline(Vec<Point2>);
 
 impl Polyline {
     #[inline]

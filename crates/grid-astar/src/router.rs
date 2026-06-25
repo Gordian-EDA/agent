@@ -34,7 +34,7 @@
 //! obstacle-inflation formulas (delegated to [`crate::grid`] so the grid and
 //! router agree).
 
-use crate::astar::{self, AStarCosts, State, DIAG_COST};
+use crate::astar::{self, AStarCosts, DIAG_COST, State};
 use crate::grid::{self, RouteGrid};
 use crate::problem::{
     Capabilities, LayerRef, Point2, RouteProblem, RouteResult, RouteSolution, Router, Trace, Via,
@@ -67,7 +67,9 @@ pub fn plane_layers(layer_count: usize) -> Vec<u32> {
 
 /// Bitmask form of [`plane_layers`] for [`crate::astar::AStarCosts::plane_mask`].
 pub fn plane_mask_for(layer_count: usize) -> u32 {
-    plane_layers(layer_count).iter().fold(0u32, |m, &l| m | (1u32 << l))
+    plane_layers(layer_count)
+        .iter()
+        .fold(0u32, |m, &l| m | (1u32 << l))
 }
 
 /// The Chebyshev radius (in grid cells) a via barrel must keep clear of foreign
@@ -197,17 +199,24 @@ pub fn route_lenient(problem: &RouteProblem) -> RouteResult {
 /// never undercounts and the surviving copper is DRC-clean.
 fn reconcile(problem: &RouteProblem, result: &mut RouteResult) {
     let mut dropped = crate::lint::drop_violating_copper(problem, &mut result.solution);
-    dropped.extend(crate::lint::drop_unconnected_copper(problem, &mut result.solution));
-    let known: std::collections::BTreeSet<&str> =
-        result.failed.iter().map(|f| f.connection.as_str()).collect();
+    dropped.extend(crate::lint::drop_unconnected_copper(
+        problem,
+        &mut result.solution,
+    ));
+    let known: std::collections::BTreeSet<&str> = result
+        .failed
+        .iter()
+        .map(|f| f.connection.as_str())
+        .collect();
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let added: Vec<FailedNet> = dropped
         .into_iter()
         .filter(|n| !known.contains(n.as_str()) && seen.insert(n.clone()))
         .map(|n| FailedNet {
             connection: n,
-            reason: "DRC oracle: net dropped — could not be routed cleanly (clearance/connectivity)"
-                .to_string(),
+            reason:
+                "DRC oracle: net dropped — could not be routed cleanly (clearance/connectivity)"
+                    .to_string(),
         })
         .collect();
     result.failed.extend(added);
@@ -260,8 +269,7 @@ pub fn route_with(
         // Per-net width: fatter copper marks a wider keep-out halo and scans its extra
         // half-width as it routes (min-width nets => radius 0 => unchanged behaviour).
         let nw = problem.net_width(&conn.name);
-        let halo =
-            (((nw / 2.0 + problem.clearance + min_w / 2.0) / pitch).ceil() as usize).max(1);
+        let halo = (((nw / 2.0 + problem.clearance + min_w / 2.0) / pitch).ceil() as usize).max(1);
         // An ENCLOSED fine-pitch ball with an assigned inner escape layer escapes
         // VERTICALLY (a via-in-pad to that layer) instead of along a surface axis. The
         // A* is then restricted to {top, bottom, escape layer} so the ring→layer
@@ -301,8 +309,15 @@ pub fn route_with(
         // board, and the stub tip — not the over-blocked pad cell — seeds the tree.
         let seed_pad = point_cell(&grid, &conn.points_to_connect[0], layer_count);
         let mut tree_cells: Vec<State> = escape_cells(
-            &mut grid, problem, conn_idx, &conn.points_to_connect[0], seed_pad, halo,
-            escape_layer, &mut traces, &mut vias,
+            &mut grid,
+            problem,
+            conn_idx,
+            &conn.points_to_connect[0],
+            seed_pad,
+            halo,
+            escape_layer,
+            &mut traces,
+            &mut vias,
         );
 
         let mut net_failed: Option<String> = None;
@@ -310,8 +325,15 @@ pub fn route_with(
         for (pi, pt) in conn.points_to_connect.iter().enumerate().skip(1) {
             let start_pad = point_cell(&grid, pt, layer_count);
             let starts = escape_cells(
-                &mut grid, problem, conn_idx, pt, start_pad, halo, escape_layer,
-                &mut traces, &mut vias,
+                &mut grid,
+                problem,
+                conn_idx,
+                pt,
+                start_pad,
+                halo,
+                escape_layer,
+                &mut traces,
+                &mut vias,
             );
             // A* from the new point's cell to the nearest cell of the tree.
             let path = astar::search(&grid, conn_idx, &starts, &tree_cells, costs);
@@ -332,14 +354,7 @@ pub fn route_with(
 
             // Emit copper: split the cell path at layer changes into per-layer
             // mm polylines, with a via at each transition.
-            emit_path(
-                problem,
-                &grid,
-                &conn.name,
-                &path,
-                &mut traces,
-                &mut vias,
-            );
+            emit_path(problem, &grid, &conn.name, &path, &mut traces, &mut vias);
         }
 
         if let Some(reason) = net_failed {
@@ -372,15 +387,22 @@ fn net_order(problem: &RouteProblem, priority: &std::collections::BTreeSet<Strin
                 let kb = half_perimeter(&problem.connections[b]);
                 ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
             })
-            .then_with(|| problem.connections[a].name.cmp(&problem.connections[b].name))
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            })
     });
     order
 }
 
 /// Half-perimeter (width + height) of a connection's point bounding box.
 fn half_perimeter(conn: &crate::problem::Connection) -> f64 {
-    let pts: Vec<geom::Point2> =
-        conn.points_to_connect.iter().map(|p| geom::Point2::new(p.x, p.y)).collect();
+    let pts: Vec<geom::Point2> = conn
+        .points_to_connect
+        .iter()
+        .map(|p| geom::Point2::new(p.x, p.y))
+        .collect();
     geom::Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter())
 }
 
@@ -431,16 +453,27 @@ fn escape_cells(
     // The maze then routes radially out THERE, restricted (by `layer_mask`) to this
     // net's three layers. Tried before the surface stub: a truly-enclosed ball (free
     // region 1) has no surface axis to escape along, only a vertical one.
-    if let Some(out) = escape_layer
-        .and_then(|el| via_in_pad_escape(grid, problem, conn_idx, pt, pad_cell, el as usize, halo, vias))
-    {
+    if let Some(out) = escape_layer.and_then(|el| {
+        via_in_pad_escape(
+            grid,
+            problem,
+            conn_idx,
+            pt,
+            pad_cell,
+            el as usize,
+            halo,
+            vias,
+        )
+    }) {
         cells.push(out);
         return cells;
     }
     // Find the pad obstacle at this point: an owned obstacle covering pt. Need its
     // long axis to know the escape direction.
     let Some(pad) = problem.obstacles.iter().find(|ob| {
-        ob.connected_to.iter().any(|n| grid.connection_index(n) == Some(conn_idx))
+        ob.connected_to
+            .iter()
+            .any(|n| grid.connection_index(n) == Some(conn_idx))
             && (pt.x - ob.center.x).abs() <= ob.width / 2.0 + 1e-6
             && (pt.y - ob.center.y).abs() <= ob.height / 2.0 + 1e-6
     }) else {
@@ -469,13 +502,19 @@ fn escape_cells(
         } else {
             (pt.x, pt.y + sign * reach)
         };
-        if tx < problem.bounds.min_x || tx > problem.bounds.max_x
-            || ty < problem.bounds.min_y || ty > problem.bounds.max_y
+        if tx < problem.bounds.min_x
+            || tx > problem.bounds.max_x
+            || ty < problem.bounds.min_y
+            || ty > problem.bounds.max_y
         {
             continue;
         }
         let (ix, iy) = grid.cell_of(tx, ty);
-        let tip = State { layer: pad_cell.layer, ix, iy };
+        let tip = State {
+            layer: pad_cell.layer,
+            ix,
+            iy,
+        };
         if !grid.is_free_for(tip.layer, tip.ix, tip.iy, conn_idx) {
             continue;
         }
@@ -509,7 +548,10 @@ fn escape_cells(
     // the half-pitch perpendicular snap there is harmless; `drop_violating_copper`
     // gates the emitted mm regardless.
     let start_mm = Point2 { x: pt.x, y: pt.y };
-    let tip_mm = Point2 { x: grid.cell_center_x(tip.ix), y: grid.cell_center_y(tip.iy) };
+    let tip_mm = Point2 {
+        x: grid.cell_center_x(tip.ix),
+        y: grid.cell_center_y(tip.iy),
+    };
     traces.push(Trace {
         connection: problem.connections[conn_idx].name.clone(),
         layer: layer_ref(pad_cell.layer, problem.layer_count.max(1) as usize),
@@ -549,7 +591,11 @@ fn via_in_pad_escape(
     if el == 0 || el >= layer_count {
         return None;
     }
-    let landing = State { layer: el, ix: pad_cell.ix, iy: pad_cell.iy };
+    let landing = State {
+        layer: el,
+        ix: pad_cell.ix,
+        iy: pad_cell.iy,
+    };
     // The inner-layer landing must be open for this net (it is empty unless another
     // escape's via halo already claimed it).
     if !grid.is_free_for(landing.layer, landing.ix, landing.iy, conn_idx) {
@@ -577,10 +623,11 @@ fn via_in_pad_escape(
     });
     // Reserve the inner-layer landing + its via clearance halo for this net so a
     // neighbouring escape's via keeps the full barrel spacing.
-    let via_halo = (((problem.via_diameter / 2.0 + problem.clearance + problem.min_trace_width / 2.0)
-        / grid.pitch)
-        .ceil() as usize)
-        .max(halo);
+    let via_halo =
+        (((problem.via_diameter / 2.0 + problem.clearance + problem.min_trace_width / 2.0)
+            / grid.pitch)
+            .ceil() as usize)
+            .max(halo);
     grid.mark_net_halo(landing.layer, landing.ix, landing.iy, conn_idx, via_halo);
     Some(landing)
 }
@@ -590,7 +637,13 @@ fn via_in_pad_escape(
 /// the pitch gate's guarantee (the via sits on the ball's own pad, and the enclosed ball's
 /// top neighbourhood is legitimately BlockedAll from neighbour halos), so the top layer is
 /// excluded; the inner/bottom layers it pierces must be free of any foreign barrel.
-fn via_barrel_clear_below_top(grid: &RouteGrid, conn: usize, ix: usize, iy: usize, radius_cells: usize) -> bool {
+fn via_barrel_clear_below_top(
+    grid: &RouteGrid,
+    conn: usize,
+    ix: usize,
+    iy: usize,
+    radius_cells: usize,
+) -> bool {
     let r = radius_cells as isize;
     let r2 = (radius_cells * radius_cells) as isize;
     for dy in -r..=r {
@@ -718,7 +771,14 @@ fn emit_path(
             // Layer change: the via sits at the shared (ix,iy) of prev==cur.
             let at = mm(&prev);
             // Close the current run.
-            push_trace(traces, connection, run_layer, layer_count, width, std::mem::take(&mut run));
+            push_trace(
+                traces,
+                connection,
+                run_layer,
+                layer_count,
+                width,
+                std::mem::take(&mut run),
+            );
             vias.push(Via {
                 connection: connection.to_owned(),
                 at: Point2 { x: at.x, y: at.y },
@@ -743,7 +803,7 @@ fn push_trace(
     width: f64,
     path: Vec<Point2>,
 ) {
-    let simplified = simplify(path);
+    let simplified = geom::Polyline::new(path).simplify().into_points();
     if simplified.len() < 2 {
         return;
     }
@@ -766,13 +826,6 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
     } else {
         LayerRef(format!("inner{layer}"))
     }
-}
-
-/// Drop near-duplicate points and merge collinear runs (orthogonal AND 45°). The
-/// math lives in [`geom::Polyline::simplify`]; this thin wrapper keeps the
-/// `Vec<Point2>` call sites readable.
-fn simplify(path: Vec<Point2>) -> Vec<Point2> {
-    geom::Polyline::new(path).simplify().into_points()
 }
 
 // ── GridAStarRouter (the SDK Router impl) ───────────────────────────────────────
@@ -828,7 +881,7 @@ impl Router for GridAStarRouter {
         // the orthogonal route's fewer, fatter ones — keeping the diagonal would then
         // leave more nets unrouted (the metric the corpus reports), a regression.
         let arb_key = |r: &RouteResult| (score(problem, r), r.failed.len());
-        if arb_key(&diag).0 .0 == 0 {
+        if arb_key(&diag).0.0 == 0 {
             return diag; // the 8-way pass aced the board — skip the orthogonal fallback
         }
         // The ORTHOGONAL candidate: the better-scoring of its strict (via-scan) and lenient
@@ -851,7 +904,10 @@ impl Router for GridAStarRouter {
 /// the key as the same robustness guard the cross-engine selector uses.
 fn score(problem: &RouteProblem, r: &RouteResult) -> (usize, usize) {
     let geom = geometry_violations(problem, &r.solution);
-    (crate::problem::failed_pad_weight(problem, &r.failed) + geom, geom)
+    (
+        crate::problem::failed_pad_weight(problem, &r.failed) + geom,
+        geom,
+    )
 }
 
 /// Count the GEOMETRY DRC violations of a solution (clearance / width / via /
@@ -868,7 +924,7 @@ pub fn geometry_violations(problem: &RouteProblem, solution: &RouteSolution) -> 
 mod tests {
     use super::*;
     use crate::connectivity;
-    use crate::problem::{Rect, Connection, Obstacle, RoutePoint};
+    use crate::problem::{Connection, Obstacle, Rect, RoutePoint};
     use std::path::Path;
 
     /// A rect pad owned by `connected_to`, centred at `center`, on `layers`.
@@ -876,7 +932,10 @@ mod tests {
         Obstacle {
             kind: "rect".to_owned(),
             layers: layers.iter().map(|l| LayerRef((*l).to_owned())).collect(),
-            center: Point2 { x: center.0, y: center.1 },
+            center: Point2 {
+                x: center.0,
+                y: center.1,
+            },
             width: w,
             height: h,
             connected_to: connected_to.iter().map(|s| (*s).to_owned()).collect(),
@@ -912,8 +971,16 @@ mod tests {
             connections.push(Connection {
                 name: net,
                 points_to_connect: vec![
-                    RoutePoint { x: 5.0, y: cy, layer: LayerRef::top() },
-                    RoutePoint { x: dest.0, y: dest.1, layer: LayerRef::top() },
+                    RoutePoint {
+                        x: 5.0,
+                        y: cy,
+                        layer: LayerRef::top(),
+                    },
+                    RoutePoint {
+                        x: dest.0,
+                        y: dest.1,
+                        layer: LayerRef::top(),
+                    },
                 ],
             });
         }
@@ -922,7 +989,12 @@ mod tests {
             min_trace_width: 0.2,
             obstacles,
             connections,
-            bounds: Rect { min_x: 0.0, max_x: 10.0, min_y: 0.0, max_y: 12.0 },
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 10.0,
+                min_y: 0.0,
+                max_y: 12.0,
+            },
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
@@ -936,17 +1008,30 @@ mod tests {
         // (reconcile drops any clearance/width/via/short violator before it ships).
         let result = route(&problem);
         let routed = problem.connections.len() - result.failed.len();
-        assert!(routed >= 1, "the escape stub must route at least one enclosed QFP pin");
+        assert!(
+            routed >= 1,
+            "the escape stub must route at least one enclosed QFP pin"
+        );
         let geom: Vec<_> = crate::lint::lint(&problem, &result.solution)
             .into_iter()
             .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
             .collect();
-        assert!(geom.is_empty(), "QFP escape copper must be geometry-clean: {geom:?}");
-        // The partial-net rule: a failed net contributes no copper.
-        let failed_names: std::collections::BTreeSet<&str> =
-            result.failed.iter().map(|f| f.connection.as_str()).collect();
         assert!(
-            result.solution.traces.iter().all(|t| !failed_names.contains(t.connection.as_str())),
+            geom.is_empty(),
+            "QFP escape copper must be geometry-clean: {geom:?}"
+        );
+        // The partial-net rule: a failed net contributes no copper.
+        let failed_names: std::collections::BTreeSet<&str> = result
+            .failed
+            .iter()
+            .map(|f| f.connection.as_str())
+            .collect();
+        assert!(
+            result
+                .solution
+                .traces
+                .iter()
+                .all(|t| !failed_names.contains(t.connection.as_str())),
             "a failed net must not ship a stub/trace"
         );
     }
@@ -967,11 +1052,24 @@ mod tests {
             connections: vec![Connection {
                 name: "D".into(),
                 points_to_connect: vec![
-                    RoutePoint { x: 4.0, y: 4.0, layer: LayerRef::top() },
-                    RoutePoint { x: 14.0, y: 14.0, layer: LayerRef::top() },
+                    RoutePoint {
+                        x: 4.0,
+                        y: 4.0,
+                        layer: LayerRef::top(),
+                    },
+                    RoutePoint {
+                        x: 14.0,
+                        y: 14.0,
+                        layer: LayerRef::top(),
+                    },
                 ],
             }],
-            bounds: Rect { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 20.0 },
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 20.0,
+                min_y: 0.0,
+                max_y: 20.0,
+            },
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
@@ -980,24 +1078,38 @@ mod tests {
             escape_layers: Default::default(),
         };
         let r = route(&p);
-        assert!(r.failed.is_empty(), "corner-to-corner net must route: {:?}", r.failed);
+        assert!(
+            r.failed.is_empty(),
+            "corner-to-corner net must route: {:?}",
+            r.failed
+        );
         let has_diag = r.solution.traces.iter().any(|t| {
-            t.path.windows(2).any(|w| {
-                (w[0].x - w[1].x).abs() > 1e-9 && (w[0].y - w[1].y).abs() > 1e-9
-            })
+            t.path
+                .windows(2)
+                .any(|w| (w[0].x - w[1].x).abs() > 1e-9 && (w[0].y - w[1].y).abs() > 1e-9)
         });
-        assert!(has_diag, "the 8-way default must emit a 45° diagonal segment");
+        assert!(
+            has_diag,
+            "the 8-way default must emit a 45° diagonal segment"
+        );
 
         // The orthogonal candidate (the per-board arbiter's via-field fallback) routes the
         // SAME net with no diagonal segment at all.
         let ro = route_orthogonal(&p);
-        assert!(ro.failed.is_empty(), "orthogonal must also route this net: {:?}", ro.failed);
+        assert!(
+            ro.failed.is_empty(),
+            "orthogonal must also route this net: {:?}",
+            ro.failed
+        );
         let ortho_has_diag = ro.solution.traces.iter().any(|t| {
-            t.path.windows(2).any(|w| {
-                (w[0].x - w[1].x).abs() > 1e-9 && (w[0].y - w[1].y).abs() > 1e-9
-            })
+            t.path
+                .windows(2)
+                .any(|w| (w[0].x - w[1].x).abs() > 1e-9 && (w[0].y - w[1].y).abs() > 1e-9)
         });
-        assert!(!ortho_has_diag, "route_orthogonal must never emit a 45° diagonal");
+        assert!(
+            !ortho_has_diag,
+            "route_orthogonal must never emit a 45° diagonal"
+        );
     }
 
     /// Two adjacent nets that both want a parallel 45° diagonal corridor must emit
@@ -1012,8 +1124,16 @@ mod tests {
         let mk = |net: &str, x0: f64, y0: f64, x1: f64, y1: f64| Connection {
             name: net.into(),
             points_to_connect: vec![
-                RoutePoint { x: x0, y: y0, layer: LayerRef::top() },
-                RoutePoint { x: x1, y: y1, layer: LayerRef::top() },
+                RoutePoint {
+                    x: x0,
+                    y: y0,
+                    layer: LayerRef::top(),
+                },
+                RoutePoint {
+                    x: x1,
+                    y: y1,
+                    layer: LayerRef::top(),
+                },
             ],
         };
         let (ax0, ay0, ax1, ay1) = (3.0, 3.0, 13.0, 13.0);
@@ -1028,7 +1148,12 @@ mod tests {
                 pad(&["B"], (bx1, by1), 0.4, 0.4, &["top"]),
             ],
             connections: vec![mk("A", ax0, ay0, ax1, ay1), mk("B", bx0, by0, bx1, by1)],
-            bounds: Rect { min_x: 0.0, max_x: 20.0, min_y: 0.0, max_y: 20.0 },
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 20.0,
+                min_y: 0.0,
+                max_y: 20.0,
+            },
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
@@ -1043,7 +1168,10 @@ mod tests {
             .into_iter()
             .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
             .collect();
-        assert!(geom.is_empty(), "parallel-diagonal copper must be geometry-clean: {geom:?}");
+        assert!(
+            geom.is_empty(),
+            "parallel-diagonal copper must be geometry-clean: {geom:?}"
+        );
         // At least one net should have routed (the corridor is wide enough for one
         // diagonal; the body check correctly refuses a sub-clearance parallel second).
         assert!(
@@ -1089,8 +1217,16 @@ mod tests {
         let connections = vec![Connection {
             name: "S".into(),
             points_to_connect: vec![
-                RoutePoint { x: 5.0, y: 5.0, layer: LayerRef::top() },
-                RoutePoint { x: 12.0, y: 12.0, layer: LayerRef::top() },
+                RoutePoint {
+                    x: 5.0,
+                    y: 5.0,
+                    layer: LayerRef::top(),
+                },
+                RoutePoint {
+                    x: 12.0,
+                    y: 12.0,
+                    layer: LayerRef::top(),
+                },
             ],
         }];
         let mut escape_layers = std::collections::BTreeMap::new();
@@ -1100,7 +1236,12 @@ mod tests {
             min_trace_width: 0.2,
             obstacles,
             connections,
-            bounds: Rect { min_x: 0.0, max_x: 16.0, min_y: 0.0, max_y: 16.0 },
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 16.0,
+                min_y: 0.0,
+                max_y: 16.0,
+            },
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
@@ -1116,10 +1257,17 @@ mod tests {
             result.failed
         );
         // It dropped a via (the via-in-pad escape).
-        assert!(!result.solution.vias.is_empty(), "escape must place a via-in-pad");
+        assert!(
+            !result.solution.vias.is_empty(),
+            "escape must place a via-in-pad"
+        );
         // Some copper lands on the assigned inner signal layer (inner2).
         assert!(
-            result.solution.traces.iter().any(|t| t.layer == LayerRef("inner2".into())),
+            result
+                .solution
+                .traces
+                .iter()
+                .any(|t| t.layer == LayerRef("inner2".into())),
             "the escape must route on the assigned inner signal layer"
         );
         // The emitted copper is geometry-clean (the lint is the authority).
@@ -1127,7 +1275,10 @@ mod tests {
             .into_iter()
             .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
             .collect();
-        assert!(geom.is_empty(), "inner-layer escape copper must be geometry-clean: {geom:?}");
+        assert!(
+            geom.is_empty(),
+            "inner-layer escape copper must be geometry-clean: {geom:?}"
+        );
     }
 
     /// Without the escape assignment the SAME enclosed inner ball is unroutable (F/B are
@@ -1158,8 +1309,16 @@ mod tests {
         let connections = vec![Connection {
             name: "S".into(),
             points_to_connect: vec![
-                RoutePoint { x: 5.0, y: 5.0, layer: LayerRef::top() },
-                RoutePoint { x: 12.0, y: 12.0, layer: LayerRef::top() },
+                RoutePoint {
+                    x: 5.0,
+                    y: 5.0,
+                    layer: LayerRef::top(),
+                },
+                RoutePoint {
+                    x: 12.0,
+                    y: 12.0,
+                    layer: LayerRef::top(),
+                },
             ],
         }];
         let problem = RouteProblem {
@@ -1167,7 +1326,12 @@ mod tests {
             min_trace_width: 0.2,
             obstacles,
             connections,
-            bounds: Rect { min_x: 0.0, max_x: 16.0, min_y: 0.0, max_y: 16.0 },
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 16.0,
+                min_y: 0.0,
+                max_y: 16.0,
+            },
             clearance: 0.2,
             via_diameter: 0.6,
             via_drill: 0.3,
@@ -1176,7 +1340,11 @@ mod tests {
             escape_layers: Default::default(), // NO escape assignment
         };
         let result = route(&problem);
-        assert_eq!(result.failed.len(), 1, "with no escape, the walled-in ball cannot route");
+        assert_eq!(
+            result.failed.len(),
+            1,
+            "with no escape, the walled-in ball cannot route"
+        );
     }
 
     #[test]
@@ -1253,7 +1421,10 @@ mod tests {
         let mut prev = f64::NEG_INFINITY;
         for &i in &order {
             let hp = half_perimeter(&p.connections[i]);
-            assert!(hp >= prev - 1e-12, "net order not non-decreasing by half-perimeter");
+            assert!(
+                hp >= prev - 1e-12,
+                "net order not non-decreasing by half-perimeter"
+            );
             prev = hp;
         }
     }
@@ -1287,7 +1458,7 @@ mod tests {
             Point2 { x: 2.0, y: 0.0 }, // duplicate
             Point2 { x: 2.0, y: 3.0 },
         ];
-        let out = simplify(path);
+        let out = geom::Polyline::new(path).simplify().into_points();
         assert_eq!(
             out,
             vec![

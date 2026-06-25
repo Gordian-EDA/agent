@@ -438,8 +438,8 @@ fn sanitize(pin: &str) -> String {
 }
 
 /// Union-find over pin nodes keyed by `(refdes, pin)`. `make` interns a node;
-/// the disjoint-set core (`find`/`union`) is `geom::union_find` over the
-/// interned `parent` slice (second-wins union, so a node's root is unchanged).
+/// the disjoint-set core runs over the interned `parent` slice. Union keeps the
+/// second node's root as the survivor.
 #[derive(Default)]
 struct PinUnionFind {
     nodes: Vec<(String, String)>,
@@ -461,10 +461,10 @@ impl PinUnionFind {
             })
     }
     fn find(&mut self, i: usize) -> usize {
-        geom::uf_find(&mut self.parent, i)
+        geom::ParentForest::new(&mut self.parent).find(i)
     }
     fn union(&mut self, i: usize, j: usize) {
-        geom::uf_union(&mut self.parent, i, j);
+        geom::ParentForest::new(&mut self.parent).union_to(i, j);
     }
 }
 

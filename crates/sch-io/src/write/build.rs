@@ -539,7 +539,6 @@ impl SchematicWriter {
     /// no-connects, label anchors); wire segments carry their net (the power
     /// sentinel for unattributed stubs/risers).
     pub fn route_scene(&self) -> crate::wire::RouteScene {
-        use crate::label::rotated_half_extents;
         const NC: &str = "\0no_connect";
         const PWR: &str = "\0power_wire";
         let mut scene = crate::wire::RouteScene {
@@ -554,7 +553,7 @@ impl SchematicWriter {
                 scene.points.push((inst.at, inst.value.clone()));
                 continue;
             }
-            let h = rotated_half_extents(inst.half_extents, inst.angle);
+            let h = inst.half_extents.rotated_half_extents(inst.angle);
             let (hx, hy) = ((h[0] - 2.54).max(1.27), (h[1] - 2.54).max(1.27));
             scene.solids.push(Rect::new(
                 inst.at[0] - hx,

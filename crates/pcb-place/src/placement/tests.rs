@@ -292,7 +292,7 @@ fn connected_parts_end_closer_than_unconnected() {
             .map(|p| p.at.clone())
             .unwrap()
     };
-    let d = |a: Point2, b: Point2| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+    let d = |a: Point2, b: Point2| a.dist(b);
     let connected = d(at("R1"), at("R9"));
     // Two parts the grid seeds at opposite ends and that no net pulls together.
     let unconnected = d(at("R3"), at("R7"));
@@ -425,7 +425,7 @@ fn decoupling_caps_seed_beside_their_anchor_ic() {
             .at
             .clone()
     };
-    let d = |a: Point2, b: Point2| ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+    let d = |a: Point2, b: Point2| a.dist(b);
     // Each cap must hug its OWN anchor (not the other IC). A generous bound: well
     // under the inter-IC span, proving the cap is clustered, not stranded.
     for c in ["Ca0", "Ca1", "Ca2"] {

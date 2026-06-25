@@ -16,7 +16,7 @@ mod segment;
 mod shape;
 mod union_find;
 
-pub use angle::{rotated_aabb_half, snap_quadrant};
+pub use angle::snap_quadrant;
 pub use consts::{EPS, JOIN_EPS, STRICT_EPS};
 pub use grid::{GRID_50_MIL, Grid};
 pub use hash::{fnv1a, uuid_v5};
@@ -27,4 +27,4 @@ pub use polyline::Polyline;
 pub use rect::{BoundaryAxis, Rect, SharedBoundary};
 pub use segment::Segment;
 pub use shape::Dir;
-pub use union_find::{UnionFind, uf_find, uf_union};
+pub use union_find::{ParentForest, UnionFind};
