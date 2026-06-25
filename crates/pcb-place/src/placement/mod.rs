@@ -67,18 +67,20 @@ mod route;
 
 // The engine-SDK seam lives in the kernel — re-exported so a `pcb-place` caller can
 // reach the trait + oracle without a second `pcb_model::place` import.
-pub use crate::problem::place::{compute_hpwl, is_legal, Placer, RouteRanker, RoutabilityOracle};
+pub use crate::problem::place::{Placer, RoutabilityOracle, RouteRanker, compute_hpwl, is_legal};
 
 // Public surface — re-exported VERBATIM so every external `pcb_place::placement::…`
 // path resolves unchanged.
+pub use hints::{
+    apply_edge_lock, apply_grid_hints, apply_surround, fan_out_rings, unified_fanout_place,
+};
 pub use model::{
-    derive_nets, Edge, GroupHint, LockedAt, LogicalNet, Part, PartPad, PlaceProblem, PlaceReport,
-    PlaceResult, Placement, PlacementHints, Pin, Rect,
+    Edge, GroupHint, LockedAt, LogicalNet, Part, PartPad, Pin, PlaceProblem, PlaceReport,
+    PlaceResult, Placement, PlacementHints, Rect, derive_nets,
 };
 pub use pairs::{decoupling_pairs, series_fanout_order, series_pairs};
-pub use hints::{apply_edge_lock, apply_grid_hints, apply_surround, fan_out_rings, unified_fanout_place};
-pub use route::{place, place_best, place_board, to_route_problem};
 pub use route::{AnnealingPlacer, FanoutPlacer, GridAstarRanker, LegalizingPlacer};
+pub use route::{place, place_best, place_board, to_route_problem};
 
 #[cfg(test)]
 mod tests;

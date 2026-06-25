@@ -138,15 +138,13 @@ impl App {
         match ev {
             // A streamed chunk: grow the live in-progress assistant entry (created
             // on the first delta of a streamed run) so prose renders token-by-token.
-            AgentEvent::AssistantDelta(t) => {
-                match self.live_assistant {
-                    Some(i) => self.transcript[i].text.push_str(&t),
-                    None => {
-                        self.live_assistant = Some(self.transcript.len());
-                        self.transcript.push(Entry::assistant(t));
-                    }
+            AgentEvent::AssistantDelta(t) => match self.live_assistant {
+                Some(i) => self.transcript[i].text.push_str(&t),
+                None => {
+                    self.live_assistant = Some(self.transcript.len());
+                    self.transcript.push(Entry::assistant(t));
                 }
-            }
+            },
             // The turn's final text: finalize the streamed entry in place (no
             // double-render). With no live entry — a non-streamed path — push it.
             AgentEvent::AssistantText(t) => {
@@ -162,7 +160,11 @@ impl App {
                 self.transcript
                     .push(Entry::tool(format!("{name}(…) running…")));
             }
-            AgentEvent::ToolFinished { name, summary, image_path } => {
+            AgentEvent::ToolFinished {
+                name,
+                summary,
+                image_path,
+            } => {
                 // Replace the most recent "running…" card for this tool, if any,
                 // so the card collapses into its result in place. The leading
                 // marker glyph is the renderer's job — the text carries none, or
@@ -188,7 +190,8 @@ impl App {
             }
             AgentEvent::Applied { summary } => {
                 self.status.applied_count += 1;
-                self.transcript.push(Entry::system(format!("applied — {summary}")));
+                self.transcript
+                    .push(Entry::system(format!("applied — {summary}")));
             }
             AgentEvent::Usage {
                 input_tokens,
@@ -213,9 +216,15 @@ impl App {
                     "context compacted: {messages_before} → {messages_after} messages"
                 )));
             }
-            AgentEvent::Reviewed { round, score, defects } => {
+            AgentEvent::Reviewed {
+                round,
+                score,
+                defects,
+            } => {
                 let msg = if defects.is_empty() {
-                    format!("design review (round {round}): score {score}/10 — no functional defects")
+                    format!(
+                        "design review (round {round}): score {score}/10 — no functional defects"
+                    )
                 } else {
                     format!(
                         "design review (round {round}): score {score}/10 — {} defect(s) to fix:\n  {}",

@@ -16,8 +16,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use gordian_core::testing::{ScriptedClient, final_text, tool_call};
 use gordian_core::{
-    Agent, AgentEvent, ApplyInfo, Approvals, AutoApprove, Provider, ReviewOutcome, RunMode,
-    TestBackend, ToolCall, ToolOutcome,
+    Agent, AgentEvent, ApplyInfo, Approvals, AutoApprove, ChatMessage, ChatStreamEvent,
+    EventStream, Provider, ReviewOutcome, RunMode, StopReason, StreamChunk, TestBackend, Tool,
+    ToolCall, ToolOutcome,
 };
 use serde_json::{Value, json};
 
@@ -43,15 +44,21 @@ impl TestBackend for StubBackend {
         self.runs.lock().unwrap().push((call.fn_name.clone(), mode));
         match (call.fn_name.as_str(), mode) {
             ("apply_design", RunMode::Preview) => {
-                let compiles =
-                    call.fn_arguments.get("compiles").and_then(Value::as_bool).unwrap_or(true);
+                let compiles = call
+                    .fn_arguments
+                    .get("compiles")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
                 ToolOutcome {
                     value: if compiles {
                         json!({ "ok": true, "would_write": true, "diff": { "added": ["R1"] } })
                     } else {
                         json!({ "ok": false, "errors": 1, "diagnostics": ["bad part"] })
                     },
-                    apply: Some(ApplyInfo { ready: compiles, ..Default::default() }),
+                    apply: Some(ApplyInfo {
+                        ready: compiles,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }
             }
@@ -81,7 +88,10 @@ fn agent(backend: StubBackend, completions: Vec<gordian_core::StreamEnd>) -> Age
 #[tokio::test]
 async fn gate_previews_then_commits_on_approve() {
     let runs = Arc::new(Mutex::new(Vec::new()));
-    let backend = StubBackend { runs: Arc::clone(&runs), ..Default::default() };
+    let backend = StubBackend {
+        runs: Arc::clone(&runs),
+        ..Default::default()
+    };
     let mut agent = agent(
         backend,
         vec![
@@ -107,13 +117,19 @@ async fn gate_previews_then_commits_on_approve() {
         ]
     );
     // The internal preview probe is not counted as a tool call.
-    assert_eq!(out.tool_calls_made, 2, "search + apply (preview probe uncounted)");
+    assert_eq!(
+        out.tool_calls_made, 2,
+        "search + apply (preview probe uncounted)"
+    );
 }
 
 #[tokio::test]
 async fn gate_rejects_and_never_commits() {
     let runs = Arc::new(Mutex::new(Vec::new()));
-    let backend = StubBackend { runs: Arc::clone(&runs), ..Default::default() };
+    let backend = StubBackend {
+        runs: Arc::clone(&runs),
+        ..Default::default()
+    };
     let mut agent = agent(
         backend,
         vec![
@@ -140,11 +156,18 @@ async fn gate_skips_approval_when_preview_not_ready() {
     // diagnostics straight back with NO approval prompt and NO commit. A rejecting
     // approver proves approve() is never consulted.
     let runs = Arc::new(Mutex::new(Vec::new()));
-    let backend = StubBackend { runs: Arc::clone(&runs), ..Default::default() };
+    let backend = StubBackend {
+        runs: Arc::clone(&runs),
+        ..Default::default()
+    };
     let mut agent = agent(
         backend,
         vec![
-            tool_call("t1", "apply_design", json!({ "commit": true, "compiles": false })),
+            tool_call(
+                "t1",
+                "apply_design",
+                json!({ "commit": true, "compiles": false }),
+            ),
             final_text("will fix"),
         ],
     );
@@ -161,7 +184,11 @@ async fn gate_skips_approval_when_preview_not_ready() {
     let out = agent.run_turn("go", &mut approvals, None).await.unwrap();
     assert!(!out.applied);
     let runs = runs.lock().unwrap();
-    assert_eq!(*runs, vec![("apply_design".into(), RunMode::Preview)], "only the preview ran");
+    assert_eq!(
+        *runs,
+        vec![("apply_design".into(), RunMode::Preview)],
+        "only the preview ran"
+    );
 }
 
 #[tokio::test]
@@ -179,7 +206,10 @@ async fn stall_after_authoring_is_nudged_then_commits() {
     let mut approvals = AutoApprove::yes();
 
     let out = agent.run_turn("go", &mut approvals, None).await.unwrap();
-    assert!(out.applied, "the nudge drove the stalled model to commit: {out:?}");
+    assert!(
+        out.applied,
+        "the nudge drove the stalled model to commit: {out:?}"
+    );
     assert_eq!(out.final_text, "done");
 }
 
@@ -210,12 +240,17 @@ async fn stall_nudge_is_bounded_and_gives_up() {
 async fn second_turn_sees_the_first_turns_messages() {
     let (client, seen) =
         ScriptedClient::recording(vec![final_text("answer one"), final_text("answer two")]);
-    let mut agent =
-        Agent::with_test_backend(client, Box::new(StubBackend::default()), "sys");
+    let mut agent = Agent::with_test_backend(client, Box::new(StubBackend::default()), "sys");
     let mut approvals = AutoApprove::yes();
 
-    agent.run_turn("first prompt", &mut approvals, None).await.unwrap();
-    agent.run_turn("second prompt", &mut approvals, None).await.unwrap();
+    agent
+        .run_turn("first prompt", &mut approvals, None)
+        .await
+        .unwrap();
+    agent
+        .run_turn("second prompt", &mut approvals, None)
+        .await
+        .unwrap();
 
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 2, "one model call per turn");
@@ -240,11 +275,19 @@ async fn usage_tokens_flow_through_completions() {
     let mut approvals = AutoApprove::yes();
     let (tx, mut rx) = unbounded_channel();
 
-    agent.run_turn("hi", &mut approvals, Some(&tx)).await.unwrap();
+    agent
+        .run_turn("hi", &mut approvals, Some(&tx))
+        .await
+        .unwrap();
 
     let mut saw_usage = false;
     while let Ok(ev) = rx.try_recv() {
-        if let AgentEvent::Usage { input_tokens, output_tokens, .. } = ev {
+        if let AgentEvent::Usage {
+            input_tokens,
+            output_tokens,
+            ..
+        } = ev
+        {
             assert_eq!((input_tokens, output_tokens), (1234, 56));
             saw_usage = true;
         }
@@ -258,11 +301,17 @@ async fn assistant_prose_streams_as_deltas_then_one_final_text() {
     // AssistantDelta events (concatenating to the full text) and is finalized once
     // as a single AssistantText.
     use tokio::sync::mpsc::unbounded_channel;
-    let mut agent = agent(StubBackend::default(), vec![final_text("hello there, world")]);
+    let mut agent = agent(
+        StubBackend::default(),
+        vec![final_text("hello there, world")],
+    );
     let mut approvals = AutoApprove::yes();
     let (tx, mut rx) = unbounded_channel();
 
-    let out = agent.run_turn("go", &mut approvals, Some(&tx)).await.unwrap();
+    let out = agent
+        .run_turn("go", &mut approvals, Some(&tx))
+        .await
+        .unwrap();
     assert_eq!(out.final_text, "hello there, world");
 
     let mut deltas = Vec::new();
@@ -274,9 +323,186 @@ async fn assistant_prose_streams_as_deltas_then_one_final_text() {
             _ => {}
         }
     }
-    assert!(deltas.len() >= 2, "prose streams as multiple deltas: {deltas:?}");
-    assert_eq!(deltas.concat(), "hello there, world", "deltas reassemble the text");
-    assert_eq!(finals, vec!["hello there, world".to_string()], "finalized exactly once");
+    assert!(
+        deltas.len() >= 2,
+        "prose streams as multiple deltas: {deltas:?}"
+    );
+    assert_eq!(
+        deltas.concat(),
+        "hello there, world",
+        "deltas reassemble the text"
+    );
+    assert_eq!(
+        finals,
+        vec!["hello there, world".to_string()],
+        "finalized exactly once"
+    );
+}
+
+#[tokio::test]
+async fn text_only_chunk_stream_without_end_completes_turn() {
+    use futures::{StreamExt, stream};
+    use tokio::sync::mpsc::unbounded_channel;
+
+    struct ChunkOnlyClient;
+
+    #[async_trait]
+    impl Provider for ChunkOnlyClient {
+        async fn stream<'a>(
+            &'a self,
+            _system: &'a str,
+            _messages: &'a [ChatMessage],
+            _tools: &'a [Tool],
+        ) -> anyhow::Result<EventStream<'a>> {
+            Ok(stream::iter(vec![
+                Ok(ChatStreamEvent::Chunk(StreamChunk {
+                    content: "hel".into(),
+                })),
+                Ok(ChatStreamEvent::Chunk(StreamChunk {
+                    content: "lo".into(),
+                })),
+            ])
+            .boxed())
+        }
+    }
+
+    let mut agent =
+        Agent::with_test_backend(ChunkOnlyClient, Box::new(StubBackend::default()), "sys");
+    let mut approvals = AutoApprove::yes();
+    let (tx, mut rx) = unbounded_channel();
+
+    let out = agent
+        .run_turn("go", &mut approvals, Some(&tx))
+        .await
+        .unwrap();
+
+    assert_eq!(out.final_text, "hello");
+    assert_eq!(out.stop_reason, StopReason::Completed);
+    let mut finals = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let AgentEvent::AssistantText(t) = ev {
+            finals.push(t);
+        }
+    }
+    assert_eq!(
+        finals,
+        vec!["hello".to_string()],
+        "text-only streams still finalize once"
+    );
+}
+
+#[tokio::test]
+async fn empty_stream_without_end_completes_empty_turn() {
+    use futures::{StreamExt, stream};
+
+    struct EmptyStreamClient;
+
+    #[async_trait]
+    impl Provider for EmptyStreamClient {
+        async fn stream<'a>(
+            &'a self,
+            _system: &'a str,
+            _messages: &'a [ChatMessage],
+            _tools: &'a [Tool],
+        ) -> anyhow::Result<EventStream<'a>> {
+            Ok(stream::empty().boxed())
+        }
+    }
+
+    let mut agent =
+        Agent::with_test_backend(EmptyStreamClient, Box::new(StubBackend::default()), "sys");
+    let mut approvals = AutoApprove::yes();
+
+    let out = agent.run_turn("go", &mut approvals, None).await.unwrap();
+
+    assert_eq!(out.final_text, "");
+    assert_eq!(out.stop_reason, StopReason::Completed);
+    assert_eq!(out.tool_calls_made, 0);
+}
+
+#[tokio::test]
+async fn tool_call_chunk_stream_without_end_falls_back_to_complete() {
+    use futures::{StreamExt, stream};
+    use genai::chat::ToolChunk;
+    use gordian_core::{MessageContent, StreamEnd};
+
+    struct ToolEofClient {
+        streams: Mutex<usize>,
+        completes: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl Provider for ToolEofClient {
+        async fn complete(
+            &self,
+            _system: &str,
+            _messages: &[ChatMessage],
+            _tools: &[Tool],
+        ) -> anyhow::Result<StreamEnd> {
+            let mut completes = self.completes.lock().unwrap();
+            *completes += 1;
+            Ok(if *completes == 1 {
+                tool_call("t1", "get_design", json!({}))
+            } else {
+                StreamEnd {
+                    captured_content: Some(MessageContent::from_text("done")),
+                    ..Default::default()
+                }
+            })
+        }
+
+        async fn stream<'a>(
+            &'a self,
+            _system: &'a str,
+            _messages: &'a [ChatMessage],
+            _tools: &'a [Tool],
+        ) -> anyhow::Result<EventStream<'a>> {
+            let mut streams = self.streams.lock().unwrap();
+            *streams += 1;
+            if *streams == 1 {
+                Ok(
+                    stream::iter(vec![Ok(ChatStreamEvent::ToolCallChunk(ToolChunk {
+                        tool_call: ToolCall {
+                            call_id: "t1".into(),
+                            fn_name: "get_design".into(),
+                            fn_arguments: json!({}),
+                            thought_signatures: None,
+                        },
+                    }))])
+                    .boxed(),
+                )
+            } else {
+                Ok(stream::iter(vec![Ok(ChatStreamEvent::Chunk(StreamChunk {
+                    content: "done".into(),
+                }))])
+                .boxed())
+            }
+        }
+    }
+
+    let runs = Arc::new(Mutex::new(Vec::new()));
+    let backend = StubBackend {
+        runs: Arc::clone(&runs),
+        ..Default::default()
+    };
+    let mut agent = Agent::with_test_backend(
+        ToolEofClient {
+            streams: Mutex::new(0),
+            completes: Mutex::new(0),
+        },
+        Box::new(backend),
+        "sys",
+    );
+    let mut approvals = AutoApprove::yes();
+
+    let out = agent.run_turn("go", &mut approvals, None).await.unwrap();
+
+    assert_eq!(out.final_text, "done");
+    assert_eq!(out.tool_calls_made, 1);
+    assert_eq!(
+        *runs.lock().unwrap(),
+        vec![("get_design".into(), RunMode::Normal)]
+    );
 }
 
 #[tokio::test]
@@ -292,7 +518,10 @@ async fn applied_event_carries_the_domain_summary() {
     let mut approvals = AutoApprove::yes();
     let (tx, mut rx) = unbounded_channel();
 
-    agent.run_turn("go", &mut approvals, Some(&tx)).await.unwrap();
+    agent
+        .run_turn("go", &mut approvals, Some(&tx))
+        .await
+        .unwrap();
 
     let mut summary = None;
     while let Ok(ev) = rx.try_recv() {
@@ -322,10 +551,19 @@ async fn reviewed_turn_feeds_a_defect_into_a_fix_turn_then_re_reviews_clean() {
 
     // Round 0 review finds a defect → one fix turn → round 1 review is clean.
     let reviews = Arc::new(Mutex::new(VecDeque::from(vec![
-        ReviewOutcome { score: 6.0, defects: vec!["R1 has no pulldown".into()] },
-        ReviewOutcome { score: 9.0, defects: vec![] },
+        ReviewOutcome {
+            score: 6.0,
+            defects: vec!["R1 has no pulldown".into()],
+        },
+        ReviewOutcome {
+            score: 9.0,
+            defects: vec![],
+        },
     ])));
-    let backend = StubBackend { reviews: Arc::clone(&reviews), ..Default::default() };
+    let backend = StubBackend {
+        reviews: Arc::clone(&reviews),
+        ..Default::default()
+    };
     let mut agent = agent(
         backend,
         vec![
@@ -349,7 +587,10 @@ async fn reviewed_turn_feeds_a_defect_into_a_fix_turn_then_re_reviews_clean() {
     assert!(out.applied);
     assert_eq!(out.final_text, "defect fixed");
     // Both review rounds were consumed (round 0 found a defect, round 1 clean).
-    assert!(reviews.lock().unwrap().is_empty(), "both scripted reviews consumed");
+    assert!(
+        reviews.lock().unwrap().is_empty(),
+        "both scripted reviews consumed"
+    );
 
     let rounds = reviewed_rounds(&mut rx);
     assert_eq!(
@@ -365,9 +606,14 @@ async fn reviewed_turn_with_a_clean_first_review_runs_no_fix_turn() {
 
     // A single clean review: one Reviewed event, no fix turn (the script has no
     // extra completions, so a spurious fix turn would exhaust it and panic).
-    let reviews =
-        Arc::new(Mutex::new(VecDeque::from(vec![ReviewOutcome { score: 10.0, defects: vec![] }])));
-    let backend = StubBackend { reviews: Arc::clone(&reviews), ..Default::default() };
+    let reviews = Arc::new(Mutex::new(VecDeque::from(vec![ReviewOutcome {
+        score: 10.0,
+        defects: vec![],
+    }])));
+    let backend = StubBackend {
+        reviews: Arc::clone(&reviews),
+        ..Default::default()
+    };
     let mut agent = agent(
         backend,
         vec![
@@ -386,7 +632,11 @@ async fn reviewed_turn_with_a_clean_first_review_runs_no_fix_turn() {
     assert!(out.applied);
     assert_eq!(out.final_text, "committed");
     let rounds = reviewed_rounds(&mut rx);
-    assert_eq!(rounds, vec![(0, vec![])], "one clean review, no fix turn: {rounds:?}");
+    assert_eq!(
+        rounds,
+        vec![(0, vec![])],
+        "one clean review, no fix turn: {rounds:?}"
+    );
 }
 
 #[tokio::test]
@@ -400,7 +650,10 @@ async fn reviewed_turn_skips_review_when_nothing_committed() {
         score: 1.0,
         defects: vec!["should never surface".into()],
     }])));
-    let backend = StubBackend { reviews: Arc::clone(&reviews), ..Default::default() };
+    let backend = StubBackend {
+        reviews: Arc::clone(&reviews),
+        ..Default::default()
+    };
     // A pure-text answer: no authoring tool runs, so the turn commits nothing and
     // is not nudged.
     let mut agent = agent(backend, vec![final_text("here's what i found")]);
@@ -413,6 +666,13 @@ async fn reviewed_turn_skips_review_when_nothing_committed() {
         .unwrap();
 
     assert!(!out.applied, "a read-only turn commits nothing");
-    assert!(reviewed_rounds(&mut rx).is_empty(), "no review on a non-applied turn");
-    assert_eq!(reviews.lock().unwrap().len(), 1, "the scripted review was never consumed");
+    assert!(
+        reviewed_rounds(&mut rx).is_empty(),
+        "no review on a non-applied turn"
+    );
+    assert_eq!(
+        reviews.lock().unwrap().len(),
+        1,
+        "the scripted review was never consumed"
+    );
 }

@@ -13,23 +13,36 @@ use negotiated_mesh::pipeline::route_detailed;
 use negotiated_mesh::problem::RouteProblem;
 
 fn main() {
-    let name = std::env::args().nth(1).unwrap_or_else(|| "congested.json".into());
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures").join(&name);
+    let name = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "congested.json".into());
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(&name);
     let json = std::fs::read_to_string(&path).unwrap();
     let problem: RouteProblem = serde_json::from_str(&json).unwrap();
     println!("fixture {name}: {} connections", problem.connections.len());
 
     let t = Instant::now();
     let global = global_route(&problem);
-    println!("global_route       {:>8.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    println!(
+        "global_route       {:>8.1} ms",
+        t.elapsed().as_secs_f64() * 1e3
+    );
 
     let t = Instant::now();
     let mesh = CapacityMesh::build(&problem);
-    println!("mesh::build        {:>8.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    println!(
+        "mesh::build        {:>8.1} ms",
+        t.elapsed().as_secs_f64() * 1e3
+    );
 
     let t = Instant::now();
     let assignment = assign_crossings(&problem, &mesh, &global.plan);
-    println!("assign_crossings   {:>8.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    println!(
+        "assign_crossings   {:>8.1} ms",
+        t.elapsed().as_secs_f64() * 1e3
+    );
 
     let t = Instant::now();
     let cells = route_cells(&problem, &mesh, &assignment);

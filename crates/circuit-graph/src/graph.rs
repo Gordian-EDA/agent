@@ -70,7 +70,9 @@ impl CircuitGraph {
         for (i, n) in nodes.iter().enumerate() {
             for p in &n.pins {
                 if let Some(net) = &p.net {
-                    nets.entry(net.clone()).or_default().push((i, p.number.clone()));
+                    nets.entry(net.clone())
+                        .or_default()
+                        .push((i, p.number.clone()));
                 }
             }
         }

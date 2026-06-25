@@ -12,8 +12,9 @@
 //! prompt. Each lens retries its own JSON parse once; a total parse failure
 //! degrades to `(0.0, [])` (conservative — nothing actionable).
 
-use anyhow::Result;
 use crate::llm::{Binary, ChatMessage, ContentPart, MessageContent, Provider, completed_text};
+use anyhow::Result;
+use futures::future::join_all;
 use serde_json::Value;
 
 /// One independent NETLIST review pass, generalized: the DOMAIN passes the review
@@ -71,10 +72,7 @@ async fn review_ensemble(
         ])),
         None => ChatMessage::user(prompt),
     }];
-    let mut union: Vec<String> = Vec::new();
-    let mut min_score = f64::INFINITY;
-    let mut any = false;
-    for lens in lenses {
+    let passes = lenses.iter().map(|lens| {
         let lens_system = if lens.is_empty() {
             system.to_string()
         } else {
@@ -83,15 +81,26 @@ async fn review_ensemble(
                  (Still report any other clear fault you notice.)"
             )
         };
-        let mut parsed = None;
-        for _ in 0..2 {
-            let end = client.complete(&lens_system, &msgs, &[]).await?;
-            if let Some(v) = extract_json(&completed_text(&end)) {
-                parsed = Some(v);
-                break;
+
+        let msgs = msgs.clone();
+        async move {
+            let mut parsed = None;
+            for _ in 0..2 {
+                let end = client.complete(&lens_system, &msgs, &[]).await?;
+                if let Some(v) = extract_json(&completed_text(&end)) {
+                    parsed = Some(v);
+                    break;
+                }
             }
+            Ok::<_, anyhow::Error>(parsed)
         }
-        if let Some(v) = parsed {
+    });
+
+    let mut union: Vec<String> = Vec::new();
+    let mut min_score = f64::INFINITY;
+    let mut any = false;
+    for parsed in join_all(passes).await {
+        if let Some(v) = parsed? {
             any = true;
             let (score, defects) = parse_review(&v);
             min_score = min_score.min(score);
@@ -112,8 +121,14 @@ async fn review_ensemble(
 /// prefix) — so a union (across lenses, or with a deterministic check layer)
 /// never feeds two phrasings of one fault.
 pub fn same_defect(a: &str, b: &str) -> bool {
-    let refdes =
-        |s: &str| s.trim_start_matches("- ").split(':').next().unwrap_or("").trim().to_string();
+    let refdes = |s: &str| {
+        s.trim_start_matches("- ")
+            .split(':')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
     let (ra, rb) = (refdes(a), refdes(b));
     !ra.is_empty() && ra == rb
 }
@@ -121,7 +136,10 @@ pub fn same_defect(a: &str, b: &str) -> bool {
 /// Pull the verdict JSON from a reasoning+JSON response (prefer the block after
 /// `FINAL_JSON:`, else the last balanced `{...}` object).
 fn extract_json(text: &str) -> Option<Value> {
-    let tail = text.rsplit_once("FINAL_JSON:").map(|(_, b)| b).unwrap_or(text);
+    let tail = text
+        .rsplit_once("FINAL_JSON:")
+        .map(|(_, b)| b)
+        .unwrap_or(text);
     let cleaned = tail
         .trim()
         .trim_start_matches("```json")
@@ -140,7 +158,9 @@ fn extract_json(text: &str) -> Option<Value> {
             depth += 1;
         } else if b == b'}' {
             depth -= 1;
-            if depth == 0 && let Some(s) = start {
+            if depth == 0
+                && let Some(s) = start
+            {
                 last = Some(&text[s..=i]);
             }
         }
@@ -158,7 +178,12 @@ fn extract_json(text: &str) -> Option<Value> {
 fn parse_review(v: &Value) -> (f64, Vec<String>) {
     let score = v.get("score").and_then(Value::as_f64).unwrap_or(0.0);
     let mut defects = Vec::new();
-    for d in v.get("defects").and_then(Value::as_array).into_iter().flatten() {
+    for d in v
+        .get("defects")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         let sev = d.get("severity").and_then(Value::as_str).unwrap_or("");
         let conf = d.get("confidence").and_then(Value::as_str).unwrap_or("");
         if matches!(sev, "critical" | "major") && conf == "high" {
@@ -177,7 +202,11 @@ fn parse_review(v: &Value) -> (f64, Vec<String>) {
 
 /// The first non-empty of two field values (the netlist key, then the layout key).
 fn pick<'a>(primary: &'a str, fallback: &'a str) -> &'a str {
-    if primary.is_empty() { fallback } else { primary }
+    if primary.is_empty() {
+        fallback
+    } else {
+        primary
+    }
 }
 
 #[cfg(test)]
@@ -227,7 +256,60 @@ FINAL_JSON:
         let (score, defects) = parse_review(&extract_json(text).unwrap());
         assert_eq!(score, 5.0);
         assert_eq!(defects.len(), 1, "only the high-confidence major");
-        assert!(defects[0].starts_with("- C1:"), "location → target prefix: {defects:?}");
+        assert!(
+            defects[0].starts_with("- C1:"),
+            "location → target prefix: {defects:?}"
+        );
         assert!(defects[0].contains("decoupling cap"));
+    }
+
+    #[tokio::test]
+    async fn review_lenses_are_dispatched_concurrently() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::time::{Duration, sleep};
+
+        struct SlowReviewer {
+            in_flight: Arc<AtomicUsize>,
+            max_in_flight: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for SlowReviewer {
+            async fn complete(
+                &self,
+                _system: &str,
+                _messages: &[ChatMessage],
+                _tools: &[crate::Tool],
+            ) -> anyhow::Result<crate::StreamEnd> {
+                let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+                sleep(Duration::from_millis(20)).await;
+                self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                Ok(crate::StreamEnd {
+                    captured_content: Some(MessageContent::from_text(
+                        r#"FINAL_JSON: {"score": 9, "defects": []}"#,
+                    )),
+                    ..Default::default()
+                })
+            }
+        }
+
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let reviewer = SlowReviewer {
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            max_in_flight: Arc::clone(&max_in_flight),
+        };
+
+        let (_score, defects) =
+            review_ensemble(&reviewer, "sys", &["", "power", "digital"], "prompt", None)
+                .await
+                .unwrap();
+
+        assert!(defects.is_empty());
+        assert!(
+            max_in_flight.load(Ordering::SeqCst) > 1,
+            "independent lenses should overlap instead of running serially"
+        );
     }
 }

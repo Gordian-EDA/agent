@@ -11,7 +11,9 @@ fn main() {
         Ok(k) => k,
         Err(e) => {
             eprintln!("could not connect to KiCAD IPC: {e}");
-            eprintln!("(is KiCAD running with api.enable_server=true? socket: $KICAD_API_SOCKET or /tmp/kicad/api.sock)");
+            eprintln!(
+                "(is KiCAD running with api.enable_server=true? socket: $KICAD_API_SOCKET or /tmp/kicad/api.sock)"
+            );
             std::process::exit(1);
         }
     };

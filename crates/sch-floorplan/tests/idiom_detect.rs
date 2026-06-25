@@ -8,10 +8,15 @@ use sch_floorplan::floorplan;
 use std::path::Path;
 
 fn compile_fixture(provider: &SymbolTable, name: &str) -> circuit_lang::Design {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../docs/validation/{name}.circuit.yaml"));
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("../../docs/validation/{name}.circuit.yaml"));
     let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
     let result = circuit_lang::compile(&src, provider);
-    assert!(!result.diagnostics.has_errors(), "{name}: {:#?}", result.diagnostics);
+    assert!(
+        !result.diagnostics.has_errors(),
+        "{name}: {:#?}",
+        result.diagnostics
+    );
     result.design.expect("design")
 }
 
@@ -32,8 +37,17 @@ fn infer_ir_recognizes_crystal_and_decoupling_idioms() {
         .find(|i| i.kind == "crystal")
         .expect("crystal idiom detected on idiom-stm32");
     assert_eq!(crystal.anchor, "U1");
-    assert!(crystal.parts.contains(&"Y1".to_string()), "crystal includes Y1: {:?}", crystal.parts);
-    assert_eq!(crystal.parts.len(), 3, "crystal = Y1 + 2 load caps: {:?}", crystal.parts);
+    assert!(
+        crystal.parts.contains(&"Y1".to_string()),
+        "crystal includes Y1: {:?}",
+        crystal.parts
+    );
+    assert_eq!(
+        crystal.parts.len(),
+        3,
+        "crystal = Y1 + 2 load caps: {:?}",
+        crystal.parts
+    );
 
     // A decoupling bank (>=3 rail-to-rail caps on the +3V3 rail) is recognized.
     let deco = ir
@@ -42,7 +56,11 @@ fn infer_ir_recognizes_crystal_and_decoupling_idioms() {
         .find(|i| i.kind == "decoupling")
         .expect("decoupling idiom detected on idiom-stm32");
     assert_eq!(deco.anchor, "U1");
-    assert!(deco.parts.len() >= 3, "decoupling bank >=3 caps: {:?}", deco.parts);
+    assert!(
+        deco.parts.len() >= 3,
+        "decoupling bank >=3 caps: {:?}",
+        deco.parts
+    );
 
     // FROZEN idioms (crystal/decoupling) pin their members so the search ships the
     // cluster intact; a REPORT-ONLY idiom (led_indicator) is recognized but flows
@@ -89,7 +107,10 @@ fn decoupling_bank_survives_a_shared_rail_to_a_second_ic() {
         .iter()
         .find(|i| i.kind == "decoupling")
         .expect("decoupling bank still detected with an LDO on the same +3V3 rail");
-    assert_eq!(deco.anchor, "U1", "bank decouples the MCU, not the regulator");
+    assert_eq!(
+        deco.anchor, "U1",
+        "bank decouples the MCU, not the regulator"
+    );
     assert!(
         deco.parts.len() >= 3,
         "the full bank survives the shared rail (>=3 caps): {:?}",

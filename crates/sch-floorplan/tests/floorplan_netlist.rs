@@ -32,8 +32,12 @@ use sch_floorplan::floorplan::{self, LayoutIr};
 /// TIER 1 — the hand-tuned reference targets. Held to the FULL bar: electrically
 /// truthful AND zero layout warnings AND ERC-clean. These match the human
 /// references, so any regression must show up here.
-const REFERENCE_FIXTURES: &[&str] =
-    &["divider-filter", "mcp1703-power-entry", "555-blinker", "uart-level-translator"];
+const REFERENCE_FIXTURES: &[&str] = &[
+    "divider-filter",
+    "mcp1703-power-entry",
+    "555-blinker",
+    "uart-level-translator",
+];
 
 /// TIER 2 — deliberately HARD circuits (large MCUs, BGAs, RF, mixed-signal) that
 /// stress the engine far past the tuned cases. The aesthetic bar is NOT expected
@@ -43,13 +47,13 @@ const REFERENCE_FIXTURES: &[&str] =
 /// and no real ERC errors. This is the coverage that catches a connectivity or
 /// finalize bug the four clean fixtures are too small to surface.
 const CHALLENGE_FIXTURES: &[&str] = &[
-    "bedrock-oneshot-bluepill",      // STM32H743 100-pin LQFP dev board
-    "bedrock-selfrepair-bluepill",   // STM32 + HSE/32k crystals
-    "rf-lna-frontend",               // ADL5542 RF gain block + coax (HF/RF)
-    "mixed-signal-adc-frontend",     // MCP6002 op-amp -> ADS1115 I2C ADC (mixed-signal)
-    "bga-fpga-ice40",                // ICE40HX8K-BG121 121-ball BGA, dual-rail (BGA)
-    "grid-demo",                     // authored `layout:` 2D grid (NE555 blinker)
-    "idiom-stm32",                   // distributed local grounds (≥2 GND symbols) + idioms
+    "bedrock-oneshot-bluepill",    // STM32H743 100-pin LQFP dev board
+    "bedrock-selfrepair-bluepill", // STM32 + HSE/32k crystals
+    "rf-lna-frontend",             // ADL5542 RF gain block + coax (HF/RF)
+    "mixed-signal-adc-frontend",   // MCP6002 op-amp -> ADS1115 I2C ADC (mixed-signal)
+    "bga-fpga-ice40",              // ICE40HX8K-BG121 121-ball BGA, dual-rail (BGA)
+    "grid-demo",                   // authored `layout:` 2D grid (NE555 blinker)
+    "idiom-stm32",                 // distributed local grounds (≥2 GND symbols) + idioms
 ];
 
 fn doc(name: &str, ext: &str) -> std::path::PathBuf {
@@ -62,7 +66,9 @@ fn nl_pin_matches(provider: &SymbolTable, lib_id: &str, authored: &str, nl_pin: 
     if authored == nl_pin {
         return true;
     }
-    let Some(sym) = provider.symbol(lib_id) else { return false };
+    let Some(sym) = provider.symbol(lib_id) else {
+        return false;
+    };
     circuit_lang::provider::find_pin(&sym.pins, authored).map(|p| p.number.as_str()) == Some(nl_pin)
 }
 
@@ -106,8 +112,7 @@ fn floorplan_challenge_fixtures_emit_truthful_netlists_multisheet() {
     // or writes the process environment while we mutate it here.
     let prev = std::env::var_os("MULTISHEET_REFINE");
     unsafe { std::env::set_var("MULTISHEET_REFINE", "1") };
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_challenge_fixtures));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_challenge_fixtures));
     unsafe {
         match prev {
             Some(v) => std::env::set_var("MULTISHEET_REFINE", v),
@@ -211,23 +216,23 @@ const TOLERATED_ERC_KINDS: &[&str] = &[
 /// present, else `baseline_ir`), and assert the emitted sheet is electrically
 /// TRUTHFUL + on-grid + ERC-clean. With `strict_warnings`, also assert zero
 /// layout warnings (tier-1 readability bar).
-fn validate_fixture(
-    env: &KicadEnv,
-    provider: &SymbolTable,
-    name: &str,
-    strict_warnings: bool,
-) {
+fn validate_fixture(env: &KicadEnv, provider: &SymbolTable, name: &str, strict_warnings: bool) {
     {
         let src = std::fs::read_to_string(doc(name, "circuit.yaml")).unwrap();
         let result = circuit_lang::compile(&src, provider);
-        assert!(!result.diagnostics.has_errors(), "{name}: {:#?}", result.diagnostics);
+        assert!(
+            !result.diagnostics.has_errors(),
+            "{name}: {:#?}",
+            result.diagnostics
+        );
         let design = result.design.unwrap();
 
         let ir = match std::fs::read_to_string(doc(name, "layout.json")) {
             Ok(s) => LayoutIr::from_json(&s).unwrap(),
             Err(_) => floorplan::baseline_ir(&design),
         };
-        let out = floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let out = floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
 
         // Readability invariant (tier-1 only): the reference fixtures emit with ZERO
         // layout warnings (no symbol/text overlap, no value-text smeared onto a
@@ -263,21 +268,30 @@ fn validate_fixture(
         // (resolved through the extends chain) already drives the rail.
         let erc = KicadCli::new(env).erc(&sch).unwrap();
         let tolerated = |kind: &str| {
-            kind == "lib_symbol_issues"
-                || (!strict_warnings && TOLERATED_ERC_KINDS.contains(&kind))
+            kind == "lib_symbol_issues" || (!strict_warnings && TOLERATED_ERC_KINDS.contains(&kind))
         };
         let real_errors: Vec<_> = erc
             .violations
             .iter()
             .filter(|v| v.severity == "error" && !tolerated(&v.kind))
             .collect();
-        assert!(real_errors.is_empty(), "{name}: real ERC errors: {real_errors:#?}");
+        assert!(
+            real_errors.is_empty(),
+            "{name}: real ERC errors: {real_errors:#?}"
+        );
 
         // No off-grid wire/pin endpoints: the reframe shift must stay a grid
         // multiple so connectivity geometry remains on the 1.27 mm grid (a
         // non-grid shift connects fine but ERCs every endpoint as off-grid).
-        let off_grid = erc.violations.iter().filter(|v| v.kind == "endpoint_off_grid").count();
-        assert_eq!(off_grid, 0, "{name}: {off_grid} off-grid endpoints (reframe shift not snapped?)");
+        let off_grid = erc
+            .violations
+            .iter()
+            .filter(|v| v.kind == "endpoint_off_grid")
+            .count();
+        assert_eq!(
+            off_grid, 0,
+            "{name}: {off_grid} off-grid endpoints (reframe shift not snapped?)"
+        );
 
         // Truthfulness: every authored pin lands on exactly one netlist net;
         // authored nets neither split nor merge.
@@ -293,7 +307,9 @@ fn validate_fixture(
                     continue;
                 }
                 for (pin, target) in &comp.pins {
-                    let circuit_lang::model::PinTarget::Net(want) = target else { continue };
+                    let circuit_lang::model::PinTarget::Net(want) = target else {
+                        continue;
+                    };
                     let got = nl.nets.iter().position(|n| {
                         n.nodes
                             .iter()

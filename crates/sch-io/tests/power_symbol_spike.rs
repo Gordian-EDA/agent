@@ -14,13 +14,24 @@ fn power_symbol_value_names_the_net() {
 
     let mut w = SchematicWriter::new();
     // R1 vertical at (127, 63.5): pin 1 endpoint (127, 59.69), pin 2 (127, 67.31).
-    w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0).unwrap();
+    w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0)
+        .unwrap();
     // Stock GND at R1 pin 2 (graphic extends down; connection point = origin).
-    w.add_power_symbol(&env, "power:GND", "#PWR01", "GND", [127.0, 67.31], 0.0).unwrap();
+    w.add_power_symbol(&env, "power:GND", "#PWR01", "GND", [127.0, 67.31], 0.0)
+        .unwrap();
     // Donor power:VCC renamed to a custom rail at R1 pin 1.
-    w.add_power_symbol(&env, "power:VCC", "#PWR02", "RAIL_CUSTOM", [127.0, 59.69], 0.0).unwrap();
+    w.add_power_symbol(
+        &env,
+        "power:VCC",
+        "#PWR02",
+        "RAIL_CUSTOM",
+        [127.0, 59.69],
+        0.0,
+    )
+    .unwrap();
     // PWR_FLAG pin-coincident with the GND attach point (label-free attachment).
-    w.add_power_flag_at(&env, "#FLG01", [127.0, 67.31], 0.0).unwrap();
+    w.add_power_flag_at(&env, "#FLG01", [127.0, 67.31], 0.0)
+        .unwrap();
 
     let tmp = tempfile::tempdir().unwrap();
     let sch = tmp.path().join("spike.kicad_sch");
@@ -49,8 +60,16 @@ fn power_symbol_value_names_the_net() {
             .map(|n| n.name.clone())
             .unwrap_or_default()
     };
-    assert_eq!(net_of("R1", "2"), "GND", "R1 pin 2 should be on the GND net");
-    assert_eq!(net_of("R1", "1"), "RAIL_CUSTOM", "R1 pin 1 should be on the RAIL_CUSTOM net (Value-rename)");
+    assert_eq!(
+        net_of("R1", "2"),
+        "GND",
+        "R1 pin 2 should be on the GND net"
+    );
+    assert_eq!(
+        net_of("R1", "1"),
+        "RAIL_CUSTOM",
+        "R1 pin 1 should be on the RAIL_CUSTOM net (Value-rename)"
+    );
 
     // (d) the coincident PWR_FLAG drives GND -> zero ERC errors on that net.
     let erc = KicadCli::new(&env).erc(&sch).expect("erc");
@@ -69,5 +88,8 @@ fn power_symbol_value_names_the_net() {
         .filter(|v| v.severity == "error" && v.kind == "power_pin_not_driven")
         .filter(|v| v.items.iter().any(|i| i.description.contains("GND")))
         .collect();
-    assert!(gnd_errors.is_empty(), "GND undriven despite PWR_FLAG: {gnd_errors:?}");
+    assert!(
+        gnd_errors.is_empty(),
+        "GND undriven despite PWR_FLAG: {gnd_errors:?}"
+    );
 }

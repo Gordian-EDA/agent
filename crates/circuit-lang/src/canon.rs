@@ -287,7 +287,7 @@ nets:
     #[test]
     fn decouple_multivalue_round_trip_is_model_stable() {
         // compile() lives in lib.rs; use parse+desugar here with a provider exposing VDD/VSS by name.
-        use crate::provider::{SymbolTable, PinType};
+        use crate::provider::{PinType, SymbolTable};
         let mut p = SymbolTable::with_basics();
         p.mock_add(
             "M:CPU",

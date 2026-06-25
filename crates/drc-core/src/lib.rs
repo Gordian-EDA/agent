@@ -37,8 +37,8 @@
 
 pub use pcb_model as problem;
 
-mod ctx;
 pub mod connectivity;
+mod ctx;
 pub mod rules;
 
 pub use connectivity::Violation;

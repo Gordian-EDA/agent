@@ -18,8 +18,12 @@ use kicad_symbol::SymbolTable;
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let yaml = args.next().expect("usage: render_multisheet <draft.yaml> <out_dir>");
-    let out_dir = args.next().expect("usage: render_multisheet <draft.yaml> <out_dir>");
+    let yaml = args
+        .next()
+        .expect("usage: render_multisheet <draft.yaml> <out_dir>");
+    let out_dir = args
+        .next()
+        .expect("usage: render_multisheet <draft.yaml> <out_dir>");
     std::fs::create_dir_all(&out_dir)?;
 
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
@@ -27,18 +31,29 @@ fn main() -> anyhow::Result<()> {
     let src = std::fs::read_to_string(&yaml)?;
     let result = circuit_lang::compile(&src, &provider);
     let design = result.design.ok_or_else(|| {
-        let errs: Vec<String> = result.diagnostics.0.iter().map(|d| d.message.clone()).collect();
+        let errs: Vec<String> = result
+            .diagnostics
+            .0
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
         anyhow::anyhow!("compile produced no design: {}", errs.join("; "))
     })?;
 
     if design.blocks.len() < 2 {
-        eprintln!("only {} block(s) — composing needs a multi-block design", design.blocks.len());
+        eprintln!(
+            "only {} block(s) — composing needs a multi-block design",
+            design.blocks.len()
+        );
     }
 
     // COMPOSE the single committable sheet (refine into groups, per-group anneal, tile each as
     // a labeled bounding box, join cross-block nets via global labels) — the production path.
-    let root =
-        gordian_core::multisheet::compose_single_sheet(&env, &design, std::path::Path::new(&out_dir))?;
+    let root = gordian_core::multisheet::compose_single_sheet(
+        &env,
+        &design,
+        std::path::Path::new(&out_dir),
+    )?;
     println!("wrote composed sheet -> {}", root.display());
 
     // Render it to a PNG for the critic.
@@ -46,14 +61,20 @@ fn main() -> anyhow::Result<()> {
     let svg_path = KicadCli::new(&env).export_svg_opts(&root, svg_dir.path(), true)?;
     let svg = std::fs::read_to_string(&svg_path)?;
     let png = gordian_core::render::svg_to_png(&svg, 2400)?;
-    let stem =
-        std::path::Path::new(&yaml).file_stem().and_then(|s| s.to_str()).unwrap_or("composed");
+    let stem = std::path::Path::new(&yaml)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("composed");
     let out_png = format!("{out_dir}/{stem}.png");
     std::fs::write(&out_png, png)?;
     println!("rendered -> {out_png}");
 
     match KicadCli::new(&env).erc(&root) {
-        Ok(r) => println!("ERC: {} errors, {} warnings", r.error_count(), r.warning_count()),
+        Ok(r) => println!(
+            "ERC: {} errors, {} warnings",
+            r.error_count(),
+            r.warning_count()
+        ),
         Err(e) => println!("ERC failed: {e}"),
     }
     Ok(())

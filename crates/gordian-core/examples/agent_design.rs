@@ -45,12 +45,18 @@ async fn main() -> anyhow::Result<()> {
         let (mut tin, mut tout) = (0u64, 0u64);
         while let Some(ev) = rx.recv().await {
             match ev {
-                gordian_core::AgentEvent::Usage { input_tokens, output_tokens, .. } => {
+                gordian_core::AgentEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    ..
+                } => {
                     tin += input_tokens;
                     tout += output_tokens;
                 }
                 gordian_core::AgentEvent::ToolStarted { name } => eprintln!("  tool -> {name}"),
-                gordian_core::AgentEvent::ToolFinished { name, summary, .. } => eprintln!("       {name}: {summary}"),
+                gordian_core::AgentEvent::ToolFinished { name, summary, .. } => {
+                    eprintln!("       {name}: {summary}")
+                }
                 gordian_core::AgentEvent::AssistantText(t) if !t.trim().is_empty() => {
                     eprintln!("  ...: {}", t.trim());
                 }
@@ -74,7 +80,11 @@ async fn main() -> anyhow::Result<()> {
     // Save the agent's DRAFT (its multi-block source) regardless of whether it committed,
     // so a dense design can be re-emitted as multi-sheet even if the agent only previewed.
     if draft_path.exists() {
-        std::fs::copy(&draft_path, std::path::Path::new(&out).with_extension("draft.yaml")).ok();
+        std::fs::copy(
+            &draft_path,
+            std::path::Path::new(&out).with_extension("draft.yaml"),
+        )
+        .ok();
     }
 
     if !sch_path.exists() {
@@ -91,16 +101,32 @@ async fn main() -> anyhow::Result<()> {
     // Keep the source sch + a lifted YAML next to the PNG so a defect can be
     // reproduced deterministically (re-render via layout_spike) without re-spending
     // an LLM call.
-    std::fs::copy(&sch_path, std::path::Path::new(&out).with_extension("kicad_sch")).ok();
+    std::fs::copy(
+        &sch_path,
+        std::path::Path::new(&out).with_extension("kicad_sch"),
+    )
+    .ok();
     if let Ok(yaml) = sch_io::read::lift(&env, &sch_path) {
-        std::fs::write(std::path::Path::new(&out).with_extension("circuit.yaml"), yaml).ok();
+        std::fs::write(
+            std::path::Path::new(&out).with_extension("circuit.yaml"),
+            yaml,
+        )
+        .ok();
     }
     if draft_path.exists() {
-        std::fs::copy(&draft_path, std::path::Path::new(&out).with_extension("draft.yaml")).ok();
+        std::fs::copy(
+            &draft_path,
+            std::path::Path::new(&out).with_extension("draft.yaml"),
+        )
+        .ok();
     }
 
     match KicadCli::new(&env).erc(&sch_path) {
-        Ok(r) => eprintln!("ERC: {} errors, {} warnings", r.error_count(), r.warning_count()),
+        Ok(r) => eprintln!(
+            "ERC: {} errors, {} warnings",
+            r.error_count(),
+            r.warning_count()
+        ),
         Err(e) => eprintln!("ERC failed: {e}"),
     }
     println!("rendered {out}");

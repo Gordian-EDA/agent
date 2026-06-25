@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use kicad_env::KicadEnv;
 use kicad_footprint::{
-    CourtyardSource, Footprint, FootprintCatalog, FootprintId, LibraryId, PadTechnology, SearchQuery,
+    CourtyardSource, Footprint, FootprintCatalog, FootprintId, LibraryId, PadTechnology,
+    SearchQuery,
 };
 
 fn fixtures() -> PathBuf {
@@ -115,7 +116,11 @@ fn r0603_two_smd_pads_and_rect_courtyard() {
     assert!(fp.pads.iter().all(|p| p.shape == "roundrect"));
 
     assert_eq!(fp.courtyard_source, CourtyardSource::ExplicitCourtyard);
-    assert!(close(fp.courtyard.width(), 2.96), "{}", fp.courtyard.width());
+    assert!(
+        close(fp.courtyard.width(), 2.96),
+        "{}",
+        fp.courtyard.width()
+    );
     assert!(
         close(fp.courtyard.height(), 1.46),
         "{}",
@@ -134,17 +139,33 @@ fn sot23_three_smd_pads_and_aggregated_courtyard() {
 
     assert_eq!(fp.courtyard_source, CourtyardSource::ExplicitCourtyard);
     assert!(close(fp.courtyard.min_x, -1.93) && close(fp.courtyard.max_x, 1.93));
-    assert!(close(fp.courtyard.width(), 3.86), "{}", fp.courtyard.width());
-    assert!(close(fp.courtyard.height(), 3.4), "{}", fp.courtyard.height());
+    assert!(
+        close(fp.courtyard.width(), 3.86),
+        "{}",
+        fp.courtyard.width()
+    );
+    assert!(
+        close(fp.courtyard.height(), 3.4),
+        "{}",
+        fp.courtyard.height()
+    );
 }
 
 #[test]
 fn pinheader_1x02_two_thru_hole_pads_with_drill() {
     let fp = load("PinHeader_1x02_P2.54mm_Vertical");
     assert_eq!(fp.pad_count(), 2);
-    assert!(fp.pads.iter().all(|p| p.technology == PadTechnology::ThruHole));
+    assert!(
+        fp.pads
+            .iter()
+            .all(|p| p.technology == PadTechnology::ThruHole)
+    );
     assert!(fp.pads.iter().all(|p| p.is_through_hole()));
-    assert!(fp.pads.iter().all(|p| p.drill.is_some_and(|d| close(d, 1.0))));
+    assert!(
+        fp.pads
+            .iter()
+            .all(|p| p.drill.is_some_and(|d| close(d, 1.0)))
+    );
     assert!(
         fp.pads
             .iter()
@@ -234,7 +255,10 @@ fn catalog_indexes_pretty_dirs_and_searches() {
     assert_eq!(catalog.library_count(), 2);
     assert_eq!(catalog.len(), 2);
     assert_eq!(
-        catalog.libraries().map(|l| l.id().as_str()).collect::<Vec<_>>(),
+        catalog
+            .libraries()
+            .map(|l| l.id().as_str())
+            .collect::<Vec<_>>(),
         ["Package_TO_SOT_SMD", "Resistor_SMD"]
     );
     let resistor = LibraryId::new("Resistor_SMD").unwrap();
@@ -252,9 +276,14 @@ fn catalog_indexes_pretty_dirs_and_searches() {
     assert_eq!(hits[0].pad_count, Some(2));
 
     // Lazy detail lookup is tagged with its id.
-    let fp = catalog.footprint(&fid("Package_TO_SOT_SMD:SOT-23")).unwrap();
+    let fp = catalog
+        .footprint(&fid("Package_TO_SOT_SMD:SOT-23"))
+        .unwrap();
     assert_eq!(fp.pad_count(), 3);
-    assert_eq!(fp.id.as_ref().map(|i| i.to_string()).as_deref(), Some("Package_TO_SOT_SMD:SOT-23"));
+    assert_eq!(
+        fp.id.as_ref().map(|i| i.to_string()).as_deref(),
+        Some("Package_TO_SOT_SMD:SOT-23")
+    );
 
     // An unknown id is NotFound, not a parse failure.
     let err = catalog
@@ -269,7 +298,10 @@ fn catalog_search_ordering_is_deterministic() {
     let catalog = FootprintCatalog::from_root(&root).unwrap();
     let a = catalog.search(SearchQuery::new("0603").limit(5));
     let b = catalog.search(SearchQuery::new("0603").limit(5));
-    assert_eq!(a, b, "identical queries must return identical, ordered hits");
+    assert_eq!(
+        a, b,
+        "identical queries must return identical, ordered hits"
+    );
 }
 
 #[test]

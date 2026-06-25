@@ -9,12 +9,12 @@
 //!
 //! Needs KiCAD for the tools; SKIPs gracefully otherwise.
 
-use gordian_core::testing::{ScriptedClient, final_text, tool_call};
-use gordian_core::{Agent, Approvals};
-use gordian_core::prompts::system_prompt;
-use gordian_core::tools::PcbToolCtx;
 use anyhow::Result;
 use async_trait::async_trait;
+use gordian_core::prompts::system_prompt;
+use gordian_core::testing::{ScriptedClient, final_text, tool_call};
+use gordian_core::tools::PcbToolCtx;
+use gordian_core::{Agent, Approvals};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
@@ -58,7 +58,11 @@ async fn bridge_approval_a_keypress_commits_the_write() -> Result<()> {
     assert!(!sch_path.exists());
 
     let script = vec![
-        tool_call("t1", "apply_design", json!({ "yaml": TINY_YAML, "commit": true })),
+        tool_call(
+            "t1",
+            "apply_design",
+            json!({ "yaml": TINY_YAML, "commit": true }),
+        ),
         final_text("done"),
     ];
     let mut agent = agent(ctx, script);
@@ -77,7 +81,10 @@ async fn bridge_approval_a_keypress_commits_the_write() -> Result<()> {
         }
     });
 
-    let outcome = agent.run_turn("add two resistors", &mut approvals, None).await.unwrap();
+    let outcome = agent
+        .run_turn("add two resistors", &mut approvals, None)
+        .await
+        .unwrap();
     ui.await.unwrap();
 
     assert!(outcome.applied, "approved gate must commit: {outcome:?}");
@@ -94,7 +101,11 @@ async fn bridge_rejection_r_keypress_blocks_the_write() -> Result<()> {
     let sch_path = ctx.sch_path().to_path_buf();
 
     let script = vec![
-        tool_call("t1", "apply_design", json!({ "yaml": TINY_YAML, "commit": true })),
+        tool_call(
+            "t1",
+            "apply_design",
+            json!({ "yaml": TINY_YAML, "commit": true }),
+        ),
         final_text("done"),
     ];
     let mut agent = agent(ctx, script);
@@ -109,10 +120,16 @@ async fn bridge_rejection_r_keypress_blocks_the_write() -> Result<()> {
         }
     });
 
-    let outcome = agent.run_turn("add two resistors", &mut approvals, None).await.unwrap();
+    let outcome = agent
+        .run_turn("add two resistors", &mut approvals, None)
+        .await
+        .unwrap();
     ui.await.unwrap();
 
-    assert!(!outcome.applied, "rejected gate must not commit: {outcome:?}");
+    assert!(
+        !outcome.applied,
+        "rejected gate must not commit: {outcome:?}"
+    );
     assert!(!sch_path.exists(), "rejected write must not land the file");
     Ok(())
 }

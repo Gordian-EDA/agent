@@ -329,7 +329,14 @@ impl RouteGrid {
     /// can still route through it (it never blocks itself), while foreign nets
     /// are kept the full clearance away. See [`Self::mark_net`] for the
     /// per-cell tag-combine rules.
-    pub fn mark_net_halo(&mut self, layer: usize, ix: usize, iy: usize, conn: usize, radius_cells: usize) {
+    pub fn mark_net_halo(
+        &mut self,
+        layer: usize,
+        ix: usize,
+        iy: usize,
+        conn: usize,
+        radius_cells: usize,
+    ) {
         if layer >= self.layer_count {
             return;
         }
@@ -412,10 +419,10 @@ impl RouteGrid {
     /// `((v - min) / pitch).floor()`.
     #[inline]
     pub fn cell_of(&self, x: f64, y: f64) -> (usize, usize) {
-        let ix = (((x - self.min_x) / self.pitch).floor() as isize)
-            .clamp(0, self.nx as isize - 1) as usize;
-        let iy = (((y - self.min_y) / self.pitch).floor() as isize)
-            .clamp(0, self.ny as isize - 1) as usize;
+        let ix = (((x - self.min_x) / self.pitch).floor() as isize).clamp(0, self.nx as isize - 1)
+            as usize;
+        let iy = (((y - self.min_y) / self.pitch).floor() as isize).clamp(0, self.ny as isize - 1)
+            as usize;
         (ix, iy)
     }
 
@@ -553,7 +560,11 @@ impl RouteGrid {
     /// `BlockedAll` (a real short the lint must see).
     fn assert_pad_copper(&mut self, obstacles: &[crate::problem::Obstacle]) {
         for ob in obstacles {
-            let Some(owner) = ob.connected_to.iter().find_map(|n| self.connection_index(n)) else {
+            let Some(owner) = ob
+                .connected_to
+                .iter()
+                .find_map(|n| self.connection_index(n))
+            else {
                 continue; // unowned (keepout / foreign copper) — never relax
             };
             let hw = ob.width / 2.0;
@@ -582,7 +593,9 @@ impl RouteGrid {
                         // (that is a real short) or the owner's own (already free).
                         let i = self.idx(layer, ix, iy);
                         match self.cells[i] {
-                            Cell::BlockedAll if !self.foreign_pad_copper(obstacles, owner, layer, cx, cy) => {
+                            Cell::BlockedAll
+                                if !self.foreign_pad_copper(obstacles, owner, layer, cx, cy) =>
+                            {
                                 self.cells[i] = Cell::Net(owner);
                             }
                             _ => {}
@@ -605,10 +618,16 @@ impl RouteGrid {
         cy: f64,
     ) -> bool {
         obstacles.iter().any(|ob| {
-            let other = ob.connected_to.iter().find_map(|n| self.connection_index(n));
+            let other = ob
+                .connected_to
+                .iter()
+                .find_map(|n| self.connection_index(n));
             other != Some(owner)
                 && other.is_some()
-                && ob.layers.iter().any(|l| l.index(self.layer_count as u32) == Some(layer as u32))
+                && ob
+                    .layers
+                    .iter()
+                    .any(|l| l.index(self.layer_count as u32) == Some(layer as u32))
                 && (cx - ob.center.x).abs() <= ob.width / 2.0
                 && (cy - ob.center.y).abs() <= ob.height / 2.0
         })
@@ -657,7 +676,7 @@ fn combine(existing: Cell, incoming: Cell) -> Cell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{Rect, Connection, LayerRef, Obstacle, Point2, RoutePoint, RouteProblem};
+    use crate::problem::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem};
 
     fn problem(obstacles: Vec<Obstacle>) -> RouteProblem {
         RouteProblem {
@@ -765,7 +784,10 @@ mod tests {
 
         // A neighbouring cell within inflation is also SIG-owned (blocks GND).
         // Inflated half-extent = 0.5 + 0.3 = 0.8 mm → reaches the next cell.
-        assert!(!g.is_free_for(0, cx + 1, cy, gnd), "inflation blocks GND nearby");
+        assert!(
+            !g.is_free_for(0, cx + 1, cy, gnd),
+            "inflation blocks GND nearby"
+        );
         assert!(g.is_free_for(0, cx + 1, cy, sig), "but SIG still passes");
 
         // Bottom layer is untouched by a top-only pad.
@@ -816,10 +838,10 @@ mod tests {
         // edge but whose right/top/bottom edges are interior to the board.
         let p = problem(vec![]);
         let win = Rect {
-            min_x: 0.0,   // touches the real left board edge
-            min_y: 4.0,   // interior (window edge, not board edge)
-            max_x: 6.0,   // interior
-            max_y: 6.0,   // interior
+            min_x: 0.0, // touches the real left board edge
+            min_y: 4.0, // interior (window edge, not board edge)
+            max_x: 6.0, // interior
+            max_y: 6.0, // interior
         };
         let g = RouteGrid::build_window(&p, &win);
         let sig = g.connection_index("SIG").unwrap();

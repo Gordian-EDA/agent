@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use gordian_core::testing::{ScriptedClient, final_text, tool_call};
 use gordian_core::{
-    Agent, AgentEvent, ApplyInfo, AutoApprove, Binary, ChatMessage, ContentPart, Provider,
-    MessageContent, ReviewOutcome, RunMode, StreamEnd, TestBackend, Tool, ToolCall, ToolOutcome,
+    Agent, AgentEvent, ApplyInfo, AutoApprove, Binary, ChatMessage, ContentPart, MessageContent,
+    Provider, ReviewOutcome, RunMode, StreamEnd, TestBackend, Tool, ToolCall, ToolOutcome,
 };
 use serde_json::{Value, json};
 
@@ -35,7 +35,13 @@ struct CannedReviewer {
 impl CannedReviewer {
     fn new(verdict: &str) -> (Self, Arc<Mutex<Vec<Vec<ChatMessage>>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        (Self { verdict: verdict.to_string(), seen: Arc::clone(&seen) }, seen)
+        (
+            Self {
+                verdict: verdict.to_string(),
+                seen: Arc::clone(&seen),
+            },
+            seen,
+        )
     }
 }
 
@@ -81,13 +87,20 @@ impl TestBackend for ReviewStub {
                 value: json!({ "ok": true, "would_write": true }),
                 images: Vec::new(),
                 image_path: None,
-                apply: Some(ApplyInfo { ready: true, ..Default::default() }),
+                apply: Some(ApplyInfo {
+                    ready: true,
+                    ..Default::default()
+                }),
             },
             ("apply_design", RunMode::Commit) => ToolOutcome {
                 value: json!({ "ok": true, "written": true }),
                 images: Vec::new(),
                 image_path: None,
-                apply: Some(ApplyInfo { ready: true, committed: true, summary: "ok".into() }),
+                apply: Some(ApplyInfo {
+                    ready: true,
+                    committed: true,
+                    summary: "ok".into(),
+                }),
             },
             _ => ToolOutcome::plain(json!({ "ok": true })),
         }
@@ -105,7 +118,10 @@ impl TestBackend for ReviewStub {
         // Round 0 surfaces the defect (drives a fix turn); round 1 is clean so the
         // loop terminates without exhausting the script.
         if round > 0 {
-            return Some(ReviewOutcome { score: 9.0, defects: vec![] });
+            return Some(ReviewOutcome {
+                score: 9.0,
+                defects: vec![],
+            });
         }
         let reviewer = self.reviewer.as_ref();
         // Netlist plane (text subject).
@@ -124,11 +140,17 @@ impl TestBackend for ReviewStub {
         .await
         .ok()?;
         for d in l_defects {
-            if !defects.iter().any(|e| gordian_core::review_kicad::same_defect(e, &d)) {
+            if !defects
+                .iter()
+                .any(|e| gordian_core::review_kicad::same_defect(e, &d))
+            {
                 defects.push(d);
             }
         }
-        Some(ReviewOutcome { score: n_score.min(l_score), defects })
+        Some(ReviewOutcome {
+            score: n_score.min(l_score),
+            defects,
+        })
     }
 }
 
@@ -167,7 +189,10 @@ async fn committed_turn_runs_netlist_and_layout_review_then_fixes_the_layout_def
         .unwrap();
 
     assert!(out.applied);
-    assert_eq!(out.final_text, "layout fixed", "the fix turn ran and re-committed");
+    assert_eq!(
+        out.final_text, "layout fixed",
+        "the fix turn ran and re-committed"
+    );
 
     // The Reviewed events: round 0 carries the layout defect, round 1 is clean.
     let mut rounds: Vec<(usize, Vec<String>)> = Vec::new();
@@ -176,10 +201,17 @@ async fn committed_turn_runs_netlist_and_layout_review_then_fixes_the_layout_def
             rounds.push((round, defects));
         }
     }
-    assert_eq!(rounds.len(), 2, "round 0 (defect) + round 1 (clean): {rounds:?}");
+    assert_eq!(
+        rounds.len(),
+        2,
+        "round 0 (defect) + round 1 (clean): {rounds:?}"
+    );
     assert_eq!(rounds[0].0, 0);
     assert!(
-        rounds[0].1.iter().any(|d| d.contains("C1") && d.contains("decoupling cap")),
+        rounds[0]
+            .1
+            .iter()
+            .any(|d| d.contains("C1") && d.contains("decoupling cap")),
         "the LAYOUT defect unioned into the fed-back list: {:?}",
         rounds[0].1
     );
@@ -204,8 +236,8 @@ async fn committed_turn_runs_netlist_and_layout_review_then_fixes_the_layout_def
 #[tokio::test]
 #[ignore = "live: needs KiCAD and LLM creds in .env"]
 async fn live_layout_review_smoke() {
-    use tokio::sync::mpsc::unbounded_channel;
     use gordian_core::tools::{PcbToolCtx, run_tool};
+    use tokio::sync::mpsc::unbounded_channel;
 
     let Some(ctx) = PcbToolCtx::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
@@ -222,8 +254,17 @@ async fn live_layout_review_smoke() {
         \x20     U1: {part: Device:R, pins: {1: VCC, 2: GND}}\n\
         \x20     C1: {part: Device:C, pins: {1: VCC, 2: GND}}\n\
         \x20     C2: {part: Device:C, pins: {1: VCC, 2: GND}}\n";
-    let out = run_tool("apply_design", json!({ "yaml": yaml, "commit": true }), &ctx).unwrap();
-    assert_eq!(out.get("written").and_then(Value::as_bool), Some(true), "committed: {out}");
+    let out = run_tool(
+        "apply_design",
+        json!({ "yaml": yaml, "commit": true }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(
+        out.get("written").and_then(Value::as_bool),
+        Some(true),
+        "committed: {out}"
+    );
 
     // Drive a review-only turn through the production loop so the real netlist +
     // vision review runs over the committed schematic. The model immediately
@@ -233,7 +274,9 @@ async fn live_layout_review_smoke() {
     let (tx, mut rx) = unbounded_channel();
     agent
         .run_turn_reviewed(
-            &format!("Re-apply this exact design with apply_design(commit:true), no change:\n{yaml}"),
+            &format!(
+                "Re-apply this exact design with apply_design(commit:true), no change:\n{yaml}"
+            ),
             "a decoupled supply rail",
             &mut approvals,
             Some(&tx),
@@ -244,11 +287,19 @@ async fn live_layout_review_smoke() {
 
     let mut saw_review = false;
     while let Ok(ev) = rx.try_recv() {
-        if let AgentEvent::Reviewed { round, score, defects } = ev {
+        if let AgentEvent::Reviewed {
+            round,
+            score,
+            defects,
+        } = ev
+        {
             eprintln!("LIVE review round {round}: score={score} defects={defects:#?}");
             assert!((0.0..=10.0).contains(&score), "a sane score: {score}");
             saw_review = true;
         }
     }
-    assert!(saw_review, "the production review ran end-to-end with a live vision call");
+    assert!(
+        saw_review,
+        "the production review ran end-to-end with a live vision call"
+    );
 }

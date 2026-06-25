@@ -25,11 +25,20 @@ static CRYSTAL_ROLES: &[Role] = &[
     // decoupling pattern's `Not(Connector)` anchor guard.
     Role::one(
         "anchor",
-        NodePred::And(&[NodePred::PinsAtLeast(3), NodePred::Not(&NodePred::LibAny(CRYSTAL_LIBS))]),
+        NodePred::And(&[
+            NodePred::PinsAtLeast(3),
+            NodePred::Not(&NodePred::LibAny(CRYSTAL_LIBS)),
+        ]),
     ),
     Role::one("crystal", NodePred::LibAny(CRYSTAL_LIBS)),
-    Role::one("cap_a", NodePred::And(&[NodePred::LibAny(CAP_LIBS), NodePred::Pins(2)])),
-    Role::one("cap_b", NodePred::And(&[NodePred::LibAny(CAP_LIBS), NodePred::Pins(2)])),
+    Role::one(
+        "cap_a",
+        NodePred::And(&[NodePred::LibAny(CAP_LIBS), NodePred::Pins(2)]),
+    ),
+    Role::one(
+        "cap_b",
+        NodePred::And(&[NodePred::LibAny(CAP_LIBS), NodePred::Pins(2)]),
+    ),
 ];
 static CRYSTAL_EDGES: &[Edge] = &[
     // The crystal shares an oscillator (signal) net with the anchor.
@@ -62,9 +71,17 @@ static DECOUPLE_ROLES: &[Role] = &[
     // matcher binds the bank to the connector and the placement then drops it).
     Role::one(
         "anchor",
-        NodePred::And(&[NodePred::PinsAtLeast(3), NodePred::Not(&NodePred::LibAny(&["Connector"]))]),
+        NodePred::And(&[
+            NodePred::PinsAtLeast(3),
+            NodePred::Not(&NodePred::LibAny(&["Connector"])),
+        ]),
     ),
-    Role::many("cap", NodePred::And(&[NodePred::LibAny(CAP_LIBS), NodePred::Pins(2)]), 3, 64),
+    Role::many(
+        "cap",
+        NodePred::And(&[NodePred::LibAny(CAP_LIBS), NodePred::Pins(2)]),
+        3,
+        64,
+    ),
 ];
 static DECOUPLE_EDGES: &[Edge] = &[
     // Every bank cap bridges power and ground …
@@ -85,8 +102,14 @@ pub static DECOUPLING: Pattern = Pattern {
 /// ground by a capacitor. Defined here and unit-tested; not yet in the active set
 /// (awaiting a series placement rule). Demonstrates extensibility.
 static RC_ROLES: &[Role] = &[
-    Role::one("res", NodePred::And(&[NodePred::LibAny(RES_LIBS), NodePred::Pins(2)])),
-    Role::one("cap", NodePred::And(&[NodePred::LibAny(CAP_LIBS), NodePred::Pins(2)])),
+    Role::one(
+        "res",
+        NodePred::And(&[NodePred::LibAny(RES_LIBS), NodePred::Pins(2)]),
+    ),
+    Role::one(
+        "cap",
+        NodePred::And(&[NodePred::LibAny(CAP_LIBS), NodePred::Pins(2)]),
+    ),
 ];
 static RC_EDGES: &[Edge] = &[
     // Resistor and cap share the filtered node …
@@ -108,7 +131,10 @@ pub static RC_LOWPASS: Pattern = Pattern {
 /// shares the same supply (a reset pull-up on the same V+).
 static LED_ROLES: &[Role] = &[
     Role::one("led", NodePred::LibAny(LED_LIBS)),
-    Role::one("res", NodePred::And(&[NodePred::LibAny(RES_LIBS), NodePred::Pins(2)])),
+    Role::one(
+        "res",
+        NodePred::And(&[NodePred::LibAny(RES_LIBS), NodePred::Pins(2)]),
+    ),
 ];
 static LED_EDGES: &[Edge] = &[Edge::shared("led", "res", NetMatch::Kind(NetKind::Signal))];
 pub static LED_INDICATOR: Pattern = Pattern {
@@ -127,9 +153,18 @@ const USB_LIBS: &[&str] = &["USB"];
 /// a spare column (the power-entry sheet's R2-exiled defect). USB-scoped (the connector lib_id
 /// must contain "USB"), so generic 2-pin header references never match ⇒ snapshots byte-stable.
 static CC_PULLDOWN_ROLES: &[Role] = &[
-    Role::one("anchor", NodePred::And(&[NodePred::LibAny(USB_LIBS), NodePred::PinsAtLeast(6)])),
-    Role::one("res_a", NodePred::And(&[NodePred::LibAny(RES_LIBS), NodePred::Pins(2)])),
-    Role::one("res_b", NodePred::And(&[NodePred::LibAny(RES_LIBS), NodePred::Pins(2)])),
+    Role::one(
+        "anchor",
+        NodePred::And(&[NodePred::LibAny(USB_LIBS), NodePred::PinsAtLeast(6)]),
+    ),
+    Role::one(
+        "res_a",
+        NodePred::And(&[NodePred::LibAny(RES_LIBS), NodePred::Pins(2)]),
+    ),
+    Role::one(
+        "res_b",
+        NodePred::And(&[NodePred::LibAny(RES_LIBS), NodePred::Pins(2)]),
+    ),
 ];
 static CC_PULLDOWN_EDGES: &[Edge] = &[
     // Each resistor taps a (distinct) connector signal net …
@@ -167,8 +202,14 @@ static I2C_PULLUP_ROLES: &[Role] = &[
             NodePred::Not(&NodePred::LibAny(&["Connector", "Conn_", "USB"])),
         ]),
     ),
-    Role::one("res_a", NodePred::And(&[NodePred::LibAny(RES_LIBS), NodePred::Pins(2)])),
-    Role::one("res_b", NodePred::And(&[NodePred::LibAny(RES_LIBS), NodePred::Pins(2)])),
+    Role::one(
+        "res_a",
+        NodePred::And(&[NodePred::LibAny(RES_LIBS), NodePred::Pins(2)]),
+    ),
+    Role::one(
+        "res_b",
+        NodePred::And(&[NodePred::LibAny(RES_LIBS), NodePred::Pins(2)]),
+    ),
 ];
 static I2C_PULLUP_EDGES: &[Edge] = &[
     // Each resistor taps a (distinct) IC signal net …
@@ -192,7 +233,12 @@ pub static I2C_PULLUP: Pattern = Pattern {
 /// their anchor; LED_INDICATOR is report-only — its resistor is snapped below the LED by an mm
 /// post-pass. Order matters only for cross-pattern claim tie-breaks (earlier wins).
 pub fn active_library() -> Vec<Pattern> {
-    vec![CRYSTAL.clone(), DECOUPLING.clone(), LED_INDICATOR.clone(), CC_PULLDOWN.clone()]
+    vec![
+        CRYSTAL.clone(),
+        DECOUPLING.clone(),
+        LED_INDICATOR.clone(),
+        CC_PULLDOWN.clone(),
+    ]
 }
 
 /// Idioms defined and tested but not yet wired into the engine. Adding one to the

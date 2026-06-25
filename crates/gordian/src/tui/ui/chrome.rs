@@ -33,10 +33,15 @@ pub(super) fn draw_header(f: &mut Frame, area: Rect, app: &App) {
         // The brand carries the accent; everything else is metadata, so it dims.
         Span::styled(
             "Gordian",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         sep(),
-        Span::styled(file_name(&app.status.sch_path), Style::default().fg(Color::Gray)),
+        Span::styled(
+            file_name(&app.status.sch_path),
+            Style::default().fg(Color::Gray),
+        ),
         sep(),
         Span::styled(
             format!("KiCAD {dot}"),
@@ -86,11 +91,17 @@ pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
     // While an approval gate holds the turn the verb says so, and the elapsed
     // clock is already frozen (see `App::turn_elapsed_secs`); else it's "working".
     let gated = app.pending.is_some();
-    let verb = if gated { "waiting for approval" } else { "working" };
+    let verb = if gated {
+        "waiting for approval"
+    } else {
+        "working"
+    };
     let mut spans = vec![
         Span::styled(
             format!("{frame} "),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(verb, Style::default().fg(Color::Yellow)),
         Span::styled(format!(" · {secs}s"), dim),
@@ -111,7 +122,9 @@ pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
             Span::styled("  ↳ ", dim),
             Span::styled(
                 format!("{tool}…"),
-                Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::ITALIC),
             ),
         ]));
     }
@@ -122,8 +135,10 @@ pub(super) fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let area = body(area);
     // The right side only carries a hint that isn't already on screen. A pending
     // change shows its actions on the card, so the footer stays quiet there.
-    let right = if app.running {
-        "Ctrl-C quit"
+    let right = if app.ctrl_c_armed {
+        "Ctrl-C again to quit"
+    } else if app.running {
+        "Ctrl-C Ctrl-C quit"
     } else if app.esc_armed {
         "Esc again to unwind"
     } else {
@@ -217,7 +232,9 @@ fn status_left(app: &App, avail: usize) -> String {
 }
 
 pub(super) fn draw_help(f: &mut Frame, area: Rect) {
-    let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let accent = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(Color::DarkGray);
     // A key/description row: the key in accent, the description in soft gray.
     let kv = |k: &str, d: &str| {
@@ -226,7 +243,12 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect) {
             Span::styled(d.to_string(), Style::default().fg(Color::Gray)),
         ])
     };
-    let section = |t: &str| Line::from(Span::styled(t.to_string(), dim.add_modifier(Modifier::BOLD)));
+    let section = |t: &str| {
+        Line::from(Span::styled(
+            t.to_string(),
+            dim.add_modifier(Modifier::BOLD),
+        ))
+    };
 
     let mut lines = vec![
         section("KEYS"),
@@ -239,7 +261,7 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect) {
         kv("Ctrl-U/W/A/E", "line editing (kill line/word, home/end)"),
         kv("Esc", "close help / reject gate / clear input"),
         kv("Esc Esc", "unwind the last turn (context only)"),
-        kv("Ctrl-C", "exit"),
+        kv("Ctrl-C Ctrl-C", "exit"),
         Line::from(""),
         section("COMMANDS"),
     ];

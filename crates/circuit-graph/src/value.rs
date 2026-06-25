@@ -31,7 +31,10 @@ pub fn parse_eng(raw: &str) -> Option<f64> {
 
     let chars: Vec<char> = s.chars().collect();
     // Leading numeric run (digits and a decimal point).
-    let split = chars.iter().position(|c| !(c.is_ascii_digit() || *c == '.')).unwrap_or(chars.len());
+    let split = chars
+        .iter()
+        .position(|c| !(c.is_ascii_digit() || *c == '.'))
+        .unwrap_or(chars.len());
     let head: String = chars[..split].iter().collect();
     let rest: String = chars[split..].iter().collect();
 
@@ -50,7 +53,11 @@ pub fn parse_eng(raw: &str) -> Option<f64> {
 
     // RKM / embedded-prefix form: prefix sits between digits ("4k7", "R47").
     if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
-        let int: f64 = if head.is_empty() { 0.0 } else { head.parse().ok()? };
+        let int: f64 = if head.is_empty() {
+            0.0
+        } else {
+            head.parse().ok()?
+        };
         let frac: f64 = tail.parse::<f64>().ok()? / 10f64.powi(tail.chars().count() as i32);
         return Some((int + frac) * mult);
     }

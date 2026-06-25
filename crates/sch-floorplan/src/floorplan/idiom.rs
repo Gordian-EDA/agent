@@ -5,10 +5,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::infer::{
+    best_decoupling_anchor, place_cc_pulldown, place_crystal, place_decoupling, place_i2c_pullup,
+};
 use super::*;
 use sch_place::item::{Incidence, Item};
-use sch_place::netclass::{is_ground, PinSide};
-use super::infer::{best_decoupling_anchor, place_cc_pulldown, place_crystal, place_decoupling, place_i2c_pullup};
+use sch_place::netclass::{PinSide, is_ground};
 
 /// A circuit idiom recognized purely from connectivity + symbol pin geometry.
 /// `infer_ir` turns it into an [`sch_place::result::IdiomReport`] for the LLM. A FROZEN
@@ -29,7 +31,10 @@ pub(super) struct Idiom {
 /// matcher consumes. Net kinds come from the rail table, with a name-based ground
 /// fallback so a lifted netlist that dropped the power-net marks still classifies
 /// `GND`/`VSS` correctly (the crystal load caps return to ground by name).
-fn build_circuit_graph(items: &[Item], rails: &BTreeMap<String, Band>) -> circuit_graph::CircuitGraph {
+fn build_circuit_graph(
+    items: &[Item],
+    rails: &BTreeMap<String, Band>,
+) -> circuit_graph::CircuitGraph {
     let nodes: Vec<circuit_graph::Node> = items
         .iter()
         .map(|it| circuit_graph::Node {
@@ -50,7 +55,11 @@ fn build_circuit_graph(items: &[Item], rails: &BTreeMap<String, Band>) -> circui
     let rails = rails.clone();
     circuit_graph::CircuitGraph::new(nodes, move |net| {
         if rails.contains_key(net) {
-            if is_ground(net) { circuit_graph::NetKind::Ground } else { circuit_graph::NetKind::Power }
+            if is_ground(net) {
+                circuit_graph::NetKind::Ground
+            } else {
+                circuit_graph::NetKind::Power
+            }
         } else if is_ground(net) {
             circuit_graph::NetKind::Ground
         } else {
@@ -88,11 +97,17 @@ pub(super) fn detect_idioms(
     let matches = circuit_graph::find_all(&graph, &lib);
     if std::env::var("IDIOM_AUDIT").is_ok() {
         for m in &matches {
-            eprintln!("AUDIT-MATCH {} anchor={} score={:.2} bindings={:?}", m.pattern, m.anchor, m.score, m.bindings);
+            eprintln!(
+                "AUDIT-MATCH {} anchor={} score={:.2} bindings={:?}",
+                m.pattern, m.anchor, m.score, m.bindings
+            );
         }
     }
-    let idx: BTreeMap<&str, usize> =
-        items.iter().enumerate().map(|(i, it)| (it.refdes.as_str(), i)).collect();
+    let idx: BTreeMap<&str, usize> = items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| (it.refdes.as_str(), i))
+        .collect();
     let get = |rd: &str| idx.get(rd).copied();
 
     let mut out: Vec<Idiom> = Vec::new();
@@ -102,7 +117,10 @@ pub(super) fn detect_idioms(
         match m.pattern {
             "crystal" => {
                 let (Some(yi), Some(caps)) = (
-                    m.bindings.get("crystal").and_then(|v| v.first()).and_then(|r| get(r)),
+                    m.bindings
+                        .get("crystal")
+                        .and_then(|v| v.first())
+                        .and_then(|r| get(r)),
                     Some(
                         ["cap_a", "cap_b"]
                             .iter()
@@ -114,7 +132,12 @@ pub(super) fn detect_idioms(
                 ) else {
                     continue;
                 };
-                if caps.len() != 2 || caps.iter().chain(std::iter::once(&yi)).any(|c| claimed.contains(c)) {
+                if caps.len() != 2
+                    || caps
+                        .iter()
+                        .chain(std::iter::once(&yi))
+                        .any(|c| claimed.contains(c))
+                {
                     continue;
                 }
                 if let Some(cells) =
@@ -122,7 +145,12 @@ pub(super) fn detect_idioms(
                 {
                     claimed.insert(yi);
                     claimed.extend(&caps);
-                    out.push(Idiom { kind: "crystal", anchor: ai, cells, freeze: true });
+                    out.push(Idiom {
+                        kind: "crystal",
+                        anchor: ai,
+                        cells,
+                        freeze: true,
+                    });
                 }
             }
             "decoupling" => {
@@ -142,9 +170,9 @@ pub(super) fn detect_idioms(
                 // 3-pin part and floats far from the MCU (the #1 "decoupling bank in the
                 // far corner" critic defect).
                 let ai = best_decoupling_anchor(items, anchors, rails, &caps).unwrap_or(ai);
-                if let Some(mut cells) =
-                    place_decoupling(items, inc, anchors, rails, anchor_col, anchor_row, ai, &caps, &out)
-                {
+                if let Some(mut cells) = place_decoupling(
+                    items, inc, anchors, rails, anchor_col, anchor_row, ai, &caps, &out,
+                ) {
                     // A SMALL decoupling anchor (a 3-4 pin LDO/regulator) connects only through
                     // power rails — weak cohesion, so the SA drifts it off its own FROZEN bank
                     // (the "LDO isolated far from the caps it serves" power-entry defect). Pin it
@@ -156,14 +184,23 @@ pub(super) fn detect_idioms(
                         && !claimed.contains(&ai)
                         && let (Some(&acol), Some(&arow)) =
                             (anchor_col.get(&ai), anchor_row.get(&ai))
-                        {
-                            cells.push((
-                                items[ai].refdes.clone(),
-                                Cell { col: acol, row: arow, orient: Orient::Right },
-                            ));
-                        }
+                    {
+                        cells.push((
+                            items[ai].refdes.clone(),
+                            Cell {
+                                col: acol,
+                                row: arow,
+                                orient: Orient::Right,
+                            },
+                        ));
+                    }
                     claimed.extend(cells.iter().filter_map(|(rd, _)| get(rd)));
-                    out.push(Idiom { kind: "decoupling", anchor: ai, cells, freeze: true });
+                    out.push(Idiom {
+                        kind: "decoupling",
+                        anchor: ai,
+                        cells,
+                        freeze: true,
+                    });
                 }
             }
             "led_indicator" => {
@@ -171,7 +208,11 @@ pub(super) fn detect_idioms(
                 // well; we just recognize the pair so the mm post-pass (`align_led_chain`)
                 // can snap the series resistor directly below the LED, clear of the body,
                 // rather than letting it drift to a spare column.
-                let Some(ri) = m.bindings.get("res").and_then(|v| v.first()).and_then(|r| get(r))
+                let Some(ri) = m
+                    .bindings
+                    .get("res")
+                    .and_then(|v| v.first())
+                    .and_then(|r| get(r))
                 else {
                     continue;
                 };
@@ -181,46 +222,83 @@ pub(super) fn detect_idioms(
                 out.push(Idiom {
                     kind: "led_indicator",
                     anchor: ai,
-                    cells: vec![(items[ri].refdes.clone(), Cell { col: 0, row: 0, orient: Orient::Down })],
+                    cells: vec![(
+                        items[ri].refdes.clone(),
+                        Cell {
+                            col: 0,
+                            row: 0,
+                            orient: Orient::Down,
+                        },
+                    )],
                     freeze: false,
                 });
             }
             "cc_pulldown" => {
                 // Freeze the two CC resistors as a reserved pair beside the connector.
                 let (Some(ra), Some(rb)) = (
-                    m.bindings.get("res_a").and_then(|v| v.first()).and_then(|r| get(r)),
-                    m.bindings.get("res_b").and_then(|v| v.first()).and_then(|r| get(r)),
+                    m.bindings
+                        .get("res_a")
+                        .and_then(|v| v.first())
+                        .and_then(|r| get(r)),
+                    m.bindings
+                        .get("res_b")
+                        .and_then(|v| v.first())
+                        .and_then(|r| get(r)),
                 ) else {
                     continue;
                 };
                 if [ai, ra, rb].iter().any(|c| claimed.contains(c)) {
                     continue;
                 }
-                if let Some(cells) =
-                    place_cc_pulldown(anchor_col, anchor_row, ai, &items[ra].refdes, &items[rb].refdes)
-                {
+                if let Some(cells) = place_cc_pulldown(
+                    anchor_col,
+                    anchor_row,
+                    ai,
+                    &items[ra].refdes,
+                    &items[rb].refdes,
+                ) {
                     claimed.insert(ra);
                     claimed.insert(rb);
-                    out.push(Idiom { kind: "cc_pulldown", anchor: ai, cells, freeze: true });
+                    out.push(Idiom {
+                        kind: "cc_pulldown",
+                        anchor: ai,
+                        cells,
+                        freeze: true,
+                    });
                 }
             }
             "i2c_pullup" => {
                 // Freeze the two I2C pull-ups as a reserved pair beside the IC (tap UP to power).
                 let (Some(ra), Some(rb)) = (
-                    m.bindings.get("res_a").and_then(|v| v.first()).and_then(|r| get(r)),
-                    m.bindings.get("res_b").and_then(|v| v.first()).and_then(|r| get(r)),
+                    m.bindings
+                        .get("res_a")
+                        .and_then(|v| v.first())
+                        .and_then(|r| get(r)),
+                    m.bindings
+                        .get("res_b")
+                        .and_then(|v| v.first())
+                        .and_then(|r| get(r)),
                 ) else {
                     continue;
                 };
                 if [ai, ra, rb].iter().any(|c| claimed.contains(c)) {
                     continue;
                 }
-                if let Some(cells) =
-                    place_i2c_pullup(anchor_col, anchor_row, ai, &items[ra].refdes, &items[rb].refdes)
-                {
+                if let Some(cells) = place_i2c_pullup(
+                    anchor_col,
+                    anchor_row,
+                    ai,
+                    &items[ra].refdes,
+                    &items[rb].refdes,
+                ) {
                     claimed.insert(ra);
                     claimed.insert(rb);
-                    out.push(Idiom { kind: "i2c_pullup", anchor: ai, cells, freeze: true });
+                    out.push(Idiom {
+                        kind: "i2c_pullup",
+                        anchor: ai,
+                        cells,
+                        freeze: true,
+                    });
                 }
             }
             _ => {}
@@ -228,4 +306,3 @@ pub(super) fn detect_idioms(
     }
     out
 }
-

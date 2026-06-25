@@ -427,9 +427,17 @@ mod tests {
 
         // Inline **strong** is plain bold — no recolour — so the two are distinct.
         let strong = render_markdown("a **bold** word", base());
-        let seg = strong[0].segments.iter().find(|(t, _)| t == "bold").unwrap();
+        let seg = strong[0]
+            .segments
+            .iter()
+            .find(|(t, _)| t == "bold")
+            .unwrap();
         assert!(seg.1.add_modifier.contains(Modifier::BOLD));
-        assert_ne!(seg.1.fg, Some(Color::Cyan), "strong stays plain, not accented");
+        assert_ne!(
+            seg.1.fg,
+            Some(Color::Cyan),
+            "strong stays plain, not accented"
+        );
     }
 
     #[test]
@@ -468,7 +476,12 @@ mod tests {
         );
         assert_eq!(lines[3].segments[0].1.fg, Some(Color::Cyan));
         // The fence language rides the opening code row only.
-        assert_eq!(lines[2].kind, LineKind::Code { lang: Some("yaml".into()) });
+        assert_eq!(
+            lines[2].kind,
+            LineKind::Code {
+                lang: Some("yaml".into())
+            }
+        );
         assert_eq!(lines[3].kind, LineKind::Code { lang: None });
     }
 

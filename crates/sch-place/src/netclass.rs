@@ -14,14 +14,18 @@ pub fn is_ground(net: &str) -> bool {
 /// a digit and contain only digits / `.` / a single `V`, so signal names like
 /// `5V_SENSE` or `VIN_FB` are NOT matched.
 fn is_voltage_token(u: &str) -> bool {
-    let s = u.strip_prefix('+').or_else(|| u.strip_prefix('-')).unwrap_or(u);
+    let s = u
+        .strip_prefix('+')
+        .or_else(|| u.strip_prefix('-'))
+        .unwrap_or(u);
     if !s.starts_with(|c: char| c.is_ascii_digit()) {
         return false;
     }
     if s.chars().filter(|&c| c == 'V').count() != 1 {
         return false;
     }
-    s.chars().all(|c| c.is_ascii_digit() || c == '.' || c == 'V')
+    s.chars()
+        .all(|c| c.is_ascii_digit() || c == '.' || c == 'V')
 }
 
 /// Whether a net NAME is conventionally a power/ground rail. Used to infer rails on
@@ -35,13 +39,33 @@ pub fn is_power_net(net: &str) -> bool {
     let u = net.to_ascii_uppercase();
     if matches!(
         u.as_str(),
-        "VCC" | "VDD" | "VDDA" | "VCCA" | "VCCD" | "AVCC" | "AVDD" | "DVDD"
-            | "VBAT" | "VBUS" | "VIN" | "VOUT" | "VEE" | "VPP" | "VDDIO" | "VSYS"
-            | "V+" | "V-" | "VS" | "VMOT"
+        "VCC"
+            | "VDD"
+            | "VDDA"
+            | "VCCA"
+            | "VCCD"
+            | "AVCC"
+            | "AVDD"
+            | "DVDD"
+            | "VBAT"
+            | "VBUS"
+            | "VIN"
+            | "VOUT"
+            | "VEE"
+            | "VPP"
+            | "VDDIO"
+            | "VSYS"
+            | "V+"
+            | "V-"
+            | "VS"
+            | "VMOT"
     ) {
         return true;
     }
-    if u.starts_with("VCC") || u.starts_with("VDD") || u.starts_with("VBUS") || u.starts_with("VBAT")
+    if u.starts_with("VCC")
+        || u.starts_with("VDD")
+        || u.starts_with("VBUS")
+        || u.starts_with("VBAT")
     {
         return true;
     }

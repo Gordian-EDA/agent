@@ -15,9 +15,9 @@
 //!   set -a; source .env; set +a
 //!   cargo test -p gordian-core --test bluepill_agent -- --ignored --nocapture
 
-use gordian_core::{Agent, AutoApprove};
 use gordian_core::prompts::system_prompt;
 use gordian_core::tools::PcbToolCtx;
+use gordian_core::{Agent, AutoApprove};
 use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
 
@@ -48,8 +48,7 @@ async fn bluepill_founding_prompt_yields_erc_clean_schematic() {
     let sch_path = ctx.sch_path().to_path_buf();
     assert!(!sch_path.exists(), "the project starts with no schematic");
 
-    let mut agent =
-        Agent::new(client, ctx, system_prompt());
+    let mut agent = Agent::new(client, ctx, system_prompt());
     let mut approvals = AutoApprove::yes();
 
     let outcome = agent

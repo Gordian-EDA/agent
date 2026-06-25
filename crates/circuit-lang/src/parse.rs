@@ -142,7 +142,6 @@ impl Parser<'_> {
             ..Default::default()
         };
 
-
         match Self::get(map, "blocks") {
             Some(n) => {
                 if let Some(bm) = self.map_node(n, "blocks") {

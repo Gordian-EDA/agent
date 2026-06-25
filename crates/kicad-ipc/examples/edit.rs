@@ -6,9 +6,9 @@
 //! cargo run -p kicad-ipc --example edit
 //! ```
 
+use kicad_ipc::Kicad;
 use kicad_ipc::proto::kiapi::board::types::{BoardLayer, Track};
 use kicad_ipc::proto::kiapi::common::types::{Distance, Vector2};
-use kicad_ipc::Kicad;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut k = Kicad::connect()?;
@@ -16,7 +16,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let fps_before = k.footprints()?;
     let tracks_before = k.tracks()?.len();
-    println!("before: {} footprints, {} tracks", fps_before.len(), tracks_before);
+    println!(
+        "before: {} footprints, {} tracks",
+        fps_before.len(),
+        tracks_before
+    );
 
     let mut fp = fps_before[0].clone();
     let p0 = fp.position.clone().unwrap_or_default();
@@ -31,9 +35,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // 2) a fat 1.0 mm track on F.Cu (the "wide copper for power" capability)
         let track = Track {
-            start: Some(Vector2 { x_nm: 3_000_000, y_nm: 27_000_000 }),
-            end: Some(Vector2 { x_nm: 18_000_000, y_nm: 27_000_000 }),
-            width: Some(Distance { value_nm: 1_000_000 }),
+            start: Some(Vector2 {
+                x_nm: 3_000_000,
+                y_nm: 27_000_000,
+            }),
+            end: Some(Vector2 {
+                x_nm: 18_000_000,
+                y_nm: 27_000_000,
+            }),
+            width: Some(Distance {
+                value_nm: 1_000_000,
+            }),
             layer: BoardLayer::BlFCu as i32,
             ..Default::default()
         };

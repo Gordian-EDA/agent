@@ -19,8 +19,9 @@ use crate::tools::RENDER_MAX_PX;
 /// degrade to a netlist-only review (the layout pass is best-effort).
 pub fn schematic_png(env: &KicadEnv, sch: &Path) -> Result<Vec<u8>> {
     let tmp = tempfile::tempdir().context("temp dir for schematic SVG export")?;
-    let svg_path =
-        KicadCli::new(env).export_svg(sch, tmp.path()).context("exporting schematic SVG")?;
+    let svg_path = KicadCli::new(env)
+        .export_svg(sch, tmp.path())
+        .context("exporting schematic SVG")?;
     let svg = std::fs::read_to_string(&svg_path).context("reading exported SVG")?;
     svg_to_png(&svg, RENDER_MAX_PX)
 }
@@ -34,8 +35,7 @@ pub fn svg_to_png(svg: &str, max_px: u32) -> Result<Vec<u8>> {
     let w = ((size.width() * scale).ceil() as u32).max(1);
     let h = ((size.height() * scale).ceil() as u32).max(1);
 
-    let mut pixmap =
-        resvg::tiny_skia::Pixmap::new(w, h).context("allocating pixmap")?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).context("allocating pixmap")?;
     // KiCAD SVGs assume a paper-white background; resvg default is transparent.
     pixmap.fill(resvg::tiny_skia::Color::WHITE);
     resvg::render(

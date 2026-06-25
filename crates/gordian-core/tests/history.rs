@@ -9,10 +9,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use gordian_core::testing::{ScriptedClient, final_text};
-use gordian_core::{Agent, AutoApprove, ChatMessage, ChatRole, ContentPart};
 use gordian_core::prompts::system_prompt;
+use gordian_core::testing::{ScriptedClient, final_text};
 use gordian_core::tools::PcbToolCtx;
+use gordian_core::{Agent, AutoApprove, ChatMessage, ChatRole, ContentPart};
 
 /// Build an agent over a [`PcbToolCtx`] + a recording client, returning the agent
 /// and the shared handle to the recorded `messages` slices.
@@ -46,12 +46,20 @@ async fn second_turn_sees_the_first_turns_messages() {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
-    let (mut agent, seen) =
-        recording_agent(ctx, vec![final_text("answer one"), final_text("answer two")]);
+    let (mut agent, seen) = recording_agent(
+        ctx,
+        vec![final_text("answer one"), final_text("answer two")],
+    );
     let mut approvals = AutoApprove::yes();
 
-    agent.run_turn("first prompt", &mut approvals, None).await.unwrap();
-    agent.run_turn("second prompt", &mut approvals, None).await.unwrap();
+    agent
+        .run_turn("first prompt", &mut approvals, None)
+        .await
+        .unwrap();
+    agent
+        .run_turn("second prompt", &mut approvals, None)
+        .await
+        .unwrap();
 
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 2, "one model call per turn");
@@ -73,8 +81,10 @@ async fn pop_last_turn_unwinds_the_last_exchange() {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
-    let (mut agent, seen) =
-        recording_agent(ctx, vec![final_text("a1"), final_text("a2"), final_text("a3")]);
+    let (mut agent, seen) = recording_agent(
+        ctx,
+        vec![final_text("a1"), final_text("a2"), final_text("a3")],
+    );
     let mut approvals = AutoApprove::yes();
 
     agent.run_turn("one", &mut approvals, None).await.unwrap();
@@ -127,7 +137,10 @@ async fn context_stats_reflect_the_session() {
     let empty = agent.context_stats();
     assert_eq!((empty.turns, empty.messages), (0, 0));
 
-    agent.run_turn("hello there", &mut approvals, None).await.unwrap();
+    agent
+        .run_turn("hello there", &mut approvals, None)
+        .await
+        .unwrap();
     let stats = agent.context_stats();
     assert_eq!(stats.turns, 1);
     assert_eq!(stats.messages, 2, "user + assistant");
@@ -140,8 +153,14 @@ async fn compact_replaces_history_with_a_summary_pair() {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
-    let (mut agent, seen) =
-        recording_agent(ctx, vec![final_text("a1"), final_text("THE SUMMARY"), final_text("a2")]);
+    let (mut agent, seen) = recording_agent(
+        ctx,
+        vec![
+            final_text("a1"),
+            final_text("THE SUMMARY"),
+            final_text("a2"),
+        ],
+    );
     let mut approvals = AutoApprove::yes();
 
     agent.run_turn("one", &mut approvals, None).await.unwrap();
@@ -188,11 +207,19 @@ async fn usage_tokens_flow_through_completions() {
     let mut approvals = AutoApprove::yes();
     let (tx, mut rx) = unbounded_channel();
 
-    agent.run_turn("hi", &mut approvals, Some(&tx)).await.unwrap();
+    agent
+        .run_turn("hi", &mut approvals, Some(&tx))
+        .await
+        .unwrap();
 
     let mut saw_usage = false;
     while let Ok(ev) = rx.try_recv() {
-        if let AgentEvent::Usage { input_tokens, output_tokens, .. } = ev {
+        if let AgentEvent::Usage {
+            input_tokens,
+            output_tokens,
+            ..
+        } = ev
+        {
             assert_eq!((input_tokens, output_tokens), (1234, 56));
             saw_usage = true;
         }

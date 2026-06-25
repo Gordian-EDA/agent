@@ -15,7 +15,12 @@ use drc_core::problem::{
 use drc_core::{DrcCtx, DrcSuite, Finding, Rule};
 
 fn bounds() -> Rect {
-    Rect { min_x: 0.0, max_x: 100.0, min_y: 0.0, max_y: 100.0 }
+    Rect {
+        min_x: 0.0,
+        max_x: 100.0,
+        min_y: 0.0,
+        max_y: 100.0,
+    }
 }
 
 fn problem(connections: Vec<Connection>, obstacles: Vec<Obstacle>) -> RouteProblem {
@@ -39,7 +44,11 @@ fn conn(name: &str, pts: &[(f64, f64, &str)]) -> Connection {
         name: name.to_owned(),
         points_to_connect: pts
             .iter()
-            .map(|&(x, y, l)| RoutePoint { x, y, layer: LayerRef(l.to_owned()) })
+            .map(|&(x, y, l)| RoutePoint {
+                x,
+                y,
+                layer: LayerRef(l.to_owned()),
+            })
             .collect(),
     }
 }
@@ -66,7 +75,10 @@ fn mixed_board() -> (RouteProblem, RouteSolution) {
             // A narrow trace (width 0.10 < min 0.25).
             conn("THIN", &[(5.0, 40.0, "top"), (25.0, 40.0, "top")]),
             // A connection whose second point is never reached → Unconnected.
-            conn("GAP", &[(5.0, 70.0, "top"), (25.0, 70.0, "top"), (45.0, 70.0, "top")]),
+            conn(
+                "GAP",
+                &[(5.0, 70.0, "top"), (25.0, 70.0, "top"), (45.0, 70.0, "top")],
+            ),
         ],
         vec![],
     );
@@ -99,7 +111,10 @@ fn standard_suite_reproduces_known_finding_set() {
         // (4) connectivity folded in last: GAP's point #2 stranded.
         { "kind": "connectivity", "violation": { "kind": "unconnected", "connection": "GAP", "point_index": 2 } },
     ]);
-    assert_eq!(got, expected, "standard suite finding set drifted:\n{got:#}");
+    assert_eq!(
+        got, expected,
+        "standard suite finding set drifted:\n{got:#}"
+    );
 }
 
 /// `run()` is exactly the ordered concatenation of each standard rule's `check`.

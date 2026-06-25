@@ -23,7 +23,10 @@ pub enum Error {
     /// The id is well-formed but no such footprint is indexed.
     NotFound { id: FootprintId },
     /// A filesystem error, tagged with the path it happened on.
-    Io { path: PathBuf, source: std::io::Error },
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     /// The `.kicad_mod` text could not be parsed into a footprint.
     Parse { path: PathBuf, message: String },
 }

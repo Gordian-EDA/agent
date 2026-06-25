@@ -160,6 +160,11 @@ pub struct ContextStats {
 /// A typed handle for the optional UI event sink. `None` is the headless case.
 type Events<'a> = Option<&'a UnboundedSender<AgentEvent>>;
 
+/// Keep enough recent visual context for follow-up inspection without re-sending
+/// every old base64 render on each model call.
+const RECENT_RENDER_IMAGE_MESSAGES_TO_KEEP: usize = 2;
+const STALE_RENDER_IMAGE_PLACEHOLDER: &str = "[earlier render image omitted from model context; call render_schematic/render_board again if needed]";
+
 /// Best-effort emit: a closed receiver (UI gone) is ignored.
 fn emit(events: Events<'_>, ev: AgentEvent) {
     if let Some(tx) = events {
@@ -167,17 +172,20 @@ fn emit(events: Events<'_>, ev: AgentEvent) {
     }
 }
 
+enum StreamCompletion {
+    End { text: String, end: StreamEnd },
+    MissingEnd { text: String },
+}
+
 /// Drain one provider [`stream`](Provider::stream) to its terminal
 /// [`ChatStreamEvent::End`], forwarding each text chunk as an
 /// [`AgentEvent::AssistantDelta`] so the UI can render tokens as they arrive.
-/// Returns `(reply text, the End's StreamEnd)`: the text is the chunks
-/// concatenated (the live reply); the [`StreamEnd`] carries the captured tool
-/// calls + usage. Errors if the stream ends without an `End` event (a malformed /
-/// truncated stream).
+/// Returns the live text and either the terminal [`StreamEnd`] or a marker that
+/// the transport closed before genai finalized the response.
 async fn stream_completion(
     mut events_stream: EventStream<'_>,
     ui: Events<'_>,
-) -> Result<(String, StreamEnd)> {
+) -> Result<StreamCompletion> {
     let mut text = String::new();
     while let Some(ev) = events_stream.next().await {
         match ev? {
@@ -187,13 +195,13 @@ async fn stream_completion(
                     emit(ui, AgentEvent::AssistantDelta(chunk.content));
                 }
             }
-            ChatStreamEvent::End(end) => return Ok((text, end)),
+            ChatStreamEvent::End(end) => return Ok(StreamCompletion::End { text, end }),
             // Start markers, reasoning, thought-signature, and tool-call chunks:
             // the tool calls surface assembled on the End event.
             _ => {}
         }
     }
-    anyhow::bail!("stream ended without an End event")
+    Ok(StreamCompletion::MissingEnd { text })
 }
 
 /// Why a [`Agent::run_turn`] stopped.
@@ -359,13 +367,7 @@ impl<P: Provider> Agent<P> {
             .history
             .iter()
             .flat_map(|m| m.content.iter())
-            .map(|p| match p {
-                ContentPart::Text(t) => t.len(),
-                ContentPart::ToolCall(tc) => tc.fn_arguments.to_string().len(),
-                ContentPart::ToolResponse(tr) => tr.content.len(),
-                // Base64 bytes / signatures aren't text tokens; don't inflate the proxy.
-                _ => 0,
-            })
+            .map(ContentPart::size)
             .sum();
         ContextStats {
             turns: self.turn_starts.len(),
@@ -463,13 +465,27 @@ impl<P: Provider> Agent<P> {
             // event carries the assembled tool calls + usage. A non-streaming
             // backend's default `stream` yields one chunk then the End, so the loop
             // is unchanged for it.
-            let (text, end) = stream_completion(
+            let streamed = stream_completion(
                 self.client
                     .stream(&self.system, &self.history, &defs)
                     .await?,
                 events,
             )
             .await?;
+            let (text, end) = match streamed {
+                StreamCompletion::End { text, end } => (text, end),
+                StreamCompletion::MissingEnd { text } => {
+                    let end = self
+                        .client
+                        .complete(&self.system, &self.history, &defs)
+                        .await?;
+                    let final_text = match completed_text(&end) {
+                        t if !t.is_empty() => t,
+                        _ => text,
+                    };
+                    (final_text, end)
+                }
+            };
             let (input_tokens, output_tokens, cache_write_tokens, cache_read_tokens) =
                 token_usage(&end);
             let tool_calls = end.captured_into_tool_calls().unwrap_or_default();
@@ -572,6 +588,7 @@ impl<P: Provider> Agent<P> {
             if !result_images.is_empty() {
                 self.history
                     .push(ChatMessage::user(MessageContent::from_parts(result_images)));
+                prune_stale_images(&mut self.history);
             }
 
             // Carry any text the model emitted alongside its tool calls so a turn
@@ -725,6 +742,35 @@ impl<P: Provider> Agent<P> {
 /// one-liner.
 fn parse_or_null(result_json: &str) -> Value {
     serde_json::from_str(result_json).unwrap_or(Value::Null)
+}
+
+/// Drop old base64 render payloads from the prompt while preserving a stable
+/// textual breadcrumb. The UI still has the on-disk PNG paths from tool events.
+fn prune_stale_images(history: &mut [ChatMessage]) {
+    let mut kept = 0usize;
+    for msg in history.iter_mut().rev() {
+        if !is_image_only_message(msg) {
+            continue;
+        }
+        kept += 1;
+        if kept > RECENT_RENDER_IMAGE_MESSAGES_TO_KEEP {
+            *msg = ChatMessage::user(STALE_RENDER_IMAGE_PLACEHOLDER);
+        }
+    }
+}
+
+fn is_image_only_message(msg: &ChatMessage) -> bool {
+    if msg.role != ChatRole::User {
+        return false;
+    }
+    let mut saw_image = false;
+    for part in msg.content.iter() {
+        match part {
+            ContentPart::Binary(binary) if binary.is_image() => saw_image = true,
+            _ => return false,
+        }
+    }
+    saw_image
 }
 
 // ── KiCAD-concrete tool dispatch ───────────────────────────────────────────────
@@ -927,15 +973,16 @@ async fn review_committed_kicad(
         return None;
     }
     let netlist = sch_io::read::lift(ctx.env(), sch).ok()?;
-    let (mut score, mut defects) = review_netlist_with_erc(ctx, reviewer, intent, &netlist)
-        .await
-        .ok()?;
+    let (netlist_review, layout_review) = tokio::join!(
+        review_netlist_with_erc(ctx, reviewer, intent, &netlist),
+        review_layout_schematic(ctx, reviewer, intent),
+    );
+    let (mut score, mut defects) = netlist_review.ok()?;
 
     // Layout (vision) plane — best-effort, unioned in. A `(0.0, [])` result means
     // the vision pass produced no parseable verdict (no signal), so it must NOT
     // drag the score to zero — skip it.
-    if let Some((layout_score, layout_defects)) =
-        review_layout_schematic(ctx, reviewer, intent).await
+    if let Some((layout_score, layout_defects)) = layout_review
         && !(layout_score == 0.0 && layout_defects.is_empty())
     {
         score = score.min(layout_score);
@@ -1315,6 +1362,55 @@ mod tests {
         let mut clean = vec![ChatMessage::user("hi"), ChatMessage::assistant("done")];
         repair_history(&mut clean);
         assert_eq!(clean.len(), 2, "a finished exchange needs no repair");
+    }
+
+    #[test]
+    fn stale_image_pruning_keeps_recent_renders_only() {
+        let image = || Binary::from_base64("image/png", "AAAA".to_string(), None);
+        let mut history = vec![
+            ChatMessage::user("prompt"),
+            ChatMessage::user(MessageContent::from_parts(vec![ContentPart::Binary(
+                image(),
+            )])),
+            ChatMessage::assistant("saw first render"),
+            ChatMessage::user(MessageContent::from_parts(vec![ContentPart::Binary(
+                image(),
+            )])),
+            ChatMessage::assistant("saw second render"),
+            ChatMessage::user(MessageContent::from_parts(vec![ContentPart::Binary(
+                image(),
+            )])),
+        ];
+
+        prune_stale_images(&mut history);
+
+        let binary_messages = history
+            .iter()
+            .filter(|m| {
+                m.content
+                    .iter()
+                    .any(|p| matches!(p, ContentPart::Binary(_)))
+            })
+            .count();
+        assert_eq!(
+            binary_messages, 2,
+            "only the two newest render images stay in context"
+        );
+        assert!(
+            matches!(history[1].content.parts().as_slice(), [ContentPart::Text(t)] if t.contains("earlier render image omitted"))
+        );
+        assert!(
+            history[3]
+                .content
+                .iter()
+                .any(|p| matches!(p, ContentPart::Binary(_)))
+        );
+        assert!(
+            history[5]
+                .content
+                .iter()
+                .any(|p| matches!(p, ContentPart::Binary(_)))
+        );
     }
 
     #[test]

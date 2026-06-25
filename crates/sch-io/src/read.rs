@@ -226,8 +226,7 @@ fn is_unconnected_net(name: &str) -> bool {
 /// either), only the PARTITION — caller dedups to keep distinct nets distinct.
 fn kernel_net_name(name: &str) -> String {
     let s = name.strip_prefix('/').unwrap_or(name);
-    let rejected =
-        |c: char| matches!(c, '/' | ' ' | '(' | ')' | '~' | '{' | '}') || c == '\t';
+    let rejected = |c: char| matches!(c, '/' | ' ' | '(' | ')' | '~' | '{' | '}') || c == '\t';
     if s.starts_with("Net-(") || s.chars().any(rejected) {
         let mut out = String::new();
         let mut gap = false;

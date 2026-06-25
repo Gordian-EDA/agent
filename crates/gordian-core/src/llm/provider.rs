@@ -51,9 +51,11 @@ impl GenaiProvider {
              a namespaced `bedrock_api::anthropic.claude-...` / `open_router::openai/gpt-4.1`, or \
              `genai_1::<model>` for a private endpoint (GENAI_1_ENDPOINT + GENAI_1_API_KEY)",
         )?;
-        Ok(Self { client: Client::default(), model })
+        Ok(Self {
+            client: Client::default(),
+            model,
+        })
     }
-
 }
 
 #[async_trait]
@@ -72,6 +74,33 @@ impl Provider for GenaiProvider {
         (provider, self.model.clone())
     }
 
+    async fn complete(
+        &self,
+        system: &str,
+        messages: &[ChatMessage],
+        tools: &[Tool],
+    ) -> Result<StreamEnd> {
+        let mut req = ChatRequest::new(messages.to_vec());
+        if !system.is_empty() {
+            req = req.with_system(system);
+        }
+        if !tools.is_empty() {
+            req = req.with_tools(tools.to_vec());
+        }
+        let opts = chat_options();
+        let resp = self
+            .client
+            .exec_chat(self.model.as_str(), req, Some(&opts))
+            .await?;
+        Ok(StreamEnd {
+            captured_usage: Some(resp.usage),
+            captured_stop_reason: resp.stop_reason,
+            captured_content: Some(resp.content),
+            captured_reasoning_content: resp.reasoning_content,
+            captured_response_id: resp.response_id,
+        })
+    }
+
     async fn stream<'a>(
         &'a self,
         system: &'a str,
@@ -88,20 +117,32 @@ impl Provider for GenaiProvider {
         // One ephemeral cache breakpoint over the static prefix; capture the
         // assembled tool calls + usage off the terminal End event (the reply text
         // arrives live as Chunk events, so no need to capture content).
-        let opts = ChatOptions::default()
-            .with_max_tokens(MAX_TOKENS)
-            .with_cache_control(CacheControl::Ephemeral)
-            .with_capture_tool_calls(true)
-            .with_capture_usage(true);
-        let resp = self.client.exec_chat_stream(self.model.as_str(), req, Some(&opts)).await?;
-        Ok(resp.stream.map(|ev| ev.map_err(anyhow::Error::from)).boxed())
+        let opts = chat_options();
+        let resp = self
+            .client
+            .exec_chat_stream(self.model.as_str(), req, Some(&opts))
+            .await?;
+        Ok(resp
+            .stream
+            .map(|ev| ev.map_err(anyhow::Error::from))
+            .boxed())
     }
+}
+
+fn chat_options() -> ChatOptions {
+    ChatOptions::default()
+        .with_max_tokens(MAX_TOKENS)
+        .with_cache_control(CacheControl::Ephemeral)
+        .with_capture_tool_calls(true)
+        .with_capture_usage(true)
 }
 
 /// Reply text captured at stream end, all text parts concatenated. Empty when the
 /// backend streamed text only as deltas (the agent reads those live instead).
 pub fn completed_text(end: &StreamEnd) -> String {
-    end.captured_texts().map(|parts| parts.concat()).unwrap_or_default()
+    end.captured_texts()
+        .map(|parts| parts.concat())
+        .unwrap_or_default()
 }
 
 /// `(input, output, cache_write, cache_read)` token counts off a [`StreamEnd`].
@@ -121,7 +162,12 @@ pub fn token_usage(end: &StreamEnd) -> (u64, u64, u64, u64) {
         .as_ref()
         .map(|d| (widen(d.cache_creation_tokens), widen(d.cached_tokens)))
         .unwrap_or((0, 0));
-    (widen(u.prompt_tokens), widen(u.completion_tokens), cache_write, cache_read)
+    (
+        widen(u.prompt_tokens),
+        widen(u.completion_tokens),
+        cache_write,
+        cache_read,
+    )
 }
 
 #[cfg(test)]
@@ -143,9 +189,15 @@ mod tests {
 
     #[test]
     fn token_usage_clamps_negatives_and_widens() {
-        assert_eq!(token_usage(&end_with_usage(Some(10), Some(1))), (10, 1, 0, 0));
+        assert_eq!(
+            token_usage(&end_with_usage(Some(10), Some(1))),
+            (10, 1, 0, 0)
+        );
         assert_eq!(token_usage(&end_with_usage(None, None)), (0, 0, 0, 0));
-        assert_eq!(token_usage(&end_with_usage(Some(-1), Some(-5))), (0, 0, 0, 0));
+        assert_eq!(
+            token_usage(&end_with_usage(Some(-1), Some(-5))),
+            (0, 0, 0, 0)
+        );
         assert_eq!(token_usage(&StreamEnd::default()), (0, 0, 0, 0));
     }
 
@@ -157,14 +209,22 @@ mod tests {
             cached_tokens: Some(0),
             ..Default::default()
         });
-        assert_eq!(token_usage(&end), (1000, 2, 800, 0), "first call: cache write");
+        assert_eq!(
+            token_usage(&end),
+            (1000, 2, 800, 0),
+            "first call: cache write"
+        );
 
         end.captured_usage.as_mut().unwrap().prompt_tokens_details = Some(PromptTokensDetails {
             cache_creation_tokens: Some(0),
             cached_tokens: Some(800),
             ..Default::default()
         });
-        assert_eq!(token_usage(&end), (1000, 2, 0, 800), "later call: cache read");
+        assert_eq!(
+            token_usage(&end),
+            (1000, 2, 0, 800),
+            "later call: cache read"
+        );
     }
 
     #[test]
@@ -188,6 +248,10 @@ mod tests {
             }])),
             ..Default::default()
         };
-        assert_eq!(completed_text(&end), "", "a tool-call-only completion has no text");
+        assert_eq!(
+            completed_text(&end),
+            "",
+            "a tool-call-only completion has no text"
+        );
     }
 }

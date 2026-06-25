@@ -70,13 +70,31 @@ pub struct Edge {
 
 impl Edge {
     pub const fn shared(a: &'static str, b: &'static str, net: NetMatch) -> Self {
-        Edge { a, b: Target::Role(b), net, negate: false, optional: false }
+        Edge {
+            a,
+            b: Target::Role(b),
+            net,
+            negate: false,
+            optional: false,
+        }
     }
     pub const fn rail(a: &'static str, kind: NetKind) -> Self {
-        Edge { a, b: Target::Rail(kind), net: NetMatch::Kind(kind), negate: false, optional: false }
+        Edge {
+            a,
+            b: Target::Rail(kind),
+            net: NetMatch::Kind(kind),
+            negate: false,
+            optional: false,
+        }
     }
     pub const fn distinct(a: &'static str, b: &'static str, net: NetMatch) -> Self {
-        Edge { a, b: Target::Role(b), net, negate: true, optional: false }
+        Edge {
+            a,
+            b: Target::Role(b),
+            net,
+            negate: true,
+            optional: false,
+        }
     }
     pub const fn opt(mut self) -> Self {
         self.optional = true;
@@ -106,10 +124,20 @@ pub struct Role {
 
 impl Role {
     pub const fn one(name: &'static str, pred: NodePred) -> Self {
-        Role { name, pred, mult: Mult::One, optional: false }
+        Role {
+            name,
+            pred,
+            mult: Mult::One,
+            optional: false,
+        }
     }
     pub const fn many(name: &'static str, pred: NodePred, min: usize, max: usize) -> Self {
-        Role { name, pred, mult: Mult::Many { min, max }, optional: false }
+        Role {
+            name,
+            pred,
+            mult: Mult::Many { min, max },
+            optional: false,
+        }
     }
 }
 

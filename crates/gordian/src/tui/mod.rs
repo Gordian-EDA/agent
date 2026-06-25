@@ -39,14 +39,11 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gordian_core::{Agent, AgentEvent, Approvals, Provider as _, StopReason};
-use gordian_core::prompts::system_prompt;
-use gordian_core::tools::PcbToolCtx;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    EventStream, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event, EventStream,
+    KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
@@ -55,8 +52,11 @@ use crossterm::terminal::{
     supports_keyboard_enhancement,
 };
 use futures::StreamExt;
-use kicad_env::KicadEnv;
 use gordian_core::history::SnapshotStore;
+use gordian_core::prompts::system_prompt;
+use gordian_core::tools::PcbToolCtx;
+use gordian_core::{Agent, AgentEvent, Approvals, Provider as _, StopReason};
+use kicad_env::KicadEnv;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui_image::picker::Picker;
@@ -116,7 +116,10 @@ pub async fn run(project_dir: PathBuf) -> Result<()> {
     let client = gordian_core::GenaiProvider::from_env().ok();
     let (provider, model) = match &client {
         Some(client) => client.status(),
-        None => ("unconfigured".to_string(), "(AGENT_MODEL unset)".to_string()),
+        None => (
+            "unconfigured".to_string(),
+            "(AGENT_MODEL unset)".to_string(),
+        ),
     };
 
     let agent_handle: Option<SharedAgent> = match (&env, client) {
@@ -157,9 +160,10 @@ pub async fn run(project_dir: PathBuf) -> Result<()> {
     }
 
     // 3. Terminal setup (RAII guard restores it on any exit path).
-    let mut terminal = setup_terminal().context("entering the alternate screen")?;
+    let (mut terminal, keyboard_enhancement) =
+        setup_terminal().context("entering the alternate screen")?;
     let result = event_loop(&mut terminal, &mut app, agent_handle, sch_path, snapshots).await;
-    restore_terminal(&mut terminal).ok();
+    restore_terminal(&mut terminal, keyboard_enhancement).ok();
     result
 }
 
@@ -407,7 +411,9 @@ async fn event_loop(
     // means inline renders fall back to a text label rather than corrupting
     // scrollback with graphics escapes.
     let picker = build_picker();
-    let mut ctx = ui::RenderCtx { picker: picker.as_ref() };
+    let mut ctx = ui::RenderCtx {
+        picker: picker.as_ref(),
+    };
 
     terminal.draw(|f| ui::draw_with(f, app, &mut ctx))?;
 
@@ -490,7 +496,9 @@ async fn event_loop(
 /// these paths hit it today, but the renderer treats `None` as text-label mode).
 fn build_picker() -> Option<Picker> {
     let multiplexed = std::env::var_os("TMUX").is_some()
-        || std::env::var("TERM").map(|t| t.starts_with("screen") || t.contains("tmux")).unwrap_or(false)
+        || std::env::var("TERM")
+            .map(|t| t.starts_with("screen") || t.contains("tmux"))
+            .unwrap_or(false)
         || std::env::var_os("ZELLIJ").is_some();
     if multiplexed {
         return Some(Picker::halfblocks());
@@ -504,11 +512,12 @@ fn build_picker() -> Option<Picker> {
 /// `DISAMBIGUATE_ESCAPE_CODES` so chords like Shift+Enter arrive distinct from a
 /// bare Enter; legacy terminals are left untouched (the composer hint still
 /// advertises ⇧⏎, it just won't fire there).
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+fn setup_terminal() -> Result<(Terminal<CrosstermBackend<Stdout>>, bool)> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
-    if supports_keyboard_enhancement().unwrap_or(false) {
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    let keyboard_enhancement = supports_keyboard_enhancement().unwrap_or(false);
+    if keyboard_enhancement {
         execute!(
             stdout,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
@@ -516,12 +525,15 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     }
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
-    Ok(terminal)
+    Ok((terminal, keyboard_enhancement))
 }
 
 /// Restore the terminal to its normal state. Always safe to call.
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
-    if supports_keyboard_enhancement().unwrap_or(false) {
+fn restore_terminal(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    keyboard_enhancement: bool,
+) -> Result<()> {
+    if keyboard_enhancement {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
     }
     disable_raw_mode()?;

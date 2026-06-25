@@ -32,7 +32,11 @@ fn main() -> anyhow::Result<()> {
     let mut total_body = 0usize;
     for path in &args {
         let p = Path::new(path);
-        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("out").to_string();
+        let stem = p
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("out")
+            .to_string();
         match bench_one(&env, &provider, p, &out_dir, &stem) {
             Ok((parts, pins, nets, warn, body, ic, xing, secs)) => {
                 slowest = slowest.max(secs);
@@ -62,7 +66,12 @@ fn bench_one(
     let src = std::fs::read_to_string(yaml_path)?;
     let result = circuit_lang::compile(&src, provider);
     let design = result.design.ok_or_else(|| {
-        let errs: Vec<String> = result.diagnostics.0.iter().map(|d| d.message.clone()).collect();
+        let errs: Vec<String> = result
+            .diagnostics
+            .0
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
         anyhow::anyhow!("compile produced no design: {}", errs.join("; "))
     })?;
 
@@ -71,12 +80,16 @@ fn bench_one(
         eprintln!("  [{stem}] rails={:?}", ir.rails.keys().collect::<Vec<_>>());
         eprintln!("  [{stem}] frozen={:?}", ir.frozen);
         for d in &ir.idioms {
-            eprintln!("  [{stem}] idiom {} anchor={} parts={:?}", d.kind, d.anchor, d.parts);
+            eprintln!(
+                "  [{stem}] idiom {} anchor={} parts={:?}",
+                d.kind, d.anchor, d.parts
+            );
         }
     }
     let t0 = std::time::Instant::now();
-    let emit = sch_floorplan::floorplan::emit_strategy(env, &design, &ir, Box::new(anneal_place::Anneal))
-        .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
+    let emit =
+        sch_floorplan::floorplan::emit_strategy(env, &design, &ir, Box::new(anneal_place::Anneal))
+            .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
     let secs = t0.elapsed().as_secs_f64();
 
     let parts = design.blocks.values().map(|b| b.components.len()).sum();

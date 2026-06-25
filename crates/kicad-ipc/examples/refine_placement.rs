@@ -7,14 +7,17 @@
 //!   cargo run -p kicad-ipc --example refine_placement -- BOARD.kicad_pcb [RING_MM]
 
 use kicad_ipc::proto::kiapi::common::types::Vector2;
-use kicad_ipc::{footprint_reference, Session};
+use kicad_ipc::{Session, footprint_reference};
 use std::path::Path;
 
 const NM: f64 = 1_000_000.0;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let board = std::env::args().nth(1).expect("board path");
-    let ring_mm: f64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(7.5);
+    let ring_mm: f64 = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7.5);
 
     let mut session = Session::launch_headless(Path::new(&board))?;
     let k = session.kicad();
@@ -23,7 +26,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Classify by reference designator prefix.
     let refs: Vec<(String, Vector2)> = fps
         .iter()
-        .map(|f| (footprint_reference(f), f.position.clone().unwrap_or_default()))
+        .map(|f| {
+            (
+                footprint_reference(f),
+                f.position.clone().unwrap_or_default(),
+            )
+        })
         .collect();
     let pos = |pred: &dyn Fn(&str) -> bool| -> Vec<(String, Vector2)> {
         refs.iter().filter(|(r, _)| pred(r)).cloned().collect()
@@ -36,8 +44,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Board bbox from all footprint centers (+ margin), for edge-seeking.
     let (mut minx, mut miny, mut maxx, mut maxy) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
     for (_, p) in &refs {
-        minx = minx.min(p.x_nm); miny = miny.min(p.y_nm);
-        maxx = maxx.max(p.x_nm); maxy = maxy.max(p.y_nm);
+        minx = minx.min(p.x_nm);
+        miny = miny.min(p.y_nm);
+        maxx = maxx.max(p.x_nm);
+        maxy = maxy.max(p.y_nm);
     }
     // The anchor IC = the one nearest the bbox centre (the board's hub).
     let (cx, cy) = ((minx + maxx) / 2, (miny + maxy) / 2);
@@ -49,8 +59,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("no IC (U*) found — nothing to cluster around");
         return Ok(());
     };
-    println!("anchor IC: {ic_ref} @ ({:.1},{:.1}) mm; {} caps, {} conns, {} xtal",
-        ic_pos.x_nm as f64 / NM, ic_pos.y_nm as f64 / NM, caps.len(), conns.len(), xtals.len());
+    println!(
+        "anchor IC: {ic_ref} @ ({:.1},{:.1}) mm; {} caps, {} conns, {} xtal",
+        ic_pos.x_nm as f64 / NM,
+        ic_pos.y_nm as f64 / NM,
+        caps.len(),
+        conns.len(),
+        xtals.len()
+    );
 
     // CONNS_ONLY: only edge-seek connectors (caps are already well-placed by the
     // engine's auto-surround) — the interactive fix for the stray inboard connector.
@@ -62,7 +78,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1) Caps on concentric rings hugging the IC. Spacing keeps them clear.
     let per_ring = 12usize;
     for (i, (r, _)) in caps.iter().enumerate() {
-        if conns_only { break; }
+        if conns_only {
+            break;
+        }
         let ring = i / per_ring;
         let radius = (ring_mm + ring as f64 * 2.5) * NM;
         let n = per_ring.min(caps.len() - ring * per_ring).max(1);
@@ -80,8 +98,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3) Connectors to the nearest board edge (spread along it).
     for (j, (r, p)) in conns.iter().enumerate() {
         let d = [
-            (p.x_nm - minx, "L"), (maxx - p.x_nm, "R"),
-            (p.y_nm - miny, "T"), (maxy - p.y_nm, "B"),
+            (p.x_nm - minx, "L"),
+            (maxx - p.x_nm, "R"),
+            (p.y_nm - miny, "T"),
+            (maxy - p.y_nm, "B"),
         ];
         let (_, edge) = *d.iter().min_by_key(|(dist, _)| *dist).unwrap();
         let off = (j as i64) * (4.0 * NM) as i64;

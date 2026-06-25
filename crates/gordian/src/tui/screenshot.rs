@@ -68,9 +68,8 @@ fn hex(c: Color, is_fg: bool) -> Option<String> {
 /// The standard xterm 256-colour palette (16 ANSI + 6×6×6 cube + grayscale ramp).
 fn indexed(i: u8) -> String {
     const ANSI: [&str; 16] = [
-        "#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7",
-        "#7dcfff", "#a9b1d6", "#565f89", "#ff7a93", "#b9f27c", "#ff9e64",
-        "#7da6ff", "#c8a2ff", "#b4f9f8", "#c0caf5",
+        "#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
+        "#565f89", "#ff7a93", "#b9f27c", "#ff9e64", "#7da6ff", "#c8a2ff", "#b4f9f8", "#c0caf5",
     ];
     match i {
         0..=15 => ANSI[i as usize].into(),
@@ -90,7 +89,9 @@ fn indexed(i: u8) -> String {
 }
 
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// SVG path data for a box-drawing glyph occupying the cell at `(x0, y0)`. Strokes
@@ -104,10 +105,26 @@ fn box_path(ch: &str, x0: f64, y0: f64) -> Option<String> {
         "─" | "━" => format!("M{x0:.1} {cy:.1}L{x1:.1} {cy:.1}"),
         "│" | "┃" => format!("M{cx:.1} {y0:.1}L{cx:.1} {y1:.1}"),
         // Rounded corners: a stub to one edge, a quadratic turn, a stub to the other.
-        "╭" => format!("M{x1:.1} {cy:.1}L{:.1} {cy:.1}Q{cx:.1} {cy:.1} {cx:.1} {:.1}L{cx:.1} {y1:.1}", cx + R, cy + R),
-        "╮" => format!("M{x0:.1} {cy:.1}L{:.1} {cy:.1}Q{cx:.1} {cy:.1} {cx:.1} {:.1}L{cx:.1} {y1:.1}", cx - R, cy + R),
-        "╰" => format!("M{x1:.1} {cy:.1}L{:.1} {cy:.1}Q{cx:.1} {cy:.1} {cx:.1} {:.1}L{cx:.1} {y0:.1}", cx + R, cy - R),
-        "╯" => format!("M{x0:.1} {cy:.1}L{:.1} {cy:.1}Q{cx:.1} {cy:.1} {cx:.1} {:.1}L{cx:.1} {y0:.1}", cx - R, cy - R),
+        "╭" => format!(
+            "M{x1:.1} {cy:.1}L{:.1} {cy:.1}Q{cx:.1} {cy:.1} {cx:.1} {:.1}L{cx:.1} {y1:.1}",
+            cx + R,
+            cy + R
+        ),
+        "╮" => format!(
+            "M{x0:.1} {cy:.1}L{:.1} {cy:.1}Q{cx:.1} {cy:.1} {cx:.1} {:.1}L{cx:.1} {y1:.1}",
+            cx - R,
+            cy + R
+        ),
+        "╰" => format!(
+            "M{x1:.1} {cy:.1}L{:.1} {cy:.1}Q{cx:.1} {cy:.1} {cx:.1} {:.1}L{cx:.1} {y0:.1}",
+            cx + R,
+            cy - R
+        ),
+        "╯" => format!(
+            "M{x0:.1} {cy:.1}L{:.1} {cy:.1}Q{cx:.1} {cy:.1} {cx:.1} {:.1}L{cx:.1} {y0:.1}",
+            cx - R,
+            cy - R
+        ),
         // Square corners.
         "┌" => format!("M{x1:.1} {cy:.1}L{cx:.1} {cy:.1}L{cx:.1} {y1:.1}"),
         "┐" => format!("M{x0:.1} {cy:.1}L{cx:.1} {cy:.1}L{cx:.1} {y1:.1}"),
@@ -148,7 +165,9 @@ fn buffer_to_svg(buf: &Buffer) -> String {
     // Background-rect layer (drawn first, under the glyphs).
     for y in 0..h {
         for x in 0..w {
-            let Some(cell) = buf.cell((x, y)) else { continue };
+            let Some(cell) = buf.cell((x, y)) else {
+                continue;
+            };
             if let Some(bg) = hex(cell.bg, false) {
                 let _ = writeln!(
                     s,
@@ -164,7 +183,9 @@ fn buffer_to_svg(buf: &Buffer) -> String {
     // Glyph layer.
     for y in 0..h {
         for x in 0..w {
-            let Some(cell) = buf.cell((x, y)) else { continue };
+            let Some(cell) = buf.cell((x, y)) else {
+                continue;
+            };
             let sym = cell.symbol();
             if sym == " " || sym.is_empty() {
                 continue;
@@ -183,9 +204,21 @@ fn buffer_to_svg(buf: &Buffer) -> String {
                 );
                 continue;
             }
-            let bold = if m.contains(Modifier::BOLD) { " font-weight=\"bold\"" } else { "" };
-            let italic = if m.contains(Modifier::ITALIC) { " font-style=\"italic\"" } else { "" };
-            let dim = if m.contains(Modifier::DIM) { " opacity=\"0.55\"" } else { "" };
+            let bold = if m.contains(Modifier::BOLD) {
+                " font-weight=\"bold\""
+            } else {
+                ""
+            };
+            let italic = if m.contains(Modifier::ITALIC) {
+                " font-style=\"italic\""
+            } else {
+                ""
+            };
+            let dim = if m.contains(Modifier::DIM) {
+                " opacity=\"0.55\""
+            } else {
+                ""
+            };
             let tx = x as f64 * CW + CW / 2.0;
             // Baseline centred in the (now taller) cell: vertical middle + half the
             // cap height, so glyphs sit mid-row rather than hugging the top.
@@ -221,7 +254,11 @@ fn status() -> Status {
 }
 
 fn push(app: &mut App, speaker: Speaker, text: &str, level: NoticeLevel) {
-    app.transcript.push(Entry { speaker, text: text.into(), level });
+    app.transcript.push(Entry {
+        speaker,
+        text: text.into(),
+        level,
+    });
 }
 
 /// Drive a finished tool card through the real agent-event path (start → finish)
@@ -240,7 +277,12 @@ fn tool(app: &mut App, name: &str, summary: &str) {
 /// same `update`/agent-event path the running app uses, so the captures can't
 /// drift from real rendering (e.g. mask a double marker).
 fn seed_conversation(app: &mut App) {
-    push(app, Speaker::User, "design a 5V 3A buck converter from 12V in", NoticeLevel::Plain);
+    push(
+        app,
+        Speaker::User,
+        "design a 5V 3A buck converter from 12V in",
+        NoticeLevel::Plain,
+    );
     app.update(Msg::Agent(AgentEvent::AssistantText(
         "I'll build a synchronous buck around a TPS54331. Let me search for parts and lay out \
          the power stage with input/output bulk caps and a feedback divider."
@@ -269,7 +311,12 @@ fn seed_conversation(app: &mut App) {
          stage, feedback network, and decoupling are all in place. Want me to lay out the PCB next?"
             .into(),
     )));
-    push(app, Speaker::System, "turn finished · 6 tool calls · 12.4k tokens", NoticeLevel::Success);
+    push(
+        app,
+        Speaker::System,
+        "turn finished · 6 tool calls · 12.4k tokens",
+        NoticeLevel::Success,
+    );
 }
 
 #[test]
@@ -335,7 +382,12 @@ fn tui_screenshots() {
     //    band, gutter rule, language label), inline code, and the three notice
     //    levels as callouts.
     let mut app = App::new(status());
-    push(&mut app, Speaker::User, "show me the feedback divider values", NoticeLevel::Plain);
+    push(
+        &mut app,
+        Speaker::User,
+        "show me the feedback divider values",
+        NoticeLevel::Plain,
+    );
     app.update(Msg::Agent(AgentEvent::AssistantText(
         "## Feedback network\n\
          The divider sets the output to **5.0 V** with `Vref = 0.8 V`:\n\n\
@@ -347,7 +399,12 @@ fn tui_screenshots() {
             .into(),
     )));
     tool(&mut app, "run_erc", "0 errors, 1 warning");
-    push(&mut app, Speaker::System, "applied — ERC 0 errors, 1 warning", NoticeLevel::Success);
+    push(
+        &mut app,
+        Speaker::System,
+        "applied — ERC 0 errors, 1 warning",
+        NoticeLevel::Success,
+    );
     push(
         &mut app,
         Speaker::System,
@@ -365,7 +422,12 @@ fn tui_screenshots() {
     // 9. A turn mid-stream: assistant prose still arriving token-by-token (a
     //    live entry with its trailing cursor), the running indicator below.
     let mut app = App::new(status());
-    push(&mut app, Speaker::User, "design a 3.3V LDO with input and output caps", NoticeLevel::Plain);
+    push(
+        &mut app,
+        Speaker::User,
+        "design a 3.3V LDO with input and output caps",
+        NoticeLevel::Plain,
+    );
     tool(&mut app, "search_symbols", "\"LDO 3.3V\" → 9 hits");
     for chunk in [
         "I'll use an **AMS1117-3.3** with a 10µF input cap and a 22µF output ",
@@ -382,14 +444,23 @@ fn tui_screenshots() {
     //     harness there is no image picker, so the cell renders its stable
     //     text-label placeholder; the live terminal shows real graphics here.
     let mut app = App::new(status());
-    push(&mut app, Speaker::User, "route the board and show me the result", NoticeLevel::Plain);
-    app.update(Msg::Agent(AgentEvent::ToolStarted { name: "route_board".into() }));
+    push(
+        &mut app,
+        Speaker::User,
+        "route the board and show me the result",
+        NoticeLevel::Plain,
+    );
+    app.update(Msg::Agent(AgentEvent::ToolStarted {
+        name: "route_board".into(),
+    }));
     app.update(Msg::Agent(AgentEvent::ToolFinished {
         name: "route_board".into(),
         summary: "2-layer · 0 failed nets".into(),
         image_path: None,
     }));
-    app.update(Msg::Agent(AgentEvent::ToolStarted { name: "render_board".into() }));
+    app.update(Msg::Agent(AgentEvent::ToolStarted {
+        name: "render_board".into(),
+    }));
     app.update(Msg::Agent(AgentEvent::ToolFinished {
         name: "render_board".into(),
         summary: "routed view → ok".into(),

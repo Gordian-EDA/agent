@@ -7,10 +7,10 @@
 //! loop drives still need KiCAD (via [`PcbToolCtx::detect_for_test`]); all tests
 //! SKIP gracefully when no KiCAD is detected.
 
-use gordian_core::testing::{ScriptedClient, final_text, tool_call};
-use gordian_core::{Agent, AutoApprove};
 use gordian_core::prompts::system_prompt;
+use gordian_core::testing::{ScriptedClient, final_text, tool_call};
 use gordian_core::tools::PcbToolCtx;
+use gordian_core::{Agent, AutoApprove};
 
 /// Build an agent over a [`PcbToolCtx`] and a scripted client.
 fn agent(ctx: PcbToolCtx, completions: Vec<gordian_core::StreamEnd>) -> Agent<ScriptedClient> {
@@ -30,8 +30,16 @@ blocks:\n\
 /// The shared script: (1) search_symbols, (2) apply_design{commit:true}, (3) done.
 fn script() -> Vec<gordian_core::StreamEnd> {
     vec![
-        tool_call("tu_1", "search_symbols", serde_json::json!({ "query": "resistor" })),
-        tool_call("tu_2", "apply_design", serde_json::json!({ "yaml": TINY_YAML, "commit": true })),
+        tool_call(
+            "tu_1",
+            "search_symbols",
+            serde_json::json!({ "query": "resistor" }),
+        ),
+        tool_call(
+            "tu_2",
+            "apply_design",
+            serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+        ),
         final_text("done"),
     ]
 }
@@ -53,8 +61,14 @@ async fn loop_runs_tools_and_gates_apply_on_yes() {
         .await
         .unwrap();
 
-    assert!(outcome.applied, "approve=yes must commit the write: {outcome:?}");
-    assert!(sch_path.exists(), "approved apply must write the .kicad_sch: {outcome:?}");
+    assert!(
+        outcome.applied,
+        "approve=yes must commit the write: {outcome:?}"
+    );
+    assert!(
+        sch_path.exists(),
+        "approved apply must write the .kicad_sch: {outcome:?}"
+    );
     assert!(
         outcome.tool_calls_made >= 2,
         "expected at least the search + apply tool calls, got {}",
@@ -77,9 +91,17 @@ async fn stall_after_research_is_nudged_until_it_commits() {
 
     // (1) research, (2) premature text-only stop → NUDGE, (3) apply+commit, (4) done.
     let script = vec![
-        tool_call("tu_1", "search_symbols", serde_json::json!({ "query": "resistor" })),
+        tool_call(
+            "tu_1",
+            "search_symbols",
+            serde_json::json!({ "query": "resistor" }),
+        ),
         final_text("I looked up the parts."), // stalls without committing
-        tool_call("tu_2", "apply_design", serde_json::json!({ "yaml": TINY_YAML, "commit": true })),
+        tool_call(
+            "tu_2",
+            "apply_design",
+            serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+        ),
         final_text("done"),
     ];
     let mut agent = agent(ctx, script);
@@ -90,8 +112,14 @@ async fn stall_after_research_is_nudged_until_it_commits() {
         .await
         .unwrap();
 
-    assert!(outcome.applied, "the nudge must drive the stalled model to commit: {outcome:?}");
-    assert!(sch_path.exists(), "the post-nudge commit must write the .kicad_sch: {outcome:?}");
+    assert!(
+        outcome.applied,
+        "the nudge must drive the stalled model to commit: {outcome:?}"
+    );
+    assert!(
+        sch_path.exists(),
+        "the post-nudge commit must write the .kicad_sch: {outcome:?}"
+    );
     assert_eq!(outcome.final_text, "done");
 }
 
@@ -107,7 +135,11 @@ async fn stall_nudge_is_bounded_and_gives_up() {
     };
 
     let script = vec![
-        tool_call("tu_1", "search_symbols", serde_json::json!({ "query": "resistor" })),
+        tool_call(
+            "tu_1",
+            "search_symbols",
+            serde_json::json!({ "query": "resistor" }),
+        ),
         final_text("stop 1"), // → nudge 1
         final_text("stop 2"), // → nudge 2
         final_text("stop 3"), // nudges exhausted → return
@@ -141,8 +173,14 @@ async fn loop_rejects_apply_on_no_and_does_not_write() {
         .await
         .unwrap();
 
-    assert!(!outcome.applied, "approve=no must NOT report applied: {outcome:?}");
-    assert!(!sch_path.exists(), "rejected apply must NOT write the .kicad_sch: {outcome:?}");
+    assert!(
+        !outcome.applied,
+        "approve=no must NOT report applied: {outcome:?}"
+    );
+    assert!(
+        !sch_path.exists(),
+        "rejected apply must NOT write the .kicad_sch: {outcome:?}"
+    );
     // The loop still ran the tools and reached the final text.
     assert!(outcome.tool_calls_made >= 2, "tools still ran: {outcome:?}");
     assert_eq!(outcome.final_text, "done");

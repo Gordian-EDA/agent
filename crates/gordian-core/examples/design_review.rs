@@ -14,8 +14,12 @@ use tokio::sync::mpsc;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let out = args.next().expect("usage: design_review <out.png> <prompt>");
-    let prompt = args.next().expect("usage: design_review <out.png> <prompt>");
+    let out = args
+        .next()
+        .expect("usage: design_review <out.png> <prompt>");
+    let prompt = args
+        .next()
+        .expect("usage: design_review <out.png> <prompt>");
 
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
     let tmp = tempfile::tempdir()?;
@@ -33,8 +37,15 @@ async fn main() -> anyhow::Result<()> {
     let printer = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
             match ev {
-                AgentEvent::Reviewed { round, score, defects } => {
-                    eprintln!("[review {round}] score={score} high-conf critical/major defects={}", defects.len());
+                AgentEvent::Reviewed {
+                    round,
+                    score,
+                    defects,
+                } => {
+                    eprintln!(
+                        "[review {round}] score={score} high-conf critical/major defects={}",
+                        defects.len()
+                    );
                     for d in &defects {
                         eprintln!("    {d}");
                     }
@@ -48,7 +59,9 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Turn 1 designs; up to 2 review→fix rounds follow.
-    agent.run_turn_reviewed(&prompt, &prompt, &mut approvals, Some(&tx), 2).await?;
+    agent
+        .run_turn_reviewed(&prompt, &prompt, &mut approvals, Some(&tx), 2)
+        .await?;
     drop(tx);
     printer.await.ok();
 
@@ -61,7 +74,11 @@ async fn main() -> anyhow::Result<()> {
     let svg = std::fs::read_to_string(&svg_path)?;
     let png = gordian_core::render::svg_to_png(&svg, 1600)?;
     std::fs::write(&out, png)?;
-    std::fs::copy(&sch_path, std::path::Path::new(&out).with_extension("kicad_sch")).ok();
+    std::fs::copy(
+        &sch_path,
+        std::path::Path::new(&out).with_extension("kicad_sch"),
+    )
+    .ok();
     if let Ok(y) = sch_io::read::lift(&env, &sch_path) {
         std::fs::write(std::path::Path::new(&out).with_extension("circuit.yaml"), y).ok();
     }

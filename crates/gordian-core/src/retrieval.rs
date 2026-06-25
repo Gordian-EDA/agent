@@ -245,8 +245,24 @@ impl Corpus {
 /// Generic words that carry no discriminating signal for a hardware intent — if
 /// every board is "a board with ...", matching on them just adds noise.
 const STOP_WORDS: &[&str] = &[
-    "a", "an", "the", "and", "or", "with", "for", "of", "to", "on", "in",
-    "board", "design", "circuit", "schematic", "pcb", "module", "system",
+    "a",
+    "an",
+    "the",
+    "and",
+    "or",
+    "with",
+    "for",
+    "of",
+    "to",
+    "on",
+    "in",
+    "board",
+    "design",
+    "circuit",
+    "schematic",
+    "pcb",
+    "module",
+    "system",
 ];
 
 /// Split an intent into the salient lowercase terms used for ranking: alphanumeric
@@ -301,9 +317,15 @@ mod tests {
     fn staged_corpus() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let designs = [
-            ("aaa", "STM32 microcontroller board with USB and a 3V3 regulator."),
+            (
+                "aaa",
+                "STM32 microcontroller board with USB and a 3V3 regulator.",
+            ),
             ("bbb", "Simple resistor voltage divider reference design."),
-            ("ccc", "Audio amplifier with an op-amp and power supply filtering."),
+            (
+                "ccc",
+                "Audio amplifier with an op-amp and power supply filtering.",
+            ),
         ];
         for (id, desc) in designs {
             let mut f = std::fs::File::create(tmp.path().join(format!("{id}.json"))).unwrap();
@@ -336,7 +358,10 @@ mod tests {
         let (best, score) = corpus
             .best_meta("STM32 microcontroller board with USB and 3V3 regulator")
             .expect("a plausible match");
-        assert_eq!(best.id, "aaa", "STM32 intent must rank the STM32 design first");
+        assert_eq!(
+            best.id, "aaa",
+            "STM32 intent must rank the STM32 design first"
+        );
         assert!(score > 0, "a real subsequence match scores positive");
     }
 

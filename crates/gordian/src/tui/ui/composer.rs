@@ -26,8 +26,14 @@ pub(super) fn draw_completions(f: &mut Frame, input_area: Rect, app: &App) {
             // plain name, dim description — the soft Codex selection, not an
             // inverted bar.
             let sel = selected == Some(i);
-            let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-            let name_style = if sel { accent } else { Style::default().fg(Color::Cyan) };
+            let accent = Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD);
+            let name_style = if sel {
+                accent
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
             Line::from(vec![
                 Span::styled(if sel { "› " } else { "  " }, accent),
                 Span::styled(format!("{:<name_w$}  ", c.name), name_style),
@@ -38,7 +44,12 @@ pub(super) fn draw_completions(f: &mut Frame, input_area: Rect, app: &App) {
 
     let content_w = lines
         .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum::<usize>()
+        })
         .max()
         .unwrap_or(0) as u16;
     let maxw = input_area.width.saturating_sub(2 * MARGIN);
@@ -59,7 +70,9 @@ pub(super) fn draw_completions(f: &mut Frame, input_area: Rect, app: &App) {
                 .border_style(Style::default().fg(Color::Cyan))
                 .title(Span::styled(
                     " commands · Tab ",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 )),
         ),
         popup,
@@ -132,7 +145,9 @@ pub(super) fn draw_diff(f: &mut Frame, area: Rect, app: &App) {
     let hint = Line::from(vec![
         Span::styled(
             format!("[{}] approve", super::super::event::APPROVE_KEY),
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("    "),
         Span::styled(
@@ -174,7 +189,11 @@ pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     // A rounded composer box (Codex idiom). The border brightens to the accent
     // while typing is live and dims otherwise, so the eye knows where focus is.
     let focused = app.input_active() && app.pending.is_none();
-    let border = if focused { Color::Cyan } else { Color::DarkGray };
+    let border = if focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -253,7 +272,10 @@ pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
 
     // The terminal cursor on the cursor's row, windowed to match its line.
     if app.input_active() {
-        let chars = logical.get(cur_line).map(|l| l.chars().count()).unwrap_or(0);
+        let chars = logical
+            .get(cur_line)
+            .map(|l| l.chars().count())
+            .unwrap_or(0);
         let start = cur_col.min(chars).saturating_sub(avail.saturating_sub(1));
         let row = cur_line.saturating_sub(first) as u16;
         let x = inner.x + 2 + (cur_col - start) as u16;
@@ -296,7 +318,9 @@ pub(super) fn draw_unwind(f: &mut Frame, input_area: Rect, app: &App) {
         .map(|(i, prompt)| {
             // Soft selection: accent caret + bold on the chosen row; others dim.
             let sel = i == p.selected;
-            let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+            let accent = Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD);
             let text_style = if sel {
                 accent
             } else {
@@ -304,7 +328,10 @@ pub(super) fn draw_unwind(f: &mut Frame, input_area: Rect, app: &App) {
             };
             Line::from(vec![
                 Span::styled(if sel { "› " } else { "  " }, accent),
-                Span::styled(format!("↶{:<idx_w$}  ", i + 1), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("↶{:<idx_w$}  ", i + 1),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(prompt.clone(), text_style),
             ])
         })
@@ -322,7 +349,9 @@ pub(super) fn draw_unwind(f: &mut Frame, input_area: Rect, app: &App) {
         .unwrap_or(0) as u16;
     // `.max().min()` not `clamp()`: a terminal narrower than the floor would
     // make clamp(lo, hi) panic with lo > hi.
-    let w = (content_w + 2).max(24).min(input_area.width.saturating_sub(2 * MARGIN));
+    let w = (content_w + 2)
+        .max(24)
+        .min(input_area.width.saturating_sub(2 * MARGIN));
     let h = (p.prompts.len() as u16 + 2).min(input_area.y); // never above the screen top
     let popup = Rect {
         x: input_area.x + MARGIN, // align with the composer
@@ -339,7 +368,9 @@ pub(super) fn draw_unwind(f: &mut Frame, input_area: Rect, app: &App) {
                 .border_style(Style::default().fg(Color::Cyan))
                 .title(Span::styled(
                     " unwind to… · ↑↓ Enter · Esc ",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 )),
         ),
         popup,
@@ -363,6 +394,10 @@ mod tests {
             added: (0..60).map(|i| format!("U{i}")).collect(),
             ..Default::default()
         };
-        assert_eq!(diff_height(&big, 80), 9, "capped so it can't eat the transcript");
+        assert_eq!(
+            diff_height(&big, 80),
+            9,
+            "capped so it can't eat the transcript"
+        );
     }
 }

@@ -8,7 +8,9 @@ use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;
 
 fn main() -> anyhow::Result<()> {
-    let path = std::env::args().nth(1).expect("usage: erc_check <design.yaml>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: erc_check <design.yaml>");
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
     let provider = SymbolTable::from_env(&env);
     let src = std::fs::read_to_string(&path)?;

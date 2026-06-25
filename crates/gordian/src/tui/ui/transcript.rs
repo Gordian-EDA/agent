@@ -102,16 +102,17 @@ fn layout_blocks(app: &App, body_w: usize, ctx: &RenderCtx) -> Vec<Block> {
     let mut prev: Option<Speaker> = None;
     let mut img = 0usize; // next un-emitted image (images are sorted by `after`)
 
-    let mut flush_images_after = |n: usize, blocks: &mut Vec<Block>, text: &mut Vec<Line<'static>>| {
-        while img < app.images.len() && app.images[img].after <= n {
-            if !text.is_empty() {
-                blocks.push(Block::Text(std::mem::take(text)));
+    let mut flush_images_after =
+        |n: usize, blocks: &mut Vec<Block>, text: &mut Vec<Line<'static>>| {
+            while img < app.images.len() && app.images[img].after <= n {
+                if !text.is_empty() {
+                    blocks.push(Block::Text(std::mem::take(text)));
+                }
+                let rows = image_rows(&app.images[img], body_w, ctx);
+                blocks.push(Block::Image { idx: img, rows });
+                img += 1;
             }
-            let rows = image_rows(&app.images[img], body_w, ctx);
-            blocks.push(Block::Image { idx: img, rows });
-            img += 1;
-        }
-    };
+        };
 
     for (i, e) in app.transcript.iter().enumerate() {
         // Emit any images pinned at this transcript position (after == i) before
@@ -204,9 +205,11 @@ fn draw_image(f: &mut Frame, rect: Rect, app: &mut App, idx: usize, ctx: &mut Re
     f.render_widget(text_label(&caption, Color::Cyan), cap_rect);
     if img_rect.height > 0 {
         if let ImageState::Ready(proto) = &mut app.images[idx].state {
-            StatefulImage::default()
-                .resize(Resize::Fit(None))
-                .render(img_rect, f.buffer_mut(), proto.as_mut());
+            StatefulImage::default().resize(Resize::Fit(None)).render(
+                img_rect,
+                f.buffer_mut(),
+                proto.as_mut(),
+            );
         }
     }
 }
@@ -237,7 +240,10 @@ fn split_caption(rect: Rect) -> (Rect, Rect) {
 
 /// Decode a PNG at `path` into a fitted [`StatefulProtocol`] via the picker.
 /// `None` on any read/decode error (the caller falls back to the text label).
-fn decode(picker: &ratatui_image::picker::Picker, path: &str) -> Option<ratatui_image::protocol::StatefulProtocol> {
+fn decode(
+    picker: &ratatui_image::picker::Picker,
+    path: &str,
+) -> Option<ratatui_image::protocol::StatefulProtocol> {
     let img = image::ImageReader::open(path).ok()?.decode().ok()?;
     Some(picker.new_resize_protocol(img))
 }
@@ -246,18 +252,20 @@ fn decode(picker: &ratatui_image::picker::Picker, path: &str) -> Option<ratatui_
 /// the brand, a tagline, a few example prompts, and the key hints — vertically
 /// centred so an empty cockpit feels intentional rather than blank.
 fn draw_welcome(f: &mut Frame, area: Rect) {
-    let accent = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let accent = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(Color::DarkGray);
     let caret = Style::default().fg(Color::Cyan);
     let example = |s: &'static str| {
-        Line::from(vec![Span::styled("    › ", caret), Span::styled(s, Style::default())])
+        Line::from(vec![
+            Span::styled("    › ", caret),
+            Span::styled(s, Style::default()),
+        ])
     };
     let lines = vec![
         Line::from(Span::styled("Gordian", accent)),
-        Line::from(Span::styled(
-            "the schematic & PCB design copilot",
-            dim,
-        )),
+        Line::from(Span::styled("the schematic & PCB design copilot", dim)),
         Line::from(""),
         Line::from(Span::styled("  Try:", dim)),
         example("design a 3.3V LDO regulator with input and output caps"),
@@ -313,7 +321,9 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
         Speaker::User => (
             "› ",
             "  ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
             Style::default().add_modifier(Modifier::BOLD),
             false,
         ),
@@ -429,7 +439,9 @@ fn code_row_spans(ml: &MdLine, row: Vec<Span<'static>>, opening: bool) -> Vec<Sp
         if let LineKind::Code { lang: Some(lang) } = &ml.kind {
             spans.push(Span::styled(
                 format!("  {lang}"),
-                bg(Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+                bg(Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM)),
             ));
         }
     }

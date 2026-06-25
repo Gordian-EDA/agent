@@ -9,7 +9,7 @@
 use gordian_core::AgentEvent;
 use serde_json::Value;
 
-use super::{App, Entry, PendingDiff};
+use super::{App, Entry, NoticeLevel, PendingDiff};
 
 /// An input event or async arrival the [`App`] reacts to.
 #[derive(Clone, Debug)]
@@ -57,7 +57,7 @@ pub enum Msg {
     /// Esc — close help / reject a gate / clear input / cancel a turn / arm
     /// (then perform) a context unwind, in that order of precedence.
     Cancel,
-    /// Ctrl-C — quit unconditionally.
+    /// Ctrl-C — arm quit; a second Ctrl-C exits.
     ForceQuit,
     /// A periodic animation tick from the shell (advances the spinner).
     Tick,
@@ -123,6 +123,18 @@ pub enum Action {
 impl App {
     /// Apply one message, mutating state and returning the shell's next action.
     pub fn update(&mut self, msg: Msg) -> Action {
+        if matches!(msg, Msg::ForceQuit) {
+            return self.request_quit();
+        }
+
+        // Any user action other than Ctrl-C disarms the two-step quit catcher.
+        if !matches!(
+            msg,
+            Msg::Tick | Msg::Agent(_) | Msg::PendingDiff(_) | Msg::TurnEnded(_)
+        ) {
+            self.ctrl_c_armed = false;
+        }
+
         // While the unwind picker owns the screen it is modal: arrow keys move the
         // selection, Enter confirms, Esc cancels, and every other key is swallowed
         // so it can't disturb the input or scroll underneath.
@@ -277,10 +289,7 @@ impl App {
                 Action::None
             }
             Msg::Cancel => self.cancel(),
-            Msg::ForceQuit => {
-                self.should_quit = true;
-                Action::Quit
-            }
+            Msg::ForceQuit => unreachable!("handled before modal dispatch"),
             Msg::Tick => {
                 if self.running {
                     self.spinner = self.spinner.wrapping_add(1);
@@ -313,7 +322,7 @@ impl App {
 
     /// Esc, layered: close help → reject the gate → clear a non-empty input →
     /// cancel a running turn → arm, then perform, a one-turn context unwind.
-    /// Esc never quits; that's `Ctrl-C` or `/quit`.
+    /// Esc never quits; that's double Ctrl-C or `/quit`.
     fn cancel(&mut self) -> Action {
         if self.help {
             self.help = false;
@@ -335,6 +344,21 @@ impl App {
             self.esc_armed = true;
             Action::None
         }
+    }
+
+    /// First Ctrl-C posts a visible guard; the second exits.
+    fn request_quit(&mut self) -> Action {
+        if self.ctrl_c_armed {
+            self.should_quit = true;
+            return Action::Quit;
+        }
+        self.ctrl_c_armed = true;
+        self.esc_armed = false;
+        self.transcript.push(Entry::notice(
+            NoticeLevel::Warn,
+            "Press Ctrl-C again to exit",
+        ));
+        Action::None
     }
 
     /// Confirm the picker: close it and ask the shell to drop `selected + 1`
@@ -422,9 +446,9 @@ impl App {
             "/preview" => {
                 match self.latest_render_path() {
                     Some(path) => self.push_image(path, "preview"),
-                    None => self
-                        .transcript
-                        .push(Entry::system("no render yet — ask me to render the board first")),
+                    None => self.transcript.push(Entry::system(
+                        "no render yet — ask me to render the board first",
+                    )),
                 }
                 Action::None
             }

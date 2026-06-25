@@ -114,7 +114,10 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
                     .unwrap_or(key.as_str());
                 let u = pin_name.to_ascii_uppercase();
                 if matches!(u.as_str(), "NRST" | "RESET" | "RST" | "NMI") || u.starts_with("BOOT") {
-                    ctrl_pins.entry(n.clone()).or_default().push(format!("{refdes}.{pin_name}"));
+                    ctrl_pins
+                        .entry(n.clone())
+                        .or_default()
+                        .push(format!("{refdes}.{pin_name}"));
                 }
             }
         }
@@ -207,7 +210,7 @@ mod tests {
     use super::*;
     use crate::desugar::desugar;
     use crate::parse::parse_str;
-    use crate::provider::{SymbolTable, PinType};
+    use crate::provider::{PinType, SymbolTable};
 
     fn provider() -> SymbolTable {
         use PinType::*;
@@ -223,7 +226,10 @@ mod tests {
                 ("6", "NRST", Other, 1),
             ],
         );
-        p.mock_add("Device:Crystal", vec![("1", "1", Other, 1), ("2", "2", Other, 1)]);
+        p.mock_add(
+            "Device:Crystal",
+            vec![("1", "1", Other, 1), ("2", "2", Other, 1)],
+        );
         p
     }
 

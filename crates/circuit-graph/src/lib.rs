@@ -23,7 +23,7 @@ pub mod pattern;
 pub mod value;
 
 pub use graph::{CircuitGraph, NetKind, Node, Pin};
-pub use matcher::{find, find_all, Match};
+pub use matcher::{Match, find, find_all};
 pub use pattern::{Edge, Mult, NetMatch, NodePred, Pattern, Role, Target};
 
 #[cfg(test)]
@@ -72,7 +72,12 @@ mod tests {
                     ("PA0", "SIG"),
                 ],
             ),
-            node("Y1", "Device:Crystal", "8MHz", &[("1", "XTAL1"), ("2", "XTAL2")]),
+            node(
+                "Y1",
+                "Device:Crystal",
+                "8MHz",
+                &[("1", "XTAL1"), ("2", "XTAL2")],
+            ),
             node("C1", "Device:C", "22pF", &[("1", "XTAL1"), ("2", "GND")]),
             node("C2", "Device:C", "22pF", &[("1", "XTAL2"), ("2", "GND")]),
             node("C3", "Device:C", "100nF", &[("1", "+3V3"), ("2", "GND")]),
@@ -108,7 +113,10 @@ mod tests {
         caps.sort();
         // C3/C4/C5 are the rail-to-rail caps; the crystal load caps (to a signal
         // net, not power) must NOT be swept in.
-        assert_eq!(caps, vec!["C3".to_string(), "C4".to_string(), "C5".to_string()]);
+        assert_eq!(
+            caps,
+            vec!["C3".to_string(), "C4".to_string(), "C5".to_string()]
+        );
     }
 
     #[test]
@@ -118,8 +126,18 @@ mod tests {
         // (which is a supply entry) — else the connector steals the anchor and placement
         // drops the whole bank, scattering it.
         let nodes = vec![
-            node("U1", "MCU:X", "", &[("1", "+3V3"), ("2", "GND"), ("3", "SIG")]),
-            node("J1", "Connector_Generic:Conn_01x04", "", &[("1", "+3V3"), ("2", "GND"), ("3", "SWDIO"), ("4", "SWCLK")]),
+            node(
+                "U1",
+                "MCU:X",
+                "",
+                &[("1", "+3V3"), ("2", "GND"), ("3", "SIG")],
+            ),
+            node(
+                "J1",
+                "Connector_Generic:Conn_01x04",
+                "",
+                &[("1", "+3V3"), ("2", "GND"), ("3", "SWDIO"), ("4", "SWCLK")],
+            ),
             node("C1", "Device:C", "100nF", &[("1", "+3V3"), ("2", "GND")]),
             node("C2", "Device:C", "100nF", &[("1", "+3V3"), ("2", "GND")]),
             node("C3", "Device:C", "100nF", &[("1", "+3V3"), ("2", "GND")]),
@@ -160,12 +178,25 @@ mod tests {
         // Drop C2: only one load cap. With min_score 1.0 (both caps required) the
         // crystal pattern must not match.
         let nodes = vec![
-            node("U1", "MCU:X", "", &[("1", "+3V3"), ("2", "GND"), ("3", "XTAL1"), ("4", "XTAL2")]),
-            node("Y1", "Device:Crystal", "8MHz", &[("1", "XTAL1"), ("2", "XTAL2")]),
+            node(
+                "U1",
+                "MCU:X",
+                "",
+                &[("1", "+3V3"), ("2", "GND"), ("3", "XTAL1"), ("4", "XTAL2")],
+            ),
+            node(
+                "Y1",
+                "Device:Crystal",
+                "8MHz",
+                &[("1", "XTAL1"), ("2", "XTAL2")],
+            ),
             node("C1", "Device:C", "22pF", &[("1", "XTAL1"), ("2", "GND")]),
         ];
         let g = CircuitGraph::new(nodes, kind_of);
-        assert!(find(&g, &library::CRYSTAL).is_empty(), "one-cap crystal fails full match");
+        assert!(
+            find(&g, &library::CRYSTAL).is_empty(),
+            "one-cap crystal fails full match"
+        );
     }
 
     #[test]
@@ -176,7 +207,11 @@ mod tests {
             node("C1", "Device:C", "100nF", &[("1", "OUT"), ("2", "GND")]),
         ];
         let g = CircuitGraph::new(rc, kind_of);
-        assert_eq!(find(&g, &library::RC_LOWPASS).len(), 1, "rc_lowpass matches");
+        assert_eq!(
+            find(&g, &library::RC_LOWPASS).len(),
+            1,
+            "rc_lowpass matches"
+        );
 
         // LED indicator: LED in series with a resistor.
         let led = vec![
@@ -184,7 +219,11 @@ mod tests {
             node("R1", "Device:R", "330", &[("1", "+3V3"), ("2", "NODE")]),
         ];
         let g = CircuitGraph::new(led, kind_of);
-        assert_eq!(find(&g, &library::LED_INDICATOR).len(), 1, "led_indicator matches");
+        assert_eq!(
+            find(&g, &library::LED_INDICATOR).len(),
+            1,
+            "led_indicator matches"
+        );
     }
 
     #[test]
@@ -200,7 +239,11 @@ mod tests {
         let g = CircuitGraph::new(nodes, kind_of);
         let ms = find(&g, &library::LED_INDICATOR);
         assert_eq!(ms.len(), 1, "one LED indicator");
-        assert_eq!(ms[0].bindings["res"], vec!["R2".to_string()], "pairs the SERIES resistor R2");
+        assert_eq!(
+            ms[0].bindings["res"],
+            vec!["R2".to_string()],
+            "pairs the SERIES resistor R2"
+        );
     }
 
     #[test]
@@ -212,8 +255,14 @@ mod tests {
                 "Sensor:BME280",
                 "",
                 &[
-                    ("SCK", "SCL"), ("SDI", "SDA"), ("VDD", "+3V3"), ("GND", "GND"),
-                    ("SDO", "AD"), ("CSB", "+3V3"), ("VDDIO", "+3V3"), ("GND2", "GND"),
+                    ("SCK", "SCL"),
+                    ("SDI", "SDA"),
+                    ("VDD", "+3V3"),
+                    ("GND", "GND"),
+                    ("SDO", "AD"),
+                    ("CSB", "+3V3"),
+                    ("VDDIO", "+3V3"),
+                    ("GND2", "GND"),
                 ],
             ),
             node("R1", "Device:R", "4.7k", &[("1", "+3V3"), ("2", "SDA")]),
@@ -226,9 +275,15 @@ mod tests {
 
         // The SAME pull-up shape on a 17-pin MCU must NOT match (PinsAtMost(16)) — EN/BOOT
         // control pull-ups are not an I2C bus pair and must not be frozen as a cluster.
-        let mut pins: Vec<(&str, &str)> =
-            vec![("EN", "ENN"), ("IO0", "BOOT"), ("VDD", "+3V3"), ("GND", "GND")];
-        for n in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m"] {
+        let mut pins: Vec<(&str, &str)> = vec![
+            ("EN", "ENN"),
+            ("IO0", "BOOT"),
+            ("VDD", "+3V3"),
+            ("GND", "GND"),
+        ];
+        for n in [
+            "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+        ] {
             pins.push((n, n));
         }
         let mcu = vec![
@@ -237,6 +292,9 @@ mod tests {
             node("R2", "Device:R", "10k", &[("1", "+3V3"), ("2", "BOOT")]),
         ];
         let g2 = CircuitGraph::new(mcu, kind_of);
-        assert!(find(&g2, &library::I2C_PULLUP).is_empty(), "control pull-ups on a large MCU don't match");
+        assert!(
+            find(&g2, &library::I2C_PULLUP).is_empty(),
+            "control pull-ups on a large MCU don't match"
+        );
     }
 }

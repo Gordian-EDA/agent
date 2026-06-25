@@ -41,8 +41,8 @@ impl Footprint {
             path: tmp.path().to_path_buf(),
             source: e,
         })?;
-        let doc =
-            kiutils_kicad::FootprintFile::read(tmp.path()).map_err(|e| map_kiutils_err(tmp.path(), e))?;
+        let doc = kiutils_kicad::FootprintFile::read(tmp.path())
+            .map_err(|e| map_kiutils_err(tmp.path(), e))?;
         Ok(build_footprint(name.into(), doc.ast(), || {
             Some(source.to_string())
         }))
@@ -191,7 +191,10 @@ fn graphic_points(g: &kiutils_kicad::FpGraphic) -> Vec<Point2> {
     pts
 }
 
-fn courtyard_bbox(ast: &kiutils_kicad::FootprintAst, pads: &[FootprintPad]) -> (Rect, CourtyardSource) {
+fn courtyard_bbox(
+    ast: &kiutils_kicad::FootprintAst,
+    pads: &[FootprintPad],
+) -> (Rect, CourtyardSource) {
     let mut crtyd: Vec<Point2> = Vec::new();
     for g in &ast.graphics {
         if matches!(g.layer.as_deref(), Some("F.CrtYd") | Some("B.CrtYd")) {

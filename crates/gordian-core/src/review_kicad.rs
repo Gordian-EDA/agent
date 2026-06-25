@@ -18,24 +18,18 @@
 //! → unbiased; the generating model can't rationalise its own slips). The netlist
 //! pass also unions in the deterministic exact-math ERC.
 
-use anyhow::Result;
 use crate::{Binary, Provider};
+use anyhow::Result;
 
-pub const REVIEW_SYSTEM: &str = r#"You are a senior electronics design engineer performing a NETLIST review (NOT a layout review).
+pub const REVIEW_SYSTEM: &str = r#"You are a senior electronics engineer reviewing a circuit-YAML NETLIST, not layout.
 
-You are given a circuit's intended function and its netlist in circuit-YAML (components with a refdes, a `part:` KiCAD lib_id, an optional `value:`, and pin->net maps; `between:[A,B]` = a 2-pin part across nets A,B; `positive/negative` = a polarized part; `power:NET` = a rail symbol; `label:global` = an exposed port).
+Find only high-confidence electrical design faults that can pass ERC: wrong pin
+function, wrong value/ratio, missing essential support part, voltage-domain error,
+reversed polarity, or broken feedback/bias/topology. Do not report style,
+layout, optional protection, or guesses; a correct design scores 9-10.
 
-Review ONLY for ELECTRICAL-DESIGN CORRECTNESS — faults a netlist can have while still passing ERC (connectivity) and looking clean:
-1. PIN-FUNCTION mis-wires: a net wired to the WRONG pin for its function. Use your knowledge of the SPECIFIC part's pinout (e.g. SPI/ISP MISO/MOSI/SCK on the wrong MCU pin; a regulator FB pin not seeing the feedback divider; enable/boot/reset tied wrong).
-2. WRONG VALUES: a resistor/cap value wrong by ~an order of magnitude for its role (1M I2C pull-up; 10nF "bulk" cap; a feedback divider whose ratio gives the wrong output voltage).
-3. MISSING ESSENTIAL parts (cannot function without): crystal with no load caps; regulator with no output cap; an IC powered with NO decoupling at all.
-4. VOLTAGE-DOMAIN / part-selection: a part operated outside its supply range (e.g. a 5V-only transceiver on a 3.3V rail).
-5. TOPOLOGY errors: feedback/bias/reference wired wrong; reversed polarity; a missing return path.
-
-Do NOT report layout, naming/style, nice-to-have protection, or anything you are not confident is a real electrical fault. A correct design SHOULD score 9-10 with few/no defects; do NOT invent defects.
-
-REASON step by step FIRST (per IC, state its key pins from your knowledge of that exact part, then trace the critical nets), THEN emit, after a line `FINAL_JSON:`, a JSON object:
-{"score": 0-10, "summary": "one line", "defects": [{"severity": "critical|major|minor", "confidence": "high|medium|low", "refdes": "U1", "issue": "short", "why": "the electrical reason"}]}"#;
+Reason briefly by IC/net, then emit only a JSON verdict after `FINAL_JSON:`:
+{"score":0-10,"summary":"one line","defects":[{"severity":"critical|major|minor","confidence":"high|medium|low","refdes":"U1","issue":"short","why":"electrical reason"}]}"#;
 
 /// Diverse review LENSES, unioned. A ground-truth recall sweep (tools/recall_harness.py, 25 injected
 /// defects) showed repeated SAME-prompt sampling is flat (it can't recover a *consistent* miss), while
@@ -349,6 +343,31 @@ fn layout_prompt(intent: &str, kind: LayoutKind) -> String {
     )
 }
 
+const COMPACT_SCHEMATIC_CRITIC_SYSTEM: &str = r#"Review one rendered KiCAD schematic for visual/layout readability, not electrical correctness.
+
+Use image evidence only. Do not report wire-through-body or dangling-pin: engine
+ground truth says every pin is connected and zero wires cross component bodies.
+Judge avoidable text overlap, orientation, dog-legs, crossings/congestion,
+spacing/sprawl, and confusing placement. Minor issues alone score >=8; a real
+major scores 5-7; critical wrong-reading/unreadable issues score <=4.
+
+Reason briefly, tracing each candidate defect to visible evidence. Then emit
+strict JSON after `FINAL_JSON:` with:
+{"score":0-10,"summary":"one sentence","defects":[{"severity":"critical|major|minor","confidence":"high|medium|low","category":"wire-through-body|dangling-pin|text-overlap|orientation|off-spine-leg|wire-crossing|congestion|spacing|other","location":"refdes/region","description":"concrete observation","verification":"visible evidence"}]}"#;
+
+const COMPACT_PCB_CRITIC_SYSTEM: &str = r#"Review one rendered KiCAD PCB plot for placement/routing quality, not electrical correctness.
+
+DRC ground truth says zero shorts, clearance violations, and unconnected items;
+do not report those. Judge related-part grouping, connector edge placement,
+board utilisation, routing directness/neatness, via economy, and silkscreen
+legibility. Different copper colors are different layers. Minor issues alone
+score >=8; a real major scores 5-7; critical unusable/broken-looking issues
+score <=4.
+
+Reason briefly from visible evidence and name a concrete better alternative for
+each defect. Then emit strict JSON after `FINAL_JSON:` with:
+{"score":0-10,"summary":"one sentence","defects":[{"severity":"critical|major|minor","confidence":"high|medium|low","category":"placement|board-utilisation|routing-directness|routing-neatness|via-economy|silkscreen|other","location":"refdes/region","description":"concrete observation","verification":"visible evidence"}]}"#;
+
 /// Run the diverse-lens VISION layout critic over a rendered design `image` and
 /// return `(lowest score, union of high-confidence critical/major layout defect
 /// lines)` — the SAME shape [`review_netlist`] returns, so the review→fix loop
@@ -362,8 +381,8 @@ pub async fn review_layout(
     kind: LayoutKind,
 ) -> Result<(f64, Vec<String>)> {
     let system = match kind {
-        LayoutKind::Schematic => SCHEMATIC_CRITIC_SYSTEM,
-        LayoutKind::Board => PCB_CRITIC_SYSTEM,
+        LayoutKind::Schematic => COMPACT_SCHEMATIC_CRITIC_SYSTEM,
+        LayoutKind::Board => COMPACT_PCB_CRITIC_SYSTEM,
     };
     let prompt = layout_prompt(intent, kind);
     crate::review_image(client, system, LAYOUT_LENSES, &prompt, image).await

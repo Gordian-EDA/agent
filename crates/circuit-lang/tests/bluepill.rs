@@ -1,4 +1,4 @@
-use circuit_lang::{SymbolTable, PinType, compile};
+use circuit_lang::{PinType, SymbolTable, compile};
 
 fn provider() -> SymbolTable {
     use PinType::*;

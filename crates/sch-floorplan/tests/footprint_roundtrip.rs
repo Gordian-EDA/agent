@@ -35,19 +35,25 @@ blocks:
         pins: { "1": VCC, "2": GND }
 "#;
     let result = circuit_lang::compile(yaml, &provider);
-    assert!(!result.diagnostics.has_errors(), "compile: {:#?}", result.diagnostics);
+    assert!(
+        !result.diagnostics.has_errors(),
+        "compile: {:#?}",
+        result.diagnostics
+    );
     let design = result.design.expect("yaml compiles to a design");
 
     // Emit through the floorplan engine to a temp .kicad_sch.
     let ir = floorplan::baseline_ir(&design);
-    let out = floorplan::emit_strategy(&env, &design, &ir, Box::new(greedy_place::Greedy)).expect("emit a .kicad_sch");
+    let out = floorplan::emit_strategy(&env, &design, &ir, Box::new(greedy_place::Greedy))
+        .expect("emit a .kicad_sch");
     let dir = tempfile::tempdir().unwrap();
     let sch_path = dir.path().join("rt.kicad_sch");
     std::fs::write(&sch_path, &out.sch).unwrap();
 
     // The emitted sheet must carry the real Footprint field (the emit fix).
     assert!(
-        out.sch.contains("(property \"Footprint\" \"Capacitor_SMD:C_0603_1608Metric\""),
+        out.sch
+            .contains("(property \"Footprint\" \"Capacitor_SMD:C_0603_1608Metric\""),
         "emitted .kicad_sch must record the footprint:\n{}",
         out.sch
     );

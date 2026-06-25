@@ -58,10 +58,10 @@
 
 use crate::grid::grid_pitch;
 use crate::mesh::{CapacityMesh, LeafId};
-use crate::problem::Rect;
 use crate::pathing::GlobalPlan;
+use crate::problem::Rect;
 use crate::problem::{LayerRef, Point2, RouteProblem};
-use geom::{BoundaryAxis, SharedBoundary, STRICT_EPS};
+use geom::{BoundaryAxis, STRICT_EPS, SharedBoundary};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -217,14 +217,16 @@ pub fn assign_crossings(
                 let Some(x) = &step.exit else { continue };
                 let exit_center = step.center.clone();
                 let entry_center = path.steps[si + 1].center.clone();
-                uses.entry((x.edge, x.layer)).or_default().push(CrossingUse {
-                    net_pos,
-                    connection: net.connection.clone(),
-                    path: pi,
-                    step: si,
-                    exit_center,
-                    entry_center,
-                });
+                uses.entry((x.edge, x.layer))
+                    .or_default()
+                    .push(CrossingUse {
+                        net_pos,
+                        connection: net.connection.clone(),
+                        path: pi,
+                        step: si,
+                        exit_center,
+                        entry_center,
+                    });
             }
         }
     }
@@ -267,11 +269,7 @@ pub fn assign_crossings(
                     let at = boundary.point_at(coord);
                     point_of.insert(
                         (u.net_pos, u.path, u.step),
-                        CrossingPoint {
-                            edge,
-                            layer,
-                            at,
-                        },
+                        CrossingPoint { edge, layer, at },
                     );
                 }
             }
@@ -290,11 +288,7 @@ pub fn assign_crossings(
                     let at = boundary.point_at(coord);
                     point_of.insert(
                         (u.net_pos, u.path, u.step),
-                        CrossingPoint {
-                            edge,
-                            layer,
-                            at,
-                        },
+                        CrossingPoint { edge, layer, at },
                     );
                 }
             }
@@ -368,13 +362,7 @@ pub fn assign_crossings(
                 // foreign copper; the via step's `layer` is the entry layer.
                 if step.via {
                     let leaf_rect = &mesh.leaves[step.leaf].rect;
-                    match place_via(
-                        leaf_rect,
-                        net_pos,
-                        &obstacles,
-                        via_clearance,
-                        detail_pitch,
-                    ) {
+                    match place_via(leaf_rect, net_pos, &obstacles, via_clearance, detail_pitch) {
                         Some(at) => acc.terminals.push(Terminal {
                             kind: TerminalKind::Via,
                             at,
@@ -569,11 +557,7 @@ fn max_slots(usable: &[(f64, f64)], pitch: f64) -> usize {
             let len = hi - lo;
             if len < pitch - EPS {
                 // A sub-pitch gap still admits a single centred crossing.
-                if len > EPS {
-                    1
-                } else {
-                    0
-                }
+                if len > EPS { 1 } else { 0 }
             } else {
                 (len / pitch + EPS).floor() as usize
             }
@@ -600,11 +584,7 @@ fn place_slots(usable: &[(f64, f64)], n: usize, pitch: f64) -> Option<Vec<f64>> 
         .map(|&(lo, hi)| {
             let len = hi - lo;
             if len < pitch - EPS {
-                if len > EPS {
-                    1
-                } else {
-                    0
-                }
+                if len > EPS { 1 } else { 0 }
             } else {
                 (len / pitch + EPS).floor() as usize
             }
@@ -833,7 +813,7 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
 mod tests {
     use super::*;
     use crate::pathing::global_route;
-    use crate::problem::{Rect, Connection, Obstacle, RoutePoint};
+    use crate::problem::{Connection, Obstacle, Rect, RoutePoint};
     use std::path::Path;
 
     fn load(name: &str) -> RouteProblem {
@@ -935,8 +915,12 @@ mod tests {
                 .shared_boundary(&mesh.leaves[e.b].rect)
                 .expect("plan edge joins abutting leaves");
             let on = match b.axis {
-                BoundaryAxis::Vertical => (x.at.x - b.coord).abs() < EPS && x.at.y >= b.lo - EPS && x.at.y <= b.hi + EPS,
-                BoundaryAxis::Horizontal => (x.at.y - b.coord).abs() < EPS && x.at.x >= b.lo - EPS && x.at.x <= b.hi + EPS,
+                BoundaryAxis::Vertical => {
+                    (x.at.x - b.coord).abs() < EPS && x.at.y >= b.lo - EPS && x.at.y <= b.hi + EPS
+                }
+                BoundaryAxis::Horizontal => {
+                    (x.at.y - b.coord).abs() < EPS && x.at.x >= b.lo - EPS && x.at.x <= b.hi + EPS
+                }
             };
             assert!(
                 on,
@@ -1038,7 +1022,10 @@ mod tests {
                     && (t.at.x - x.at.x).abs() < 1e-9
                     && (t.at.y - x.at.y).abs() < 1e-9
             });
-            assert!(entries.count() >= 1, "crossing has a matching entry terminal");
+            assert!(
+                entries.count() >= 1,
+                "crossing has a matching entry terminal"
+            );
         }
     }
 
@@ -1118,10 +1105,6 @@ mod tests {
             "nudged via site clears the keepout"
         );
         // The centre itself was NOT clear (the keepout covers it).
-        assert!(!fc.via_clear(
-            &Point2 { x: 4.0, y: 4.0 },
-            0,
-            via_clearance
-        ));
+        assert!(!fc.via_clear(&Point2 { x: 4.0, y: 4.0 }, 0, via_clearance));
     }
 }

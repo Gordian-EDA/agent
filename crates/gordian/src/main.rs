@@ -14,10 +14,10 @@ mod tui;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use gordian_core::{Agent, AgentEvent, AutoApprove};
+use anyhow::{Context, Result, bail};
 use gordian_core::prompts::system_prompt_with_reference;
 use gordian_core::tools::PcbToolCtx;
-use anyhow::{Context, Result, bail};
+use gordian_core::{Agent, AgentEvent, AutoApprove};
 use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
 
@@ -165,12 +165,20 @@ fn parse_agent_args(args: &[String]) -> Result<AgentInvocation> {
     };
 
     let project_dir = project_dir.unwrap_or_else(|| PathBuf::from(DEFAULT_PROJECT_DIR));
-    Ok(AgentInvocation { project_dir, prompt, review })
+    Ok(AgentInvocation {
+        project_dir,
+        prompt,
+        review,
+    })
 }
 
 /// Run the `agent` subcommand: one headless turn against real Bedrock + KiCAD.
 fn run_agent_command(args: &[String]) -> Result<()> {
-    let AgentInvocation { project_dir, prompt, review } = parse_agent_args(args)?;
+    let AgentInvocation {
+        project_dir,
+        prompt,
+        review,
+    } = parse_agent_args(args)?;
 
     // 1. Detect KiCAD (symbol libs + kicad-cli).
     let env = KicadEnv::detect().context(
@@ -228,7 +236,12 @@ fn run_agent_command(args: &[String]) -> Result<()> {
 
     // Drain and log any review rounds the self-correction pass emitted.
     while let Ok(ev) = events_rx.try_recv() {
-        if let AgentEvent::Reviewed { round, score, defects } = ev {
+        if let AgentEvent::Reviewed {
+            round,
+            score,
+            defects,
+        } = ev
+        {
             eprintln!(
                 "review (round {round}): score {score}/10 — {}",
                 if defects.is_empty() {
@@ -303,8 +316,7 @@ mod tests {
 
     #[test]
     fn no_review_flag_disables_review() {
-        let inv =
-            parse_agent_args(&["--no-review".into(), "make a board".into()]).unwrap();
+        let inv = parse_agent_args(&["--no-review".into(), "make a board".into()]).unwrap();
         assert_eq!(inv.prompt, "make a board");
         assert!(!inv.review, "--no-review turns the post-commit review off");
     }

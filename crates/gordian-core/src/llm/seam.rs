@@ -60,8 +60,9 @@ pub trait Provider: Send + Sync {
 
 /// Drain an [`EventStream`] to its terminal [`StreamEnd`]: concatenate the text
 /// chunks and, when the end didn't capture content text, fold them back in so a
-/// caller can read the reply uniformly via [`StreamEnd::captured_texts`]. Errors
-/// if the stream ends without an `End` event.
+/// caller can read the reply uniformly via [`StreamEnd::captured_texts`]. If the
+/// transport closes without `End`, return a default end and drop any partial
+/// structured chunks.
 pub async fn drain_stream(mut events: EventStream<'_>) -> Result<StreamEnd> {
     let mut text = String::new();
     while let Some(ev) = events.next().await {
@@ -78,5 +79,42 @@ pub async fn drain_stream(mut events: EventStream<'_>) -> Result<StreamEnd> {
             _ => {}
         }
     }
-    anyhow::bail!("stream ended without an End event")
+    Ok(StreamEnd::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use genai::chat::StreamChunk;
+
+    #[tokio::test]
+    async fn drain_stream_ignores_text_without_end() {
+        let events = stream::iter([Ok::<_, anyhow::Error>(ChatStreamEvent::Chunk(
+            StreamChunk {
+                content: "hello".into(),
+            },
+        ))])
+        .boxed();
+
+        let end = drain_stream(events).await.unwrap();
+
+        assert!(end.captured_texts().is_none());
+        assert!(
+            end.captured_into_tool_calls()
+                .unwrap_or_default()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_stream_ignores_empty_stream_without_end() {
+        let end = drain_stream(stream::empty().boxed()).await.unwrap();
+
+        assert!(end.captured_texts().is_none());
+        assert!(
+            end.captured_into_tool_calls()
+                .unwrap_or_default()
+                .is_empty()
+        );
+    }
 }

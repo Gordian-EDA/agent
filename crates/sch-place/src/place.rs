@@ -90,4 +90,3 @@ pub struct PlaceResult {
     /// selection objective, not an absolute quality scale).
     pub cost: f64,
 }
-

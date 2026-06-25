@@ -59,12 +59,19 @@ fn node_matches(pred: &NodePred, node: &Node) -> bool {
 
 /// The single bound node for a role, if it is a `One` role already bound.
 fn one_node(bindings: &Bindings, role: &str) -> Option<usize> {
-    bindings.get(role).and_then(|v| (v.len() == 1).then(|| v[0]))
+    bindings
+        .get(role)
+        .and_then(|v| (v.len() == 1).then(|| v[0]))
 }
 
 /// Evaluate an edge given concrete nodes for its endpoints (`b_node` is `None` for
 /// a rail edge). Folds in `negate`.
-fn edge_holds(g: &CircuitGraph, e: &crate::pattern::Edge, a_node: usize, b_node: Option<usize>) -> bool {
+fn edge_holds(
+    g: &CircuitGraph,
+    e: &crate::pattern::Edge,
+    a_node: usize,
+    b_node: Option<usize>,
+) -> bool {
     let raw = match &e.b {
         Target::Rail(kind) => g.touches_kind(a_node, *kind),
         Target::Role(_) => match b_node {
@@ -84,9 +91,19 @@ fn edge_holds(g: &CircuitGraph, e: &crate::pattern::Edge, a_node: usize, b_node:
 /// All *required* edges that become determined when `role` is bound to `cand`
 /// must hold. Edges with a still-unbound role endpoint are deferred (checked when
 /// that endpoint binds). Returns false to prune the branch.
-fn required_edges_ok(g: &CircuitGraph, p: &Pattern, bindings: &Bindings, role: &str, cand: usize) -> bool {
+fn required_edges_ok(
+    g: &CircuitGraph,
+    p: &Pattern,
+    bindings: &Bindings,
+    role: &str,
+    cand: usize,
+) -> bool {
     let resolve = |r: &str| -> Option<usize> {
-        if r == role { Some(cand) } else { one_node(bindings, r) }
+        if r == role {
+            Some(cand)
+        } else {
+            one_node(bindings, r)
+        }
     };
     for e in p.edges {
         if e.optional {
@@ -153,8 +170,12 @@ fn member_ok(g: &CircuitGraph, p: &Pattern, bindings: &Bindings, role: &str, m: 
 /// maximising pruning), then any unreachable singletons. `Many` roles are bound
 /// after all singletons, so they are excluded here.
 fn one_role_order(p: &Pattern) -> Vec<&'static str> {
-    let singles: BTreeSet<&str> =
-        p.roles.iter().filter(|r| matches!(r.mult, Mult::One)).map(|r| r.name).collect();
+    let singles: BTreeSet<&str> = p
+        .roles
+        .iter()
+        .filter(|r| matches!(r.mult, Mult::One))
+        .map(|r| r.name)
+        .collect();
     let mut order: Vec<&'static str> = Vec::new();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     let mut queue: Vec<&'static str> = Vec::new();
@@ -168,7 +189,11 @@ fn one_role_order(p: &Pattern) -> Vec<&'static str> {
         for e in p.edges {
             // The role on the other end of any edge incident to `r`.
             let nbr = if e.a == r {
-                if let Target::Role(rb) = &e.b { Some(*rb) } else { None }
+                if let Target::Role(rb) = &e.b {
+                    Some(*rb)
+                } else {
+                    None
+                }
             } else if let Target::Role(rb) = &e.b {
                 (*rb == r).then_some(e.a)
             } else {
@@ -263,11 +288,18 @@ fn backtrack(
 
 /// With all singletons bound, gather each bank role's members and assemble the
 /// match (or `None` if a required bank is short of its minimum).
-fn finish_many(g: &CircuitGraph, p: &Pattern, bindings: &Bindings, used: &BTreeSet<usize>) -> Option<Match> {
+fn finish_many(
+    g: &CircuitGraph,
+    p: &Pattern,
+    bindings: &Bindings,
+    used: &BTreeSet<usize>,
+) -> Option<Match> {
     let mut bindings = bindings.clone();
     let mut used = used.clone();
     for r in p.roles {
-        let Mult::Many { min, max } = r.mult else { continue };
+        let Mult::Many { min, max } = r.mult else {
+            continue;
+        };
         let mut members: Vec<usize> = (0..g.nodes.len())
             .filter(|&i| !used.contains(&i) && node_matches(&r.pred, &g.nodes[i]))
             .filter(|&i| member_ok(g, p, &bindings, r.name, i))
@@ -294,7 +326,12 @@ fn finish_many(g: &CircuitGraph, p: &Pattern, bindings: &Bindings, used: &BTreeS
         .iter()
         .map(|(k, v)| (*k, v.iter().map(|&i| g.refdes(i).to_string()).collect()))
         .collect();
-    Some(Match { pattern: p.name, anchor, bindings: refdes_bindings, score: s })
+    Some(Match {
+        pattern: p.name,
+        anchor,
+        bindings: refdes_bindings,
+        score: s,
+    })
 }
 
 /// Every occurrence of `pattern` in `graph`. For each distinct anchor node only
@@ -305,7 +342,15 @@ pub fn find(graph: &CircuitGraph, pattern: &Pattern) -> Vec<Match> {
     let mut raw: Vec<Match> = Vec::new();
     let mut bindings: Bindings = BTreeMap::new();
     let mut used: BTreeSet<usize> = BTreeSet::new();
-    backtrack(graph, pattern, &order, 0, &mut bindings, &mut used, &mut raw);
+    backtrack(
+        graph,
+        pattern,
+        &order,
+        0,
+        &mut bindings,
+        &mut used,
+        &mut raw,
+    );
 
     // Keep the best-scoring match per (anchor, member-set) signature.
     let mut best: BTreeMap<String, Match> = BTreeMap::new();

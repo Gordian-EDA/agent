@@ -6,8 +6,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     k.open_board()?;
     let nets = k.nets()?;
     println!("nets: {nets:?}");
-    let power: Vec<&str> = nets.iter().map(|s| s.as_str())
-        .filter(|n| matches!(*n, "VIN" | "VOUT" | "GND")).collect();
+    let power: Vec<&str> = nets
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|n| matches!(*n, "VIN" | "VOUT" | "GND"))
+        .collect();
     k.set_net_class("Power", 1_000_000, 300_000, &power)?;
     println!("set net class Power @ 1.0mm width / 0.3mm clearance on {power:?}");
     println!("NETCLASS OK");

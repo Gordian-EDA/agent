@@ -33,7 +33,7 @@ pub use update::{Action, Msg, TurnEndReason};
 mod tests {
     use super::*;
     use gordian_core::AgentEvent;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::time::Instant;
 
     fn app() -> App {
@@ -229,7 +229,10 @@ mod tests {
         let mut a = app();
         let big = "x".repeat(500);
         a.update(Msg::Paste(big.clone()));
-        assert_eq!(a.input, "[Pasted 500 chars]", "composer shows the placeholder");
+        assert_eq!(
+            a.input, "[Pasted 500 chars]",
+            "composer shows the placeholder"
+        );
         assert_eq!(a.paste.as_deref(), Some(big.as_str()), "real text stashed");
         // Submitting expands the placeholder back to the real pasted text.
         let action = a.update(Msg::Submit);
@@ -288,15 +291,29 @@ mod tests {
     }
 
     #[test]
-    fn quit_is_command_or_ctrl_c_but_not_esc() {
+    fn quit_is_command_or_double_ctrl_c_but_not_esc() {
         let mut a = app();
         type_str(&mut a, "/quit");
         assert_eq!(a.update(Msg::Submit), Action::Quit);
         assert!(a.should_quit);
 
         let mut b = app();
-        assert_eq!(b.update(Msg::Cancel), Action::None, "first idle Esc arms");
-        assert!(!b.should_quit, "Esc never quits");
+        assert_eq!(b.update(Msg::ForceQuit), Action::None);
+        assert!(b.ctrl_c_armed);
+        assert!(!b.should_quit, "first Ctrl-C only arms quit");
+        assert!(
+            b.transcript
+                .iter()
+                .any(|e| e.text.contains("Press Ctrl-C again to exit")),
+            "first Ctrl-C posts a visible guard: {:?}",
+            b.transcript
+        );
+        assert_eq!(b.update(Msg::ForceQuit), Action::Quit);
+        assert!(b.should_quit);
+
+        let mut c = app();
+        assert_eq!(c.update(Msg::Cancel), Action::None, "first idle Esc arms");
+        assert!(!c.should_quit, "Esc never quits");
     }
 
     #[test]
@@ -331,6 +348,17 @@ mod tests {
         b.update(Msg::Cancel);
         b.update(Msg::Tick);
         assert!(b.esc_armed, "ticks don't disarm");
+    }
+
+    #[test]
+    fn typing_disarms_ctrl_c_quit_catcher() {
+        let mut a = app();
+        assert_eq!(a.update(Msg::ForceQuit), Action::None);
+        assert!(a.ctrl_c_armed);
+        a.update(Msg::Char('x'));
+        assert!(!a.ctrl_c_armed, "any user action disarms");
+        assert_eq!(a.update(Msg::ForceQuit), Action::None);
+        assert!(!a.should_quit, "second non-consecutive Ctrl-C only rearms");
     }
 
     #[test]
@@ -375,7 +403,9 @@ mod tests {
         for prompt in ["first", "second", "third"] {
             type_str(&mut a, prompt);
             a.update(Msg::Submit);
-            a.update(Msg::Agent(AgentEvent::AssistantText(format!("re: {prompt}"))));
+            a.update(Msg::Agent(AgentEvent::AssistantText(format!(
+                "re: {prompt}"
+            ))));
             a.update(Msg::TurnEnded(TurnEndReason::Completed));
         }
         assert_eq!(a.status.turn_count, 3);
@@ -512,7 +542,11 @@ mod tests {
         // Tab highlights the first match; now Enter accepts it into the input.
         a.update(Msg::Complete);
         assert_eq!(a.input, "/clear");
-        assert_eq!(a.update(Msg::Submit), Action::None, "Enter accepts, not submits");
+        assert_eq!(
+            a.update(Msg::Submit),
+            Action::None,
+            "Enter accepts, not submits"
+        );
         assert_eq!(a.input, "/clear");
         assert!(a.completion_idx.is_none(), "accepting clears the cycle");
         // A second Enter now runs the confirmed command.
@@ -562,7 +596,11 @@ mod tests {
         }));
         assert_eq!(a.status.ctx_tokens, 1800, "latest call defines the context");
         let l = &a.status.ledger;
-        assert_eq!(l.input, 200 + 700, "full-price input excludes cache reads/writes");
+        assert_eq!(
+            l.input,
+            200 + 700,
+            "full-price input excludes cache reads/writes"
+        );
         assert_eq!(l.output, 500);
         assert_eq!(l.cache_write, 800);
         assert_eq!(l.cache_read, 800);
@@ -605,10 +643,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_force_quits_even_mid_turn() {
+    fn double_ctrl_c_quits_even_mid_turn() {
         let mut a = app();
         type_str(&mut a, "go");
         a.update(Msg::Submit);
+        assert_eq!(a.update(Msg::ForceQuit), Action::None);
+        assert!(a.running, "first Ctrl-C does not abort the running turn");
         assert_eq!(a.update(Msg::ForceQuit), Action::Quit);
         assert!(a.should_quit);
     }
@@ -681,7 +721,10 @@ mod tests {
         assert!(a.paused_since.is_some(), "gate open → clock frozen");
         a.update(Msg::Char('a'));
         assert!(a.paused_since.is_none(), "resolved → clock running again");
-        assert!(a.paused_total >= std::time::Duration::ZERO, "the pause was banked");
+        assert!(
+            a.paused_total >= std::time::Duration::ZERO,
+            "the pause was banked"
+        );
     }
 
     #[test]
@@ -815,7 +858,10 @@ mod tests {
                 .iter()
                 .filter(|e| e.text.contains("Cogitated"))
                 .count();
-            assert_eq!(indicators, 1, "exactly one indicator (done_first={done_first})");
+            assert_eq!(
+                indicators, 1,
+                "exactly one indicator (done_first={done_first})"
+            );
         }
     }
 
@@ -841,15 +887,28 @@ mod tests {
         let live = a.live_assistant.expect("a live entry is open mid-stream");
         assert_eq!(a.transcript[live].text, "I'll search");
         assert_eq!(a.transcript[live].speaker, Speaker::Assistant);
-        let count = a.transcript.iter().filter(|e| e.speaker == Speaker::Assistant).count();
+        let count = a
+            .transcript
+            .iter()
+            .filter(|e| e.speaker == Speaker::Assistant)
+            .count();
         assert_eq!(count, 1, "deltas grow ONE entry, not one per chunk");
 
         // The final text finalizes the same entry in place (no second entry).
-        a.update(Msg::Agent(AgentEvent::AssistantText("I'll search for the part.".into())));
+        a.update(Msg::Agent(AgentEvent::AssistantText(
+            "I'll search for the part.".into(),
+        )));
         assert!(a.live_assistant.is_none(), "finalized: no live entry");
-        let assistants: Vec<&Entry> =
-            a.transcript.iter().filter(|e| e.speaker == Speaker::Assistant).collect();
-        assert_eq!(assistants.len(), 1, "still one assistant entry (finalized in place)");
+        let assistants: Vec<&Entry> = a
+            .transcript
+            .iter()
+            .filter(|e| e.speaker == Speaker::Assistant)
+            .collect();
+        assert_eq!(
+            assistants.len(),
+            1,
+            "still one assistant entry (finalized in place)"
+        );
         assert_eq!(assistants[0].text, "I'll search for the part.");
     }
 
@@ -860,7 +919,9 @@ mod tests {
         let mut a = app();
         a.update(Msg::Agent(AgentEvent::AssistantDelta("first".into())));
         a.update(Msg::Agent(AgentEvent::AssistantText("first".into())));
-        a.update(Msg::Agent(AgentEvent::ToolStarted { name: "get_design".into() }));
+        a.update(Msg::Agent(AgentEvent::ToolStarted {
+            name: "get_design".into(),
+        }));
         a.update(Msg::Agent(AgentEvent::AssistantDelta("second".into())));
         a.update(Msg::Agent(AgentEvent::AssistantText("second".into())));
         let texts: Vec<&str> = a

@@ -82,6 +82,9 @@ pub struct App {
     /// First idle Esc pressed: the next Esc unwinds the last turn. Any other
     /// user action disarms.
     pub esc_armed: bool,
+    /// First Ctrl-C pressed: the next Ctrl-C exits. Any other user action
+    /// disarms, so accidental interrupts do not tear down the session.
+    pub ctrl_c_armed: bool,
     /// The typed `/`-prefix Tab completion is cycling against (the input
     /// itself once Tab starts rewriting it no longer matches).
     pub(super) completion_stem: Option<String>,
@@ -149,6 +152,7 @@ impl App {
             history_pos: None,
             draft: String::new(),
             esc_armed: false,
+            ctrl_c_armed: false,
             completion_stem: None,
             completion_idx: None,
             auto: false,

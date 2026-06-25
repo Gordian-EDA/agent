@@ -40,13 +40,19 @@ fn snap_path(name: &str) -> PathBuf {
 fn render(env: &KicadEnv, provider: &SymbolTable, name: &str) -> String {
     let src = std::fs::read_to_string(doc(name, "circuit.yaml")).unwrap();
     let result = circuit_lang::compile(&src, provider);
-    assert!(!result.diagnostics.has_errors(), "{name}: {:#?}", result.diagnostics);
+    assert!(
+        !result.diagnostics.has_errors(),
+        "{name}: {:#?}",
+        result.diagnostics
+    );
     let design = result.design.unwrap();
     let ir = match std::fs::read_to_string(doc(name, "layout.json")) {
         Ok(s) => LayoutIr::from_json(&s).unwrap(),
         Err(_) => floorplan::infer_ir(env, &design),
     };
-    floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy)).unwrap_or_else(|e| panic!("{name}: {e}")).sch
+    floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy))
+        .unwrap_or_else(|e| panic!("{name}: {e}"))
+        .sch
 }
 
 #[test]
@@ -84,7 +90,9 @@ fn placement_snapshots_match() {
 
 #[test]
 fn emit_is_deterministic() {
-    let Some(env) = KicadEnv::detect() else { return };
+    let Some(env) = KicadEnv::detect() else {
+        return;
+    };
     let provider = SymbolTable::from_env(&env);
     // Emit twice with the same (default) strategy + fixed seed; must be identical.
     // Trivial for the deterministic greedy default today, but this is the guard

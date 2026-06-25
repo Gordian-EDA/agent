@@ -191,7 +191,10 @@ mod tests {
         // The ``` fence markers are gone; the language surfaces as a dim label on
         // the code block's opening row, not as a literal fence line.
         assert!(!text.contains("```"), "fence markers stripped:\n{text}");
-        assert!(text.contains("yaml"), "fence language shows as a label:\n{text}");
+        assert!(
+            text.contains("yaml"),
+            "fence language shows as a label:\n{text}"
+        );
     }
 
     #[test]
@@ -318,16 +321,24 @@ mod tests {
             a.update(Msg::Char(c));
         }
         a.update(Msg::Submit);
-        a.update(Msg::Agent(AgentEvent::ToolStarted { name: "route_board".into() }));
+        a.update(Msg::Agent(AgentEvent::ToolStarted {
+            name: "route_board".into(),
+        }));
         let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("route_board"), "active tool named under spinner:\n{text}");
+        assert!(
+            text.contains("route_board"),
+            "active tool named under spinner:\n{text}"
+        );
         // When the tool finishes, the detail row clears.
         a.update(Msg::Agent(AgentEvent::ToolFinished {
             name: "route_board".into(),
             summary: "ok".into(),
             image_path: None,
         }));
-        assert!(a.active_tool.is_none(), "detail clears when the tool finishes");
+        assert!(
+            a.active_tool.is_none(),
+            "detail clears when the tool finishes"
+        );
     }
 
     #[test]
@@ -345,14 +356,20 @@ mod tests {
         }));
         a.update(Msg::Tick);
         let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("↓1.2k tok"), "per-turn output tokens:\n{text}");
+        assert!(
+            text.contains("↓1.2k tok"),
+            "per-turn output tokens:\n{text}"
+        );
     }
 
     #[test]
     fn idle_app_has_no_running_line() {
         let mut a = app();
         let text = render_to_string(&mut a, 80, 24);
-        assert!(!text.contains("esc to interrupt"), "no running line idle:\n{text}");
+        assert!(
+            !text.contains("esc to interrupt"),
+            "no running line idle:\n{text}"
+        );
     }
 
     #[test]
@@ -420,7 +437,10 @@ mod tests {
         // 23000 in / 1M * $5 + 400 out / 1M * $25 = $0.115 + $0.01 = $0.12 (2dp).
         assert!(text.contains("$0.12"), "session cost:\n{text}");
         // ctx 23.4k of a 200k window → ~88% left.
-        assert!(text.contains("88% ctx left"), "context-left percentage:\n{text}");
+        assert!(
+            text.contains("88% ctx left"),
+            "context-left percentage:\n{text}"
+        );
     }
 
     #[test]
@@ -440,7 +460,10 @@ mod tests {
         }));
         let text = render_to_string(&mut a, 120, 24);
         assert!(text.contains("cached"), "cache indicator shows:\n{text}");
-        assert!(text.contains('—'), "unpriced model renders a dash, not a number:\n{text}");
+        assert!(
+            text.contains('—'),
+            "unpriced model renders a dash, not a number:\n{text}"
+        );
     }
 
     #[test]
@@ -475,7 +498,10 @@ mod tests {
         a.open_unwind(vec!["swap the regulator".into(), "add usb-c".into()]);
         let text = render_to_string(&mut a, 80, 24);
         assert!(text.contains("unwind to"), "picker title:\n{text}");
-        assert!(text.contains("swap the regulator"), "newest prompt:\n{text}");
+        assert!(
+            text.contains("swap the regulator"),
+            "newest prompt:\n{text}"
+        );
         assert!(text.contains("add usb-c"), "older prompt:\n{text}");
     }
 
@@ -499,8 +525,14 @@ mod tests {
         let mut a = app();
         let idle = render_to_string(&mut a, 80, 24);
         // Idle footer is lean: provider/model only, no /command list.
-        assert!(idle.contains("bedrock"), "idle footer shows the provider:\n{idle}");
-        assert!(!idle.contains("/clear"), "idle footer drops the command list:\n{idle}");
+        assert!(
+            idle.contains("bedrock"),
+            "idle footer shows the provider:\n{idle}"
+        );
+        assert!(
+            !idle.contains("/clear"),
+            "idle footer drops the command list:\n{idle}"
+        );
 
         for c in "go".chars() {
             a.update(Msg::Char(c));
@@ -508,19 +540,25 @@ mod tests {
         a.update(Msg::Submit);
         let running = render_to_string(&mut a, 80, 24);
         // The interrupt hint now lives on the running line; the bar keeps the
-        // hard-quit reminder.
+        // double-quit reminder.
         assert!(
             running.contains("esc to interrupt"),
             "running line hint:\n{running}"
         );
-        assert!(running.contains("Ctrl-C quit"), "running bar hint:\n{running}");
+        assert!(
+            running.contains("Ctrl-C Ctrl-C quit"),
+            "running bar hint:\n{running}"
+        );
 
         a.update(Msg::PendingDiff(json!({
             "diff": { "added": ["U1"], "removed": [], "changed": [] }
         })));
         let gated = render_to_string(&mut a, 80, 24);
         // The gate's actions live on the card, not duplicated in the footer.
-        assert!(gated.contains("approve"), "gate shows approve action:\n{gated}");
+        assert!(
+            gated.contains("approve"),
+            "gate shows approve action:\n{gated}"
+        );
     }
 
     #[test]
@@ -539,8 +577,14 @@ mod tests {
         let text = render_to_string(&mut a, 36, 24);
         let bar = text.lines().last().expect("status row");
         // The right-edge hint survives intact; the left status is ellipsized.
-        assert!(bar.contains("unwind"), "right hint pinned to the edge:\n{bar}");
-        assert!(bar.contains('…'), "left status is truncated, not overlapped:\n{bar}");
+        assert!(
+            bar.contains("unwind"),
+            "right hint pinned to the edge:\n{bar}"
+        );
+        assert!(
+            bar.contains('…'),
+            "left status is truncated, not overlapped:\n{bar}"
+        );
     }
 
     #[test]
@@ -555,15 +599,30 @@ mod tests {
         // Wide: the full HUD (tokens, cost, context-left) is present.
         let wide = render_to_string(&mut a, 120, 24);
         let wide_bar = wide.lines().last().expect("status row");
-        assert!(wide_bar.contains("ctx left"), "wide bar keeps context field:\n{wide_bar}");
-        assert!(wide_bar.contains('$'), "wide bar keeps cost field:\n{wide_bar}");
-        assert!(wide_bar.contains("tok"), "wide bar keeps token field:\n{wide_bar}");
+        assert!(
+            wide_bar.contains("ctx left"),
+            "wide bar keeps context field:\n{wide_bar}"
+        );
+        assert!(
+            wide_bar.contains('$'),
+            "wide bar keeps cost field:\n{wide_bar}"
+        );
+        assert!(
+            wide_bar.contains("tok"),
+            "wide bar keeps token field:\n{wide_bar}"
+        );
 
         // Narrow: tail fields drop, but the model anchor always survives.
         let narrow = render_to_string(&mut a, 30, 24);
         let narrow_bar = narrow.lines().last().expect("status row");
-        assert!(narrow_bar.contains("opus"), "model anchor survives the collapse:\n{narrow_bar}");
-        assert!(!narrow_bar.contains("ctx left"), "tail field dropped when narrow:\n{narrow_bar}");
+        assert!(
+            narrow_bar.contains("opus"),
+            "model anchor survives the collapse:\n{narrow_bar}"
+        );
+        assert!(
+            !narrow_bar.contains("ctx left"),
+            "tail field dropped when narrow:\n{narrow_bar}"
+        );
     }
 
     #[test]

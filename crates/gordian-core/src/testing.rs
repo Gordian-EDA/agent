@@ -10,13 +10,13 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
-use async_trait::async_trait;
-use futures::stream::{self, StreamExt};
 use crate::llm::{
     ChatMessage, ChatStreamEvent, EventStream, MessageContent, Provider, StreamChunk, StreamEnd,
     Tool, ToolCall,
 };
+use anyhow::Result;
+use async_trait::async_trait;
+use futures::stream::{self, StreamExt};
 
 /// A [`Provider`] that replays a fixed script of completions, one per call, and
 /// records the conversation it was shown.
@@ -78,7 +78,10 @@ impl Provider for ScriptedClient {
         _tools: &'a [Tool],
     ) -> Result<EventStream<'a>> {
         let end = self.next_completion(messages)?;
-        let text = end.captured_texts().map(|parts| parts.concat()).unwrap_or_default();
+        let text = end
+            .captured_texts()
+            .map(|parts| parts.concat())
+            .unwrap_or_default();
         let mut events: Vec<Result<ChatStreamEvent>> = split_in_two(&text)
             .into_iter()
             .map(|content| Ok(ChatStreamEvent::Chunk(StreamChunk { content })))
@@ -94,9 +97,17 @@ fn split_in_two(text: &str) -> Vec<String> {
     if text.is_empty() {
         return Vec::new();
     }
-    let mid = text.char_indices().nth(text.chars().count() / 2).map(|(i, _)| i).unwrap_or(text.len());
+    let mid = text
+        .char_indices()
+        .nth(text.chars().count() / 2)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
     let (a, b) = text.split_at(mid);
-    [a, b].into_iter().filter(|s| !s.is_empty()).map(str::to_string).collect()
+    [a, b]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Build a completion carrying a single tool call (no text).

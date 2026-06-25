@@ -55,7 +55,10 @@ pub fn lint(problem: &RouteProblem, solution: &RouteSolution) -> Vec<DrcViolatio
 /// the reported result is faithful (an honest unrouted net, never silent copper
 /// that lies about connectivity). Dropping a net's copper only removes obstacles,
 /// so it can never break another net or introduce a geometry violation.
-pub fn drop_unconnected_copper(problem: &RouteProblem, solution: &mut RouteSolution) -> Vec<String> {
+pub fn drop_unconnected_copper(
+    problem: &RouteProblem,
+    solution: &mut RouteSolution,
+) -> Vec<String> {
     use crate::connectivity::Violation as ConnViolation;
     let mut broken: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for v in lint(problem, solution) {
@@ -92,7 +95,8 @@ pub fn drop_violating_copper(problem: &RouteProblem, solution: &mut RouteSolutio
     // One net can be dropped per pass; at most one pass per net plus a margin.
     let max_passes = problem.connections.len() + 1;
     for _ in 0..max_passes {
-        let mut tally: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        let mut tally: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
         for v in lint(problem, solution) {
             for net in violation_nets(&v) {
                 *tally.entry(net).or_default() += 1;
@@ -138,8 +142,8 @@ mod tests {
     use super::*;
     use crate::connectivity::Violation;
     use crate::problem::{
-        Connection, LayerRef, Obstacle, Point2, Polygon, Rect, RoutePoint, RouteProblem, RouteSolution, Trace, Via,
-        ViaSpan,
+        Connection, LayerRef, Obstacle, Point2, Polygon, Rect, RoutePoint, RouteProblem,
+        RouteSolution, Trace, Via, ViaSpan,
     };
 
     fn bounds() -> Rect {
@@ -233,14 +237,27 @@ mod tests {
                 .iter()
                 .any(|v| matches!(v, DrcViolation::ViaDiameterBelowMin { .. }))
         };
-        let micro = ViaSpan::Partial { from: 0, to: 1, micro: true };
+        let micro = ViaSpan::Partial {
+            from: 0,
+            to: 1,
+            micro: true,
+        };
         // A 0.5 THROUGH via is below the 0.6 netclass min → flagged (the exact class that shipped
         // 56 via_diameter faults from an undersized HDI blind via before this check existed).
-        assert!(flagged(&mk(0.5, ViaSpan::Through)), "undersized through via must flag");
+        assert!(
+            flagged(&mk(0.5, ViaSpan::Through)),
+            "undersized through via must flag"
+        );
         // A full-size through via is fine.
-        assert!(!flagged(&mk(0.6, ViaSpan::Through)), "full through via must pass");
+        assert!(
+            !flagged(&mk(0.6, ViaSpan::Through)),
+            "full through via must pass"
+        );
         // A 0.4 MICRO via clears the relaxed 0.3 micro floor → NOT flagged (the HDI escape size).
-        assert!(!flagged(&mk(0.4, micro.clone())), "0.4 micro via must pass the micro floor");
+        assert!(
+            !flagged(&mk(0.4, micro.clone())),
+            "0.4 micro via must pass the micro floor"
+        );
         // A 0.2 MICRO via is below even the micro floor → flagged.
         assert!(flagged(&mk(0.2, micro)), "sub-floor micro via must flag");
     }
@@ -291,7 +308,10 @@ mod tests {
         };
         let vs = lint(&p, &s);
         assert_eq!(
-            count(&vs, |v| matches!(v, DrcViolation::ClearanceTraceTrace { .. })),
+            count(&vs, |v| matches!(
+                v,
+                DrcViolation::ClearanceTraceTrace { .. }
+            )),
             1,
             "exactly one trace/trace clearance violation, got {vs:?}"
         );
@@ -414,11 +434,16 @@ mod tests {
             vias: vec![via("NET_A", (20.0, 10.0)), via("NET_A", (20.0, 10.4))],
         };
         let vs = lint(&p, &s);
-        let hole = count(&vs, |v| matches!(
-            v,
-            DrcViolation::ClearanceViaAny { required, .. } if (*required - 0.25).abs() < 1e-9
-        ));
-        assert_eq!(hole, 1, "drill-to-drill hole clearance must fire once, got {vs:?}");
+        let hole = count(&vs, |v| {
+            matches!(
+                v,
+                DrcViolation::ClearanceViaAny { required, .. } if (*required - 0.25).abs() < 1e-9
+            )
+        });
+        assert_eq!(
+            hole, 1,
+            "drill-to-drill hole clearance must fire once, got {vs:?}"
+        );
     }
 
     #[test]
@@ -432,11 +457,16 @@ mod tests {
             vec![conn("NET_A", &[(10.0, 10.0, "top")])],
             vec![pad(&["NET_B"], (10.5, 10.0), 0.4, 0.4, &["top"])],
         );
-        let s = RouteSolution { traces: vec![], vias: vec![via("NET_A", (10.0, 10.0))] };
-        let hole = count(&lint(&p, &s), |v| matches!(
-            v,
-            DrcViolation::ClearanceViaAny { required, .. } if (*required - 0.25).abs() < 1e-9
-        ));
+        let s = RouteSolution {
+            traces: vec![],
+            vias: vec![via("NET_A", (10.0, 10.0))],
+        };
+        let hole = count(&lint(&p, &s), |v| {
+            matches!(
+                v,
+                DrcViolation::ClearanceViaAny { required, .. } if (*required - 0.25).abs() < 1e-9
+            )
+        });
         assert_eq!(hole, 1, "via↔foreign-pad hole clearance must fire once");
 
         // SAME-NET pad is via-in-pad (intentional) — no hole violation.
@@ -444,12 +474,20 @@ mod tests {
             vec![conn("NET_A", &[(10.0, 10.0, "top")])],
             vec![pad(&["NET_A"], (10.5, 10.0), 0.4, 0.4, &["top"])],
         );
-        let s2 = RouteSolution { traces: vec![], vias: vec![via("NET_A", (10.0, 10.0))] };
-        let hole2 = count(&lint(&p2, &s2), |v| matches!(
-            v,
-            DrcViolation::ClearanceViaAny { required, .. } if (*required - 0.25).abs() < 1e-9
-        ));
-        assert_eq!(hole2, 0, "same-net pad (via-in-pad) must NOT fire hole clearance");
+        let s2 = RouteSolution {
+            traces: vec![],
+            vias: vec![via("NET_A", (10.0, 10.0))],
+        };
+        let hole2 = count(&lint(&p2, &s2), |v| {
+            matches!(
+                v,
+                DrcViolation::ClearanceViaAny { required, .. } if (*required - 0.25).abs() < 1e-9
+            )
+        });
+        assert_eq!(
+            hole2, 0,
+            "same-net pad (via-in-pad) must NOT fire hole clearance"
+        );
     }
 
     #[test]
@@ -468,15 +506,25 @@ mod tests {
             ])
             .unwrap(),
         );
-        let near = RouteSolution { traces: vec![], vias: vec![via("NET", (5.3, 10.0))] };
+        let near = RouteSolution {
+            traces: vec![],
+            vias: vec![via("NET", (5.3, 10.0))],
+        };
         assert!(
-            lint(&p, &near).iter().any(|v| matches!(v, DrcViolation::OutOfBounds { .. })),
+            lint(&p, &near)
+                .iter()
+                .any(|v| matches!(v, DrcViolation::OutOfBounds { .. })),
             "via <0.5mm from a custom outline edge must fire copper-edge clearance"
         );
         // A via centred in the outline is well clear → no edge violation.
-        let mid = RouteSolution { traces: vec![], vias: vec![via("NET", (10.0, 10.0))] };
+        let mid = RouteSolution {
+            traces: vec![],
+            vias: vec![via("NET", (10.0, 10.0))],
+        };
         assert!(
-            !lint(&p, &mid).iter().any(|v| matches!(v, DrcViolation::OutOfBounds { .. })),
+            !lint(&p, &mid)
+                .iter()
+                .any(|v| matches!(v, DrcViolation::OutOfBounds { .. })),
             "a centred via must NOT fire copper-edge clearance"
         );
     }
@@ -485,10 +533,7 @@ mod tests {
     fn clearance_via_any_clean_for_own_trace() {
         // A via and a trace of the SAME net are not a clearance conflict.
         let p = problem(
-            vec![conn(
-                "NET_A",
-                &[(5.0, 10.0, "top"), (20.0, 10.0, "bottom")],
-            )],
+            vec![conn("NET_A", &[(5.0, 10.0, "top"), (20.0, 10.0, "bottom")])],
             vec![],
         );
         let s = RouteSolution {
@@ -519,7 +564,10 @@ mod tests {
         };
         let vs = lint(&p, &s);
         assert_eq!(
-            count(&vs, |v| matches!(v, DrcViolation::TraceWidthBelowMin { .. })),
+            count(&vs, |v| matches!(
+                v,
+                DrcViolation::TraceWidthBelowMin { .. }
+            )),
             1,
             "exactly one width violation, got {vs:?}"
         );
@@ -645,7 +693,8 @@ mod tests {
         };
         let vs = lint(&p, &s);
         assert!(
-            !vs.iter().any(|v| matches!(v, DrcViolation::InvalidLayer { .. })),
+            !vs.iter()
+                .any(|v| matches!(v, DrcViolation::InvalidLayer { .. })),
             "valid layer names must not raise InvalidLayer, got {vs:?}"
         );
     }

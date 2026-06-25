@@ -11,7 +11,11 @@ fn footprint_crate_exposes_parser_and_catalog_api() {
     assert_eq!(fp.name, "R_0603_1608Metric");
     assert_eq!(fp.pad_count(), 2);
     assert_eq!(fp.courtyard_source, CourtyardSource::ExplicitCourtyard);
-    assert!(fp.pads.iter().all(|pad| pad.technology == PadTechnology::Smd));
+    assert!(
+        fp.pads
+            .iter()
+            .all(|pad| pad.technology == PadTechnology::Smd)
+    );
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let pretty = tmp.path().join("Resistor_SMD.pretty");

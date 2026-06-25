@@ -25,8 +25,10 @@ fn fields_dodge_neighbor_body() {
     // positions are on the 1.27 grid (no snap drift). Legacy ref position for
     // R1 at (101.6, 101.6): x = 101.6+5.08+1.27 = 107.95. R2 at (111.76,
     // 101.6): body spans x in [106.68, 116.84] -> covers 107.95.
-    w.add_symbol(&env, "Device:R", "R1", "1k", [101.6, 101.6], 0.0).unwrap();
-    w.add_symbol(&env, "Device:R", "R2", "2k", [111.76, 101.6], 0.0).unwrap();
+    w.add_symbol(&env, "Device:R", "R1", "1k", [101.6, 101.6], 0.0)
+        .unwrap();
+    w.add_symbol(&env, "Device:R", "R2", "2k", [111.76, 101.6], 0.0)
+        .unwrap();
     let sch = w.finish();
     let r1_prop = sch
         .split("(property \"Reference\" \"R1\"")
@@ -45,7 +47,8 @@ fn fields_dodge_neighbor_body() {
 fn timer_pin_labels_stay_on_stub_ends() {
     let Some(env) = detect_env() else { return };
     let mut w = SchematicWriter::new();
-    w.add_symbol(&env, "Timer:NE555P", "U1", "NE555P", [152.4, 101.6], 0.0).unwrap();
+    w.add_symbol(&env, "Timer:NE555P", "U1", "NE555P", [152.4, 101.6], 0.0)
+        .unwrap();
     w.add_signal_label(&env, "U1", "2", "N_TR").unwrap();
     let sch = w.finish();
     // Pin 2 is on the west side; its stub extends west 3.81mm and the label
@@ -63,8 +66,10 @@ fn timer_pin_labels_stay_on_stub_ends() {
 fn adjacent_power_rail_values_do_not_merge() {
     let Some(env) = detect_env() else { return };
     let mut w = SchematicWriter::new();
-    w.add_power_symbol(&env, "power:VCC", "#PWR01", "VCCD", [101.6, 101.6], 0.0).unwrap();
-    w.add_power_symbol(&env, "power:VCC", "#PWR02", "VCC3V3", [106.68, 101.6], 0.0).unwrap();
+    w.add_power_symbol(&env, "power:VCC", "#PWR01", "VCCD", [101.6, 101.6], 0.0)
+        .unwrap();
+    w.add_power_symbol(&env, "power:VCC", "#PWR02", "VCC3V3", [106.68, 101.6], 0.0)
+        .unwrap();
     let sch = w.finish();
     let pos = |val: &str| -> (f64, f64) {
         let seg = sch
@@ -99,7 +104,8 @@ fn adjacent_power_rail_values_do_not_merge() {
 fn lone_symbol_keeps_conventional_fields() {
     let Some(env) = detect_env() else { return };
     let mut w = SchematicWriter::new();
-    w.add_symbol(&env, "Device:R", "R1", "1k", [101.6, 101.6], 0.0).unwrap();
+    w.add_symbol(&env, "Device:R", "R1", "1k", [101.6, 101.6], 0.0)
+        .unwrap();
     let sch = w.finish();
     assert!(
         sch.contains("(property \"Reference\" \"R1\"\n\t\t\t(at 107.95 100.33 0)"),

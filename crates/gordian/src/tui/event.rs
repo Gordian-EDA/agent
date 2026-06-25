@@ -38,7 +38,8 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
     // Control chords (readline-style line editing + hard quit).
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
-            KeyCode::Char('c') => Some(Msg::ForceQuit),
+            KeyCode::Char('c') if key.kind == KeyEventKind::Press => Some(Msg::ForceQuit),
+            KeyCode::Char('c') => None,
             KeyCode::Char('u') => Some(Msg::KillToStart),
             KeyCode::Char('w') => Some(Msg::KillWordBack),
             KeyCode::Char('a') => Some(Msg::Home),
@@ -115,10 +116,21 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_force_quits() {
+    fn ctrl_c_maps_to_quit_request() {
         let a = app();
         let k = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(matches!(map_key(&a, k), Some(Msg::ForceQuit)));
+    }
+
+    #[test]
+    fn ctrl_c_repeat_does_not_count_as_a_second_press() {
+        let a = app();
+        let k = KeyEvent::new_with_kind(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        );
+        assert!(map_key(&a, k).is_none());
     }
 
     #[test]
@@ -190,7 +202,10 @@ mod tests {
         assert!(matches!(map_key(&a, shift), Some(Msg::Newline)));
         assert!(matches!(map_key(&a, alt), Some(Msg::Newline)));
         // A bare Enter still submits.
-        assert!(matches!(map_key(&a, key(KeyCode::Enter)), Some(Msg::Submit)));
+        assert!(matches!(
+            map_key(&a, key(KeyCode::Enter)),
+            Some(Msg::Submit)
+        ));
     }
 
     #[test]

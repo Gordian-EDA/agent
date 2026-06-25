@@ -22,14 +22,70 @@ pub struct Price {
 /// produced by [`canonical_model`]. An unknown id has no entry → the HUD renders
 /// "—" rather than a wrong number.
 pub const MODEL_PRICES: &[(&str, Price)] = &[
-    ("claude-opus-4-8", Price { input: 5.0, output: 25.0, cached_input: 0.5 }),
-    ("claude-opus-4-7", Price { input: 5.0, output: 25.0, cached_input: 0.5 }),
-    ("claude-opus-4-6", Price { input: 5.0, output: 25.0, cached_input: 0.5 }),
-    ("claude-opus-4-5", Price { input: 5.0, output: 25.0, cached_input: 0.5 }),
-    ("claude-sonnet-4-6", Price { input: 3.0, output: 15.0, cached_input: 0.3 }),
-    ("claude-sonnet-4-5", Price { input: 3.0, output: 15.0, cached_input: 0.3 }),
-    ("claude-haiku-4-5", Price { input: 1.0, output: 5.0, cached_input: 0.1 }),
-    ("claude-fable-5", Price { input: 10.0, output: 50.0, cached_input: 1.0 }),
+    (
+        "claude-opus-4-8",
+        Price {
+            input: 5.0,
+            output: 25.0,
+            cached_input: 0.5,
+        },
+    ),
+    (
+        "claude-opus-4-7",
+        Price {
+            input: 5.0,
+            output: 25.0,
+            cached_input: 0.5,
+        },
+    ),
+    (
+        "claude-opus-4-6",
+        Price {
+            input: 5.0,
+            output: 25.0,
+            cached_input: 0.5,
+        },
+    ),
+    (
+        "claude-opus-4-5",
+        Price {
+            input: 5.0,
+            output: 25.0,
+            cached_input: 0.5,
+        },
+    ),
+    (
+        "claude-sonnet-4-6",
+        Price {
+            input: 3.0,
+            output: 15.0,
+            cached_input: 0.3,
+        },
+    ),
+    (
+        "claude-sonnet-4-5",
+        Price {
+            input: 3.0,
+            output: 15.0,
+            cached_input: 0.3,
+        },
+    ),
+    (
+        "claude-haiku-4-5",
+        Price {
+            input: 1.0,
+            output: 5.0,
+            cached_input: 0.1,
+        },
+    ),
+    (
+        "claude-fable-5",
+        Price {
+            input: 10.0,
+            output: 50.0,
+            cached_input: 1.0,
+        },
+    ),
 ];
 
 /// Fold a provider model id onto its canonical family key. Handles the three id
@@ -48,7 +104,10 @@ pub fn canonical_model(model: &str) -> Option<&'static str> {
 /// Look up the price for a (possibly decorated) model id, `None` if unknown.
 pub fn price_of(model: &str) -> Option<Price> {
     let key = canonical_model(model)?;
-    MODEL_PRICES.iter().find(|(k, _)| *k == key).map(|(_, p)| *p)
+    MODEL_PRICES
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, p)| *p)
 }
 
 /// Cumulative token usage across a session, for the cost + cached HUD. Token
@@ -70,8 +129,16 @@ impl Ledger {
     /// Fold one `AgentEvent::Usage` into the running totals. `input_tokens` from
     /// the event *includes* the cache counts, so the full-price remainder is
     /// `input_tokens − cache_read − cache_write`.
-    pub fn record(&mut self, input_tokens: u64, output_tokens: u64, cache_write: u64, cache_read: u64) {
-        self.input += input_tokens.saturating_sub(cache_read).saturating_sub(cache_write);
+    pub fn record(
+        &mut self,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_write: u64,
+        cache_read: u64,
+    ) {
+        self.input += input_tokens
+            .saturating_sub(cache_read)
+            .saturating_sub(cache_write);
         self.output += output_tokens;
         self.cache_write += cache_write;
         self.cache_read += cache_read;
@@ -107,7 +174,10 @@ mod tests {
             canonical_model("us.anthropic.claude-opus-4-5-20251101-v1:0"),
             Some("claude-opus-4-5"),
         );
-        assert_eq!(canonical_model("anthropic/claude-sonnet-4-6"), Some("claude-sonnet-4-6"));
+        assert_eq!(
+            canonical_model("anthropic/claude-sonnet-4-6"),
+            Some("claude-sonnet-4-6")
+        );
         assert_eq!(canonical_model("claude-opus-4-8"), Some("claude-opus-4-8"));
         assert_eq!(canonical_model("gpt-4o"), None);
     }
@@ -122,7 +192,11 @@ mod tests {
         // Turn 3: more cache reads.
         l.record(1200, 80, 0, 1000);
 
-        assert_eq!(l.input, 200 + 250 + 200, "full-price input is the non-cached remainder");
+        assert_eq!(
+            l.input,
+            200 + 250 + 200,
+            "full-price input is the non-cached remainder"
+        );
         assert_eq!(l.output, 300);
         assert_eq!(l.cache_write, 800);
         assert_eq!(l.cache_read, 1800);
@@ -141,8 +215,14 @@ mod tests {
         let mut cached = Ledger::default();
         cached.record(1_000_000, 1_000_000, 0, 1_000_000);
         let with_cache = cached.cost("claude-opus-4-8").unwrap();
-        assert!((with_cache - 25.5).abs() < 1e-9, "0.5 + 25 = $25.50, got {with_cache}");
-        assert!(with_cache < full, "cache reads must be cheaper — that's the savings");
+        assert!(
+            (with_cache - 25.5).abs() < 1e-9,
+            "0.5 + 25 = $25.50, got {with_cache}"
+        );
+        assert!(
+            with_cache < full,
+            "cache reads must be cheaper — that's the savings"
+        );
 
         // A cache write costs 1.25× input: 1M write → $6.25 on top of output.
         let mut wrote = Ledger::default();
