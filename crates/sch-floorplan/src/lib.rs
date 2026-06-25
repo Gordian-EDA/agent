@@ -16,18 +16,10 @@
 //!   it re-publishes the realization library + the stable layout geometry they need, so a
 //!   `place`-internal rename never touches an engine crate. See the module docs.
 //!
-//! The shared vocabulary (geometry, grid, ids, the IR types, the
-//! [`sch_place::place`] engine boundary) lives in `sch-place`; the elbow router +
-//! text solver + `SchematicWriter` + reader live in `sch-io`. The
-//! `crate::{write,wire,label,read,grid,ids}` re-exports below let the `floorplan`
-//! module reach those I/O modules through plain `crate::` paths.
+//! The shared placement vocabulary lives in `sch-place`; pure geometry and grid
+//! snapping live in `geom`; schematic I/O lives in `sch-io`.
 
 pub mod contract;
 pub mod floorplan;
 
-// The I/O layer (elbow router + text solver + SchematicWriter + reader) lives in the
-// `sch-io` crate; re-exported so `floorplan`'s `crate::wire` / `crate::write` /
-// `crate::label` / `crate::read` paths resolve unchanged.
 pub use sch_io::{label, read, wire, write};
-
-pub use sch_place::{grid, ids};

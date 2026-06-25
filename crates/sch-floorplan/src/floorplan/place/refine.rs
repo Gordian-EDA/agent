@@ -10,13 +10,13 @@ use std::io;
 use kicad_cli::env::KicadEnv;
 
 use crate::write::SchematicWriter;
-use sch_place::geom::Dir;
+use geom::Dir;
 
 use super::*;
 use sch_place::item::{Incidence, Item};
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `sch_place::union_find`, shared with circuit-lang's pin reconciler.
+// `geom::union_find`, shared with circuit-lang's pin reconciler.
 use sch_place::ir::LayoutIr;
 
 /// Default deterministic seed for the placement search (a stochastic engine's PRNG).
@@ -131,7 +131,7 @@ pub(crate) fn collapse_empty_bands(items: &mut [Item]) -> bool {
         }
         for it in items.iter_mut() {
             if it.at[1] > top {
-                it.at[1] = crate::grid::snap(it.at[1] - dy);
+                it.at[1] = geom::grid::snap(it.at[1] - dy);
             }
         }
         any = true;
@@ -224,7 +224,7 @@ pub(crate) fn decongest_off_labels(
         let ci = a.center()[axis];
         let cb = b.center()[axis];
         let dir = if ci >= cb { 1.0 } else { -1.0 };
-        items[i].at[axis] = crate::grid::snap(items[i].at[axis] + dir * push);
+        items[i].at[axis] = geom::grid::snap(items[i].at[axis] + dir * push);
     }
 }
 

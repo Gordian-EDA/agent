@@ -66,7 +66,7 @@ pub fn choose(obstacles: &[Obstacle], movables: &[Movable]) -> Vec<(usize, bool)
 
 use kicad_symbol::geometry::PinGeom;
 
-use sch_place::geom::Dir;
+use geom::Dir;
 
 /// Estimated width of rendered text (mm): 1.1 mm/char at the 1.27 font.
 pub fn text_width(s: &str) -> f64 {

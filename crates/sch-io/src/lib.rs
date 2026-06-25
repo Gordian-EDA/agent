@@ -5,12 +5,8 @@
 //! - [`write`] — the `SchematicWriter`: placed symbols + routed wires → `.kicad_sch`.
 //! - [`read`] — recover a `Design` view from an emitted `.kicad_sch`.
 //!
-//! `wire` and `write` are mutually coupled (the writer hands the router a `RouteScene`;
-//! the router fills the writer), so they share one crate rather than a forced split.
-//! Geometry/grid/ids vocabulary comes from `sch-place` (re-exported for the modules'
-//! `crate::grid` / `crate::ids` paths).
-
-pub use sch_place::{grid, ids};
+//! `wire` and `write` are mutually coupled (the writer hands the router a
+//! `RouteScene`; the router fills the writer), so they share one crate.
 
 pub mod label;
 pub mod read;

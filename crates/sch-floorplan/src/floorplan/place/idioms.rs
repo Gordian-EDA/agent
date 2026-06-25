@@ -12,17 +12,17 @@ use sch_place::item::{Incidence, Item};
 use sch_place::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net};
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `sch_place::union_find`, shared with circuit-lang's pin reconciler.
+// `geom::union_find`, shared with circuit-lang's pin reconciler.
 use super::super::infer::anchor_tap;
+use geom::union_find::{uf_find, uf_union};
 use sch_place::ir::{LayoutIr, Orient};
-use sch_place::union_find::{uf_find, uf_union};
 
 /// each load cap two gaps out, level with its osc pin. Returns true if it moved
 /// anything (so the caller re-runs `decongest`). The cluster members are frozen, so
 /// the placement search has already finished around them and won't undo this.
 pub fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
     const GAP: f64 = 7.62;
-    let snap = crate::grid::snap;
+    let snap = geom::grid::snap;
     // (item, position, optional forced angle). The crystal gets a forced angle so its pins
     // run TOWARD the IC (along `dir`); the anneal otherwise leaves it on the perpendicular
     // axis, which forces both 3-pin OSC nets to wrap around the body → route-fail → a bridging
@@ -180,7 +180,7 @@ pub fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
 /// Returns true if it moved anything.
 pub fn align_led_chains(items: &mut [Item], _inc: &Incidence, ir: &LayoutIr) -> bool {
     const DROP: f64 = 10.16; // LED half + gap + resistor half, on grid.
-    let snap = crate::grid::snap;
+    let snap = geom::grid::snap;
     let mut moves: Vec<(usize, [f64; 2], f64)> = Vec::new();
     for idiom in &ir.idioms {
         if idiom.kind != "led_indicator" {
@@ -345,7 +345,7 @@ pub(crate) fn align_rail_cap_rows(items: &mut [Item], ir: &LayoutIr) -> bool {
     // A net is a "rail" if it's a recognized power token OR the engine treats it as a rail (covers
     // board-specific names like VM/VSW that is_power_net's token list misses).
     let is_rail = |n: &str| is_power_net(n) || ir.rails.contains_key(n);
-    let snap = crate::grid::snap;
+    let snap = geom::grid::snap;
     const PITCH: f64 = 12.7; // cap body + value/refdes label width, on grid (7.62 packed the labels
     // tight enough that the follow-up decongest scattered the whole row back out)
     // The exact set of caps `gather_decoupling_bank` will re-seat — only THESE may be deferred from the
@@ -423,7 +423,7 @@ pub(crate) fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool 
     if std::env::var("MULTISHEET_REFINE").is_err() {
         return false;
     }
-    let snap = crate::grid::snap;
+    let snap = geom::grid::snap;
     let is_rail = |n: &str| is_power_net(n) || ir.rails.contains_key(n);
     // A positive supply net (the rail whose pins the bank hugs): a power net that is neither ground
     // nor a negative supply.
@@ -687,7 +687,7 @@ pub(crate) fn gather_banked_decoupling(
     if banked.is_empty() {
         return false;
     }
-    let snap = sch_place::grid::snap;
+    let snap = geom::grid::snap;
     let is_rail = |n: &str| is_power_net(n) || ir.rails.contains_key(n);
     let is_vp = |n: &str| is_rail(n) && !is_ground(n) && !is_neg_supply(n);
 
@@ -880,7 +880,7 @@ pub(crate) fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool
     if std::env::var("MULTISHEET_REFINE").is_err() {
         return false;
     }
-    let snap = crate::grid::snap;
+    let snap = geom::grid::snap;
     const GAP: f64 = 7.62;
     let is_crystal = |it: &Item| {
         it.geom.pins.len() == 2
@@ -1161,7 +1161,7 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
     if std::env::var("MULTISHEET_REFINE").is_err() {
         return false;
     }
-    let snap = crate::grid::snap;
+    let snap = geom::grid::snap;
     const GAP: f64 = 7.62;
 
     // A 2-pin part's net set (filters None). Used to match the bridging cap / feeding diode.
@@ -1587,7 +1587,7 @@ pub(crate) fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool
     if std::env::var("MULTISHEET_REFINE").is_err() {
         return false;
     }
-    let snap = crate::grid::snap;
+    let snap = geom::grid::snap;
     const GAP: f64 = 5.08; // bridged-pin edge → bridge part, on grid (short stub each side)
 
     // A net is PURELY LOCAL iff the author did not mark it a port (cross-sheet) AND it is not a
@@ -1823,7 +1823,7 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
     if std::env::var("MULTISHEET_REFINE").is_err() {
         return false;
     }
-    let snap = crate::grid::snap;
+    let snap = geom::grid::snap;
     const GAP: f64 = 5.08; // IC bus-pin edge → pull-up's near (bus) pin, on grid (short stub)
 
     // A pull-up bridges a power RAIL and a non-power BUS SIGNAL that the author marked a cross-sheet
@@ -2168,7 +2168,7 @@ pub(crate) fn align_repeated_columns(
     if std::env::var("MULTISHEET_REFINE").is_err() {
         return false;
     }
-    let snap = crate::grid::snap;
+    let snap = geom::grid::snap;
     let is_rail = |n: &str| is_power_net(n) || ir.rails.contains_key(n);
     // A "spine" is one instance of the repeated block: a MULTI-PIN ANCHOR (≥3 pins — same definition the
     // engine uses for `anchors`). Three half-bridges = six IRLZ44N FETs (3-pin). We deliberately do NOT

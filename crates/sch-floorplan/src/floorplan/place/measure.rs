@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use geom::{Point2, Rect};
+use geom::{EPS, Point2, Rect};
 use kicad_cli::env::KicadEnv;
 
 use crate::write::SchematicWriter;
@@ -27,10 +27,9 @@ use sch_place::place::Crossings;
 use sch_place::place::{PlaceProblem, PlaceResult};
 
 use super::score::{
-    count_body_crossings, count_close_wires, count_collinear_body_crossings,
-    count_congestion, count_corners, count_crossings, count_foreign_taps, count_ic_body_crossings,
-    count_merges, count_parallel_body_crossings, count_shorts, count_stray, grid_order_viol,
-    item_rect,
+    count_body_crossings, count_close_wires, count_collinear_body_crossings, count_congestion,
+    count_corners, count_crossings, count_foreign_taps, count_ic_body_crossings, count_merges,
+    count_parallel_body_crossings, count_shorts, count_stray, grid_order_viol, item_rect,
 };
 use super::*;
 
@@ -118,7 +117,12 @@ impl<'a> Realizer<'a> {
     /// (the undriven power nets that need a flag) so the caller need not plumb it.
     pub fn new(env: &'a KicadEnv, inc: &'a Incidence, ir: &'a LayoutIr, items: &[Item]) -> Self {
         let needs_flag = compute_needs_flag(env, items, ir);
-        Self { env, inc, ir, needs_flag }
+        Self {
+            env,
+            inc,
+            ir,
+            needs_flag,
+        }
     }
 
     /// The KiCAD environment (to load symbol geometry for routing).
@@ -143,7 +147,15 @@ impl<'a> Realizer<'a> {
     /// no weights, no `premium` policy. A build failure saturates every count to the
     /// worst (so any min-based objective rejects it); the engine prices it as it likes.
     pub fn measure(&self, items: &[Item]) -> RawMetrics {
-        match build_writer(self.env, None, items, self.inc, self.ir, &self.needs_flag, false) {
+        match build_writer(
+            self.env,
+            None,
+            items,
+            self.inc,
+            self.ir,
+            &self.needs_flag,
+            false,
+        ) {
             Ok(w) => raw_metrics(self.env, &w, items, self.inc, self.ir),
             Err(_) => RawMetrics {
                 fallbacks: usize::MAX,
@@ -170,7 +182,15 @@ impl<'a> Realizer<'a> {
     /// `fan_risers=true` build + the real finalize (split wires, solve text, reframe) +
     /// count. A build failure saturates to [`usize::MAX`].
     pub fn warnings(&self, items: &[Item]) -> usize {
-        match build_writer(self.env, None, items, self.inc, self.ir, &self.needs_flag, true) {
+        match build_writer(
+            self.env,
+            None,
+            items,
+            self.inc,
+            self.ir,
+            &self.needs_flag,
+            true,
+        ) {
             Ok(mut w) => {
                 w.set_frame(true);
                 w.prepare();
@@ -185,8 +205,15 @@ impl<'a> Realizer<'a> {
     /// sheet, not the raw per-move build. A DIAGNOSTIC tiebreaker; reports zero on an
     /// un-buildable unit.
     pub fn crossings(&self, items: &[Item]) -> Crossings {
-        let Ok(w) = build_writer(self.env, None, items, self.inc, self.ir, &self.needs_flag, true)
-        else {
+        let Ok(w) = build_writer(
+            self.env,
+            None,
+            items,
+            self.inc,
+            self.ir,
+            &self.needs_flag,
+            true,
+        ) else {
             return Crossings::default();
         };
         let wires = w.wires_with_nets();
@@ -205,7 +232,15 @@ impl<'a> Realizer<'a> {
     /// placement (readability `warnings` do NOT detect a merge). Saturates to
     /// [`usize::MAX`] on a build failure.
     pub fn truthfulness_breaks(&self, items: &[Item]) -> usize {
-        match build_writer(self.env, None, items, self.inc, self.ir, &self.needs_flag, true) {
+        match build_writer(
+            self.env,
+            None,
+            items,
+            self.inc,
+            self.ir,
+            &self.needs_flag,
+            true,
+        ) {
             Ok(w) => {
                 let wires = w.wires_with_nets();
                 count_merges(&wires, &w.junction_positions())
@@ -230,7 +265,10 @@ fn bodies_and_ic_rects(
         .filter(|i| i.geom.pins.len() == 2)
         .filter_map(|it| {
             let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
-            match (w.pin_dirs(env, &it.refdes, n0), w.pin_dirs(env, &it.refdes, n1)) {
+            match (
+                w.pin_dirs(env, &it.refdes, n0),
+                w.pin_dirs(env, &it.refdes, n1),
+            ) {
                 (Ok(d0), Ok(d1)) => match (d0.first(), d1.first()) {
                     (Some((a, _)), Some((b, _))) => Some((*a, *b)),
                     _ => None,
@@ -246,9 +284,10 @@ fn bodies_and_ic_rects(
             let mut pts = Vec::new();
             for pg in &it.geom.pins {
                 if let Ok(d) = w.pin_dirs(env, &it.refdes, &pg.number)
-                    && let Some((p, _)) = d.first() {
-                        pts.push(Point2::from(*p));
-                    }
+                    && let Some((p, _)) = d.first()
+                {
+                    pts.push(Point2::from(*p));
+                }
             }
             Rect::bounding(&pts)
                 .map(|r| Rect::new(r.min_x + 2.0, r.min_y + 2.0, r.max_x - 2.0, r.max_y - 2.0))
@@ -315,39 +354,55 @@ pub fn raw_metrics(
                 Some(degree >= 2)
             }
         };
-        let Some(prefer_vertical) = prefer_vertical else { continue };
+        let Some(prefer_vertical) = prefer_vertical else {
+            continue;
+        };
         let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
-        if let (Ok(d0), Ok(d1)) = (w.pin_dirs(env, &it.refdes, n0), w.pin_dirs(env, &it.refdes, n1))
-            && let (Some((a, _)), Some((b, _))) = (d0.first(), d1.first()) {
-                let horizontal = (a[0] - b[0]).abs() > (a[1] - b[1]).abs();
-                if prefer_vertical == horizontal {
-                    orient_viol += 1;
-                    if rail_count == 1 {
+        if let (Ok(d0), Ok(d1)) = (
+            w.pin_dirs(env, &it.refdes, n0),
+            w.pin_dirs(env, &it.refdes, n1),
+        ) && let (Some((a, _)), Some((b, _))) = (d0.first(), d1.first())
+        {
+            let horizontal = (a[0] - b[0]).abs() > (a[1] - b[1]).abs();
+            if prefer_vertical == horizontal {
+                orient_viol += 1;
+                if rail_count == 1 {
+                    leg_viol += 1;
+                }
+            } else if rail_count == 1 && prefer_vertical {
+                let net_of = |pn: &str| {
+                    it.pins
+                        .iter()
+                        .find(|(p, _, _)| p == pn)
+                        .and_then(|(_, _, n)| n.as_deref())
+                };
+                let n0_rail = net_of(n0).is_some_and(|n| ir.rails.contains_key(n));
+                let rail = if n0_rail { net_of(n0) } else { net_of(n1) };
+                if let Some(rn) = rail {
+                    let (rail_pos, other_pos) = if n0_rail { (a, b) } else { (b, a) };
+                    let rail_up = rail_pos[1] < other_pos[1] - EPS;
+                    if is_ground(rn) == rail_up {
                         leg_viol += 1;
-                    }
-                } else if rail_count == 1 && prefer_vertical {
-                    let net_of =
-                        |pn: &str| it.pins.iter().find(|(p, _, _)| p == pn).and_then(|(_, _, n)| n.as_deref());
-                    let n0_rail = net_of(n0).is_some_and(|n| ir.rails.contains_key(n));
-                    let rail = if n0_rail { net_of(n0) } else { net_of(n1) };
-                    if let Some(rn) = rail {
-                        let (rail_pos, other_pos) = if n0_rail { (a, b) } else { (b, a) };
-                        let rail_up = rail_pos[1] < other_pos[1] - EPS;
-                        if is_ground(rn) == rail_up {
-                            leg_viol += 1;
-                        }
                     }
                 }
             }
+        }
     }
     let legs: Vec<(usize, Vec<&str>, bool)> = items
         .iter()
         .enumerate()
         .filter(|(_, it)| it.geom.pins.len() == 2)
         .map(|(i, it)| {
-            let nets: Vec<&str> = it.pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+            let nets: Vec<&str> = it
+                .pins
+                .iter()
+                .filter_map(|(_, _, n)| n.as_deref())
+                .collect();
             let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
-            let vertical = match (w.pin_dirs(env, &it.refdes, n0), w.pin_dirs(env, &it.refdes, n1)) {
+            let vertical = match (
+                w.pin_dirs(env, &it.refdes, n0),
+                w.pin_dirs(env, &it.refdes, n1),
+            ) {
                 (Ok(d0), Ok(d1)) => match (d0.first(), d1.first()) {
                     (Some((a, _)), Some((b, _))) => (a[1] - b[1]).abs() > (a[0] - b[0]).abs(),
                     _ => false,
@@ -372,7 +427,11 @@ pub fn raw_metrics(
             let (ia, na, va) = (legs[a].0, &legs[a].1, legs[a].2);
             let (ib, nb, vb) = (legs[b].0, &legs[b].1, legs[b].2);
             let cap = |i: usize| items[i].refdes.starts_with('C');
-            if va && vb && !cap(ia) && !cap(ib) && is_spine(na, nb)
+            if va
+                && vb
+                && !cap(ia)
+                && !cap(ib)
+                && is_spine(na, nb)
                 && (items[ia].at[0] - items[ib].at[0]).abs() > EPS
             {
                 spine_viol += 1;
@@ -389,7 +448,10 @@ pub fn raw_metrics(
     let grid_order = grid_order_viol(items, ir);
     let mut by_refdes: BTreeMap<&str, Vec<Point2>> = BTreeMap::new();
     for it in items {
-        by_refdes.entry(&it.refdes).or_default().push(Point2::from(it.at));
+        by_refdes
+            .entry(&it.refdes)
+            .or_default()
+            .push(Point2::from(it.at));
     }
     let sib_spread: f64 = by_refdes
         .values()

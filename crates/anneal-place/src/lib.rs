@@ -185,7 +185,11 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
                 [0.0, -ROW_GAP],
             ] {
                 let prev = items[i].at;
-                items[i].at = [snap(prev[0] + d[0]), snap(prev[1] + d[1])].into();
+                items[i].at = [
+                    geom::grid::snap(prev[0] + d[0]),
+                    geom::grid::snap(prev[1] + d[1]),
+                ]
+                .into();
                 let c = greedy_score(r, items);
                 if c + 0.5 < best {
                     best = c;
@@ -230,7 +234,7 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
         }
         for &i in &satellites {
             if let Some(ax) = anchor_x(items, r.incidence(), i) {
-                let nx = snap(2.0 * ax - items[i].at[0]);
+                let nx = geom::grid::snap(2.0 * ax - items[i].at[0]);
                 if (nx - items[i].at[0]).abs() > EPS {
                     let prev = items[i].at;
                     items[i].at = [nx, prev[1]].into();
@@ -417,7 +421,7 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
     for (si, vertical, target) in plans {
         let axis = if vertical { 0 } else { 1 };
         let orig = items[si].at;
-        let goal = snap(target[axis]);
+        let goal = geom::grid::snap(target[axis]);
         let dir = (goal - orig[axis]).signum();
         if dir == 0.0 {
             continue;
@@ -439,11 +443,6 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
         items[si].at = best_pos;
         best = best_cost;
     }
-}
-
-/// Grid snap — the engine works on the 1.27 mm grid like the seed.
-fn snap(v: f64) -> f64 {
-    sch_place::grid::snap(v)
 }
 
 // ===========================================================================
@@ -955,8 +954,8 @@ fn anneal_items(
     // One grid cell-step in x/y for the relocation moves.
     let relocate = |rng: &mut Rng, at: [f64; 2], n: i32| -> [f64; 2] {
         [
-            sch_place::grid::snap(at[0] + rng.step(n) as f64 * COL_GAP),
-            sch_place::grid::snap(at[1] + rng.step(n) as f64 * ROW_GAP),
+            geom::grid::snap(at[0] + rng.step(n) as f64 * COL_GAP),
+            geom::grid::snap(at[1] + rng.step(n) as f64 * ROW_GAP),
         ]
     };
     // NB: no "exit early once `best` plateaus for N iters" rule. Measured the largest
@@ -1008,8 +1007,8 @@ fn anneal_items(
                 .collect();
             for &k in &group {
                 items[k].at = [
-                    sch_place::grid::snap(items[k].at[0] + d[0]),
-                    sch_place::grid::snap(items[k].at[1] + d[1]),
+                    geom::grid::snap(items[k].at[0] + d[0]),
+                    geom::grid::snap(items[k].at[1] + d[1]),
                 ]
                 .into();
             }
@@ -1055,7 +1054,10 @@ fn proxy_cost(
     let grid_order = grid_order_viol(items, ir);
     let mut hpwl = 0.0;
     for pins in inc.values() {
-        let pts: Vec<Point2> = pins.iter().map(|(i, _)| Point2::from(items[*i].at)).collect();
+        let pts: Vec<Point2> = pins
+            .iter()
+            .map(|(i, _)| Point2::from(items[*i].at))
+            .collect();
         hpwl += Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter());
     }
     let item_pts: Vec<Point2> = items.iter().map(|it| Point2::from(it.at)).collect();
@@ -1131,8 +1133,8 @@ fn anneal_locality(r: &Realizer, items: &mut [Item], inc: &Incidence, ir: &Layou
     let mut rng = Rng(seed);
     let relocate = |rng: &mut Rng, at: [f64; 2], n: i32| -> [f64; 2] {
         [
-            sch_place::grid::snap(at[0] + rng.step(n) as f64 * COL_GAP),
-            sch_place::grid::snap(at[1] + rng.step(n) as f64 * ROW_GAP),
+            geom::grid::snap(at[0] + rng.step(n) as f64 * COL_GAP),
+            geom::grid::snap(at[1] + rng.step(n) as f64 * ROW_GAP),
         ]
     };
     // Board extent in cells — the hot cluster-jump radius.
@@ -1209,8 +1211,8 @@ fn anneal_locality(r: &Realizer, items: &mut [Item], inc: &Incidence, ir: &Layou
                 .collect();
             for &k in &group {
                 items[k].at = [
-                    sch_place::grid::snap(items[k].at[0] + d[0]),
-                    sch_place::grid::snap(items[k].at[1] + d[1]),
+                    geom::grid::snap(items[k].at[0] + d[0]),
+                    geom::grid::snap(items[k].at[1] + d[1]),
                 ]
                 .into();
             }
@@ -1347,8 +1349,8 @@ fn magnet_proxy(
         for dy in -2..=2 {
             for dx in -2..=2 {
                 let p = [
-                    sch_place::grid::snap(t[0] + dx as f64 * COL_GAP),
-                    sch_place::grid::snap(t[1] + dy as f64 * ROW_GAP),
+                    geom::grid::snap(t[0] + dx as f64 * COL_GAP),
+                    geom::grid::snap(t[1] + dy as f64 * ROW_GAP),
                 ];
                 let r = item_rect(&items[si], p);
                 let pad = [r[0] - 1.27, r[1] - 1.27, r[2] + 1.27, r[3] + 1.27];
@@ -1527,8 +1529,8 @@ fn align_repeated_motifs(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) -> 
         for (idx, &ai) in g.iter().enumerate() {
             let (col, row) = (idx % cols, idx / cols);
             let bb = blk_bbox(items, ai);
-            let dx = sch_place::grid::snap(origin.min_x + col as f64 * pitch_x - bb.min_x);
-            let dy = sch_place::grid::snap(origin.min_y + row as f64 * pitch_y - bb.min_y);
+            let dx = geom::grid::snap(origin.min_x + col as f64 * pitch_x - bb.min_x);
+            let dy = geom::grid::snap(origin.min_y + row as f64 * pitch_y - bb.min_y);
             if dx != 0.0 || dy != 0.0 {
                 let mut grp = vec![ai];
                 if let Some(b) = blocks.get(&ai) {

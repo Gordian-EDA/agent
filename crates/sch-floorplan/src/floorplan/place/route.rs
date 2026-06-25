@@ -8,16 +8,16 @@ use std::io;
 use kicad_cli::env::KicadEnv;
 
 use crate::write::SchematicWriter;
-use sch_place::geom::Dir;
+use geom::{Dir, EPS};
 
 use super::*;
 use sch_place::item::{Incidence, Item};
 use sch_place::netclass::{is_connector_like, is_ground};
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `sch_place::union_find`, shared with circuit-lang's pin reconciler.
+// `geom::union_find`, shared with circuit-lang's pin reconciler.
+use geom::union_find::{uf_find, uf_union};
 use sch_place::ir::{Band, LayoutIr, Side};
-use sch_place::union_find::{uf_find, uf_union};
 
 // ---------------------------------------------------------------------------
 // Wiring: rails, signal routing, ports.
@@ -498,10 +498,10 @@ pub(crate) fn route_signal(
         let lead = 2.54;
         let stub = |p: ::geom::Point2, d: Option<Dir>| -> ::geom::Point2 {
             match d {
-                Some(Dir::East) => [crate::grid::snap(p[0] + lead), p[1]].into(),
-                Some(Dir::West) => [crate::grid::snap(p[0] - lead), p[1]].into(),
-                Some(Dir::North) => [p[0], crate::grid::snap(p[1] - lead)].into(),
-                Some(Dir::South) => [p[0], crate::grid::snap(p[1] + lead)].into(),
+                Some(Dir::East) => [geom::grid::snap(p[0] + lead), p[1]].into(),
+                Some(Dir::West) => [geom::grid::snap(p[0] - lead), p[1]].into(),
+                Some(Dir::North) => [p[0], geom::grid::snap(p[1] - lead)].into(),
+                Some(Dir::South) => [p[0], geom::grid::snap(p[1] + lead)].into(),
                 None => p,
             }
         };
@@ -527,8 +527,8 @@ pub(crate) fn route_signal(
             // follower loop drops under), then ABOVE.
             let mut bands: Vec<f64> = Vec::new();
             for step in 1..=6 {
-                bands.push(crate::grid::snap(by_hi + 1.27 * step as f64));
-                bands.push(crate::grid::snap(by_lo - 1.27 * step as f64));
+                bands.push(geom::grid::snap(by_hi + 1.27 * step as f64));
+                bands.push(geom::grid::snap(by_lo - 1.27 * step as f64));
             }
             for band_y in bands {
                 let path = vec![
@@ -607,8 +607,9 @@ pub(crate) fn route_signal(
     // A terminal landing inside another same-net segment is a T-join.
     for (p, _) in &terms {
         let interior = w.wire_segments_on_net(net).iter().any(|(a, b)| {
-            let ends = near(*p, *a) || near(*p, *b);
-            !ends && ::geom::Segment::new((*a).into(), (*b).into()).contains_point((*p).into())
+            let point = ::geom::Point2::from(*p);
+            let ends = point.near_eq((*a).into(), EPS) || point.near_eq((*b).into(), EPS);
+            !ends && ::geom::Segment::new((*a).into(), (*b).into()).contains_point(point)
         });
         if interior {
             w.add_junction(*p);
@@ -662,7 +663,7 @@ pub(crate) fn route_local_tee(
     };
     let horizontal = (max_x - min_x) >= (max_y - min_y);
     if horizontal {
-        let ty = crate::grid::snap(median(ys));
+        let ty = geom::grid::snap(median(ys));
         w.add_wire_on_net([min_x, ty], [max_x, ty], net);
         scene
             .segments
@@ -676,7 +677,7 @@ pub(crate) fn route_local_tee(
             }
         }
     } else {
-        let tx = crate::grid::snap(median(xs));
+        let tx = geom::grid::snap(median(xs));
         w.add_wire_on_net([tx, min_y], [tx, max_y], net);
         scene
             .segments
@@ -719,7 +720,7 @@ pub(crate) fn port_exit_point(eps: &[([f64; 2], Dir)], side: Side) -> [f64; 2] {
                 .max_by(|a, b| a.0[0].total_cmp(&b.0[0]))
                 .map(|t| t.0[1])
                 .unwrap_or(min_y);
-            [crate::grid::snap(max_x + reach), y]
+            [geom::grid::snap(max_x + reach), y]
         }
         Side::Left => {
             let y = eps
@@ -727,7 +728,7 @@ pub(crate) fn port_exit_point(eps: &[([f64; 2], Dir)], side: Side) -> [f64; 2] {
                 .min_by(|a, b| a.0[0].total_cmp(&b.0[0]))
                 .map(|t| t.0[1])
                 .unwrap_or(min_y);
-            [crate::grid::snap(min_x - reach), y]
+            [geom::grid::snap(min_x - reach), y]
         }
         Side::Top => {
             let x = eps
@@ -735,7 +736,7 @@ pub(crate) fn port_exit_point(eps: &[([f64; 2], Dir)], side: Side) -> [f64; 2] {
                 .min_by(|a, b| a.0[1].total_cmp(&b.0[1]))
                 .map(|t| t.0[0])
                 .unwrap_or(min_x);
-            [x, crate::grid::snap(min_y - reach)]
+            [x, geom::grid::snap(min_y - reach)]
         }
         Side::Bottom => {
             let x = eps
@@ -743,7 +744,7 @@ pub(crate) fn port_exit_point(eps: &[([f64; 2], Dir)], side: Side) -> [f64; 2] {
                 .max_by(|a, b| a.0[1].total_cmp(&b.0[1]))
                 .map(|t| t.0[0])
                 .unwrap_or(max_x);
-            [x, crate::grid::snap(max_y + reach)]
+            [x, geom::grid::snap(max_y + reach)]
         }
     }
 }
@@ -800,7 +801,7 @@ pub(crate) fn ic_port_exit_override(
     name_side: Side,
 ) -> Option<(Side, [f64; 2])> {
     const NAME_OFFSET: f64 = 0.508; // KiCAD default pin-name offset (matches the `label` solver)
-    let snap = crate::grid::snap;
+    let snap = geom::grid::snap;
     // Map the net's pins (same flatten order `wire()` used to build `eps`) back to
     // their (item, pin) so we can read each IC pin's geometry + name.
     let mut pin_of: Vec<Option<(usize, String)>> = vec![None; eps.len()];
@@ -902,12 +903,6 @@ pub(crate) fn dir_toward(a: impl Into<::geom::Point2>, b: impl Into<::geom::Poin
     } else {
         Dir::North
     }
-}
-
-pub(crate) fn near(p: impl Into<::geom::Point2>, q: impl Into<::geom::Point2>) -> bool {
-    let p = p.into();
-    let q = q.into();
-    (p[0] - q[0]).abs() < EPS && (p[1] - q[1]).abs() < EPS
 }
 
 /// Assign each drawn rail (≥3 pins) a y. Rails in a band share a base y, but
@@ -1016,8 +1011,6 @@ pub(crate) fn assign_rail_levels(
     }
     out
 }
-
-pub use ::geom::EPS;
 
 /// A side (E/W) pin leads OUTWARD this far before its riser climbs to the rail,
 /// so the riser never runs up the IC edge past the other pins on that side.

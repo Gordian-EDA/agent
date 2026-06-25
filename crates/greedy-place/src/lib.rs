@@ -120,7 +120,11 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
                 [0.0, -ROW_GAP],
             ] {
                 let prev = items[i].at;
-                items[i].at = [snap(prev[0] + d[0]), snap(prev[1] + d[1])].into();
+                items[i].at = [
+                    geom::grid::snap(prev[0] + d[0]),
+                    geom::grid::snap(prev[1] + d[1]),
+                ]
+                .into();
                 let c = cost(r, items);
                 if c + 0.5 < best {
                     best = c;
@@ -170,7 +174,7 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
         // side of its IC migrates over (the wire then drops straight).
         for &i in &satellites {
             if let Some(ax) = anchor_x(items, r.incidence(), i) {
-                let nx = snap(2.0 * ax - items[i].at[0]);
+                let nx = geom::grid::snap(2.0 * ax - items[i].at[0]);
                 if (nx - items[i].at[0]).abs() > EPS {
                     let prev = items[i].at;
                     items[i].at = [nx, prev[1]].into();
@@ -396,7 +400,7 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
         // part still slides as close as it can instead of staying put.
         let axis = if vertical { 0 } else { 1 };
         let orig = items[si].at;
-        let goal = snap(target[axis]);
+        let goal = geom::grid::snap(target[axis]);
         let dir = (goal - orig[axis]).signum();
         if dir == 0.0 {
             continue;
@@ -418,9 +422,4 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
         items[si].at = best_pos;
         best = best_cost;
     }
-}
-
-/// Grid snap — the engine works on the 1.27 mm grid like the seed.
-fn snap(v: f64) -> f64 {
-    sch_place::grid::snap(v)
 }

@@ -8,7 +8,7 @@ use geom::{Point2, Rect};
 use kicad_cli::env::KicadEnv;
 use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
 
-use crate::grid::snap_point;
+use geom::grid::snap_point;
 
 use super::{
     Dir, Instance, Junction, NoConnect, PinLabel, SchematicWriter, SheetRect, SheetText, Stub, Wire,

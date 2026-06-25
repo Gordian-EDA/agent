@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use geom::{EPS, Point2, Segment};
 
-use crate::grid::snap_point;
+use geom::grid::snap_point;
 
 use super::{BBox, Justify, SchematicWriter, TextPos, Wire, field_anchors, field_box};
 
@@ -764,7 +764,7 @@ impl SchematicWriter {
         // grid-multiple shift keeps it grid-aligned (KiCAD ERCs off-grid endpoints).
         // `minx`/`miny` include off-grid text extents, so an unsnapped shift would
         // knock the whole sheet off the 1.27 mm grid.
-        let (dx, dy) = (crate::grid::snap(M - minx), crate::grid::snap(M - miny));
+        let (dx, dy) = (geom::grid::snap(M - minx), geom::grid::snap(M - miny));
         if dx.abs() < EPS && dy.abs() < EPS {
             return;
         }

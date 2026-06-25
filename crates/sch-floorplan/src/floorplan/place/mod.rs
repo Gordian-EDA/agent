@@ -21,8 +21,8 @@ mod emit;
 mod idioms;
 mod measure;
 mod refine;
-mod score;
 mod route;
+mod score;
 
 pub use emit::*;
 pub use idioms::*;
@@ -48,16 +48,22 @@ pub use sch_place::ir::LayoutIr;
 mod grid_tests {
     use super::*;
     use circuit_lang::model::{Block, Component, Design, LayoutGrid};
+    use geom::Dir;
     use indexmap::IndexMap;
     use kicad_symbol::geometry::SymbolGeometry;
-    use sch_place::geom::Dir;
     use sch_place::ir::Side;
     use sch_place::item::Item;
 
     fn cells(names: &[&str]) -> Vec<Option<String>> {
         names
             .iter()
-            .map(|n| if *n == "~" { None } else { Some((*n).to_string()) })
+            .map(|n| {
+                if *n == "~" {
+                    None
+                } else {
+                    Some((*n).to_string())
+                }
+            })
             .collect()
     }
 
@@ -66,7 +72,11 @@ mod grid_tests {
         for r in refs {
             components.insert((*r).to_string(), Component::default());
         }
-        Block { note: None, components, layout }
+        Block {
+            note: None,
+            components,
+            layout,
+        }
     }
 
     #[test]
@@ -101,7 +111,10 @@ mod grid_tests {
         let w = |a: [f64; 2], b: [f64; 2]| (a, b, None);
         // A wire on the SAME line (x=10) running from above the top pin to below the
         // bottom pin slices straight THROUGH the part — 1 crossing.
-        assert_eq!(count_collinear_body_crossings(&body, &[w([10.0, -5.0], [10.0, 15.0])]), 1);
+        assert_eq!(
+            count_collinear_body_crossings(&body, &[w([10.0, -5.0], [10.0, 15.0])]),
+            1
+        );
         // A correctly-drawn series part: leads STOP at each pin (two segments, neither
         // spanning beyond both pins) — 0.
         assert_eq!(
@@ -112,17 +125,28 @@ mod grid_tests {
             0
         );
         // A parallel wire on a DIFFERENT line (x=20) is not collinear — 0.
-        assert_eq!(count_collinear_body_crossings(&body, &[w([20.0, -5.0], [20.0, 15.0])]), 0);
+        assert_eq!(
+            count_collinear_body_crossings(&body, &[w([20.0, -5.0], [20.0, 15.0])]),
+            0
+        );
         // A PERPENDICULAR wire (handled by count_body_crossings, not this) — 0 here.
-        assert_eq!(count_collinear_body_crossings(&body, &[w([0.0, 5.0], [20.0, 5.0])]), 0);
+        assert_eq!(
+            count_collinear_body_crossings(&body, &[w([0.0, 5.0], [20.0, 5.0])]),
+            0
+        );
         // A wire reaching one pin from outside but stopping inside the body — 0.
-        assert_eq!(count_collinear_body_crossings(&body, &[w([10.0, -5.0], [10.0, 5.0])]), 0);
+        assert_eq!(
+            count_collinear_body_crossings(&body, &[w([10.0, -5.0], [10.0, 5.0])]),
+            0
+        );
     }
 
     #[test]
     fn block_without_layout_contributes_nothing() {
         let mut design = Design::default();
-        design.blocks.insert("main".into(), block(&["U1", "R1"], Vec::new()));
+        design
+            .blocks
+            .insert("main".into(), block(&["U1", "R1"], Vec::new()));
         assert!(grid_from_layout(&design).is_empty());
     }
 
@@ -157,7 +181,11 @@ mod grid_tests {
             part: part.into(),
             value: String::new(),
             footprint: None,
-            geom: SymbolGeometry { lib_id: part.into(), pins: geom_pins, raw_definition: String::new() },
+            geom: SymbolGeometry {
+                lib_id: part.into(),
+                pins: geom_pins,
+                raw_definition: String::new(),
+            },
             pins,
             at: at.into(),
             angle: 0.0,
@@ -174,7 +202,12 @@ mod grid_tests {
     fn three_pin_anchor_with_two_caps_is_not_a_deferred_bank() {
         let ir = LayoutIr::default();
         let items = vec![
-            item("VR1", "Regulator_Linear:AMS1117", [0.0, 0.0], &["VIN", "GND", "VCC"]),
+            item(
+                "VR1",
+                "Regulator_Linear:AMS1117",
+                [0.0, 0.0],
+                &["VIN", "GND", "VCC"],
+            ),
             item("C1", "Device:C", [10.0, 0.0], &["VCC", "GND"]),
             item("C2", "Device:C", [20.0, 0.0], &["VCC", "GND"]),
         ];
@@ -204,7 +237,12 @@ mod grid_tests {
     fn connector_anchor_never_forms_a_deferred_bank() {
         let ir = LayoutIr::default();
         let items = vec![
-            item("J1", "Connector:Conn_01x03", [0.0, 0.0], &["VIN", "GND", "VCC"]),
+            item(
+                "J1",
+                "Connector:Conn_01x03",
+                [0.0, 0.0],
+                &["VIN", "GND", "VCC"],
+            ),
             item("C1", "Device:C", [10.0, 0.0], &["VCC", "GND"]),
             item("C2", "Device:C", [20.0, 0.0], &["VCC", "GND"]),
             item("C3", "Device:C", [30.0, 0.0], &["VCC", "GND"]),
@@ -218,12 +256,20 @@ mod grid_tests {
         // pennant on a SHORT stub to its own side (clear of its body and of the
         // next symbol in a packed row), NOT the long multi-pin reach.
         let west = [([20.0, 0.0], Dir::West)];
-        assert_eq!(port_exit_point(&west, Side::Left), [crate::grid::snap(20.0 - 2.54), 0.0]);
+        assert_eq!(
+            port_exit_point(&west, Side::Left),
+            [geom::grid::snap(20.0 - 2.54), 0.0]
+        );
         let east = [([20.0, 0.0], Dir::East)];
-        assert_eq!(port_exit_point(&east, Side::Right), [crate::grid::snap(20.0 + 2.54), 0.0]);
+        assert_eq!(
+            port_exit_point(&east, Side::Right),
+            [geom::grid::snap(20.0 + 2.54), 0.0]
+        );
         // A multi-pin port keeps the longer reach so it clears the last pin.
         let two = [([20.0, 0.0], Dir::East), ([24.0, 0.0], Dir::East)];
-        assert_eq!(port_exit_point(&two, Side::Right), [crate::grid::snap(24.0 + 7.62), 0.0]);
+        assert_eq!(
+            port_exit_point(&two, Side::Right),
+            [geom::grid::snap(24.0 + 7.62), 0.0]
+        );
     }
 }
-

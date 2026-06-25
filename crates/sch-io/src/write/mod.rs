@@ -24,8 +24,8 @@
 //!   does not match the document's `(uuid …)`, the component is not annotated
 //!   and drops out of the netlist. So the writer computes the root uuid once
 //!   and threads it into every instance.
-//! - **Determinism.** Every uuid comes from [`crate::ids::stable_uuid`] and
-//!   positions are snapped via [`crate::grid::snap_point`], so re-emitting the
+//! - **Determinism.** Every uuid comes from [`geom::ids::stable_uuid`] and
+//!   positions are snapped via [`geom::grid::snap_point`], so re-emitting the
 //!   same placements yields byte-identical output (spec §5.1).
 //!
 //! ## Module layout
@@ -43,7 +43,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use geom::{Point2, Rect};
+use geom::{Dir, Point2, Rect};
 use kicad_symbol::geometry::PinGeom;
 
 mod build;
@@ -202,10 +202,6 @@ pub(super) struct SheetRect {
 }
 
 pub(super) type BBox = Rect;
-
-// `Dir` lives in `sch_place::geom` (shared with the `label`/`wire` modules);
-// re-exported so `crate::write::Dir` and the public API keep working.
-pub use sch_place::geom::Dir;
 
 /// One `(no_connect …)` marker emitted at a pin's sheet-space endpoint.
 ///

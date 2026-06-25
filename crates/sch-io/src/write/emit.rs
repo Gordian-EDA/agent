@@ -4,7 +4,7 @@
 
 use std::fmt::Write as _;
 
-use crate::ids::stable_uuid;
+use geom::ids::stable_uuid;
 
 use super::{
     Dir, Instance, NoConnect, PinLabel, ROOT_SHEET_KEY, SchematicWriter, field_anchors,

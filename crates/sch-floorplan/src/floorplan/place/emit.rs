@@ -13,14 +13,14 @@ use kicad_symbol::SymbolTable;
 use kicad_symbol::geometry::SymbolGeometry;
 
 use crate::write::SchematicWriter;
-use sch_place::geom::Dir;
+use geom::Dir;
 use sch_place::result::EmitOutput;
 
 use super::*;
 use sch_place::item::{Incidence, Item};
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `sch_place::union_find`, shared with circuit-lang's pin reconciler.
+// `geom::union_find`, shared with circuit-lang's pin reconciler.
 use sch_place::ir::{Cell, LayoutIr, Orient};
 
 /// Read the engine [`PlaceOptions`] from the environment at problem construction —
@@ -479,8 +479,8 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
         let [tx, ty] = tiles[i];
         let [tw, th] = sizes[i];
         let (dx, dy) = (
-            crate::grid::snap(tx + TILE_MARGIN - M),
-            crate::grid::snap(ty + TILE_MARGIN - M),
+            geom::grid::snap(tx + TILE_MARGIN - M),
+            geom::grid::snap(ty + TILE_MARGIN - M),
         );
         w.translate(dx, dy);
         // Frame: a dashed box hugging the tile's content + a bold name above it.
@@ -828,8 +828,8 @@ pub(crate) fn apply_cells(items: &mut [Item], cells: &[Cell]) {
 
     for ((it, c), &angle) in items.iter_mut().zip(cells).zip(&angles) {
         it.at = [
-            crate::grid::snap(col_x[&c.col]),
-            crate::grid::snap(row_y[&c.row]),
+            geom::grid::snap(col_x[&c.col]),
+            geom::grid::snap(row_y[&c.row]),
         ]
         .into();
         it.angle = angle;

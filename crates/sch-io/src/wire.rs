@@ -9,8 +9,8 @@
 //! by construction; a failed route falls back to label connectivity at the
 //! call site — never an error.
 
-use geom::{Point2, Polyline, Rect, Segment, EPS};
-use sch_place::geom::Dir;
+use geom::Dir;
+use geom::{EPS, Point2, Polyline, Rect, Segment};
 
 /// Minimum lead length out of a pin before the first turn, mm.
 const LEAD_MM: f64 = 2.54;
@@ -614,14 +614,16 @@ mod tests {
             vec![],
             vec![],
         );
-        assert!(route_edge(
-            Point2::new(0.0, 0.0),
-            Dir::East,
-            Point2::new(30.0, 0.0),
-            "A",
-            &s
-        )
-        .is_none());
+        assert!(
+            route_edge(
+                Point2::new(0.0, 0.0),
+                Dir::East,
+                Point2::new(30.0, 0.0),
+                "A",
+                &s
+            )
+            .is_none()
+        );
     }
 
     #[test]

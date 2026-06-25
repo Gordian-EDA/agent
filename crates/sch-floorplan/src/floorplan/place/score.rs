@@ -10,17 +10,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use circuit_lang::model::Design;
 use circuit_lang::{PinType, find_pin};
+use geom::EPS;
 use kicad_cli::env::KicadEnv;
 use kicad_symbol::SymbolTable;
 
 use crate::write::SchematicWriter;
 
-use super::*;
 use sch_place::item::{Incidence, Item};
 use sch_place::netclass::is_ground;
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `sch_place::union_find`, shared with circuit-lang's pin reconciler.
+// `geom::union_find`, shared with circuit-lang's pin reconciler.
 use sch_place::ir::LayoutIr;
 
 /// An item's body rect at position `at`. Uses the FULL `approx_size` (which
@@ -181,15 +181,11 @@ pub fn count_ic_body_crossings(
             let cross = if (w1[0] - w2[0]).abs() < EPS {
                 let x = w1[0];
                 let (ylo, yhi) = (w1[1].min(w2[1]), w1[1].max(w2[1]));
-                r.min_x + EPS < x
-                    && x < r.max_x - EPS
-                    && ylo.max(r.min_y) < yhi.min(r.max_y) - EPS
+                r.min_x + EPS < x && x < r.max_x - EPS && ylo.max(r.min_y) < yhi.min(r.max_y) - EPS
             } else {
                 let y = w1[1];
                 let (xlo, xhi) = (w1[0].min(w2[0]), w1[0].max(w2[0]));
-                r.min_y + EPS < y
-                    && y < r.max_y - EPS
-                    && xlo.max(r.min_x) < xhi.min(r.max_x) - EPS
+                r.min_y + EPS < y && y < r.max_y - EPS && xlo.max(r.min_x) < xhi.min(r.max_x) - EPS
             };
             if cross {
                 n += 1;
@@ -271,10 +267,9 @@ pub fn count_corners(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
 /// and is excluded by the net check.
 pub fn count_foreign_taps(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
     let strict_interior = |p: [f64; 2], a: [f64; 2], b: [f64; 2]| {
-        let is_end = |q: [f64; 2]| near(p, q);
-        !is_end(a)
-            && !is_end(b)
-            && ::geom::Segment::new(a.into(), b.into()).contains_point(p.into())
+        let point = ::geom::Point2::from(p);
+        let is_end = |q: [f64; 2]| point.near_eq(q.into(), EPS);
+        !is_end(a) && !is_end(b) && ::geom::Segment::new(a.into(), b.into()).contains_point(point)
     };
     let mut n = 0;
     for (a1, a2, an) in wires {
@@ -668,7 +663,10 @@ pub(crate) fn diagnose_shorts(
                     if wn.as_deref() == Some(net.as_str()) {
                         continue;
                     }
-                    let how = if near(ep, *a) || near(ep, *b) {
+                    let ep_point = ::geom::Point2::from(ep);
+                    let how = if ep_point.near_eq((*a).into(), EPS)
+                        || ep_point.near_eq((*b).into(), EPS)
+                    {
                         "ENDPOINT"
                     } else if ::geom::Segment::new((*a).into(), (*b).into())
                         .contains_point(ep.into())
@@ -749,8 +747,9 @@ pub fn count_shorts(
                     // A pin coinciding with a foreign wire's endpoint, OR landing
                     // on its interior (KiCAD connects a pin to a wire it touches),
                     // is a short on a different net.
-                    if near(ep, *a)
-                        || near(ep, *b)
+                    let ep_point = ::geom::Point2::from(ep);
+                    if ep_point.near_eq((*a).into(), EPS)
+                        || ep_point.near_eq((*b).into(), EPS)
                         || ::geom::Segment::new((*a).into(), (*b).into()).contains_point(ep.into())
                     {
                         n += 1;
