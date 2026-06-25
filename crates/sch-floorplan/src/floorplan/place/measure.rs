@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use geom::Point2;
 use kicad_cli::env::KicadEnv;
 
 use crate::write::SchematicWriter;
@@ -272,8 +273,10 @@ pub fn raw_metrics(
     let fallbacks = w.signal_label_count();
     let junctions = w.junction_count();
     let wires = w.wires_with_nets();
-    let length: f64 =
-        wires.iter().map(|(a, b, _)| (a[0] - b[0]).abs() + (a[1] - b[1]).abs()).sum();
+    let length: f64 = wires
+        .iter()
+        .map(|(a, b, _)| Point2::from(*a).manhattan(Point2::from(*b)))
+        .sum();
     let crossings = count_crossings(&wires);
     let corners = count_corners(&wires);
     let merges = count_merges(&wires, &w.junction_positions())

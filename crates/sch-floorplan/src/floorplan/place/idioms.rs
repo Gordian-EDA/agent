@@ -2615,7 +2615,7 @@ pub(crate) fn pin_world_dist(
         items[j].angle,
         items[j].mirror,
     );
-    (p[0] - from[0]).abs() + (p[1] - from[1]).abs()
+    from.manhattan(p.into())
 }
 
 pub fn cohesion_targets(

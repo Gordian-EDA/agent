@@ -31,6 +31,12 @@ impl Point2 {
         self.dist2(other).sqrt()
     }
 
+    /// Manhattan distance (`|dx| + |dy|`) in millimetres.
+    #[inline]
+    pub fn manhattan(&self, other: Point2) -> f64 {
+        (self.x - other.x).abs() + (self.y - other.y).abs()
+    }
+
     /// Orientation determinant of `(self, a, b)`: >0 ccw, <0 cw, 0 collinear.
     #[inline]
     pub fn orient(self, a: Point2, b: Point2) -> f64 {
@@ -127,6 +133,14 @@ mod tests {
     fn transform_mirror_negates_x() {
         let p = Point2::new(1.0, 2.0).transform(0.0, true);
         assert_eq!(p, Point2::new(-1.0, 2.0));
+    }
+
+    #[test]
+    fn manhattan_distance() {
+        assert_eq!(
+            Point2::new(1.0, -2.0).manhattan(Point2::new(4.0, 3.0)),
+            8.0
+        );
     }
 
     #[test]

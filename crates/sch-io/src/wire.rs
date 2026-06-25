@@ -197,9 +197,7 @@ const CLEAR_MM: f64 = 2.54;
 
 /// Total Manhattan length of a path.
 fn path_len(p: &[Point2]) -> f64 {
-    p.windows(2)
-        .map(|w| (w[0].x - w[1].x).abs() + (w[0].y - w[1].y).abs())
-        .sum()
+    p.windows(2).map(|w| w[0].manhattan(w[1])).sum()
 }
 
 /// Route one edge from `a` (a pin, leaving along `dir_a`) to `b` (any
@@ -340,9 +338,7 @@ pub fn mst_edges(terminals: &[Point2]) -> Vec<(usize, usize)> {
     if n < 2 {
         return Vec::new();
     }
-    let dist = |i: usize, j: usize| {
-        (terminals[i].x - terminals[j].x).abs() + (terminals[i].y - terminals[j].y).abs()
-    };
+    let dist = |i: usize, j: usize| terminals[i].manhattan(terminals[j]);
     let mut in_tree = vec![false; n];
     in_tree[0] = true;
     let mut edges = Vec::with_capacity(n - 1);
