@@ -56,7 +56,7 @@ use crossterm::terminal::{
 };
 use futures::StreamExt;
 use kicad_cli::env::KicadEnv;
-use kicad_sexpr::snapshot::SnapshotStore;
+use gordian_core::history::SnapshotStore;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui_image::picker::Picker;

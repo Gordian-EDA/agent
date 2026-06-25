@@ -54,7 +54,7 @@ use kicad_cli::env::KicadEnv;
 use kicad_sexpr::footlib::FootprintIndex;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::search::SymbolIndex;
-use kicad_sexpr::snapshot::SnapshotStore;
+use crate::history::SnapshotStore;
 
 use sch_floorplan::floorplan::{infer_ir, LayoutIr};
 use sch_io::read::lift;

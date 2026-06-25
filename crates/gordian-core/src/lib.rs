@@ -26,6 +26,7 @@
 //! [`PcbToolCtx`].
 
 mod agent;
+pub mod history;
 pub mod llm;
 pub mod multisheet;
 pub mod prompts;

@@ -1013,7 +1013,6 @@ dependencies = [
  "gordian-core",
  "image",
  "kicad-cli",
- "kicad-sexpr",
  "pulldown-cmark",
  "ratatui",
  "ratatui-image",
