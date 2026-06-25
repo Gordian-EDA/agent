@@ -203,10 +203,9 @@ pub(super) struct SheetRect {
 
 pub(super) type BBox = Rect;
 
-// `Dir` and `transform_offset` live in `sch_place::geom` (shared with the
-// `label`/`wire` modules); re-exported so `crate::write::Dir` etc. and the
-// public API keep working.
-pub use sch_place::geom::{Dir, transform_offset};
+// `Dir` lives in `sch_place::geom` (shared with the `label`/`wire` modules);
+// re-exported so `crate::write::Dir` and the public API keep working.
+pub use sch_place::geom::Dir;
 
 /// One `(no_connect …)` marker emitted at a pin's sheet-space endpoint.
 ///

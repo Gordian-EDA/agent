@@ -14,9 +14,6 @@ use super::{
     Dir, Instance, Junction, NoConnect, PinLabel, SchematicWriter, SheetRect, SheetText, Stub, Wire,
 };
 
-// `transform_offset` is re-exported through `super` from `sch_place::geom`.
-use super::transform_offset;
-
 impl SchematicWriter {
     /// Place one symbol instance.
     ///
@@ -778,7 +775,7 @@ impl SchematicWriter {
 /// 0" — used by cluster geometry's pin callback (which takes the first end) and
 /// by anchor-pin slotting (offset + [`quantize_dir`]). A pin *name* can match
 /// several physical pins, so a `Vec` is returned. The offset is
-/// `transform_offset(pin.at, 0.0, false)`, i.e. `[pin.x, -pin.y]`.
+/// `pin.at.transform_offset(0.0, false)`, i.e. `[pin.x, -pin.y]`.
 pub fn pin_end0(env: &KicadEnv, lib_id: &str, pin: &str) -> io::Result<Vec<[f64; 2]>> {
     let geom = SymbolGeometry::load(env, lib_id)?;
     let matches: Vec<&PinGeom> = {
@@ -791,7 +788,7 @@ pub fn pin_end0(env: &KicadEnv, lib_id: &str, pin: &str) -> io::Result<Vec<[f64;
     };
     Ok(matches
         .into_iter()
-        .map(|pg| <[f64; 2]>::from(transform_offset(pg.at, 0.0, false)))
+        .map(|pg| <[f64; 2]>::from(pg.at.transform_offset(0.0, false)))
         .collect())
 }
 
@@ -858,7 +855,7 @@ pub fn pin_endpoint(
     mirror: bool,
 ) -> [f64; 2] {
     let inst_at = inst_at.into();
-    let off = transform_offset(pin.at, inst_angle, mirror);
+    let off = pin.at.transform_offset(inst_angle, mirror);
     snap_point(Point2::new(inst_at.x + off[0], inst_at.y + off[1])).into()
 }
 

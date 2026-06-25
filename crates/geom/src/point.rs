@@ -66,6 +66,18 @@ impl Point2 {
         };
         m.rotate(deg)
     }
+
+    /// Transform a KiCad symbol-local offset into schematic sheet space:
+    /// optional x-mirror, symbol-space rotation, then y-flip into sheet space.
+    #[inline]
+    pub fn transform_offset(self, deg: f64, mirror: bool) -> Point2 {
+        let (mut x, y) = (self.x, self.y);
+        if mirror {
+            x = -x;
+        }
+        let (s, c) = deg.to_radians().sin_cos();
+        Point2::new(x * c - y * s, -(x * s + y * c))
+    }
 }
 
 impl From<[f64; 2]> for Point2 {
@@ -133,6 +145,14 @@ mod tests {
     fn transform_mirror_negates_x() {
         let p = Point2::new(1.0, 2.0).transform(0.0, true);
         assert_eq!(p, Point2::new(-1.0, 2.0));
+    }
+
+    #[test]
+    fn transform_offset_flips_symbol_y_into_sheet_space() {
+        let p = Point2::new(1.0, 2.0).transform_offset(0.0, false);
+        assert_eq!(p, Point2::new(1.0, -2.0));
+        let q = Point2::new(1.0, 2.0).transform_offset(90.0, true);
+        assert!((q.x - -2.0).abs() < 1e-9 && (q.y - 1.0).abs() < 1e-9);
     }
 
     #[test]

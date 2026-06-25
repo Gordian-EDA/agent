@@ -66,7 +66,7 @@ pub fn choose(obstacles: &[Obstacle], movables: &[Movable]) -> Vec<(usize, bool)
 
 use kicad_symbol::geometry::PinGeom;
 
-use sch_place::geom::{Dir, transform_offset};
+use sch_place::geom::Dir;
 
 /// Estimated width of rendered text (mm): 1.1 mm/char at the 1.27 font.
 pub fn text_width(s: &str) -> f64 {
@@ -107,7 +107,7 @@ pub fn pin_text_boxes(
     let u = Point2::new(theta.cos(), theta.sin()); // local: from tip INTO the body
     let p = Point2::new(-u.y, u.x); // perpendicular
     let to_sheet = |local: Point2| {
-        let off = transform_offset(local, inst_angle, inst_mirror);
+        let off = local.transform_offset(inst_angle, inst_mirror);
         Point2::new(inst_at.x + off.x, inst_at.y + off.y)
     };
     let mut boxes = Vec::new();

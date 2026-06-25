@@ -2453,7 +2453,7 @@ pub(crate) fn align_repeated_columns(
 /// connectors) are pre-oriented and stay at 0° (use `mirror` to flip them).
 ///
 /// A local pin `(lx, ly)` maps to sheet offset `(rx, -ry)` after a CCW rotation
-/// by the instance angle (see `emit::transform_offset`), so increasing the angle
+/// by the instance angle (see `Point2::transform_offset`), so increasing the angle
 /// turns the sheet-space axis clockwise. We test the four quarter-turns and pick
 /// the one whose resulting cardinal axis matches the request.
 pub fn orient_angle(geom: &SymbolGeometry, orient: Orient) -> f64 {

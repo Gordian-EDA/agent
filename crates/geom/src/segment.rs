@@ -130,7 +130,7 @@ mod tests {
     }
 
     #[test]
-    fn contains_point_on_segment() {
+    fn contains_point_accepts_segment_points() {
         let s = Segment::new(Point2::new(0.0, 0.0), Point2::new(4.0, 0.0));
         assert!(s.contains_point(Point2::new(2.0, 0.0)));
         assert!(!s.contains_point(Point2::new(2.0, 0.5)));

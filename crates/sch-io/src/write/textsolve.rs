@@ -958,7 +958,7 @@ impl SchematicWriter {
             // body rect — the EXACT geometry the cost's `count_ic_body_crossings` uses.
             let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
             for pg in pins {
-                let off = super::transform_offset(pg.at, inst.angle, inst.mirror);
+                let off = pg.at.transform_offset(inst.angle, inst.mirror);
                 let p = [inst.at[0] + off[0], inst.at[1] + off[1]];
                 lo[0] = lo[0].min(p[0]);
                 lo[1] = lo[1].min(p[1]);

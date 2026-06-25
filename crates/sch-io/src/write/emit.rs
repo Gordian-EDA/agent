@@ -362,8 +362,8 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
     s.push_str("\t(symbol\n");
     let _ = writeln!(s, "\t\t(lib_id \"{lib_id}\")");
     let _ = writeln!(s, "\t\t(at {x} {y} {angle})");
-    // A left-right flip negates local x — that is `(mirror y)` in KiCAD — so the
-    // render matches the endpoint transform (`transform_offset` negates x).
+    // A left-right flip negates local x — that is `(mirror y)` in KiCAD — matching
+    // `Point2::transform_offset`.
     if inst.mirror {
         s.push_str("\t\t(mirror y)\n");
     }
