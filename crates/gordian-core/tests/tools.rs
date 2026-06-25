@@ -170,7 +170,7 @@ fn get_design_tool_notes_absent_schematic() {
 
 #[test]
 fn defs_lists_all_tools() {
-    let names: Vec<String> = tool_defs().into_iter().map(|d| d.name).collect();
+    let names: Vec<String> = tool_defs().into_iter().map(|d| d.name.to_string()).collect();
     for expected in [
         "search_symbols",
         "get_symbol_info",
@@ -227,11 +227,12 @@ fn defs_lists_all_tools() {
     sorted.dedup();
     assert_eq!(sorted.len(), names.len(), "tool names must be unique: {names:?}");
 
-    // Every def's input_schema is a JSON object with a "type":"object" root —
-    // schema sanity for the model-facing definitions.
+    // Every def's schema is a JSON object with a "type":"object" root — schema
+    // sanity for the model-facing definitions.
     for def in tool_defs() {
+        let schema = def.schema.expect("every tool carries a JSON schema");
         assert_eq!(
-            def.input_schema["type"], serde_json::json!("object"),
+            schema["type"], serde_json::json!("object"),
             "{} schema root must be an object", def.name
         );
     }
@@ -785,7 +786,7 @@ fn build_board_draft_unknown_footprint_errors_with_suggestions() {
 fn board_draft_round_trips_through_the_workspace() {
     use gordian_core::tools_pcb::{BoardDraft, DraftPart, DraftRules};
     use pcb_place::placement::PlacementHints;
-    use pcb_model::Bounds;
+    use pcb_model::Rect;
 
     let (ctx, _guard) = fixture_ctx();
     let mut pad_nets = std::collections::BTreeMap::new();
@@ -793,7 +794,7 @@ fn board_draft_round_trips_through_the_workspace() {
     pad_nets.insert("2".to_string(), "GND".to_string());
 
     let draft = BoardDraft {
-        bounds: Bounds { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 },
+        bounds: Rect { min_x: 0.0, max_x: 30.0, min_y: 0.0, max_y: 20.0 },
         rules: DraftRules::default(),
         parts: vec![DraftPart {
             reference: "R1".into(),

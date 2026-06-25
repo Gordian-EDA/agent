@@ -40,7 +40,8 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::llm::{
-    Completion, ContentBlock, ImageData, Message, Provider, Role, StreamEvent, ToolCall,
+    Binary, ChatMessage, ChatRole, ChatStreamEvent, ContentPart, EventStream, GenaiProvider,
+    MessageContent, Provider, StreamEnd, ToolCall, ToolResponse, completed_text, token_usage,
 };
 
 use crate::tools::{IMAGE_PATH_KEY, PcbToolCtx, run_tool, tool_defs};
@@ -159,34 +160,33 @@ fn emit(events: Events<'_>, ev: AgentEvent) {
     }
 }
 
-/// Drain one provider [`stream`](Provider::stream) to its final [`Completion`],
-/// forwarding each text delta as an [`AgentEvent::AssistantDelta`] so the UI can
-/// render tokens as they arrive. The terminating `Completed` event supplies the
-/// assembled tool calls, stop reason, and usage; its text falls back to the
-/// concatenated deltas when the backend didn't fill it. Errors if the stream
-/// ends without a `Completed` event (a malformed / truncated stream).
+/// Drain one provider [`stream`](Provider::stream) to its terminal
+/// [`ChatStreamEvent::End`], forwarding each text chunk as an
+/// [`AgentEvent::AssistantDelta`] so the UI can render tokens as they arrive.
+/// Returns `(reply text, the End's StreamEnd)`: the text is the chunks
+/// concatenated (the live reply); the [`StreamEnd`] carries the captured tool
+/// calls + usage. Errors if the stream ends without an `End` event (a malformed /
+/// truncated stream).
 async fn stream_completion(
-    mut events_stream: crate::llm::EventStream<'_>,
+    mut events_stream: EventStream<'_>,
     ui: Events<'_>,
-) -> Result<Completion> {
+) -> Result<(String, StreamEnd)> {
     let mut text = String::new();
     while let Some(ev) = events_stream.next().await {
         match ev? {
-            StreamEvent::TextDelta(t) => {
-                if !t.is_empty() {
-                    text.push_str(&t);
-                    emit(ui, AgentEvent::AssistantDelta(t));
+            ChatStreamEvent::Chunk(chunk) => {
+                if !chunk.content.is_empty() {
+                    text.push_str(&chunk.content);
+                    emit(ui, AgentEvent::AssistantDelta(chunk.content));
                 }
             }
-            StreamEvent::Completed(mut c) => {
-                if c.text.is_empty() && !text.is_empty() {
-                    c.text = text;
-                }
-                return Ok(c);
-            }
+            ChatStreamEvent::End(end) => return Ok((text, end)),
+            // Start markers, reasoning, thought-signature, and tool-call chunks:
+            // the tool calls surface assembled on the End event.
+            _ => {}
         }
     }
-    anyhow::bail!("stream ended without a Completed event")
+    anyhow::bail!("stream ended without an End event")
 }
 
 /// Why a [`Agent::run_turn`] stopped.
@@ -262,37 +262,41 @@ impl Backend {
 
 /// An agent session over one project: the LLM client, the tool backend, the
 /// system prompt, and the persistent conversation.
-pub struct Agent {
-    client: Box<dyn Provider>,
+///
+/// Generic over the [`Provider`] seam (defaulting to the one production
+/// [`GenaiProvider`]) only so the deterministic, no-network tests can drive the
+/// loop with a scripted client; production is always `Agent<GenaiProvider>`.
+pub struct Agent<P: Provider = GenaiProvider> {
+    client: P,
     backend: Backend,
     /// The KiCAD system prompt (the LLM's standing instructions).
     system: String,
     /// The whole session's conversation, carried across turns. Tool results live
     /// here too — context is everything the next request will see.
-    history: Vec<Message>,
+    history: Vec<ChatMessage>,
     /// `history.len()` at the start of each user turn, so [`Agent::pop_last_turn`]
     /// can unwind exactly one exchange.
     turn_starts: Vec<usize>,
 }
 
-impl Agent {
-    /// Build an agent over a project's [`PcbToolCtx`] and an LLM [`Provider`].
+impl<P: Provider> Agent<P> {
+    /// Build an agent over a project's [`PcbToolCtx`] and a [`Provider`] client.
     /// `system` is the KiCAD system prompt.
-    pub fn new(client: Box<dyn Provider>, ctx: PcbToolCtx, system: impl Into<String>) -> Self {
+    pub fn new(client: P, ctx: PcbToolCtx, system: impl Into<String>) -> Self {
         Self::with_backend(client, Backend::Kicad(Arc::new(ctx)), system)
     }
 
     /// Build an agent over a test tool backend instead of a real [`PcbToolCtx`] —
     /// the minimal seam the gating tests bind to. Production uses [`Agent::new`].
     pub fn with_test_backend(
-        client: Box<dyn Provider>,
+        client: P,
         backend: Box<dyn TestBackend>,
         system: impl Into<String>,
     ) -> Self {
         Self::with_backend(client, Backend::Stub(backend), system)
     }
 
-    fn with_backend(client: Box<dyn Provider>, backend: Backend, system: impl Into<String>) -> Self {
+    fn with_backend(client: P, backend: Backend, system: impl Into<String>) -> Self {
         Self {
             client,
             backend,
@@ -339,13 +343,13 @@ impl Agent {
         let approx_chars = self
             .history
             .iter()
-            .flat_map(|m| &m.content)
-            .map(|b| match b {
-                ContentBlock::Text(t) => t.len(),
-                ContentBlock::ToolUse { input, .. } => input.to_string().len(),
-                ContentBlock::ToolResult { content, .. } => content.len(),
-                // Base64 bytes aren't text tokens; don't inflate the proxy with them.
-                ContentBlock::Image(_) => 0,
+            .flat_map(|m| m.content.iter())
+            .map(|p| match p {
+                ContentPart::Text(t) => t.len(),
+                ContentPart::ToolCall(tc) => tc.fn_arguments.to_string().len(),
+                ContentPart::ToolResponse(tr) => tr.content.len(),
+                // Base64 bytes / signatures aren't text tokens; don't inflate the proxy.
+                _ => 0,
             })
             .sum();
         ContextStats {
@@ -370,27 +374,23 @@ impl Agent {
         // toolUse/toolResult blocks unless a toolConfig is present.
         let defs = tool_defs();
         let mut messages = self.history.clone();
-        messages.push(Message::user(COMPACT_PROMPT));
-        let completion = self.client.complete(&self.system, &messages, &defs).await?;
+        messages.push(ChatMessage::user(COMPACT_PROMPT));
+        let end = self.client.complete(&self.system, &messages, &defs).await?;
+        let (input_tokens, output_tokens, cache_write_tokens, cache_read_tokens) = token_usage(&end);
         emit(
             events,
-            AgentEvent::Usage {
-                input_tokens: completion.input_tokens,
-                output_tokens: completion.output_tokens,
-                cache_write_tokens: completion.cache_write_tokens,
-                cache_read_tokens: completion.cache_read_tokens,
-            },
+            AgentEvent::Usage { input_tokens, output_tokens, cache_write_tokens, cache_read_tokens },
         );
 
-        let summary = completion.text.trim().to_string();
+        let summary = completed_text(&end).trim().to_string();
         if summary.is_empty() {
             anyhow::bail!("compaction failed: the model returned no summary text");
         }
         self.history = vec![
-            Message::user(format!(
+            ChatMessage::user(format!(
                 "[Conversation summary — earlier context was compacted]\n{summary}"
             )),
-            Message::assistant("Understood — I'll continue from that summary."),
+            ChatMessage::assistant("Understood — I'll continue from that summary."),
         ];
         self.turn_starts.clear();
         let after = self.history.len();
@@ -416,7 +416,7 @@ impl Agent {
 
         repair_history(&mut self.history);
         self.turn_starts.push(self.history.len());
-        self.history.push(Message::user(user_msg));
+        self.history.push(ChatMessage::user(user_msg));
 
         let mut applied = false;
         let mut tool_calls_made = 0usize;
@@ -435,48 +435,47 @@ impl Agent {
 
         for _ in 0..MAX_ITERATIONS {
             // Drive the provider's stream so assistant prose renders token-by-token
-            // (each delta forwarded as `AssistantDelta`), while accumulating the
-            // same final `Completion` — text, tool calls, usage — the loop drove
-            // before. A non-streaming backend's default `stream` yields one big
-            // delta then the completion, so the loop is unchanged for it.
-            let completion = stream_completion(
+            // (each chunk forwarded as `AssistantDelta`), while the terminal End
+            // event carries the assembled tool calls + usage. A non-streaming
+            // backend's default `stream` yields one chunk then the End, so the loop
+            // is unchanged for it.
+            let (text, end) = stream_completion(
                 self.client.stream(&self.system, &self.history, &defs).await?,
                 events,
             )
             .await?;
+            let (input_tokens, output_tokens, cache_write_tokens, cache_read_tokens) =
+                token_usage(&end);
+            let tool_calls = end.captured_into_tool_calls().unwrap_or_default();
             emit(
                 events,
                 AgentEvent::Usage {
-                    input_tokens: completion.input_tokens,
-                    output_tokens: completion.output_tokens,
-                    cache_write_tokens: completion.cache_write_tokens,
-                    cache_read_tokens: completion.cache_read_tokens,
+                    input_tokens,
+                    output_tokens,
+                    cache_write_tokens,
+                    cache_read_tokens,
                 },
             );
 
             // Finalize the streamed prose so non-streaming consumers and the
             // transcript see the whole assistant text once.
-            if !completion.text.is_empty() {
-                emit(events, AgentEvent::AssistantText(completion.text.clone()));
+            if !text.is_empty() {
+                emit(events, AgentEvent::AssistantText(text.clone()));
             }
 
-            // Record the assistant turn (text + any tool_use blocks) verbatim.
-            let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
-            if !completion.text.is_empty() {
-                assistant_blocks.push(ContentBlock::Text(completion.text.clone()));
+            // Record the assistant turn (text + any tool-call parts) verbatim.
+            let mut assistant_parts: Vec<ContentPart> = Vec::new();
+            if !text.is_empty() {
+                assistant_parts.push(ContentPart::from_text(text.clone()));
             }
-            for call in &completion.tool_calls {
-                assistant_blocks.push(ContentBlock::ToolUse {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    input: call.input.clone(),
-                });
+            for call in &tool_calls {
+                assistant_parts.push(ContentPart::ToolCall(call.clone()));
             }
-            self.history.push(Message { role: Role::Assistant, content: assistant_blocks });
+            self.history.push(ChatMessage::assistant(MessageContent::from_parts(assistant_parts)));
 
             // No tool calls → the model wants to stop.
-            if completion.tool_calls.is_empty() {
-                final_text = completion.text;
+            if tool_calls.is_empty() {
+                final_text = text;
 
                 // Catch the premature stop: the model did authoring work but ended
                 // the turn WITHOUT ever attempting a commit, so nothing ships.
@@ -485,7 +484,7 @@ impl Agent {
                 // authoring work), and a flow that never commits.
                 if did_authoring_work && !applied && !commit_attempted && nudges_left > 0 {
                     nudges_left -= 1;
-                    self.history.push(Message::user(COMMIT_NUDGE));
+                    self.history.push(ChatMessage::user(COMMIT_NUDGE));
                     continue;
                 }
 
@@ -498,42 +497,49 @@ impl Agent {
                 });
             }
 
-            // Run every requested tool and collect the results into one user
-            // message (Converse requires all tool results in a single turn).
-            let mut result_blocks: Vec<ContentBlock> = Vec::new();
-            for call in &completion.tool_calls {
+            // Run every requested tool, collecting the responses into one `tool`
+            // message; any images those results attached ride a trailing `user`
+            // message (genai's ToolResponse is text-only).
+            let mut tool_responses: Vec<ToolResponse> = Vec::new();
+            let mut result_images: Vec<ContentPart> = Vec::new();
+            for call in &tool_calls {
                 tool_calls_made += 1;
                 let gated_commit =
-                    tool_effect(&call.name) == ToolEffect::Gated && wants_apply(call);
+                    tool_effect(&call.fn_name) == ToolEffect::Gated && wants_apply(call);
                 if gated_commit {
                     commit_attempted = true;
                 }
-                if is_authoring_for_commit(&call.name) {
+                if is_authoring_for_commit(&call.fn_name) {
                     did_authoring_work = true;
                 }
-                emit(events, AgentEvent::ToolStarted { name: call.name.clone() });
+                emit(events, AgentEvent::ToolStarted { name: call.fn_name.clone() });
                 let (content, images, image_path) =
                     self.run_tool_call(call, gated_commit, approvals, &mut applied, events).await;
                 emit(
                     events,
                     AgentEvent::ToolFinished {
-                        name: call.name.clone(),
-                        summary: tool_summary(&call.name, &call.input, &parse_or_null(&content)),
+                        name: call.fn_name.clone(),
+                        summary: tool_summary(
+                            &call.fn_name,
+                            &call.fn_arguments,
+                            &parse_or_null(&content),
+                        ),
                         image_path,
                     },
                 );
-                result_blocks.push(ContentBlock::ToolResult {
-                    tool_use_id: call.id.clone(),
-                    content,
-                    images,
-                });
+                tool_responses.push(ToolResponse::new(call.call_id.clone(), content));
+                result_images.extend(images.into_iter().map(ContentPart::Binary));
             }
-            self.history.push(Message { role: Role::User, content: result_blocks });
+            self.history
+                .push(ChatMessage::tool(MessageContent::from_tool_responses(tool_responses)));
+            if !result_images.is_empty() {
+                self.history.push(ChatMessage::user(MessageContent::from_parts(result_images)));
+            }
 
             // Carry any text the model emitted alongside its tool calls so a turn
             // that ends without a trailing text-only completion still has a reply.
-            if !completion.text.is_empty() {
-                final_text = completion.text;
+            if !text.is_empty() {
+                final_text = text;
             }
         }
 
@@ -575,7 +581,7 @@ impl Agent {
             return Ok(outcome);
         }
         for round in 0..=max_fix {
-            let Some(review) = self.backend.review_committed(intent, self.client.as_ref()).await
+            let Some(review) = self.backend.review_committed(intent, &self.client).await
             else {
                 break;
             };
@@ -607,11 +613,11 @@ impl Agent {
         approvals: &mut dyn Approvals,
         applied: &mut bool,
         events: Events<'_>,
-    ) -> (String, Vec<ImageData>, Option<String>) {
+    ) -> (String, Vec<Binary>, Option<String>) {
         if gated_commit {
             return self.gated_apply(call, approvals, applied, events).await;
         }
-        let outcome = self.backend.run(call, RunMode::Normal, self.client.as_ref()).await;
+        let outcome = self.backend.run(call, RunMode::Normal, &self.client).await;
         (outcome.value.to_string(), outcome.images, outcome.image_path)
     }
 
@@ -623,9 +629,9 @@ impl Agent {
         approvals: &mut dyn Approvals,
         applied: &mut bool,
         events: Events<'_>,
-    ) -> (String, Vec<ImageData>, Option<String>) {
+    ) -> (String, Vec<Binary>, Option<String>) {
         // 1. Preview (no write) to get the diff.
-        let preview = self.backend.run(call, RunMode::Preview, self.client.as_ref()).await;
+        let preview = self.backend.run(call, RunMode::Preview, &self.client).await;
         let preview_apply = preview.apply.clone().unwrap_or_default();
 
         // If the preview isn't ready (e.g. the input didn't compile), there is
@@ -647,7 +653,7 @@ impl Agent {
         }
 
         // 3. Approved → commit (the real write).
-        let committed = self.backend.run(call, RunMode::Commit, self.client.as_ref()).await;
+        let committed = self.backend.run(call, RunMode::Commit, &self.client).await;
         if let Some(ApplyInfo { committed: true, summary, .. }) = &committed.apply {
             *applied = true;
             emit(events, AgentEvent::Applied { summary: summary.clone() });
@@ -680,8 +686,8 @@ fn tool_effect(name: &str) -> ToolEffect {
 
 /// Whether this `apply_design` call intends to APPLY (write) — i.e. `commit:true`.
 fn wants_apply(call: &ToolCall) -> bool {
-    call.name == "apply_design"
-        && call.input.get("commit").and_then(Value::as_bool) == Some(true)
+    call.fn_name == "apply_design"
+        && call.fn_arguments.get("commit").and_then(Value::as_bool) == Some(true)
 }
 
 /// Whether a tool is schematic research/authoring whose deliverable is a committed
@@ -721,16 +727,16 @@ async fn run_kicad_tool(
     reviewer: &dyn Provider,
 ) -> ToolOutcome {
     // review_design needs the LLM client + async, so it can't ride the sync dispatch.
-    if call.name == "review_design" {
-        return into_outcome(review_design(ctx, &call.input, reviewer).await, None);
+    if call.fn_name == "review_design" {
+        return into_outcome(review_design(ctx, &call.fn_arguments, reviewer).await, None);
     }
 
     // The gated apply: the loop drives Preview/Commit; map each onto the dry-run /
     // commit `apply_design` body, lifting the gate facts into ApplyInfo.
-    if call.name == "apply_design" {
+    if call.fn_name == "apply_design" {
         match mode {
             RunMode::Preview => {
-                let mut input = call.input.clone();
+                let mut input = call.fn_arguments.clone();
                 input["commit"] = json!(false);
                 let dry = run_blocking(ctx, "apply_design", input).await;
                 // `ready` = the YAML compiled (dry.ok == true); otherwise the loop
@@ -743,7 +749,7 @@ async fn run_kicad_tool(
                 return into_outcome(dry, Some(ApplyInfo { ready, ..Default::default() }));
             }
             RunMode::Commit => {
-                let mut input = call.input.clone();
+                let mut input = call.fn_arguments.clone();
                 input["commit"] = json!(true);
                 let committed = run_blocking(ctx, "apply_design", input).await;
                 let apply = committed.as_ref().ok().map(|v| {
@@ -763,7 +769,7 @@ async fn run_kicad_tool(
         }
     }
 
-    into_outcome(run_blocking(ctx, &call.name, call.input.clone()).await, None)
+    into_outcome(run_blocking(ctx, &call.fn_name, call.fn_arguments.clone()).await, None)
 }
 
 /// Run one synchronous tool on the blocking pool. Tools can take seconds (symbol-
@@ -876,10 +882,11 @@ async fn review_layout_schematic(
     .await
     .ok()?
     .ok()?;
-    let image = ImageData {
-        format: "png".to_string(),
-        base64: base64::engine::general_purpose::STANDARD.encode(png),
-    };
+    let image = Binary::from_base64(
+        "image/png",
+        base64::engine::general_purpose::STANDARD.encode(png),
+        None,
+    );
     crate::review_kicad::review_layout(
         reviewer,
         intent,
@@ -911,9 +918,9 @@ fn into_outcome(result: Result<Value>, apply: Option<ApplyInfo>) -> ToolOutcome 
 
 /// Pull a `_image_path` out of a tool result: load + base64 the PNG for the model,
 /// strip the key so the model's text view stays clean, and return the path so a UI
-/// can show the same PNG inline. An unreadable file yields no [`ImageData`] but the
+/// can show the same PNG inline. An unreadable file yields no [`Binary`] but the
 /// path is still returned (the UI falls back to a text label).
-fn take_images(value: &mut Value) -> (Vec<ImageData>, Option<String>) {
+fn take_images(value: &mut Value) -> (Vec<Binary>, Option<String>) {
     let Some(path) = value.get(IMAGE_PATH_KEY).and_then(Value::as_str).map(str::to_string) else {
         return (Vec::new(), None);
     };
@@ -921,10 +928,11 @@ fn take_images(value: &mut Value) -> (Vec<ImageData>, Option<String>) {
         obj.remove(IMAGE_PATH_KEY);
     }
     let images = match std::fs::read(&path) {
-        Ok(bytes) => vec![ImageData {
-            format: "png".to_string(),
-            base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-        }],
+        Ok(bytes) => vec![Binary::from_base64(
+            "image/png",
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+            None,
+        )],
         Err(e) => {
             eprintln!("render image unreadable at {path}: {e}");
             Vec::new()
@@ -1020,46 +1028,47 @@ issues. Reply with ONLY the summary text — no tool calls.";
 /// - a trailing user message (e.g. tool results whose follow-up completion never
 ///   ran) is closed with a synthetic assistant note, keeping the user/assistant
 ///   alternation valid once the next user turn is appended.
-fn repair_history(history: &mut Vec<Message>) {
+fn repair_history(history: &mut Vec<ChatMessage>) {
     let Some(last) = history.last() else {
         return;
     };
 
-    if last.role == Role::Assistant {
+    if last.role == ChatRole::Assistant {
         let dangling: Vec<String> = last
             .content
             .iter()
-            .filter_map(|b| match b {
-                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+            .filter_map(|p| match p {
+                ContentPart::ToolCall(tc) => Some(tc.call_id.clone()),
                 _ => None,
             })
             .collect();
         if !dangling.is_empty() {
-            let results = dangling
+            let responses: Vec<ToolResponse> = dangling
                 .into_iter()
-                .map(|id| ContentBlock::ToolResult {
-                    tool_use_id: id,
-                    content: json!({
-                        "cancelled": true,
-                        "note": "the turn was cancelled before this tool ran",
-                    })
-                    .to_string(),
-                    images: Vec::new(),
+                .map(|id| {
+                    ToolResponse::new(
+                        id,
+                        json!({
+                            "cancelled": true,
+                            "note": "the turn was cancelled before this tool ran",
+                        })
+                        .to_string(),
+                    )
                 })
                 .collect();
-            history.push(Message { role: Role::User, content: results });
+            history.push(ChatMessage::tool(MessageContent::from_tool_responses(responses)));
         }
     }
 
-    if history.last().map(|m| m.role) == Some(Role::User) {
-        history.push(Message::assistant("(turn interrupted)"));
+    if matches!(history.last().map(|m| &m.role), Some(ChatRole::Tool | ChatRole::User)) {
+        history.push(ChatMessage::assistant("(turn interrupted)"));
     }
 }
 
-/// The first text block of a message, if any (a user turn's prompt lives here).
-fn first_text(m: &Message) -> Option<&str> {
-    m.content.iter().find_map(|b| match b {
-        ContentBlock::Text(t) => Some(t.as_str()),
+/// The first text part of a message, if any (a user turn's prompt lives here).
+fn first_text(m: &ChatMessage) -> Option<&str> {
+    m.content.iter().find_map(|p| match p {
+        ContentPart::Text(t) => Some(t.as_str()),
         _ => None,
     })
 }
@@ -1078,7 +1087,7 @@ fn preview(text: &str) -> String {
 }
 
 /// Newest-first prompt previews for the turns recorded in `turn_starts`.
-fn turn_previews(history: &[Message], turn_starts: &[usize]) -> Vec<String> {
+fn turn_previews(history: &[ChatMessage], turn_starts: &[usize]) -> Vec<String> {
     turn_starts
         .iter()
         .rev()
@@ -1094,7 +1103,7 @@ fn turn_previews(history: &[Message], turn_starts: &[usize]) -> Vec<String> {
 
 /// Pop the `k` most recent turns: drop each turn's start index and truncate the
 /// history back to it. Returns how many were actually popped.
-fn pop_n(history: &mut Vec<Message>, turn_starts: &mut Vec<usize>, k: usize) -> usize {
+fn pop_n(history: &mut Vec<ChatMessage>, turn_starts: &mut Vec<usize>, k: usize) -> usize {
     let mut popped = 0;
     while popped < k {
         match turn_starts.pop() {
@@ -1124,12 +1133,14 @@ mod tests {
         assert_eq!(tool_effect("apply_design"), ToolEffect::Gated);
         assert_eq!(tool_effect("edit_design"), ToolEffect::Authoring);
         assert_eq!(tool_effect("search_symbols"), ToolEffect::ReadOnly);
-        let commit =
-            ToolCall { id: "1".into(), name: "apply_design".into(), input: json!({ "commit": true }) };
-        let dry =
-            ToolCall { id: "1".into(), name: "apply_design".into(), input: json!({ "commit": false }) };
-        assert!(wants_apply(&commit));
-        assert!(!wants_apply(&dry));
+        let call = |commit: bool| ToolCall {
+            call_id: "1".into(),
+            fn_name: "apply_design".into(),
+            fn_arguments: json!({ "commit": commit }),
+            thought_signatures: None,
+        };
+        assert!(wants_apply(&call(true)));
+        assert!(!wants_apply(&call(false)));
     }
 
     #[test]
@@ -1145,46 +1156,44 @@ mod tests {
     #[test]
     fn repair_history_closes_a_dangling_tool_use() {
         let mut history = vec![
-            Message::user("add a resistor"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    ContentBlock::Text("searching".into()),
-                    ContentBlock::ToolUse {
-                        id: "tu_9".into(),
-                        name: "search_symbols".into(),
-                        input: json!({ "query": "R" }),
-                    },
-                ],
-            },
+            ChatMessage::user("add a resistor"),
+            ChatMessage::assistant(MessageContent::from_parts(vec![
+                ContentPart::from_text("searching"),
+                ContentPart::ToolCall(ToolCall {
+                    call_id: "tu_9".into(),
+                    fn_name: "search_symbols".into(),
+                    fn_arguments: json!({ "query": "R" }),
+                    thought_signatures: None,
+                }),
+            ])),
         ];
         repair_history(&mut history);
         assert_eq!(history.len(), 4, "{history:#?}");
-        match &history[2].content[0] {
-            ContentBlock::ToolResult { tool_use_id, content, .. } => {
-                assert_eq!(tool_use_id, "tu_9");
-                assert!(content.contains("cancelled"));
+        match &history[2].content.parts()[0] {
+            ContentPart::ToolResponse(tr) => {
+                assert_eq!(tr.call_id, "tu_9");
+                assert!(tr.content.contains("cancelled"));
             }
-            other => panic!("expected a tool result, got {other:?}"),
+            other => panic!("expected a tool response, got {other:?}"),
         }
-        assert_eq!(history[3].role, Role::Assistant);
+        assert_eq!(history[3].role, ChatRole::Assistant);
     }
 
     #[test]
     fn repair_history_closes_a_trailing_user_message() {
-        let mut history = vec![Message::user("hello")];
+        let mut history = vec![ChatMessage::user("hello")];
         repair_history(&mut history);
         assert_eq!(history.len(), 2);
-        assert_eq!(history[1].role, Role::Assistant);
+        assert_eq!(history[1].role, ChatRole::Assistant);
     }
 
     #[test]
     fn repair_history_leaves_clean_histories_alone() {
-        let mut empty: Vec<Message> = Vec::new();
+        let mut empty: Vec<ChatMessage> = Vec::new();
         repair_history(&mut empty);
         assert!(empty.is_empty());
 
-        let mut clean = vec![Message::user("hi"), Message::assistant("done")];
+        let mut clean = vec![ChatMessage::user("hi"), ChatMessage::assistant("done")];
         repair_history(&mut clean);
         assert_eq!(clean.len(), 2, "a finished exchange needs no repair");
     }
@@ -1192,10 +1201,10 @@ mod tests {
     #[test]
     fn turn_previews_are_newest_first_and_single_lined() {
         let history = vec![
-            Message::user("  first   prompt  "),
-            Message::assistant("ok"),
-            Message::user("second prompt"),
-            Message::assistant("done"),
+            ChatMessage::user("  first   prompt  "),
+            ChatMessage::assistant("ok"),
+            ChatMessage::user("second prompt"),
+            ChatMessage::assistant("done"),
         ];
         let starts = vec![0, 2];
         let p = turn_previews(&history, &starts);
@@ -1213,12 +1222,12 @@ mod tests {
     #[test]
     fn pop_n_truncates_history_and_reports_the_real_count() {
         let mut history = vec![
-            Message::user("t1"),
-            Message::assistant("a1"),
-            Message::user("t2"),
-            Message::assistant("a2"),
-            Message::user("t3"),
-            Message::assistant("a3"),
+            ChatMessage::user("t1"),
+            ChatMessage::assistant("a1"),
+            ChatMessage::user("t2"),
+            ChatMessage::assistant("a2"),
+            ChatMessage::user("t3"),
+            ChatMessage::assistant("a3"),
         ];
         let mut starts = vec![0, 2, 4];
 

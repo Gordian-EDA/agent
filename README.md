@@ -53,7 +53,7 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 | Crate | Role |
 |-------|------|
 | `gordian` | CLI + ratatui copilot TUI — the entry point |
-| `gordian-core` | The KiCAD agent: the turn loop + apply-gate, the schematic/PCB tools, prompts, review, and render — over a provider-agnostic, genai-backed `Provider` (the `llm` module: neutral message/tool types + the `Provider` trait, BYOK any provider) |
+| `gordian-core` | The KiCAD agent: the turn loop + apply-gate, the schematic/PCB tools, prompts, review, and render — over the `Provider` seam with one provider-agnostic, genai-backed `GenaiProvider` (BYOK any provider) |
 | `circuit-lang` | Parser, linter, and canonical emitter for the circuit markup language |
 | `circuit-graph` | Attributed circuit graph + a declarative idiom matcher |
 | `sch-floorplan` / `sch-io` / `sch-place` | Deterministic schematic floorplan core (`Design` → `.kicad_sch` and back), over the `greedy-place`/`anneal-place` engines, with the shared model + I/O layers |

@@ -379,19 +379,9 @@ fn net_order(problem: &RouteProblem, priority: &std::collections::BTreeSet<Strin
 
 /// Half-perimeter (width + height) of a connection's point bounding box.
 fn half_perimeter(conn: &crate::problem::Connection) -> f64 {
-    let pts = &conn.points_to_connect;
-    if pts.is_empty() {
-        return 0.0;
-    }
-    let (mut min_x, mut max_x) = (pts[0].x, pts[0].x);
-    let (mut min_y, mut max_y) = (pts[0].y, pts[0].y);
-    for p in pts {
-        min_x = min_x.min(p.x);
-        max_x = max_x.max(p.x);
-        min_y = min_y.min(p.y);
-        max_y = max_y.max(p.y);
-    }
-    (max_x - min_x) + (max_y - min_y)
+    let pts: Vec<geom::Point2> =
+        conn.points_to_connect.iter().map(|p| geom::Point2::new(p.x, p.y)).collect();
+    geom::Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter())
 }
 
 /// Entry cells for a terminal `pt` (already mapped to `pad_cell`), pre-routing a
@@ -778,37 +768,11 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
     }
 }
 
-/// Drop near-duplicate points and merge collinear runs, **including 45° runs** so a
-/// straight diagonal staircase of cells collapses to two endpoints. Collinear iff the
-/// cross product of consecutive edge vectors is ~0 and the heading does not reverse —
-/// handling orthogonal and diagonal segments uniformly (the octilinear analog of the
-/// `sch-io/src/wire.rs` simplify idea; the crates stay decoupled).
+/// Drop near-duplicate points and merge collinear runs (orthogonal AND 45°). The
+/// math lives in [`geom::Polyline::simplify`]; this thin wrapper keeps the
+/// `Vec<Point2>` call sites readable.
 fn simplify(path: Vec<Point2>) -> Vec<Point2> {
-    const EPS: f64 = 1e-9;
-    let mut deduped: Vec<Point2> = Vec::with_capacity(path.len());
-    for p in path {
-        match deduped.last() {
-            Some(last) if (last.x - p.x).abs() < EPS && (last.y - p.y).abs() < EPS => {}
-            _ => deduped.push(p),
-        }
-    }
-    let mut out: Vec<Point2> = Vec::with_capacity(deduped.len());
-    for p in deduped {
-        if out.len() >= 2 {
-            let a = &out[out.len() - 2];
-            let b = &out[out.len() - 1];
-            let v1 = (b.x - a.x, b.y - a.y);
-            let v2 = (p.x - b.x, p.y - b.y);
-            let cross = v1.0 * v2.1 - v1.1 * v2.0;
-            let dot = v1.0 * v2.0 + v1.1 * v2.1;
-            if cross.abs() < EPS && dot > 0.0 {
-                *out.last_mut().unwrap() = p;
-                continue;
-            }
-        }
-        out.push(p);
-    }
-    out
+    geom::Polyline::new(path).simplify().into_points()
 }
 
 // ── GridAStarRouter (the SDK Router impl) ───────────────────────────────────────

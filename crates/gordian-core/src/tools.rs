@@ -4,7 +4,7 @@
 //! `circuit-lang`, `kicad-sexpr`/`kicad-cli`, and `sch-floorplan`/`sch-io`. The registry
 //! exposes two free functions, both driven directly by the [`crate::Agent`] loop:
 //!
-//! - [`tool_defs`] — the JSON-Schema [`ToolDef`]s handed to the LLM.
+//! - [`tool_defs`] — the JSON-Schema genai [`Tool`]s handed to the LLM.
 //! - [`run_tool`] — dispatch a tool by name with a JSON input, returning JSON the
 //!   model reads back. Results are structured for **self-repair**: failures carry
 //!   diagnostic strings and "did you mean" suggestions rather than just an error
@@ -59,7 +59,7 @@ use crate::history::SnapshotStore;
 use sch_floorplan::floorplan::{infer_ir, LayoutIr};
 use sch_io::read::lift;
 
-use crate::ToolDef;
+use crate::Tool;
 
 /// Default number of symbol-search hits returned when `limit` is omitted.
 const DEFAULT_SEARCH_LIMIT: usize = 8;
@@ -294,10 +294,18 @@ impl PcbToolCtx {
 }
 
 /// The JSON-Schema definitions for every tool, in a stable order. The
-/// [`crate::Agent`] loop hands these to the model.
-pub fn tool_defs() -> Vec<ToolDef> {
-    vec![
-            ToolDef {
+/// [`crate::Agent`] loop hands these to the model as genai [`Tool`]s.
+pub fn tool_defs() -> Vec<Tool> {
+    /// One tool definition, mapped to a genai [`Tool`] below. Mirrors the fields
+    /// a [`Tool`] carries (name + description + JSON schema) so the table reads
+    /// as plain data.
+    struct Def {
+        name: String,
+        description: String,
+        input_schema: Value,
+    }
+    let defs = vec![
+            Def {
                 name: "search_symbols".into(),
                 description: "Search every installed KiCAD symbol library by name \
                     and return the best matches as fully-qualified `Lib:Name` ids \
@@ -315,7 +323,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "required": ["query"]
                 }),
             },
-            ToolDef {
+            Def {
                 name: "get_symbol_info".into(),
                 description: "Return the full pin table (number, name, electrical \
                     type, unit) for a fully-qualified `Lib:Name` symbol. If the \
@@ -331,7 +339,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "required": ["lib_id"]
                 }),
             },
-            ToolDef {
+            Def {
                 name: "get_design".into(),
                 description: "Return the working draft (circuit-YAML) when one \
                     exists, seeding it from the current schematic if needed. If \
@@ -344,7 +352,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
-            ToolDef {
+            Def {
                 name: "validate_design".into(),
                 description: "Compile circuit-YAML against the real symbol \
                     libraries WITHOUT writing anything. Returns ok plus every \
@@ -359,7 +367,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "required": ["yaml"]
                 }),
             },
-            ToolDef {
+            Def {
                 name: "apply_design".into(),
                 description: "Compile circuit-YAML and render the reconciled \
                     schematic. By default (commit omitted/false) this is a DRY RUN: \
@@ -379,7 +387,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     }
                 }),
             },
-            ToolDef {
+            Def {
                 name: "review_design".into(),
                 description: "Get an INDEPENDENT electrical-correctness review of the \
                     current design. A FRESH reviewer (no memory of your work, so it \
@@ -402,7 +410,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     }
                 }),
             },
-            ToolDef {
+            Def {
                 name: "run_erc".into(),
                 description: "Run KiCAD's Electrical Rules Check on the current \
                     schematic and return the error/warning counts plus the \
@@ -411,7 +419,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
-            ToolDef {
+            Def {
                 name: "project_info".into(),
                 description: "Return the current project's paths and state: the \
                     project directory, the schematic path the tools read/write, \
@@ -422,7 +430,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
-            ToolDef {
+            Def {
                 name: "read_schematic".into(),
                 description: "Read ANY .kicad_sch file on disk and return it \
                     lifted to circuit-YAML. The path may be absolute, start \
@@ -439,7 +447,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "required": ["path"]
                 }),
             },
-            ToolDef {
+            Def {
                 name: "find_similar_designs".into(),
                 description: "Study REAL professional KiCAD schematics that match your \
                     design intent, returned as circuit-YAML you can emulate. Given a \
@@ -467,7 +475,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "required": ["intent"]
                 }),
             },
-            ToolDef {
+            Def {
                 name: "render_schematic".into(),
                 description: "Render the current schematic to a PNG image and \
                     return it so you can SEE the sheet. Use after apply_design \
@@ -477,7 +485,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
-            ToolDef {
+            Def {
                 name: "create_design".into(),
                 description: "Create the working draft (circuit-YAML) from \
                     scratch. The draft is the document edit_design patches and \
@@ -494,7 +502,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "required": ["yaml"]
                 }),
             },
-            ToolDef {
+            Def {
                 name: "edit_design".into(),
                 description: "Patch the working draft by exact string \
                     replacement: old_string must occur exactly once (or pass \
@@ -513,7 +521,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 }),
             },
             // ── PCB tools (slice 5) ─────────────────────────────────────────
-            ToolDef {
+            Def {
                 name: "search_footprints".into(),
                 description: "Search every installed KiCAD footprint library by \
                     name and return the best matches as fully-qualified \
@@ -533,7 +541,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "required": ["query"]
                 }),
             },
-            ToolDef {
+            Def {
                 name: "get_footprint_info".into(),
                 description: "Return the pad NUMBER list (use these to build the pad_nets \
                     map for derive_board) plus a compact shape summary — pad_count, \
@@ -552,7 +560,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "required": ["lib_id"]
                 }),
             },
-            ToolDef {
+            Def {
                 name: "assign_footprint".into(),
                 description: "Set a part's footprint in the board draft (fills a part whose \
                     schematic symbol carried no footprint). The footprint must have every pad the \
@@ -568,7 +576,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "required": ["reference", "footprint"]
                 }),
             },
-            ToolDef {
+            Def {
                 name: "open_board".into(),
                 description: "Open the exported .kicad_pcb in a LIVE headless KiCAD for INTERACTIVE \
                     editing over IPC. After this you edit the REAL board directly — move_part, \
@@ -578,14 +586,14 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
-            ToolDef {
+            Def {
                 name: "board_state".into(),
                 description: "Read the live (open) board: every part's reference + position (mm), the \
                     track count, and the net list. Inspect before/after an interactive edit. Requires open_board."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
-            ToolDef {
+            Def {
                 name: "move_part".into(),
                 description: "Move a part to (x, y) mm (optional rotation degrees) on the live board — \
                     direct geometry control for thermal / decoupling / length-match placement. Requires open_board."
@@ -601,7 +609,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "required": ["reference", "x", "y"]
                 }),
             },
-            ToolDef {
+            Def {
                 name: "route_track".into(),
                 description: "Route a straight copper track on the live board: start/end as [x,y] mm, \
                     width mm, a copper layer (F.Cu/B.Cu/In1.Cu/...), optionally on a net. WIDTH is the \
@@ -619,7 +627,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "required": ["start", "end"]
                 }),
             },
-            ToolDef {
+            Def {
                 name: "set_net_width".into(),
                 description: "Define (or update) a net class with a track width + clearance (mm) and \
                     assign nets to it — the idiomatic \"wide copper for power\" lever (e.g. widen \
@@ -636,7 +644,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     "required": ["name", "nets"]
                 }),
             },
-            ToolDef {
+            Def {
                 name: "derive_board".into(),
                 description: "Seed the board from the committed schematic: reads the parts + \
                     netlist (pin->pad is KiCAD's) and builds the board draft — one part per \
@@ -664,7 +672,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     }
                 }),
             },
-            ToolDef {
+            Def {
                 name: "get_board".into(),
                 description: "Return the current board draft (parts as \
                     reference/footprint/lock + a pad_count — the full per-pad net map you \
@@ -676,7 +684,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
-            ToolDef {
+            Def {
                 name: "place_board".into(),
                 description: "Place the current board: turn every part's footprint \
                     + design rules + any locked positions into a placement problem, \
@@ -692,7 +700,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
-            ToolDef {
+            Def {
                 name: "route_board".into(),
                 description: "Route the placed board: build the routing problem from \
                     the placement, add the keepouts as blocking obstacles, and run the \
@@ -710,7 +718,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
-            ToolDef {
+            Def {
                 name: "autoroute".into(),
                 description: "Auto-route the exported board with the FREEROUTING autorouter — the \
                     heavy-duty assist for dense boards (BGA/QFP fan-out) the in-house route_board \
@@ -722,7 +730,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
-            ToolDef {
+            Def {
                 name: "render_board".into(),
                 description: "Render the board to a PNG image and attach it so you can \
                     SEE the board. Call this AFTER place_board to inspect part positions \
@@ -751,7 +759,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     }
                 }),
             },
-            ToolDef {
+            Def {
                 name: "export_board".into(),
                 description: "Export the placed + routed board to a .kicad_pcb file. \
                     Synthesizes the board from the engine placement (footprints + \
@@ -775,7 +783,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     }
                 }),
             },
-            ToolDef {
+            Def {
                 name: "export_fab".into(),
                 description: "Bundle the routed board into a manufacturable FAB deliverable: \
                     Gerbers (one *.gbr per copper/mask/silk/edge layer), an Excellon drill set \
@@ -803,7 +811,10 @@ pub fn tool_defs() -> Vec<ToolDef> {
                     }
                 }),
             },
-    ]
+    ];
+    defs.into_iter()
+        .map(|d| Tool::new(d.name).with_description(d.description).with_schema(d.input_schema))
+        .collect()
 }
 
 /// Dispatch a tool by name (synchronous). `input` is the model-supplied JSON

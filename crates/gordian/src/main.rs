@@ -185,7 +185,7 @@ fn run_agent_command(args: &[String]) -> Result<()> {
 
     // 2. Build the LLM client from the environment / local .env (BYOK: any
     //    genai-supported provider via its standard key + AGENT_MODEL; see .env.example).
-    let client = gordian_core::from_env().context(
+    let client = gordian_core::GenaiProvider::from_env().context(
         "could not build the LLM client — set a provider key (e.g. ANTHROPIC_API_KEY / \
          OPENAI_API_KEY) and AGENT_MODEL in the environment or a local .env file (see .env.example)",
     )?;

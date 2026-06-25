@@ -11,10 +11,10 @@
 //! cargo run --release -p agent --example board_agent -- <out.kicad_pcb> "<prompt>"
 //! ```
 //!
-//! Needs the OpenAI-compatible backend (OPENAI_API_KEY / OPENAI_BASE_URL) and an
-//! installed KiCAD (footprint library + `kicad-cli pcb drc`).
+//! Needs an `AGENT_MODEL` plus the provider's standard key, and an installed
+//! KiCAD (footprint library + `kicad-cli pcb drc`).
 
-use gordian_core::{Agent, AutoApprove};
+use gordian_core::{Agent, AutoApprove, Provider as _};
 use kicad_cli::cli::KicadCli;
 use kicad_cli::env::KicadEnv;
 use tokio::sync::mpsc;
@@ -29,14 +29,14 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let (provider, model) = gordian_core::provider_status();
+    let client = gordian_core::GenaiProvider::from_env()?;
+    let (provider, model) = client.status();
     eprintln!("provider={provider} model={model}\nprompt: {prompt}\n");
 
     let tmp = tempfile::tempdir()?;
     let ctx = gordian_core::tools::PcbToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
     let pcb_path = ctx.pcb_path();
 
-    let client = gordian_core::from_env()?;
     let mut agent = Agent::new(client, ctx, gordian_core::prompts::system_prompt());
 
     // Stream the tool calls so the run is visible while it works.

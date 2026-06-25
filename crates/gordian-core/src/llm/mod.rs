@@ -1,23 +1,28 @@
-//! Provider-agnostic LLM client.
+//! LLM client, spoken directly in genai's conversation types.
 //!
-//! This module owns the vendor-neutral conversation types ([`Role`],
-//! [`ImageData`], [`ContentBlock`], [`Message`], [`ToolDef`], [`ToolCall`],
-//! [`Completion`]) and the [`Provider`] trait every backend implements, with no
-//! domain/UI/KiCAD coupling.
+//! There are no neutral wrapper types: messages are genai [`ChatMessage`]s, tools
+//! are genai [`Tool`]s, a tool call is a genai [`ToolCall`], an image is a genai
+//! [`Binary`]. The one production LLM is [`GenaiProvider`], provider-agnostic over
+//! the `genai` crate: bring any key + an `AGENT_MODEL`, and genai routes by the
+//! model name — even a private OpenAI-compatible endpoint via a `genai_N::` model
+//! namespace. [`GenaiProvider::from_env`] is just `Client::default()` + the model
+//! id.
 //!
-//! A [`Provider`] runs one completion in either shape — await the whole
-//! [`Completion`] ([`Provider::complete`]) or consume it incrementally as
-//! [`StreamEvent`]s ([`Provider::stream`]).
-//!
-//! The one real backend, [`GenaiProvider`], is provider-agnostic over the
-//! `genai` crate: bring any key + an `AGENT_MODEL`, and genai routes by the
-//! model name. [`from_env`] only special-cases a private OpenAI-compatible base
-//! URL (`OPENAI_BASE_URL`) — the one thing genai can't infer.
+//! The agent loop talks to its LLM through the small [`Provider`] seam (a backend
+//! runs one completion as a whole [`StreamEnd`] or as a genai [`ChatStreamEvent`]
+//! stream); [`GenaiProvider`] is its one production impl, and the `testing`
+//! doubles are the others, so the loop's single external dependency stays
+//! swappable for the no-network tests.
 
-mod backend;
 mod provider;
-mod types;
+mod seam;
 
-pub use backend::{GenaiProvider, from_env, provider_status};
-pub use provider::{EventStream, Provider, StreamEvent};
-pub use types::{Completion, ContentBlock, ImageData, Message, Role, ToolCall, ToolDef};
+pub use provider::{GenaiProvider, completed_text, token_usage};
+pub use seam::{EventStream, Provider, drain_stream};
+
+// The genai types the rest of the crate speaks. Re-exported so callers build on
+// `gordian_core::*` without taking a direct genai dependency.
+pub use genai::chat::{
+    Binary, ChatMessage, ChatRole, ChatStreamEvent, ContentPart, MessageContent, StreamChunk,
+    StreamEnd, Tool, ToolCall, ToolResponse, Usage,
+};

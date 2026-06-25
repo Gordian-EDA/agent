@@ -5,11 +5,11 @@
 //! Usage:
 //!   cargo run --release -p agent --example agent_design -- <out.png> "<prompt>"
 //!
-//! Needs the OpenAI-compatible backend configured in the environment (OPENAI_API_KEY
-//! / OPENAI_BASE_URL); `from_env()` selects it. Prints the model's final reply, the
-//! tool-call count, and the engine's layout-warning list for the emitted sheet.
+//! Needs a provider configured in the environment (BYOK: an `AGENT_MODEL` + the
+//! provider's standard key); `GenaiProvider::from_env()` builds it. Prints the
+//! model's final reply, the tool-call count, and the engine's layout-warning list.
 
-use gordian_core::{Agent, AutoApprove};
+use gordian_core::{Agent, AutoApprove, Provider as _};
 use kicad_cli::cli::KicadCli;
 use kicad_cli::env::KicadEnv;
 use tokio::sync::mpsc;
@@ -24,7 +24,8 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let (provider, model) = gordian_core::provider_status();
+    let client = gordian_core::GenaiProvider::from_env()?;
+    let (provider, model) = client.status();
     eprintln!("provider={provider} model={model}\nprompt: {prompt}\n");
 
     // Fresh throwaway project for this run.
@@ -36,7 +37,6 @@ async fn main() -> anyhow::Result<()> {
     // YAML below is FLAT; this draft keeps the block structure.
     let draft_path = tmp.path().join(".gordian/draft.circuit.yaml");
 
-    let client = gordian_core::from_env()?;
     let mut agent = Agent::new(client, ctx, gordian_core::prompts::system_prompt());
 
     // Stream events so the run's tool calls are visible while it works.

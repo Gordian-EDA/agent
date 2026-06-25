@@ -39,7 +39,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gordian_core::{Agent, AgentEvent, Approvals, StopReason};
+use gordian_core::{Agent, AgentEvent, Approvals, Provider as _, StopReason};
 use gordian_core::prompts::system_prompt;
 use gordian_core::tools::PcbToolCtx;
 use anyhow::{Context, Result};
@@ -110,10 +110,17 @@ pub async fn run(project_dir: PathBuf) -> Result<()> {
 
     // 2. Build the agent if we have both KiCAD and credentials; otherwise launch
     //    a "degraded" UI that explains what's missing (so `tui` never panics).
-    let (provider, model) = gordian_core::provider_status();
+    //    The provider builds from `AGENT_MODEL` alone (genai validates the key
+    //    lazily), so its `(provider, model)` label shows even when KiCAD is
+    //    missing; a missing `AGENT_MODEL` falls back to a placeholder.
+    let client = gordian_core::GenaiProvider::from_env().ok();
+    let (provider, model) = match &client {
+        Some(client) => client.status(),
+        None => ("unconfigured".to_string(), "(AGENT_MODEL unset)".to_string()),
+    };
 
-    let agent_handle: Option<SharedAgent> = match (&env, gordian_core::from_env()) {
-        (Some(env), Ok(client)) => {
+    let agent_handle: Option<SharedAgent> = match (&env, client) {
+        (Some(env), Some(client)) => {
             let ctx = PcbToolCtx::for_project(env.clone(), project_dir.clone())
                 .context("building the tool context for the project")?;
             Some(Rc::new(Mutex::new(Agent::new(
@@ -145,7 +152,7 @@ pub async fn run(project_dir: PathBuf) -> Result<()> {
     )));
     if agent_handle.is_none() {
         app.transcript.push(app::Entry::system(
-            "agent unavailable: need KiCAD + AWS_BEARER_TOKEN_BEDROCK (set in .env). UI is read-only.",
+            "agent unavailable: need KiCAD + an AGENT_MODEL and its provider API key (set in .env). UI is read-only.",
         ));
     }
 

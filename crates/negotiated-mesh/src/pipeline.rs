@@ -350,7 +350,7 @@ fn stitch(
             let mut layers: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
             for t in &traces {
                 if t.connection == connection
-                    && t.path.windows(2).any(|w| seg_point_dist(&w[0], &w[1], &at) < TOUCH)
+                    && t.path.windows(2).any(|w| geom::Segment::new(w[0], w[1]).dist_to_point(at) < TOUCH)
                 {
                     layers.insert(t.layer.0.as_str());
                 }
@@ -506,19 +506,6 @@ fn try_join(
 /// Are two points byte-exactly (within [`JOIN_EPS`]) the same?
 fn same_point(a: &Point2, b: &Point2) -> bool {
     (a.x - b.x).abs() < JOIN_EPS && (a.y - b.y).abs() < JOIN_EPS
-}
-
-/// Distance from point `p` to segment `a`–`b` (mm). Used to test whether a via
-/// lies on a trace (endpoint or pass-through) when filtering dangling vias.
-fn seg_point_dist(a: &Point2, b: &Point2, p: &Point2) -> f64 {
-    let (dx, dy) = (b.x - a.x, b.y - a.y);
-    let len2 = dx * dx + dy * dy;
-    if len2 < 1e-12 {
-        return ((p.x - a.x).powi(2) + (p.y - a.y).powi(2)).sqrt();
-    }
-    let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0);
-    let (cx, cy) = (a.x + t * dx, a.y + t * dy);
-    ((p.x - cx).powi(2) + (p.y - cy).powi(2)).sqrt()
 }
 
 /// Quantise a point to an integer key so byte-exact-equal points collide in a

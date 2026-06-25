@@ -10,7 +10,7 @@
 use std::sync::{Arc, Mutex};
 
 use gordian_core::testing::{ScriptedClient, final_text};
-use gordian_core::{Agent, AutoApprove, Completion, ContentBlock, Message, Role};
+use gordian_core::{Agent, AutoApprove, ChatMessage, ChatRole, ContentPart};
 use gordian_core::prompts::system_prompt;
 use gordian_core::tools::PcbToolCtx;
 
@@ -18,19 +18,19 @@ use gordian_core::tools::PcbToolCtx;
 /// and the shared handle to the recorded `messages` slices.
 fn recording_agent(
     ctx: PcbToolCtx,
-    completions: Vec<Completion>,
-) -> (Agent, Arc<Mutex<Vec<Vec<Message>>>>) {
+    completions: Vec<gordian_core::StreamEnd>,
+) -> (Agent<ScriptedClient>, Arc<Mutex<Vec<Vec<ChatMessage>>>>) {
     let (client, seen) = ScriptedClient::recording(completions);
-    let agent = Agent::new(Box::new(client), ctx, system_prompt());
+    let agent = Agent::new(client, ctx, system_prompt());
     (agent, seen)
 }
 
 /// All text content of a message, concatenated.
-fn text_of(m: &Message) -> String {
+fn text_of(m: &ChatMessage) -> String {
     m.content
         .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text(t) => Some(t.as_str()),
+        .filter_map(|p| match p {
+            ContentPart::Text(t) => Some(t.as_str()),
             _ => None,
         })
         .collect()
@@ -59,11 +59,11 @@ async fn second_turn_sees_the_first_turns_messages() {
     // The second call must carry the whole first exchange plus the new prompt.
     let second = &seen[1];
     assert_eq!(second.len(), 3, "user1 + assistant1 + user2: {second:#?}");
-    assert_eq!(second[0].role, Role::User);
+    assert_eq!(second[0].role, ChatRole::User);
     assert_eq!(text_of(&second[0]), "first prompt");
-    assert_eq!(second[1].role, Role::Assistant);
+    assert_eq!(second[1].role, ChatRole::Assistant);
     assert_eq!(text_of(&second[1]), "answer one");
-    assert_eq!(second[2].role, Role::User);
+    assert_eq!(second[2].role, ChatRole::User);
     assert_eq!(text_of(&second[2]), "second prompt");
 }
 
@@ -153,13 +153,13 @@ async fn compact_replaces_history_with_a_summary_pair() {
     let seen = seen.lock().unwrap();
     let third = &seen[2];
     assert_eq!(third.len(), 3, "summary pair + new prompt: {third:#?}");
-    assert_eq!(third[0].role, Role::User);
+    assert_eq!(third[0].role, ChatRole::User);
     assert!(
         text_of(&third[0]).contains("THE SUMMARY"),
         "summary carried: {}",
         text_of(&third[0])
     );
-    assert_eq!(third[1].role, Role::Assistant);
+    assert_eq!(third[1].role, ChatRole::Assistant);
     assert_eq!(text_of(&third[2]), "two");
 
     // Compaction is a context barrier: nothing before it can be unwound.
@@ -175,11 +175,13 @@ async fn usage_tokens_flow_through_completions() {
     use gordian_core::AgentEvent;
     use tokio::sync::mpsc::unbounded_channel;
 
-    let completion = Completion {
-        text: "done".to_string(),
-        stop_reason: "end_turn".to_string(),
-        input_tokens: 1234,
-        output_tokens: 56,
+    let completion = gordian_core::StreamEnd {
+        captured_content: Some(gordian_core::MessageContent::from_text("done")),
+        captured_usage: Some(gordian_core::Usage {
+            prompt_tokens: Some(1234),
+            completion_tokens: Some(56),
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let (mut agent, _seen) = recording_agent(ctx, vec![completion]);

@@ -2,7 +2,7 @@
 //!
 //! `tools.rs` stays the schematic file; the PCB tools live here and are merged
 //! into [`crate::tools::tool_defs`]/[`run`](crate::tools::run_tool). They follow the same house pattern:
-//! [`crate::ToolDef`] JSON schemas, free `fn(input, ctx) -> Result<Value>`
+//! genai [`crate::Tool`] JSON schemas, free `fn(input, ctx) -> Result<Value>`
 //! handlers, `require_str`-style arg handling, and recoverable failures returned
 //! as `{"error": …, "suggestions": …}` values rather than `Err`.
 //!

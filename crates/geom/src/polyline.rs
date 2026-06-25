@@ -38,25 +38,34 @@ impl Polyline {
     }
 
     /// Dedup consecutive coincident points and merge collinear runs (orthogonal
-    /// AND 45°). The single polyline simplifier for routed paths.
+    /// AND 45°) that keep heading — a straight diagonal staircase collapses to its
+    /// endpoints, but a reversal (`A→B→A`) is preserved. The single polyline
+    /// simplifier for routed copper/wire paths.
     pub fn simplify(self) -> Polyline {
-        let mut pts: Vec<Point2> = Vec::with_capacity(self.0.len());
+        let mut deduped: Vec<Point2> = Vec::with_capacity(self.0.len());
         for p in self.0 {
-            if pts.last().map_or(true, |q: &Point2| q.dist2(p) > EPS * EPS) {
-                pts.push(p);
+            match deduped.last() {
+                Some(last) if (last.x - p.x).abs() < EPS && (last.y - p.y).abs() < EPS => {}
+                _ => deduped.push(p),
             }
         }
-        if pts.len() < 3 {
-            return Polyline(pts);
-        }
-        let mut out: Vec<Point2> = vec![pts[0]];
-        for i in 1..pts.len() - 1 {
-            let (a, b, c) = (out[out.len() - 1], pts[i], pts[i + 1]);
-            if a.orient(b, c).abs() > EPS {
-                out.push(b);
+        let mut out: Vec<Point2> = Vec::with_capacity(deduped.len());
+        for p in deduped {
+            if out.len() >= 2 {
+                let a = out[out.len() - 2];
+                let b = out[out.len() - 1];
+                let v1 = (b.x - a.x, b.y - a.y);
+                let v2 = (p.x - b.x, p.y - b.y);
+                let cross = v1.0 * v2.1 - v1.1 * v2.0;
+                let dot = v1.0 * v2.0 + v1.1 * v2.1;
+                // Collinear and not reversing → extend the current run.
+                if cross.abs() < EPS && dot > 0.0 {
+                    *out.last_mut().unwrap() = p;
+                    continue;
+                }
             }
+            out.push(p);
         }
-        out.push(pts[pts.len() - 1]);
         Polyline(out)
     }
 }

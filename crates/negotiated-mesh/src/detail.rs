@@ -521,26 +521,11 @@ fn mark_segment_capsule(
         let cx = grid.cell_center_x(ix);
         for iy in iy0..=iy1 {
             let cy = grid.cell_center_y(iy);
-            if point_seg_dist2(cx, cy, a, b) <= thresh2 {
+            if geom::Segment::new(*a, *b).dist2_to_point(Point2::new(cx, cy)) <= thresh2 {
                 grid.mark_net(layer, ix, iy, conn);
             }
         }
     }
-}
-
-/// Squared distance (mm²) from point `(px, py)` to segment `a`–`b`. The exact
-/// kernel of [`mark_segment_capsule`].
-fn point_seg_dist2(px: f64, py: f64, a: &Point2, b: &Point2) -> f64 {
-    let (dx, dy) = (b.x - a.x, b.y - a.y);
-    let len2 = dx * dx + dy * dy;
-    let (cx, cy) = if len2 < 1e-18 {
-        (a.x, a.y)
-    } else {
-        let t = (((px - a.x) * dx + (py - a.y) * dy) / len2).clamp(0.0, 1.0);
-        (a.x + t * dx, a.y + t * dy)
-    };
-    let (ex, ey) = (px - cx, py - cy);
-    ex * ex + ey * ey
 }
 
 /// Stamp a freshly routed cell `path`'s swept-clearance capsule into `grid` as
@@ -1041,19 +1026,8 @@ fn net_rank(problem: &RouteProblem) -> BTreeMap<String, usize> {
 
 /// Half-perimeter (width + height) of a connection's point bounding box.
 fn half_perimeter(conn: &crate::problem::Connection) -> f64 {
-    let pts = &conn.points_to_connect;
-    if pts.is_empty() {
-        return 0.0;
-    }
-    let (mut min_x, mut max_x) = (pts[0].x, pts[0].x);
-    let (mut min_y, mut max_y) = (pts[0].y, pts[0].y);
-    for p in pts {
-        min_x = min_x.min(p.x);
-        max_x = max_x.max(p.x);
-        min_y = min_y.min(p.y);
-        max_y = max_y.max(p.y);
-    }
-    (max_x - min_x) + (max_y - min_y)
+    let pts: Vec<Point2> = conn.points_to_connect.iter().map(|p| Point2::new(p.x, p.y)).collect();
+    geom::Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter())
 }
 
 /// The [`LayerRef`] for a numeric copper layer index (0 = top, last = bottom,
@@ -1069,43 +1043,11 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
     }
 }
 
-/// Drop near-duplicate points and merge collinear runs (including 45° runs).
-/// Fresh copy of the simplify idea in `router.rs`, extended to merge diagonal
-/// collinearity so a straight 45° staircase of cells collapses to two points.
-///
-/// Shared with [`crate::pipeline`], which re-runs it over per-net polylines
-/// stitched across cells (so a joined run that is collinear across a former cell
-/// boundary collapses too) — the 45°-aware simplify lives here, its natural home
-/// as the detailed stage's emitter, rather than being duplicated.
+/// Drop near-duplicate points and merge collinear runs (orthogonal AND 45°). Thin
+/// wrapper over [`geom::Polyline::simplify`]; shared with [`crate::pipeline`],
+/// which re-runs it over per-net polylines stitched across cells.
 pub(crate) fn simplify(path: Vec<Point2>) -> Vec<Point2> {
-    const EPS: f64 = 1e-9;
-    let mut deduped: Vec<Point2> = Vec::with_capacity(path.len());
-    for p in path {
-        match deduped.last() {
-            Some(last) if (last.x - p.x).abs() < EPS && (last.y - p.y).abs() < EPS => {}
-            _ => deduped.push(p),
-        }
-    }
-    let mut out: Vec<Point2> = Vec::with_capacity(deduped.len());
-    for p in deduped {
-        if out.len() >= 2 {
-            let a = &out[out.len() - 2];
-            let b = &out[out.len() - 1];
-            // Collinear iff the cross product of (b-a) and (p-b) is ~0 AND the
-            // direction does not reverse (same forward heading). Handles
-            // orthogonal and 45° runs uniformly.
-            let v1 = (b.x - a.x, b.y - a.y);
-            let v2 = (p.x - b.x, p.y - b.y);
-            let cross = v1.0 * v2.1 - v1.1 * v2.0;
-            let dot = v1.0 * v2.0 + v1.1 * v2.1;
-            if cross.abs() < EPS && dot > 0.0 {
-                *out.last_mut().unwrap() = p;
-                continue;
-            }
-        }
-        out.push(p);
-    }
-    out
+    geom::Polyline::new(path).simplify().into_points()
 }
 
 #[cfg(test)]

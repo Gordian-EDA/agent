@@ -40,10 +40,11 @@ struct StubBackend {
 #[async_trait]
 impl TestBackend for StubBackend {
     async fn run(&self, call: &ToolCall, mode: RunMode, _reviewer: &dyn Provider) -> ToolOutcome {
-        self.runs.lock().unwrap().push((call.name.clone(), mode));
-        match (call.name.as_str(), mode) {
+        self.runs.lock().unwrap().push((call.fn_name.clone(), mode));
+        match (call.fn_name.as_str(), mode) {
             ("apply_design", RunMode::Preview) => {
-                let compiles = call.input.get("compiles").and_then(Value::as_bool).unwrap_or(true);
+                let compiles =
+                    call.fn_arguments.get("compiles").and_then(Value::as_bool).unwrap_or(true);
                 ToolOutcome {
                     value: if compiles {
                         json!({ "ok": true, "would_write": true, "diff": { "added": ["R1"] } })
@@ -73,8 +74,8 @@ impl TestBackend for StubBackend {
 }
 
 /// Build an agent over a stub backend and a scripted client.
-fn agent(backend: StubBackend, completions: Vec<gordian_core::Completion>) -> Agent {
-    Agent::with_test_backend(Box::new(ScriptedClient::new(completions)), Box::new(backend), "sys")
+fn agent(backend: StubBackend, completions: Vec<gordian_core::StreamEnd>) -> Agent<ScriptedClient> {
+    Agent::with_test_backend(ScriptedClient::new(completions), Box::new(backend), "sys")
 }
 
 #[tokio::test]
@@ -210,7 +211,7 @@ async fn second_turn_sees_the_first_turns_messages() {
     let (client, seen) =
         ScriptedClient::recording(vec![final_text("answer one"), final_text("answer two")]);
     let mut agent =
-        Agent::with_test_backend(Box::new(client), Box::new(StubBackend::default()), "sys");
+        Agent::with_test_backend(client, Box::new(StubBackend::default()), "sys");
     let mut approvals = AutoApprove::yes();
 
     agent.run_turn("first prompt", &mut approvals, None).await.unwrap();
@@ -224,12 +225,15 @@ async fn second_turn_sees_the_first_turns_messages() {
 
 #[tokio::test]
 async fn usage_tokens_flow_through_completions() {
+    use gordian_core::{MessageContent, StreamEnd, Usage};
     use tokio::sync::mpsc::unbounded_channel;
-    let completion = gordian_core::Completion {
-        text: "done".into(),
-        stop_reason: "end_turn".into(),
-        input_tokens: 1234,
-        output_tokens: 56,
+    let completion = StreamEnd {
+        captured_content: Some(MessageContent::from_text("done")),
+        captured_usage: Some(Usage {
+            prompt_tokens: Some(1234),
+            completion_tokens: Some(56),
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let mut agent = agent(StubBackend::default(), vec![completion]);

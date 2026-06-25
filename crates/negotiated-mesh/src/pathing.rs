@@ -969,19 +969,9 @@ fn net_order(problem: &RouteProblem) -> Vec<usize> {
 
 /// Half-perimeter (width + height) of a connection's point bounding box.
 fn half_perimeter(conn: &crate::problem::Connection) -> f64 {
-    let pts = &conn.points_to_connect;
-    if pts.is_empty() {
-        return 0.0;
-    }
-    let (mut min_x, mut max_x) = (pts[0].x, pts[0].x);
-    let (mut min_y, mut max_y) = (pts[0].y, pts[0].y);
-    for p in pts {
-        min_x = min_x.min(p.x);
-        max_x = max_x.max(p.x);
-        min_y = min_y.min(p.y);
-        max_y = max_y.max(p.y);
-    }
-    (max_x - min_x) + (max_y - min_y)
+    let pts: Vec<geom::Point2> =
+        conn.points_to_connect.iter().map(|p| geom::Point2::new(p.x, p.y)).collect();
+    geom::Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter())
 }
 
 #[cfg(test)]

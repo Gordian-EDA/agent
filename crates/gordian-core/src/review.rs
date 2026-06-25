@@ -13,7 +13,7 @@
 //! degrades to `(0.0, [])` (conservative — nothing actionable).
 
 use anyhow::Result;
-use crate::llm::{ImageData, Message, Provider};
+use crate::llm::{Binary, ChatMessage, ContentPart, MessageContent, Provider, completed_text};
 use serde_json::Value;
 
 /// One independent NETLIST review pass, generalized: the DOMAIN passes the review
@@ -38,16 +38,16 @@ pub async fn review(
 /// passes the vision-critic `system` prompt (e.g. the ported schematic/PCB critic)
 /// and the `lenses`; `prompt` is the textual framing that rides alongside the
 /// image (intended circuit + "reason first, then FINAL_JSON"). The `image` is
-/// attached as a [`crate::llm::ContentBlock::Image`] so the genai backend sends
-/// it. Returns the same `(lowest score, union of high-confidence defects)` shape,
-/// degrading to `(0.0, [])` on a total parse failure — so a flaky vision call
-/// never poisons the union with phantom defects.
+/// attached as a genai [`Binary`] content part so the backend sends it. Returns
+/// the same `(lowest score, union of high-confidence defects)` shape, degrading
+/// to `(0.0, [])` on a total parse failure — so a flaky vision call never poisons
+/// the union with phantom defects.
 pub async fn review_image(
     client: &dyn Provider,
     system: &str,
     lenses: &[&str],
     prompt: &str,
-    image: ImageData,
+    image: Binary,
 ) -> Result<(f64, Vec<String>)> {
     review_ensemble(client, system, lenses, prompt, Some(image)).await
 }
@@ -62,11 +62,14 @@ async fn review_ensemble(
     system: &str,
     lenses: &[&str],
     prompt: &str,
-    image: Option<ImageData>,
+    image: Option<Binary>,
 ) -> Result<(f64, Vec<String>)> {
     let msgs = [match &image {
-        Some(img) => Message::user_with_image(prompt, img.clone()),
-        None => Message::user(prompt),
+        Some(img) => ChatMessage::user(MessageContent::from_parts(vec![
+            ContentPart::from_text(prompt),
+            ContentPart::Binary(img.clone()),
+        ])),
+        None => ChatMessage::user(prompt),
     }];
     let mut union: Vec<String> = Vec::new();
     let mut min_score = f64::INFINITY;
@@ -82,8 +85,8 @@ async fn review_ensemble(
         };
         let mut parsed = None;
         for _ in 0..2 {
-            let completion = client.complete(&lens_system, &msgs, &[]).await?;
-            if let Some(v) = extract_json(&completion.text) {
+            let end = client.complete(&lens_system, &msgs, &[]).await?;
+            if let Some(v) = extract_json(&completed_text(&end)) {
                 parsed = Some(v);
                 break;
             }

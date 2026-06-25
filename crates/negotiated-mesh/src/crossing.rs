@@ -821,7 +821,7 @@ impl ForeignCopper {
                 if !foreign {
                     continue;
                 }
-                if point_rect_gap(p, rect) < clearance - EPS {
+                if rect.dist_to_point(*p) < clearance - EPS {
                     return false;
                 }
             }
@@ -877,13 +877,6 @@ fn place_via(
         }
     }
     None
-}
-
-/// Minimum distance from a point to an axis-aligned rectangle (0 if inside).
-fn point_rect_gap(p: &Point2, r: &Rect) -> f64 {
-    let dx = (r.min_x - p.x).max(0.0).max(p.x - r.max_x);
-    let dy = (r.min_y - p.y).max(0.0).max(p.y - r.max_y);
-    (dx * dx + dy * dy).sqrt()
 }
 
 /// Connection name → dense index (connections order, first-wins) — mirrors

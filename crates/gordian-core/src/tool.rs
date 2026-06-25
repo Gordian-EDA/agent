@@ -13,7 +13,7 @@
 //! The KiCAD-concrete classifiers and the commit-forcing / `ApplyInfo`-lifting body
 //! live in [`crate::agent`] alongside the loop they serve.
 
-use crate::llm::ImageData;
+use crate::llm::Binary;
 use serde_json::Value;
 
 /// How a tool affects the world — the loop's dispatch discriminator.
@@ -75,7 +75,7 @@ pub struct ToolOutcome {
     /// The structured JSON result fed back to the model as text.
     pub value: Value,
     /// Images to attach to the tool result (e.g. a rendered schematic).
-    pub images: Vec<ImageData>,
+    pub images: Vec<Binary>,
     /// The on-disk path of the image a render tool produced, if any. The model
     /// sees the base64 in [`Self::images`]; the *path* is kept here so a UI can
     /// display the same PNG inline (rather than re-encoding it).

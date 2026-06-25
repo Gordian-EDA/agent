@@ -19,7 +19,7 @@
 //! pass also unions in the deterministic exact-math ERC.
 
 use anyhow::Result;
-use crate::{ImageData, Provider};
+use crate::{Binary, Provider};
 
 pub const REVIEW_SYSTEM: &str = r#"You are a senior electronics design engineer performing a NETLIST review (NOT a layout review).
 
@@ -358,7 +358,7 @@ fn layout_prompt(intent: &str, kind: LayoutKind) -> String {
 pub async fn review_layout(
     client: &dyn Provider,
     intent: &str,
-    image: ImageData,
+    image: Binary,
     kind: LayoutKind,
 ) -> Result<(f64, Vec<String>)> {
     let system = match kind {

@@ -44,8 +44,8 @@ blocks:\n\
 \x20     R1: {part: R, value: 10k, between: [A, GND]}\n\
 \x20     R2: {part: R, value: 10k, between: [GND, B]}\n";
 
-fn agent(ctx: PcbToolCtx, completions: Vec<gordian_core::Completion>) -> Agent {
-    Agent::new(Box::new(ScriptedClient::new(completions)), ctx, system_prompt())
+fn agent(ctx: PcbToolCtx, completions: Vec<gordian_core::StreamEnd>) -> Agent<ScriptedClient> {
+    Agent::new(ScriptedClient::new(completions), ctx, system_prompt())
 }
 
 #[tokio::test]

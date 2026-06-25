@@ -1,7 +1,7 @@
 //! Agent-loop tests with a SCRIPTED client (no network), driving the REAL KiCAD
 //! tools via the KiCAD tools (a real `PcbToolCtx`).
 //!
-//! [`ScriptedClient`] returns a fixed `Vec<Completion>`, one per `complete()`
+//! [`ScriptedClient`] returns a fixed `Vec<StreamEnd>`, one per `complete()`
 //! call in order, so the loop's control flow (tool dispatch → result feedback →
 //! apply-gate → final text) is exercised deterministically. The real tools the
 //! loop drives still need KiCAD (via [`PcbToolCtx::detect_for_test`]); all tests
@@ -13,8 +13,8 @@ use gordian_core::prompts::system_prompt;
 use gordian_core::tools::PcbToolCtx;
 
 /// Build an agent over a [`PcbToolCtx`] and a scripted client.
-fn agent(ctx: PcbToolCtx, completions: Vec<gordian_core::Completion>) -> Agent {
-    Agent::new(Box::new(ScriptedClient::new(completions)), ctx, system_prompt())
+fn agent(ctx: PcbToolCtx, completions: Vec<gordian_core::StreamEnd>) -> Agent<ScriptedClient> {
+    Agent::new(ScriptedClient::new(completions), ctx, system_prompt())
 }
 
 /// A tiny, self-contained valid design: two resistors so that GND has 2 pins and
@@ -28,7 +28,7 @@ blocks:\n\
 \x20     R2: {part: R, value: 10k, between: [GND, B]}\n";
 
 /// The shared script: (1) search_symbols, (2) apply_design{commit:true}, (3) done.
-fn script() -> Vec<gordian_core::Completion> {
+fn script() -> Vec<gordian_core::StreamEnd> {
     vec![
         tool_call("tu_1", "search_symbols", serde_json::json!({ "query": "resistor" })),
         tool_call("tu_2", "apply_design", serde_json::json!({ "yaml": TINY_YAML, "commit": true })),

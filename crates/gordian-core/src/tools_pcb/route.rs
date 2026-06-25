@@ -439,19 +439,6 @@ fn assign_planes(draft: &BoardDraft) -> Vec<(String, u32)> {
         .collect()
 }
 
-/// Distance from point `p` to segment `a`–`b` (mm) — used to keep a plane
-/// stitching via clear of routed signal tracks.
-fn seg_point_dist(a: &Point2, b: &Point2, p: &Point2) -> f64 {
-    let (dx, dy) = (b.x - a.x, b.y - a.y);
-    let len2 = dx * dx + dy * dy;
-    if len2 < 1e-12 {
-        return ((p.x - a.x).powi(2) + (p.y - a.y).powi(2)).sqrt();
-    }
-    let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0);
-    let (cx, cy) = (a.x + t * dx, a.y + t * dy);
-    ((p.x - cx).powi(2) + (p.y - cy).powi(2)).sqrt()
-}
-
 /// Would a stitch via at `at` (radius `via_r`) on net `net` clear every FOREIGN pad,
 /// via, and routed track? (Same-net copper is fine to touch.)
 #[allow(clippy::too_many_arguments)] // internal clearance helper; flat args keep the hot loop readable
@@ -485,7 +472,7 @@ fn stitch_via_clears(
     }) && traces.iter().all(|t| {
             t.connection == net || {
                 let need = via_r + t.width / 2.0 + clearance;
-                !t.path.windows(2).any(|w| seg_point_dist(&w[0], &w[1], at) < need)
+                !t.path.windows(2).any(|w| geom::Segment::new(w[0], w[1]).dist_to_point(*at) < need)
             }
         })
 }
@@ -532,7 +519,7 @@ fn fanout_seg_clears(
         let trk_ok = traces.iter().all(|tr| {
             tr.connection == net || {
                 let need = hw + tr.width / 2.0 + clearance;
-                !tr.path.windows(2).any(|w| seg_point_dist(&w[0], &w[1], &p) < need)
+                !tr.path.windows(2).any(|w| geom::Segment::new(w[0], w[1]).dist_to_point(p) < need)
             }
         });
         if !trk_ok {

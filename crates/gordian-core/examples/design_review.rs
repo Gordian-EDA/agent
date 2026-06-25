@@ -21,7 +21,11 @@ async fn main() -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;
     let ctx = gordian_core::tools::PcbToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
     let sch_path = ctx.sch_path().to_path_buf();
-    let mut agent = Agent::new(gordian_core::from_env()?, ctx, gordian_core::prompts::system_prompt());
+    let mut agent = Agent::new(
+        gordian_core::GenaiProvider::from_env()?,
+        ctx,
+        gordian_core::prompts::system_prompt(),
+    );
     let mut approvals = AutoApprove::yes();
 
     // Show the per-round review verdicts (and apply commits) as they happen.

@@ -1065,6 +1065,7 @@ name = "grid-astar"
 version = "0.1.0"
 dependencies = [
  "drc-lint",
+ "geom",
  "pcb-model",
  "serde",
  "serde_json",
@@ -1867,6 +1868,7 @@ name = "negotiated-mesh"
 version = "0.1.0"
 dependencies = [
  "drc-lint",
+ "geom",
  "grid-astar",
  "pcb-model",
  "rayon",

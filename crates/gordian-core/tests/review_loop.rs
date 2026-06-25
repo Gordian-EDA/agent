@@ -7,8 +7,8 @@
 //! UNIONS the two defect lists exactly as the production path does. Driving it
 //! through [`Agent::run_turn_reviewed`] proves:
 //!
-//! - the layout-review call is MADE, and carries a [`ContentBlock::Image`] (the
-//!   render the vision critic looks at);
+//! - the layout-review call is MADE, and carries a genai [`Binary`] image part
+//!   (the render the vision critic looks at);
 //! - a high-confidence LAYOUT defect unions into the fix turn alongside the
 //!   netlist defects and feeds a fix turn; and
 //! - [`AgentEvent::Reviewed`] fires with that defect.
@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use gordian_core::testing::{ScriptedClient, final_text, tool_call};
 use gordian_core::{
-    Agent, AgentEvent, ApplyInfo, AutoApprove, Completion, ContentBlock, ImageData, Message,
-    Provider, ReviewOutcome, RunMode, TestBackend, ToolCall, ToolDef, ToolOutcome,
+    Agent, AgentEvent, ApplyInfo, AutoApprove, Binary, ChatMessage, ContentPart, Provider,
+    MessageContent, ReviewOutcome, RunMode, StreamEnd, TestBackend, Tool, ToolCall, ToolOutcome,
 };
 use serde_json::{Value, json};
 
@@ -29,11 +29,11 @@ use serde_json::{Value, json};
 /// high-confidence major defect (so it survives the high-confidence filter).
 struct CannedReviewer {
     verdict: String,
-    seen: Arc<Mutex<Vec<Vec<Message>>>>,
+    seen: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
 }
 
 impl CannedReviewer {
-    fn new(verdict: &str) -> (Self, Arc<Mutex<Vec<Vec<Message>>>>) {
+    fn new(verdict: &str) -> (Self, Arc<Mutex<Vec<Vec<ChatMessage>>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         (Self { verdict: verdict.to_string(), seen: Arc::clone(&seen) }, seen)
     }
@@ -46,11 +46,14 @@ impl Provider for CannedReviewer {
     async fn complete(
         &self,
         _system: &str,
-        messages: &[Message],
-        _tools: &[ToolDef],
-    ) -> anyhow::Result<Completion> {
+        messages: &[ChatMessage],
+        _tools: &[Tool],
+    ) -> anyhow::Result<StreamEnd> {
         self.seen.lock().unwrap().push(messages.to_vec());
-        Ok(Completion { text: self.verdict.clone(), stop_reason: "end_turn".into(), ..Default::default() })
+        Ok(StreamEnd {
+            captured_content: Some(MessageContent::from_text(self.verdict.clone())),
+            ..Default::default()
+        })
     }
 }
 
@@ -73,7 +76,7 @@ struct ReviewStub {
 #[async_trait]
 impl TestBackend for ReviewStub {
     async fn run(&self, call: &ToolCall, mode: RunMode, _r: &dyn Provider) -> ToolOutcome {
-        match (call.name.as_str(), mode) {
+        match (call.fn_name.as_str(), mode) {
             ("apply_design", RunMode::Preview) => ToolOutcome {
                 value: json!({ "ok": true, "would_write": true }),
                 images: Vec::new(),
@@ -111,7 +114,7 @@ impl TestBackend for ReviewStub {
                 .await
                 .ok()?;
         // Layout plane (vision over a mocked render).
-        let image = ImageData { format: "png".into(), base64: tiny_png_b64() };
+        let image = Binary::from_base64("image/png", tiny_png_b64(), None);
         let (l_score, l_defects) = gordian_core::review_kicad::review_layout(
             reviewer,
             intent,
@@ -154,7 +157,7 @@ async fn committed_turn_runs_netlist_and_layout_review_then_fixes_the_layout_def
         tool_call("t2", "apply_design", json!({ "commit": true })), // fix turn: re-commit
         final_text("layout fixed"),
     ]);
-    let mut agent = Agent::with_test_backend(Box::new(client), Box::new(backend), "sys");
+    let mut agent = Agent::with_test_backend(client, Box::new(backend), "sys");
     let mut approvals = AutoApprove::yes();
     let (tx, mut rx) = unbounded_channel();
 
@@ -188,9 +191,9 @@ async fn committed_turn_runs_netlist_and_layout_review_then_fixes_the_layout_def
     let had_image = seen
         .iter()
         .flatten()
-        .flat_map(|m| &m.content)
-        .any(|b| matches!(b, ContentBlock::Image(_)));
-    assert!(had_image, "the layout review attached a ContentBlock::Image");
+        .flat_map(|m| m.content.iter())
+        .any(|p| matches!(p, ContentPart::Binary(_)));
+    assert!(had_image, "the layout review attached a Binary image part");
 }
 
 /// LIVE one-turn smoke (`#[ignore]` — needs KiCAD + `.env` creds): commit a small
@@ -208,7 +211,7 @@ async fn live_layout_review_smoke() {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
-    let Ok(client) = gordian_core::from_env() else {
+    let Ok(client) = gordian_core::GenaiProvider::from_env() else {
         eprintln!("SKIP: no LLM creds (.env) for the live layout-review smoke");
         return;
     };
