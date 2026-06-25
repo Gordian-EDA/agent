@@ -47,6 +47,7 @@ pub use sch_place::ir::LayoutIr;
 #[cfg(test)]
 mod grid_tests {
     use super::*;
+    use crate::wire::DrawnSegment;
     use circuit_lang::model::{Block, Component, Design, LayoutGrid};
     use geom::Dir;
     use indexmap::IndexMap;
@@ -108,7 +109,7 @@ mod grid_tests {
     fn collinear_body_crossing_fires_on_passthrough_not_on_series() {
         // Vertical 2-pin part, pins at (10,0) (top) and (10,10) (bottom).
         let body = vec![([10.0, 0.0], [10.0, 10.0])];
-        let w = |a: [f64; 2], b: [f64; 2]| (a, b, None);
+        let w = |a: [f64; 2], b: [f64; 2]| DrawnSegment::new(a.into(), b.into(), None);
         // A wire on the SAME line (x=10) running from above the top pin to below the
         // bottom pin slices straight THROUGH the part — 1 crossing.
         assert_eq!(

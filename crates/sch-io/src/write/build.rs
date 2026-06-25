@@ -4,9 +4,11 @@
 
 use std::io;
 
-use geom::{GRID_50_MIL, Point2, Rect};
+use geom::{GRID_50_MIL, Point2, Rect, Segment};
 use kicad_env::KicadEnv;
 use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
+
+use crate::wire::{DrawnSegment, NetSegment};
 
 use super::{
     Dir, Instance, Junction, NoConnect, PinLabel, SchematicWriter, SheetRect, SheetText, Stub, Wire,
@@ -588,17 +590,17 @@ impl SchematicWriter {
         }
         for w in &self.wires {
             let net = w.net.clone().unwrap_or_else(|| PWR.to_string());
-            scene.segments.push((w.a, w.b, net));
+            scene.segments.push(NetSegment::new(w.a, w.b, net));
         }
         scene
     }
 
     /// Wire segments attributed to `net` (for junction counting at taps).
-    pub fn wire_segments_on_net(&self, net: &str) -> Vec<([f64; 2], [f64; 2])> {
+    pub fn wire_segments_on_net(&self, net: &str) -> Vec<Segment> {
         self.wires
             .iter()
             .filter(|w| w.net.as_deref() == Some(net))
-            .map(|w| (w.a.into(), w.b.into()))
+            .map(|w| Segment::new(w.a, w.b))
             .collect()
     }
 
@@ -636,10 +638,10 @@ impl SchematicWriter {
 
     /// Every drawn wire segment with its net (`None` for unattributed power
     /// stubs). For the refinement scorer's crossing / length / short metrics.
-    pub fn wires_with_nets(&self) -> Vec<([f64; 2], [f64; 2], Option<String>)> {
+    pub fn wires_with_nets(&self) -> Vec<DrawnSegment> {
         self.wires
             .iter()
-            .map(|w| (w.a.into(), w.b.into(), w.net.clone()))
+            .map(|w| DrawnSegment::new(w.a, w.b, w.net.clone()))
             .collect()
     }
 

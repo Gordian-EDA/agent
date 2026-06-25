@@ -15,6 +15,38 @@ use geom::{EPS, Point2, Polyline, Rect, Segment};
 /// Minimum lead length out of a pin before the first turn, mm.
 const LEAD_MM: f64 = 2.54;
 
+/// A drawn segment assigned to a concrete net.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NetSegment {
+    pub segment: Segment,
+    pub net: String,
+}
+
+impl NetSegment {
+    pub fn new(a: Point2, b: Point2, net: impl Into<String>) -> Self {
+        Self {
+            segment: Segment::new(a, b),
+            net: net.into(),
+        }
+    }
+}
+
+/// A drawn segment whose net attribution may be unknown.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrawnSegment {
+    pub segment: Segment,
+    pub net: Option<String>,
+}
+
+impl DrawnSegment {
+    pub fn new(a: Point2, b: Point2, net: Option<String>) -> Self {
+        Self {
+            segment: Segment::new(a, b),
+            net,
+        }
+    }
+}
+
 /// 2–4 point Manhattan elbow from `a` (leaving along `dir_a` for at least
 /// [`LEAD_MM`]) to `b`: straight when the lead axis lines up, else one L or
 /// one Z. Every segment is axis-aligned.
@@ -63,7 +95,7 @@ pub struct RouteScene {
     /// Any touch with a different net's segment — shared point, collinear
     /// overlap, endpoint-on-segment — is forbidden; a strictly-interior
     /// perpendicular crossing is fine (KiCAD draws no connection there).
-    pub segments: Vec<(Point2, Point2, String)>,
+    pub segments: Vec<NetSegment>,
     /// Port-label (global-tag pennant) boxes with their OWN net. A FOREIGN net's
     /// wire may not pass through one — that draws a wire straight across someone
     /// else's edge tag (the inverting-input net bisecting a VIN pennant). The
@@ -95,7 +127,7 @@ pub fn path_ok(path: &[Point2], net: &str, scene: &RouteScene) -> bool {
         if scene
             .segments
             .iter()
-            .any(|(s1, s2, n)| n != net && seg.axis_aligned_connects(Segment::new(*s1, *s2)))
+            .any(|existing| existing.net != net && seg.axis_aligned_connects(existing.segment))
         {
             return false;
         }
@@ -120,11 +152,11 @@ pub fn path_crossings(path: &[Point2], net: &str, scene: &RouteScene) -> usize {
     let mut n = 0;
     for w in path.windows(2) {
         let seg = Segment::new(w[0], w[1]);
-        for (b1, b2, bn) in &scene.segments {
-            if bn == net {
+        for existing in &scene.segments {
+            if existing.net == net {
                 continue; // same net: a deliberate join, not a crossing
             }
-            if seg.axis_aligned_crosses_interior(Segment::new(*b1, *b2)) {
+            if seg.axis_aligned_crosses_interior(existing.segment) {
                 n += 1;
             }
         }
@@ -380,7 +412,7 @@ mod tests {
     fn scene(
         solids: Vec<Rect>,
         points: Vec<(Point2, &str)>,
-        segments: Vec<(Point2, Point2, &str)>,
+        segments: Vec<NetSegment>,
     ) -> RouteScene {
         RouteScene {
             solids,
@@ -388,12 +420,13 @@ mod tests {
                 .into_iter()
                 .map(|(p, n)| (p, n.to_string()))
                 .collect(),
-            segments: segments
-                .into_iter()
-                .map(|(a, b, n)| (a, b, n.to_string()))
-                .collect(),
+            segments,
             label_solids: Vec::new(),
         }
+    }
+
+    fn net_segment(a: Point2, b: Point2, net: &str) -> NetSegment {
+        NetSegment::new(a, b, net)
     }
 
     #[test]
@@ -599,7 +632,11 @@ mod tests {
         let s = scene(
             vec![],
             vec![],
-            vec![(Point2::new(3.0, 0.0), Point2::new(12.0, 0.0), "B")],
+            vec![net_segment(
+                Point2::new(3.0, 0.0),
+                Point2::new(12.0, 0.0),
+                "B",
+            )],
         );
         let p = vec![Point2::new(0.0, 0.0), Point2::new(10.0, 0.0)];
         assert!(!path_ok(&p, "A", &s));
@@ -607,14 +644,22 @@ mod tests {
         let s = scene(
             vec![],
             vec![],
-            vec![(Point2::new(5.0, -4.0), Point2::new(5.0, 4.0), "B")],
+            vec![net_segment(
+                Point2::new(5.0, -4.0),
+                Point2::new(5.0, 4.0),
+                "B",
+            )],
         );
         assert!(path_ok(&p, "A", &s));
         // Same crossing but the foreign wire ENDS on our path: merge.
         let s = scene(
             vec![],
             vec![],
-            vec![(Point2::new(5.0, -4.0), Point2::new(5.0, 0.0), "B")],
+            vec![net_segment(
+                Point2::new(5.0, -4.0),
+                Point2::new(5.0, 0.0),
+                "B",
+            )],
         );
         assert!(!path_ok(&p, "A", &s));
         // Our segment ENDING on a foreign wire: merge.
@@ -622,14 +667,22 @@ mod tests {
         let s = scene(
             vec![],
             vec![],
-            vec![(Point2::new(5.0, -4.0), Point2::new(5.0, 4.0), "B")],
+            vec![net_segment(
+                Point2::new(5.0, -4.0),
+                Point2::new(5.0, 4.0),
+                "B",
+            )],
         );
         assert!(!path_ok(&p2, "A", &s));
         // Same-net touches are deliberate joins.
         let s = scene(
             vec![],
             vec![],
-            vec![(Point2::new(5.0, -4.0), Point2::new(5.0, 0.0), "A")],
+            vec![net_segment(
+                Point2::new(5.0, -4.0),
+                Point2::new(5.0, 0.0),
+                "A",
+            )],
         );
         assert!(path_ok(&p, "A", &s));
     }
@@ -640,7 +693,11 @@ mod tests {
         let s = scene(
             vec![],
             vec![],
-            vec![(Point2::new(5.0, -4.0), Point2::new(5.0, 4.0), "B")],
+            vec![net_segment(
+                Point2::new(5.0, -4.0),
+                Point2::new(5.0, 4.0),
+                "B",
+            )],
         );
         let p = vec![Point2::new(0.0, 0.0), Point2::new(10.0, 0.0)];
         assert_eq!(path_crossings(&p, "A", &s), 1);
@@ -651,7 +708,11 @@ mod tests {
         let s = scene(
             vec![],
             vec![],
-            vec![(Point2::new(5.0, -4.0), Point2::new(5.0, 0.0), "B")],
+            vec![net_segment(
+                Point2::new(5.0, -4.0),
+                Point2::new(5.0, 0.0),
+                "B",
+            )],
         );
         assert_eq!(path_crossings(&p, "A", &s), 0);
         // Two foreign over-passes -> count 2.
@@ -659,8 +720,8 @@ mod tests {
             vec![],
             vec![],
             vec![
-                (Point2::new(3.0, -4.0), Point2::new(3.0, 4.0), "B"),
-                (Point2::new(7.0, -4.0), Point2::new(7.0, 4.0), "C"),
+                net_segment(Point2::new(3.0, -4.0), Point2::new(3.0, 4.0), "B"),
+                net_segment(Point2::new(7.0, -4.0), Point2::new(7.0, 4.0), "C"),
             ],
         );
         assert_eq!(path_crossings(&p, "A", &s), 2);

@@ -87,8 +87,7 @@ impl SchematicWriter {
              m: &mut BTreeMap<(u64, u64), std::collections::BTreeSet<String>>| {
                 m.entry(bits(p)).or_default().insert(net.to_string());
             };
-        // Foreign axis-aligned segments: (a, b, net).
-        let mut segments: Vec<(Point2, Point2, String)> = Vec::new();
+        let mut segments: Vec<crate::wire::NetSegment> = Vec::new();
 
         for inst in &self.instances {
             // Power-symbol/flag pin origins (identified by `power:` lib_id) occupy
@@ -110,7 +109,7 @@ impl SchematicWriter {
         // wires carry their real net so same-net stubs may touch them.
         for w in &self.wires {
             let net = w.net.clone().unwrap_or_else(|| PWR.to_string());
-            segments.push((w.a, w.b, net.clone()));
+            segments.push(crate::wire::NetSegment::new(w.a, w.b, net.clone()));
             // Only register endpoints as points for wires with a known net, so
             // that a same-net stub whose end lands exactly on a cluster wire
             // endpoint is recognized as a deliberate join. Power-wire endpoints
@@ -148,7 +147,7 @@ impl SchematicWriter {
                 .is_some_and(|nets| nets.iter().any(|n| *n != net));
             let end_on_seg = segments
                 .iter()
-                .any(|(a, b, n)| *n != net && Segment::new(*a, *b).contains_point(end));
+                .any(|seg| seg.net != net && seg.segment.contains_point(end));
             let seg_thru_point = points.iter().any(|(&(xb, yb), nets)| {
                 let p = Point2::new(f64::from_bits(xb), f64::from_bits(yb));
                 nets.iter().any(|n| *n != net) && Segment::new(pin_at, end).contains_point(p)
@@ -167,7 +166,7 @@ impl SchematicWriter {
                 // second call would retract every survivor onto its pin.
                 self.add_wire_on_net(pin_at, end, &net);
                 add_point(end, &net, &mut points);
-                segments.push((pin_at, end, net));
+                segments.push(crate::wire::NetSegment::new(pin_at, end, net));
             }
         }
     }

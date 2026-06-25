@@ -310,7 +310,7 @@ pub fn raw_metrics(
     let wires = w.wires_with_nets();
     let length: f64 = wires
         .iter()
-        .map(|(a, b, _)| Point2::from(*a).manhattan(Point2::from(*b)))
+        .map(|wire| wire.segment.a.manhattan(wire.segment.b))
         .sum();
     let crossings = count_crossings(&wires);
     let corners = count_corners(&wires);

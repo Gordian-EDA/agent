@@ -441,7 +441,9 @@ pub(crate) fn route_signal(
             }
             for seg in p.windows(2) {
                 w.add_wire_on_net(seg[0], seg[1], net);
-                scene.segments.push((seg[0], seg[1], net.to_string()));
+                scene
+                    .segments
+                    .push(crate::wire::NetSegment::new(seg[0], seg[1], net));
             }
             paths.push(p);
             uf.union_to(i, j);
@@ -459,7 +461,9 @@ pub(crate) fn route_signal(
         && uf.find(0) != uf.find(pi)
     {
         w.add_wire_on_net(pts[0], pts[pi], net);
-        scene.segments.push((pts[0], pts[pi], net.to_string()));
+        scene
+            .segments
+            .push(crate::wire::NetSegment::new(pts[0], pts[pi], net));
         uf.union_to(0, pi);
     }
 
@@ -544,7 +548,9 @@ pub(crate) fn route_signal(
                             || (seg[0][1] - seg[1][1]).abs() > EPS
                         {
                             w.add_wire_on_net(seg[0], seg[1], net);
-                            scene.segments.push((seg[0], seg[1], net.to_string()));
+                            scene
+                                .segments
+                                .push(crate::wire::NetSegment::new(seg[0], seg[1], net));
                         }
                     }
                     uf.union_to(0, k);
@@ -597,18 +603,18 @@ pub(crate) fn route_signal(
 
     // Junction dots: 3-way meets among the routed paths.
     let mut all = paths.clone();
-    for (a, b) in w.wire_segments_on_net(net) {
-        all.push(vec![a.into(), b.into()]);
+    for segment in w.wire_segments_on_net(net) {
+        all.push(vec![segment.a, segment.b]);
     }
     for j in crate::wire::junction_points(&all) {
         w.add_junction(j);
     }
     // A terminal landing inside another same-net segment is a T-join.
     for (p, _) in &terms {
-        let interior = w.wire_segments_on_net(net).iter().any(|(a, b)| {
+        let interior = w.wire_segments_on_net(net).iter().any(|segment| {
             let point = ::geom::Point2::from(*p);
-            let ends = point.near_eq((*a).into(), EPS) || point.near_eq((*b).into(), EPS);
-            !ends && ::geom::Segment::new((*a).into(), (*b).into()).contains_point(point)
+            let ends = point.near_eq(segment.a, EPS) || point.near_eq(segment.b, EPS);
+            !ends && segment.contains_point(point)
         });
         if interior {
             w.add_junction(*p);
@@ -664,9 +670,11 @@ pub(crate) fn route_local_tee(
     if horizontal {
         let ty = geom::GRID_50_MIL.snap(median(ys));
         w.add_wire_on_net([min_x, ty], [max_x, ty], net);
-        scene
-            .segments
-            .push(([min_x, ty].into(), [max_x, ty].into(), net.to_string()));
+        scene.segments.push(crate::wire::NetSegment::new(
+            [min_x, ty].into(),
+            [max_x, ty].into(),
+            net,
+        ));
         for (p, _) in terms {
             if (p[1] - ty).abs() > EPS {
                 w.add_wire_on_net(*p, [p[0], ty], net);
@@ -678,9 +686,11 @@ pub(crate) fn route_local_tee(
     } else {
         let tx = geom::GRID_50_MIL.snap(median(xs));
         w.add_wire_on_net([tx, min_y], [tx, max_y], net);
-        scene
-            .segments
-            .push(([tx, min_y].into(), [tx, max_y].into(), net.to_string()));
+        scene.segments.push(crate::wire::NetSegment::new(
+            [tx, min_y].into(),
+            [tx, max_y].into(),
+            net,
+        ));
         for (p, _) in terms {
             if (p[0] - tx).abs() > EPS {
                 w.add_wire_on_net(*p, [tx, p[1]], net);

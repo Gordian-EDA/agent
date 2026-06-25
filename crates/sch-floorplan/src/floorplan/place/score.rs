@@ -10,10 +10,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use circuit_lang::model::Design;
 use circuit_lang::{PinType, find_pin};
-use geom::EPS;
+use geom::{EPS, Point2, Segment};
 use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;
 
+use crate::wire::DrawnSegment;
 use crate::write::SchematicWriter;
 
 use sch_place::item::{Incidence, Item};
@@ -74,32 +75,30 @@ pub fn body_overlap_count(items: &[Item]) -> usize {
 /// the existing parallel-proximity check never catches it (it is a crossing, not
 /// a hug). A lead leaving a pin is collinear with / starts at the body endpoint,
 /// so it is excluded.
-pub fn count_body_crossings(
-    bodies: &[([f64; 2], [f64; 2])],
-    wires: &[([f64; 2], [f64; 2], Option<String>)],
-) -> usize {
+pub fn count_body_crossings(bodies: &[([f64; 2], [f64; 2])], wires: &[DrawnSegment]) -> usize {
     let mut n = 0;
     for (a, b) in bodies {
         let bh = (a[1] - b[1]).abs() < EPS; // body axis horizontal?
         if (a[0] - b[0]).abs() < EPS && (a[1] - b[1]).abs() < EPS {
             continue;
         }
-        for (w1, w2, _) in wires {
-            let wh = (w1[1] - w2[1]).abs() < EPS;
+        for wire in wires {
+            let seg = wire.segment;
+            let wh = (seg.a.y - seg.b.y).abs() < EPS;
             if bh == wh {
                 continue; // need a perpendicular wire
             }
             let (interior, on_wire) = if bh {
-                let p = [w1[0], a[1]];
+                let p = Point2::new(seg.a.x, a[1]);
                 (
-                    p[0] > a[0].min(b[0]) + EPS && p[0] < a[0].max(b[0]) - EPS,
-                    ::geom::Segment::new((*w1).into(), (*w2).into()).contains_point(p.into()),
+                    p.x > a[0].min(b[0]) + EPS && p.x < a[0].max(b[0]) - EPS,
+                    seg.contains_point(p),
                 )
             } else {
-                let p = [a[0], w1[1]];
+                let p = Point2::new(a[0], seg.a.y);
                 (
-                    p[1] > a[1].min(b[1]) + EPS && p[1] < a[1].max(b[1]) - EPS,
-                    ::geom::Segment::new((*w1).into(), (*w2).into()).contains_point(p.into()),
+                    p.y > a[1].min(b[1]) + EPS && p.y < a[1].max(b[1]) - EPS,
+                    seg.contains_point(p),
                 )
             };
             if interior && on_wire {
@@ -120,7 +119,7 @@ pub fn count_body_crossings(
 /// both — so this never fires on a correctly-drawn in-line resistor/cap.
 pub fn count_collinear_body_crossings(
     bodies: &[([f64; 2], [f64; 2])],
-    wires: &[([f64; 2], [f64; 2], Option<String>)],
+    wires: &[DrawnSegment],
 ) -> usize {
     let mut n = 0;
     for (a, b) in bodies {
@@ -130,17 +129,18 @@ pub fn count_collinear_body_crossings(
         let bh = (a[1] - b[1]).abs() < EPS; // horizontal part (pins differ in x)?
         let axis = if bh { 0 } else { 1 };
         let (plo, phi) = (a[axis].min(b[axis]), a[axis].max(b[axis]));
-        for (w1, w2, _) in wires {
-            let wh = (w1[1] - w2[1]).abs() < EPS;
+        for wire in wires {
+            let seg = wire.segment;
+            let wh = (seg.a.y - seg.b.y).abs() < EPS;
             if bh != wh {
                 continue; // need a PARALLEL wire (the collinear candidate)
             }
             // ...on the SAME line as the body axis (matching perpendicular coord).
             let perp = if bh { 1 } else { 0 };
-            if (w1[perp] - a[perp]).abs() > EPS {
+            if (seg.a[perp] - a[perp]).abs() > EPS {
                 continue;
             }
-            let (wlo, whi) = (w1[axis].min(w2[axis]), w1[axis].max(w2[axis]));
+            let (wlo, whi) = (seg.a[axis].min(seg.b[axis]), seg.a[axis].max(seg.b[axis]));
             if wlo < plo - EPS && whi > phi + EPS {
                 n += 1;
             }
@@ -157,17 +157,14 @@ pub fn count_collinear_body_crossings(
 /// (pin-tip bbox shrunk inward past the pin stubs) so a wire legitimately
 /// attaching at a pin tip and routing OUTWARD never counts; only a segment with a
 /// portion strictly inside the rect does.
-pub fn count_ic_body_crossings(
-    ic_rects: &[::geom::Rect],
-    wires: &[([f64; 2], [f64; 2], Option<String>)],
-) -> usize {
+pub fn count_ic_body_crossings(ic_rects: &[::geom::Rect], wires: &[DrawnSegment]) -> usize {
     let mut n = 0;
     for r in ic_rects {
         if r.width() < EPS || r.height() < EPS {
             continue;
         }
-        for (w1, w2, _) in wires {
-            if ::geom::Segment::new((*w1).into(), (*w2).into()).axis_aligned_hits_rect_interior(r) {
+        for wire in wires {
+            if wire.segment.axis_aligned_hits_rect_interior(r) {
                 n += 1;
             }
         }
@@ -185,7 +182,7 @@ pub fn count_ic_body_crossings(
 /// drawn in-line part never fires.
 pub fn count_parallel_body_crossings(
     bodies: &[([f64; 2], [f64; 2])],
-    wires: &[([f64; 2], [f64; 2], Option<String>)],
+    wires: &[DrawnSegment],
 ) -> usize {
     const PLATE_HALF: f64 = 1.4; // half the drawn 2-pin body width (catches a 1.27 mm offset)
     const PIN_STUB: f64 = 2.54; // exclude the pin stubs at each end
@@ -201,15 +198,16 @@ pub fn count_parallel_body_crossings(
         if bhi <= blo + EPS {
             continue;
         }
-        for (w1, w2, _) in wires {
-            let wh = (w1[1] - w2[1]).abs() < EPS;
+        for wire in wires {
+            let seg = wire.segment;
+            let wh = (seg.a.y - seg.b.y).abs() < EPS;
             if bh != wh {
                 continue; // need a PARALLEL wire (perpendicular is count_body_crossings)
             }
-            if (w1[perp] - a[perp]).abs() > PLATE_HALF - EPS {
+            if (seg.a[perp] - a[perp]).abs() > PLATE_HALF - EPS {
                 continue; // outside the drawn body width
             }
-            let (wlo, whi) = (w1[axis].min(w2[axis]), w1[axis].max(w2[axis]));
+            let (wlo, whi) = (seg.a[axis].min(seg.b[axis]), seg.a[axis].max(seg.b[axis]));
             if wlo < bhi - EPS && whi > blo + EPS {
                 n += 1;
             }
@@ -224,14 +222,15 @@ pub fn count_parallel_body_crossings(
 /// straight runs along rails — the single term that most separates a clean
 /// reference layout from a compact-but-jiggly diagonal staircase. A ≥3-way meet
 /// (a junction/tap) is not a corner and is excluded by the exact-two test.
-pub fn count_corners(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
+pub fn count_corners(wires: &[DrawnSegment]) -> usize {
     // (net, point) -> orientations of the segments ending there (true = horizontal).
     let mut at: BTreeMap<(String, u64, u64), Vec<bool>> = BTreeMap::new();
-    for (a, b, n) in wires {
-        let Some(net) = n else { continue };
-        let horiz = (a[1] - b[1]).abs() < EPS;
-        for p in [a, b] {
-            at.entry((net.clone(), p[0].to_bits(), p[1].to_bits()))
+    for wire in wires {
+        let Some(net) = &wire.net else { continue };
+        let seg = wire.segment;
+        let horiz = (seg.a.y - seg.b.y).abs() < EPS;
+        for p in [seg.a, seg.b] {
+            at.entry((net.clone(), p.x.to_bits(), p.y.to_bits()))
                 .or_default()
                 .push(horiz);
         }
@@ -245,19 +244,22 @@ pub fn count_corners(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
 /// at the tap), so it must read as a short here or the hill-climb would create
 /// one to save length. A same-net riser tapping its own rail is the intended case
 /// and is excluded by the net check.
-pub fn count_foreign_taps(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
-    let strict_interior = |p: [f64; 2], a: [f64; 2], b: [f64; 2]| {
-        let point = ::geom::Point2::from(p);
-        let is_end = |q: [f64; 2]| point.near_eq(q.into(), EPS);
-        !is_end(a) && !is_end(b) && ::geom::Segment::new(a.into(), b.into()).contains_point(point)
+pub fn count_foreign_taps(wires: &[DrawnSegment]) -> usize {
+    let strict_interior = |p: Point2, seg: Segment| {
+        !p.near_eq(seg.a, EPS) && !p.near_eq(seg.b, EPS) && seg.contains_point(p)
     };
     let mut n = 0;
-    for (a1, a2, an) in wires {
-        for (b1, b2, bn) in wires {
-            if an == bn || an.is_none() || bn.is_none() {
+    for endpoint_wire in wires {
+        for through_wire in wires {
+            if endpoint_wire.net.as_deref() == through_wire.net.as_deref()
+                || endpoint_wire.net.is_none()
+                || through_wire.net.is_none()
+            {
                 continue;
             }
-            if strict_interior(*a1, *b1, *b2) || strict_interior(*a2, *b1, *b2) {
+            if strict_interior(endpoint_wire.segment.a, through_wire.segment)
+                || strict_interior(endpoint_wire.segment.b, through_wire.segment)
+            {
                 n += 1;
             }
         }
@@ -458,27 +460,22 @@ pub(crate) fn driven_rail_drivers(
 /// off adjacent IC pins, is fine), but wire-vs-body uses a wider cutoff because a
 /// part's body has width, so a wire hugging the *edge* sits ~2 grid off the
 /// pin-to-pin *centre line*.
-pub(crate) fn parallel_too_close(
-    a1: [f64; 2],
-    a2: [f64; 2],
-    b1: [f64; 2],
-    b2: [f64; 2],
-    near: f64,
-) -> bool {
+pub(crate) fn parallel_too_close(a: Segment, b: Segment, near: f64) -> bool {
     const MIN_OVERLAP: f64 = 6.35; // only a sustained parallel run reads as cramped
-    let horiz = |a: &[f64; 2], b: &[f64; 2]| (a[1] - b[1]).abs() < EPS;
-    let vert = |a: &[f64; 2], b: &[f64; 2]| (a[0] - b[0]).abs() < EPS;
-    let (perp, lo, hi) = if horiz(&a1, &a2) && horiz(&b1, &b2) {
+    let (a1, a2, b1, b2) = (a.a, a.b, b.a, b.b);
+    let horiz = |segment: Segment| (segment.a.y - segment.b.y).abs() < EPS;
+    let vert = |segment: Segment| (segment.a.x - segment.b.x).abs() < EPS;
+    let (perp, lo, hi) = if horiz(a) && horiz(b) {
         (
-            (a1[1] - b1[1]).abs(),
-            a1[0].min(a2[0]).max(b1[0].min(b2[0])),
-            a1[0].max(a2[0]).min(b1[0].max(b2[0])),
+            (a1.y - b1.y).abs(),
+            a1.x.min(a2.x).max(b1.x.min(b2.x)),
+            a1.x.max(a2.x).min(b1.x.max(b2.x)),
         )
-    } else if vert(&a1, &a2) && vert(&b1, &b2) {
+    } else if vert(a) && vert(b) {
         (
-            (a1[0] - b1[0]).abs(),
-            a1[1].min(a2[1]).max(b1[1].min(b2[1])),
-            a1[1].max(a2[1]).min(b1[1].max(b2[1])),
+            (a1.x - b1.x).abs(),
+            a1.y.min(a2.y).max(b1.y.min(b2.y)),
+            a1.y.max(a2.y).min(b1.y.max(b2.y)),
         )
     } else {
         return false;
@@ -489,25 +486,24 @@ pub(crate) fn parallel_too_close(
 /// Cramped-spacing count: parallel wires hugging each other (1-grid cutoff) AND
 /// wires hugging a 2-pin part's body axis (wider 1.5-grid cutoff — see
 /// [`parallel_too_close`]). One rule covers wire-vs-wire and wire-vs-body.
-pub fn count_close_wires(
-    wires: &[([f64; 2], [f64; 2], Option<String>)],
-    bodies: &[([f64; 2], [f64; 2])],
-) -> usize {
+pub fn count_close_wires(wires: &[DrawnSegment], bodies: &[([f64; 2], [f64; 2])]) -> usize {
     const NEAR_WIRE: f64 = 2.54; // wires closer than 2 grid (i.e. 1 grid) are too close
     const NEAR_BODY: f64 = 3.81; // a body's width pushes the hug ~1 grid further off centre
     let mut n = 0;
     for i in 0..wires.len() {
         for j in (i + 1)..wires.len() {
-            let (a1, a2, _) = wires[i];
-            let (b1, b2, _) = wires[j];
-            if parallel_too_close(a1, a2, b1, b2, NEAR_WIRE) {
+            if parallel_too_close(wires[i].segment, wires[j].segment, NEAR_WIRE) {
                 n += 1;
             }
         }
     }
-    for (a1, a2, _) in wires {
+    for wire in wires {
         for (b1, b2) in bodies {
-            if parallel_too_close(*a1, *a2, *b1, *b2, NEAR_BODY) {
+            if parallel_too_close(
+                wire.segment,
+                Segment::new((*b1).into(), (*b2).into()),
+                NEAR_BODY,
+            ) {
                 n += 1;
             }
         }
@@ -538,22 +534,17 @@ pub fn count_congestion(junctions: &[[f64; 2]]) -> usize {
 /// junction, so — unlike the router's stricter connecting-touch test — those near
 /// misses are excluded here, else the scorer chases phantom shorts on a layout
 /// ERC calls clean.
-pub fn count_merges(
-    wires: &[([f64; 2], [f64; 2], Option<String>)],
-    junctions: &[[f64; 2]],
-) -> usize {
+pub fn count_merges(wires: &[DrawnSegment], junctions: &[[f64; 2]]) -> usize {
     let mut n = 0;
     // (a) Collinear overlaps.
     for i in 0..wires.len() {
         for j in (i + 1)..wires.len() {
-            let (a1, a2, an) = &wires[i];
-            let (b1, b2, bn) = &wires[j];
-            if an == bn {
+            let a = &wires[i];
+            let b = &wires[j];
+            if a.net.as_deref() == b.net.as_deref() {
                 continue;
             }
-            let a = ::geom::Segment::new((*a1).into(), (*a2).into());
-            let b = ::geom::Segment::new((*b1).into(), (*b2).into());
-            if a.axis_aligned_collinear_overlap(b) {
+            if a.segment.axis_aligned_collinear_overlap(b.segment) {
                 n += 1;
             }
         }
@@ -562,11 +553,11 @@ pub fn count_merges(
     // through it — if those carry different nets, that is a real short).
     for &jp in junctions {
         let mut nets: BTreeSet<&str> = BTreeSet::new();
-        for (a, b, wn) in wires {
-            if let Some(net) = wn
-                && ::geom::Segment::new((*a).into(), (*b).into()).contains_point(jp.into())
+        for wire in wires {
+            if let Some(net) = wire.net.as_deref()
+                && wire.segment.contains_point(jp.into())
             {
-                nets.insert(net.as_str());
+                nets.insert(net);
             }
         }
         if nets.len() > 1 {
@@ -579,18 +570,16 @@ pub fn count_merges(
 /// Visual wire crossings: pairs of different-net segments, one horizontal and
 /// one vertical, intersecting at a point interior to both (KiCAD draws no
 /// junction there — the wires just cross over).
-pub fn count_crossings(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
+pub fn count_crossings(wires: &[DrawnSegment]) -> usize {
     let mut n = 0;
     for i in 0..wires.len() {
         for j in (i + 1)..wires.len() {
-            let (a1, a2, an) = &wires[i];
-            let (b1, b2, bn) = &wires[j];
-            if an == bn {
+            let a = &wires[i];
+            let b = &wires[j];
+            if a.net.as_deref() == b.net.as_deref() {
                 continue; // same net: a deliberate join, not a crossing
             }
-            if ::geom::Segment::new((*a1).into(), (*a2).into())
-                .axis_aligned_crosses_interior(::geom::Segment::new((*b1).into(), (*b2).into()))
-            {
+            if a.segment.axis_aligned_crosses_interior(b.segment) {
                 n += 1;
             }
         }
@@ -624,18 +613,15 @@ pub(crate) fn diagnose_shorts(
                 continue;
             };
             for (ep, _) in eps {
-                for (a, b, wn) in &wires {
-                    if wn.as_deref() == Some(net.as_str()) {
+                for wire in &wires {
+                    if wire.net.as_deref() == Some(net.as_str()) {
                         continue;
                     }
+                    let seg = wire.segment;
                     let ep_point = ::geom::Point2::from(ep);
-                    let how = if ep_point.near_eq((*a).into(), EPS)
-                        || ep_point.near_eq((*b).into(), EPS)
-                    {
+                    let how = if ep_point.near_eq(seg.a, EPS) || ep_point.near_eq(seg.b, EPS) {
                         "ENDPOINT"
-                    } else if ::geom::Segment::new((*a).into(), (*b).into())
-                        .contains_point(ep.into())
-                    {
+                    } else if seg.contains_point(ep.into()) {
                         "INTERIOR"
                     } else {
                         continue;
@@ -643,7 +629,15 @@ pub(crate) fn diagnose_shorts(
                     eprintln!(
                         "[SHORT-DIAG]  PIN {}.{}@{net} at [{:.2},{:.2}] lands {how} of net {:?} wire \
                          [{:.2},{:.2}]->[{:.2},{:.2}]",
-                        items[*i].refdes, num, ep[0], ep[1], wn, a[0], a[1], b[0], b[1]
+                        items[*i].refdes,
+                        num,
+                        ep[0],
+                        ep[1],
+                        &wire.net,
+                        seg.a.x,
+                        seg.a.y,
+                        seg.b.x,
+                        seg.b.y
                     );
                 }
             }
@@ -652,18 +646,25 @@ pub(crate) fn diagnose_shorts(
     // (2) collinear overlaps of different nets.
     for i in 0..wires.len() {
         for j in (i + 1)..wires.len() {
-            let (a1, a2, an) = &wires[i];
-            let (b1, b2, bn) = &wires[j];
-            if an == bn || an.is_none() || bn.is_none() {
+            let a = &wires[i];
+            let b = &wires[j];
+            if a.net.as_deref() == b.net.as_deref() || a.net.is_none() || b.net.is_none() {
                 continue;
             }
-            let a = ::geom::Segment::new((*a1).into(), (*a2).into());
-            let b = ::geom::Segment::new((*b1).into(), (*b2).into());
-            if a.axis_aligned_collinear_overlap(b) {
+            if a.segment.axis_aligned_collinear_overlap(b.segment) {
                 eprintln!(
                     "[SHORT-DIAG]  COLLINEAR net {:?} [{:.2},{:.2}]->[{:.2},{:.2}] overlaps net {:?} \
                      [{:.2},{:.2}]->[{:.2},{:.2}]",
-                    an, a1[0], a1[1], a2[0], a2[1], bn, b1[0], b1[1], b2[0], b2[1]
+                    &a.net,
+                    a.segment.a.x,
+                    a.segment.a.y,
+                    a.segment.b.x,
+                    a.segment.b.y,
+                    &b.net,
+                    b.segment.a.x,
+                    b.segment.a.y,
+                    b.segment.b.x,
+                    b.segment.b.y
                 );
             }
         }
@@ -671,11 +672,11 @@ pub(crate) fn diagnose_shorts(
     // (3) junctions fusing >1 net.
     for &jp in &junctions {
         let mut nets: BTreeSet<&str> = BTreeSet::new();
-        for (a, b, wn) in &wires {
-            if let Some(net) = wn
-                && ::geom::Segment::new((*a).into(), (*b).into()).contains_point(jp.into())
+        for wire in &wires {
+            if let Some(net) = wire.net.as_deref()
+                && wire.segment.contains_point(jp.into())
             {
-                nets.insert(net.as_str());
+                nets.insert(net);
             }
         }
         if nets.len() > 1 {
@@ -696,7 +697,7 @@ pub fn count_shorts(
     w: &SchematicWriter,
     items: &[Item],
     inc: &Incidence,
-    wires: &[([f64; 2], [f64; 2], Option<String>)],
+    wires: &[DrawnSegment],
 ) -> usize {
     let mut n = 0;
     for (net, pins) in inc {
@@ -705,17 +706,17 @@ pub fn count_shorts(
                 continue;
             };
             for (ep, _) in eps {
-                for (a, b, wn) in wires {
-                    if wn.as_deref() == Some(net.as_str()) {
+                for wire in wires {
+                    if wire.net.as_deref() == Some(net.as_str()) {
                         continue; // own net
                     }
                     // A pin coinciding with a foreign wire's endpoint, OR landing
                     // on its interior (KiCAD connects a pin to a wire it touches),
                     // is a short on a different net.
                     let ep_point = ::geom::Point2::from(ep);
-                    if ep_point.near_eq((*a).into(), EPS)
-                        || ep_point.near_eq((*b).into(), EPS)
-                        || ::geom::Segment::new((*a).into(), (*b).into()).contains_point(ep.into())
+                    if ep_point.near_eq(wire.segment.a, EPS)
+                        || ep_point.near_eq(wire.segment.b, EPS)
+                        || wire.segment.contains_point(ep.into())
                     {
                         n += 1;
                     }
