@@ -16,9 +16,8 @@ use sch_place::netclass::{is_connector_like, is_ground};
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
 // `sch_place::union_find`, shared with circuit-lang's pin reconciler.
-use sch_place::union_find::{uf_find, uf_union};
 use sch_place::ir::{Band, LayoutIr, Side};
-
+use sch_place::union_find::{uf_find, uf_union};
 
 // ---------------------------------------------------------------------------
 // Wiring: rails, signal routing, ports.
@@ -66,8 +65,11 @@ pub(crate) fn wire(
     // one net (the stacked-BGA-balls GND/1V2 short). Finalize-only: the per-move
     // scorer passes `fan_risers = false` so transient mid-search collisions never
     // perturb the placement.
-    let riser_offsets =
-        if fan_risers { plan_riser_offsets(&net_eps, ir, &rail_y_map) } else { BTreeMap::new() };
+    let riser_offsets = if fan_risers {
+        plan_riser_offsets(&net_eps, ir, &rail_y_map)
+    } else {
+        BTreeMap::new()
+    };
 
     // 2-pin body segments (finalize-only, so the per-move scorer is untouched) so a
     // rail riser can JOG around a part body it would otherwise be drawn straight
@@ -78,7 +80,10 @@ pub(crate) fn wire(
             .filter(|it| it.geom.pins.len() == 2)
             .filter_map(|it| {
                 let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
-                match (w.pin_dirs(env, &it.refdes, n0), w.pin_dirs(env, &it.refdes, n1)) {
+                match (
+                    w.pin_dirs(env, &it.refdes, n0),
+                    w.pin_dirs(env, &it.refdes, n1),
+                ) {
                     (Ok(d0), Ok(d1)) => match (d0.first(), d1.first()) {
                         (Some((a, _)), Some((b, _))) => Some((*a, *b)),
                         _ => None,
@@ -120,22 +125,35 @@ pub(crate) fn wire(
             // as a "bare stub" at a far pin (rule 3 violation, the CAN-node VDD defect). Give
             // such a net distributed LOCAL symbols at each pin. Span-gated so tight 2-pin taps
             // keep their clean short trunk. Gated on MULTISHEET_REFINE ⇒ refs byte-identical.
-            let multisheet_spread = std::env::var("MULTISHEET_REFINE").is_ok() && eps.len() >= 2 && {
-                let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-                for (p, _) in eps {
-                    lo[0] = lo[0].min(p[0]);
-                    lo[1] = lo[1].min(p[1]);
-                    hi[0] = hi[0].max(p[0]);
-                    hi[1] = hi[1].max(p[1]);
-                }
-                (hi[0] - lo[0]) + (hi[1] - lo[1]) > 38.0
-            };
+            let multisheet_spread =
+                std::env::var("MULTISHEET_REFINE").is_ok() && eps.len() >= 2 && {
+                    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+                    for (p, _) in eps {
+                        lo[0] = lo[0].min(p[0]);
+                        lo[1] = lo[1].min(p[1]);
+                        hi[0] = hi[0].max(p[0]);
+                        hi[1] = hi[1].max(p[1]);
+                    }
+                    (hi[0] - lo[0]) + (hi[1] - lo[1]) > 38.0
+                };
             let distribute = ir.rail_locals.contains(net)
                 || (pin_total > FAST_PINS && rail_should_distribute(eps))
                 || multisheet_spread;
             let rail_y = rail_y_map.get(net).copied().filter(|_| !distribute);
             let driver = rail_drivers.get(net).copied();
-            emit_rail(env, w, net, eps, *band, rail_y, flag, &riser_offsets, &bodies, driver, fan_risers)?;
+            emit_rail(
+                env,
+                w,
+                net,
+                eps,
+                *band,
+                rail_y,
+                flag,
+                &riser_offsets,
+                &bodies,
+                driver,
+                fan_risers,
+            )?;
         }
     }
 
@@ -149,7 +167,7 @@ pub(crate) fn wire(
             continue;
         }
         for (p, _) in eps {
-            scene.points.push((*p, net.clone()));
+            scene.points.push(((*p).into(), net.clone()));
         }
         // Reserve each port's pennant box up front so a LATER net's wire routes
         // around it instead of straight through someone else's edge tag. The label
@@ -159,7 +177,9 @@ pub(crate) fn wire(
             // the label actually lands (clear of the IC's long pin-name text).
             let (side, at) = ic_port_exit_override(env, w, items, inc, net, eps, side)
                 .unwrap_or((side, port_exit_point(eps, side)));
-            scene.label_solids.push((port_label_obstacle(at, side, net), net.clone()));
+            scene
+                .label_solids
+                .push((port_label_obstacle(at, side, net).into(), net.clone()));
         }
     }
 
@@ -179,7 +199,17 @@ pub(crate) fn wire(
         if ir.rails.contains_key(net) {
             continue;
         }
-        route_signal(env, w, items, inc, net, eps, ir.ports.get(net).copied(), label_policy, &mut scene)?;
+        route_signal(
+            env,
+            w,
+            items,
+            inc,
+            net,
+            eps,
+            ir.ports.get(net).copied(),
+            label_policy,
+            &mut scene,
+        )?;
     }
     Ok(())
 }
@@ -206,7 +236,12 @@ impl LabelPolicy {
     /// Thresholds, overridable for sweeps via `SIGNAL_LABEL_SPAN_MM` (length) and
     /// `SIGNAL_CROSS_SPAN_MM` (crossing) — set length very high to disable entirely.
     pub(crate) fn from_env() -> Self {
-        let env = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let env = |k: &str, d: f64| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
         LabelPolicy {
             len_mm: env("SIGNAL_LABEL_SPAN_MM", LABEL_LEN_MM),
             cross_len_mm: env("SIGNAL_CROSS_SPAN_MM", CROSS_LABEL_LEN_MM),
@@ -243,7 +278,9 @@ pub(crate) fn route_signal(
     // Terminals: real pins (with outward dir) + an optional virtual port exit.
     let mut terms: Vec<([f64; 2], Option<Dir>)> = eps.iter().map(|(p, d)| (*p, Some(*d))).collect();
     let port_idx = port.map(|side| {
-        let at = ic_exit.map(|(_, at)| at).unwrap_or_else(|| port_exit_point(eps, side));
+        let at = ic_exit
+            .map(|(_, at)| at)
+            .unwrap_or_else(|| port_exit_point(eps, side));
         terms.push((at, None));
         terms.len() - 1
     });
@@ -302,29 +339,46 @@ pub(crate) fn route_signal(
     // every FOREIGN symbol's body bbox (full `approx_size`, the lint's extent). Only the
     // OWN body is exempt (a label on its own pin legitimately sits inside its generous
     // body bbox — the lint exempts that pairing).
-    let obstacle_boxes = |it: usize| -> Vec<[f64; 4]> {
+    let obstacle_boxes = |it: usize| -> Vec<::geom::Rect> {
         let mut boxes = Vec::new();
         for (i, item) in items.iter().enumerate() {
             if i != it {
                 let s = item.geom.approx_size();
                 let quarter = ((item.angle / 90.0).round() as i64).rem_euclid(2) == 1;
                 let (bw, bh) = if quarter { (s[1], s[0]) } else { (s[0], s[1]) };
-                boxes.push([item.at[0] - bw / 2.0, item.at[1] - bh / 2.0, item.at[0] + bw / 2.0, item.at[1] + bh / 2.0]);
+                boxes.push(
+                    [
+                        item.at[0] - bw / 2.0,
+                        item.at[1] - bh / 2.0,
+                        item.at[0] + bw / 2.0,
+                        item.at[1] + bh / 2.0,
+                    ]
+                    .into(),
+                );
             }
             for pg in &item.geom.pins {
-                boxes.extend(crate::label::pin_text_boxes(pg, item.at, item.angle, item.mirror));
+                boxes.extend(crate::label::pin_text_boxes(
+                    pg,
+                    item.at,
+                    item.angle,
+                    item.mirror,
+                ));
             }
         }
         boxes
     };
     let label_clear = |it: usize, num: &str| -> bool {
-        let Ok(ds) = w.pin_dirs(env, &items[it].refdes, num) else { return true };
+        let Ok(ds) = w.pin_dirs(env, &items[it].refdes, num) else {
+            return true;
+        };
         let obstacles = obstacle_boxes(it);
         ds.iter().all(|(ep, dir)| {
             let v = dir.vec();
             let end = [ep[0] + v[0] * STUB_MM, ep[1] + v[1] * STUB_MM];
             let bx = crate::label::label_box(end, *dir, crate::label::text_width(net));
-            !obstacles.iter().any(|r| crate::label::boxes_overlap(&bx, r))
+            !obstacles
+                .iter()
+                .any(|r| crate::label::boxes_overlap(&bx, r))
         })
     };
     // Whether each terminal could carry a body-clear net label (a virtual port exit,
@@ -335,13 +389,13 @@ pub(crate) fn route_signal(
         .map(|tp| tp.as_ref().is_none_or(|(it, num)| label_clear(*it, num)))
         .collect();
 
-    let pts: Vec<[f64; 2]> = terms.iter().map(|t| t.0).collect();
+    let pts: Vec<::geom::Point2> = terms.iter().map(|t| t.0.into()).collect();
     // Union-find over terminals: a successful edge merges its endpoints; a failed
     // one leaves them split. Route each edge as it succeeds and commit it to the
     // scene immediately so later edges detour around it (partial progress, never
     // the old all-or-nothing that label-bombed the whole net on one bad edge).
     let mut parent: Vec<usize> = (0..terms.len()).collect();
-    let mut paths: Vec<crate::wire::Path> = Vec::new();
+    let mut paths: Vec<Vec<::geom::Point2>> = Vec::new();
     for (i, j) in crate::wire::mst_edges(&pts) {
         let (a, da, b) = match (terms[i].1, terms[j].1) {
             (Some(d), _) => (pts[i], d, pts[j]),
@@ -354,17 +408,20 @@ pub(crate) fn route_signal(
         // is Some only at finalize (see `wire`), so every per-move route is unaffected.
         let direct = (a[0] - b[0]).abs() + (a[1] - b[1]).abs();
         if let Some(pol) = label_policy
-            && direct > pol.len_mm {
-                continue;
-            }
+            && direct > pol.len_mm
+        {
+            continue;
+        }
         if let Some(p) = crate::wire::route_edge(a, da, b, net, scene) {
             if let Some(pol) = label_policy {
                 // The DIRECT gap may be short while the only obstacle-free ROUTE is a sheet-wide
                 // DETOUR (two ICs whose shared bus pins face opposite ways, so the wire wraps the
                 // perimeter). A drawn wraparound reads far worse than naming each end, so discard a
                 // path whose routed length exceeds the policy length and leave the endpoints split.
-                let routed: f64 =
-                    p.windows(2).map(|s| (s[0][0] - s[1][0]).abs() + (s[0][1] - s[1][1]).abs()).sum();
+                let routed: f64 = p
+                    .windows(2)
+                    .map(|s| (s[0][0] - s[1][0]).abs() + (s[0][1] - s[1][1]).abs())
+                    .sum();
                 if routed > pol.len_mm {
                     continue;
                 }
@@ -379,10 +436,12 @@ pub(crate) fn route_signal(
                 // finalize stub-retraction — keeps its wire instead of becoming a lint-flagged
                 // label. Conservative on purpose: the TIER-1 references must stay 0-warning.
                 if direct > pol.cross_len_mm
-                    && term_label_clear[i] && term_label_clear[j]
-                    && crate::wire::path_crossings(&p, net, scene) > 0 {
-                        continue;
-                    }
+                    && term_label_clear[i]
+                    && term_label_clear[j]
+                    && crate::wire::path_crossings(&p, net, scene) > 0
+                {
+                    continue;
+                }
             }
             for seg in p.windows(2) {
                 w.add_wire_on_net(seg[0], seg[1], net);
@@ -401,11 +460,12 @@ pub(crate) fn route_signal(
     // only fires when the route genuinely failed, so cleanly-routed references stay byte-identical.
     if eps.len() == 1
         && let Some(pi) = port_idx
-            && uf_find(&mut parent, 0) != uf_find(&mut parent, pi) {
-                w.add_wire_on_net(pts[0], pts[pi], net);
-                scene.segments.push((pts[0], pts[pi], net.to_string()));
-                uf_union(&mut parent, 0, pi);
-            }
+        && uf_find(&mut parent, 0) != uf_find(&mut parent, pi)
+    {
+        w.add_wire_on_net(pts[0], pts[pi], net);
+        scene.segments.push((pts[0], pts[pi], net.to_string()));
+        uf_union(&mut parent, 0, pi);
+    }
 
     // MULTI-PIN PORT whose local pins the MST couldn't join (an op-amp follower's OUT↔IN-
     // feedback the router can't wrap around the body — BLDC current_sense U6/ISENSE_W): force
@@ -431,18 +491,19 @@ pub(crate) fn route_signal(
         // column (band lands at the sheet edge, always blocked). Default to the pin row.
         let (mut by_lo, mut by_hi) = (py_lo, py_hi);
         for r in &scene.solids {
-            if r[0] < px_hi - EPS && px_lo < r[2] - EPS && r[1] < py_hi + EPS && py_lo < r[3] + EPS {
+            if r[0] < px_hi - EPS && px_lo < r[2] - EPS && r[1] < py_hi + EPS && py_lo < r[3] + EPS
+            {
                 by_lo = by_lo.min(r[1]);
                 by_hi = by_hi.max(r[3]);
             }
         }
         let lead = 2.54;
-        let stub = |p: [f64; 2], d: Option<Dir>| -> [f64; 2] {
+        let stub = |p: ::geom::Point2, d: Option<Dir>| -> ::geom::Point2 {
             match d {
-                Some(Dir::East) => [crate::grid::snap(p[0] + lead), p[1]],
-                Some(Dir::West) => [crate::grid::snap(p[0] - lead), p[1]],
-                Some(Dir::North) => [p[0], crate::grid::snap(p[1] - lead)],
-                Some(Dir::South) => [p[0], crate::grid::snap(p[1] + lead)],
+                Some(Dir::East) => [crate::grid::snap(p[0] + lead), p[1]].into(),
+                Some(Dir::West) => [crate::grid::snap(p[0] - lead), p[1]].into(),
+                Some(Dir::North) => [p[0], crate::grid::snap(p[1] - lead)].into(),
+                Some(Dir::South) => [p[0], crate::grid::snap(p[1] + lead)].into(),
                 None => p,
             }
         };
@@ -457,9 +518,10 @@ pub(crate) fn route_signal(
             // SDA pin already gets. The local op-amp feedback case (pins a few mm apart) is well under
             // the length, so it still forces its clean loop.
             if let Some(pol) = label_policy
-                && (pts[0][0] - pts[k][0]).abs() + (pts[0][1] - pts[k][1]).abs() > pol.len_mm {
-                    continue;
-                }
+                && (pts[0][0] - pts[k][0]).abs() + (pts[0][1] - pts[k][1]).abs() > pol.len_mm
+            {
+                continue;
+            }
             let (pa, da) = (pts[0], terms[0].1);
             let (pb, db) = (pts[k], terms[k].1);
             let (sa, sb) = (stub(pa, da), stub(pb, db));
@@ -471,10 +533,19 @@ pub(crate) fn route_signal(
                 bands.push(crate::grid::snap(by_lo - 1.27 * step as f64));
             }
             for band_y in bands {
-                let path = vec![pa, sa, [sa[0], band_y], [sb[0], band_y], sb, pb];
+                let path = vec![
+                    pa,
+                    sa,
+                    [sa[0], band_y].into(),
+                    [sb[0], band_y].into(),
+                    sb,
+                    pb,
+                ];
                 if crate::wire::path_ok(&path, net, scene) {
                     for seg in path.windows(2) {
-                        if (seg[0][0] - seg[1][0]).abs() > EPS || (seg[0][1] - seg[1][1]).abs() > EPS {
+                        if (seg[0][0] - seg[1][0]).abs() > EPS
+                            || (seg[0][1] - seg[1][1]).abs() > EPS
+                        {
                             w.add_wire_on_net(seg[0], seg[1], net);
                             scene.segments.push((seg[0], seg[1], net.to_string()));
                         }
@@ -520,7 +591,7 @@ pub(crate) fn route_signal(
                 w.add_signal_label(env, &items[*i].refdes, num, net)?;
                 if let Ok(ds) = w.pin_dirs(env, &items[*i].refdes, num) {
                     for (p, _) in ds {
-                        scene.points.push((p, net.to_string()));
+                        scene.points.push((p.into(), net.to_string()));
                     }
                 }
             }
@@ -530,7 +601,7 @@ pub(crate) fn route_signal(
     // Junction dots: 3-way meets among the routed paths.
     let mut all = paths.clone();
     for (a, b) in w.wire_segments_on_net(net) {
-        all.push(vec![a, b]);
+        all.push(vec![a.into(), b.into()]);
     }
     for j in crate::wire::junction_points(&all) {
         w.add_junction(j);
@@ -566,8 +637,14 @@ pub(crate) fn route_local_tee(
     const LOCAL: f64 = 30.48;
     let xs: Vec<f64> = terms.iter().map(|t| t.0[0]).collect();
     let ys: Vec<f64> = terms.iter().map(|t| t.0[1]).collect();
-    let (min_x, max_x) = (xs.iter().cloned().fold(f64::MAX, f64::min), xs.iter().cloned().fold(f64::MIN, f64::max));
-    let (min_y, max_y) = (ys.iter().cloned().fold(f64::MAX, f64::min), ys.iter().cloned().fold(f64::MIN, f64::max));
+    let (min_x, max_x) = (
+        xs.iter().cloned().fold(f64::MAX, f64::min),
+        xs.iter().cloned().fold(f64::MIN, f64::max),
+    );
+    let (min_y, max_y) = (
+        ys.iter().cloned().fold(f64::MAX, f64::min),
+        ys.iter().cloned().fold(f64::MIN, f64::max),
+    );
     if max_x - min_x > LOCAL || max_y - min_y > LOCAL {
         return false;
     }
@@ -589,7 +666,9 @@ pub(crate) fn route_local_tee(
     if horizontal {
         let ty = crate::grid::snap(median(ys));
         w.add_wire_on_net([min_x, ty], [max_x, ty], net);
-        scene.segments.push(([min_x, ty], [max_x, ty], net.to_string()));
+        scene
+            .segments
+            .push(([min_x, ty].into(), [max_x, ty].into(), net.to_string()));
         for (p, _) in terms {
             if (p[1] - ty).abs() > EPS {
                 w.add_wire_on_net(*p, [p[0], ty], net);
@@ -601,7 +680,9 @@ pub(crate) fn route_local_tee(
     } else {
         let tx = crate::grid::snap(median(xs));
         w.add_wire_on_net([tx, min_y], [tx, max_y], net);
-        scene.segments.push(([tx, min_y], [tx, max_y], net.to_string()));
+        scene
+            .segments
+            .push(([tx, min_y].into(), [tx, max_y].into(), net.to_string()));
         for (p, _) in terms {
             if (p[0] - tx).abs() > EPS {
                 w.add_wire_on_net(*p, [tx, p[1]], net);
@@ -624,24 +705,46 @@ pub(crate) fn port_exit_point(eps: &[([f64; 2], Dir)], side: Side) -> [f64; 2] {
     let reach: f64 = if eps.len() == 1 { 2.54 } else { 7.62 };
     let xs: Vec<f64> = eps.iter().map(|(p, _)| p[0]).collect();
     let ys: Vec<f64> = eps.iter().map(|(p, _)| p[1]).collect();
-    let (min_x, max_x) = (xs.iter().cloned().fold(f64::MAX, f64::min), xs.iter().cloned().fold(f64::MIN, f64::max));
-    let (min_y, max_y) = (ys.iter().cloned().fold(f64::MAX, f64::min), ys.iter().cloned().fold(f64::MIN, f64::max));
+    let (min_x, max_x) = (
+        xs.iter().cloned().fold(f64::MAX, f64::min),
+        xs.iter().cloned().fold(f64::MIN, f64::max),
+    );
+    let (min_y, max_y) = (
+        ys.iter().cloned().fold(f64::MAX, f64::min),
+        ys.iter().cloned().fold(f64::MIN, f64::max),
+    );
     // Align the exit with the pin nearest that edge so the wire runs straight.
     match side {
         Side::Right => {
-            let y = eps.iter().max_by(|a, b| a.0[0].total_cmp(&b.0[0])).map(|t| t.0[1]).unwrap_or(min_y);
+            let y = eps
+                .iter()
+                .max_by(|a, b| a.0[0].total_cmp(&b.0[0]))
+                .map(|t| t.0[1])
+                .unwrap_or(min_y);
             [crate::grid::snap(max_x + reach), y]
         }
         Side::Left => {
-            let y = eps.iter().min_by(|a, b| a.0[0].total_cmp(&b.0[0])).map(|t| t.0[1]).unwrap_or(min_y);
+            let y = eps
+                .iter()
+                .min_by(|a, b| a.0[0].total_cmp(&b.0[0]))
+                .map(|t| t.0[1])
+                .unwrap_or(min_y);
             [crate::grid::snap(min_x - reach), y]
         }
         Side::Top => {
-            let x = eps.iter().min_by(|a, b| a.0[1].total_cmp(&b.0[1])).map(|t| t.0[0]).unwrap_or(min_x);
+            let x = eps
+                .iter()
+                .min_by(|a, b| a.0[1].total_cmp(&b.0[1]))
+                .map(|t| t.0[0])
+                .unwrap_or(min_x);
             [x, crate::grid::snap(min_y - reach)]
         }
         Side::Bottom => {
-            let x = eps.iter().max_by(|a, b| a.0[1].total_cmp(&b.0[1])).map(|t| t.0[0]).unwrap_or(max_x);
+            let x = eps
+                .iter()
+                .max_by(|a, b| a.0[1].total_cmp(&b.0[1]))
+                .map(|t| t.0[0])
+                .unwrap_or(max_x);
             [x, crate::grid::snap(max_y + reach)]
         }
     }
@@ -740,7 +843,9 @@ pub(crate) fn ic_port_exit_override(
         }
         // This pin's NAME text extent, measured from the tip INTO the body. We only
         // care about the case where the name actually reaches past a plain exit reach.
-        let Some(pg) = it.geom.pins.iter().find(|p| p.number == *num) else { continue };
+        let Some(pg) = it.geom.pins.iter().find(|p| p.number == *num) else {
+            continue;
+        };
         if pg.name == "~" {
             continue;
         }
@@ -789,7 +894,9 @@ pub(crate) fn port_label_obstacle(at: [f64; 2], side: Side, net: &str) -> [f64; 
 }
 
 /// A coarse Manhattan direction from `a` toward `b`.
-pub(crate) fn dir_toward(a: [f64; 2], b: [f64; 2]) -> Dir {
+pub(crate) fn dir_toward(a: impl Into<::geom::Point2>, b: impl Into<::geom::Point2>) -> Dir {
+    let a = a.into();
+    let b = b.into();
     if (b[0] - a[0]).abs() >= (b[1] - a[1]).abs() {
         if b[0] >= a[0] { Dir::East } else { Dir::West }
     } else if b[1] >= a[1] {
@@ -799,7 +906,9 @@ pub(crate) fn dir_toward(a: [f64; 2], b: [f64; 2]) -> Dir {
     }
 }
 
-pub(crate) fn near(p: [f64; 2], q: [f64; 2]) -> bool {
+pub(crate) fn near(p: impl Into<::geom::Point2>, q: impl Into<::geom::Point2>) -> bool {
+    let p = p.into();
+    let q = q.into();
     (p[0] - q[0]).abs() < 1e-6 && (p[1] - q[1]).abs() < 1e-6
 }
 
@@ -876,7 +985,11 @@ pub(crate) fn assign_rail_levels(
         }
         rails.sort_by(|a, b| a.1.total_cmp(&b.1));
         // Base y: the band edge across all these rails' pins.
-        let ys = rails.iter().filter_map(|(n, _, _)| net_eps.get(n)).flatten().map(|(p, _)| p[1]);
+        let ys = rails
+            .iter()
+            .filter_map(|(n, _, _)| net_eps.get(n))
+            .flatten()
+            .map(|(p, _)| p[1]);
         let base = match band {
             Band::Top => ys.fold(f64::MAX, f64::min) - 5.08,
             Band::Bottom => ys.fold(f64::MIN, f64::max) + 5.08,
@@ -888,7 +1001,8 @@ pub(crate) fn assign_rail_levels(
             for (lvl, occ) in levels.iter_mut().enumerate() {
                 if occ.iter().all(|&(a, b)| hi < a - EPS || lo > b + EPS) {
                     occ.push((lo, hi));
-                    let y = base + lvl as f64 * RAIL_GAP * if band == Band::Top { -1.0 } else { 1.0 };
+                    let y =
+                        base + lvl as f64 * RAIL_GAP * if band == Band::Top { -1.0 } else { 1.0 };
                     out.insert(net.clone(), y);
                     placed = true;
                     break;
@@ -946,7 +1060,9 @@ pub(crate) fn plan_riser_offsets(
         if !ir.rails.contains_key(net) || eps.len() < 3 {
             continue;
         }
-        let Some(&ry) = rail_y_map.get(net) else { continue };
+        let Some(&ry) = rail_y_map.get(net) else {
+            continue;
+        };
         for (p, dir) in eps {
             let x = riser_base_x(p, *dir);
             risers.push((net.clone(), x, p[1].min(ry), p[1].max(ry)));
@@ -1031,7 +1147,12 @@ pub(crate) fn riser_hits_body(x: f64, ylo: f64, yhi: f64, bodies: &[([f64; 2], [
             // Horizontal part: a riser crossing it perpendicular, strictly inside
             // the central span (its own connecting riser lands at a pin END → outside).
             let (xlo, xhi) = (a[0].min(b[0]) + PIN_STUB, a[0].max(b[0]) - PIN_STUB);
-            if xhi > xlo + EPS && x > xlo + EPS && x < xhi - EPS && ylo < a[1] - EPS && yhi > a[1] + EPS {
+            if xhi > xlo + EPS
+                && x > xlo + EPS
+                && x < xhi - EPS
+                && ylo < a[1] - EPS
+                && yhi > a[1] + EPS
+            {
                 return true;
             }
         }
@@ -1095,29 +1216,42 @@ pub(crate) fn emit_rail(
             (hi[0] - lo[0]) + (hi[1] - lo[1]) <= DRIVEN_STAR_MAX_SPREAD
         });
         if let Some(dp) = driver
-            && let Some((_, ddir)) =
-                eps.iter().copied().find(|(p, _)| (p[0] - dp[0]).abs() < EPS && (p[1] - dp[1]).abs() < EPS)
-            {
-                w.add_power_symbol(env, &lib, &format!("#PWR_{net}"), net, dp, power_angle(ddir))?;
-                for (ep, _) in eps.iter() {
-                    if (ep[0] - dp[0]).abs() >= EPS || (ep[1] - dp[1]).abs() >= EPS {
-                        // Manhattan two-segment hop from the driver to this pin (a single
-                        // straight wire when they already share a row/column).
-                        if (ep[0] - dp[0]).abs() >= EPS && (ep[1] - dp[1]).abs() >= EPS {
-                            w.add_wire_on_net(dp, [ep[0], dp[1]], net);
-                            w.add_wire_on_net([ep[0], dp[1]], *ep, net);
-                        } else {
-                            w.add_wire_on_net(dp, *ep, net);
-                        }
+            && let Some((_, ddir)) = eps
+                .iter()
+                .copied()
+                .find(|(p, _)| (p[0] - dp[0]).abs() < EPS && (p[1] - dp[1]).abs() < EPS)
+        {
+            w.add_power_symbol(
+                env,
+                &lib,
+                &format!("#PWR_{net}"),
+                net,
+                dp,
+                power_angle(ddir),
+            )?;
+            for (ep, _) in eps.iter() {
+                if (ep[0] - dp[0]).abs() >= EPS || (ep[1] - dp[1]).abs() >= EPS {
+                    // Manhattan two-segment hop from the driver to this pin (a single
+                    // straight wire when they already share a row/column).
+                    if (ep[0] - dp[0]).abs() >= EPS && (ep[1] - dp[1]).abs() >= EPS {
+                        w.add_wire_on_net(dp, [ep[0], dp[1]], net);
+                        w.add_wire_on_net([ep[0], dp[1]], *ep, net);
+                    } else {
+                        w.add_wire_on_net(dp, *ep, net);
                     }
                 }
-                if let (Some(flag_points), Some((_, dir))) =
-                    (flag, eps.iter().find(|(p, _)| (p[0] - dp[0]).abs() < EPS && (p[1] - dp[1]).abs() < EPS))
-                {
-                    flag_points.entry(net.to_string()).or_insert((dp, flag_angle(*dir)));
-                }
-                return Ok(());
             }
+            if let (Some(flag_points), Some((_, dir))) = (
+                flag,
+                eps.iter()
+                    .find(|(p, _)| (p[0] - dp[0]).abs() < EPS && (p[1] - dp[1]).abs() < EPS),
+            ) {
+                flag_points
+                    .entry(net.to_string())
+                    .or_insert((dp, flag_angle(*dir)));
+            }
+            return Ok(());
+        }
         // One power symbol per pin — but MERGE a pin into a nearby, COLLINEAR
         // already-placed symbol (≤2 grid, same x or y) via a short connecting wire
         // instead of stamping a second symbol. Two adjacent same-net pins (e.g. the
@@ -1166,7 +1300,9 @@ pub(crate) fn emit_rail(
         // arrow/triangle — into the open space the power symbol already claims,
         // so the flag reads as part of the supply marker, never a floating leash.
         if let (Some(flag_points), Some((ep, dir))) = (flag, eps.first()) {
-            flag_points.entry(net.to_string()).or_insert((*ep, flag_angle(*dir)));
+            flag_points
+                .entry(net.to_string())
+                .or_insert((*ep, flag_angle(*dir)));
         }
         return Ok(());
     };
@@ -1186,8 +1322,11 @@ pub(crate) fn emit_rail(
         .iter()
         .map(|(ep, dir)| {
             let base = riser_base_x(ep, *dir);
-            let mut ax =
-                base + riser_offsets.get(&(net.to_string(), col_key(base))).copied().unwrap_or(0.0);
+            let mut ax = base
+                + riser_offsets
+                    .get(&(net.to_string(), col_key(base)))
+                    .copied()
+                    .unwrap_or(0.0);
             if !bodies.is_empty() {
                 let (rlo, rhi) = (ep[1].min(rail_y), ep[1].max(rail_y));
                 if riser_hits_body(ax, rlo, rhi, bodies)
@@ -1195,9 +1334,9 @@ pub(crate) fn emit_rail(
                         .flat_map(|k| [k as f64, -(k as f64)])
                         .map(|m| ax + m * RAIL_LANE)
                         .find(|&c| !riser_hits_body(c, rlo, rhi, bodies))
-                    {
-                        ax = clear;
-                    }
+                {
+                    ax = clear;
+                }
             }
             ax
         })
@@ -1232,7 +1371,9 @@ pub(crate) fn emit_rail(
     // V+ rail, down for a bottom GND rail) — into open space, no dangling stub.
     if let Some(flag_points) = flag {
         let angle = if band == Band::Top { 0.0 } else { 180.0 };
-        flag_points.entry(net.to_string()).or_insert(([sym_x, rail_y], angle));
+        flag_points
+            .entry(net.to_string())
+            .or_insert(([sym_x, rail_y], angle));
     }
     Ok(())
 }

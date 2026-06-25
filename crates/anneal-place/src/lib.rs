@@ -14,16 +14,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use sch_place::item::{Incidence, Item};
 use sch_place::ir::{LayoutIr, Orient};
+use sch_place::item::{Incidence, Item};
 use sch_place::netclass::is_power_net;
 use sch_place::place::{Crossings, PlaceProblem, PlaceResult};
 
 use sch_floorplan::contract::{
+    COL_GAP, FAST_PINS, GRID_KEY, PlacementEngine, ROW_GAP, RawMetrics, Realizer,
     align_idiom_clusters, align_led_chains, body_overlap_count, build_anchor_blocks, build_writer,
     cluster_group, cohesion_targets, decongest, grid_order_viol, item_rect, multi_unit_siblings,
     orient_angle, overlaps_any, pin_endpoint, rects_overlap, signal_anchor_centroid,
-    supply_pin_target, PlacementEngine, RawMetrics, Realizer, COL_GAP, FAST_PINS, GRID_KEY, ROW_GAP,
+    supply_pin_target,
 };
 
 /// Geometry coincidence tolerance (mm) — anneal's own copy of the shared 1e-6 epsilon.
@@ -111,7 +112,8 @@ fn amplified_energy(m: &RawMetrics) -> f64 {
         + 0.15 * m.length
         + 0.45 * m.spread;
     let multiunit = SIB_COHESION * m.sib_spread;
-    base + multiunit + COMPACT_BOOST * (0.15 * m.length + 0.45 * m.spread)
+    base + multiunit
+        + COMPACT_BOOST * (0.15 * m.length + 0.45 * m.spread)
         + ORIENT_BOOST * m.leg_viol as f64
 }
 
@@ -167,8 +169,9 @@ fn greedy_score(r: &Realizer, items: &[Item]) -> f64 {
 /// descent candidate). Local moves kept only on strict improvement of the base routed
 /// cost. Anchors hold.
 fn refine_items(r: &Realizer, items: &mut [Item]) {
-    let satellites: Vec<usize> =
-        (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen).collect();
+    let satellites: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
+        .collect();
     if satellites.is_empty() {
         return;
     }
@@ -177,9 +180,14 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
     for _ in 0..MAX_ROUNDS {
         let mut improved = false;
         for &i in &satellites {
-            for d in [[COL_GAP, 0.0], [-COL_GAP, 0.0], [0.0, ROW_GAP], [0.0, -ROW_GAP]] {
+            for d in [
+                [COL_GAP, 0.0],
+                [-COL_GAP, 0.0],
+                [0.0, ROW_GAP],
+                [0.0, -ROW_GAP],
+            ] {
                 let prev = items[i].at;
-                items[i].at = [snap(prev[0] + d[0]), snap(prev[1] + d[1])];
+                items[i].at = [snap(prev[0] + d[0]), snap(prev[1] + d[1])].into();
                 let c = greedy_score(r, items);
                 if c + 0.5 < best {
                     best = c;
@@ -227,7 +235,7 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
                 let nx = snap(2.0 * ax - items[i].at[0]);
                 if (nx - items[i].at[0]).abs() > EPS {
                     let prev = items[i].at;
-                    items[i].at = [nx, prev[1]];
+                    items[i].at = [nx, prev[1]].into();
                     let c = greedy_score(r, items);
                     if c + 0.5 < best {
                         best = c;
@@ -264,7 +272,9 @@ fn anchor_x(items: &[Item], inc: &Incidence, i: usize) -> Option<f64> {
 /// Sub-grid compaction: slide each satellite one grid step toward the centroid where it
 /// does not raise the base routed cost and creates no overlap.
 fn compact(r: &Realizer, items: &mut [Item]) {
-    let sats: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen).collect();
+    let sats: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
+        .collect();
     if sats.is_empty() {
         return;
     }
@@ -295,7 +305,7 @@ fn compact(r: &Realizer, items: &mut [Item]) {
                 {
                     continue;
                 }
-                items[i].at = p;
+                items[i].at = p.into();
                 let sc = greedy_score(r, items);
                 if sc + 0.25 < best {
                     best = sc;
@@ -330,7 +340,9 @@ fn polish(r: &Realizer, items: &mut [Item]) {
 /// Free per-axis nudge: slide each satellite ±1 grid in x and y, keeping any move that
 /// lowers the base routed cost without creating a clearance-padded overlap.
 fn free_nudge(r: &Realizer, items: &mut [Item]) {
-    let sats: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen).collect();
+    let sats: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
+        .collect();
     if sats.is_empty() {
         return;
     }
@@ -352,11 +364,11 @@ fn free_nudge(r: &Realizer, items: &mut [Item]) {
                 {
                     continue;
                 }
-                items[i].at = p;
+                items[i].at = p.into();
                 let c = greedy_score(r, items);
                 if c + 0.25 < best_cost {
                     best_cost = c;
-                    best_pos = p;
+                    best_pos = p.into();
                 }
             }
             items[i].at = best_pos;
@@ -377,14 +389,21 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
     let env = r.env();
     let inc = r.incidence();
     let ir = r.ir();
-    let Ok(w0) = build_writer(env, None, items, inc, ir, r.needs_flag(), false) else { return };
+    let Ok(w0) = build_writer(env, None, items, inc, ir, r.needs_flag(), false) else {
+        return;
+    };
     let mut plans: Vec<(usize, bool, [f64; 2])> = Vec::new();
     for (si, s) in items.iter().enumerate() {
         if s.geom.pins.len() != 2 {
             continue;
         }
-        let pos = |n: &str| w0.pin_dirs(env, &s.refdes, n).ok().and_then(|v| v.first().map(|x| x.0));
-        let (Some(p0), Some(p1)) = (pos(&s.geom.pins[0].number), pos(&s.geom.pins[1].number)) else {
+        let pos = |n: &str| {
+            w0.pin_dirs(env, &s.refdes, n)
+                .ok()
+                .and_then(|v| v.first().map(|x| x.0))
+        };
+        let (Some(p0), Some(p1)) = (pos(&s.geom.pins[0].number), pos(&s.geom.pins[1].number))
+        else {
             continue;
         };
         let vertical = (p0[1] - p1[1]).abs() >= (p0[0] - p1[0]).abs();
@@ -412,11 +431,11 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
             if (p[axis] - goal) * dir > EPS || overlaps_any(items, si, p) {
                 break;
             }
-            items[si].at = p;
+            items[si].at = p.into();
             let c = greedy_score(r, items);
             if c + 0.5 < best_cost {
                 best_cost = c;
-                best_pos = p;
+                best_pos = p.into();
             }
         }
         items[si].at = best_pos;
@@ -445,7 +464,11 @@ impl Rng {
         z ^ (z >> 31)
     }
     fn below(&mut self, n: usize) -> usize {
-        if n == 0 { 0 } else { (self.next() % n as u64) as usize }
+        if n == 0 {
+            0
+        } else {
+            (self.next() % n as u64) as usize
+        }
     }
     /// Uniform in [0,1).
     fn unit(&mut self) -> f64 {
@@ -495,7 +518,8 @@ pub fn anneal_place(
     // power_entry 8→9). Self-contained reference boards have <6 single-pin signal nets, so
     // they stay on the small path ⇒ snapshots byte-identical.
     let port_heavy = {
-        let mut npins: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        let mut npins: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
         for it in items.iter() {
             for (_, _, net) in &it.pins {
                 if let Some(net) = net {
@@ -530,7 +554,10 @@ pub fn anneal_place(
             })
             .collect();
         if timed_top {
-            eprintln!("  [SA-fast] {n_starts} proxy starts: {:.2}s", t_search.elapsed().as_secs_f64());
+            eprintln!(
+                "  [SA-fast] {n_starts} proxy starts: {:.2}s",
+                t_search.elapsed().as_secs_f64()
+            );
         }
         let mut bases = vec![raw];
         bases.append(&mut starts);
@@ -567,7 +594,11 @@ pub fn anneal_place(
             })
             .collect();
         if timed_top {
-            eprintln!("  [SA-fast] score {} candidates: {:.2}s", candidates.len(), t_score.elapsed().as_secs_f64());
+            eprintln!(
+                "  [SA-fast] score {} candidates: {:.2}s",
+                candidates.len(),
+                t_score.elapsed().as_secs_f64()
+            );
         }
         let (mut best, mut best_b, mut best_w, mut best_c) =
             (0usize, usize::MAX, usize::MAX, f64::INFINITY);
@@ -639,7 +670,16 @@ pub fn anneal_place(
         let mut refined = candidates[best].clone();
         let t_ref = std::time::Instant::now();
         let ref_cap = (30_000 / pins).clamp(80, 300);
-        anneal_items(r, &mut refined, inc, ir, false, true, seed ^ 0x5EF1, Some(ref_cap));
+        anneal_items(
+            r,
+            &mut refined,
+            inc,
+            ir,
+            false,
+            true,
+            seed ^ 0x5EF1,
+            Some(ref_cap),
+        );
         decongest(&mut refined);
         let (rb, rw, rx, rc) = score(&refined);
         let refined_wins = (rb, rw, rx).cmp(&(bb, bw, bx)) == std::cmp::Ordering::Less
@@ -650,7 +690,11 @@ pub fn anneal_place(
                 t_ref.elapsed().as_secs_f64()
             );
         }
-        let mut fast_final: Vec<Item> = if refined_wins { refined } else { candidates[best].clone() };
+        let mut fast_final: Vec<Item> = if refined_wins {
+            refined
+        } else {
+            candidates[best].clone()
+        };
         // MOTIF TILING (opt-in via `MOTIF_TILE`, dense-only): tile repeated same-part
         // anchor blocks (4× DRV8871 etc.) on a regular lattice — the human idiom for
         // repeated structure (mined rule #9). Strictly ADDITIVE: applied only when it
@@ -663,10 +707,8 @@ pub fn anneal_place(
             let mut cand = fast_final.clone();
             if align_repeated_motifs(&mut cand, inc, ir) {
                 decongest(&mut cand);
-                let before =
-                    (r.truthfulness_breaks(&fast_final), r.warnings(&fast_final));
-                let after =
-                    (r.truthfulness_breaks(&cand), r.warnings(&cand));
+                let before = (r.truthfulness_breaks(&fast_final), r.warnings(&fast_final));
+                let after = (r.truthfulness_breaks(&cand), r.warnings(&cand));
                 if after <= before {
                     fast_final = cand;
                 }
@@ -751,18 +793,46 @@ fn small_path_search(
     let mut state_d: Vec<Item> = Vec::new();
     let mut greedy_state: Vec<Item> = Vec::new();
     rayon::scope(|s| {
-        s.spawn(|_| { let mut f = || anneal_items(r, &mut state_b, inc, ir, true, false, rng_seed, None); tic("B broad", &mut f); });
-        { let mut f = || refine_items(r, &mut work); tic("greedy", &mut f); }
+        s.spawn(|_| {
+            let mut f = || anneal_items(r, &mut state_b, inc, ir, true, false, rng_seed, None);
+            tic("B broad", &mut f);
+        });
+        {
+            let mut f = || refine_items(r, &mut work);
+            tic("greedy", &mut f);
+        }
         greedy_state = work.to_vec();
         state_a = greedy_state.clone();
         state_c = greedy_state.clone();
         state_d = greedy_state.clone();
         rayon::join(
-            || { let mut f = || anneal_items(r, &mut state_a, inc, ir, false, false, rng_seed, None); tic("A seeded", &mut f); },
+            || {
+                let mut f = || anneal_items(r, &mut state_a, inc, ir, false, false, rng_seed, None);
+                tic("A seeded", &mut f);
+            },
             || {
                 rayon::join(
-                    || { let mut f = || anneal_items(r, &mut state_c, inc, ir, false, true, rng_seed ^ 0x9E3779B97F4A7C15, None); tic("C amplified", &mut f); },
-                    || { let mut f = || anneal_locality(r, &mut state_d, inc, ir, rng_seed ^ 0x517CC1B727220A95); tic("D locality", &mut f); },
+                    || {
+                        let mut f = || {
+                            anneal_items(
+                                r,
+                                &mut state_c,
+                                inc,
+                                ir,
+                                false,
+                                true,
+                                rng_seed ^ 0x9E3779B97F4A7C15,
+                                None,
+                            )
+                        };
+                        tic("C amplified", &mut f);
+                    },
+                    || {
+                        let mut f = || {
+                            anneal_locality(r, &mut state_d, inc, ir, rng_seed ^ 0x517CC1B727220A95)
+                        };
+                        tic("D locality", &mut f);
+                    },
                 )
             },
         );
@@ -832,8 +902,12 @@ fn anneal_items(
             base_cost(&r.measure(items))
         }
     };
-    let sats: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen).collect();
-    let anchors: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() >= 3).collect();
+    let sats: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
+        .collect();
+    let anchors: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() >= 3)
+        .collect();
     if sats.is_empty() {
         return;
     }
@@ -902,18 +976,21 @@ fn anneal_items(
         if m < 6 {
             // Relocate a satellite to a nearby cell (the big move greedy lacks).
             let i = sats[rng.below(sats.len())];
-            undo = vec![(i, items[i].at, items[i].angle)];
-            items[i].at = relocate(&mut rng, items[i].at, 2);
+            undo = vec![(i, items[i].at.into(), items[i].angle)];
+            items[i].at = relocate(&mut rng, items[i].at.into(), 2).into();
         } else if m < 8 {
             // Re-orient a satellite.
             let i = sats[rng.below(sats.len())];
-            undo = vec![(i, items[i].at, items[i].angle)];
+            undo = vec![(i, items[i].at.into(), items[i].angle)];
             items[i].angle = orient_angle(&items[i].geom, orients[rng.below(4)]);
         } else if m < 9 && sats.len() >= 2 {
             // Swap two satellites' positions (keep each orientation).
             let a = sats[rng.below(sats.len())];
             let b = sats[rng.below(sats.len())];
-            undo = vec![(a, items[a].at, items[a].angle), (b, items[b].at, items[b].angle)];
+            undo = vec![
+                (a, items[a].at.into(), items[a].angle),
+                (b, items[b].at.into(), items[b].angle),
+            ];
             let (pa, pb) = (items[a].at, items[b].at);
             items[a].at = pb;
             items[b].at = pa;
@@ -924,13 +1001,19 @@ fn anneal_items(
             // match the old anchor-only nudge (anchor pick + relocate); only the
             // block now follows, so the move is no longer self-defeating.
             let i = anchors[rng.below(anchors.len())];
-            let new = relocate(&mut rng, items[i].at, 1);
+            let new = relocate(&mut rng, items[i].at.into(), 1);
             let d = [new[0] - items[i].at[0], new[1] - items[i].at[1]];
             let group = cluster_group(i, &blocks, &siblings);
-            undo = group.iter().map(|&k| (k, items[k].at, items[k].angle)).collect();
+            undo = group
+                .iter()
+                .map(|&k| (k, items[k].at.into(), items[k].angle))
+                .collect();
             for &k in &group {
-                items[k].at =
-                    [sch_place::grid::snap(items[k].at[0] + d[0]), sch_place::grid::snap(items[k].at[1] + d[1])];
+                items[k].at = [
+                    sch_place::grid::snap(items[k].at[0] + d[0]),
+                    sch_place::grid::snap(items[k].at[1] + d[1]),
+                ]
+                .into();
             }
         } else {
             continue;
@@ -946,7 +1029,7 @@ fn anneal_items(
             }
         } else {
             for (i, at, angle) in undo {
-                items[i].at = at;
+                items[i].at = at.into();
                 items[i].angle = angle;
             }
         }
@@ -993,7 +1076,11 @@ fn proxy_cost(
         hi[0] = hi[0].max(it.at[0]);
         hi[1] = hi[1].max(it.at[1]);
     }
-    let spread = if hi[0] >= lo[0] { (hi[0] - lo[0]) + (hi[1] - lo[1]) } else { 0.0 };
+    let spread = if hi[0] >= lo[0] {
+        (hi[0] - lo[0]) + (hi[1] - lo[1])
+    } else {
+        0.0
+    };
     let mut cohere = 0.0;
     for (si, tgts) in cohesion {
         let (mut cx, mut cy) = (0.0f64, 0.0f64);
@@ -1043,16 +1130,13 @@ fn proxy_cost(
 /// region in one step (the crystal/reset-cluster gap). Run as an EXTRA candidate in
 /// `Anneal::search`: the pick ships it only if it beats the tuned paths on the true
 /// cost, so it is purely additive and never regresses a tuned fixture.
-fn anneal_locality(
-    r: &Realizer,
-    items: &mut [Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-    seed: u64,
-) {
-    let sats: Vec<usize> =
-        (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen).collect();
-    let anchors: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() >= 3).collect();
+fn anneal_locality(r: &Realizer, items: &mut [Item], inc: &Incidence, ir: &LayoutIr, seed: u64) {
+    let sats: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
+        .collect();
+    let anchors: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() >= 3)
+        .collect();
     if sats.is_empty() {
         return;
     }
@@ -1075,7 +1159,9 @@ fn anneal_locality(
         bhi[0] = bhi[0].max(it.at[0]);
         bhi[1] = bhi[1].max(it.at[1]);
     }
-    let span_cells = (((bhi[0] - blo[0]).max(bhi[1] - blo[1])) / COL_GAP).ceil().max(2.0) as i32;
+    let span_cells = (((bhi[0] - blo[0]).max(bhi[1] - blo[1])) / COL_GAP)
+        .ceil()
+        .max(2.0) as i32;
 
     // Cheap proxy ⇒ afford a big budget; no per-move routing, so no pin-count cap.
     let iters = (40 * sats.len()).clamp(800, 8000);
@@ -1088,7 +1174,11 @@ fn anneal_locality(
     // candidate pick re-routes the result, so fewer mid-search verifies never ships
     // worse, only tracks a slightly-staler true-best.
     let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
-    let max_verifies = if pins > FAST_PINS { (4000 / pins.max(1)).clamp(6, 128) } else { 256 };
+    let max_verifies = if pins > FAST_PINS {
+        (4000 / pins.max(1)).clamp(6, 128)
+    } else {
+        256
+    };
     let verify_period = (iters / max_verifies).max(1);
     let mut last_verify = 0usize;
 
@@ -1105,16 +1195,19 @@ fn anneal_locality(
         let undo: Vec<(usize, [f64; 2], f64)>;
         if m < 6 {
             let i = sats[rng.below(sats.len())];
-            undo = vec![(i, items[i].at, items[i].angle)];
-            items[i].at = relocate(&mut rng, items[i].at, 2);
+            undo = vec![(i, items[i].at.into(), items[i].angle)];
+            items[i].at = relocate(&mut rng, items[i].at.into(), 2).into();
         } else if m < 8 {
             let i = sats[rng.below(sats.len())];
-            undo = vec![(i, items[i].at, items[i].angle)];
+            undo = vec![(i, items[i].at.into(), items[i].angle)];
             items[i].angle = orient_angle(&items[i].geom, orients[rng.below(4)]);
         } else if m < 9 && sats.len() >= 2 {
             let a = sats[rng.below(sats.len())];
             let b = sats[rng.below(sats.len())];
-            undo = vec![(a, items[a].at, items[a].angle), (b, items[b].at, items[b].angle)];
+            undo = vec![
+                (a, items[a].at.into(), items[a].angle),
+                (b, items[b].at.into(), items[b].angle),
+            ];
             let (pa, pb) = (items[a].at, items[b].at);
             items[a].at = pb;
             items[b].at = pa;
@@ -1123,13 +1216,19 @@ fn anneal_locality(
             // 1-cell nudge when cold — carries the anchor's whole block rigidly.
             let radius = (((1.0 - p) * span_cells as f64).round() as i32).max(1);
             let i = anchors[rng.below(anchors.len())];
-            let new = relocate(&mut rng, items[i].at, radius);
+            let new = relocate(&mut rng, items[i].at.into(), radius);
             let d = [new[0] - items[i].at[0], new[1] - items[i].at[1]];
             let group = cluster_group(i, &blocks, &siblings);
-            undo = group.iter().map(|&k| (k, items[k].at, items[k].angle)).collect();
+            undo = group
+                .iter()
+                .map(|&k| (k, items[k].at.into(), items[k].angle))
+                .collect();
             for &k in &group {
-                items[k].at =
-                    [sch_place::grid::snap(items[k].at[0] + d[0]), sch_place::grid::snap(items[k].at[1] + d[1])];
+                items[k].at = [
+                    sch_place::grid::snap(items[k].at[0] + d[0]),
+                    sch_place::grid::snap(items[k].at[1] + d[1]),
+                ]
+                .into();
             }
         } else {
             continue;
@@ -1154,7 +1253,7 @@ fn anneal_locality(
             }
         } else {
             for (i, at, angle) in undo {
-                items[i].at = at;
+                items[i].at = at.into();
                 items[i].angle = angle;
             }
         }
@@ -1176,8 +1275,9 @@ fn anneal_locality(
 /// two parts into a readability-lint touch. The SHIPPED warnings are still measured
 /// by the one real route emit runs afterwards; this only positions.
 fn polish_proxy(items: &mut [Item], inc: &Incidence, ir: &LayoutIr, magnet: bool, gravity: bool) {
-    let sats: Vec<usize> =
-        (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen).collect();
+    let sats: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
+        .collect();
     if sats.is_empty() {
         return;
     }
@@ -1207,11 +1307,11 @@ fn polish_proxy(items: &mut [Item], inc: &Incidence, ir: &LayoutIr, magnet: bool
                 {
                     continue;
                 }
-                items[i].at = p;
+                items[i].at = p.into();
                 let c = proxy_cost(items, inc, ir, &cohesion);
                 if c + 0.25 < best_cost {
                     best_cost = c;
-                    best_pos = p;
+                    best_pos = p.into();
                 }
             }
             items[i].at = best_pos;
@@ -1276,11 +1376,11 @@ fn magnet_proxy(
                 {
                     continue;
                 }
-                items[si].at = p;
+                items[si].at = p.into();
                 let c = proxy_cost(items, inc, ir, cohesion);
                 if c + 0.25 < best_c {
                     best_c = c;
-                    best_pos = p;
+                    best_pos = p.into();
                 }
             }
         }
@@ -1302,9 +1402,12 @@ fn block_gravity_proxy(
     ir: &LayoutIr,
     cohesion: &[(usize, Vec<(usize, usize)>)],
 ) {
-    let anchors: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() >= 3).collect();
-    let sats: Vec<usize> =
-        (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen).collect();
+    let anchors: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() >= 3)
+        .collect();
+    let sats: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
+        .collect();
     if anchors.is_empty() {
         return;
     }
@@ -1345,10 +1448,9 @@ fn block_gravity_proxy(
                     let np = [items[k].at[0] + delta[0], items[k].at[1] + delta[1]];
                     let r = item_rect(&items[k], np);
                     let pad = [r[0] - G, r[1] - G, r[2] + G, r[3] + G];
-                    items
-                        .iter()
-                        .enumerate()
-                        .any(|(j, it)| !in_group.contains(&j) && rects_overlap(pad, item_rect(it, it.at)))
+                    items.iter().enumerate().any(|(j, it)| {
+                        !in_group.contains(&j) && rects_overlap(pad, item_rect(it, it.at))
+                    })
                 });
                 if collide {
                     continue;
@@ -1381,9 +1483,12 @@ fn block_gravity_proxy(
 /// parts), unlike the global authored grid which over-constrains and hurts. Finalize-only;
 /// positions only — connectivity untouched (router redraws; long inter-cell nets → labels).
 fn align_repeated_motifs(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) -> bool {
-    let anchors: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() >= 3).collect();
-    let sats: Vec<usize> =
-        (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen).collect();
+    let anchors: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() >= 3)
+        .collect();
+    let sats: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
+        .collect();
     let blocks = build_anchor_blocks(items, inc, &anchors, &sats, ir);
     let blk_bbox = |items: &[Item], ai: usize| -> [f64; 4] {
         let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
@@ -1413,13 +1518,29 @@ fn align_repeated_motifs(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) -> 
             items[a].at[0]
                 .partial_cmp(&items[b].at[0])
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then(items[a].at[1].partial_cmp(&items[b].at[1]).unwrap_or(std::cmp::Ordering::Equal))
+                .then(
+                    items[a].at[1]
+                        .partial_cmp(&items[b].at[1])
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
         });
         const GAP: f64 = 7.62;
-        let pitch_x =
-            g.iter().map(|&ai| { let b = blk_bbox(items, ai); b[2] - b[0] }).fold(0.0_f64, f64::max) + GAP;
-        let pitch_y =
-            g.iter().map(|&ai| { let b = blk_bbox(items, ai); b[3] - b[1] }).fold(0.0_f64, f64::max) + GAP;
+        let pitch_x = g
+            .iter()
+            .map(|&ai| {
+                let b = blk_bbox(items, ai);
+                b[2] - b[0]
+            })
+            .fold(0.0_f64, f64::max)
+            + GAP;
+        let pitch_y = g
+            .iter()
+            .map(|&ai| {
+                let b = blk_bbox(items, ai);
+                b[3] - b[1]
+            })
+            .fold(0.0_f64, f64::max)
+            + GAP;
         let cols = (g.len() as f64).sqrt().ceil().max(1.0) as usize;
         let origin = blk_bbox(items, g[0]);
         for (idx, &ai) in g.iter().enumerate() {

@@ -13,6 +13,7 @@ circuit-lang = { path = "../circuit-lang" }
 circuit-graph = { path = "../circuit-graph" }
 kicad-cli = { path = "../kicad-cli" }
 kicad-symbol = { path = "../kicad-symbol" }
+geom = { path = "../geom" }
 indexmap.workspace = true
 serde_json.workspace = true
 rayon.workspace = true

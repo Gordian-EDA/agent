@@ -2,11 +2,7 @@
 //! Gerbers + Excellon drill + pick-and-place + (when a schematic is present) a
 //! BOM, all under a single `fab/` directory the user can hand to a board house.
 //!
-//! This is the one-click bundle on top of [`export_board`](super::export_board):
-//! `export_board` writes (and DRC-checks) the `.kicad_pcb`; `export_fab` runs
-//! that board through the [`kicad_cli`] fabrication wrappers. It is read-only
-//! over the design (it only reads the exported board) and never mutates the
-//! draft, so it is a `ReadOnly` tool.
+//! This is the one-click bundle for the saved active `.kicad_pcb`.
 
 use std::path::{Path, PathBuf};
 
@@ -20,10 +16,8 @@ use crate::tools::PcbToolCtx;
 /// Run the routed board through the fabrication exporters into `<project>/fab/`
 /// and report the produced files.
 ///
-/// Precondition: the board must already be exported (and routed) — run
-/// `export_board` first. We require the `.kicad_pcb` to exist rather than
-/// re-synthesizing it, so the bundle always reflects the board the user has
-/// inspected. Optional `path` overrides the input board; optional `out_dir`
+/// Precondition: the board must already exist and should have passed
+/// `check_board`. Optional `path` overrides the input board; optional `out_dir`
 /// overrides the output directory (default `<project>/fab/`).
 ///
 /// Produces, all keyed off the board: Gerbers (one `*.gbr` per layer), a
@@ -40,8 +34,8 @@ pub fn export_fab(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     if !board.is_file() {
         return Ok(json!({
             "error": format!(
-                "no routed board at {} — run place_board → route_board → export_board first, \
-                 then export_fab (it bundles the exported .kicad_pcb)",
+                "no routed board at {} — run derive_board → place_board → route_board → check_board first, \
+                 then export_fab (it bundles the saved .kicad_pcb)",
                 board.display()
             ),
         }));
@@ -58,7 +52,10 @@ pub fn export_fab(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     }
 
     let cli = KicadCli::new(ctx.env());
-    let stem = board.file_stem().and_then(|s| s.to_str()).unwrap_or("board");
+    let stem = board
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("board");
 
     // Each exporter is independent; a failure of one (e.g. a board with no
     // through-holes still yields a drill file) is reported per-artifact rather
@@ -99,10 +96,7 @@ pub fn export_fab(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     };
 
     files.sort();
-    let names: Vec<String> = files
-        .iter()
-        .filter_map(|p| file_name(p))
-        .collect();
+    let names: Vec<String> = files.iter().filter_map(|p| file_name(p)).collect();
 
     let note = if files.is_empty() {
         "fab export produced no files — see errors.".to_string()
@@ -112,7 +106,11 @@ pub fn export_fab(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
              {bom_note} Hand the {} directory to a board house.",
             out_dir.display(),
             files.len(),
-            if ctx.sch_path().is_file() { " + BOM" } else { "" },
+            if ctx.sch_path().is_file() {
+                " + BOM"
+            } else {
+                ""
+            },
             out_dir.display(),
         )
     };

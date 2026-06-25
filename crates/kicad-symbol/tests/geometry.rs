@@ -16,7 +16,7 @@ fn device_r_pin_geometry() {
     let g = SymbolGeometry::load(&env, "Device:R").unwrap();
     assert_eq!(g.pins.len(), 2);
     // Device:R pins are vertical at x=0, y=±3.81, length 1.27 (per spike).
-    let ys: Vec<f64> = g.pins.iter().map(|p| p.at[1]).collect();
+    let ys: Vec<f64> = g.pins.iter().map(|p| p.at.y).collect();
     assert!(ys.contains(&3.81) && ys.contains(&-3.81), "{ys:?}");
     assert!(g.pins.iter().all(|p| (p.length - 1.27).abs() < 1e-9));
     // Device:R is single-unit: every pin carries unit identity 1.
@@ -34,8 +34,8 @@ fn approx_size_scales_with_symbol() {
         return;
     };
     let r = SymbolGeometry::load(&env, "Device:R").unwrap().approx_size();
-    assert!(r[1] > r[0], "R is taller than wide: {r:?}");
-    assert!(r[1] <= 15.0, "passive stays small: {r:?}");
+    assert!(r.y > r.x, "R is taller than wide: {r:?}");
+    assert!(r.y <= 15.0, "passive stays small: {r:?}");
 }
 
 /// Multi-unit symbols (op-amps, logic gates) flatten every unit's pins into the
@@ -140,8 +140,8 @@ fn build_schematic(lib_id: &str, def: &str, g: &SymbolGeometry) -> String {
     let mut labels = String::new();
     for (i, p) in g.pins.iter().enumerate() {
         let rad = p.angle.to_radians();
-        let tipx = p.at[0] + p.length * rad.cos();
-        let tipy = p.at[1] + p.length * rad.sin();
+        let tipx = p.at.x + p.length * rad.cos();
+        let tipy = p.at.y + p.length * rad.sin();
         let (ex, ey) = (ix + tipx, iy - tipy);
         labels.push_str(&format!(
             "\t(label \"N{i}\" (at {ex} {ey} 0) (effects (font (size 1.27 1.27))) (uuid \"cccccccc-0000-4000-8000-00000000000{i}\"))\n"

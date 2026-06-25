@@ -36,9 +36,8 @@
 //! - Vias become a square bbox of side `size`.
 //! - Zones are skipped unless they are keepouts; a keepout becomes a full-board
 //!   obstacle. (Copper-fill zones do not constrain a fresh route in v1.)
-//! - Design rules come from `RouteProblem` defaults: `PcbSetup` in this
-//!   kiutils version only surfaces mask/paste clearances, not copper clearance
-//!   or track width, so there is nothing board-specific to read.
+//! - Net-class design rules are recovered from top-level `(net_class …)` board
+//!   text because the typed `kiutils` setup wrapper does not expose them.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -46,6 +45,7 @@ use std::io;
 use std::path::Path;
 
 use kiutils_kicad::{PcbAst, PcbFile, PcbFootprint, PcbPad};
+use kiutils_sexpr::{Atom, Node, parse_one};
 use pcb_model::{
     Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, RouteProblem, RouteSolution, Trace,
     Via, ViaSpan,
@@ -75,30 +75,28 @@ pub fn read_problem(path: &Path) -> io::Result<BoardProblem> {
     let layer_count = layer_names.len().max(1) as u32;
 
     let net_codes = net_codes(ast);
-    let connections = connections(ast, &layer_names);
     // kiutils 0.3 drops custom-pad primitive geometry, so a custom pad would be
     // modelled by its tiny base anchor (under-sizing real copper → the placer /
     // outline crop seats it too close to the edge, a copper_edge_clearance fault).
     // Re-parse each custom pad's primitive bbox from the raw source so its obstacle
     // reflects the true copper. (Same fix as footlib::Footprint::load.)
     let raw = std::fs::read_to_string(path).unwrap_or_default();
+    let connections = connections(ast, &layer_names, &raw);
+    let rules = read_net_class_rules(&raw);
     let custom_bboxes = crate::footlib::custom_pad_bboxes(&raw);
-    let obstacles = obstacles(ast, &layer_names, &custom_bboxes);
+    let obstacles = obstacles(ast, &layer_names, &custom_bboxes, &raw);
     let bounds = board_bounds(ast);
 
     let problem = RouteProblem {
         layer_count,
-        min_trace_width: 0.25,
+        min_trace_width: rules.min_trace_width.unwrap_or(0.25),
         obstacles,
         connections,
         bounds,
-        // Defaults: kiutils' PcbSetup exposes only mask/paste clearances in
-        // this version, so there is no board-specific copper clearance / track
-        // width to read — fall back to the RouteProblem defaults.
-        clearance: 0.2,
-        via_diameter: 0.6,
-        via_drill: 0.3,
-        net_widths: Default::default(),
+        clearance: rules.clearance.unwrap_or(0.2),
+        via_diameter: rules.via_diameter.unwrap_or(0.6),
+        via_drill: rules.via_drill.unwrap_or(0.3),
+        net_widths: rules.net_widths,
         outline: None,
         escape_layers: Default::default(),
     };
@@ -108,6 +106,208 @@ pub fn read_problem(path: &Path) -> io::Result<BoardProblem> {
         net_codes,
         layer_names,
     })
+}
+
+#[derive(Debug, Default)]
+struct NetClassRules {
+    min_trace_width: Option<f64>,
+    clearance: Option<f64>,
+    via_diameter: Option<f64>,
+    via_drill: Option<f64>,
+    net_widths: BTreeMap<String, f64>,
+}
+
+fn read_net_class_rules(raw: &str) -> NetClassRules {
+    let Ok(doc) = parse_one(raw) else {
+        return NetClassRules::default();
+    };
+    let Some(root) = doc.nodes.first() else {
+        return NetClassRules::default();
+    };
+
+    let mut rules = NetClassRules::default();
+    for class in direct_children(root, "net_class") {
+        let Some(items) = list_items(class) else {
+            continue;
+        };
+        let trace_width = find_child_f64(class, "trace_width");
+        if let Some(width) = trace_width {
+            rules.min_trace_width = Some(rules.min_trace_width.map_or(width, |v| v.min(width)));
+        }
+        if let Some(clearance) = find_child_f64(class, "clearance") {
+            rules.clearance = Some(rules.clearance.map_or(clearance, |v| v.min(clearance)));
+        }
+        if let Some(via_dia) = find_child_f64(class, "via_dia") {
+            rules.via_diameter = Some(rules.via_diameter.map_or(via_dia, |v| v.min(via_dia)));
+        }
+        if let Some(via_drill) = find_child_f64(class, "via_drill") {
+            rules.via_drill = Some(rules.via_drill.map_or(via_drill, |v| v.min(via_drill)));
+        }
+        let Some(width) = trace_width else {
+            continue;
+        };
+        for item in &items[1..] {
+            if head(item).as_deref() == Some("add_net")
+                && let Some(net) = nth_atom_string(item, 1)
+            {
+                rules.net_widths.insert(net, width);
+            }
+        }
+    }
+    rules
+}
+
+fn list_items(node: &Node) -> Option<&[Node]> {
+    match node {
+        Node::List { items, .. } => Some(items),
+        _ => None,
+    }
+}
+
+fn head(node: &Node) -> Option<String> {
+    nth_atom_string(node, 0)
+}
+
+fn nth_atom_string(node: &Node, index: usize) -> Option<String> {
+    let items = list_items(node)?;
+    atom_str(items.get(index)?)
+}
+
+fn atom_str(node: &Node) -> Option<String> {
+    match node {
+        Node::Atom { atom, .. } => Some(match atom {
+            Atom::Symbol(s) | Atom::Quoted(s) => s.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn node_f64(node: &Node) -> Option<f64> {
+    match node {
+        Node::Atom {
+            atom: Atom::Symbol(s),
+            ..
+        } => s.parse().ok(),
+        _ => None,
+    }
+}
+
+fn direct_children<'a>(node: &'a Node, name: &str) -> impl Iterator<Item = &'a Node> {
+    list_items(node)
+        .into_iter()
+        .flat_map(|items| items.iter())
+        .filter(move |child| head(child).as_deref() == Some(name))
+}
+
+fn find_child_f64(node: &Node, name: &str) -> Option<f64> {
+    let child = direct_children(node, name).next()?;
+    let items = list_items(child)?;
+    node_f64(items.get(1)?)
+}
+
+fn first_child_atom_string(node: &Node, name: &str) -> Option<String> {
+    let child = direct_children(node, name).next()?;
+    nth_atom_string(child, 1)
+}
+
+#[cfg(test)]
+mod read_problem_rule_tests {
+    use super::*;
+
+    #[test]
+    fn reads_net_class_trace_widths_from_board_text() {
+        let src = include_str!("../tests/fixtures/two_res.kicad_pcb");
+        let board = src.replace(
+            "\t(net 2 \"SIG\")\n",
+            "\t(net 2 \"SIG\")\n\
+\t(net_class \"Power\" \"fat power\"\n\
+\t\t(clearance 0.3)\n\
+\t\t(trace_width 0.8)\n\
+\t\t(via_dia 0.7)\n\
+\t\t(via_drill 0.35)\n\
+\t\t(add_net \"GND\")\n\
+\t)\n\
+\t(net_class \"Signal\" \"thin signal\"\n\
+\t\t(clearance 0.16)\n\
+\t\t(trace_width 0.18)\n\
+\t\t(via_dia 0.45)\n\
+\t\t(via_drill 0.22)\n\
+\t\t(add_net \"SIG\")\n\
+\t)\n",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("board.kicad_pcb");
+        std::fs::write(&path, board).unwrap();
+
+        let problem = read_problem(&path).unwrap().problem;
+
+        assert_eq!(problem.min_trace_width, 0.18);
+        assert_eq!(problem.net_width("SIG"), 0.18);
+        assert_eq!(problem.net_width("GND"), 0.8);
+        assert_eq!(problem.clearance, 0.16);
+        assert_eq!(problem.via_diameter, 0.45);
+        assert_eq!(problem.via_drill, 0.22);
+    }
+
+    #[test]
+    fn reads_copper_zones_as_same_net_obstacles() {
+        let src = include_str!("../tests/fixtures/two_res.kicad_pcb");
+        let board = src.replace(
+            "\n)",
+            "\n\t(zone\n\t\t(net 1)\n\t\t(net_name \"GND\")\n\t\t(layer \"B.Cu\")\n\t\t(uuid \"22222222-3333-4444-5555-666666666666\")\n\t\t(hatch edge 0.5)\n\t\t(connect_pads yes (clearance 0.2))\n\t\t(min_thickness 0.2)\n\t\t(fill yes)\n\t\t(polygon (pts (xy 1 1) (xy 5 1) (xy 5 4) (xy 1 4)))\n\t)\n)",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("board.kicad_pcb");
+        std::fs::write(&path, board).unwrap();
+
+        let problem = read_problem(&path).unwrap().problem;
+        let zone = problem
+            .obstacles
+            .iter()
+            .find(|ob| ob.kind == "zone")
+            .expect("zone obstacle");
+
+        assert_eq!(zone.connected_to, vec!["GND".to_owned()]);
+        assert_eq!(zone.layers, vec![LayerRef::bottom()]);
+        assert_eq!(zone.center, Point2 { x: 3.0, y: 2.5 });
+        assert_eq!(zone.width, 4.0);
+        assert_eq!(zone.height, 3.0);
+    }
+
+    #[test]
+    fn reads_kicad_10_string_pad_nets_as_connections() {
+        let src = include_str!("../tests/fixtures/two_res.kicad_pcb");
+        let board = src
+            .replace("\t\t\t(net 1 \"GND\")", "\t\t\t(net \"GND\")")
+            .replace("\t\t\t(net 2 \"SIG\")", "\t\t\t(net \"SIG\")")
+            .replace("\t(net 1 \"GND\")\n", "")
+            .replace("\t(net 2 \"SIG\")\n", "");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("board.kicad_pcb");
+        std::fs::write(&path, board).unwrap();
+
+        let problem = read_problem(&path).unwrap().problem;
+
+        let mut nets: Vec<_> = problem
+            .connections
+            .iter()
+            .map(|c| (c.name.as_str(), c.points_to_connect.len()))
+            .collect();
+        nets.sort_unstable();
+        assert_eq!(nets, vec![("GND", 2), ("SIG", 2)]);
+        assert!(
+            problem
+                .obstacles
+                .iter()
+                .any(|ob| ob.connected_to == ["GND".to_owned()])
+        );
+        assert!(
+            problem
+                .obstacles
+                .iter()
+                .any(|ob| ob.connected_to == ["SIG".to_owned()])
+        );
+    }
 }
 
 /// A board parsed at the FOOTPRINT level — each part's reference + lib_id +
@@ -256,17 +456,17 @@ fn net_codes(ast: &PcbAst) -> BTreeMap<String, i32> {
 
 /// One [`Connection`] per named net, its `points_to_connect` the absolute
 /// centers of every pad on that net.
-fn connections(ast: &PcbAst, layer_names: &[String]) -> Vec<Connection> {
+fn connections(ast: &PcbAst, layer_names: &[String], raw: &str) -> Vec<Connection> {
     // Net name → accumulated route points, keyed in a BTreeMap for stable order.
     let mut by_net: BTreeMap<String, Vec<RoutePoint>> = BTreeMap::new();
 
     for fp in &ast.footprints {
         for pad in &fp.pads {
             let Some(net) = &pad.net else { continue };
-            let (Some(code), Some(name)) = (net.code, net.name.clone()) else {
+            let Some(name) = net.name.clone() else {
                 continue;
             };
-            if code == 0 || name.is_empty() {
+            if name.is_empty() || net.code == Some(0) {
                 continue;
             }
             let center = pad_center(fp, pad);
@@ -278,6 +478,9 @@ fn connections(ast: &PcbAst, layer_names: &[String]) -> Vec<Connection> {
             });
         }
     }
+    if by_net.is_empty() {
+        by_net = raw_pad_connections(raw, layer_names);
+    }
 
     by_net
         .into_iter()
@@ -286,6 +489,79 @@ fn connections(ast: &PcbAst, layer_names: &[String]) -> Vec<Connection> {
             points_to_connect,
         })
         .collect()
+}
+
+fn raw_pad_connections(raw: &str, layer_names: &[String]) -> BTreeMap<String, Vec<RoutePoint>> {
+    let Ok(doc) = parse_one(raw) else {
+        return BTreeMap::new();
+    };
+    let Some(root) = doc.nodes.first() else {
+        return BTreeMap::new();
+    };
+    let mut by_net: BTreeMap<String, Vec<RoutePoint>> = BTreeMap::new();
+    for fp in direct_children(root, "footprint") {
+        let (fx, fy, rot) = at_xyz(fp);
+        for pad in direct_children(fp, "pad") {
+            let Some(net) = pad_net_name(pad) else {
+                continue;
+            };
+            let (dx, dy, _) = at_xyz(pad);
+            let offset = Point2::new(dx, dy).rotate(rot);
+            let layer = raw_pad_layer(pad, layer_names);
+            by_net.entry(net).or_default().push(RoutePoint {
+                x: fx + offset.x,
+                y: fy + offset.y,
+                layer,
+            });
+        }
+    }
+    by_net
+}
+
+fn at_xyz(node: &Node) -> (f64, f64, f64) {
+    let Some(at) = direct_children(node, "at").next() else {
+        return (0.0, 0.0, 0.0);
+    };
+    let Some(items) = list_items(at) else {
+        return (0.0, 0.0, 0.0);
+    };
+    let x = items.get(1).and_then(node_f64).unwrap_or(0.0);
+    let y = items.get(2).and_then(node_f64).unwrap_or(0.0);
+    let rot = items.get(3).and_then(node_f64).unwrap_or(0.0);
+    (x, y, rot)
+}
+
+fn pad_net_name(pad: &Node) -> Option<String> {
+    let net = direct_children(pad, "net").next()?;
+    let items = list_items(net)?;
+    items
+        .iter()
+        .skip(1)
+        .filter_map(atom_str)
+        .filter(|s| !s.is_empty() && s.parse::<i32>().ok() != Some(0))
+        .next_back()
+}
+
+fn raw_pad_layer(pad: &Node, layer_names: &[String]) -> LayerRef {
+    let Some(layers) = direct_children(pad, "layers").next() else {
+        return LayerRef::top();
+    };
+    let names: Vec<_> = list_items(layers)
+        .into_iter()
+        .flat_map(|items| items.iter().skip(1))
+        .filter_map(atom_str)
+        .collect();
+    if names.iter().any(|l| l == "F.Cu" || l == "*.Cu") {
+        LayerRef::top()
+    } else if names.iter().any(|l| l == "B.Cu" || l == "*.Cu") {
+        LayerRef::bottom()
+    } else {
+        names
+            .iter()
+            .find(|l| l.ends_with(".Cu"))
+            .map(|l| layer_ref_for(l, layer_names))
+            .unwrap_or_else(LayerRef::top)
+    }
 }
 
 /// The connection layer for a pad: `top` for an F.Cu pad, `bottom` for a B.Cu
@@ -324,7 +600,12 @@ fn pad_center(fp: &PcbFootprint, pad: &PcbPad) -> Point2 {
 
 // ── obstacles ────────────────────────────────────────────────────────────────
 
-fn obstacles(ast: &PcbAst, layer_names: &[String], custom_bboxes: &[(f64, f64)]) -> Vec<Obstacle> {
+fn obstacles(
+    ast: &PcbAst,
+    layer_names: &[String],
+    custom_bboxes: &[(f64, f64)],
+    raw: &str,
+) -> Vec<Obstacle> {
     let mut out = Vec::new();
 
     // Every pad becomes a rect obstacle on the copper layers it occupies,
@@ -332,6 +613,8 @@ fn obstacles(ast: &PcbAst, layer_names: &[String], custom_bboxes: &[(f64, f64)])
     // its primitive bbox (kiutils gives only the base anchor) — `custom_bboxes`
     // lists those half-extents in pad order.
     let mut ci = 0;
+    let raw_pad_nets = raw_pad_net_names(raw);
+    let mut pi = 0;
     for fp in &ast.footprints {
         for pad in &fp.pads {
             let custom_half = if pad.shape.as_deref() == Some("custom") {
@@ -341,7 +624,9 @@ fn obstacles(ast: &PcbAst, layer_names: &[String], custom_bboxes: &[(f64, f64)])
             } else {
                 None
             };
-            out.push(pad_obstacle(fp, pad, layer_names, custom_half));
+            let raw_net = raw_pad_nets.get(pi).and_then(|n| n.as_deref());
+            pi += 1;
+            out.push(pad_obstacle(fp, pad, layer_names, custom_half, raw_net));
         }
     }
 
@@ -405,8 +690,124 @@ fn obstacles(ast: &PcbAst, layer_names: &[String], custom_bboxes: &[(f64, f64)])
             });
         }
     }
+    out.extend(zone_obstacles(raw, layer_names));
 
     out
+}
+
+fn raw_pad_net_names(raw: &str) -> Vec<Option<String>> {
+    let Ok(doc) = parse_one(raw) else {
+        return Vec::new();
+    };
+    let Some(root) = doc.nodes.first() else {
+        return Vec::new();
+    };
+    direct_children(root, "footprint")
+        .flat_map(|fp| direct_children(fp, "pad"))
+        .map(pad_net_name)
+        .collect()
+}
+
+fn zone_obstacles(raw: &str, layer_names: &[String]) -> Vec<Obstacle> {
+    let Ok(doc) = parse_one(raw) else {
+        return Vec::new();
+    };
+    let Some(root) = doc.nodes.first() else {
+        return Vec::new();
+    };
+
+    direct_children(root, "zone")
+        .filter(|zone| direct_children(zone, "keepout").next().is_none())
+        .filter_map(|zone| {
+            let net = first_child_atom_string(zone, "net_name");
+            let layers = zone_layers(zone, layer_names);
+            let points = zone_points(zone);
+            bbox_obstacle("zone", layers, net.into_iter().collect(), &points)
+        })
+        .collect()
+}
+
+fn zone_layers(zone: &Node, layer_names: &[String]) -> Vec<LayerRef> {
+    if let Some(layer) = first_child_atom_string(zone, "layer") {
+        return vec![layer_ref_for(&layer, layer_names)];
+    }
+    if let Some(layers_node) = direct_children(zone, "layers").next()
+        && let Some(items) = list_items(layers_node)
+    {
+        let layers: Vec<LayerRef> = items
+            .iter()
+            .skip(1)
+            .filter_map(atom_str)
+            .map(|name| layer_ref_for(&name, layer_names))
+            .collect();
+        if !layers.is_empty() {
+            return layers;
+        }
+    }
+    all_layer_refs(layer_names)
+}
+
+fn zone_points(zone: &Node) -> Vec<Point2> {
+    let mut points = Vec::new();
+    for child in list_items(zone)
+        .into_iter()
+        .flat_map(|items| items.iter().skip(1))
+    {
+        match head(child).as_deref() {
+            Some("polygon") | Some("filled_polygon") => {
+                if let Some(pts) = direct_children(child, "pts").next()
+                    && let Some(items) = list_items(pts)
+                {
+                    points.extend(items.iter().skip(1).filter_map(xy_point));
+                }
+            }
+            _ => {}
+        }
+    }
+    points
+}
+
+fn xy_point(node: &Node) -> Option<Point2> {
+    if head(node).as_deref() != Some("xy") {
+        return None;
+    }
+    let items = list_items(node)?;
+    Some(Point2 {
+        x: node_f64(items.get(1)?)?,
+        y: node_f64(items.get(2)?)?,
+    })
+}
+
+fn bbox_obstacle(
+    kind: &str,
+    layers: Vec<LayerRef>,
+    connected_to: Vec<String>,
+    points: &[Point2],
+) -> Option<Obstacle> {
+    if points.is_empty() {
+        return None;
+    }
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for p in points {
+        min_x = min_x.min(p.x);
+        max_x = max_x.max(p.x);
+        min_y = min_y.min(p.y);
+        max_y = max_y.max(p.y);
+    }
+    Some(Obstacle {
+        kind: kind.to_owned(),
+        layers,
+        center: Point2 {
+            x: (min_x + max_x) / 2.0,
+            y: (min_y + max_y) / 2.0,
+        },
+        width: max_x - min_x,
+        height: max_y - min_y,
+        connected_to,
+    })
 }
 
 /// A single pad as a rect obstacle (rotated-rect AABB, v1 conservatism).
@@ -415,6 +816,7 @@ fn pad_obstacle(
     pad: &PcbPad,
     layer_names: &[String],
     custom_half: Option<(f64, f64)>,
+    raw_net: Option<&str>,
 ) -> Obstacle {
     let center = pad_center(fp, pad);
     let [mut w, mut h] = pad.size.unwrap_or([0.0, 0.0]);
@@ -433,6 +835,7 @@ fn pad_obstacle(
         .as_ref()
         .and_then(|n| n.name.clone())
         .filter(|n| !n.is_empty())
+        .or_else(|| raw_net.map(str::to_owned))
         .into_iter()
         .collect();
 
@@ -556,8 +959,7 @@ fn copper_uuid(key: &str) -> String {
 /// no trailing zeros (`10`, `8.9125`), and `-0.0` collapsed to `0`. Mirrors
 /// `sch_io::write::fmt_coord`'s negative-zero canonicalization.
 ///
-/// The single owner of KiCAD coordinate formatting; `pcb-synth` re-uses it via
-/// the [`crate::fmt_num`] re-export so synthesized boards stay byte-identical.
+/// The single owner of KiCAD coordinate formatting for PCB-side file edits.
 pub fn fmt_num(v: f64) -> String {
     let v = if v == 0.0 { 0.0 } else { v };
     // Rust's `{}` for f64 already prints the shortest round-tripping decimal
@@ -868,7 +1270,12 @@ mod via_render_tests {
             min_trace_width: 0.2,
             obstacles: vec![],
             connections: vec![],
-            bounds: Rect { min_x: 0.0, max_x: 10.0, min_y: 0.0, max_y: 10.0 },
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 10.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
             clearance: 0.15,
             via_diameter: 0.5,
             via_drill: 0.3,
@@ -881,7 +1288,12 @@ mod via_render_tests {
         BoardProblem {
             problem,
             net_codes,
-            layer_names: vec!["F.Cu".into(), "In1.Cu".into(), "In2.Cu".into(), "B.Cu".into()],
+            layer_names: vec![
+                "F.Cu".into(),
+                "In1.Cu".into(),
+                "In2.Cu".into(),
+                "B.Cu".into(),
+            ],
         }
     }
 
@@ -901,24 +1313,50 @@ mod via_render_tests {
     #[test]
     fn through_via_emits_no_keyword_full_stack() {
         let s = render(ViaSpan::Through);
-        assert!(s.contains("(via (at 8.4 8.4)"), "through via has no type keyword: {s}");
-        assert!(s.contains("(layers \"F.Cu\" \"B.Cu\")"), "through spans the full stack: {s}");
+        assert!(
+            s.contains("(via (at 8.4 8.4)"),
+            "through via has no type keyword: {s}"
+        );
+        assert!(
+            s.contains("(layers \"F.Cu\" \"B.Cu\")"),
+            "through spans the full stack: {s}"
+        );
     }
 
     #[test]
     fn micro_via_emits_bare_micro_keyword_and_span() {
         // F.Cu -> In1.Cu microvia (the de-risked HDI inner-ball escape form).
-        let s = render(ViaSpan::Partial { from: 0, to: 1, micro: true });
-        assert!(s.contains("(via micro (at 8.4 8.4)"), "micro keyword must be BARE after via: {s}");
-        assert!(s.contains("(layers \"F.Cu\" \"In1.Cu\")"), "micro spans its own layers: {s}");
+        let s = render(ViaSpan::Partial {
+            from: 0,
+            to: 1,
+            micro: true,
+        });
+        assert!(
+            s.contains("(via micro (at 8.4 8.4)"),
+            "micro keyword must be BARE after via: {s}"
+        );
+        assert!(
+            s.contains("(layers \"F.Cu\" \"In1.Cu\")"),
+            "micro spans its own layers: {s}"
+        );
         // The wrong `(type micro)` form silently breaks the json DRC writer — must never appear.
         assert!(!s.contains("(type"), "no (type ...) sub-node allowed: {s}");
     }
 
     #[test]
     fn blind_via_emits_bare_blind_keyword_and_span() {
-        let s = render(ViaSpan::Partial { from: 0, to: 2, micro: false });
-        assert!(s.contains("(via blind (at 8.4 8.4)"), "blind keyword must be BARE after via: {s}");
-        assert!(s.contains("(layers \"F.Cu\" \"In2.Cu\")"), "blind spans its own layers: {s}");
+        let s = render(ViaSpan::Partial {
+            from: 0,
+            to: 2,
+            micro: false,
+        });
+        assert!(
+            s.contains("(via blind (at 8.4 8.4)"),
+            "blind keyword must be BARE after via: {s}"
+        );
+        assert!(
+            s.contains("(layers \"F.Cu\" \"In2.Cu\")"),
+            "blind spans its own layers: {s}"
+        );
     }
 }

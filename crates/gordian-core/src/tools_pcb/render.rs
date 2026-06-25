@@ -4,35 +4,37 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
-use pcb_place::placement::{PlaceReport, PlaceResult, to_route_problem};
+use pcb_place::placement::{PlaceReport, PlaceResult};
 
 use crate::tools::PcbToolCtx;
 
-use super::draft::BoardDraft;
 use super::place::place_problem_from_draft;
-use super::route::{StoredRoute, inject_keepouts};
 
 /// Render the board to a PNG using the placement or routed SVG, save under
 /// `.gordian/renders/`, and attach via `IMAGE_PATH_KEY`.
 ///
 /// `view` may be `"placed"` or `"routed"`. When omitted the default is
-/// `"routed"` when `route.json` exists, `"placed"` otherwise.
+/// `"routed"` when the live board has copper, `"placed"` otherwise.
 pub fn render_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
-    // ── load draft ───────────────────────────────────────────────────────────
-    let Some(draft) = BoardDraft::load(ctx) else {
-        return Ok(json!({
-            "error": "no board draft yet — run derive_board first",
-        }));
+    let draft = match super::active::draft_from_live(ctx) {
+        Ok(draft) => draft,
+        Err(err) => return Ok(json!({ "error": err })),
     };
 
     // ── resolve view ─────────────────────────────────────────────────────────
-    let has_route = ctx.workspace().read_route().is_some();
+    let has_route = super::active::copper_solution(ctx)
+        .map(|s| !s.traces.is_empty() || !s.vias.is_empty())
+        .unwrap_or(false);
     let view_str = input.get("view").and_then(Value::as_str);
     let view = match view_str {
         Some("placed") => "placed",
         Some("routed") => "routed",
         None => {
-            if has_route { "routed" } else { "placed" }
+            if has_route {
+                "routed"
+            } else {
+                "placed"
+            }
         }
         Some(other) => {
             return Ok(json!({
@@ -74,35 +76,31 @@ pub fn render_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             super::engine_svg::render_placement(&problem, &draft.hints, &result)
         }
         "routed" => {
-            // Need route.json.
-            let Some(raw) = ctx.workspace().read_route() else {
-                return Ok(json!({
-                    "error": "board has not been routed yet — run route_board first, \
-                              then render_board",
-                }));
-            };
-            // Need placements too (to rebuild the RouteProblem).
-            let Some(placements) = draft.last_placement.clone() else {
-                return Ok(json!({
-                    "error": "board has no placement in the draft — run place_board \
-                              then route_board before rendering the routed view",
-                }));
-            };
-            let stored: StoredRoute = match serde_json::from_str(&raw) {
-                Ok(s) => s,
-                Err(e) => {
+            let solution = match super::active::copper_solution(ctx) {
+                Ok(solution) if !solution.traces.is_empty() || !solution.vias.is_empty() => {
+                    solution
+                }
+                Ok(_) => {
                     return Ok(json!({
-                        "error": format!("route.json is corrupt or schema-mismatch: {e}"),
+                        "error": "board has no routed copper yet — run route_board first, then render_board",
                     }));
                 }
+                Err(err) => {
+                    return Ok(json!({ "error": err }));
+                }
             };
-            let problem = match place_problem_from_draft(&draft, ctx) {
-                Ok(p) => p,
-                Err(msg) => return Ok(json!({ "error": msg })),
+            let board = match super::active::board_problem(ctx) {
+                Ok(board) => board,
+                Err(err) => {
+                    return Ok(json!({ "error": err }));
+                }
             };
-            let mut rp = to_route_problem(&problem, &placements);
-            inject_keepouts(&mut rp, &draft.keepouts);
-            super::engine_svg::render_svg(&rp, &stored.solution, &stored.failed)
+            if board.problem.connections.is_empty() {
+                return Ok(json!({
+                    "error": "board has no routeable nets — derive/place the board first",
+                }));
+            }
+            super::engine_svg::render_svg(&board.problem, &solution, &[])
         }
         // The match above is exhaustive over {"placed","routed"}; the `other`
         // arm returned early, so this branch is unreachable.
@@ -112,8 +110,7 @@ pub fn render_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // ── rasterize + persist ──────────────────────────────────────────────────
     let png = crate::render::svg_to_png(&svg, crate::tools::RENDER_MAX_PX)?;
     let path = ctx.workspace().next_render_path()?;
-    std::fs::write(&path, &png)
-        .with_context(|| format!("writing render to {}", path.display()))?;
+    std::fs::write(&path, &png).with_context(|| format!("writing render to {}", path.display()))?;
 
     let mut obj = json!({
         "ok": true,

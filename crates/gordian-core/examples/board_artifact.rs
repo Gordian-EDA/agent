@@ -1,5 +1,5 @@
-//! Drive the full create -> place -> route -> export flow on a small board and
-//! dump the exported `.kicad_pcb` to a known path so it can be rendered with
+//! Drive the full create -> place -> route -> check flow on a small board and
+//! dump the saved `.kicad_pcb` to a known path so it can be rendered with
 //! KiCAD's own renderer (`kicad-cli pcb export svg`). This is the "professional
 //! artifact" path, as opposed to the engine's debug SVG.
 //!
@@ -13,12 +13,14 @@ use gordian_core::tools::{PcbToolCtx, run_tool};
 use serde_json::json;
 
 fn main() {
-    let out_dir = std::env::args().nth(1).unwrap_or_else(|| "/tmp/artifact".into());
+    let out_dir = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/tmp/artifact".into());
     std::fs::create_dir_all(&out_dir).unwrap();
 
     // Stage the vendored fixture footprints into a .pretty dir for the index.
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../kicad-sexpr/tests/fixtures/footprints");
+    let src =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../kicad-sexpr/tests/fixtures/footprints");
     let staging = PathBuf::from(&out_dir).join("fp");
     let pretty = staging.join("Fixtures.pretty");
     std::fs::create_dir_all(&pretty).unwrap();
@@ -49,14 +51,15 @@ fn main() {
     let r = run_tool("place_board", json!({}), &ctx).unwrap();
     println!("place_board: legal={} hpwl={}", r["legal"], r["hpwl"]);
     let r = run_tool("route_board", json!({}), &ctx).unwrap();
-    println!("route_board: router={} failed={} metrics={}", r["router"], r["failed"], r["metrics"]);
-    let r = run_tool("export_board", json!({}), &ctx).unwrap();
-    println!("export_board: ok={} path={} drc={}", r["ok"], r["path"], r["drc"]);
+    println!(
+        "route_board: router={} failed={} metrics={}",
+        r["router"], r["failed"], r["metrics"]
+    );
+    let r = run_tool("check_board", json!({}), &ctx).unwrap();
+    println!("check_board: ok={} drc={}", r["ok"], r);
 
-    // Copy the exported board out to the stable artifact path.
-    if let Some(p) = r["path"].as_str() {
-        let dest = PathBuf::from(&out_dir).join("board.kicad_pcb");
-        std::fs::copy(p, &dest).unwrap();
-        println!("artifact: {}", dest.display());
-    }
+    // Copy the saved active board out to the stable artifact path.
+    let dest = PathBuf::from(&out_dir).join("board.kicad_pcb");
+    std::fs::copy(ctx.pcb_path(), &dest).unwrap();
+    println!("artifact: {}", dest.display());
 }

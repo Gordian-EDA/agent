@@ -1040,7 +1040,8 @@ dependencies = [
  "negotiated-mesh",
  "pcb-model",
  "pcb-place",
- "pcb-synth",
+ "prost",
+ "prost-types",
  "rayon",
  "resvg",
  "sch-floorplan",
@@ -1638,6 +1639,7 @@ name = "kicad-symbol"
 version = "0.1.0"
 dependencies = [
  "fuzzy-matcher",
+ "geom",
  "kicad-cli",
  "kiutils_kicad",
  "kiutils_sexpr",
@@ -2085,18 +2087,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pcb-synth"
-version = "0.1.0"
-dependencies = [
- "geom",
- "kicad-sexpr",
- "kiutils_kicad",
- "pcb-model",
- "tempfile",
- "uuid",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2225,7 +2215,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "once_cell",
@@ -2245,7 +2235,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -2868,6 +2858,7 @@ version = "0.1.0"
 dependencies = [
  "circuit-graph",
  "circuit-lang",
+ "geom",
  "greedy-place",
  "indexmap 2.14.0",
  "kicad-cli",
@@ -2884,6 +2875,7 @@ name = "sch-io"
 version = "0.1.0"
 dependencies = [
  "circuit-lang",
+ "geom",
  "kicad-cli",
  "kicad-symbol",
  "kiutils_kicad",

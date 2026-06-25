@@ -9,12 +9,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use circuit_lang::model::Design;
 use kicad_cli::env::KicadEnv;
 
-
 use super::idiom;
-use super::*;
-use sch_place::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net, pin_side, PinSide};
 use super::place::{gather, grid_from_layout, incidence};
+use super::*;
 use sch_place::item::{Incidence, Item};
+use sch_place::netclass::{
+    PinSide, is_connector_like, is_ground, is_neg_supply, is_power_net, pin_side,
+};
 
 /// A deterministic baseline IR for designs without an LLM-produced one: rails
 /// from the design's power nets (ground-like → bottom, else top), no explicit
@@ -23,7 +24,11 @@ pub fn baseline_ir(design: &Design) -> LayoutIr {
     let mut rails = BTreeMap::new();
     for (net, attrs) in &design.nets {
         if attrs.power {
-            let band = if is_ground(net) { Band::Bottom } else { Band::Top };
+            let band = if is_ground(net) {
+                Band::Bottom
+            } else {
+                Band::Top
+            };
             rails.insert(net.clone(), band);
         }
     }
@@ -70,21 +75,29 @@ fn local_rail_nets(design: &Design) -> BTreeSet<String> {
         .collect()
 }
 
-
 /// Connectivity-driven frame inference: derive a full Layout IR — rails, anchor
 /// columns, satellite cells/orientation by the spec's inference rules, and edge
 /// ports — straight from the netlist + symbol pin geometry, so the engine owns the
 /// whole layout and needs no LLM `place`. The coarse cells it emits are polished
 /// by the same refine/align/decongest passes the LLM-frame path uses.
 pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
-    let Ok(items) = gather(env, design) else { return baseline_ir(design) };
+    let Ok(items) = gather(env, design) else {
+        return baseline_ir(design);
+    };
     let inc = incidence(&items);
 
     // Rails: declared power nets, V+ on top, ground on bottom.
     let mut rails = BTreeMap::new();
     for (net, attrs) in &design.nets {
         if attrs.power {
-            rails.insert(net.clone(), if is_ground(net) { Band::Bottom } else { Band::Top });
+            rails.insert(
+                net.clone(),
+                if is_ground(net) {
+                    Band::Bottom
+                } else {
+                    Band::Top
+                },
+            );
         }
     }
     // Agent boards routinely NAME nets `GND`/`3V3`/`VBUS` but place NO `power:`
@@ -112,8 +125,12 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
     let is_rail = |n: &str| rails.contains_key(n);
     let is_vplus = |n: &str| is_rail(n) && !is_ground(n);
 
-    let anchors: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() >= 3).collect();
-    let sats: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() == 2).collect();
+    let anchors: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() >= 3)
+        .collect();
+    let sats: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() == 2)
+        .collect();
 
     // Per-anchor: its pins grouped by side, ordered, so a satellite tapping one
     // pin knows the pin's side (which column) and rank (which row) on that side.
@@ -143,13 +160,18 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
     // are ORDINAL — `apply_cells` packs each populated track by its real content size — so
     // a module only needs the right SHELF and order, not a metric footprint; a satellite-
     // heavy anchor still reserves extra columns so its tap fan does not collide a neighbour.
-    let inferred: Vec<usize> =
-        order.iter().copied().filter(|ai| !authored.contains_key(&items[*ai].refdes)).collect();
+    let inferred: Vec<usize> = order
+        .iter()
+        .copied()
+        .filter(|ai| !authored.contains_key(&items[*ai].refdes))
+        .collect();
     let fwidth = |ai: usize| -> i32 {
         let nsat = sats
             .iter()
             .filter(|&&si| {
-                anchor_tap(&items, &inc, &anchors, si, &rails).map(|(a, _, _)| a == ai).unwrap_or(false)
+                anchor_tap(&items, &inc, &anchors, si, &rails)
+                    .map(|(a, _, _)| a == ai)
+                    .unwrap_or(false)
             })
             .count() as i32;
         (1 + nsat / 6).max(1)
@@ -182,7 +204,14 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         let row = MID + grow * ROW_BAND;
         anchor_col.insert(ai, col);
         anchor_row.insert(ai, row);
-        place.insert(rd.clone(), Cell { col, row, orient: Orient::Down });
+        place.insert(
+            rd.clone(),
+            Cell {
+                col,
+                row,
+                orient: Orient::Down,
+            },
+        );
     }
 
     // For each anchor, map pin number -> (side, rank-on-side) for row offsets.
@@ -191,7 +220,10 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         let mut by_side: BTreeMap<u8, Vec<(&str, f64)>> = BTreeMap::new();
         for pg in &items[ai].geom.pins {
             let s = pin_side(pg.at);
-            by_side.entry(s as u8).or_default().push((pg.number.as_str(), pg.at[1]));
+            by_side
+                .entry(s as u8)
+                .or_default()
+                .push((pg.number.as_str(), pg.at[1]));
         }
         for (sb, mut v) in by_side {
             // East/West ranked top->down (descending local y); top/bottom by x.
@@ -216,7 +248,14 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
     // marking the members `placed` so the loop skips them. A board with no idiom is
     // untouched; an author-gridded cluster is left to the grid override below.
     let detected = idiom::detect_idioms(
-        &items, &inc, &anchors, &sats, &rails, &pin_meta, &anchor_col, &anchor_row,
+        &items,
+        &inc,
+        &anchors,
+        &sats,
+        &rails,
+        &pin_meta,
+        &anchor_col,
+        &anchor_row,
     );
     let mut placed: BTreeSet<String> = BTreeSet::new();
     let mut idiom_reports: Vec<sch_place::result::IdiomReport> = Vec::new();
@@ -266,7 +305,9 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
             continue;
         }
         let (n1, n2) = (s.pins[0].2.clone(), s.pins[1].2.clone());
-        let (Some(n1), Some(n2)) = (n1, n2) else { continue };
+        let (Some(n1), Some(n2)) = (n1, n2) else {
+            continue;
+        };
 
         // An explicitly-gridded satellite in an anchor-less cell: place it at its
         // cell, stacking successive parts down the column so they don't collide.
@@ -277,7 +318,14 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
             let k = stack_row.entry((gc, gr)).or_insert(0);
             let row = MID + gr * ROW_BAND + *k;
             *k += 1;
-            place.insert(s.refdes.clone(), Cell { col: gc * 5, row, orient: orient_for(&s.pins, &n1, true) });
+            place.insert(
+                s.refdes.clone(),
+                Cell {
+                    col: gc * 5,
+                    row,
+                    orient: orient_for(&s.pins, &n1, true),
+                },
+            );
             continue;
         }
 
@@ -287,7 +335,9 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         let cell = if let Some((ai, ref pin_num, tap_net)) = tap {
             let acol = anchor_col[&ai];
             let arow = anchor_row[&ai]; // tap satellites sit in their anchor's grid row
-            let (side, rank) = *pin_meta.get(&(ai, pin_num.clone())).unwrap_or(&(PinSide::East, 0));
+            let (side, rank) = *pin_meta
+                .get(&(ai, pin_num.clone()))
+                .unwrap_or(&(PinSide::East, 0));
             // The OTHER net (not the tapped pin's) decides the satellite's role.
             let other = if tap_net == n1 { &n2 } else { &n1 };
             // Multiple satellites tapping the SAME anchor pin (e.g. a bias node's
@@ -307,7 +357,11 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
             if is_vplus(other) {
                 // Pull-up / supply tap → vertical in the V+ band above its pin.
                 let c = col_for_side(side);
-                Cell { col: c, row: arow - 2, orient: orient_for(&s.pins, &n1, true) }
+                Cell {
+                    col: c,
+                    row: arow - 2,
+                    orient: orient_for(&s.pins, &n1, true),
+                }
             } else if is_ground(other) || is_neg_supply(other) {
                 // Pull-down / ground return OR negative-supply tap → vertical in the band
                 // below. A cap/part whose OTHER pin is GND (or VEE/V-) is a rail tap, not a
@@ -316,12 +370,24 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
                 // multi-sheet sub-design (the split-supply VEE↔GND cap drawn sideways). The
                 // references declare power symbols so is_rail(GND) held there → inert for them.
                 let c = col_for_side(side);
-                Cell { col: c, row: arow + 2, orient: orient_for(&s.pins, &n1, true) }
+                Cell {
+                    col: c,
+                    row: arow + 2,
+                    orient: orient_for(&s.pins, &n1, true),
+                }
             } else {
                 // Series element in the signal flow → horizontal beside the pin.
                 let c = col_for_side(side);
-                let horiz = if side == PinSide::West { Orient::Left } else { Orient::Right };
-                Cell { col: c, row: arow + rank, orient: series_orient(&s.pins, &tap_net, horiz) }
+                let horiz = if side == PinSide::West {
+                    Orient::Left
+                } else {
+                    Orient::Right
+                };
+                Cell {
+                    col: c,
+                    row: arow + rank,
+                    orient: series_orient(&s.pins, &tap_net, horiz),
+                }
             }
         } else if (is_vplus(&n1) || is_neg_supply(&n1)) && is_ground(&n2)
             || is_ground(&n1) && (is_vplus(&n2) || is_neg_supply(&n2))
@@ -353,7 +419,12 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
                 .iter()
                 .copied()
                 .filter(|&ai| refdes_vp(&items[ai].refdes) > 0)
-                .max_by_key(|&ai| (!is_connector_like(&items[ai].part), refdes_vp(&items[ai].refdes)));
+                .max_by_key(|&ai| {
+                    (
+                        !is_connector_like(&items[ai].part),
+                        refdes_vp(&items[ai].refdes),
+                    )
+                });
             if let Some(ai) = sup {
                 let acol = anchor_col[&ai];
                 let arow = anchor_row[&ai];
@@ -363,11 +434,19 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
                     *e += 1;
                     o
                 };
-                Cell { col: acol + 1 + off, row: arow - 2, orient: orient_for(&s.pins, &n1, true) }
+                Cell {
+                    col: acol + 1 + off,
+                    row: arow - 2,
+                    orient: orient_for(&s.pins, &n1, true),
+                }
             } else {
                 let c = spare_col;
                 spare_col += 1;
-                Cell { col: c, row: MID, orient: orient_for(&s.pins, &n1, true) }
+                Cell {
+                    col: c,
+                    row: MID,
+                    orient: orient_for(&s.pins, &n1, true),
+                }
             }
         } else {
             // Rail-to-rail / star leg with a signal midpoint (e.g. a divider): a
@@ -382,7 +461,11 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
                 col
             });
             let row = if high { MID - 1 } else { MID + 1 };
-            Cell { col: c, row, orient: orient_for(&s.pins, &n1, true) }
+            Cell {
+                col: c,
+                row,
+                orient: orient_for(&s.pins, &n1, true),
+            }
         };
         place.insert(s.refdes.clone(), cell);
     }
@@ -400,7 +483,11 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         // Not a no-connect (NC_*) and not a power rail (rails draw their own symbols).
         let nc = net.to_ascii_uppercase().starts_with("NC");
         if !power && !nc && (marked || pins.len() == 1) {
-            let side = if net_is_input(net) { Side::Left } else { Side::Right };
+            let side = if net_is_input(net) {
+                Side::Left
+            } else {
+                Side::Right
+            };
             ports.insert(net.clone(), side);
         }
     }
@@ -457,13 +544,20 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
 
 /// Cheap stable column key for a net name (group same-node legs in one column).
 fn hash_col(net: &str) -> i32 {
-    net.bytes().fold(0i32, |a, b| a.wrapping_mul(31).wrapping_add(b as i32)).abs() % 100000
+    net.bytes()
+        .fold(0i32, |a, b| a.wrapping_mul(31).wrapping_add(b as i32))
+        .abs()
+        % 100000
 }
 
 /// True if a net name reads like a board input (goes on the left edge).
 fn net_is_input(net: &str) -> bool {
     let u = net.to_ascii_uppercase();
-    u.contains("IN") || u.contains("VIN") || u.contains("BUS") || u.contains("RX") || u.contains("TX_RAW")
+    u.contains("IN")
+        || u.contains("VIN")
+        || u.contains("BUS")
+        || u.contains("RX")
+        || u.contains("TX_RAW")
 }
 
 /// Orient a 2-pin part vertical with pin1 toward the top when `pin1_high`, derived
@@ -495,7 +589,6 @@ fn series_orient(
     }
 }
 
-
 /// The IC a decoupling bank actually bypasses: among anchors with a pin on the bank's
 /// V+ rail, the real IC (not a connector/jumper) with the most pins on that rail, then
 /// the most pins overall. `None` if the caps share no non-ground rail with any anchor.
@@ -510,12 +603,17 @@ pub(super) fn best_decoupling_anchor(
     for &ci in caps {
         for (_, _, n) in &items[ci].pins {
             if let Some(n) = n.as_deref()
-                && rails.contains_key(n) && !is_ground(n) {
-                    *vp_count.entry(n.to_string()).or_insert(0) += 1;
-                }
+                && rails.contains_key(n)
+                && !is_ground(n)
+            {
+                *vp_count.entry(n.to_string()).or_insert(0) += 1;
+            }
         }
     }
-    let vp = vp_count.into_iter().max_by_key(|(_, c)| *c).map(|(n, _)| n)?;
+    let vp = vp_count
+        .into_iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(n, _)| n)?;
     anchors
         .iter()
         .copied()
@@ -526,7 +624,12 @@ pub(super) fn best_decoupling_anchor(
                 .filter(|(_, _, n)| n.as_deref() == Some(vp.as_str()))
                 .count();
             (on_rail > 0).then(|| {
-                (ai, !is_connector_like(&items[ai].part), on_rail, items[ai].geom.pins.len())
+                (
+                    ai,
+                    !is_connector_like(&items[ai].part),
+                    on_rail,
+                    items[ai].geom.pins.len(),
+                )
             })
         })
         .max_by(|a, b| (a.1, a.2, a.3).cmp(&(b.1, b.2, b.3)))
@@ -562,7 +665,11 @@ pub(super) fn place_decoupling(
     // still decouples THIS IC regardless of where the rail enters the sheet.
     let mut by_rail: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for &ci in caps {
-        let cn: Vec<&str> = items[ci].pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+        let cn: Vec<&str> = items[ci]
+            .pins
+            .iter()
+            .filter_map(|(_, _, n)| n.as_deref())
+            .collect();
         if cn.len() != 2 {
             continue;
         }
@@ -595,7 +702,11 @@ pub(super) fn place_decoupling(
     let mut bank: Vec<usize> = if multisheet {
         by_rail.into_values().flatten().collect()
     } else {
-        by_rail.into_values().filter(|v| v.len() >= 3).flatten().collect()
+        by_rail
+            .into_values()
+            .filter(|v| v.len() >= 3)
+            .flatten()
+            .collect()
     };
     bank.sort_unstable();
     if bank.len() < if multisheet { 2 } else { 3 } {
@@ -626,7 +737,11 @@ pub(super) fn place_decoupling(
         bank.iter()
             .enumerate()
             .map(|(k, &ci)| {
-                let cell = Cell { col: acol + base + k as i32, row: arow - 1, orient: Orient::Down };
+                let cell = Cell {
+                    col: acol + base + k as i32,
+                    row: arow - 1,
+                    orient: Orient::Down,
+                };
                 (items[ci].refdes.clone(), cell)
             })
             .collect(),
@@ -656,8 +771,22 @@ pub(super) fn place_cc_pulldown(
     let acol = *anchor_col.get(&ai)?;
     let arow = *anchor_row.get(&ai)?;
     Some(vec![
-        (ra.to_string(), Cell { col: acol + 1, row: arow, orient: Orient::Down }),
-        (rb.to_string(), Cell { col: acol + 2, row: arow, orient: Orient::Down }),
+        (
+            ra.to_string(),
+            Cell {
+                col: acol + 1,
+                row: arow,
+                orient: Orient::Down,
+            },
+        ),
+        (
+            rb.to_string(),
+            Cell {
+                col: acol + 2,
+                row: arow,
+                orient: Orient::Down,
+            },
+        ),
     ])
 }
 
@@ -675,8 +804,22 @@ pub(super) fn place_i2c_pullup(
     let acol = *anchor_col.get(&ai)?;
     let arow = *anchor_row.get(&ai)?;
     Some(vec![
-        (ra.to_string(), Cell { col: acol + 1, row: arow, orient: Orient::Up }),
-        (rb.to_string(), Cell { col: acol + 2, row: arow, orient: Orient::Up }),
+        (
+            ra.to_string(),
+            Cell {
+                col: acol + 1,
+                row: arow,
+                orient: Orient::Up,
+            },
+        ),
+        (
+            rb.to_string(),
+            Cell {
+                col: acol + 2,
+                row: arow,
+                orient: Orient::Up,
+            },
+        ),
     ])
 }
 
@@ -714,7 +857,11 @@ pub(super) fn place_crystal(
             .pins
             .iter()
             .filter_map(|(_, _, n)| n.clone())
-            .filter_map(|n| anchor_pin(&n).filter(|(j, _)| *j == ai).map(|(_, num)| (n, num)))
+            .filter_map(|n| {
+                anchor_pin(&n)
+                    .filter(|(j, _)| *j == ai)
+                    .map(|(_, num)| (n, num))
+            })
             .collect();
         if osc.len() != 2 || osc[0].0 == osc[1].0 {
             return None;
@@ -723,7 +870,12 @@ pub(super) fn place_crystal(
         let (xb, pb) = (osc[1].0.clone(), osc[1].1.clone());
         // Bind each load cap to the osc net it shares with the crystal.
         let cap_on = |osc: &str| -> Option<usize> {
-            caps.iter().copied().find(|&ci| items[ci].pins.iter().any(|(_, _, n)| n.as_deref() == Some(osc)))
+            caps.iter().copied().find(|&ci| {
+                items[ci]
+                    .pins
+                    .iter()
+                    .any(|(_, _, n)| n.as_deref() == Some(osc))
+            })
         };
         let (Some(ca), Some(cb)) = (cap_on(&xa), cap_on(&xb)) else {
             return None;
@@ -735,8 +887,14 @@ pub(super) fn place_crystal(
         // Raw pin geometry. `pin_side` (|x| vs |y|) mis-buckets a TALL IC's corner
         // pins — a left-edge pin high on the body has |y|>|x| and reads "North" — so
         // classify the osc port by which EDGE of the IC's pin bounding box it hugs.
-        let pin_at =
-            |num: &str| items[ai].geom.pins.iter().find(|p| p.number == num).map(|p| p.at);
+        let pin_at = |num: &str| {
+            items[ai]
+                .geom
+                .pins
+                .iter()
+                .find(|p| p.number == num)
+                .map(|p| p.at)
+        };
         let (Some(paa), Some(pba)) = (pin_at(&pa), pin_at(&pb)) else {
             return None;
         };
@@ -769,7 +927,7 @@ pub(super) fn place_crystal(
         // that same edge — the convention the generic tap placement uses (arow+rank),
         // so the cluster aligns with the actual osc pin rows. Ranking by NEAREST bbox
         // edge dodges the `pin_side` corner-pin bug.
-        let pin_edge = |at: [f64; 2]| -> (i32, i32) {
+        let pin_edge = |at: ::geom::Point2| -> (i32, i32) {
             let (l, r, b, t) = (at[0] - lo[0], hi[0] - at[0], at[1] - lo[1], hi[1] - at[1]);
             let mn = l.min(r).min(b).min(t);
             if mn == l {
@@ -787,7 +945,12 @@ pub(super) fn place_crystal(
             .pins
             .iter()
             .filter(|p| pin_edge(p.at) == (dcol, drow))
-            .map(|p| (p.number.as_str(), if dcol != 0 { -p.at[1] } else { p.at[0] }))
+            .map(|p| {
+                (
+                    p.number.as_str(),
+                    if dcol != 0 { -p.at[1] } else { p.at[0] },
+                )
+            })
             .collect();
         edge_pins.sort_by(|a, b| a.1.total_cmp(&b.1));
         let n_edge = edge_pins.len() as i32;
@@ -801,8 +964,12 @@ pub(super) fn place_crystal(
         if dbg {
             eprintln!(
                 "IDIOM crystal {} FIRES (ai={}, caps {}@{} {}@{}, dcol={dcol} drow={drow})",
-                items[yi].refdes, items[ai].refdes, items[ca].refdes, off_of(&pa),
-                items[cb].refdes, off_of(&pb)
+                items[yi].refdes,
+                items[ai].refdes,
+                items[ca].refdes,
+                off_of(&pa),
+                items[cb].refdes,
+                off_of(&pb)
             );
         }
         // Placement: a tight cluster just off the osc edge. The crystal sits ONE step
@@ -812,15 +979,27 @@ pub(super) fn place_crystal(
         let (oa, ob) = (off_of(&pa), off_of(&pb));
         let cell_at = |step: i32, off: i32, orient: Orient| -> Cell {
             if dcol != 0 {
-                Cell { col: acol + step * dcol, row: arow + off, orient }
+                Cell {
+                    col: acol + step * dcol,
+                    row: arow + off,
+                    orient,
+                }
             } else {
-                Cell { col: acol + off, row: arow + step * drow, orient }
+                Cell {
+                    col: acol + off,
+                    row: arow + step * drow,
+                    orient,
+                }
             }
         };
         // Crystal vertical on an E/W edge (pin1 toward its higher osc pin), horizontal
         // on an N/S edge.
         let p1 = items[yi].pins.first().and_then(|p| p.2.as_deref());
-        let (o1, o2) = if p1 == Some(xa.as_str()) { (oa, ob) } else { (ob, oa) };
+        let (o1, o2) = if p1 == Some(xa.as_str()) {
+            (oa, ob)
+        } else {
+            (ob, oa)
+        };
         let y_orient = if dcol != 0 {
             if o1 <= o2 { Orient::Down } else { Orient::Up }
         } else {
@@ -832,7 +1011,11 @@ pub(super) fn place_crystal(
         // IC and let the router run the (short) leads — the two caps still flank the
         // crystal, higher osc pin on top.
         let c = ((oa + ob) / 2).clamp(-1, 1);
-        let (ca_off, cb_off) = if oa <= ob { (c - 1, c + 1) } else { (c + 1, c - 1) };
+        let (ca_off, cb_off) = if oa <= ob {
+            (c - 1, c + 1)
+        } else {
+            (c + 1, c - 1)
+        };
         let cells = vec![
             (items[yi].refdes.clone(), cell_at(1, c, y_orient)),
             (
@@ -920,10 +1103,10 @@ fn wants_mirror(
                 for (_, _, n2) in &items[*j].pins {
                     if let Some(n2) = n2
                         && n2 != net
-                            && inc.get(n2).into_iter().flatten().any(|(k, _)| is_conn(*k))
-                        {
-                            return true;
-                        }
+                        && inc.get(n2).into_iter().flatten().any(|(k, _)| is_conn(*k))
+                    {
+                        return true;
+                    }
                 }
             }
         }
@@ -967,7 +1150,8 @@ fn order_anchors(items: &[Item], inc: &Incidence, anchors: &[usize]) -> Vec<usiz
     // touch everything). Greedy chain from the base seed: repeatedly append the unplaced
     // anchor most-connected to the already-placed set, tie-broken by base order.
     let is_anchor = |i: usize| items[i].geom.pins.len() >= 3;
-    let idx_in_anchors: BTreeMap<usize, usize> = base.iter().enumerate().map(|(k, &a)| (a, k)).collect();
+    let idx_in_anchors: BTreeMap<usize, usize> =
+        base.iter().enumerate().map(|(k, &a)| (a, k)).collect();
     let mut adj: BTreeMap<(usize, usize), i32> = BTreeMap::new();
     let mut bump = |x: usize, y: usize, w: i32| {
         if x != y {
@@ -984,7 +1168,11 @@ fn order_anchors(items: &[Item], inc: &Incidence, anchors: &[usize]) -> Vec<usiz
             continue;
         }
         let w = if is_power_net(net) { 1 } else { 3 };
-        let ancs: Vec<usize> = pins.iter().map(|(j, _)| *j).filter(|&j| is_anchor(j)).collect();
+        let ancs: Vec<usize> = pins
+            .iter()
+            .map(|(j, _)| *j)
+            .filter(|&j| is_anchor(j))
+            .collect();
         for a in 0..ancs.len() {
             for b in (a + 1)..ancs.len() {
                 bump(ancs[a], ancs[b], w);
@@ -1019,9 +1207,7 @@ fn order_anchors(items: &[Item], inc: &Incidence, anchors: &[usize]) -> Vec<usiz
             }
         }
     }
-    let weight = |x: usize, y: usize| -> i32 {
-        *adj.get(&(x.min(y), x.max(y))).unwrap_or(&0)
-    };
+    let weight = |x: usize, y: usize| -> i32 { *adj.get(&(x.min(y), x.max(y))).unwrap_or(&0) };
     let mut placed: Vec<usize> = vec![base[0]];
     let mut remaining: Vec<usize> = base[1..].to_vec();
     while !remaining.is_empty() {

@@ -12,7 +12,7 @@ pub mod proto {
 }
 
 pub mod session;
-pub use session::Session;
+pub use session::{Session, SessionManager};
 
 use std::time::Duration;
 
@@ -115,9 +115,10 @@ impl Kicad {
             let resp = ApiResponse::decode(reply.as_slice())?;
             if self.token.is_empty()
                 && let Some(h) = &resp.header
-                    && !h.kicad_token.is_empty() {
-                        self.token = h.kicad_token.clone();
-                    }
+                && !h.kicad_token.is_empty()
+            {
+                self.token = h.kicad_token.clone();
+            }
             if let Some(st) = &resp.status {
                 // KiCAD just started / is mid-operation — back off and retry.
                 if (st.status == AS_NOT_READY || st.status == AS_BUSY)
@@ -164,23 +165,28 @@ impl Kicad {
 
 // ── Board read / edit ────────────────────────────────────────────────────────
 
-use proto::kiapi::board::types::{FootprintInstance, Track};
+use proto::kiapi::board::commands::RefillZones;
+use proto::kiapi::board::types::{FootprintInstance, Pad, Track, Via, Zone};
 use proto::kiapi::common::commands::{
-    BeginCommit, BeginCommitResponse, CommitAction, CreateItems, CreateItemsResponse, EndCommit,
-    GetItems, GetItemsResponse, GetOpenDocuments, GetOpenDocumentsResponse, ItemStatusCode,
-    SaveDocument, UpdateItems, UpdateItemsResponse,
+    BeginCommit, BeginCommitResponse, CommitAction, CreateItems, CreateItemsResponse, DeleteItems,
+    DeleteItemsResponse, EndCommit, GetItems, GetItemsResponse, GetOpenDocuments,
+    GetOpenDocumentsResponse, ItemDeletionStatus, ItemStatusCode, SaveDocument, UpdateItems,
+    UpdateItemsResponse,
 };
-use proto::kiapi::common::types::{DocumentType, ItemHeader, KiCadObjectType};
+use proto::kiapi::common::types::{DocumentType, ItemHeader, KiCadObjectType, Kiid};
 
 /// Turn a per-item `ItemStatus` into an error unless it is `ISC_OK`.
-fn check_item_status(status: &Option<proto::kiapi::common::commands::ItemStatus>) -> Result<(), Error> {
+fn check_item_status(
+    status: &Option<proto::kiapi::common::commands::ItemStatus>,
+) -> Result<(), Error> {
     if let Some(s) = status
-        && s.code != ItemStatusCode::IscOk as i32 {
-            return Err(Error::Item {
-                code: s.code,
-                message: s.error_message.clone(),
-            });
-        }
+        && s.code != ItemStatusCode::IscOk as i32
+    {
+        return Err(Error::Item {
+            code: s.code,
+            message: s.error_message.clone(),
+        });
+    }
     Ok(())
 }
 
@@ -197,11 +203,36 @@ impl Kicad {
         Ok(())
     }
 
+    /// Find and cache the open PCB document whose filename matches `board`.
+    pub fn open_board_path(&mut self, board: &std::path::Path) -> Result<(), Error> {
+        let resp: GetOpenDocumentsResponse = self.call(&GetOpenDocuments {
+            r#type: DocumentType::DoctypePcb as i32,
+        })?;
+        self.board_doc = resp
+            .documents
+            .into_iter()
+            .find(|doc| document_matches_board(doc, board));
+        if self.board_doc.is_none() {
+            return Err(Error::NoBoard);
+        }
+        Ok(())
+    }
+
     fn header(&self) -> Result<ItemHeader, Error> {
         Ok(ItemHeader {
             document: Some(self.board_doc.clone().ok_or(Error::NoBoard)?),
             container: None,
             field_mask: None,
+        })
+    }
+
+    fn header_with_mask(&self, paths: &[&str]) -> Result<ItemHeader, Error> {
+        Ok(ItemHeader {
+            document: Some(self.board_doc.clone().ok_or(Error::NoBoard)?),
+            container: None,
+            field_mask: Some(prost_types::FieldMask {
+                paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+            }),
         })
     }
 
@@ -230,7 +261,26 @@ impl Kicad {
     pub fn tracks(&mut self) -> Result<Vec<Track>, Error> {
         self.get_items(&[KiCadObjectType::KotPcbTrace])?
             .into_iter()
-            .map(|a| a.to_msg::<Track>().map_err(|_| Error::TypeMismatch("Track")))
+            .map(|a| {
+                a.to_msg::<Track>()
+                    .map_err(|_| Error::TypeMismatch("Track"))
+            })
+            .collect()
+    }
+
+    /// All vias on the board.
+    pub fn vias(&mut self) -> Result<Vec<Via>, Error> {
+        self.get_items(&[KiCadObjectType::KotPcbVia])?
+            .into_iter()
+            .map(|a| a.to_msg::<Via>().map_err(|_| Error::TypeMismatch("Via")))
+            .collect()
+    }
+
+    /// All zones on the board.
+    pub fn zones(&mut self) -> Result<Vec<Zone>, Error> {
+        self.get_items(&[KiCadObjectType::KotPcbZone])?
+            .into_iter()
+            .map(|a| a.to_msg::<Zone>().map_err(|_| Error::TypeMismatch("Zone")))
             .collect()
     }
 
@@ -252,6 +302,24 @@ impl Kicad {
     /// Update existing board items (e.g. a moved footprint).
     pub fn update_items(&mut self, items: Vec<prost_types::Any>) -> Result<(), Error> {
         let header = self.header()?;
+        self.update_items_with_header(header, items)
+    }
+
+    /// Update existing board items with an explicit field mask.
+    pub fn update_items_masked(
+        &mut self,
+        paths: &[&str],
+        items: Vec<prost_types::Any>,
+    ) -> Result<(), Error> {
+        let header = self.header_with_mask(paths)?;
+        self.update_items_with_header(header, items)
+    }
+
+    fn update_items_with_header(
+        &mut self,
+        header: ItemHeader,
+        items: Vec<prost_types::Any>,
+    ) -> Result<(), Error> {
         let resp: UpdateItemsResponse = self.call(&UpdateItems {
             header: Some(header),
             items,
@@ -260,6 +328,38 @@ impl Kicad {
             check_item_status(&r.status)?;
         }
         Ok(())
+    }
+
+    /// Delete board items by KIID.
+    pub fn delete_items(&mut self, item_ids: Vec<Kiid>) -> Result<(), Error> {
+        if item_ids.is_empty() {
+            return Ok(());
+        }
+        let header = self.header()?;
+        let resp: DeleteItemsResponse = self.call(&DeleteItems {
+            header: Some(header),
+            item_ids,
+        })?;
+        for r in &resp.deleted_items {
+            if r.status != ItemDeletionStatus::IdsOk as i32 {
+                return Err(Error::Item {
+                    code: r.status,
+                    message: format!(
+                        "could not delete item {}",
+                        r.id.as_ref()
+                            .map(|id| id.value.as_str())
+                            .unwrap_or("<unknown>")
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete packed board items that carry a supported KIID-bearing type.
+    pub fn delete_packed_items(&mut self, items: &[prost_types::Any]) -> Result<(), Error> {
+        let ids = items.iter().filter_map(item_id_from_any).collect();
+        self.delete_items(ids)
     }
 
     /// Run `f`'s edits inside ONE KiCAD commit (a single undo step). Commits on
@@ -288,6 +388,15 @@ impl Kicad {
     pub fn save(&mut self) -> Result<(), Error> {
         let document = Some(self.board_doc.clone().ok_or(Error::NoBoard)?);
         self.call_void(&SaveDocument { document })
+    }
+
+    /// Refill all zones on the open board.
+    pub fn refill_zones(&mut self) -> Result<(), Error> {
+        let board = Some(self.board_doc.clone().ok_or(Error::NoBoard)?);
+        self.call_void(&RefillZones {
+            board,
+            zones: Vec::new(),
+        })
     }
 }
 
@@ -324,8 +433,12 @@ impl Kicad {
             r#type: NetClassType::NctExplicit as i32,
             constituents: nets.iter().map(|s| s.to_string()).collect(),
             board: Some(NetClassBoardSettings {
-                track_width: Some(Distance { value_nm: track_width_nm }),
-                clearance: (clearance_nm > 0).then_some(Distance { value_nm: clearance_nm }),
+                track_width: Some(Distance {
+                    value_nm: track_width_nm,
+                }),
+                clearance: (clearance_nm > 0).then_some(Distance {
+                    value_nm: clearance_nm,
+                }),
                 ..Default::default()
             }),
             ..Default::default()
@@ -342,6 +455,14 @@ impl Kicad {
 use proto::kiapi::board::types::{BoardLayer, Net};
 use proto::kiapi::common::types::{Angle, Vector2};
 
+#[derive(Debug, Clone)]
+pub struct FootprintMove {
+    pub reference: String,
+    pub x_nm: i64,
+    pub y_nm: i64,
+    pub rotation_deg: Option<f64>,
+}
+
 /// The reference designator of a footprint (e.g. "U1"), or "" if unset.
 pub fn footprint_reference(fp: &FootprintInstance) -> String {
     fp.reference_field
@@ -354,7 +475,7 @@ pub fn footprint_reference(fp: &FootprintInstance) -> String {
 
 impl Kicad {
     /// Full `Net` objects (name + code) for the open board.
-    fn net_list(&mut self) -> Result<Vec<Net>, Error> {
+    pub fn net_list(&mut self) -> Result<Vec<Net>, Error> {
         let board = Some(self.board_doc.clone().ok_or(Error::NoBoard)?);
         let resp: NetsResponse = self.call(&GetNets {
             board,
@@ -377,12 +498,65 @@ impl Kicad {
             .into_iter()
             .find(|f| footprint_reference(f) == reference)
             .ok_or_else(|| Error::NotFound(format!("footprint {reference}")))?;
+        let old = fp.position.clone().unwrap_or_default();
+        translate_footprint_pads(&mut fp, x_nm - old.x_nm, y_nm - old.y_nm)?;
         fp.position = Some(Vector2 { x_nm, y_nm });
         if let Some(deg) = rotation_deg {
             fp.orientation = Some(Angle { value_degrees: deg });
         }
         self.commit(&format!("move {reference}"), |k| {
-            k.update_items(vec![prost_types::Any::from_msg(&fp)?])
+            k.update_items_masked(
+                &["position", "orientation"],
+                vec![prost_types::Any::from_msg(&fp)?],
+            )
+        })
+    }
+
+    /// Move a set of footprints in one KiCAD undoable commit.
+    pub fn move_footprints(&mut self, moves: &[FootprintMove]) -> Result<(), Error> {
+        if moves.is_empty() {
+            return Ok(());
+        }
+        let by_ref: std::collections::BTreeMap<&str, &FootprintMove> =
+            moves.iter().map(|m| (m.reference.as_str(), m)).collect();
+        let mut updates = Vec::new();
+        for mut fp in self.footprints()? {
+            let reference = footprint_reference(&fp);
+            let Some(mv) = by_ref.get(reference.as_str()) else {
+                continue;
+            };
+            let old = fp.position.clone().unwrap_or_default();
+            translate_footprint_pads(&mut fp, mv.x_nm - old.x_nm, mv.y_nm - old.y_nm)?;
+            fp.position = Some(Vector2 {
+                x_nm: mv.x_nm,
+                y_nm: mv.y_nm,
+            });
+            if let Some(deg) = mv.rotation_deg {
+                fp.orientation = Some(Angle { value_degrees: deg });
+            }
+            updates.push(prost_types::Any::from_msg(&fp)?);
+        }
+        if updates.len() != moves.len() {
+            let found: std::collections::BTreeSet<String> = updates
+                .iter()
+                .filter_map(|any| {
+                    any.to_msg::<FootprintInstance>()
+                        .ok()
+                        .map(|fp| footprint_reference(&fp))
+                })
+                .collect();
+            let missing: Vec<&str> = moves
+                .iter()
+                .map(|m| m.reference.as_str())
+                .filter(|r| !found.contains(*r))
+                .collect();
+            return Err(Error::NotFound(format!(
+                "footprint(s) {}",
+                missing.join(", ")
+            )));
+        }
+        self.commit("place board", |k| {
+            k.update_items_masked(&["position", "orientation"], updates)
         })
     }
 
@@ -401,8 +575,14 @@ impl Kicad {
             None => None,
         };
         let track = Track {
-            start: Some(Vector2 { x_nm: start_nm.0, y_nm: start_nm.1 }),
-            end: Some(Vector2 { x_nm: end_nm.0, y_nm: end_nm.1 }),
+            start: Some(Vector2 {
+                x_nm: start_nm.0,
+                y_nm: start_nm.1,
+            }),
+            end: Some(Vector2 {
+                x_nm: end_nm.0,
+                y_nm: end_nm.1,
+            }),
             width: Some(Distance { value_nm: width_nm }),
             layer: layer as i32,
             net,
@@ -411,5 +591,163 @@ impl Kicad {
         self.commit("add track", |k| {
             k.create_items(vec![prost_types::Any::from_msg(&track)?])
         })
+    }
+}
+
+fn translate_footprint_pads(
+    fp: &mut FootprintInstance,
+    dx_nm: i64,
+    dy_nm: i64,
+) -> Result<(), Error> {
+    if dx_nm == 0 && dy_nm == 0 {
+        return Ok(());
+    }
+    let Some(definition) = fp.definition.as_mut() else {
+        return Ok(());
+    };
+    for item in &mut definition.items {
+        let Ok(mut pad) = item.to_msg::<Pad>() else {
+            continue;
+        };
+        if let Some(position) = pad.position.as_mut() {
+            position.x_nm += dx_nm;
+            position.y_nm += dy_nm;
+        }
+        *item = prost_types::Any::from_msg(&pad)?;
+    }
+    Ok(())
+}
+
+fn document_matches_board(
+    doc: &proto::kiapi::common::types::DocumentSpecifier,
+    board: &std::path::Path,
+) -> bool {
+    let Some(proto::kiapi::common::types::document_specifier::Identifier::BoardFilename(name)) =
+        doc.identifier.as_ref()
+    else {
+        return false;
+    };
+    if board.file_name().and_then(|s| s.to_str()) != Some(name.as_str()) {
+        return false;
+    }
+    let Some(project) = &doc.project else {
+        return true;
+    };
+    if project.path.is_empty() {
+        return true;
+    }
+    same_pathish(
+        &std::path::PathBuf::from(&project.path),
+        board.parent().unwrap_or_else(|| std::path::Path::new("")),
+    )
+}
+
+fn same_pathish(a: &std::path::Path, b: &std::path::Path) -> bool {
+    if let (Ok(a), Ok(b)) = (a.canonicalize(), b.canonicalize()) {
+        return a == b;
+    }
+    a == b
+}
+
+fn item_id_from_any(any: &prost_types::Any) -> Option<proto::kiapi::common::types::Kiid> {
+    any.to_msg::<proto::kiapi::board::types::Track>()
+        .ok()
+        .and_then(|track| track.id)
+        .or_else(|| {
+            any.to_msg::<proto::kiapi::board::types::Via>()
+                .ok()
+                .and_then(|via| via.id)
+        })
+        .or_else(|| {
+            any.to_msg::<proto::kiapi::board::types::Zone>()
+                .ok()
+                .and_then(|zone| zone.id)
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proto::kiapi::board::types::{Track, Via, Zone};
+    use proto::kiapi::common::types::document_specifier::Identifier;
+    use proto::kiapi::common::types::{DocumentSpecifier, DocumentType, Kiid, ProjectSpecifier};
+
+    #[test]
+    fn extracts_item_id_from_packed_track() {
+        let track = Track {
+            id: Some(Kiid {
+                value: "11111111-2222-3333-4444-555555555555".to_string(),
+            }),
+            ..Default::default()
+        };
+        let any = prost_types::Any::from_msg(&track).unwrap();
+
+        let id = item_id_from_any(&any).expect("track id");
+
+        assert_eq!(id.value, "11111111-2222-3333-4444-555555555555");
+    }
+
+    #[test]
+    fn extracts_item_id_from_packed_via() {
+        let via = Via {
+            id: Some(Kiid {
+                value: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
+            }),
+            ..Default::default()
+        };
+        let any = prost_types::Any::from_msg(&via).unwrap();
+
+        let id = item_id_from_any(&any).expect("via id");
+
+        assert_eq!(id.value, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    }
+
+    #[test]
+    fn extracts_item_id_from_packed_zone() {
+        let zone = Zone {
+            id: Some(Kiid {
+                value: "99999999-8888-7777-6666-555555555555".to_string(),
+            }),
+            ..Default::default()
+        };
+        let any = prost_types::Any::from_msg(&zone).unwrap();
+
+        let id = item_id_from_any(&any).expect("zone id");
+
+        assert_eq!(id.value, "99999999-8888-7777-6666-555555555555");
+    }
+
+    #[test]
+    fn document_match_rejects_same_filename_different_project() {
+        let doc = DocumentSpecifier {
+            r#type: DocumentType::DoctypePcb as i32,
+            identifier: Some(Identifier::BoardFilename("design.kicad_pcb".to_string())),
+            project: Some(ProjectSpecifier {
+                name: "other".to_string(),
+                path: "/tmp/other_project".to_string(),
+            }),
+        };
+
+        assert!(!document_matches_board(
+            &doc,
+            std::path::Path::new("/tmp/this_project/design.kicad_pcb")
+        ));
+    }
+
+    #[test]
+    fn document_match_accepts_matching_project_and_filename() {
+        let doc = DocumentSpecifier {
+            r#type: DocumentType::DoctypePcb as i32,
+            identifier: Some(Identifier::BoardFilename("design.kicad_pcb".to_string())),
+            project: Some(ProjectSpecifier {
+                name: "this_project".to_string(),
+                path: "/tmp/this_project".to_string(),
+            }),
+        };
+
+        assert!(document_matches_board(
+            &doc,
+            std::path::Path::new("/tmp/this_project/design.kicad_pcb")
+        ));
     }
 }

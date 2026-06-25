@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use gordian_core::tools::{PcbToolCtx, run_tool};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn footprint_dir() -> PathBuf {
     std::env::var("FOOTPRINT_DIR")
@@ -34,11 +34,6 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
     let created = gordian_core::tools_pcb::build_board_draft(board, &ctx).unwrap();
     if created["ok"] != json!(true) {
         return json!({ "name": name, "stage": "create", "result": created });
-    }
-    if spec.get("keepouts").is_some() || spec.get("hints").is_some() {
-        let mut draft = gordian_core::tools_pcb::BoardDraft::load(&ctx).unwrap();
-        gordian_core::tools_pcb::apply_spec_extras(&mut draft, spec);
-        draft.save(&ctx).unwrap();
     }
     let t0 = std::time::Instant::now();
     let placed = run_tool("place_board", json!({}), &ctx).unwrap();
@@ -145,10 +140,13 @@ fn main() {
     println!("{}", serde_json::to_string_pretty(&all).unwrap());
 
     // Compact summary table.
-    eprintln!("\n{:<26} {:>8} {:>7} {:>6} {:>7} {:>6} {:>5} {:>5} {:>6}",
-        "board", "router", "nets", "fail", "compl%", "traces", "vias", "tplc", "trte");
+    eprintln!(
+        "\n{:<26} {:>8} {:>7} {:>6} {:>7} {:>6} {:>5} {:>5} {:>6}",
+        "board", "router", "nets", "fail", "compl%", "traces", "vias", "tplc", "trte"
+    );
     for r in &all {
-        eprintln!("{:<26} {:>8} {:>7} {:>6} {:>6.1} {:>7} {:>5} {:>5} {:>6}",
+        eprintln!(
+            "{:<26} {:>8} {:>7} {:>6} {:>6.1} {:>7} {:>5} {:>5} {:>6}",
             r["name"].as_str().unwrap_or("?"),
             r["router"].as_str().unwrap_or("-"),
             r["total_multipin_nets"].as_u64().unwrap_or(0),

@@ -44,8 +44,8 @@ use crate::llm::{
     MessageContent, Provider, StreamEnd, ToolCall, ToolResponse, completed_text, token_usage,
 };
 
+use crate::tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
 use crate::tools::{IMAGE_PATH_KEY, PcbToolCtx, run_tool, tool_defs};
-use crate::tool::{ApplyInfo, RunMode, ReviewOutcome, ToolEffect, ToolOutcome};
 
 /// Safety cap on LLM round-trips per turn. Generous enough for the longest
 /// legitimate flow, bounded so a misbehaving model can't loop forever.
@@ -130,12 +130,19 @@ pub enum AgentEvent {
         cache_read_tokens: u64,
     },
     /// `compact` replaced the conversation history with a summary pair.
-    Compacted { messages_before: usize, messages_after: usize },
+    Compacted {
+        messages_before: usize,
+        messages_after: usize,
+    },
     /// The turn finished.
     TurnDone,
     /// An independent review pass over the committed work completed (from
     /// [`Agent::run_turn_reviewed`]). `round` 0 is the first review.
-    Reviewed { round: usize, score: f64, defects: Vec<String> },
+    Reviewed {
+        round: usize,
+        score: f64,
+        defects: Vec<String>,
+    },
 }
 
 /// Counters describing the live conversation context, for a `/context` view.
@@ -233,7 +240,11 @@ pub trait TestBackend: Send + Sync {
     /// Execute one tool in the given pass, returning the structured outcome.
     async fn run(&self, call: &ToolCall, mode: RunMode, reviewer: &dyn Provider) -> ToolOutcome;
     /// The independent post-turn review; `None` = nothing to review.
-    async fn review_committed(&self, _intent: &str, _reviewer: &dyn Provider) -> Option<ReviewOutcome> {
+    async fn review_committed(
+        &self,
+        _intent: &str,
+        _reviewer: &dyn Provider,
+    ) -> Option<ReviewOutcome> {
         None
     }
 }
@@ -252,7 +263,11 @@ impl Backend {
     }
 
     /// The independent post-turn review of the committed work.
-    async fn review_committed(&self, intent: &str, reviewer: &dyn Provider) -> Option<ReviewOutcome> {
+    async fn review_committed(
+        &self,
+        intent: &str,
+        reviewer: &dyn Provider,
+    ) -> Option<ReviewOutcome> {
         match self {
             Backend::Stub(b) => b.review_committed(intent, reviewer).await,
             Backend::Kicad(ctx) => review_committed_kicad(ctx, intent, reviewer).await,
@@ -376,10 +391,16 @@ impl<P: Provider> Agent<P> {
         let mut messages = self.history.clone();
         messages.push(ChatMessage::user(COMPACT_PROMPT));
         let end = self.client.complete(&self.system, &messages, &defs).await?;
-        let (input_tokens, output_tokens, cache_write_tokens, cache_read_tokens) = token_usage(&end);
+        let (input_tokens, output_tokens, cache_write_tokens, cache_read_tokens) =
+            token_usage(&end);
         emit(
             events,
-            AgentEvent::Usage { input_tokens, output_tokens, cache_write_tokens, cache_read_tokens },
+            AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_write_tokens,
+                cache_read_tokens,
+            },
         );
 
         let summary = completed_text(&end).trim().to_string();
@@ -396,7 +417,10 @@ impl<P: Provider> Agent<P> {
         let after = self.history.len();
         emit(
             events,
-            AgentEvent::Compacted { messages_before: before, messages_after: after },
+            AgentEvent::Compacted {
+                messages_before: before,
+                messages_after: after,
+            },
         );
         Ok((before, after))
     }
@@ -440,7 +464,9 @@ impl<P: Provider> Agent<P> {
             // backend's default `stream` yields one chunk then the End, so the loop
             // is unchanged for it.
             let (text, end) = stream_completion(
-                self.client.stream(&self.system, &self.history, &defs).await?,
+                self.client
+                    .stream(&self.system, &self.history, &defs)
+                    .await?,
                 events,
             )
             .await?;
@@ -471,7 +497,10 @@ impl<P: Provider> Agent<P> {
             for call in &tool_calls {
                 assistant_parts.push(ContentPart::ToolCall(call.clone()));
             }
-            self.history.push(ChatMessage::assistant(MessageContent::from_parts(assistant_parts)));
+            self.history
+                .push(ChatMessage::assistant(MessageContent::from_parts(
+                    assistant_parts,
+                )));
 
             // No tool calls → the model wants to stop.
             if tool_calls.is_empty() {
@@ -512,9 +541,15 @@ impl<P: Provider> Agent<P> {
                 if is_authoring_for_commit(&call.fn_name) {
                     did_authoring_work = true;
                 }
-                emit(events, AgentEvent::ToolStarted { name: call.fn_name.clone() });
-                let (content, images, image_path) =
-                    self.run_tool_call(call, gated_commit, approvals, &mut applied, events).await;
+                emit(
+                    events,
+                    AgentEvent::ToolStarted {
+                        name: call.fn_name.clone(),
+                    },
+                );
+                let (content, images, image_path) = self
+                    .run_tool_call(call, gated_commit, approvals, &mut applied, events)
+                    .await;
                 emit(
                     events,
                     AgentEvent::ToolFinished {
@@ -531,9 +566,12 @@ impl<P: Provider> Agent<P> {
                 result_images.extend(images.into_iter().map(ContentPart::Binary));
             }
             self.history
-                .push(ChatMessage::tool(MessageContent::from_tool_responses(tool_responses)));
+                .push(ChatMessage::tool(MessageContent::from_tool_responses(
+                    tool_responses,
+                )));
             if !result_images.is_empty() {
-                self.history.push(ChatMessage::user(MessageContent::from_parts(result_images)));
+                self.history
+                    .push(ChatMessage::user(MessageContent::from_parts(result_images)));
             }
 
             // Carry any text the model emitted alongside its tool calls so a turn
@@ -581,8 +619,7 @@ impl<P: Provider> Agent<P> {
             return Ok(outcome);
         }
         for round in 0..=max_fix {
-            let Some(review) = self.backend.review_committed(intent, &self.client).await
-            else {
+            let Some(review) = self.backend.review_committed(intent, &self.client).await else {
                 break;
             };
             emit(
@@ -618,7 +655,11 @@ impl<P: Provider> Agent<P> {
             return self.gated_apply(call, approvals, applied, events).await;
         }
         let outcome = self.backend.run(call, RunMode::Normal, &self.client).await;
-        (outcome.value.to_string(), outcome.images, outcome.image_path)
+        (
+            outcome.value.to_string(),
+            outcome.images,
+            outcome.image_path,
+        )
     }
 
     /// The apply-gate: preview to get the diff, ask for approval, and only then
@@ -638,7 +679,11 @@ impl<P: Provider> Agent<P> {
         // nothing to approve — return the diagnostics straight back so the model
         // self-repairs.
         if !preview_apply.ready {
-            return (preview.value.to_string(), preview.images, preview.image_path);
+            return (
+                preview.value.to_string(),
+                preview.images,
+                preview.image_path,
+            );
         }
 
         // 2. Human apply-gate on the preview value.
@@ -654,11 +699,25 @@ impl<P: Provider> Agent<P> {
 
         // 3. Approved → commit (the real write).
         let committed = self.backend.run(call, RunMode::Commit, &self.client).await;
-        if let Some(ApplyInfo { committed: true, summary, .. }) = &committed.apply {
+        if let Some(ApplyInfo {
+            committed: true,
+            summary,
+            ..
+        }) = &committed.apply
+        {
             *applied = true;
-            emit(events, AgentEvent::Applied { summary: summary.clone() });
+            emit(
+                events,
+                AgentEvent::Applied {
+                    summary: summary.clone(),
+                },
+            );
         }
-        (committed.value.to_string(), committed.images, committed.image_path)
+        (
+            committed.value.to_string(),
+            committed.images,
+            committed.image_path,
+        )
     }
 }
 
@@ -676,9 +735,10 @@ fn tool_effect(name: &str) -> ToolEffect {
         // The one human-gated write.
         "apply_design" => ToolEffect::Gated,
         // Tools that mutate the working draft / board scratch state.
-        "create_design" | "edit_design" | "derive_board" | "assign_footprint" | "place_board"
-        | "route_board" | "autoroute" | "export_board" | "open_board" | "move_part"
-        | "route_track" | "set_net_width" => ToolEffect::Authoring,
+        "create_design" | "edit_design" | "derive_board" | "place_board" | "route_board"
+        | "autoroute" | "open_board" | "move_part" | "route_track" | "set_net_width" => {
+            ToolEffect::Authoring
+        }
         // Everything else reads only.
         _ => ToolEffect::ReadOnly,
     }
@@ -746,7 +806,13 @@ async fn run_kicad_tool(
                     .ok()
                     .and_then(|v| v.get("ok").and_then(Value::as_bool))
                     == Some(true);
-                return into_outcome(dry, Some(ApplyInfo { ready, ..Default::default() }));
+                return into_outcome(
+                    dry,
+                    Some(ApplyInfo {
+                        ready,
+                        ..Default::default()
+                    }),
+                );
             }
             RunMode::Commit => {
                 let mut input = call.fn_arguments.clone();
@@ -754,8 +820,14 @@ async fn run_kicad_tool(
                 let committed = run_blocking(ctx, "apply_design", input).await;
                 let apply = committed.as_ref().ok().map(|v| {
                     let written = v.get("written").and_then(Value::as_bool) == Some(true);
-                    let errors = v.pointer("/erc/errors").and_then(Value::as_u64).unwrap_or(0);
-                    let warnings = v.pointer("/erc/warnings").and_then(Value::as_u64).unwrap_or(0);
+                    let errors = v
+                        .pointer("/erc/errors")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let warnings = v
+                        .pointer("/erc/warnings")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
                     ApplyInfo {
                         ready: true,
                         committed: written,
@@ -769,7 +841,10 @@ async fn run_kicad_tool(
         }
     }
 
-    into_outcome(run_blocking(ctx, &call.fn_name, call.fn_arguments.clone()).await, None)
+    into_outcome(
+        run_blocking(ctx, &call.fn_name, call.fn_arguments.clone()).await,
+        None,
+    )
 }
 
 /// Run one synchronous tool on the blocking pool. Tools can take seconds (symbol-
@@ -793,7 +868,11 @@ async fn review_design(
 ) -> Result<Value> {
     let intent = input.get("intent").and_then(Value::as_str).unwrap_or("");
     let dv = run_blocking(ctx, "get_design", json!({})).await?;
-    let netlist = dv.get("yaml").and_then(Value::as_str).unwrap_or_default().to_string();
+    let netlist = dv
+        .get("yaml")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     if netlist.trim().is_empty() {
         return Ok(json!({
             "error": "no design to review yet — build one with create_design/edit_design (or apply_design) first",
@@ -818,7 +897,8 @@ async fn review_netlist_with_erc(
     intent: &str,
     netlist: &str,
 ) -> Result<(f64, Vec<String>)> {
-    let (score, mut defects) = crate::review_kicad::review_netlist(reviewer, intent, netlist).await?;
+    let (score, mut defects) =
+        crate::review_kicad::review_netlist(reviewer, intent, netlist).await?;
     if let Some(design) = circuit_lang::compile(netlist, ctx.provider()).design {
         for d in circuit_lang::erc::erc_checks(&design) {
             if !defects.iter().any(|e| crate::review::same_defect(e, &d)) {
@@ -847,13 +927,15 @@ async fn review_committed_kicad(
         return None;
     }
     let netlist = sch_io::read::lift(ctx.env(), sch).ok()?;
-    let (mut score, mut defects) =
-        review_netlist_with_erc(ctx, reviewer, intent, &netlist).await.ok()?;
+    let (mut score, mut defects) = review_netlist_with_erc(ctx, reviewer, intent, &netlist)
+        .await
+        .ok()?;
 
     // Layout (vision) plane — best-effort, unioned in. A `(0.0, [])` result means
     // the vision pass produced no parseable verdict (no signal), so it must NOT
     // drag the score to zero — skip it.
-    if let Some((layout_score, layout_defects)) = review_layout_schematic(ctx, reviewer, intent).await
+    if let Some((layout_score, layout_defects)) =
+        review_layout_schematic(ctx, reviewer, intent).await
         && !(layout_score == 0.0 && layout_defects.is_empty())
     {
         score = score.min(layout_score);
@@ -905,7 +987,12 @@ fn into_outcome(result: Result<Value>, apply: Option<ApplyInfo>) -> ToolOutcome 
     match result {
         Ok(mut value) => {
             let (images, image_path) = take_images(&mut value);
-            ToolOutcome { value, images, image_path, apply }
+            ToolOutcome {
+                value,
+                images,
+                image_path,
+                apply,
+            }
         }
         Err(e) => ToolOutcome {
             value: json!({ "error": e.to_string() }),
@@ -921,7 +1008,11 @@ fn into_outcome(result: Result<Value>, apply: Option<ApplyInfo>) -> ToolOutcome 
 /// can show the same PNG inline. An unreadable file yields no [`Binary`] but the
 /// path is still returned (the UI falls back to a text label).
 fn take_images(value: &mut Value) -> (Vec<Binary>, Option<String>) {
-    let Some(path) = value.get(IMAGE_PATH_KEY).and_then(Value::as_str).map(str::to_string) else {
+    let Some(path) = value
+        .get(IMAGE_PATH_KEY)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
         return (Vec::new(), None);
     };
     if let Some(obj) = value.as_object_mut() {
@@ -950,12 +1041,20 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
     match name {
         "search_symbols" => {
             let q = input.get("query").and_then(Value::as_str).unwrap_or("");
-            let n = result.get("hits").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+            let n = result
+                .get("hits")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
             format!("\"{q}\" → {n} hits")
         }
         "get_symbol_info" => {
             let lib = input.get("lib_id").and_then(Value::as_str).unwrap_or("");
-            let n = result.get("pins").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+            let n = result
+                .get("pins")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
             format!("{lib} → {n} pins")
         }
         "get_design" => "lifted current design".to_string(),
@@ -966,7 +1065,10 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
         }
         "apply_design" => {
             if result.get("written").and_then(Value::as_bool) == Some(true) {
-                let errors = result.pointer("/erc/errors").and_then(Value::as_u64).unwrap_or(0);
+                let errors = result
+                    .pointer("/erc/errors")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 format!("written (ERC {errors} errors)")
             } else if result.get("rejected").and_then(Value::as_bool) == Some(true) {
                 "rejected".to_string()
@@ -1003,7 +1105,11 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
         "render_schematic" => "rendered schematic to PNG".to_string(),
         "review_design" => {
             let score = result.get("score").and_then(Value::as_f64).unwrap_or(0.0);
-            let n = result.get("defects").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+            let n = result
+                .get("defects")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
             if n == 0 {
                 format!("score {score:.0}/10 — clean")
             } else {
@@ -1056,11 +1162,16 @@ fn repair_history(history: &mut Vec<ChatMessage>) {
                     )
                 })
                 .collect();
-            history.push(ChatMessage::tool(MessageContent::from_tool_responses(responses)));
+            history.push(ChatMessage::tool(MessageContent::from_tool_responses(
+                responses,
+            )));
         }
     }
 
-    if matches!(history.last().map(|m| &m.role), Some(ChatRole::Tool | ChatRole::User)) {
+    if matches!(
+        history.last().map(|m| &m.role),
+        Some(ChatRole::Tool | ChatRole::User)
+    ) {
         history.push(ChatMessage::assistant("(turn interrupted)"));
     }
 }
@@ -1145,9 +1256,17 @@ mod tests {
 
     #[test]
     fn tool_summary_reads_structured_results() {
-        let s = tool_summary("search_symbols", &json!({ "query": "STM32" }), &json!({ "hits": [1, 2, 3] }));
+        let s = tool_summary(
+            "search_symbols",
+            &json!({ "query": "STM32" }),
+            &json!({ "hits": [1, 2, 3] }),
+        );
         assert_eq!(s, "\"STM32\" → 3 hits");
-        let s = tool_summary("apply_design", &json!({}), &json!({ "written": true, "erc": { "errors": 0 } }));
+        let s = tool_summary(
+            "apply_design",
+            &json!({}),
+            &json!({ "written": true, "erc": { "errors": 0 } }),
+        );
         assert!(s.contains("written"), "got: {s}");
         let s = tool_summary("get_design", &json!({}), &json!({ "error": "boom" }));
         assert_eq!(s, "error: boom");
@@ -1208,7 +1327,10 @@ mod tests {
         ];
         let starts = vec![0, 2];
         let p = turn_previews(&history, &starts);
-        assert_eq!(p, vec!["second prompt".to_string(), "first prompt".to_string()]);
+        assert_eq!(
+            p,
+            vec!["second prompt".to_string(), "first prompt".to_string()]
+        );
     }
 
     #[test]
@@ -1237,6 +1359,10 @@ mod tests {
 
         assert_eq!(pop_n(&mut history, &mut starts, 5), 1);
         assert!(history.is_empty() && starts.is_empty());
-        assert_eq!(pop_n(&mut history, &mut starts, 1), 0, "nothing left to pop");
+        assert_eq!(
+            pop_n(&mut history, &mut starts, 1),
+            0,
+            "nothing left to pop"
+        );
     }
 }

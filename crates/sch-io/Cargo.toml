@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Schematic I/O: the elbow wire router, label text solver, the SchematicWriter (Design+placement → .kicad_sch), and read (.kicad_sch → Design)."
 
 [dependencies]
+geom = { path = "../geom" }
 sch-place = { path = "../sch-place" }
 circuit-lang = { path = "../circuit-lang" }
 kicad-cli = { path = "../kicad-cli" }

@@ -7,6 +7,7 @@ repository.workspace = true
 description = "KiCAD symbol vocabulary + library reader: .kicad_sym parsing, pin metadata, drawing geometry, install-backed provider, and cross-library search."
 
 [dependencies]
+geom = { path = "../geom" }
 kicad-cli = { path = "../kicad-cli" }
 kiutils_kicad.workspace = true
 kiutils_sexpr.workspace = true

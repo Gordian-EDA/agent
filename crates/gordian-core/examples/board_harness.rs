@@ -1,4 +1,4 @@
-//! E2E engine harness: drive create -> place -> route -> export over a set of
+//! E2E engine harness: drive create -> place -> route -> check over a set of
 //! hand-authored circuit specs, using the **real** installed KiCAD footprint
 //! library. Deterministic (no LLM) — this exercises the placement/routing/
 //! synth/DRC engine on varied, realistic boards.
@@ -10,14 +10,14 @@
 //! ```
 //!
 //! Outputs per circuit into /tmp/pcb-harness/<name>/:
-//!   board.kicad_pcb   — the exported board (the artifact)
+//!   board.kicad_pcb   — the saved active board (the artifact)
 //!   engine.png        — the engine's debug routing render
 //! plus a one-line status to stdout (place legal? route failed nets? DRC counts).
 
 use std::path::{Path, PathBuf};
 
 use gordian_core::tools::{PcbToolCtx, run_tool};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn footprint_dir() -> PathBuf {
     std::env::var("FOOTPRINT_DIR")
@@ -33,7 +33,10 @@ fn rasterize(svg: &str, out: &Path, scale: f32) {
     let opt = resvg::usvg::Options::default();
     let tree = resvg::usvg::Tree::from_str(svg, &opt).expect("parse svg");
     let size = tree.size();
-    let (w, h) = ((size.width() * scale) as u32, (size.height() * scale) as u32);
+    let (w, h) = (
+        (size.width() * scale) as u32,
+        (size.height() * scale) as u32,
+    );
     let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).expect("pixmap");
     pixmap.fill(resvg::tiny_skia::Color::WHITE);
     let ts = resvg::tiny_skia::Transform::from_scale(scale, scale);
@@ -59,38 +62,28 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
     if created["ok"] != json!(true) {
         return json!({ "name": name, "stage": "create", "result": created });
     }
-    // Keepouts + placement hints from the spec, set directly on the saved draft
-    // (the agent authors these in the Board-DSL; the harness seeds them on the draft).
-    if spec.get("keepouts").is_some() || spec.get("hints").is_some() {
-        let mut draft = gordian_core::tools_pcb::BoardDraft::load(&ctx).unwrap();
-        gordian_core::tools_pcb::apply_spec_extras(&mut draft, spec);
-        draft.save(&ctx).unwrap();
-    }
     let placed = run_tool("place_board", json!({}), &ctx).unwrap();
     if placed["legal"] != json!(true) {
         eprintln!(
             "[place {name}] legal=false overlaps_resolved={} clamps={} suggested={:?} current={:?}",
-            placed["overlaps_resolved"], placed["out_of_bounds_clamps"],
-            placed.get("suggested_min_bounds_mm"), placed.get("current_bounds_mm")
+            placed["overlaps_resolved"],
+            placed["out_of_bounds_clamps"],
+            placed.get("suggested_min_bounds_mm"),
+            placed.get("current_bounds_mm")
         );
     }
     let routed = run_tool("route_board", json!({}), &ctx).unwrap();
-    let exported = run_tool("export_board", json!({}), &ctx).unwrap();
+    let checked = run_tool("check_board", json!({}), &ctx).unwrap();
 
     let out_dir = PathBuf::from("/tmp/pcb-harness").join(name);
     std::fs::create_dir_all(&out_dir).unwrap();
-    if let Some(p) = exported["path"].as_str() {
-        let _ = std::fs::copy(p, out_dir.join("board.kicad_pcb"));
-        // The sibling .kicad_pro carries the design rules (net class) — copy it so a
-        // re-run of kicad-cli DRC on the /tmp board checks against the engine's rules.
-        let pro = PathBuf::from(p).with_extension("kicad_pro");
-        let _ = std::fs::copy(&pro, out_dir.join("board.kicad_pro"));
-    }
+    let _ = std::fs::copy(ctx.pcb_path(), out_dir.join("board.kicad_pcb"));
     // Engine debug render (routed view).
     if let Ok(render) = run_tool("render_board", json!({ "view": "routed" }), &ctx)
-        && let Some(p) = render["png_path"].as_str() {
-            let _ = std::fs::copy(p, out_dir.join("engine.png"));
-        }
+        && let Some(p) = render["png_path"].as_str()
+    {
+        let _ = std::fs::copy(p, out_dir.join("engine.png"));
+    }
     let _ = rasterize; // (kept for ad-hoc SVG rasterization)
 
     json!({
@@ -101,8 +94,8 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
         "failed_nets": routed["failed"].as_array().map(|a| a.len()).unwrap_or(0),
         "metrics": routed["metrics"],
         "lint": routed["lint_summary"],
-        "export_ok": exported["ok"],
-        "drc": exported["drc"],
+        "check_ok": checked["ok"],
+        "drc": checked,
         "artifact": out_dir.join("board.kicad_pcb").display().to_string(),
     })
 }
@@ -119,9 +112,10 @@ fn main() {
         }
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
         if let Some(only) = &only
-            && !stem.contains(only.as_str()) {
-                continue;
-            }
+            && !stem.contains(only.as_str())
+        {
+            continue;
+        }
         let spec: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         specs.push((stem, spec));
     }
@@ -168,9 +162,15 @@ fn main() {
     // Fidelity gate: the engine must never EMIT a copper DRC fault.
     println!("\n===== FIDELITY GATE =====");
     if fault_boards.is_empty() {
-        println!("PASS — 0 copper DRC faults across {} boards (unrouted nets are honest).", all.len());
+        println!(
+            "PASS — 0 copper DRC faults across {} boards (unrouted nets are honest).",
+            all.len()
+        );
     } else {
-        println!("FAIL — copper DRC faults emitted on: {}", fault_boards.join(", "));
+        println!(
+            "FAIL — copper DRC faults emitted on: {}",
+            fault_boards.join(", ")
+        );
         std::process::exit(1);
     }
 }

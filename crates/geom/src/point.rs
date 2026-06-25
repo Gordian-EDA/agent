@@ -1,6 +1,7 @@
 //! The single 2-D point type shared across the schematic and PCB stacks.
 
 use serde::{Deserialize, Serialize};
+use std::ops::{Index, IndexMut};
 
 /// A 2-D point in millimetres, y-down. The single point type across the
 /// workspace (schematic sheet, PCB board, symbol pins after load).
@@ -52,7 +53,11 @@ impl Point2 {
     /// the caller's job.
     #[inline]
     pub fn transform(self, deg: f64, mirror: bool) -> Point2 {
-        let m = if mirror { Point2::new(-self.x, self.y) } else { self };
+        let m = if mirror {
+            Point2::new(-self.x, self.y)
+        } else {
+            self
+        };
         m.rotate(deg)
     }
 }
@@ -71,6 +76,30 @@ impl From<Point2> for [f64; 2] {
     }
 }
 
+impl Index<usize> for Point2 {
+    type Output = f64;
+
+    #[inline]
+    fn index(&self, index: usize) -> &Self::Output {
+        match index {
+            0 => &self.x,
+            1 => &self.y,
+            _ => panic!("Point2 index out of bounds: {index}"),
+        }
+    }
+}
+
+impl IndexMut<usize> for Point2 {
+    #[inline]
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        match index {
+            0 => &mut self.x,
+            1 => &mut self.y,
+            _ => panic!("Point2 index out of bounds: {index}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,11 +107,20 @@ mod tests {
     #[test]
     fn rotate_matches_kicad_convention() {
         let p = Point2::new(-2.475, 1.905).rotate(270.0);
-        assert!((p.x - -1.905).abs() < 1e-9 && (p.y - -2.475).abs() < 1e-9, "{p:?}");
+        assert!(
+            (p.x - -1.905).abs() < 1e-9 && (p.y - -2.475).abs() < 1e-9,
+            "{p:?}"
+        );
         let q = Point2::new(-2.475, 1.905).rotate(90.0);
-        assert!((q.x - 1.905).abs() < 1e-9 && (q.y - 2.475).abs() < 1e-9, "{q:?}");
+        assert!(
+            (q.x - 1.905).abs() < 1e-9 && (q.y - 2.475).abs() < 1e-9,
+            "{q:?}"
+        );
         let r = Point2::new(1.0, 2.0).rotate(180.0);
-        assert!((r.x - -1.0).abs() < 1e-9 && (r.y - -2.0).abs() < 1e-9, "{r:?}");
+        assert!(
+            (r.x - -1.0).abs() < 1e-9 && (r.y - -2.0).abs() < 1e-9,
+            "{r:?}"
+        );
     }
 
     #[test]

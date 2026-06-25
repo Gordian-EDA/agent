@@ -7,8 +7,8 @@ use std::fmt::Write as _;
 use crate::ids::stable_uuid;
 
 use super::{
-    field_anchors, justify_token, Dir, Instance, NoConnect, PinLabel, SchematicWriter,
-    ROOT_SHEET_KEY,
+    Dir, Instance, NoConnect, PinLabel, ROOT_SHEET_KEY, SchematicWriter, field_anchors,
+    justify_token,
 };
 
 impl SchematicWriter {
@@ -61,7 +61,8 @@ impl SchematicWriter {
     /// `None` for an empty writer.
     pub fn content_size(&self) -> Option<[f64; 2]> {
         const M: f64 = 12.7; // `content_extent`'s PAGE_MARGIN / `reframe`'s M
-        self.content_extent().map(|[w, h]| [(w - 2.0 * M).max(1.0), (h - 2.0 * M).max(1.0)])
+        self.content_extent()
+            .map(|[w, h]| [(w - 2.0 * M).max(1.0), (h - 2.0 * M).max(1.0)])
     }
 
     /// Assemble the complete `.kicad_sch` document as a deterministic string.
@@ -168,7 +169,9 @@ impl SchematicWriter {
             let _ = writeln!(
                 out,
                 "\t(text \"{body}\"\n\t\t(exclude_from_sim no)\n\t\t(at {} {} 0)\n\t\t(effects (font (size {sz} {sz}){weight}) (justify left bottom))\n\t\t(uuid \"{uuid}\")\n\t)",
-                fmt_coord(t.at[0]), fmt_coord(t.at[1]), sz = t.size,
+                fmt_coord(t.at[0]),
+                fmt_coord(t.at[1]),
+                sz = t.size,
             );
         }
         for r in &rects {
@@ -176,8 +179,10 @@ impl SchematicWriter {
             let _ = writeln!(
                 out,
                 "\t(rectangle\n\t\t(start {} {})\n\t\t(end {} {})\n\t\t(stroke (width 0.1524) (type dash))\n\t\t(fill (type none))\n\t\t(uuid \"{uuid}\")\n\t)",
-                fmt_coord(r.start[0]), fmt_coord(r.start[1]),
-                fmt_coord(r.end[0]), fmt_coord(r.end[1]),
+                fmt_coord(r.start[0]),
+                fmt_coord(r.start[1]),
+                fmt_coord(r.end[0]),
+                fmt_coord(r.end[1]),
             );
         }
 
@@ -259,7 +264,10 @@ fn render_label(label: &PinLabel) -> String {
         let _ = writeln!(s, "\t(global_label \"{net}\"");
         let _ = writeln!(s, "\t\t(shape bidirectional)");
         let _ = writeln!(s, "\t\t(at {x} {y} {angle})");
-        let _ = writeln!(s, "\t\t(effects (font (size 1.27 1.27)) (justify {justify}))");
+        let _ = writeln!(
+            s,
+            "\t\t(effects (font (size 1.27 1.27)) (justify {justify}))"
+        );
         let _ = writeln!(s, "\t\t(uuid \"{uuid}\")");
         s.push_str("\t)\n");
         return s;
@@ -551,7 +559,7 @@ mod tests {
     fn label_orientation_per_direction() {
         let mk = |dir| PinLabel {
             net: "X".into(),
-            at: [0.0, 0.0],
+            at: [0.0, 0.0].into(),
             uuid_key: "k".into(),
             dir,
             stub: None,
@@ -587,7 +595,8 @@ mod tests {
         // symbol must carry 270-degree fields so the text reads horizontal.
         let Some(env) = detect_env() else { return };
         let mut w = SchematicWriter::new();
-        w.add_symbol(&env, "Device:R", "R1", "1k", [101.6, 101.6], 90.0).unwrap();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [101.6, 101.6], 90.0)
+            .unwrap();
         let sch = w.finish();
         let seg = sch.split("(property \"Reference\" \"R1\"").nth(1).unwrap();
         let at_line = seg.lines().nth(1).unwrap();
@@ -602,8 +611,10 @@ mod tests {
         let Some(env) = detect_env() else { return };
         let build = |presolve: bool| {
             let mut w = SchematicWriter::new();
-            w.add_symbol(&env, "Device:R", "R1", "1k", [101.6, 101.6], 0.0).unwrap();
-            w.add_symbol(&env, "Device:R", "R2", "2k", [111.76, 101.6], 0.0).unwrap();
+            w.add_symbol(&env, "Device:R", "R1", "1k", [101.6, 101.6], 0.0)
+                .unwrap();
+            w.add_symbol(&env, "Device:R", "R2", "2k", [111.76, 101.6], 0.0)
+                .unwrap();
             w.add_signal_label(&env, "R1", "1", "SIG").unwrap();
             if presolve {
                 w.retract_colliding_stubs();
@@ -611,7 +622,11 @@ mod tests {
             }
             w.finish()
         };
-        assert_eq!(build(false), build(true), "pre-solving must not change output");
+        assert_eq!(
+            build(false),
+            build(true),
+            "pre-solving must not change output"
+        );
     }
 
     #[test]
@@ -622,7 +637,8 @@ mod tests {
         // reads away from the body — not reset to East across the pin line.
         let Some(env) = detect_env() else { return };
         let mut w = SchematicWriter::new();
-        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0).unwrap();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0)
+            .unwrap();
         w.add_signal_label(&env, "R1", "1", "SIG").unwrap();
         // Foreign wire through the stub end (127.0, 55.88).
         w.add_wire_on_net([121.92, 55.88], [132.08, 55.88], "OTHER");
@@ -653,8 +669,10 @@ mod tests {
         };
 
         let mut w = SchematicWriter::new();
-        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0).unwrap();
-        w.add_symbol(&env, "Device:R", "R2", "1k", [177.8, 63.5], 0.0).unwrap();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0)
+            .unwrap();
+        w.add_symbol(&env, "Device:R", "R2", "1k", [177.8, 63.5], 0.0)
+            .unwrap();
         w.add_signal_label(&env, "R1", "1", "SIG").unwrap();
         w.add_signal_label(&env, "R2", "1", "SIG").unwrap();
 
@@ -681,15 +699,22 @@ mod tests {
 
     #[test]
     fn u1_fields_dodge_out_label() {
-        let Some(env) = KicadEnv::detect() else { eprintln!("SKIP"); return };
+        let Some(env) = KicadEnv::detect() else {
+            eprintln!("SKIP");
+            return;
+        };
         let mut w = SchematicWriter::new();
-        w.add_symbol(&env, "Timer:NE555P", "U1", "", [45.72, 45.72], 0.0).unwrap();
+        w.add_symbol(&env, "Timer:NE555P", "U1", "", [45.72, 45.72], 0.0)
+            .unwrap();
         // KiCad 9's Timer:NE555P names the output pin "Q" (older libs used "OUT").
         w.add_signal_label(&env, "U1", "Q", "N_Q").unwrap();
         let sch = w.finish();
         let seg = sch.split("(property \"Reference\" \"U1\"").nth(1).unwrap();
         let at = seg.lines().nth(1).unwrap();
         println!("U1 ref at: {at}");
-        assert!(!at.contains("(at 59.69"), "U1 ref must not sit on the N_Q label:\n{at}");
+        assert!(
+            !at.contains("(at 59.69"),
+            "U1 ref must not sit on the N_Q label:\n{at}"
+        );
     }
 }

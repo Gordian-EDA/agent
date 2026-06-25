@@ -76,14 +76,14 @@ pub enum PinSide {
 }
 
 /// Classify a pin's local `(x, y)` offset into the body side it sits on.
-pub fn pin_side(at: [f64; 2]) -> PinSide {
-    if at[0].abs() >= at[1].abs() {
-        if at[0] >= 0.0 {
+pub fn pin_side(at: ::geom::Point2) -> PinSide {
+    if at.x.abs() >= at.y.abs() {
+        if at.x >= 0.0 {
             PinSide::East
         } else {
             PinSide::West
         }
-    } else if at[1] >= 0.0 {
+    } else if at.y >= 0.0 {
         PinSide::North // symbol-local +y is up; the pin points up = top side
     } else {
         PinSide::South

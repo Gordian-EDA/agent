@@ -47,16 +47,16 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
-use circuit_lang::model::{Component, Design, PinTarget};
+use crate::history::SnapshotStore;
 use circuit_lang::compile;
+use circuit_lang::model::{Component, Design, PinTarget};
 use kicad_cli::cli::KicadCli;
 use kicad_cli::env::KicadEnv;
 use kicad_sexpr::footlib::FootprintIndex;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::search::SymbolIndex;
-use crate::history::SnapshotStore;
 
-use sch_floorplan::floorplan::{infer_ir, LayoutIr};
+use sch_floorplan::floorplan::{LayoutIr, infer_ir};
 use sch_io::read::lift;
 
 use crate::Tool;
@@ -92,10 +92,10 @@ pub struct PcbToolCtx {
     footprint_dir_override: Option<PathBuf>,
     /// Project-local persistent state directory `.gordian/`.
     workspace: crate::workspace::Workspace,
-    /// The live KiCAD IPC session for interactive board editing, launched lazily
-    /// by `open_board` and reused by the geometry tools (`move_part`,
-    /// `route_track`, …). `Mutex` so `PcbToolCtx` stays `Send + Sync`.
-    kicad: std::sync::Mutex<Option<kicad_ipc::Session>>,
+    /// The unique KiCAD IPC session manager for live board editing. PCB tools ask
+    /// it for the active board; it attaches to a running KiCAD or lazily opens a
+    /// managed headless session.
+    kicad: kicad_ipc::SessionManager,
     /// Keeps a test tempdir alive for the ctx's lifetime; `None` for real ctxs.
     _tempdir: Option<tempfile::TempDir>,
 }
@@ -127,7 +127,7 @@ impl PcbToolCtx {
             footprint_index: OnceLock::new(),
             footprint_dir_override: None,
             workspace,
-            kicad: std::sync::Mutex::new(None),
+            kicad: kicad_ipc::SessionManager::new(),
             _tempdir: None,
         })
     }
@@ -166,7 +166,7 @@ impl PcbToolCtx {
             footprint_index: OnceLock::new(),
             footprint_dir_override: None,
             workspace,
-            kicad: std::sync::Mutex::new(None),
+            kicad: kicad_ipc::SessionManager::new(),
             _tempdir: Some(tempdir),
         })
     }
@@ -202,7 +202,7 @@ impl PcbToolCtx {
             footprint_index: OnceLock::new(),
             footprint_dir_override: Some(footprint_dir),
             workspace,
-            kicad: std::sync::Mutex::new(None),
+            kicad: kicad_ipc::SessionManager::new(),
             _tempdir: Some(tempdir),
         })
     }
@@ -232,6 +232,11 @@ impl PcbToolCtx {
         &self.project_dir
     }
 
+    /// Close the cached live KiCAD session, if one is open.
+    pub fn close_kicad_session(&self) {
+        self.kicad.close();
+    }
+
     /// The detected KiCAD environment.
     pub fn env(&self) -> &KicadEnv {
         &self.env
@@ -252,10 +257,9 @@ impl PcbToolCtx {
         &self.workspace
     }
 
-    /// The live KiCAD IPC session (guarded). `open_board` installs one;
-    /// interactive geometry tools take `guard.as_mut()`.
-    pub(crate) fn kicad(&self) -> std::sync::MutexGuard<'_, Option<kicad_ipc::Session>> {
-        self.kicad.lock().expect("kicad session mutex poisoned")
+    /// The live KiCAD IPC session manager.
+    pub(crate) fn kicad(&self) -> &kicad_ipc::SessionManager {
+        &self.kicad
     }
 
     /// The cross-library symbol index, built once and cached.
@@ -289,7 +293,10 @@ impl PcbToolCtx {
             None => FootprintIndex::build(&self.env).context("building footprint index")?,
         };
         let _ = self.footprint_index.set(idx);
-        Ok(self.footprint_index.get().expect("footprint index just set"))
+        Ok(self
+            .footprint_index
+            .get()
+            .expect("footprint index just set"))
     }
 }
 
@@ -562,10 +569,11 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "assign_footprint".into(),
-                description: "Set a part's footprint in the board draft (fills a part whose \
-                    schematic symbol carried no footprint). The footprint must have every pad the \
-                    part nets (checked). Find lib_ids with search_footprints — never guess. Run \
-                    after derive_board, before place_board."
+                description: "Stateless helper for assigning a footprint in circuit YAML. It does \
+                    not read or write PCB state; it returns the edit_design instruction needed to \
+                    set the component's schematic footprint field. Find lib_ids with \
+                    search_footprints / get_footprint_info — never guess. After editing and \
+                    apply_design, run derive_board to sync the PCB."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -581,8 +589,8 @@ pub fn tool_defs() -> Vec<Tool> {
                 description: "Open the exported .kicad_pcb in a LIVE headless KiCAD for INTERACTIVE \
                     editing over IPC. After this you edit the REAL board directly — move_part, \
                     route_track, set_net_width — with board_state to read it and render_board to see \
-                    it. Requires an exported board (derive_board -> [assign_footprint] -> place_board \
-                    -> route_board -> export_board). Returns the board state."
+                    it. Opens or attaches to the project board (derive_board -> place_board \
+                    -> route_board). Returns the board state."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
@@ -647,13 +655,12 @@ pub fn tool_defs() -> Vec<Tool> {
             Def {
                 name: "derive_board".into(),
                 description: "Seed the board from the committed schematic: reads the parts + \
-                    netlist (pin->pad is KiCAD's) and builds the board draft — one part per \
+                    netlist (pin->pad is KiCAD's) and builds the KiCAD board — one part per \
                     component with its pad->net map and the footprint taken from the symbol. \
                     Requires a committed .kicad_sch (run apply_design first). `missing_footprints` \
                     lists parts whose symbol had no footprint — set each with assign_footprint. \
-                    Then place_board -> route_board -> export_board -> open_board to refine \
-                    interactively. Optional `bounds` seeds the outline (mm); `rules.layers` the \
-                    copper layer count; overwrite=true replaces an existing draft."
+                    Then place_board -> route_board -> check_board. Optional `bounds` seeds the \
+                    outline (mm); `rules.layers` the copper layer count."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -724,8 +731,8 @@ pub fn tool_defs() -> Vec<Tool> {
                     heavy-duty assist for dense boards (BGA/QFP fan-out) the in-house route_board \
                     can't escape. Routes from scratch at the board's design rules, writes the \
                     routed copper back to the .kicad_pcb, and reports copper DRC + unconnected \
-                    counts. Requires an exported (placed) board (derive_board → place_board → \
-                    export_board → autoroute). Use this instead of route_board when route_board \
+                    counts. Requires a placed board (derive_board → place_board → autoroute). \
+                    Use this instead of route_board when route_board \
                     leaves many nets failed on a dense board; then open_board to inspect/refine."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
@@ -740,7 +747,7 @@ pub fn tool_defs() -> Vec<Tool> {
                     view=\"routed\" shows the full copper + vias + failed-net highlights. \
                     Colour key (routed view): red = top-layer trace, blue = bottom-layer \
                     trace, orange cross = failed net endpoint (route that net differently). \
-                    When view is omitted the default is \"routed\" if route.json exists, \
+                    When view is omitted the default is \"routed\" if the live board has copper, \
                     \"placed\" otherwise. Requires place_board (placed view) or route_board \
                     (routed view); missing state returns a recoverable error. The PNG is \
                     also saved under .gordian/renders/."
@@ -760,28 +767,13 @@ pub fn tool_defs() -> Vec<Tool> {
                 }),
             },
             Def {
-                name: "export_board".into(),
-                description: "Export the placed + routed board to a .kicad_pcb file. \
-                    Synthesizes the board from the engine placement (footprints + \
-                    per-pad nets + a board outline) and splices the routed copper onto \
-                    it. Requires a placed AND routed board — run place_board then \
-                    route_board first (else a recoverable error). When a KiCAD 8+ CLI \
-                    is available it runs `kicad-cli pcb drc` and returns the counts \
-                    (copper_violations, unconnected_items; lib_footprint_mismatch \
-                    warnings are a tolerated library-bookkeeping carve-out, not a copper \
-                    fault); otherwise DRC is skipped with a note. Default output path is \
-                    the project's <stem>.kicad_pcb next to the schematic."
+                name: "check_board".into(),
+                description: "Save the active KiCAD board and run KiCAD PCB DRC. \
+                    Use after route_board or manual IPC edits. Reports total violations, \
+                    copper violations, and unconnected items. This is read-only over \
+                    the design except for saving the live board before DRC."
                     .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Output .kicad_pcb path. Omit to write the \
-                                project's default <stem>.kicad_pcb next to the schematic."
-                        }
-                    }
-                }),
+                input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "export_fab".into(),
@@ -790,9 +782,9 @@ pub fn tool_defs() -> Vec<Tool> {
                     (separate plated/non-plated files + drill maps), a CSV pick-and-place \
                     (component positions), and — when the project has a schematic — a grouped \
                     BOM CSV. Everything lands in a single fab/ directory you hand to a board \
-                    house. Call this LAST, AFTER export_board has written the .kicad_pcb \
-                    (place_board → route_board → export_board → export_fab); if no board file \
-                    exists it returns a recoverable error pointing at export_board. Returns the \
+                    house. Call this LAST, AFTER check_board passes \
+                    (derive_board → place_board → route_board → check_board → export_fab); if no board file \
+                    exists it returns a recoverable error pointing at derive_board. Returns the \
                     fab directory and the produced file list."
                     .into(),
                 input_schema: json!({
@@ -801,7 +793,7 @@ pub fn tool_defs() -> Vec<Tool> {
                         "path": {
                             "type": "string",
                             "description": "Input .kicad_pcb to bundle. Omit to use the \
-                                project's default <stem>.kicad_pcb (what export_board wrote)."
+                                project's default <stem>.kicad_pcb."
                         },
                         "out_dir": {
                             "type": "string",
@@ -813,7 +805,11 @@ pub fn tool_defs() -> Vec<Tool> {
             },
     ];
     defs.into_iter()
-        .map(|d| Tool::new(d.name).with_description(d.description).with_schema(d.input_schema))
+        .map(|d| {
+            Tool::new(d.name)
+                .with_description(d.description)
+                .with_schema(d.input_schema)
+        })
         .collect()
 }
 
@@ -823,35 +819,35 @@ pub fn tool_defs() -> Vec<Tool> {
 pub fn run_tool(name: &str, input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     match name {
         "search_symbols" => search_symbols(input, ctx),
-            "get_symbol_info" => get_symbol_info(input, ctx),
-            "get_design" => get_design(ctx),
-            "validate_design" => validate_design(input, ctx),
-            "apply_design" => apply_design(input, ctx),
-            "run_erc" => run_erc(ctx),
-            "project_info" => project_info(ctx),
-            "read_schematic" => read_schematic(input, ctx),
-            "find_similar_designs" => find_similar_designs(input, ctx),
-            "render_schematic" => render_schematic(ctx),
-            "create_design" => create_design(input, ctx),
-            "edit_design" => edit_design(input, ctx),
-            "search_footprints" => crate::tools_pcb::search_footprints(input, ctx),
-            "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
-            "derive_board" => crate::tools_pcb::derive_board(input, ctx),
-            "assign_footprint" => crate::tools_pcb::assign_footprint(input, ctx),
-            "get_board" => crate::tools_pcb::get_board(ctx),
-            "place_board" => crate::tools_pcb::place_board(input, ctx),
-            "route_board" => crate::tools_pcb::route_board(input, ctx),
-            "autoroute" => crate::tools_pcb::autoroute(input, ctx),
-            "export_board" => crate::tools_pcb::export_board(input, ctx),
-            "export_fab" => crate::tools_pcb::export_fab(input, ctx),
-            "open_board" => crate::tools_pcb::open_board(input, ctx),
-            "board_state" => crate::tools_pcb::board_state(ctx),
-            "move_part" => crate::tools_pcb::move_part(input, ctx),
-            "route_track" => crate::tools_pcb::route_track(input, ctx),
-            "set_net_width" => crate::tools_pcb::set_net_width(input, ctx),
-            "render_board" => crate::tools_pcb::render_board(input, ctx),
-            other => bail!("unknown tool: {other}"),
-        }
+        "get_symbol_info" => get_symbol_info(input, ctx),
+        "get_design" => get_design(ctx),
+        "validate_design" => validate_design(input, ctx),
+        "apply_design" => apply_design(input, ctx),
+        "run_erc" => run_erc(ctx),
+        "project_info" => project_info(ctx),
+        "read_schematic" => read_schematic(input, ctx),
+        "find_similar_designs" => find_similar_designs(input, ctx),
+        "render_schematic" => render_schematic(ctx),
+        "create_design" => create_design(input, ctx),
+        "edit_design" => edit_design(input, ctx),
+        "search_footprints" => crate::tools_pcb::search_footprints(input, ctx),
+        "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
+        "derive_board" => crate::tools_pcb::derive_board(input, ctx),
+        "assign_footprint" => crate::tools_pcb::assign_footprint(input, ctx),
+        "get_board" => crate::tools_pcb::get_board(ctx),
+        "place_board" => crate::tools_pcb::place_board(input, ctx),
+        "route_board" => crate::tools_pcb::route_board(input, ctx),
+        "autoroute" => crate::tools_pcb::autoroute(input, ctx),
+        "check_board" => crate::tools_pcb::check_board(input, ctx),
+        "export_fab" => crate::tools_pcb::export_fab(input, ctx),
+        "open_board" => crate::tools_pcb::open_board(input, ctx),
+        "board_state" => crate::tools_pcb::board_state(ctx),
+        "move_part" => crate::tools_pcb::move_part(input, ctx),
+        "route_track" => crate::tools_pcb::route_track(input, ctx),
+        "set_net_width" => crate::tools_pcb::set_net_width(input, ctx),
+        "render_board" => crate::tools_pcb::render_board(input, ctx),
+        other => bail!("unknown tool: {other}"),
+    }
 }
 
 /// Pull a required string field out of the input, with a clear error.
@@ -934,7 +930,10 @@ fn current_sch_text(ctx: &PcbToolCtx) -> Option<String> {
 fn get_design(ctx: &PcbToolCtx) -> Result<Value> {
     if let Some(draft) = ctx.workspace().read_draft() {
         let mut out = json!({ "yaml": draft, "source": "draft" });
-        if ctx.workspace().draft_is_stale(current_sch_text(ctx).as_deref()) {
+        if ctx
+            .workspace()
+            .draft_is_stale(current_sch_text(ctx).as_deref())
+        {
             out["stale"] = json!(true);
             out["note"] = json!(
                 "the .kicad_sch changed since this draft was seeded (user edit \
@@ -989,7 +988,10 @@ fn compile_report(diags: &circuit_lang::Diagnostics) -> Value {
 // ── 5. apply_design ────────────────────────────────────────────────────────
 
 fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
-    let explicit_yaml = input.get("yaml").and_then(Value::as_str).map(str::to_string);
+    let explicit_yaml = input
+        .get("yaml")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let yaml = match explicit_yaml.clone() {
         Some(y) => y,
         None => match ctx.workspace().read_draft() {
@@ -1003,7 +1005,9 @@ fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         },
     };
     let stale = explicit_yaml.is_none()
-        && ctx.workspace().draft_is_stale(current_sch_text(ctx).as_deref());
+        && ctx
+            .workspace()
+            .draft_is_stale(current_sch_text(ctx).as_deref());
 
     let commit = input
         .get("commit")
@@ -1034,8 +1038,13 @@ fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // Production uses the locality-aware ANNEAL search (strictly ≥ greedy via the
     // candidate pick) so generated boards get the premium placement, not the
     // env-defaulted greedy free tier.
-    let emitted = sch_floorplan::floorplan::emit_strategy(&ctx.env, &design, &ir, Box::new(anneal_place::Anneal))
-        .context("rendering schematic")?;
+    let emitted = sch_floorplan::floorplan::emit_strategy(
+        &ctx.env,
+        &design,
+        &ir,
+        Box::new(anneal_place::Anneal),
+    )
+    .context("rendering schematic")?;
     let rendered = emitted.sch;
     let diff = design_diff(prior_design.as_ref(), &design);
 
@@ -1071,16 +1080,22 @@ fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // cross-border global SA; cross-block nets join via matching global labels on the one
     // sheet. Only a single-block design takes the plain single-sheet emit. The composed
     // .kicad_sch is written at ctx.sch_path; downstream render/ERC operate on it.
-    let n_blocks = design.blocks.values().filter(|b| !b.components.is_empty()).count();
+    let n_blocks = design
+        .blocks
+        .values()
+        .filter(|b| !b.components.is_empty())
+        .count();
     let multisheet = n_blocks >= 2;
     if multisheet {
-        let dir = ctx.sch_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let dir = ctx
+            .sch_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
         let root = crate::multisheet::compose_single_sheet(&ctx.env, &design, dir)
             .context("composing single-sheet schematic")?;
         if root != ctx.sch_path {
-            std::fs::rename(&root, &ctx.sch_path).with_context(|| {
-                format!("placing composed sheet at {}", ctx.sch_path.display())
-            })?;
+            std::fs::rename(&root, &ctx.sch_path)
+                .with_context(|| format!("placing composed sheet at {}", ctx.sch_path.display()))?;
         }
     } else {
         std::fs::write(&ctx.sch_path, &rendered)
@@ -1377,7 +1392,10 @@ fn run_erc(ctx: &PcbToolCtx) -> Result<Value> {
 
 fn create_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let yaml = require_str(&input, "yaml")?;
-    let overwrite = input.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
+    let overwrite = input
+        .get("overwrite")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if ctx.workspace().read_draft().is_some() && !overwrite {
         return Ok(json!({
             "error": "a draft already exists — pass overwrite=true to replace it, \
@@ -1394,7 +1412,10 @@ fn create_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
 fn edit_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let old = require_str(&input, "old_string")?;
     let new = require_str(&input, "new_string")?;
-    let replace_all = input.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
+    let replace_all = input
+        .get("replace_all")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     let Some(draft) = ctx.workspace().read_draft() else {
         return Ok(json!({
@@ -1445,8 +1466,7 @@ fn render_schematic(ctx: &PcbToolCtx) -> Result<Value> {
     }
     let png = crate::render::schematic_png(&ctx.env, &ctx.sch_path)?;
     let path = ctx.workspace().next_render_path()?;
-    std::fs::write(&path, &png)
-        .with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(&path, &png).with_context(|| format!("writing {}", path.display()))?;
     let mut obj = json!({
         "ok": true,
         "png_path": path.display().to_string(),

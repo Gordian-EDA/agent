@@ -7,18 +7,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use kicad_symbol::geometry::SymbolGeometry;
 
-
 use super::*;
 use sch_place::item::{Incidence, Item};
 use sch_place::netclass::{is_connector_like, is_ground, is_neg_supply, is_power_net};
 
 // The disjoint-set forest (over a caller-owned `parent` slice) lives in
 // `sch_place::union_find`, shared with circuit-lang's pin reconciler.
-use sch_place::union_find::{uf_find, uf_union};
-use sch_place::ir::{LayoutIr, Orient};
 use super::super::infer::anchor_tap;
-
-
+use sch_place::ir::{LayoutIr, Orient};
+use sch_place::union_find::{uf_find, uf_union};
 
 /// each load cap two gaps out, level with its osc pin. Returns true if it moved
 /// anything (so the caller re-runs `decongest`). The cluster members are frozen, so
@@ -39,22 +36,35 @@ pub fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
         let Some(ai) = items.iter().position(|it| it.refdes == idiom.anchor) else {
             continue;
         };
-        let Some(yi) = items
-            .iter()
-            .position(|it| in_idiom(it) && (it.part.contains("Crystal") || it.part.contains("Resonator")))
-        else {
+        let Some(yi) = items.iter().position(|it| {
+            in_idiom(it) && (it.part.contains("Crystal") || it.part.contains("Resonator"))
+        }) else {
             continue;
         };
         let y_refdes = items[yi].refdes.clone();
-        let onets: Vec<String> = items[yi].pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
+        let onets: Vec<String> = items[yi]
+            .pins
+            .iter()
+            .filter_map(|(_, _, n)| n.clone())
+            .collect();
         if onets.len() != 2 {
             continue;
         }
         // The IC's pin-tip world position for an osc net.
         let osc_world = |net: &str| -> Option<[f64; 2]> {
-            let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net))?.0.clone();
+            let num = items[ai]
+                .pins
+                .iter()
+                .find(|(_, _, n)| n.as_deref() == Some(net))?
+                .0
+                .clone();
             let pg = items[ai].geom.pins.iter().find(|p| p.number == num)?;
-            Some(crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
+            Some(crate::write::pin_endpoint(
+                pg,
+                items[ai].at,
+                items[ai].angle,
+                items[ai].mirror,
+            ))
         };
         let (Some(wa), Some(wb)) = (osc_world(&onets[0]), osc_world(&onets[1])) else {
             continue;
@@ -71,7 +81,12 @@ pub fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
             hi[0] = hi[0].max(w[0]);
             hi[1] = hi[1].max(w[1]);
         }
-        let (dl, dr, dt, db) = (mid[0] - lo[0], hi[0] - mid[0], mid[1] - lo[1], hi[1] - mid[1]);
+        let (dl, dr, dt, db) = (
+            mid[0] - lo[0],
+            hi[0] - mid[0],
+            mid[1] - lo[1],
+            hi[1] - mid[1],
+        );
         let m = dl.min(dr).min(dt).min(db);
         let dir: [f64; 2] = if m == dl {
             [-1.0, 0.0]
@@ -100,7 +115,11 @@ pub fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
             Orient::Down
         };
         let cry_angle = orient_angle(&items[yi].geom, dir_orient);
-        moves.push((yi, [snap(mid[0] + dir[0] * GAP), snap(mid[1] + dir[1] * GAP)], Some(cry_angle)));
+        moves.push((
+            yi,
+            [snap(mid[0] + dir[0] * GAP), snap(mid[1] + dir[1] * GAP)],
+            Some(cry_angle),
+        ));
         // Each load cap sits two gaps out and TWO gaps to its osc pin's side of the midpoint
         // (perp axis). The pins are one 2.54 mm pitch apart but a cap is ~7.6 mm tall, so the
         // caps must clear both the pin rows AND each other; one gap off-centre left them packed
@@ -112,10 +131,17 @@ pub fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
             if let Some(ci) = items.iter().position(|it| {
                 in_idiom(it)
                     && it.refdes != y_refdes
-                    && it.pins.iter().any(|(_, _, n)| n.as_deref() == Some(net.as_str()))
+                    && it
+                        .pins
+                        .iter()
+                        .any(|(_, _, n)| n.as_deref() == Some(net.as_str()))
             }) {
                 // Which side of the midpoint this osc pin lies on, along the edge.
-                let side = if dir[0] != 0.0 { (w[1] - mid[1]).signum() } else { (w[0] - mid[0]).signum() };
+                let side = if dir[0] != 0.0 {
+                    (w[1] - mid[1]).signum()
+                } else {
+                    (w[0] - mid[0]).signum()
+                };
                 let side = if side == 0.0 { 1.0 } else { side };
                 moves.push((
                     ci,
@@ -131,11 +157,14 @@ pub fn align_idiom_clusters(items: &mut [Item], ir: &LayoutIr) -> bool {
     let moved = !moves.is_empty();
     if std::env::var("IDIOM_DEBUG").is_ok() {
         for (i, at, ang) in &moves {
-            eprintln!("ALIGN {} -> [{:.1},{:.1}] ang={ang:?}", items[*i].refdes, at[0], at[1]);
+            eprintln!(
+                "ALIGN {} -> [{:.1},{:.1}] ang={ang:?}",
+                items[*i].refdes, at[0], at[1]
+            );
         }
     }
     for (i, at, ang) in moves {
-        items[i].at = at;
+        items[i].at = at.into();
         if let Some(a) = ang {
             items[i].angle = a;
         }
@@ -157,13 +186,26 @@ pub fn align_led_chains(items: &mut [Item], _inc: &Incidence, ir: &LayoutIr) -> 
         if idiom.kind != "led_indicator" {
             continue;
         }
-        let Some(li) = items.iter().position(|it| it.refdes == idiom.anchor) else { continue };
-        let Some(res_rd) = idiom.parts.first() else { continue };
-        let Some(ri) = items.iter().position(|it| &it.refdes == res_rd) else { continue };
+        let Some(li) = items.iter().position(|it| it.refdes == idiom.anchor) else {
+            continue;
+        };
+        let Some(res_rd) = idiom.parts.first() else {
+            continue;
+        };
+        let Some(ri) = items.iter().position(|it| &it.refdes == res_rd) else {
+            continue;
+        };
         // The node the LED and resistor share (the LED cathode → resistor top).
-        let led_nets: Vec<String> = items[li].pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
-        let Some(shared) =
-            items[ri].pins.iter().filter_map(|(_, _, n)| n.clone()).find(|n| led_nets.contains(n))
+        let led_nets: Vec<String> = items[li]
+            .pins
+            .iter()
+            .filter_map(|(_, _, n)| n.clone())
+            .collect();
+        let Some(shared) = items[ri]
+            .pins
+            .iter()
+            .filter_map(|(_, _, n)| n.clone())
+            .find(|n| led_nets.contains(n))
         else {
             continue;
         };
@@ -172,24 +214,35 @@ pub fn align_led_chains(items: &mut [Item], _inc: &Incidence, ir: &LayoutIr) -> 
         // collinear series string rather than an L-bend (a horizontal LED over a vertical
         // resistor). Keep the LED's position; only its angle changes.
         let l_pin1 = items[li].pins.first().and_then(|p| p.2.clone());
-        let l_orient = if l_pin1.as_deref() == Some(shared.as_str()) { Orient::Up } else { Orient::Down };
+        let l_orient = if l_pin1.as_deref() == Some(shared.as_str()) {
+            Orient::Up
+        } else {
+            Orient::Down
+        };
         let l_angle = orient_angle(&items[li].geom, l_orient);
-        moves.push((li, items[li].at, l_angle));
+        moves.push((li, items[li].at.into(), l_angle));
         let at = [snap(items[li].at[0]), snap(items[li].at[1] + DROP)];
         // Vertical, shared (cathode) pin UP toward the LED above, GND pin DOWN.
         let r_pin1 = items[ri].pins.first().and_then(|p| p.2.clone());
-        let orient = if r_pin1.as_deref() == Some(shared.as_str()) { Orient::Down } else { Orient::Up };
+        let orient = if r_pin1.as_deref() == Some(shared.as_str()) {
+            Orient::Down
+        } else {
+            Orient::Up
+        };
         let angle = orient_angle(&items[ri].geom, orient);
         moves.push((ri, at, angle));
     }
     let moved = !moves.is_empty();
     if std::env::var("IDIOM_DEBUG").is_ok() {
         for (i, at, _) in &moves {
-            eprintln!("ALIGN-LED {} -> [{:.1},{:.1}]", items[*i].refdes, at[0], at[1]);
+            eprintln!(
+                "ALIGN-LED {} -> [{:.1},{:.1}]",
+                items[*i].refdes, at[0], at[1]
+            );
         }
     }
     for (i, at, angle) in moves {
-        items[i].at = at;
+        items[i].at = at.into();
         items[i].angle = angle;
     }
     moved
@@ -214,19 +267,33 @@ pub(crate) fn decoupling_bank_of(items: &[Item], ir: &LayoutIr) -> BTreeMap<usiz
         if !it.refdes.starts_with('C') || it.geom.pins.len() != 2 {
             continue;
         }
-        let nets: Vec<&str> = it.pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+        let nets: Vec<&str> = it
+            .pins
+            .iter()
+            .filter_map(|(_, _, n)| n.as_deref())
+            .collect();
         if nets.len() != 2 || !nets.iter().all(|n| is_rail(n)) || !nets.iter().any(|n| is_vp(n)) {
             continue;
         }
         let Some(vp_net) = nets.iter().copied().filter(|n| is_vp(n)).find(|n| {
-            anchor_idxs.iter().any(|&ai| items[ai].pins.iter().any(|(_, _, an)| an.as_deref() == Some(*n)))
+            anchor_idxs.iter().any(|&ai| {
+                items[ai]
+                    .pins
+                    .iter()
+                    .any(|(_, _, an)| an.as_deref() == Some(*n))
+            })
         }) else {
             continue;
         };
         let best = anchor_idxs
             .iter()
             .copied()
-            .filter(|&ai| items[ai].pins.iter().any(|(_, _, n)| n.as_deref() == Some(vp_net)))
+            .filter(|&ai| {
+                items[ai]
+                    .pins
+                    .iter()
+                    .any(|(_, _, n)| n.as_deref() == Some(vp_net))
+            })
             .min_by(|&a, &b| {
                 let d = |ai: usize| {
                     let dx = items[ai].at[0] - it.at[0];
@@ -246,8 +313,14 @@ pub(crate) fn decoupling_bank_of(items: &[Item], ir: &LayoutIr) -> BTreeMap<usiz
 }
 
 /// The flat set of cap indices that `gather_decoupling_bank` will re-seat (every member of every ≥3 bank).
-pub(crate) fn decoupling_bank_caps(items: &[Item], ir: &LayoutIr) -> std::collections::HashSet<usize> {
-    decoupling_bank_of(items, ir).into_values().flatten().collect()
+pub(crate) fn decoupling_bank_caps(
+    items: &[Item],
+    ir: &LayoutIr,
+) -> std::collections::HashSet<usize> {
+    decoupling_bank_of(items, ir)
+        .into_values()
+        .flatten()
+        .collect()
 }
 
 /// Align stray BULK rail caps into a tidy row. A power-only sheet (a connector + a couple of bulk
@@ -291,7 +364,10 @@ pub(crate) fn align_rail_cap_rows(items: &mut [Item], ir: &LayoutIr) -> bool {
         }
         let mut np = [nets[0].clone(), nets[1].clone()];
         np.sort();
-        groups.entry((np[0].clone(), np[1].clone())).or_default().push(i);
+        groups
+            .entry((np[0].clone(), np[1].clone()))
+            .or_default()
+            .push(i);
     }
     let mut moves: Vec<(usize, [f64; 2])> = Vec::new();
     for idxs in groups.values() {
@@ -299,7 +375,10 @@ pub(crate) fn align_rail_cap_rows(items: &mut [Item], ir: &LayoutIr) -> bool {
             continue;
         }
         // Compact UP to the topmost cap's row (toward the input); any common y reads aligned.
-        let row_y = idxs.iter().map(|&i| items[i].at[1]).fold(f64::MAX, f64::min);
+        let row_y = idxs
+            .iter()
+            .map(|&i| items[i].at[1])
+            .fold(f64::MAX, f64::min);
         if idxs.iter().all(|&i| (items[i].at[1] - row_y).abs() < 1.27) {
             continue; // already a row
         }
@@ -312,7 +391,7 @@ pub(crate) fn align_rail_cap_rows(items: &mut [Item], ir: &LayoutIr) -> bool {
     }
     let moved = !moves.is_empty();
     for (i, at) in moves {
-        items[i].at = at;
+        items[i].at = at.into();
     }
     moved
 }
@@ -362,9 +441,10 @@ pub(crate) fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool 
         for &ci in bank {
             for (_, _, n) in &items[ci].pins {
                 if let Some(n) = n.as_deref()
-                    && is_vp(n) {
-                        *vp_count.entry(n.to_string()).or_insert(0) += 1;
-                    }
+                    && is_vp(n)
+                {
+                    *vp_count.entry(n.to_string()).or_insert(0) += 1;
+                }
             }
         }
         let Some(vp) = vp_count.into_iter().max_by_key(|(_, c)| *c).map(|(n, _)| n) else {
@@ -376,9 +456,19 @@ pub(crate) fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool 
             .iter()
             .filter(|(_, _, n)| n.as_deref() == Some(vp.as_str()))
             .filter_map(|(num, _, _)| {
-                items[ai].geom.pins.iter().find(|p| &p.number == num).map(|pg| {
-                    crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror)
-                })
+                items[ai]
+                    .geom
+                    .pins
+                    .iter()
+                    .find(|p| &p.number == num)
+                    .map(|pg| {
+                        crate::write::pin_endpoint(
+                            pg,
+                            items[ai].at,
+                            items[ai].angle,
+                            items[ai].mirror,
+                        )
+                    })
             })
             .collect();
         if supply_pts.is_empty() {
@@ -396,8 +486,12 @@ pub(crate) fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool 
         let supply_cx = supply_pts.iter().map(|p| p[0]).sum::<f64>() / supply_pts.len() as f64;
         let supply_cy = supply_pts.iter().map(|p| p[1]).sum::<f64>() / supply_pts.len() as f64;
         // Nearest edge of the IC the supply pins sit on (same classifier as align_idiom_clusters).
-        let (dl, dr, dt, db) =
-            (supply_cx - lo[0], hi[0] - supply_cx, supply_cy - lo[1], hi[1] - supply_cy);
+        let (dl, dr, dt, db) = (
+            supply_cx - lo[0],
+            hi[0] - supply_cx,
+            supply_cy - lo[1],
+            hi[1] - supply_cy,
+        );
         let m = dl.min(dr).min(dt).min(db);
         let half = item_rect(&items[ai], items[ai].at);
         let n = bank.len();
@@ -453,26 +547,45 @@ pub(crate) fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool 
             let r = item_rect(&probe, items[i].at);
             if horizontal { r[2] - r[0] } else { r[3] - r[1] }
         };
-        let cw = bank.iter().map(|&i| cap_extent(i, true)).fold(0.0_f64, f64::max);
-        let ch = bank.iter().map(|&i| cap_extent(i, false)).fold(0.0_f64, f64::max);
+        let cw = bank
+            .iter()
+            .map(|&i| cap_extent(i, true))
+            .fold(0.0_f64, f64::max);
+        let ch = bank
+            .iter()
+            .map(|&i| cap_extent(i, false))
+            .fold(0.0_f64, f64::max);
         // GRID, not one long row: 6 caps in a single 95 mm row overran the crystal cluster. Lay the bank
         // as a compact grid hugging the supply edge — its along-edge span kept near the IC body width so
         // the bank reads as a tidy block beside the IC, not a sprawling line. `lane` = the along-edge
         // axis (x for a top/bottom edge, y for a side edge), `depth` = the perpendicular outward axis.
         let xpitch = snap(cw + 2.54);
         let ypitch = snap(ch + 2.54);
-        let (lane_pitch, depth_pitch) =
-            if horizontal_row { (xpitch, ypitch) } else { (ypitch, xpitch) };
+        let (lane_pitch, depth_pitch) = if horizontal_row {
+            (xpitch, ypitch)
+        } else {
+            (ypitch, xpitch)
+        };
         // Columns along the edge: enough to span ~the IC body extent, but at least 2 and at most n.
-        let body_extent = if horizontal_row { half[2] - half[0] } else { half[3] - half[1] };
-        let ncol = ((body_extent / lane_pitch).floor() as usize).clamp(2, n).min(n);
+        let body_extent = if horizontal_row {
+            half[2] - half[0]
+        } else {
+            half[3] - half[1]
+        };
+        let ncol = ((body_extent / lane_pitch).floor() as usize)
+            .clamp(2, n)
+            .min(n);
         let nrow = n.div_ceil(ncol);
         // Lane origin: centre the grid on the supply pins. Depth origin: first cell one GAP + half a cap
         // off the body edge, growing OUTWARD (away from the IC).
         let lane0 = if horizontal_row { supply_cx } else { supply_cy }
             - (ncol as f64 - 1.0) * lane_pitch / 2.0;
         let (depth0, depth_sign) = if horizontal_row {
-            if m == dt { (half[1] - GAP - ch / 2.0, -1.0) } else { (half[3] + GAP + ch / 2.0, 1.0) }
+            if m == dt {
+                (half[1] - GAP - ch / 2.0, -1.0)
+            } else {
+                (half[3] + GAP + ch / 2.0, 1.0)
+            }
         } else if m == dl {
             (half[0] - GAP - cw / 2.0, -1.0)
         } else {
@@ -484,7 +597,11 @@ pub(crate) fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool 
                 let row = k / ncol;
                 let lane = snap(lane0 + col as f64 * lane_pitch);
                 let depth = snap(depth0 + depth_sign * row as f64 * depth_pitch);
-                if horizontal_row { [lane, depth] } else { [depth, lane] }
+                if horizontal_row {
+                    [lane, depth]
+                } else {
+                    [depth, lane]
+                }
             })
             .collect();
         let _ = nrow;
@@ -500,8 +617,11 @@ pub(crate) fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool 
         // (and one would just re-scatter the caps). Reject the gather if any proposed cap position+angle
         // would newly overlap ANY other item (anchor, other bank cap, or unrelated bystander) that it
         // does not overlap today. `rect_at` evaluates item_rect under a hypothetical angle.
-        let proposed: BTreeMap<usize, [f64; 2]> =
-            sorted.iter().copied().zip(targets.iter().copied()).collect();
+        let proposed: BTreeMap<usize, [f64; 2]> = sorted
+            .iter()
+            .copied()
+            .zip(targets.iter().copied())
+            .collect();
         let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> [f64; 4] {
             let mut probe = items[idx].clone();
             probe.angle = angle;
@@ -520,7 +640,8 @@ pub(crate) fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool 
                 if other == c {
                     continue;
                 }
-                if rects_overlap(at_new(c), at_new(other)) && !rects_overlap(at_now(c), at_now(other))
+                if rects_overlap(at_new(c), at_new(other))
+                    && !rects_overlap(at_now(c), at_now(other))
                 {
                     ok = false;
                     break 'check;
@@ -536,7 +657,7 @@ pub(crate) fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool 
     }
     let moved = !moves.is_empty();
     for (i, at, angle) in moves {
-        items[i].at = at;
+        items[i].at = at.into();
         items[i].angle = angle;
     }
     moved
@@ -558,7 +679,11 @@ pub(crate) fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool 
 /// OVERLAP-SAFE: it commits only when every proposed cap position introduces NO new overlap
 /// against any other item — there is no follow-up repair (a decongest would re-scatter the bank).
 /// No-op (returns false) when there is no banked IC or no clean placement, so it never regresses.
-pub(crate) fn gather_banked_decoupling(items: &mut [Item], ir: &LayoutIr, banked: &[usize]) -> bool {
+pub(crate) fn gather_banked_decoupling(
+    items: &mut [Item],
+    ir: &LayoutIr,
+    banked: &[usize],
+) -> bool {
     if banked.is_empty() {
         return false;
     }
@@ -596,7 +721,11 @@ pub(crate) fn gather_banked_decoupling(items: &mut [Item], ir: &LayoutIr, banked
             if (it.frozen && !claimed) || !it.refdes.starts_with('C') || it.geom.pins.len() != 2 {
                 return false;
             }
-            let nets: Vec<&str> = it.pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+            let nets: Vec<&str> = it
+                .pins
+                .iter()
+                .filter_map(|(_, _, n)| n.as_deref())
+                .collect();
             nets.len() == 2
                 && nets.iter().all(|n| ic_rails.contains(*n))
                 && nets.iter().any(|n| is_vp(n))
@@ -619,11 +748,17 @@ pub(crate) fn gather_banked_decoupling(items: &mut [Item], ir: &LayoutIr, banked
 
     // Orient every cap vertical with its V+ pin UP, GND down (KiCAD draws fields to the right).
     let cap_angle = |i: usize| -> f64 {
-        let p1_is_vp =
-            items[i].pins.first().and_then(|(_, _, n)| n.as_deref()).is_some_and(is_vp);
+        let p1_is_vp = items[i]
+            .pins
+            .first()
+            .and_then(|(_, _, n)| n.as_deref())
+            .is_some_and(is_vp);
         // orient_angle takes the desired pin1→pin2 direction; V+ up ⇒ pin1→pin2 points down when
         // pin1 is V+, up otherwise.
-        orient_angle(&items[i].geom, if p1_is_vp { Orient::Down } else { Orient::Up })
+        orient_angle(
+            &items[i].geom,
+            if p1_is_vp { Orient::Down } else { Orient::Up },
+        )
     };
     let new_angle: BTreeMap<usize, f64> = bank.iter().map(|&i| (i, cap_angle(i))).collect();
     let cell_w = bank
@@ -671,7 +806,10 @@ pub(crate) fn gather_banked_decoupling(items: &mut [Item], ir: &LayoutIr, banked
         .map(|k| {
             let col = k % ncol;
             let row = k / ncol;
-            [snap(x0 + col as f64 * xpitch), snap(y0 + row as f64 * ypitch)]
+            [
+                snap(x0 + col as f64 * xpitch),
+                snap(y0 + row as f64 * ypitch),
+            ]
         })
         .collect();
 
@@ -710,7 +848,7 @@ pub(crate) fn gather_banked_decoupling(items: &mut [Item], ir: &LayoutIr, banked
         }
     }
     for (&i, &at) in &proposed {
-        items[i].at = at;
+        items[i].at = at.into();
         items[i].angle = new_angle[&i];
     }
     true
@@ -780,9 +918,12 @@ pub(crate) fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool
         // The anchor IC = the ≥3-pin non-connector that taps BOTH osc nets. If several do (rare),
         // pick the NEAREST to the crystal — the one the cluster should hug.
         let taps_both = |ai: usize| -> bool {
-            onets
-                .iter()
-                .all(|net| items[ai].pins.iter().any(|(_, _, n)| n.as_deref() == Some(net.as_str())))
+            onets.iter().all(|net| {
+                items[ai]
+                    .pins
+                    .iter()
+                    .any(|(_, _, n)| n.as_deref() == Some(net.as_str()))
+            })
         };
         let Some(ai) = anchor_idxs
             .iter()
@@ -809,11 +950,12 @@ pub(crate) fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool
                         && items[ci].geom.pins.len() == 2
                 })
                 .find(|&ci| {
-                    let nets: Vec<&str> =
-                        items[ci].pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
-                    nets.len() == 2
-                        && nets.contains(&net)
-                        && nets.iter().any(|n| is_ground(n))
+                    let nets: Vec<&str> = items[ci]
+                        .pins
+                        .iter()
+                        .filter_map(|(_, _, n)| n.as_deref())
+                        .collect();
+                    nets.len() == 2 && nets.contains(&net) && nets.iter().any(|n| is_ground(n))
                 })
         };
         let (Some(ca), Some(cb)) = (cap_on(&onets[0]), cap_on(&onets[1])) else {
@@ -824,9 +966,19 @@ pub(crate) fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool
         }
         // The IC's pin-tip world position for an osc net.
         let osc_world = |net: &str| -> Option<[f64; 2]> {
-            let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net))?.0.clone();
+            let num = items[ai]
+                .pins
+                .iter()
+                .find(|(_, _, n)| n.as_deref() == Some(net))?
+                .0
+                .clone();
             let pg = items[ai].geom.pins.iter().find(|p| p.number == num)?;
-            Some(crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
+            Some(crate::write::pin_endpoint(
+                pg,
+                items[ai].at,
+                items[ai].angle,
+                items[ai].mirror,
+            ))
         };
         let (Some(wa), Some(wb)) = (osc_world(&onets[0]), osc_world(&onets[1])) else {
             continue;
@@ -843,7 +995,12 @@ pub(crate) fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool
             hi[0] = hi[0].max(w[0]);
             hi[1] = hi[1].max(w[1]);
         }
-        let (dl, dr, dt, db) = (mid[0] - lo[0], hi[0] - mid[0], mid[1] - lo[1], hi[1] - mid[1]);
+        let (dl, dr, dt, db) = (
+            mid[0] - lo[0],
+            hi[0] - mid[0],
+            mid[1] - lo[1],
+            hi[1] - mid[1],
+        );
         let m = dl.min(dr).min(dt).min(db);
         let dir: [f64; 2] = if m == dl {
             [-1.0, 0.0]
@@ -884,7 +1041,11 @@ pub(crate) fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool
             let mut probe = items[idx].clone();
             probe.angle = angle;
             let r = item_rect(&probe, items[idx].at);
-            if dir[0] != 0.0 { r[2] - r[0] } else { r[3] - r[1] }
+            if dir[0] != 0.0 {
+                r[2] - r[0]
+            } else {
+                r[3] - r[1]
+            }
         };
         let cry_ext = extent_along(yi, cry_angle);
         let cap_ext = extent_along(ca, items[ca].angle).max(extent_along(cb, items[cb].angle));
@@ -907,7 +1068,11 @@ pub(crate) fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool
             let side = (pin_lane - lane_mid).signum();
             let side = if side == 0.0 { 1.0 } else { side };
             let lane = lane_mid + side * GAP * 2.0;
-            if dir[0] != 0.0 { [snap(cap_depth), snap(lane)] } else { [snap(lane), snap(cap_depth)] }
+            if dir[0] != 0.0 {
+                [snap(cap_depth), snap(lane)]
+            } else {
+                [snap(lane), snap(cap_depth)]
+            }
         };
         // Proposed (item, new_at, new_angle). Caps keep their angle (only the crystal is re-oriented,
         // matching align_idiom_clusters).
@@ -926,8 +1091,10 @@ pub(crate) fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool
         }
         // OVERLAP-SAFETY against the WHOLE sheet — there is no follow-up decongest to repair a
         // collision. Reject if any moved member would NEWLY overlap an item it doesn't overlap today.
-        let prop: BTreeMap<usize, ([f64; 2], f64)> =
-            proposed.iter().map(|&(i, at, ang)| (i, (at, ang))).collect();
+        let prop: BTreeMap<usize, ([f64; 2], f64)> = proposed
+            .iter()
+            .map(|&(i, at, ang)| (i, (at, ang)))
+            .collect();
         let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> [f64; 4] {
             let mut probe = items[idx].clone();
             probe.angle = angle;
@@ -947,7 +1114,9 @@ pub(crate) fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool
                 if other == c {
                     continue;
                 }
-                if rects_overlap(at_new(c), at_new(other)) && !rects_overlap(at_now(c), at_now(other)) {
+                if rects_overlap(at_new(c), at_new(other))
+                    && !rects_overlap(at_now(c), at_now(other))
+                {
                     ok = false;
                     break 'check;
                 }
@@ -961,7 +1130,7 @@ pub(crate) fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool
     }
     let moved = !moves.is_empty();
     for (i, at, angle) in moves {
-        items[i].at = at;
+        items[i].at = at.into();
         items[i].angle = angle;
     }
     moved
@@ -997,7 +1166,11 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
 
     // A 2-pin part's net set (filters None). Used to match the bridging cap / feeding diode.
     let nets_of = |i: usize| -> Vec<String> {
-        items[i].pins.iter().filter_map(|(_, _, n)| n.clone()).collect()
+        items[i]
+            .pins
+            .iter()
+            .filter_map(|(_, _, n)| n.clone())
+            .collect()
     };
     // The bootstrap CAP for a phase: a 2-pin `C*` whose two pins are exactly {vb, vs}.
     let cap_bridging = |vb: &str, vs: &str, claimed: &BTreeSet<usize>| -> Option<usize> {
@@ -1007,9 +1180,7 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
                 && items[ci].geom.pins.len() == 2
                 && {
                     let ns = nets_of(ci);
-                    ns.len() == 2
-                        && ns.iter().any(|n| n == vb)
-                        && ns.iter().any(|n| n == vs)
+                    ns.len() == 2 && ns.iter().any(|n| n == vb) && ns.iter().any(|n| n == vs)
                 }
         })
     };
@@ -1070,9 +1241,10 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
                 .iter()
                 .find(|vs| vs.as_str() != vb.as_str() && cap_bridging(vb, vs, &empty).is_some());
             if let Some(vs) = vs
-                && !pairs.iter().any(|(b, _)| b == vb) {
-                    pairs.push((vb.clone(), vs.clone()));
-                }
+                && !pairs.iter().any(|(b, _)| b == vb)
+            {
+                pairs.push((vb.clone(), vs.clone()));
+            }
         }
         // A gate driver hosts ≥2 such bootstrap phase pairs; a lone {cap, diode} is some other network.
         if pairs.len() < 2 {
@@ -1081,9 +1253,19 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
 
         // The IC's pin-tip world position for a given net.
         let pin_world = |net: &str| -> Option<[f64; 2]> {
-            let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net))?.0.clone();
+            let num = items[ai]
+                .pins
+                .iter()
+                .find(|(_, _, n)| n.as_deref() == Some(net))?
+                .0
+                .clone();
             let pg = items[ai].geom.pins.iter().find(|p| p.number == num)?;
-            Some(crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
+            Some(crate::write::pin_endpoint(
+                pg,
+                items[ai].at,
+                items[ai].angle,
+                items[ai].mirror,
+            ))
         };
         // The IC's pin bbox (to classify which edge a phase pair hugs).
         let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
@@ -1117,7 +1299,7 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
         struct Stage {
             ci: usize,
             di: usize,
-            vb: String,    // the bootstrap node (cap↔diode junction net), to orient each part's pins
+            vb: String, // the bootstrap node (cap↔diode junction net), to orient each part's pins
             lane_pin: f64, // the pin-pair centroid on the lane (stack) axis — the row's natural slot
         }
         let mut stages: Vec<Stage> = Vec::new();
@@ -1128,9 +1310,10 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
         // edge in practice). Decide it from the FIRST resolvable phase's midpoint.
         let mut dir: Option<[f64; 2]> = None;
         for (vb, vs) in &pairs {
-            let (Some(ci), Some(di)) =
-                (cap_bridging(vb, vs, &local_claim), diode_on(vb, vs, &local_claim))
-            else {
+            let (Some(ci), Some(di)) = (
+                cap_bridging(vb, vs, &local_claim),
+                diode_on(vb, vs, &local_claim),
+            ) else {
                 continue;
             };
             if ci == di {
@@ -1143,8 +1326,12 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
             };
             let mid = [(wb[0] + wvs[0]) / 2.0, (wb[1] + wvs[1]) / 2.0];
             if dir.is_none() {
-                let (dl, dr, dt, db) =
-                    (mid[0] - lo[0], hi[0] - mid[0], mid[1] - lo[1], hi[1] - mid[1]);
+                let (dl, dr, dt, db) = (
+                    mid[0] - lo[0],
+                    hi[0] - mid[0],
+                    mid[1] - lo[1],
+                    hi[1] - mid[1],
+                );
                 let m = dl.min(dr).min(dt).min(db);
                 dir = Some(if m == dl {
                     [-1.0, 0.0]
@@ -1160,7 +1347,12 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
             let lane_pin = if d[0] != 0.0 { mid[1] } else { mid[0] };
             // Reserve the parts NOW so a later anchor / phase can't grab them, but only COMMIT the moves
             // if the whole stack is overlap-free below.
-            stages.push(Stage { ci, di, vb: vb.clone(), lane_pin });
+            stages.push(Stage {
+                ci,
+                di,
+                vb: vb.clone(),
+                lane_pin,
+            });
         }
         let Some(dir) = dir else { continue };
         if stages.len() < 2 {
@@ -1194,11 +1386,7 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
         // `face` side: if pin1 is the named pin, aim pin1→pin2 at the OPPOSITE of `face`; otherwise
         // (pin2 is named) aim pin1→pin2 straight at `face`.
         let face_net = |idx: usize, net: &str, face: Orient| -> f64 {
-            let p1_on_net = items[idx]
-                .pins
-                .first()
-                .and_then(|(_, _, n)| n.as_deref())
-                == Some(net);
+            let p1_on_net = items[idx].pins.first().and_then(|(_, _, n)| n.as_deref()) == Some(net);
             let dirn = if p1_on_net { opposite(face) } else { face };
             orient_angle(&items[idx].geom, dirn)
         };
@@ -1207,7 +1395,11 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
             let mut probe = items[idx].clone();
             probe.angle = angle;
             let r = item_rect(&probe, items[idx].at);
-            let on_x = if along_dir { dir[0] != 0.0 } else { dir[0] == 0.0 };
+            let on_x = if along_dir {
+                dir[0] != 0.0
+            } else {
+                dir[0] == 0.0
+            };
             if on_x { r[2] - r[0] } else { r[3] - r[1] }
         };
         // Uniform ROW PITCH on the lane axis = the tallest stage member's lane extent + a gap, so no two
@@ -1278,7 +1470,9 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
                 .iter()
                 .filter_map(|s| {
                     items[s.ci].pins.iter().find_map(|(_, _, n)| {
-                        n.as_deref().filter(|n| *n != s.vb).map(crate::label::text_width)
+                        n.as_deref()
+                            .filter(|n| *n != s.vb)
+                            .map(crate::label::text_width)
                     })
                 })
                 .fold(0.0_f64, f64::max)
@@ -1286,7 +1480,11 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
             let dio_depth =
                 cap_depth + dir_sign * (cap_ext / 2.0 + phase_band + 2.54 + dio_ext / 2.0);
             let pos = |depth: f64| -> [f64; 2] {
-                if dir[0] != 0.0 { [snap(depth), lane] } else { [lane, snap(depth)] }
+                if dir[0] != 0.0 {
+                    [snap(depth), lane]
+                } else {
+                    [lane, snap(depth)]
+                }
             };
             proposed.push((s.ci, pos(cap_depth), cap_angle));
             proposed.push((s.di, pos(dio_depth), dio_angle));
@@ -1305,8 +1503,10 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
         // OVERLAP-SAFETY against the WHOLE sheet — no follow-up decongest repairs a collision. Fold both
         // this stack's proposal AND moves committed by earlier anchors into the rects, so the baseline
         // ("didn't overlap before") and the proposal are evaluated in the same post-move world.
-        let prop: BTreeMap<usize, ([f64; 2], f64)> =
-            proposed.iter().map(|&(i, at, ang)| (i, (at, ang))).collect();
+        let prop: BTreeMap<usize, ([f64; 2], f64)> = proposed
+            .iter()
+            .map(|&(i, at, ang)| (i, (at, ang)))
+            .collect();
         let committed: BTreeMap<usize, ([f64; 2], f64)> =
             moves.iter().map(|&(i, at, ang)| (i, (at, ang))).collect();
         let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> [f64; 4] {
@@ -1333,7 +1533,8 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
                 if other == c {
                     continue;
                 }
-                if rects_overlap(at_new(c), at_new(other)) && !rects_overlap(at_now(c), at_now(other))
+                if rects_overlap(at_new(c), at_new(other))
+                    && !rects_overlap(at_now(c), at_now(other))
                 {
                     ok = false;
                     break 'check;
@@ -1350,7 +1551,7 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
     }
     let moved = !moves.is_empty();
     for (i, at, angle) in moves {
-        items[i].at = at;
+        items[i].at = at.into();
         items[i].angle = angle;
     }
     moved
@@ -1411,16 +1612,23 @@ pub(crate) fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool
         if claimed.contains(&ri) {
             continue;
         }
-        let bnets: Vec<String> = items[ri].pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
+        let bnets: Vec<String> = items[ri]
+            .pins
+            .iter()
+            .filter_map(|(_, _, n)| n.clone())
+            .collect();
         if bnets.len() != 2 || bnets[0] == bnets[1] || !bnets.iter().all(|n| is_local(n)) {
             continue;
         }
         // The anchor IC = the ≥3-pin non-connector that taps BOTH of the resistor's nets. If several do
         // (rare), pick the NEAREST — the one the bridge should hug.
         let taps_both = |ai: usize| -> bool {
-            bnets
-                .iter()
-                .all(|net| items[ai].pins.iter().any(|(_, _, n)| n.as_deref() == Some(net.as_str())))
+            bnets.iter().all(|net| {
+                items[ai]
+                    .pins
+                    .iter()
+                    .any(|(_, _, n)| n.as_deref() == Some(net.as_str()))
+            })
         };
         let Some(ai) = anchor_idxs
             .iter()
@@ -1439,9 +1647,19 @@ pub(crate) fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool
         };
         // The IC's pin-tip world position for one of the bridged nets.
         let pin_world = |net: &str| -> Option<[f64; 2]> {
-            let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net))?.0.clone();
+            let num = items[ai]
+                .pins
+                .iter()
+                .find(|(_, _, n)| n.as_deref() == Some(net))?
+                .0
+                .clone();
             let pg = items[ai].geom.pins.iter().find(|p| p.number == num)?;
-            Some(crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
+            Some(crate::write::pin_endpoint(
+                pg,
+                items[ai].at,
+                items[ai].angle,
+                items[ai].mirror,
+            ))
         };
         let (Some(wa), Some(wb)) = (pin_world(&bnets[0]), pin_world(&bnets[1])) else {
             continue;
@@ -1457,7 +1675,12 @@ pub(crate) fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool
             hi[0] = hi[0].max(w[0]);
             hi[1] = hi[1].max(w[1]);
         }
-        let (dl, dr, dt, db) = (mid[0] - lo[0], hi[0] - mid[0], mid[1] - lo[1], hi[1] - mid[1]);
+        let (dl, dr, dt, db) = (
+            mid[0] - lo[0],
+            hi[0] - mid[0],
+            mid[1] - lo[1],
+            hi[1] - mid[1],
+        );
         let m = dl.min(dr).min(dt).min(db);
         let dir: [f64; 2] = if m == dl {
             [-1.0, 0.0]
@@ -1478,7 +1701,11 @@ pub(crate) fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool
         let net1_lane = if along_vertical { wb[1] } else { wb[0] };
         let p1_orient = if along_vertical {
             // pin1 toward the smaller-y (upper) of the two bridged pins.
-            if net0_lane <= net1_lane { Orient::Up } else { Orient::Down }
+            if net0_lane <= net1_lane {
+                Orient::Up
+            } else {
+                Orient::Down
+            }
         } else if net0_lane <= net1_lane {
             Orient::Left
         } else {
@@ -1502,7 +1729,11 @@ pub(crate) fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool
             let mut probe = items[ri].clone();
             probe.angle = res_angle;
             let r = item_rect(&probe, items[ri].at);
-            if dir[0] != 0.0 { r[2] - r[0] } else { r[3] - r[1] }
+            if dir[0] != 0.0 {
+                r[2] - r[0]
+            } else {
+                r[3] - r[1]
+            }
         };
         let lane_mid = if dir[0] != 0.0 { mid[1] } else { mid[0] };
         // Overlap test against the WHOLE sheet (the sibling discipline): a seat is admissible only if it
@@ -1562,7 +1793,7 @@ pub(crate) fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool
     }
     let moved = !moves.is_empty();
     for (i, at, angle) in moves {
-        items[i].at = at;
+        items[i].at = at.into();
         items[i].angle = angle;
     }
     moved
@@ -1616,15 +1847,29 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
         pin_world: [f64; 2],
     }
     let pin_world = |ai: usize, net: &str| -> Option<[f64; 2]> {
-        let num = items[ai].pins.iter().find(|(_, _, n)| n.as_deref() == Some(net))?.0.clone();
+        let num = items[ai]
+            .pins
+            .iter()
+            .find(|(_, _, n)| n.as_deref() == Some(net))?
+            .0
+            .clone();
         let pg = items[ai].geom.pins.iter().find(|p| p.number == num)?;
-        Some(crate::write::pin_endpoint(pg, items[ai].at, items[ai].angle, items[ai].mirror))
+        Some(crate::write::pin_endpoint(
+            pg,
+            items[ai].at,
+            items[ai].angle,
+            items[ai].mirror,
+        ))
     };
     let mut pullups: Vec<Pullup> = Vec::new();
-    for ri in (0..items.len()).filter(|&i| {
-        items[i].refdes.starts_with('R') && items[i].geom.pins.len() == 2
-    }) {
-        let bnets: Vec<String> = items[ri].pins.iter().filter_map(|(_, _, n)| n.clone()).collect();
+    for ri in (0..items.len())
+        .filter(|&i| items[i].refdes.starts_with('R') && items[i].geom.pins.len() == 2)
+    {
+        let bnets: Vec<String> = items[ri]
+            .pins
+            .iter()
+            .filter_map(|(_, _, n)| n.clone())
+            .collect();
         if bnets.len() != 2 || bnets[0] == bnets[1] {
             continue;
         }
@@ -1636,7 +1881,12 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
         let bus = buses[0].clone();
         // The IC the pull-up pulls up = the ≥3-pin non-connector that taps this bus net. If several do,
         // pick the NEAREST — the one the resistor should hug.
-        let taps = |ai: usize| items[ai].pins.iter().any(|(_, _, n)| n.as_deref() == Some(bus.as_str()));
+        let taps = |ai: usize| {
+            items[ai]
+                .pins
+                .iter()
+                .any(|(_, _, n)| n.as_deref() == Some(bus.as_str()))
+        };
         let Some(ai) = anchor_idxs
             .iter()
             .copied()
@@ -1652,8 +1902,14 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
         else {
             continue;
         };
-        let Some(pw) = pin_world(ai, &bus) else { continue };
-        pullups.push(Pullup { ri, ai, pin_world: pw });
+        let Some(pw) = pin_world(ai, &bus) else {
+            continue;
+        };
+        pullups.push(Pullup {
+            ri,
+            ai,
+            pin_world: pw,
+        });
     }
     if pullups.is_empty() {
         return false;
@@ -1688,8 +1944,12 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
             hi[0] = hi[0].max(w[0]);
             hi[1] = hi[1].max(w[1]);
         }
-        let (dl, dr, dt, db) =
-            (busmid[0] - lo[0], hi[0] - busmid[0], busmid[1] - lo[1], hi[1] - busmid[1]);
+        let (dl, dr, dt, db) = (
+            busmid[0] - lo[0],
+            hi[0] - busmid[0],
+            busmid[1] - lo[1],
+            hi[1] - busmid[1],
+        );
         let m = dl.min(dr).min(dt).min(db);
         let dir: [f64; 2] = if m == dl {
             [-1.0, 0.0]
@@ -1732,14 +1992,20 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
                 .iter()
                 .map(|pg| crate::write::pin_endpoint(pg, [0.0, 0.0], probe.angle, probe.mirror)[1])
                 .collect();
-            let (lo, hi) = ys.iter().fold((f64::MAX, f64::MIN), |(l, h), &v| (l.min(v), h.max(v)));
+            let (lo, hi) = ys
+                .iter()
+                .fold((f64::MAX, f64::MIN), |(l, h), &v| (l.min(v), h.max(v)));
             hi - lo
         };
         let col_pitch = res_h_real + 6.35; // body span + a clear gap (room for the shared rail tap + label)
         // TIGHT body rect of a vertical resistor (real pin span + thin margin, plus the field stack to the
         // RIGHT) — used for the INTER-MEMBER check so the column packs at ~col_pitch instead of the
         // conservative `item_rect`'s 12.7-mm reservation (which would force a ~13-mm pitch and long drops).
-        let val_chars = items[r0].value.chars().count().max(items[r0].refdes.chars().count()) as f64;
+        let val_chars = items[r0]
+            .value
+            .chars()
+            .count()
+            .max(items[r0].refdes.chars().count()) as f64;
         let tight_at = |at: [f64; 2]| -> [f64; 4] {
             let mut probe = items[r0].clone();
             probe.angle = res_angle;
@@ -1752,7 +2018,12 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
                 hi[0] = hi[0].max(w[0]);
                 hi[1] = hi[1].max(w[1]);
             }
-            [lo[0] - 0.9, lo[1] - 1.0, hi[0] + 0.9 + val_chars * 1.1, hi[1] + 1.0]
+            [
+                lo[0] - 0.9,
+                lo[1] - 1.0,
+                hi[0] + 0.9 + val_chars * 1.1,
+                hi[1] + 1.0,
+            ]
         };
 
         let committed: BTreeMap<usize, ([f64; 2], f64)> =
@@ -1814,7 +2085,14 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
                 for (slot, &k) in ord.iter().enumerate() {
                     let ri = pullups[k].ri;
                     let cy = col_top_cy + (slot as f64) * col_pitch + shift;
-                    let at = if along_x { [snap(cx), snap(cy)] } else { [snap(cx + shift), snap(col_top_cy + (slot as f64) * col_pitch)] };
+                    let at = if along_x {
+                        [snap(cx), snap(cy)]
+                    } else {
+                        [
+                            snap(cx + shift),
+                            snap(col_top_cy + (slot as f64) * col_pitch),
+                        ]
+                    };
                     let r = rect_at(ri, at, res_angle);
                     // Against prior group seats (TIGHT — column packs close) AND the rest of the sheet
                     // (conservative; pre-existing overlaps aren't ours to relitigate).
@@ -1861,7 +2139,7 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
     }
     let moved = !moves.is_empty();
     for (i, at, angle) in moves {
-        items[i].at = at;
+        items[i].at = at.into();
         items[i].angle = angle;
     }
     moved
@@ -1956,8 +2234,7 @@ pub(crate) fn align_repeated_columns(
         }
         // Order columns left→right by current centroid x.
         let mut columns: Vec<Vec<usize>> = cols_map.into_values().collect();
-        let col_cx =
-            |c: &[usize]| c.iter().map(|&i| items[i].at[0]).sum::<f64>() / c.len() as f64;
+        let col_cx = |c: &[usize]| c.iter().map(|&i| items[i].at[0]).sum::<f64>() / c.len() as f64;
         columns.sort_by(|a, b| col_cx(a).total_cmp(&col_cx(b)));
         // A clean repeat has uniform-size columns; skip ragged groups (mixed roles).
         let sz0 = columns[0].len();
@@ -1978,12 +2255,16 @@ pub(crate) fn align_repeated_columns(
             // VIN-GND ties to ALL high-side FETs equally, so it is stage-shared decoupling, not a
             // per-instance satellite; carrying it with one column drags it across the others and self-
             // collides. Requiring a private signal net (GATE_x / a PHASE/SHUNT node) keeps only true taps.
-            let jnets: BTreeSet<&str> =
-                jt.pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+            let jnets: BTreeSet<&str> = jt
+                .pins
+                .iter()
+                .filter_map(|(_, _, n)| n.as_deref())
+                .collect();
             let mut best: Option<(f64, usize)> = None;
             for &i in members.iter() {
                 let shares_signal = items[i].pins.iter().any(|(_, _, n)| {
-                    n.as_deref().is_some_and(|n| !is_rail(n) && jnets.contains(n))
+                    n.as_deref()
+                        .is_some_and(|n| !is_rail(n) && jnets.contains(n))
                 });
                 if !shares_signal {
                     continue;
@@ -2045,8 +2326,11 @@ pub(crate) fn align_repeated_columns(
         let is_pos_supply =
             |n: &str| is_power_net(n) && !is_ground(n) && !n.eq_ignore_ascii_case("GND");
         let supply_pins = |i: usize| -> i32 {
-            items[i].pins.iter().filter(|(_, _, n)| n.as_deref().is_some_and(is_pos_supply)).count()
-                as i32
+            items[i]
+                .pins
+                .iter()
+                .filter(|(_, _, n)| n.as_deref().is_some_and(is_pos_supply))
+                .count() as i32
         };
         let mut ranked: Vec<Vec<usize>> = columns.clone();
         for c in &mut ranked {
@@ -2096,7 +2380,7 @@ pub(crate) fn align_repeated_columns(
         // final pass make room on a sheet with empty space — the property the bus-row reverts lacked.
         let now_at = |idx: usize| item_rect(&items[idx], items[idx].at);
         let new_at = |idx: usize| -> [f64; 4] {
-            let at = proposed.get(&idx).copied().unwrap_or(items[idx].at);
+            let at = proposed.get(&idx).copied().unwrap_or(items[idx].at.into());
             item_rect(&items[idx], at)
         };
         let mut ok = true;
@@ -2115,7 +2399,7 @@ pub(crate) fn align_repeated_columns(
             continue;
         }
         for (&i, &at) in &proposed {
-            items[i].at = at;
+            items[i].at = at.into();
         }
         // LOW-SIDE FIELD KEEPOUT: in each column the role-rank-0 member is the high
         // side (text below it, clear); a member in a LOWER role-row whose own
@@ -2192,7 +2476,11 @@ pub fn orient_angle(geom: &SymbolGeometry, orient: Orient) -> f64 {
     for deg in [0.0_f64, 90.0, 180.0, 270.0] {
         let (s, c) = deg.to_radians().sin_cos();
         let (sx, sy) = (dx * c - dy * s, -(dx * s + dy * c));
-        let card = if sx.abs() >= sy.abs() { (sx.signum(), 0.0) } else { (0.0, sy.signum()) };
+        let card = if sx.abs() >= sy.abs() {
+            (sx.signum(), 0.0)
+        } else {
+            (0.0, sy.signum())
+        };
         if (card.0 - want.0).abs() < 0.5 && (card.1 - want.1).abs() < 0.5 {
             return deg;
         }
@@ -2202,8 +2490,6 @@ pub fn orient_angle(geom: &SymbolGeometry, orient: Orient) -> f64 {
 
 /// Quantization for comparing mm x's by grid cell (the 1.27 mm grid).
 pub const GRID_KEY: f64 = 1.27;
-
-
 
 /// Each anchor's cluster: the satellites that tap it + the idiom members it anchors,
 /// the rigid group the block move slides. Built once; includes frozen members so a
@@ -2259,11 +2545,15 @@ pub(crate) const MULTI_UNIT_BANKED_PINS: usize = 32;
 pub fn multi_unit_siblings(items: &[Item], anchors: &[usize]) -> BTreeMap<usize, Vec<usize>> {
     let mut by_refdes: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for &i in anchors {
-        by_refdes.entry(items[i].refdes.as_str()).or_default().push(i);
+        by_refdes
+            .entry(items[i].refdes.as_str())
+            .or_default()
+            .push(i);
     }
     let banked = |g: &[usize]| {
         g.len() >= MULTI_UNIT_RIGID_MIN
-            && g.iter().all(|&i| items[i].geom.pins.len() >= MULTI_UNIT_BANKED_PINS)
+            && g.iter()
+                .all(|&i| items[i].geom.pins.len() >= MULTI_UNIT_BANKED_PINS)
     };
     let mut m: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for group in by_refdes.values().filter(|g| banked(g)) {
@@ -2312,12 +2602,27 @@ pub fn cluster_group(
 /// Manhattan distance from `from` to anchor `j`'s pin `pgi` in world coords (the
 /// pin's live position under the anchor's placement). Used to pick the nearest
 /// supply pin for a decoupling cap's cohesion target.
-pub(crate) fn pin_world_dist(items: &[Item], j: usize, pgi: usize, from: [f64; 2]) -> f64 {
-    let p = crate::write::pin_endpoint(&items[j].geom.pins[pgi], items[j].at, items[j].angle, items[j].mirror);
+pub(crate) fn pin_world_dist(
+    items: &[Item],
+    j: usize,
+    pgi: usize,
+    from: impl Into<::geom::Point2>,
+) -> f64 {
+    let from = from.into();
+    let p = crate::write::pin_endpoint(
+        &items[j].geom.pins[pgi],
+        items[j].at,
+        items[j].angle,
+        items[j].mirror,
+    );
     (p[0] - from[0]).abs() + (p[1] - from[1]).abs()
 }
 
-pub fn cohesion_targets(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> Vec<(usize, Vec<(usize, usize)>)> {
+pub fn cohesion_targets(
+    items: &[Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+) -> Vec<(usize, Vec<(usize, usize)>)> {
     let is_anchor = |i: usize| items[i].geom.pins.len() >= 3;
     // A BANKED multi-unit IC (FPGA) is the dominant consumer of its rails, but it shares those
     // rails with the regulators that feed it — so "nearest supply pin" parks the FPGA's own
@@ -2325,7 +2630,9 @@ pub fn cohesion_targets(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> Vec<(
     // pure bypass cap that reaches a banked IC toward the IC's own supply pins. Empty (no-op) on
     // every board without a banked symbol, so single-IC layouts are untouched.
     let anchor_idxs: Vec<usize> = (0..items.len()).filter(|&i| is_anchor(i)).collect();
-    let banked: BTreeSet<usize> = multi_unit_siblings(items, &anchor_idxs).into_keys().collect();
+    let banked: BTreeSet<usize> = multi_unit_siblings(items, &anchor_idxs)
+        .into_keys()
+        .collect();
     let mut out = Vec::new();
     for si in 0..items.len() {
         if items[si].geom.pins.len() >= 3 || items[si].frozen {
@@ -2369,9 +2676,16 @@ pub fn cohesion_targets(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> Vec<(
             let pool = if !supply.is_empty() { &supply } else { &gnd };
             // If this cap's V+ rail reaches a BANKED IC, hug THAT IC's supply pins (it is the
             // real decoupling target) rather than a regulator that merely sources the rail.
-            let banked_pool: Vec<(usize, usize)> =
-                pool.iter().copied().filter(|&(j, _)| banked.contains(&j)).collect();
-            let pool: &[(usize, usize)] = if banked_pool.is_empty() { pool } else { &banked_pool };
+            let banked_pool: Vec<(usize, usize)> = pool
+                .iter()
+                .copied()
+                .filter(|&(j, _)| banked.contains(&j))
+                .collect();
+            let pool: &[(usize, usize)] = if banked_pool.is_empty() {
+                pool
+            } else {
+                &banked_pool
+            };
             let at = items[si].at;
             let nearest = pool.iter().copied().min_by(|&(ja, pa), &(jb, pb)| {
                 let da = pin_world_dist(items, ja, pa, at);
@@ -2398,7 +2712,10 @@ pub fn cohesion_targets(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> Vec<(
         std::collections::BTreeMap::new();
     for i in 0..items.len() {
         if items[i].geom.pins.len() >= 3 {
-            by_refdes.entry(items[i].refdes.as_str()).or_default().push(i);
+            by_refdes
+                .entry(items[i].refdes.as_str())
+                .or_default()
+                .push(i);
         }
     }
     for group in by_refdes.values() {
@@ -2409,11 +2726,14 @@ pub fn cohesion_targets(items: &[Item], inc: &Incidence, ir: &LayoutIr) -> Vec<(
             if items[i].frozen {
                 continue;
             }
-            let tgts: Vec<(usize, usize)> =
-                group.iter().copied().filter(|&j| j != i).map(|j| (j, 0usize)).collect();
+            let tgts: Vec<(usize, usize)> = group
+                .iter()
+                .copied()
+                .filter(|&j| j != i)
+                .map(|j| (j, 0usize))
+                .collect();
             out.push((i, tgts));
         }
     }
     out
 }
-

@@ -36,11 +36,11 @@
 - The y-up→y-down bridge: `geom::shape::transform_offset` (`crates/geom/src/shape.rs:28`) does mirror → CCW rotate → final `[rx, -ry]` flip. **Algebraically**, if pin `at.y` is negated at load, `transform_offset` collapses to exactly `mirror-then-geom::rotate` (verified: output `[rx, -ry]` identical).
 - Duplicates to delete:
   - `rotate_offset`: `pcb-model/src/place.rs:340` (i32/Point2), `kicad-sexpr/src/pcb.rs:332` (f64/tuple), `gordian-core/src/tools_pcb/engine_svg.rs:367` (i32/Point2 dup).
-  - `rotated_aabb_half`: `kicad-sexpr/src/pcb.rs:340`, `kicad-sexpr/src/footlib.rs:309`, `pcb-synth/src/placefp.rs:238` (byte-identical).
+  - `rotated_aabb_half`: `kicad-sexpr/src/pcb.rs:340`, `kicad-sexpr/src/footlib.rs:309` (byte-identical).
   - `half_perimeter`: `grid-astar/src/router.rs:381`, `negotiated-mesh/src/pathing.rs:971`, `negotiated-mesh/src/detail.rs:1043` (byte-identical).
   - `simplify`: `grid-astar/src/router.rs:786`, `negotiated-mesh/src/detail.rs:1080` (identical, incl. 45° collinear merge).
 - y-up reasoning sites that must flip with the keystone: `sch-place/src/netclass.rs` `pin_side`, `sch-floorplan/src/floorplan/place/idioms.rs` `orient_angle` (manual `-(dx*s+dy*c)`), `sch-floorplan/src/floorplan/place/infer.rs` edge pin ranking (`-p.at[1]`), `sch-io/src/label.rs` `pin_text_boxes`, `sch-io/src/write/build.rs` `quantize_dir` (`sy = -ry`).
-- `pcb-model` dependents: `drc-core`, `drc-lint`, `grid-astar`, `negotiated-mesh`, `pcb-place`, `pcb-synth`, `specctra`, `kicad-sexpr`, `gordian-core`. Schematic stack (`sch-place` deps = `geom` + `kicad-symbol`; plus `sch-io`, `sch-floorplan`, `greedy-place`, `anneal-place`) uses `[f64;2]` today and does NOT depend on `pcb-model`.
+- `pcb-model` dependents: `drc-core`, `drc-lint`, `grid-astar`, `negotiated-mesh`, `pcb-place`, `specctra`, `kicad-sexpr`, `gordian-core`. Schematic stack (`sch-place` deps = `geom` + `kicad-symbol`; plus `sch-io`, `sch-floorplan`, `greedy-place`, `anneal-place`) uses `[f64;2]` today and does NOT depend on `pcb-model`.
 - Critics: `tools/schematic_critic.py`, `tools/pcb_critic.py`. Full build/test: `cargo build --workspace`, `cargo test --workspace`.
 
 ---
@@ -577,7 +577,7 @@ Expected: PASS (including the camelCase round-trip test `lib.rs:~448`; update it
 
 - [ ] **Step 7: build everything that depends on pcb-model** (they only see re-exported `Point2`/`Rect`, so changes are minimal but `Bounds`→`Rect` and `Copy`-ness ripple):
 
-Run: `cargo build -p drc-core -p drc-lint -p grid-astar -p negotiated-mesh -p pcb-place -p pcb-synth -p specctra -p kicad-sexpr -p gordian-core`
+Run: `cargo build -p drc-core -p drc-lint -p grid-astar -p negotiated-mesh -p pcb-place -p specctra -p kicad-sexpr -p gordian-core`
 Fix each error with the mechanical rules above (the compiler is the worklist). Common fixes: `Bounds` → `Rect`, `&Point2`/`.clone()` → `Copy`, `pcb_model::geom2d::<fn>` → the `Segment`/`Rect`/`Point2` method from the Step 4 table.
 
 - [ ] **Step 8: commit**
@@ -591,7 +591,7 @@ git commit -m "refactor(pcb-model): use geom Point2/Rect/segment; drop Bounds an
 
 ### Task 3: dedup rotation + `rotated_aabb_half`
 
-**Files:** `crates/kicad-sexpr/src/pcb.rs`, `crates/kicad-sexpr/src/footlib.rs`, `crates/pcb-synth/src/placefp.rs`, `crates/gordian-core/src/tools_pcb/engine_svg.rs`, and their `Cargo.toml` (add `geom = { path = "../geom" }` if absent).
+**Files:** `crates/kicad-sexpr/src/pcb.rs`, `crates/kicad-sexpr/src/footlib.rs`, `crates/gordian-core/src/tools_pcb/engine_svg.rs`, and their `Cargo.toml` (add `geom = { path = "../geom" }` if absent).
 
 - [ ] **Step 1:** delete the three `rotated_aabb_half` bodies; replace calls with `geom::rotated_aabb_half(w, h, deg)`.
 - [ ] **Step 2:** delete `kicad-sexpr/src/pcb.rs:332` `rotate_offset(dx,dy,deg)`; replace `let (rx, ry) = rotate_offset(dx, dy, deg)` with `let r = Point2::new(dx, dy).rotate(deg)` and use `r.x`/`r.y`.
@@ -599,7 +599,7 @@ git commit -m "refactor(pcb-model): use geom Point2/Rect/segment; drop Bounds an
 - [ ] **Step 4:** delete `kicad-sexpr/src/pcb.rs:197` `snap_quadrant(f64)->i32`; replace with `geom::snap_quadrant(deg)` (now `f64`; cast at the `i32` storage site until Task 5).
 - [ ] **Step 5: verify**
 
-Run: `cargo test -p kicad-sexpr -p pcb-synth && cargo build -p gordian-core`
+Run: `cargo test -p kicad-sexpr && cargo build -p gordian-core`
 Expected: PASS. The `kicad-sexpr` pad round-trip test (`tests/pcb_roundtrip.rs` `pad_positions_match_hand_math`) MUST still pass — it is the rotation oracle.
 
 - [ ] **Step 6: commit**
@@ -634,14 +634,14 @@ git commit -m "refactor: dedup half_perimeter/simplify/point-seg-dist into geom"
 
 ### Task 5: one angle convention — `f64` degrees everywhere
 
-**Files:** `crates/pcb-model/src/place.rs` (`Placement.rotation`, `LockedAt.rotation`), and every consumer of those fields: `pcb-place/src/**`, `pcb-synth/src/{synth,placefp}.rs`, `kicad-sexpr/src/pcb.rs`, `gordian-core/src/tools_pcb/{place,export,engine_svg,route}.rs`, `specctra/src/lib.rs`.
+**Files:** `crates/pcb-model/src/place.rs` (`Placement.rotation`, `LockedAt.rotation`), and every consumer of those fields: `pcb-place/src/**`, `kicad-sexpr/src/pcb.rs`, `gordian-core/src/tools_pcb/{place,export,engine_svg,route}.rs`, `specctra/src/lib.rs`.
 
 - [ ] **Step 1:** change `Placement.rotation: i32` → `f64` and `LockedAt.rotation: i32` → `f64` in `crates/pcb-model/src/place.rs`. serde field name unchanged.
 - [ ] **Step 2:** remove every `as f64` / `as i32` shim introduced in Tasks 2–3 around rotation. Use `geom::snap_quadrant(deg) -> f64` directly. Footprint synth still rejects non-quadrant angles via `synth.rs` (compare `snap_quadrant(r) == r` within `geom::EPS`).
 - [ ] **Step 3:** update any `match rot { 90 => …}` integer matches to compare snapped `f64` (e.g. `match snap_quadrant(rot) as i32`), or refactor to `Point2::rotate`.
 - [ ] **Step 4: verify**
 
-Run: `cargo test -p pcb-model -p pcb-place -p pcb-synth -p kicad-sexpr && cargo build -p gordian-core -p specctra`
+Run: `cargo test -p pcb-model -p pcb-place -p kicad-sexpr && cargo build -p gordian-core -p specctra`
 Expected: PASS. Update the placement determinism JSON snapshot tests (`pcb-place/.../tests.rs:892-897`) — rotation now serializes as `90.0` not `90`; regenerate the expected strings.
 
 - [ ] **Step 5: commit**

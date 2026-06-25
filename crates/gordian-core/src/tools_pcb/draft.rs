@@ -1,23 +1,17 @@
-//! The persisted board draft (`.gordian/board.json`) and its serde model — the
-//! PCB analog of the schematic `draft.circuit.yaml`. Tools mutate it; place/route
-//! read it. The serde shape reuses `pcb-place` types directly so a draft
-//! round-trips straight into a `PlaceProblem` without a translation layer.
+//! Transient board-adapter types used while existing placement/routing code is
+//! migrated to direct active-board models.
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use pcb_place::placement::{LockedAt, PlacementHints, Placement};
 use pcb_model::{Point2, Rect};
-
-use crate::tools::PcbToolCtx;
+use pcb_place::placement::{LockedAt, Placement, PlacementHints};
 
 use super::create::{parse_group_hint, parse_keepout};
 
-/// The persisted board draft (`.gordian/board.json`) — the PCB analog of the
-/// schematic `draft.circuit.yaml`. Tools mutate it; place/route read it.
+/// Transient board draft adapter used by the existing place/route engine bridges.
 ///
 /// Unknown JSON fields are rejected (`deny_unknown_fields`) so a schema drift
 /// fails loudly, matching the engine's `PlaceProblem`/solution types.
@@ -138,22 +132,6 @@ pub struct Keepout {
     pub rect: pcb_place::placement::Rect,
     /// Copper layers the keepout blocks ("top", "bottom", …).
     pub layers: Vec<pcb_model::LayerRef>,
-}
-
-impl BoardDraft {
-    /// Load the persisted board draft, if one exists and parses.
-    pub fn load(ctx: &PcbToolCtx) -> Option<BoardDraft> {
-        let raw = ctx.workspace().read_board()?;
-        serde_json::from_str(&raw).ok()
-    }
-
-    /// Persist this draft to `.gordian/board.json` (pretty-printed for the
-    /// human reader, mirroring how the schematic draft stays inspectable).
-    pub fn save(&self, ctx: &PcbToolCtx) -> Result<()> {
-        let json = serde_json::to_string_pretty(self)?;
-        ctx.workspace().write_board(&json)?;
-        Ok(())
-    }
 }
 
 /// TEST-HARNESS support (NOT an agent tool): set a draft's keepouts + placement-hint

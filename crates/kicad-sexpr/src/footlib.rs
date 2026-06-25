@@ -83,7 +83,12 @@ pub struct BBox {
 impl BBox {
     /// A degenerate box at the origin.
     pub fn zero() -> Self {
-        BBox { min_x: 0.0, min_y: 0.0, max_x: 0.0, max_y: 0.0 }
+        BBox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 0.0,
+            max_y: 0.0,
+        }
     }
 
     pub fn width(&self) -> f64 {
@@ -97,7 +102,12 @@ impl BBox {
     fn from_points(pts: &[[f64; 2]]) -> Option<Self> {
         let mut it = pts.iter();
         let &[x0, y0] = it.next()?;
-        let mut b = BBox { min_x: x0, min_y: y0, max_x: x0, max_y: y0 };
+        let mut b = BBox {
+            min_x: x0,
+            min_y: y0,
+            max_x: x0,
+            max_y: y0,
+        };
         for &[x, y] in it {
             b.min_x = b.min_x.min(x);
             b.min_y = b.min_y.min(y);
@@ -192,14 +202,15 @@ impl Footprint {
         // source and grow the pad to it. (Same kiutils-drops-geometry class as the
         // fp_arc/fp_circle courtyard fixes.)
         if pads.iter().any(|p| p.shape == "custom")
-            && let Ok(raw) = std::fs::read_to_string(path) {
-                let bboxes = custom_pad_bboxes(&raw);
-                for (bi, pad) in pads.iter_mut().filter(|p| p.shape == "custom").enumerate() {
-                    if let Some(&(hx, hy)) = bboxes.get(bi) {
-                        pad.size = [pad.size[0].max(2.0 * hx), pad.size[1].max(2.0 * hy)];
-                    }
+            && let Ok(raw) = std::fs::read_to_string(path)
+        {
+            let bboxes = custom_pad_bboxes(&raw);
+            for (bi, pad) in pads.iter_mut().filter(|p| p.shape == "custom").enumerate() {
+                if let Some(&(hx, hy)) = bboxes.get(bi) {
+                    pad.size = [pad.size[0].max(2.0 * hx), pad.size[1].max(2.0 * hy)];
                 }
             }
+        }
         let (courtyard, courtyard_source) = courtyard_bbox(ast, &pads);
         let bbox = overall_bbox(ast, &pads).unwrap_or_else(BBox::zero);
 
@@ -229,7 +240,9 @@ pub(crate) fn custom_pad_bboxes(raw: &str) -> Vec<(f64, f64)> {
     let mut search = 0;
     while let Some(rel) = raw[search..].find("(pad ") {
         let start = search + rel;
-        let Some(end) = matching_paren(raw, start) else { break };
+        let Some(end) = matching_paren(raw, start) else {
+            break;
+        };
         let block = &raw[start..end];
         search = end;
         if !block.contains(" custom") {
@@ -241,12 +254,11 @@ pub(crate) fn custom_pad_bboxes(raw: &str) -> Vec<(f64, f64)> {
             let s = p + r + "(xy ".len();
             let mut it = block[s..].split_whitespace();
             if let (Some(xs), Some(ys)) = (it.next(), it.next())
-                && let (Ok(x), Ok(y)) =
-                    (xs.parse::<f64>(), ys.trim_end_matches(')').parse::<f64>())
-                {
-                    hx = hx.max(x.abs());
-                    hy = hy.max(y.abs());
-                }
+                && let (Ok(x), Ok(y)) = (xs.parse::<f64>(), ys.trim_end_matches(')').parse::<f64>())
+            {
+                hx = hx.max(x.abs());
+                hy = hy.max(y.abs());
+            }
             p = s;
         }
         out.push((hx, hy));
@@ -306,7 +318,10 @@ fn pad_corners(pad: &FootprintPad) -> [[f64; 2]; 2] {
 
 /// All defined geometry points of a graphic (`start`/`end`/`center`/`at`).
 fn graphic_points(g: &kiutils_kicad::FpGraphic) -> Vec<[f64; 2]> {
-    let mut pts: Vec<[f64; 2]> = [g.start, g.end, g.center, g.at].into_iter().flatten().collect();
+    let mut pts: Vec<[f64; 2]> = [g.start, g.end, g.center, g.at]
+        .into_iter()
+        .flatten()
+        .collect();
     // An `fp_arc` bulges BEYOND its endpoints, but kiutils 0.3 drops the `(mid)`
     // apex — so a rounded courtyard (a crystal's curved end, a round connector)
     // would be read only to its chord and the bbox under-sized, seating parts too
@@ -315,23 +330,25 @@ fn graphic_points(g: &kiutils_kicad::FpGraphic) -> Vec<[f64; 2]> {
     // midpoint; this contains any arc up to a semicircle, which every courtyard
     // arc is. (Recovers the HC49 crystal's true 8.47mm extent from start/end.)
     if g.token == "fp_arc"
-        && let (Some(s), Some(e)) = (g.start, g.end) {
-            let mid = [(s[0] + e[0]) / 2.0, (s[1] + e[1]) / 2.0];
-            let r = ((s[0] - e[0]).powi(2) + (s[1] - e[1]).powi(2)).sqrt() / 2.0;
-            pts.push([mid[0] - r, mid[1] - r]);
-            pts.push([mid[0] + r, mid[1] + r]);
-        }
+        && let (Some(s), Some(e)) = (g.start, g.end)
+    {
+        let mid = [(s[0] + e[0]) / 2.0, (s[1] + e[1]) / 2.0];
+        let r = ((s[0] - e[0]).powi(2) + (s[1] - e[1]).powi(2)).sqrt() / 2.0;
+        pts.push([mid[0] - r, mid[1] - r]);
+        pts.push([mid[0] + r, mid[1] + r]);
+    }
     // An `fp_circle` ((center) + an `(end)` point on the circumference) bounds a
     // disc of that radius — but only the two stored points would be read, missing
     // the ±radius extent on the other quadrants. A radial cap / round footprint's
     // circular courtyard would then be badly under-sized (the D8 electrolytic's
     // 8mm courtyard read as a sliver). Add the disc's bounding box.
     if g.token == "fp_circle"
-        && let (Some(c), Some(e)) = (g.center.or(g.start), g.end) {
-            let r = ((c[0] - e[0]).powi(2) + (c[1] - e[1]).powi(2)).sqrt();
-            pts.push([c[0] - r, c[1] - r]);
-            pts.push([c[0] + r, c[1] + r]);
-        }
+        && let (Some(c), Some(e)) = (g.center.or(g.start), g.end)
+    {
+        let r = ((c[0] - e[0]).powi(2) + (c[1] - e[1]).powi(2)).sqrt();
+        pts.push([c[0] - r, c[1] - r]);
+        pts.push([c[0] + r, c[1] + r]);
+    }
     pts
 }
 
@@ -370,10 +387,7 @@ fn courtyard_bbox(
 }
 
 /// Overall bbox over every pad rectangle and every graphic point.
-fn overall_bbox(
-    ast: &kiutils_kicad::FootprintAst,
-    pads: &[FootprintPad],
-) -> Option<BBox> {
+fn overall_bbox(ast: &kiutils_kicad::FootprintAst, pads: &[FootprintPad]) -> Option<BBox> {
     let mut pts: Vec<[f64; 2]> = Vec::new();
     for pad in pads {
         pts.extend(pad_corners(pad));
@@ -601,7 +615,10 @@ impl FootprintIndex {
             .filter(|e| e.lib_id.starts_with(&prefix))
             .map(|e| {
                 let bare = &e.lib_id[prefix.len()..];
-                (strsim::levenshtein(&needle, &bare.to_lowercase()), e.lib_id.as_str())
+                (
+                    strsim::levenshtein(&needle, &bare.to_lowercase()),
+                    e.lib_id.as_str(),
+                )
             })
             .filter(|(d, _)| *d <= SUGGEST_MAX_DISTANCE)
             .collect();
@@ -629,7 +646,12 @@ fn rank(entries: &[Entry], needle: &str, n: usize) -> Vec<usize> {
         .collect();
     fuzzy.sort_by(|&(sa, ia), &(sb, ib)| {
         sb.cmp(&sa)
-            .then_with(|| entries[ia].normalized.len().cmp(&entries[ib].normalized.len()))
+            .then_with(|| {
+                entries[ia]
+                    .normalized
+                    .len()
+                    .cmp(&entries[ib].normalized.len())
+            })
             .then_with(|| entries[ia].lib_id.cmp(&entries[ib].lib_id))
     });
 
@@ -643,7 +665,12 @@ fn rank(entries: &[Entry], needle: &str, n: usize) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter(|(i, _)| !taken.contains(i))
-        .map(|(i, e)| (1.0 - strsim::normalized_levenshtein(needle, &e.normalized), i))
+        .map(|(i, e)| {
+            (
+                1.0 - strsim::normalized_levenshtein(needle, &e.normalized),
+                i,
+            )
+        })
         .collect();
     rest.sort_by(|&(da, ia), &(db, ib)| {
         da.partial_cmp(&db)
@@ -697,7 +724,10 @@ mod tests {
 
     #[test]
     fn typo_returns_closest_via_backfill() {
-        let entries = vec![entry("Package_TO_SOT_SMD:SOT-23"), entry("Resistor_SMD:R_0603_1608Metric")];
+        let entries = vec![
+            entry("Package_TO_SOT_SMD:SOT-23"),
+            entry("Resistor_SMD:R_0603_1608Metric"),
+        ];
         // "0663" is not a subsequence of "0603"; backfill must still answer.
         let ranked = rank(&entries, &normalize("R_0663"), 1);
         assert_eq!(ranked.len(), 1);
@@ -706,7 +736,10 @@ mod tests {
 
     #[test]
     fn normalize_matches_symbol_search_conventions() {
-        assert_eq!(normalize("Resistor_SMD:R_0603_1608Metric"), "resistor smd r 0603 1608metric");
+        assert_eq!(
+            normalize("Resistor_SMD:R_0603_1608Metric"),
+            "resistor smd r 0603 1608metric"
+        );
         assert_eq!(normalize("SOT-23"), "sot 23");
     }
 }

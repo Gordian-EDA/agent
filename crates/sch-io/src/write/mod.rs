@@ -43,6 +43,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use geom::{Point2, Rect};
 use kicad_symbol::geometry::PinGeom;
 
 mod build;
@@ -88,7 +89,7 @@ pub(super) struct Instance {
     /// of footprint assignment — see docs/specs/unified-kicad-pcb-state.md).
     pub(super) footprint: Option<String>,
     /// Grid-snapped sheet position.
-    pub(super) at: [f64; 2],
+    pub(super) at: Point2,
     /// Orientation in degrees (0/90/180/270).
     pub(super) angle: f64,
     /// Whether the instance is mirrored on the X axis (`(mirror x)`). We do not
@@ -104,9 +105,9 @@ pub(super) struct Instance {
     /// during reconciliation, so diffs stay minimal). `None` falls back to the
     /// content-derived `stable_uuid("symbol", refdes)`.
     pub(super) uuid: Option<String>,
-    /// Half the symbol body's approximate size `[w/2, h/2]`, used to push the
+    /// Half the symbol body's approximate size `(w/2, h/2)`, used to push the
     /// Reference/Value field text clear of the body rather than a fixed offset.
-    pub(super) half_extents: [f64; 2],
+    pub(super) half_extents: Point2,
     /// Solver-assigned Reference/Value positions (`solve_text_positions`).
     /// `None` -> legacy fixed right-of-body offsets (kept for hidden fields
     /// and as the fallback when the solver has not run).
@@ -136,7 +137,7 @@ pub(super) struct PinLabel {
     /// Net name (free-form; escaped at render time).
     pub(super) net: String,
     /// Grid-snapped sheet-space position of the pin's connection endpoint.
-    pub(super) at: [f64; 2],
+    pub(super) at: Point2,
     /// Stable key for the label uuid: `"<refdes>:<pin>:<net>:<index>"`. The
     /// index disambiguates the (rare) case where a pin *name* matches multiple
     /// physical pins, each of which gets its own label.
@@ -161,14 +162,14 @@ pub(super) struct PinLabel {
 /// wire is dropped and the label is moved back to `pin_at`.
 #[derive(Clone, Copy)]
 pub(super) struct Stub {
-    pub(super) pin_at: [f64; 2],
+    pub(super) pin_at: Point2,
 }
 
 /// One `(wire …)` segment between two grid-snapped sheet points.
 #[derive(Clone)]
 pub(super) struct Wire {
-    pub(super) a: [f64; 2],
-    pub(super) b: [f64; 2],
+    pub(super) a: Point2,
+    pub(super) b: Point2,
     /// Stable key for the wire uuid (content-derived from the endpoints).
     pub(super) uuid_key: String,
     /// The net this wire belongs to, when known (cluster-generated wires).
@@ -178,7 +179,7 @@ pub(super) struct Wire {
 
 /// One `(junction …)` dot marking a deliberate ≥3-way wire join.
 pub(super) struct Junction {
-    pub(super) at: [f64; 2],
+    pub(super) at: Point2,
     /// Stable key for the junction uuid (content-derived from the position).
     pub(super) uuid_key: String,
 }
@@ -186,7 +187,7 @@ pub(super) struct Junction {
 /// Free-standing sheet text (block titles / annotations).
 pub(super) struct SheetText {
     pub(super) text: String,
-    pub(super) at: [f64; 2],
+    pub(super) at: Point2,
     /// Font size (mm); titles 2.54, annotations 1.27.
     pub(super) size: f64,
     pub(super) bold: bool,
@@ -195,15 +196,17 @@ pub(super) struct SheetText {
 
 /// A graphic rectangle (block frame).
 pub(super) struct SheetRect {
-    pub(super) start: [f64; 2],
-    pub(super) end: [f64; 2],
+    pub(super) start: Point2,
+    pub(super) end: Point2,
     pub(super) uuid_key: String,
 }
 
-// `Dir`, `point_on_segment`, and `transform_offset` live in `sch_place::geom`
-// (shared with the `label`/`wire` modules); re-exported so `crate::write::Dir`
-// etc. and the public API keep working.
-pub use sch_place::geom::{point_on_segment, transform_offset, Dir};
+pub(super) type BBox = Rect;
+
+// `Dir` and `transform_offset` live in `sch_place::geom` (shared with the
+// `label`/`wire` modules); re-exported so `crate::write::Dir` etc. and the
+// public API keep working.
+pub use sch_place::geom::{Dir, transform_offset};
 
 /// One `(no_connect …)` marker emitted at a pin's sheet-space endpoint.
 ///
@@ -214,7 +217,7 @@ pub use sch_place::geom::{point_on_segment, transform_offset, Dir};
 /// `PinTarget::NoConnect` in the `Design`); each becomes one of these markers.
 pub(super) struct NoConnect {
     /// Grid-snapped sheet-space position of the pin's connection endpoint.
-    pub(super) at: [f64; 2],
+    pub(super) at: Point2,
     /// Stable key for the marker uuid: `"<refdes>:<pin>:<index>"`.
     pub(super) uuid_key: String,
 }
@@ -243,7 +246,7 @@ pub struct SchematicWriter {
     /// Approximate symbol body size keyed by `lib_id`, populated when a new
     /// lib_id's geometry is loaded (the dedup branch). Avoids reloading geometry
     /// per instance just to compute its field-clearance half-extents.
-    pub(super) sym_sizes: BTreeMap<String, [f64; 2]>,
+    pub(super) sym_sizes: BTreeMap<String, Point2>,
     /// Pin geometry per lib_id, cached at first load, for pin-text obstacles
     /// in `solve_text_positions`.
     pub(super) sym_pins: BTreeMap<String, Vec<PinGeom>>,
@@ -273,16 +276,13 @@ impl SchematicWriter {
     }
 }
 
-/// An axis-aligned bbox: [min_x, min_y, max_x, max_y].
-pub(super) type BBox = [f64; 4];
-
 /// Resolved Reference/Value anchors for an instance: the solver's assignment
 /// when present, else the legacy fixed right-of-body offsets. The single
 /// source of truth shared by `render_instance` and the overlap lint, so the
 /// lint always boxes exactly what gets emitted.
 pub(super) fn field_anchors(inst: &Instance) -> (TextPos, TextPos) {
     let legacy = |dy: f64| TextPos {
-        at: [inst.at[0] + inst.half_extents[0] + 1.27, inst.at[1] + dy],
+        at: [inst.at.x + inst.half_extents.x + 1.27, inst.at.y + dy],
         justify: Justify::Left,
     };
     (
@@ -293,11 +293,12 @@ pub(super) fn field_anchors(inst: &Instance) -> (TextPos, TextPos) {
 
 /// Bbox of a rendered field text line: bottom-anchored, 1.6 mm tall, width
 /// per [`crate::label::text_width`], extending per its justification.
-pub(super) fn field_box(at: [f64; 2], j: Justify, width: f64) -> BBox {
+pub(super) fn field_box(at: impl Into<Point2>, j: Justify, width: f64) -> Rect {
+    let at = at.into();
     match j {
-        Justify::Left => [at[0], at[1] - 1.6, at[0] + width, at[1]],
-        Justify::Right => [at[0] - width, at[1] - 1.6, at[0], at[1]],
-        Justify::Center => [at[0] - width / 2.0, at[1] - 1.6, at[0] + width / 2.0, at[1]],
+        Justify::Left => Rect::new(at.x, at.y - 1.6, at.x + width, at.y),
+        Justify::Right => Rect::new(at.x - width, at.y - 1.6, at.x, at.y),
+        Justify::Center => Rect::new(at.x - width / 2.0, at.y - 1.6, at.x + width / 2.0, at.y),
     }
 }
 
@@ -313,12 +314,36 @@ pub(super) fn justify_token(j: Justify) -> &'static str {
 
 /// Whether two axis-aligned boxes overlap (open intervals, so edge-touching is
 /// not a collision — symbols flush against a frame don't trip the lint).
-pub(super) fn boxes_overlap(a: &BBox, b: &BBox) -> bool {
+pub(super) fn boxes_overlap(a: &Rect, b: &Rect) -> bool {
     // Tolerance matches `floorplan::rects_overlap`: a shared edge (and the
     // sub-micron float jitter around one) is a TOUCH between padded bboxes — real
     // clearance, not a collision — so it must NOT be flagged. Without this, two
     // collinear/adjacent parts whose padded boxes meet (a divider's R7/R8 spine,
     // a pull-up just above a wide IC) trip a phantom overlap warning.
     const EPS: f64 = 1e-6;
-    a[0] < b[2] - EPS && b[0] < a[2] - EPS && a[1] < b[3] - EPS && b[1] < a[3] - EPS
+    a.min_x < b.max_x - EPS
+        && b.min_x < a.max_x - EPS
+        && a.min_y < b.max_y - EPS
+        && b.min_y < a.max_y - EPS
+}
+
+pub(super) fn point_on_segment(
+    p: impl Into<Point2>,
+    a: impl Into<Point2>,
+    b: impl Into<Point2>,
+) -> bool {
+    const EPS: f64 = 1e-6;
+    let p = p.into();
+    let a = a.into();
+    let b = b.into();
+    let cross = (p.y - a.y) * (b.x - a.x) - (p.x - a.x) * (b.y - a.y);
+    if cross.abs() > EPS {
+        return false;
+    }
+    let dot = (p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y);
+    if dot < -EPS {
+        return false;
+    }
+    let len2 = (b.x - a.x).powi(2) + (b.y - a.y).powi(2);
+    dot <= len2 + EPS
 }

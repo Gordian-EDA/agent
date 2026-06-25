@@ -1,7 +1,7 @@
 //! Headless LLM-driven PCB run: hand the model a natural-language BOARD request,
 //! let it drive the real PCB tool loop (search footprints → derive_board →
-//! design_board → place_board → route_board → export_board), then locate the
-//! exported `.kicad_pcb`, run KiCAD DRC on it, and report.
+//! place_board → route_board → check_board), then locate the saved `.kicad_pcb`
+//! and report.
 //!
 //! This is the PCB analog of `agent_design` (which exercises the schematic side).
 //! It tests the AGENT-FACING surface — the tool specs, the board rules/hints syntax,
@@ -22,8 +22,12 @@ use tokio::sync::mpsc;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let out = args.next().expect("usage: board_agent <out.kicad_pcb> <prompt>");
-    let prompt = args.next().expect("usage: board_agent <out.kicad_pcb> <prompt>");
+    let out = args
+        .next()
+        .expect("usage: board_agent <out.kicad_pcb> <prompt>");
+    let prompt = args
+        .next()
+        .expect("usage: board_agent <out.kicad_pcb> <prompt>");
 
     if let Some(parent) = std::path::Path::new(&out).parent() {
         std::fs::create_dir_all(parent)?;
@@ -45,7 +49,11 @@ async fn main() -> anyhow::Result<()> {
         let (mut tin, mut tout) = (0u64, 0u64);
         while let Some(ev) = rx.recv().await {
             match ev {
-                gordian_core::AgentEvent::Usage { input_tokens, output_tokens, .. } => {
+                gordian_core::AgentEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    ..
+                } => {
                     tin += input_tokens;
                     tout += output_tokens;
                 }

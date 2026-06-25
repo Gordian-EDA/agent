@@ -1,6 +1,7 @@
 //! The single axis-aligned rectangle type (region / bounds / bbox).
 
 use serde::{Deserialize, Serialize};
+use std::ops::Index;
 
 use crate::consts::EPS;
 use crate::point::Point2;
@@ -20,7 +21,12 @@ pub struct Rect {
 impl Rect {
     #[inline]
     pub const fn new(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Self {
-        Self { min_x, min_y, max_x, max_y }
+        Self {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        }
     }
 
     /// Normalized bbox from two arbitrary corner points.
@@ -71,13 +77,21 @@ impl Rect {
 
     #[inline]
     pub fn center(&self) -> Point2 {
-        Point2::new((self.min_x + self.max_x) / 2.0, (self.min_y + self.max_y) / 2.0)
+        Point2::new(
+            (self.min_x + self.max_x) / 2.0,
+            (self.min_y + self.max_y) / 2.0,
+        )
     }
 
     /// Inflate by `m` on every side (negative shrinks).
     #[inline]
     pub fn inflate(&self, m: f64) -> Rect {
-        Rect::new(self.min_x - m, self.min_y - m, self.max_x + m, self.max_y + m)
+        Rect::new(
+            self.min_x - m,
+            self.min_y - m,
+            self.max_x + m,
+            self.max_y + m,
+        )
     }
 
     /// Is `p` inside or on the boundary?
@@ -103,7 +117,12 @@ impl Rect {
         let max_x = self.max_x.min(other.max_x);
         let min_y = self.min_y.max(other.min_y);
         let max_y = self.max_y.min(other.max_y);
-        (min_x < max_x && min_y < max_y).then_some(Rect { min_x, min_y, max_x, max_y })
+        (min_x < max_x && min_y < max_y).then_some(Rect {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        })
     }
 
     /// Does the boundary of `other` cross the interior of `self`?
@@ -127,8 +146,12 @@ impl Rect {
 
     /// Min distance to another rect; 0 if they overlap or touch.
     pub fn dist_to_rect(&self, other: &Rect) -> f64 {
-        let dx = (self.min_x - other.max_x).max(other.min_x - self.max_x).max(0.0);
-        let dy = (self.min_y - other.max_y).max(other.min_y - self.max_y).max(0.0);
+        let dx = (self.min_x - other.max_x)
+            .max(other.min_x - self.max_x)
+            .max(0.0);
+        let dy = (self.min_y - other.max_y)
+            .max(other.min_y - self.max_y)
+            .max(0.0);
         (dx * dx + dy * dy).sqrt()
     }
 
@@ -137,6 +160,28 @@ impl Rect {
     #[inline]
     pub fn dist_to_segment(&self, s: Segment) -> f64 {
         s.dist_to_rect(self)
+    }
+}
+
+impl From<[f64; 4]> for Rect {
+    #[inline]
+    fn from(r: [f64; 4]) -> Self {
+        Rect::new(r[0], r[1], r[2], r[3])
+    }
+}
+
+impl Index<usize> for Rect {
+    type Output = f64;
+
+    #[inline]
+    fn index(&self, index: usize) -> &Self::Output {
+        match index {
+            0 => &self.min_x,
+            1 => &self.min_y,
+            2 => &self.max_x,
+            3 => &self.max_y,
+            _ => panic!("Rect index out of bounds: {index}"),
+        }
     }
 }
 
@@ -178,7 +223,8 @@ mod tests {
         let j = serde_json::to_string(&r).unwrap();
         assert_eq!(j, r#"{"minX":1.0,"minY":2.0,"maxX":3.0,"maxY":4.0}"#);
         // name-based: order-independent (tscircuit emits minX,maxX,minY,maxY).
-        let p: Rect = serde_json::from_str(r#"{"minX":1.0,"maxX":3.0,"minY":2.0,"maxY":4.0}"#).unwrap();
+        let p: Rect =
+            serde_json::from_str(r#"{"minX":1.0,"maxX":3.0,"minY":2.0,"maxY":4.0}"#).unwrap();
         assert_eq!(p, r);
     }
 }

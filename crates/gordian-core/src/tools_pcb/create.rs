@@ -5,30 +5,92 @@
 //! all live here.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::io;
 
 use anyhow::Result;
+use kicad_cli::cli::KicadCli;
 use serde_json::{Value, json};
 
-use circuit_lang::model::PinTarget;
-use sch_io::read::lift;
-
-use pcb_synth::placefp::part_from_footprint;
-use pcb_place::placement::{Edge, GroupHint, LockedAt, PlacementHints, Rect};
 use pcb_model::{LayerRef, Point2};
+use pcb_place::placement::{Edge, GroupHint, LockedAt, PlacementHints, Rect};
 
 use crate::tools::PcbToolCtx;
 
 use super::draft::{BoardDraft, DraftPart, DraftRules, Keepout, PourSpec};
-use super::export::resolve_pour_layer;
 
 // ── derive_board ──────────────────────────────────────────────────────────────
 
-/// `derive_board` — build the board draft from the committed schematic + the
-/// footprint map, instead of re-typing parts by hand. Connectivity comes from the
-/// schematic's netlist (via `lift`, which keys pins by pad number — KiCAD does the
-/// pin→pad resolution for us), footprints from `.gordian/footprints.json`. The
-/// caller supplies only `bounds` and `rules`; parts and nets come from the
-/// schematic. See `docs/specs/schematic-driven-pcb.md`.
+#[derive(Debug, Clone)]
+struct BoardSeedSpec {
+    bounds: Rect,
+    rules: SeedRules,
+    parts: Vec<SeedPart>,
+    outline: Option<Vec<Point2>>,
+}
+
+#[derive(Debug, Clone)]
+struct SeedPart {
+    reference: String,
+    footprint: String,
+    pad_nets: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+struct SeedRules {
+    clearance: f64,
+    min_trace_width: f64,
+    via_diameter: f64,
+    via_drill: f64,
+    layer_count: u32,
+    net_widths: BTreeMap<String, f64>,
+}
+
+impl Default for SeedRules {
+    fn default() -> Self {
+        Self {
+            clearance: 0.2,
+            min_trace_width: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            layer_count: 2,
+            net_widths: BTreeMap::new(),
+        }
+    }
+}
+
+impl From<&DraftRules> for SeedRules {
+    fn from(rules: &DraftRules) -> Self {
+        Self {
+            clearance: rules.clearance,
+            min_trace_width: rules.min_trace_width,
+            via_diameter: rules.via_diameter,
+            via_drill: rules.via_drill,
+            layer_count: rules.layer_count,
+            net_widths: rules.net_widths.clone(),
+        }
+    }
+}
+
+fn resolve_pour_layer(layer: &str, layer_count: u32) -> Option<(u32, String)> {
+    match layer {
+        "top" => Some((0, "F.Cu".to_string())),
+        "bottom" => Some((layer_count - 1, "B.Cu".to_string())),
+        _ if layer_count >= 6 && layer.starts_with("inner") => layer
+            .trim_start_matches("inner")
+            .parse::<u32>()
+            .ok()
+            .filter(|idx| *idx > 0 && *idx < layer_count - 1)
+            .map(|idx| (idx, format!("In{idx}.Cu"))),
+        _ => None,
+    }
+}
+
+/// `derive_board` — seed the PCB from KiCAD's own schematic netlist export.
+///
+/// Footprints must already be assigned in the schematic. Missing footprints are a
+/// hard error: the agent should edit the circuit YAML, apply it, then derive the
+/// board again.
 pub fn derive_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     if !ctx.sch_path().exists() {
         return Ok(json!({
@@ -36,44 +98,45 @@ pub fn derive_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
                       then derive_board"
         }));
     }
-    let yaml = match lift(ctx.env(), ctx.sch_path()) {
-        Ok(y) => y,
+    let netlist = match KicadCli::new(ctx.env()).netlist(ctx.sch_path()) {
+        Ok(netlist) => netlist,
         Err(e) => {
-            return Ok(json!({ "error": format!("could not read the schematic netlist: {e}") }));
+            return Ok(json!({ "error": format!("could not export the schematic netlist: {e}") }));
         }
     };
-    let Some(design) = circuit_lang::compile(&yaml, ctx.provider()).design else {
-        return Ok(json!({ "error": "the schematic netlist did not compile back to a design" }));
-    };
-    let overwrite = input.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
-    if BoardDraft::load(ctx).is_some() && !overwrite {
-        return Ok(json!({ "error": "a board draft already exists — pass overwrite=true to replace it" }));
+    let mut pad_nets_by_ref: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for net in &netlist.nets {
+        if net.name.is_empty() {
+            continue;
+        }
+        for (reference, pin) in &net.nodes {
+            if reference.is_empty() || pin.is_empty() {
+                continue;
+            }
+            pad_nets_by_ref
+                .entry(reference.clone())
+                .or_default()
+                .insert(pin.clone(), net.name.clone());
+        }
     }
 
-    // Seed a BoardDraft directly from the schematic: one part per component, pads
-    // from the (pad-number-keyed) pins flattened across units, footprint taken
-    // from the symbol's footprint field. Parts whose symbol carries no footprint
-    // are flagged in `missing_footprints` for `assign_footprint`.
-    let mut parts = Vec::new();
+    let mut parts = Vec::with_capacity(netlist.components.len());
     let mut missing_footprints = Vec::new();
-    for (refdes, c) in design.blocks.values().flat_map(|b| b.components.iter()) {
-        let footprint = c.footprint.clone().unwrap_or_default();
+    for component in &netlist.components {
+        let footprint = component
+            .properties
+            .get("Footprint")
+            .cloned()
+            .unwrap_or_default();
         if footprint.is_empty() {
-            missing_footprints.push(refdes.clone());
+            missing_footprints.push(component.reference.clone());
         }
-        let mut pad_nets = BTreeMap::new();
-        for pins in std::iter::once(&c.pins).chain(c.units.values()) {
-            for (pad, target) in pins {
-                if let PinTarget::Net(net) = target {
-                    pad_nets.insert(pad.clone(), net.clone());
-                }
-            }
-        }
-        parts.push(DraftPart {
-            reference: refdes.clone(),
+        parts.push(SeedPart {
+            reference: component.reference.clone(),
             footprint,
-            pad_nets,
-            locked: None,
+            pad_nets: pad_nets_by_ref
+                .remove(&component.reference)
+                .unwrap_or_default(),
         });
     }
 
@@ -83,38 +146,643 @@ pub fn derive_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             Err(e) => return Ok(json!({ "error": e })),
         }
     } else {
-        Rect { min_x: 0.0, min_y: 0.0, max_x: 50.0, max_y: 40.0 }
+        Rect {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 50.0,
+            max_y: 40.0,
+        }
     };
-    let layer_count = input
-        .get("rules")
-        .and_then(|r| r.get("layers"))
-        .and_then(Value::as_u64)
-        .unwrap_or(2) as u32;
+    let rules = match parse_seed_rules(input.get("rules")) {
+        Ok(r) => r,
+        Err(msg) => return Ok(json!({ "error": msg })),
+    };
 
-    let part_count = parts.len();
-    let draft = BoardDraft {
+    let spec = BoardSeedSpec {
         bounds,
-        rules: DraftRules { layer_count, ..Default::default() },
+        rules,
         parts,
-        keepouts: Vec::new(),
-        hints: PlacementHints::default(),
-        last_placement: None,
-        last_place_illegal: false,
         outline: None,
     };
-    draft.save(ctx)?;
+    let part_count = spec.parts.len();
 
-    let note = if missing_footprints.is_empty() {
-        "board seeded from the schematic — run place_board, then route_board, then open_board to refine it interactively"
-    } else {
-        "board seeded; some parts have no footprint — set each with assign_footprint (use search_footprints for the lib_id), then place_board"
-    };
+    if !missing_footprints.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "part_count": part_count,
+            "missing_footprints": missing_footprints,
+            "note": "some schematic symbols have no footprint field — edit the circuit YAML footprint fields, apply_design, then derive_board again",
+        }));
+    }
+
+    match write_seed_board(&spec, ctx) {
+        Ok(()) => {}
+        Err(msg) => return Ok(json!({ "error": msg })),
+    }
+    if let Err(e) = ctx.kicad().open(&ctx.pcb_path()) {
+        return Ok(
+            json!({ "error": format!("board was written, but KiCAD could not open it over IPC: {e}") }),
+        );
+    }
     Ok(json!({
         "ok": true,
         "part_count": part_count,
-        "missing_footprints": missing_footprints,
-        "note": note,
+        "path": ctx.pcb_path().display().to_string(),
+        "note": "board seeded from the schematic into the live KiCAD session — run place_board, then route_board, then check_board",
     }))
+}
+
+fn write_seed_board(spec: &BoardSeedSpec, ctx: &PcbToolCtx) -> std::result::Result<(), String> {
+    let index = ctx
+        .footprint_index()
+        .map_err(|e| format!("footprint index unavailable: {e}"))?;
+    let mut parts = Vec::with_capacity(spec.parts.len());
+    let mut x = spec.bounds.min_x + 2.0;
+    let y = spec.bounds.min_y + 2.0;
+    for dp in &spec.parts {
+        let source = index.footprint_source(&dp.footprint).ok_or_else(|| {
+            format!(
+                "part {}: footprint `{}` source is not readable — edit the schematic footprint field",
+                dp.reference, dp.footprint
+            )
+        })?;
+        parts.push(SeedFootprint {
+            reference: dp.reference.clone(),
+            lib_id: dp.footprint.clone(),
+            source,
+            pad_nets: dp.pad_nets.clone(),
+            at: Point2 { x, y },
+            rotation: 0.0,
+        });
+        x += 2.54;
+    }
+    let text = emit_seed_board(&parts, &spec.bounds, &spec.rules, spec.outline.as_deref())
+        .map_err(|e| format!("board synthesis failed: {e}"))?;
+    std::fs::write(ctx.pcb_path(), text)
+        .map_err(|e| format!("could not write {}: {e}", ctx.pcb_path().display()))
+}
+
+fn write_initial_board(draft: &BoardDraft, ctx: &PcbToolCtx) -> std::result::Result<(), String> {
+    let spec = BoardSeedSpec {
+        bounds: draft.bounds.clone(),
+        rules: SeedRules::from(&draft.rules),
+        parts: draft
+            .parts
+            .iter()
+            .map(|part| SeedPart {
+                reference: part.reference.clone(),
+                footprint: part.footprint.clone(),
+                pad_nets: part.pad_nets.clone(),
+            })
+            .collect(),
+        outline: draft.outline.clone(),
+    };
+    write_seed_board(&spec, ctx)
+}
+
+#[derive(Debug, Clone)]
+struct SeedFootprint {
+    reference: String,
+    lib_id: String,
+    source: String,
+    pad_nets: BTreeMap<String, String>,
+    at: Point2,
+    rotation: f64,
+}
+
+#[derive(Debug, Clone)]
+struct SeedNetClass {
+    name: String,
+    description: String,
+    clearance: f64,
+    trace_width: f64,
+    via_diameter: f64,
+    via_drill: f64,
+    members: Vec<String>,
+}
+
+fn seed_net_classes(
+    rules: &SeedRules,
+    nets: impl IntoIterator<Item = String>,
+) -> Vec<SeedNetClass> {
+    let mut by_width: std::collections::BTreeMap<String, (f64, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for net in nets {
+        let width = rules
+            .net_widths
+            .get(&net)
+            .copied()
+            .unwrap_or(rules.min_trace_width);
+        let key = if (width - rules.min_trace_width).abs() < 1e-9 {
+            "Default".to_owned()
+        } else {
+            format!("Width_{}", kicad_sexpr::fmt_num(width).replace('.', "_"))
+        };
+        by_width
+            .entry(key)
+            .or_insert_with(|| (width, Vec::new()))
+            .1
+            .push(net);
+    }
+
+    let mut net_classes = Vec::new();
+    for (name, (trace_width, mut members)) in by_width {
+        members.sort();
+        net_classes.push(SeedNetClass {
+            description: if name == "Default" {
+                "default board routing rules".to_owned()
+            } else {
+                format!("{}mm trace-width nets", kicad_sexpr::fmt_num(trace_width))
+            },
+            name,
+            clearance: rules.clearance,
+            trace_width,
+            via_diameter: rules.via_diameter,
+            via_drill: rules.via_drill,
+            members,
+        });
+    }
+    net_classes
+}
+
+fn emit_seed_board(
+    parts: &[SeedFootprint],
+    bounds: &Rect,
+    rules: &SeedRules,
+    outline: Option<&[Point2]>,
+) -> io::Result<String> {
+    let net_codes = seed_net_codes(parts);
+    let net_classes = seed_net_classes(rules, net_codes.keys().cloned());
+    let mut out = String::with_capacity(4096 + parts.len() * 1024);
+    out.push_str("(kicad_pcb\n");
+    out.push_str("\t(version 20241229)\n");
+    out.push_str("\t(generator \"gordian\")\n");
+    out.push_str("\t(generator_version \"0.1\")\n");
+    out.push_str("\t(general\n\t\t(thickness 1.6)\n\t\t(legacy_teardrops no)\n\t)\n");
+    out.push_str("\t(paper \"A4\")\n");
+    push_seed_layers(&mut out, rules.layer_count);
+    out.push_str(
+        "\t(setup\n\t\t(pad_to_mask_clearance 0)\n\
+         \t\t(allow_soldermask_bridges_in_footprints no)\n\
+         \t\t(aux_axis_origin 0 0)\n\t\t(grid_origin 0 0)\n\t)\n",
+    );
+    push_seed_nets(&mut out, &net_codes);
+    push_seed_net_classes(&mut out, &net_classes, &net_codes);
+    push_seed_edge_cuts(&mut out, bounds, outline);
+    for part in parts {
+        out.push_str(&emit_seed_footprint(part, &net_codes)?);
+    }
+    out.push_str(")\n");
+    Ok(out)
+}
+
+fn seed_net_codes(parts: &[SeedFootprint]) -> BTreeMap<String, i32> {
+    let mut names = std::collections::BTreeSet::new();
+    for part in parts {
+        for net in part.pad_nets.values() {
+            if !net.is_empty() {
+                names.insert(net.clone());
+            }
+        }
+    }
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(idx, net)| (net, idx as i32 + 1))
+        .collect()
+}
+
+fn push_seed_layers(out: &mut String, layer_count: u32) {
+    out.push_str("\t(layers\n");
+    out.push_str("\t\t(0 \"F.Cu\" signal)\n");
+    if layer_count >= 4 {
+        for i in 1..=(layer_count - 2) {
+            let _ = writeln!(out, "\t\t({i} \"In{i}.Cu\" signal)");
+        }
+        let _ = writeln!(out, "\t\t({} \"B.Cu\" signal)", layer_count - 1);
+    } else {
+        out.push_str("\t\t(2 \"B.Cu\" signal)\n");
+    }
+    out.push_str("\t\t(36 \"B.SilkS\" user \"B.Silkscreen\")\n");
+    out.push_str("\t\t(37 \"F.SilkS\" user \"F.Silkscreen\")\n");
+    out.push_str("\t\t(38 \"B.Mask\" user)\n");
+    out.push_str("\t\t(39 \"F.Mask\" user)\n");
+    out.push_str("\t\t(44 \"Edge.Cuts\" user)\n");
+    out.push_str("\t)\n");
+}
+
+fn push_seed_nets(out: &mut String, net_codes: &BTreeMap<String, i32>) {
+    out.push_str("\t(net 0 \"\")\n");
+    let mut by_code: Vec<_> = net_codes.iter().map(|(name, code)| (code, name)).collect();
+    by_code.sort();
+    for (code, name) in by_code {
+        let _ = writeln!(out, "\t(net {code} \"{name}\")");
+    }
+}
+
+fn push_seed_net_classes(
+    out: &mut String,
+    classes: &[SeedNetClass],
+    net_codes: &BTreeMap<String, i32>,
+) {
+    for class in classes {
+        let members: Vec<_> = class
+            .members
+            .iter()
+            .filter(|net| net_codes.contains_key(*net))
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let _ = writeln!(
+            out,
+            "\t(net_class \"{}\" \"{}\"",
+            class.name, class.description
+        );
+        let _ = writeln!(
+            out,
+            "\t\t(clearance {})",
+            kicad_sexpr::fmt_num(class.clearance)
+        );
+        let _ = writeln!(
+            out,
+            "\t\t(trace_width {})",
+            kicad_sexpr::fmt_num(class.trace_width)
+        );
+        let _ = writeln!(
+            out,
+            "\t\t(via_dia {})",
+            kicad_sexpr::fmt_num(class.via_diameter)
+        );
+        let _ = writeln!(
+            out,
+            "\t\t(via_drill {})",
+            kicad_sexpr::fmt_num(class.via_drill)
+        );
+        for member in members {
+            let _ = writeln!(out, "\t\t(add_net \"{member}\")");
+        }
+        out.push_str("\t)\n");
+    }
+}
+
+fn push_seed_edge_cuts(out: &mut String, bounds: &Rect, outline: Option<&[Point2]>) {
+    if let Some(points) = outline
+        && points.len() >= 3
+    {
+        for idx in 0..points.len() {
+            let a = points[idx];
+            let b = points[(idx + 1) % points.len()];
+            let (x0, y0) = (kicad_sexpr::fmt_num(a.x), kicad_sexpr::fmt_num(a.y));
+            let (x1, y1) = (kicad_sexpr::fmt_num(b.x), kicad_sexpr::fmt_num(b.y));
+            let uuid = seed_uuid(&format!("edge:{x0}:{y0}:{x1}:{y1}"));
+            let _ = write!(
+                out,
+                "\t(gr_line\n\t\t(start {x0} {y0})\n\t\t(end {x1} {y1})\n\
+                 \t\t(stroke\n\t\t\t(width 0.1)\n\t\t\t(type default)\n\t\t)\n\
+                 \t\t(layer \"Edge.Cuts\")\n\t\t(uuid \"{uuid}\")\n\t)\n"
+            );
+        }
+        return;
+    }
+    let (x0, y0) = (
+        kicad_sexpr::fmt_num(bounds.min_x),
+        kicad_sexpr::fmt_num(bounds.min_y),
+    );
+    let (x1, y1) = (
+        kicad_sexpr::fmt_num(bounds.max_x),
+        kicad_sexpr::fmt_num(bounds.max_y),
+    );
+    let uuid = seed_uuid(&format!("edge:{x0}:{y0}:{x1}:{y1}"));
+    let _ = write!(
+        out,
+        "\t(gr_rect\n\t\t(start {x0} {y0})\n\t\t(end {x1} {y1})\n\
+         \t\t(stroke\n\t\t\t(width 0.1)\n\t\t\t(type default)\n\t\t)\n\
+         \t\t(fill no)\n\t\t(layer \"Edge.Cuts\")\n\t\t(uuid \"{uuid}\")\n\t)\n"
+    );
+}
+
+fn emit_seed_footprint(
+    part: &SeedFootprint,
+    net_codes: &BTreeMap<String, i32>,
+) -> io::Result<String> {
+    let body = footprint_body(&part.source).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "part {}: source has no (footprint ...) block",
+                part.reference
+            ),
+        )
+    })?;
+    let inner = footprint_inner(body).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("part {}: malformed footprint source", part.reference),
+        )
+    })?;
+    let norm = part.rotation.rem_euclid(360.0);
+    let rot = geom::snap_quadrant(norm) as i32;
+    if (rot as f64 - norm).abs() > geom::EPS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "part {}: non-axis-aligned seed rotation {norm}",
+                part.reference
+            ),
+        ));
+    }
+
+    let mut out = String::with_capacity(body.len() + 256);
+    let _ = writeln!(out, "\t(footprint \"{}\"", part.lib_id);
+    out.push_str("\t\t(layer \"F.Cu\")\n");
+    let _ = writeln!(
+        out,
+        "\t\t(uuid \"{}\")",
+        seed_uuid(&format!("fp:{}:{}", part.reference, part.lib_id))
+    );
+    if rot == 0 {
+        let _ = writeln!(
+            out,
+            "\t\t(at {} {})",
+            kicad_sexpr::fmt_num(part.at.x),
+            kicad_sexpr::fmt_num(part.at.y)
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "\t\t(at {} {} {})",
+            kicad_sexpr::fmt_num(part.at.x),
+            kicad_sexpr::fmt_num(part.at.y),
+            rot
+        );
+    }
+
+    for node in top_level_nodes(inner) {
+        if let Some(transformed) = transform_seed_node(node, part, net_codes, rot)? {
+            push_reindented(&mut out, &transformed);
+        }
+    }
+    out.push_str("\t)\n");
+    Ok(out)
+}
+
+fn transform_seed_node(
+    node: &str,
+    part: &SeedFootprint,
+    net_codes: &BTreeMap<String, i32>,
+    fp_rot: i32,
+) -> io::Result<Option<String>> {
+    match node_head(node) {
+        "at" | "uuid" | "layer" => Ok(None),
+        "fp_text" if on_silk(node) => Ok(None),
+        "version"
+        | "generator"
+        | "generator_version"
+        | "embedded_fonts"
+        | "model"
+        | "tags"
+        | "descr"
+        | "duplicate_pad_numbers_are_jumpers" => Ok(None),
+        "property" => Ok(Some(transform_seed_property(node, &part.reference))),
+        "pad" => Ok(Some(transform_seed_pad(node, part, net_codes, fp_rot)?)),
+        _ => Ok(Some(node.to_owned())),
+    }
+}
+
+const REF_TEXT_SIZE_MM: f64 = 0.8;
+
+fn transform_seed_property(node: &str, reference: &str) -> String {
+    if let Some(rest) = node.strip_prefix("(property \"Reference\" \"")
+        && let Some(close) = rest.find('"')
+    {
+        let body = cap_font_size(&rest[close + 1..], REF_TEXT_SIZE_MM);
+        return format!("(property \"Reference\" \"{reference}\"{body}");
+    }
+    if node.starts_with("(property \"Value\"")
+        && !node.contains("(hide yes)")
+        && let Some(hidden) = inject_before_close(node, "(hide yes)")
+    {
+        return hidden;
+    }
+    node.to_owned()
+}
+
+fn transform_seed_pad(
+    node: &str,
+    part: &SeedFootprint,
+    net_codes: &BTreeMap<String, i32>,
+    fp_rot: i32,
+) -> io::Result<String> {
+    let number = pad_number(node);
+    let rotated = if fp_rot != 0 {
+        bump_pad_rotation(node, fp_rot)
+    } else {
+        node.to_owned()
+    };
+    let Some(number) = number else {
+        return Ok(rotated);
+    };
+    let Some(net) = part.pad_nets.get(&number).filter(|n| !n.is_empty()) else {
+        return Ok(rotated);
+    };
+    let code = net_codes.get(net).copied().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "part {}: pad {number} net {net:?} missing from net table",
+                part.reference
+            ),
+        )
+    })?;
+    inject_before_close(&rotated, &format!("(net {code} \"{net}\")")).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("part {}: pad {number} has no closing paren", part.reference),
+        )
+    })
+}
+
+fn footprint_body(source: &str) -> Option<&str> {
+    let start = source.find("(footprint ")?;
+    let end = matching_close(source, start)?;
+    Some(&source[start..=end])
+}
+
+fn footprint_inner(body: &str) -> Option<&str> {
+    let after_kw = body.strip_prefix("(footprint ")?;
+    let rest = after_kw.strip_prefix('"')?;
+    let name_close = rest.find('"')?;
+    let inner_start = "(footprint ".len() + 1 + name_close + 1;
+    Some(&body[inner_start..body.len() - 1])
+}
+
+fn top_level_nodes(inner: &str) -> Vec<&str> {
+    let bytes = inner.as_bytes();
+    let mut nodes = Vec::new();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == b'('
+            && let Some(end) = matching_close(inner, idx)
+        {
+            nodes.push(&inner[idx..=end]);
+            idx = end + 1;
+            continue;
+        }
+        idx += 1;
+    }
+    nodes
+}
+
+fn matching_close(s: &str, open: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut idx = open;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'"' => in_string = !in_string,
+            b'(' if !in_string => depth += 1,
+            b')' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn node_head(node: &str) -> &str {
+    let rest = node.strip_prefix('(').unwrap_or(node);
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+fn on_silk(node: &str) -> bool {
+    node.contains("(layer \"F.SilkS\")") || node.contains("(layer \"B.SilkS\")")
+}
+
+fn pad_number(node: &str) -> Option<String> {
+    let rest = node.strip_prefix("(pad ")?;
+    let rest = rest.strip_prefix('"')?;
+    let close = rest.find('"')?;
+    Some(rest[..close].to_owned())
+}
+
+fn inject_before_close(node: &str, insertion: &str) -> Option<String> {
+    let close = node.rfind(')')?;
+    let indent = child_indent(node);
+    let mut out = String::with_capacity(node.len() + insertion.len() + indent.len() + 2);
+    out.push_str(&node[..close]);
+    out.push_str(insertion);
+    out.push('\n');
+    out.push_str(&indent);
+    out.push_str(&node[close..]);
+    Some(out)
+}
+
+fn child_indent(node: &str) -> String {
+    let Some(nl) = node.find('\n') else {
+        return String::new();
+    };
+    node[nl + 1..]
+        .chars()
+        .take_while(|c| *c == '\t' || *c == ' ')
+        .collect()
+}
+
+fn push_reindented(out: &mut String, node: &str) {
+    for (i, line) in node.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if !line.is_empty() {
+            out.push('\t');
+        }
+        out.push_str(line);
+    }
+    out.push('\n');
+}
+
+fn cap_font_size(body: &str, max: f64) -> String {
+    let Some(start) = body.find("(size ") else {
+        return body.to_owned();
+    };
+    let open = start + "(size ".len();
+    let Some(rel_close) = body[open..].find(')') else {
+        return body.to_owned();
+    };
+    let inner = &body[open..open + rel_close];
+    let nums: Vec<f64> = inner
+        .split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect();
+    if nums.len() != 2 {
+        return body.to_owned();
+    }
+    let (w, h) = (nums[0].min(max), nums[1].min(max));
+    format!(
+        "{}(size {} {}){}",
+        &body[..start],
+        kicad_sexpr::fmt_num(w),
+        kicad_sexpr::fmt_num(h),
+        &body[open + rel_close + 1..]
+    )
+}
+
+fn bump_pad_rotation(node: &str, fp_rot: i32) -> String {
+    const AT: &str = "(at ";
+    let Some(at_pos) = node.find(AT) else {
+        return node.to_owned();
+    };
+    let after = &node[at_pos + AT.len()..];
+    let Some(line_end) = after.find(')') else {
+        return node.to_owned();
+    };
+    let inside = &after[..line_end];
+    let nums: Vec<&str> = inside.split_whitespace().collect();
+    let (x, y) = match (nums.first(), nums.get(1)) {
+        (Some(x), Some(y)) => (*x, *y),
+        _ => return node.to_owned(),
+    };
+    let pad_rot: f64 = nums.get(2).and_then(|r| r.parse().ok()).unwrap_or(0.0);
+    let new_rot = (pad_rot + fp_rot as f64).rem_euclid(360.0);
+    let replacement = if new_rot == 0.0 {
+        format!("(at {x} {y}")
+    } else {
+        format!("(at {x} {y} {})", kicad_sexpr::fmt_num(new_rot))
+    };
+    let mut out = String::with_capacity(node.len() + 8);
+    out.push_str(&node[..at_pos]);
+    out.push_str(&replacement);
+    out.push_str(&node[at_pos + AT.len() + line_end + 1..]);
+    out
+}
+
+fn seed_uuid(key: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h1 = std::collections::hash_map::DefaultHasher::new();
+    "gordian-seed-a".hash(&mut h1);
+    key.hash(&mut h1);
+    let mut h2 = std::collections::hash_map::DefaultHasher::new();
+    "gordian-seed-b".hash(&mut h2);
+    key.hash(&mut h2);
+    let a = h1.finish();
+    let b = h2.finish();
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        (a >> 32) as u32,
+        (a >> 16) as u16,
+        (a as u16 & 0x0fff) | 0x5000,
+        ((b >> 48) as u16 & 0x3fff) | 0x8000,
+        b & 0x0000_ffff_ffff_ffff
+    )
 }
 
 // ── create_board ─────────────────────────────────────────────────────────────
@@ -144,6 +812,10 @@ fn parse_bounds(v: Option<&Value>) -> std::result::Result<Rect, String> {
 
 /// Parse optional `rules` from snake_case model input; an absent/null `rules`
 /// yields the engine defaults ([`DraftRules::default`]).
+fn parse_seed_rules(v: Option<&Value>) -> std::result::Result<SeedRules, String> {
+    parse_rules(v).map(|rules| SeedRules::from(&rules))
+}
+
 fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
     let d = DraftRules::default();
     let obj = match v {
@@ -160,7 +832,9 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
         .map(|n| n as u32)
         .unwrap_or(d.layer_count);
     if !matches!(layer_count, 2 | 4 | 6 | 8) {
-        return Err(format!("rules.layers must be 2, 4, 6, or 8, got {layer_count}"));
+        return Err(format!(
+            "rules.layers must be 2, 4, 6, or 8, got {layer_count}"
+        ));
     }
     let via_diameter = num("via_diameter", d.via_diameter);
     let via_drill = num("via_drill", d.via_drill);
@@ -210,7 +884,9 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
             .as_array()
             .ok_or_else(|| "rules.pours must be an array of {net, layer}".to_string())?;
         for p in arr {
-            let net = p.get("net").and_then(Value::as_str)
+            let net = p
+                .get("net")
+                .and_then(Value::as_str)
                 .ok_or_else(|| "rules.pours[].net must be a string".to_string())?;
             let layer = p.get("layer").and_then(Value::as_str).unwrap_or("bottom");
             // A pour floods a SIGNAL layer (top/bottom, or an inner signal layer on a
@@ -233,7 +909,10 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<DraftRules, String> {
                 }
                 Some(_) => {}
             }
-            pours.push(PourSpec { net: net.to_string(), layer: layer.to_string() });
+            pours.push(PourSpec {
+                net: net.to_string(),
+                layer: layer.to_string(),
+            });
         }
     }
     Ok(DraftRules {
@@ -270,7 +949,9 @@ fn parse_draft_part(
     let footprint = pj
         .get("footprint")
         .and_then(Value::as_str)
-        .ok_or_else(|| json!({ "error": format!("part {reference}: missing string `footprint` lib_id") }))?
+        .ok_or_else(
+            || json!({ "error": format!("part {reference}: missing string `footprint` lib_id") }),
+        )?
         .to_string();
     let Some(resolved_fp) = index.footprint(&footprint) else {
         return Err(json!({
@@ -287,55 +968,47 @@ fn parse_draft_part(
             json!({ "error": format!("part {reference}: pad_nets must map pad number → net name: {e}") })
         })?,
     };
-    // Reject a footprint whose own pads (different-net OR un-netted/NC) sit closer than the
-    // board clearance — an inherent clearance DRC fault no routing can fix.
-    if let Some((a, b, gap)) =
-        pcb_synth::placefp::pad_clearance_violations(&resolved_fp, &pad_nets, clearance).first()
-    {
-        return Err(json!({
-            "error": format!(
-                "part {reference}: footprint `{footprint}` pads {a} and {b} are only {gap:.3}mm \
-                 apart (< the {clearance:.3}mm rules.clearance) — they are on different nets, so \
-                 this is a built-in clearance violation. Lower rules.clearance (e.g. to {:.2}) or \
-                 use a coarser-pitch footprint.",
-                (gap - 0.01_f64).max(0.05),
-            ),
-        }));
-    }
+    let _ = (resolved_fp, clearance);
     // Optional lock: pin a part at a position/rotation. Accepts {x,y,rotation?} or {at:{x,y},…}.
     let locked = match pj.get("locked") {
         None | Some(Value::Null) => None,
         Some(l) => {
             let at = l.get("at").unwrap_or(l);
-            match (at.get("x").and_then(Value::as_f64), at.get("y").and_then(Value::as_f64)) {
+            match (
+                at.get("x").and_then(Value::as_f64),
+                at.get("y").and_then(Value::as_f64),
+            ) {
                 (Some(x), Some(y)) => {
                     let raw = l.get("rotation").and_then(Value::as_f64).unwrap_or(0.0);
                     let rotation = axis_aligned_rotation(raw)
                         .map_err(|e| json!({ "error": format!("part {reference}: {e}") }))?;
-                    Some(LockedAt { at: Point2 { x, y }, rotation })
+                    Some(LockedAt {
+                        at: Point2 { x, y },
+                        rotation,
+                    })
                 }
                 _ => {
-                    return Err(json!({ "error": format!("part {reference}: `locked` needs numeric x and y") }));
+                    return Err(
+                        json!({ "error": format!("part {reference}: `locked` needs numeric x and y") }),
+                    );
                 }
             }
         }
     };
-    Ok(DraftPart { reference, footprint, pad_nets, locked })
+    Ok(DraftPart {
+        reference,
+        footprint,
+        pad_nets,
+        locked,
+    })
 }
 
-/// Build (and persist) the working [`BoardDraft`] from a `{bounds, parts, rules?, outline?,
+/// Build the working KiCAD board from a `{bounds, parts, rules?, outline?,
 /// overwrite?}` spec. **Internal builder — NOT an agent tool.** The agent reaches the board
 /// only through [`derive_board`], which assembles this spec from the committed schematic + the
 /// footprint map. Also called directly by the deterministic test harnesses (board_harness /
 /// pcb_gate / board_artifact) that build boards from standalone JSON, no schematic.
 pub fn build_board_draft(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
-    let overwrite = input.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
-    if BoardDraft::load(ctx).is_some() && !overwrite {
-        return Ok(json!({
-            "error": "a board draft already exists — pass overwrite=true to replace it",
-        }));
-    }
-
     // Optional custom OUTLINE (polygon points, mm) — circle/square/star/any shape. When
     // given, `bounds` is its bounding box (placement/routing extent) and the polygon
     // becomes the Edge.Cuts at export (the render then shows the true shape).
@@ -344,7 +1017,9 @@ pub fn build_board_draft(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         Some(o) => {
             let arr = match o.as_array() {
                 Some(a) if a.len() >= 3 => a,
-                _ => return Ok(json!({ "error": "outline must be an array of >= 3 [x,y] points" })),
+                _ => {
+                    return Ok(json!({ "error": "outline must be an array of >= 3 [x,y] points" }));
+                }
             };
             let mut pts = Vec::with_capacity(arr.len());
             for p in arr {
@@ -434,7 +1109,9 @@ pub fn build_board_draft(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         last_place_illegal: false,
         outline,
     };
-    draft.save(ctx)?;
+    if let Err(msg) = write_initial_board(&draft, ctx) {
+        return Ok(json!({ "error": msg }));
+    }
 
     Ok(json!({
         "ok": true,
@@ -445,23 +1122,14 @@ pub fn build_board_draft(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     }))
 }
 
-/// Pin count per net across the draft, derived from the resolved footprints via
-/// `placefp::part_from_footprint` (the SAME geometry place/route consumes). A
-/// pad whose number is absent from `pad_nets` contributes no pin.
+/// Pin count per net across the draft. A pad whose number is absent from
+/// `pad_nets` contributes no pin.
 pub(super) fn net_pin_counts(parts: &[DraftPart], ctx: &PcbToolCtx) -> BTreeMap<String, usize> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    let Ok(index) = ctx.footprint_index() else {
-        return counts;
-    };
+    let _ = ctx;
     for p in parts {
-        let Some(fp) = index.footprint(&p.footprint) else {
-            continue;
-        };
-        let part = part_from_footprint(&fp, &p.reference, &p.pad_nets);
-        for pad in &part.pads {
-            if let Some(net) = &pad.net {
-                *counts.entry(net.clone()).or_default() += 1;
-            }
+        for net in p.pad_nets.values().filter(|net| !net.is_empty()) {
+            *counts.entry(net.clone()).or_default() += 1;
         }
     }
     counts
@@ -490,7 +1158,10 @@ fn axis_aligned_rotation(rot: f64) -> std::result::Result<f64, String> {
 /// Parse one group hint from snake_case model input, validating its members
 /// against the draft's known references. Returns the engine [`GroupHint`] on
 /// success or a model-readable error string.
-pub(super) fn parse_group_hint(v: &Value, known_refs: &[&str]) -> std::result::Result<GroupHint, String> {
+pub(super) fn parse_group_hint(
+    v: &Value,
+    known_refs: &[&str],
+) -> std::result::Result<GroupHint, String> {
     let name = v
         .get("name")
         .and_then(Value::as_str)
@@ -525,14 +1196,16 @@ pub(super) fn parse_group_hint(v: &Value, known_refs: &[&str]) -> std::result::R
     };
     let grid = v.get("grid").and_then(Value::as_bool).unwrap_or(false);
     if grid && region.is_none() {
-        return Err(format!("group `{name}`: `grid` requires a `region` to tile into"));
+        return Err(format!(
+            "group `{name}`: `grid` requires a `region` to tile into"
+        ));
     }
     let surround = match v.get("surround") {
         None | Some(Value::Null) => None,
         Some(s) => {
-            let r = s
-                .as_str()
-                .ok_or_else(|| format!("group `{name}`: `surround` must be a part-reference string"))?;
+            let r = s.as_str().ok_or_else(|| {
+                format!("group `{name}`: `surround` must be a part-reference string")
+            })?;
             if !known_refs.contains(&r) {
                 return Err(format!(
                     "group `{name}`: surround target `{r}` is not a part on this board"
@@ -571,7 +1244,9 @@ fn parse_edge(v: &Value) -> std::result::Result<Edge, String> {
         "s" => Ok(Edge::S),
         "e" => Ok(Edge::E),
         "w" => Ok(Edge::W),
-        other => Err(format!("edge must be \"n\"/\"s\"/\"e\"/\"w\", got {other:?}")),
+        other => Err(format!(
+            "edge must be \"n\"/\"s\"/\"e\"/\"w\", got {other:?}"
+        )),
     }
 }
 
@@ -601,8 +1276,14 @@ pub(super) fn parse_keepout(
     {
         return Err(format!(
             "{ctxstr}: rect [{},{}]x[{},{}] is outside the board bounds [{},{}]x[{},{}]",
-            rect.min_x, rect.max_x, rect.min_y, rect.max_y,
-            bounds.min_x, bounds.max_x, bounds.min_y, bounds.max_y
+            rect.min_x,
+            rect.max_x,
+            rect.min_y,
+            rect.max_y,
+            bounds.min_x,
+            bounds.max_x,
+            bounds.min_y,
+            bounds.max_y
         ));
     }
     let layers_json = v
@@ -610,7 +1291,9 @@ pub(super) fn parse_keepout(
         .and_then(Value::as_array)
         .ok_or_else(|| format!("{ctxstr}: missing `layers` array (e.g. [\"top\",\"bottom\"])"))?;
     if layers_json.is_empty() {
-        return Err(format!("{ctxstr}: `layers` must name at least one copper layer"));
+        return Err(format!(
+            "{ctxstr}: `layers` must name at least one copper layer"
+        ));
     }
     let mut layers = Vec::with_capacity(layers_json.len());
     for l in layers_json {
@@ -622,10 +1305,7 @@ pub(super) fn parse_keepout(
         // "inner1".."inner{layer_count-2}" on a multilayer board.
         if layer.index(layer_count).is_none() {
             let inners = if layer_count >= 4 {
-                format!(
-                    ", \"inner1\"..\"inner{}\"",
-                    layer_count - 2
-                )
+                format!(", \"inner1\"..\"inner{}\"", layer_count - 2)
             } else {
                 String::new()
             };

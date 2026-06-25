@@ -63,39 +63,6 @@ impl Workspace {
         recorded != current_sch_text.map(fnv1a64)
     }
 
-    /// Path of the persisted board draft (`board.json`) inside `.gordian/`.
-    pub fn board_path(&self) -> PathBuf {
-        self.root.join("board.json")
-    }
-
-    /// The raw board-draft JSON text, if a board draft exists. Callers
-    /// deserialize into their own `BoardDraft` (mirrors [`Self::read_draft`]).
-    pub fn read_board(&self) -> Option<String> {
-        std::fs::read_to_string(self.board_path()).ok()
-    }
-
-    /// Persist the board-draft JSON text (mirrors [`Self::write_draft`]).
-    pub fn write_board(&self, json: &str) -> io::Result<()> {
-        std::fs::write(self.board_path(), json)
-    }
-
-    /// Path of the persisted route solution (`route.json`) inside `.gordian/`.
-    /// Written by `route_board` (Task 2); read here so `get_board` can report
-    /// the routed flag.
-    pub fn route_path(&self) -> PathBuf {
-        self.root.join("route.json")
-    }
-
-    /// The raw route-solution JSON text, if a routed solution exists.
-    pub fn read_route(&self) -> Option<String> {
-        std::fs::read_to_string(self.route_path()).ok()
-    }
-
-    /// Persist the route-solution JSON text (used by `route_board` in Task 2).
-    pub fn write_route(&self, json: &str) -> io::Result<()> {
-        std::fs::write(self.route_path(), json)
-    }
-
     /// The next free `renders/render-NNN.png` path.
     pub fn next_render_path(&self) -> io::Result<PathBuf> {
         let dir = self.root.join("renders");
@@ -143,7 +110,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::for_project(dir.path()).unwrap();
 
-        ws.write_draft("version: 1\n", Some("sch contents v1")).unwrap();
+        ws.write_draft("version: 1\n", Some("sch contents v1"))
+            .unwrap();
         assert_eq!(ws.read_draft().as_deref(), Some("version: 1\n"));
         // Same sch text -> not stale; different -> stale.
         assert!(!ws.draft_is_stale(Some("sch contents v1")));

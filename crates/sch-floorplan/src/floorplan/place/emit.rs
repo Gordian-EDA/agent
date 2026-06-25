@@ -7,10 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use circuit_lang::model::{Component, Design, PinTarget};
-use circuit_lang::{find_pin, PinType};
+use circuit_lang::{PinType, find_pin};
 use kicad_cli::env::KicadEnv;
-use kicad_symbol::geometry::SymbolGeometry;
 use kicad_symbol::SymbolTable;
+use kicad_symbol::geometry::SymbolGeometry;
 
 use crate::write::SchematicWriter;
 use sch_place::geom::Dir;
@@ -86,10 +86,12 @@ pub const ROW_GAP: f64 = 5.08; // 4 grid — vertical stack; tighter lets the ro
 // unconventional), so keep the conventional spacing here.
 pub(crate) const MARGIN: f64 = 12.7;
 
-
 /// Resolve a component's pins to (number, name, net) using geometry + the
 /// authored pin map (number first, then name — matching the emitter).
-pub(crate) fn resolve_pins(comp: &Component, geom: &SymbolGeometry) -> Vec<(String, String, Option<String>)> {
+pub(crate) fn resolve_pins(
+    comp: &Component,
+    geom: &SymbolGeometry,
+) -> Vec<(String, String, Option<String>)> {
     geom.pins
         .iter()
         .map(|pg| {
@@ -209,15 +211,24 @@ pub(crate) fn prepare_writer(
     // IC's bank column. Overlap-safe and no-op when there is no banked IC, so single-IC boards are
     // untouched; a follow-up decongest tidies anything the relocated block now abuts.
     {
-        let anchors: Vec<usize> =
-            (0..items.len()).filter(|&i| items[i].geom.pins.len() >= 3).collect();
+        let anchors: Vec<usize> = (0..items.len())
+            .filter(|&i| items[i].geom.pins.len() >= 3)
+            .collect();
         let banked: Vec<usize> = multi_unit_siblings(&items, &anchors).into_keys().collect();
         if gather_banked_decoupling(&mut items, ir, &banked) {
             decongest(&mut items);
         }
     }
 
-    let mut w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
+    let mut w = build_writer(
+        env,
+        design.name.as_deref(),
+        &items,
+        &inc,
+        ir,
+        &needs_flag,
+        true,
+    )?;
     // PORT-LABEL KEEPOUT (multi-sheet sub-sheets only): an indicator satellite (LED-chain resistor)
     // often lands in the swath where a header's OTHER pins' port labels extend, overprinting them
     // (usb io / FPGA io = 5). Push such satellites toward their own connections, off the foreign
@@ -228,7 +239,7 @@ pub(crate) fn prepare_writer(
         let keepouts = port_label_keepouts(env, &mut w, &items, &inc, ir)?;
         let mut changed = false;
         if !keepouts.is_empty() {
-            let before: Vec<[f64; 2]> = items.iter().map(|it| it.at).collect();
+            let before: Vec<::geom::Point2> = items.iter().map(|it| it.at).collect();
             decongest_off_labels(&mut items, &inc, &keepouts);
             changed = items.iter().zip(&before).any(|(it, b)| it.at != *b);
         }
@@ -278,7 +289,15 @@ pub(crate) fn prepare_writer(
         // tidy adjacent vertical block off the bus-pin edge so each bus net is named ONCE, compactly.
         changed |= gather_i2c_pullups(&mut items, ir);
         if changed {
-            w = build_writer(env, design.name.as_deref(), &items, &inc, ir, &needs_flag, true)?;
+            w = build_writer(
+                env,
+                design.name.as_deref(),
+                &items,
+                &inc,
+                ir,
+                &needs_flag,
+                true,
+            )?;
         }
         // The low-side FETs that `align_repeated_columns` flagged want their fields
         // ABOVE the body (clear of the rotated SHUNT port label below their source);
@@ -359,7 +378,9 @@ pub(crate) fn pack_columns(sizes: &[[f64; 2]], margin: f64, target_aspect: f64) 
         let mut yof = vec![0.0_f64; n];
         for &i in &order {
             // Shortest column (lowest running y), ties to the leftmost.
-            let c = (0..ncol).min_by(|&a, &b| col_y[a].total_cmp(&col_y[b])).unwrap();
+            let c = (0..ncol)
+                .min_by(|&a, &b| col_y[a].total_cmp(&col_y[b]))
+                .unwrap();
             yof[i] = col_y[c];
             col_of[i] = c;
             col_y[c] += sizes[i][1] + margin;
@@ -408,8 +429,11 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
     // no flag for it (a regulator drives it) ⇒ drop ALL its flags; UNDRIVEN raw rail
     // ⇒ keep exactly one flag globally.
     let mut groups = groups;
-    let flag_nets: std::collections::HashSet<String> =
-        groups.iter().flat_map(|(_, w)| w.pwr_flag_nets()).map(|(n, _)| n).collect();
+    let flag_nets: std::collections::HashSet<String> = groups
+        .iter()
+        .flat_map(|(_, w)| w.pwr_flag_nets())
+        .map(|(n, _)| n)
+        .collect();
     // A flagged net is driven iff some group references it WITHOUT flagging it.
     let driven: std::collections::HashSet<String> = flag_nets
         .into_iter()
@@ -439,7 +463,10 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
     // is closest to TARGET_ASPECT — first-fit-decreasing by height, each block dropped into the
     // currently-shortest column — and keep the column assignment that minimises |aspect - 1.4|.
     const TARGET_ASPECT: f64 = 1.4; // landscape sheets read better than square or portrait
-    let sizes: Vec<[f64; 2]> = groups.iter().map(|(_, w)| w.content_size().unwrap_or([1.0, 1.0])).collect();
+    let sizes: Vec<[f64; 2]> = groups
+        .iter()
+        .map(|(_, w)| w.content_size().unwrap_or([1.0, 1.0]))
+        .collect();
     let tiles = pack_columns(&sizes, TILE_MARGIN, TARGET_ASPECT);
 
     // ── Translate each group to its tile, frame it, and fold into one writer. The
@@ -451,13 +478,22 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
     for (i, (name, mut w)) in groups.into_iter().enumerate() {
         let [tx, ty] = tiles[i];
         let [tw, th] = sizes[i];
-        let (dx, dy) = (crate::grid::snap(tx + TILE_MARGIN - M), crate::grid::snap(ty + TILE_MARGIN - M));
+        let (dx, dy) = (
+            crate::grid::snap(tx + TILE_MARGIN - M),
+            crate::grid::snap(ty + TILE_MARGIN - M),
+        );
         w.translate(dx, dy);
         // Frame: a dashed box hugging the tile's content + a bold name above it.
         let (rx0, ry0) = (tx + TILE_MARGIN - 6.0, ty + TILE_MARGIN - 6.0);
         let (rx1, ry1) = (tx + TILE_MARGIN + tw + 1.0, ty + TILE_MARGIN + th + 1.0);
         out.add_rect([rx0, ry0], [rx1, ry1], &format!("frame:{name}"));
-        out.add_text(&name, [rx0 + 1.0, ry0 - 1.5], 3.0, true, &format!("label:{name}"));
+        out.add_text(
+            &name,
+            [rx0 + 1.0, ry0 - 1.5],
+            3.0,
+            true,
+            &format!("label:{name}"),
+        );
         out.absorb(w);
     }
     // Already laid out per group + tiled here; a global reframe would only re-snap.
@@ -512,7 +548,16 @@ pub fn build_writer(
         }
     }
     let mut flag_points: BTreeMap<String, ([f64; 2], f64)> = BTreeMap::new();
-    wire(env, &mut w, items, inc, ir, needs_flag, &mut flag_points, fan_risers)?;
+    wire(
+        env,
+        &mut w,
+        items,
+        inc,
+        ir,
+        needs_flag,
+        &mut flag_points,
+        fan_risers,
+    )?;
     for net in needs_flag {
         if let Some((at, angle)) = flag_points.get(net) {
             w.add_power_flag_at(env, &format!("#FLG_{net}"), *at, *angle)?;
@@ -525,11 +570,17 @@ pub fn build_writer(
 /// rail, minus any net already driven by a power-output pin (a regulator output,
 /// say). KiCAD flags an undriven power-input pin as an error, so each such net
 /// gets exactly one flag.
-pub(crate) fn compute_needs_flag(env: &KicadEnv, items: &[Item], ir: &LayoutIr) -> BTreeSet<String> {
+pub(crate) fn compute_needs_flag(
+    env: &KicadEnv,
+    items: &[Item],
+    ir: &LayoutIr,
+) -> BTreeSet<String> {
     let provider = SymbolTable::from_env(env);
     let (mut driven, mut power_input) = (BTreeSet::new(), BTreeSet::new());
     for it in items {
-        let Some(meta) = provider.symbol(&it.part) else { continue };
+        let Some(meta) = provider.symbol(&it.part) else {
+            continue;
+        };
         for (num, _name, net) in &it.pins {
             if let (Some(net), Some(pm)) = (net, find_pin(&meta.pins, num)) {
                 match pm.etype {
@@ -579,9 +630,12 @@ pub(crate) fn gather(env: &KicadEnv, design: &Design) -> io::Result<Vec<Item>> {
             // reference's "MCP1703A-3302" etc. Passives keep their authored value.
             let value = match comp.value.clone() {
                 Some(v) if !v.is_empty() => v,
-                _ if geom.pins.len() >= 3 => {
-                    comp.part.rsplit(':').next().unwrap_or(&comp.part).to_string()
-                }
+                _ if geom.pins.len() >= 3 => comp
+                    .part
+                    .rsplit(':')
+                    .next()
+                    .unwrap_or(&comp.part)
+                    .to_string(),
                 _ => String::new(),
             };
             // MULTI-UNIT SPLIT. A part's pins are spread across symbol units
@@ -595,7 +649,7 @@ pub(crate) fn gather(env: &KicadEnv, design: &Design) -> io::Result<Vec<Item>> {
             let mut units: Vec<u8> = pin_unit
                 .iter()
                 .zip(pins.iter())
-                .filter(|pair| pair.1 .2.is_some())
+                .filter(|pair| pair.1.2.is_some())
                 .map(|pair| *pair.0)
                 .collect();
             units.sort_unstable();
@@ -619,7 +673,7 @@ pub(crate) fn gather(env: &KicadEnv, design: &Design) -> io::Result<Vec<Item>> {
                     footprint: if k == 0 { comp.footprint.clone() } else { None },
                     geom: geom.clone(),
                     pins: unit_pins,
-                    at: [0.0, 0.0],
+                    at: [0.0, 0.0].into(),
                     angle: 0.0,
                     unit: u,
                     mirror: false,
@@ -719,11 +773,19 @@ pub(crate) fn assign_cells(items: &[Item], ir: &LayoutIr) -> Vec<Cell> {
                 v
             };
             match ir.place.get(&it.refdes) {
-                Some(c) => Cell { col: c.col, row: c.row + k, orient: c.orient },
+                Some(c) => Cell {
+                    col: c.col,
+                    row: c.row + k,
+                    orient: c.orient,
+                },
                 None => {
                     let c = spare;
                     spare += 1;
-                    Cell { col: c, row: k, orient: Orient::Down }
+                    Cell {
+                        col: c,
+                        row: k,
+                        orient: Orient::Down,
+                    }
                 }
             }
         })
@@ -731,8 +793,11 @@ pub(crate) fn assign_cells(items: &[Item], ir: &LayoutIr) -> Vec<Cell> {
 }
 
 pub(crate) fn apply_cells(items: &mut [Item], cells: &[Cell]) {
-    let angles: Vec<f64> =
-        items.iter().zip(cells).map(|(it, c)| orient_angle(&it.geom, c.orient)).collect();
+    let angles: Vec<f64> = items
+        .iter()
+        .zip(cells)
+        .map(|(it, c)| orient_angle(&it.geom, c.orient))
+        .collect();
 
     // Rotation-aware footprint (a quarter-turn swaps width and height).
     let dims: Vec<(f64, f64)> = items
@@ -762,7 +827,11 @@ pub(crate) fn apply_cells(items: &mut [Item], cells: &[Cell]) {
     let row_y = track_centres(&row_h, ROW_GAP);
 
     for ((it, c), &angle) in items.iter_mut().zip(cells).zip(&angles) {
-        it.at = [crate::grid::snap(col_x[&c.col]), crate::grid::snap(row_y[&c.row])];
+        it.at = [
+            crate::grid::snap(col_x[&c.col]),
+            crate::grid::snap(row_y[&c.row]),
+        ]
+        .into();
         it.angle = angle;
     }
 }

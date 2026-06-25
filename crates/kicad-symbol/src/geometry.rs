@@ -37,6 +37,7 @@
 use std::io;
 use std::path::PathBuf;
 
+use geom::Point2;
 use kiutils_kicad::{SymPin, Symbol, SymbolLibFile};
 use kiutils_sexpr::{Atom, Node, parse_one};
 
@@ -54,8 +55,8 @@ pub struct PinGeom {
     pub number: String,
     /// Pin name (e.g. `"~"`, `"VCC"`, `"GND"`).
     pub name: String,
-    /// Local position of the pin's connection root, `[x, y]` in mm.
-    pub at: [f64; 2],
+    /// Local position of the pin's connection root, in mm (symbol Y grows upward).
+    pub at: Point2,
     /// Pin orientation in degrees (0/90/180/270).
     pub angle: f64,
     /// Pin line length in mm.
@@ -154,22 +155,22 @@ impl SymbolGeometry {
         &self.raw_definition
     }
 
-    /// Approximate body extents `[width, height]` in mm, derived from pin
+    /// Approximate body extents `(width, height)` in mm, derived from pin
     /// connection points (pins bound the drawn body closely for almost every
     /// KiCAD symbol). Floors at 5.08 mm and pads 2.54 mm per side so even a
     /// bare two-pin passive gets a sane footprint.
-    pub fn approx_size(&self) -> [f64; 2] {
+    pub fn approx_size(&self) -> Point2 {
         let (mut min_x, mut max_x, mut min_y, mut max_y) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
         for p in &self.pins {
-            min_x = min_x.min(p.at[0]);
-            max_x = max_x.max(p.at[0]);
-            min_y = min_y.min(p.at[1]);
-            max_y = max_y.max(p.at[1]);
+            min_x = min_x.min(p.at.x);
+            max_x = max_x.max(p.at.x);
+            min_y = min_y.min(p.at.y);
+            max_y = max_y.max(p.at.y);
         }
-        [
+        Point2::new(
             (max_x - min_x).max(5.08) + 5.08,
             (max_y - min_y).max(5.08) + 5.08,
-        ]
+        )
     }
 }
 
@@ -237,7 +238,7 @@ fn pin_geom(p: &SymPin, unit: u8) -> Option<PinGeom> {
     Some(PinGeom {
         number: p.number.clone()?,
         name: p.name.clone().unwrap_or_default(),
-        at: p.at?,
+        at: Point2::from(p.at?),
         angle: p.angle.unwrap_or(0.0),
         length: p.length?,
         unit,

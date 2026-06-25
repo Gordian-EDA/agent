@@ -37,10 +37,9 @@ pub(crate) const SEARCH_SEED: u64 = 0xD1B54A32D192ED03;
 /// lane; the `> FAST_PINS` test keeps uart itself routed, hence byte-identical.)
 pub const FAST_PINS: usize = 34;
 
-
-
 /// Whether placing item `si` at `at` would overlap any other item's body.
-pub fn overlaps_any(items: &[Item], si: usize, at: [f64; 2]) -> bool {
+pub fn overlaps_any(items: &[Item], si: usize, at: impl Into<::geom::Point2>) -> bool {
+    let at = at.into();
     let a = item_rect(&items[si], at);
     items
         .iter()
@@ -61,7 +60,10 @@ pub fn decongest(items: &mut [Item]) {
         let mut hit = None;
         'scan: for i in 0..items.len() {
             for j in (i + 1)..items.len() {
-                let (a, b) = (item_rect(&items[i], items[i].at), item_rect(&items[j], items[j].at));
+                let (a, b) = (
+                    item_rect(&items[i], items[i].at),
+                    item_rect(&items[j], items[j].at),
+                );
                 if rects_overlap(a, b) {
                     hit = Some((i, j, a, b));
                     break 'scan;
@@ -75,9 +77,12 @@ pub fn decongest(items: &mut [Item]) {
         let pen = if axis == 0 { pen_x } else { pen_y };
         let push = ((pen / 1.27).ceil() * 1.27).max(1.27);
         // Move j away from i along `axis` (deterministic by the +side of i).
-        let dir = if items[j].at[axis] >= items[i].at[axis] { 1.0 } else { -1.0 };
-        let (i_anchor, j_anchor) =
-            (items[i].geom.pins.len() >= 3, items[j].geom.pins.len() >= 3);
+        let dir = if items[j].at[axis] >= items[i].at[axis] {
+            1.0
+        } else {
+            -1.0
+        };
+        let (i_anchor, j_anchor) = (items[i].geom.pins.len() >= 3, items[j].geom.pins.len() >= 3);
         match (i_anchor, j_anchor) {
             (false, true) => items[i].at[axis] -= dir * push,
             (true, false) => items[j].at[axis] += dir * push,
@@ -101,8 +106,13 @@ pub(crate) fn collapse_empty_bands(items: &mut [Item]) -> bool {
     const TRIGGER: f64 = 25.4;
     let mut any = false;
     for _ in 0..8 {
-        let mut iv: Vec<(f64, f64)> =
-            items.iter().map(|it| { let r = item_rect(it, it.at); (r[1], r[3]) }).collect();
+        let mut iv: Vec<(f64, f64)> = items
+            .iter()
+            .map(|it| {
+                let r = item_rect(it, it.at);
+                (r[1], r[3])
+            })
+            .collect();
         iv.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut cover = f64::MIN;
         let mut band = None;
@@ -135,7 +145,11 @@ pub(crate) fn collapse_empty_bands(items: &mut [Item]) -> bool {
 /// satellite settle where it clears parts AND foreign labels. Net-aware: a part is never
 /// pushed off its OWN port's label (that label extends away from it anyway). Gated by the
 /// caller on `MULTISHEET_REFINE`, so single-sheet references never reach it.
-pub(crate) fn decongest_off_labels(items: &mut [Item], inc: &Incidence, keepouts: &[([f64; 4], String)]) {
+pub(crate) fn decongest_off_labels(
+    items: &mut [Item],
+    inc: &Incidence,
+    keepouts: &[([f64; 4], String)],
+) {
     let item_nets: Vec<Vec<String>> = (0..items.len())
         .map(|i| {
             inc.iter()
@@ -150,7 +164,10 @@ pub(crate) fn decongest_off_labels(items: &mut [Item], inc: &Incidence, keepouts
         let mut part_hit = None;
         'scan: for i in 0..items.len() {
             for j in (i + 1)..items.len() {
-                let (a, b) = (item_rect(&items[i], items[i].at), item_rect(&items[j], items[j].at));
+                let (a, b) = (
+                    item_rect(&items[i], items[i].at),
+                    item_rect(&items[j], items[j].at),
+                );
                 if rects_overlap(a, b) {
                     part_hit = Some((i, j, a, b));
                     break 'scan;
@@ -163,7 +180,11 @@ pub(crate) fn decongest_off_labels(items: &mut [Item], inc: &Incidence, keepouts
             let axis = if pen_x <= pen_y { 0 } else { 1 };
             let pen = if axis == 0 { pen_x } else { pen_y };
             let push = ((pen / 1.27).ceil() * 1.27).max(1.27);
-            let dir = if items[j].at[axis] >= items[i].at[axis] { 1.0 } else { -1.0 };
+            let dir = if items[j].at[axis] >= items[i].at[axis] {
+                1.0
+            } else {
+                -1.0
+            };
             let (ia, ja) = (items[i].geom.pins.len() >= 3, items[j].geom.pins.len() >= 3);
             match (ia, ja) {
                 (false, true) => items[i].at[axis] -= dir * push,
@@ -228,7 +249,10 @@ pub(crate) fn port_label_keepouts(
             continue;
         }
         if let Some(s) = effective_port_side(Some(*side), &eps) {
-            ks.push((port_label_obstacle(port_exit_point(&eps, s), s, net), net.clone()));
+            ks.push((
+                port_label_obstacle(port_exit_point(&eps, s), s, net),
+                net.clone(),
+            ));
         }
     }
     Ok(ks)
@@ -246,6 +270,6 @@ pub(crate) fn normalize(items: &mut [Item]) {
     let dx = MARGIN - min_x;
     let dy = MARGIN - min_y;
     for it in items.iter_mut() {
-        it.at = [it.at[0] + dx, it.at[1] + dy];
+        it.at = [it.at[0] + dx, it.at[1] + dy].into();
     }
 }

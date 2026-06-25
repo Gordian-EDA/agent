@@ -8,8 +8,8 @@ footprint round-trip that is dead end-to-end.
 
 ### The double state
 
-- **Layer 1 — headless engine.** `derive_board → place_board → route_board →
-  export_board` runs in pure Rust (`pcb_place`, `negotiated_mesh`, `pcb_synth`) over
+- **Layer 1 — headless engine.** `derive_board → place_board → route_board`
+  runs in pure Rust (`pcb_place`, `negotiated_mesh`) over
   a persisted draft `.gordian/board.json` (`BoardDraft`) plus `.gordian/route.json`.
   `export_board` synthesizes the `.kicad_pcb` *from scratch* out of the draft.
 - **Layer 2 — live KiCAD IPC.** `open_board` launches `xvfb-run pcbnew <file>`;

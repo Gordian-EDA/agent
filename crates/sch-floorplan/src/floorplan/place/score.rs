@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use circuit_lang::model::Design;
-use circuit_lang::{find_pin, PinType};
+use circuit_lang::{PinType, find_pin};
 use kicad_cli::env::KicadEnv;
 use kicad_symbol::SymbolTable;
 
@@ -29,7 +29,8 @@ use sch_place::ir::LayoutIr;
 /// readability lint flags as an overlap, so a layout the climb accepts is one
 /// the lint passes. (The router uses its own, tighter solid extent in
 /// `emit::route_scene`; this looser one is only for symbol-vs-symbol spacing.)
-pub fn item_rect(it: &Item, at: [f64; 2]) -> [f64; 4] {
+pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> [f64; 4] {
+    let at = at.into();
     let s = it.geom.approx_size();
     let quarter = ((it.angle / 90.0).round() as i64).rem_euclid(2) == 1;
     let (w, h) = if quarter { (s[1], s[0]) } else { (s[0], s[1]) };
@@ -62,7 +63,10 @@ pub fn body_overlap_count(items: &[Item]) -> usize {
     let mut n = 0;
     for i in 0..items.len() {
         for j in (i + 1)..items.len() {
-            if rects_overlap(item_rect(&items[i], items[i].at), item_rect(&items[j], items[j].at)) {
+            if rects_overlap(
+                item_rect(&items[i], items[i].at),
+                item_rect(&items[j], items[j].at),
+            ) {
                 n += 1;
             }
         }
@@ -245,7 +249,9 @@ pub fn count_corners(wires: &[([f64; 2], [f64; 2], Option<String>)]) -> usize {
         let Some(net) = n else { continue };
         let horiz = (a[1] - b[1]).abs() < EPS;
         for p in [a, b] {
-            at.entry((net.clone(), p[0].to_bits(), p[1].to_bits())).or_default().push(horiz);
+            at.entry((net.clone(), p[0].to_bits(), p[1].to_bits()))
+                .or_default()
+                .push(horiz);
         }
     }
     at.values().filter(|o| o.len() == 2 && o[0] != o[1]).count()
@@ -287,7 +293,10 @@ pub fn grid_order_viol(items: &[Item], ir: &LayoutIr) -> usize {
     if ir.grid.is_empty() {
         return 0;
     }
-    let pos: BTreeMap<&str, [f64; 2]> = items.iter().map(|it| (it.refdes.as_str(), it.at)).collect();
+    let pos: BTreeMap<&str, [f64; 2]> = items
+        .iter()
+        .map(|it| (it.refdes.as_str(), it.at.into()))
+        .collect();
     let g: Vec<(&String, &[i32; 4])> = ir.grid.iter().collect();
     let mut viol = 0;
     for i in 0..g.len() {
@@ -298,15 +307,11 @@ pub fn grid_order_viol(items: &[Item], ir: &LayoutIr) -> usize {
                 continue;
             };
             // Columns → left/right, only when the two boxes share no column.
-            if (ba[2] < bb[0] && pa[0] >= pb[0] - EPS)
-                || (bb[2] < ba[0] && pb[0] >= pa[0] - EPS)
-            {
+            if (ba[2] < bb[0] && pa[0] >= pb[0] - EPS) || (bb[2] < ba[0] && pb[0] >= pa[0] - EPS) {
                 viol += 1;
             }
             // Rows → above/below (smaller y is higher), only when row-disjoint.
-            if (ba[3] < bb[1] && pa[1] >= pb[1] - EPS)
-                || (bb[3] < ba[1] && pb[1] >= pa[1] - EPS)
-            {
+            if (ba[3] < bb[1] && pa[1] >= pb[1] - EPS) || (bb[3] < ba[1] && pb[1] >= pa[1] - EPS) {
                 viol += 1;
             }
         }
@@ -363,13 +368,14 @@ pub fn signal_anchor_centroid(
             }
             for (j, num) in inc.get(net).into_iter().flatten() {
                 if is_anchor(*j)
-                    && let Ok(eps) = w.pin_dirs(env, &items[*j].refdes, num) {
-                        for (p, _) in &eps {
-                            sum[0] += p[0];
-                            sum[1] += p[1];
-                            cnt += 1.0;
-                        }
+                    && let Ok(eps) = w.pin_dirs(env, &items[*j].refdes, num)
+                {
+                    for (p, _) in &eps {
+                        sum[0] += p[0];
+                        sum[1] += p[1];
+                        cnt += 1.0;
                     }
+                }
             }
         }
         (sum, cnt)
@@ -447,14 +453,17 @@ pub(crate) fn driven_rail_drivers(
             if items[*i].geom.pins.len() < 3 {
                 continue; // only an IC/regulator pin can drive a rail
             }
-            let Some(meta) = provider.symbol(&items[*i].part) else { continue };
+            let Some(meta) = provider.symbol(&items[*i].part) else {
+                continue;
+            };
             if find_pin(&meta.pins, num).map(|p| p.etype) != Some(PinType::PowerOutput) {
                 continue;
             }
             if let Ok(eps) = w.pin_dirs(env, &items[*i].refdes, num)
-                && let Some((p, _)) = eps.first() {
-                    out.entry(net.clone()).or_insert(*p);
-                }
+                && let Some((p, _)) = eps.first()
+            {
+                out.entry(net.clone()).or_insert(*p);
+            }
         }
     }
     out
@@ -466,7 +475,13 @@ pub(crate) fn driven_rail_drivers(
 /// off adjacent IC pins, is fine), but wire-vs-body uses a wider cutoff because a
 /// part's body has width, so a wire hugging the *edge* sits ~2 grid off the
 /// pin-to-pin *centre line*.
-pub(crate) fn parallel_too_close(a1: [f64; 2], a2: [f64; 2], b1: [f64; 2], b2: [f64; 2], near: f64) -> bool {
+pub(crate) fn parallel_too_close(
+    a1: [f64; 2],
+    a2: [f64; 2],
+    b1: [f64; 2],
+    b2: [f64; 2],
+    near: f64,
+) -> bool {
     const MIN_OVERLAP: f64 = 6.35; // only a sustained parallel run reads as cramped
     let horiz = |a: &[f64; 2], b: &[f64; 2]| (a[1] - b[1]).abs() < EPS;
     let vert = |a: &[f64; 2], b: &[f64; 2]| (a[0] - b[0]).abs() < EPS;
@@ -526,7 +541,10 @@ pub fn count_congestion(junctions: &[[f64; 2]]) -> usize {
     let mut n = 0;
     for i in 0..junctions.len() {
         for j in (i + 1)..junctions.len() {
-            let (dx, dy) = (junctions[i][0] - junctions[j][0], junctions[i][1] - junctions[j][1]);
+            let (dx, dy) = (
+                junctions[i][0] - junctions[j][0],
+                junctions[i][1] - junctions[j][1],
+            );
             if dx.hypot(dy) < TIGHT - EPS {
                 n += 1;
             }
@@ -565,9 +583,10 @@ pub fn count_merges(
         let mut nets: BTreeSet<&str> = BTreeSet::new();
         for (a, b, wn) in wires {
             if let Some(net) = wn
-                && sch_place::geom::point_on_segment(jp, *a, *b) {
-                    nets.insert(net.as_str());
-                }
+                && sch_place::geom::point_on_segment(jp, *a, *b)
+            {
+                nets.insert(net.as_str());
+            }
         }
         if nets.len() > 1 {
             n += 1;
@@ -651,7 +670,9 @@ pub(crate) fn diagnose_shorts(
     // (1) pin-on-foreign-wire shorts (count_shorts geometry).
     for (net, pins) in inc {
         for (i, num) in pins {
-            let Ok(eps) = w.pin_dirs(env, &items[*i].refdes, num) else { continue };
+            let Ok(eps) = w.pin_dirs(env, &items[*i].refdes, num) else {
+                continue;
+            };
             for (ep, _) in eps {
                 for (a, b, wn) in &wires {
                     if wn.as_deref() == Some(net.as_str()) {
@@ -695,9 +716,10 @@ pub(crate) fn diagnose_shorts(
         let mut nets: BTreeSet<&str> = BTreeSet::new();
         for (a, b, wn) in &wires {
             if let Some(net) = wn
-                && sch_place::geom::point_on_segment(jp, *a, *b) {
-                    nets.insert(net.as_str());
-                }
+                && sch_place::geom::point_on_segment(jp, *a, *b)
+            {
+                nets.insert(net.as_str());
+            }
         }
         if nets.len() > 1 {
             eprintln!(
@@ -722,7 +744,9 @@ pub fn count_shorts(
     let mut n = 0;
     for (net, pins) in inc {
         for (i, num) in pins {
-            let Ok(eps) = w.pin_dirs(env, &items[*i].refdes, num) else { continue };
+            let Ok(eps) = w.pin_dirs(env, &items[*i].refdes, num) else {
+                continue;
+            };
             for (ep, _) in eps {
                 for (a, b, wn) in wires {
                     if wn.as_deref() == Some(net.as_str()) {
@@ -731,7 +755,8 @@ pub fn count_shorts(
                     // A pin coinciding with a foreign wire's endpoint, OR landing
                     // on its interior (KiCAD connects a pin to a wire it touches),
                     // is a short on a different net.
-                    if near(ep, *a) || near(ep, *b) || sch_place::geom::point_on_segment(ep, *a, *b) {
+                    if near(ep, *a) || near(ep, *b) || sch_place::geom::point_on_segment(ep, *a, *b)
+                    {
                         n += 1;
                     }
                 }

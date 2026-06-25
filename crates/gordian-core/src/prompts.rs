@@ -64,7 +64,11 @@ pub fn system_prompt_with_reference(env: &KicadEnv, intent: &str) -> String {
          references at any time with the `find_similar_designs` tool.\n\n\
          Reference — {desc} (from {repo}):\n\n```yaml\n{example}```\n",
         desc = reference.meta.description,
-        repo = if reference.meta.repo.is_empty() { "unknown" } else { &reference.meta.repo },
+        repo = if reference.meta.repo.is_empty() {
+            "unknown"
+        } else {
+            &reference.meta.repo
+        },
     )
 }
 
@@ -301,10 +305,10 @@ KiCAD board, with the deterministic engine as your ASSIST for the bulk work.
    to SEE it. `route_board()` — the in-house router (the fast AUTOROUTE assist); returns the
    failed nets + metrics + `lint_summary` (expected zero; non-zero = an engine bug to report
    verbatim, not triage). On a DENSE board (BGA/QFP fan-out) where route_board leaves many nets
-   failed, `autoroute()` runs the heavy-duty FREEROUTING autorouter instead (export_board first).
+   failed, `autoroute()` runs the heavy-duty FREEROUTING autorouter instead.
    A few honest unrouted nets are acceptable.
-4. `export_board()` — writes the `.kicad_pcb` (+ project) and runs DRC (KiCAD ≥ 8).
-5. `open_board()` — open THAT board in a live headless KiCAD. From here you EDIT THE REAL
+4. `check_board()` — saves the live `.kicad_pcb` and runs DRC (KiCAD ≥ 8).
+5. `open_board()` — warm or inspect the global KiCAD session. From here you EDIT THE REAL
    BOARD interactively over IPC — this is where you apply engineering judgement the engine
    can't:
    - `board_state()` — read parts (reference + position mm), track count, nets.
@@ -362,7 +366,7 @@ mod tests {
     #[test]
     fn system_prompt_covers_the_pcb_workflow_and_triage() {
         let p = system_prompt();
-        // The interactive board flow: engine seeds (derive/place/route/export),
+        // The interactive board flow: engine seeds (derive/place/route/check),
         // then the LLM edits the live board over IPC (open/state/move/route/width).
         for tool in [
             "search_footprints",
@@ -371,7 +375,7 @@ mod tests {
             "place_board",
             "route_board",
             "autoroute",
-            "export_board",
+            "check_board",
             "open_board",
             "board_state",
             "move_part",
@@ -391,7 +395,10 @@ mod tests {
             "resize_board",
             "unlock_part",
         ] {
-            assert!(!p.contains(gone), "prompt still mentions removed tool `{gone}`");
+            assert!(
+                !p.contains(gone),
+                "prompt still mentions removed tool `{gone}`"
+            );
         }
         // The PCB doctrine: geometry IS the engineering; wide copper for power.
         assert!(p.contains("GEOMETRY IS THE ENGINEERING"));

@@ -9,11 +9,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use geom::Point2;
+
 use crate::grid::snap_point;
 
 use super::{
-    boxes_overlap, field_anchors, field_box, point_on_segment, BBox, Justify, SchematicWriter,
-    TextPos, Wire,
+    BBox, Justify, SchematicWriter, TextPos, Wire, boxes_overlap, field_anchors, field_box,
+    point_on_segment,
 };
 
 /// What [`SchematicWriter::solve_text_positions`] mutates once the greedy solver
@@ -77,18 +79,21 @@ impl SchematicWriter {
         // signal net — any signal touch is therefore foreign).
         const PWR: &str = "\0power_wire";
 
-        let bits = |p: [f64; 2]| {
+        let bits = |p: Point2| {
             let p = snap_point(p);
             (p[0].to_bits(), p[1].to_bits())
         };
 
         // Foreign points: net name(s) at each occupied point.
         let mut points: BTreeMap<(u64, u64), std::collections::BTreeSet<String>> = BTreeMap::new();
-        let add_point = |p: [f64; 2], net: &str, m: &mut BTreeMap<(u64, u64), std::collections::BTreeSet<String>>| {
-            m.entry(bits(p)).or_default().insert(net.to_string());
-        };
+        let add_point =
+            |p: Point2,
+             net: &str,
+             m: &mut BTreeMap<(u64, u64), std::collections::BTreeSet<String>>| {
+                m.entry(bits(p)).or_default().insert(net.to_string());
+            };
         // Foreign axis-aligned segments: (a, b, net).
-        let mut segments: Vec<([f64; 2], [f64; 2], String)> = Vec::new();
+        let mut segments: Vec<(Point2, Point2, String)> = Vec::new();
 
         for inst in &self.instances {
             // Power-symbol/flag pin origins (identified by `power:` lib_id) occupy
@@ -150,7 +155,7 @@ impl SchematicWriter {
                 .iter()
                 .any(|(a, b, n)| *n != net && point_on_segment(end, *a, *b));
             let seg_thru_point = points.iter().any(|(&(xb, yb), nets)| {
-                let p = [f64::from_bits(xb), f64::from_bits(yb)];
+                let p = Point2::new(f64::from_bits(xb), f64::from_bits(yb));
                 nets.iter().any(|n| *n != net) && point_on_segment(p, pin_at, end)
             });
 
@@ -232,8 +237,7 @@ impl SchematicWriter {
     /// and fixed (stub-less) labels.
     fn build_obstacles(&self) -> Vec<crate::label::Obstacle> {
         use crate::label::{
-            label_box, pin_text_boxes, rotated_half_extents, text_width, wire_box, ObKind,
-            Obstacle,
+            ObKind, Obstacle, label_box, pin_text_boxes, rotated_half_extents, text_width, wire_box,
         };
         let mut obstacles: Vec<Obstacle> = Vec::new();
         for inst in &self.instances {
@@ -244,26 +248,40 @@ impl SchematicWriter {
                     inst.at[1] - h[1],
                     inst.at[0] + h[0],
                     inst.at[1] + h[1],
-                ],
+                ]
+                .into(),
                 kind: ObKind::OwnExempt(inst.refdes.clone()),
             });
             // Pin name/number text (skip power/flag graphics — single
             // unnamed pin, no meaningful pin text).
             if !inst.refdes.starts_with('#')
-                && let Some(pins) = self.sym_pins.get(&inst.lib_id) {
-                    for pg in pins {
-                        for b in pin_text_boxes(pg, inst.at, inst.angle, inst.mirror) {
-                            obstacles.push(Obstacle { bbox: b, kind: ObKind::Hard });
-                        }
+                && let Some(pins) = self.sym_pins.get(&inst.lib_id)
+            {
+                for pg in pins {
+                    for b in pin_text_boxes(pg, inst.at, inst.angle, inst.mirror) {
+                        obstacles.push(Obstacle {
+                            bbox: b,
+                            kind: ObKind::Hard,
+                        });
                     }
                 }
+            }
         }
         for w in &self.wires {
-            obstacles.push(Obstacle { bbox: wire_box(w.a, w.b), kind: ObKind::Hard });
+            obstacles.push(Obstacle {
+                bbox: wire_box(w.a, w.b),
+                kind: ObKind::Hard,
+            });
         }
         for nc in &self.no_connects {
             obstacles.push(Obstacle {
-                bbox: [nc.at[0] - 0.64, nc.at[1] - 0.64, nc.at[0] + 0.64, nc.at[1] + 0.64],
+                bbox: [
+                    nc.at[0] - 0.64,
+                    nc.at[1] - 0.64,
+                    nc.at[0] + 0.64,
+                    nc.at[1] + 0.64,
+                ]
+                .into(),
                 kind: ObKind::Hard,
             });
         }
@@ -284,7 +302,7 @@ impl SchematicWriter {
     /// onto the always-safe pin endpoint keeping the outward direction (the stub
     /// wire is dropped when retraction wins).
     fn stub_label_movables(&self) -> (Vec<crate::label::Movable>, Vec<Apply>) {
-        use crate::label::{label_box, text_width, Movable};
+        use crate::label::{Movable, label_box, text_width};
         let mut movables: Vec<Movable> = Vec::new();
         let mut applies: Vec<Apply> = Vec::new();
         let mut stub_idx: Vec<usize> = (0..self.labels.len())
@@ -335,7 +353,7 @@ impl SchematicWriter {
     /// adjacent rails never merge their names. `None` for `power:PWR_FLAG`,
     /// whose Value is hidden and has nothing to place.
     fn power_value_movable(&self, i: usize) -> Option<(crate::label::Movable, Apply)> {
-        use crate::label::{rotated_half_extents, text_width, Movable};
+        use crate::label::{Movable, rotated_half_extents, text_width};
         let r2 = |v: f64| (v * 100.0).round() / 100.0;
         let inst = &self.instances[i];
         if inst.lib_id == "power:PWR_FLAG" {
@@ -346,20 +364,32 @@ impl SchematicWriter {
         let (minx, miny, maxx, maxy) = (cx - h[0], cy - h[1], cx + h[0], cy + h[1]);
         let vw = text_width(&inst.value);
         let above = (
-            TextPos { at: [r2(cx), r2(miny - 0.64)], justify: Justify::Center },
-            [cx - vw / 2.0, miny - 2.24, cx + vw / 2.0, miny - 0.64] as BBox,
+            TextPos {
+                at: [r2(cx), r2(miny - 0.64)],
+                justify: Justify::Center,
+            },
+            [cx - vw / 2.0, miny - 2.24, cx + vw / 2.0, miny - 0.64].into(),
         );
         let below = (
-            TextPos { at: [r2(cx), r2(maxy + 2.24)], justify: Justify::Center },
-            [cx - vw / 2.0, maxy + 0.64, cx + vw / 2.0, maxy + 2.24],
+            TextPos {
+                at: [r2(cx), r2(maxy + 2.24)],
+                justify: Justify::Center,
+            },
+            [cx - vw / 2.0, maxy + 0.64, cx + vw / 2.0, maxy + 2.24].into(),
         );
         let right = (
-            TextPos { at: [r2(maxx + 0.64), r2(cy + 0.8)], justify: Justify::Left },
-            [maxx + 0.64, cy - 0.8, maxx + 0.64 + vw, cy + 0.8],
+            TextPos {
+                at: [r2(maxx + 0.64), r2(cy + 0.8)],
+                justify: Justify::Left,
+            },
+            [maxx + 0.64, cy - 0.8, maxx + 0.64 + vw, cy + 0.8].into(),
         );
         let left = (
-            TextPos { at: [r2(minx - 0.64), r2(cy + 0.8)], justify: Justify::Right },
-            [minx - 0.64 - vw, cy - 0.8, minx - 0.64, cy + 0.8],
+            TextPos {
+                at: [r2(minx - 0.64), r2(cy + 0.8)],
+                justify: Justify::Right,
+            },
+            [minx - 0.64 - vw, cy - 0.8, minx - 0.64, cy + 0.8].into(),
         );
         // A 180-rotated power symbol points down (GND family): the
         // name goes below the graphic; otherwise above.
@@ -372,7 +402,10 @@ impl SchematicWriter {
             owner: Some(inst.refdes.clone()),
             candidates: cands.iter().map(|c| c.1).collect(),
         };
-        Some((movable, Apply::PowerVal(i, cands.into_iter().map(|c| c.0).collect())))
+        Some((
+            movable,
+            Apply::PowerVal(i, cands.into_iter().map(|c| c.0).collect()),
+        ))
     }
 
     /// Reference+Value field pair for a non-power instance: right / left / above
@@ -380,7 +413,7 @@ impl SchematicWriter {
     /// symbols. Wide (rotated passive) bodies prefer above/below; ICs carry the
     /// pair on the horizontal band least overlapping their own pin text.
     fn field_pair_movable(&self, i: usize) -> (crate::label::Movable, Apply) {
-        use crate::label::{pin_text_boxes, rotated_half_extents, text_width, Movable};
+        use crate::label::{Movable, pin_text_boxes, rotated_half_extents, text_width};
         let r2 = |v: f64| (v * 100.0).round() / 100.0;
         let inst = &self.instances[i];
         let h = rotated_half_extents(inst.half_extents, inst.angle);
@@ -393,46 +426,94 @@ impl SchematicWriter {
         // bottom-anchored and 1.6 tall, so a line anchored at Y occupies
         // [Y-1.6, Y].
         let right = (
-            TextPos { at: [r2(maxx + 1.27), r2(cy - 1.27)], justify: Justify::Left },
-            TextPos { at: [r2(maxx + 1.27), r2(cy + 1.27)], justify: Justify::Left },
-            [maxx + 1.27, cy - 2.87, maxx + 1.27 + wmax, cy + 1.27] as BBox,
+            TextPos {
+                at: [r2(maxx + 1.27), r2(cy - 1.27)],
+                justify: Justify::Left,
+            },
+            TextPos {
+                at: [r2(maxx + 1.27), r2(cy + 1.27)],
+                justify: Justify::Left,
+            },
+            [maxx + 1.27, cy - 2.87, maxx + 1.27 + wmax, cy + 1.27].into(),
         );
         let left = (
-            TextPos { at: [r2(minx - 1.27), r2(cy - 1.27)], justify: Justify::Right },
-            TextPos { at: [r2(minx - 1.27), r2(cy + 1.27)], justify: Justify::Right },
-            [minx - 1.27 - wmax, cy - 2.87, minx - 1.27, cy + 1.27],
+            TextPos {
+                at: [r2(minx - 1.27), r2(cy - 1.27)],
+                justify: Justify::Right,
+            },
+            TextPos {
+                at: [r2(minx - 1.27), r2(cy + 1.27)],
+                justify: Justify::Right,
+            },
+            [minx - 1.27 - wmax, cy - 2.87, minx - 1.27, cy + 1.27].into(),
         );
         let above = (
-            TextPos { at: [r2(cx), r2(miny - 3.18)], justify: Justify::Center },
-            TextPos { at: [r2(cx), r2(miny - 0.64)], justify: Justify::Center },
-            [cx - wmax / 2.0, miny - 4.78, cx + wmax / 2.0, miny - 0.64],
+            TextPos {
+                at: [r2(cx), r2(miny - 3.18)],
+                justify: Justify::Center,
+            },
+            TextPos {
+                at: [r2(cx), r2(miny - 0.64)],
+                justify: Justify::Center,
+            },
+            [cx - wmax / 2.0, miny - 4.78, cx + wmax / 2.0, miny - 0.64].into(),
         );
         let below = (
-            TextPos { at: [r2(cx), r2(maxy + 2.24)], justify: Justify::Center },
-            TextPos { at: [r2(cx), r2(maxy + 4.78)], justify: Justify::Center },
-            [cx - wmax / 2.0, maxy + 0.64, cx + wmax / 2.0, maxy + 4.78],
+            TextPos {
+                at: [r2(cx), r2(maxy + 2.24)],
+                justify: Justify::Center,
+            },
+            TextPos {
+                at: [r2(cx), r2(maxy + 4.78)],
+                justify: Justify::Center,
+            },
+            [cx - wmax / 2.0, maxy + 0.64, cx + wmax / 2.0, maxy + 4.78].into(),
         );
         // Corner fallbacks for crowded symbols (an IC whose four sides all
         // carry labels/power): the field pair tucks against a body corner.
         let above_left = (
-            TextPos { at: [r2(minx), r2(miny - 3.18)], justify: Justify::Left },
-            TextPos { at: [r2(minx), r2(miny - 0.64)], justify: Justify::Left },
-            [minx, miny - 4.78, minx + wmax, miny - 0.64] as BBox,
+            TextPos {
+                at: [r2(minx), r2(miny - 3.18)],
+                justify: Justify::Left,
+            },
+            TextPos {
+                at: [r2(minx), r2(miny - 0.64)],
+                justify: Justify::Left,
+            },
+            [minx, miny - 4.78, minx + wmax, miny - 0.64].into(),
         );
         let above_right = (
-            TextPos { at: [r2(maxx), r2(miny - 3.18)], justify: Justify::Right },
-            TextPos { at: [r2(maxx), r2(miny - 0.64)], justify: Justify::Right },
-            [maxx - wmax, miny - 4.78, maxx, miny - 0.64],
+            TextPos {
+                at: [r2(maxx), r2(miny - 3.18)],
+                justify: Justify::Right,
+            },
+            TextPos {
+                at: [r2(maxx), r2(miny - 0.64)],
+                justify: Justify::Right,
+            },
+            [maxx - wmax, miny - 4.78, maxx, miny - 0.64].into(),
         );
         let below_left = (
-            TextPos { at: [r2(minx), r2(maxy + 2.24)], justify: Justify::Left },
-            TextPos { at: [r2(minx), r2(maxy + 4.78)], justify: Justify::Left },
-            [minx, maxy + 0.64, minx + wmax, maxy + 4.78],
+            TextPos {
+                at: [r2(minx), r2(maxy + 2.24)],
+                justify: Justify::Left,
+            },
+            TextPos {
+                at: [r2(minx), r2(maxy + 4.78)],
+                justify: Justify::Left,
+            },
+            [minx, maxy + 0.64, minx + wmax, maxy + 4.78].into(),
         );
         let below_right = (
-            TextPos { at: [r2(maxx), r2(maxy + 2.24)], justify: Justify::Right },
-            TextPos { at: [r2(maxx), r2(maxy + 4.78)], justify: Justify::Right },
-            [maxx - wmax, maxy + 0.64, maxx, maxy + 4.78],
+            TextPos {
+                at: [r2(maxx), r2(maxy + 2.24)],
+                justify: Justify::Right,
+            },
+            TextPos {
+                at: [r2(maxx), r2(maxy + 4.78)],
+                justify: Justify::Right,
+            },
+            [maxx - wmax, maxy + 0.64, maxx, maxy + 4.78].into(),
         );
         // Last-resort FAR bands (pushed ~5 mm further out): when a body is
         // ringed by packed neighbours — a tight decoupling cluster on a dense
@@ -441,14 +522,26 @@ impl SchematicWriter {
         // detached but never overlaps). Appended LAST for both ICs and passives,
         // so a part with any near free spot is unaffected.
         let above_far = (
-            TextPos { at: [r2(cx), r2(miny - 8.18)], justify: Justify::Center },
-            TextPos { at: [r2(cx), r2(miny - 5.64)], justify: Justify::Center },
-            [cx - wmax / 2.0, miny - 9.78, cx + wmax / 2.0, miny - 5.64] as BBox,
+            TextPos {
+                at: [r2(cx), r2(miny - 8.18)],
+                justify: Justify::Center,
+            },
+            TextPos {
+                at: [r2(cx), r2(miny - 5.64)],
+                justify: Justify::Center,
+            },
+            [cx - wmax / 2.0, miny - 9.78, cx + wmax / 2.0, miny - 5.64].into(),
         );
         let below_far = (
-            TextPos { at: [r2(cx), r2(maxy + 5.64)], justify: Justify::Center },
-            TextPos { at: [r2(cx), r2(maxy + 8.18)], justify: Justify::Center },
-            [cx - wmax / 2.0, maxy + 5.64, cx + wmax / 2.0, maxy + 9.78],
+            TextPos {
+                at: [r2(cx), r2(maxy + 5.64)],
+                justify: Justify::Center,
+            },
+            TextPos {
+                at: [r2(cx), r2(maxy + 8.18)],
+                justify: Justify::Center,
+            },
+            [cx - wmax / 2.0, maxy + 5.64, cx + wmax / 2.0, maxy + 9.78].into(),
         );
         // Multi-pin parts (ICs) carry refdes+value on a HORIZONTAL band
         // (above/below the body), the reference convention — a long MPN
@@ -463,7 +556,10 @@ impl SchematicWriter {
         // win, dodging the centre GND drop. Passives keep the KiCAD
         // convention: wide (rotated) bodies prefer above/below, tall prefer
         // right/left.
-        let is_ic = self.sym_pins.get(&inst.lib_id).is_some_and(|p| p.len() >= 3);
+        let is_ic = self
+            .sym_pins
+            .get(&inst.lib_id)
+            .is_some_and(|p| p.len() >= 3);
         let cands = if is_ic {
             let pin_boxes: Vec<BBox> = self
                 .sym_pins
@@ -475,10 +571,19 @@ impl SchematicWriter {
                 })
                 .unwrap_or_default();
             let hits = |c: &(TextPos, TextPos, BBox)| {
-                pin_boxes.iter().filter(|pb| boxes_overlap(&c.2, pb)).count()
+                pin_boxes
+                    .iter()
+                    .filter(|pb| boxes_overlap(&c.2, pb))
+                    .count()
             };
-            let mut bands =
-                vec![below, above, below_left, below_right, above_left, above_right];
+            let mut bands = vec![
+                below,
+                above,
+                below_left,
+                below_right,
+                above_left,
+                above_right,
+            ];
             bands.sort_by_key(hits);
             // Far bands (detached but clear of the body's OWN pins) BEFORE right/left: on a crowded
             // IC whose every near band is blocked by a decoupling cap, right/left sit at the body
@@ -501,13 +606,29 @@ impl SchematicWriter {
             bands
         } else if h[0] > h[1] {
             vec![
-                above, below, right, left, above_left, above_right, below_left, below_right,
-                above_far, below_far,
+                above,
+                below,
+                right,
+                left,
+                above_left,
+                above_right,
+                below_left,
+                below_right,
+                above_far,
+                below_far,
             ]
         } else {
             vec![
-                right, left, above, below, above_left, above_right, below_left, below_right,
-                above_far, below_far,
+                right,
+                left,
+                above,
+                below,
+                above_left,
+                above_right,
+                below_left,
+                below_right,
+                above_far,
+                below_far,
             ]
         };
         // A flagged low-side FET (its down-facing source pin hangs a rotated
@@ -528,7 +649,10 @@ impl SchematicWriter {
             owner: Some(inst.refdes.clone()),
             candidates: cands.iter().map(|c| c.2).collect(),
         };
-        (movable, Apply::Fields(i, cands.into_iter().map(|c| (c.0, c.1)).collect()))
+        (
+            movable,
+            Apply::Fields(i, cands.into_iter().map(|c| (c.0, c.1)).collect()),
+        )
     }
 
     /// Split each wire at every junction / other-wire endpoint lying strictly in
@@ -547,14 +671,14 @@ impl SchematicWriter {
     /// interior node is a same-net tap.
     fn split_wires_at_nodes(&mut self) {
         const EPS: f64 = 1e-6;
-        let same = |p: [f64; 2], q: [f64; 2]| (p[0] - q[0]).abs() < EPS && (p[1] - q[1]).abs() < EPS;
+        let same = |p: Point2, q: Point2| (p[0] - q[0]).abs() < EPS && (p[1] - q[1]).abs() < EPS;
         // Candidate split points: every junction position + every wire endpoint.
-        let mut pts: Vec<[f64; 2]> = self.junctions.iter().map(|j| j.at).collect();
+        let mut pts: Vec<Point2> = self.junctions.iter().map(|j| j.at).collect();
         for w in &self.wires {
             pts.push(w.a);
             pts.push(w.b);
         }
-        let mk = |a: [f64; 2], b: [f64; 2], net: Option<String>| Wire {
+        let mk = |a: Point2, b: Point2, net: Option<String>| Wire {
             a,
             b,
             uuid_key: format!("{}:{}:{}:{}", a[0], a[1], b[0], b[1]),
@@ -566,7 +690,7 @@ impl SchematicWriter {
             let mut changed = false;
             for w in &self.wires {
                 // The interior split point closest to `a` (deterministic order).
-                let mut best: Option<[f64; 2]> = None;
+                let mut best: Option<Point2> = None;
                 let mut best_d = f64::INFINITY;
                 for &p in &pts {
                     if same(p, w.a) || same(p, w.b) || !point_on_segment(p, w.a, w.b) {
@@ -780,7 +904,8 @@ impl SchematicWriter {
                     inst.at[1] - h[1],
                     inst.at[0] + h[0],
                     inst.at[1] + h[1],
-                ],
+                ]
+                .into(),
                 inst.refdes.clone(),
                 Kind::Body,
             ));
@@ -812,12 +937,7 @@ impl SchematicWriter {
         }
         for label in &self.labels {
             let b = label_box(label.at, label.dir, text_width(&label.net));
-            let owner = label
-                .uuid_key
-                .split(':')
-                .next()
-                .unwrap_or("")
-                .to_string();
+            let owner = label.uuid_key.split(':').next().unwrap_or("").to_string();
             items.push((
                 format!("label \"{}\" at {:?}", label.net, label.at),
                 b,
@@ -853,7 +973,12 @@ impl SchematicWriter {
                 hi[0] = hi[0].max(p[0]);
                 hi[1] = hi[1].max(p[1]);
             }
-            let r = [lo[0] + BODY_INSET, lo[1] + BODY_INSET, hi[0] - BODY_INSET, hi[1] - BODY_INSET];
+            let r = [
+                lo[0] + BODY_INSET,
+                lo[1] + BODY_INSET,
+                hi[0] - BODY_INSET,
+                hi[1] - BODY_INSET,
+            ];
             if r[2] - r[0] < BODY_EPS || r[3] - r[1] < BODY_EPS {
                 continue;
             }
@@ -862,11 +987,15 @@ impl SchematicWriter {
                 let cross = if (w1[0] - w2[0]).abs() < BODY_EPS {
                     let x = w1[0];
                     let (ylo, yhi) = (w1[1].min(w2[1]), w1[1].max(w2[1]));
-                    r[0] + BODY_EPS < x && x < r[2] - BODY_EPS && ylo.max(r[1]) < yhi.min(r[3]) - BODY_EPS
+                    r[0] + BODY_EPS < x
+                        && x < r[2] - BODY_EPS
+                        && ylo.max(r[1]) < yhi.min(r[3]) - BODY_EPS
                 } else {
                     let y = w1[1];
                     let (xlo, xhi) = (w1[0].min(w2[0]), w1[0].max(w2[0]));
-                    r[1] + BODY_EPS < y && y < r[3] - BODY_EPS && xlo.max(r[0]) < xhi.min(r[2]) - BODY_EPS
+                    r[1] + BODY_EPS < y
+                        && y < r[3] - BODY_EPS
+                        && xlo.max(r[0]) < xhi.min(r[2]) - BODY_EPS
                 };
                 if cross {
                     warnings.push(format!("wire crosses body of {}", inst.refdes));
@@ -878,8 +1007,7 @@ impl SchematicWriter {
             for j in (i + 1)..items.len() {
                 let same_owner = items[i].2 == items[j].2;
                 let either_body = items[i].3 == Kind::Body || items[j].3 == Kind::Body;
-                let both_pin_text =
-                    items[i].3 == Kind::PinText && items[j].3 == Kind::PinText;
+                let both_pin_text = items[i].3 == Kind::PinText && items[j].3 == Kind::PinText;
                 // Exempt own-body pairs and intra-symbol pin-text pairs.
                 if same_owner && (either_body || both_pin_text) {
                     continue;
@@ -927,18 +1055,24 @@ mod tests {
         let Some(env) = detect_env() else { return };
         let mut w = SchematicWriter::new();
         // Two symbols stacked nearly on top of each other -> collision.
-        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0).unwrap();
-        w.add_symbol(&env, "Device:R", "R2", "2k", [127.0, 64.77], 0.0).unwrap();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0)
+            .unwrap();
+        w.add_symbol(&env, "Device:R", "R2", "2k", [127.0, 64.77], 0.0)
+            .unwrap();
         let warnings = w.layout_warnings();
         assert!(
-            warnings.iter().any(|s| s.contains("R1") && s.contains("R2")),
+            warnings
+                .iter()
+                .any(|s| s.contains("R1") && s.contains("R2")),
             "expected an R1/R2 overlap warning, got {warnings:?}"
         );
 
         // Far apart -> clean.
         let mut w = SchematicWriter::new();
-        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0).unwrap();
-        w.add_symbol(&env, "Device:R", "R2", "2k", [177.8, 63.5], 0.0).unwrap();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0)
+            .unwrap();
+        w.add_symbol(&env, "Device:R", "R2", "2k", [177.8, 63.5], 0.0)
+            .unwrap();
         assert!(w.layout_warnings().is_empty());
     }
 
@@ -946,7 +1080,8 @@ mod tests {
     fn lint_flags_text_on_pin_names() {
         let Some(env) = detect_env() else { return };
         let mut w = SchematicWriter::new();
-        w.add_symbol(&env, "Timer:NE555P", "U1", "NE555P", [152.4, 101.6], 0.0).unwrap();
+        w.add_symbol(&env, "Timer:NE555P", "U1", "NE555P", [152.4, 101.6], 0.0)
+            .unwrap();
         // A fixed cluster label parked on a west-side pin endpoint, reading
         // East: the text runs back across the pin line over the pin name.
         // (This is the legacy retracted-label shape the solver now avoids —
@@ -955,7 +1090,9 @@ mod tests {
         w.add_cluster_label("X", ep, Dir::East, false);
         let warnings = w.layout_warnings();
         assert!(
-            warnings.iter().any(|s| s.contains("pin text") && s.contains("U1")),
+            warnings
+                .iter()
+                .any(|s| s.contains("pin text") && s.contains("U1")),
             "expected a pin-text overlap warning, got {warnings:?}"
         );
     }
@@ -967,11 +1104,15 @@ mod tests {
         // blind extents (half-height 6.35) their boxes overlap; with rotated
         // extents (half-height 5.08) they exactly touch -> no overlap.
         let mut w = SchematicWriter::new();
-        w.add_symbol(&env, "Device:R", "R1", "1k", [101.6, 101.6], 90.0).unwrap();
-        w.add_symbol(&env, "Device:R", "R2", "2k", [101.6, 111.76], 90.0).unwrap();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [101.6, 101.6], 90.0)
+            .unwrap();
+        w.add_symbol(&env, "Device:R", "R2", "2k", [101.6, 111.76], 90.0)
+            .unwrap();
         let warnings = w.layout_warnings();
         assert!(
-            !warnings.iter().any(|s| s.contains("symbol R1") && s.contains("symbol R2")),
+            !warnings
+                .iter()
+                .any(|s| s.contains("symbol R1") && s.contains("symbol R2")),
             "rotated bodies must use rotated extents, got {warnings:?}"
         );
     }

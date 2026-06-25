@@ -6,8 +6,6 @@ use serde_json::{Value, json};
 
 use crate::tools::{PcbToolCtx, require_str};
 
-use super::draft::BoardDraft;
-
 /// Default number of footprint-search hits returned when `limit` is omitted.
 /// Mirrors `tools::DEFAULT_SEARCH_LIMIT` for the symbol side.
 const DEFAULT_SEARCH_LIMIT: usize = 8;
@@ -41,8 +39,12 @@ pub fn get_footprint_info(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Valu
             // than the full per-pad table — for a 256-ball BGA the old table was ~20k chars
             // re-sent every turn. min_pitch + pad_size let the model judge fine-pitch (pick a
             // clearance/via); technologies/layers tell it SMD vs thru-hole.
-            let pad_numbers: Vec<&str> =
-                fp.pads.iter().map(|p| p.number.as_str()).filter(|n| !n.is_empty()).collect();
+            let pad_numbers: Vec<&str> = fp
+                .pads
+                .iter()
+                .map(|p| p.number.as_str())
+                .filter(|n| !n.is_empty())
+                .collect();
             let mut min_pitch = f64::INFINITY;
             for (i, a) in fp.pads.iter().enumerate() {
                 for b in &fp.pads[i + 1..] {
@@ -58,8 +60,11 @@ pub fn get_footprint_info(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Valu
                 wmin = wmin.min(s);
                 wmax = wmax.max(p.size[0].max(p.size[1]));
             }
-            let techs: std::collections::BTreeSet<&str> =
-                fp.pads.iter().map(|p| technology_str(p.technology)).collect();
+            let techs: std::collections::BTreeSet<&str> = fp
+                .pads
+                .iter()
+                .map(|p| technology_str(p.technology))
+                .collect();
             Ok(json!({
                 "lib_id": lib_id,
                 "name": fp.name,
@@ -113,65 +118,24 @@ fn bbox_json(b: &kicad_sexpr::footlib::BBox) -> Value {
     })
 }
 
-/// Pad numbers the part nets that the chosen footprint does NOT have (sorted, deduped).
-fn pads_missing<'a>(pad_keys: impl IntoIterator<Item = &'a str>, fp_pads: &[&str]) -> Vec<String> {
-    let mut missing: Vec<String> = pad_keys
-        .into_iter()
-        .filter(|p| !fp_pads.contains(p))
-        .map(String::from)
-        .collect();
-    missing.sort();
-    missing.dedup();
-    missing
-}
-
-/// Assign a footprint to a part in the draft (fills a missing footprint before placement).
-pub fn assign_footprint(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Value> {
+/// Return the circuit-YAML edit needed to assign a footprint.
+///
+/// Footprint assignment belongs to the schematic/circuit YAML, not PCB state. This helper is
+/// deliberately stateless: it does not read a board draft, inspect the schematic, or write files.
+pub fn assign_footprint(input: Value, _ctx: &PcbToolCtx) -> anyhow::Result<Value> {
     let reference = require_str(&input, "reference")?;
     let footprint = require_str(&input, "footprint")?;
-    let Some(mut draft) = BoardDraft::load(ctx) else {
-        return Ok(json!({ "error": "no board draft — run derive_board first" }));
-    };
-    let index = ctx.footprint_index()?;
-    let Some(fp) = index.footprint(&footprint) else {
-        return Ok(json!({
-            "error": format!("unknown footprint `{footprint}`"),
-            "suggestions": index.suggest(&footprint),
-        }));
-    };
-    let Some(part) = draft.parts.iter_mut().find(|p| p.reference == reference) else {
-        return Ok(json!({ "error": format!("no part `{reference}` on the board") }));
-    };
-    // The footprint must carry every pad the part nets.
-    let fp_pads: Vec<&str> = fp.pads.iter().map(|pp| pp.number.as_str()).collect();
-    let missing = pads_missing(part.pad_nets.keys().map(String::as_str), &fp_pads);
-    if !missing.is_empty() {
-        return Ok(json!({
-            "error": format!("footprint `{footprint}` lacks pads the part nets: {missing:?}"),
-            "note": "pick a footprint whose pads match the part's pins (search_footprints / get_footprint_info)",
-        }));
-    }
-    part.footprint = footprint.clone();
-    draft.save(ctx)?;
-    Ok(json!({ "ok": true, "reference": reference, "footprint": footprint }))
-}
-
-#[cfg(test)]
-mod pads_missing_tests {
-    use super::pads_missing;
-
-    #[test]
-    fn flags_only_pads_absent_from_the_footprint() {
-        // R-style: pins 1,2 on a footprint with pads 1,2 — nothing missing.
-        assert!(pads_missing(["1", "2"], &["1", "2"]).is_empty());
-        // A pin mapped to a pad the footprint lacks (3 on a 2-pad part) is flagged.
-        assert_eq!(pads_missing(["1", "2", "3"], &["1", "2"]), vec!["3".to_string()]);
-        // BGA-style alphanumeric pads; the inner ball isn't on a perimeter footprint.
-        assert_eq!(
-            pads_missing(["A1", "C5"], &["A1", "A2", "B1"]),
-            vec!["C5".to_string()]
-        );
-        // Result is sorted + deduped.
-        assert_eq!(pads_missing(["5", "5", "4"], &["1"]), vec!["4".to_string(), "5".to_string()]);
-    }
+    Ok(json!({
+        "ok": true,
+        "reference": reference,
+        "footprint": footprint,
+        "edit_design": {
+            "instruction": format!(
+                "Set the circuit YAML component `{reference}` footprint field to `{footprint}`. \
+                 Do not edit PCB files directly; after apply_design, run derive_board to sync the PCB."
+            ),
+            "yaml_field": "footprint",
+            "value": footprint,
+        }
+    }))
 }

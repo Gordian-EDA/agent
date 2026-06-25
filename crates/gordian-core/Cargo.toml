@@ -11,7 +11,6 @@ circuit-lang = { path = "../circuit-lang" }
 kicad-cli = { path = "../kicad-cli" }
 kicad-sexpr = { path = "../kicad-sexpr" }
 kicad-symbol = { path = "../kicad-symbol" }
-pcb-synth = { path = "../pcb-synth" }
 specctra = { path = "../specctra" }
 kicad-ipc = { path = "../kicad-ipc" }
 drc-lint = { path = "../drc-lint" }
@@ -38,6 +37,8 @@ directories.workspace = true
 resvg = { workspace = true }
 base64 = { workspace = true }
 fuzzy-matcher.workspace = true
+prost = "0.13"
+prost-types = "0.13"
 
 [dev-dependencies]
 greedy-place = { path = "../greedy-place" }

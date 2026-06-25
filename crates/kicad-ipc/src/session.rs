@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::{Error, Kicad};
@@ -23,12 +24,123 @@ pub struct Session {
     kicad: Kicad,
 }
 
+/// The single KiCAD board session owner for an agent process.
+///
+/// Callers ask for a board session; the manager attaches to an existing KiCAD
+/// IPC server if possible, otherwise launches a managed headless `pcbnew`.
+pub struct SessionManager {
+    session: Mutex<Option<ManagedSession>>,
+}
+
+struct ManagedSession {
+    board: PathBuf,
+    session: Session,
+}
+
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SessionManager {
+    pub fn new() -> Self {
+        Self {
+            session: Mutex::new(None),
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.session.lock().map(|s| s.is_some()).unwrap_or(false)
+    }
+
+    pub fn open(&self, board: &Path) -> Result<(), Error> {
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| Error::Spawn("KiCAD session manager mutex poisoned".to_string()))?;
+        match session.as_ref() {
+            Some(existing) if same_board(&existing.board, board) => {}
+            Some(existing) => {
+                return Err(Error::Spawn(format!(
+                    "KiCAD session is already bound to {}; refusing to reuse it for {}",
+                    existing.board.display(),
+                    board.display()
+                )));
+            }
+            None => {
+                *session = Some(ManagedSession {
+                    board: board.to_path_buf(),
+                    session: Self::attach_or_launch(board)?,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn with_session<T>(
+        &self,
+        board: &Path,
+        f: impl FnOnce(&mut Session) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| Error::Spawn("KiCAD session manager mutex poisoned".to_string()))?;
+        match session.as_ref() {
+            Some(existing) if same_board(&existing.board, board) => {}
+            Some(existing) => {
+                return Err(Error::Spawn(format!(
+                    "KiCAD session is already bound to {}; refusing to reuse it for {}",
+                    existing.board.display(),
+                    board.display()
+                )));
+            }
+            None => {
+                *session = Some(ManagedSession {
+                    board: board.to_path_buf(),
+                    session: Self::attach_or_launch(board)?,
+                });
+            }
+        }
+        f(&mut session.as_mut().expect("session initialized").session)
+    }
+
+    pub fn save_if_open(&self) -> Result<bool, Error> {
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| Error::Spawn("KiCAD session manager mutex poisoned".to_string()))?;
+        let Some(session) = session.as_mut() else {
+            return Ok(false);
+        };
+        session.session.kicad().save()?;
+        Ok(true)
+    }
+
+    pub fn close(&self) {
+        if let Ok(mut session) = self.session.lock() {
+            *session = None;
+        }
+    }
+
+    fn attach_or_launch(board: &Path) -> Result<Session, Error> {
+        match Session::connect_running_board(board) {
+            Ok(session) => Ok(session),
+            Err(_) => Session::launch_headless(board),
+        }
+    }
+}
+
 impl Session {
     /// Launch a headless KiCAD (`xvfb-run pcbnew <board>`), wait for the IPC
     /// socket, connect, and open the board. The board file must exist.
     pub fn launch_headless(board: &Path) -> Result<Self, Error> {
         if !board.exists() {
-            return Err(Error::Spawn(format!("board not found: {}", board.display())));
+            return Err(Error::Spawn(format!(
+                "board not found: {}",
+                board.display()
+            )));
         }
         ensure_api_enabled();
         // A killed prior instance can leave a stale socket → ConnectionRefused.
@@ -48,8 +160,11 @@ impl Session {
         std::thread::sleep(Duration::from_millis(500));
 
         let mut kicad = Kicad::connect()?;
-        kicad.open_board()?;
-        Ok(Self { child: Some(child), kicad })
+        kicad.open_board_path(board)?;
+        Ok(Self {
+            child: Some(child),
+            kicad,
+        })
     }
 
     /// Attach to an already-running KiCAD (the local GUI, or a `kicad-cli
@@ -57,6 +172,13 @@ impl Session {
     pub fn connect_running() -> Result<Self, Error> {
         let mut kicad = Kicad::connect()?;
         kicad.open_board()?;
+        Ok(Self { child: None, kicad })
+    }
+
+    /// Attach to an already-running KiCAD only if it has `board` open.
+    pub fn connect_running_board(board: &Path) -> Result<Self, Error> {
+        let mut kicad = Kicad::connect()?;
+        kicad.open_board_path(board)?;
         Ok(Self { child: None, kicad })
     }
 
@@ -77,6 +199,13 @@ impl Session {
     }
 }
 
+fn same_board(a: &Path, b: &Path) -> bool {
+    if let (Ok(a), Ok(b)) = (a.canonicalize(), b.canonicalize()) {
+        return a == b;
+    }
+    a == b
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
@@ -91,15 +220,33 @@ impl Drop for Session {
 /// server actually binds. Idempotent; silent on any failure (the connect step
 /// surfaces a clear error if the server never comes up).
 fn ensure_api_enabled() {
-    let Some(home) = std::env::var_os("HOME") else { return };
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
     let cfg_root = PathBuf::from(home).join(".config/kicad");
-    let Ok(versions) = std::fs::read_dir(&cfg_root) else { return };
+    let Ok(versions) = std::fs::read_dir(&cfg_root) else {
+        return;
+    };
     for v in versions.flatten() {
         let cfg = v.path().join("kicad_common.json");
-        let Ok(text) = std::fs::read_to_string(&cfg) else { continue };
+        let Ok(text) = std::fs::read_to_string(&cfg) else {
+            continue;
+        };
         if text.contains("\"enable_server\": false") {
             let patched = text.replace("\"enable_server\": false", "\"enable_server\": true");
             let _ = std::fs::write(&cfg, patched);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionManager;
+
+    #[test]
+    fn manager_starts_without_open_session() {
+        let manager = SessionManager::new();
+
+        assert!(!manager.is_open());
     }
 }

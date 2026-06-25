@@ -10,13 +10,13 @@
 //! of the amplified engine's energy, but the two engines are independently evolvable — the
 //! weights are copied, not factored into a shared type.
 
-use sch_place::item::{Incidence, Item};
 use sch_place::ir::Orient;
+use sch_place::item::{Incidence, Item};
 use sch_place::place::{Crossings, PlaceProblem, PlaceResult};
 
 use sch_floorplan::contract::{
-    build_writer, item_rect, orient_angle, overlaps_any, rects_overlap, signal_anchor_centroid,
-    supply_pin_target, PlacementEngine, RawMetrics, Realizer, COL_GAP, GRID_KEY, ROW_GAP,
+    COL_GAP, GRID_KEY, PlacementEngine, ROW_GAP, RawMetrics, Realizer, build_writer, item_rect,
+    orient_angle, overlaps_any, rects_overlap, signal_anchor_centroid, supply_pin_target,
 };
 
 /// Geometry coincidence tolerance (mm) — greedy's own copy of the shared 1e-6 epsilon.
@@ -103,8 +103,9 @@ fn report(engine: &str, r: &Realizer, items: &[Item]) -> PlaceResult {
 /// improvement of the REAL routed cost. Anchors hold. Operating directly on mm means
 /// the objective IS the geometry that ships.
 fn refine_items(r: &Realizer, items: &mut [Item]) {
-    let satellites: Vec<usize> =
-        (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen).collect();
+    let satellites: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
+        .collect();
     if satellites.is_empty() {
         return;
     }
@@ -114,9 +115,14 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
         let mut improved = false;
         // Single-part nudges: shift one satellite by one cell-step (grid-snapped).
         for &i in &satellites {
-            for d in [[COL_GAP, 0.0], [-COL_GAP, 0.0], [0.0, ROW_GAP], [0.0, -ROW_GAP]] {
+            for d in [
+                [COL_GAP, 0.0],
+                [-COL_GAP, 0.0],
+                [0.0, ROW_GAP],
+                [0.0, -ROW_GAP],
+            ] {
                 let prev = items[i].at;
-                items[i].at = [snap(prev[0] + d[0]), snap(prev[1] + d[1])];
+                items[i].at = [snap(prev[0] + d[0]), snap(prev[1] + d[1])].into();
                 let c = cost(r, items);
                 if c + 0.5 < best {
                     best = c;
@@ -169,7 +175,7 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
                 let nx = snap(2.0 * ax - items[i].at[0]);
                 if (nx - items[i].at[0]).abs() > EPS {
                     let prev = items[i].at;
-                    items[i].at = [nx, prev[1]];
+                    items[i].at = [nx, prev[1]].into();
                     let c = cost(r, items);
                     if c + 0.5 < best {
                         best = c;
@@ -212,7 +218,9 @@ fn anchor_x(items: &[Item], inc: &Incidence, i: usize) -> Option<f64> {
 /// this closes the slack between them. Strictly cost-gated, so it only ever
 /// tightens — it can never regress a layout the optimiser already settled.
 fn compact(r: &Realizer, items: &mut [Item]) {
-    let sats: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen).collect();
+    let sats: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
+        .collect();
     if sats.is_empty() {
         return;
     }
@@ -246,7 +254,7 @@ fn compact(r: &Realizer, items: &mut [Item]) {
                 {
                     continue;
                 }
-                items[i].at = p;
+                items[i].at = p.into();
                 let sc = cost(r, items);
                 if sc + 0.25 < best {
                     best = sc;
@@ -295,7 +303,9 @@ fn polish(r: &Realizer, items: &mut [Item]) {
 /// step sideways to uncross a wire), which is the extra freedom `polish` adds over
 /// the old align-then-compact.
 fn free_nudge(r: &Realizer, items: &mut [Item]) {
-    let sats: Vec<usize> = (0..items.len()).filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen).collect();
+    let sats: Vec<usize> = (0..items.len())
+        .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
+        .collect();
     if sats.is_empty() {
         return;
     }
@@ -319,7 +329,7 @@ fn free_nudge(r: &Realizer, items: &mut [Item]) {
                 {
                     continue;
                 }
-                items[i].at = p;
+                items[i].at = p.into();
                 let c = cost(r, items);
                 if c + 0.25 < best_cost {
                     best_cost = c;
@@ -348,15 +358,22 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
     let env = r.env();
     let inc = r.incidence();
     let ir = r.ir();
-    let Ok(w0) = build_writer(env, None, items, inc, ir, r.needs_flag(), false) else { return };
+    let Ok(w0) = build_writer(env, None, items, inc, ir, r.needs_flag(), false) else {
+        return;
+    };
     // Per satellite: is it vertical, and where is its signal-pin target?
     let mut plans: Vec<(usize, bool, [f64; 2])> = Vec::new();
     for (si, s) in items.iter().enumerate() {
         if s.geom.pins.len() != 2 {
             continue;
         }
-        let pos = |n: &str| w0.pin_dirs(env, &s.refdes, n).ok().and_then(|v| v.first().map(|x| x.0));
-        let (Some(p0), Some(p1)) = (pos(&s.geom.pins[0].number), pos(&s.geom.pins[1].number)) else {
+        let pos = |n: &str| {
+            w0.pin_dirs(env, &s.refdes, n)
+                .ok()
+                .and_then(|v| v.first().map(|x| x.0))
+        };
+        let (Some(p0), Some(p1)) = (pos(&s.geom.pins[0].number), pos(&s.geom.pins[1].number))
+        else {
             continue;
         };
         let vertical = (p0[1] - p1[1]).abs() >= (p0[0] - p1[0]).abs();
@@ -393,7 +410,7 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
             if (p[axis] - goal) * dir > EPS || overlaps_any(items, si, p) {
                 break;
             }
-            items[si].at = p;
+            items[si].at = p.into();
             let c = cost(r, items);
             if c + 0.5 < best_cost {
                 best_cost = c;

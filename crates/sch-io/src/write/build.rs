@@ -4,14 +4,14 @@
 
 use std::io;
 
+use geom::{Point2, Rect};
 use kicad_cli::env::KicadEnv;
 use kicad_symbol::geometry::{PinGeom, SymbolGeometry};
 
 use crate::grid::snap_point;
 
 use super::{
-    Dir, Instance, Junction, NoConnect, PinLabel, SchematicWriter, SheetRect, SheetText, Stub,
-    Wire,
+    Dir, Instance, Junction, NoConnect, PinLabel, SchematicWriter, SheetRect, SheetText, Stub, Wire,
 };
 
 // `transform_offset` is re-exported through `super` from `sch_place::geom`.
@@ -33,10 +33,20 @@ impl SchematicWriter {
         lib_id: &str,
         refdes: &str,
         value: &str,
-        at: [f64; 2],
+        at: impl Into<Point2>,
         angle: f64,
     ) -> io::Result<()> {
-        self.add_symbol_full(env, lib_id, refdes, value, at, angle, None, &[], None)
+        self.add_symbol_full(
+            env,
+            lib_id,
+            refdes,
+            value,
+            at.into(),
+            angle,
+            None,
+            &[],
+            None,
+        )
     }
 
     /// Place one symbol instance with reconciliation metadata.
@@ -59,26 +69,32 @@ impl SchematicWriter {
         lib_id: &str,
         refdes: &str,
         value: &str,
-        at: [f64; 2],
+        at: impl Into<Point2>,
         angle: f64,
         footprint: Option<&str>,
         extra_props: &[(String, String)],
         uuid: Option<String>,
     ) -> io::Result<()> {
+        let at = at.into();
         // Register the lib_symbol body once per lib_id (dedup). The same branch
         // caches the symbol's approximate size by lib_id so field placement need
         // not reload geometry per instance.
         if !self.lib_symbols.contains_key(lib_id) {
             let geom = SymbolGeometry::load(env, lib_id)?;
-            self.sym_sizes.insert(lib_id.to_string(), geom.approx_size());
+            self.sym_sizes
+                .insert(lib_id.to_string(), geom.approx_size());
             self.sym_pins.insert(lib_id.to_string(), geom.pins.clone());
             self.lib_symbols
                 .insert(lib_id.to_string(), geom.raw_definition);
         }
 
         // Cached above on the first instance of this lib_id; reused for the rest.
-        let size = self.sym_sizes.get(lib_id).copied().unwrap_or([0.0, 0.0]);
-        let half_extents = [size[0] / 2.0, size[1] / 2.0];
+        let size = self
+            .sym_sizes
+            .get(lib_id)
+            .copied()
+            .unwrap_or(Point2::new(0.0, 0.0));
+        let half_extents = Point2::new(size.x / 2.0, size.y / 2.0);
 
         self.instances.push(Instance {
             lib_id: lib_id.to_string(),
@@ -186,7 +202,7 @@ impl SchematicWriter {
         for (idx, (ep, dir)) in self.pin_dirs(env, refdes, pin)?.into_iter().enumerate() {
             let ep = snap_point(ep);
             let v = dir.vec();
-            let end = snap_point([ep[0] + v[0] * STUB_MM, ep[1] + v[1] * STUB_MM]);
+            let end = snap_point(Point2::new(ep.x + v.x * STUB_MM, ep.y + v.y * STUB_MM));
             self.labels.push(PinLabel {
                 net: net.to_string(),
                 at: end,
@@ -212,11 +228,14 @@ impl SchematicWriter {
         lib_id: &str,
         refdes: &str,
         net: &str,
-        at: [f64; 2],
+        at: impl Into<Point2>,
         angle: f64,
     ) -> io::Result<()> {
-        debug_assert!(refdes.starts_with('#'), "power symbol refdes must be #-prefixed, got {refdes:?}");
-        self.add_symbol(env, lib_id, refdes, net, at, angle)
+        debug_assert!(
+            refdes.starts_with('#'),
+            "power symbol refdes must be #-prefixed, got {refdes:?}"
+        );
+        self.add_symbol(env, lib_id, refdes, net, at.into(), angle)
     }
 
     /// Place a `PWR_FLAG` whose pin is **pin-coincident** with `at`.
@@ -229,10 +248,10 @@ impl SchematicWriter {
         &mut self,
         env: &KicadEnv,
         refdes: &str,
-        at: [f64; 2],
+        at: impl Into<Point2>,
         angle: f64,
     ) -> io::Result<()> {
-        self.add_symbol(env, "power:PWR_FLAG", refdes, "PWR_FLAG", at, angle)
+        self.add_symbol(env, "power:PWR_FLAG", refdes, "PWR_FLAG", at.into(), angle)
     }
 
     /// Add a wire segment between two sheet points (snapped).
@@ -241,27 +260,32 @@ impl SchematicWriter {
     /// dropped (a zero-length wire would clutter the schematic with no benefit).
     /// The `uuid_key` is content-derived so repeated calls with the same
     /// endpoints produce one deterministic wire.
-    pub fn add_wire(&mut self, a: [f64; 2], b: [f64; 2]) {
-        self.push_wire(a, b, None);
+    pub fn add_wire(&mut self, a: impl Into<Point2>, b: impl Into<Point2>) {
+        self.push_wire(a.into(), b.into(), None);
     }
 
     /// Add a wire that belongs to a known net (cluster geometry). Same-net
     /// touches against it are deliberate joins, not collisions.
-    pub fn add_wire_on_net(&mut self, a: [f64; 2], b: [f64; 2], net: &str) {
-        self.push_wire(a, b, Some(net.to_string()));
+    pub fn add_wire_on_net(&mut self, a: impl Into<Point2>, b: impl Into<Point2>, net: &str) {
+        self.push_wire(a.into(), b.into(), Some(net.to_string()));
     }
 
-    fn push_wire(&mut self, a: [f64; 2], b: [f64; 2], net: Option<String>) {
+    fn push_wire(&mut self, a: Point2, b: Point2, net: Option<String>) {
         let a = snap_point(a);
         let b = snap_point(b);
         if a == b {
             return;
         }
-        let uuid_key = format!("{}:{}:{}:{}", a[0], a[1], b[0], b[1]);
+        let uuid_key = format!("{}:{}:{}:{}", a.x, a.y, b.x, b.y);
         if self.wires.iter().any(|w| w.uuid_key == uuid_key) {
             return;
         }
-        self.wires.push(Wire { a, b, uuid_key, net });
+        self.wires.push(Wire {
+            a,
+            b,
+            uuid_key,
+            net,
+        });
     }
 
     /// Place a cluster net label at `at`, oriented `dir`.
@@ -271,12 +295,12 @@ impl SchematicWriter {
     /// joins to the rest of the sheet without per-pin label spam. The label is
     /// keyed on `cluster:{net}:{x}:{y}` (position-derived) and carries no stub —
     /// it sits directly on the cluster wire it labels.
-    pub fn add_cluster_label(&mut self, net: &str, at: [f64; 2], dir: Dir, global: bool) {
-        let at = snap_point(at);
+    pub fn add_cluster_label(&mut self, net: &str, at: impl Into<Point2>, dir: Dir, global: bool) {
+        let at = snap_point(at.into());
         self.labels.push(PinLabel {
             net: net.to_string(),
             at,
-            uuid_key: format!("cluster:{net}:{}:{}", at[0], at[1]),
+            uuid_key: format!("cluster:{net}:{}:{}", at.x, at.y),
             dir,
             stub: None,
             global,
@@ -284,9 +308,9 @@ impl SchematicWriter {
     }
 
     /// Add a junction dot at a wire join. Deduplicated by position.
-    pub fn add_junction(&mut self, at: [f64; 2]) {
-        let at = snap_point(at);
-        let uuid_key = format!("{}:{}", at[0], at[1]);
+    pub fn add_junction(&mut self, at: impl Into<Point2>) {
+        let at = snap_point(at.into());
+        let uuid_key = format!("{}:{}", at.x, at.y);
         if self.junctions.iter().any(|j| j.uuid_key == uuid_key) {
             return;
         }
@@ -299,10 +323,17 @@ impl SchematicWriter {
     }
 
     /// Add free-standing text to the sheet.
-    pub fn add_text(&mut self, text: &str, at: [f64; 2], size: f64, bold: bool, key: &str) {
+    pub fn add_text(
+        &mut self,
+        text: &str,
+        at: impl Into<Point2>,
+        size: f64,
+        bold: bool,
+        key: &str,
+    ) {
         self.texts.push(SheetText {
             text: text.to_string(),
-            at: snap_point(at),
+            at: snap_point(at.into()),
             size,
             bold,
             uuid_key: key.to_string(),
@@ -310,10 +341,10 @@ impl SchematicWriter {
     }
 
     /// Add a graphic rectangle (no fill, dashed) to the sheet.
-    pub fn add_rect(&mut self, start: [f64; 2], end: [f64; 2], key: &str) {
+    pub fn add_rect(&mut self, start: impl Into<Point2>, end: impl Into<Point2>, key: &str) {
         self.rects.push(SheetRect {
-            start: snap_point(start),
-            end: snap_point(end),
+            start: snap_point(start.into()),
+            end: snap_point(end.into()),
             uuid_key: key.to_string(),
         });
     }
@@ -450,7 +481,7 @@ impl SchematicWriter {
     /// position/orientation/mirror into a grid-snapped sheet point. Shared by
     /// label, no-connect, and power-flag emission so they always agree on where a
     /// pin's connection point lands.
-    fn pin_endpoints(&self, env: &KicadEnv, refdes: &str, pin: &str) -> io::Result<Vec<[f64; 2]>> {
+    fn pin_endpoints(&self, env: &KicadEnv, refdes: &str, pin: &str) -> io::Result<Vec<Point2>> {
         let any = self
             .instances
             .iter()
@@ -488,13 +519,16 @@ impl SchematicWriter {
         // misplaced no_connect over a connected feedback pin). Fall back to `any` for an
         // unplaced unit / single-unit part (byte-identical there). Mirrors `pin_dirs`.
         let inst_for = |u: u8| -> &Instance {
-            self.instances.iter().find(|i| i.refdes == refdes && i.unit == u).unwrap_or(any)
+            self.instances
+                .iter()
+                .find(|i| i.refdes == refdes && i.unit == u)
+                .unwrap_or(any)
         };
         Ok(matches
             .into_iter()
             .map(|pg| {
                 let inst = inst_for(pg.unit.max(1));
-                pin_endpoint(pg, inst.at, inst.angle, inst.mirror)
+                Point2::from(pin_endpoint(pg, inst.at, inst.angle, inst.mirror))
             })
             .collect())
     }
@@ -526,12 +560,12 @@ impl SchematicWriter {
             }
             let h = rotated_half_extents(inst.half_extents, inst.angle);
             let (hx, hy) = ((h[0] - 2.54).max(1.27), (h[1] - 2.54).max(1.27));
-            scene.solids.push([
+            scene.solids.push(Rect::new(
                 inst.at[0] - hx,
                 inst.at[1] - hy,
                 inst.at[0] + hx,
                 inst.at[1] + hy,
-            ]);
+            ));
         }
         // A no-connect X is a glyph with real extent, owned by no net. Register it
         // both as a foreign anchor point (a wire may not pass exactly through it) AND
@@ -542,7 +576,12 @@ impl SchematicWriter {
         for nc in &self.no_connects {
             scene.points.push((nc.at, NC.to_string()));
             scene.label_solids.push((
-                [nc.at[0] - NC_KEEPOUT, nc.at[1] - NC_KEEPOUT, nc.at[0] + NC_KEEPOUT, nc.at[1] + NC_KEEPOUT],
+                Rect::new(
+                    nc.at[0] - NC_KEEPOUT,
+                    nc.at[1] - NC_KEEPOUT,
+                    nc.at[0] + NC_KEEPOUT,
+                    nc.at[1] + NC_KEEPOUT,
+                ),
                 NC.to_string(),
             ));
         }
@@ -564,7 +603,7 @@ impl SchematicWriter {
         self.wires
             .iter()
             .filter(|w| w.net.as_deref() == Some(net))
-            .map(|w| (w.a, w.b))
+            .map(|w| (w.a.into(), w.b.into()))
             .collect()
     }
 
@@ -576,7 +615,7 @@ impl SchematicWriter {
     /// Junction-dot positions (for the scorer's merge check: a junction sitting
     /// on wires of two different nets fuses them).
     pub fn junction_positions(&self) -> Vec<[f64; 2]> {
-        self.junctions.iter().map(|j| j.at).collect()
+        self.junctions.iter().map(|j| j.at.into()).collect()
     }
 
     /// Count of plain (non-global) labels — i.e. signal-label fallbacks where the
@@ -603,7 +642,10 @@ impl SchematicWriter {
     /// Every drawn wire segment with its net (`None` for unattributed power
     /// stubs). For the refinement scorer's crossing / length / short metrics.
     pub fn wires_with_nets(&self) -> Vec<([f64; 2], [f64; 2], Option<String>)> {
-        self.wires.iter().map(|w| (w.a, w.b, w.net.clone())).collect()
+        self.wires
+            .iter()
+            .map(|w| (w.a.into(), w.b.into(), w.net.clone()))
+            .collect()
     }
 
     /// Absorb every drawn element of `other` into `self` (lib_symbols merged by
@@ -641,7 +683,11 @@ impl SchematicWriter {
             .enumerate()
             .filter_map(|(i, inst)| {
                 (inst.lib_id == "power:PWR_FLAG")
-                    .then(|| inst.refdes.strip_prefix("#FLG_").map(|n| (n.to_string(), i)))
+                    .then(|| {
+                        inst.refdes
+                            .strip_prefix("#FLG_")
+                            .map(|n| (n.to_string(), i))
+                    })
                     .flatten()
             })
             .collect()
@@ -682,17 +728,21 @@ impl SchematicWriter {
     /// translate a fully-laid-out group writer to its tile in mm — no string
     /// geometry math. Caller keeps the shift grid-aligned to stay on the KiCAD grid.
     pub fn translate(&mut self, dx: f64, dy: f64) {
-        let sh = |p: &mut [f64; 2]| {
+        let sh = |p: &mut Point2| {
+            p.x += dx;
+            p.y += dy;
+        };
+        let sha = |p: &mut [f64; 2]| {
             p[0] += dx;
             p[1] += dy;
         };
         for i in &mut self.instances {
             sh(&mut i.at);
             if let Some(p) = &mut i.ref_pos {
-                sh(&mut p.at);
+                sha(&mut p.at);
             }
             if let Some(p) = &mut i.val_pos {
-                sh(&mut p.at);
+                sha(&mut p.at);
             }
         }
         for w in &mut self.wires {
@@ -741,7 +791,7 @@ pub fn pin_end0(env: &KicadEnv, lib_id: &str, pin: &str) -> io::Result<Vec<[f64;
     };
     Ok(matches
         .into_iter()
-        .map(|pg| transform_offset(pg.at, 0.0, false))
+        .map(|pg| <[f64; 2]>::from(transform_offset(pg.at, 0.0, false)))
         .collect())
 }
 
@@ -801,9 +851,15 @@ pub fn quantize_dir(pin_angle: f64, inst_angle: f64, mirror: bool) -> Dir {
 /// spike's proven form. Angles are restricted to 0/90/180/270 in practice, so
 /// the sin/cos are exact (±1, 0) and the result stays on the grid; we still snap
 /// to absorb floating-point dust.
-pub fn pin_endpoint(pin: &PinGeom, inst_at: [f64; 2], inst_angle: f64, mirror: bool) -> [f64; 2] {
+pub fn pin_endpoint(
+    pin: &PinGeom,
+    inst_at: impl Into<Point2>,
+    inst_angle: f64,
+    mirror: bool,
+) -> [f64; 2] {
+    let inst_at = inst_at.into();
     let off = transform_offset(pin.at, inst_angle, mirror);
-    snap_point([inst_at[0] + off[0], inst_at[1] + off[1]])
+    snap_point(Point2::new(inst_at.x + off[0], inst_at.y + off[1])).into()
 }
 
 #[cfg(test)]
@@ -828,7 +884,7 @@ mod tests {
         PinGeom {
             number: "1".to_string(),
             name: "~".to_string(),
-            at: [x, y],
+            at: [x, y].into(),
             angle: 0.0,
             length: 1.27,
             unit: 1,
@@ -883,8 +939,10 @@ mod tests {
     fn pin_outward_directions_quantize_per_rotation() {
         let Some(env) = detect_env() else { return };
         let mut w = SchematicWriter::new();
-        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0).unwrap();
-        w.add_symbol(&env, "Device:R", "R2", "1k", [101.6, 63.5], 90.0).unwrap();
+        w.add_symbol(&env, "Device:R", "R1", "1k", [127.0, 63.5], 0.0)
+            .unwrap();
+        w.add_symbol(&env, "Device:R", "R2", "1k", [101.6, 63.5], 90.0)
+            .unwrap();
         let d1 = w.pin_dirs(&env, "R1", "1").unwrap();
         // Device:R pin 1 (local (0, 3.81), angle 270) at instance angle 0:
         // endpoint is above the body, outward points up -> North on the sheet.

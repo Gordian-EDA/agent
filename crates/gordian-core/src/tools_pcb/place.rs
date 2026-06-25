@@ -6,22 +6,127 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use serde_json::{Value, json};
 
+use kicad_ipc::FootprintMove;
+use kicad_sexpr::footlib::{BBox, Footprint, FootprintPad, PadTechnology};
+use pcb_model::LayerRef;
+use pcb_model::place::PartPad;
 use pcb_place::placement::{Part, PlaceProblem, Placement, Rect};
-use pcb_model::{LayerRef, RouteProblem};
-use pcb_synth::placefp::part_from_footprint_layers;
 
 use crate::tools::PcbToolCtx;
 
 use super::create::net_pin_counts;
 use super::draft::BoardDraft;
 
+fn part_from_footprint_layers(
+    footprint: &Footprint,
+    reference: &str,
+    net_map: &BTreeMap<String, String>,
+    layer_count: u32,
+) -> Part {
+    let pads = footprint
+        .pads
+        .iter()
+        .map(|pad| part_pad(pad, net_map, layer_count))
+        .collect();
+    let (courtyard_w, courtyard_h) = enclosing_courtyard(footprint);
+    Part {
+        reference: reference.to_owned(),
+        courtyard_w,
+        courtyard_h,
+        pads,
+        locked: None,
+    }
+}
+
+fn part_pad(pad: &FootprintPad, net_map: &BTreeMap<String, String>, layer_count: u32) -> PartPad {
+    PartPad {
+        number: pad.number.clone(),
+        offset: pcb_model::Point2 {
+            x: pad.at[0],
+            y: pad.at[1],
+        },
+        width: pad.size[0],
+        height: pad.size[1],
+        layers: pad_layers(pad, layer_count),
+        net: net_map.get(&pad.number).cloned(),
+    }
+}
+
+fn all_copper_layers(layer_count: u32) -> Vec<LayerRef> {
+    let n = layer_count.max(2);
+    let mut layers = vec![LayerRef::top()];
+    for i in 1..=(n.saturating_sub(2)) {
+        layers.push(LayerRef(format!("inner{i}")));
+    }
+    layers.push(LayerRef::bottom());
+    layers
+}
+
+fn pad_layers(pad: &FootprintPad, layer_count: u32) -> Vec<LayerRef> {
+    let spans_all = matches!(
+        pad.technology,
+        PadTechnology::ThruHole | PadTechnology::NpThruHole
+    ) || pad.layers.iter().any(|l| l == "*.Cu");
+    if spans_all {
+        return all_copper_layers(layer_count);
+    }
+    let on_front = pad.layers.iter().any(|l| l == "F.Cu");
+    let on_back = pad.layers.iter().any(|l| l == "B.Cu");
+    match (on_front, on_back) {
+        (true, true) => all_copper_layers(layer_count),
+        (false, true) => vec![LayerRef::bottom()],
+        _ => vec![LayerRef::top()],
+    }
+}
+
+fn enclosing_courtyard(footprint: &Footprint) -> (f64, f64) {
+    let (mut hw, mut hh) = abs_half(&footprint.courtyard);
+    if let Some(pad_bbox) = pad_bbox(&footprint.pads) {
+        let (pw, ph) = abs_half(&pad_bbox);
+        hw = hw.max(pw);
+        hh = hh.max(ph);
+    }
+    (hw * 2.0, hh * 2.0)
+}
+
+fn abs_half(b: &BBox) -> (f64, f64) {
+    (
+        b.min_x.abs().max(b.max_x.abs()),
+        b.min_y.abs().max(b.max_y.abs()),
+    )
+}
+
+fn pad_bbox(pads: &[FootprintPad]) -> Option<BBox> {
+    let mut it = pads.iter();
+    let first = it.next()?;
+    let mut bbox = pad_aabb(first);
+    for pad in it {
+        let p = pad_aabb(pad);
+        bbox.min_x = bbox.min_x.min(p.min_x);
+        bbox.min_y = bbox.min_y.min(p.min_y);
+        bbox.max_x = bbox.max_x.max(p.max_x);
+        bbox.max_y = bbox.max_y.max(p.max_y);
+    }
+    Some(bbox)
+}
+
+fn pad_aabb(pad: &FootprintPad) -> BBox {
+    let [cx, cy] = pad.at;
+    let (hw, hh) = geom::rotated_aabb_half(pad.size[0], pad.size[1], pad.rotation);
+    BBox {
+        min_x: cx - hw,
+        min_y: cy - hh,
+        max_x: cx + hw,
+        max_y: cy + hh,
+    }
+}
+
 // ── get_board ────────────────────────────────────────────────────────────────
 
 pub fn get_board(ctx: &PcbToolCtx) -> Result<Value> {
-    let Some(draft) = BoardDraft::load(ctx) else {
-        return Ok(json!({
-            "error": "no board draft yet — run derive_board first",
-        }));
+    let draft = match super::active::draft_from_live(ctx) {
+        Ok(draft) => draft,
+        Err(err) => return Ok(json!({ "error": err })),
     };
 
     let net_pins = net_pin_counts(&draft.parts, ctx);
@@ -31,9 +136,13 @@ pub fn get_board(ctx: &PcbToolCtx) -> Result<Value> {
         .collect();
 
     let placed = draft.last_placement.is_some();
-    // Routed state lives in a separate workspace file (route.json, Task 2);
-    // for now report routed=false unless that file exists.
-    let routed = ctx.workspace().read_route().is_some();
+    // Routed state is read from the active KiCAD board.
+    let routed = ctx
+        .kicad()
+        .with_session(&ctx.pcb_path(), |session| {
+            Ok(session.kicad().tracks()?.len() > 0)
+        })
+        .unwrap_or(false);
 
     // Lean draft view: each part's pad→net map is exactly what the model itself passed to
     // create_board, so echoing it back on every get_board call only re-bloats the context
@@ -143,44 +252,14 @@ fn routing_bounds(draft: &BoardDraft) -> Rect {
     }
     let b = &draft.bounds;
     // Never invert a small board: clamp the inset so min stays < max.
-    let inset = EDGE_CLEAR_MM.min((b.max_x - b.min_x) / 2.0 - 0.1).min((b.max_y - b.min_y) / 2.0 - 0.1);
+    let inset = EDGE_CLEAR_MM
+        .min((b.max_x - b.min_x) / 2.0 - 0.1)
+        .min((b.max_y - b.min_y) / 2.0 - 0.1);
     Rect {
         min_x: b.min_x + inset,
         max_x: b.max_x - inset,
         min_y: b.min_y + inset,
         max_y: b.max_y - inset,
-    }
-}
-
-/// Grow `rp.bounds` ONLY when a placed obstacle falls OUTSIDE the declared frame, so the
-/// routing grid covers a placement the fan-out expanded past `bounds` (else its pads are
-/// clamped onto the grid edge and unroutable — the bga64 fields: balls at x≈91 on a 46 mm
-/// frame). A board whose obstacles already fit is left BYTE-IDENTICAL (the grow runs only
-/// per-axis when that axis overflows), so no in-bounds board's grid shifts. The overflow
-/// side grows to the obstacle edge + a board-edge margin (copper off the finished edge).
-pub(super) fn fit_bounds_to_obstacles(rp: &mut RouteProblem) {
-    let (mut mnx, mut mxx, mut mny, mut mxy) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-    for ob in &rp.obstacles {
-        mnx = mnx.min(ob.center.x - ob.width / 2.0);
-        mxx = mxx.max(ob.center.x + ob.width / 2.0);
-        mny = mny.min(ob.center.y - ob.height / 2.0);
-        mxy = mxy.max(ob.center.y + ob.height / 2.0);
-    }
-    if !mnx.is_finite() {
-        return; // no obstacles
-    }
-    let b = &mut rp.bounds;
-    if mnx < b.min_x {
-        b.min_x = mnx - EDGE_CLEAR_MM;
-    }
-    if mxx > b.max_x {
-        b.max_x = mxx + EDGE_CLEAR_MM;
-    }
-    if mny < b.min_y {
-        b.min_y = mny - EDGE_CLEAR_MM;
-    }
-    if mxy > b.max_y {
-        b.max_y = mxy + EDGE_CLEAR_MM;
     }
 }
 
@@ -221,10 +300,9 @@ fn is_mounting_hole(footprint: &str) -> bool {
 }
 
 pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
-    let Some(mut draft) = BoardDraft::load(ctx) else {
-        return Ok(json!({
-            "error": "no board draft yet — run derive_board first",
-        }));
+    let draft = match super::active::draft_from_live(ctx) {
+        Ok(draft) => draft,
+        Err(live_err) => return Ok(json!({ "error": live_err })),
     };
 
     let problem = match place_problem_from_draft(&draft, ctx) {
@@ -278,12 +356,22 @@ pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // overrides any of this with the interactive geometry tools (move_part/route_track).
     let result = pcb_place::placement::place_board(&problem, &hints);
 
-    // Persist the placement into the draft so route_board / render_board / a
-    // later get_board can read it without re-running the placer.
-    draft.last_placement = Some(result.placements.clone());
-    draft.last_place_illegal = !result.legal;
-    draft.save(ctx)?;
-
+    let moves: Vec<FootprintMove> = result
+        .placements
+        .iter()
+        .map(|p| FootprintMove {
+            reference: p.reference.clone(),
+            x_nm: (p.at.x * 1_000_000.0).round() as i64,
+            y_nm: (p.at.y * 1_000_000.0).round() as i64,
+            rotation_deg: Some(p.rotation as f64),
+        })
+        .collect();
+    if let Err(e) = ctx.kicad().with_session(&ctx.pcb_path(), |session| {
+        session.kicad().move_footprints(&moves)?;
+        session.kicad().save()
+    }) {
+        return Ok(json!({ "error": format!("could not write placement to KiCAD: {e}") }));
+    }
     let positions: Vec<Value> = result.placements.iter().map(placement_json).collect();
 
     // Discoverability: if a legal placement has a decoupling-heavy IC whose caps the
@@ -299,8 +387,10 @@ pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         for (ic, caps) in by_ic {
             if caps.len() >= 4 && caps.iter().all(|&c| problem.parts[c].locked.is_none()) {
                 let ic_ref = problem.parts[ic].reference.clone();
-                let cap_refs: Vec<String> =
-                    caps.iter().map(|&c| problem.parts[c].reference.clone()).collect();
+                let cap_refs: Vec<String> = caps
+                    .iter()
+                    .map(|&c| problem.parts[c].reference.clone())
+                    .collect();
                 hint_suggestions.push(json!({
                     "type": "surround",
                     "target": ic_ref,
@@ -326,8 +416,16 @@ pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             .iter()
             .map(|p| p.courtyard_w * p.courtyard_h)
             .sum();
-        let max_w = problem.parts.iter().map(|p| p.courtyard_w).fold(0.0, f64::max);
-        let max_h = problem.parts.iter().map(|p| p.courtyard_h).fold(0.0, f64::max);
+        let max_w = problem
+            .parts
+            .iter()
+            .map(|p| p.courtyard_w)
+            .fold(0.0, f64::max);
+        let max_h = problem
+            .parts
+            .iter()
+            .map(|p| p.courtyard_h)
+            .fold(0.0, f64::max);
         let cw = (problem.bounds.max_x - problem.bounds.min_x).max(0.1);
         let ch = (problem.bounds.max_y - problem.bounds.min_y).max(0.1);
         // ~2x the courtyard area leaves room for spacing, refdes gaps, and routing;

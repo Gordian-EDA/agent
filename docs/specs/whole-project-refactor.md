@@ -48,7 +48,6 @@ crates/
     drc-lint         clearance/width/via/connectivity DRC               : DrcOracle[free]
     freerouting      Specctra bridge + LocalJar backend                 : Router  [free]
     pcb-svg          diagnostic board render (engine view + failures)            [free]
-    pcb-synth        BoardDraft -> .kicad_pcb (planes/zones/outline/silk)        [free]
     anneal-place     simulated-annealing board placement                : Placer  [premium]
     fanout-place     radial fan-out placement (the 8-9/10 placer)       : Placer  [premium]
     negotiated-mesh  negotiated rip-up/reroute over a quadtree capacity mesh : Router [premium]
@@ -79,7 +78,7 @@ crates/
 | placement (premium) | anneal-place · fanout-place | floorplan-anneal | — |
 | routing (free) | grid-astar · freerouting | elbow-route | — |
 | routing (premium) | negotiated-mesh · freerouting-hosted | — | — |
-| emit -> KiCAD | pcb-synth | sch-emit | kicad-sexpr |
+| emit -> KiCAD | kicad-sexpr / live KiCAD IPC | sch-emit | kicad-sexpr |
 | read <- KiCAD | (kicad-sexpr) | sch-lift | kicad-sexpr |
 | library | (footprint) | (symbol) | kicad-sexpr + kicad-lib-index |
 | correctness | drc-lint | sch-erc | — |

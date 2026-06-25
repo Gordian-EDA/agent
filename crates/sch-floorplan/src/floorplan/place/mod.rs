@@ -146,7 +146,7 @@ mod grid_tests {
             .map(|k| kicad_symbol::geometry::PinGeom {
                 number: (k + 1).to_string(),
                 name: nets[k].to_string(),
-                at: [0.0, 0.0],
+                at: [0.0, 0.0].into(),
                 angle: 0.0,
                 length: 2.54,
                 unit: 1,
@@ -159,7 +159,7 @@ mod grid_tests {
             footprint: None,
             geom: SymbolGeometry { lib_id: part.into(), pins: geom_pins, raw_definition: String::new() },
             pins,
-            at,
+            at: at.into(),
             angle: 0.0,
             unit: 1,
             mirror: false,

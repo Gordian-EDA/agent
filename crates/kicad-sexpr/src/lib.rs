@@ -1,8 +1,8 @@
 //! KiCAD s-expr **PCB-side** file access: read/write `.kicad_pcb` ([`pcb`]) and
 //! footprint `.kicad_mod` libraries ([`footlib`]). Symbol concerns (`.kicad_sym`
 //! parsing, pin metadata, drawing geometry, search) live in the `kicad-symbol`
-//! crate; the `kicad-cli` wrapper in `kicad-cli`; board synthesis in `pcb-synth`;
-//! the Freerouting bridge in `specctra`.
+//! crate; the `kicad-cli` wrapper in `kicad-cli`; and the Freerouting bridge in
+//! `specctra`.
 
 pub mod footlib;
 pub mod pcb;

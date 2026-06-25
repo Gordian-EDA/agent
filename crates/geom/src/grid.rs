@@ -4,6 +4,8 @@
 //! land cleanly only when symbol instances and labels sit on this grid, so we
 //! snap every emitted coordinate to the nearest multiple of [`GRID_MM`].
 
+use crate::point::Point2;
+
 /// The schematic grid pitch in millimetres (50 mil).
 pub const GRID_MM: f64 = 1.27;
 
@@ -20,8 +22,9 @@ pub fn snap(v: f64) -> f64 {
 }
 
 /// Snap both coordinates of a point to the grid.
-pub fn snap_point(p: [f64; 2]) -> [f64; 2] {
-    [snap(p[0]), snap(p[1])]
+pub fn snap_point(p: impl Into<Point2>) -> Point2 {
+    let p = p.into();
+    Point2::new(snap(p.x), snap(p.y))
 }
 
 #[cfg(test)]
@@ -83,9 +86,9 @@ mod tests {
 
     #[test]
     fn snap_point_snaps_both_axes() {
-        let p = snap_point([1.9, 1.2]);
-        assert!(close(p[0], 1.27) && close(p[1], 1.27), "{p:?}");
+        let p = snap_point(Point2::new(1.9, 1.2));
+        assert!(close(p.x, 1.27) && close(p.y, 1.27), "{p:?}");
         // Already-on-grid points are unchanged.
-        assert_eq!(snap_point([0.0, 2.54]), [0.0, 2.54]);
+        assert_eq!(snap_point(Point2::new(0.0, 2.54)), Point2::new(0.0, 2.54));
     }
 }

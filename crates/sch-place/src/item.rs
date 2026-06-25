@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use ::geom::Point2;
 use kicad_symbol::geometry::SymbolGeometry;
 
 /// One placed component plus the data the engine needs about it.
@@ -20,7 +21,7 @@ pub struct Item {
     /// (pin number, pin name, net or None for NC). For a multi-unit part this
     /// holds only the pins of THIS item's `unit` (each unit is its own Item).
     pub pins: Vec<(String, String, Option<String>)>,
-    pub at: [f64; 2],
+    pub at: Point2,
     pub angle: f64,
     /// 1-based symbol unit this Item places. Single-unit parts are 1; a multi-unit
     /// part (op-amp/FPGA) splits into one Item per used unit, all sharing `refdes`
