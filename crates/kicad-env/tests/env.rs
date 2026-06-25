@@ -6,7 +6,12 @@ fn detects_installed_kicad() {
         eprintln!("SKIP: kicad not found");
         return;
     };
-    assert!(env.symbol_dir.join("Device.kicad_sym").exists());
+    assert!(
+        env.symbol_dir.join("Device.kicad_sym").is_file()
+            || env.symbol_dir.join("Device.kicad_symdir").is_dir(),
+        "{}",
+        env.symbol_dir.display()
+    );
     assert!(
         env.footprint_dir.is_dir(),
         "{}",

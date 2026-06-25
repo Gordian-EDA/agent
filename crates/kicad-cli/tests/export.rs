@@ -3,9 +3,9 @@
 //!
 //! Each detects a real `kicad-cli` via [`KicadEnv::detect`] and SKIPs (prints +
 //! returns) when none is installed, so they only assert on a machine with KiCAD
-//! on PATH. They drive a tiny vendored two-resistor board (shared with
-//! `kicad-sexpr`) through the wrappers and assert real, non-empty deliverables
-//! land on disk — the unit the higher-level `export_fab` tool depends on.
+//! on PATH. They drive a tiny vendored two-resistor board through the wrappers
+//! and assert real, non-empty deliverables land on disk — the unit the
+//! higher-level `export_fab` tool depends on.
 
 use std::path::PathBuf;
 
