@@ -6,3 +6,10 @@
 
 pub mod cli;
 pub mod env;
+mod export;
+pub mod netlist;
+pub mod reports;
+
+pub use cli::KicadCli;
+pub use netlist::{Net, NetComp, Netlist};
+pub use reports::{DrcReport, ErcReport, Violation, ViolationItem};
