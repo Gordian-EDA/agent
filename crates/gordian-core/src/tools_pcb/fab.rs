@@ -49,6 +49,34 @@ pub fn export_fab(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         }));
     }
 
+    let cli = KicadCli::new(ctx.env());
+    let drc = match cli.drc(&board) {
+        Ok(report) => report,
+        Err(e) => {
+            return Ok(
+                json!({ "error": format!("kicad-cli pcb drc failed before fab export: {e}") }),
+            );
+        }
+    };
+    let copper_violations = drc
+        .violations
+        .iter()
+        .filter(|v| !super::export::is_non_copper(v))
+        .count();
+    if copper_violations > 0 || !drc.unconnected_items.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "error": "PCB DRC is not clean; fix copper violations/unconnected items before export_fab",
+            "copper_violations": copper_violations,
+            "unconnected_items": drc.unconnected_items.len(),
+            "top_violations": super::export::violation_summaries(
+                drc.violations.iter().filter(|v| !super::export::is_non_copper(v)),
+                5,
+            ),
+            "top_unconnected": super::export::violation_summaries(drc.unconnected_items.iter(), 5),
+        }));
+    }
+
     let out_dir = match input.get("out_dir").and_then(Value::as_str) {
         Some(d) => PathBuf::from(d),
         None => ctx.project_dir().join("fab"),
@@ -59,7 +87,6 @@ pub fn export_fab(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         }));
     }
 
-    let cli = KicadCli::new(ctx.env());
     let stem = board
         .file_stem()
         .and_then(|s| s.to_str())

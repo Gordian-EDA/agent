@@ -83,6 +83,7 @@ fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
         "t_route_s": (t_route * 10.0).round() / 10.0,
         "engine_bug": routed.get("engine_bug").cloned().unwrap_or(json!(false)),
         "escape_bottleneck": routed.get("escape_bottleneck").cloned().unwrap_or(Value::Null),
+        "route_error": routed.get("error").cloned().unwrap_or(Value::Null),
     })
 }
 

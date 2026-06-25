@@ -2,15 +2,15 @@
 //!
 //! [`review`] runs a FRESH, history-free [`Provider::complete`] ensemble over a
 //! subject (a netlist, a layout, anything the caller can describe in text),
-//! parses each pass's verdict JSON, and returns `(lowest score, union of
+//! parses each pass's verdict JSON, and returns `(actionable score, union of
 //! high-confidence critical/major defect lines)`. The DOMAIN supplies the review
 //! system prompt and the diverse `lenses`; this module owns only the ensemble
 //! loop, the verdict parsing, and the defect-dedup.
 //!
 //! A single LLM pass has run-to-run variance and a narrow attention span;
 //! diverse lenses each catch different fault classes, which beats repeating one
-//! prompt. Each lens retries its own JSON parse once; a total parse failure
-//! degrades to `(0.0, [])` (conservative — nothing actionable).
+//! prompt. JSON retries are opt-in via `GORDIAN_REVIEW_RETRY_JSON=1`; a total
+//! parse failure degrades to `(0.0, [])` (conservative — nothing actionable).
 
 use crate::llm::{Binary, ChatMessage, ContentPart, MessageContent, Provider, completed_text};
 use anyhow::Result;
@@ -20,7 +20,7 @@ use serde_json::Value;
 /// One independent NETLIST review pass, generalized: the DOMAIN passes the review
 /// `system` prompt and the diverse `lenses` (an empty-string lens is the general
 /// pass; a non-empty lens appends an "extra emphasis this pass" rider). Returns
-/// `(lowest score across lenses, union of high-confidence critical/major defect
+/// `(actionable score across lenses, union of high-confidence critical/major defect
 /// lines)` — ready to feed back as a fix turn. A total parse failure degrades to
 /// `(0.0, [])`.
 pub async fn review(
@@ -40,7 +40,7 @@ pub async fn review(
 /// and the `lenses`; `prompt` is the textual framing that rides alongside the
 /// image (intended circuit + "reason first, then FINAL_JSON"). The `image` is
 /// attached as a genai [`Binary`] content part so the backend sends it. Returns
-/// the same `(lowest score, union of high-confidence defects)` shape, degrading
+/// the same `(actionable score, union of high-confidence defects)` shape, degrading
 /// to `(0.0, [])` on a total parse failure — so a flaky vision call never poisons
 /// the union with phantom defects.
 pub async fn review_image(
@@ -53,11 +53,11 @@ pub async fn review_image(
     review_ensemble(client, system, lenses, prompt, Some(image)).await
 }
 
-/// The shared diverse-lens loop behind [`review`] (text) and [`review_image`]
-/// (vision): for each lens, run a FRESH history-free completion over `prompt`
-/// (plus the optional `image`), parse its verdict, and union the high-confidence
-/// defects. Retries each lens's JSON parse once; degrades to `(0.0, [])` if NO
-/// lens ever parsed.
+/// The shared lens loop behind [`review`] (text) and [`review_image`] (vision):
+/// for each lens, run a FRESH history-free completion over `prompt` (plus the
+/// optional `image`), parse its verdict, and union the high-confidence defects.
+/// By default each lens runs once; set `GORDIAN_REVIEW_RETRY_JSON=1` to retry a
+/// lens once on malformed JSON. Degrades to `(0.0, [])` if NO lens ever parsed.
 async fn review_ensemble(
     client: &dyn Provider,
     system: &str,
@@ -85,7 +85,12 @@ async fn review_ensemble(
         let msgs = msgs.clone();
         async move {
             let mut parsed = None;
-            for _ in 0..2 {
+            let attempts = if std::env::var_os("GORDIAN_REVIEW_RETRY_JSON").is_some() {
+                2
+            } else {
+                1
+            };
+            for _ in 0..attempts {
                 let end = client.complete(&lens_system, &msgs, &[]).await?;
                 if let Some(v) = extract_json(&completed_text(&end)) {
                     parsed = Some(v);
@@ -168,6 +173,8 @@ fn extract_json(text: &str) -> Option<Value> {
     last.and_then(|s| serde_json::from_str(s).ok())
 }
 
+const NO_ACTIONABLE_DEFECT_FLOOR: f64 = 8.0;
+
 /// `(score, high-confidence critical/major defect lines)` from a verdict object.
 ///
 /// Handles BOTH verdict shapes the critics emit, since the same dedup/feedback
@@ -175,8 +182,13 @@ fn extract_json(text: &str) -> Option<Value> {
 /// vision layout critic's `{location, category, description}`. Each defect renders
 /// to the same `- <target>: <issue> (<why>)` line so [`same_defect`] can dedup a
 /// layout defect against a netlist one on the shared `<target>` prefix.
+///
+/// Important: only high-confidence major/critical defects are actionable in the
+/// agent loop. If a reviewer returns `score: 3` but its defects are all minor,
+/// medium/low confidence, or empty, that score is noise for gating purposes. In
+/// that case clamp it to the non-gating band.
 fn parse_review(v: &Value) -> (f64, Vec<String>) {
-    let score = v.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+    let mut score = v.get("score").and_then(Value::as_f64).unwrap_or(0.0);
     let mut defects = Vec::new();
     for d in v
         .get("defects")
@@ -196,6 +208,9 @@ fn parse_review(v: &Value) -> (f64, Vec<String>) {
             let why = pick(str_of("why"), str_of("category"));
             defects.push(format!("- {target}: {issue} ({why})"));
         }
+    }
+    if defects.is_empty() && score > 0.0 {
+        score = score.max(NO_ACTIONABLE_DEFECT_FLOOR);
     }
     (score, defects)
 }
@@ -261,6 +276,35 @@ FINAL_JSON:
             "location → target prefix: {defects:?}"
         );
         assert!(defects[0].contains("decoupling cap"));
+    }
+
+    #[test]
+    fn low_score_without_actionable_defects_is_clamped() {
+        let text = r#"FINAL_JSON:
+{"score": 3, "defects": [
+  {"severity":"minor","confidence":"high","refdes":"R1","issue":"cosmetic","why":"style"},
+  {"severity":"major","confidence":"low","refdes":"C1","issue":"guess","why":"uncertain"}
+]}"#;
+        let (score, defects) = parse_review(&extract_json(text).unwrap());
+        assert!(
+            defects.is_empty(),
+            "minor/low-confidence issues are not actionable: {defects:?}"
+        );
+        assert_eq!(
+            score, 8.0,
+            "raw 3/10 with no actionable defect must not gate a fix loop"
+        );
+    }
+
+    #[test]
+    fn low_score_with_actionable_defect_is_preserved() {
+        let text = r#"FINAL_JSON:
+{"score": 3, "defects": [
+  {"severity":"critical","confidence":"high","refdes":"U1","issue":"wrong rail","why":"VDD on 12V"}
+]}"#;
+        let (score, defects) = parse_review(&extract_json(text).unwrap());
+        assert_eq!(score, 3.0);
+        assert_eq!(defects.len(), 1);
     }
 
     #[tokio::test]

@@ -1,18 +1,14 @@
 //! Routing orchestration for the active KiCAD board: route generation, IPC copper
 //! write-back, and route-result lint/triage.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use serde_json::{Value, json};
 
 use drc_lint::connectivity::Violation as ConnViolation;
 use drc_lint::lint::{DrcViolation, lint};
-use kicad_ipc::proto::kiapi::board::types::{
-    BoardLayer, DrillProperties, DrillShape, Net as KiNet, PadStack, PadStackLayer, PadStackShape,
-    PadStackType, Track as KiTrack, UnconnectedLayerRemoval, Via as KiVia, ViaType,
-};
-use kicad_ipc::proto::kiapi::common::types::{Distance, Vector2};
+use kicad_ipc::proto::kiapi::board::types::Net as KiNet;
 use kicad_ipc::snapshot::ImportedPart;
 use negotiated_mesh::pathing::global_route;
 use negotiated_mesh::pipeline::route_auto;
@@ -183,9 +179,16 @@ fn route_live_board(ctx: &PcbToolCtx) -> std::result::Result<Value, String> {
 
     let rp = board.problem.clone();
     let mut result = route_auto(&rp);
-    let used_direct_fallback = apply_direct_two_pin_fallback(&rp, &mut result);
-    let split = lint_summary(&rp, &result.solution, &result.failed, &Default::default());
-    if split.real > 0 && !used_direct_fallback {
+    let _used_direct_fallback = apply_direct_two_pin_fallback(&rp, &mut result);
+    let original_solution = result.solution.clone();
+    let mut pruned_spurs = prune_dangling_spurs(&rp, &mut result.solution);
+    let mut split = lint_summary(&rp, &result.solution, &result.failed, &Default::default());
+    if split.real > 0 && pruned_spurs > 0 {
+        result.solution = original_solution;
+        pruned_spurs = 0;
+        split = lint_summary(&rp, &result.solution, &result.failed, &Default::default());
+    }
+    if split.real > 0 {
         return Err(format!(
             "router produced {} real DRC violation(s); refusing to write copper to live KiCAD board",
             split.real
@@ -226,12 +229,13 @@ fn route_live_board(ctx: &PcbToolCtx) -> std::result::Result<Value, String> {
         },
         "lint_summary": split.by_kind,
         "expected_connectivity_gaps": split.expected_gaps,
+        "pruned_dangling_spurs": pruned_spurs,
         "congestion": congestion,
         "escape_bottleneck": escape,
         "note": if result.failed.is_empty() {
-            "routed live KiCAD board cleanly"
+            "routed and saved the KiCAD board cleanly"
         } else {
-            "routed live KiCAD board with honest failed nets"
+            "routed and saved the KiCAD board with honest failed nets"
         },
     }))
 }
@@ -271,6 +275,167 @@ fn apply_direct_two_pin_fallback(rp: &RouteProblem, result: &mut RouteResult) ->
     applied
 }
 
+#[derive(Clone, Debug)]
+struct RouteSegment {
+    connection: String,
+    layer: LayerRef,
+    width: f64,
+    start: Point2,
+    end: Point2,
+}
+
+fn prune_dangling_spurs(rp: &RouteProblem, solution: &mut RouteSolution) -> usize {
+    let mut segments = flatten_segments(solution);
+    if segments.is_empty() {
+        return 0;
+    }
+    let protected = protected_route_nodes(rp, solution);
+    let mut alive = vec![true; segments.len()];
+    let mut removed = 0usize;
+
+    loop {
+        let mut degree: BTreeMap<(String, u32, i64, i64), usize> = BTreeMap::new();
+        for (idx, segment) in segments.iter().enumerate() {
+            if !alive[idx] {
+                continue;
+            }
+            for key in [
+                node_key(
+                    &segment.connection,
+                    &segment.layer,
+                    segment.start,
+                    rp.layer_count,
+                ),
+                node_key(
+                    &segment.connection,
+                    &segment.layer,
+                    segment.end,
+                    rp.layer_count,
+                ),
+            ] {
+                *degree.entry(key).or_default() += 1;
+            }
+        }
+
+        let mut changed = false;
+        for (idx, segment) in segments.iter().enumerate() {
+            if !alive[idx] {
+                continue;
+            }
+            let a = node_key(
+                &segment.connection,
+                &segment.layer,
+                segment.start,
+                rp.layer_count,
+            );
+            let b = node_key(
+                &segment.connection,
+                &segment.layer,
+                segment.end,
+                rp.layer_count,
+            );
+            let a_dangles = degree.get(&a).copied().unwrap_or(0) <= 1 && !protected.contains(&a);
+            let b_dangles = degree.get(&b).copied().unwrap_or(0) <= 1 && !protected.contains(&b);
+            if a_dangles || b_dangles {
+                alive[idx] = false;
+                removed += 1;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    if removed > 0 {
+        solution.traces = segments
+            .drain(..)
+            .zip(alive)
+            .filter_map(|(segment, alive)| {
+                alive.then_some(Trace {
+                    connection: segment.connection,
+                    layer: segment.layer,
+                    width: segment.width,
+                    path: vec![segment.start, segment.end],
+                })
+            })
+            .collect();
+    }
+    removed
+}
+
+fn flatten_segments(solution: &RouteSolution) -> Vec<RouteSegment> {
+    let mut segments = Vec::new();
+    for trace in &solution.traces {
+        for pair in trace.path.windows(2) {
+            segments.push(RouteSegment {
+                connection: trace.connection.clone(),
+                layer: trace.layer.clone(),
+                width: trace.width,
+                start: pair[0],
+                end: pair[1],
+            });
+        }
+    }
+    segments
+}
+
+fn protected_route_nodes(
+    rp: &RouteProblem,
+    solution: &RouteSolution,
+) -> BTreeSet<(String, u32, i64, i64)> {
+    let mut protected = BTreeSet::new();
+    for conn in &rp.connections {
+        for point in &conn.points_to_connect {
+            protected.insert(node_key(
+                &conn.name,
+                &point.layer,
+                point.point(),
+                rp.layer_count,
+            ));
+        }
+    }
+    for via in &solution.vias {
+        for layer in via_span_indices(&via.span, rp.layer_count) {
+            protected.insert((
+                via.connection.clone(),
+                layer,
+                quantize_mm(via.at.x),
+                quantize_mm(via.at.y),
+            ));
+        }
+    }
+    protected
+}
+
+fn via_span_indices(span: &ViaSpan, layer_count: u32) -> Vec<u32> {
+    match *span {
+        ViaSpan::Through => (0..layer_count.max(1)).collect(),
+        ViaSpan::Partial { from, to, .. } => {
+            let (lo, hi) = if from <= to { (from, to) } else { (to, from) };
+            (lo..=hi).filter(|idx| *idx < layer_count).collect()
+        }
+    }
+}
+
+fn node_key(
+    connection: &str,
+    layer: &LayerRef,
+    point: Point2,
+    layer_count: u32,
+) -> (String, u32, i64, i64) {
+    (
+        connection.to_string(),
+        layer.index(layer_count).unwrap_or(0),
+        quantize_mm(point.x),
+        quantize_mm(point.y),
+    )
+}
+
+fn quantize_mm(v: f64) -> i64 {
+    (v * 1_000_000.0).round() as i64
+}
+
 fn write_route(
     ctx: &PcbToolCtx,
     rp: &RouteProblem,
@@ -278,57 +443,22 @@ fn write_route(
     layer_names: &[String],
 ) -> std::result::Result<(), kicad_ipc::Error> {
     let path = ctx.pcb_path();
-    match write_route_once(ctx, &path, rp, solution, layer_names) {
-        Ok(()) => Ok(()),
-        Err(err) if err.is_transient_api_ready_error() => {
-            std::thread::sleep(std::time::Duration::from_millis(750));
-            write_route_once(ctx, &path, rp, solution, layer_names)
-        }
-        Err(err) if err.is_transport_timeout() => {
-            ctx.close_kicad_session();
-            if route_is_written(ctx, solution)? {
-                return Ok(());
-            }
-            write_route_once(ctx, &path, rp, solution, layer_names)
-        }
-        Err(err) => Err(err),
-    }
-}
-
-fn write_route_once(
-    ctx: &PcbToolCtx,
-    path: &std::path::Path,
-    rp: &RouteProblem,
-    solution: &RouteSolution,
-    layer_names: &[String],
-) -> std::result::Result<(), kicad_ipc::Error> {
-    ctx.kicad().with_session(path, |session| {
+    let nets = ctx.kicad().with_session(&path, |session| {
         let nets: BTreeMap<String, KiNet> = session
             .kicad()
             .net_list()?
             .into_iter()
             .map(|n| (n.name.clone(), n))
             .collect();
-        let items = route_items_for_ipc(rp, solution, layer_names, &nets).map_err(|e| {
-            kicad_ipc::Error::Spawn(format!("could not build IPC route items: {e}"))
-        })?;
-        session
-            .kicad()
-            .commit("route board", |k| k.create_items(items))
-    })
-}
+        session.kicad().save()?;
+        Ok(nets)
+    })?;
+    ctx.close_kicad_session();
 
-fn route_is_written(
-    ctx: &PcbToolCtx,
-    solution: &RouteSolution,
-) -> std::result::Result<bool, kicad_ipc::Error> {
-    let path = ctx.pcb_path();
-    let snapshot = ctx
-        .kicad()
-        .with_session(&path, |session| session.kicad().board_snapshot())?;
-    Ok(snapshot.copper.traces.len() >= solution.traces.len()
-        && snapshot.copper.vias.len() >= solution.vias.len()
-        && (!solution.traces.is_empty() || !solution.vias.is_empty()))
+    let items = route_items_for_file(rp, solution, layer_names, &nets)
+        .map_err(|e| kicad_ipc::Error::Spawn(format!("could not build route S-expr: {e}")))?;
+    append_route_items_to_board(&path, &items)
+        .map_err(|e| kicad_ipc::Error::Spawn(format!("could not write routed board file: {e}")))
 }
 
 fn is_seed_placement(bounds: &pcb_model::Rect, parts: &[ImportedPart]) -> bool {
@@ -353,169 +483,156 @@ fn is_seed_placement(bounds: &pcb_model::Rect, parts: &[ImportedPart]) -> bool {
     })
 }
 
-fn route_items_for_ipc(
+fn route_items_for_file(
     problem: &RouteProblem,
     solution: &RouteSolution,
     layer_names: &[String],
     nets: &BTreeMap<String, KiNet>,
-) -> std::result::Result<Vec<prost_types::Any>, String> {
-    let mut items = Vec::new();
+) -> std::result::Result<String, String> {
+    let mut out = String::new();
+    let mut uuid_idx = 1usize;
     for trace in &solution.traces {
-        let layer = board_layer(&trace.layer, problem.layer_count, layer_names);
-        let net = nets
-            .get(trace.connection.as_str())
-            .cloned()
-            .ok_or_else(|| format!("KiCAD board has no net `{}`", trace.connection))?;
+        let layer = layer_name(&trace.layer, problem.layer_count, layer_names);
+        let net = net_code(nets, &trace.connection)?;
         for segment in trace.path.windows(2) {
-            items.push(
-                prost_types::Any::from_msg(&KiTrack {
-                    start: Some(mm_point(&segment[0])),
-                    end: Some(mm_point(&segment[1])),
-                    width: Some(mm_distance(trace.width)),
-                    layer: layer as i32,
-                    net: Some(net.clone()),
-                    ..Default::default()
-                })
-                .map_err(|e| e.to_string())?,
+            out.push_str("  ");
+            push_segment_sexpr(
+                &mut out,
+                &segment[0],
+                &segment[1],
+                trace.width,
+                layer,
+                net,
+                uuid_idx,
             );
+            uuid_idx += 1;
+            out.push('\n');
         }
     }
     for via in &solution.vias {
-        let (start_layer, end_layer, via_type) = match via.span {
-            ViaSpan::Through => (BoardLayer::BlFCu, BoardLayer::BlBCu, ViaType::VtThrough),
-            ViaSpan::Partial { from, to, micro } => (
-                board_layer_by_index(from, layer_names),
-                board_layer_by_index(to, layer_names),
-                if micro {
-                    ViaType::VtMicro
-                } else {
-                    ViaType::VtBlindBuried
-                },
-            ),
-        };
-        let net = nets
-            .get(via.connection.as_str())
-            .cloned()
-            .ok_or_else(|| format!("KiCAD board has no net `{}`", via.connection))?;
-        let via_layers = via_span_layers(&via.span, layer_names);
-        let copper_layers: Vec<PadStackLayer> = via_layers
-            .iter()
-            .map(|layer| PadStackLayer {
-                layer: *layer as i32,
-                shape: PadStackShape::PssCircle as i32,
-                size: Some(Vector2 {
-                    x_nm: mm_to_nm(via.diameter),
-                    y_nm: mm_to_nm(via.diameter),
-                }),
-                ..Default::default()
-            })
-            .collect();
-        items.push(
-            prost_types::Any::from_msg(&KiVia {
-                position: Some(mm_point(&via.at)),
-                pad_stack: Some(PadStack {
-                    r#type: PadStackType::PstNormal as i32,
-                    layers: via_layers.iter().map(|layer| *layer as i32).collect(),
-                    drill: Some(DrillProperties {
-                        start_layer: start_layer as i32,
-                        end_layer: end_layer as i32,
-                        diameter: Some(Vector2 {
-                            x_nm: mm_to_nm(via.drill),
-                            y_nm: mm_to_nm(via.drill),
-                        }),
-                        shape: DrillShape::DsCircle as i32,
-                    }),
-                    unconnected_layer_removal: UnconnectedLayerRemoval::UlrKeep as i32,
-                    copper_layers,
-                    ..Default::default()
-                }),
-                net: Some(net),
-                r#type: via_type as i32,
-                ..Default::default()
-            })
-            .map_err(|e| e.to_string())?,
-        );
+        let net = net_code(nets, &via.connection)?;
+        let (from, to) = via_span_layer_names(&via.span, layer_names);
+        out.push_str("  ");
+        push_via_sexpr(&mut out, via, from, to, net, uuid_idx);
+        uuid_idx += 1;
+        out.push('\n');
     }
-    Ok(items)
+    Ok(out)
 }
 
-fn via_span_layers(span: &ViaSpan, layer_names: &[String]) -> Vec<BoardLayer> {
+fn append_route_items_to_board(
+    path: &std::path::Path,
+    items: &str,
+) -> std::result::Result<(), String> {
+    if items.trim().is_empty() {
+        return Ok(());
+    }
+    let mut text = std::fs::read_to_string(path)
+        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let insert_at = text
+        .rfind("\n)")
+        .ok_or_else(|| format!("{} is not a KiCAD board S-expression", path.display()))?;
+    let mut insert = String::new();
+    if !text[..insert_at].ends_with('\n') {
+        insert.push('\n');
+    }
+    insert.push_str(items);
+    text.insert_str(insert_at, &insert);
+    std::fs::write(path, text).map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
+fn push_segment_sexpr(
+    out: &mut String,
+    start: &Point2,
+    end: &Point2,
+    width: f64,
+    layer: &str,
+    net: i32,
+    uuid_idx: usize,
+) {
+    out.push_str("(segment");
+    push_xy(out, "start", start);
+    push_xy(out, "end", end);
+    out.push_str(&format!(
+        " (width {}) (layer \"{}\") (net {}) (uuid \"{}\"))",
+        fmt_mm(width),
+        sexpr_escape(layer),
+        net,
+        route_uuid(uuid_idx),
+    ));
+}
+
+fn push_via_sexpr(
+    out: &mut String,
+    via: &pcb_model::Via,
+    from_layer: &str,
+    to_layer: &str,
+    net: i32,
+    uuid_idx: usize,
+) {
+    let via_kind = match via.span {
+        ViaSpan::Through => "",
+        ViaSpan::Partial { micro: true, .. } => " micro",
+        ViaSpan::Partial { micro: false, .. } => " blind",
+    };
+    out.push_str(&format!("(via{via_kind}"));
+    push_xy(out, "at", &via.at);
+    out.push_str(&format!(
+        " (size {}) (drill {}) (layers \"{}\" \"{}\") (net {}) (uuid \"{}\"))",
+        fmt_mm(via.diameter),
+        fmt_mm(via.drill),
+        sexpr_escape(from_layer),
+        sexpr_escape(to_layer),
+        net,
+        route_uuid(uuid_idx),
+    ));
+}
+
+fn push_xy(out: &mut String, tag: &str, p: &Point2) {
+    out.push_str(&format!(" ({tag} {} {})", fmt_mm(p.x), fmt_mm(p.y)));
+}
+
+fn route_uuid(idx: usize) -> String {
+    format!("00000000-0000-4000-8000-{idx:012x}")
+}
+
+fn fmt_mm(v: f64) -> String {
+    let mut s = format!("{v:.6}");
+    while s.contains('.') && s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.push('0');
+    }
+    s
+}
+
+fn sexpr_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn net_code(nets: &BTreeMap<String, KiNet>, name: &str) -> std::result::Result<i32, String> {
+    nets.get(name)
+        .and_then(|net| net.code.as_ref().map(|code| code.value))
+        .ok_or_else(|| format!("KiCAD board has no net code for `{name}`"))
+}
+
+fn layer_name<'a>(layer: &LayerRef, layer_count: u32, layer_names: &'a [String]) -> &'a str {
+    let idx = layer.index(layer_count).unwrap_or(0) as usize;
+    layer_names.get(idx).map(String::as_str).unwrap_or("F.Cu")
+}
+
+fn via_span_layer_names<'a>(span: &ViaSpan, layer_names: &'a [String]) -> (&'a str, &'a str) {
     match *span {
-        ViaSpan::Through => (0..layer_names.len() as u32)
-            .map(|idx| board_layer_by_index(idx, layer_names))
-            .collect(),
-        ViaSpan::Partial { from, to, .. } => {
-            let (lo, hi) = if from <= to { (from, to) } else { (to, from) };
-            (lo..=hi)
-                .map(|idx| board_layer_by_index(idx, layer_names))
-                .collect()
+        ViaSpan::Through => {
+            let top = layer_names.first().map(String::as_str).unwrap_or("F.Cu");
+            let bottom = layer_names.last().map(String::as_str).unwrap_or("B.Cu");
+            (top, bottom)
         }
-    }
-}
-
-fn mm_to_nm(mm: f64) -> i64 {
-    (mm * 1_000_000.0).round() as i64
-}
-
-fn mm_point(p: &Point2) -> Vector2 {
-    Vector2 {
-        x_nm: mm_to_nm(p.x),
-        y_nm: mm_to_nm(p.y),
-    }
-}
-
-fn mm_distance(mm: f64) -> Distance {
-    Distance {
-        value_nm: mm_to_nm(mm),
-    }
-}
-
-fn board_layer(layer: &LayerRef, layer_count: u32, layer_names: &[String]) -> BoardLayer {
-    layer
-        .index(layer_count)
-        .map(|idx| board_layer_by_index(idx as u32, layer_names))
-        .unwrap_or(BoardLayer::BlFCu)
-}
-
-fn board_layer_by_index(index: u32, layer_names: &[String]) -> BoardLayer {
-    let last = layer_names.len().saturating_sub(1) as u32;
-    if index == 0 {
-        BoardLayer::BlFCu
-    } else if index == last {
-        BoardLayer::BlBCu
-    } else {
-        match index {
-            1 => BoardLayer::BlIn1Cu,
-            2 => BoardLayer::BlIn2Cu,
-            3 => BoardLayer::BlIn3Cu,
-            4 => BoardLayer::BlIn4Cu,
-            5 => BoardLayer::BlIn5Cu,
-            6 => BoardLayer::BlIn6Cu,
-            7 => BoardLayer::BlIn7Cu,
-            8 => BoardLayer::BlIn8Cu,
-            9 => BoardLayer::BlIn9Cu,
-            10 => BoardLayer::BlIn10Cu,
-            11 => BoardLayer::BlIn11Cu,
-            12 => BoardLayer::BlIn12Cu,
-            13 => BoardLayer::BlIn13Cu,
-            14 => BoardLayer::BlIn14Cu,
-            15 => BoardLayer::BlIn15Cu,
-            16 => BoardLayer::BlIn16Cu,
-            17 => BoardLayer::BlIn17Cu,
-            18 => BoardLayer::BlIn18Cu,
-            19 => BoardLayer::BlIn19Cu,
-            20 => BoardLayer::BlIn20Cu,
-            21 => BoardLayer::BlIn21Cu,
-            22 => BoardLayer::BlIn22Cu,
-            23 => BoardLayer::BlIn23Cu,
-            24 => BoardLayer::BlIn24Cu,
-            25 => BoardLayer::BlIn25Cu,
-            26 => BoardLayer::BlIn26Cu,
-            27 => BoardLayer::BlIn27Cu,
-            28 => BoardLayer::BlIn28Cu,
-            29 => BoardLayer::BlIn29Cu,
-            30 => BoardLayer::BlIn30Cu,
-            _ => BoardLayer::BlBCu,
+        ViaSpan::Partial { from, to, .. } => {
+            let a = layer_names.get(from as usize).map(String::as_str);
+            let b = layer_names.get(to as usize).map(String::as_str);
+            (a.unwrap_or("F.Cu"), b.unwrap_or("B.Cu"))
         }
     }
 }
@@ -523,6 +640,7 @@ fn board_layer_by_index(index: u32, layer_names: &[String]) -> BoardLayer {
 #[cfg(test)]
 mod escape_bottleneck_tests {
     use super::*;
+    use kicad_ipc::proto::kiapi::board::types::NetCode;
 
     fn part(reference: &str, footprint: &str, nets: &[(&str, &str)]) -> ImportedPart {
         ImportedPart {
@@ -578,5 +696,127 @@ mod escape_bottleneck_tests {
         // "<N plane stitching vias>" is not a net name → matches no pad → no bottleneck.
         let parts = vec![part("U1", "fp", &[("1", "GND")])];
         assert!(escape_bottleneck(&parts, &failed(&["<7 plane stitching vias>"])).is_none());
+    }
+
+    #[test]
+    fn via_routes_are_emitted_as_native_kicad_pcb_items() {
+        let mut nets = BTreeMap::new();
+        nets.insert(
+            "GND".to_string(),
+            KiNet {
+                code: Some(NetCode { value: 7 }),
+                name: "GND".to_string(),
+            },
+        );
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 20.0,
+                max_y: 20.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+        let solution = RouteSolution {
+            traces: vec![Trace {
+                connection: "GND".to_string(),
+                layer: LayerRef::top(),
+                width: 0.25,
+                path: vec![Point2 { x: 1.0, y: 2.0 }, Point2 { x: 3.0, y: 4.0 }],
+            }],
+            vias: vec![pcb_model::Via {
+                connection: "GND".to_string(),
+                at: Point2 { x: 3.0, y: 4.0 },
+                diameter: 0.6,
+                drill: 0.3,
+                span: ViaSpan::Through,
+            }],
+        };
+
+        let sexpr =
+            route_items_for_file(&problem, &solution, &["F.Cu".into(), "B.Cu".into()], &nets)
+                .unwrap();
+
+        assert!(sexpr.contains("(segment (start 1.0 2.0) (end 3.0 4.0)"));
+        assert!(sexpr.contains("(width 0.25) (layer \"F.Cu\") (net 7)"));
+        assert!(sexpr.contains("(via (at 3.0 4.0) (size 0.6) (drill 0.3)"));
+        assert!(sexpr.contains("(layers \"F.Cu\" \"B.Cu\") (net 7)"));
+    }
+
+    #[test]
+    fn dangling_route_spurs_are_pruned_before_write() {
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![pcb_model::Connection {
+                name: "GND".to_string(),
+                points_to_connect: vec![
+                    pcb_model::RoutePoint {
+                        x: 0.0,
+                        y: 0.0,
+                        layer: LayerRef::top(),
+                    },
+                    pcb_model::RoutePoint {
+                        x: 4.0,
+                        y: 0.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 10.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+        let mut solution = RouteSolution {
+            traces: vec![
+                Trace {
+                    connection: "GND".to_string(),
+                    layer: LayerRef::top(),
+                    width: 0.25,
+                    path: vec![
+                        Point2 { x: 0.0, y: 0.0 },
+                        Point2 { x: 2.0, y: 0.0 },
+                        Point2 { x: 4.0, y: 0.0 },
+                    ],
+                },
+                Trace {
+                    connection: "GND".to_string(),
+                    layer: LayerRef::top(),
+                    width: 0.25,
+                    path: vec![Point2 { x: 2.0, y: 0.0 }, Point2 { x: 2.0, y: 1.0 }],
+                },
+            ],
+            vias: vec![],
+        };
+
+        let removed = prune_dangling_spurs(&problem, &mut solution);
+
+        assert_eq!(removed, 1);
+        assert_eq!(solution.traces.len(), 2);
+        assert!(
+            !solution
+                .traces
+                .iter()
+                .any(|trace| trace.path.contains(&Point2 { x: 2.0, y: 1.0 }))
+        );
     }
 }

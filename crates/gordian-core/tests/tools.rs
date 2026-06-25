@@ -302,47 +302,28 @@ fn export_fab_errors_without_a_board() {
 }
 
 #[test]
-fn export_fab_bundles_gerbers_and_drill() {
+fn export_fab_refuses_unclean_board() {
     let Some(ctx) = PcbToolCtx::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
-    // Stand in a routed board at the project's default .kicad_pcb path, then
-    // bundle it. (export_fab reads the exported board; it does not re-route.)
+    // Stand in an unrouted board at the project's default .kicad_pcb path.
+    // export_fab must refuse it instead of bundling a board house package with
+    // known missing copper.
     std::fs::write(ctx.pcb_path(), TWO_RES_PCB).unwrap();
     let out = run_tool("export_fab", serde_json::json!({}), &ctx).unwrap();
 
-    assert_eq!(out["ok"], serde_json::json!(true), "got: {out}");
-    let files: Vec<String> = out["files"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect();
-    // Real Gerber layers + an Excellon drill file landed in the bundle.
+    assert_eq!(out["ok"], serde_json::json!(false), "got: {out}");
     assert!(
-        files.iter().any(|f| f.ends_with(".gbr")),
-        "no Gerber in {files:?}"
+        out["error"].as_str().is_some_and(|e| e.contains("DRC")),
+        "expected DRC refusal: {out}"
     );
     assert!(
-        files.iter().any(|f| f.ends_with(".drl")),
-        "no drill in {files:?}"
+        out["top_unconnected"]
+            .as_array()
+            .is_some_and(|v| !v.is_empty()),
+        "expected actionable unconnected details: {out}"
     );
-    assert!(
-        files.iter().any(|f| f.ends_with("-pos.csv")),
-        "no pos in {files:?}"
-    );
-
-    // The bundle dir exists and every reported file is a real, non-empty file.
-    let fab_dir = std::path::PathBuf::from(out["fab_dir"].as_str().unwrap());
-    assert!(fab_dir.is_dir(), "fab dir missing: {}", fab_dir.display());
-    for f in &files {
-        let p = fab_dir.join(f);
-        let len = std::fs::metadata(&p)
-            .unwrap_or_else(|_| panic!("missing {}", p.display()))
-            .len();
-        assert!(len > 0, "{} is empty", p.display());
-    }
 }
 
 #[test]
@@ -505,6 +486,16 @@ blocks:
     assert_eq!(out["ok"], serde_json::json!(true));
     assert_eq!(out["replacements"], serde_json::json!(1));
 
+    let replacement_yaml = yaml.replace("value: 1k", "value: 2.2k");
+    let out = run_tool(
+        "edit_design",
+        serde_json::json!({"yaml": replacement_yaml}),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true));
+    assert_eq!(out["mode"], serde_json::json!("full_replace"));
+
     // apply_design with NO yaml applies the draft.
     let out = run_tool("apply_design", serde_json::json!({"commit": true}), &ctx).unwrap();
     assert_eq!(out["written"], serde_json::json!(true));
@@ -512,7 +503,7 @@ blocks:
     // get_design now prefers the draft and reports its source.
     let out = run_tool("get_design", serde_json::json!({}), &ctx).unwrap();
     assert_eq!(out["source"], serde_json::json!("draft"));
-    assert!(out["yaml"].as_str().unwrap().contains("4.7k"));
+    assert!(out["yaml"].as_str().unwrap().contains("2.2k"));
 }
 
 #[test]
@@ -740,6 +731,53 @@ blocks:
     assert!(
         draft.contains("footprint: \"Fixtures:R_0603_1608Metric\""),
         "draft was not edited:\n{draft}"
+    );
+}
+
+#[test]
+fn derive_board_rejects_unapplied_draft_footprints() {
+    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+
+    let written = run_tool(
+        "apply_design",
+        serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(written["written"], serde_json::json!(true), "{written}");
+
+    let draft = run_tool("get_design", serde_json::json!({}), &ctx).unwrap();
+    assert!(
+        draft["yaml"].as_str().is_some_and(|y| y.contains("R1")),
+        "draft seeded from committed schematic: {draft}"
+    );
+    let assigned = run_tool(
+        "assign_footprint",
+        serde_json::json!({
+            "reference": "R1",
+            "footprint": "Resistor_SMD:R_0603_1608Metric",
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(assigned["ok"], serde_json::json!(true), "{assigned}");
+
+    let out = run_tool("derive_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(out["ok"], serde_json::json!(false), "{out}");
+    assert!(
+        out["unapplied_draft_footprints"]
+            .as_array()
+            .is_some_and(|changes| changes.iter().any(|c| c["reference"] == "R1")),
+        "derive_board should ask to apply draft footprint changes first: {out}"
+    );
+    assert!(
+        out["note"]
+            .as_str()
+            .is_some_and(|n| n.contains("apply_design(commit:true)")),
+        "derive note should name the required commit: {out}"
     );
 }
 

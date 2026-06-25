@@ -102,6 +102,14 @@ pub fn derive_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             return Ok(json!({ "error": format!("could not export the schematic netlist: {e}") }));
         }
     };
+    let unapplied_footprints = unapplied_draft_footprint_changes(ctx, &netlist);
+    if !unapplied_footprints.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "unapplied_draft_footprints": unapplied_footprints,
+            "note": "footprint fields live in circuit-YAML/schematic state; call apply_design(commit:true) to write the draft, then derive_board again",
+        }));
+    }
     let mut pad_nets_by_ref: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for net in &netlist.nets {
         if net.name.is_empty() {
@@ -170,7 +178,7 @@ pub fn derive_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             "ok": false,
             "part_count": part_count,
             "missing_footprints": missing_footprints,
-            "note": "some schematic symbols have no footprint field — edit the circuit YAML footprint fields, apply_design, then derive_board again",
+            "note": "some schematic symbols have no footprint field — assign footprints in the circuit-YAML draft, apply_design(commit:true), then derive_board again",
         }));
     }
 
@@ -191,6 +199,42 @@ pub fn derive_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     }))
 }
 
+fn unapplied_draft_footprint_changes(ctx: &PcbToolCtx, netlist: &kicad_cli::Netlist) -> Vec<Value> {
+    let Some(draft) = ctx.workspace().read_draft() else {
+        return Vec::new();
+    };
+    let Some(design) = circuit_lang::compile(&draft, ctx.provider()).design else {
+        return Vec::new();
+    };
+    let committed: BTreeMap<String, String> = netlist
+        .components
+        .iter()
+        .map(|c| {
+            (
+                c.reference.clone(),
+                c.properties.get("Footprint").cloned().unwrap_or_default(),
+            )
+        })
+        .collect();
+    let mut changes = Vec::new();
+    for block in design.blocks.values() {
+        for (reference, component) in &block.components {
+            let Some(draft_fp) = component.footprint.as_deref().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let committed_fp = committed.get(reference).map(String::as_str).unwrap_or("");
+            if committed_fp != draft_fp {
+                changes.push(json!({
+                    "reference": reference,
+                    "draft": draft_fp,
+                    "committed": committed_fp,
+                }));
+            }
+        }
+    }
+    changes
+}
+
 fn write_seed_board(spec: &BoardSeedSpec, ctx: &PcbToolCtx) -> std::result::Result<(), String> {
     let catalog = ctx
         .footprint_catalog()
@@ -206,10 +250,23 @@ fn write_seed_board(spec: &BoardSeedSpec, ctx: &PcbToolCtx) -> std::result::Resu
             )
         })?;
         let source = catalog.source(&id).map_err(|e| {
-            format!(
-                "part {}: footprint `{}` source is not readable: {e} — edit the schematic footprint field",
-                dp.reference, dp.footprint
-            )
+            if e.is_not_found() {
+                let suggestions = catalog
+                    .suggest(&id)
+                    .iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "part {}: unknown footprint `{}` — use one of these real lib_ids if suitable: {suggestions}",
+                    dp.reference, dp.footprint
+                )
+            } else {
+                format!(
+                    "part {}: footprint `{}` source is not readable: {e} — edit the schematic footprint field",
+                    dp.reference, dp.footprint
+                )
+            }
         })?;
         parts.push(SeedFootprint {
             reference: dp.reference.clone(),
@@ -913,6 +970,11 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
                 .ok_or_else(|| format!("rules.net_widths[{net}] must be a number (mm)"))?;
             if w <= 0.0 {
                 return Err(format!("rules.net_widths[{net}] must be > 0, got {w}"));
+            }
+            if w > 1.5 {
+                return Err(format!(
+                    "rules.net_widths[{net}] is {w} mm; use <= 1.5 mm for routed traces, or enlarge the board/add planes"
+                ));
             }
             net_widths.insert(net.clone(), w);
         }

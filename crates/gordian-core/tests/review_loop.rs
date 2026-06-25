@@ -25,8 +25,7 @@ use serde_json::{Value, json};
 
 /// A reviewer [`Provider`] that returns ONE canned verdict for every
 /// `complete()` and RECORDS the messages it was shown — so a test can assert the
-/// layout pass attached an image. The verdict is a layout-critic FINAL_JSON with a
-/// high-confidence major defect (so it survives the high-confidence filter).
+/// layout pass attached an image.
 struct CannedReviewer {
     verdict: String,
     seen: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
@@ -69,6 +68,14 @@ FINAL_JSON:
 {"score": 5, "dimension_scores": {"readability": 5},
  "defects": [{"severity":"major","confidence":"high","category":"spacing",
    "location":"C1","description":"decoupling cap C1 sits across the sheet from U1's power pin"}]}"#;
+
+/// A noisy low-score verdict with no actionable high-confidence major/critical
+/// defects. This must not drive a review-fix turn.
+const LOW_NON_ACTIONABLE_VERDICT: &str = r#"reasoning: stylistic nits only.
+FINAL_JSON:
+{"score": 3, "summary": "too harsh but not actionable",
+ "defects": [{"severity":"minor","confidence":"high","refdes":"R1",
+   "issue":"could be drawn closer","why":"style only"}]}"#;
 
 /// A stub backend whose `review_committed` runs the real netlist + layout review
 /// passes (the layout pass over a fixed mocked PNG) against `reviewer`, unioning
@@ -226,6 +233,65 @@ async fn committed_turn_runs_netlist_and_layout_review_then_fixes_the_layout_def
         .flat_map(|m| m.content.iter())
         .any(|p| matches!(p, ContentPart::Binary(_)));
     assert!(had_image, "the layout review attached a Binary image part");
+}
+
+#[tokio::test]
+async fn low_review_score_without_actionable_defects_does_not_trigger_fix_turn() {
+    use tokio::sync::mpsc::unbounded_channel;
+
+    let (reviewer, _seen) = CannedReviewer::new(LOW_NON_ACTIONABLE_VERDICT);
+    let reviewer = Arc::new(reviewer);
+    let reviews_done = Arc::new(Mutex::new(0));
+    let backend = ReviewStub {
+        reviewer: Arc::clone(&reviewer),
+        reviews_done: Arc::clone(&reviews_done),
+    };
+
+    let client = ScriptedClient::new(vec![
+        tool_call("t1", "apply_design", json!({ "commit": true })),
+        final_text("committed"),
+    ]);
+    let mut agent = Agent::with_test_backend(client, Box::new(backend), "sys");
+    let mut approvals = AutoApprove::yes();
+    let (tx, mut rx) = unbounded_channel();
+
+    let out = agent
+        .run_turn_reviewed(
+            "a simple divider",
+            "a simple divider",
+            &mut approvals,
+            Some(&tx),
+            1,
+        )
+        .await
+        .unwrap();
+
+    assert!(out.applied);
+    assert_eq!(
+        out.final_text, "committed",
+        "no review-fix turn should run for non-actionable noise"
+    );
+    assert_eq!(
+        *reviews_done.lock().unwrap(),
+        1,
+        "only the initial post-commit review should run"
+    );
+
+    let mut reviewed = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let AgentEvent::Reviewed {
+            round,
+            score,
+            defects,
+        } = ev
+        {
+            reviewed.push((round, score, defects));
+        }
+    }
+    assert_eq!(reviewed.len(), 1, "one clean review event: {reviewed:?}");
+    assert_eq!(reviewed[0].0, 0);
+    assert_eq!(reviewed[0].1, 8.0);
+    assert!(reviewed[0].2.is_empty());
 }
 
 /// LIVE one-turn smoke (`#[ignore]` — needs KiCAD + `.env` creds): commit a small

@@ -45,15 +45,29 @@ pub const LENSES: &[&str] = &[
      crystal/oscillator pin placement, reset/boot/enable/chip-select straps, direction and address pins",
 ];
 
-/// Review a netlist with the diverse-lens ENSEMBLE and return `(lowest score, union of
-/// high-confidence critical/major defect lines)` — ready to feed back as a fix turn. Thin domain
-/// wrapper over [`crate::review()`](fn@crate::review) with this module's [`REVIEW_SYSTEM`] + [`LENSES`].
+const QUICK_LENSES: &[&str] = &[
+    "check power/regulation math, polarity, essential support parts, feedback/bias topology, digital pin functions, clocks, resets, enables, straps, and interface direction",
+];
+
+fn netlist_lenses() -> &'static [&'static str] {
+    if std::env::var_os("GORDIAN_REVIEW_ENSEMBLE").is_some() {
+        LENSES
+    } else {
+        QUICK_LENSES
+    }
+}
+
+/// Review a netlist and return `(actionable score, union of high-confidence
+/// critical/major defect lines)` — ready to feed back as a fix turn. Thin domain
+/// wrapper over [`crate::review()`](fn@crate::review) with this module's
+/// [`REVIEW_SYSTEM`] and the quick lens, or [`LENSES`] when
+/// `GORDIAN_REVIEW_ENSEMBLE=1`.
 pub async fn review_netlist(
     client: &dyn Provider,
     intent: &str,
     netlist: &str,
 ) -> Result<(f64, Vec<String>)> {
-    crate::review(client, REVIEW_SYSTEM, LENSES, intent, netlist).await
+    crate::review(client, REVIEW_SYSTEM, netlist_lenses(), intent, netlist).await
 }
 
 // ── LAYOUT (vision) critic ───────────────────────────────────────────────────
@@ -328,6 +342,18 @@ pub const LAYOUT_LENSES: &[&str] = &[
      refdes / value TEXT colliding with a wire, a body, or other text",
 ];
 
+const QUICK_LAYOUT_LENSES: &[&str] = &[
+    "check the visible worst layout issues only: related-part grouping, connector placement, board use, route/wire directness, congestion, and text/silkscreen legibility",
+];
+
+fn layout_lenses() -> &'static [&'static str] {
+    if std::env::var_os("GORDIAN_REVIEW_ENSEMBLE").is_some() {
+        LAYOUT_LENSES
+    } else {
+        QUICK_LAYOUT_LENSES
+    }
+}
+
 /// The prompt text that rides ALONGSIDE the rendered image: the design intent plus
 /// the "reason first, then FINAL_JSON" instruction. The image itself is attached as
 /// a vision block by [`crate::review_image`].
@@ -368,8 +394,8 @@ Reason briefly from visible evidence and name a concrete better alternative for
 each defect. Then emit strict JSON after `FINAL_JSON:` with:
 {"score":0-10,"summary":"one sentence","defects":[{"severity":"critical|major|minor","confidence":"high|medium|low","category":"placement|board-utilisation|routing-directness|routing-neatness|via-economy|silkscreen|other","location":"refdes/region","description":"concrete observation","verification":"visible evidence"}]}"#;
 
-/// Run the diverse-lens VISION layout critic over a rendered design `image` and
-/// return `(lowest score, union of high-confidence critical/major layout defect
+/// Run the VISION layout critic over a rendered design `image` and return
+/// `(actionable score, union of high-confidence critical/major layout defect
 /// lines)` — the SAME shape [`review_netlist`] returns, so the review→fix loop
 /// folds layout defects in beside the netlist ones. `kind` picks the ported critic
 /// prompt ([`SCHEMATIC_CRITIC_SYSTEM`] / [`PCB_CRITIC_SYSTEM`]). A flaky/empty
@@ -385,7 +411,7 @@ pub async fn review_layout(
         LayoutKind::Board => COMPACT_PCB_CRITIC_SYSTEM,
     };
     let prompt = layout_prompt(intent, kind);
-    crate::review_image(client, system, LAYOUT_LENSES, &prompt, image).await
+    crate::review_image(client, system, layout_lenses(), &prompt, image).await
 }
 
 /// Two defect lines are "the same" if they target the same refdes — so a union (across lenses, or

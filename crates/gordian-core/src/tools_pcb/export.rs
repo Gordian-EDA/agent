@@ -21,6 +21,24 @@ pub(super) fn is_non_copper(v: &Violation) -> bool {
     v.severity == "warning" && NON_COPPER_WARNINGS.contains(&v.kind.as_str())
 }
 
+pub(super) fn violation_summaries<'a>(
+    violations: impl IntoIterator<Item = &'a Violation>,
+    limit: usize,
+) -> Vec<Value> {
+    violations
+        .into_iter()
+        .take(limit)
+        .map(|v| {
+            json!({
+                "type": v.kind,
+                "severity": v.severity,
+                "description": v.description,
+                "items": v.items.iter().take(3).map(|i| i.description.clone()).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}
+
 /// Save the active board and run KiCAD's PCB DRC against it.
 pub fn check_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let path = match super::active::save_live_board(ctx) {
@@ -43,6 +61,11 @@ pub fn check_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         "violations": report.violations.len(),
         "copper_violations": copper_violations,
         "unconnected_items": report.unconnected_items.len(),
+        "top_violations": violation_summaries(
+            report.violations.iter().filter(|v| !is_non_copper(v)),
+            5,
+        ),
+        "top_unconnected": violation_summaries(report.unconnected_items.iter(), 5),
         "note": if copper_violations == 0 && report.unconnected_items.is_empty() {
             "KiCAD DRC passed for the saved live board."
         } else {

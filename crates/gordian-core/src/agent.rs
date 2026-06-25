@@ -31,6 +31,7 @@
 //! UI supplies its own.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -899,9 +900,32 @@ async fn run_kicad_tool(
 async fn run_blocking(ctx: &Arc<PcbToolCtx>, name: &str, input: Value) -> Result<Value> {
     let ctx = Arc::clone(ctx);
     let name = name.to_string();
-    tokio::task::spawn_blocking(move || run_tool(&name, input, &ctx))
-        .await
-        .map_err(|e| anyhow::anyhow!("tool execution task failed: {e}"))?
+    let timeout = tool_timeout(&name);
+    let handle = tokio::task::spawn_blocking({
+        let name = name.clone();
+        move || run_tool(&name, input, &ctx)
+    });
+    match tokio::time::timeout(timeout, handle).await {
+        Ok(joined) => joined.map_err(|e| anyhow::anyhow!("tool execution task failed: {e}"))?,
+        Err(_) => {
+            anyhow::bail!(
+                "{name} timed out after {}s; close any KiCAD dialogs/processes touching the project and retry, or simplify/batch the draft before applying",
+                timeout.as_secs()
+            );
+        }
+    }
+}
+
+fn tool_timeout(name: &str) -> Duration {
+    match name {
+        // Covers compile + schematic layout + optional write + KiCAD ERC. A hang
+        // here wedges the agent turn, so fail back to the model instead.
+        "apply_design" => Duration::from_secs(120),
+        // KiCAD IPC/CLI paths can legitimately take longer on first launch.
+        "derive_board" | "place_board" | "route_board" | "check_board" | "export_fab"
+        | "open_board" => Duration::from_secs(180),
+        _ => Duration::from_secs(90),
+    }
 }
 
 /// The `review_design` tool: an INDEPENDENT electrical-correctness review of the
@@ -952,7 +976,7 @@ async fn review_netlist_with_erc(
             }
         }
     }
-    Ok((score, defects))
+    Ok(normalize_review_score((score, defects)))
 }
 
 /// The post-turn review of the committed schematic, in TWO complementary planes
@@ -960,9 +984,10 @@ async fn review_netlist_with_erc(
 /// exact-math ERC), and the LAYOUT plane — an in-loop VISION critic that renders
 /// the committed `.kicad_sch` to PNG and judges READABILITY.
 ///
-/// The two defect lists are deduped by their shared `- <target>:` prefix and the
-/// score is the lower of the two. The layout pass is BEST-EFFORT: a render or
-/// vision failure contributes nothing and the review degrades to netlist-only.
+/// The two defect lists are deduped by their shared `- <target>:` prefix. A
+/// layout score only lowers the result when it contributes actionable defects;
+/// the layout pass is BEST-EFFORT, so a render or vision failure contributes
+/// nothing and the review degrades to netlist-only.
 async fn review_committed_kicad(
     ctx: &Arc<PcbToolCtx>,
     intent: &str,
@@ -977,13 +1002,13 @@ async fn review_committed_kicad(
         review_netlist_with_erc(ctx, reviewer, intent, &netlist),
         review_layout_schematic(ctx, reviewer, intent),
     );
-    let (mut score, mut defects) = netlist_review.ok()?;
+    let (mut score, mut defects) = normalize_review_score(netlist_review.ok()?);
 
-    // Layout (vision) plane — best-effort, unioned in. A `(0.0, [])` result means
-    // the vision pass produced no parseable verdict (no signal), so it must NOT
-    // drag the score to zero — skip it.
+    // Layout (vision) plane — best-effort, unioned in. It can only lower the
+    // score when it contributes actionable high-confidence defects. A low layout
+    // score with no surviving defects is not useful feedback for a fix turn.
     if let Some((layout_score, layout_defects)) = layout_review
-        && !(layout_score == 0.0 && layout_defects.is_empty())
+        && !layout_defects.is_empty()
     {
         score = score.min(layout_score);
         for d in layout_defects {
@@ -992,7 +1017,19 @@ async fn review_committed_kicad(
             }
         }
     }
+    let (score, defects) = normalize_review_score((score, defects));
     Some(ReviewOutcome { score, defects })
+}
+
+fn normalize_review_score((score, defects): (f64, Vec<String>)) -> (f64, Vec<String>) {
+    let score = if defects.is_empty() && score > 0.0 {
+        score.max(8.0)
+    } else if !defects.is_empty() {
+        score.min(6.0)
+    } else {
+        score
+    };
+    (score, defects)
 }
 
 /// Render the committed schematic to PNG (on the blocking pool — it shells out to

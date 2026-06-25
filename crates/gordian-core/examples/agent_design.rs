@@ -42,16 +42,20 @@ async fn main() -> anyhow::Result<()> {
     // Stream events so the run's tool calls are visible while it works.
     let (tx, mut rx) = mpsc::unbounded_channel();
     let printer = tokio::spawn(async move {
-        let (mut tin, mut tout) = (0u64, 0u64);
+        let (mut tin, mut tout, mut cache_write, mut cache_read) = (0u64, 0u64, 0u64, 0u64);
         while let Some(ev) = rx.recv().await {
             match ev {
                 gordian_core::AgentEvent::Usage {
                     input_tokens,
                     output_tokens,
+                    cache_write_tokens,
+                    cache_read_tokens,
                     ..
                 } => {
                     tin += input_tokens;
                     tout += output_tokens;
+                    cache_write += cache_write_tokens;
+                    cache_read += cache_read_tokens;
                 }
                 gordian_core::AgentEvent::ToolStarted { name } => eprintln!("  tool -> {name}"),
                 gordian_core::AgentEvent::ToolFinished { name, summary, .. } => {
@@ -63,16 +67,16 @@ async fn main() -> anyhow::Result<()> {
                 _ => {}
             }
         }
-        (tin, tout)
+        (tin, tout, cache_write, cache_read)
     });
 
     let mut approvals = AutoApprove::yes();
     let outcome = agent.run_turn(&prompt, &mut approvals, Some(&tx)).await?;
     drop(tx);
-    let (tin, tout) = printer.await.unwrap_or((0, 0));
+    let (tin, tout, cache_write, cache_read) = printer.await.unwrap_or((0, 0, 0, 0));
 
     eprintln!(
-        "\n--- outcome ---\napplied={} tool_calls={} stop={:?} tokens(in={tin} out={tout})",
+        "\n--- outcome ---\napplied={} tool_calls={} stop={:?} tokens(in={tin} out={tout} cache_write={cache_write} cache_read={cache_read})",
         outcome.applied, outcome.tool_calls_made, outcome.stop_reason
     );
     eprintln!("final reply:\n{}\n", outcome.final_text.trim());

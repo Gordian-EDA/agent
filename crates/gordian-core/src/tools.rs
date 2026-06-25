@@ -314,437 +314,283 @@ pub fn tool_defs() -> Vec<Tool> {
     let defs = vec![
             Def {
                 name: "search_symbols".into(),
-                description: "Search every installed KiCAD symbol library by name \
-                    and return the best matches as fully-qualified `Lib:Name` ids \
-                    with their pin counts. Use this to find the real lib_id for a \
-                    part before placing it — never guess a lib_id."
+                description: "Find KiCAD symbol `Lib:Name` ids. Skip stable built-ins like Device:R/C/LED, power:GND/+3V3, Connector:Conn_01x02_Pin; reuse hits."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "query": { "type": "string",
-                            "description": "Part name or fragment, e.g. \"STM32H743VI\" or \"USB-C receptacle\"." },
-                        "limit": { "type": "integer",
-                            "description": "Max hits to return (default 8).", "minimum": 1 }
+                        "query": { "type": "string", "description": "Part name/fragment." },
+                        "limit": { "type": "integer", "description": "Max hits, default 8.", "minimum": 1 }
                     },
                     "required": ["query"]
                 }),
             },
             Def {
                 name: "get_symbol_info".into(),
-                description: "Return the full pin table (number, name, electrical \
-                    type, unit) for a fully-qualified `Lib:Name` symbol. If the \
-                    lib_id is unknown, returns an error with the closest known \
-                    suggestions."
+                description: "Return pin number/name/type/unit for a symbol `Lib:Name`."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "lib_id": { "type": "string",
-                            "description": "Fully-qualified symbol id, e.g. \"Device:R\" or \"MCU_ST_STM32H7:STM32H743VITx\"." }
+                        "lib_id": { "type": "string", "description": "Symbol id, e.g. Device:R." }
                     },
                     "required": ["lib_id"]
                 }),
             },
             Def {
                 name: "get_design".into(),
-                description: "Return the working draft (circuit-YAML) when one \
-                    exists, seeding it from the current schematic if needed. If \
-                    a draft already exists, returns it (source=draft) and flags \
-                    stale=true when the .kicad_sch changed out-of-band since the \
-                    draft was seeded. If no draft exists, lifts the schematic \
-                    (source=lifted), seeds the draft so edit_design is immediately \
-                    usable, and returns the lifted YAML. If no schematic exists \
-                    yet, returns an empty yaml with a note."
+                description: "Return current circuit-YAML draft; if absent, lift/seed it from the schematic. Do not call right after create_design."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "validate_design".into(),
-                description: "Compile circuit-YAML against the real symbol \
-                    libraries WITHOUT writing anything. Returns ok plus every \
-                    diagnostic (errors and warnings) as human-readable strings — \
-                    use the diagnostics to self-repair the YAML."
+                description: "Compile circuit-YAML without writing; returns ok/errors/warnings."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "yaml": { "type": "string", "description": "The circuit-YAML source to validate." }
+                        "yaml": { "type": "string", "description": "circuit-YAML." }
                     },
                     "required": ["yaml"]
                 }),
             },
             Def {
                 name: "apply_design".into(),
-                description: "Compile circuit-YAML and render the reconciled \
-                    schematic. By default (commit omitted/false) this is a DRY RUN: \
-                    it returns a diff (added/removed/changed refdes + net delta) \
-                    and does NOT write. With commit=true it writes the .kicad_sch, \
-                    snapshots the prior, runs ERC, and returns the ERC counts. \
-                    Compilation errors are returned as diagnostics with ok=false. \
-                    If yaml is omitted, applies the current draft (see \
-                    create_design/edit_design)."
+                description: "Compile/render schematic. Default commit=false previews diff; commit=true writes and runs ERC. Omit yaml to use draft."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "yaml": { "type": "string", "description": "The circuit-YAML source to apply. If omitted, the current draft is used." },
-                        "commit": { "type": "boolean",
-                            "description": "Write the schematic (true) or dry-run and only return the diff (false, default)." }
+                        "yaml": { "type": "string", "description": "Optional circuit-YAML; default draft." },
+                        "commit": { "type": "boolean", "description": "true writes; false previews." }
                     }
                 }),
             },
             Def {
                 name: "review_design".into(),
-                description: "Get an INDEPENDENT electrical-correctness review of the \
-                    current design. A FRESH reviewer (no memory of your work, so it \
-                    won't rationalise your choices) plus a deterministic exact-math ERC \
-                    audit the netlist for FUNCTIONAL faults that pass ERC and look clean \
-                    but are electrically wrong: pin-function mis-wires (a bus signal on \
-                    the wrong device pin), a part on the wrong voltage rail, a feedback \
-                    divider set for the wrong output voltage, reversed polarity, a missing \
-                    essential part (crystal load caps, regulator output cap). Returns a \
-                    score (0-10) and a list of high-confidence defects. STRONGLY \
-                    RECOMMENDED once your design is complete (before you finish): call it, \
-                    fix any defects with edit_design, then re-check. It reviews the current \
-                    draft, so you can run it before committing."
+                description: "Independent electrical review of the current draft. Costly: call once when the draft is complete, fix high-confidence defects, then continue."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "intent": { "type": "string",
-                            "description": "What the circuit is supposed to do (the design goal), for the reviewer's context. Be specific about rails, key parts, and interfaces." }
+                        "intent": { "type": "string", "description": "Design goal with rails/key parts/interfaces." }
                     }
                 }),
             },
             Def {
                 name: "run_erc".into(),
-                description: "Run KiCAD's Electrical Rules Check on the current \
-                    schematic and return the error/warning counts plus the \
-                    violations (severity, type, description). Errors if no \
-                    schematic exists yet."
+                description: "Run KiCAD ERC on the current schematic; returns counts and violations."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "project_info".into(),
-                description: "Return the current project's paths and state: the \
-                    project directory, the schematic path the tools read/write, \
-                    whether that file exists yet, how many undo snapshots there \
-                    are, and the process working directory. Use this when the \
-                    user asks where files live or whether you can see their \
-                    schematic."
+                description: "Return project paths/state."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "read_schematic".into(),
-                description: "Read ANY .kicad_sch file on disk and return it \
-                    lifted to circuit-YAML. The path may be absolute, start \
-                    with ~, or be relative to the project directory. Use this \
-                    to inspect a schematic the user references by path; it does \
-                    not change which file the project edits."
+                description: "Lift a .kicad_sch path to circuit-YAML without changing the project."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string",
-                            "description": "Path to a .kicad_sch file, e.g. \"/home/me/boards/x.kicad_sch\" or \"~/boards/x.kicad_sch\"." }
+                        "path": { "type": "string", "description": ".kicad_sch path." }
                     },
                     "required": ["path"]
                 }),
             },
             Def {
                 name: "find_similar_designs".into(),
-                description: "Study REAL professional KiCAD schematics that match your \
-                    design intent, returned as circuit-YAML you can emulate. Given a \
-                    one-line intent (e.g. \"STM32 board with USB and a 3V3 regulator\"), \
-                    this ranks a corpus of human-authored designs and returns the top \
-                    matches — each with its description, origin repo, and (when it lifts \
-                    cleanly) its full circuit-YAML — so you can copy professional patterns: \
-                    how to PARTITION into blocks, place decoupling, wire idioms (crystal + \
-                    load caps, regulator in/out caps), and which parts pros actually use. \
-                    Call this BEFORE authoring a new design to ground yourself in real \
-                    references. Some human schematics won't lift to YAML (exotic libs / \
-                    hierarchy); those still return their description, and lift_success_rate \
-                    reports how many produced YAML. Returns empty when no reference corpus \
-                    is installed — that is fine, just design from first principles."
+                description: "Return similar real KiCAD designs as circuit-YAML references, if a corpus is installed."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "intent": { "type": "string",
-                            "description": "One-line description of what you want to design, \
-                                e.g. \"STM32 microcontroller board with USB and 3V3 regulator\"." },
-                        "k": { "type": "integer",
-                            "description": "How many references to return (default 3).", "minimum": 1 }
+                        "intent": { "type": "string", "description": "One-line design goal." },
+                        "k": { "type": "integer", "description": "Max references, default 3.", "minimum": 1 }
                     },
                     "required": ["intent"]
                 }),
             },
             Def {
                 name: "render_schematic".into(),
-                description: "Render the current schematic to a PNG image and \
-                    return it so you can SEE the sheet. Use after apply_design \
-                    to inspect layout quality: overlapping text, crowding, \
-                    confusing arrangement. The PNG is also saved under \
-                    .gordian/renders/."
+                description: "Render current schematic to PNG for visual inspection."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "create_design".into(),
-                description: "Create the working draft (circuit-YAML) from \
-                    scratch. The draft is the document edit_design patches and \
-                    apply_design (with no yaml argument) applies. Fails if a \
-                    draft already exists unless overwrite=true. Returns compile \
-                    diagnostics for the new draft."
+                description: "Create a new circuit-YAML draft. Fails if one exists unless overwrite=true."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "yaml": { "type": "string", "description": "The full circuit-YAML draft content." },
-                        "overwrite": { "type": "boolean", "description": "Replace an existing draft (default false)." }
+                        "yaml": { "type": "string", "description": "Full draft." },
+                        "overwrite": { "type": "boolean", "description": "Replace existing draft." }
                     },
                     "required": ["yaml"]
                 }),
             },
             Def {
                 name: "edit_design".into(),
-                description: "Patch the working draft by exact string \
-                    replacement: old_string must occur exactly once (or pass \
-                    replace_all=true). Far cheaper and safer than resending the \
-                    whole document. Returns compile diagnostics for the edited \
-                    draft so you get immediate validation feedback."
+                description: "Edit draft. For multiple changes use one full `yaml` replacement; use old_string/new_string only for one exact copied snippet. Returns diagnostics."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "old_string": { "type": "string", "description": "Exact text to find in the draft." },
-                        "new_string": { "type": "string", "description": "Replacement text." },
-                        "replace_all": { "type": "boolean", "description": "Replace every occurrence (default false)." }
-                    },
-                    "required": ["old_string", "new_string"]
+                        "yaml": { "type": "string", "description": "Full replacement draft." },
+                        "old_string": { "type": "string", "description": "Exact current snippet." },
+                        "new_string": { "type": "string", "description": "Replacement snippet." },
+                        "replace_all": { "type": "boolean", "description": "Replace all matches." }
+                    }
                 }),
             },
             // ── PCB tools (slice 5) ─────────────────────────────────────────
             Def {
                 name: "search_footprints".into(),
-                description: "Search every installed KiCAD footprint library by \
-                    name and return the best matches as fully-qualified \
-                    `Lib:Name` ids with their pad counts. Use this to find the \
-                    real footprint lib_id for a part before putting it on a board \
-                    — NEVER guess a footprint lib_id. The pad count is the number \
-                    of pads you must assign nets to in derive_board."
+                description: "Find real KiCAD footprint `Lib:Name` ids. Use during schematic drafting before apply_design; reuse hits."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "query": { "type": "string",
-                            "description": "Footprint name or fragment, e.g. \"R_0603\", \"SOT-23\", \"PinHeader 1x02 2.54\"." },
-                        "limit": { "type": "integer",
-                            "description": "Max hits to return (default 8).", "minimum": 1 }
+                        "query": { "type": "string", "description": "Footprint name/fragment." },
+                        "limit": { "type": "integer", "description": "Max hits, default 8.", "minimum": 1 }
                     },
                     "required": ["query"]
                 }),
             },
             Def {
                 name: "get_footprint_info".into(),
-                description: "Return the pad NUMBER list (use these to build the pad_nets \
-                    map for derive_board) plus a compact shape summary — pad_count, \
-                    min_pitch_mm, pad dimensions, pad technologies, the courtyard rectangle, \
-                    and the bounding box — for a fully-qualified `Lib:Name` footprint. \
-                    (Per-pad coordinates are summarized, not listed: the engine places pads, \
-                    not you.) If the lib_id is unknown, returns an error with the closest \
-                    known suggestions — never guess the id."
+                description: "Return footprint pad numbers and compact geometry summary for a `Lib:Name`."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "lib_id": { "type": "string",
-                            "description": "Fully-qualified footprint id, e.g. \"Resistor_SMD:R_0603_1608Metric\" or \"Package_TO_SOT_SMD:SOT-23\"." }
+                        "lib_id": { "type": "string", "description": "Footprint id." }
                     },
                     "required": ["lib_id"]
                 }),
             },
             Def {
                 name: "assign_footprint".into(),
-                description: "Assign a real footprint lib_id to one component in the working \
-                    circuit-YAML draft. This validates the footprint id, edits the draft's \
-                    footprint field directly, and returns compile diagnostics. Find lib_ids \
-                    with search_footprints / get_footprint_info — never guess. After this \
-                    succeeds, call apply_design(commit=true), then derive_board to sync the PCB."
+                description: "Set one component's footprint field in the circuit-YAML draft. After assignments, apply_design(commit=true) before derive_board."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "reference": { "type": "string", "description": "Part reference, e.g. \"U1\"." },
-                        "footprint": { "type": "string", "description": "Footprint lib_id, e.g. \"Package_SO:SOIC-8_3.9x4.9mm_P1.27mm\"." }
+                        "reference": { "type": "string", "description": "Refdes." },
+                        "footprint": { "type": "string", "description": "Footprint id." }
                     },
                     "required": ["reference", "footprint"]
                 }),
             },
             Def {
                 name: "open_board".into(),
-                description: "Open the exported .kicad_pcb in a LIVE headless KiCAD for INTERACTIVE \
-                    editing over IPC. After this you edit the REAL board directly — move_part, \
-                    route_track, set_net_width — with board_state to read it and render_board to see \
-                    it. Opens or attaches to the project board (derive_board -> place_board \
-                    -> route_board). Returns the board state."
+                description: "Open the project .kicad_pcb in headless KiCAD for live IPC edits; returns board_state."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "board_state".into(),
-                description: "Read the live (open) board: every part's reference + position (mm), the \
-                    track count, and the net list. Inspect before/after an interactive edit. Requires open_board."
+                description: "Read live board refs/positions, track count, and nets. Requires open_board."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "move_part".into(),
-                description: "Move a part to (x, y) mm (optional rotation degrees) on the live board — \
-                    direct geometry control for thermal / decoupling / length-match placement. Requires open_board."
+                description: "Move a live-board part to x/y mm, optional rotation. Requires open_board."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "reference": { "type": "string", "description": "Part reference, e.g. \"U1\"." },
-                        "x": { "type": "number", "description": "X position (mm)." },
-                        "y": { "type": "number", "description": "Y position (mm)." },
-                        "rotation": { "type": "number", "description": "Optional rotation (degrees)." }
+                        "reference": { "type": "string", "description": "Refdes." },
+                        "x": { "type": "number", "description": "mm." },
+                        "y": { "type": "number", "description": "mm." },
+                        "rotation": { "type": "number", "description": "Degrees." }
                     },
                     "required": ["reference", "x", "y"]
                 }),
             },
             Def {
                 name: "route_track".into(),
-                description: "Route a straight copper track on the live board: start/end as [x,y] mm, \
-                    width mm, a copper layer (F.Cu/B.Cu/In1.Cu/...), optionally on a net. WIDTH is the \
-                    engineering lever — fat copper for power/high current, thin for signals. Requires open_board."
+                description: "Add one straight live-board track: start/end [x,y] mm, width, layer, optional net. Requires open_board."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "start": { "type": "array", "items": {"type":"number"}, "description": "[x, y] mm." },
                         "end": { "type": "array", "items": {"type":"number"}, "description": "[x, y] mm." },
-                        "width": { "type": "number", "description": "Track width (mm). Default 0.2." },
-                        "layer": { "type": "string", "description": "Copper layer: F.Cu, B.Cu, In1.Cu, ... Default F.Cu." },
-                        "net": { "type": "string", "description": "Optional net name to assign." }
+                        "width": { "type": "number", "description": "mm, default 0.2." },
+                        "layer": { "type": "string", "description": "F.Cu/B.Cu/etc." },
+                        "net": { "type": "string", "description": "Net name." }
                     },
                     "required": ["start", "end"]
                 }),
             },
             Def {
                 name: "set_net_width".into(),
-                description: "Define (or update) a net class with a track width + clearance (mm) and \
-                    assign nets to it — the idiomatic \"wide copper for power\" lever (e.g. widen \
-                    GND/VCC/VIN). Requires open_board. (Per-track widths are also settable via route_track.)"
+                description: "Set live-board net class width/clearance for nets. Prefer derive_board.rules.net_widths before routing."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "name": { "type": "string", "description": "Net class name, e.g. \"Power\"." },
-                        "width": { "type": "number", "description": "Track width (mm). Default 0.5." },
-                        "clearance": { "type": "number", "description": "Clearance (mm). Default 0.2." },
-                        "nets": { "type": "array", "items": {"type":"string"}, "description": "Net names, e.g. [\"GND\",\"VCC\"]." }
+                        "name": { "type": "string", "description": "Class name." },
+                        "width": { "type": "number", "description": "mm, default 0.5." },
+                        "clearance": { "type": "number", "description": "mm, default 0.2." },
+                        "nets": { "type": "array", "items": {"type":"string"}, "description": "Net names." }
                     },
                     "required": ["name", "nets"]
                 }),
             },
             Def {
                 name: "derive_board".into(),
-                description: "Seed the board from the committed schematic: reads the parts + \
-                    netlist (pin->pad is KiCAD's) and builds the KiCAD board — one part per \
-                    component with its pad->net map and the footprint taken from the symbol. \
-                    Requires a committed .kicad_sch (run apply_design first). `missing_footprints` \
-                    lists parts whose symbol had no footprint — set each with assign_footprint. \
-                    Then place_board -> route_board -> check_board. Optional `bounds` seeds the \
-                    outline (mm); `rules.layers` the copper layer count."
+                description: "Seed PCB from the committed schematic. If footprints are missing/unapplied, fix YAML and apply_design(commit=true) first."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "bounds": {
                             "type": "object",
-                            "description": "Optional: seed the board outline (mm, y-down).",
+                            "description": "Board outline rect, mm.",
                             "properties": {
                                 "min_x": { "type": "number" }, "max_x": { "type": "number" },
                                 "min_y": { "type": "number" }, "max_y": { "type": "number" }
                             }
                         },
-                        "rules": { "type": "object",
-                            "description": "Optional: {layers: 2|4} seeds the copper layer count." }
+                        "rules": { "type": "object", "description": "{layers, net_widths, clearance, min_trace_width}." }
                     }
                 }),
             },
             Def {
                 name: "get_board".into(),
-                description: "Return the current live KiCAD board (parts as \
-                    reference/footprint/position + pad_count) plus a derived summary: \
-                    part count, net count, per-net pin counts, and whether the board \
-                    has been placed / routed yet. Use this to inspect board state before \
-                    placing or routing, or to confirm a derive_board / IPC edit took effect."
+                description: "Return live board parts/summary/state."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "place_board".into(),
-                description: "Place the current board: turn every part's footprint \
-                    + design rules + any locked positions into a placement problem, \
-                    apply automatic placement hints, and run the deterministic \
-                    placer. The placement is written to the live KiCAD board over IPC \
-                    (route_board and render_board read that board). Returns legal (true iff no courtyard \
-                    overlap and all parts in bounds), the HPWL wirelength metric, how \
-                    many overlaps the legalizer resolved / parts it clamped, and the \
-                    per-part positions [{reference, x, y, rotation}]. Routing obstacles \
-                    are read from the live KiCAD board when route_board runs. \
-                    Run derive_board first; an unplaceable (too-tight) board returns \
-                    legal=false with a note on how to relax it."
+                description: "Auto-place the derived board and write placement. Run after derive_board."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "route_board".into(),
-                description: "Route the placed board: build the routing problem from \
-                    the live KiCAD board and run the auto-router (detailed pipeline \
-                    with a naive fallback). Requires a placement — run place_board first \
-                    (else a recoverable error). Routed copper is written back over IPC; \
-                    the result returns: router \
-                    (\"detailed\"/\"naive\"), failed nets [{connection, reason}] with \
-                    stage provenance (global:/assign:/cell:/finisher:), metrics \
-                    (wirelength, vias, traces), and lint_summary (DRC violation counts \
-                    by kind — EXPECTED ZERO; a non-zero count sets engine_bug=true and \
-                    is an engine fault, not a board you can fix). When nets fail, a \
-                    congestion report (iterations + edge hotspots) is included to guide \
-                    triage — re-seed with a bigger outline or more layers (derive_board \
-                    overwrite=true), or refine interactively after open_board."
+                description: "Auto-route the placed board and write copper. Returns failed nets and metrics."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "autoroute".into(),
-                description: "Disabled for the IPC-only PCB flow. Freerouting must be \
-                    reconnected to read the live KiCAD IPC board and write routed copper \
-                    back through IPC before this tool can modify a board. Use route_board \
-                    for routing until that integration exists."
+                description: "Disabled; use route_board."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "render_board".into(),
-                description: "Render the board to a PNG image and attach it so you can \
-                    SEE the board. Call this AFTER place_board to inspect part positions \
-                    and AFTER route_board to inspect the copper. Two views: \
-                    view=\"placed\" shows part courtyards + pads coloured by net + region \
-                    hints (dashed blue) + keepout/obstacle rectangles in dark grey; \
-                    view=\"routed\" shows the full copper + vias + failed-net highlights. \
-                    Colour key (routed view): red = top-layer trace, blue = bottom-layer \
-                    trace, orange cross = failed net endpoint (route that net differently). \
-                    When view is omitted the default is \"routed\" if the live board has copper, \
-                    \"placed\" otherwise. Requires place_board (placed view) or route_board \
-                    (routed view); missing state returns a recoverable error. The PNG is \
-                    also saved under .gordian/renders/."
+                description: "Render board PNG; view placed/routed. Use when visual inspection is needed."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -752,48 +598,26 @@ pub fn tool_defs() -> Vec<Tool> {
                         "view": {
                             "type": "string",
                             "enum": ["placed", "routed"],
-                            "description": "Which view to render: \"placed\" (part positions, \
-                                courtyards, pads, region hints) or \"routed\" (full copper, \
-                                vias, failed-net highlights). Omit for auto (routed if routed, \
-                                else placed)."
+                            "description": "placed/routed; omit for auto."
                         }
                     }
                 }),
             },
             Def {
                 name: "check_board".into(),
-                description: "Save the active KiCAD board and run KiCAD PCB DRC. \
-                    Use after route_board or manual IPC edits. Reports total violations, \
-                    copper violations, and unconnected items. This is read-only over \
-                    the design except for saving the live board before DRC."
+                description: "Save live board and run KiCAD PCB DRC; returns violations/unconnected counts."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "export_fab".into(),
-                description: "Bundle the routed board into a manufacturable FAB deliverable: \
-                    Gerbers (one *.gbr per copper/mask/silk/edge layer), an Excellon drill set \
-                    (separate plated/non-plated files + drill maps), a CSV pick-and-place \
-                    (component positions), and — when the project has a schematic — a grouped \
-                    BOM CSV. Everything lands in a single fab/ directory you hand to a board \
-                    house. Call this LAST, AFTER check_board passes \
-                    (derive_board → place_board → route_board → check_board → export_fab); if no board file \
-                    exists it returns a recoverable error pointing at derive_board. Returns the \
-                    fab directory and the produced file list."
+                description: "Export Gerbers/drill/position/BOM fab bundle. Call last after check_board passes."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Input .kicad_pcb to bundle. Omit to use the \
-                                project's default <stem>.kicad_pcb."
-                        },
-                        "out_dir": {
-                            "type": "string",
-                            "description": "Output directory for the bundle. Omit for the \
-                                project's default fab/ directory."
-                        }
+                        "path": { "type": "string", "description": "Input .kicad_pcb; default project board." },
+                        "out_dir": { "type": "string", "description": "Output dir; default fab/." }
                     }
                 }),
             },
@@ -862,6 +686,24 @@ fn search_symbols(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         .and_then(Value::as_u64)
         .map(|n| n as usize)
         .unwrap_or(DEFAULT_SEARCH_LIMIT);
+    if let Some((lib_id, pin_count)) = builtin_symbol_alias(&query) {
+        return Ok(json!({
+            "hits": [{ "lib_id": lib_id, "pin_count": pin_count }],
+            "note": "built-in alias/canonical symbol; use it directly and do not repeat this search",
+        }));
+    }
+    if looks_like_pinheader_2pin_symbol_query(&query) {
+        let hits: Vec<Value> = ctx
+            .index()?
+            .search("Conn_01x02", limit)
+            .into_iter()
+            .map(|h| json!({ "lib_id": h.lib_id, "pin_count": h.pin_count }))
+            .collect();
+        return Ok(json!({
+            "hits": hits,
+            "note": "PinHeader_* names are footprints. Use Connector_Generic:Conn_01x02 as the schematic symbol when suitable; use search_footprints for the physical header footprint.",
+        }));
+    }
 
     let hits: Vec<Value> = ctx
         .index()?
@@ -871,6 +713,30 @@ fn search_symbols(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         .collect();
 
     Ok(json!({ "hits": hits }))
+}
+
+fn builtin_symbol_alias(query: &str) -> Option<(&'static str, usize)> {
+    let q = query.trim().to_ascii_lowercase();
+    match q.as_str() {
+        "r" | "device:r" => Some(("Device:R", 2)),
+        "c" | "device:c" => Some(("Device:C", 2)),
+        "l" | "device:l" => Some(("Device:L", 2)),
+        "d" | "device:d" => Some(("Device:D", 2)),
+        "led" | "device:led" => Some(("Device:LED", 2)),
+        "gnd" | "power:gnd" => Some(("power:GND", 1)),
+        "vcc" | "power:vcc" => Some(("power:VCC", 1)),
+        _ => None,
+    }
+}
+
+fn looks_like_pinheader_2pin_symbol_query(query: &str) -> bool {
+    let q = query.to_ascii_lowercase();
+    q.contains("pinheader")
+        && (q.contains("2pin")
+            || q.contains("2 pin")
+            || q.contains("1x02")
+            || q.contains("01x02")
+            || q.contains("2x1"))
 }
 
 // ── 2. get_symbol_info ─────────────────────────────────────────────────────
@@ -1404,6 +1270,22 @@ fn create_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
 }
 
 fn edit_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+    let full_yaml = input.get("yaml").and_then(Value::as_str);
+    let Some(draft) = ctx.workspace().read_draft() else {
+        return Ok(json!({
+            "error": "no draft exists — call get_design (seeds a draft from the \
+                      current schematic) or create_design first",
+        }));
+    };
+    if let Some(yaml) = full_yaml {
+        ctx.workspace()
+            .write_draft(yaml, current_sch_text(ctx).as_deref())?;
+        let mut report = compile_report(&compile(yaml, &ctx.provider).diagnostics);
+        report["draft_written"] = json!(true);
+        report["mode"] = json!("full_replace");
+        return Ok(report);
+    }
+
     let old = require_str(&input, "old_string")?;
     let new = require_str(&input, "new_string")?;
     let replace_all = input
@@ -1411,17 +1293,13 @@ fn edit_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    let Some(draft) = ctx.workspace().read_draft() else {
-        return Ok(json!({
-            "error": "no draft exists — call get_design (seeds a draft from the \
-                      current schematic) or create_design first",
-        }));
-    };
     let count = draft.matches(&*old).count();
     if count == 0 {
         return Ok(json!({
-            "error": format!("old_string not found in the draft (it must match \
-                              exactly, including whitespace): {old:?}"),
+            "error": "old_string not found in the current draft",
+            "old_string": old,
+            "hint": "Use get_design once to copy an exact current snippet, or call edit_design with a full corrected `yaml` for broad/formatting-heavy changes.",
+            "draft_chars": draft.len(),
         }));
     }
     if count > 1 && !replace_all {

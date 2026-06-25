@@ -21,6 +21,8 @@ const SOCKET_FILE: &str = "/tmp/kicad/api.sock";
 /// A running KiCAD instance plus the connected client.
 pub struct Session {
     child: Option<Child>,
+    xvfb: Option<Child>,
+    owned_board: Option<PathBuf>,
     kicad: Kicad,
 }
 
@@ -130,16 +132,18 @@ impl SessionManager {
     }
 
     fn attach_or_launch(board: &Path) -> Result<Session, Error> {
-        match Session::connect_running_board(board) {
-            Ok(session) => Ok(session),
-            Err(_) => Session::launch_headless(board),
+        if std::env::var_os("GORDIAN_ATTACH_RUNNING_KICAD").is_some() {
+            match Session::connect_running_board(board) {
+                Ok(session) => return Ok(session),
+                Err(_) => {}
+            }
         }
+        Session::launch_headless(board)
     }
 }
 
 impl Session {
-    /// Launch a headless KiCAD (`xvfb-run env -u WAYLAND_DISPLAY GDK_BACKEND=x11 pcbnew <board>`),
-    /// wait for the IPC
+    /// Launch a headless KiCAD (`Xvfb` + `pcbnew <board>`), wait for the IPC
     /// socket, connect, and open the board. The board file must exist.
     pub fn launch_headless(board: &Path) -> Result<Self, Error> {
         if !board.exists() {
@@ -148,25 +152,24 @@ impl Session {
                 board.display()
             )));
         }
+        kill_board_pcbnew(board);
         remove_board_lock(board);
         ensure_api_enabled();
         // A killed prior instance can leave a stale socket → ConnectionRefused.
         let _ = std::fs::remove_file(SOCKET_FILE);
 
         let launch_cwd = board.parent().unwrap_or_else(|| Path::new("/tmp"));
-        let child = Command::new("xvfb-run")
-            .arg("-a")
-            .arg("env")
-            .arg("-u")
-            .arg("WAYLAND_DISPLAY")
-            .arg("GDK_BACKEND=x11")
-            .arg("pcbnew")
+        let (display, xvfb) = launch_xvfb()?;
+        let child = Command::new("pcbnew")
             .arg(board)
             .current_dir(launch_cwd)
+            .env("DISPLAY", &display)
+            .env_remove("WAYLAND_DISPLAY")
+            .env("GDK_BACKEND", "x11")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| Error::Spawn(format!("launch xvfb-run pcbnew: {e}")))?;
+            .map_err(|e| Error::Spawn(format!("launch pcbnew: {e}")))?;
 
         Self::await_socket(Duration::from_secs(90))?;
         // Let the server finish binding before the first request.
@@ -177,6 +180,8 @@ impl Session {
         std::thread::sleep(Duration::from_millis(1_500));
         Ok(Self {
             child: Some(child),
+            xvfb: Some(xvfb),
+            owned_board: Some(board.to_path_buf()),
             kicad,
         })
     }
@@ -186,14 +191,24 @@ impl Session {
     pub fn connect_running() -> Result<Self, Error> {
         let mut kicad = Kicad::connect()?;
         kicad.open_board()?;
-        Ok(Self { child: None, kicad })
+        Ok(Self {
+            child: None,
+            xvfb: None,
+            owned_board: None,
+            kicad,
+        })
     }
 
     /// Attach to an already-running KiCAD only if it has `board` open.
     pub fn connect_running_board(board: &Path) -> Result<Self, Error> {
         let mut kicad = Kicad::connect()?;
         kicad.open_board_path(board)?;
-        Ok(Self { child: None, kicad })
+        Ok(Self {
+            child: None,
+            xvfb: None,
+            owned_board: None,
+            kicad,
+        })
     }
 
     /// The connected client (board read/edit ops).
@@ -222,12 +237,105 @@ fn same_board(a: &Path, b: &Path) -> bool {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        if let Some(board) = self.owned_board.as_deref() {
+            kill_board_pcbnew(board);
+            remove_board_lock(board);
+        }
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = std::fs::remove_file(SOCKET_FILE);
+        }
+        if let Some(mut child) = self.xvfb.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = std::fs::remove_file(SOCKET_FILE);
+    }
+}
+
+fn launch_xvfb() -> Result<(String, Child), Error> {
+    for display_num in 120..220 {
+        let display = format!(":{display_num}");
+        let mut child = Command::new("Xvfb")
+            .arg(&display)
+            .arg("-screen")
+            .arg("0")
+            .arg("1024x768x24")
+            .arg("-nolisten")
+            .arg("tcp")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| Error::Spawn(format!("launch Xvfb: {e}")))?;
+        std::thread::sleep(Duration::from_millis(250));
+        match child.try_wait() {
+            Ok(None) => return Ok((display, child)),
+            Ok(Some(_)) => {
+                let _ = child.wait();
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
     }
+    Err(Error::Spawn(
+        "could not start Xvfb on displays :120..:219".to_string(),
+    ))
+}
+
+fn kill_board_pcbnew(board: &Path) {
+    let needles = board_needles(board);
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    let mut pids = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == std::process::id() {
+            continue;
+        }
+        let cmdline = entry.path().join("cmdline");
+        let Ok(bytes) = std::fs::read(&cmdline) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes).replace('\0', " ");
+        if text.contains("pcbnew") && needles.iter().any(|needle| text.contains(needle)) {
+            pids.push(pid);
+        }
+    }
+    if pids.is_empty() {
+        return;
+    }
+    kill_pids("TERM", &pids);
+    std::thread::sleep(Duration::from_millis(500));
+    kill_pids("KILL", &pids);
+}
+
+fn board_needles(board: &Path) -> Vec<String> {
+    let mut needles = vec![board.display().to_string()];
+    if let Ok(canonical) = board.canonicalize() {
+        let canonical = canonical.display().to_string();
+        if !needles.contains(&canonical) {
+            needles.push(canonical);
+        }
+    }
+    needles
+}
+
+fn kill_pids(signal: &str, pids: &[u32]) {
+    let mut cmd = Command::new("kill");
+    cmd.arg(format!("-{signal}"));
+    for pid in pids {
+        cmd.arg(pid.to_string());
+    }
+    let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
 }
 
 fn remove_board_lock(board: &Path) {
