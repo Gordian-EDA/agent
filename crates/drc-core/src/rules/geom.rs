@@ -19,24 +19,6 @@ pub(crate) fn point_overshoot(p: [f64; 2], radius: f64, problem: &RouteProblem) 
     (left.max(right).max(top).max(bottom), p)
 }
 
-/// Minimum distance from segment `pq` (a via passes p == q) to the boundary of polygon `poly` —
-/// i.e. to its nearest edge. Used to verify routed copper clears a custom board outline.
-pub(crate) fn poly_edge_gap(p: [f64; 2], q: [f64; 2], poly: &[[f64; 2]]) -> f64 {
-    let n = poly.len();
-    if n < 2 {
-        return f64::INFINITY;
-    }
-    let pq = geom::Segment::new(p.into(), q.into());
-    let mut best = f64::INFINITY;
-    for i in 0..n {
-        let g = pq.dist_to_segment(geom::Segment::new(poly[i].into(), poly[(i + 1) % n].into()));
-        if g < best {
-            best = g;
-        }
-    }
-    best
-}
-
 /// Do two items share at least one owning connection? (A pad owned by the
 /// trace's net, the same net's own copper, etc. — never a clearance conflict.)
 pub(crate) fn share_owner(x: &CopperItem, y: &CopperItem) -> bool {

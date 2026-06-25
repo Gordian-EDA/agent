@@ -407,7 +407,7 @@ pub fn is_legal(
         // COURTYARD may still overhang (only copper is constrained), preserving the mounting-hole
         // -in-a-notch allowance.
         if let Some(poly) = &problem.outline {
-            if !crate::point_in_polygon(&pos[i], poly) {
+            if !geom::point_in_polygon(pos[i], poly) {
                 return false;
             }
             let (xmin, ymin, xmax, ymax) = copper_bbox[i];
@@ -422,7 +422,7 @@ pub fn is_legal(
                     x: pos[i].x + dx,
                     y: pos[i].y + dy,
                 };
-                if !crate::point_in_polygon(&c, poly) {
+                if !geom::point_in_polygon(c, poly) {
                     return false;
                 }
             }

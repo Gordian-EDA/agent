@@ -10,7 +10,7 @@
 //! No outline ⇒ no findings.
 
 use crate::ctx::CopperGeom;
-use crate::rules::geom::{EPS, poly_edge_gap};
+use crate::rules::geom::EPS;
 use crate::{DrcCtx, Finding, Rule};
 
 /// KiCAD's copper-to-board-edge clearance, mm.
@@ -29,11 +29,16 @@ impl Rule for BoardEdgeClearanceRule {
         let Some(poly) = &ctx.problem.outline else {
             return out;
         };
-        let pts: Vec<[f64; 2]> = poly.iter().map(|p| [p.x, p.y]).collect();
         for item in &ctx.copper {
             let (gap, half, at) = match &item.geom {
-                CopperGeom::Via { at, radius } => (poly_edge_gap(*at, *at, &pts), *radius, *at),
-                CopperGeom::Segment { a, b, half_w, .. } => (poly_edge_gap(*a, *b, &pts), *half_w, *a),
+                CopperGeom::Via { at, radius } => {
+                    let seg = geom::Segment::new((*at).into(), (*at).into());
+                    (geom::segment_dist_to_polygon_edge(seg, poly), *radius, *at)
+                }
+                CopperGeom::Segment { a, b, half_w, .. } => {
+                    let seg = geom::Segment::new((*a).into(), (*b).into());
+                    (geom::segment_dist_to_polygon_edge(seg, poly), *half_w, *a)
+                }
                 CopperGeom::Rect { .. } => continue,
             };
             if gap < EDGE_CLEAR + half - EPS {

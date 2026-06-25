@@ -29,7 +29,7 @@
 //! single-owner pads, so this is exact for them; the DRC lint (a later task) is
 //! the precision authority regardless.
 
-use crate::problem::{dist_to_polygon_edge, point_in_polygon, Point2, RouteProblem};
+use crate::problem::{Point2, RouteProblem};
 use std::collections::BTreeMap;
 
 /// Minimum grid pitch, mm. Keeps the grid from exploding on tiny design rules.
@@ -431,7 +431,7 @@ impl RouteGrid {
         for ix in 0..self.nx {
             for iy in 0..self.ny {
                 let pt = Point2 { x: self.cell_center_x(ix), y: self.cell_center_y(iy) };
-                if !point_in_polygon(&pt, poly) || dist_to_polygon_edge(&pt, poly) < inflation {
+                if !geom::point_in_polygon(pt, poly) || geom::dist_to_polygon_edge(pt, poly) < inflation {
                     for layer in 0..self.layer_count {
                         let i = self.idx(layer, ix, iy);
                         self.cells[i] = Cell::BlockedAll;

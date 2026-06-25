@@ -165,44 +165,6 @@ pub struct RouteProblem {
     pub escape_layers: std::collections::BTreeMap<String, u32>,
 }
 
-/// Is `pt` inside the closed polygon `poly` (ray-casting, even-odd rule)? A polygon of
-/// fewer than 3 points is treated as "no outline" → always inside.
-pub fn point_in_polygon(pt: &Point2, poly: &[Point2]) -> bool {
-    let n = poly.len();
-    if n < 3 {
-        return true;
-    }
-    let mut inside = false;
-    let mut j = n - 1;
-    for i in 0..n {
-        let (pi, pj) = (&poly[i], &poly[j]);
-        if (pi.y > pt.y) != (pj.y > pt.y) {
-            let x_int = pi.x + (pt.y - pi.y) / (pj.y - pi.y) * (pj.x - pi.x);
-            if pt.x < x_int {
-                inside = !inside;
-            }
-        }
-        j = i;
-    }
-    inside
-}
-
-/// Minimum distance from `pt` to the boundary of polygon `poly` (any edge). Used with
-/// [`point_in_polygon`] to enforce copper-to-edge clearance on a custom outline.
-pub fn dist_to_polygon_edge(pt: &Point2, poly: &[Point2]) -> f64 {
-    let n = poly.len();
-    if n < 2 {
-        return f64::INFINITY;
-    }
-    let mut best = f64::INFINITY;
-    let mut j = n - 1;
-    for i in 0..n {
-        best = best.min(Segment::new(poly[j], poly[i]).dist_to_point(*pt));
-        j = i;
-    }
-    best
-}
-
 impl RouteProblem {
     /// Trace width to emit for `net`: its per-net override, else the board minimum.
     pub fn net_width(&self, net: &str) -> f64 {
