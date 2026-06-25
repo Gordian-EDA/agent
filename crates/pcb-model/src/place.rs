@@ -9,11 +9,10 @@
 //! among placers by routability it drops `Box::new(MyPlacer)` into a
 //! [`RoutabilityOracle`] and supplies its own [`RouteRanker`] (its own router).
 //!
-//! This is the PCB analog of the schematic `sch_place::place::PlacementEngine` SDK:
-//! the identical silhouette (`name`/`capabilities`/a self-contained result/an
-//! injected evaluator), so the two tiers stay symmetric. The evaluator here is the
-//! [`RouteRanker`] (the placement oracle's router), carried where the schematic side
-//! carries its `PlacementCost`.
+//! This is the PCB analog of the schematic `PlacementEngine` SDK: the identical
+//! silhouette (`name`/`capabilities`/a self-contained result/an injected evaluator),
+//! so the two tiers stay symmetric. The evaluator here is the [`RouteRanker`] (the
+//! placement oracle's router).
 
 use crate::{Bounds, LayerRef, Point2, Rect};
 use crate::{Connection, Obstacle, RoutePoint, RouteProblem};

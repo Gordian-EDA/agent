@@ -119,7 +119,7 @@ pub fn emit_strategy(
     env: &KicadEnv,
     design: &Design,
     ir: &LayoutIr,
-    engine: Box<dyn MeasuringEngine>,
+    engine: Box<dyn PlacementEngine>,
 ) -> io::Result<EmitOutput> {
     let (w, mut out) = prepare_writer(env, design, ir, engine)?;
     out.sch = w.finish();
@@ -136,7 +136,7 @@ pub(crate) fn prepare_writer(
     env: &KicadEnv,
     design: &Design,
     ir: &LayoutIr,
-    engine: Box<dyn MeasuringEngine>,
+    engine: Box<dyn PlacementEngine>,
 ) -> io::Result<(SchematicWriter, EmitOutput)> {
     let mut items = gather(env, design)?;
     // Seed each item's mirror flag from the IR (lifted onto Item so the search
@@ -177,7 +177,7 @@ pub(crate) fn prepare_writer(
     if std::env::var("DEBUG_PLACE").is_ok() {
         eprintln!("[place] engine = {}", engine.name());
     }
-    let _report = engine.place_measured(&realizer, &problem, &mut items);
+    let _report = engine.place(&realizer, &problem, &mut items);
     // Guarantee no body overlap: the cost-gated refine can leave two parts
     // touching when separating them would transiently raise routed cost (a local
     // minimum), so a final, unconditional relaxation pushes any remaining
@@ -331,7 +331,7 @@ pub fn emit_writer(
     env: &KicadEnv,
     design: &Design,
     ir: &LayoutIr,
-    engine: Box<dyn MeasuringEngine>,
+    engine: Box<dyn PlacementEngine>,
 ) -> io::Result<SchematicWriter> {
     Ok(prepare_writer(env, design, ir, engine)?.0)
 }

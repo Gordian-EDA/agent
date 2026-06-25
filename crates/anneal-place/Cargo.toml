@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Premium simulated-annealing schematic placement engine: implements sch-place's PlacementEngine, declares the premium tier, and OWNS its objective (the premium energy + warning gate) and its search (the SA move-set + proxy costs + multi-start), calling sch-floorplan's measurement library because it CHOSE a measurement-based method."
+description = "Premium simulated-annealing schematic placement engine: implements sch-floorplan's PlacementEngine and OWNS its objective (the premium energy + warning gate) and its search (the SA move-set + proxy costs + multi-start), over sch-floorplan's routed-sheet measurement library."
 
 [dependencies]
 sch-place = { path = "../sch-place" }

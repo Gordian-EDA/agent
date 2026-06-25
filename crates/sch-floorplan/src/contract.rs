@@ -15,8 +15,8 @@
 //!
 //! - **Measurement library** — [`Realizer`] (build + route + read a candidate),
 //!   [`RawMetrics`] (the weight-free 16 terms an engine weights into its objective), and
-//!   the [`MeasuringEngine`] dispatch a routed-sheet engine implements. An engine CALLS
-//!   this because IT chose to score routed sheets.
+//!   the [`PlacementEngine`] trait a routed-sheet engine implements (its `place` scores
+//!   candidates through the `Realizer`).
 //! - **Pad geometry** — [`pin_endpoint`] (a placed pin's world position), the input every
 //!   geometric proxy needs to reason about wiring without re-routing.
 //! - **Layout geometry / scaffold** — the engine-independent realization helpers both
@@ -34,7 +34,7 @@ pub use crate::floorplan::place::{
     align_idiom_clusters, align_led_chains, body_overlap_count, build_anchor_blocks, build_writer,
     cluster_group, cohesion_targets, decongest, grid_order_viol, item_rect, multi_unit_siblings,
     orient_angle, overlaps_any, rects_overlap, signal_anchor_centroid, supply_pin_target,
-    MeasuringEngine, RawMetrics, Realizer, COL_GAP, FAST_PINS, GRID_KEY, ROW_GAP,
+    PlacementEngine, RawMetrics, Realizer, COL_GAP, FAST_PINS, GRID_KEY, ROW_GAP,
 };
 
 pub use sch_io::write::pin_endpoint;

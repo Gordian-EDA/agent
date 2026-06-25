@@ -3,8 +3,8 @@
 //! (the routed `refine` hill-climb + the `polish` align→compact→nudge fixpoint). It is a
 //! MEASUREMENT-based engine: it builds + routes each candidate to score it, so it calls
 //! `sch-floorplan`'s measurement library ([`Realizer`]/[`RawMetrics`]) and the shared
-//! geometry primitives. A non-measuring engine would depend on `sch-place` alone; greedy
-//! depends on `sch-floorplan` precisely because it CHOSE to measure routed sheets.
+//! geometry primitives, and implements the `PlacementEngine` trait `sch-floorplan`
+//! publishes beside that library.
 //!
 //! The objective weights here are greedy's own. They COINCIDE today with the shared base
 //! of the amplified engine's energy, but the two engines are independently evolvable — the
@@ -12,11 +12,11 @@
 
 use sch_place::item::{Incidence, Item};
 use sch_place::ir::Orient;
-use sch_place::place::{Crossings, PlaceProblem, PlaceResult, PlacementEngine};
+use sch_place::place::{Crossings, PlaceProblem, PlaceResult};
 
 use sch_floorplan::contract::{
     build_writer, item_rect, orient_angle, overlaps_any, rects_overlap, signal_anchor_centroid,
-    supply_pin_target, MeasuringEngine, RawMetrics, Realizer, COL_GAP, GRID_KEY, ROW_GAP,
+    supply_pin_target, PlacementEngine, RawMetrics, Realizer, COL_GAP, GRID_KEY, ROW_GAP,
 };
 
 /// Geometry coincidence tolerance (mm) — greedy's own copy of the shared 1e-6 epsilon.
@@ -31,28 +31,7 @@ impl PlacementEngine for Greedy {
         "greedy"
     }
 
-    /// Pure-trait entry (no realizer supplied): greedy measures routed sheets, so it
-    /// builds its own [`Realizer`] from the problem and delegates to the measurement
-    /// entry. The realization context (`env`/`inc`/`ir`) is reachable from the problem's
-    /// data here only via the routed emit pipeline, which invokes
-    /// [`MeasuringEngine::place_measured`] directly — so this fallback is a courtesy and
-    /// is not the production path.
-    fn place(&self, _problem: &PlaceProblem, _items: &mut [Item]) -> PlaceResult {
-        // Greedy needs a `KicadEnv` to route+score, which the pure problem does not carry.
-        // Production dispatch goes through `place_measured`; a caller holding only the
-        // pure trait cannot route, so there is nothing to optimise — report the seed.
-        PlaceResult {
-            engine: self.name().to_string(),
-            truthfulness_breaks: 0,
-            warnings: 0,
-            crossings: Crossings::default(),
-            cost: 0.0,
-        }
-    }
-}
-
-impl MeasuringEngine for Greedy {
-    fn place_measured(&self, r: &Realizer, _p: &PlaceProblem, items: &mut [Item]) -> PlaceResult {
+    fn place(&self, r: &Realizer, _p: &PlaceProblem, items: &mut [Item]) -> PlaceResult {
         refine_items(r, items);
         // The base engine uses the ROUTED polish at EVERY size: it is the truthfulness-
         // safe path (each move re-routes, so the cost sees a net merge / short — the

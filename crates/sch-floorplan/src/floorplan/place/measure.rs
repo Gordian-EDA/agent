@@ -23,7 +23,7 @@ use sch_place::item::{Incidence, Item};
 use sch_place::netclass::is_ground;
 use sch_place::place::Crossings;
 
-use sch_place::place::{PlaceProblem, PlaceResult, PlacementEngine};
+use sch_place::place::{PlaceProblem, PlaceResult};
 
 use super::score::{
     count_body_crossings, count_close_wires, count_collinear_body_crossings,
@@ -33,18 +33,28 @@ use super::score::{
 };
 use super::*;
 
-/// A measurement-based placement engine: one that CHOSE to score routed sheets, so it
-/// receives a [`Realizer`] to measure against. This is the dispatch the routed-sheet emit
-/// pipeline uses; the pure [`PlacementEngine`] trait (in `sch-place`) stays method-silent
-/// so a non-measuring engine — e.g. a fixed-grid placer — implements it against
-/// `sch-place` ALONE, never seeing a `Realizer`. A measuring engine still implements
-/// [`PlacementEngine`] (for `name`); its [`PlacementEngine::place`] can simply
-/// delegate to [`MeasuringEngine::place_measured`] with a freshly built realizer when
-/// invoked without one.
-pub trait MeasuringEngine: PlacementEngine {
+/// A schematic placement ENGINE: given the per-problem [`Realizer`] (to build, route, and
+/// score candidate sheets) and the [`PlaceProblem`], write final positions into `items`
+/// and return the [`PlaceResult`] describing them. The only contract is "produce a
+/// placement"; the OBJECTIVE (the weights) and the SEARCH are the engine's own business.
+///
+/// ## Contract
+/// - **Deterministic given the [`PlaceProblem`].** No clock; a fixed `seed` reproduces.
+/// - **Never panics.** A unit it cannot place reports through the result's counts, never
+///   by unwinding.
+/// - The returned [`PlaceResult`] describes the FINAL `items` it wrote — the placement
+///   the caller will ship.
+///
+/// The trait lives HERE, beside the measurement library, rather than in the `sch-place`
+/// vocabulary kernel: every production engine scores routed sheets, so its one method
+/// takes the [`Realizer`] this module defines.
+pub trait PlacementEngine {
+    /// Open provenance: the engine's stable name (e.g. `"greedy"`, `"anneal"`).
+    fn name(&self) -> &'static str;
+
     /// Write the final placement into `items` (scoring candidates through `r`) and return
     /// its diagnostics.
-    fn place_measured(&self, r: &Realizer, p: &PlaceProblem, items: &mut [Item]) -> PlaceResult;
+    fn place(&self, r: &Realizer, p: &PlaceProblem, items: &mut [Item]) -> PlaceResult;
 }
 
 /// The raw, weight-FREE measurements of a routed candidate placement — the 16 terms an

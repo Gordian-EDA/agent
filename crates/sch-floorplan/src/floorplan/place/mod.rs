@@ -9,9 +9,9 @@
 //! - [`score`] — the routed `count_*` crossing/merge/short terms + the geometry primitives
 //!   the [`measure`] library reads off a built sheet.
 //! - [`measure`] — the MEASUREMENT library: [`Realizer`] (build+route+read raw counts) +
-//!   [`RawMetrics`] (the weight-free 16 terms) + the [`MeasuringEngine`] dispatch. A
-//!   measurement-based engine CALLS this because IT chose measurement; the OBJECTIVE
-//!   (the weights) and the SEARCH live in the engine crates, not here.
+//!   [`RawMetrics`] (the weight-free 16 terms) + the [`PlacementEngine`] trait an engine
+//!   implements. A measurement-based engine CALLS this because IT chose measurement; the
+//!   OBJECTIVE (the weights) and the SEARCH live in the engine crates, not here.
 //! - [`route`] — the orthogonal elbow router + power-rail riser planning.
 //!
 //! Realizing a sheet is heavy + non-algorithmic (how to draw and measure), so it lives
@@ -33,12 +33,12 @@ pub use score::*;
 // pre-split), so re-export it crate-visibly, not publicly.
 pub(crate) use route::*;
 
-// The pure placement-problem boundary — `PlaceProblem` (what an engine reads) and the
-// `PlacementEngine` trait (what it implements) — lives in `sch_place::place`, so the
-// engine crates depend on the shared vocabulary. The measurement-aware `MeasuringEngine`
-// dispatch lives in [`measure`] alongside `Realizer`. Re-export the pure boundary here so
-// this module's paths resolve unchanged.
-pub use sch_place::place::{PlaceProblem, PlacementEngine};
+// The placement vocabulary — `PlaceProblem` (what an engine reads) and `PlaceResult`
+// (what it returns) — is pure data in `sch_place::place`; the `PlacementEngine` trait
+// itself lives in [`measure`] alongside `Realizer` (re-exported via `pub use measure::*`),
+// because every engine measures routed sheets. Re-export the problem type here so this
+// module's paths resolve unchanged.
+pub use sch_place::place::PlaceProblem;
 
 // `measure` reads `LayoutIr` through `super::*` (every other submodule imports the ir
 // types it uses directly); `super` is this `place` module, so this resolves verbatim.

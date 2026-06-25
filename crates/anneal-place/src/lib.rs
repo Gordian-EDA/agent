@@ -4,8 +4,8 @@
 //! search (the SA move-set + proxy costs + multi-start + route-aware refinement). It is a
 //! MEASUREMENT-based engine: it builds + routes candidates to score them, so it calls
 //! `sch-floorplan`'s measurement library ([`Realizer`]/[`RawMetrics`]) and the shared
-//! geometry/idiom primitives. A non-measuring engine would depend on `sch-place` alone;
-//! anneal depends on `sch-floorplan` because it CHOSE to measure routed sheets.
+//! geometry/idiom primitives, and implements the `PlacementEngine` trait `sch-floorplan`
+//! publishes beside that library.
 //!
 //! The amplified objective + the SA + the greedy-descent SEED candidate all live here. The
 //! greedy refine/polish below is a COPY of the free engine's descent (the SA uses a
@@ -17,13 +17,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use sch_place::item::{Incidence, Item};
 use sch_place::ir::{LayoutIr, Orient};
 use sch_place::netclass::is_power_net;
-use sch_place::place::{Crossings, PlaceProblem, PlaceResult, PlacementEngine};
+use sch_place::place::{Crossings, PlaceProblem, PlaceResult};
 
 use sch_floorplan::contract::{
     align_idiom_clusters, align_led_chains, body_overlap_count, build_anchor_blocks, build_writer,
     cluster_group, cohesion_targets, decongest, grid_order_viol, item_rect, multi_unit_siblings,
     orient_angle, overlaps_any, pin_endpoint, rects_overlap, signal_anchor_centroid,
-    supply_pin_target, MeasuringEngine, RawMetrics, Realizer, COL_GAP, FAST_PINS, GRID_KEY, ROW_GAP,
+    supply_pin_target, PlacementEngine, RawMetrics, Realizer, COL_GAP, FAST_PINS, GRID_KEY, ROW_GAP,
 };
 
 /// Geometry coincidence tolerance (mm) — anneal's own copy of the shared 1e-6 epsilon.
@@ -37,23 +37,8 @@ impl PlacementEngine for Anneal {
     fn name(&self) -> &'static str {
         "anneal"
     }
-    /// Pure-trait entry (no realizer supplied): the SA measures routed sheets, which the
-    /// pure problem cannot do (it carries no `KicadEnv`), so production dispatch is via
-    /// [`MeasuringEngine::place_measured`]. A pure-trait caller cannot route — report the
-    /// seed unchanged.
-    fn place(&self, _problem: &PlaceProblem, _items: &mut [Item]) -> PlaceResult {
-        PlaceResult {
-            engine: self.name().to_string(),
-            truthfulness_breaks: 0,
-            warnings: 0,
-            crossings: Crossings::default(),
-            cost: 0.0,
-        }
-    }
-}
 
-impl MeasuringEngine for Anneal {
-    fn place_measured(&self, r: &Realizer, p: &PlaceProblem, items: &mut [Item]) -> PlaceResult {
+    fn place(&self, r: &Realizer, p: &PlaceProblem, items: &mut [Item]) -> PlaceResult {
         anneal_place(r, p, items, self.name())
     }
 }
