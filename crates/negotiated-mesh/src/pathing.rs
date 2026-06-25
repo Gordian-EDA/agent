@@ -939,8 +939,8 @@ fn congestion_penalty(usage: u32, capacity: u32) -> f64 {
 fn net_order(problem: &RouteProblem) -> Vec<usize> {
     let mut order: Vec<usize> = (0..problem.connections.len()).collect();
     order.sort_by(|&a, &b| {
-        let ka = half_perimeter(&problem.connections[a]);
-        let kb = half_perimeter(&problem.connections[b]);
+        let ka = problem.connections[a].half_perimeter();
+        let kb = problem.connections[b].half_perimeter();
         ka.total_cmp(&kb).then_with(|| {
             problem.connections[a]
                 .name
@@ -948,16 +948,6 @@ fn net_order(problem: &RouteProblem) -> Vec<usize> {
         })
     });
     order
-}
-
-/// Half-perimeter (width + height) of a connection's point bounding box.
-fn half_perimeter(conn: &crate::problem::Connection) -> f64 {
-    let pts: Vec<geom::Point2> = conn
-        .points_to_connect
-        .iter()
-        .map(|p| geom::Point2::new(p.x, p.y))
-        .collect();
-    geom::Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter())
 }
 
 #[cfg(test)]

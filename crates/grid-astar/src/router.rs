@@ -383,8 +383,8 @@ fn net_order(problem: &RouteProblem, priority: &std::collections::BTreeSet<Strin
         let pb = priority.contains(&problem.connections[b].name);
         pb.cmp(&pa) // priority nets first
             .then_with(|| {
-                let ka = half_perimeter(&problem.connections[a]);
-                let kb = half_perimeter(&problem.connections[b]);
+                let ka = problem.connections[a].half_perimeter();
+                let kb = problem.connections[b].half_perimeter();
                 ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
             })
             .then_with(|| {
@@ -394,16 +394,6 @@ fn net_order(problem: &RouteProblem, priority: &std::collections::BTreeSet<Strin
             })
     });
     order
-}
-
-/// Half-perimeter (width + height) of a connection's point bounding box.
-fn half_perimeter(conn: &crate::problem::Connection) -> f64 {
-    let pts: Vec<geom::Point2> = conn
-        .points_to_connect
-        .iter()
-        .map(|p| geom::Point2::new(p.x, p.y))
-        .collect();
-    geom::Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter())
 }
 
 /// Entry cells for a terminal `pt` (already mapped to `pad_cell`), pre-routing a
@@ -1420,7 +1410,7 @@ mod tests {
         // Half-perimeters must be non-decreasing along the order.
         let mut prev = f64::NEG_INFINITY;
         for &i in &order {
-            let hp = half_perimeter(&p.connections[i]);
+            let hp = p.connections[i].half_perimeter();
             assert!(
                 hp >= prev - 1e-12,
                 "net order not non-decreasing by half-perimeter"

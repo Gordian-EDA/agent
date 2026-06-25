@@ -207,6 +207,18 @@ pub struct Connection {
     pub points_to_connect: Vec<RoutePoint>,
 }
 
+impl Connection {
+    /// Half-perimeter of this net's terminal bounding box.
+    pub fn half_perimeter(&self) -> f64 {
+        let pts: Vec<Point2> = self
+            .points_to_connect
+            .iter()
+            .map(RoutePoint::point)
+            .collect();
+        Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter())
+    }
+}
+
 /// A point on a specific layer that must be reached by a route.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -214,6 +226,12 @@ pub struct RoutePoint {
     pub x: f64,
     pub y: f64,
     pub layer: LayerRef,
+}
+
+impl RoutePoint {
+    pub fn point(&self) -> Point2 {
+        Point2::new(self.x, self.y)
+    }
 }
 
 // ── FailedNet ────────────────────────────────────────────────────────────────
@@ -303,5 +321,32 @@ mod tests {
         assert_eq!(LayerRef::resolve("inner3", 2), None);
         assert_eq!(LayerRef::resolve("nope", 4), None);
         assert_eq!(LayerRef::resolve("bottom", 0), None);
+    }
+
+    #[test]
+    fn connection_half_perimeter_uses_terminal_bbox() {
+        let layer = LayerRef::top();
+        let empty = Connection {
+            name: "EMPTY".into(),
+            points_to_connect: Vec::new(),
+        };
+        assert_eq!(empty.half_perimeter(), 0.0);
+
+        let conn = Connection {
+            name: "N".into(),
+            points_to_connect: vec![
+                RoutePoint {
+                    x: 1.0,
+                    y: 4.0,
+                    layer: layer.clone(),
+                },
+                RoutePoint {
+                    x: 5.0,
+                    y: -2.0,
+                    layer,
+                },
+            ],
+        };
+        assert_eq!(conn.half_perimeter(), 10.0);
     }
 }

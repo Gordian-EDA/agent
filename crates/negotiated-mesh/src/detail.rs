@@ -1029,8 +1029,8 @@ fn route_point_cell(
 fn net_rank(problem: &RouteProblem) -> BTreeMap<String, usize> {
     let mut order: Vec<usize> = (0..problem.connections.len()).collect();
     order.sort_by(|&a, &b| {
-        let ka = half_perimeter(&problem.connections[a]);
-        let kb = half_perimeter(&problem.connections[b]);
+        let ka = problem.connections[a].half_perimeter();
+        let kb = problem.connections[b].half_perimeter();
         ka.partial_cmp(&kb)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| {
@@ -1045,16 +1045,6 @@ fn net_rank(problem: &RouteProblem) -> BTreeMap<String, usize> {
             .or_insert(r);
     }
     rank
-}
-
-/// Half-perimeter (width + height) of a connection's point bounding box.
-fn half_perimeter(conn: &crate::problem::Connection) -> f64 {
-    let pts: Vec<Point2> = conn
-        .points_to_connect
-        .iter()
-        .map(|p| Point2::new(p.x, p.y))
-        .collect();
-    geom::Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter())
 }
 
 /// The [`LayerRef`] for a numeric copper layer index (0 = top, last = bottom,
