@@ -339,10 +339,10 @@ pub fn pad_world(problem: &PlaceProblem, pos: &[Point2], pin: &Pin) -> Point2 {
     }
 }
 
-/// Margin-inflated axis overlaps of two centered rects. `> 0` on BOTH axes ⇒
-/// overlapping; each rect is inflated by `margin/2` per side so the required *gap*
-/// between courtyards is `margin`.
-pub fn rect_overlap(
+/// Per-axis penetration depth `(ox, oy)` of two centered rects, each inflated by
+/// `margin/2` per side so the required *gap* between courtyards is `margin`. A
+/// clearance METRIC, not a boolean: `> 0` on BOTH axes ⇒ overlapping.
+pub fn rect_axis_penetration(
     ci: &Point2,
     hi: (f64, f64),
     cj: &Point2,
@@ -364,7 +364,7 @@ pub fn courtyard_overlap(
     i: usize,
     j: usize,
 ) -> (f64, f64) {
-    rect_overlap(&pos[i], half[i], &pos[j], half[j], margin)
+    rect_axis_penetration(&pos[i], half[i], &pos[j], half[j], margin)
 }
 
 /// Does a part's courtyard fit fully within `bounds`?

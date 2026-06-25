@@ -12,7 +12,7 @@ use crate::problem::{Point2, Rect};
 // Shared (kernel) geometry — re-exported VERBATIM.
 pub(crate) use crate::problem::place::{
     courtyard_margin, courtyard_overlap, fits_in_bounds, pad_world, part_keepout_overlap,
-    rect_overlap, rotated_copper_bbox, rotated_courtyard_half,
+    rect_axis_penetration, rotated_copper_bbox, rotated_courtyard_half,
 };
 
 // ── engine-private design constants ──────────────────────────────────────────

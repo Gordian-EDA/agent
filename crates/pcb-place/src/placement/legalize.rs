@@ -8,7 +8,7 @@
 //! the result in exact geometry — the algorithm's verdict is never trusted.
 
 use super::geometry::{
-    clamp_into_bounds, fits_in_bounds, rect_overlap, snap, PLACE_GRID, SPIRAL_MAX_RING,
+    clamp_into_bounds, fits_in_bounds, rect_axis_penetration, snap, PLACE_GRID, SPIRAL_MAX_RING,
 };
 use super::model::PlaceProblem;
 use crate::problem::Point2;
@@ -154,7 +154,7 @@ pub(crate) fn collides(
     placed: &[usize],
 ) -> bool {
     placed.iter().any(|&j| {
-        let (ox, oy) = rect_overlap(cand, cand_half, &pos[j], half[j], margin);
+        let (ox, oy) = rect_axis_penetration(cand, cand_half, &pos[j], half[j], margin);
         ox > 0.0 && oy > 0.0
     })
 }
