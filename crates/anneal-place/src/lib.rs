@@ -1473,22 +1473,20 @@ fn align_repeated_motifs(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) -> 
         .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
         .collect();
     let blocks = build_anchor_blocks(items, inc, &anchors, &sats, ir);
-    let blk_bbox = |items: &[Item], ai: usize| -> [f64; 4] {
-        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-        let extend = |k: usize, lo: &mut [f64; 2], hi: &mut [f64; 2]| {
+    let blk_bbox = |items: &[Item], ai: usize| -> Rect {
+        let mut corners = Vec::new();
+        let mut extend = |k: usize| {
             let r = item_rect(&items[k], items[k].at);
-            lo[0] = lo[0].min(r[0]);
-            lo[1] = lo[1].min(r[1]);
-            hi[0] = hi[0].max(r[2]);
-            hi[1] = hi[1].max(r[3]);
+            corners.push(Point2::new(r.min_x, r.min_y));
+            corners.push(Point2::new(r.max_x, r.max_y));
         };
-        extend(ai, &mut lo, &mut hi);
+        extend(ai);
         if let Some(b) = blocks.get(&ai) {
             for &k in b {
-                extend(k, &mut lo, &mut hi);
+                extend(k);
             }
         }
-        [lo[0], lo[1], hi[0], hi[1]]
+        Rect::bounding(&corners).expect("anchor bbox has at least one item")
     };
     let mut by_part: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for &ai in &anchors {
@@ -1512,7 +1510,7 @@ fn align_repeated_motifs(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) -> 
             .iter()
             .map(|&ai| {
                 let b = blk_bbox(items, ai);
-                b[2] - b[0]
+                b.width()
             })
             .fold(0.0_f64, f64::max)
             + GAP;
@@ -1520,7 +1518,7 @@ fn align_repeated_motifs(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) -> 
             .iter()
             .map(|&ai| {
                 let b = blk_bbox(items, ai);
-                b[3] - b[1]
+                b.height()
             })
             .fold(0.0_f64, f64::max)
             + GAP;
@@ -1529,8 +1527,8 @@ fn align_repeated_motifs(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) -> 
         for (idx, &ai) in g.iter().enumerate() {
             let (col, row) = (idx % cols, idx / cols);
             let bb = blk_bbox(items, ai);
-            let dx = sch_place::grid::snap(origin[0] + col as f64 * pitch_x - bb[0]);
-            let dy = sch_place::grid::snap(origin[1] + row as f64 * pitch_y - bb[1]);
+            let dx = sch_place::grid::snap(origin.min_x + col as f64 * pitch_x - bb.min_x);
+            let dy = sch_place::grid::snap(origin.min_y + row as f64 * pitch_y - bb.min_y);
             if dx != 0.0 || dy != 0.0 {
                 let mut grp = vec![ai];
                 if let Some(b) = blocks.get(&ai) {
