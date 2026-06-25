@@ -3,7 +3,7 @@
 
 use kicad_cli::env::KicadEnv;
 use kicad_sexpr::symlib::SymbolLib;
-use symbol_contract::PinType;
+use kicad_symbol::PinType;
 
 fn lib(name: &str) -> Option<SymbolLib> {
     let env = KicadEnv::detect()?;

@@ -1,6 +1,6 @@
 use kicad_cli::env::KicadEnv;
 use kicad_sexpr::provider::RealSymbolProvider;
-use symbol_contract::SymbolProvider;
+use kicad_symbol::SymbolProvider;
 
 #[test]
 fn compiles_validated_bedrock_design_against_real_libs() {

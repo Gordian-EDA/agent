@@ -19,7 +19,7 @@
 use std::fs;
 use std::io;
 
-use symbol_contract::SymbolProvider;
+use kicad_symbol::SymbolProvider;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 

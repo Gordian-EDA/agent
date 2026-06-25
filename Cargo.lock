@@ -346,10 +346,10 @@ version = "0.1.0"
 dependencies = [
  "geom",
  "indexmap 2.14.0",
+ "kicad-symbol",
  "saphyr",
  "saphyr-parser",
  "strsim",
- "symbol-contract",
 ]
 
 [[package]]
@@ -1627,6 +1627,7 @@ dependencies = [
  "fuzzy-matcher",
  "geom",
  "kicad-cli",
+ "kicad-symbol",
  "kiutils_kicad",
  "kiutils_sexpr",
  "pcb-model",
@@ -1634,9 +1635,15 @@ dependencies = [
  "serde",
  "serde_json",
  "strsim",
- "symbol-contract",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "kicad-symbol"
+version = "0.1.0"
+dependencies = [
+ "strsim",
 ]
 
 [[package]]
@@ -3258,13 +3265,6 @@ checksum = "695b5790b3131dafa99b3bbfd25a216edb3d216dad9ca208d4657bfb8f2abc3d"
 dependencies = [
  "kurbo",
  "siphasher",
-]
-
-[[package]]
-name = "symbol-contract"
-version = "0.1.0"
-dependencies = [
- "strsim",
 ]
 
 [[package]]
