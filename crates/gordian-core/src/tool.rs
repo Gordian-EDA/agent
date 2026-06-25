@@ -21,8 +21,8 @@ use serde_json::Value;
 pub enum ToolEffect {
     /// Reads only; never changes project state (search, info, render, validate).
     ReadOnly,
-    /// Mutates working/draft state the loop does not gate (drafting, board
-    /// pipeline steps that write only into the project's scratch state).
+    /// Mutates authoring state the loop does not gate: schematic drafts or the
+    /// live IPC board.
     Authoring,
     /// A human-gated write: previewed, approved, then committed.
     Gated,
@@ -88,6 +88,11 @@ pub struct ToolOutcome {
 impl ToolOutcome {
     /// A plain result (no images, not a gated apply).
     pub fn plain(value: Value) -> Self {
-        Self { value, images: Vec::new(), image_path: None, apply: None }
+        Self {
+            value,
+            images: Vec::new(),
+            image_path: None,
+            apply: None,
+        }
     }
 }

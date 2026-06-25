@@ -2,7 +2,8 @@
 //! Gerbers + Excellon drill + pick-and-place + (when a schematic is present) a
 //! BOM, all under a single `fab/` directory the user can hand to a board house.
 //!
-//! This is the one-click bundle for the saved active `.kicad_pcb`.
+//! This is the one-click bundle for the active board after saving any open IPC
+//! session.
 
 use std::path::{Path, PathBuf};
 
@@ -31,6 +32,13 @@ pub fn export_fab(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         Some(p) => PathBuf::from(p),
         None => ctx.pcb_path(),
     };
+    if board == ctx.pcb_path()
+        && let Err(e) = super::interactive::save_session_if_open(ctx)
+    {
+        return Ok(
+            json!({ "error": format!("could not save live KiCAD board before fab export: {e}") }),
+        );
+    }
     if !board.is_file() {
         return Ok(json!({
             "error": format!(

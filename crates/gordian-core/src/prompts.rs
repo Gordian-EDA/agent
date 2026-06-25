@@ -318,7 +318,7 @@ KiCAD board, with the deterministic engine as your ASSIST for the bulk work.
      power/high-current, thin for signals. Layers: `F.Cu`/`B.Cu`/`In1.Cu`/…
    - `set_net_width(name, width, clearance, nets)` — "wide copper for power" (widen
      GND/VCC/VIN as a net class).
-   - `render_board()` — LOOK (it saves the live board first). Iterate edit → render.
+   - `render_board()` — LOOK at the live IPC snapshot. Iterate edit → render.
    The engine seeds the board; YOU refine it. Use `move_part` to fix placement the engine got
    wrong, `route_track` to add/repair copper, `set_net_width`/`route_track` width for power.
 

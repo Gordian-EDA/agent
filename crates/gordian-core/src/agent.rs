@@ -734,7 +734,7 @@ fn tool_effect(name: &str) -> ToolEffect {
     match name {
         // The one human-gated write.
         "apply_design" => ToolEffect::Gated,
-        // Tools that mutate the working draft / board scratch state.
+        // Tools that mutate draft schematic text or the live IPC board.
         "create_design" | "edit_design" | "derive_board" | "place_board" | "route_board"
         | "autoroute" | "open_board" | "move_part" | "route_track" | "set_net_width" => {
             ToolEffect::Authoring
