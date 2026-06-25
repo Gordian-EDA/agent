@@ -10,6 +10,6 @@ fn erc_runs_on_blank_schematic_and_parses_report() {
     let report = cli
         .erc(std::path::Path::new("tests/fixtures/blank.kicad_sch"))
         .unwrap();
-    // blank sheet: no violations expected (or only sheet-level warnings)
+
     assert_eq!(report.error_count(), 0, "{report:?}");
 }

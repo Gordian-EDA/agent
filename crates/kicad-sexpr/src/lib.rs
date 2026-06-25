@@ -1,9 +1,8 @@
-//! KiCAD footprint `.kicad_mod` library access.
+//! Small KiCAD S-expression formatting helpers.
 //!
-//! Board files are owned by KiCAD IPC/CLI in the PCB flow; this crate only
-//! indexes footprint libraries.
-
-pub mod footlib;
+//! Footprint library access moved to `kicad-footprint`. This crate remains only
+//! for board writer formatting glue until that helper is moved closer to the
+//! writer.
 
 /// KiCAD coordinate number formatting.
 pub fn fmt_num(v: f64) -> String {

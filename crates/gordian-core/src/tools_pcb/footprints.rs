@@ -89,10 +89,10 @@ pub fn get_footprint_info(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Valu
     }
 }
 
-/// Render a [`kicad_sexpr::footlib::PadTechnology`] as a stable lowercase
+/// Render a [`kicad_footprint::PadTechnology`] as a stable lowercase
 /// string for the LLM.
-fn technology_str(t: kicad_sexpr::footlib::PadTechnology) -> &'static str {
-    use kicad_sexpr::footlib::PadTechnology::*;
+fn technology_str(t: kicad_footprint::PadTechnology) -> &'static str {
+    use kicad_footprint::PadTechnology::*;
     match t {
         Smd => "smd",
         ThruHole => "thru_hole",
@@ -101,15 +101,15 @@ fn technology_str(t: kicad_sexpr::footlib::PadTechnology) -> &'static str {
     }
 }
 
-fn courtyard_source_str(s: kicad_sexpr::footlib::CourtyardSource) -> &'static str {
-    use kicad_sexpr::footlib::CourtyardSource::*;
+fn courtyard_source_str(s: kicad_footprint::CourtyardSource) -> &'static str {
+    use kicad_footprint::CourtyardSource::*;
     match s {
         Crtyd => "crtyd",
         PadSilkFallback => "pad_silk_fallback",
     }
 }
 
-fn bbox_json(b: &kicad_sexpr::footlib::BBox) -> Value {
+fn bbox_json(b: &kicad_footprint::BBox) -> Value {
     json!({
         "min_x": b.min_x,
         "min_y": b.min_y,

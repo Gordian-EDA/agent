@@ -283,7 +283,7 @@ fn project_info_reports_paths_and_state() {
     assert_eq!(out["sch_exists"], serde_json::json!(true), "got: {out}");
 }
 
-/// The two-resistor fixture board, shared with `kicad-sexpr`/`kicad-cli`.
+/// The two-resistor fixture board, shared with `kicad-cli`.
 const TWO_RES_PCB: &str = include_str!("fixtures/two_res.kicad_pcb");
 
 #[test]
@@ -643,7 +643,7 @@ blocks:
 /// alive by the caller) plus its path. The lib nickname is therefore `Fixtures`.
 fn staged_footprint_dir() -> (tempfile::TempDir, std::path::PathBuf) {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../kicad-sexpr/tests/fixtures/footprints");
+        .join("../kicad-footprint/tests/fixtures/footprints");
     let tmp = tempfile::tempdir().unwrap();
     let pretty = tmp.path().join("Fixtures.pretty");
     std::fs::create_dir_all(&pretty).unwrap();
@@ -699,7 +699,7 @@ fn derive_board_seeds_board_from_schematic_then_assign_footprint() {
     };
     // Stage the RC-pair fixture as the project's schematic.
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../kicad-sexpr/tests/fixtures/rc_pair.kicad_sch");
+        .join("../kicad-cli/tests/fixtures/rc_pair.kicad_sch");
     std::fs::copy(&fixture, ctx.sch_path()).unwrap();
 
     let bounds = serde_json::json!({ "min_x": 0, "max_x": 20, "min_y": 0, "max_y": 12 });

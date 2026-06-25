@@ -1,11 +1,8 @@
-//! Integration tests for `KicadCli::netlist` against real `kicad-cli` 10.0.3.
-//!
-//! These run only when KiCAD is detected (otherwise they SKIP-gracefully, like
-//! the ERC tests), and exercise the netlist exporter — the connectivity oracle
-//! that Plan 3's "lift" (sch -> kernel YAML) consumes.
+//! Integration tests for `KicadCli::netlist` against real `kicad-cli`.
+
+use std::path::Path;
 
 use kicad_cli::{cli::KicadCli, env::KicadEnv};
-use std::path::Path;
 
 #[test]
 fn netlist_export_runs_and_parses() {
@@ -17,12 +14,9 @@ fn netlist_export_runs_and_parses() {
     let nl = cli
         .netlist(Path::new("tests/fixtures/blank.kicad_sch"))
         .unwrap();
-    assert!(nl.components.is_empty() && nl.nets.is_empty()); // blank sheet
+    assert!(nl.components.is_empty() && nl.nets.is_empty());
 }
 
-/// A blank sheet can't prove the parser actually reads components and nets, so
-/// this asserts on a fixture with real content: a resistor and a capacitor with
-/// a wire joining their pin-2s (a shared net) and a named label on each pin-1.
 #[test]
 fn netlist_export_parses_real_components_and_nets() {
     let Some(env) = KicadEnv::detect() else {
@@ -34,7 +28,6 @@ fn netlist_export_parses_real_components_and_nets() {
         .netlist(Path::new("tests/fixtures/rc_pair.kicad_sch"))
         .unwrap();
 
-    // Two components, with reconstructed lib_id and values.
     assert_eq!(nl.components.len(), 2);
     let r = nl
         .components
@@ -50,13 +43,11 @@ fn netlist_export_parses_real_components_and_nets() {
         .expect("C1 present");
     assert_eq!(c.value, "100nF");
     assert_eq!(c.lib_id, "Device:C");
-    // Properties are captured (footprint is carried as a property).
     assert_eq!(
         c.properties.get("Footprint").map(String::as_str),
         Some("Capacitor_SMD:C_0603_1608Metric")
     );
 
-    // The shared net joins R1.2 and C1.2 (the only 2-node net here).
     let shared = nl
         .nets
         .iter()
@@ -72,7 +63,6 @@ fn netlist_export_parses_real_components_and_nets() {
         ]
     );
 
-    // The two label nets each have exactly one node.
     assert!(
         nl.nets
             .iter()

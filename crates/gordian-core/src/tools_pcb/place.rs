@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use serde_json::{Value, json};
 
+use kicad_footprint::{BBox, Footprint, FootprintPad, PadTechnology};
 use kicad_ipc::{FootprintMove, snapshot::IpcBoardSnapshot};
-use kicad_sexpr::footlib::{BBox, Footprint, FootprintPad, PadTechnology};
 use pcb_model::LayerRef;
 use pcb_model::place::PartPad;
 use pcb_place::placement::{LockedAt, Part, PlaceProblem, Placement, PlacementHints, Rect};

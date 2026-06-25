@@ -2,7 +2,7 @@
 
 The `.kicad_mod` files in this directory are verbatim copies of footprints
 shipped with KiCAD 10.0.3 (`/usr/share/kicad/footprints/*.pretty/`). They are
-vendored here so `footlib.rs` parsing tests run **without** a KiCAD install.
+vendored here so `kicad-footprint` parsing tests run **without** a KiCAD install.
 
 | File | Source library (`.pretty`) |
 | --- | --- |

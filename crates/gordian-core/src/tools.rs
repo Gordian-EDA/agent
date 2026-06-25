@@ -1,7 +1,7 @@
 //! The schematic + PCB tool registry the agent drives.
 //!
 //! Each tool is a thin, deterministic wrapper over logic that already lives in
-//! `circuit-lang`, `kicad-sexpr`/`kicad-cli`, and `sch-floorplan`/`sch-io`. The registry
+//! `circuit-lang`, `kicad-footprint`/`kicad-cli`, and `sch-floorplan`/`sch-io`. The registry
 //! exposes two free functions, both driven directly by the [`crate::Agent`] loop:
 //!
 //! - [`tool_defs`] — the JSON-Schema genai [`Tool`]s handed to the LLM.
@@ -52,7 +52,7 @@ use circuit_lang::compile;
 use circuit_lang::model::{Component, Design, PinTarget};
 use kicad_cli::cli::KicadCli;
 use kicad_cli::env::KicadEnv;
-use kicad_sexpr::footlib::FootprintIndex;
+use kicad_footprint::FootprintIndex;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::search::SymbolIndex;
 

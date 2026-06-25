@@ -4,20 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "KiCAD footprint .kicad_mod library access with a fuzzy footprint index."
+description = "Small KiCAD S-expression formatting helpers."
 
 [dependencies]
-geom = { path = "../geom" }
-kicad-cli = { path = "../kicad-cli" }
-strsim.workspace = true
-fuzzy-matcher.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-kiutils_kicad.workspace = true
-kiutils_sexpr.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
-# DSL-integration tests only: drive `circuit_lang::compile` against the real
-# symbol provider. The library no longer depends on circuit-lang (see CB-3).
-circuit-lang = { path = "../circuit-lang" }

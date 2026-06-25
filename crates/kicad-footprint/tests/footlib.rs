@@ -3,13 +3,12 @@
 //! Fixture-parse tests run **without** KiCAD installed against the vendored
 //! `.kicad_mod` files under `tests/fixtures/footprints/` (see that dir's
 //! `ATTRIBUTION.md`). Environment-dependent discovery/search tests gate on a
-//! detected KiCAD install and SKIP visibly, like `tests/search.rs` /
-//! `tests/env.rs`.
+//! detected KiCAD install and SKIP visibly.
 
 use std::path::{Path, PathBuf};
 
 use kicad_cli::env::KicadEnv;
-use kicad_sexpr::footlib::{CourtyardSource, Footprint, FootprintIndex, PadTechnology};
+use kicad_footprint::{CourtyardSource, Footprint, FootprintIndex, PadTechnology};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/footprints")
@@ -52,8 +51,16 @@ fn circle_courtyard_radius_is_captured() {
     // cap / round footprint is badly under-sized and overlaps its neighbours.
     let fp = load("CircleCourtyard");
     assert_eq!(fp.courtyard_source, CourtyardSource::Crtyd);
-    assert!(close(fp.courtyard.width(), 8.0), "circle width {}", fp.courtyard.width());
-    assert!(close(fp.courtyard.height(), 8.0), "circle height {}", fp.courtyard.height());
+    assert!(
+        close(fp.courtyard.width(), 8.0),
+        "circle width {}",
+        fp.courtyard.width()
+    );
+    assert!(
+        close(fp.courtyard.height(), 8.0),
+        "circle height {}",
+        fp.courtyard.height()
+    );
 }
 
 #[test]
@@ -67,15 +74,35 @@ fn r0603_two_smd_pads_and_rect_courtyard() {
     let mut nums: Vec<_> = fp.pads.iter().map(|p| p.number.as_str()).collect();
     nums.sort();
     assert_eq!(nums, ["1", "2"]);
-    assert!(fp.pads.iter().any(|p| close(p.at[0], -0.825) && close(p.at[1], 0.0)));
-    assert!(fp.pads.iter().any(|p| close(p.at[0], 0.825) && close(p.at[1], 0.0)));
-    assert!(fp.pads.iter().all(|p| close(p.size[0], 0.8) && close(p.size[1], 0.95)));
+    assert!(
+        fp.pads
+            .iter()
+            .any(|p| close(p.at[0], -0.825) && close(p.at[1], 0.0))
+    );
+    assert!(
+        fp.pads
+            .iter()
+            .any(|p| close(p.at[0], 0.825) && close(p.at[1], 0.0))
+    );
+    assert!(
+        fp.pads
+            .iter()
+            .all(|p| close(p.size[0], 0.8) && close(p.size[1], 0.95))
+    );
     assert!(fp.pads.iter().all(|p| p.shape == "roundrect"));
 
     // Single F.CrtYd fp_rect: (-1.48,-0.73)..(1.48,0.73) → 2.96 × 1.46 mm.
     assert_eq!(fp.courtyard_source, CourtyardSource::Crtyd);
-    assert!(close(fp.courtyard.width(), 2.96), "{}", fp.courtyard.width());
-    assert!(close(fp.courtyard.height(), 1.46), "{}", fp.courtyard.height());
+    assert!(
+        close(fp.courtyard.width(), 2.96),
+        "{}",
+        fp.courtyard.width()
+    );
+    assert!(
+        close(fp.courtyard.height(), 1.46),
+        "{}",
+        fp.courtyard.height()
+    );
 }
 
 #[test]
@@ -91,17 +118,33 @@ fn sot23_three_smd_pads_and_aggregated_courtyard() {
     // x[-1.93, 1.93] (3.86) and y[-1.7, 1.7] (3.4).
     assert_eq!(fp.courtyard_source, CourtyardSource::Crtyd);
     assert!(close(fp.courtyard.min_x, -1.93) && close(fp.courtyard.max_x, 1.93));
-    assert!(close(fp.courtyard.width(), 3.86), "{}", fp.courtyard.width());
-    assert!(close(fp.courtyard.height(), 3.4), "{}", fp.courtyard.height());
+    assert!(
+        close(fp.courtyard.width(), 3.86),
+        "{}",
+        fp.courtyard.width()
+    );
+    assert!(
+        close(fp.courtyard.height(), 3.4),
+        "{}",
+        fp.courtyard.height()
+    );
 }
 
 #[test]
 fn pinheader_1x02_two_thru_hole_pads_with_drill() {
     let fp = load("PinHeader_1x02_P2.54mm_Vertical");
     assert_eq!(fp.pad_count(), 2);
-    assert!(fp.pads.iter().all(|p| p.technology == PadTechnology::ThruHole));
+    assert!(
+        fp.pads
+            .iter()
+            .all(|p| p.technology == PadTechnology::ThruHole)
+    );
     // 1.0 mm drill on both pads; both span the full copper stack (*.Cu).
-    assert!(fp.pads.iter().all(|p| p.drill.is_some_and(|d| close(d, 1.0))));
+    assert!(
+        fp.pads
+            .iter()
+            .all(|p| p.drill.is_some_and(|d| close(d, 1.0)))
+    );
     assert!(fp.pads.iter().all(|p| p.layers.iter().any(|l| l == "*.Cu")));
     // Pads on a 2.54 mm pitch along +y.
     assert!(fp.pads.iter().any(|p| close(p.at[1], 0.0)));
@@ -110,7 +153,11 @@ fn pinheader_1x02_two_thru_hole_pads_with_drill() {
 
 #[test]
 fn overall_bbox_encloses_courtyard() {
-    for name in ["R_0603_1608Metric", "SOT-23", "PinHeader_1x02_P2.54mm_Vertical"] {
+    for name in [
+        "R_0603_1608Metric",
+        "SOT-23",
+        "PinHeader_1x02_P2.54mm_Vertical",
+    ] {
         let fp = load(name);
         assert!(fp.bbox.min_x <= fp.courtyard.min_x + 1e-9, "{name}");
         assert!(fp.bbox.max_x >= fp.courtyard.max_x - 1e-9, "{name}");
@@ -138,13 +185,23 @@ fn build_indexes_pretty_dirs_and_searches() {
     .unwrap();
     let sot = tmp.path().join("Package_TO_SOT_SMD.pretty");
     std::fs::create_dir(&sot).unwrap();
-    std::fs::copy(fixtures().join("SOT-23.kicad_mod"), sot.join("SOT-23.kicad_mod")).unwrap();
+    std::fs::copy(
+        fixtures().join("SOT-23.kicad_mod"),
+        sot.join("SOT-23.kicad_mod"),
+    )
+    .unwrap();
 
     let idx = FootprintIndex::build_from_dir(tmp.path()).unwrap();
     assert_eq!(idx.library_count(), 2);
     assert_eq!(idx.len(), 2);
-    assert_eq!(idx.libraries().collect::<Vec<_>>(), ["Package_TO_SOT_SMD", "Resistor_SMD"]);
-    assert_eq!(idx.footprints_in("Resistor_SMD"), ["Resistor_SMD:R_0603_1608Metric"]);
+    assert_eq!(
+        idx.libraries().collect::<Vec<_>>(),
+        ["Package_TO_SOT_SMD", "Resistor_SMD"]
+    );
+    assert_eq!(
+        idx.footprints_in("Resistor_SMD"),
+        ["Resistor_SMD:R_0603_1608Metric"]
+    );
 
     // Search resolves the hit and lazily parses its pad count.
     let hits = idx.search("R_0603_1608Metric", 5);
@@ -163,13 +220,19 @@ fn search_ordering_is_deterministic() {
     let lib = tmp.path().join("Resistor_SMD.pretty");
     std::fs::create_dir(&lib).unwrap();
     for n in ["R_0603_1608Metric", "SOT-23"] {
-        std::fs::copy(fixtures().join(format!("{n}.kicad_mod")), lib.join(format!("{n}.kicad_mod")))
-            .unwrap();
+        std::fs::copy(
+            fixtures().join(format!("{n}.kicad_mod")),
+            lib.join(format!("{n}.kicad_mod")),
+        )
+        .unwrap();
     }
     let idx = FootprintIndex::build_from_dir(tmp.path()).unwrap();
     let a = idx.search("0603", 5);
     let b = idx.search("0603", 5);
-    assert_eq!(a, b, "identical queries must return identical, ordered hits");
+    assert_eq!(
+        a, b,
+        "identical queries must return identical, ordered hits"
+    );
 }
 
 #[test]
@@ -211,8 +274,16 @@ fn live_index_sees_many_libraries() {
         return;
     };
     let idx = FootprintIndex::build(&env).unwrap();
-    eprintln!("indexed {} footprints across {} libraries", idx.len(), idx.library_count());
-    assert!(idx.library_count() > 50, "{} libraries", idx.library_count());
+    eprintln!(
+        "indexed {} footprints across {} libraries",
+        idx.len(),
+        idx.library_count()
+    );
+    assert!(
+        idx.library_count() > 50,
+        "{} libraries",
+        idx.library_count()
+    );
     assert!(idx.len() > 1000, "{} footprints", idx.len());
 }
 
@@ -225,7 +296,8 @@ fn live_search_finds_r0603() {
     let idx = FootprintIndex::build(&env).unwrap();
     let hits = idx.search("R_0603_1608Metric", 8);
     assert!(
-        hits.iter().any(|h| h.lib_id == "Resistor_SMD:R_0603_1608Metric"),
+        hits.iter()
+            .any(|h| h.lib_id == "Resistor_SMD:R_0603_1608Metric"),
         "{hits:?}"
     );
     assert_eq!(hits[0].pad_count, 2, "{:?}", hits[0]);

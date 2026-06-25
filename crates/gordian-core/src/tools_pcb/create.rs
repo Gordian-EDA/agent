@@ -964,7 +964,7 @@ const KICAD_MIN_ANNULAR: f64 = 0.1;
 /// Parse one part JSON into a validated [`BoardSeedPart`].
 fn parse_seed_part(
     pj: &Value,
-    index: &kicad_sexpr::footlib::FootprintIndex,
+    index: &kicad_footprint::FootprintIndex,
     clearance: f64,
 ) -> std::result::Result<BoardSeedPart, Value> {
     let reference = pj

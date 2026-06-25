@@ -1035,6 +1035,7 @@ dependencies = [
  "grid-astar",
  "indexmap 2.14.0",
  "kicad-cli",
+ "kicad-footprint",
  "kicad-ipc",
  "kicad-sexpr",
  "kicad-symbol",
@@ -1605,6 +1606,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kicad-footprint"
+version = "0.1.0"
+dependencies = [
+ "fuzzy-matcher",
+ "geom",
+ "kicad-cli",
+ "kiutils_kicad",
+ "serde",
+ "strsim",
+ "tempfile",
+]
+
+[[package]]
 name = "kicad-ipc"
 version = "0.1.0"
 dependencies = [
@@ -1620,18 +1634,6 @@ dependencies = [
 [[package]]
 name = "kicad-sexpr"
 version = "0.1.0"
-dependencies = [
- "circuit-lang",
- "fuzzy-matcher",
- "geom",
- "kicad-cli",
- "kiutils_kicad",
- "kiutils_sexpr",
- "serde",
- "serde_json",
- "strsim",
- "tempfile",
-]
 
 [[package]]
 name = "kicad-symbol"

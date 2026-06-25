@@ -1,0 +1,18 @@
+[package]
+name = "kicad-footprint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "KiCAD footprint library reader: .pretty discovery, .kicad_mod parsing, pad/courtyard geometry, and search."
+
+[dependencies]
+geom = { path = "../geom" }
+kicad-cli = { path = "../kicad-cli" }
+strsim.workspace = true
+fuzzy-matcher.workspace = true
+serde.workspace = true
+kiutils_kicad.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
