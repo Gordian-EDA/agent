@@ -69,9 +69,13 @@ impl Rule for HoleClearanceRule {
                 if ob.connected_to.contains(&a.connection) {
                     continue;
                 }
-                let dx = (a.at.x - ob.center.x).abs() - ob.width / 2.0;
-                let dy = (a.at.y - ob.center.y).abs() - ob.height / 2.0;
-                let gap = (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt() - ar;
+                let pad = geom::Rect::new(
+                    ob.center.x - ob.width / 2.0,
+                    ob.center.y - ob.height / 2.0,
+                    ob.center.x + ob.width / 2.0,
+                    ob.center.y + ob.height / 2.0,
+                );
+                let gap = pad.dist_to_point(a.at) - ar;
                 if gap + EPS < HOLE_CLEAR {
                     out.push(Finding::ClearanceViaAny {
                         connection: a.connection.clone(),
