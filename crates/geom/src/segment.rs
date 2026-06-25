@@ -84,6 +84,26 @@ impl Segment {
             || self.contains_point(d)
     }
 
+    /// Do two axis-aligned segments lie on the same line with open-span overlap?
+    /// Endpoint-only touches and perpendicular crossings are not overlaps.
+    pub fn axis_aligned_collinear_overlap(&self, other: Segment) -> bool {
+        let self_h = (self.a.y - self.b.y).abs() < EPS;
+        let other_h = (other.a.y - other.b.y).abs() < EPS;
+        let self_v = (self.a.x - self.b.x).abs() < EPS;
+        let other_v = (other.a.x - other.b.x).abs() < EPS;
+        if self_h && other_h && (self.a.y - other.a.y).abs() < EPS {
+            let (alo, ahi) = (self.a.x.min(self.b.x), self.a.x.max(self.b.x));
+            let (blo, bhi) = (other.a.x.min(other.b.x), other.a.x.max(other.b.x));
+            alo < bhi - EPS && blo < ahi - EPS
+        } else if self_v && other_v && (self.a.x - other.a.x).abs() < EPS {
+            let (alo, ahi) = (self.a.y.min(self.b.y), self.a.y.max(self.b.y));
+            let (blo, bhi) = (other.a.y.min(other.b.y), other.a.y.max(other.b.y));
+            alo < bhi - EPS && blo < ahi - EPS
+        } else {
+            false
+        }
+    }
+
     /// Min distance to an axis-aligned rect; 0 if it enters/touches the rect.
     pub fn dist_to_rect(&self, r: &Rect) -> f64 {
         if r.dist_to_point(self.a) <= EPS || r.dist_to_point(self.b) <= EPS {
@@ -149,6 +169,20 @@ mod tests {
         assert!(s.contains_point(Point2::new(2.0, 0.0)));
         assert!(!s.contains_point(Point2::new(2.0, 0.5)));
         assert!(!s.contains_point(Point2::new(5.0, 0.0)));
+    }
+
+    #[test]
+    fn axis_aligned_collinear_overlap_requires_shared_span() {
+        let a = Segment::new(Point2::new(0.0, 0.0), Point2::new(5.0, 0.0));
+        let overlaps = Segment::new(Point2::new(4.0, 0.0), Point2::new(8.0, 0.0));
+        let touches = Segment::new(Point2::new(5.0, 0.0), Point2::new(8.0, 0.0));
+        let crosses = Segment::new(Point2::new(2.0, -1.0), Point2::new(2.0, 1.0));
+        let parallel = Segment::new(Point2::new(0.0, 1.0), Point2::new(5.0, 1.0));
+
+        assert!(a.axis_aligned_collinear_overlap(overlaps));
+        assert!(!a.axis_aligned_collinear_overlap(touches));
+        assert!(!a.axis_aligned_collinear_overlap(crosses));
+        assert!(!a.axis_aligned_collinear_overlap(parallel));
     }
 
     #[test]

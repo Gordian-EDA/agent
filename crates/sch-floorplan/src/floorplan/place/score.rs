@@ -580,7 +580,9 @@ pub fn count_merges(
             if an == bn {
                 continue;
             }
-            if collinear_overlap(*a1, *a2, *b1, *b2) {
+            let a = ::geom::Segment::new((*a1).into(), (*a2).into());
+            let b = ::geom::Segment::new((*b1).into(), (*b2).into());
+            if a.axis_aligned_collinear_overlap(b) {
                 n += 1;
             }
         }
@@ -601,26 +603,6 @@ pub fn count_merges(
         }
     }
     n
-}
-
-/// Two axis-aligned segments that lie on the same line and overlap (KiCAD fuses
-/// these). Endpoint-only touches of perpendicular segments are NOT included.
-pub(crate) fn collinear_overlap(a1: [f64; 2], a2: [f64; 2], b1: [f64; 2], b2: [f64; 2]) -> bool {
-    let a_h = (a1[1] - a2[1]).abs() < EPS;
-    let b_h = (b1[1] - b2[1]).abs() < EPS;
-    let a_v = (a1[0] - a2[0]).abs() < EPS;
-    let b_v = (b1[0] - b2[0]).abs() < EPS;
-    if a_h && b_h && (a1[1] - b1[1]).abs() < EPS {
-        let (alo, ahi) = (a1[0].min(a2[0]), a1[0].max(a2[0]));
-        let (blo, bhi) = (b1[0].min(b2[0]), b1[0].max(b2[0]));
-        alo < bhi - EPS && blo < ahi - EPS
-    } else if a_v && b_v && (a1[0] - b1[0]).abs() < EPS {
-        let (alo, ahi) = (a1[1].min(a2[1]), a1[1].max(a2[1]));
-        let (blo, bhi) = (b1[1].min(b2[1]), b1[1].max(b2[1]));
-        alo < bhi - EPS && blo < ahi - EPS
-    } else {
-        false
-    }
 }
 
 /// Visual wire crossings: pairs of different-net segments, one horizontal and
@@ -712,7 +694,9 @@ pub(crate) fn diagnose_shorts(
             if an == bn || an.is_none() || bn.is_none() {
                 continue;
             }
-            if collinear_overlap(*a1, *a2, *b1, *b2) {
+            let a = ::geom::Segment::new((*a1).into(), (*a2).into());
+            let b = ::geom::Segment::new((*b1).into(), (*b2).into());
+            if a.axis_aligned_collinear_overlap(b) {
                 eprintln!(
                     "[SHORT-DIAG]  COLLINEAR net {:?} [{:.2},{:.2}]->[{:.2},{:.2}] overlaps net {:?} \
                      [{:.2},{:.2}]->[{:.2},{:.2}]",
