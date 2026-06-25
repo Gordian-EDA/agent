@@ -8,14 +8,20 @@
 use std::path::{Path, PathBuf};
 
 use kicad_env::KicadEnv;
-use kicad_footprint::{CourtyardSource, Footprint, FootprintIndex, PadTechnology};
+use kicad_footprint::{
+    CourtyardSource, Footprint, FootprintCatalog, FootprintId, LibraryId, PadTechnology, SearchQuery,
+};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/footprints")
 }
 
 fn load(name: &str) -> Footprint {
-    Footprint::load(&fixtures().join(format!("{name}.kicad_mod"))).expect("parse fixture")
+    Footprint::from_file(fixtures().join(format!("{name}.kicad_mod"))).expect("parse fixture")
+}
+
+fn fid(lib_id: &str) -> FootprintId {
+    FootprintId::parse(lib_id).expect("valid lib id")
 }
 
 /// Approximate float equality for parsed millimetre coordinates.
@@ -23,15 +29,35 @@ fn close(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-6
 }
 
+/// Stage `names` into a `<lib>.pretty` directory under a fresh tempdir, and
+/// return the tempdir guard plus the root that holds the `.pretty` dir.
+fn staged_pretty(lib: &str, names: &[&str]) -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join(format!("{lib}.pretty"));
+    std::fs::create_dir(&dir).unwrap();
+    for n in names {
+        std::fs::copy(
+            fixtures().join(format!("{n}.kicad_mod")),
+            dir.join(format!("{n}.kicad_mod")),
+        )
+        .unwrap();
+    }
+    let root = tmp.path().to_path_buf();
+    (tmp, root)
+}
+
 // ── fixture parse correctness (no KiCAD needed) ──────────────────────────────
 
 #[test]
+fn standalone_parse_has_no_id() {
+    // A bare-file parse does not know its library.
+    assert!(load("R_0603_1608Metric").id.is_none());
+}
+
+#[test]
 fn arc_courtyard_bulge_is_captured() {
-    // kiutils 0.3 drops an fp_arc's (mid) apex; the courtyard parser must still
-    // bound the bulge from start/end. This footprint's right-end arc bulges to
-    // x=8.47 and the left to x=-3.59 → courtyard x must span [-3.59, 8.47].
     let fp = load("ArcCourtyard");
-    assert_eq!(fp.courtyard_source, CourtyardSource::Crtyd);
+    assert_eq!(fp.courtyard_source, CourtyardSource::ExplicitCourtyard);
     assert!(
         fp.courtyard.max_x >= 8.46,
         "right arc bulge missed: max_x={}",
@@ -46,11 +72,8 @@ fn arc_courtyard_bulge_is_captured() {
 
 #[test]
 fn circle_courtyard_radius_is_captured() {
-    // A circular courtyard ((center 1.25 0) (end 5.25 0) → r=4) must bound the
-    // whole disc x=[-2.75, 5.25], not just the center+edge sliver — else a radial
-    // cap / round footprint is badly under-sized and overlaps its neighbours.
     let fp = load("CircleCourtyard");
-    assert_eq!(fp.courtyard_source, CourtyardSource::Crtyd);
+    assert_eq!(fp.courtyard_source, CourtyardSource::ExplicitCourtyard);
     assert!(
         close(fp.courtyard.width(), 8.0),
         "circle width {}",
@@ -68,9 +91,9 @@ fn r0603_two_smd_pads_and_rect_courtyard() {
     let fp = load("R_0603_1608Metric");
     assert_eq!(fp.pad_count(), 2);
     assert!(fp.pads.iter().all(|p| p.technology == PadTechnology::Smd));
+    assert!(fp.pads.iter().all(|p| !p.is_through_hole()));
     assert!(fp.pads.iter().all(|p| p.drill.is_none()));
 
-    // Pad numbers and the two symmetric offsets from the file.
     let mut nums: Vec<_> = fp.pads.iter().map(|p| p.number.as_str()).collect();
     nums.sort();
     assert_eq!(nums, ["1", "2"]);
@@ -91,13 +114,8 @@ fn r0603_two_smd_pads_and_rect_courtyard() {
     );
     assert!(fp.pads.iter().all(|p| p.shape == "roundrect"));
 
-    // Single F.CrtYd fp_rect: (-1.48,-0.73)..(1.48,0.73) → 2.96 × 1.46 mm.
-    assert_eq!(fp.courtyard_source, CourtyardSource::Crtyd);
-    assert!(
-        close(fp.courtyard.width(), 2.96),
-        "{}",
-        fp.courtyard.width()
-    );
+    assert_eq!(fp.courtyard_source, CourtyardSource::ExplicitCourtyard);
+    assert!(close(fp.courtyard.width(), 2.96), "{}", fp.courtyard.width());
     assert!(
         close(fp.courtyard.height(), 1.46),
         "{}",
@@ -114,177 +132,212 @@ fn sot23_three_smd_pads_and_aggregated_courtyard() {
     nums.sort();
     assert_eq!(nums, ["1", "2", "3"]);
 
-    // Courtyard is drawn as many F.CrtYd fp_lines; the aggregated bbox spans
-    // x[-1.93, 1.93] (3.86) and y[-1.7, 1.7] (3.4).
-    assert_eq!(fp.courtyard_source, CourtyardSource::Crtyd);
+    assert_eq!(fp.courtyard_source, CourtyardSource::ExplicitCourtyard);
     assert!(close(fp.courtyard.min_x, -1.93) && close(fp.courtyard.max_x, 1.93));
-    assert!(
-        close(fp.courtyard.width(), 3.86),
-        "{}",
-        fp.courtyard.width()
-    );
-    assert!(
-        close(fp.courtyard.height(), 3.4),
-        "{}",
-        fp.courtyard.height()
-    );
+    assert!(close(fp.courtyard.width(), 3.86), "{}", fp.courtyard.width());
+    assert!(close(fp.courtyard.height(), 3.4), "{}", fp.courtyard.height());
 }
 
 #[test]
 fn pinheader_1x02_two_thru_hole_pads_with_drill() {
     let fp = load("PinHeader_1x02_P2.54mm_Vertical");
     assert_eq!(fp.pad_count(), 2);
+    assert!(fp.pads.iter().all(|p| p.technology == PadTechnology::ThruHole));
+    assert!(fp.pads.iter().all(|p| p.is_through_hole()));
+    assert!(fp.pads.iter().all(|p| p.drill.is_some_and(|d| close(d, 1.0))));
     assert!(
         fp.pads
             .iter()
-            .all(|p| p.technology == PadTechnology::ThruHole)
+            .all(|p| p.copper_layers().iter().any(|l| l == "*.Cu"))
     );
-    // 1.0 mm drill on both pads; both span the full copper stack (*.Cu).
-    assert!(
-        fp.pads
-            .iter()
-            .all(|p| p.drill.is_some_and(|d| close(d, 1.0)))
-    );
-    assert!(fp.pads.iter().all(|p| p.layers.iter().any(|l| l == "*.Cu")));
     // Pads on a 2.54 mm pitch along +y.
     assert!(fp.pads.iter().any(|p| close(p.at.y, 0.0)));
     assert!(fp.pads.iter().any(|p| close(p.at.y, 2.54)));
 }
 
 #[test]
-fn overall_bbox_encloses_courtyard() {
+fn overall_bounds_encloses_courtyard() {
     for name in [
         "R_0603_1608Metric",
         "SOT-23",
         "PinHeader_1x02_P2.54mm_Vertical",
     ] {
         let fp = load(name);
-        assert!(fp.bbox.min_x <= fp.courtyard.min_x + 1e-9, "{name}");
-        assert!(fp.bbox.max_x >= fp.courtyard.max_x - 1e-9, "{name}");
-        assert!(fp.bbox.min_y <= fp.courtyard.min_y + 1e-9, "{name}");
-        assert!(fp.bbox.max_y >= fp.courtyard.max_y - 1e-9, "{name}");
+        assert!(fp.bounds.min_x <= fp.courtyard.min_x + 1e-9, "{name}");
+        assert!(fp.bounds.max_x >= fp.courtyard.max_x - 1e-9, "{name}");
+        assert!(fp.bounds.min_y <= fp.courtyard.min_y + 1e-9, "{name}");
+        assert!(fp.bounds.max_y >= fp.courtyard.max_y - 1e-9, "{name}");
     }
 }
 
-// ── index over the fixture dir (no KiCAD needed) ─────────────────────────────
-//
-// The fixtures dir is a flat dir of `.kicad_mod` files, not `.pretty` dirs, so
-// it exercises `Footprint::load` but not `.pretty` discovery — that is covered
-// by the live-environment tests below. Here we build an index over a tiny
-// synthetic `.pretty` layout to test discovery + search without KiCAD.
+// ── parse_str + parser edge cases (no KiCAD needed) ──────────────────────────
 
 #[test]
-fn build_indexes_pretty_dirs_and_searches() {
-    let tmp = tempfile::tempdir().unwrap();
-    let lib = tmp.path().join("Resistor_SMD.pretty");
-    std::fs::create_dir(&lib).unwrap();
-    std::fs::copy(
-        fixtures().join("R_0603_1608Metric.kicad_mod"),
-        lib.join("R_0603_1608Metric.kicad_mod"),
-    )
-    .unwrap();
-    let sot = tmp.path().join("Package_TO_SOT_SMD.pretty");
-    std::fs::create_dir(&sot).unwrap();
-    std::fs::copy(
-        fixtures().join("SOT-23.kicad_mod"),
-        sot.join("SOT-23.kicad_mod"),
-    )
-    .unwrap();
+fn parse_str_round_trips_a_fixture() {
+    let source = std::fs::read_to_string(fixtures().join("SOT-23.kicad_mod")).unwrap();
+    let from_str = Footprint::parse_str("SOT-23", &source).expect("parse_str");
+    let from_file = load("SOT-23");
+    assert_eq!(from_str.pad_count(), from_file.pad_count());
+    assert_eq!(from_str.courtyard_source, from_file.courtyard_source);
+}
 
-    let idx = FootprintIndex::build_from_dir(tmp.path()).unwrap();
-    assert_eq!(idx.library_count(), 2);
-    assert_eq!(idx.len(), 2);
+#[test]
+fn parse_str_recovers_custom_pad_extent() {
+    // kiutils reports a `custom` pad's `size` as the anchor pad only; the parser
+    // must grow it to enclose the primitive polygon (half-extents 1 x 2 -> 2 x 4).
+    let source = r#"(footprint "Custom" (layer "F.Cu")
+  (pad "1" smd custom (at 0 0) (size 0.5 0.5) (layers "F.Cu")
+    (primitives (gr_poly (pts (xy -1 -2) (xy 1 -2) (xy 1 2) (xy -1 2)) (width 0))))
+)"#;
+    let fp = Footprint::parse_str("Custom", source).expect("parse_str custom pad");
+    let pad = &fp.pads[0];
+    assert_eq!(pad.shape, "custom");
+    assert!(close(pad.size.x, 2.0), "custom pad width {}", pad.size.x);
+    assert!(close(pad.size.y, 4.0), "custom pad height {}", pad.size.y);
+}
+
+#[test]
+fn estimated_courtyard_when_no_crtyd_layer() {
+    // No F.CrtYd graphics: courtyard is estimated from pads + silkscreen.
+    let source = r#"(footprint "NoCrtYd" (layer "F.Cu")
+  (pad "1" smd roundrect (at -1 0) (size 1 1) (layers "F.Cu"))
+  (pad "2" smd roundrect (at 1 0) (size 1 1) (layers "F.Cu"))
+  (fp_line (start -2 -1) (end 2 -1) (layer "F.SilkS"))
+)"#;
+    let fp = Footprint::parse_str("NoCrtYd", source).expect("parse_str no crtyd");
     assert_eq!(
-        idx.libraries().collect::<Vec<_>>(),
+        fp.courtyard_source,
+        CourtyardSource::EstimatedFromPadsAndSilkscreen
+    );
+    assert!(fp.courtyard.width() > 0.0 && fp.courtyard.height() > 0.0);
+}
+
+// ── catalog over a synthetic `.pretty` layout (no KiCAD needed) ───────────────
+
+#[test]
+fn catalog_indexes_pretty_dirs_and_searches() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (lib, name) in [
+        ("Resistor_SMD", "R_0603_1608Metric"),
+        ("Package_TO_SOT_SMD", "SOT-23"),
+    ] {
+        let dir = tmp.path().join(format!("{lib}.pretty"));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::copy(
+            fixtures().join(format!("{name}.kicad_mod")),
+            dir.join(format!("{name}.kicad_mod")),
+        )
+        .unwrap();
+    }
+
+    let catalog = FootprintCatalog::from_root(tmp.path()).unwrap();
+    assert_eq!(catalog.library_count(), 2);
+    assert_eq!(catalog.len(), 2);
+    assert_eq!(
+        catalog.libraries().map(|l| l.id().as_str()).collect::<Vec<_>>(),
         ["Package_TO_SOT_SMD", "Resistor_SMD"]
     );
+    let resistor = LibraryId::new("Resistor_SMD").unwrap();
     assert_eq!(
-        idx.footprints_in("Resistor_SMD"),
+        catalog
+            .entries_in(&resistor)
+            .map(|e| e.id().to_string())
+            .collect::<Vec<_>>(),
         ["Resistor_SMD:R_0603_1608Metric"]
     );
 
     // Search resolves the hit and lazily parses its pad count.
-    let hits = idx.search("R_0603_1608Metric", 5);
-    assert_eq!(hits[0].lib_id, "Resistor_SMD:R_0603_1608Metric");
-    assert_eq!(hits[0].pad_count, 2);
+    let hits = catalog.search(SearchQuery::new("R_0603_1608Metric").limit(5));
+    assert_eq!(hits[0].id.to_string(), "Resistor_SMD:R_0603_1608Metric");
+    assert_eq!(hits[0].pad_count, Some(2));
 
-    // Lazy detail lookup works through the index too.
-    let fp = idx.footprint("Package_TO_SOT_SMD:SOT-23").unwrap();
+    // Lazy detail lookup is tagged with its id.
+    let fp = catalog.footprint(&fid("Package_TO_SOT_SMD:SOT-23")).unwrap();
     assert_eq!(fp.pad_count(), 3);
-    assert!(idx.footprint("Resistor_SMD:DoesNotExist").is_none());
+    assert_eq!(fp.id.as_ref().map(|i| i.to_string()).as_deref(), Some("Package_TO_SOT_SMD:SOT-23"));
+
+    // An unknown id is NotFound, not a parse failure.
+    let err = catalog
+        .footprint(&fid("Resistor_SMD:DoesNotExist"))
+        .unwrap_err();
+    assert!(err.is_not_found(), "{err}");
 }
 
 #[test]
-fn search_ordering_is_deterministic() {
-    let tmp = tempfile::tempdir().unwrap();
-    let lib = tmp.path().join("Resistor_SMD.pretty");
-    std::fs::create_dir(&lib).unwrap();
-    for n in ["R_0603_1608Metric", "SOT-23"] {
-        std::fs::copy(
-            fixtures().join(format!("{n}.kicad_mod")),
-            lib.join(format!("{n}.kicad_mod")),
-        )
-        .unwrap();
-    }
-    let idx = FootprintIndex::build_from_dir(tmp.path()).unwrap();
-    let a = idx.search("0603", 5);
-    let b = idx.search("0603", 5);
-    assert_eq!(
-        a, b,
-        "identical queries must return identical, ordered hits"
-    );
+fn catalog_search_ordering_is_deterministic() {
+    let (_guard, root) = staged_pretty("Resistor_SMD", &["R_0603_1608Metric", "SOT-23"]);
+    let catalog = FootprintCatalog::from_root(&root).unwrap();
+    let a = catalog.search(SearchQuery::new("0603").limit(5));
+    let b = catalog.search(SearchQuery::new("0603").limit(5));
+    assert_eq!(a, b, "identical queries must return identical, ordered hits");
 }
 
 #[test]
-fn suggest_offers_closest_name_in_library() {
-    let tmp = tempfile::tempdir().unwrap();
-    let lib = tmp.path().join("Resistor_SMD.pretty");
-    std::fs::create_dir(&lib).unwrap();
-    std::fs::copy(
-        fixtures().join("R_0603_1608Metric.kicad_mod"),
-        lib.join("R_0603_1608Metric.kicad_mod"),
-    )
-    .unwrap();
-    let idx = FootprintIndex::build_from_dir(tmp.path()).unwrap();
-    // A near-miss name within an existing library yields a did-you-mean.
-    let s = idx.suggest("Resistor_SMD:R_0603_1608Metrik");
+fn catalog_suggest_offers_closest_name_in_library() {
+    let (_guard, root) = staged_pretty("Resistor_SMD", &["R_0603_1608Metric"]);
+    let catalog = FootprintCatalog::from_root(&root).unwrap();
+    let s: Vec<String> = catalog
+        .suggest(&fid("Resistor_SMD:R_0603_1608Metrik"))
+        .iter()
+        .map(|i| i.to_string())
+        .collect();
     assert_eq!(s, ["Resistor_SMD:R_0603_1608Metric"]);
 }
 
 #[test]
-fn empty_query_returns_no_hits() {
+fn catalog_empty_query_returns_no_hits() {
+    let (_guard, root) = staged_pretty("Resistor_SMD", &["R_0603_1608Metric"]);
+    let catalog = FootprintCatalog::from_root(&root).unwrap();
+    assert!(catalog.search(SearchQuery::new("@@@")).is_empty());
+}
+
+#[test]
+fn catalog_propagates_parse_errors_distinctly() {
     let tmp = tempfile::tempdir().unwrap();
-    let lib = tmp.path().join("Resistor_SMD.pretty");
-    std::fs::create_dir(&lib).unwrap();
+    let dir = tmp.path().join("Fixtures.pretty");
+    std::fs::create_dir(&dir).unwrap();
     std::fs::copy(
         fixtures().join("R_0603_1608Metric.kicad_mod"),
-        lib.join("R_0603_1608Metric.kicad_mod"),
+        dir.join("R_0603_1608Metric.kicad_mod"),
     )
     .unwrap();
-    let idx = FootprintIndex::build_from_dir(tmp.path()).unwrap();
-    assert!(idx.search("@@@", 5).is_empty());
+    // A `.kicad_mod` whose root is not a footprint -> parse error, not NotFound.
+    std::fs::write(dir.join("Broken.kicad_mod"), "(symbol \"NotAFootprint\")").unwrap();
+
+    let catalog = FootprintCatalog::from_root(tmp.path()).unwrap();
+    let good = catalog.footprint(&fid("Fixtures:R_0603_1608Metric"));
+    assert!(good.is_ok(), "{good:?}");
+
+    let bad = catalog.footprint(&fid("Fixtures:Broken")).unwrap_err();
+    assert!(bad.is_parse(), "expected a parse error, got {bad}");
+    assert_eq!(bad.path(), Some(dir.join("Broken.kicad_mod").as_path()));
+}
+
+#[test]
+fn from_env_indexes_the_environment_footprint_dir() {
+    // from_env must read `env.footprint_dir`, NOT a symbol-dir-derived sibling.
+    let (guard, root) = staged_pretty("Resistor_SMD", &["R_0603_1608Metric"]);
+    let env = KicadEnv::with_library_dirs(guard.path().join("symbols"), root);
+    let catalog = FootprintCatalog::from_env(&env).unwrap();
+    assert!(catalog.contains(&fid("Resistor_SMD:R_0603_1608Metric")));
 }
 
 // ── live environment (gated on KiCAD) ────────────────────────────────────────
 
 #[test]
-fn live_index_sees_many_libraries() {
+fn live_catalog_sees_many_libraries() {
     let Some(env) = KicadEnv::detect() else {
         eprintln!("SKIP: no KiCAD installation detected");
         return;
     };
-    let idx = FootprintIndex::build(&env).unwrap();
+    let catalog = FootprintCatalog::from_env(&env).unwrap();
     eprintln!(
         "indexed {} footprints across {} libraries",
-        idx.len(),
-        idx.library_count()
+        catalog.len(),
+        catalog.library_count()
     );
-    assert!(
-        idx.library_count() > 50,
-        "{} libraries",
-        idx.library_count()
-    );
-    assert!(idx.len() > 1000, "{} footprints", idx.len());
+    assert!(catalog.library_count() > 50, "{}", catalog.library_count());
+    assert!(catalog.len() > 1000, "{}", catalog.len());
 }
 
 #[test]
@@ -293,14 +346,14 @@ fn live_search_finds_r0603() {
         eprintln!("SKIP: no KiCAD installation detected");
         return;
     };
-    let idx = FootprintIndex::build(&env).unwrap();
-    let hits = idx.search("R_0603_1608Metric", 8);
+    let catalog = FootprintCatalog::from_env(&env).unwrap();
+    let hits = catalog.search(SearchQuery::new("R_0603_1608Metric").limit(8));
     assert!(
         hits.iter()
-            .any(|h| h.lib_id == "Resistor_SMD:R_0603_1608Metric"),
+            .any(|h| h.id.to_string() == "Resistor_SMD:R_0603_1608Metric"),
         "{hits:?}"
     );
-    assert_eq!(hits[0].pad_count, 2, "{:?}", hits[0]);
+    assert_eq!(hits[0].pad_count, Some(2), "{:?}", hits[0]);
 }
 
 #[test]
@@ -309,12 +362,11 @@ fn live_search_fuzzy_finds_sot23() {
         eprintln!("SKIP: no KiCAD installation detected");
         return;
     };
-    let idx = FootprintIndex::build(&env).unwrap();
-    // Fragment of the qualified id with separator noise, like the symbol
-    // search's USB-C test — fuzzy matching must still surface the exact part.
-    let hits = idx.search("TO_SOT_SMD SOT-23", 10);
+    let catalog = FootprintCatalog::from_env(&env).unwrap();
+    let hits = catalog.search(SearchQuery::new("TO_SOT_SMD SOT-23").limit(10));
     assert!(
-        hits.iter().any(|h| h.lib_id == "Package_TO_SOT_SMD:SOT-23"),
+        hits.iter()
+            .any(|h| h.id.to_string() == "Package_TO_SOT_SMD:SOT-23"),
         "{hits:?}"
     );
 }

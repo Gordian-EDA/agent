@@ -8,6 +8,7 @@ use anyhow::Result;
 use kicad_cli::KicadCli;
 use serde_json::{Value, json};
 
+use kicad_footprint::FootprintId;
 use pcb_model::{LayerRef, Point2, Polygon};
 use pcb_place::placement::{Edge, GroupHint, LockedAt, PlacementHints, Rect};
 
@@ -191,16 +192,22 @@ pub fn derive_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
 }
 
 fn write_seed_board(spec: &BoardSeedSpec, ctx: &PcbToolCtx) -> std::result::Result<(), String> {
-    let index = ctx
-        .footprint_index()
-        .map_err(|e| format!("footprint index unavailable: {e}"))?;
+    let catalog = ctx
+        .footprint_catalog()
+        .map_err(|e| format!("footprint catalog unavailable: {e}"))?;
     let mut parts = Vec::with_capacity(spec.parts.len());
     let mut x = spec.bounds.min_x + 2.0;
     let y = spec.bounds.min_y + 2.0;
     for dp in &spec.parts {
-        let source = index.footprint_source(&dp.footprint).ok_or_else(|| {
+        let id = FootprintId::parse(&dp.footprint).map_err(|e| {
             format!(
-                "part {}: footprint `{}` source is not readable — edit the schematic footprint field",
+                "part {}: invalid footprint id `{}`: {e}",
+                dp.reference, dp.footprint
+            )
+        })?;
+        let source = catalog.source(&id).map_err(|e| {
+            format!(
+                "part {}: footprint `{}` source is not readable: {e} — edit the schematic footprint field",
                 dp.reference, dp.footprint
             )
         })?;
@@ -964,7 +971,7 @@ const KICAD_MIN_ANNULAR: f64 = 0.1;
 /// Parse one part JSON into a validated [`BoardSeedPart`].
 fn parse_seed_part(
     pj: &Value,
-    index: &kicad_footprint::FootprintIndex,
+    catalog: &kicad_footprint::FootprintCatalog,
     clearance: f64,
 ) -> std::result::Result<BoardSeedPart, Value> {
     let reference = pj
@@ -979,14 +986,30 @@ fn parse_seed_part(
             || json!({ "error": format!("part {reference}: missing string `footprint` lib_id") }),
         )?
         .to_string();
-    let Some(resolved_fp) = index.footprint(&footprint) else {
-        return Err(json!({
-            "error": format!(
-                "part {reference}: unknown footprint `{footprint}` — \
-                 search_footprints for the real lib_id, never guess it"
-            ),
-            "suggestions": index.suggest(&footprint),
-        }));
+    let id = match FootprintId::parse(&footprint) {
+        Ok(id) => id,
+        Err(_) => {
+            return Err(json!({
+                "error": format!("part {reference}: invalid footprint id `{footprint}`"),
+            }));
+        }
+    };
+    let resolved_fp = match catalog.footprint(&id) {
+        Ok(fp) => fp,
+        Err(e) if e.is_not_found() => {
+            return Err(json!({
+                "error": format!(
+                    "part {reference}: unknown footprint `{footprint}` — \
+                     search_footprints for the real lib_id, never guess it"
+                ),
+                "suggestions": catalog.suggest(&id).iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+            }));
+        }
+        Err(e) => {
+            return Err(json!({
+                "error": format!("part {reference}: footprint `{footprint}` could not be read: {e}"),
+            }));
+        }
     };
     let pad_nets: BTreeMap<String, String> = match pj.get("pad_nets") {
         None | Some(Value::Null) => BTreeMap::new(),
@@ -1081,14 +1104,14 @@ pub fn build_seed_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         }));
     };
 
-    let index = ctx.footprint_index()?;
+    let catalog = ctx.footprint_catalog()?;
     let mut parts: Vec<BoardSeedPart> = Vec::with_capacity(parts_json.len());
 
     // Resolve every footprint up front; a single unknown lib_id is a recoverable
     // error with suggestions (mirrors get_footprint_info), so the model can fix
     // exactly that part rather than re-sending the whole board.
     for pj in parts_json {
-        match parse_seed_part(pj, index, rules.clearance) {
+        match parse_seed_part(pj, catalog, rules.clearance) {
             Ok(p) => parts.push(p),
             Err(e) => return Ok(e),
         }

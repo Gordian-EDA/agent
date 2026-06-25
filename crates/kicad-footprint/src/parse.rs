@@ -1,48 +1,83 @@
-use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use geom::{Point2, Rect};
 
+use crate::error::{Error, Result};
 use crate::{CourtyardSource, Footprint, FootprintPad, PadTechnology};
 
 impl Footprint {
     /// Parse a single `.kicad_mod` file into a [`Footprint`].
     ///
     /// The bare footprint name is taken from the file stem, which is canonical
-    /// for `.pretty` libraries: the filename is the footprint name.
-    pub fn load(path: &Path) -> io::Result<Footprint> {
-        let doc = kiutils_kicad::FootprintFile::read(path).map_err(map_kiutils_err)?;
-        let ast = doc.ast();
-
+    /// for `.pretty` libraries: the filename is the footprint name. The library
+    /// is unknown for a standalone file, so [`Footprint::id`] is `None`.
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Footprint> {
+        let path = path.as_ref();
+        let doc = kiutils_kicad::FootprintFile::read(path).map_err(|e| map_kiutils_err(path, e))?;
         let name = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string();
+        Ok(build_footprint(name, doc.ast(), || {
+            std::fs::read_to_string(path).ok()
+        }))
+    }
 
-        let mut pads: Vec<FootprintPad> = ast.pads.iter().map(pad_detail).collect();
-        if pads.iter().any(|p| p.shape == "custom")
-            && let Ok(raw) = std::fs::read_to_string(path)
-        {
-            let bboxes = custom_pad_half_extents(&raw);
-            for (bi, pad) in pads.iter_mut().filter(|p| p.shape == "custom").enumerate() {
-                if let Some(half) = bboxes.get(bi) {
-                    pad.size =
-                        Point2::new(pad.size.x.max(2.0 * half.x), pad.size.y.max(2.0 * half.y));
-                }
+    /// Parse `.kicad_mod` `source` text directly, attributing it to `name`.
+    ///
+    /// `kiutils` 0.3 only parses footprints from a path, so the text is staged
+    /// in a tempfile; the workaround is contained here and never surfaces in the
+    /// public contract. [`Footprint::id`] is `None`.
+    pub fn parse_str(name: impl Into<String>, source: &str) -> Result<Footprint> {
+        let tmp = tempfile::Builder::new()
+            .suffix(".kicad_mod")
+            .tempfile()
+            .map_err(|e| Error::Io {
+                path: PathBuf::from("<parse_str>"),
+                source: e,
+            })?;
+        std::fs::write(tmp.path(), source).map_err(|e| Error::Io {
+            path: tmp.path().to_path_buf(),
+            source: e,
+        })?;
+        let doc =
+            kiutils_kicad::FootprintFile::read(tmp.path()).map_err(|e| map_kiutils_err(tmp.path(), e))?;
+        Ok(build_footprint(name.into(), doc.ast(), || {
+            Some(source.to_string())
+        }))
+    }
+}
+
+/// Assemble a [`Footprint`] from a parsed AST. `raw_source` is consulted only
+/// when a custom-shaped pad needs its primitive extents recovered from text.
+fn build_footprint(
+    name: String,
+    ast: &kiutils_kicad::FootprintAst,
+    raw_source: impl FnOnce() -> Option<String>,
+) -> Footprint {
+    let mut pads: Vec<FootprintPad> = ast.pads.iter().map(pad_detail).collect();
+    if pads.iter().any(|p| p.shape == "custom")
+        && let Some(raw) = raw_source()
+    {
+        let half_extents = custom_pad_half_extents(&raw);
+        for (bi, pad) in pads.iter_mut().filter(|p| p.shape == "custom").enumerate() {
+            if let Some(half) = half_extents.get(bi) {
+                pad.size = Point2::new(pad.size.x.max(2.0 * half.x), pad.size.y.max(2.0 * half.y));
             }
         }
-        let (courtyard, courtyard_source) = courtyard_bbox(ast, &pads);
-        let bbox = overall_bbox(ast, &pads).unwrap_or_else(Rect::zero);
+    }
+    let (courtyard, courtyard_source) = courtyard_bbox(ast, &pads);
+    let bounds = overall_bbox(ast, &pads).unwrap_or_else(Rect::zero);
 
-        Ok(Footprint {
-            name,
-            descr: ast.descr.clone(),
-            pads,
-            courtyard,
-            courtyard_source,
-            bbox,
-        })
+    Footprint {
+        id: None,
+        name,
+        descr: ast.descr.clone(),
+        pads,
+        courtyard,
+        courtyard_source,
+        bounds,
     }
 }
 
@@ -156,10 +191,7 @@ fn graphic_points(g: &kiutils_kicad::FpGraphic) -> Vec<Point2> {
     pts
 }
 
-fn courtyard_bbox(
-    ast: &kiutils_kicad::FootprintAst,
-    pads: &[FootprintPad],
-) -> (Rect, CourtyardSource) {
+fn courtyard_bbox(ast: &kiutils_kicad::FootprintAst, pads: &[FootprintPad]) -> (Rect, CourtyardSource) {
     let mut crtyd: Vec<Point2> = Vec::new();
     for g in &ast.graphics {
         if matches!(g.layer.as_deref(), Some("F.CrtYd") | Some("B.CrtYd")) {
@@ -167,7 +199,7 @@ fn courtyard_bbox(
         }
     }
     if let Some(b) = Rect::bounding(&crtyd) {
-        return (b, CourtyardSource::Crtyd);
+        return (b, CourtyardSource::ExplicitCourtyard);
     }
 
     let mut pts: Vec<Point2> = Vec::new();
@@ -181,7 +213,7 @@ fn courtyard_bbox(
     }
     (
         Rect::bounding(&pts).unwrap_or_else(Rect::zero),
-        CourtyardSource::PadSilkFallback,
+        CourtyardSource::EstimatedFromPadsAndSilkscreen,
     )
 }
 
@@ -196,9 +228,15 @@ fn overall_bbox(ast: &kiutils_kicad::FootprintAst, pads: &[FootprintPad]) -> Opt
     Rect::bounding(&pts)
 }
 
-fn map_kiutils_err(e: kiutils_kicad::Error) -> io::Error {
+fn map_kiutils_err(path: &Path, e: kiutils_kicad::Error) -> Error {
     match e {
-        kiutils_kicad::Error::Io(io) => io,
-        other => io::Error::new(io::ErrorKind::InvalidData, other.to_string()),
+        kiutils_kicad::Error::Io(io) => Error::Io {
+            path: path.to_path_buf(),
+            source: io,
+        },
+        other => Error::Parse {
+            path: path.to_path_buf(),
+            message: other.to_string(),
+        },
     }
 }

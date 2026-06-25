@@ -52,7 +52,7 @@ use circuit_lang::compile;
 use circuit_lang::model::{Component, Design, PinTarget};
 use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
-use kicad_footprint::FootprintIndex;
+use kicad_footprint::FootprintCatalog;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::search::SymbolIndex;
 
@@ -82,11 +82,11 @@ pub struct PcbToolCtx {
     snapshots: SnapshotStore,
     /// Cross-library name index, built on first `search_symbols` and reused.
     index: OnceLock<SymbolIndex>,
-    /// Cross-library footprint index, built on first `search_footprints` /
+    /// Cross-library footprint catalog, built on first `search_footprints` /
     /// `get_footprint_info` / `derive_board` and reused. Scanning every
     /// `.pretty` library is expensive, so (like `index`) it is built once.
-    footprint_index: OnceLock<FootprintIndex>,
-    /// Test override: when set, the footprint index is built from this directory
+    footprint_catalog: OnceLock<FootprintCatalog>,
+    /// Test override: when set, the footprint catalog is built from this directory
     /// of `.pretty` libraries (the vendored fixtures) instead of the installed
     /// KiCAD footprint share dir, so footprint tests run without KiCAD libs.
     footprint_dir_override: Option<PathBuf>,
@@ -124,7 +124,7 @@ impl PcbToolCtx {
             provider,
             snapshots,
             index: OnceLock::new(),
-            footprint_index: OnceLock::new(),
+            footprint_catalog: OnceLock::new(),
             footprint_dir_override: None,
             workspace,
             kicad: kicad_ipc::SessionManager::new(),
@@ -163,7 +163,7 @@ impl PcbToolCtx {
             provider,
             snapshots,
             index: OnceLock::new(),
-            footprint_index: OnceLock::new(),
+            footprint_catalog: OnceLock::new(),
             footprint_dir_override: None,
             workspace,
             kicad: kicad_ipc::SessionManager::new(),
@@ -199,7 +199,7 @@ impl PcbToolCtx {
             provider,
             snapshots,
             index: OnceLock::new(),
-            footprint_index: OnceLock::new(),
+            footprint_catalog: OnceLock::new(),
             footprint_dir_override: Some(footprint_dir),
             workspace,
             kicad: kicad_ipc::SessionManager::new(),
@@ -276,27 +276,27 @@ impl PcbToolCtx {
         Ok(self.index.get().expect("index just set"))
     }
 
-    /// The cross-library footprint index, built once and cached.
+    /// The cross-library footprint catalog, built once and cached.
     ///
     /// Building scans every installed `.pretty` library (155 of them) — far
     /// dearer than the symbol scan — so the result is memoized like
     /// [`Self::index`]. When a footprint-dir override is set (the test
-    /// constructor), the index is built from that directory of `.pretty`
+    /// constructor), the catalog is built from that directory of `.pretty`
     /// libraries instead of the installed KiCAD footprint share dir.
-    pub(crate) fn footprint_index(&self) -> Result<&FootprintIndex> {
-        if let Some(idx) = self.footprint_index.get() {
-            return Ok(idx);
+    pub(crate) fn footprint_catalog(&self) -> Result<&FootprintCatalog> {
+        if let Some(catalog) = self.footprint_catalog.get() {
+            return Ok(catalog);
         }
-        let idx = match &self.footprint_dir_override {
-            Some(dir) => FootprintIndex::build_from_dir(dir)
-                .with_context(|| format!("building footprint index from {}", dir.display()))?,
-            None => FootprintIndex::build(&self.env).context("building footprint index")?,
+        let catalog = match &self.footprint_dir_override {
+            Some(dir) => FootprintCatalog::from_root(dir)
+                .with_context(|| format!("building footprint catalog from {}", dir.display()))?,
+            None => FootprintCatalog::from_env(&self.env).context("building footprint catalog")?,
         };
-        let _ = self.footprint_index.set(idx);
+        let _ = self.footprint_catalog.set(catalog);
         Ok(self
-            .footprint_index
+            .footprint_catalog
             .get()
-            .expect("footprint index just set"))
+            .expect("footprint catalog just set"))
     }
 }
 

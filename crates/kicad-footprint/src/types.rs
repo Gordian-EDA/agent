@@ -1,6 +1,8 @@
 use geom::{Point2, Rect};
 use serde::{Deserialize, Serialize};
 
+use crate::id::FootprintId;
+
 /// Through-hole vs. surface-mount, derived from a pad's KiCAD `pad_type`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -16,14 +18,36 @@ pub enum PadTechnology {
     Other,
 }
 
-/// How the courtyard bbox was obtained.
+impl PadTechnology {
+    /// Stable lowercase token, matching the serde representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PadTechnology::Smd => "smd",
+            PadTechnology::ThruHole => "thru_hole",
+            PadTechnology::NpThruHole => "np_thru_hole",
+            PadTechnology::Other => "other",
+        }
+    }
+}
+
+/// How a footprint's courtyard bounding box was obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CourtyardSource {
     /// Bounding box of the `F.CrtYd` / `B.CrtYd` graphics actually present.
-    Crtyd,
-    /// No courtyard layer present: bbox of pads plus silkscreen graphics.
-    PadSilkFallback,
+    ExplicitCourtyard,
+    /// No courtyard layer present: estimated from pads plus silkscreen graphics.
+    EstimatedFromPadsAndSilkscreen,
+}
+
+impl CourtyardSource {
+    /// Stable lowercase token, matching the serde representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CourtyardSource::ExplicitCourtyard => "explicit_courtyard",
+            CourtyardSource::EstimatedFromPadsAndSilkscreen => "estimated_from_pads_and_silkscreen",
+        }
+    }
 }
 
 /// One pad of a footprint, reference-designator-agnostic.
@@ -47,21 +71,42 @@ pub struct FootprintPad {
     pub drill: Option<f64>,
 }
 
+impl FootprintPad {
+    /// The KiCAD layer tokens this pad occupies.
+    pub fn copper_layers(&self) -> &[String] {
+        &self.layers
+    }
+
+    /// Whether the pad is a drilled through-hole pad (plated or not).
+    pub fn is_through_hole(&self) -> bool {
+        matches!(
+            self.technology,
+            PadTechnology::ThruHole | PadTechnology::NpThruHole
+        )
+    }
+}
+
 /// A parsed footprint: everything placement needs before board context.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Footprint {
+    /// The library id this footprint was resolved under, when known.
+    ///
+    /// `None` for a standalone parse ([`Footprint::from_file`] /
+    /// [`Footprint::parse_str`]); set when obtained via
+    /// [`crate::FootprintCatalog::footprint`].
+    pub id: Option<FootprintId>,
     /// Bare footprint name (the `.kicad_mod` stem).
     pub name: String,
     /// Free-text description from `(descr ...)`, if any.
     pub descr: Option<String>,
     /// Reference-designator-agnostic pad list.
     pub pads: Vec<FootprintPad>,
-    /// Courtyard bounding box in the footprint frame.
+    /// Courtyard bounding box in the footprint frame (placement keep-out).
     pub courtyard: Rect,
     /// How [`Self::courtyard`] was derived.
     pub courtyard_source: CourtyardSource,
-    /// Overall bounding box over pads and graphics.
-    pub bbox: Rect,
+    /// Overall bounding box over every pad and graphic element.
+    pub bounds: Rect,
 }
 
 impl Footprint {

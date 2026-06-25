@@ -4,6 +4,8 @@
 
 use serde_json::{Value, json};
 
+use kicad_footprint::{FootprintId, SearchQuery};
+
 use crate::tools::{PcbToolCtx, require_str};
 
 /// Default number of footprint-search hits returned when `limit` is omitted.
@@ -19,10 +21,10 @@ pub fn search_footprints(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Value
         .unwrap_or(DEFAULT_SEARCH_LIMIT);
 
     let hits: Vec<Value> = ctx
-        .footprint_index()?
-        .search(&query, limit)
+        .footprint_catalog()?
+        .search(SearchQuery::new(query).limit(limit))
         .into_iter()
-        .map(|h| json!({ "lib_id": h.lib_id, "pad_count": h.pad_count }))
+        .map(|h| json!({ "lib_id": h.id.to_string(), "pad_count": h.pad_count }))
         .collect();
 
     Ok(json!({ "hits": hits }))
@@ -30,10 +32,17 @@ pub fn search_footprints(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Value
 
 pub fn get_footprint_info(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Value> {
     let lib_id = require_str(&input, "lib_id")?;
-    let index = ctx.footprint_index()?;
+    let catalog = ctx.footprint_catalog()?;
 
-    match index.footprint(&lib_id) {
-        Some(fp) => {
+    let id = match FootprintId::parse(&lib_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(json!({ "error": format!("invalid footprint id `{lib_id}`") }));
+        }
+    };
+
+    match catalog.footprint(&id) {
+        Ok(fp) => {
             // The model binds nets by pad NUMBER and never needs each pad's coordinates (it
             // doesn't place pads), so return the number list + a compact shape SUMMARY rather
             // than the full per-pad table — for a 256-ball BGA the old table was ~20k chars
@@ -60,13 +69,10 @@ pub fn get_footprint_info(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Valu
                 wmin = wmin.min(s);
                 wmax = wmax.max(p.size.x.max(p.size.y));
             }
-            let techs: std::collections::BTreeSet<&str> = fp
-                .pads
-                .iter()
-                .map(|p| technology_str(p.technology))
-                .collect();
+            let techs: std::collections::BTreeSet<&str> =
+                fp.pads.iter().map(|p| p.technology.as_str()).collect();
             Ok(json!({
-                "lib_id": lib_id,
+                "lib_id": id.to_string(),
                 "name": fp.name,
                 "descr": fp.descr,
                 "pad_count": fp.pads.len(),
@@ -76,34 +82,17 @@ pub fn get_footprint_info(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Valu
                 "pad_max_dim_mm": (wmax * 1000.0).round() / 1000.0,
                 "technologies": techs,
                 "courtyard": bbox_json(&fp.courtyard),
-                "courtyard_source": courtyard_source_str(fp.courtyard_source),
-                "bbox": bbox_json(&fp.bbox),
+                "courtyard_source": fp.courtyard_source.as_str(),
+                "bbox": bbox_json(&fp.bounds),
             }))
         }
-        None => Ok(json!({
+        Err(e) if e.is_not_found() => Ok(json!({
             "error": format!("unknown footprint `{lib_id}`"),
-            "suggestions": index.suggest(&lib_id),
+            "suggestions": catalog.suggest(&id).iter().map(|i| i.to_string()).collect::<Vec<_>>(),
         })),
-    }
-}
-
-/// Render a [`kicad_footprint::PadTechnology`] as a stable lowercase
-/// string for the LLM.
-fn technology_str(t: kicad_footprint::PadTechnology) -> &'static str {
-    use kicad_footprint::PadTechnology::*;
-    match t {
-        Smd => "smd",
-        ThruHole => "thru_hole",
-        NpThruHole => "np_thru_hole",
-        Other => "other",
-    }
-}
-
-fn courtyard_source_str(s: kicad_footprint::CourtyardSource) -> &'static str {
-    use kicad_footprint::CourtyardSource::*;
-    match s {
-        Crtyd => "crtyd",
-        PadSilkFallback => "pad_silk_fallback",
+        Err(e) => Ok(json!({
+            "error": format!("footprint `{lib_id}` could not be read: {e}"),
+        })),
     }
 }
 

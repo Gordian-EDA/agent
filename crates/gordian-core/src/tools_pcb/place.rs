@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use kicad_footprint::{Footprint, FootprintPad, PadTechnology};
+use kicad_footprint::{Footprint, FootprintId, FootprintPad, PadTechnology};
 use kicad_ipc::{FootprintMove, snapshot::IpcBoardSnapshot};
 use pcb_model::LayerRef;
 use pcb_model::place::PartPad;
@@ -191,17 +191,23 @@ pub(super) fn place_problem_from_snapshot(
     board: &IpcBoardSnapshot,
     ctx: &PcbToolCtx,
 ) -> std::result::Result<PlaceProblem, String> {
-    let index = ctx
-        .footprint_index()
-        .map_err(|e| format!("footprint index unavailable: {e}"))?;
+    let catalog = ctx
+        .footprint_catalog()
+        .map_err(|e| format!("footprint catalog unavailable: {e}"))?;
     let mut parts: Vec<Part> = Vec::with_capacity(board.imported.parts.len());
     for imported in &board.imported.parts {
-        let Some(fp) = index.footprint(&imported.lib_id) else {
-            return Err(format!(
-                "part {}: footprint `{}` is no longer resolvable",
+        let id = FootprintId::parse(&imported.lib_id).map_err(|e| {
+            format!(
+                "part {}: invalid footprint id `{}`: {e}",
                 imported.reference, imported.lib_id
-            ));
-        };
+            )
+        })?;
+        let fp = catalog.footprint(&id).map_err(|e| {
+            format!(
+                "part {}: footprint `{}` is no longer resolvable: {e}",
+                imported.reference, imported.lib_id
+            )
+        })?;
         parts.push(part_from_footprint_layers(
             &fp,
             &imported.reference,

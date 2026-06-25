@@ -13,6 +13,7 @@ strsim.workspace = true
 fuzzy-matcher.workspace = true
 serde.workspace = true
 kiutils_kicad.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
