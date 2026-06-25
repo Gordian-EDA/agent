@@ -622,13 +622,13 @@ pub(crate) fn gather_decoupling_bank(items: &mut [Item], ir: &LayoutIr) -> bool 
             .copied()
             .zip(targets.iter().copied())
             .collect();
-        let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> [f64; 4] {
+        let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> ::geom::Rect {
             let mut probe = items[idx].clone();
             probe.angle = angle;
             item_rect(&probe, at)
         };
         let at_now = |idx: usize| item_rect(&items[idx], items[idx].at);
-        let at_new = |idx: usize| -> [f64; 4] {
+        let at_new = |idx: usize| -> ::geom::Rect {
             match proposed.get(&idx) {
                 Some(&at) => rect_at(idx, at, new_angle[&idx]),
                 None => item_rect(&items[idx], items[idx].at),
@@ -825,12 +825,12 @@ pub(crate) fn gather_banked_decoupling(
     // OVERLAP-SAFETY against the whole sheet (no follow-up decongest).
     let proposed: BTreeMap<usize, [f64; 2]> =
         bank.iter().copied().zip(targets.iter().copied()).collect();
-    let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> [f64; 4] {
+    let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> ::geom::Rect {
         let mut probe = items[idx].clone();
         probe.angle = angle;
         item_rect(&probe, at)
     };
-    let at_new = |idx: usize| -> [f64; 4] {
+    let at_new = |idx: usize| -> ::geom::Rect {
         match proposed.get(&idx) {
             Some(&at) => rect_at(idx, at, new_angle[&idx]),
             None => item_rect(&items[idx], items[idx].at),
@@ -1095,13 +1095,13 @@ pub(crate) fn gather_crystal_cluster(items: &mut [Item], _ir: &LayoutIr) -> bool
             .iter()
             .map(|&(i, at, ang)| (i, (at, ang)))
             .collect();
-        let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> [f64; 4] {
+        let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> ::geom::Rect {
             let mut probe = items[idx].clone();
             probe.angle = angle;
             item_rect(&probe, at)
         };
         let at_now = |idx: usize| item_rect(&items[idx], items[idx].at);
-        let at_new = |idx: usize| -> [f64; 4] {
+        let at_new = |idx: usize| -> ::geom::Rect {
             match prop.get(&idx) {
                 Some(&(at, ang)) => rect_at(idx, at, ang),
                 None => item_rect(&items[idx], items[idx].at),
@@ -1509,19 +1509,19 @@ pub(crate) fn gather_bootstrap_stages(items: &mut [Item], _ir: &LayoutIr) -> boo
             .collect();
         let committed: BTreeMap<usize, ([f64; 2], f64)> =
             moves.iter().map(|&(i, at, ang)| (i, (at, ang))).collect();
-        let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> [f64; 4] {
+        let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> ::geom::Rect {
             let mut probe = items[idx].clone();
             probe.angle = angle;
             item_rect(&probe, at)
         };
-        let settled = |idx: usize| -> [f64; 4] {
+        let settled = |idx: usize| -> ::geom::Rect {
             match committed.get(&idx) {
                 Some(&(at, ang)) => rect_at(idx, at, ang),
                 None => item_rect(&items[idx], items[idx].at),
             }
         };
         let at_now = |idx: usize| settled(idx);
-        let at_new = |idx: usize| -> [f64; 4] {
+        let at_new = |idx: usize| -> ::geom::Rect {
             match prop.get(&idx) {
                 Some(&(at, ang)) => rect_at(idx, at, ang),
                 None => settled(idx),
@@ -1741,12 +1741,12 @@ pub(crate) fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool
         // committed moves into both the baseline and the proposal so they're judged in the same world.
         let committed: BTreeMap<usize, ([f64; 2], f64)> =
             moves.iter().map(|&(i, at, ang)| (i, (at, ang))).collect();
-        let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> [f64; 4] {
+        let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> ::geom::Rect {
             let mut probe = items[idx].clone();
             probe.angle = angle;
             item_rect(&probe, at)
         };
-        let settled = |idx: usize| -> [f64; 4] {
+        let settled = |idx: usize| -> ::geom::Rect {
             match committed.get(&idx) {
                 Some(&(at, ang)) => rect_at(idx, at, ang),
                 None => item_rect(&items[idx], items[idx].at),
@@ -2006,7 +2006,7 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
             .chars()
             .count()
             .max(items[r0].refdes.chars().count()) as f64;
-        let tight_at = |at: [f64; 2]| -> [f64; 4] {
+        let tight_at = |at: [f64; 2]| -> ::geom::Rect {
             let mut probe = items[r0].clone();
             probe.angle = res_angle;
             let mut lo = [f64::MAX; 2];
@@ -2018,22 +2018,22 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
                 hi[0] = hi[0].max(w[0]);
                 hi[1] = hi[1].max(w[1]);
             }
-            [
+            ::geom::Rect::new(
                 lo[0] - 0.9,
                 lo[1] - 1.0,
                 hi[0] + 0.9 + val_chars * 1.1,
                 hi[1] + 1.0,
-            ]
+            )
         };
 
         let committed: BTreeMap<usize, ([f64; 2], f64)> =
             moves.iter().map(|&(i, at, ang)| (i, (at, ang))).collect();
-        let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> [f64; 4] {
+        let rect_at = |idx: usize, at: [f64; 2], angle: f64| -> ::geom::Rect {
             let mut probe = items[idx].clone();
             probe.angle = angle;
             item_rect(&probe, at)
         };
-        let settled = |idx: usize| -> [f64; 4] {
+        let settled = |idx: usize| -> ::geom::Rect {
             match committed.get(&idx) {
                 Some(&(at, ang)) => rect_at(idx, at, ang),
                 None => item_rect(&items[idx], items[idx].at),
@@ -2080,7 +2080,7 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
             };
             for shift in [0.0_f64, -2.54, 2.54, -5.08, 5.08] {
                 let mut trial: Vec<(usize, [f64; 2], f64)> = Vec::new();
-                let mut placed: Vec<[f64; 4]> = Vec::new();
+                let mut placed: Vec<::geom::Rect> = Vec::new();
                 let mut all_ok = true;
                 for (slot, &k) in ord.iter().enumerate() {
                     let ri = pullups[k].ri;
@@ -2379,7 +2379,7 @@ pub(crate) fn align_repeated_columns(
         // (A pre-existing overlap is likewise not ours to relitigate.) This is the discipline that lets a
         // final pass make room on a sheet with empty space — the property the bus-row reverts lacked.
         let now_at = |idx: usize| item_rect(&items[idx], items[idx].at);
-        let new_at = |idx: usize| -> [f64; 4] {
+        let new_at = |idx: usize| -> ::geom::Rect {
             let at = proposed.get(&idx).copied().unwrap_or(items[idx].at.into());
             item_rect(&items[idx], at)
         };

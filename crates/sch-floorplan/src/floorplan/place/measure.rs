@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use geom::Point2;
+use geom::{Point2, Rect};
 use kicad_cli::env::KicadEnv;
 
 use crate::write::SchematicWriter;
@@ -224,7 +224,7 @@ fn bodies_and_ic_rects(
     env: &KicadEnv,
     w: &SchematicWriter,
     items: &[Item],
-) -> (Vec<([f64; 2], [f64; 2])>, Vec<[f64; 4]>) {
+) -> (Vec<([f64; 2], [f64; 2])>, Vec<Rect>) {
     let bodies: Vec<([f64; 2], [f64; 2])> = items
         .iter()
         .filter(|i| i.geom.pins.len() == 2)
@@ -239,23 +239,19 @@ fn bodies_and_ic_rects(
             }
         })
         .collect();
-    let ic_rects: Vec<[f64; 4]> = items
+    let ic_rects: Vec<Rect> = items
         .iter()
         .filter(|it| it.geom.pins.len() >= 3)
         .filter_map(|it| {
-            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-            let mut any = false;
+            let mut pts = Vec::new();
             for pg in &it.geom.pins {
                 if let Ok(d) = w.pin_dirs(env, &it.refdes, &pg.number)
                     && let Some((p, _)) = d.first() {
-                        lo[0] = lo[0].min(p[0]);
-                        lo[1] = lo[1].min(p[1]);
-                        hi[0] = hi[0].max(p[0]);
-                        hi[1] = hi[1].max(p[1]);
-                        any = true;
+                        pts.push(Point2::from(*p));
                     }
             }
-            any.then(|| [lo[0] + 2.0, lo[1] + 2.0, hi[0] - 2.0, hi[1] - 2.0])
+            Rect::bounding(&pts)
+                .map(|r| Rect::new(r.min_x + 2.0, r.min_y + 2.0, r.max_x - 2.0, r.max_y - 2.0))
         })
         .collect();
     (bodies, ic_rects)
@@ -291,40 +287,8 @@ pub fn raw_metrics(
                 label_boxes.iter().any(|b| rects_overlap(r, *b))
             })
             .count();
-    let bodies: Vec<([f64; 2], [f64; 2])> = items
-        .iter()
-        .filter(|i| i.geom.pins.len() == 2)
-        .filter_map(|it| {
-            let (n0, n1) = (&it.geom.pins[0].number, &it.geom.pins[1].number);
-            match (w.pin_dirs(env, &it.refdes, n0), w.pin_dirs(env, &it.refdes, n1)) {
-                (Ok(d0), Ok(d1)) => match (d0.first(), d1.first()) {
-                    (Some((a, _)), Some((b, _))) => Some((*a, *b)),
-                    _ => None,
-                },
-                _ => None,
-            }
-        })
-        .collect();
+    let (bodies, ic_rects) = bodies_and_ic_rects(env, w, items);
     let congestion = count_congestion(&w.junction_positions()) + count_close_wires(&wires, &bodies);
-    let ic_rects: Vec<[f64; 4]> = items
-        .iter()
-        .filter(|it| it.geom.pins.len() >= 3)
-        .filter_map(|it| {
-            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-            let mut any = false;
-            for pg in &it.geom.pins {
-                if let Ok(d) = w.pin_dirs(env, &it.refdes, &pg.number)
-                    && let Some((p, _)) = d.first() {
-                        lo[0] = lo[0].min(p[0]);
-                        lo[1] = lo[1].min(p[1]);
-                        hi[0] = hi[0].max(p[0]);
-                        hi[1] = hi[1].max(p[1]);
-                        any = true;
-                    }
-            }
-            any.then(|| [lo[0] + 2.0, lo[1] + 2.0, hi[0] - 2.0, hi[1] - 2.0])
-        })
-        .collect();
     let body_cross = count_body_crossings(&bodies, &wires)
         + count_collinear_body_crossings(&bodies, &wires)
         + count_parallel_body_crossings(&bodies, &wires)
@@ -415,23 +379,23 @@ pub fn raw_metrics(
             }
         }
     }
-    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+    let mut body_corners = Vec::new();
     for it in items {
         let r = item_rect(it, it.at);
-        lo[0] = lo[0].min(r[0]);
-        lo[1] = lo[1].min(r[1]);
-        hi[0] = hi[0].max(r[2]);
-        hi[1] = hi[1].max(r[3]);
+        body_corners.push(Point2::new(r.min_x, r.min_y));
+        body_corners.push(Point2::new(r.max_x, r.max_y));
     }
-    let spread = if lo[0].is_finite() { (hi[0] - lo[0]) + (hi[1] - lo[1]) } else { 0.0 };
+    let spread = Rect::bounding(&body_corners).map_or(0.0, |r| r.half_perimeter());
     let grid_order = grid_order_viol(items, ir);
-    let mut by_refdes: BTreeMap<&str, [f64; 4]> = BTreeMap::new();
+    let mut by_refdes: BTreeMap<&str, Vec<Point2>> = BTreeMap::new();
     for it in items {
-        let e = by_refdes.entry(&it.refdes).or_insert([f64::MAX, f64::MAX, f64::MIN, f64::MIN]);
-        e[0] = e[0].min(it.at[0]); e[1] = e[1].min(it.at[1]);
-        e[2] = e[2].max(it.at[0]); e[3] = e[3].max(it.at[1]);
+        by_refdes.entry(&it.refdes).or_default().push(Point2::from(it.at));
     }
-    let sib_spread: f64 = by_refdes.values().map(|e| (e[2] - e[0]) + (e[3] - e[1])).sum();
+    let sib_spread: f64 = by_refdes
+        .values()
+        .filter_map(|pts| Rect::bounding(pts))
+        .map(|r| r.half_perimeter())
+        .sum();
     RawMetrics {
         fallbacks,
         junctions,

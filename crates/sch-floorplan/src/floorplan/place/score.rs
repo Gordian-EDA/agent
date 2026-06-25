@@ -29,13 +29,13 @@ use sch_place::ir::LayoutIr;
 /// readability lint flags as an overlap, so a layout the climb accepts is one
 /// the lint passes. (The router uses its own, tighter solid extent in
 /// `emit::route_scene`; this looser one is only for symbol-vs-symbol spacing.)
-pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> [f64; 4] {
+pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> ::geom::Rect {
     let at = at.into();
     let s = it.geom.approx_size();
     let quarter = ((it.angle / 90.0).round() as i64).rem_euclid(2) == 1;
     let (w, h) = if quarter { (s[1], s[0]) } else { (s[0], s[1]) };
     let (hw, hh) = ((w / 2.0).max(1.27), (h / 2.0).max(1.27));
-    let mut r = [at[0] - hw, at[1] - hh, at[0] + hw, at[1] + hh];
+    let mut r = ::geom::Rect::new(at[0] - hw, at[1] - hh, at[0] + hw, at[1] + hh);
     // Reserve the side-mounted refdes/value text footprint so a tight pack leaves
     // it collision-free — the readability lint flags text-over-body, so the climb
     // must keep a neighbour out of the conventional text spot. KiCAD draws a
@@ -43,18 +43,20 @@ pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> [f64; 4] {
     // refdes above / value below. (~1.1 mm/char, ~1.6 mm/line.)
     if it.geom.pins.len() == 2 {
         if quarter {
-            r[1] -= 2.0; // refdes line above
-            r[3] += 2.0; // value line below
+            r.min_y -= 2.0; // refdes line above
+            r.max_y += 2.0; // value line below
         } else {
             let chars = it.value.chars().count().max(it.refdes.chars().count()) as f64;
-            r[2] += chars * 1.1 + 1.27; // field stack to the right
+            r.max_x += chars * 1.1 + 1.27; // field stack to the right
         }
     }
     r
 }
 
-pub fn rects_overlap(a: [f64; 4], b: [f64; 4]) -> bool {
-    ::geom::Rect::from(a).overlaps(&::geom::Rect::from(b))
+pub fn rects_overlap(a: impl Into<::geom::Rect>, b: impl Into<::geom::Rect>) -> bool {
+    let a = a.into();
+    let b = b.into();
+    a.overlaps(&b)
 }
 
 /// Count pairs of items whose bodies overlap — the hard "never let two symbols
@@ -164,12 +166,12 @@ pub fn count_collinear_body_crossings(
 /// attaching at a pin tip and routing OUTWARD never counts; only a segment with a
 /// portion strictly inside the rect does.
 pub fn count_ic_body_crossings(
-    ic_rects: &[[f64; 4]],
+    ic_rects: &[::geom::Rect],
     wires: &[([f64; 2], [f64; 2], Option<String>)],
 ) -> usize {
     let mut n = 0;
     for r in ic_rects {
-        if r[2] - r[0] < EPS || r[3] - r[1] < EPS {
+        if r.width() < EPS || r.height() < EPS {
             continue;
         }
         for (w1, w2, _) in wires {
@@ -179,11 +181,15 @@ pub fn count_ic_body_crossings(
             let cross = if (w1[0] - w2[0]).abs() < EPS {
                 let x = w1[0];
                 let (ylo, yhi) = (w1[1].min(w2[1]), w1[1].max(w2[1]));
-                r[0] + EPS < x && x < r[2] - EPS && ylo.max(r[1]) < yhi.min(r[3]) - EPS
+                r.min_x + EPS < x
+                    && x < r.max_x - EPS
+                    && ylo.max(r.min_y) < yhi.min(r.max_y) - EPS
             } else {
                 let y = w1[1];
                 let (xlo, xhi) = (w1[0].min(w2[0]), w1[0].max(w2[0]));
-                r[1] + EPS < y && y < r[3] - EPS && xlo.max(r[0]) < xhi.min(r[2]) - EPS
+                r.min_y + EPS < y
+                    && y < r.max_y - EPS
+                    && xlo.max(r.min_x) < xhi.min(r.max_x) - EPS
             };
             if cross {
                 n += 1;
