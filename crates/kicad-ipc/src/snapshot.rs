@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use geom::Polyline;
+
 use crate::{
     Error, Kicad, footprint_reference,
     proto::kiapi::{
@@ -17,7 +19,7 @@ use crate::{
 };
 use pcb_model::{
     Connection, LayerRef, Obstacle, Point2, Polygon, Rect, RoutePoint, RouteProblem, RouteSolution,
-    Trace, Via as ModelVia, ViaSpan,
+    Segment, Trace, Via as ModelVia, ViaSpan,
     place::{LockedAt, Part, PartPad, PlaceProblem},
 };
 
@@ -628,7 +630,7 @@ fn edge_cuts_outline(shapes: &[BoardGraphicShape]) -> Option<Vec<Point2>> {
                 let (Some(start), Some(end)) = (&segment.start, &segment.end) else {
                     continue;
                 };
-                segments.push((point(start), point(end)));
+                segments.push(Segment::new(point(start), point(end)));
             }
             Some(Geometry::Rectangle(rectangle)) => {
                 let (Some(top_left), Some(bottom_right)) =
@@ -650,7 +652,7 @@ fn edge_cuts_outline(shapes: &[BoardGraphicShape]) -> Option<Vec<Point2>> {
                 let mid = point(mid);
                 let end = point(end);
                 outline_points.extend([start, mid, end]);
-                segments.push((start, end));
+                segments.push(Segment::new(start, end));
             }
             Some(Geometry::Circle(circle)) => {
                 let (Some(center), Some(radius_point)) = (&circle.center, &circle.radius_point)
@@ -689,38 +691,10 @@ fn edge_cuts_outline(shapes: &[BoardGraphicShape]) -> Option<Vec<Point2>> {
             None => {}
         }
     }
-    chain_segments(&segments)
+    Polyline::from_unordered_segments(segments)
+        .map(Polyline::into_points)
         .filter(|points| points.len() >= 3)
         .or_else(|| (outline_points.len() >= 3).then_some(outline_points))
-}
-
-fn chain_segments(segments: &[(Point2, Point2)]) -> Option<Vec<Point2>> {
-    let (first, rest) = segments.split_first()?;
-    let mut unused = rest.to_vec();
-    let mut chain = vec![first.0, first.1];
-    while !unused.is_empty() {
-        let tail = *chain.last()?;
-        let Some((idx, next, reverse)) =
-            unused.iter().enumerate().find_map(|(idx, (start, end))| {
-                if tail.near_eq(*start, geom::EPS) {
-                    Some((idx, *end, false))
-                } else if tail.near_eq(*end, geom::EPS) {
-                    Some((idx, *start, true))
-                } else {
-                    None
-                }
-            })
-        else {
-            break;
-        };
-        let _ = reverse;
-        unused.remove(idx);
-        if next.near_eq(chain[0], geom::EPS) {
-            break;
-        }
-        chain.push(next);
-    }
-    (chain.len() >= 3 && unused.is_empty()).then_some(chain)
 }
 
 fn infer_layer_names(

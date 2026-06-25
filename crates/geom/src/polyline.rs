@@ -3,6 +3,7 @@
 use crate::consts::EPS;
 use crate::point::Point2;
 use crate::rect::Rect;
+use crate::segment::Segment;
 
 /// An ordered polyline (mm, y-down): a routed copper/wire path or a net's
 /// terminal set. Owns simplification and bbox queries.
@@ -35,6 +36,36 @@ impl Polyline {
     #[inline]
     pub fn half_perimeter(&self) -> f64 {
         self.bbox().map_or(0.0, |r| r.half_perimeter())
+    }
+
+    /// Chain connected unordered segments into one path.
+    pub fn from_unordered_segments(segments: impl IntoIterator<Item = Segment>) -> Option<Self> {
+        let mut unused: Vec<Segment> = segments.into_iter().collect();
+        let first = unused.first().copied()?;
+        unused.remove(0);
+
+        let mut chain = vec![first.a, first.b];
+        while !unused.is_empty() {
+            let tail = *chain.last()?;
+            let Some((idx, next)) = unused.iter().enumerate().find_map(|(idx, segment)| {
+                if tail.near_eq(segment.a, EPS) {
+                    Some((idx, segment.b))
+                } else if tail.near_eq(segment.b, EPS) {
+                    Some((idx, segment.a))
+                } else {
+                    None
+                }
+            }) else {
+                break;
+            };
+            unused.remove(idx);
+            if next.near_eq(chain[0], EPS) {
+                break;
+            }
+            chain.push(next);
+        }
+
+        unused.is_empty().then_some(Self(chain))
     }
 
     /// Dedup consecutive coincident points and merge forward collinear runs.
@@ -108,5 +139,36 @@ mod tests {
         let pl = Polyline::new(vec![Point2::new(0.0, 0.0), Point2::new(3.0, 4.0)]);
         assert!((pl.half_perimeter() - 7.0).abs() < 1e-9);
         assert_eq!(Polyline::default().half_perimeter(), 0.0);
+    }
+
+    #[test]
+    fn chains_unordered_segments_without_repeating_closure() {
+        let chain = Polyline::from_unordered_segments([
+            Segment::new(Point2::new(1.0, 0.0), Point2::new(1.0, 1.0)),
+            Segment::new(Point2::new(0.0, 0.0), Point2::new(1.0, 0.0)),
+            Segment::new(Point2::new(0.0, 1.0), Point2::new(1.0, 1.0)),
+            Segment::new(Point2::new(0.0, 1.0), Point2::new(0.0, 0.0)),
+        ])
+        .unwrap();
+        assert_eq!(
+            chain.into_points(),
+            vec![
+                Point2::new(1.0, 0.0),
+                Point2::new(1.0, 1.0),
+                Point2::new(0.0, 1.0),
+                Point2::new(0.0, 0.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn disconnected_segments_do_not_chain() {
+        assert!(
+            Polyline::from_unordered_segments([
+                Segment::new(Point2::new(0.0, 0.0), Point2::new(1.0, 0.0)),
+                Segment::new(Point2::new(3.0, 0.0), Point2::new(4.0, 0.0)),
+            ])
+            .is_none()
+        );
     }
 }
