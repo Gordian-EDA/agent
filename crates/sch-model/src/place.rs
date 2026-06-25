@@ -118,7 +118,7 @@ pub trait PlacementEngine {
 mod tests {
     use super::*;
     use crate::item::Incidence;
-    use kicad_sexpr::geometry::SymbolGeometry;
+    use kicad_symbol::geometry::SymbolGeometry;
     use std::collections::BTreeMap;
 
     /// THE INVARIANT CHECK. A trivial fixed-grid placer that IGNORES connectivity and

@@ -11,6 +11,7 @@ llm-client = { path = "../llm-client" }
 circuit-lang = { path = "../circuit-lang" }
 kicad-cli = { path = "../kicad-cli" }
 kicad-sexpr = { path = "../kicad-sexpr" }
+kicad-symbol = { path = "../kicad-symbol" }
 pcb-synth = { path = "../pcb-synth" }
 specctra = { path = "../specctra" }
 kicad-ipc = { path = "../kicad-ipc" }

@@ -1,15 +1,12 @@
-//! KiCAD s-expr file & library access: read `.kicad_pcb`, footprint and symbol
-//! libraries, geometry helpers, and a fuzzy index over the libraries. The
-//! `kicad-cli` wrapper lives in `kicad-cli`; board synthesis in `pcb-synth`;
-//! the Specctra/Freerouting bridge in `specctra`.
+//! KiCAD s-expr **PCB-side** file access: read/write `.kicad_pcb` ([`pcb`]),
+//! footprint `.kicad_mod` libraries ([`footlib`]), and the undo/snapshot store
+//! ([`snapshot`]). Symbol concerns (`.kicad_sym` parsing, pin metadata, drawing
+//! geometry, search) live in the `kicad-symbol` crate; the `kicad-cli` wrapper in
+//! `kicad-cli`; board synthesis in `pcb-synth`; the Freerouting bridge in `specctra`.
 
 pub mod footlib;
-pub mod geometry;
 pub mod pcb;
-pub mod provider;
-pub mod search;
 pub mod snapshot;
-pub mod symlib;
 
 /// KiCAD coordinate number formatting (shortest round-tripping decimal, `-0.0`
 /// collapsed to `0`). The single owner; re-exported here so synthesis and other

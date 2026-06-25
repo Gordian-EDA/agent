@@ -4,7 +4,7 @@
 //! JSON, never through the schematic). See docs/specs/unified-kicad-pcb-state.md §1.
 
 use kicad_cli::env::KicadEnv;
-use kicad_sexpr::provider::RealSymbolProvider;
+use kicad_symbol::provider::RealSymbolProvider;
 use sch_floorplan::floorplan;
 use sch_io::read::lift;
 

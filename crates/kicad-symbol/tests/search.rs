@@ -1,5 +1,5 @@
 use kicad_cli::env::KicadEnv;
-use kicad_sexpr::search::SymbolIndex;
+use kicad_symbol::search::SymbolIndex;
 
 #[test]
 fn finds_stm32h743_by_substring() {

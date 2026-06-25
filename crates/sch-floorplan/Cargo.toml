@@ -12,7 +12,7 @@ sch-io = { path = "../sch-io" }
 circuit-lang = { path = "../circuit-lang" }
 circuit-graph = { path = "../circuit-graph" }
 kicad-cli = { path = "../kicad-cli" }
-kicad-sexpr = { path = "../kicad-sexpr" }
+kicad-symbol = { path = "../kicad-symbol" }
 indexmap.workspace = true
 serde_json.workspace = true
 rayon.workspace = true

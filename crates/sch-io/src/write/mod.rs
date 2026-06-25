@@ -43,7 +43,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use kicad_sexpr::geometry::PinGeom;
+use kicad_symbol::geometry::PinGeom;
 
 mod build;
 mod emit;

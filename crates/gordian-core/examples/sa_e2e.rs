@@ -7,7 +7,7 @@
 
 use circuit_lang::SymbolProvider;
 use kicad_cli::env::KicadEnv;
-use kicad_sexpr::provider::RealSymbolProvider;
+use kicad_symbol::provider::RealSymbolProvider;
 use sch_floorplan::floorplan::{self, LayoutIr};
 
 const FIXTURES: &[&str] = &[

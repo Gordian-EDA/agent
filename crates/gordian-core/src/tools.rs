@@ -52,8 +52,8 @@ use circuit_lang::{SymbolProvider, compile};
 use kicad_cli::cli::KicadCli;
 use kicad_cli::env::KicadEnv;
 use kicad_sexpr::footlib::FootprintIndex;
-use kicad_sexpr::provider::RealSymbolProvider;
-use kicad_sexpr::search::SymbolIndex;
+use kicad_symbol::provider::RealSymbolProvider;
+use kicad_symbol::search::SymbolIndex;
 use kicad_sexpr::snapshot::SnapshotStore;
 
 use sch_floorplan::floorplan::{infer_ir, LayoutIr};

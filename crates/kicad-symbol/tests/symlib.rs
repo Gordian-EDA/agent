@@ -2,7 +2,7 @@
 //! validated ground truth from the installed KiCAD libraries.
 
 use kicad_cli::env::KicadEnv;
-use kicad_sexpr::symlib::SymbolLib;
+use kicad_symbol::symlib::SymbolLib;
 use kicad_symbol::PinType;
 
 fn lib(name: &str) -> Option<SymbolLib> {

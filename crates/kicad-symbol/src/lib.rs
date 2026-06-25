@@ -1,9 +1,14 @@
-//! Pure symbol-metadata contract: the `PinMeta`/`SymbolMeta`/`SymbolProvider`
-//! types `circuit-lang` resolves against and `kicad-sexpr`'s `RealSymbolProvider`
-//! implements. Kept in its own crate so the low-level KiCAD reader can satisfy the
-//! contract without depending on the high-level circuit DSL.
+//! `kicad-symbol` — everything about KiCAD *symbols*: the pin/metadata vocabulary
+//! (`PinMeta`/`SymbolMeta`), the `.kicad_sym` library reader ([`symlib`]), the
+//! per-symbol drawing geometry + embeddable definition ([`geometry`]), the
+//! installation-backed [`provider`], and cross-library [`search`].
 //!
-//! `circuit-lang` re-exports these (`circuit_lang::{PinType, …}`) for back-compat.
+//! `circuit-lang` re-exports the metadata types (`circuit_lang::{PinType, …}`).
+
+pub mod geometry;
+pub mod provider;
+pub mod search;
+pub mod symlib;
 
 use std::collections::HashMap;
 

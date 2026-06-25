@@ -71,7 +71,7 @@ pub fn choose(obstacles: &[Obstacle], movables: &[Movable]) -> Vec<(usize, bool)
     out
 }
 
-use kicad_sexpr::geometry::PinGeom;
+use kicad_symbol::geometry::PinGeom;
 
 use sch_model::geom::{transform_offset, Dir};
 

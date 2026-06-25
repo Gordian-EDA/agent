@@ -8,7 +8,7 @@
 use circuit_lang::SymbolProvider;
 use kicad_cli::cli::KicadCli;
 use kicad_cli::env::KicadEnv;
-use kicad_sexpr::provider::RealSymbolProvider;
+use kicad_symbol::provider::RealSymbolProvider;
 use std::path::{Path, PathBuf};
 
 fn main() -> anyhow::Result<()> {

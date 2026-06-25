@@ -10,7 +10,7 @@ description = "Schematic I/O: the elbow wire router, label text solver, the Sche
 sch-model = { path = "../sch-model" }
 circuit-lang = { path = "../circuit-lang" }
 kicad-cli = { path = "../kicad-cli" }
-kicad-sexpr = { path = "../kicad-sexpr" }
+kicad-symbol = { path = "../kicad-symbol" }
 kiutils_kicad.workspace = true
 uuid.workspace = true
 tempfile.workspace = true

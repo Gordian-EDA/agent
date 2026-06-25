@@ -9,8 +9,8 @@ use std::io;
 use circuit_lang::model::{Component, Design, PinTarget};
 use circuit_lang::{find_pin, PinType, SymbolProvider};
 use kicad_cli::env::KicadEnv;
-use kicad_sexpr::geometry::SymbolGeometry;
-use kicad_sexpr::provider::RealSymbolProvider;
+use kicad_symbol::geometry::SymbolGeometry;
+use kicad_symbol::provider::RealSymbolProvider;
 
 use crate::write::SchematicWriter;
 use sch_model::geom::Dir;

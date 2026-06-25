@@ -10,7 +10,7 @@
 //! placement the oracle can't see.
 
 use kicad_cli::env::KicadEnv;
-use kicad_sexpr::provider::RealSymbolProvider;
+use kicad_symbol::provider::RealSymbolProvider;
 use sch_floorplan::floorplan::{self, LayoutIr};
 use std::path::{Path, PathBuf};
 

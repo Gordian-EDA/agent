@@ -9,7 +9,7 @@
 use circuit_lang::SymbolProvider;
 use kicad_cli::cli::KicadCli;
 use kicad_cli::env::KicadEnv;
-use kicad_sexpr::provider::RealSymbolProvider;
+use kicad_symbol::provider::RealSymbolProvider;
 
 const TARGETS: &[&str] =
     &["divider-filter", "mcp1703-power-entry", "555-blinker", "uart-level-translator"];

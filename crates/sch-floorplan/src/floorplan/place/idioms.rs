@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use kicad_sexpr::geometry::SymbolGeometry;
+use kicad_symbol::geometry::SymbolGeometry;
 
 
 use super::*;

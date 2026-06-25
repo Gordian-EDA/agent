@@ -346,6 +346,7 @@ version = "0.1.0"
 dependencies = [
  "geom",
  "indexmap 2.14.0",
+ "kicad-cli",
  "kicad-symbol",
  "saphyr",
  "saphyr-parser",
@@ -1041,6 +1042,7 @@ dependencies = [
  "kicad-cli",
  "kicad-ipc",
  "kicad-sexpr",
+ "kicad-symbol",
  "llm-client",
  "negotiated-mesh",
  "pcb-model",
@@ -1643,7 +1645,13 @@ dependencies = [
 name = "kicad-symbol"
 version = "0.1.0"
 dependencies = [
+ "elsa",
+ "fuzzy-matcher",
+ "kicad-cli",
+ "kiutils_kicad",
+ "kiutils_sexpr",
  "strsim",
+ "tempfile",
 ]
 
 [[package]]
@@ -2884,7 +2892,7 @@ dependencies = [
  "greedy-place",
  "indexmap 2.14.0",
  "kicad-cli",
- "kicad-sexpr",
+ "kicad-symbol",
  "rayon",
  "sch-io",
  "sch-model",
@@ -2898,7 +2906,7 @@ version = "0.1.0"
 dependencies = [
  "circuit-lang",
  "kicad-cli",
- "kicad-sexpr",
+ "kicad-symbol",
  "kiutils_kicad",
  "sch-model",
  "tempfile",
@@ -2910,7 +2918,7 @@ name = "sch-model"
 version = "0.1.0"
 dependencies = [
  "geom",
- "kicad-sexpr",
+ "kicad-symbol",
  "serde",
  "serde_json",
 ]

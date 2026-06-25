@@ -3,7 +3,7 @@
 //! them on `LayoutIr.idioms`, pinning their members in `LayoutIr.frozen`.
 
 use kicad_cli::env::KicadEnv;
-use kicad_sexpr::provider::RealSymbolProvider;
+use kicad_symbol::provider::RealSymbolProvider;
 use sch_floorplan::floorplan;
 use std::path::Path;
 

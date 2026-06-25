@@ -49,7 +49,7 @@ mod grid_tests {
     use super::*;
     use circuit_lang::model::{Block, Component, Design, LayoutGrid};
     use indexmap::IndexMap;
-    use kicad_sexpr::geometry::SymbolGeometry;
+    use kicad_symbol::geometry::SymbolGeometry;
     use sch_model::geom::Dir;
     use sch_model::ir::Side;
     use sch_model::item::Item;
@@ -143,7 +143,7 @@ mod grid_tests {
             .map(|(k, n)| ((k + 1).to_string(), n.to_string(), Some(n.to_string())))
             .collect();
         let geom_pins = (0..nets.len())
-            .map(|k| kicad_sexpr::geometry::PinGeom {
+            .map(|k| kicad_symbol::geometry::PinGeom {
                 number: (k + 1).to_string(),
                 name: nets[k].to_string(),
                 at: [0.0, 0.0],

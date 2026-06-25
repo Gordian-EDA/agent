@@ -1,7 +1,7 @@
 //! Pin geometry and `(lib_symbols)` definition extraction for a single symbol.
 //!
 //! The schematic writer (`sch-io::write`) needs two things per used symbol that the
-//! geometry-free `kicad_symbol::PinMeta` deliberately omits:
+//! geometry-free `crate::PinMeta` deliberately omits:
 //!
 //! 1. **Pin geometry** — each pin's local position (`at`), `angle`, and
 //!    `length`. The connection endpoint is the pin's local `at` itself (the

@@ -5,7 +5,7 @@
 
 use kicad_cli::cli::KicadCli;
 use kicad_cli::env::KicadEnv;
-use kicad_sexpr::geometry::SymbolGeometry;
+use kicad_symbol::geometry::SymbolGeometry;
 
 #[test]
 fn device_r_pin_geometry() {

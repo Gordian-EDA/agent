@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use kicad_sexpr::geometry::SymbolGeometry;
+use kicad_symbol::geometry::SymbolGeometry;
 
 /// One placed component plus the data the engine needs about it.
 #[derive(Clone)]
