@@ -71,8 +71,9 @@ pub fn decongest(items: &mut [Item]) {
             }
         }
         let Some((i, j, a, b)) = hit else { break };
-        let pen_x = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
-        let pen_y = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+        let Some((pen_x, pen_y)) = a.overlap_size(&b) else {
+            continue;
+        };
         let axis = if pen_x <= pen_y { 0 } else { 1 };
         let pen = if axis == 0 { pen_x } else { pen_y };
         let push = ((pen / 1.27).ceil() * 1.27).max(1.27);
@@ -110,7 +111,7 @@ pub(crate) fn collapse_empty_bands(items: &mut [Item]) -> bool {
             .iter()
             .map(|it| {
                 let r = item_rect(it, it.at);
-                (r[1], r[3])
+                (r.min_y, r.max_y)
             })
             .collect();
         iv.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -175,8 +176,9 @@ pub(crate) fn decongest_off_labels(
             }
         }
         if let Some((i, j, a, b)) = part_hit {
-            let pen_x = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
-            let pen_y = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+            let Some((pen_x, pen_y)) = a.overlap_size(&b) else {
+                continue;
+            };
             let axis = if pen_x <= pen_y { 0 } else { 1 };
             let pen = if axis == 0 { pen_x } else { pen_y };
             let push = ((pen / 1.27).ceil() * 1.27).max(1.27);
@@ -213,13 +215,14 @@ pub(crate) fn decongest_off_labels(
             }
         }
         let Some((i, a, b)) = lab_hit else { break };
-        let pen_x = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
-        let pen_y = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+        let Some((pen_x, pen_y)) = a.overlap_size(&b) else {
+            continue;
+        };
         let axis = if pen_x <= pen_y { 0 } else { 1 };
         let pen = if axis == 0 { pen_x } else { pen_y };
         let push = ((pen / 1.27).ceil() * 1.27).max(1.27);
-        let ci = (a[axis] + a[axis + 2]) / 2.0;
-        let cb = (b[axis] + b[axis + 2]) / 2.0;
+        let ci = a.center()[axis];
+        let cb = b.center()[axis];
         let dir = if ci >= cb { 1.0 } else { -1.0 };
         items[i].at[axis] = crate::grid::snap(items[i].at[axis] + dir * push);
     }

@@ -161,6 +161,11 @@ impl Rect {
         })
     }
 
+    /// Positive overlap width and height, or `None` when no area overlaps.
+    pub fn overlap_size(&self, other: &Rect) -> Option<(f64, f64)> {
+        self.intersection(other).map(|r| (r.width(), r.height()))
+    }
+
     /// Positive-length boundary shared with an abutting rect.
     pub fn shared_boundary(&self, other: &Rect) -> Option<SharedBoundary> {
         let touch_v = |left: &Rect, right: &Rect| -> Option<SharedBoundary> {
@@ -323,6 +328,14 @@ mod tests {
         assert!(a.shared_boundary(&corner).is_none());
         assert!(a.shared_boundary(&gap).is_none());
         assert!(a.shared_boundary(&overlap).is_none());
+    }
+
+    #[test]
+    fn overlap_size_reports_penetration_dims() {
+        let a = Rect::new(0.0, 0.0, 5.0, 4.0);
+        let b = Rect::new(3.0, 1.0, 7.0, 3.0);
+        assert_eq!(a.overlap_size(&b), Some((2.0, 2.0)));
+        assert_eq!(a.overlap_size(&Rect::new(5.0, 0.0, 6.0, 4.0)), None);
     }
 
     #[test]
