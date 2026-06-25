@@ -7,7 +7,7 @@
 //! Usage: cargo run --release -p agent --example design_review -- <out.png> "<prompt>"
 
 use gordian_core::{Agent, AgentEvent, AutoApprove};
-use kicad_cli::cli::KicadCli;
+use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
 use tokio::sync::mpsc;
 

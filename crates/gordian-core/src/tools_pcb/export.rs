@@ -3,7 +3,7 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use kicad_cli::cli::{KicadCli, Violation};
+use kicad_cli::{KicadCli, Violation};
 
 use crate::tools::PcbToolCtx;
 

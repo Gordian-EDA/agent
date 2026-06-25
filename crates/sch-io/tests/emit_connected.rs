@@ -4,7 +4,7 @@
 //! label endpoints actually land on the pins. SKIP-graceful when no KiCAD is
 //! detected; runs against KiCAD 10 here.
 
-use kicad_cli::cli::KicadCli;
+use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
 use sch_io::write::SchematicWriter;
 

@@ -5,7 +5,7 @@
 //!
 //! Usage: cargo run --release -p agent --example bench_corpus -- [--out DIR] FILE.circuit.yaml ...
 
-use kicad_cli::cli::KicadCli;
+use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;
 use std::path::{Path, PathBuf};

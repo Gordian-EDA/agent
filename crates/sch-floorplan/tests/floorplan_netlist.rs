@@ -24,7 +24,7 @@ use std::sync::Mutex;
 /// serialize, but each is the same ~8 min either way — correctness over parallelism.)
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-use kicad_cli::cli::{KicadCli, Netlist};
+use kicad_cli::{KicadCli, Netlist};
 use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan::{self, LayoutIr};

@@ -1,8 +1,7 @@
 //! Command runner for the `kicad-cli` binary.
 //!
 //! This module owns subprocess invocation and KiCAD CLI exit semantics. The
-//! normalized report and netlist contracts live in sibling modules and are
-//! re-exported here for compatibility with existing `kicad_cli::cli::*` imports.
+//! normalized report and netlist contracts live in sibling modules.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -10,11 +9,9 @@ use std::process::Command;
 
 use kicad_env::KicadEnv;
 
-pub use crate::netlist::{Net, NetComp, Netlist};
-pub use crate::reports::{DrcReport, ErcReport, Violation, ViolationItem};
-
 use crate::export::{check_status, files_with_ext, with_trailing_sep};
-use crate::netlist::parse_netlist_xml;
+use crate::netlist::{Netlist, parse_netlist_xml};
+use crate::reports::{DrcReport, ErcReport};
 
 /// A handle to `kicad-cli` for running schematic/PCB checks and exports.
 pub struct KicadCli {

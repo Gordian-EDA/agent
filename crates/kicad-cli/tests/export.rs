@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use kicad_cli::cli::KicadCli;
+use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
 
 /// The vendored two-resistor board, embedded so the test is self-contained.

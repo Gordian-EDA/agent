@@ -18,7 +18,7 @@ use gordian_core::{Agent, AgentEvent, AutoApprove};
 use gordian_core::prompts::system_prompt_with_reference;
 use gordian_core::tools::PcbToolCtx;
 use anyhow::{Context, Result, bail};
-use kicad_cli::cli::KicadCli;
+use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
 
 /// Default project directory when `--project` is omitted.

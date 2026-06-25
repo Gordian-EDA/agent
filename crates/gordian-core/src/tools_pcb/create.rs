@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::io;
 
 use anyhow::Result;
-use kicad_cli::cli::KicadCli;
+use kicad_cli::KicadCli;
 use serde_json::{Value, json};
 
 use pcb_model::{LayerRef, Point2, Polygon};

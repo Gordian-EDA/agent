@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use kicad_cli::cli::KicadCli;
+use kicad_cli::KicadCli;
 
 use crate::tools::PcbToolCtx;
 

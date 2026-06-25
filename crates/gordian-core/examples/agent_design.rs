@@ -10,7 +10,7 @@
 //! model's final reply, the tool-call count, and the engine's layout-warning list.
 
 use gordian_core::{Agent, AutoApprove, Provider as _};
-use kicad_cli::cli::KicadCli;
+use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
 use tokio::sync::mpsc;
 

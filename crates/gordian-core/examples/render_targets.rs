@@ -6,7 +6,7 @@
 //! Usage: cargo run --release -p agent --example render_targets [name ...]
 //! With no args, renders all four targets.
 
-use kicad_cli::cli::KicadCli;
+use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;
 

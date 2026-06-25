@@ -18,7 +18,7 @@
 use gordian_core::{Agent, AutoApprove};
 use gordian_core::prompts::system_prompt;
 use gordian_core::tools::PcbToolCtx;
-use kicad_cli::cli::KicadCli;
+use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
 
 /// The EXACT founding prompt the whole project is organized around.

@@ -12,7 +12,7 @@
 //!
 //! Usage: cargo run --release -p agent --example render_multisheet -- <draft.yaml> <out_dir>
 
-use kicad_cli::cli::KicadCli;
+use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;
 
