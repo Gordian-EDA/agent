@@ -23,7 +23,6 @@ pcb-place = { path = "../pcb-place" }
 sch-floorplan = { path = "../sch-floorplan" }
 sch-io = { path = "../sch-io" }
 anneal-place = { path = "../anneal-place" }
-greedy-place = { path = "../greedy-place" }
 
 anyhow.workspace = true
 async-trait.workspace = true
@@ -41,6 +40,7 @@ base64 = { workspace = true }
 fuzzy-matcher.workspace = true
 
 [dev-dependencies]
+greedy-place = { path = "../greedy-place" }
 tokio.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true

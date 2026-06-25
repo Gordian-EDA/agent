@@ -4,16 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "KiCAD s-expr file & library access: .kicad_pcb + footprint/symbol libraries, geometry, fuzzy index."
+description = "KiCAD s-expr PCB-side file & library access: .kicad_pcb + footprint .kicad_mod libraries, with a fuzzy footprint index."
 
 [dependencies]
-kicad-symbol = { path = "../kicad-symbol" }
 geom = { path = "../geom" }
 pcb-model = { path = "../pcb-model" }
 kicad-cli = { path = "../kicad-cli" }
 strsim.workspace = true
 fuzzy-matcher.workspace = true
-elsa.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 kiutils_kicad.workspace = true
