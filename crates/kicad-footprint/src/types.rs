@@ -1,4 +1,4 @@
-use geom::Rect;
+use geom::{Point2, Rect};
 use serde::{Deserialize, Serialize};
 
 /// Through-hole vs. surface-mount, derived from a pad's KiCAD `pad_type`.
@@ -31,12 +31,12 @@ pub enum CourtyardSource {
 pub struct FootprintPad {
     /// Pad number/name as a string (`"1"`, `"A1"`, `"GND"`); may repeat.
     pub number: String,
-    /// Centre offset `[x, y]` in the footprint frame, millimetres.
-    pub at: [f64; 2],
+    /// Centre offset in the footprint frame, millimetres.
+    pub at: Point2,
     /// Local pad rotation in degrees, if the file specifies one.
     pub rotation: f64,
-    /// Pad copper size `[w, h]`, millimetres.
-    pub size: [f64; 2],
+    /// Pad copper size as width/height, millimetres.
+    pub size: Point2,
     /// KiCAD pad shape token (`rect`, `roundrect`, `circle`, `oval`, ...).
     pub shape: String,
     /// Copper/technical layers the pad occupies (`F.Cu`, `*.Cu`, ...).

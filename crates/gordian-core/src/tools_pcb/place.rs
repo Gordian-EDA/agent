@@ -38,12 +38,9 @@ fn part_from_footprint_layers(
 fn part_pad(pad: &FootprintPad, net_map: &BTreeMap<String, String>, layer_count: u32) -> PartPad {
     PartPad {
         number: pad.number.clone(),
-        offset: pcb_model::Point2 {
-            x: pad.at[0],
-            y: pad.at[1],
-        },
-        width: pad.size[0],
-        height: pad.size[1],
+        offset: pad.at,
+        width: pad.size.x,
+        height: pad.size.y,
         layers: pad_layers(pad, layer_count),
         net: net_map.get(&pad.number).cloned(),
     }
@@ -108,10 +105,14 @@ fn pad_bbox(pads: &[FootprintPad]) -> Option<Rect> {
 }
 
 fn pad_aabb(pad: &FootprintPad) -> Rect {
-    let [cx, cy] = pad.at;
     let half =
-        geom::Point2::new(pad.size[0] / 2.0, pad.size[1] / 2.0).rotated_half_extents(pad.rotation);
-    Rect::new(cx - half.x, cy - half.y, cx + half.x, cy + half.y)
+        geom::Point2::new(pad.size.x / 2.0, pad.size.y / 2.0).rotated_half_extents(pad.rotation);
+    Rect::new(
+        pad.at.x - half.x,
+        pad.at.y - half.y,
+        pad.at.x + half.x,
+        pad.at.y + half.y,
+    )
 }
 
 // ── get_board ────────────────────────────────────────────────────────────────

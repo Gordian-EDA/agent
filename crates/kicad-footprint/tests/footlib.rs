@@ -77,17 +77,17 @@ fn r0603_two_smd_pads_and_rect_courtyard() {
     assert!(
         fp.pads
             .iter()
-            .any(|p| close(p.at[0], -0.825) && close(p.at[1], 0.0))
+            .any(|p| close(p.at.x, -0.825) && close(p.at.y, 0.0))
     );
     assert!(
         fp.pads
             .iter()
-            .any(|p| close(p.at[0], 0.825) && close(p.at[1], 0.0))
+            .any(|p| close(p.at.x, 0.825) && close(p.at.y, 0.0))
     );
     assert!(
         fp.pads
             .iter()
-            .all(|p| close(p.size[0], 0.8) && close(p.size[1], 0.95))
+            .all(|p| close(p.size.x, 0.8) && close(p.size.y, 0.95))
     );
     assert!(fp.pads.iter().all(|p| p.shape == "roundrect"));
 
@@ -147,8 +147,8 @@ fn pinheader_1x02_two_thru_hole_pads_with_drill() {
     );
     assert!(fp.pads.iter().all(|p| p.layers.iter().any(|l| l == "*.Cu")));
     // Pads on a 2.54 mm pitch along +y.
-    assert!(fp.pads.iter().any(|p| close(p.at[1], 0.0)));
-    assert!(fp.pads.iter().any(|p| close(p.at[1], 2.54)));
+    assert!(fp.pads.iter().any(|p| close(p.at.y, 0.0)));
+    assert!(fp.pads.iter().any(|p| close(p.at.y, 2.54)));
 }
 
 #[test]

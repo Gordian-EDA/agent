@@ -4,8 +4,6 @@
 
 use serde_json::{Value, json};
 
-use geom::Point2;
-
 use crate::tools::{PcbToolCtx, require_str};
 
 /// Default number of footprint-search hits returned when `limit` is omitted.
@@ -50,7 +48,7 @@ pub fn get_footprint_info(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Valu
             let mut min_pitch = f64::INFINITY;
             for (i, a) in fp.pads.iter().enumerate() {
                 for b in &fp.pads[i + 1..] {
-                    let d = Point2::new(a.at[0], a.at[1]).dist(Point2::new(b.at[0], b.at[1]));
+                    let d = a.at.dist(b.at);
                     if d > geom::EPS && d < min_pitch {
                         min_pitch = d;
                     }
@@ -58,9 +56,9 @@ pub fn get_footprint_info(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Valu
             }
             let (mut wmin, mut wmax) = (f64::INFINITY, 0.0_f64);
             for p in &fp.pads {
-                let s = p.size[0].min(p.size[1]);
+                let s = p.size.x.min(p.size.y);
                 wmin = wmin.min(s);
-                wmax = wmax.max(p.size[0].max(p.size[1]));
+                wmax = wmax.max(p.size.x.max(p.size.y));
             }
             let techs: std::collections::BTreeSet<&str> = fp
                 .pads

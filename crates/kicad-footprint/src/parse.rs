@@ -24,10 +24,11 @@ impl Footprint {
         if pads.iter().any(|p| p.shape == "custom")
             && let Ok(raw) = std::fs::read_to_string(path)
         {
-            let bboxes = custom_pad_bboxes(&raw);
+            let bboxes = custom_pad_half_extents(&raw);
             for (bi, pad) in pads.iter_mut().filter(|p| p.shape == "custom").enumerate() {
-                if let Some(&(hx, hy)) = bboxes.get(bi) {
-                    pad.size = [pad.size[0].max(2.0 * hx), pad.size[1].max(2.0 * hy)];
+                if let Some(half) = bboxes.get(bi) {
+                    pad.size =
+                        Point2::new(pad.size.x.max(2.0 * half.x), pad.size.y.max(2.0 * half.y));
                 }
             }
         }
@@ -45,8 +46,8 @@ impl Footprint {
     }
 }
 
-/// Per custom pad (in file order), the primitive half-extents `(hx, hy)`.
-pub(crate) fn custom_pad_bboxes(raw: &str) -> Vec<(f64, f64)> {
+/// Per custom pad, the primitive half-extents in file order.
+pub(crate) fn custom_pad_half_extents(raw: &str) -> Vec<Point2> {
     let mut out = Vec::new();
     let mut search = 0;
     while let Some(rel) = raw[search..].find("(pad ") {
@@ -72,12 +73,12 @@ pub(crate) fn custom_pad_bboxes(raw: &str) -> Vec<(f64, f64)> {
             p = s;
         }
         if let Some(bounds) = Rect::bounding(&points) {
-            out.push((
+            out.push(Point2::new(
                 bounds.min_x.abs().max(bounds.max_x.abs()),
                 bounds.min_y.abs().max(bounds.max_y.abs()),
             ));
         } else {
-            out.push((0.0, 0.0));
+            out.push(Point2::new(0.0, 0.0));
         }
     }
     out
@@ -111,9 +112,9 @@ fn pad_detail(pad: &kiutils_kicad::FpPad) -> FootprintPad {
     };
     FootprintPad {
         number: pad.number.clone().unwrap_or_default(),
-        at: pad.at.unwrap_or([0.0, 0.0]),
+        at: pad.at.map(Point2::from).unwrap_or(Point2::new(0.0, 0.0)),
         rotation: pad.rotation.unwrap_or(0.0),
-        size: pad.size.unwrap_or([0.0, 0.0]),
+        size: pad.size.map(Point2::from).unwrap_or(Point2::new(0.0, 0.0)),
         shape: pad.shape.clone().unwrap_or_default(),
         layers: pad.layers.clone(),
         technology,
@@ -122,12 +123,10 @@ fn pad_detail(pad: &kiutils_kicad::FpPad) -> FootprintPad {
 }
 
 fn pad_corners(pad: &FootprintPad) -> [Point2; 2] {
-    let [cx, cy] = pad.at;
-    let [w, h] = pad.size;
-    let half = Point2::new(w / 2.0, h / 2.0).rotated_half_extents(pad.rotation);
+    let half = Point2::new(pad.size.x / 2.0, pad.size.y / 2.0).rotated_half_extents(pad.rotation);
     [
-        Point2::new(cx - half.x, cy - half.y),
-        Point2::new(cx + half.x, cy + half.y),
+        Point2::new(pad.at.x - half.x, pad.at.y - half.y),
+        Point2::new(pad.at.x + half.x, pad.at.y + half.y),
     ]
 }
 
