@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end PCB quality sweep: route + export every harness circuit, render each
-# with KiCAD's plotter, and score it with the VLM critic. Prints a summary table.
+# End-to-end PCB quality sweep over already-generated boards, rendering each with
+# KiCAD's plotter and scoring it with the VLM critic. Prints a summary table.
 #
 #   set -a; . ./.env; set +a
 #   . .venv-pcb/bin/activate
@@ -12,9 +12,6 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT=/tmp/pcb-harness
 SCALE=16
-
-# (Re)generate boards from the circuit specs.
-cargo run --release -q -p gordian-core --example board_harness >/dev/null 2>&1
 
 declare -A DESC=(
   [rc-divider]="resistive voltage divider with a 2-pin power/ground header"

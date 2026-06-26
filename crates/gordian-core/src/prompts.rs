@@ -53,7 +53,7 @@ Schematic flow:
 
 # PCB flow
 GEOMETRY IS THE ENGINEERING: placement, layers, trace width, and route shape matter.
-Footprints are schematic/YAML state. `assign_footprints({assignments:[...]})` edits the draft in batch; use it even for one footprint. After any footprint assignment, call `apply_design()` before `regenerate_board`. If `regenerate_board` reports `missing_footprints` or `unapplied_draft_footprints`, do not retry it unchanged: assign/apply the footprints first, then regenerate. `regenerate_board` is destructive seed/regeneration, NOT KiCAD F8 sync: it may replace an existing PCB's placement/routing. Use it for a fresh board or explicit regeneration, not incremental schematic-to-PCB merge.
+Footprints are schematic/YAML state. `assign_footprints({assignments:[...]})` edits the draft in batch; use it even for one footprint. After any footprint assignment, call `apply_design()` before `regenerate_board`. If `regenerate_board` reports `missing_footprints` or `unapplied_draft_footprints`, do not retry it unchanged: assign/apply the footprints first, then regenerate. `regenerate_board` is destructive seed/regeneration, NOT KiCAD F8 sync: it may replace an existing PCB's placement/routing. Use it for a fresh board or explicit regeneration, not incremental schematic-to-PCB merge. If the user asks to resize, shrink, center, or change the shape of an existing PCB, use `update_board_outline` on the current PCB instead of `regenerate_board`.
 
 PCB order:
 1. `regenerate_board({bounds?, rules?})` from an ERC-clean committed schematic only when starting/regenerating the board. For USB-C/QFN boards, use fine-pitch-capable rules such as `clearance: 0.15` and `minTraceWidth: 0.15`. Put wide copper for power in `rules.net_widths` as plain numbers before routing when possible, e.g. `{GND: 0.6, V3V3: 0.5}`. For dense RP2040/USB-C boards, prefer `layers: 6` and generous bounds on the first PCB attempt.
@@ -61,7 +61,7 @@ PCB order:
 3. `route_board()`.
 4. `check_board()`.
 5. `export_fab()` only after DRC passes.
-6. Use `open_board`, `board_state`, `move_part`, `route_track`, `set_net_width`, and `render_board` only for deliberate live refinements. If you change widths after routing, do not rerun `route_board` over existing copper.
+6. Use `open_board`, `board_state`, `update_board_outline`, `move_part`, `route_track`, `set_net_width`, and `render_board` only for deliberate live refinements. For "board too large" tasks, call `update_board_outline({fit_to_geometry:true, margin: ...})` to shrink/center Edge.Cuts around the existing design. If you change widths after routing, do not rerun `route_board` over existing copper.
 
 Hard rules:
 - NEVER guess a footprint lib_id; use `search_footprints`.
@@ -116,6 +116,7 @@ mod tests {
             "move_part",
             "route_track",
             "set_net_width",
+            "update_board_outline",
             "render_board",
         ] {
             assert!(p.contains(tool), "prompt missing the `{tool}` tool");

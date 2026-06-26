@@ -229,14 +229,14 @@ fn defs_lists_all_tools() {
         "move_part",
         "route_track",
         "set_net_width",
+        "update_board_outline",
     ];
     for expected in expected_tools {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
-    // The Board-DSL authoring surface (design_board/import_board) and the old
-    // board mutators are GONE — the board is seeded from the schematic
-    // (regenerate_board) and edited INTERACTIVELY over KiCAD IPC (open_board +
-    // move_part/route_track/set_net_width).
+    // The Board-DSL authoring surface (design_board/import_board) and legacy
+    // mutators are GONE — the board is seeded from the schematic
+    // (regenerate_board) and edited through focused current-PCB tools.
     for gone in [
         "set_placement_hints",
         "set_constraints",
@@ -1073,75 +1073,6 @@ fn get_footprint_info_suggests_for_unknown_lib_id() {
 }
 
 #[test]
-fn build_seed_board_resolves_vendored_footprints_and_persists() {
-    let (ctx, _guard) = fixture_ctx();
-
-    // get_board before any board -> recoverable error.
-    let out = run_tool("get_board", serde_json::json!({}), &ctx).unwrap();
-    assert!(
-        out["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("no board") || e.contains("board not found")),
-        "got: {out}"
-    );
-
-    let board = serde_json::json!({
-        "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
-        "parts": [
-            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
-              "pad_nets": { "1": "VIN", "2": "MID" } },
-            { "reference": "U1", "footprint": "Fixtures:SOT-23",
-              "pad_nets": { "1": "MID", "2": "GND", "3": "VOUT" } },
-            { "reference": "J1", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
-              "pad_nets": { "1": "VIN", "2": "GND" } }
-        ]
-    });
-    let out = gordian_core::tools_pcb::build_seed_board(board.clone(), &ctx).unwrap();
-    assert_eq!(out["ok"], serde_json::json!(true), "got: {out}");
-    assert_eq!(out["part_count"], serde_json::json!(3), "got: {out}");
-    // VIN(2), MID(2), GND(2), VOUT(1) -> 4 nets; VOUT is a single-pin warning.
-    assert_eq!(out["net_count"], serde_json::json!(4), "got: {out}");
-    let warnings = out["warnings"].as_array().expect("warnings");
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.as_str().unwrap().contains("VOUT")),
-        "VOUT single-pin net should warn: {out}"
-    );
-
-    assert!(
-        ctx.pcb_path().exists(),
-        "builder should seed the project board"
-    );
-}
-
-#[test]
-fn build_seed_board_unknown_footprint_errors_with_suggestions() {
-    let (ctx, _guard) = fixture_ctx();
-    let out = gordian_core::tools_pcb::build_seed_board(
-        serde_json::json!({
-            "bounds": { "min_x": 0.0, "max_x": 10.0, "min_y": 0.0, "max_y": 10.0 },
-            "parts": [
-                { "reference": "R1", "footprint": "Fixtures:R_0603_WRONG",
-                  "pad_nets": { "1": "A", "2": "B" } }
-            ]
-        }),
-        &ctx,
-    )
-    .unwrap();
-    assert!(
-        out["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("R1") && e.contains("unknown footprint")),
-        "got: {out}"
-    );
-    assert!(
-        out.get("suggestions").is_some(),
-        "expected suggestions: {out}"
-    );
-}
-
-#[test]
 fn board_seed_round_trips_as_adapter_json() {
     use gordian_core::tools_pcb::{BoardSeed, BoardSeedPart, BoardSeedRules};
     use pcb_model::Rect;
@@ -1183,28 +1114,60 @@ fn board_seed_round_trips_as_adapter_json() {
 // KiCAD install needed). The standard board is a small 3-part divider-ish board
 // whose nets each have ≥2 pins, so it places legal and routes with zero failures.
 
-/// Create the standard small board (R1 + U1 + J1, three 2-pin nets) on a fresh
+/// Create the standard small board on a fresh
 /// fixture ctx. Returns the ctx and its tempdir guard.
 fn placed_board_ctx() -> (AgentRuntime, tempfile::TempDir) {
     let (ctx, guard) = fixture_ctx();
-    let board = serde_json::json!({
-        "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
-        "parts": [
-            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
-              "pad_nets": { "1": "VIN", "2": "MID" } },
-            { "reference": "R2", "footprint": "Fixtures:R_0603_1608Metric",
-              "pad_nets": { "1": "MID", "2": "GND" } },
-            { "reference": "J1", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
-              "pad_nets": { "1": "VIN", "2": "GND" } }
-        ]
-    });
-    let out = gordian_core::tools_pcb::build_seed_board(board, &ctx).unwrap();
-    assert_eq!(
-        out["ok"],
-        serde_json::json!(true),
-        "build_seed_board: {out}"
-    );
+    write_fixture_board(&ctx, 30.0, 20.0);
     (ctx, guard)
+}
+
+fn write_fixture_board(ctx: &AgentRuntime, w: f64, h: f64) {
+    let board = TWO_RES_PCB
+        .replace("Resistor_SMD:R_0805_2012Metric", "Fixtures:R_0603_1608Metric")
+        .replace("(end 30 20)", &format!("(end {w} {h})"));
+    std::fs::write(ctx.pcb_path(), board).unwrap();
+}
+
+#[test]
+fn update_board_outline_replaces_existing_rect_without_regeneration() {
+    let (ctx, _guard) = fixture_ctx();
+    write_fixture_board(&ctx, 30.0, 20.0);
+
+    let out = run_tool(
+        "update_board_outline",
+        serde_json::json!({
+            "bounds": { "min_x": 2.0, "max_x": 18.0, "min_y": 3.0, "max_y": 15.0 }
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "got: {out}");
+    let board = std::fs::read_to_string(ctx.pcb_path()).unwrap();
+    assert!(board.contains("(start 2 3)"), "{board}");
+    assert!(board.contains("(end 18 15)"), "{board}");
+    assert!(!board.contains("(end 30 20)"), "{board}");
+    assert!(board.contains("(footprint \"Fixtures:R_0603_1608Metric\""));
+}
+
+#[test]
+fn update_board_outline_accepts_polygon_points() {
+    let (ctx, _guard) = fixture_ctx();
+    write_fixture_board(&ctx, 30.0, 20.0);
+
+    let out = run_tool(
+        "update_board_outline",
+        serde_json::json!({
+            "outline": [[0.0, 0.0], [12.0, 0.0], [6.0, 8.0]]
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(out["ok"], serde_json::json!(true), "got: {out}");
+    assert_eq!(out["outline_points"], serde_json::json!(3), "got: {out}");
+    let board = std::fs::read_to_string(ctx.pcb_path()).unwrap();
+    assert_eq!(board.matches("(layer \"Edge.Cuts\")").count(), 3);
+    assert!(board.contains("(gr_line"));
 }
 
 fn skip_unstable_footprint_update(ctx: &AgentRuntime) -> bool {
@@ -1236,18 +1199,7 @@ fn place_board_failure_suggests_a_larger_bounds() {
     // Three parts crammed into a 3x3 mm board cannot fit; the failure must hand the
     // agent a CONCRETE, larger min-bounds suggestion so it can retry deterministically.
     let (ctx, _g) = fixture_ctx();
-    let board = serde_json::json!({
-        "bounds": { "min_x": 0.0, "max_x": 3.0, "min_y": 0.0, "max_y": 3.0 },
-        "parts": [
-            { "reference": "J1", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
-              "pad_nets": { "1": "A", "2": "B" } },
-            { "reference": "J2", "footprint": "Fixtures:PinHeader_1x02_P2.54mm_Vertical",
-              "pad_nets": { "1": "A", "2": "B" } },
-            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
-              "pad_nets": { "1": "A", "2": "B" } }
-        ]
-    });
-    gordian_core::tools_pcb::build_seed_board(board, &ctx).unwrap();
+    write_fixture_board(&ctx, 3.0, 3.0);
     let out = run_tool("place_board", serde_json::json!({}), &ctx).unwrap();
     assert_eq!(
         out["legal"],
@@ -1263,50 +1215,6 @@ fn place_board_failure_suggests_a_larger_bounds() {
     assert!(
         out["parts_courtyard_area_mm2"].as_f64().unwrap() > 0.0,
         "must report the parts' courtyard area: {out}"
-    );
-}
-
-#[test]
-fn locked_part_rejects_non_axis_aligned_rotation() {
-    // A 45° lock must be rejected at the surface (the placer/synth are axis-aligned
-    // only) with a clear message — not silently routed to wrong pads then failed at
-    // export. 0/90/180/270 are accepted.
-    let (ctx, _g) = fixture_ctx();
-    let bad = gordian_core::tools_pcb::build_seed_board(
-        serde_json::json!({
-            "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
-            "parts": [
-                { "reference": "U1", "footprint": "Fixtures:R_0603_1608Metric",
-                  "pad_nets": { "1": "A", "2": "B" },
-                  "locked": { "x": 15.0, "y": 10.0, "rotation": 45 } }
-            ]
-        }),
-        &ctx,
-    )
-    .unwrap();
-    assert!(
-        bad["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("not supported")),
-        "45° lock must be rejected: {bad}"
-    );
-    let ok = gordian_core::tools_pcb::build_seed_board(
-        serde_json::json!({
-            "overwrite": true,
-            "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
-            "parts": [
-                { "reference": "U1", "footprint": "Fixtures:R_0603_1608Metric",
-                  "pad_nets": { "1": "A", "2": "B" },
-                  "locked": { "x": 15.0, "y": 10.0, "rotation": 90 } }
-            ]
-        }),
-        &ctx,
-    )
-    .unwrap();
-    assert_eq!(
-        ok["ok"],
-        serde_json::json!(true),
-        "90° lock must be accepted: {ok}"
     );
 }
 
@@ -1509,17 +1417,7 @@ fn render_board_before_create_is_recoverable_error() {
 fn render_board_before_place_returns_ok_and_png_magic() {
     let (ctx, _guard) = fixture_ctx();
     // Create board but do NOT place.
-    let board = serde_json::json!({
-        "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
-        "parts": [
-            { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric",
-              "pad_nets": { "1": "VIN", "2": "GND" } }
-        ]
-    });
-    assert_eq!(
-        gordian_core::tools_pcb::build_seed_board(board, &ctx).unwrap()["ok"],
-        serde_json::json!(true)
-    );
+    write_fixture_board(&ctx, 30.0, 20.0);
 
     // The current board preview should render even before placement.
     let out = run_tool("render_board", serde_json::json!({}), &ctx).unwrap();

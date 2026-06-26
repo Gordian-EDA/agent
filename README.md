@@ -66,13 +66,8 @@ cargo test --workspace          # unit + integration tests
 cargo clippy --workspace        # lints
 ```
 
-Deterministic end-to-end harnesses route/export every fixture circuit against the real installed
-KiCAD libraries and assert **0 copper-error DRC faults** (unrouted nets are reported honestly, never
-hidden):
-
-```sh
-cargo run --release -p gordian-core --example board_harness   # PCB place/route/DRC across all fixtures
-```
+PCB changes should be exercised through the same schematic-derived and current-board tools the
+agent uses; avoid privileged JSON-only board construction paths in tests.
 
 ## Status
 

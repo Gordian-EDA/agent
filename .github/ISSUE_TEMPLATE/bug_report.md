@@ -18,5 +18,5 @@ A clear description of the bug.
 - OS / Rust version (`rustc --version`)
 - DRC/ERC output, if relevant
 
-A failing case added to the relevant harness (`board_harness`, `floorplan_netlist`) is the most
-useful report of all.
+A failing case added to the relevant schematic-derived PCB flow or floorplan netlist test is the
+most useful report of all.

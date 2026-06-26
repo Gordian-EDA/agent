@@ -20,7 +20,7 @@
 //! - [`footprints`] — footprint discovery + assignment: `search_footprints`,
 //!   `get_footprint_info`, `assign_footprints`.
 //! - [`create`] — board construction + input parsing: `regenerate_board`,
-//!   `build_seed_board`, rules / bounds / keepout / group parsing.
+//!   rules / bounds / keepout / group parsing.
 //! - [`place`] — `get_board`, IPC snapshot→`PlaceProblem`, and `place_board`.
 //! - [`route`] — `route_board` IPC copper write-back + triage.
 //! - [`export`] — `check_board`.
@@ -35,6 +35,7 @@ mod export;
 mod fab;
 mod footprints;
 mod interactive;
+mod outline;
 mod place;
 mod render;
 mod route;
@@ -45,13 +46,14 @@ pub(super) fn fmt_num(v: f64) -> String {
     format!("{v}")
 }
 
-pub use create::{build_seed_board, regenerate_board};
+pub use create::regenerate_board;
 pub use export::check_board;
 pub use fab::export_fab;
 pub use footprints::{assign_footprints, get_footprint_info, search_footprints};
 pub use interactive::{
     board_state, move_part, open_board, route_track, save_session_if_open, set_net_width,
 };
+pub use outline::update_board_outline;
 pub use place::{debug_place_problem_from_seed, get_board, place_board};
 pub use render::render_board;
 pub use route::route_board;

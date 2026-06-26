@@ -284,6 +284,40 @@ pub fn tool_defs() -> Vec<Tool> {
                 }),
             },
             Def {
+                name: "update_board_outline".into(),
+                description: "Edit the existing PCB Edge.Cuts without regenerating. Use bounds for a rectangle, outline for polygon points, or fit_to_geometry=true with margin to shrink/center around current parts/copper."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "bounds": {
+                            "type": "object",
+                            "description": "Rectangular Edge.Cuts, mm.",
+                            "properties": {
+                                "min_x": { "type": "number" }, "max_x": { "type": "number" },
+                                "min_y": { "type": "number" }, "max_y": { "type": "number" }
+                            }
+                        },
+                        "outline": {
+                            "type": "array",
+                            "description": "Arbitrary closed polygon outline as [[x,y], ...] in mm.",
+                            "minItems": 3,
+                            "items": {
+                                "type": "array",
+                                "items": { "type": "number" },
+                                "minItems": 2,
+                                "maxItems": 2
+                            }
+                        },
+                        "fit_to_geometry": {
+                            "type": "boolean",
+                            "description": "Derive a rectangular outline around current footprints/copper plus margin."
+                        },
+                        "margin": { "type": "number", "description": "Margin in mm for fit_to_geometry, default 2." }
+                    }
+                }),
+            },
+            Def {
                 name: "regenerate_board".into(),
                 description: "Destructively regenerate/seed the PCB from the committed schematic; not KiCAD F8 sync. May replace existing placement/routing. If footprints are missing/unapplied, fix YAML and apply_design first."
                     .into(),
@@ -408,6 +442,7 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "move_part" => crate::tools_pcb::move_part(input, ctx),
         "route_track" => crate::tools_pcb::route_track(input, ctx),
         "set_net_width" => crate::tools_pcb::set_net_width(input, ctx),
+        "update_board_outline" => crate::tools_pcb::update_board_outline(input, ctx),
         "render_board" => crate::tools_pcb::render_board(input, ctx),
         other => bail!("unknown tool: {other}"),
     }

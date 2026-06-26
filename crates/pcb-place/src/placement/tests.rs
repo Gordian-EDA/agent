@@ -863,9 +863,8 @@ fn to_route_problem_round_trips_and_oracle_accepts_geometry() {
     );
 }
 
-// (place→route→lint integration is covered end-to-end by board_harness across
-// all 77 circuits; a duplicate single-board smoke here would only pull the
-// negotiated-mesh router into pcb-place's dev-deps.)
+// Keep place→route→lint integration outside this crate; a duplicate single-board
+// smoke here would pull the negotiated-mesh router into pcb-place's dev-deps.
 
 // ── HPWL is reported and sane ────────────────────────────────────────────
 

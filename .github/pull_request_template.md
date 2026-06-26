@@ -6,7 +6,7 @@
 
 - [ ] `cargo test --workspace` passes
 - [ ] `cargo clippy --workspace` clean (for the crates you touched)
-- [ ] `cargo run --release -p agent --example board_harness` reports **0 copper DRC faults** (for engine changes)
+- [ ] PCB engine changes are verified through schematic-derived/current-board tool flows
 - [ ] Determinism preserved (no wall-clock / RNG in layout)
 
 ## Notes
