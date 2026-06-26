@@ -34,10 +34,8 @@ libraries (e.g. `/usr/share/kicad/symbols`).
 # Build
 cargo build --release
 
-# Configure a model provider in .env (OpenAI-compatible gateway shown):
-#   OPENAI_API_KEY=...        OPENAI_BASE_URL=...        OPENAI_MODEL=...
-# or AWS Bedrock:
-#   AWS_BEARER_TOKEN_BEDROCK=...   AWS_REGION=...   AGENT_PROVIDER=bedrock
+# First run creates a platform config file, e.g. ~/.config/gordian/config.toml.
+# Set llm.model and llm.apiKey there before running the agent.
 
 # Run one headless design turn:
 cargo run --release -p gordian -- agent --project ./my_board "a 3.3V buck converter from 12V, 2A"

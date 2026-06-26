@@ -12,10 +12,10 @@
 //!
 //! ## Configurable + absent-safe
 //!
-//! The corpus directory comes from `$GORDIAN_CORPUS_DIR`, falling back to
-//! `~/kicad-scraper/dataset`. [`Corpus::discover`] never fails when the corpus is
-//! missing — it returns an empty corpus, so retrieval degrades to a no-op on
-//! machines without the dataset.
+//! The corpus directory is supplied by the frontend via typed config.
+//! [`Corpus::from_optional_dir`] never fails when the corpus is missing — it
+//! returns an empty corpus, so retrieval degrades to a no-op on machines without
+//! the dataset.
 //!
 //! ## Lift is best-effort
 //!
@@ -32,12 +32,6 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use kicad_env::KicadEnv;
 use serde::Deserialize;
-
-/// Environment variable naming the corpus directory; overrides the default.
-pub const CORPUS_DIR_ENV: &str = "GORDIAN_CORPUS_DIR";
-
-/// Default corpus location (under `$HOME`) when [`CORPUS_DIR_ENV`] is unset.
-const DEFAULT_CORPUS_SUBPATH: &str = "kicad-scraper/dataset";
 
 /// Default number of references [`Corpus::find_similar`] returns.
 pub const DEFAULT_K: usize = 3;
@@ -86,22 +80,12 @@ pub struct Corpus {
 }
 
 impl Corpus {
-    /// Resolve the corpus directory from [`CORPUS_DIR_ENV`] or the default
-    /// `~/kicad-scraper/dataset`, returning `None` only when no home directory is
-    /// known and no override is set.
-    pub fn default_dir() -> Option<PathBuf> {
-        if let Some(dir) = std::env::var_os(CORPUS_DIR_ENV) {
-            return Some(PathBuf::from(dir));
-        }
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(DEFAULT_CORPUS_SUBPATH))
-    }
-
-    /// Discover the corpus at the configured directory. ABSENT-SAFE: a missing or
-    /// unreadable directory yields an empty corpus (never an error), so callers on
-    /// machines without the dataset get a graceful no-op.
-    pub fn discover() -> Self {
-        match Self::default_dir() {
-            Some(dir) => Self::from_dir(&dir),
+    /// Discover the corpus at an optional configured directory. ABSENT-SAFE: a
+    /// missing or unreadable directory yields an empty corpus (never an error),
+    /// so callers on machines without the dataset get a graceful no-op.
+    pub fn from_optional_dir(dir: Option<&Path>) -> Self {
+        match dir {
+            Some(dir) => Self::from_dir(dir),
             None => Self::default(),
         }
     }

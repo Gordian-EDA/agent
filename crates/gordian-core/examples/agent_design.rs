@@ -5,9 +5,11 @@
 //! Usage:
 //!   cargo run --release -p agent --example agent_design -- <out.png> "<prompt>"
 //!
-//! Needs a provider configured in the environment (BYOK: an `AGENT_MODEL` + the
-//! provider's standard key); `GenaiProvider::from_env()` builds it. Prints the
-//! model's final reply, the tool-call count, and the engine's layout-warning list.
+//! Needs the platform Gordian TOML config populated with `llm.model` and
+//! `llm.apiKey`. Prints the model's final reply, the tool-call count, and the
+//! engine's layout-warning list.
+
+mod config_support;
 
 use gordian_core::{Agent, AutoApprove, Provider as _};
 use kicad_cli::KicadCli;
@@ -23,14 +25,24 @@ async fn main() -> anyhow::Result<()> {
     if let Some(parent) = std::path::Path::new(&out).parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let client = gordian_core::GenaiProvider::from_env()?;
+    let config = config_support::load_config()?;
+    let env = KicadEnv::detect_with(
+        config.kicad.symbol_dir.as_deref(),
+        config.kicad.footprint_dir.as_deref(),
+        config.kicad.cli_path.as_deref(),
+    )
+    .expect("no KiCAD environment detected");
+    let client = gordian_core::GenaiProvider::from_config(&config.llm)?;
     let (provider, model) = client.status();
     eprintln!("provider={provider} model={model}\nprompt: {prompt}\n");
 
     // Fresh throwaway project for this run.
     let tmp = tempfile::tempdir()?;
-    let ctx = gordian_core::tools::PcbToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
+    let ctx = gordian_core::AgentRuntime::for_project_with_config(
+        env.clone(),
+        tmp.path().to_path_buf(),
+        config,
+    )?;
     let sch_path = ctx.sch_path().to_path_buf();
     // The agent's own MULTI-BLOCK source (what it wrote via create_design) — preserved so the
     // multi-sheet path (tools/multisheet.py) can render one clean sheet per block. The lifted

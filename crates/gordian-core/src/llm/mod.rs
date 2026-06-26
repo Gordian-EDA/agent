@@ -3,10 +3,9 @@
 //! There are no neutral wrapper types: messages are genai [`ChatMessage`]s, tools
 //! are genai [`Tool`]s, a tool call is a genai [`ToolCall`], an image is a genai
 //! [`Binary`]. The one production LLM is [`GenaiProvider`], provider-agnostic over
-//! the `genai` crate: bring any key + an `AGENT_MODEL`, and genai routes by the
-//! model name — even a private OpenAI-compatible endpoint via a `genai_N::` model
-//! namespace. [`GenaiProvider::from_env`] is just `Client::default()` + the model
-//! id.
+//! the `genai` crate. It is built from typed [`crate::config::LlmConfig`]; genai
+//! routes by the configured model name and Gordian supplies auth/endpoint
+//! explicitly.
 //!
 //! The agent loop talks to its LLM through the small [`Provider`] seam (a backend
 //! runs one completion as a whole [`StreamEnd`] or as a genai [`ChatStreamEvent`]

@@ -12,7 +12,7 @@
 //! ├──────────────────────────────────────────────────────────────┤
 //! │ > input…                                                      │
 //! ├──────────────────────────────────────────────────────────────┤
-//! │ bedrock · opus · turns 2 · ctx 23.4k (12%) ····· /help /undo  │
+//! │ bedrock · opus · turns 2 · ctx 23.4k (12%) ····· /help /clear │
 //! └──────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -639,7 +639,7 @@ mod tests {
         a.help = true;
         let text = render_to_string(&mut a, 80, 24);
         assert!(text.contains("help"), "help overlay:\n{text}");
-        assert!(text.contains("/undo"), "help lists commands:\n{text}");
+        assert!(text.contains("/clear"), "help lists commands:\n{text}");
         assert!(text.contains("Esc Esc"), "help covers unwind:\n{text}");
     }
 }

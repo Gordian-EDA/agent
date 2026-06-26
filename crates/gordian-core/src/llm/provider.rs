@@ -3,17 +3,9 @@
 //! [`GenaiProvider`] is a streaming [`Provider`](super::Provider) (it overrides
 //! only [`Provider::stream`](super::Provider::stream); `complete` is derived by
 //! draining it). genai is provider-agnostic — it picks the wire adapter from the
-//! model name and reads each provider's standard key itself — so this is just the
-//! genai [`Client`] wiring ([`GenaiProvider::from_env`]), the
-//! [`Provider::status`](super::Provider::status) label, and the [`StreamEnd`]
-//! accessors the agent reads usage off of.
-//!
-//! [`GenaiProvider::from_env`] needs only `AGENT_MODEL`; genai reads the
-//! provider's standard key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
-//! `BEDROCK_API_KEY` for `bedrock_api::…`, `OPEN_ROUTER_API_KEY` for
-//! `open_router::…`, …). Even a private OpenAI-compatible endpoint is env-native
-//! via genai's custom adapter: `AGENT_MODEL=genai_1::<model>` reads
-//! `GENAI_1_ENDPOINT` + `GENAI_1_API_KEY`.
+//! model name. Gordian supplies model/auth/endpoint from
+//! [`crate::config::LlmConfig`], so core does not read provider environment
+//! variables.
 //!
 //! Notable: one request-level `ephemeral` [`CacheControl`] breakpoint caches the
 //! static system+tools prefix (genai routes it per adapter and folds the cache
@@ -25,35 +17,55 @@ use futures::StreamExt;
 
 use genai::Client;
 use genai::chat::{CacheControl, ChatMessage, ChatOptions, ChatRequest, StreamEnd, Tool};
+use genai::resolver::{AuthData, Endpoint};
 
 use super::seam::{EventStream, Provider};
-
-/// Request `max_tokens`. 16k not 4k: one `create_design` carries the whole
-/// circuit YAML, which for a large board exceeds 4k and would truncate; the
-/// configured models allow ≥16k.
-const MAX_TOKENS: u32 = 16384;
+use crate::config::LlmConfig;
 
 /// The one production [`Provider`], over genai: the configured [`Client`] and the
-/// model id. genai routes by the model name - bring any key + an `AGENT_MODEL`.
+/// model id. genai routes by the model name.
 pub struct GenaiProvider {
     client: Client,
     model: String,
+    max_tokens: u32,
+    ephemeral_cache: bool,
 }
 
 impl GenaiProvider {
-    /// Build the configured provider from the environment / local `.env`.
-    /// Requires `AGENT_MODEL`; genai resolves the adapter, endpoint, and key from
-    /// it (including private endpoints via `genai_N::`).
-    pub fn from_env() -> Result<Self> {
-        let _ = dotenvy::dotenv();
-        let model = std::env::var("AGENT_MODEL").context(
-            "AGENT_MODEL not set — the model id genai routes by, e.g. `claude-sonnet-4-6`, `gpt-4o`, \
-             a namespaced `bedrock_api::anthropic.claude-...` / `open_router::openai/gpt-4.1`, or \
-             `genai_1::<model>` for a private endpoint (GENAI_1_ENDPOINT + GENAI_1_API_KEY)",
-        )?;
+    /// Build the configured provider from typed config. Persistence and config
+    /// source selection belong to the caller.
+    pub fn from_config(config: &LlmConfig) -> Result<Self> {
+        validate_llm_config(config)?;
+        let model = config
+            .model
+            .clone()
+            .context("llm.model not set in Gordian config")?;
+        let api_key = config.api_key.clone();
+        let endpoint = config.endpoint.clone();
+        let mut builder = Client::builder().with_auth_resolver_fn(
+            move |_model_iden| -> std::result::Result<Option<AuthData>, genai::resolver::Error> {
+                Ok(Some(match &api_key {
+                    Some(key) => AuthData::from_single(key.clone()),
+                    None => AuthData::None,
+                }))
+            },
+        );
+        if let Some(endpoint) = endpoint {
+            builder = builder.with_service_target_resolver_fn(
+                move |mut target: genai::ServiceTarget| -> std::result::Result<
+                    genai::ServiceTarget,
+                    genai::resolver::Error,
+                > {
+                    target.endpoint = Endpoint::from_owned(endpoint.clone());
+                    Ok(target)
+                },
+            );
+        }
         Ok(Self {
-            client: Client::default(),
+            client: builder.build(),
             model,
+            max_tokens: config.max_tokens,
+            ephemeral_cache: config.ephemeral_cache,
         })
     }
 }
@@ -64,7 +76,7 @@ impl Provider for GenaiProvider {
     /// adapter the model routes to (`Anthropic`, `OpenAI`, `Bedrock`, ...),
     /// resolved from the model name by [`Client::default_model`] (the same
     /// name-sniffing / `namespace::` rule genai routes by - no network, no
-    /// credentials); `model` is the configured `AGENT_MODEL`.
+    /// credentials); `model` is the configured `llm.model`.
     fn status(&self) -> (String, String) {
         let provider = self
             .client
@@ -87,7 +99,7 @@ impl Provider for GenaiProvider {
         if !tools.is_empty() {
             req = req.with_tools(tools.to_vec());
         }
-        let opts = chat_options();
+        let opts = self.chat_options();
         let resp = self
             .client
             .exec_chat(self.model.as_str(), req, Some(&opts))
@@ -117,7 +129,7 @@ impl Provider for GenaiProvider {
         // One ephemeral cache breakpoint over the static prefix; capture the
         // assembled tool calls + usage off the terminal End event (the reply text
         // arrives live as Chunk events, so no need to capture content).
-        let opts = chat_options();
+        let opts = self.chat_options();
         let resp = self
             .client
             .exec_chat_stream(self.model.as_str(), req, Some(&opts))
@@ -129,12 +141,47 @@ impl Provider for GenaiProvider {
     }
 }
 
-fn chat_options() -> ChatOptions {
-    ChatOptions::default()
-        .with_max_tokens(MAX_TOKENS)
-        .with_cache_control(CacheControl::Ephemeral)
-        .with_capture_tool_calls(true)
-        .with_capture_usage(true)
+impl GenaiProvider {
+    fn chat_options(&self) -> ChatOptions {
+        let mut opts = ChatOptions::default()
+            .with_max_tokens(self.max_tokens)
+            .with_capture_tool_calls(true)
+            .with_capture_usage(true);
+        if self.ephemeral_cache {
+            opts = opts.with_cache_control(CacheControl::Ephemeral);
+        }
+        opts
+    }
+}
+
+fn validate_llm_config(config: &LlmConfig) -> Result<()> {
+    if config
+        .model
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        anyhow::bail!("llm.model not set in Gordian config");
+    }
+    if config.max_tokens == 0 {
+        anyhow::bail!("llm.maxTokens must be greater than zero");
+    }
+    if let Some(api_key) = &config.api_key
+        && api_key.trim().is_empty()
+    {
+        anyhow::bail!("llm.apiKey must not be empty when set");
+    }
+    if let Some(endpoint) = &config.endpoint {
+        let endpoint = endpoint.trim();
+        if endpoint.is_empty() {
+            anyhow::bail!("llm.endpoint must not be empty when set");
+        }
+        if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
+            anyhow::bail!("llm.endpoint must start with http:// or https://");
+        }
+    }
+    Ok(())
 }
 
 /// Reply text captured at stream end, all text parts concatenated. Empty when the

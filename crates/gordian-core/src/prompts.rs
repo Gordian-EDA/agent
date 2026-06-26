@@ -2,7 +2,7 @@
 //! sugar), the workflow doctrine, and the PCB layout/routing doctrine.
 //!
 //! Kept as a single embedded string (no design state) — the model pulls the
-//! design on demand via `get_design`.
+//! design on demand via `read_schematic`.
 //!
 //! For a NEW design the prompt can be RETRIEVAL-AUGMENTED: [`system_prompt_with_reference`]
 //! appends the single best-matching real human design (lifted to circuit-YAML) as a
@@ -10,6 +10,7 @@
 //! in the cached system-prompt prefix, so it costs once per session, and is size-capped so
 //! it never bloats the prompt.
 
+use crate::config::RetrievalConfig;
 use crate::retrieval::Corpus;
 use kicad_env::KicadEnv;
 
@@ -31,9 +32,16 @@ pub fn system_prompt() -> String {
 ///
 /// Bounded by design: exactly ONE example, capped at [`REFERENCE_YAML_CAP`] chars,
 /// so the retrieval grounding rides in the cached prefix without bloating calls.
-pub fn system_prompt_with_reference(env: &KicadEnv, intent: &str) -> String {
+pub fn system_prompt_with_reference(
+    env: &KicadEnv,
+    intent: &str,
+    config: &RetrievalConfig,
+) -> String {
     let base = system_prompt();
-    let corpus = Corpus::discover();
+    if !config.enabled {
+        return base;
+    }
+    let corpus = Corpus::from_optional_dir(config.corpus_dir.as_deref());
     if corpus.is_empty() {
         return base;
     }
@@ -100,9 +108,9 @@ Useful sugar:
 Blocks are the schematic floorplan. Keep related circuitry together; split very large blocks. Optional per-block `layout:` may pin key anchors, but most placement should be inferred.
 
 # Efficient workflow
-NEW: create one complete draft with `create_design(yaml)`. EDIT: call `get_design()` once, then edit the draft.
-After `create_design`, do not call `get_design` unless the tool reported an error; you already know the draft you wrote.
-Avoid repeated exact patches. For multiple changes, call `edit_design({yaml: full_corrected_yaml})` once. Use `old_string`/`new_string` only for one small snippet copied exactly from `get_design`.
+NEW: create one complete draft with `create_design(yaml)`. EDIT: call `read_schematic({source:"draft"})` once, then edit the draft.
+After `create_design`, do not call `read_schematic({source:"draft"})` unless the tool reported an error; you already know the draft you wrote.
+Avoid repeated exact patches. For multiple changes, call `edit_design({yaml: full_corrected_yaml})` once. Use `old_string`/`new_string` only for one small snippet copied exactly from `read_schematic({source:"draft"})`.
 Batch changes, then `validate_design`; do not validate after every tiny edit. Call `review_design(intent)` at most once when the draft is complete, and fix only high-confidence defects.
 
 Schematic flow:
@@ -115,10 +123,10 @@ Schematic flow:
 
 # PCB flow
 GEOMETRY IS THE ENGINEERING: placement, layers, trace width, and route shape matter.
-Footprints are schematic/YAML state. `assign_footprint` edits the draft; after any footprint assignment, call `apply_design(commit:true)` before `derive_board`. `derive_board` uses the committed schematic and will reject unapplied draft footprints.
+Footprints are schematic/YAML state. `assign_footprint` edits the draft; after any footprint assignment, call `apply_design(commit:true)` before `regenerate_board`. `regenerate_board` is destructive seed/regeneration, NOT KiCAD F8 sync: it may replace an existing PCB's placement/routing. Use it for a fresh board or explicit regeneration, not incremental schematic-to-PCB merge.
 
 PCB order:
-1. `derive_board({bounds?, rules?})` from committed schematic. Put power widths in `rules.net_widths` before routing when possible (wide copper for power, thin signals). Use more layers/bigger bounds for density.
+1. `regenerate_board({bounds?, rules?})` from committed schematic only when starting/regenerating the board. Put power widths in `rules.net_widths` before routing when possible (wide copper for power, thin signals). Use more layers/bigger bounds for density.
 2. `place_board()`.
 3. `route_board()`.
 4. `check_board()`.
@@ -150,6 +158,7 @@ mod tests {
         assert!(p.contains("decouple:"));
         // Workflow doctrine + real-lib guidance.
         assert!(p.contains("search_symbols"));
+        assert!(p.contains("read_schematic"));
         assert!(p.contains("validate_design"));
         assert!(p.contains("apply_design"));
         assert!(p.contains("commit:false"));
@@ -163,7 +172,7 @@ mod tests {
         // then the LLM edits the live board over IPC (open/state/move/route/width).
         for tool in [
             "search_footprints",
-            "derive_board",
+            "regenerate_board",
             "assign_footprint",
             "place_board",
             "route_board",

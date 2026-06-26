@@ -666,13 +666,6 @@ mod tests {
     }
 
     #[test]
-    fn undo_command_returns_undo_action() {
-        let mut a = app();
-        type_str(&mut a, "/undo");
-        assert_eq!(a.update(Msg::Submit), Action::Undo);
-    }
-
-    #[test]
     fn help_command_toggles_help_and_esc_dismisses() {
         let mut a = app();
         type_str(&mut a, "/help");

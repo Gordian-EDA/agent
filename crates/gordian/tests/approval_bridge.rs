@@ -13,8 +13,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use gordian_core::prompts::system_prompt;
 use gordian_core::testing::{ScriptedClient, final_text, tool_call};
-use gordian_core::tools::PcbToolCtx;
-use gordian_core::{Agent, Approvals};
+use gordian_core::{Agent, AgentRuntime, Approvals};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
@@ -44,13 +43,13 @@ blocks:\n\
 \x20     R1: {part: R, value: 10k, between: [A, GND]}\n\
 \x20     R2: {part: R, value: 10k, between: [GND, B]}\n";
 
-fn agent(ctx: PcbToolCtx, completions: Vec<gordian_core::StreamEnd>) -> Agent<ScriptedClient> {
+fn agent(ctx: AgentRuntime, completions: Vec<gordian_core::StreamEnd>) -> Agent<ScriptedClient> {
     Agent::new(ScriptedClient::new(completions), ctx, system_prompt())
 }
 
 #[tokio::test]
 async fn bridge_approval_a_keypress_commits_the_write() -> Result<()> {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return Ok(());
     };
@@ -94,7 +93,7 @@ async fn bridge_approval_a_keypress_commits_the_write() -> Result<()> {
 
 #[tokio::test]
 async fn bridge_rejection_r_keypress_blocks_the_write() -> Result<()> {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return Ok(());
     };

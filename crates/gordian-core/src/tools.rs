@@ -5,16 +5,17 @@
 //! exposes two free functions, both driven directly by the [`crate::Agent`] loop:
 //!
 //! - [`tool_defs`] — the JSON-Schema genai [`Tool`]s handed to the LLM.
-//! - [`run_tool`] — dispatch a tool by name with a JSON input, returning JSON the
-//!   model reads back. Results are structured for **self-repair**: failures carry
+//! - [`run_tool`] — dispatch a tool by name with a JSON input, returning the
+//!   result the model reads back. Most results are structured JSON for
+//!   **self-repair**: failures carry
 //!   diagnostic strings and "did you mean" suggestions rather than just an error
 //!   flag, so the model can correct itself on the next turn.
 //!
-//! The schematic side covers `search_symbols` / `get_symbol_info` / `get_design`
+//! The schematic side covers `search_symbols` / `get_symbol_info`
 //! / `validate_design` / `apply_design` / `review_design` / `run_erc` /
 //! `project_info` / `read_schematic` / `render_schematic` / `create_design` /
 //! `edit_design`; the PCB side (in [`crate::tools_pcb`]) covers the footprint
-//! search/info, `derive_board`, and the place/route/export/interactive flow.
+//! search/info, `regenerate_board`, and the place/route/export/interactive flow.
 //!
 //! ## `apply_design`: dry-run vs commit
 //!
@@ -26,279 +27,32 @@
 //! [`crate::Agent`] loop (the preview → approve → commit choreography over a
 //! [`crate::ToolEffect::Gated`] tool); only once it approves does the loop re-call
 //! with `commit: true`, which writes
-//! the file, snapshots the prior, and runs ERC, returning
+//! the file and runs ERC, returning
 //! `{written: true, erc: {errors, warnings}}`.
 //!
 //! ## Symbol-index caching
 //!
 //! `search_symbols` is backed by [`SymbolIndex`], whose `build` scans every
-//! installed `.kicad_sym` (~0.5 s). The index is built **once per `PcbToolCtx`**
+//! installed `.kicad_sym` (~0.5 s). The index is built **once per `AgentRuntime`**
 //! and cached in a [`OnceLock`]; subsequent searches reuse it.
 //!
 //! ## Threading
 //!
-//! [`PcbToolCtx`] is `Send + Sync` (asserted below) so the agent loop can run
+//! [`AgentRuntime`] is `Send + Sync` (asserted below) so the agent loop can run
 //! tool calls on `spawn_blocking` threads — keeping a single-threaded UI
 //! responsive while a tool compiles, renders, or shells out to `kicad-cli`.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
-use crate::history::SnapshotStore;
 use circuit_lang::compile;
 use circuit_lang::model::{Component, Design, PinTarget};
 use kicad_cli::KicadCli;
-use kicad_env::KicadEnv;
-use kicad_footprint::FootprintCatalog;
-use kicad_symbol::SymbolTable;
-use kicad_symbol::search::SymbolIndex;
-
-use sch_floorplan::floorplan::{LayoutIr, infer_ir};
 use sch_io::read::lift;
 
-use crate::Tool;
-
-/// Default number of symbol-search hits returned when `limit` is omitted.
-const DEFAULT_SEARCH_LIMIT: usize = 8;
-
-/// Shared state every tool runs against: the detected KiCAD environment, the
-/// project directory and its `.kicad_sch`, a symbol provider, a snapshot store,
-/// and a lazily-built (then cached) symbol index.
-///
-/// The provider and index are interior-mutable / cached, so `run` takes
-/// `&PcbToolCtx` — tools never need exclusive access.
-pub struct PcbToolCtx {
-    env: KicadEnv,
-    /// Project directory holding the schematic and `.gordian/history`.
-    project_dir: PathBuf,
-    /// Path to the project's `.kicad_sch` (may not exist yet).
-    sch_path: PathBuf,
-    /// Symbol provider over the installed libraries (memoizes lookups).
-    provider: SymbolTable,
-    /// Per-write history / undo store.
-    snapshots: SnapshotStore,
-    /// Cross-library name index, built on first `search_symbols` and reused.
-    index: OnceLock<SymbolIndex>,
-    /// Cross-library footprint catalog, built on first `search_footprints` /
-    /// `get_footprint_info` / `derive_board` and reused. Scanning every
-    /// `.pretty` library is expensive, so (like `index`) it is built once.
-    footprint_catalog: OnceLock<FootprintCatalog>,
-    /// Test override: when set, the footprint catalog is built from this directory
-    /// of `.pretty` libraries (the vendored fixtures) instead of the installed
-    /// KiCAD footprint share dir, so footprint tests run without KiCAD libs.
-    footprint_dir_override: Option<PathBuf>,
-    /// Project-local persistent state directory `.gordian/`.
-    workspace: crate::workspace::Workspace,
-    /// The unique KiCAD IPC session manager for live board editing. PCB tools ask
-    /// it for the active board; it attaches to a running KiCAD or lazily opens a
-    /// managed headless session.
-    kicad: kicad_ipc::SessionManager,
-    /// Keeps a test tempdir alive for the ctx's lifetime; `None` for real ctxs.
-    _tempdir: Option<tempfile::TempDir>,
-}
-
-/// Tool execution happens on blocking threads; the context must cross them.
-const _: fn() = || {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<PcbToolCtx>();
-};
-
-impl PcbToolCtx {
-    /// Build a context for an existing project directory.
-    ///
-    /// `project_dir` must exist; `<project_dir>/<name>.kicad_sch` is the file the
-    /// tools read/write. The schematic itself need not exist yet.
-    pub fn new(env: KicadEnv, project_dir: PathBuf, sch_path: PathBuf) -> Result<Self> {
-        let snapshots = SnapshotStore::for_project(&project_dir)
-            .with_context(|| format!("opening snapshot store in {}", project_dir.display()))?;
-        let workspace = crate::workspace::Workspace::for_project(&project_dir)
-            .with_context(|| format!("opening .gordian workspace in {}", project_dir.display()))?;
-        let provider = SymbolTable::from_env(&env);
-        Ok(Self {
-            env,
-            project_dir,
-            sch_path,
-            provider,
-            snapshots,
-            index: OnceLock::new(),
-            footprint_catalog: OnceLock::new(),
-            footprint_dir_override: None,
-            workspace,
-            kicad: kicad_ipc::SessionManager::new(),
-            _tempdir: None,
-        })
-    }
-
-    /// Build a context for a real project directory using the project's
-    /// conventional schematic name `design.kicad_sch`.
-    ///
-    /// `project_dir` is created if it does not exist. The schematic itself need
-    /// not exist yet — the agent's first `apply_design(commit:true)` writes it.
-    /// This is the constructor the headless `gordian agent` subcommand uses.
-    pub fn for_project(env: KicadEnv, project_dir: PathBuf) -> Result<Self> {
-        std::fs::create_dir_all(&project_dir)
-            .with_context(|| format!("creating project dir {}", project_dir.display()))?;
-        let sch_path = project_dir.join("design.kicad_sch");
-        Self::new(env, project_dir, sch_path)
-    }
-
-    /// Detect a real KiCAD installation and build a context over a fresh
-    /// temporary project (no schematic yet). Returns `None` when no KiCAD is
-    /// found, so tests SKIP gracefully off the project's test environment.
-    pub fn detect_for_test() -> Option<Self> {
-        let env = KicadEnv::detect()?;
-        let tempdir = tempfile::tempdir().ok()?;
-        let project_dir = tempdir.path().to_path_buf();
-        let sch_path = project_dir.join("project.kicad_sch");
-        let snapshots = SnapshotStore::for_project(&project_dir).ok()?;
-        let workspace = crate::workspace::Workspace::for_project(&project_dir).ok()?;
-        let provider = SymbolTable::from_env(&env);
-        Some(Self {
-            env,
-            project_dir,
-            sch_path,
-            provider,
-            snapshots,
-            index: OnceLock::new(),
-            footprint_catalog: OnceLock::new(),
-            footprint_dir_override: None,
-            workspace,
-            kicad: kicad_ipc::SessionManager::new(),
-            _tempdir: Some(tempdir),
-        })
-    }
-
-    /// Build a context over a fresh temporary project whose **footprint index**
-    /// is sourced from `footprint_dir` (a directory of `.pretty` libraries)
-    /// instead of an installed KiCAD share dir. This is the footprint-tool test
-    /// entry point: it needs no KiCAD installation, so the PCB tools can be
-    /// exercised against the vendored fixtures on any machine.
-    ///
-    /// The symbol-side fields still point at a (possibly absent) real KiCAD env
-    /// via [`KicadEnv::detect`]; tests that only touch footprint tools never
-    /// reach them. Returns `None` only if a tempdir or the workspace cannot be
-    /// created.
-    pub fn with_footprint_dir_for_test(footprint_dir: PathBuf) -> Option<Self> {
-        // Symbol-side env is a placeholder (footprint tests never touch it);
-        // the footprint index is built from `footprint_dir`, not from `env`.
-        let env = KicadEnv::detect()
-            .unwrap_or_else(|| KicadEnv::with_symbol_dir(PathBuf::from("/nonexistent")));
-        let tempdir = tempfile::tempdir().ok()?;
-        let project_dir = tempdir.path().to_path_buf();
-        let sch_path = project_dir.join("project.kicad_sch");
-        let snapshots = SnapshotStore::for_project(&project_dir).ok()?;
-        let workspace = crate::workspace::Workspace::for_project(&project_dir).ok()?;
-        let provider = SymbolTable::from_env(&env);
-        Some(Self {
-            env,
-            project_dir,
-            sch_path,
-            provider,
-            snapshots,
-            index: OnceLock::new(),
-            footprint_catalog: OnceLock::new(),
-            footprint_dir_override: Some(footprint_dir),
-            workspace,
-            kicad: kicad_ipc::SessionManager::new(),
-            _tempdir: Some(tempdir),
-        })
-    }
-
-    /// The Layout IR for `design`: the connectivity-driven frame inferred from
-    /// the netlist (rails, anchor order, satellite placement, ports, mirror).
-    /// Pure and cheap, so it is just recomputed each call (no cache — a stale
-    /// fingerprint would silently ignore `layout:`/`power:` edits).
-    fn layout_for(&self, design: &Design) -> LayoutIr {
-        infer_ir(&self.env, design)
-    }
-
-    /// The project's `.kicad_sch` path (may not exist).
-    pub fn sch_path(&self) -> &Path {
-        &self.sch_path
-    }
-
-    /// The project's `.kicad_pcb` path: the schematic path with a `.kicad_pcb`
-    /// extension (`design.kicad_sch` → `design.kicad_pcb`), the board the PCB
-    /// tools export to. May not exist yet.
-    pub fn pcb_path(&self) -> PathBuf {
-        self.sch_path.with_extension("kicad_pcb")
-    }
-
-    /// The project directory.
-    pub fn project_dir(&self) -> &Path {
-        &self.project_dir
-    }
-
-    /// Close the cached live KiCAD session, if one is open.
-    pub fn close_kicad_session(&self) {
-        self.kicad.close();
-    }
-
-    /// The detected KiCAD environment.
-    pub fn env(&self) -> &KicadEnv {
-        &self.env
-    }
-
-    /// The symbol provider over the installed libraries.
-    pub fn provider(&self) -> &SymbolTable {
-        &self.provider
-    }
-
-    /// The snapshot / undo store for this project.
-    pub fn snapshots(&self) -> &SnapshotStore {
-        &self.snapshots
-    }
-
-    /// The project's `.gordian/` persistent state.
-    pub fn workspace(&self) -> &crate::workspace::Workspace {
-        &self.workspace
-    }
-
-    /// The live KiCAD IPC session manager.
-    pub(crate) fn kicad(&self) -> &kicad_ipc::SessionManager {
-        &self.kicad
-    }
-
-    /// The cross-library symbol index, built once and cached.
-    ///
-    /// Building scans every installed `.kicad_sym` (~0.5 s); the result is
-    /// memoized so repeated `search_symbols` calls are cheap.
-    fn index(&self) -> Result<&SymbolIndex> {
-        if let Some(idx) = self.index.get() {
-            return Ok(idx);
-        }
-        let idx = SymbolIndex::build(&self.env).context("building symbol index")?;
-        // `set` only fails if another thread raced us; dispatch is single-threaded.
-        let _ = self.index.set(idx);
-        Ok(self.index.get().expect("index just set"))
-    }
-
-    /// The cross-library footprint catalog, built once and cached.
-    ///
-    /// Building scans every installed `.pretty` library (155 of them) — far
-    /// dearer than the symbol scan — so the result is memoized like
-    /// [`Self::index`]. When a footprint-dir override is set (the test
-    /// constructor), the catalog is built from that directory of `.pretty`
-    /// libraries instead of the installed KiCAD footprint share dir.
-    pub(crate) fn footprint_catalog(&self) -> Result<&FootprintCatalog> {
-        if let Some(catalog) = self.footprint_catalog.get() {
-            return Ok(catalog);
-        }
-        let catalog = match &self.footprint_dir_override {
-            Some(dir) => FootprintCatalog::from_root(dir)
-                .with_context(|| format!("building footprint catalog from {}", dir.display()))?,
-            None => FootprintCatalog::from_env(&self.env).context("building footprint catalog")?,
-        };
-        let _ = self.footprint_catalog.set(catalog);
-        Ok(self
-            .footprint_catalog
-            .get()
-            .expect("footprint catalog just set"))
-    }
-}
+use crate::{AgentRuntime, Tool};
 
 /// The JSON-Schema definitions for every tool, in a stable order. The
 /// [`crate::Agent`] loop hands these to the model as genai [`Tool`]s.
@@ -336,12 +90,6 @@ pub fn tool_defs() -> Vec<Tool> {
                     },
                     "required": ["lib_id"]
                 }),
-            },
-            Def {
-                name: "get_design".into(),
-                description: "Return current circuit-YAML draft; if absent, lift/seed it from the schematic. Do not call right after create_design."
-                    .into(),
-                input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "validate_design".into(),
@@ -392,14 +140,13 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "read_schematic".into(),
-                description: "Lift a .kicad_sch path to circuit-YAML without changing the project."
+                description: "Read circuit-YAML as plain text. source='draft' reads/seeds the project draft; otherwise source is a .kicad_sch path and does not change the draft."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": ".kicad_sch path." }
-                    },
-                    "required": ["path"]
+                        "source": { "type": "string", "description": "'draft' (default) or a .kicad_sch path." }
+                    }
                 }),
             },
             Def {
@@ -476,7 +223,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "assign_footprint".into(),
-                description: "Set one component's footprint field in the circuit-YAML draft. After assignments, apply_design(commit=true) before derive_board."
+                description: "Set one component's footprint field in the circuit-YAML draft. After assignments, apply_design(commit=true) before regenerate_board."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -532,7 +279,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "set_net_width".into(),
-                description: "Set live-board net class width/clearance for nets. Prefer derive_board.rules.net_widths before routing."
+                description: "Set live-board net class width/clearance for nets. Prefer regenerate_board.rules.net_widths before routing."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -546,8 +293,8 @@ pub fn tool_defs() -> Vec<Tool> {
                 }),
             },
             Def {
-                name: "derive_board".into(),
-                description: "Seed PCB from the committed schematic. If footprints are missing/unapplied, fix YAML and apply_design(commit=true) first."
+                name: "regenerate_board".into(),
+                description: "Destructively regenerate/seed the PCB from the committed schematic; not KiCAD F8 sync. May replace existing placement/routing. If footprints are missing/unapplied, fix YAML and apply_design(commit=true) first."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -572,7 +319,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "place_board".into(),
-                description: "Auto-place the derived board and write placement. Run after derive_board."
+                description: "Auto-place the regenerated board and write placement. Run after regenerate_board."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
@@ -634,11 +381,10 @@ pub fn tool_defs() -> Vec<Tool> {
 /// Dispatch a tool by name (synchronous). `input` is the model-supplied JSON
 /// arguments; the returned `Value` is fed back to the model. The [`crate::Agent`]
 /// loop off-loads this onto the blocking pool.
-pub fn run_tool(name: &str, input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
     match name {
         "search_symbols" => search_symbols(input, ctx),
         "get_symbol_info" => get_symbol_info(input, ctx),
-        "get_design" => get_design(ctx),
         "validate_design" => validate_design(input, ctx),
         "apply_design" => apply_design(input, ctx),
         "run_erc" => run_erc(ctx),
@@ -650,7 +396,7 @@ pub fn run_tool(name: &str, input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         "edit_design" => edit_design(input, ctx),
         "search_footprints" => crate::tools_pcb::search_footprints(input, ctx),
         "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
-        "derive_board" => crate::tools_pcb::derive_board(input, ctx),
+        "regenerate_board" => crate::tools_pcb::regenerate_board(input, ctx),
         "assign_footprint" => crate::tools_pcb::assign_footprint(input, ctx),
         "get_board" => crate::tools_pcb::get_board(ctx),
         "place_board" => crate::tools_pcb::place_board(input, ctx),
@@ -679,13 +425,13 @@ pub(crate) fn require_str(input: &Value, key: &str) -> Result<String> {
 
 // ── 1. search_symbols ──────────────────────────────────────────────────────
 
-fn search_symbols(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+fn search_symbols(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let query = require_str(&input, "query")?;
     let limit = input
         .get("limit")
         .and_then(Value::as_u64)
         .map(|n| n as usize)
-        .unwrap_or(DEFAULT_SEARCH_LIMIT);
+        .unwrap_or(ctx.config().tools.default_search_limit);
     if let Some((lib_id, pin_count)) = builtin_symbol_alias(&query) {
         return Ok(json!({
             "hits": [{ "lib_id": lib_id, "pin_count": pin_count }],
@@ -741,10 +487,10 @@ fn looks_like_pinheader_2pin_symbol_query(query: &str) -> bool {
 
 // ── 2. get_symbol_info ─────────────────────────────────────────────────────
 
-fn get_symbol_info(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+fn get_symbol_info(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let lib_id = require_str(&input, "lib_id")?;
 
-    match ctx.provider.symbol(&lib_id) {
+    match ctx.provider().symbol(&lib_id) {
         Some(meta) => {
             let pins: Vec<Value> = meta
                 .pins
@@ -761,7 +507,7 @@ fn get_symbol_info(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             Ok(json!({ "lib_id": lib_id, "pins": pins }))
         }
         None => {
-            let suggestions = ctx.provider.suggest(&lib_id);
+            let suggestions = ctx.provider().suggest(&lib_id);
             Ok(json!({
                 "error": format!("unknown symbol `{lib_id}`"),
                 "suggestions": suggestions,
@@ -781,45 +527,61 @@ fn pin_type_str(t: circuit_lang::PinType) -> &'static str {
     }
 }
 
-// ── 3. get_design ──────────────────────────────────────────────────────────
+// ── 3. read_schematic helpers ──────────────────────────────────────────────
 
-pub(crate) fn current_sch_text(ctx: &PcbToolCtx) -> Option<String> {
-    std::fs::read_to_string(&ctx.sch_path).ok()
+pub(crate) fn current_sch_text(ctx: &AgentRuntime) -> Option<String> {
+    std::fs::read_to_string(ctx.sch_path()).ok()
 }
 
-fn get_design(ctx: &PcbToolCtx) -> Result<Value> {
+struct DraftRead {
+    yaml: String,
+    stale: bool,
+    note: Option<&'static str>,
+}
+
+fn read_draft_or_seed(ctx: &AgentRuntime) -> Result<DraftRead> {
     if let Some(draft) = ctx.workspace().read_draft() {
-        let mut out = json!({ "yaml": draft, "source": "draft" });
-        if ctx
+        let stale = ctx
             .workspace()
-            .draft_is_stale(current_sch_text(ctx).as_deref())
-        {
-            out["stale"] = json!(true);
-            out["note"] = json!(
+            .draft_is_stale(current_sch_text(ctx).as_deref());
+        return Ok(DraftRead {
+            yaml: draft,
+            stale,
+            note: stale.then_some(
                 "the .kicad_sch changed since this draft was seeded (user edit \
                  in KiCAD?) — call read_schematic on the project schematic to \
-                 see the current state, then reconcile your draft deliberately"
-            );
-        }
-        return Ok(out);
+                 see the current state, then reconcile your draft deliberately",
+            ),
+        });
     }
-    if !ctx.sch_path.exists() {
-        return Ok(json!({ "yaml": "", "note": "no schematic yet" }));
+    if !ctx.sch_path().exists() {
+        return Ok(DraftRead {
+            yaml: String::new(),
+            stale: false,
+            note: Some("no schematic yet"),
+        });
     }
-    let yaml = lift(&ctx.env, &ctx.sch_path)
-        .with_context(|| format!("lifting {}", ctx.sch_path.display()))?;
+    let yaml = lift(ctx.env(), ctx.sch_path())
+        .with_context(|| format!("lifting {}", ctx.sch_path().display()))?;
     // Seed the draft so edit_design is immediately usable.
     ctx.workspace()
         .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
-    Ok(json!({ "yaml": yaml, "source": "lifted",
-               "note": "draft seeded from the schematic; use edit_design for changes" }))
+    Ok(DraftRead {
+        yaml,
+        stale: false,
+        note: Some("draft seeded from the schematic; use edit_design for changes"),
+    })
+}
+
+pub(crate) fn current_design_yaml(ctx: &AgentRuntime) -> Result<String> {
+    Ok(read_draft_or_seed(ctx)?.yaml)
 }
 
 // ── 4. validate_design ─────────────────────────────────────────────────────
 
-fn validate_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+fn validate_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let yaml = require_str(&input, "yaml")?;
-    let result = compile(&yaml, &ctx.provider);
+    let result = compile(&yaml, &ctx.provider());
     Ok(compile_report(&result.diagnostics))
 }
 
@@ -847,7 +609,7 @@ pub(crate) fn compile_report(diags: &circuit_lang::Diagnostics) -> Value {
 
 // ── 5. apply_design ────────────────────────────────────────────────────────
 
-fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let explicit_yaml = input
         .get("yaml")
         .and_then(Value::as_str)
@@ -859,7 +621,7 @@ fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             None => {
                 return Ok(json!({
                     "error": "no yaml given and no draft exists — pass yaml, or \
-                              create a draft via get_design/create_design",
+                              create a draft via read_schematic({source:\"draft\"})/create_design",
                 }));
             }
         },
@@ -875,7 +637,7 @@ fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         .unwrap_or(false);
 
     // Compile first; never render or write a design with errors.
-    let result = compile(&yaml, &ctx.provider);
+    let result = compile(&yaml, &ctx.provider());
     let Some(design) = result.design else {
         let mut report = compile_report(&result.diagnostics);
         // `ok` is already false here (errors > 0), but be explicit for the LLM.
@@ -884,10 +646,10 @@ fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     };
 
     // Prior design (for the diff), lifted from the existing schematic.
-    let prior_design = if ctx.sch_path.exists() {
-        let prior_yaml = lift(&ctx.env, &ctx.sch_path)
-            .with_context(|| format!("lifting prior {}", ctx.sch_path.display()))?;
-        compile(&prior_yaml, &ctx.provider).design
+    let prior_design = if ctx.sch_path().exists() {
+        let prior_yaml = lift(ctx.env(), ctx.sch_path())
+            .with_context(|| format!("lifting prior {}", ctx.sch_path().display()))?;
+        compile(&prior_yaml, &ctx.provider()).design
     } else {
         None
     };
@@ -899,7 +661,7 @@ fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // candidate pick) so generated boards get the premium placement, not the
     // env-defaulted greedy free tier.
     let emitted = sch_floorplan::floorplan::emit_strategy(
-        &ctx.env,
+        ctx.env(),
         &design,
         &ir,
         Box::new(anneal_place::Anneal),
@@ -926,12 +688,7 @@ fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         }));
     }
 
-    // Commit path: snapshot the prior (if any), write, then ERC.
-    if ctx.sch_path.exists() {
-        ctx.snapshots
-            .snapshot(&ctx.sch_path)
-            .with_context(|| format!("snapshotting {}", ctx.sch_path.display()))?;
-    }
+    // Commit path: write, then ERC.
     // ANY multi-block design ships as ONE COMPOSED sheet: each functional block is laid out
     // independently (8-9 each), then the block regions are tiled onto a single enlarged page
     // as labeled bounding boxes — per-block independent layout is the RULE, not a dense-only
@@ -939,7 +696,7 @@ fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     // over-crammed, merge tiny) so even a 2-block design lays out per-block with no
     // cross-border global SA; cross-block nets join via matching global labels on the one
     // sheet. Only a single-block design takes the plain single-sheet emit. The composed
-    // .kicad_sch is written at ctx.sch_path; downstream render/ERC operate on it.
+    // .kicad_sch is written at ctx.sch_path(); downstream render/ERC operate on it.
     let n_blocks = design
         .blocks
         .values()
@@ -948,23 +705,24 @@ fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     let multisheet = n_blocks >= 2;
     if multisheet {
         let dir = ctx
-            .sch_path
+            .sch_path()
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        let root = crate::multisheet::compose_single_sheet(&ctx.env, &design, dir)
+        let root = crate::multisheet::compose_single_sheet(ctx.env(), &design, dir)
             .context("composing single-sheet schematic")?;
-        if root != ctx.sch_path {
-            std::fs::rename(&root, &ctx.sch_path)
-                .with_context(|| format!("placing composed sheet at {}", ctx.sch_path.display()))?;
+        if root != ctx.sch_path() {
+            std::fs::rename(&root, ctx.sch_path()).with_context(|| {
+                format!("placing composed sheet at {}", ctx.sch_path().display())
+            })?;
         }
     } else {
-        std::fs::write(&ctx.sch_path, &rendered)
-            .with_context(|| format!("writing {}", ctx.sch_path.display()))?;
+        std::fs::write(ctx.sch_path(), &rendered)
+            .with_context(|| format!("writing {}", ctx.sch_path().display()))?;
     }
 
-    let erc = KicadCli::new(&ctx.env)
-        .erc(&ctx.sch_path)
-        .with_context(|| format!("running ERC on {}", ctx.sch_path.display()))?;
+    let erc = KicadCli::new(ctx.env())
+        .erc(ctx.sch_path())
+        .with_context(|| format!("running ERC on {}", ctx.sch_path().display()))?;
 
     // Record the hash of the just-written schematic (current_sch_text reads the
     // file we wrote above) so the applied draft is no longer flagged stale.
@@ -977,7 +735,7 @@ fn apply_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     Ok(json!({
         "ok": true,
         "written": true,
-        "path": ctx.sch_path.display().to_string(),
+        "path": ctx.sch_path().display().to_string(),
         "stale_draft_warning": stale,
         "diff": diff,
         "erc": { "errors": erc.error_count(), "warnings": erc.warning_count() },
@@ -1078,17 +836,11 @@ fn design_diff(prior: Option<&Design>, new: &Design) -> Value {
 
 // ── 6. project_info ────────────────────────────────────────────────────────
 
-fn project_info(ctx: &PcbToolCtx) -> Result<Value> {
-    let snapshots = ctx
-        .snapshots
-        .list(&ctx.sch_path)
-        .map(|v| v.len())
-        .unwrap_or(0);
+fn project_info(ctx: &AgentRuntime) -> Result<Value> {
     Ok(json!({
-        "project_dir": ctx.project_dir.display().to_string(),
-        "sch_path": ctx.sch_path.display().to_string(),
-        "sch_exists": ctx.sch_path.exists(),
-        "snapshots": snapshots,
+        "project_dir": ctx.project_dir().display().to_string(),
+        "sch_path": ctx.sch_path().display().to_string(),
+        "sch_exists": ctx.sch_path().exists(),
         "cwd": std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
@@ -1097,49 +849,89 @@ fn project_info(ctx: &PcbToolCtx) -> Result<Value> {
 
 // ── 7. read_schematic ──────────────────────────────────────────────────────
 
-fn read_schematic(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
-    let raw = require_str(&input, "path")?;
-    let path = resolve_user_path(&raw, &ctx.project_dir);
+fn read_schematic(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let raw = input
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("draft");
+    if raw == "draft" {
+        let draft = read_draft_or_seed(ctx)?;
+        return Ok(Value::String(format_schematic_text(
+            "draft",
+            None,
+            Some(draft.stale),
+            draft.note,
+            &draft.yaml,
+        )));
+    }
+
+    let path = resolve_user_path(raw, ctx.project_dir());
 
     if !path.is_file() {
-        return Ok(json!({
-            "error": format!("no file at `{}`", path.display()),
-            "note": "the path may be absolute, start with ~, or be relative to the project dir",
-        }));
+        return Ok(Value::String(format!(
+            "error: no file at `{}`\nnote: the source may be `draft`, absolute, start with ~, or be relative to the project dir",
+            path.display()
+        )));
     }
     if path.extension().and_then(|e| e.to_str()) != Some("kicad_sch") {
-        return Ok(json!({
-            "error": format!("`{}` is not a .kicad_sch schematic", path.display()),
-        }));
+        return Ok(Value::String(format!(
+            "error: `{}` is not a .kicad_sch schematic",
+            path.display()
+        )));
     }
 
-    let yaml = match lift(&ctx.env, &path) {
+    let yaml = match lift(ctx.env(), &path) {
         Ok(yaml) => yaml,
         Err(e) => {
-            return Ok(json!({
-                "error": format!("could not lift `{}`: {e}", path.display()),
-            }));
+            return Ok(Value::String(format!(
+                "error: could not lift `{}`: {e}",
+                path.display()
+            )));
         }
     };
 
-    let mut out = json!({
-        "path": path.display().to_string(),
-        "yaml": yaml,
-    });
-    if same_file(&path, &ctx.sch_path) {
-        out["note"] =
-            json!("this IS the project's current schematic (the one apply_design writes)");
+    Ok(Value::String(format_schematic_text(
+        "path",
+        Some(&path),
+        None,
+        None,
+        &yaml,
+    )))
+}
+
+fn format_schematic_text(
+    source: &str,
+    path: Option<&Path>,
+    stale: Option<bool>,
+    note: Option<&str>,
+    yaml: &str,
+) -> String {
+    let mut out = format!("source: {source}\n");
+    if let Some(path) = path {
+        out.push_str(&format!("path: {}\n", path.display()));
     }
-    Ok(out)
+    if let Some(stale) = stale {
+        out.push_str(&format!("stale: {stale}\n"));
+    }
+    if let Some(note) = note {
+        out.push_str(&format!("note: {note}\n"));
+    }
+    out.push_str("\n```yaml\n");
+    out.push_str(yaml);
+    if !yaml.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("```\n");
+    out
 }
 
 /// Resolve a user-supplied path: expand a leading `~`, and anchor relative
 /// paths at the project directory (the agent's natural working root).
 fn resolve_user_path(raw: &str, project_dir: &Path) -> PathBuf {
     if let Some(rest) = raw.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
+        && let Some(base_dirs) = directories::BaseDirs::new()
     {
-        return PathBuf::from(home).join(rest);
+        return base_dirs.home_dir().join(rest);
     }
     let p = PathBuf::from(raw);
     if p.is_absolute() {
@@ -1149,42 +941,40 @@ fn resolve_user_path(raw: &str, project_dir: &Path) -> PathBuf {
     }
 }
 
-/// Whether two paths name the same existing file (canonicalized comparison;
-/// falls back to literal equality when either cannot be canonicalized).
-fn same_file(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(ca), Ok(cb)) => ca == cb,
-        _ => a == b,
-    }
-}
-
 // ── find_similar_designs (retrieval-augmented references) ───────────────────
 
 /// Rank the corpus of real human schematics against `intent` and return the
 /// top-`k` as circuit-YAML the model can emulate. Absent-safe: with no corpus
 /// installed it returns `{matches: [], note: ...}` rather than erroring.
-fn find_similar_designs(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
-    use crate::retrieval::{Corpus, DEFAULT_K};
+fn find_similar_designs(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    use crate::retrieval::Corpus;
 
     let intent = require_str(&input, "intent")?;
     let k = input
         .get("k")
         .and_then(Value::as_u64)
         .map(|n| n as usize)
-        .unwrap_or(DEFAULT_K)
+        .unwrap_or(ctx.config().retrieval.references_per_query)
         .max(1);
 
-    let corpus = Corpus::discover();
+    if !ctx.config().retrieval.enabled {
+        return Ok(json!({
+            "matches": [],
+            "note": "reference retrieval is disabled in Gordian config",
+        }));
+    }
+
+    let corpus = Corpus::from_optional_dir(ctx.config().retrieval.corpus_dir.as_deref());
     if corpus.is_empty() {
         return Ok(json!({
             "matches": [],
             "note": "no reference corpus installed — design from first principles \
-                     (set GORDIAN_CORPUS_DIR to a dataset of *.kicad_sch + *.json to \
-                     enable references)",
+                     (set retrieval.corpusDir in config.toml to a dataset of \
+                     *.kicad_sch + *.json to enable references)",
         }));
     }
 
-    let report = corpus.find_similar(&ctx.env, &intent, k);
+    let report = corpus.find_similar(ctx.env(), &intent, k);
     let matches: Vec<Value> = report
         .references
         .iter()
@@ -1218,16 +1008,16 @@ fn find_similar_designs(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
 
 // ── 8. run_erc ─────────────────────────────────────────────────────────────
 
-fn run_erc(ctx: &PcbToolCtx) -> Result<Value> {
-    if !ctx.sch_path.exists() {
+fn run_erc(ctx: &AgentRuntime) -> Result<Value> {
+    if !ctx.sch_path().exists() {
         bail!(
             "no schematic to check at {} — apply a design first",
-            ctx.sch_path.display()
+            ctx.sch_path().display()
         );
     }
-    let report = KicadCli::new(&ctx.env)
-        .erc(&ctx.sch_path)
-        .with_context(|| format!("running ERC on {}", ctx.sch_path.display()))?;
+    let report = KicadCli::new(ctx.env())
+        .erc(ctx.sch_path())
+        .with_context(|| format!("running ERC on {}", ctx.sch_path().display()))?;
 
     let violations: Vec<Value> = report
         .violations
@@ -1250,7 +1040,7 @@ fn run_erc(ctx: &PcbToolCtx) -> Result<Value> {
 
 // ── 9. create_design / edit_design ────────────────────────────────────────
 
-fn create_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let yaml = require_str(&input, "yaml")?;
     let overwrite = input
         .get("overwrite")
@@ -1264,23 +1054,23 @@ fn create_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     }
     ctx.workspace()
         .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
-    let mut report = compile_report(&compile(&yaml, &ctx.provider).diagnostics);
+    let mut report = compile_report(&compile(&yaml, &ctx.provider()).diagnostics);
     report["draft_written"] = json!(true);
     Ok(report)
 }
 
-fn edit_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let full_yaml = input.get("yaml").and_then(Value::as_str);
     let Some(draft) = ctx.workspace().read_draft() else {
         return Ok(json!({
-            "error": "no draft exists — call get_design (seeds a draft from the \
+            "error": "no draft exists — call read_schematic({source:\"draft\"}) (seeds a draft from the \
                       current schematic) or create_design first",
         }));
     };
     if let Some(yaml) = full_yaml {
         ctx.workspace()
             .write_draft(yaml, current_sch_text(ctx).as_deref())?;
-        let mut report = compile_report(&compile(yaml, &ctx.provider).diagnostics);
+        let mut report = compile_report(&compile(yaml, &ctx.provider()).diagnostics);
         report["draft_written"] = json!(true);
         report["mode"] = json!("full_replace");
         return Ok(report);
@@ -1298,7 +1088,7 @@ fn edit_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         return Ok(json!({
             "error": "old_string not found in the current draft",
             "old_string": old,
-            "hint": "Use get_design once to copy an exact current snippet, or call edit_design with a full corrected `yaml` for broad/formatting-heavy changes.",
+            "hint": "Use read_schematic({source:\"draft\"}) once to copy an exact current snippet, or call edit_design with a full corrected `yaml` for broad/formatting-heavy changes.",
             "draft_chars": draft.len(),
         }));
     }
@@ -1316,7 +1106,7 @@ fn edit_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     ctx.workspace()
         .write_draft(&edited, current_sch_text(ctx).as_deref())?;
 
-    let mut report = compile_report(&compile(&edited, &ctx.provider).diagnostics);
+    let mut report = compile_report(&compile(&edited, &ctx.provider()).diagnostics);
     report["replacements"] = json!(if replace_all { count } else { 1 });
     Ok(report)
 }
@@ -1327,16 +1117,14 @@ fn edit_design(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
 /// block (and strip from the JSON the model sees as text).
 pub const IMAGE_PATH_KEY: &str = "_image_path";
 
-/// Long-edge pixel cap for rendered schematics / board renders (Claude vision sweet spot).
-pub(crate) const RENDER_MAX_PX: u32 = 1600;
-
-fn render_schematic(ctx: &PcbToolCtx) -> Result<Value> {
-    if !ctx.sch_path.exists() {
+fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
+    if !ctx.sch_path().exists() {
         return Ok(json!({
             "error": "no schematic yet — apply a design first",
         }));
     }
-    let png = crate::render::schematic_png(&ctx.env, &ctx.sch_path)?;
+    let png =
+        crate::render::schematic_png(ctx.env(), ctx.sch_path(), ctx.config().tools.render_max_px)?;
     let path = ctx.workspace().next_render_path()?;
     std::fs::write(&path, &png).with_context(|| format!("writing {}", path.display()))?;
     let mut obj = json!({

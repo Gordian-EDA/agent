@@ -5,8 +5,8 @@
 //! [`Approvals`]), and feeds the structured result back, until the model returns a
 //! final text (or a safety iteration cap is hit). There is one domain (KiCAD,
 //! forever), so the loop dispatches [`crate::tools::run_tool`] /
-//! [`crate::tools::tool_defs`] DIRECTLY — off-loading the synchronous, non-`Send`
-//! [`PcbToolCtx`] work onto the blocking pool at the call site.
+//! [`crate::tools::tool_defs`] DIRECTLY — off-loading synchronous [`AgentRuntime`]
+//! work onto the blocking pool at the call site.
 //!
 //! ## Context is persistent
 //!
@@ -45,8 +45,9 @@ use crate::llm::{
     MessageContent, Provider, StreamEnd, ToolCall, ToolResponse, completed_text, token_usage,
 };
 
+use crate::AgentRuntime;
 use crate::tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
-use crate::tools::{IMAGE_PATH_KEY, PcbToolCtx, run_tool, tool_defs};
+use crate::tools::{IMAGE_PATH_KEY, run_tool, tool_defs};
 
 /// Safety cap on LLM round-trips per turn. Generous enough for the longest
 /// legitimate flow, bounded so a misbehaving model can't loop forever.
@@ -230,69 +231,15 @@ pub struct TurnOutcome {
     pub stop_reason: StopReason,
 }
 
-/// What the loop executes its tools against. Production is [`Backend::Kicad`] (the
-/// real [`PcbToolCtx`], run on the blocking pool); [`Backend::Stub`] lets the
-/// gating tests drive the loop's choreography without KiCAD. This is the loop's
-/// ONLY seam beyond the [`Provider`] — deliberately a two-method tool runner, not
-/// a pluggable domain.
-enum Backend {
-    Kicad(Arc<PcbToolCtx>),
-    Stub(Box<dyn TestBackend>),
-}
-
-/// A minimal, test-only stand-in for the KiCAD tool execution: just the two async
-/// operations the loop's gate and review→fix choreography drive. Tests implement
-/// it to exercise the gate (preview→approve→commit, self-repair, rejection,
-/// stall-nudge, review-fix) deterministically without KiCAD or a network.
-#[async_trait]
-pub trait TestBackend: Send + Sync {
-    /// Execute one tool in the given pass, returning the structured outcome.
-    async fn run(&self, call: &ToolCall, mode: RunMode, reviewer: &dyn Provider) -> ToolOutcome;
-    /// The independent post-turn review; `None` = nothing to review.
-    async fn review_committed(
-        &self,
-        _intent: &str,
-        _reviewer: &dyn Provider,
-    ) -> Option<ReviewOutcome> {
-        None
-    }
-}
-
-impl Backend {
-    /// Run one tool. The KiCAD backend forces `apply_design`'s `commit` flag to
-    /// match the gate's pass and lifts the dry-run `ok` / commit `written` + ERC
-    /// counts into [`ApplyInfo`]; everything else runs the synchronous tool on the
-    /// blocking pool. `review_design` (async, needs the LLM client) is handled
-    /// here too. The stub backend simply delegates.
-    async fn run(&self, call: &ToolCall, mode: RunMode, reviewer: &dyn Provider) -> ToolOutcome {
-        match self {
-            Backend::Stub(b) => b.run(call, mode, reviewer).await,
-            Backend::Kicad(ctx) => run_kicad_tool(ctx, call, mode, reviewer).await,
-        }
-    }
-
-    /// The independent post-turn review of the committed work.
-    async fn review_committed(
-        &self,
-        intent: &str,
-        reviewer: &dyn Provider,
-    ) -> Option<ReviewOutcome> {
-        match self {
-            Backend::Stub(b) => b.review_committed(intent, reviewer).await,
-            Backend::Kicad(ctx) => review_committed_kicad(ctx, intent, reviewer).await,
-        }
-    }
-}
-
-/// An agent session over one project: the LLM client, the tool backend, the
-/// system prompt, and the persistent conversation.
+/// An agent session over one KiCAD project: the LLM client, runtime resources,
+/// system prompt, and persistent conversation.
 ///
 /// Generic over the [`Provider`] seam (defaulting to the one production
 /// [`GenaiProvider`]) only so the deterministic, no-network tests can drive the
 /// loop with a scripted client; production is always `Agent<GenaiProvider>`.
 pub struct Agent<P: Provider = GenaiProvider> {
     client: P,
-    backend: Backend,
+    runtime: Arc<AgentRuntime>,
     /// The KiCAD system prompt (the LLM's standing instructions).
     system: String,
     /// The whole session's conversation, carried across turns. Tool results live
@@ -304,26 +251,12 @@ pub struct Agent<P: Provider = GenaiProvider> {
 }
 
 impl<P: Provider> Agent<P> {
-    /// Build an agent over a project's [`PcbToolCtx`] and a [`Provider`] client.
+    /// Build an agent over a project's [`AgentRuntime`] and a [`Provider`] client.
     /// `system` is the KiCAD system prompt.
-    pub fn new(client: P, ctx: PcbToolCtx, system: impl Into<String>) -> Self {
-        Self::with_backend(client, Backend::Kicad(Arc::new(ctx)), system)
-    }
-
-    /// Build an agent over a test tool backend instead of a real [`PcbToolCtx`] —
-    /// the minimal seam the gating tests bind to. Production uses [`Agent::new`].
-    pub fn with_test_backend(
-        client: P,
-        backend: Box<dyn TestBackend>,
-        system: impl Into<String>,
-    ) -> Self {
-        Self::with_backend(client, Backend::Stub(backend), system)
-    }
-
-    fn with_backend(client: P, backend: Backend, system: impl Into<String>) -> Self {
+    pub fn new(client: P, ctx: AgentRuntime, system: impl Into<String>) -> Self {
         Self {
             client,
-            backend,
+            runtime: Arc::new(ctx),
             system: system.into(),
             history: Vec::new(),
             turn_starts: Vec::new(),
@@ -331,12 +264,9 @@ impl<P: Provider> Agent<P> {
     }
 
     /// The project's tool context (so callers can inspect the `.kicad_sch` path
-    /// after a turn). Panics on a test backend — production paths always hold one.
-    pub fn ctx(&self) -> &PcbToolCtx {
-        match &self.backend {
-            Backend::Kicad(ctx) => ctx,
-            Backend::Stub(_) => panic!("ctx() is not available on a test backend"),
-        }
+    /// after a turn).
+    pub fn ctx(&self) -> &AgentRuntime {
+        &self.runtime
     }
 
     /// Drop the entire conversation history (a fresh start; project files
@@ -637,7 +567,8 @@ impl<P: Provider> Agent<P> {
             return Ok(outcome);
         }
         for round in 0..=max_fix {
-            let Some(review) = self.backend.review_committed(intent, &self.client).await else {
+            let Some(review) = review_committed_kicad(&self.runtime, intent, &self.client).await
+            else {
                 break;
             };
             emit(
@@ -657,8 +588,8 @@ impl<P: Provider> Agent<P> {
         Ok(outcome)
     }
 
-    /// Execute one tool call, returning the JSON-stringified result, any images to
-    /// feed back, and the render PNG's on-disk path (for inline UI display). A
+    /// Execute one tool call, returning the text result, any images to feed back,
+    /// and the render PNG's on-disk path (for inline UI display). A
     /// gated-commit call is routed through the apply-gate; every other call runs
     /// once in [`RunMode::Normal`].
     async fn run_tool_call(
@@ -672,9 +603,9 @@ impl<P: Provider> Agent<P> {
         if gated_commit {
             return self.gated_apply(call, approvals, applied, events).await;
         }
-        let outcome = self.backend.run(call, RunMode::Normal, &self.client).await;
+        let outcome = run_kicad_tool(&self.runtime, call, RunMode::Normal, &self.client).await;
         (
-            outcome.value.to_string(),
+            tool_result_text(&outcome.value),
             outcome.images,
             outcome.image_path,
         )
@@ -690,7 +621,7 @@ impl<P: Provider> Agent<P> {
         events: Events<'_>,
     ) -> (String, Vec<Binary>, Option<String>) {
         // 1. Preview (no write) to get the diff.
-        let preview = self.backend.run(call, RunMode::Preview, &self.client).await;
+        let preview = run_kicad_tool(&self.runtime, call, RunMode::Preview, &self.client).await;
         let preview_apply = preview.apply.clone().unwrap_or_default();
 
         // If the preview isn't ready (e.g. the input didn't compile), there is
@@ -716,7 +647,7 @@ impl<P: Provider> Agent<P> {
         }
 
         // 3. Approved → commit (the real write).
-        let committed = self.backend.run(call, RunMode::Commit, &self.client).await;
+        let committed = run_kicad_tool(&self.runtime, call, RunMode::Commit, &self.client).await;
         if let Some(ApplyInfo {
             committed: true,
             summary,
@@ -732,11 +663,18 @@ impl<P: Provider> Agent<P> {
             );
         }
         (
-            committed.value.to_string(),
+            tool_result_text(&committed.value),
             committed.images,
             committed.image_path,
         )
     }
+}
+
+fn tool_result_text(value: &Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string())
 }
 
 /// Parse a tool result back into JSON (Null on a malformed result), for the UI
@@ -782,7 +720,7 @@ fn tool_effect(name: &str) -> ToolEffect {
         // The one human-gated write.
         "apply_design" => ToolEffect::Gated,
         // Tools that mutate draft schematic text or the live IPC board.
-        "create_design" | "edit_design" | "derive_board" | "place_board" | "route_board"
+        "create_design" | "edit_design" | "regenerate_board" | "place_board" | "route_board"
         | "autoroute" | "open_board" | "move_part" | "route_track" | "set_net_width" => {
             ToolEffect::Authoring
         }
@@ -822,13 +760,13 @@ fn fix_prompt(defects: &[String]) -> String {
     )
 }
 
-/// Run one KiCAD tool, off-loading the synchronous, non-`Send` dispatch onto the
+/// Run one KiCAD tool, off-loading the synchronous dispatch onto the
 /// blocking pool so a compile / render / `kicad-cli` subprocess never stalls a
 /// single-threaded UI runtime. `apply_design`'s Preview/Commit passes force the
 /// `commit` flag and lift the gate facts into [`ApplyInfo`]; `review_design` rides
 /// the async LLM client.
 async fn run_kicad_tool(
-    ctx: &Arc<PcbToolCtx>,
+    ctx: &Arc<AgentRuntime>,
     call: &ToolCall,
     mode: RunMode,
     reviewer: &dyn Provider,
@@ -897,7 +835,7 @@ async fn run_kicad_tool(
 /// Run one synchronous tool on the blocking pool. Tools can take seconds (symbol-
 /// index build, reconciled render, ERC subprocess); off-loading them keeps an
 /// interactive caller redrawing.
-async fn run_blocking(ctx: &Arc<PcbToolCtx>, name: &str, input: Value) -> Result<Value> {
+async fn run_blocking(ctx: &Arc<AgentRuntime>, name: &str, input: Value) -> Result<Value> {
     let ctx = Arc::clone(ctx);
     let name = name.to_string();
     let timeout = tool_timeout(&name);
@@ -922,7 +860,7 @@ fn tool_timeout(name: &str) -> Duration {
         // here wedges the agent turn, so fail back to the model instead.
         "apply_design" => Duration::from_secs(120),
         // KiCAD IPC/CLI paths can legitimately take longer on first launch.
-        "derive_board" | "place_board" | "route_board" | "check_board" | "export_fab"
+        "regenerate_board" | "place_board" | "route_board" | "check_board" | "export_fab"
         | "open_board" => Duration::from_secs(180),
         _ => Duration::from_secs(90),
     }
@@ -932,17 +870,12 @@ fn tool_timeout(name: &str) -> Duration {
 /// current draft. Runs the FRESH diverse-lens LLM review (no conversation history)
 /// UNIONED with the deterministic exact-math ERC.
 async fn review_design(
-    ctx: &Arc<PcbToolCtx>,
+    ctx: &Arc<AgentRuntime>,
     input: &Value,
     reviewer: &dyn Provider,
 ) -> Result<Value> {
     let intent = input.get("intent").and_then(Value::as_str).unwrap_or("");
-    let dv = run_blocking(ctx, "get_design", json!({})).await?;
-    let netlist = dv
-        .get("yaml")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    let netlist = crate::tools::current_design_yaml(ctx)?;
     if netlist.trim().is_empty() {
         return Ok(json!({
             "error": "no design to review yet — build one with create_design/edit_design (or apply_design) first",
@@ -962,13 +895,14 @@ async fn review_design(
 /// exact-math ERC (feedback-divider ratios, LED current, dangling/crystal/
 /// polarity) — deduped by refdes so a fault both layers find isn't doubled.
 async fn review_netlist_with_erc(
-    ctx: &Arc<PcbToolCtx>,
+    ctx: &Arc<AgentRuntime>,
     reviewer: &dyn Provider,
     intent: &str,
     netlist: &str,
 ) -> Result<(f64, Vec<String>)> {
     let (score, mut defects) =
-        crate::review_kicad::review_netlist(reviewer, intent, netlist).await?;
+        crate::review_kicad::review_netlist(reviewer, intent, netlist, &ctx.config().review)
+            .await?;
     if let Some(design) = circuit_lang::compile(netlist, ctx.provider()).design {
         for d in circuit_lang::erc::erc_checks(&design) {
             if !defects.iter().any(|e| crate::review::same_defect(e, &d)) {
@@ -989,7 +923,7 @@ async fn review_netlist_with_erc(
 /// the layout pass is BEST-EFFORT, so a render or vision failure contributes
 /// nothing and the review degrades to netlist-only.
 async fn review_committed_kicad(
-    ctx: &Arc<PcbToolCtx>,
+    ctx: &Arc<AgentRuntime>,
     intent: &str,
     reviewer: &dyn Provider,
 ) -> Option<ReviewOutcome> {
@@ -1037,13 +971,18 @@ fn normalize_review_score((score, defects): (f64, Vec<String>)) -> (f64, Vec<Str
 /// failure (no schematic, render error, vision call error) so the caller degrades
 /// to netlist-only — the layout pass must never crash a turn.
 async fn review_layout_schematic(
-    ctx: &Arc<PcbToolCtx>,
+    ctx: &Arc<AgentRuntime>,
     reviewer: &dyn Provider,
     intent: &str,
 ) -> Option<(f64, Vec<String>)> {
+    if !ctx.config().review.layout {
+        return None;
+    }
+    let render_max_px = ctx.config().tools.render_max_px;
+    let review_config = ctx.config().review.clone();
     let ctx = Arc::clone(ctx);
     let png = tokio::task::spawn_blocking(move || {
-        crate::render::schematic_png(ctx.env(), ctx.sch_path())
+        crate::render::schematic_png(ctx.env(), ctx.sch_path(), render_max_px)
     })
     .await
     .ok()?
@@ -1058,6 +997,7 @@ async fn review_layout_schematic(
         intent,
         image,
         crate::review_kicad::LayoutKind::Schematic,
+        &review_config,
     )
     .await
     .ok()
@@ -1141,7 +1081,7 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 .unwrap_or(0);
             format!("{lib} → {n} pins")
         }
-        "get_design" => "lifted current design".to_string(),
+        "read_schematic" => "read schematic YAML".to_string(),
         "validate_design" => {
             let errors = result.get("errors").and_then(Value::as_u64).unwrap_or(0);
             let warnings = result.get("warnings").and_then(Value::as_u64).unwrap_or(0);
@@ -1182,10 +1122,6 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             .and_then(Value::as_str)
             .unwrap_or("project state")
             .to_string(),
-        "read_schematic" => {
-            let path = input.get("path").and_then(Value::as_str).unwrap_or("?");
-            format!("lifted {path}")
-        }
         "render_schematic" => "rendered schematic to PNG".to_string(),
         "review_design" => {
             let score = result.get("score").and_then(Value::as_f64).unwrap_or(0.0);
@@ -1352,8 +1288,17 @@ mod tests {
             &json!({ "written": true, "erc": { "errors": 0 } }),
         );
         assert!(s.contains("written"), "got: {s}");
-        let s = tool_summary("get_design", &json!({}), &json!({ "error": "boom" }));
+        let s = tool_summary("read_schematic", &json!({}), &json!({ "error": "boom" }));
         assert_eq!(s, "error: boom");
+    }
+
+    #[test]
+    fn tool_result_text_returns_raw_strings() {
+        assert_eq!(
+            tool_result_text(&json!("source: draft\n\n```yaml\nversion: 1\n```")),
+            "source: draft\n\n```yaml\nversion: 1\n```"
+        );
+        assert_eq!(tool_result_text(&json!({"ok": true})), "{\"ok\":true}");
     }
 
     #[test]

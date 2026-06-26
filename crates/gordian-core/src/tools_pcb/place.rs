@@ -11,9 +11,7 @@ use pcb_model::LayerRef;
 use pcb_model::place::PartPad;
 use pcb_place::placement::{LockedAt, Part, PlaceProblem, Placement, PlacementHints, Rect};
 
-use crate::tools::PcbToolCtx;
-
-use super::fmt_num;
+use crate::AgentRuntime;
 
 fn part_from_footprint_layers(
     footprint: &Footprint,
@@ -119,7 +117,7 @@ fn pad_aabb(pad: &FootprintPad) -> Rect {
 
 // ── get_board ────────────────────────────────────────────────────────────────
 
-pub fn get_board(ctx: &PcbToolCtx) -> Result<Value> {
+pub fn get_board(ctx: &AgentRuntime) -> Result<Value> {
     let board = match super::active::board_problem(ctx) {
         Ok(board) => board,
         Err(err) => return Ok(json!({ "error": err })),
@@ -191,7 +189,7 @@ fn snapshot_net_pin_counts(board: &IpcBoardSnapshot) -> BTreeMap<String, usize> 
 
 pub(super) fn place_problem_from_snapshot(
     board: &IpcBoardSnapshot,
-    ctx: &PcbToolCtx,
+    ctx: &AgentRuntime,
 ) -> std::result::Result<PlaceProblem, String> {
     let catalog = ctx
         .footprint_catalog()
@@ -302,7 +300,7 @@ fn is_mounting_hole(footprint: &str) -> bool {
     footprint.to_ascii_lowercase().contains("mountinghole")
 }
 
-pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let board = match super::active::board_problem(ctx) {
         Ok(board) => board,
         Err(live_err) => return Ok(json!({ "error": live_err })),
@@ -408,7 +406,7 @@ pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
                     "note": format!(
                         "{ic_ref} has {} decoupling caps the placer scattered. For a tidy ring, \
                          add a `place.groups` entry to the DSL — {{<name>: {{members: [<the caps>], \
-                         surround: {ic_ref}}}}} — then apply_design, derive_board, and place_board.",
+                         surround: {ic_ref}}}}} — then apply_design, regenerate_board, and place_board.",
                         caps.len()
                     ),
                 }));
@@ -467,8 +465,8 @@ pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
              Call route_board next, or render_board to see it."
         } else {
             "placement is NOT legal — the board is too tight for these parts. The fix is more \
-             room, not rearrangement: enlarge the board outline or derive_board bounds to at least \
-             suggested_min_bounds_mm, derive_board again, then re-run place_board. \
+             room, not rearrangement: enlarge the board outline or regenerate_board bounds to at least \
+             suggested_min_bounds_mm, regenerate_board again, then re-run place_board. \
              Locking/nudging parts won't help when the board is simply too small for the courtyards."
         },
     });
@@ -482,122 +480,12 @@ pub fn place_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
 }
 
 fn write_placement(
-    ctx: &PcbToolCtx,
+    ctx: &AgentRuntime,
     moves: &[FootprintMove],
 ) -> std::result::Result<(), kicad_ipc::Error> {
     let path = ctx.pcb_path();
-    write_placement_file(&path, moves).map_err(kicad_ipc::Error::Spawn)?;
-    // The placement was written outside KiCAD IPC because some KiCAD 10 IPC
-    // FootprintInstance updates can save back empty footprint definitions even
-    // with a field mask. Force the next board read to reopen the updated file.
-    ctx.close_kicad_session();
-    Ok(())
-}
-
-fn write_placement_file(
-    path: &std::path::Path,
-    moves: &[FootprintMove],
-) -> std::result::Result<(), String> {
-    let mut text = std::fs::read_to_string(path)
-        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
-    for mv in moves {
-        text = patch_footprint_at(&text, mv)?;
-    }
-    std::fs::write(path, text).map_err(|e| format!("could not write {}: {e}", path.display()))
-}
-
-fn patch_footprint_at(text: &str, mv: &FootprintMove) -> std::result::Result<String, String> {
-    let mut scan = 0usize;
-    while let Some(rel) = text[scan..].find("(footprint ") {
-        let start = scan + rel;
-        let Some(end) = matching_close(text, start) else {
-            return Err("malformed board: footprint has no closing paren".to_owned());
-        };
-        let fp = &text[start..=end];
-        if footprint_has_reference(fp, &mv.reference) {
-            let Some(at_rel) = top_level_node(fp, "at") else {
-                return Err(format!("footprint {} has no top-level at", mv.reference));
-            };
-            let at_start = start + at_rel.0;
-            let at_end = start + at_rel.1;
-            let x = fmt_num(mv.x_nm as f64 / 1_000_000.0);
-            let y = fmt_num(mv.y_nm as f64 / 1_000_000.0);
-            let replacement = match mv.rotation_deg {
-                Some(rot) => format!("\t\t(at {x} {y} {})", fmt_num(rot)),
-                None => format!("\t\t(at {x} {y})"),
-            };
-            let mut out = String::with_capacity(text.len() + replacement.len());
-            out.push_str(&text[..at_start]);
-            out.push_str(&replacement);
-            out.push_str(&text[at_end + 1..]);
-            return Ok(out);
-        }
-        scan = end + 1;
-    }
-    Err(format!(
-        "footprint {} not found in board file",
-        mv.reference
-    ))
-}
-
-fn footprint_has_reference(fp: &str, reference: &str) -> bool {
-    let needle = format!("(property \"Reference\" \"{reference}\"");
-    fp.contains(&needle)
-}
-
-fn top_level_node(s: &str, head: &str) -> Option<(usize, usize)> {
-    let mut idx = s.find('\n').map(|p| p + 1).unwrap_or(0);
-    while idx < s.len() {
-        let rel = s[idx..].find('(')?;
-        let start = idx + rel;
-        let end = matching_close(s, start)?;
-        if node_head(&s[start..=end]) == head {
-            return Some((start, end));
-        }
-        idx = end + 1;
-    }
-    None
-}
-
-fn node_head(node: &str) -> &str {
-    let rest = node.strip_prefix('(').unwrap_or(node);
-    let end = rest
-        .find(|c: char| c.is_whitespace() || c == '(' || c == ')')
-        .unwrap_or(rest.len());
-    &rest[..end]
-}
-
-fn matching_close(s: &str, open: usize) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escape = false;
-    let mut idx = open;
-    while idx < bytes.len() {
-        let b = bytes[idx];
-        if in_string {
-            if escape {
-                escape = false;
-            } else if b == b'\\' {
-                escape = true;
-            } else if b == b'"' {
-                in_string = false;
-            }
-            idx += 1;
-            continue;
-        }
-        match b {
-            b'"' => in_string = true,
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(idx);
-                }
-            }
-            _ => {}
-        }
-        idx += 1;
-    }
-    None
+    ctx.kicad().with_session(&path, |session| {
+        session.kicad().move_footprints(moves)?;
+        session.kicad().save()
+    })
 }

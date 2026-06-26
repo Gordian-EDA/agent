@@ -9,17 +9,17 @@
 //!   (spec §11): a chat transcript, a proposed-changes apply-gate, and an input
 //!   line, driving the same agent interactively.
 
+mod config;
 mod tui;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
+use gordian_core::AgentRuntime;
 use gordian_core::prompts::system_prompt_with_reference;
-use gordian_core::tools::PcbToolCtx;
 use gordian_core::{Agent, AgentEvent, AutoApprove};
 use kicad_cli::KicadCli;
-use kicad_env::KicadEnv;
 
 /// Default project directory when `--project` is omitted.
 const DEFAULT_PROJECT_DIR: &str = "gordian-project";
@@ -93,12 +93,12 @@ fn default_tui_project_dir() -> PathBuf {
 /// Run the `tui` subcommand: launch the cockpit on a single-threaded Tokio
 /// runtime + `LocalSet`.
 ///
-/// The agent's [`ToolCtx`] is intentionally **not** `Send` (its symbol caches use
-/// non-thread-safe interior mutability), so the turn task is spawned with
-/// `spawn_local` and the whole UI runs on one thread. A current-thread runtime
-/// gives us a `LocalSet` to host that.
+/// The TUI owns an `Rc` agent handle and terminal event loop on one thread, so
+/// turn tasks use `spawn_local`. A current-thread runtime gives us a `LocalSet`
+/// to host that.
 fn run_tui_command(args: &[String]) -> Result<()> {
     let project_dir = parse_tui_args(args)?;
+    let loaded = config::load_or_create()?;
     std::fs::create_dir_all(&project_dir)
         .with_context(|| format!("creating project dir {}", project_dir.display()))?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -106,7 +106,7 @@ fn run_tui_command(args: &[String]) -> Result<()> {
         .build()
         .context("starting the Tokio runtime")?;
     let local = tokio::task::LocalSet::new();
-    local.block_on(&runtime, tui::run(project_dir))
+    local.block_on(&runtime, tui::run(project_dir, loaded.config, loaded.path))
 }
 
 /// Parsed `agent` invocation: where to work, what to do, and whether the
@@ -180,29 +180,36 @@ fn run_agent_command(args: &[String]) -> Result<()> {
         review,
     } = parse_agent_args(args)?;
 
+    let loaded = config::load_or_create()?;
+    let config = loaded.config;
+
     // 1. Detect KiCAD (symbol libs + kicad-cli).
-    let env = KicadEnv::detect().context(
-        "no KiCAD installation found — install KiCAD 9+/10 (or set AUTO_PCB_SYMBOL_DIR) so \
-         the agent can resolve symbols and run ERC",
+    let env = config::detect_kicad(&config).context(
+        "no KiCAD installation found — install KiCAD 9+/10 or set kicad.symbolDir / \
+         kicad.footprintDir / kicad.cliPath in config.toml so the agent can resolve \
+         symbols and run ERC",
     )?;
     eprintln!(
         "kicad: {} (symbols: {})",
         env.cli_version,
         env.symbol_dir.display()
     );
+    eprintln!("config: {}", loaded.path.display());
 
-    // 2. Build the LLM client from the environment / local .env (BYOK: any
-    //    genai-supported provider via its standard key + AGENT_MODEL; see .env.example).
-    let client = gordian_core::GenaiProvider::from_env().context(
-        "could not build the LLM client — set a provider key (e.g. ANTHROPIC_API_KEY / \
-         OPENAI_API_KEY) and AGENT_MODEL in the environment or a local .env file (see .env.example)",
-    )?;
+    // 2. Build the LLM client from TOML config.
+    let client = gordian_core::GenaiProvider::from_config(&config.llm).with_context(|| {
+        format!(
+            "could not build the LLM client — set llm.model and llm.apiKey in {}",
+            loaded.path.display()
+        )
+    })?;
 
     // 3. Tool context over the real project directory. `apply_design` derives
     //    its human-style floorplan from the netlist (`infer_ir`), so no separate
     //    layout client is wired here.
-    let ctx = PcbToolCtx::for_project(env.clone(), project_dir.clone())
-        .context("building the tool context for the project")?;
+    let ctx =
+        AgentRuntime::for_project_with_config(env.clone(), project_dir.clone(), config.clone())
+            .context("building the tool context for the project")?;
     let sch_path = ctx.sch_path().to_path_buf();
     eprintln!("project: {}", project_dir.display());
     eprintln!("prompt:  {prompt}\n");
@@ -216,17 +223,23 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     // Retrieval-augment the system prompt: at design-start the intent (the prompt)
     // is known, so inject the single best-matching real human design as a worked
     // few-shot example. Falls back to the plain prompt when no corpus / match.
-    let system = system_prompt_with_reference(&env, &prompt);
+    let system = system_prompt_with_reference(&env, &prompt, &config.retrieval);
     let mut agent = Agent::new(client, ctx, system);
     let mut approvals = AutoApprove::yes();
     let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
     let outcome = runtime
         .block_on(async {
-            if review {
+            if review && config.agent.post_commit_review {
                 // intent == prompt: the design goal the reviewer judges against.
                 agent
-                    .run_turn_reviewed(&prompt, &prompt, &mut approvals, Some(&events_tx), 1)
+                    .run_turn_reviewed(
+                        &prompt,
+                        &prompt,
+                        &mut approvals,
+                        Some(&events_tx),
+                        config.agent.review_fix_rounds as usize,
+                    )
                     .await
             } else {
                 agent.run_turn(&prompt, &mut approvals, None).await

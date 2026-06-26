@@ -11,19 +11,17 @@ use anyhow::{Context, Result};
 use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
 
-use crate::tools::RENDER_MAX_PX;
-
-/// Render a committed `.kicad_sch` to PNG bytes at [`RENDER_MAX_PX`] — the image
+/// Render a committed `.kicad_sch` to PNG bytes — the image
 /// the in-loop vision LAYOUT critic looks at. Exports the schematic to an SVG in a
 /// throwaway temp dir, then rasterizes it. Errors propagate so the caller can
 /// degrade to a netlist-only review (the layout pass is best-effort).
-pub fn schematic_png(env: &KicadEnv, sch: &Path) -> Result<Vec<u8>> {
+pub fn schematic_png(env: &KicadEnv, sch: &Path, max_px: u32) -> Result<Vec<u8>> {
     let tmp = tempfile::tempdir().context("temp dir for schematic SVG export")?;
     let svg_path = KicadCli::new(env)
         .export_svg(sch, tmp.path())
         .context("exporting schematic SVG")?;
     let svg = std::fs::read_to_string(&svg_path).context("reading exported SVG")?;
-    svg_to_png(&svg, RENDER_MAX_PX)
+    svg_to_png(&svg, max_px)
 }
 
 /// Render `svg` to PNG bytes, scaling so the long edge is `max_px` pixels.

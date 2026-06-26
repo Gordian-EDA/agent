@@ -1,6 +1,8 @@
-//! KiCAD session lifecycle — launch a headless KiCAD on a board, connect over
-//! IPC, and tear it down. This is the reusable handle the interactive PCB flow
-//! (agent tools, the deterministic e2e harness) builds on.
+//! KiCAD session lifecycle compatibility layer.
+//!
+//! This module still launches a headless KiCAD on a board, connects over IPC,
+//! and tears it down for existing callers. Keep launch/headless policy isolated
+//! here; the crate-level IPC boundary should remain a socket/protocol adapter.
 //!
 //! - **Cloud / headless:** `xvfb-run pcbnew <board>` on KiCAD 9 (this box), or
 //!   `kicad-cli api-server` on KiCAD 11+ (no display).
@@ -32,6 +34,7 @@ pub struct Session {
 /// IPC server if possible, otherwise launches a managed headless `pcbnew`.
 pub struct SessionManager {
     session: Mutex<Option<ManagedSession>>,
+    attach_running: bool,
 }
 
 struct ManagedSession {
@@ -47,8 +50,13 @@ impl Default for SessionManager {
 
 impl SessionManager {
     pub fn new() -> Self {
+        Self::with_attach_running(false)
+    }
+
+    pub fn with_attach_running(attach_running: bool) -> Self {
         Self {
             session: Mutex::new(None),
+            attach_running,
         }
     }
 
@@ -74,7 +82,7 @@ impl SessionManager {
             None => {
                 *session = Some(ManagedSession {
                     board: board.to_path_buf(),
-                    session: Self::attach_or_launch(board)?,
+                    session: self.attach_or_launch(board)?,
                 });
             }
         }
@@ -103,7 +111,7 @@ impl SessionManager {
             None => {
                 *session = Some(ManagedSession {
                     board: board.to_path_buf(),
-                    session: Self::attach_or_launch(board)?,
+                    session: self.attach_or_launch(board)?,
                 });
             }
         }
@@ -131,8 +139,8 @@ impl SessionManager {
         }
     }
 
-    fn attach_or_launch(board: &Path) -> Result<Session, Error> {
-        if std::env::var_os("GORDIAN_ATTACH_RUNNING_KICAD").is_some() {
+    fn attach_or_launch(&self, board: &Path) -> Result<Session, Error> {
+        if self.attach_running {
             match Session::connect_running_board(board) {
                 Ok(session) => return Ok(session),
                 Err(_) => {}
@@ -352,10 +360,10 @@ fn remove_board_lock(board: &Path) {
 /// server actually binds. Idempotent; silent on any failure (the connect step
 /// surfaces a clear error if the server never comes up).
 fn ensure_api_enabled() {
-    let Some(home) = std::env::var_os("HOME") else {
+    let Some(base_dirs) = directories::BaseDirs::new() else {
         return;
     };
-    let cfg_root = PathBuf::from(home).join(".config/kicad");
+    let cfg_root = base_dirs.config_dir().join("kicad");
     let Ok(versions) = std::fs::read_dir(&cfg_root) else {
         return;
     };

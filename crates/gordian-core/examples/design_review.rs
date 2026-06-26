@@ -6,6 +6,8 @@
 //!
 //! Usage: cargo run --release -p agent --example design_review -- <out.png> "<prompt>"
 
+mod config_support;
+
 use gordian_core::{Agent, AgentEvent, AutoApprove};
 use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
@@ -21,12 +23,22 @@ async fn main() -> anyhow::Result<()> {
         .next()
         .expect("usage: design_review <out.png> <prompt>");
 
-    let env = KicadEnv::detect().expect("no KiCAD environment detected");
+    let config = config_support::load_config()?;
+    let env = KicadEnv::detect_with(
+        config.kicad.symbol_dir.as_deref(),
+        config.kicad.footprint_dir.as_deref(),
+        config.kicad.cli_path.as_deref(),
+    )
+    .expect("no KiCAD environment detected");
     let tmp = tempfile::tempdir()?;
-    let ctx = gordian_core::tools::PcbToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
+    let ctx = gordian_core::AgentRuntime::for_project_with_config(
+        env.clone(),
+        tmp.path().to_path_buf(),
+        config.clone(),
+    )?;
     let sch_path = ctx.sch_path().to_path_buf();
     let mut agent = Agent::new(
-        gordian_core::GenaiProvider::from_env()?,
+        gordian_core::GenaiProvider::from_config(&config.llm)?,
         ctx,
         gordian_core::prompts::system_prompt(),
     );

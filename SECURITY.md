@@ -12,5 +12,5 @@ We will acknowledge your report, investigate, and coordinate a fix and disclosur
 
 This project shells out to `kicad-cli` and reads KiCAD's symbol/footprint libraries, and (for the
 agent loop) sends prompts to a configured LLM provider. Note that **API keys live only in your local
-`.env`** — never commit them. Reports about credential handling, command injection via untrusted
+`config.toml`** — never commit them. Reports about credential handling, command injection via untrusted
 circuit input, or unsafe file writes are especially welcome.

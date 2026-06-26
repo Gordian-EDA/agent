@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use kicad_cli::{KicadCli, Violation};
 
-use crate::tools::PcbToolCtx;
+use crate::AgentRuntime;
 
 /// DRC findings KiCAD raises that are independent of routed copper.
 const NON_COPPER_WARNINGS: &[&str] = &[
@@ -40,7 +40,7 @@ pub(super) fn violation_summaries<'a>(
 }
 
 /// Save the active board and run KiCAD's PCB DRC against it.
-pub fn check_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = match super::active::save_live_board(ctx) {
         Ok(path) => path,
         Err(err) => return Ok(json!({ "error": err })),

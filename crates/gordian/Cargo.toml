@@ -13,7 +13,10 @@ kicad-env = { path = "../kicad-env" }
 
 anyhow.workspace = true
 tokio.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
+directories.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 ratatui-image = { version = "9.0.0", default-features = false, features = ["crossterm", "image-defaults"] }

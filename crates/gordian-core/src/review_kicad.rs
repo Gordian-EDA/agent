@@ -18,6 +18,7 @@
 //! → unbiased; the generating model can't rationalise its own slips). The netlist
 //! pass also unions in the deterministic exact-math ERC.
 
+use crate::config::ReviewConfig;
 use crate::{Binary, Provider};
 use anyhow::Result;
 
@@ -49,8 +50,8 @@ const QUICK_LENSES: &[&str] = &[
     "check power/regulation math, polarity, essential support parts, feedback/bias topology, digital pin functions, clocks, resets, enables, straps, and interface direction",
 ];
 
-fn netlist_lenses() -> &'static [&'static str] {
-    if std::env::var_os("GORDIAN_REVIEW_ENSEMBLE").is_some() {
+fn netlist_lenses(config: &ReviewConfig) -> &'static [&'static str] {
+    if config.ensemble {
         LENSES
     } else {
         QUICK_LENSES
@@ -60,14 +61,22 @@ fn netlist_lenses() -> &'static [&'static str] {
 /// Review a netlist and return `(actionable score, union of high-confidence
 /// critical/major defect lines)` — ready to feed back as a fix turn. Thin domain
 /// wrapper over [`crate::review()`](fn@crate::review) with this module's
-/// [`REVIEW_SYSTEM`] and the quick lens, or [`LENSES`] when
-/// `GORDIAN_REVIEW_ENSEMBLE=1`.
+/// [`REVIEW_SYSTEM`] and the configured lens set.
 pub async fn review_netlist(
     client: &dyn Provider,
     intent: &str,
     netlist: &str,
+    config: &ReviewConfig,
 ) -> Result<(f64, Vec<String>)> {
-    crate::review(client, REVIEW_SYSTEM, netlist_lenses(), intent, netlist).await
+    crate::review::review_with_retry(
+        client,
+        REVIEW_SYSTEM,
+        netlist_lenses(config),
+        intent,
+        netlist,
+        config.retry_json,
+    )
+    .await
 }
 
 // ── LAYOUT (vision) critic ───────────────────────────────────────────────────
@@ -346,8 +355,8 @@ const QUICK_LAYOUT_LENSES: &[&str] = &[
     "check the visible worst layout issues only: related-part grouping, connector placement, board use, route/wire directness, congestion, and text/silkscreen legibility",
 ];
 
-fn layout_lenses() -> &'static [&'static str] {
-    if std::env::var_os("GORDIAN_REVIEW_ENSEMBLE").is_some() {
+fn layout_lenses(config: &ReviewConfig) -> &'static [&'static str] {
+    if config.ensemble {
         LAYOUT_LENSES
     } else {
         QUICK_LAYOUT_LENSES
@@ -405,13 +414,22 @@ pub async fn review_layout(
     intent: &str,
     image: Binary,
     kind: LayoutKind,
+    config: &ReviewConfig,
 ) -> Result<(f64, Vec<String>)> {
     let system = match kind {
         LayoutKind::Schematic => COMPACT_SCHEMATIC_CRITIC_SYSTEM,
         LayoutKind::Board => COMPACT_PCB_CRITIC_SYSTEM,
     };
     let prompt = layout_prompt(intent, kind);
-    crate::review_image(client, system, layout_lenses(), &prompt, image).await
+    crate::review::review_image_with_retry(
+        client,
+        system,
+        layout_lenses(config),
+        &prompt,
+        image,
+        config.retry_json,
+    )
+    .await
 }
 
 /// Two defect lines are "the same" if they target the same refdes — so a union (across lenses, or

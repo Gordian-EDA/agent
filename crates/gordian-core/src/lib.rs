@@ -13,20 +13,24 @@
 //! so a future web frontend reuses the lib. To build a working agent:
 //!
 //! ```ignore
-//! let ctx = gordian_core::tools::PcbToolCtx::for_project(env, project_dir)?;
+//! let config = gordian_core::GordianConfig::default();
+//! let ctx = gordian_core::AgentRuntime::for_project_with_config(
+//!     env,
+//!     project_dir,
+//!     config.clone(),
+//! )?;
 //! let agent = gordian_core::Agent::new(
-//!     gordian_core::GenaiProvider::from_env()?,
+//!     gordian_core::GenaiProvider::from_config(&config.llm)?,
 //!     ctx,
 //!     gordian_core::prompts::system_prompt(),
 //! );
 //! ```
 //!
-//! The [`testing`] module's [`testing::ScriptedClient`] drives the loop without a
-//! network; the gating tests inject a [`TestBackend`] instead of a real
-//! [`PcbToolCtx`].
+//! The [`testing`] module's [`testing::ScriptedClient`] drives provider behavior
+//! without a network; tools always run against a real [`AgentRuntime`].
 
 mod agent;
-pub mod history;
+pub mod config;
 pub mod llm;
 pub mod multisheet;
 pub mod prompts;
@@ -34,6 +38,7 @@ pub mod render;
 pub mod retrieval;
 pub mod review;
 pub mod review_kicad;
+mod runtime;
 pub mod session;
 pub mod testing;
 mod tool;
@@ -41,10 +46,14 @@ pub mod tools;
 pub mod tools_pcb;
 pub mod workspace;
 
-pub use agent::{
-    Agent, AgentEvent, Approvals, AutoApprove, ContextStats, StopReason, TestBackend, TurnOutcome,
+pub use agent::{Agent, AgentEvent, Approvals, AutoApprove, ContextStats, StopReason, TurnOutcome};
+pub use config::{
+    AgentConfig, CONFIG_SCHEMA_VERSION, ConfigError, DEFAULT_MAX_TOKENS, DEFAULT_REFERENCE_COUNT,
+    DEFAULT_RENDER_MAX_PX, DEFAULT_SCHEMATIC_FILENAME, DEFAULT_SEARCH_LIMIT, GordianConfig,
+    KicadConfig, LlmConfig, ProjectConfig, RetrievalConfig, ReviewConfig, ToolConfig,
 };
 pub use review::{review, review_image};
+pub use runtime::AgentRuntime;
 pub use tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
 
 // Re-export the LLM (the production `GenaiProvider`, the `Provider` seam, and

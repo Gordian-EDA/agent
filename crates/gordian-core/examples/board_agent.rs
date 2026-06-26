@@ -1,5 +1,5 @@
 //! Headless LLM-driven PCB run: hand the model a natural-language BOARD request,
-//! let it drive the real PCB tool loop (search footprints → derive_board →
+//! let it drive the real PCB tool loop (search footprints → regenerate_board →
 //! place_board → route_board → check_board), then locate the saved `.kicad_pcb`
 //! and report.
 //!
@@ -11,8 +11,10 @@
 //! cargo run --release -p agent --example board_agent -- <out.kicad_pcb> "<prompt>"
 //! ```
 //!
-//! Needs an `AGENT_MODEL` plus the provider's standard key, and an installed
-//! KiCAD (footprint library + `kicad-cli pcb drc`).
+//! Needs the platform Gordian TOML config populated with `llm.model` and
+//! `llm.apiKey`, and an installed KiCAD (footprint library + `kicad-cli pcb drc`).
+
+mod config_support;
 
 use gordian_core::{Agent, AutoApprove, Provider as _};
 use kicad_cli::KicadCli;
@@ -32,13 +34,23 @@ async fn main() -> anyhow::Result<()> {
     if let Some(parent) = std::path::Path::new(&out).parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let client = gordian_core::GenaiProvider::from_env()?;
+    let config = config_support::load_config()?;
+    let env = KicadEnv::detect_with(
+        config.kicad.symbol_dir.as_deref(),
+        config.kicad.footprint_dir.as_deref(),
+        config.kicad.cli_path.as_deref(),
+    )
+    .expect("no KiCAD environment detected");
+    let client = gordian_core::GenaiProvider::from_config(&config.llm)?;
     let (provider, model) = client.status();
     eprintln!("provider={provider} model={model}\nprompt: {prompt}\n");
 
     let tmp = tempfile::tempdir()?;
-    let ctx = gordian_core::tools::PcbToolCtx::for_project(env.clone(), tmp.path().to_path_buf())?;
+    let ctx = gordian_core::AgentRuntime::for_project_with_config(
+        env.clone(),
+        tmp.path().to_path_buf(),
+        config,
+    )?;
     let pcb_path = ctx.pcb_path();
 
     let mut agent = Agent::new(client, ctx, gordian_core::prompts::system_prompt());

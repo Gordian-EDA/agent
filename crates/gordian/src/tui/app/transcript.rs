@@ -283,8 +283,7 @@ impl App {
     }
 
     /// The shell's answer to [`super::Action::UnwindTo`]: roll the transcript back
-    /// over the `popped` turns the agent actually dropped. Files are untouched —
-    /// `/undo` is the schematic-level undo.
+    /// over the `popped` turns the agent actually dropped. Files are untouched.
     pub fn apply_unwind_to(&mut self, popped: usize) {
         if popped == 0 {
             self.transcript.push(Entry::system("nothing to unwind"));
@@ -314,8 +313,7 @@ impl App {
         } else {
             format!("{popped} turns")
         };
-        self.transcript.push(Entry::system(format!(
-            "unwound {what} (context only — /undo restores the schematic)"
-        )));
+        self.transcript
+            .push(Entry::system(format!("unwound {what} (context only)")));
     }
 }

@@ -1,6 +1,6 @@
 //! Interactive IPC board editing.
 //!
-//! Once the engine has seeded a board (derive_board → place_board → route_board),
+//! Once the engine has seeded a board (regenerate_board → place_board → route_board),
 //! `open_board` launches or inspects the live KiCAD session and the geometry
 //! tools edit the REAL board over IPC. This is where the LLM directly controls
 //! geometry (the engine is the assist that produced the starting point).
@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 use kicad_ipc::footprint_reference;
 use kicad_ipc::proto::kiapi::board::types::BoardLayer;
 
-use crate::tools::{PcbToolCtx, require_str};
+use crate::AgentRuntime;
+use crate::tools::require_str;
 
 use super::create::req_num;
 
@@ -41,7 +42,7 @@ fn parse_copper_layer(name: &str) -> std::result::Result<BoardLayer, String> {
 }
 
 /// Open the project board in a live headless KiCAD for interactive editing.
-pub fn open_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+pub fn open_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
     match ctx.kicad().open(&path) {
         Ok(()) => {}
@@ -51,7 +52,7 @@ pub fn open_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
 }
 
 /// Read the live board: footprints (ref + position mm), track/net counts.
-pub fn board_state(ctx: &PcbToolCtx) -> Result<Value> {
+pub fn board_state(ctx: &AgentRuntime) -> Result<Value> {
     ctx.kicad()
         .with_session(&ctx.pcb_path(), |session| {
             let k = session.kicad();
@@ -81,7 +82,7 @@ pub fn board_state(ctx: &PcbToolCtx) -> Result<Value> {
 }
 
 /// Move a part (reference) to (x,y) mm, optional rotation degrees.
-pub fn move_part(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+pub fn move_part(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let reference = require_str(&input, "reference")?;
     let x = match req_num(&input, "x", "move_part") {
         Ok(v) => v,
@@ -104,7 +105,7 @@ pub fn move_part(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
 
 /// Route a straight track segment: start `[x,y]`, end `[x,y]` (mm), width (mm),
 /// layer (F.Cu/…), optional net.
-pub fn route_track(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let start = input.get("start").and_then(|v| v.as_array());
     let end = input.get("end").and_then(|v| v.as_array());
     let (Some(s), Some(e)) = (start, end) else {
@@ -140,7 +141,7 @@ pub fn route_track(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
 /// Set (or update) a net class with a track width + clearance (mm) and assign
 /// nets to it — "wide copper for power". (Note: also achievable per-track via
 /// route_track width.)
-pub fn set_net_width(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let name = require_str(&input, "name")?;
     let width = input.get("width").and_then(Value::as_f64).unwrap_or(0.5);
     let clearance = input
@@ -168,11 +169,11 @@ pub fn set_net_width(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
 }
 
 /// Freerouting is disabled until its DSN export path consumes the live IPC board.
-pub fn autoroute(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+pub fn autoroute(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let board_path = ctx.pcb_path();
     if !board_path.exists() {
         return Ok(
-            json!({ "error": "no .kicad_pcb — run derive_board then place_board before autoroute" }),
+            json!({ "error": "no .kicad_pcb — run regenerate_board then place_board before autoroute" }),
         );
     }
     Ok(json!({
@@ -181,6 +182,6 @@ pub fn autoroute(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
 }
 
 /// Save the live KiCAD board to disk if a session is open. Returns whether it saved.
-pub fn save_session_if_open(ctx: &PcbToolCtx) -> Result<bool> {
+pub fn save_session_if_open(ctx: &AgentRuntime) -> Result<bool> {
     ctx.kicad().save_if_open().map_err(ipc_err)
 }

@@ -1,0 +1,38 @@
+# Gordian config. The CLI/TUI persist the real file at the platform config path,
+# e.g. ~/.config/gordian/config.toml on Linux.
+
+schemaVersion = 1
+
+[llm]
+model = "gpt-4o"
+apiKey = "replace-me"
+# endpoint = "https://your-openai-compatible-gateway/v1"
+maxTokens = 16384
+ephemeralCache = true
+
+[kicad]
+# symbolDir = "/usr/share/kicad/symbols"
+# footprintDir = "/usr/share/kicad/footprints"
+# cliPath = "/usr/bin/kicad-cli"
+attachRunning = false
+
+[project]
+schematicFilename = "design.kicad_sch"
+
+[agent]
+postCommitReview = true
+reviewFixRounds = 1
+
+[retrieval]
+enabled = true
+# corpusDir = "/path/to/kicad-scraper/dataset"
+referencesPerQuery = 3
+
+[review]
+retryJson = false
+ensemble = false
+layout = true
+
+[tools]
+defaultSearchLimit = 8
+renderMaxPx = 1600

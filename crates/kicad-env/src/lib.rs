@@ -38,12 +38,25 @@ impl KicadEnv {
     /// Discover an installed KiCAD. Returns `None` if required resources cannot
     /// be found.
     ///
-    /// `AUTO_PCB_SYMBOL_DIR` and `AUTO_PCB_FOOTPRINT_DIR` override library
-    /// discovery independently before falling back to known install paths.
+    /// Checks known install paths for libraries and `PATH` for `kicad-cli`.
     pub fn detect() -> Option<Self> {
-        let symbol_dir = detect_symbol_dir()?;
-        let footprint_dir = detect_footprint_dir(&symbol_dir)?;
-        let cli_path = find_in_path("kicad-cli")?;
+        Self::detect_with(None, None, None)
+    }
+
+    /// Discover KiCAD using explicit overrides where provided, then known
+    /// install paths / `PATH` for the missing pieces.
+    pub fn detect_with(
+        symbol_dir: Option<&Path>,
+        footprint_dir: Option<&Path>,
+        cli_path: Option<&Path>,
+    ) -> Option<Self> {
+        let symbol_dir = detect_symbol_dir(symbol_dir)?;
+        let footprint_dir = detect_footprint_dir(&symbol_dir, footprint_dir)?;
+        let cli_path = match cli_path {
+            Some(path) if path.is_file() => path.to_path_buf(),
+            Some(_) => return None,
+            None => find_in_path("kicad-cli")?,
+        };
         let cli_version = cli_version(&cli_path)?;
         Some(Self {
             symbol_dir,
@@ -73,10 +86,9 @@ impl KicadEnv {
     }
 }
 
-fn detect_symbol_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("AUTO_PCB_SYMBOL_DIR") {
-        let dir = PathBuf::from(dir);
-        return dir.is_dir().then_some(dir);
+fn detect_symbol_dir(configured: Option<&Path>) -> Option<PathBuf> {
+    if let Some(dir) = configured {
+        return dir.is_dir().then(|| dir.to_path_buf());
     }
     KNOWN_SYMBOL_DIRS
         .iter()
@@ -84,10 +96,9 @@ fn detect_symbol_dir() -> Option<PathBuf> {
         .find(|p| p.is_dir())
 }
 
-fn detect_footprint_dir(symbol_dir: &Path) -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("AUTO_PCB_FOOTPRINT_DIR") {
-        let dir = PathBuf::from(dir);
-        return dir.is_dir().then_some(dir);
+fn detect_footprint_dir(symbol_dir: &Path, configured: Option<&Path>) -> Option<PathBuf> {
+    if let Some(dir) = configured {
+        return dir.is_dir().then(|| dir.to_path_buf());
     }
     let sibling = sibling_footprint_dir(symbol_dir);
     if sibling.is_dir() {

@@ -101,8 +101,6 @@ pub enum Action {
     ResolveApproval(bool),
     /// Abort the in-flight agent turn.
     CancelTurn,
-    /// Restore the previous schematic from the snapshot store.
-    Undo,
     /// `/clear` — drop the agent's conversation history (the transcript is
     /// already cleared by the time this is returned).
     ClearContext,
@@ -425,15 +423,6 @@ impl App {
                 self.transcript
                     .push(Entry::system(format!("apply-gate auto-approve: {state}")));
                 Action::None
-            }
-            "/undo" => {
-                if self.running {
-                    self.transcript
-                        .push(Entry::system("can't undo while a turn is running"));
-                    Action::None
-                } else {
-                    Action::Undo
-                }
             }
             "/clear" => {
                 self.transcript.clear();

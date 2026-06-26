@@ -8,9 +8,8 @@ Thanks for your interest! This document covers how to build, test, and submit ch
 - **KiCAD ≥ 8** installed, for its symbol/footprint libraries and `kicad-cli` ERC/DRC. The engines
   auto-detect the libraries (e.g. `/usr/share/kicad/symbols`).
 - A model provider for the agent itself (only needed to run the LLM loop, not for the engines or
-  most tests): an OpenAI-compatible gateway (`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL`)
-  or AWS Bedrock (`AWS_BEARER_TOKEN_BEDROCK` / `AWS_REGION`, `AGENT_PROVIDER=bedrock`). Put these in
-  a local `.env`.
+  most tests). Run `gordian tui` once to create the platform `config.toml`, then set `llm.model`,
+  `llm.apiKey`, and optionally `llm.endpoint`.
 
 ```sh
 cargo build --release

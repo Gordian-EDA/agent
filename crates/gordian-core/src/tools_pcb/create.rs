@@ -12,12 +12,12 @@ use kicad_footprint::FootprintId;
 use pcb_model::{LayerRef, Point2, Polygon};
 use pcb_place::placement::{Edge, GroupHint, LockedAt, PlacementHints, Rect};
 
-use crate::tools::PcbToolCtx;
+use crate::AgentRuntime;
 
 use super::fmt_num;
 use super::seed::{BoardSeed, BoardSeedPart, BoardSeedRules, Keepout, PourSpec};
 
-// ── derive_board ──────────────────────────────────────────────────────────────
+// ── regenerate_board ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 struct BoardSeedSpec {
@@ -85,16 +85,16 @@ fn resolve_pour_layer(layer: &str, layer_count: u32) -> Option<(u32, String)> {
     }
 }
 
-/// `derive_board` — seed the PCB from KiCAD's own schematic netlist export.
+/// `regenerate_board` — seed the PCB from KiCAD's own schematic netlist export.
 ///
 /// Footprints must already be assigned in the schematic. Missing footprints are a
-/// hard error: the agent should edit the circuit YAML, apply it, then derive the
-/// board again.
-pub fn derive_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+/// hard error: the agent should edit the circuit YAML, apply it, then regenerate
+/// the board again.
+pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if !ctx.sch_path().exists() {
         return Ok(json!({
             "error": "no .kicad_sch yet — commit the schematic with apply_design first, \
-                      then derive_board"
+                      then regenerate_board"
         }));
     }
     let netlist = match KicadCli::new(ctx.env()).netlist(ctx.sch_path()) {
@@ -108,7 +108,7 @@ pub fn derive_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         return Ok(json!({
             "ok": false,
             "unapplied_draft_footprints": unapplied_footprints,
-            "note": "footprint fields live in circuit-YAML/schematic state; call apply_design(commit:true) to write the draft, then derive_board again",
+            "note": "footprint fields live in circuit-YAML/schematic state; call apply_design(commit:true) to write the draft, then regenerate_board again",
         }));
     }
     let mut pad_nets_by_ref: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
@@ -179,7 +179,7 @@ pub fn derive_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
             "ok": false,
             "part_count": part_count,
             "missing_footprints": missing_footprints,
-            "note": "some schematic symbols have no footprint field — assign footprints in the circuit-YAML draft, apply_design(commit:true), then derive_board again",
+            "note": "some schematic symbols have no footprint field — assign footprints in the circuit-YAML draft, apply_design(commit:true), then regenerate_board again",
         }));
     }
 
@@ -196,11 +196,14 @@ pub fn derive_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
         "ok": true,
         "part_count": part_count,
         "path": ctx.pcb_path().display().to_string(),
-        "note": "board seeded from the schematic into the live KiCAD session — run place_board, then route_board, then check_board",
+        "note": "board regenerated from the committed schematic into the live KiCAD session (not F8 sync; existing placement/routing may be replaced) — run place_board, then route_board, then check_board",
     }))
 }
 
-fn unapplied_draft_footprint_changes(ctx: &PcbToolCtx, netlist: &kicad_cli::Netlist) -> Vec<Value> {
+fn unapplied_draft_footprint_changes(
+    ctx: &AgentRuntime,
+    netlist: &kicad_cli::Netlist,
+) -> Vec<Value> {
     let Some(draft) = ctx.workspace().read_draft() else {
         return Vec::new();
     };
@@ -236,7 +239,7 @@ fn unapplied_draft_footprint_changes(ctx: &PcbToolCtx, netlist: &kicad_cli::Netl
     changes
 }
 
-fn write_seed_board(spec: &BoardSeedSpec, ctx: &PcbToolCtx) -> std::result::Result<(), String> {
+fn write_seed_board(spec: &BoardSeedSpec, ctx: &AgentRuntime) -> std::result::Result<(), String> {
     let catalog = ctx
         .footprint_catalog()
         .map_err(|e| format!("footprint catalog unavailable: {e}"))?;
@@ -287,7 +290,7 @@ fn write_seed_board(spec: &BoardSeedSpec, ctx: &PcbToolCtx) -> std::result::Resu
         .map_err(|e| format!("could not write {}: {e}", ctx.pcb_path().display()))
 }
 
-fn write_initial_board(seed: &BoardSeed, ctx: &PcbToolCtx) -> std::result::Result<(), String> {
+fn write_initial_board(seed: &BoardSeed, ctx: &AgentRuntime) -> std::result::Result<(), String> {
     let spec = BoardSeedSpec {
         bounds: seed.bounds.clone(),
         rules: SeedRules::from(&seed.rules),
@@ -1099,9 +1102,9 @@ fn parse_seed_part(
 
 /// Build the first KiCAD board from a `{bounds, parts, rules?, outline?}` spec.
 ///
-/// Internal builder, not an agent tool. [`derive_board`] is the normal path; the
+/// Internal builder, not an agent tool. [`regenerate_board`] is the normal path; the
 /// deterministic harnesses call this directly with standalone JSON specs.
-pub fn build_seed_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+pub fn build_seed_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // Optional custom OUTLINE (polygon points, mm) — circle/square/star/any shape. When
     // given, `bounds` is its bounding box (placement/routing extent) and the polygon
     // becomes the Edge.Cuts at export (the render then shows the true shape).
@@ -1207,7 +1210,10 @@ pub fn build_seed_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
 }
 
 /// Pin count per net across seed parts.
-pub(super) fn net_pin_counts(parts: &[BoardSeedPart], ctx: &PcbToolCtx) -> BTreeMap<String, usize> {
+pub(super) fn net_pin_counts(
+    parts: &[BoardSeedPart],
+    ctx: &AgentRuntime,
+) -> BTreeMap<String, usize> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let _ = ctx;
     for p in parts {

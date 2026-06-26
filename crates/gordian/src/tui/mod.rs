@@ -12,7 +12,7 @@
 //!   agent AgentEvent mpsc ─┼─ tokio::select! ─► App::update ─► Action ─► Shell
 //!   apply-gate mpsc       ─┤                                   (spawn turn,
 //!   animation tick        ─┘                                    resolve gate,
-//!                                                               cancel, undo,
+//!                                                               cancel,
 //!                                                               quit)
 //! ```
 //!
@@ -52,11 +52,10 @@ use crossterm::terminal::{
     supports_keyboard_enhancement,
 };
 use futures::StreamExt;
-use gordian_core::history::SnapshotStore;
+use gordian_core::AgentRuntime;
+use gordian_core::GordianConfig;
 use gordian_core::prompts::system_prompt;
-use gordian_core::tools::PcbToolCtx;
 use gordian_core::{Agent, AgentEvent, Approvals, Provider as _, StopReason};
-use kicad_env::KicadEnv;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui_image::picker::Picker;
@@ -96,36 +95,34 @@ impl Approvals for TuiApprovals {
 }
 
 /// The shared agent handle: the spawned (local) turn task locks it for the
-/// turn's duration. `Rc<Mutex<…>>` — single-threaded, since the agent's tool
-/// context is not `Send` — so the main loop can hold it across turns.
+/// turn's duration. `Rc<Mutex<...>>` keeps the TUI side single-threaded, so the
+/// main loop can hold the same agent across turns.
 type SharedAgent = Rc<Mutex<Agent>>;
 
 /// Launch the cockpit over a project directory. Sets up the terminal, builds the
 /// agent, and runs the event loop until the user quits.
-pub async fn run(project_dir: PathBuf) -> Result<()> {
+pub async fn run(project_dir: PathBuf, config: GordianConfig, config_path: PathBuf) -> Result<()> {
     // 1. Detect KiCAD (best-effort: the UI still launches without it, just shows
     //    a disconnected indicator and the agent's tools will error).
-    let env = KicadEnv::detect();
+    let env = crate::config::detect_kicad(&config);
     let kicad_connected = env.is_some();
 
-    // 2. Build the agent if we have both KiCAD and credentials; otherwise launch
+    // 2. Build the agent if we have both KiCAD and LLM config; otherwise launch
     //    a "degraded" UI that explains what's missing (so `tui` never panics).
-    //    The provider builds from `AGENT_MODEL` alone (genai validates the key
-    //    lazily), so its `(provider, model)` label shows even when KiCAD is
-    //    missing; a missing `AGENT_MODEL` falls back to a placeholder.
-    let client = gordian_core::GenaiProvider::from_env().ok();
+    let client = gordian_core::GenaiProvider::from_config(&config.llm).ok();
     let (provider, model) = match &client {
         Some(client) => client.status(),
-        None => (
-            "unconfigured".to_string(),
-            "(AGENT_MODEL unset)".to_string(),
-        ),
+        None => ("unconfigured".to_string(), "(llm.model unset)".to_string()),
     };
 
     let agent_handle: Option<SharedAgent> = match (&env, client) {
         (Some(env), Some(client)) => {
-            let ctx = PcbToolCtx::for_project(env.clone(), project_dir.clone())
-                .context("building the tool context for the project")?;
+            let ctx = AgentRuntime::for_project_with_config(
+                env.clone(),
+                project_dir.clone(),
+                config.clone(),
+            )
+            .context("building the tool context for the project")?;
             Some(Rc::new(Mutex::new(Agent::new(
                 client,
                 ctx,
@@ -135,9 +132,7 @@ pub async fn run(project_dir: PathBuf) -> Result<()> {
         _ => None,
     };
 
-    let sch_path = project_dir.join("design.kicad_sch");
-    let snapshots = SnapshotStore::for_project(&project_dir).ok();
-
+    let sch_path = project_dir.join(&config.project.schematic_filename);
     let mut status = Status::new(
         provider,
         model,
@@ -153,30 +148,42 @@ pub async fn run(project_dir: PathBuf) -> Result<()> {
         project_dir.display(),
         sch_path.display()
     )));
+    app.transcript.push(app::Entry::system(format!(
+        "config: {}",
+        config_path.display()
+    )));
     if agent_handle.is_none() {
-        app.transcript.push(app::Entry::system(
-            "agent unavailable: need KiCAD + an AGENT_MODEL and its provider API key (set in .env). UI is read-only.",
-        ));
+        app.transcript.push(app::Entry::system(format!(
+            "agent unavailable: need KiCAD + llm.model and provider credentials in {}. UI is read-only.",
+            config_path.display()
+        )));
     }
 
     // 3. Terminal setup (RAII guard restores it on any exit path).
     let (mut terminal, keyboard_enhancement) =
         setup_terminal().context("entering the alternate screen")?;
-    let result = event_loop(&mut terminal, &mut app, agent_handle, sch_path, snapshots).await;
+    let result = event_loop(
+        &mut terminal,
+        &mut app,
+        agent_handle,
+        config.agent.post_commit_review,
+        config.agent.review_fix_rounds,
+    )
+    .await;
     restore_terminal(&mut terminal, keyboard_enhancement).ok();
     result
 }
 
 /// The side-effecting half of the cockpit: everything the [`Action`]s returned
 /// by [`App::update`] need to touch (channels, the agent handle, the in-flight
-/// turn task, the snapshot store).
+/// turn task, and project path).
 struct Shell {
     agent: Option<SharedAgent>,
     events_tx: UnboundedSender<AgentEvent>,
     gate_tx: UnboundedSender<GateRequest>,
     done_tx: UnboundedSender<TurnEndReason>,
-    sch_path: PathBuf,
-    snapshots: Option<SnapshotStore>,
+    post_commit_review: bool,
+    review_fix_rounds: u8,
     /// The oneshot answering the currently open apply-gate, if any.
     pending_gate: Option<oneshot::Sender<bool>>,
     /// The in-flight turn task (aborted by [`Action::CancelTurn`]).
@@ -197,7 +204,6 @@ impl Shell {
                 }
             }
             Action::CancelTurn => self.cancel_turn(app),
-            Action::Undo => self.undo(app),
             Action::ClearContext => self.clear_context(app),
             Action::OpenUnwind => self.open_unwind(app),
             Action::UnwindTo(k) => self.unwind_to(app, k),
@@ -218,8 +224,10 @@ impl Shell {
         let events_tx = self.events_tx.clone();
         let gate_tx = self.gate_tx.clone();
         let done_tx = self.done_tx.clone();
-        // spawn_local: the agent's PcbToolCtx is not Send, so the turn runs on
-        // this thread's LocalSet rather than the shared scheduler.
+        let post_commit_review = self.post_commit_review;
+        let review_fix_rounds = self.review_fix_rounds as usize;
+        // spawn_local: the TUI shares the agent through Rc, so turns run on this
+        // thread's LocalSet rather than the shared scheduler.
         self.turn_task = Some(tokio::task::spawn_local(async move {
             let mut approvals = TuiApprovals { gate_tx };
             let mut agent = handle.lock().await;
@@ -229,9 +237,21 @@ impl Shell {
             // skipped on read-only/conversational turns (nothing applied). The
             // user's prompt is the design intent the reviewer judges against;
             // `Reviewed` events flow through `events_tx` to the transcript.
-            let result = agent
-                .run_turn_reviewed(&prompt, &prompt, &mut approvals, Some(&events_tx), 1)
-                .await;
+            let result = if post_commit_review {
+                agent
+                    .run_turn_reviewed(
+                        &prompt,
+                        &prompt,
+                        &mut approvals,
+                        Some(&events_tx),
+                        review_fix_rounds,
+                    )
+                    .await
+            } else {
+                agent
+                    .run_turn(&prompt, &mut approvals, Some(&events_tx))
+                    .await
+            };
             let reason = match result {
                 Ok(o) => match o.stop_reason {
                     StopReason::Completed => TurnEndReason::Completed,
@@ -257,23 +277,6 @@ impl Shell {
         // The aborted task never sends done_tx, so close the turn ourselves —
         // flagged as a user interruption so the indicator reads "Interrupted".
         app.update(Msg::TurnEnded(TurnEndReason::Interrupted));
-    }
-
-    /// `/undo` — restore the previous schematic from the snapshot store.
-    fn undo(&self, app: &mut App) {
-        let Some(store) = &self.snapshots else {
-            app.transcript
-                .push(app::Entry::system("no snapshot store for this project"));
-            return;
-        };
-        match store.undo(&self.sch_path) {
-            Ok(()) => app
-                .transcript
-                .push(app::Entry::system("undo: restored the previous schematic")),
-            Err(e) => app
-                .transcript
-                .push(app::Entry::system(format!("undo failed: {e}"))),
-        }
     }
 
     /// `/clear` — the transcript is already wiped; drop the agent's history
@@ -380,8 +383,8 @@ async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
     agent_handle: Option<SharedAgent>,
-    sch_path: PathBuf,
-    snapshots: Option<SnapshotStore>,
+    post_commit_review: bool,
+    review_fix_rounds: u8,
 ) -> Result<()> {
     let mut input = EventStream::new();
     let (events_tx, mut events_rx): (UnboundedSender<AgentEvent>, UnboundedReceiver<AgentEvent>) =
@@ -399,8 +402,8 @@ async fn event_loop(
         events_tx,
         gate_tx,
         done_tx,
-        sch_path,
-        snapshots,
+        post_commit_review,
+        review_fix_rounds,
         pending_gate: None,
         turn_task: None,
     };

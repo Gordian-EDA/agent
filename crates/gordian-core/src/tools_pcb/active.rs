@@ -5,13 +5,13 @@ use std::path::PathBuf;
 use kicad_ipc::snapshot::{ImportedBoard, IpcBoardSnapshot};
 use pcb_place::placement::Placement;
 
-use crate::tools::PcbToolCtx;
+use crate::AgentRuntime;
 
 /// Save the active KiCAD board and return its project PCB path.
-pub fn save_live_board(ctx: &PcbToolCtx) -> std::result::Result<PathBuf, String> {
+pub fn save_live_board(ctx: &AgentRuntime) -> std::result::Result<PathBuf, String> {
     let path = ctx.pcb_path();
     if !path.exists() {
-        return Err("no board exists yet — run derive_board first".to_owned());
+        return Err("no board exists yet — run regenerate_board first".to_owned());
     }
     ctx.kicad()
         .with_session(&path, |session| session.kicad().save())
@@ -20,14 +20,14 @@ pub fn save_live_board(ctx: &PcbToolCtx) -> std::result::Result<PathBuf, String>
 }
 
 /// Read the active board as a routing problem.
-pub fn board_problem(ctx: &PcbToolCtx) -> std::result::Result<IpcBoardSnapshot, String> {
+pub fn board_problem(ctx: &AgentRuntime) -> std::result::Result<IpcBoardSnapshot, String> {
     read_snapshot(ctx)
 }
 
-fn read_snapshot(ctx: &PcbToolCtx) -> std::result::Result<IpcBoardSnapshot, String> {
+fn read_snapshot(ctx: &AgentRuntime) -> std::result::Result<IpcBoardSnapshot, String> {
     let path = ctx.pcb_path();
     if !path.exists() {
-        return Err("no board exists yet — run derive_board first".to_owned());
+        return Err("no board exists yet — run regenerate_board first".to_owned());
     }
     let mut last_ready_err = None;
     for _ in 0..6 {

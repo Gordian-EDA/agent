@@ -4,20 +4,20 @@
 //! `messages` slice it receives per call, so the tests assert on what the model
 //! would actually see.
 //!
-//! The tools the loop drives still need KiCAD (via [`PcbToolCtx::detect_for_test`]);
+//! The tools the loop drives still need KiCAD (via [`AgentRuntime::detect_for_test`]);
 //! all tests SKIP gracefully when no KiCAD is detected.
 
 use std::sync::{Arc, Mutex};
 
+use gordian_core::AgentRuntime;
 use gordian_core::prompts::system_prompt;
 use gordian_core::testing::{ScriptedClient, final_text};
-use gordian_core::tools::PcbToolCtx;
 use gordian_core::{Agent, AutoApprove, ChatMessage, ChatRole, ContentPart};
 
-/// Build an agent over a [`PcbToolCtx`] + a recording client, returning the agent
+/// Build an agent over a [`AgentRuntime`] + a recording client, returning the agent
 /// and the shared handle to the recorded `messages` slices.
 fn recording_agent(
-    ctx: PcbToolCtx,
+    ctx: AgentRuntime,
     completions: Vec<gordian_core::StreamEnd>,
 ) -> (Agent<ScriptedClient>, Arc<Mutex<Vec<Vec<ChatMessage>>>>) {
     let (client, seen) = ScriptedClient::recording(completions);
@@ -36,8 +36,8 @@ fn text_of(m: &ChatMessage) -> String {
         .collect()
 }
 
-fn ctx() -> Option<PcbToolCtx> {
-    PcbToolCtx::detect_for_test()
+fn ctx() -> Option<AgentRuntime> {
+    AgentRuntime::detect_for_test()
 }
 
 #[tokio::test]

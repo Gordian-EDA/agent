@@ -5,7 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
-use gordian_core::tools::{PcbToolCtx, run_tool};
+use gordian_core::AgentRuntime;
+use gordian_core::tools::run_tool;
 use serde_json::{Value, json};
 
 fn footprint_dir() -> PathBuf {
@@ -19,7 +20,7 @@ fn circuits_dir() -> PathBuf {
 }
 
 fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
-    let ctx = match PcbToolCtx::with_footprint_dir_for_test(fp_dir.to_path_buf()) {
+    let ctx = match AgentRuntime::with_footprint_dir_for_test(fp_dir.to_path_buf()) {
         Some(c) => c,
         None => return json!({ "name": name, "error": "no footprint index / KiCAD env" }),
     };

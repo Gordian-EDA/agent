@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use pcb_place::placement::PlacementHints;
 use pcb_place::placement::{PlaceReport, PlaceResult};
 
-use crate::tools::PcbToolCtx;
+use crate::AgentRuntime;
 
 use super::place::place_problem_from_snapshot;
 
@@ -16,7 +16,7 @@ use super::place::place_problem_from_snapshot;
 ///
 /// `view` may be `"placed"` or `"routed"`. When omitted the default is
 /// `"routed"` when the live board has copper, `"placed"` otherwise.
-pub fn render_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+pub fn render_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // ── resolve view ─────────────────────────────────────────────────────────
     let board = super::active::board_problem(ctx).ok();
     let has_route = board
@@ -102,7 +102,7 @@ pub fn render_board(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     };
 
     // ── rasterize + persist ──────────────────────────────────────────────────
-    let png = crate::render::svg_to_png(&svg, crate::tools::RENDER_MAX_PX)?;
+    let png = crate::render::svg_to_png(&svg, ctx.config().tools.render_max_px)?;
     let path = ctx.workspace().next_render_path()?;
     std::fs::write(&path, &png).with_context(|| format!("writing render to {}", path.display()))?;
 

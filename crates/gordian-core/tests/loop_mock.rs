@@ -1,19 +1,19 @@
 //! Agent-loop tests with a SCRIPTED client (no network), driving the REAL KiCAD
-//! tools via the KiCAD tools (a real `PcbToolCtx`).
+//! tools via the KiCAD tools (a real `AgentRuntime`).
 //!
 //! [`ScriptedClient`] returns a fixed `Vec<StreamEnd>`, one per `complete()`
 //! call in order, so the loop's control flow (tool dispatch → result feedback →
 //! apply-gate → final text) is exercised deterministically. The real tools the
-//! loop drives still need KiCAD (via [`PcbToolCtx::detect_for_test`]); all tests
+//! loop drives still need KiCAD (via [`AgentRuntime::detect_for_test`]); all tests
 //! SKIP gracefully when no KiCAD is detected.
 
+use gordian_core::AgentRuntime;
 use gordian_core::prompts::system_prompt;
 use gordian_core::testing::{ScriptedClient, final_text, tool_call};
-use gordian_core::tools::PcbToolCtx;
 use gordian_core::{Agent, AutoApprove};
 
-/// Build an agent over a [`PcbToolCtx`] and a scripted client.
-fn agent(ctx: PcbToolCtx, completions: Vec<gordian_core::StreamEnd>) -> Agent<ScriptedClient> {
+/// Build an agent over a [`AgentRuntime`] and a scripted client.
+fn agent(ctx: AgentRuntime, completions: Vec<gordian_core::StreamEnd>) -> Agent<ScriptedClient> {
     Agent::new(ScriptedClient::new(completions), ctx, system_prompt())
 }
 
@@ -46,7 +46,7 @@ fn script() -> Vec<gordian_core::StreamEnd> {
 
 #[tokio::test]
 async fn loop_runs_tools_and_gates_apply_on_yes() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -82,7 +82,7 @@ async fn stall_after_research_is_nudged_until_it_commits() {
     // The bug: a model that RESEARCHES (search_symbols) then tries to stop with
     // a text-only turn ships NOTHING (applied stays false). The loop must
     // re-prompt it to finish + commit, so it lands the design instead.
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -129,7 +129,7 @@ async fn stall_nudge_is_bounded_and_gives_up() {
     // not loop forever: at most MAX_COMMIT_NUDGES (2) re-prompts, then the turn
     // returns honestly unapplied. The script ends after the 3rd stop; if the loop
     // nudged a 3rd time it would exhaust the script and error.
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -158,7 +158,7 @@ async fn stall_nudge_is_bounded_and_gives_up() {
 
 #[tokio::test]
 async fn loop_rejects_apply_on_no_and_does_not_write() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };

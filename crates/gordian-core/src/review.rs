@@ -9,8 +9,8 @@
 //!
 //! A single LLM pass has run-to-run variance and a narrow attention span;
 //! diverse lenses each catch different fault classes, which beats repeating one
-//! prompt. JSON retries are opt-in via `GORDIAN_REVIEW_RETRY_JSON=1`; a total
-//! parse failure degrades to `(0.0, [])` (conservative — nothing actionable).
+//! prompt. JSON retries are caller-controlled; a total parse failure degrades to
+//! `(0.0, [])` (conservative — nothing actionable).
 
 use crate::llm::{Binary, ChatMessage, ContentPart, MessageContent, Provider, completed_text};
 use anyhow::Result;
@@ -31,7 +31,7 @@ pub async fn review(
     subject: &str,
 ) -> Result<(f64, Vec<String>)> {
     let prompt = format!("Intended circuit: {intent}\n\nNetlist:\n{subject}");
-    review_ensemble(client, system, lenses, &prompt, None).await
+    review_ensemble(client, system, lenses, &prompt, None, false).await
 }
 
 /// One independent LAYOUT (vision) review pass: the same diverse-lens ensemble,
@@ -50,20 +50,46 @@ pub async fn review_image(
     prompt: &str,
     image: Binary,
 ) -> Result<(f64, Vec<String>)> {
-    review_ensemble(client, system, lenses, prompt, Some(image)).await
+    review_ensemble(client, system, lenses, prompt, Some(image), false).await
+}
+
+/// Same as [`review`], but with explicit JSON retry control.
+pub async fn review_with_retry(
+    client: &dyn Provider,
+    system: &str,
+    lenses: &[&str],
+    intent: &str,
+    subject: &str,
+    retry_json: bool,
+) -> Result<(f64, Vec<String>)> {
+    let prompt = format!("Intended circuit: {intent}\n\nNetlist:\n{subject}");
+    review_ensemble(client, system, lenses, &prompt, None, retry_json).await
+}
+
+/// Same as [`review_image`], but with explicit JSON retry control.
+pub async fn review_image_with_retry(
+    client: &dyn Provider,
+    system: &str,
+    lenses: &[&str],
+    prompt: &str,
+    image: Binary,
+    retry_json: bool,
+) -> Result<(f64, Vec<String>)> {
+    review_ensemble(client, system, lenses, prompt, Some(image), retry_json).await
 }
 
 /// The shared lens loop behind [`review`] (text) and [`review_image`] (vision):
 /// for each lens, run a FRESH history-free completion over `prompt` (plus the
 /// optional `image`), parse its verdict, and union the high-confidence defects.
-/// By default each lens runs once; set `GORDIAN_REVIEW_RETRY_JSON=1` to retry a
-/// lens once on malformed JSON. Degrades to `(0.0, [])` if NO lens ever parsed.
+/// By default each lens runs once; callers may enable one retry on malformed
+/// JSON. Degrades to `(0.0, [])` if NO lens ever parsed.
 async fn review_ensemble(
     client: &dyn Provider,
     system: &str,
     lenses: &[&str],
     prompt: &str,
     image: Option<Binary>,
+    retry_json: bool,
 ) -> Result<(f64, Vec<String>)> {
     let msgs = [match &image {
         Some(img) => ChatMessage::user(MessageContent::from_parts(vec![
@@ -85,11 +111,7 @@ async fn review_ensemble(
         let msgs = msgs.clone();
         async move {
             let mut parsed = None;
-            let attempts = if std::env::var_os("GORDIAN_REVIEW_RETRY_JSON").is_some() {
-                2
-            } else {
-                1
-            };
+            let attempts = if retry_json { 2 } else { 1 };
             for _ in 0..attempts {
                 let end = client.complete(&lens_system, &msgs, &[]).await?;
                 if let Some(v) = extract_json(&completed_text(&end)) {
@@ -345,10 +367,16 @@ FINAL_JSON:
             max_in_flight: Arc::clone(&max_in_flight),
         };
 
-        let (_score, defects) =
-            review_ensemble(&reviewer, "sys", &["", "power", "digital"], "prompt", None)
-                .await
-                .unwrap();
+        let (_score, defects) = review_ensemble(
+            &reviewer,
+            "sys",
+            &["", "power", "digital"],
+            "prompt",
+            None,
+            false,
+        )
+        .await
+        .unwrap();
 
         assert!(defects.is_empty());
         assert!(

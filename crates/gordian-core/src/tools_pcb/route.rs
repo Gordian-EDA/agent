@@ -8,7 +8,6 @@ use serde_json::{Value, json};
 
 use drc_lint::connectivity::Violation as ConnViolation;
 use drc_lint::lint::{DrcViolation, lint};
-use kicad_ipc::proto::kiapi::board::types::Net as KiNet;
 use kicad_ipc::snapshot::ImportedPart;
 use negotiated_mesh::pathing::global_route;
 use negotiated_mesh::pipeline::route_auto;
@@ -16,7 +15,7 @@ use pcb_model::{
     FailedNet, LayerRef, Point2, RouteProblem, RouteResult, RouteSolution, Trace, ViaSpan,
 };
 
-use crate::tools::PcbToolCtx;
+use crate::AgentRuntime;
 
 // ── route_board ──────────────────────────────────────────────────────────────
 
@@ -156,14 +155,14 @@ fn escape_bottleneck(
     (total >= 3 && c * 100 >= total * 60).then_some((r, fp, c, total))
 }
 
-pub fn route_board(_input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+pub fn route_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     match route_live_board(ctx) {
         Ok(out) => Ok(out),
         Err(err) => Ok(json!({ "error": err })),
     }
 }
 
-fn route_live_board(ctx: &PcbToolCtx) -> std::result::Result<Value, String> {
+fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     let board = super::active::board_problem(ctx)?;
     if is_seed_placement(&board.imported.bounds, &board.imported.parts) {
         return Err("board has only the initial seed-row footprint positions — run place_board before route_board".to_owned());
@@ -437,28 +436,17 @@ fn quantize_mm(v: f64) -> i64 {
 }
 
 fn write_route(
-    ctx: &PcbToolCtx,
+    ctx: &AgentRuntime,
     rp: &RouteProblem,
     solution: &RouteSolution,
     layer_names: &[String],
 ) -> std::result::Result<(), kicad_ipc::Error> {
     let path = ctx.pcb_path();
-    let nets = ctx.kicad().with_session(&path, |session| {
-        let nets: BTreeMap<String, KiNet> = session
+    ctx.kicad().with_session(&path, |session| {
+        session
             .kicad()
-            .net_list()?
-            .into_iter()
-            .map(|n| (n.name.clone(), n))
-            .collect();
-        session.kicad().save()?;
-        Ok(nets)
-    })?;
-    ctx.close_kicad_session();
-
-    let items = route_items_for_file(rp, solution, layer_names, &nets)
-        .map_err(|e| kicad_ipc::Error::Spawn(format!("could not build route S-expr: {e}")))?;
-    append_route_items_to_board(&path, &items)
-        .map_err(|e| kicad_ipc::Error::Spawn(format!("could not write routed board file: {e}")))
+            .create_route_solution(rp, solution, layer_names)
+    })
 }
 
 fn is_seed_placement(bounds: &pcb_model::Rect, parts: &[ImportedPart]) -> bool {
@@ -483,164 +471,9 @@ fn is_seed_placement(bounds: &pcb_model::Rect, parts: &[ImportedPart]) -> bool {
     })
 }
 
-fn route_items_for_file(
-    problem: &RouteProblem,
-    solution: &RouteSolution,
-    layer_names: &[String],
-    nets: &BTreeMap<String, KiNet>,
-) -> std::result::Result<String, String> {
-    let mut out = String::new();
-    let mut uuid_idx = 1usize;
-    for trace in &solution.traces {
-        let layer = layer_name(&trace.layer, problem.layer_count, layer_names);
-        let net = net_code(nets, &trace.connection)?;
-        for segment in trace.path.windows(2) {
-            out.push_str("  ");
-            push_segment_sexpr(
-                &mut out,
-                &segment[0],
-                &segment[1],
-                trace.width,
-                layer,
-                net,
-                uuid_idx,
-            );
-            uuid_idx += 1;
-            out.push('\n');
-        }
-    }
-    for via in &solution.vias {
-        let net = net_code(nets, &via.connection)?;
-        let (from, to) = via_span_layer_names(&via.span, layer_names);
-        out.push_str("  ");
-        push_via_sexpr(&mut out, via, from, to, net, uuid_idx);
-        uuid_idx += 1;
-        out.push('\n');
-    }
-    Ok(out)
-}
-
-fn append_route_items_to_board(
-    path: &std::path::Path,
-    items: &str,
-) -> std::result::Result<(), String> {
-    if items.trim().is_empty() {
-        return Ok(());
-    }
-    let mut text = std::fs::read_to_string(path)
-        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
-    let insert_at = text
-        .rfind("\n)")
-        .ok_or_else(|| format!("{} is not a KiCAD board S-expression", path.display()))?;
-    let mut insert = String::new();
-    if !text[..insert_at].ends_with('\n') {
-        insert.push('\n');
-    }
-    insert.push_str(items);
-    text.insert_str(insert_at, &insert);
-    std::fs::write(path, text).map_err(|e| format!("could not write {}: {e}", path.display()))
-}
-
-fn push_segment_sexpr(
-    out: &mut String,
-    start: &Point2,
-    end: &Point2,
-    width: f64,
-    layer: &str,
-    net: i32,
-    uuid_idx: usize,
-) {
-    out.push_str("(segment");
-    push_xy(out, "start", start);
-    push_xy(out, "end", end);
-    out.push_str(&format!(
-        " (width {}) (layer \"{}\") (net {}) (uuid \"{}\"))",
-        fmt_mm(width),
-        sexpr_escape(layer),
-        net,
-        route_uuid(uuid_idx),
-    ));
-}
-
-fn push_via_sexpr(
-    out: &mut String,
-    via: &pcb_model::Via,
-    from_layer: &str,
-    to_layer: &str,
-    net: i32,
-    uuid_idx: usize,
-) {
-    let via_kind = match via.span {
-        ViaSpan::Through => "",
-        ViaSpan::Partial { micro: true, .. } => " micro",
-        ViaSpan::Partial { micro: false, .. } => " blind",
-    };
-    out.push_str(&format!("(via{via_kind}"));
-    push_xy(out, "at", &via.at);
-    out.push_str(&format!(
-        " (size {}) (drill {}) (layers \"{}\" \"{}\") (net {}) (uuid \"{}\"))",
-        fmt_mm(via.diameter),
-        fmt_mm(via.drill),
-        sexpr_escape(from_layer),
-        sexpr_escape(to_layer),
-        net,
-        route_uuid(uuid_idx),
-    ));
-}
-
-fn push_xy(out: &mut String, tag: &str, p: &Point2) {
-    out.push_str(&format!(" ({tag} {} {})", fmt_mm(p.x), fmt_mm(p.y)));
-}
-
-fn route_uuid(idx: usize) -> String {
-    format!("00000000-0000-4000-8000-{idx:012x}")
-}
-
-fn fmt_mm(v: f64) -> String {
-    let mut s = format!("{v:.6}");
-    while s.contains('.') && s.ends_with('0') {
-        s.pop();
-    }
-    if s.ends_with('.') {
-        s.push('0');
-    }
-    s
-}
-
-fn sexpr_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn net_code(nets: &BTreeMap<String, KiNet>, name: &str) -> std::result::Result<i32, String> {
-    nets.get(name)
-        .and_then(|net| net.code.as_ref().map(|code| code.value))
-        .ok_or_else(|| format!("KiCAD board has no net code for `{name}`"))
-}
-
-fn layer_name<'a>(layer: &LayerRef, layer_count: u32, layer_names: &'a [String]) -> &'a str {
-    let idx = layer.index(layer_count).unwrap_or(0) as usize;
-    layer_names.get(idx).map(String::as_str).unwrap_or("F.Cu")
-}
-
-fn via_span_layer_names<'a>(span: &ViaSpan, layer_names: &'a [String]) -> (&'a str, &'a str) {
-    match *span {
-        ViaSpan::Through => {
-            let top = layer_names.first().map(String::as_str).unwrap_or("F.Cu");
-            let bottom = layer_names.last().map(String::as_str).unwrap_or("B.Cu");
-            (top, bottom)
-        }
-        ViaSpan::Partial { from, to, .. } => {
-            let a = layer_names.get(from as usize).map(String::as_str);
-            let b = layer_names.get(to as usize).map(String::as_str);
-            (a.unwrap_or("F.Cu"), b.unwrap_or("B.Cu"))
-        }
-    }
-}
-
 #[cfg(test)]
 mod escape_bottleneck_tests {
     use super::*;
-    use kicad_ipc::proto::kiapi::board::types::NetCode;
 
     fn part(reference: &str, footprint: &str, nets: &[(&str, &str)]) -> ImportedPart {
         ImportedPart {
@@ -696,60 +529,6 @@ mod escape_bottleneck_tests {
         // "<N plane stitching vias>" is not a net name → matches no pad → no bottleneck.
         let parts = vec![part("U1", "fp", &[("1", "GND")])];
         assert!(escape_bottleneck(&parts, &failed(&["<7 plane stitching vias>"])).is_none());
-    }
-
-    #[test]
-    fn via_routes_are_emitted_as_native_kicad_pcb_items() {
-        let mut nets = BTreeMap::new();
-        nets.insert(
-            "GND".to_string(),
-            KiNet {
-                code: Some(NetCode { value: 7 }),
-                name: "GND".to_string(),
-            },
-        );
-        let problem = RouteProblem {
-            layer_count: 2,
-            min_trace_width: 0.2,
-            obstacles: vec![],
-            connections: vec![],
-            bounds: pcb_model::Rect {
-                min_x: 0.0,
-                min_y: 0.0,
-                max_x: 20.0,
-                max_y: 20.0,
-            },
-            clearance: 0.2,
-            via_diameter: 0.6,
-            via_drill: 0.3,
-            net_widths: Default::default(),
-            outline: None,
-            escape_layers: Default::default(),
-        };
-        let solution = RouteSolution {
-            traces: vec![Trace {
-                connection: "GND".to_string(),
-                layer: LayerRef::top(),
-                width: 0.25,
-                path: vec![Point2 { x: 1.0, y: 2.0 }, Point2 { x: 3.0, y: 4.0 }],
-            }],
-            vias: vec![pcb_model::Via {
-                connection: "GND".to_string(),
-                at: Point2 { x: 3.0, y: 4.0 },
-                diameter: 0.6,
-                drill: 0.3,
-                span: ViaSpan::Through,
-            }],
-        };
-
-        let sexpr =
-            route_items_for_file(&problem, &solution, &["F.Cu".into(), "B.Cu".into()], &nets)
-                .unwrap();
-
-        assert!(sexpr.contains("(segment (start 1.0 2.0) (end 3.0 4.0)"));
-        assert!(sexpr.contains("(width 0.25) (layer \"F.Cu\") (net 7)"));
-        assert!(sexpr.contains("(via (at 3.0 4.0) (size 0.6) (drill 0.3)"));
-        assert!(sexpr.contains("(layers \"F.Cu\" \"B.Cu\") (net 7)"));
     }
 
     #[test]

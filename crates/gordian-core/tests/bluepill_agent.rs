@@ -7,16 +7,17 @@
 //! self-repair off the structured diagnostics).
 //!
 //! It is `#[ignore]` because it costs live LLM round-trips (a minute+) and needs
-//! both a Bedrock token (`AWS_BEARER_TOKEN_BEDROCK`, e.g. via a local `.env`) and
-//! a KiCAD install. It also SKIPs gracefully when either is absent, so an
+//! a platform Gordian TOML config with `llm.model` / `llm.apiKey` and a KiCAD
+//! install. It also SKIPs gracefully when either is absent, so an
 //! accidental `--ignored` run on a machine without credentials does not fail.
 //!
 //! Run it manually:
-//!   set -a; source .env; set +a
 //!   cargo test -p gordian-core --test bluepill_agent -- --ignored --nocapture
 
+mod common;
+
+use gordian_core::AgentRuntime;
 use gordian_core::prompts::system_prompt;
-use gordian_core::tools::PcbToolCtx;
 use gordian_core::{Agent, AutoApprove};
 use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
@@ -33,7 +34,7 @@ async fn bluepill_founding_prompt_yields_erc_clean_schematic() {
         return;
     };
     // SKIP gracefully if no LLM credentials are configured.
-    let client = match gordian_core::GenaiProvider::from_env() {
+    let client = match common::live_provider_from_config() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("SKIP: no LLM client ({e})");
@@ -43,7 +44,7 @@ async fn bluepill_founding_prompt_yields_erc_clean_schematic() {
 
     // Fresh temp project — the agent writes design.kicad_sch into it.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let ctx = PcbToolCtx::for_project(env.clone(), tempdir.path().to_path_buf())
+    let ctx = AgentRuntime::for_project(env.clone(), tempdir.path().to_path_buf())
         .expect("tool context for temp project");
     let sch_path = ctx.sch_path().to_path_buf();
     assert!(!sch_path.exists(), "the project starts with no schematic");

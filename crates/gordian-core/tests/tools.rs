@@ -1,12 +1,13 @@
 //! Deterministic tests for the six-tool registry (no LLM, no network).
 //!
 //! Every test is SKIP-graceful: if no KiCAD installation is detected,
-//! [`PcbToolCtx::detect_for_test`] returns `None` and the test prints `SKIP` and
+//! [`AgentRuntime::detect_for_test`] returns `None` and the test prints `SKIP` and
 //! returns rather than failing. The tests that touch real symbol libraries and
 //! `kicad-cli` therefore only assert on machines with KiCAD installed (the
 //! project's test environment has KiCAD 10.0.3).
 
-use gordian_core::tools::{PcbToolCtx, run_tool, tool_defs};
+use gordian_core::AgentRuntime;
+use gordian_core::tools::{run_tool, tool_defs};
 
 /// A tiny self-contained valid design: one resistor between two named nets.
 const TINY_YAML: &str =
@@ -14,7 +15,7 @@ const TINY_YAML: &str =
 
 #[test]
 fn search_symbols_tool_finds_stm32() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -32,7 +33,7 @@ fn search_symbols_tool_finds_stm32() {
 
 #[test]
 fn validate_design_tool_reports_errors_for_bad_part() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -48,7 +49,7 @@ fn validate_design_tool_reports_errors_for_bad_part() {
 
 #[test]
 fn get_symbol_info_tool_returns_full_pin_table_for_stm32() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -75,7 +76,7 @@ fn get_symbol_info_tool_returns_full_pin_table_for_stm32() {
 
 #[test]
 fn get_symbol_info_tool_suggests_for_unknown_part() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -94,7 +95,7 @@ fn get_symbol_info_tool_suggests_for_unknown_part() {
 
 #[test]
 fn apply_design_dry_run_returns_diff_without_writing() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -124,7 +125,7 @@ fn apply_design_dry_run_returns_diff_without_writing() {
 
 #[test]
 fn apply_design_commit_writes_file_and_runs_erc() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -155,15 +156,22 @@ fn apply_design_commit_writes_file_and_runs_erc() {
 }
 
 #[test]
-fn get_design_tool_notes_absent_schematic() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+fn read_schematic_draft_notes_absent_schematic() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
-    let out = run_tool("get_design", serde_json::json!({}), &ctx).unwrap();
-    // No schematic yet: empty YAML with a note.
-    assert_eq!(out["yaml"], serde_json::json!(""));
-    assert!(out.get("note").is_some(), "expected a note: {out}");
+    let out = run_tool(
+        "read_schematic",
+        serde_json::json!({ "source": "draft" }),
+        &ctx,
+    )
+    .unwrap();
+    let text = out.as_str().expect("plain text read_schematic result");
+    assert!(text.contains("source: draft"), "{text}");
+    assert!(text.contains("stale: false"), "{text}");
+    assert!(text.contains("note: no schematic yet"), "{text}");
+    assert!(text.contains("```yaml\n\n```"), "{text}");
 }
 
 #[test]
@@ -172,10 +180,9 @@ fn defs_lists_all_tools() {
         .into_iter()
         .map(|d| d.name.to_string())
         .collect();
-    for expected in [
+    let expected_tools = [
         "search_symbols",
         "get_symbol_info",
-        "get_design",
         "validate_design",
         "apply_design",
         "run_erc",
@@ -195,19 +202,20 @@ fn defs_lists_all_tools() {
         "check_board",
         "export_fab",
         "review_design",
-        "derive_board",
+        "regenerate_board",
         "assign_footprint",
         "open_board",
         "board_state",
         "move_part",
         "route_track",
         "set_net_width",
-    ] {
+    ];
+    for expected in expected_tools {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
     // The Board-DSL authoring surface (design_board/import_board) and the old
     // batch mutators are GONE — the board is seeded from the schematic
-    // (derive_board) and edited INTERACTIVELY over KiCAD IPC (open_board +
+    // (regenerate_board) and edited INTERACTIVELY over KiCAD IPC (open_board +
     // move_part/route_track/set_net_width).
     for gone in [
         "set_placement_hints",
@@ -225,8 +233,9 @@ fn defs_lists_all_tools() {
     }
     assert_eq!(
         names.len(),
-        29,
-        "expected exactly 29 tools, got {}: {:?}",
+        expected_tools.len(),
+        "expected exactly {} tools, got {}: {:?}",
+        expected_tools.len(),
         names.len(),
         names
     );
@@ -256,7 +265,7 @@ fn defs_lists_all_tools() {
 
 #[test]
 fn project_info_reports_paths_and_state() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -270,8 +279,6 @@ fn project_info_reports_paths_and_state() {
         out["project_dir"],
         serde_json::json!(ctx.project_dir().display().to_string())
     );
-    assert!(out["snapshots"].is_number(), "snapshot count: {out}");
-
     // After a commit the same tool reports the file as present.
     run_tool(
         "apply_design",
@@ -288,22 +295,22 @@ const TWO_RES_PCB: &str = include_str!("fixtures/two_res.kicad_pcb");
 
 #[test]
 fn export_fab_errors_without_a_board() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
-    // No board yet → a recoverable error pointing at derive_board.
+    // No board yet → a recoverable error pointing at regenerate_board.
     let out = run_tool("export_fab", serde_json::json!({}), &ctx).unwrap();
     let err = out["error"].as_str().unwrap_or_default();
     assert!(
-        err.contains("derive_board"),
-        "expected a derive_board hint, got: {out}"
+        err.contains("regenerate_board"),
+        "expected a regenerate_board hint, got: {out}"
     );
 }
 
 #[test]
 fn export_fab_refuses_unclean_board() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -328,7 +335,7 @@ fn export_fab_refuses_unclean_board() {
 
 #[test]
 fn read_schematic_lifts_an_external_file_by_absolute_path() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -341,18 +348,16 @@ fn read_schematic_lifts_an_external_file_by_absolute_path() {
     )
     .unwrap();
     let abs = ctx.sch_path().display().to_string();
-    let out = run_tool("read_schematic", serde_json::json!({ "path": abs }), &ctx).unwrap();
-    let yaml = out["yaml"].as_str().expect("lifted yaml");
-    assert!(yaml.contains("R1"), "lifted yaml carries R1: {yaml}");
-    assert!(
-        out.get("note").is_some(),
-        "reading the project's own schematic is noted: {out}"
-    );
+    let out = run_tool("read_schematic", serde_json::json!({ "source": abs }), &ctx).unwrap();
+    let text = out.as_str().expect("plain text read_schematic result");
+    assert!(text.contains("source: path"), "{text}");
+    assert!(text.contains("path:"), "{text}");
+    assert!(text.contains("R1"), "lifted yaml carries R1: {text}");
 }
 
 #[test]
 fn read_schematic_resolves_relative_to_the_project_dir() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -363,50 +368,51 @@ fn read_schematic_resolves_relative_to_the_project_dir() {
     )
     .unwrap();
     let rel = ctx.sch_path().file_name().unwrap().to_string_lossy();
-    let out = run_tool("read_schematic", serde_json::json!({ "path": rel }), &ctx).unwrap();
+    let out = run_tool("read_schematic", serde_json::json!({ "source": rel }), &ctx).unwrap();
+    let text = out.as_str().expect("plain text read_schematic result");
     assert!(
-        out["yaml"].as_str().is_some_and(|y| y.contains("R1")),
-        "relative path resolves against the project dir: {out}"
+        text.contains("R1"),
+        "relative path resolves against the project dir: {text}"
     );
 }
 
 #[test]
 fn read_schematic_errors_cleanly_for_missing_or_wrong_files() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
 
     let out = run_tool(
         "read_schematic",
-        serde_json::json!({ "path": "/no/such/file.kicad_sch" }),
+        serde_json::json!({ "source": "/no/such/file.kicad_sch" }),
         &ctx,
     )
     .unwrap();
+    let text = out.as_str().expect("plain text read_schematic result");
     assert!(
-        out["error"].as_str().is_some_and(|e| e.contains("no file")),
-        "missing file is a structured error: {out}"
+        text.contains("error: no file"),
+        "missing file is a text error: {text}"
     );
 
     let not_sch = ctx.project_dir().join("readme.txt");
     std::fs::write(&not_sch, "hello").unwrap();
     let out = run_tool(
         "read_schematic",
-        serde_json::json!({ "path": not_sch.display().to_string() }),
+        serde_json::json!({ "source": not_sch.display().to_string() }),
         &ctx,
     )
     .unwrap();
+    let text = out.as_str().expect("plain text read_schematic result");
     assert!(
-        out["error"]
-            .as_str()
-            .is_some_and(|e| e.contains(".kicad_sch")),
-        "wrong extension is a structured error: {out}"
+        text.contains(".kicad_sch"),
+        "wrong extension is a text error: {text}"
     );
 }
 
 #[test]
 fn apply_design_commit_reports_the_written_path() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -425,7 +431,7 @@ fn apply_design_commit_reports_the_written_path() {
 
 #[test]
 fn unknown_tool_is_an_error() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -434,7 +440,7 @@ fn unknown_tool_is_an_error() {
 
 #[test]
 fn draft_lifecycle_create_edit_apply() {
-    let Some(ctx) = gordian_core::tools::PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = gordian_core::AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
@@ -500,15 +506,21 @@ blocks:
     let out = run_tool("apply_design", serde_json::json!({"commit": true}), &ctx).unwrap();
     assert_eq!(out["written"], serde_json::json!(true));
 
-    // get_design now prefers the draft and reports its source.
-    let out = run_tool("get_design", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(out["source"], serde_json::json!("draft"));
-    assert!(out["yaml"].as_str().unwrap().contains("2.2k"));
+    // read_schematic(draft) prefers the draft and returns plain YAML text.
+    let out = run_tool(
+        "read_schematic",
+        serde_json::json!({ "source": "draft" }),
+        &ctx,
+    )
+    .unwrap();
+    let text = out.as_str().expect("plain text read_schematic result");
+    assert!(text.contains("source: draft"), "{text}");
+    assert!(text.contains("2.2k"), "{text}");
 }
 
 #[test]
-fn get_design_seeds_draft_from_lift_and_flags_staleness() {
-    let Some(ctx) = gordian_core::tools::PcbToolCtx::detect_for_test() else {
+fn read_schematic_draft_seeds_from_lift_and_flags_staleness() {
+    let Some(ctx) = gordian_core::AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
@@ -529,23 +541,44 @@ blocks:
     )
     .unwrap();
 
-    // get_design lifts AND seeds the draft.
-    let out = run_tool("get_design", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(out["source"], serde_json::json!("lifted"));
-    let out2 = run_tool("get_design", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(out2["source"], serde_json::json!("draft"));
-    assert_eq!(out2.get("stale"), None);
+    // read_schematic(draft) lifts AND seeds the draft.
+    let out = run_tool(
+        "read_schematic",
+        serde_json::json!({ "source": "draft" }),
+        &ctx,
+    )
+    .unwrap();
+    let text = out.as_str().expect("plain text read_schematic result");
+    assert!(text.contains("source: draft"), "{text}");
+    assert!(text.contains("stale: false"), "{text}");
+    assert!(text.contains("draft seeded from the schematic"), "{text}");
+
+    let out2 = run_tool(
+        "read_schematic",
+        serde_json::json!({ "source": "draft" }),
+        &ctx,
+    )
+    .unwrap();
+    let text2 = out2.as_str().expect("plain text read_schematic result");
+    assert!(text2.contains("source: draft"), "{text2}");
+    assert!(text2.contains("stale: false"), "{text2}");
 
     // Out-of-band sch edit -> staleness surfaces.
     let sch = std::fs::read_to_string(ctx.sch_path()).unwrap();
     std::fs::write(ctx.sch_path(), format!("{sch}\n")).unwrap();
-    let out3 = run_tool("get_design", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(out3["stale"], serde_json::json!(true));
+    let out3 = run_tool(
+        "read_schematic",
+        serde_json::json!({ "source": "draft" }),
+        &ctx,
+    )
+    .unwrap();
+    let text3 = out3.as_str().expect("plain text read_schematic result");
+    assert!(text3.contains("stale: true"), "{text3}");
 }
 
 #[test]
 fn render_schematic_returns_png_and_image_path() {
-    let Some(ctx) = gordian_core::tools::PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = gordian_core::AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
@@ -584,7 +617,7 @@ blocks:
 
 #[test]
 fn apply_design_surfaces_layout_warnings() {
-    let Some(ctx) = gordian_core::tools::PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = gordian_core::AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
     };
@@ -651,9 +684,9 @@ fn staged_footprint_dir() -> (tempfile::TempDir, std::path::PathBuf) {
 
 /// A ctx whose footprint index is the staged vendored fixtures. The returned
 /// TempDir guard must outlive the ctx (it holds the staged `.pretty` dir).
-fn fixture_ctx() -> (PcbToolCtx, tempfile::TempDir) {
+fn fixture_ctx() -> (AgentRuntime, tempfile::TempDir) {
     let (guard, dir) = staged_footprint_dir();
-    let ctx = PcbToolCtx::with_footprint_dir_for_test(dir).expect("fixture ctx");
+    let ctx = AgentRuntime::with_footprint_dir_for_test(dir).expect("fixture ctx");
     (ctx, guard)
 }
 
@@ -690,7 +723,10 @@ blocks:
     components:
       R1:
         part: R
-        between: [A, B]
+        between: [NET_A, NET_B]
+      R2:
+        part: R
+        between: [NET_A, NET_B]
 ";
     let created = run_tool(
         "create_design",
@@ -714,15 +750,27 @@ blocks:
     )
     .unwrap();
     assert_eq!(
-        assigned["draft_written"],
+        assigned["ok"],
         serde_json::json!(true),
         "assign footprint: {assigned}"
     );
+    assert_eq!(assigned["reference"], serde_json::json!("R1"));
     assert_eq!(
-        assigned["next_step"],
-        serde_json::json!(
-            "call apply_design with commit=true to write the updated schematic, then call derive_board again"
-        )
+        assigned["footprint"],
+        serde_json::json!("Fixtures:R_0603_1608Metric")
+    );
+    assert_eq!(assigned["edit"], serde_json::json!("inserted"));
+    assert_eq!(
+        assigned["next"],
+        serde_json::json!("apply_design({commit:true}), then regenerate_board")
+    );
+    assert!(
+        assigned.get("diagnostics").is_none(),
+        "compact success should omit diagnostics: {assigned}"
+    );
+    assert!(
+        assigned.get("draft_written").is_none(),
+        "compact success should omit draft_written: {assigned}"
     );
     let draft = ctx
         .workspace()
@@ -735,8 +783,8 @@ blocks:
 }
 
 #[test]
-fn derive_board_rejects_unapplied_draft_footprints() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+fn regenerate_board_rejects_unapplied_draft_footprints() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };
@@ -749,9 +797,15 @@ fn derive_board_rejects_unapplied_draft_footprints() {
     .unwrap();
     assert_eq!(written["written"], serde_json::json!(true), "{written}");
 
-    let draft = run_tool("get_design", serde_json::json!({}), &ctx).unwrap();
+    let draft = run_tool(
+        "read_schematic",
+        serde_json::json!({ "source": "draft" }),
+        &ctx,
+    )
+    .unwrap();
+    let draft = draft.as_str().expect("plain text read_schematic result");
     assert!(
-        draft["yaml"].as_str().is_some_and(|y| y.contains("R1")),
+        draft.contains("R1"),
         "draft seeded from committed schematic: {draft}"
     );
     let assigned = run_tool(
@@ -765,13 +819,13 @@ fn derive_board_rejects_unapplied_draft_footprints() {
     .unwrap();
     assert_eq!(assigned["ok"], serde_json::json!(true), "{assigned}");
 
-    let out = run_tool("derive_board", serde_json::json!({}), &ctx).unwrap();
+    let out = run_tool("regenerate_board", serde_json::json!({}), &ctx).unwrap();
     assert_eq!(out["ok"], serde_json::json!(false), "{out}");
     assert!(
         out["unapplied_draft_footprints"]
             .as_array()
             .is_some_and(|changes| changes.iter().any(|c| c["reference"] == "R1")),
-        "derive_board should ask to apply draft footprint changes first: {out}"
+        "regenerate_board should ask to apply draft footprint changes first: {out}"
     );
     assert!(
         out["note"]
@@ -782,11 +836,11 @@ fn derive_board_rejects_unapplied_draft_footprints() {
 }
 
 #[test]
-#[ignore = "live KiCAD IPC: derive_board opens the project board through the session manager"]
-fn derive_board_seeds_board_from_schematic_then_assign_footprint() {
+#[ignore = "live KiCAD IPC: regenerate_board opens the project board through the session manager"]
+fn regenerate_board_seeds_board_from_schematic_then_assign_footprint() {
     // Needs a real KiCAD env (lift runs kicad-cli + resolves real footprints).
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
-        eprintln!("SKIP derive_board: no KiCAD env");
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP regenerate_board: no KiCAD env");
         return;
     };
     // Stage the RC-pair fixture as the project's schematic.
@@ -796,15 +850,15 @@ fn derive_board_seeds_board_from_schematic_then_assign_footprint() {
 
     let bounds = serde_json::json!({ "min_x": 0, "max_x": 20, "min_y": 0, "max_y": 12 });
 
-    // derive_board seeds the board directly from the schematic (no DSL/YAML).
+    // regenerate_board seeds the board directly from the schematic (no DSL/YAML).
     let seed = run_tool(
-        "derive_board",
+        "regenerate_board",
         serde_json::json!({ "bounds": bounds }),
         &ctx,
     )
     .unwrap();
     if seed.get("error").is_some() {
-        eprintln!("SKIP derive_board: lift failed (kicad-cli unavailable?): {seed}");
+        eprintln!("SKIP regenerate_board: lift failed (kicad-cli unavailable?): {seed}");
         return;
     }
     assert_eq!(seed["ok"], serde_json::json!(true), "board seeded: {seed}");
@@ -1010,7 +1064,7 @@ fn board_seed_round_trips_as_adapter_json() {
 
 /// Create the standard small board (R1 + U1 + J1, three 2-pin nets) on a fresh
 /// fixture ctx. Returns the ctx and its tempdir guard.
-fn placed_board_ctx() -> (PcbToolCtx, tempfile::TempDir) {
+fn placed_board_ctx() -> (AgentRuntime, tempfile::TempDir) {
     let (ctx, guard) = fixture_ctx();
     let board = serde_json::json!({
         "bounds": { "min_x": 0.0, "max_x": 30.0, "min_y": 0.0, "max_y": 20.0 },
@@ -1032,7 +1086,7 @@ fn placed_board_ctx() -> (PcbToolCtx, tempfile::TempDir) {
     (ctx, guard)
 }
 
-fn skip_unstable_footprint_update(ctx: &PcbToolCtx) -> bool {
+fn skip_unstable_footprint_update(ctx: &AgentRuntime) -> bool {
     if std::env::var_os("GORDIAN_RUN_UNSTABLE_KICAD_IPC").is_some() {
         return false;
     }
@@ -1142,7 +1196,7 @@ fn full_flow_create_place_route_is_clean() {
     if skip_unstable_footprint_update(&ctx) {
         return;
     }
-    struct CloseKicad<'a>(&'a PcbToolCtx);
+    struct CloseKicad<'a>(&'a AgentRuntime);
     impl Drop for CloseKicad<'_> {
         fn drop(&mut self) {
             self.0.close_kicad_session();
@@ -1218,7 +1272,7 @@ fn place_board_after_seed_snapshot_reopen_is_ready() {
     if skip_unstable_footprint_update(&ctx) {
         return;
     }
-    struct CloseKicad<'a>(&'a PcbToolCtx);
+    struct CloseKicad<'a>(&'a AgentRuntime);
     impl Drop for CloseKicad<'_> {
         fn drop(&mut self) {
             self.0.close_kicad_session();
@@ -1325,7 +1379,7 @@ fn render_board_before_create_is_recoverable_error() {
         out["error"]
             .as_str()
             .is_some_and(|e| e.contains("no board")),
-        "render_board before derive_board must be a recoverable error: {out}"
+        "render_board before regenerate_board must be a recoverable error: {out}"
     );
 }
 
@@ -1500,7 +1554,7 @@ fn render_board_default_view_logic() {
 
 #[test]
 fn find_similar_designs_is_absent_safe_and_well_formed() {
-    let Some(ctx) = PcbToolCtx::detect_for_test() else {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
     };

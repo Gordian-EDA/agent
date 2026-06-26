@@ -6,19 +6,16 @@ use serde_json::{Value, json};
 
 use kicad_footprint::{FootprintId, SearchQuery};
 
-use crate::tools::{PcbToolCtx, compile_report, current_sch_text, require_str};
+use crate::AgentRuntime;
+use crate::tools::{compile_report, current_sch_text, require_str};
 
-/// Default number of footprint-search hits returned when `limit` is omitted.
-/// Mirrors `tools::DEFAULT_SEARCH_LIMIT` for the symbol side.
-const DEFAULT_SEARCH_LIMIT: usize = 8;
-
-pub fn search_footprints(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Value> {
+pub fn search_footprints(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Value> {
     let query = require_str(&input, "query")?;
     let limit = input
         .get("limit")
         .and_then(Value::as_u64)
         .map(|n| n as usize)
-        .unwrap_or(DEFAULT_SEARCH_LIMIT);
+        .unwrap_or(ctx.config().tools.default_search_limit);
 
     let hits: Vec<Value> = ctx
         .footprint_catalog()?
@@ -30,7 +27,7 @@ pub fn search_footprints(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Value
     Ok(json!({ "hits": hits }))
 }
 
-pub fn get_footprint_info(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Value> {
+pub fn get_footprint_info(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Value> {
     let lib_id = require_str(&input, "lib_id")?;
     let catalog = ctx.footprint_catalog()?;
 
@@ -111,9 +108,10 @@ fn bbox_json(b: &geom::Rect) -> Value {
 ///
 /// Footprint assignment belongs to the schematic/circuit YAML, not PCB state.
 /// Earlier this helper returned only prose instructions, which live models often
-/// treated as a completed state change and then looped on derive_board. It now
-/// performs the draft edit directly and returns the normal compile report.
-pub fn assign_footprint(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Value> {
+/// treated as a completed state change and then looped on regenerate_board. It now
+/// performs the draft edit directly and returns a compact edit result, adding
+/// compile diagnostics only when the edited draft has errors or warnings.
+pub fn assign_footprint(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Value> {
     let reference = require_str(&input, "reference")?;
     let footprint = require_str(&input, "footprint")?;
     let catalog = ctx.footprint_catalog()?;
@@ -137,7 +135,7 @@ pub fn assign_footprint(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Value>
 
     let Some(draft) = ctx.workspace().read_draft() else {
         return Ok(json!({
-            "error": "no draft exists — call get_design (seeds a draft from the current schematic) or create_design first",
+            "error": "no draft exists — call read_schematic({source:\"draft\"}) (seeds a draft from the current schematic) or create_design first",
         }));
     };
     let (edited, edit_kind) = match patch_footprint(&draft, &reference, &footprint) {
@@ -147,15 +145,22 @@ pub fn assign_footprint(input: Value, ctx: &PcbToolCtx) -> anyhow::Result<Value>
     ctx.workspace()
         .write_draft(&edited, current_sch_text(ctx).as_deref())?;
 
-    let mut report = compile_report(&circuit_lang::compile(&edited, ctx.provider()).diagnostics);
-    report["draft_written"] = json!(true);
-    report["reference"] = json!(reference);
-    report["footprint"] = json!(footprint);
-    report["edit"] = json!(edit_kind);
-    report["next_step"] = json!(
-        "call apply_design with commit=true to write the updated schematic, then call derive_board again"
-    );
-    Ok(report)
+    let report = compile_report(&circuit_lang::compile(&edited, ctx.provider()).diagnostics);
+    let errors = report.get("errors").and_then(Value::as_u64).unwrap_or(0);
+    let warnings = report.get("warnings").and_then(Value::as_u64).unwrap_or(0);
+    let mut out = json!({
+        "ok": errors == 0,
+        "reference": reference,
+        "footprint": footprint,
+        "edit": edit_kind,
+        "next": "apply_design({commit:true}), then regenerate_board",
+    });
+    if errors > 0 || warnings > 0 {
+        out["errors"] = json!(errors);
+        out["warnings"] = json!(warnings);
+        out["diagnostics"] = report["diagnostics"].clone();
+    }
+    Ok(out)
 }
 
 fn patch_footprint(

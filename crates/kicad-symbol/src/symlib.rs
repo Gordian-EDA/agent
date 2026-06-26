@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::{PinDir, PinMeta, PinType, SymbolMeta};
+use crate::types::{PinDir, PinMeta, PinType, SymbolMeta};
 use kiutils_kicad::{SymPin, Symbol, SymbolLibFile};
 
 /// Load and fully resolve one `.kicad_sym` file into `bare name → SymbolMeta`

@@ -19,7 +19,7 @@
 //! - [`seed`] — create/derive [`BoardSeed`] input types.
 //! - [`footprints`] — footprint discovery + assignment: `search_footprints`,
 //!   `get_footprint_info`, `assign_footprint`.
-//! - [`create`] — board construction + input parsing: `derive_board`,
+//! - [`create`] — board construction + input parsing: `regenerate_board`,
 //!   `build_seed_board`, rules / bounds / keepout / group parsing.
 //! - [`place`] — `get_board`, IPC snapshot→`PlaceProblem`, and `place_board`.
 //! - [`route`] — `route_board` IPC copper write-back + triage.
@@ -49,7 +49,7 @@ pub(super) fn fmt_num(v: f64) -> String {
     format!("{v}")
 }
 
-pub use create::{build_seed_board, derive_board};
+pub use create::{build_seed_board, regenerate_board};
 pub use export::check_board;
 pub use fab::export_fab;
 pub use footprints::{assign_footprint, get_footprint_info, search_footprints};

@@ -13,6 +13,7 @@ pcb-model = { path = "../pcb-model" }
 prost = "0.13"
 prost-types = "0.13"
 thiserror.workspace = true
+directories.workspace = true
 
 [build-dependencies]
 prost-build = "0.13"

@@ -28,10 +28,6 @@ pub const COMMANDS: &[CommandSpec] = &[
         desc: "toggle auto-approve (yolo)",
     },
     CommandSpec {
-        name: "/undo",
-        desc: "restore the previous schematic",
-    },
-    CommandSpec {
         name: "/clear",
         desc: "clear the transcript AND the agent's context",
     },

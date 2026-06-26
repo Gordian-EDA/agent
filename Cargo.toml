@@ -25,11 +25,11 @@ elsa = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 tempfile = "3"
 quick-xml = "0.37"
 anyhow = "1"
 async-trait = "0.1"
-dotenvy = "0.15"
 fastrand = "2"
 directories = "6"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls", "stream"] }

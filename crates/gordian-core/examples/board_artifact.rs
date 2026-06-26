@@ -9,7 +9,8 @@
 
 use std::path::PathBuf;
 
-use gordian_core::tools::{PcbToolCtx, run_tool};
+use gordian_core::AgentRuntime;
+use gordian_core::tools::run_tool;
 use serde_json::json;
 
 fn main() {
@@ -32,7 +33,7 @@ fn main() {
         std::fs::copy(src.join(name), pretty.join(name)).unwrap();
     }
 
-    let ctx = PcbToolCtx::with_footprint_dir_for_test(staging).expect("ctx");
+    let ctx = AgentRuntime::with_footprint_dir_for_test(staging).expect("ctx");
 
     // A voltage divider with a 2-pin power/ground header.
     let board = json!({

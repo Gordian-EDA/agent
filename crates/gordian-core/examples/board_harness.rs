@@ -16,7 +16,8 @@
 
 use std::path::{Path, PathBuf};
 
-use gordian_core::tools::{PcbToolCtx, run_tool};
+use gordian_core::AgentRuntime;
+use gordian_core::tools::run_tool;
 use serde_json::{Value, json};
 
 fn footprint_dir() -> PathBuf {
@@ -45,7 +46,7 @@ fn rasterize(svg: &str, out: &Path, scale: f32) {
 }
 
 fn run_circuit(name: &str, spec: &Value, fp_dir: &Path) -> Value {
-    let ctx = match PcbToolCtx::with_footprint_dir_for_test(fp_dir.to_path_buf()) {
+    let ctx = match AgentRuntime::with_footprint_dir_for_test(fp_dir.to_path_buf()) {
         Some(c) => c,
         None => return json!({ "name": name, "error": "no footprint index / KiCAD env" }),
     };
@@ -123,7 +124,7 @@ fn main() {
 
     println!("footprint library: {}", fp_dir.display());
     // Route/export/DRC every circuit IN PARALLEL — each runs in its own isolated
-    // PcbToolCtx (a per-board tempdir) and writes to its own /tmp/pcb-harness/<name>/
+    // AgentRuntime (a per-board tempdir) and writes to its own /tmp/pcb-harness/<name>/
     // dir, so the boards are independent. rayon's indexed collect preserves spec
     // order, so the printed report is identical to the sequential run, just faster.
     use rayon::prelude::*;

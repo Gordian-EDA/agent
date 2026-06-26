@@ -8,7 +8,7 @@
 //! - **Discovery & inventory.** [`FootprintCatalog`] indexes the `.pretty`
 //!   libraries reachable from a *resolved* footprint root. Platform/version
 //!   discovery lives in [`kicad_env`]; build with [`FootprintCatalog::from_env`]
-//!   to honor `AUTO_PCB_FOOTPRINT_DIR` and known install paths, or
+//!   after resolving a [`kicad_env::KicadEnv`], or
 //!   [`FootprintCatalog::from_root`] for an explicit directory (tests, vendored
 //!   fixtures).
 //! - **Identity.** Footprints are addressed by [`FootprintId`] (`Nickname:Name`),

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use kicad_cli::KicadCli;
 
-use crate::tools::PcbToolCtx;
+use crate::AgentRuntime;
 
 /// Run the routed board through the fabrication exporters into `<project>/fab/`
 /// and report the produced files.
@@ -27,7 +27,7 @@ use crate::tools::PcbToolCtx;
 /// added; otherwise BOM is skipped with a note (the PCB carries no part values).
 /// Returns the bundle directory and the full produced-file list. Individual
 /// exporter failures are surfaced as a recoverable `{error}` value, not `Err`.
-pub fn export_fab(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
+pub fn export_fab(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let board = match input.get("path").and_then(Value::as_str) {
         Some(p) => PathBuf::from(p),
         None => ctx.pcb_path(),
@@ -42,7 +42,7 @@ pub fn export_fab(input: Value, ctx: &PcbToolCtx) -> Result<Value> {
     if !board.is_file() {
         return Ok(json!({
             "error": format!(
-                "no routed board at {} — run derive_board → place_board → route_board → check_board first, \
+                "no routed board at {} — run regenerate_board → place_board → route_board → check_board first, \
                  then export_fab (it bundles the saved .kicad_pcb)",
                 board.display()
             ),
