@@ -36,7 +36,6 @@ futures.workspace = true
 directories.workspace = true
 resvg = { workspace = true }
 base64 = { workspace = true }
-fuzzy-matcher.workspace = true
 prost = "0.13"
 prost-types = "0.13"
 

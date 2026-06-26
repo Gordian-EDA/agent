@@ -317,7 +317,7 @@ fn decode(
 /// centred so an empty cockpit feels intentional rather than blank.
 fn draw_welcome(f: &mut Frame, area: Rect) {
     let logo = Style::default()
-        .fg(Color::Rgb(184, 112, 50))
+        .fg(Color::Rgb(181, 113, 58))
         .add_modifier(Modifier::BOLD);
     let accent = Style::default()
         .fg(Color::Cyan)
@@ -331,10 +331,21 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
         ])
     };
 
-    let mut lines: Vec<Line<'static>> = ["   ⣠⣴⣾⣿⣷⣦⣄", " ⢀⣾⣿⠟⠉⠙⣿⣿⣷", " ⣿⣿⣧⡀ ⢀⣾⣿⠟", "  ⠙⠿⣿⣿⣿⠿⠋"]
-        .into_iter()
-        .map(|row| Line::from(Span::styled(row, logo)))
-        .collect();
+    let mut lines: Vec<Line<'static>> = [
+        "         .",
+        "      :++;++:",
+        "     ;+     +;",
+        "    .+.     ...",
+        "    :+. +++++;.",
+        " .+  +;       :++",
+        ":+:  :+:   :+:  :+:",
+        "+;    ..  ++.    ;+",
+        "+:;    :++:     ;:;",
+        "  .:;;:.   .:;;:.",
+    ]
+    .into_iter()
+    .map(|row| Line::from(Span::styled(row, logo)))
+    .collect();
     lines.extend([
         Line::from(""),
         Line::from(Span::styled("Gordian", accent)),

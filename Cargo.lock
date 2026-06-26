@@ -1025,7 +1025,6 @@ dependencies = [
  "directories",
  "drc-lint",
  "futures",
- "fuzzy-matcher",
  "genai",
  "geom",
  "greedy-place",

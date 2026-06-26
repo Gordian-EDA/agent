@@ -210,7 +210,6 @@ fn defs_lists_all_tools() {
         "run_erc",
         "project_info",
         "read_schematic",
-        "find_similar_designs",
         "render_schematic",
         "create_design",
         "edit_design",
@@ -1577,32 +1576,5 @@ fn render_board_default_view_logic() {
         out["view"],
         serde_json::json!("routed"),
         "default after route must be routed: {out}"
-    );
-}
-
-// ── find_similar_designs (retrieval-augmented references) ─────────────────────
-
-#[test]
-fn find_similar_designs_is_absent_safe_and_well_formed() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-    // The tool never crashes regardless of whether a corpus is installed, and
-    // always returns a `matches` array. (Ranking + absent-corpus correctness are
-    // covered directly in the retrieval module's unit tests, which avoid env
-    // races by driving Corpus::from_dir on a staged fixture.)
-    let out = run_tool(
-        "find_similar_designs",
-        serde_json::json!({ "intent": "STM32 microcontroller board with USB and 3V3 regulator" }),
-        &ctx,
-    )
-    .unwrap();
-    assert!(out["matches"].is_array(), "matches array present: {out}");
-    // When a corpus is present the report fields are populated; when absent the
-    // tool returns a note instead. Either way it's a structured, non-error result.
-    assert!(
-        out.get("note").is_some() || out.get("lift_success_rate").is_some(),
-        "result must carry a note (no corpus) or a lift_success_rate (corpus present): {out}"
     );
 }

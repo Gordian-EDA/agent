@@ -624,10 +624,10 @@ mod tests {
         let buf = terminal.backend().buffer().clone();
         let text = buffer_text(&buf);
 
-        assert!(text.contains("⣠⣴⣾⣿⣷⣦⣄"), "logo art appears:\n{text}");
+        assert!(text.contains(":++;++:"), "logo art appears:\n{text}");
         assert!(text.contains("Gordian"), "brand text appears:\n{text}");
 
-        let logo_color = Some(Color::Rgb(184, 112, 50));
+        let logo_color = Some(Color::Rgb(181, 113, 58));
         let colored_logo_cells = buf
             .content()
             .iter()

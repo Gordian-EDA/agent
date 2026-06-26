@@ -19,12 +19,9 @@ pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 /// Default request token cap used by the production LLM provider today.
 pub const DEFAULT_MAX_TOKENS: u32 = 16_384;
 
-/// Default number of symbol, footprint, and retrieval hits when a tool input
-/// does not provide its own limit.
+/// Default number of symbol and footprint hits when a tool input does not
+/// provide its own limit.
 pub const DEFAULT_SEARCH_LIMIT: usize = 8;
-
-/// Default number of similar reference designs to retrieve.
-pub const DEFAULT_REFERENCE_COUNT: usize = 3;
 
 /// Default long-edge cap for rendered schematic and board PNGs.
 pub const DEFAULT_RENDER_MAX_PX: u32 = 1600;
@@ -51,8 +48,6 @@ pub struct GordianConfig {
     pub project: ProjectConfig,
     /// Agent loop policy.
     pub agent: AgentConfig,
-    /// Retrieval-augmented reference design behavior.
-    pub retrieval: RetrievalConfig,
     /// Independent post-generation review behavior.
     pub review: ReviewConfig,
     /// Tool-level defaults shared across schematic and PCB tools.
@@ -69,7 +64,6 @@ impl Default for GordianConfig {
             kicad: KicadConfig::default(),
             project: ProjectConfig::default(),
             agent: AgentConfig::default(),
-            retrieval: RetrievalConfig::default(),
             review: ReviewConfig::default(),
             tools: ToolConfig::default(),
             engines: EngineConfig::default(),
@@ -90,7 +84,6 @@ impl GordianConfig {
         self.kicad.validate("kicad")?;
         self.project.validate("project")?;
         self.agent.validate("agent")?;
-        self.retrieval.validate("retrieval")?;
         self.tools.validate("tools")?;
         self.engines.validate("engines")?;
         Ok(())
@@ -406,41 +399,6 @@ impl AgentConfig {
     }
 }
 
-/// Retrieval-augmented reference design behavior.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct RetrievalConfig {
-    /// Whether the agent may include similar real KiCAD designs as references.
-    pub enabled: bool,
-    /// Optional corpus directory override.
-    pub corpus_dir: Option<PathBuf>,
-    /// Default number of references returned per retrieval request.
-    pub references_per_query: usize,
-}
-
-impl Default for RetrievalConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            corpus_dir: None,
-            references_per_query: DEFAULT_REFERENCE_COUNT,
-        }
-    }
-}
-
-impl RetrievalConfig {
-    fn validate(&self, path: &'static str) -> Result<(), ConfigError> {
-        validate_optional_path(path, "corpusDir", &self.corpus_dir)?;
-        if self.references_per_query == 0 {
-            return Err(ConfigError::new(
-                format!("{path}.referencesPerQuery"),
-                "reference count must be greater than zero",
-            ));
-        }
-        Ok(())
-    }
-}
-
 /// Independent review behavior.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -619,8 +577,7 @@ mod tests {
     #[test]
     fn partial_deserialize_fills_defaults() {
         let cfg: GordianConfig = serde_json::from_value(serde_json::json!({
-            "llm": { "adapter": "openai", "model": "gpt-4o", "apiKey": "test-key" },
-            "retrieval": { "enabled": false }
+            "llm": { "adapter": "openai", "model": "gpt-4o", "apiKey": "test-key" }
         }))
         .unwrap();
 
@@ -628,7 +585,6 @@ mod tests {
         assert_eq!(cfg.llm.model.as_deref(), Some("gpt-4o"));
         assert_eq!(cfg.llm.api_key.as_deref(), Some("test-key"));
         assert_eq!(cfg.llm.max_tokens, DEFAULT_MAX_TOKENS);
-        assert!(!cfg.retrieval.enabled);
         assert_eq!(cfg.tools.default_search_limit, DEFAULT_SEARCH_LIMIT);
         assert_eq!(cfg.engines, EngineConfig::default());
         cfg.validate().unwrap();

@@ -26,11 +26,6 @@ schematicFilename = "design.kicad_sch"
 postCommitReview = true
 reviewFixRounds = 1
 
-[retrieval]
-enabled = true
-# corpusDir = "/path/to/kicad-scraper/dataset"
-referencesPerQuery = 3
-
 [review]
 retryJson = false
 ensemble = false

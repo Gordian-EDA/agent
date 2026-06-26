@@ -3,8 +3,8 @@
 //! - `gordian` (no args) prints the version.
 //! - `gordian agent [--project <dir>] "<prompt>"` runs ONE headless agent turn
 //!   against real Bedrock + real KiCAD, auto-approving the write, and prints the
-//!   turn outcome plus the final ERC result. This is the CLI form of the
-//!   interactive copilot.
+//!   live transcript, turn outcome, token totals, and final ERC result. This is
+//!   the CLI form of the interactive copilot.
 //! - `gordian tui [--project <dir>]` launches the ratatui copilot cockpit
 //!   (spec §11): a chat transcript, a proposed-changes apply-gate, and an input
 //!   line, driving the same agent interactively.
@@ -17,7 +17,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use gordian_core::AgentRuntime;
-use gordian_core::prompts::system_prompt_with_reference;
+use gordian_core::prompts::system_prompt;
 use gordian_core::{Agent, AgentEvent, AutoApprove};
 use kicad_cli::KicadCli;
 
@@ -172,6 +172,90 @@ fn parse_agent_args(args: &[String]) -> Result<AgentInvocation> {
     })
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct UsageTotals {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_write_tokens: u64,
+    cache_read_tokens: u64,
+}
+
+#[derive(Debug, Default)]
+struct AgentDebugLog {
+    usage: UsageTotals,
+}
+
+impl AgentDebugLog {
+    fn observe(&mut self, ev: &AgentEvent) -> Option<String> {
+        match ev {
+            AgentEvent::AssistantDelta(_) => None,
+            AgentEvent::AssistantText(text) => {
+                let text = text.trim();
+                (!text.is_empty()).then(|| format!("assistant: {text}"))
+            }
+            AgentEvent::ToolStarted { name } => Some(format!("tool -> {name}")),
+            AgentEvent::ToolFinished {
+                name,
+                summary,
+                image_path,
+            } => {
+                let image = image_path
+                    .as_deref()
+                    .map(|path| format!(" (image: {path})"))
+                    .unwrap_or_default();
+                Some(format!("tool <- {name}: {summary}{image}"))
+            }
+            AgentEvent::Applied { summary } => Some(format!("applied: {summary}")),
+            AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_write_tokens,
+                cache_read_tokens,
+            } => {
+                self.usage.input_tokens += input_tokens;
+                self.usage.output_tokens += output_tokens;
+                self.usage.cache_write_tokens += cache_write_tokens;
+                self.usage.cache_read_tokens += cache_read_tokens;
+                Some(format!(
+                    "usage: in={input_tokens} out={output_tokens} \
+                     cache_write={cache_write_tokens} cache_read={cache_read_tokens}"
+                ))
+            }
+            AgentEvent::Compacted {
+                messages_before,
+                messages_after,
+            } => Some(format!(
+                "compacted: messages {messages_before} -> {messages_after}"
+            )),
+            AgentEvent::TurnDone => Some("turn done".to_string()),
+            AgentEvent::ReviewStarted { round } => Some(format!("review -> round {round}")),
+            AgentEvent::Reviewed {
+                round,
+                score,
+                defects,
+            } => {
+                let defect_summary = if defects.is_empty() {
+                    "no defects".to_string()
+                } else {
+                    format!("{} defect(s): {}", defects.len(), defects.join("; "))
+                };
+                Some(format!(
+                    "review <- round {round}: score {}/10 — {defect_summary}",
+                    format_score(*score)
+                ))
+            }
+        }
+    }
+}
+
+fn format_score(score: f64) -> String {
+    if score.fract().abs() < f64::EPSILON {
+        format!("{score:.0}")
+    } else {
+        format!("{score:.1}")
+    }
+}
+
 /// Run the `agent` subcommand: one headless turn against real Bedrock + KiCAD.
 fn run_agent_command(args: &[String]) -> Result<()> {
     let AgentInvocation {
@@ -218,19 +302,28 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     //    through `run_turn_reviewed`: after a turn that COMMITS a design change,
     //    an independent reviewer pass scores the netlist and feeds high-confidence
     //    defects into a bounded follow-up fix turn. `--no-review` runs the plain
-    //    turn. A live events channel surfaces each `Reviewed` round to the log.
+    //    turn. A live events channel mirrors the TUI transcript in stderr so
+    //    headless runs remain debuggable.
     let runtime = tokio::runtime::Runtime::new().context("starting the Tokio runtime")?;
-    // Retrieval-augment the system prompt: at design-start the intent (the prompt)
-    // is known, so inject the single best-matching real human design as a worked
-    // few-shot example. Falls back to the plain prompt when no corpus / match.
-    let system = system_prompt_with_reference(&env, &prompt, &config.retrieval);
+    let system = system_prompt();
     let mut agent = Agent::new(client, ctx, system);
     let mut approvals = AutoApprove::yes();
-    let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
-    let outcome = runtime
+    eprintln!("--- agent events ---");
+    let (outcome, usage) = runtime
         .block_on(async {
-            if review && config.agent.post_commit_review {
+            let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+            let printer = tokio::spawn(async move {
+                let mut log = AgentDebugLog::default();
+                while let Some(ev) = events_rx.recv().await {
+                    if let Some(line) = log.observe(&ev) {
+                        eprintln!("{line}");
+                    }
+                }
+                log.usage
+            });
+
+            let run = if review && config.agent.post_commit_review {
                 // intent == prompt: the design goal the reviewer judges against.
                 agent
                     .run_turn_reviewed(
@@ -242,34 +335,25 @@ fn run_agent_command(args: &[String]) -> Result<()> {
                     )
                     .await
             } else {
-                agent.run_turn(&prompt, &mut approvals, None).await
-            }
+                agent
+                    .run_turn(&prompt, &mut approvals, Some(&events_tx))
+                    .await
+            };
+            drop(events_tx);
+            let usage = printer.await.unwrap_or_default();
+            run.map(|outcome| (outcome, usage))
         })
         .context("running the agent turn")?;
-
-    // Drain and log any review rounds the self-correction pass emitted.
-    while let Ok(ev) = events_rx.try_recv() {
-        if let AgentEvent::Reviewed {
-            round,
-            score,
-            defects,
-        } = ev
-        {
-            eprintln!(
-                "review (round {round}): score {score}/10 — {}",
-                if defects.is_empty() {
-                    "no functional defects".to_string()
-                } else {
-                    format!("{} defect(s): {}", defects.len(), defects.join("; "))
-                }
-            );
-        }
-    }
 
     // 5. Report the outcome.
     println!("--- agent turn ---");
     println!("tool calls made: {}", outcome.tool_calls_made);
     println!("applied (wrote schematic): {}", outcome.applied);
+    println!("stop reason: {:?}", outcome.stop_reason);
+    println!(
+        "tokens: input {} output {} cache_write {} cache_read {}",
+        usage.input_tokens, usage.output_tokens, usage.cache_write_tokens, usage.cache_read_tokens
+    );
     println!("\nfinal reply:\n{}", outcome.final_text.trim());
 
     // 6. Final ERC: re-run on whatever the agent produced (the source of truth).
@@ -338,5 +422,74 @@ mod tests {
     fn errors_with_no_prompt() {
         assert!(parse_agent_args(&[]).is_err());
         assert!(parse_agent_args(&["--project".into(), "/tmp/demo".into()]).is_err());
+    }
+
+    #[test]
+    fn debug_log_formats_agent_events_and_accumulates_usage() {
+        let mut log = AgentDebugLog::default();
+
+        assert_eq!(
+            log.observe(&AgentEvent::AssistantText("  checking schematic\n".into())),
+            Some("assistant: checking schematic".into())
+        );
+        assert_eq!(
+            log.observe(&AgentEvent::ToolStarted {
+                name: "regenerate_board".into()
+            }),
+            Some("tool -> regenerate_board".into())
+        );
+        assert_eq!(
+            log.observe(&AgentEvent::ToolFinished {
+                name: "regenerate_board".into(),
+                summary: "written".into(),
+                image_path: Some(".gordian/renders/render-001.png".into()),
+            }),
+            Some(
+                "tool <- regenerate_board: written (image: .gordian/renders/render-001.png)".into()
+            )
+        );
+        assert_eq!(
+            log.observe(&AgentEvent::Applied {
+                summary: "ERC 0 errors, 0 warnings".into()
+            }),
+            Some("applied: ERC 0 errors, 0 warnings".into())
+        );
+        assert_eq!(
+            log.observe(&AgentEvent::Reviewed {
+                round: 1,
+                score: 6.0,
+                defects: vec!["- U1: missing decoupling".into()],
+            }),
+            Some("review <- round 1: score 6/10 — 1 defect(s): - U1: missing decoupling".into())
+        );
+        assert_eq!(
+            log.observe(&AgentEvent::Usage {
+                input_tokens: 100,
+                output_tokens: 20,
+                cache_write_tokens: 30,
+                cache_read_tokens: 40,
+            }),
+            Some("usage: in=100 out=20 cache_write=30 cache_read=40".into())
+        );
+
+        assert_eq!(
+            log.usage,
+            UsageTotals {
+                input_tokens: 100,
+                output_tokens: 20,
+                cache_write_tokens: 30,
+                cache_read_tokens: 40,
+            }
+        );
+    }
+
+    #[test]
+    fn debug_log_skips_noisy_streaming_deltas() {
+        let mut log = AgentDebugLog::default();
+        assert_eq!(
+            log.observe(&AgentEvent::AssistantDelta("partial".into())),
+            None
+        );
+        assert_eq!(log.observe(&AgentEvent::AssistantText("   ".into())), None);
     }
 }

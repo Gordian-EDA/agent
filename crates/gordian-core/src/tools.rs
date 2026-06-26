@@ -143,19 +143,6 @@ pub fn tool_defs() -> Vec<Tool> {
                 }),
             },
             Def {
-                name: "find_similar_designs".into(),
-                description: "Return similar real KiCAD designs as circuit-YAML references, if a corpus is installed."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "intent": { "type": "string", "description": "One-line design goal." },
-                        "k": { "type": "integer", "description": "Max references, default 3.", "minimum": 1 }
-                    },
-                    "required": ["intent"]
-                }),
-            },
-            Def {
                 name: "render_schematic".into(),
                 description: "Render current schematic to PNG for visual inspection."
                     .into(),
@@ -383,7 +370,6 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "run_erc" => run_erc(ctx),
         "project_info" => project_info(ctx),
         "read_schematic" => read_schematic(input, ctx),
-        "find_similar_designs" => find_similar_designs(input, ctx),
         "render_schematic" => render_schematic(ctx),
         "create_design" => create_design(input, ctx),
         "edit_design" => edit_design(input, ctx),
@@ -948,71 +934,6 @@ fn resolve_user_path(raw: &str, project_dir: &Path) -> PathBuf {
     } else {
         project_dir.join(p)
     }
-}
-
-// ── find_similar_designs (retrieval-augmented references) ───────────────────
-
-/// Rank the corpus of real human schematics against `intent` and return the
-/// top-`k` as circuit-YAML the model can emulate. Absent-safe: with no corpus
-/// installed it returns `{matches: [], note: ...}` rather than erroring.
-fn find_similar_designs(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    use crate::retrieval::Corpus;
-
-    let intent = require_str(&input, "intent")?;
-    let k = input
-        .get("k")
-        .and_then(Value::as_u64)
-        .map(|n| n as usize)
-        .unwrap_or(ctx.config().retrieval.references_per_query)
-        .max(1);
-
-    if !ctx.config().retrieval.enabled {
-        return Ok(json!({
-            "matches": [],
-            "note": "reference retrieval is disabled in Gordian config",
-        }));
-    }
-
-    let corpus = Corpus::from_optional_dir(ctx.config().retrieval.corpus_dir.as_deref());
-    if corpus.is_empty() {
-        return Ok(json!({
-            "matches": [],
-            "note": "no reference corpus installed — design from first principles \
-                     (set retrieval.corpusDir in config.toml to a dataset of \
-                     *.kicad_sch + *.json to enable references)",
-        }));
-    }
-
-    let report = corpus.find_similar(ctx.env(), &intent, k);
-    let matches: Vec<Value> = report
-        .references
-        .iter()
-        .map(|r| {
-            let mut m = json!({
-                "id": r.meta.id,
-                "repo": r.meta.repo,
-                "description": r.meta.description,
-                "score": r.score,
-            });
-            match (&r.yaml, &r.lift_error) {
-                (Some(yaml), _) => m["yaml"] = json!(yaml),
-                (None, Some(err)) => m["lift_error"] = json!(err),
-                (None, None) => {}
-            }
-            m
-        })
-        .collect();
-
-    Ok(json!({
-        "matches": matches,
-        "corpus_size": corpus.len(),
-        "ranked_total": report.ranked_total,
-        "lifted_ok": report.successes,
-        "lift_success_rate": report.lift_success_rate(),
-        "note": "circuit-YAML references from real human designs — study their block \
-                 partition, decoupling, and idioms; do NOT copy verbatim. Entries with \
-                 only a description + lift_error could not be lifted.",
-    }))
 }
 
 // ── 8. run_erc ─────────────────────────────────────────────────────────────
