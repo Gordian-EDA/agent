@@ -346,25 +346,10 @@ pub fn tool_defs() -> Vec<Tool> {
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
-                name: "autoroute".into(),
-                description: "Disabled; use route_board."
+                name: "render_board".into(),
+                description: "Render current board PNG. Use when visual inspection is needed."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
-            },
-            Def {
-                name: "render_board".into(),
-                description: "Render board PNG; view placed/routed. Use when visual inspection is needed."
-                    .into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "view": {
-                            "type": "string",
-                            "enum": ["placed", "routed"],
-                            "description": "placed/routed; omit for auto."
-                        }
-                    }
-                }),
             },
             Def {
                 name: "check_board".into(),
@@ -416,7 +401,6 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "get_board" => crate::tools_pcb::get_board(ctx),
         "place_board" => crate::tools_pcb::place_board(input, ctx),
         "route_board" => crate::tools_pcb::route_board(input, ctx),
-        "autoroute" => crate::tools_pcb::autoroute(input, ctx),
         "check_board" => crate::tools_pcb::check_board(input, ctx),
         "export_fab" => crate::tools_pcb::export_fab(input, ctx),
         "open_board" => crate::tools_pcb::open_board(input, ctx),

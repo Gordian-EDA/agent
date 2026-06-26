@@ -25,6 +25,25 @@ fn fixture_board() -> (tempfile::TempDir, PathBuf) {
 }
 
 #[test]
+fn export_pcb_svg_produces_single_board_plot() {
+    let Some(env) = KicadEnv::detect() else {
+        eprintln!("SKIP: no kicad-cli detected");
+        return;
+    };
+    let cli = KicadCli::new(&env);
+    let (dir, board) = fixture_board();
+    let svg = dir.path().join("board.svg");
+
+    let written = cli
+        .export_pcb_svg(&board, &svg, "F.Cu,B.Cu,F.SilkS,Edge.Cuts", false)
+        .expect("export PCB SVG");
+    assert!(written.is_file(), "PCB SVG not written");
+    let body = std::fs::read_to_string(&written).expect("read PCB SVG");
+    assert!(body.contains("<svg"), "PCB SVG has no root element");
+    assert!(body.len() > 100, "PCB SVG is suspiciously small");
+}
+
+#[test]
 fn export_gerbers_produces_layer_files() {
     let Some(env) = KicadEnv::detect() else {
         eprintln!("SKIP: no kicad-cli detected");

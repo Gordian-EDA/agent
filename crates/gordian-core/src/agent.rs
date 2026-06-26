@@ -870,9 +870,7 @@ fn tool_effect(name: &str) -> ToolEffect {
         "apply_design" => ToolEffect::Gated,
         // Tools that mutate draft schematic text or the live IPC board.
         "create_design" | "edit_design" | "regenerate_board" | "place_board" | "route_board"
-        | "autoroute" | "open_board" | "move_part" | "route_track" | "set_net_width" => {
-            ToolEffect::Authoring
-        }
+        | "open_board" | "move_part" | "route_track" | "set_net_width" => ToolEffect::Authoring,
         // Everything else reads only.
         _ => ToolEffect::ReadOnly,
     }

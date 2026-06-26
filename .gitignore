@@ -8,11 +8,14 @@
 # Git worktrees (superpowers)
 /.worktrees/
 
+# Gordian project files
 design.kicad_sch
 design.kicad_pcb
 design.kicad_prl
 design.kicad_pro
+~*.lck
 /.history
+fab
 
 # ...but the placement-snapshot regression baselines ARE tracked (they ARE the gate).
 !crates/sch-floorplan/tests/snapshots/*.kicad_sch

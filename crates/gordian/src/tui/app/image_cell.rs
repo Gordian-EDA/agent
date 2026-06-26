@@ -40,7 +40,11 @@ pub enum ImageState {
     #[default]
     Pending,
     /// Decoded; ready to render.
-    Ready(Box<StatefulProtocol>),
+    Ready {
+        proto: Box<StatefulProtocol>,
+        cols: u16,
+        font_size: (u16, u16),
+    },
     /// The file was unreadable or failed to decode — show the text label.
     Failed,
 }
@@ -56,10 +60,24 @@ impl ImageCell {
         }
     }
 
+    /// Human label for the type of preview this render produced.
+    pub fn preview_label(&self) -> &'static str {
+        match self.caption.as_str() {
+            "render_board" => "board preview",
+            "render_schematic" => "schematic preview",
+            _ => "render preview",
+        }
+    }
+
     /// The stable text-label fallback used under the screenshot harness, while a
     /// decode is pending, and after a decode failure — so a preview never crashes
     /// the UI and the SVG snapshots stay byte-stable.
     pub fn label(&self) -> String {
-        format!("▸ board preview · {} · {}", self.caption, self.path)
+        format!(
+            "▸ {} · {} · {}",
+            self.preview_label(),
+            self.caption,
+            self.path
+        )
     }
 }

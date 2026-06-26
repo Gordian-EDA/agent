@@ -26,15 +26,11 @@
 //! - [`export`] — `check_board`.
 //! - [`fab`] — `export_fab`: bundle a routed board into Gerbers/drill/pos/BOM.
 //! - [`render`] — `render_board`.
-//! - [`engine_svg`] — diagnostic SVG of the engine's own view (placement/routed),
-//!   the fast in-loop alternative to the `kicad-cli` production render.
 //! - [`interactive`] — live IPC board editing (`open_board`, `move_part`,
-//!   `route_track`, `set_net_width`, `board_state`). `autoroute` is disabled
-//!   until Freerouting is reconnected to IPC.
+//!   `route_track`, `set_net_width`, `board_state`).
 
 mod active;
 mod create;
-pub mod engine_svg;
 mod export;
 mod fab;
 mod footprints;
@@ -54,7 +50,7 @@ pub use export::check_board;
 pub use fab::export_fab;
 pub use footprints::{assign_footprints, get_footprint_info, search_footprints};
 pub use interactive::{
-    autoroute, board_state, move_part, open_board, route_track, save_session_if_open, set_net_width,
+    board_state, move_part, open_board, route_track, save_session_if_open, set_net_width,
 };
 pub use place::{debug_place_problem_from_seed, get_board, place_board};
 pub use render::render_board;

@@ -218,7 +218,6 @@ fn defs_lists_all_tools() {
         "get_board",
         "place_board",
         "route_board",
-        "autoroute",
         "render_board",
         "check_board",
         "export_fab",
@@ -1507,7 +1506,7 @@ fn render_board_before_create_is_recoverable_error() {
 
 #[test]
 #[ignore = "live KiCAD IPC: render_board saves/imports the active board session"]
-fn render_board_before_place_is_recoverable_error() {
+fn render_board_before_place_returns_ok_and_png_magic() {
     let (ctx, _guard) = fixture_ctx();
     // Create board but do NOT place.
     let board = serde_json::json!({
@@ -1522,35 +1521,17 @@ fn render_board_before_place_is_recoverable_error() {
         serde_json::json!(true)
     );
 
-    // No placement yet: both explicit "placed" and auto (no route) must error.
-    let out = run_tool("render_board", serde_json::json!({"view": "placed"}), &ctx).unwrap();
-    assert!(
-        out["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("place_board")),
-        "render placed before place must error: {out}"
-    );
+    // The current board preview should render even before placement.
     let out = run_tool("render_board", serde_json::json!({}), &ctx).unwrap();
-    assert!(
-        out["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("place_board")),
-        "render auto (no route) before place must error: {out}"
-    );
-
-    // Explicit "routed" view before routed copper is a distinct error.
-    let out = run_tool("render_board", serde_json::json!({"view": "routed"}), &ctx).unwrap();
-    assert!(
-        out["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("route_board")),
-        "render routed before route must error: {out}"
-    );
+    assert_eq!(out["ok"], serde_json::json!(true), "render: {out}");
+    let png_path = out["png_path"].as_str().expect("png_path present");
+    let png_bytes = std::fs::read(png_path).expect("PNG file written");
+    assert_eq!(&png_bytes[..8], PNG_MAGIC, "must be a valid PNG");
 }
 
 #[test]
 #[ignore = "live KiCAD IPC: render_board saves/imports the active board session"]
-fn render_board_placed_returns_ok_and_png_magic() {
+fn render_board_after_place_returns_ok_and_png_magic() {
     let (ctx, _g) = placed_board_ctx();
     if skip_unstable_footprint_update(&ctx) {
         return;
@@ -1560,17 +1541,12 @@ fn render_board_placed_returns_ok_and_png_magic() {
     let out = run_tool("place_board", serde_json::json!({}), &ctx).unwrap();
     assert_eq!(out["legal"], serde_json::json!(true), "place: {out}");
 
-    // Render the placed view.
-    let out = run_tool("render_board", serde_json::json!({"view": "placed"}), &ctx).unwrap();
+    // Render the current board.
+    let out = run_tool("render_board", serde_json::json!({}), &ctx).unwrap();
     assert_eq!(
         out["ok"],
         serde_json::json!(true),
-        "render_board placed: {out}"
-    );
-    assert_eq!(
-        out["view"],
-        serde_json::json!("placed"),
-        "view field: {out}"
+        "render_board after place: {out}"
     );
 
     let png_path = out["png_path"].as_str().expect("png_path present");
@@ -1596,7 +1572,7 @@ fn render_board_placed_returns_ok_and_png_magic() {
 
 #[test]
 #[ignore = "live KiCAD IPC: render_board saves/imports the active board session"]
-fn render_board_routed_returns_ok_and_png_magic() {
+fn render_board_after_route_returns_ok_and_png_magic() {
     let (ctx, _g) = placed_board_ctx();
     if skip_unstable_footprint_update(&ctx) {
         return;
@@ -1610,17 +1586,12 @@ fn render_board_routed_returns_ok_and_png_magic() {
         "small board must route cleanly: {route_out}"
     );
 
-    // Render the routed view explicitly.
-    let out = run_tool("render_board", serde_json::json!({"view": "routed"}), &ctx).unwrap();
+    // Render the current board with routed copper visible.
+    let out = run_tool("render_board", serde_json::json!({}), &ctx).unwrap();
     assert_eq!(
         out["ok"],
         serde_json::json!(true),
-        "render_board routed: {out}"
-    );
-    assert_eq!(
-        out["view"],
-        serde_json::json!("routed"),
-        "view field: {out}"
+        "render_board after route: {out}"
     );
 
     let png_path = out["png_path"].as_str().expect("png_path present");
@@ -1632,42 +1603,5 @@ fn render_board_routed_returns_ok_and_png_magic() {
         out[gordian_core::tools::IMAGE_PATH_KEY].as_str(),
         Some(png_path),
         "IMAGE_PATH_KEY must equal png_path"
-    );
-}
-
-#[test]
-#[ignore = "live KiCAD IPC: render_board saves/imports the active board session"]
-fn render_board_default_view_logic() {
-    let (ctx, _g) = placed_board_ctx();
-    if skip_unstable_footprint_update(&ctx) {
-        return;
-    }
-
-    // After place but before route: auto should pick "placed".
-    run_tool("place_board", serde_json::json!({}), &ctx).unwrap();
-    let out = run_tool("render_board", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(
-        out["ok"],
-        serde_json::json!(true),
-        "auto before route: {out}"
-    );
-    assert_eq!(
-        out["view"],
-        serde_json::json!("placed"),
-        "default before route must be placed: {out}"
-    );
-
-    // After route: auto should pick "routed".
-    run_tool("route_board", serde_json::json!({}), &ctx).unwrap();
-    let out = run_tool("render_board", serde_json::json!({}), &ctx).unwrap();
-    assert_eq!(
-        out["ok"],
-        serde_json::json!(true),
-        "auto after route: {out}"
-    );
-    assert_eq!(
-        out["view"],
-        serde_json::json!("routed"),
-        "default after route must be routed: {out}"
     );
 }

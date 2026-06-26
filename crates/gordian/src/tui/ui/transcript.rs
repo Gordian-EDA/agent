@@ -5,12 +5,14 @@
 //! The first-launch [`draw_welcome`] splash lives here too, since it fills this
 //! pane until the first turn.
 
+use image::imageops::FilterType;
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, StatefulWidget};
-use ratatui_image::{Resize, StatefulImage};
+use ratatui::widgets::{Paragraph, Widget};
+use ratatui_image::{Resize, ResizeEncodeRender};
 
 use super::super::app::{App, Entry, ImageState, NoticeLevel, Speaker};
 use super::super::md::{self, LineKind, MdLine, WrapMode};
@@ -92,7 +94,10 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App, ctx: &mu
                 let skip = visible_start - b_start;
                 f.render_widget(Paragraph::new(lines.clone()).scroll((skip, 0)), rect);
             }
-            Block::Image { idx, .. } => draw_image(f, rect, app, *idx, ctx),
+            Block::Image { idx, rows } => {
+                let skip = visible_start - b_start;
+                draw_image(f, rect, app, *idx, *rows, skip, ctx);
+            }
         }
     }
 }
@@ -228,7 +233,15 @@ fn image_pixel_size(path: &str) -> Option<(u32, u32)> {
 /// Render one image cell into `rect`: a dim caption row, then the image (lazily
 /// decoded + cached in the cell on first draw). Any failure degrades to the text
 /// label — the preview never crashes the UI.
-fn draw_image(f: &mut Frame, rect: Rect, app: &mut App, idx: usize, ctx: &mut RenderCtx) {
+fn draw_image(
+    f: &mut Frame,
+    rect: Rect,
+    app: &mut App,
+    idx: usize,
+    rows: u16,
+    skip_rows: u16,
+    ctx: &mut RenderCtx,
+) {
     // Text-only mode (screenshot harness / dumb terminal): just the stable label.
     let Some(picker) = ctx.picker else {
         let label = app.images[idx].label();
@@ -236,10 +249,26 @@ fn draw_image(f: &mut Frame, rect: Rect, app: &mut App, idx: usize, ctx: &mut Re
         return;
     };
 
+    let preview_cols = image_preview_cols(rect.width);
+    let font_size = picker.font_size();
+
     // Lazily build (and cache) the image protocol the first time we draw it.
-    if matches!(app.images[idx].state, ImageState::Pending) {
-        app.images[idx].state = match decode(picker, &app.images[idx].path) {
-            Some(proto) => ImageState::Ready(Box::new(proto)),
+    let needs_decode = match app.images[idx].state {
+        ImageState::Pending => true,
+        ImageState::Ready {
+            cols,
+            font_size: cached_font_size,
+            ..
+        } => cols != preview_cols || cached_font_size != font_size,
+        ImageState::Failed => false,
+    };
+    if needs_decode {
+        app.images[idx].state = match decode(picker, &app.images[idx].path, preview_cols) {
+            Some(proto) => ImageState::Ready {
+                proto: Box::new(proto),
+                cols: preview_cols,
+                font_size,
+            },
             None => ImageState::Failed,
         };
     }
@@ -250,31 +279,50 @@ fn draw_image(f: &mut Frame, rect: Rect, app: &mut App, idx: usize, ctx: &mut Re
         return;
     }
 
-    // A dim caption on row 0; the image fills the rest of the band. The caption
-    // is read before the protocol is borrowed mutably (disjoint fields).
-    let caption = format!("▸ board preview · {}", app.images[idx].caption);
-    let preview_rect = image_preview_rect(rect);
-    let (cap_rect, img_rect) = split_caption(preview_rect);
-    f.render_widget(text_label(&caption, Color::Cyan), cap_rect);
+    // Render at the image block's full, fixed size into an offscreen buffer, then
+    // copy the visible rows into the transcript. This keeps ratatui-image from
+    // treating a partially visible scroll slice as a new resize target.
+    let full_rect = Rect {
+        x: 0,
+        y: 0,
+        width: preview_cols,
+        height: rows,
+    };
+    let mut scratch = Buffer::empty(full_rect);
+    let caption = format!(
+        "▸ {} · {}",
+        app.images[idx].preview_label(),
+        app.images[idx].caption
+    );
+    let (cap_rect, img_rect) = split_caption(full_rect);
+    text_label(&caption, Color::Cyan).render(cap_rect, &mut scratch);
     if img_rect.height > 0 {
-        if let ImageState::Ready(proto) = &mut app.images[idx].state {
-            StatefulImage::default().resize(Resize::Fit(None)).render(
-                img_rect,
-                f.buffer_mut(),
-                proto.as_mut(),
-            );
+        if let ImageState::Ready { proto, .. } = &mut app.images[idx].state {
+            proto.resize_encode_render(&Resize::Crop(None), img_rect, &mut scratch);
         }
     }
+    copy_visible_image_rows(&scratch, skip_rows, rect, f.buffer_mut());
 }
 
 fn image_preview_cols(width: u16) -> u16 {
     width.min(IMAGE_PREVIEW_COLS).max(1)
 }
 
-fn image_preview_rect(rect: Rect) -> Rect {
-    Rect {
-        width: image_preview_cols(rect.width),
-        ..rect
+fn copy_visible_image_rows(src: &Buffer, skip_rows: u16, dst_rect: Rect, dst: &mut Buffer) {
+    let copy_w = dst_rect.width.min(src.area().width);
+    for y in 0..dst_rect.height {
+        let src_y = skip_rows + y;
+        if src_y >= src.area().height {
+            break;
+        }
+        for x in 0..copy_w {
+            let Some(src_cell) = src.cell((x, src_y)).cloned() else {
+                continue;
+            };
+            if let Some(dst_cell) = dst.cell_mut((dst_rect.x + x, dst_rect.y + y)) {
+                *dst_cell = src_cell;
+            }
+        }
     }
 }
 
@@ -307,8 +355,15 @@ fn split_caption(rect: Rect) -> (Rect, Rect) {
 fn decode(
     picker: &ratatui_image::picker::Picker,
     path: &str,
+    cols: u16,
 ) -> Option<ratatui_image::protocol::StatefulProtocol> {
     let img = image::ImageReader::open(path).ok()?.decode().ok()?;
+    let (fw, _) = picker.font_size();
+    let target_w = u32::from(cols.max(1)) * u32::from(fw.max(1));
+    let target_h = ((u64::from(target_w) * u64::from(img.height())) / u64::from(img.width()))
+        .max(1)
+        .min(u64::from(u32::MAX)) as u32;
+    let img = img.resize_exact(target_w, target_h, FilterType::Triangle);
     Some(picker.new_resize_protocol(img))
 }
 

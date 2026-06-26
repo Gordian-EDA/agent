@@ -265,6 +265,33 @@ mod tests {
     }
 
     #[test]
+    fn render_schematic_image_cell_is_labeled_as_schematic_preview() {
+        let mut a = app();
+        for c in "render the schematic".chars() {
+            a.update(Msg::Char(c));
+        }
+        a.update(Msg::Submit);
+        a.update(Msg::Agent(AgentEvent::ToolStarted {
+            name: "render_schematic".into(),
+        }));
+        a.update(Msg::Agent(AgentEvent::ToolFinished {
+            name: "render_schematic".into(),
+            summary: "rendered schematic to PNG".into(),
+            image_path: Some("/tmp/proj/.gordian/renders/001.png".into()),
+        }));
+
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(
+            text.contains("schematic preview"),
+            "schematic image label shows:\n{text}"
+        );
+        assert!(
+            !text.contains("board preview"),
+            "schematic renders should not be labeled as board previews:\n{text}"
+        );
+    }
+
+    #[test]
     fn multiline_assistant_text_renders_every_line() {
         let mut a = app();
         a.update(Msg::Agent(AgentEvent::AssistantText(

@@ -66,7 +66,6 @@ PCB order:
 Hard rules:
 - NEVER guess a footprint lib_id; use `search_footprints`.
 - Do not assign schematic symbol ids as footprints.
-- `autoroute` is disabled; use `route_board`.
 - Report honest unrouted nets instead of looping.
 - For RP2040-style MCUs, use a real QFN-56 7x7mm P0.4 footprint (not BGA), connect all VDD/IOVDD/USB_VDD/ADC_AVDD supply pins to the actual 3.3V rail unless you explicitly add a ferrite/filter source; tie TESTEN low; include an external QSPI flash for production boot unless the user explicitly excludes flash; BOOTSEL must pull the QSPI flash chip-select / QSPI_SS low during reset, not an arbitrary GPIO; expose only the requested practical GPIO headers (usually 2-4 compact headers, not one header per spare pin) and mark unused GPIO/QSPI pins `nc` instead of creating orphan one-pin nets.
 - For USB-C device receptacles, use the receptacle symbol, wire VBUS/GND/D+/D-, add 5.1k pulldowns on CC1/CC2, and include ESD protection on D+/D-.
@@ -111,7 +110,6 @@ mod tests {
             "assign_footprints",
             "place_board",
             "route_board",
-            "autoroute",
             "check_board",
             "open_board",
             "board_state",

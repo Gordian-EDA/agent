@@ -168,19 +168,6 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
 }
 
-/// Freerouting is disabled until its DSN export path consumes the live IPC board.
-pub fn autoroute(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let board_path = ctx.pcb_path();
-    if !board_path.exists() {
-        return Ok(
-            json!({ "error": "no .kicad_pcb — run regenerate_board then place_board before autoroute" }),
-        );
-    }
-    Ok(json!({
-        "error": "autoroute is disabled until Freerouting consumes the live KiCAD IPC board and writes routed copper back through IPC. Use route_board for the IPC-only PCB flow."
-    }))
-}
-
 /// Save the live KiCAD board to disk if a session is open. Returns whether it saved.
 pub fn save_session_if_open(ctx: &AgentRuntime) -> Result<bool> {
     ctx.kicad().save_if_open().map_err(ipc_err)

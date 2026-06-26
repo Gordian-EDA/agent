@@ -186,6 +186,46 @@ impl KicadCli {
         }
     }
 
+    /// Run `kicad-cli pcb export svg` on `pcb`, writing one board-area SVG.
+    pub fn export_pcb_svg(
+        &self,
+        pcb: &Path,
+        out_file: &Path,
+        layers: &str,
+        mirror: bool,
+    ) -> io::Result<PathBuf> {
+        if let Some(parent) = out_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut cmd = Command::new(&self.cli_path);
+        cmd.args([
+            "pcb",
+            "export",
+            "svg",
+            "--mode-single",
+            "--exclude-drawing-sheet",
+            "--page-size-mode",
+            "2",
+            "--layers",
+            layers,
+            "--output",
+        ])
+        .arg(out_file);
+        if mirror {
+            cmd.arg("--mirror");
+        }
+        let output = cmd.arg(pcb).output()?;
+        check_status(&output, "kicad-cli pcb export svg")?;
+        if out_file.is_file() {
+            Ok(out_file.to_path_buf())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("PCB SVG not produced at {}", out_file.display()),
+            ))
+        }
+    }
+
     /// Run `kicad-cli pcb export gerbers` on `pcb`.
     pub fn export_gerbers(&self, pcb: &Path, out_dir: &Path) -> io::Result<Vec<PathBuf>> {
         std::fs::create_dir_all(out_dir)?;
