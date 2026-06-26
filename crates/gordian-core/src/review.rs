@@ -200,15 +200,15 @@ const NO_ACTIONABLE_DEFECT_FLOOR: f64 = 8.0;
 /// `(score, high-confidence critical/major defect lines)` from a verdict object.
 ///
 /// Handles BOTH verdict shapes the critics emit, since the same dedup/feedback
-/// machinery serves them: the netlist critic's `{refdes, issue, why}` and the
-/// vision layout critic's `{location, category, description}`. Each defect renders
-/// to the same `- <target>: <issue> (<why>)` line so [`same_defect`] can dedup a
-/// layout defect against a netlist one on the shared `<target>` prefix.
+/// machinery serves them: the netlist critic's `{refdes, issue, why, evidence}`
+/// and the vision layout critic's `{location, category, description}`. Each defect
+/// renders to the same `- <target>: <issue> (<why>)` line so [`same_defect`] can
+/// dedup a layout defect against a netlist one on the shared `<target>` prefix.
 ///
-/// Important: only high-confidence major/critical defects are actionable in the
-/// agent loop. If a reviewer returns `score: 3` but its defects are all minor,
-/// medium/low confidence, or empty, that score is noise for gating purposes. In
-/// that case clamp it to the non-gating band.
+/// Important: only grounded, high-confidence major/critical defects are actionable
+/// in the agent loop. If a reviewer returns `score: 3` but its defects are all
+/// minor, medium/low confidence, ungrounded, or empty, that score is noise for
+/// gating purposes. In that case clamp it to the non-gating band.
 fn parse_review(v: &Value) -> (f64, Vec<String>) {
     let mut score = v.get("score").and_then(Value::as_f64).unwrap_or(0.0);
     let mut defects = Vec::new();
@@ -220,7 +220,7 @@ fn parse_review(v: &Value) -> (f64, Vec<String>) {
     {
         let sev = d.get("severity").and_then(Value::as_str).unwrap_or("");
         let conf = d.get("confidence").and_then(Value::as_str).unwrap_or("");
-        if matches!(sev, "critical" | "major") && conf == "high" {
+        if matches!(sev, "critical" | "major") && conf == "high" && defect_is_grounded(d) {
             let str_of = |k: &str| d.get(k).and_then(Value::as_str).unwrap_or("");
             // refdes/location = the target prefix; issue/description = the fault;
             // why/category = the reason. Prefer the netlist keys, fall back to the
@@ -235,6 +235,48 @@ fn parse_review(v: &Value) -> (f64, Vec<String>) {
         score = score.max(NO_ACTIONABLE_DEFECT_FLOOR);
     }
     (score, defects)
+}
+
+fn defect_is_grounded(d: &Value) -> bool {
+    if d.get("refdes").is_some() && evidence_text(d).trim().is_empty() {
+        return false;
+    }
+    if d.get("category").and_then(Value::as_str) == Some("text-overlap") {
+        return describes_actual_text_collision(d);
+    }
+    true
+}
+
+fn evidence_text(d: &Value) -> String {
+    match d.get("evidence") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn describes_actual_text_collision(d: &Value) -> bool {
+    let str_of = |k: &str| d.get(k).and_then(Value::as_str).unwrap_or("");
+    let text =
+        format!("{}\n{}", str_of("description"), str_of("verification")).to_ascii_lowercase();
+    [
+        "overlap",
+        "collid",
+        "merge",
+        "touch",
+        "abut",
+        "cover",
+        "obscur",
+        "on top of",
+        "intersect",
+        "superimpos",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 /// The first non-empty of two field values (the netlist key, then the layout key).
@@ -255,7 +297,7 @@ mod tests {
         let text = r#"reasoning here...
 FINAL_JSON:
 {"score": 6, "summary": "x", "defects": [
-  {"severity":"critical","confidence":"high","refdes":"U1","issue":"a","why":"b"},
+  {"severity":"critical","confidence":"high","refdes":"U1","issue":"a","why":"b","evidence":"U1.pins.VDD = 12V"},
   {"severity":"minor","confidence":"high","refdes":"R1","issue":"c","why":"d"},
   {"severity":"major","confidence":"low","refdes":"C1","issue":"e","why":"f"}
 ]}"#;
@@ -322,11 +364,51 @@ FINAL_JSON:
     fn low_score_with_actionable_defect_is_preserved() {
         let text = r#"FINAL_JSON:
 {"score": 3, "defects": [
-  {"severity":"critical","confidence":"high","refdes":"U1","issue":"wrong rail","why":"VDD on 12V"}
+  {"severity":"critical","confidence":"high","refdes":"U1","issue":"wrong rail","why":"VDD on 12V","evidence":"U1.pins.VDD = 12V"}
 ]}"#;
         let (score, defects) = parse_review(&extract_json(text).unwrap());
         assert_eq!(score, 3.0);
         assert_eq!(defects.len(), 1);
+    }
+
+    #[test]
+    fn ungrounded_netlist_defect_is_not_actionable() {
+        let text = r#"FINAL_JSON:
+{"score": 2, "defects": [
+  {"severity":"major","confidence":"high","refdes":"U1","issue":"wrong/missing power pin wiring","why":"Only VDD pins appear partially assigned; pin 7 is NRST, but other required VDD/GND pins are not shown as tied consistently."}
+]}"#;
+        let (score, defects) = parse_review(&extract_json(text).unwrap());
+        assert!(
+            defects.is_empty(),
+            "netlist defects must cite exact netlist evidence, not visual inference: {defects:?}"
+        );
+        assert_eq!(score, 8.0);
+    }
+
+    #[test]
+    fn cramped_text_without_collision_is_not_actionable_overlap() {
+        let text = r#"FINAL_JSON:
+{"score": 5, "defects": [
+  {"severity":"major","confidence":"high","category":"text-overlap","location":"J1/upper-right input block","description":"Input block has cramped net/signal text packed tightly together, making associations harder to read at a glance.","verification":"5V,GND, VDD, GND, and J1 label are close together."}
+]}"#;
+        let (score, defects) = parse_review(&extract_json(text).unwrap());
+        assert!(
+            defects.is_empty(),
+            "cramped but non-colliding text is not an actionable overlap: {defects:?}"
+        );
+        assert_eq!(score, 8.0);
+    }
+
+    #[test]
+    fn actual_text_collision_remains_actionable() {
+        let text = r#"FINAL_JSON:
+{"score": 5, "defects": [
+  {"severity":"major","confidence":"high","category":"text-overlap","location":"R1/C1","description":"The GND label overlaps the R1 value text, merging the strings visually.","verification":"The GND characters collide with the 10k value text."}
+]}"#;
+        let (score, defects) = parse_review(&extract_json(text).unwrap());
+        assert_eq!(score, 5.0);
+        assert_eq!(defects.len(), 1);
+        assert!(defects[0].starts_with("- R1/C1:"));
     }
 
     #[tokio::test]

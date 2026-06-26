@@ -17,18 +17,12 @@
 //! `edit_design`; the PCB side (in [`crate::tools_pcb`]) covers the footprint
 //! search/info, `regenerate_board`, and the place/route/export/interactive flow.
 //!
-//! ## `apply_design`: dry-run vs commit
+//! ## `apply_design`: preview vs approved write
 //!
-//! `apply_design` is **dry-run by default** (`commit` absent or `false`). It
-//! compiles the YAML, and on success renders the reconciled schematic against
-//! the current `.kicad_sch` (if any), then returns a structured diff
-//! (`added`/`removed`/`changed` refdes + a net-count delta) and the rendered
-//! text length — **without writing anything**. The human apply-gate lives in the
-//! [`crate::Agent`] loop (the preview → approve → commit choreography over a
-//! [`crate::ToolEffect::Gated`] tool); only once it approves does the loop re-call
-//! with `commit: true`, which writes
-//! the file and runs ERC, returning
-//! `{written: true, erc: {errors, warnings}}`.
+//! Model-facing `apply_design` has no write flag. The human apply-gate lives in
+//! the [`crate::Agent`] loop: it first runs an internal preview to return a diff,
+//! then, after approval, re-runs the same tool with a private write switch. Direct
+//! dispatcher calls remain preview-only unless that private switch is supplied.
 //!
 //! ## Symbol-index caching
 //!
@@ -52,7 +46,7 @@ use circuit_lang::model::{Component, Design, PinTarget};
 use kicad_cli::KicadCli;
 use sch_io::read::lift;
 
-use crate::{AgentRuntime, Tool};
+use crate::{AgentRuntime, SchematicPlacementEngine, Tool};
 
 /// The JSON-Schema definitions for every tool, in a stable order. The
 /// [`crate::Agent`] loop hands these to the model as genai [`Tool`]s.
@@ -105,13 +99,12 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "apply_design".into(),
-                description: "Compile/render schematic. Default commit=false previews diff; commit=true writes and runs ERC. Omit yaml to use draft."
+                description: "Compile/render schematic, preview the diff, and submit it through the approval gate. Omit yaml to use draft."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "yaml": { "type": "string", "description": "Optional circuit-YAML; default draft." },
-                        "commit": { "type": "boolean", "description": "true writes; false previews." }
+                        "yaml": { "type": "string", "description": "Optional circuit-YAML; default draft." }
                     }
                 }),
             },
@@ -223,7 +216,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "assign_footprint".into(),
-                description: "Set one component's footprint field in the circuit-YAML draft. After assignments, apply_design(commit=true) before regenerate_board."
+                description: "Set one component's footprint field in the circuit-YAML draft. After assignments, apply_design before regenerate_board."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -294,7 +287,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "regenerate_board".into(),
-                description: "Destructively regenerate/seed the PCB from the committed schematic; not KiCAD F8 sync. May replace existing placement/routing. If footprints are missing/unapplied, fix YAML and apply_design(commit=true) first."
+                description: "Destructively regenerate/seed the PCB from the committed schematic; not KiCAD F8 sync. May replace existing placement/routing. If footprints are missing/unapplied, fix YAML and apply_design first."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -610,6 +603,11 @@ pub(crate) fn compile_report(diags: &circuit_lang::Diagnostics) -> Value {
 // ── 5. apply_design ────────────────────────────────────────────────────────
 
 fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    if input.get("commit").is_some() {
+        return Ok(json!({
+            "error": "`commit` has been removed from apply_design; call apply_design({yaml?}) through the approval gate",
+        }));
+    }
     let explicit_yaml = input
         .get("yaml")
         .and_then(Value::as_str)
@@ -632,7 +630,7 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .draft_is_stale(current_sch_text(ctx).as_deref());
 
     let commit = input
-        .get("commit")
+        .get("__commit")
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
@@ -657,14 +655,11 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // The floorplan engine re-lays-out from scratch via the connectivity-driven
     // inferred IR; the human-style layout always re-flows the whole sheet.
     let ir = ctx.layout_for(&design);
-    // Production uses the locality-aware ANNEAL search (strictly ≥ greedy via the
-    // candidate pick) so generated boards get the premium placement, not the
-    // env-defaulted greedy free tier.
     let emitted = sch_floorplan::floorplan::emit_strategy(
         ctx.env(),
         &design,
         &ir,
-        Box::new(anneal_place::Anneal),
+        schematic_placement_engine(ctx.config().engines.schematic_placer),
     )
     .context("rendering schematic")?;
     let rendered = emitted.sch;
@@ -708,8 +703,13 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             .sch_path()
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        let root = crate::multisheet::compose_single_sheet(ctx.env(), &design, dir)
-            .context("composing single-sheet schematic")?;
+        let root = crate::multisheet::compose_single_sheet(
+            ctx.env(),
+            &design,
+            dir,
+            ctx.config().engines.schematic_placer,
+        )
+        .context("composing single-sheet schematic")?;
         if root != ctx.sch_path() {
             std::fs::rename(&root, ctx.sch_path()).with_context(|| {
                 format!("placing composed sheet at {}", ctx.sch_path().display())
@@ -743,6 +743,15 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "wire_through_body": emitted.crossings.body + emitted.crossings.ic,
         "detected_idioms": detected_idioms,
     }))
+}
+
+pub(crate) fn schematic_placement_engine(
+    engine: SchematicPlacementEngine,
+) -> Box<dyn sch_floorplan::contract::PlacementEngine> {
+    match engine {
+        SchematicPlacementEngine::Anneal => Box::new(anneal_place::Anneal),
+        SchematicPlacementEngine::Greedy => Box::new(greedy_place::Greedy),
+    }
 }
 
 /// A per-refdes signature used to detect a *changed* component across a re-apply.

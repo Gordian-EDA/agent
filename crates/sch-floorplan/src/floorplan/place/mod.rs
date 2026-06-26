@@ -49,7 +49,7 @@ mod grid_tests {
     use super::*;
     use crate::wire::DrawnSegment;
     use circuit_lang::model::{Block, Component, Design, LayoutGrid};
-    use geom::Dir;
+    use geom::{Dir, Rect};
     use indexmap::IndexMap;
     use kicad_symbol::geometry::SymbolGeometry;
     use sch_place::ir::Side;
@@ -272,5 +272,76 @@ mod grid_tests {
             port_exit_point(&two, Side::Right),
             [geom::GRID_50_MIL.snap(24.0 + 7.62), 0.0]
         );
+    }
+
+    #[test]
+    fn vdd_side_power_glyph_points_away_from_served_body() {
+        // A west-facing VDD pin sits on the left edge of its symbol body. The VDD
+        // arrow must extend west into open space, not east back through the body.
+        let body = Rect::new(0.0, -2.0, 8.0, 2.0);
+        let angle = choose_power_angle("VDD", Dir::West, [0.0, 0.0], &[body]);
+        let glyph = Rect::new(-3.0, -1.5, 0.0, 1.5);
+        assert_eq!(angle, 90.0);
+        assert!(!glyph.overlaps(&body));
+    }
+
+    #[test]
+    fn gnd_side_power_glyph_points_away_from_served_body() {
+        // GND's triangle extends the opposite way from a VDD arrow at the same
+        // angle, so west-facing ground keeps the old 270-degree orientation.
+        let body = Rect::new(0.0, -2.0, 8.0, 2.0);
+        assert_eq!(
+            choose_power_angle("GND", Dir::West, [0.0, 0.0], &[body]),
+            270.0
+        );
+    }
+
+    #[test]
+    fn power_angle_chooser_uses_clear_local_side_when_conventional_side_is_blocked() {
+        // If the conventional outward side is occupied by a neighbouring body,
+        // rotate the glyph to any clear side instead of creating a visual overlap.
+        let west_neighbor = Rect::new(-8.0, -2.0, 0.0, 2.0);
+        let angle = choose_power_angle("VDD", Dir::West, [0.0, 0.0], &[west_neighbor]);
+        let glyph = power_glyph_box("VDD", [0.0, 0.0], angle);
+        assert_ne!(angle, 90.0);
+        assert!(!glyph.overlaps(&west_neighbor));
+    }
+
+    #[test]
+    fn side_gnd_down_preference_yields_to_local_collision() {
+        // The multisheet GND convention prefers a downward triangle, but that is
+        // only a tie-breaker: a body below the pin must still force a clear side.
+        let body_below = Rect::new(-2.0, 0.0, 2.0, 8.0);
+        let angle = choose_power_angle_preferred("GND", Dir::West, [0.0, 0.0], &[body_below], 0.0);
+        let glyph = power_glyph_box("GND", [0.0, 0.0], angle);
+        assert_ne!(angle, 0.0);
+        assert!(!glyph.overlaps(&body_below));
+    }
+
+    #[test]
+    fn power_flag_direction_follows_collision_avoiding_glyph() {
+        let west_neighbor = Rect::new(-8.0, -2.0, 0.0, 2.0);
+        let angle = choose_power_angle("VDD", Dir::West, [0.0, 0.0], &[west_neighbor]);
+        let glyph_dir = power_glyph_dir("VDD", angle);
+        assert_eq!(glyph_dir, Dir::East);
+        assert_eq!(flag_angle(glyph_dir), 270.0);
+    }
+
+    #[test]
+    fn pwr_flag_splits_from_power_marker_on_adjacent_taps() {
+        let eps = [
+            ([10.0, 0.0], Dir::North),
+            ([12.54, 0.0], Dir::North),
+            ([30.0, 0.0], Dir::North),
+        ];
+        assert_eq!(split_flag_power_pair(&eps, 5.08), Some((0, 1)));
+    }
+
+    #[test]
+    fn pwr_flag_split_requires_nearby_collinear_taps() {
+        let diagonal = [([10.0, 0.0], Dir::North), ([12.54, 2.54], Dir::North)];
+        let far = [([10.0, 0.0], Dir::North), ([20.32, 0.0], Dir::North)];
+        assert_eq!(split_flag_power_pair(&diagonal, 5.08), None);
+        assert_eq!(split_flag_power_pair(&far, 5.08), None);
     }
 }

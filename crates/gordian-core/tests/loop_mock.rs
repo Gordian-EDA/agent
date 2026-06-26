@@ -27,7 +27,7 @@ blocks:\n\
 \x20     R1: {part: R, value: 10k, between: [A, GND]}\n\
 \x20     R2: {part: R, value: 10k, between: [GND, B]}\n";
 
-/// The shared script: (1) search_symbols, (2) apply_design{commit:true}, (3) done.
+/// The shared script: (1) search_symbols, (2) apply_design, (3) done.
 fn script() -> Vec<gordian_core::StreamEnd> {
     vec![
         tool_call(
@@ -38,7 +38,7 @@ fn script() -> Vec<gordian_core::StreamEnd> {
         tool_call(
             "tu_2",
             "apply_design",
-            serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+            serde_json::json!({ "yaml": TINY_YAML }),
         ),
         final_text("done"),
     ]
@@ -100,7 +100,7 @@ async fn stall_after_research_is_nudged_until_it_commits() {
         tool_call(
             "tu_2",
             "apply_design",
-            serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+            serde_json::json!({ "yaml": TINY_YAML }),
         ),
         final_text("done"),
     ];

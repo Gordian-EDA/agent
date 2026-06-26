@@ -574,24 +574,12 @@ impl SchematicWriter {
                 above_right,
             ];
             bands.sort_by_key(hits);
-            // Far bands (detached but clear of the body's OWN pins) BEFORE right/left: on a crowded
-            // IC whose every near band is blocked by a decoupling cap, right/left sit at the body
-            // edge ON the side pins, so the refdes/value smears across the pin stubs (the
-            // TPA3116 / driver-IC "value over pins 16/17" defect). A slightly-detached far band
-            // reads far better than text over the pins; right/left stay the genuine last resort.
-            // Multi-sheet sub-sheets only (where the dense power-IC sheets live) so the single-sheet
-            // reference snapshots stay byte-identical.
-            if std::env::var("MULTISHEET_REFINE").is_ok() {
-                bands.push(above_far);
-                bands.push(below_far);
-                bands.push(right);
-                bands.push(left);
-            } else {
-                bands.push(right);
-                bands.push(left);
-                bands.push(above_far);
-                bands.push(below_far);
-            }
+            // IC side fields sit on the dense pin-name/number band and can look
+            // valid to the approximate boxes while visibly smearing over pins.
+            // Keep IC fields on horizontal bands only, with far bands as the
+            // detached fallback.
+            bands.push(above_far);
+            bands.push(below_far);
             bands
         } else if h[0] > h[1] {
             vec![
@@ -1021,8 +1009,10 @@ impl SchematicWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::write::Dir;
+    use crate::write::{Dir, Instance};
+    use geom::Point2;
     use kicad_env::KicadEnv;
+    use kicad_symbol::geometry::PinGeom;
 
     /// `add_symbol` needs a real symbol library to resolve geometry, so these
     /// tests SKIP-gracefully when no KiCAD environment is detected.
@@ -1034,6 +1024,72 @@ mod tests {
                 None
             }
         }
+    }
+
+    #[test]
+    fn ic_far_bands_precede_side_fields() {
+        let mut w = SchematicWriter::new();
+        w.instances.push(Instance {
+            lib_id: "Test:IC".into(),
+            refdes: "U1".into(),
+            value: "STM32F103C8Tx".into(),
+            footprint: None,
+            at: Point2::new(100.0, 100.0),
+            angle: 0.0,
+            mirror: false,
+            extra_props: Vec::new(),
+            uuid: None,
+            half_extents: Point2::new(10.0, 20.0),
+            ref_pos: None,
+            val_pos: None,
+            val_hidden: false,
+            unit: 1,
+        });
+        w.sym_pins.insert(
+            "Test:IC".into(),
+            vec![
+                PinGeom {
+                    number: "1".into(),
+                    name: "LEFT".into(),
+                    at: Point2::new(-10.0, 0.0),
+                    angle: 0.0,
+                    length: 2.54,
+                    unit: 1,
+                },
+                PinGeom {
+                    number: "2".into(),
+                    name: "RIGHT".into(),
+                    at: Point2::new(10.0, 0.0),
+                    angle: 180.0,
+                    length: 2.54,
+                    unit: 1,
+                },
+                PinGeom {
+                    number: "3".into(),
+                    name: "TOP".into(),
+                    at: Point2::new(0.0, 20.0),
+                    angle: 270.0,
+                    length: 2.54,
+                    unit: 1,
+                },
+            ],
+        );
+
+        let (movable, _) = w.field_pair_movable(0);
+        let first_after_near_bands = movable.candidates[6];
+
+        assert!(
+            first_after_near_bands.max_y < 80.0 || first_after_near_bands.min_y > 120.0,
+            "ICs should try far above/below bands before side fields; got {first_after_near_bands:?}"
+        );
+        assert!(
+            movable
+                .candidates
+                .iter()
+                .all(|c| c.max_y < 80.0 || c.min_y > 120.0),
+            "IC fields should never use side bands over pin text: {:?}",
+            movable.candidates
+        );
     }
 
     #[test]

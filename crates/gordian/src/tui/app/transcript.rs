@@ -156,9 +156,7 @@ impl App {
             }
             AgentEvent::ToolStarted { name } => {
                 self.turn_tool_calls += 1;
-                self.active_tool = Some(name.clone());
-                self.transcript
-                    .push(Entry::tool(format!("{name}(…) running…")));
+                self.active_work = Some(name.clone());
             }
             AgentEvent::ToolFinished {
                 name,
@@ -181,7 +179,7 @@ impl App {
                     self.transcript
                         .push(Entry::tool(format!("{name} → {summary}")));
                 }
-                self.active_tool = None;
+                self.active_work = None;
                 // A render tool returned a PNG: post an inline preview right after
                 // the collapsed card.
                 if let Some(path) = image_path {
@@ -190,8 +188,10 @@ impl App {
             }
             AgentEvent::Applied { summary } => {
                 self.status.applied_count += 1;
-                self.transcript
-                    .push(Entry::system(format!("applied — {summary}")));
+                self.transcript.push(Entry::notice(
+                    NoticeLevel::Success,
+                    format!("applied — {summary}"),
+                ));
             }
             AgentEvent::Usage {
                 input_tokens,
@@ -216,11 +216,15 @@ impl App {
                     "context compacted: {messages_before} → {messages_after} messages"
                 )));
             }
+            AgentEvent::ReviewStarted { round } => {
+                self.active_work = Some(format!("design review round {round}"));
+            }
             AgentEvent::Reviewed {
                 round,
                 score,
                 defects,
             } => {
+                self.active_work = None;
                 let msg = if defects.is_empty() {
                     format!(
                         "design review (round {round}): score {score}/10 — no functional defects"
@@ -243,6 +247,7 @@ impl App {
                 // closed so the next turn's deltas can't append to it.
                 self.live_assistant = None;
                 self.running = false;
+                self.active_work = None;
             }
         }
     }

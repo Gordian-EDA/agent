@@ -7,7 +7,7 @@
 //! Per-block independent layout is the RULE here, not a dense-only special case.
 //! [`refine_blocks`] first normalizes the agent's blocks into uniform-sized SHEET GROUPS
 //! (split over-crammed blocks, merge tiny fragments), then [`compose_single_sheet`] runs a
-//! SEPARATE anneal per group (each in its own coordinate space), shelf-packs the group
+//! SEPARATE placement pass per group (each in its own coordinate space), shelf-packs the group
 //! regions onto one sheet with margins so they never touch, translates each group's
 //! geometry to its tile, and frames each with a graphic rectangle + a name label. The page
 //! is enlarged to fit; global labels mean a large sheet still has no long wires.
@@ -18,6 +18,8 @@ use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+use crate::SchematicPlacementEngine;
 
 /// Deterministic UUIDv5-style id from a seed (no randomness ⇒ stable re-emits).
 pub fn det_uuid(seed: &str) -> String {
@@ -273,7 +275,7 @@ pub fn refine_blocks(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
 
 /// Emit a multi-block `Design` as ONE composed `.kicad_sch` under `out_dir` (file
 /// `root.kicad_sch`). Refines the blocks into uniform sheet GROUPS ([`refine_blocks`]), runs
-/// a SEPARATE anneal per group (each in its own coordinate space, as a TYPED writer), then
+/// a SEPARATE placement pass per group (each in its own coordinate space, as a TYPED writer), then
 /// hands the group writers to the engine's `compose_writers`, which tiles the group regions
 /// onto a single enlarged page (translating each writer's items in mm) and frames each with a
 /// labeled bounding box. Cross-group nets auto-become global labels (single-pin ports) / power
@@ -284,6 +286,7 @@ pub fn compose_single_sheet(
     env: &KicadEnv,
     design: &Design,
     out_dir: &Path,
+    engine: SchematicPlacementEngine,
 ) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(out_dir)?;
     // SAFETY: process-wide flag read by the engine to opt each group into route-aware
@@ -304,9 +307,13 @@ pub fn compose_single_sheet(
         // Lay out each group INDEPENDENTLY and keep its TYPED writer (not a rendered
         // string): the engine composer translates each group's items to its tile in mm
         // and folds them into one sheet — no string-level geometry math here.
-        let w =
-            sch_floorplan::floorplan::emit_writer(env, &sub, &ir, Box::new(anneal_place::Anneal))
-                .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
+        let w = sch_floorplan::floorplan::emit_writer(
+            env,
+            &sub,
+            &ir,
+            crate::tools::schematic_placement_engine(engine),
+        )
+        .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
         groups_w.push((sanitize(&gname), w));
     }
     let composed = sch_floorplan::floorplan::compose_writers(groups_w, design.name.as_deref());
@@ -362,7 +369,7 @@ pub fn emit_and_check(
     design: &Design,
     out_dir: &Path,
 ) -> anyhow::Result<(PathBuf, usize, usize)> {
-    let root = compose_single_sheet(env, design, out_dir)?;
+    let root = compose_single_sheet(env, design, out_dir, SchematicPlacementEngine::Anneal)?;
     let (e, w) = match KicadCli::new(env).erc(&root) {
         Ok(r) => (r.error_count(), r.warning_count()),
         Err(_) => (usize::MAX, 0),

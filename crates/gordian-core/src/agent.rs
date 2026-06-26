@@ -16,14 +16,14 @@
 //!
 //! ## The apply-gate (preview → approve → commit)
 //!
-//! `apply_design` with `commit:true` is the one [`ToolEffect::Gated`] write; it is
+//! `apply_design` is the one [`ToolEffect::Gated`] write; it is
 //! NOT written immediately. The loop:
 //!
-//! 1. Runs `apply_design(commit:false)` in [`RunMode::Preview`] to obtain the diff.
+//! 1. Runs `apply_design` in [`RunMode::Preview`] to obtain the diff.
 //! 2. If the preview is not `ready` (e.g. the input didn't compile), returns the
 //!    diagnostics straight back so the model self-repairs — no approval prompt.
 //! 3. Hands the preview value to [`Approvals::approve`].
-//! 4. On approval, re-runs `apply_design(commit:true)` in [`RunMode::Commit`] and
+//! 4. On approval, re-runs `apply_design` in [`RunMode::Commit`] and
 //!    marks the turn applied, emitting [`AgentEvent::Applied`].
 //! 5. On rejection, feeds a "user rejected" result back to the model.
 //!
@@ -138,6 +138,14 @@ pub enum AgentEvent {
     },
     /// The turn finished.
     TurnDone,
+    /// An independent review pass over the committed work started. This is not
+    /// a model-requested tool call, so UIs should show it as agent progress
+    /// without incrementing tool-call counters.
+    ReviewStarted {
+        /// `0` is the first review of the committed work; later rounds follow
+        /// review-driven fix turns.
+        round: usize,
+    },
     /// An independent review pass over the committed work completed (from
     /// [`Agent::run_turn_reviewed`]). `round` 0 is the first review.
     Reviewed {
@@ -369,6 +377,17 @@ impl<P: Provider> Agent<P> {
         approvals: &mut dyn Approvals,
         events: Events<'_>,
     ) -> Result<TurnOutcome> {
+        let outcome = self.run_agent_subturn(user_msg, approvals, events).await?;
+        emit(events, AgentEvent::TurnDone);
+        Ok(outcome)
+    }
+
+    async fn run_agent_subturn(
+        &mut self,
+        user_msg: &str,
+        approvals: &mut dyn Approvals,
+        events: Events<'_>,
+    ) -> Result<TurnOutcome> {
         let defs = tool_defs();
 
         repair_history(&mut self.history);
@@ -464,7 +483,6 @@ impl<P: Provider> Agent<P> {
                     continue;
                 }
 
-                emit(events, AgentEvent::TurnDone);
                 return Ok(TurnOutcome {
                     applied,
                     final_text,
@@ -533,7 +551,6 @@ impl<P: Provider> Agent<P> {
         if final_text.is_empty() {
             final_text = "(agent reached its iteration limit without a final answer)".to_string();
         }
-        emit(events, AgentEvent::TurnDone);
         Ok(TurnOutcome {
             applied,
             final_text,
@@ -546,8 +563,8 @@ impl<P: Provider> Agent<P> {
     /// INDEPENDENTLY review the committed work and feed any high-confidence
     /// defects back as a fix turn, re-reviewing up to `max_fix` rounds. The
     /// reviewer is a fresh, history-free LLM call (unbiased). `intent` is the
-    /// design goal. Emits [`AgentEvent::Reviewed`] per round; returns the final
-    /// turn's outcome.
+    /// design goal. Emits [`AgentEvent::ReviewStarted`] / [`AgentEvent::Reviewed`]
+    /// per round; returns the final turn's outcome.
     ///
     /// A read-only / conversational turn (nothing applied) skips review entirely,
     /// so the extra reviewer LLM call is paid only on authoring turns. A review
@@ -560,13 +577,15 @@ impl<P: Provider> Agent<P> {
         events: Events<'_>,
         max_fix: usize,
     ) -> Result<TurnOutcome> {
-        let mut outcome = self.run_turn(user_msg, approvals, events).await?;
+        let mut outcome = self.run_agent_subturn(user_msg, approvals, events).await?;
         // Gate: review only authoring/commit turns. Conversational and read-only
         // turns commit nothing, so there is nothing to independently review.
         if !outcome.applied {
+            emit(events, AgentEvent::TurnDone);
             return Ok(outcome);
         }
         for round in 0..=max_fix {
+            emit(events, AgentEvent::ReviewStarted { round });
             let Some(review) = review_committed_kicad(&self.runtime, intent, &self.client).await
             else {
                 break;
@@ -583,8 +602,9 @@ impl<P: Provider> Agent<P> {
                 break;
             }
             let fix = fix_prompt(&review.defects);
-            outcome = self.run_turn(&fix, approvals, events).await?;
+            outcome = self.run_agent_subturn(&fix, approvals, events).await?;
         }
+        emit(events, AgentEvent::TurnDone);
         Ok(outcome)
     }
 
@@ -729,10 +749,9 @@ fn tool_effect(name: &str) -> ToolEffect {
     }
 }
 
-/// Whether this `apply_design` call intends to APPLY (write) — i.e. `commit:true`.
+/// Whether this tool call goes through the apply gate.
 fn wants_apply(call: &ToolCall) -> bool {
     call.fn_name == "apply_design"
-        && call.fn_arguments.get("commit").and_then(Value::as_bool) == Some(true)
 }
 
 /// Whether a tool is schematic research/authoring whose deliverable is a committed
@@ -748,7 +767,7 @@ fn is_authoring_for_commit(name: &str) -> bool {
 /// The re-prompt sent when a stalled authoring turn never committed.
 const COMMIT_NUDGE: &str = "Your turn ended without a committed design — nothing was written. You MUST \
      finish the schematic now: call `create_design`/`edit_design` to author the \
-     full design, then `apply_design(commit:true)` to commit it. Do this now \
+     full design, then `apply_design` to submit it for approval. Do this now \
      before ending your turn.";
 
 /// The text fed back as a fix turn when the post-turn review finds defects.
@@ -763,8 +782,8 @@ fn fix_prompt(defects: &[String]) -> String {
 /// Run one KiCAD tool, off-loading the synchronous dispatch onto the
 /// blocking pool so a compile / render / `kicad-cli` subprocess never stalls a
 /// single-threaded UI runtime. `apply_design`'s Preview/Commit passes force the
-/// `commit` flag and lift the gate facts into [`ApplyInfo`]; `review_design` rides
-/// the async LLM client.
+/// private write switch and lift the gate facts into [`ApplyInfo`]; `review_design`
+/// rides the async LLM client.
 async fn run_kicad_tool(
     ctx: &Arc<AgentRuntime>,
     call: &ToolCall,
@@ -782,7 +801,7 @@ async fn run_kicad_tool(
         match mode {
             RunMode::Preview => {
                 let mut input = call.fn_arguments.clone();
-                input["commit"] = json!(false);
+                input["__commit"] = json!(false);
                 let dry = run_blocking(ctx, "apply_design", input).await;
                 // `ready` = the YAML compiled (dry.ok == true); otherwise the loop
                 // returns the diagnostics straight back with no approval prompt.
@@ -801,7 +820,7 @@ async fn run_kicad_tool(
             }
             RunMode::Commit => {
                 let mut input = call.fn_arguments.clone();
-                input["commit"] = json!(true);
+                input["__commit"] = json!(true);
                 let committed = run_blocking(ctx, "apply_design", input).await;
                 let apply = committed.as_ref().ok().map(|v| {
                     let written = v.get("written").and_then(Value::as_bool) == Some(true);
@@ -900,10 +919,22 @@ async fn review_netlist_with_erc(
     intent: &str,
     netlist: &str,
 ) -> Result<(f64, Vec<String>)> {
-    let (score, mut defects) =
-        crate::review_kicad::review_netlist(reviewer, intent, netlist, &ctx.config().review)
-            .await?;
-    if let Some(design) = circuit_lang::compile(netlist, ctx.provider()).design {
+    let compiled = circuit_lang::compile(netlist, ctx.provider());
+    let review_subject = compiled
+        .design
+        .as_ref()
+        .map(|design| {
+            crate::review_kicad::annotate_netlist_for_review(netlist, design, ctx.provider())
+        })
+        .unwrap_or_else(|| netlist.to_string());
+    let (score, mut defects) = crate::review_kicad::review_netlist(
+        reviewer,
+        intent,
+        &review_subject,
+        &ctx.config().review,
+    )
+    .await?;
+    if let Some(design) = compiled.design {
         for d in circuit_lang::erc::erc_checks(&design) {
             if !defects.iter().any(|e| crate::review::same_defect(e, &d)) {
                 defects.push(d);
@@ -1264,14 +1295,20 @@ mod tests {
         assert_eq!(tool_effect("apply_design"), ToolEffect::Gated);
         assert_eq!(tool_effect("edit_design"), ToolEffect::Authoring);
         assert_eq!(tool_effect("search_symbols"), ToolEffect::ReadOnly);
-        let call = |commit: bool| ToolCall {
+        let apply_call = ToolCall {
             call_id: "1".into(),
             fn_name: "apply_design".into(),
-            fn_arguments: json!({ "commit": commit }),
+            fn_arguments: json!({}),
             thought_signatures: None,
         };
-        assert!(wants_apply(&call(true)));
-        assert!(!wants_apply(&call(false)));
+        let preview_call = ToolCall {
+            call_id: "2".into(),
+            fn_name: "validate_design".into(),
+            fn_arguments: json!({}),
+            thought_signatures: None,
+        };
+        assert!(wants_apply(&apply_call));
+        assert!(!wants_apply(&preview_call));
     }
 
     #[test]

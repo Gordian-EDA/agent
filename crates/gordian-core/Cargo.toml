@@ -22,6 +22,7 @@ pcb-place = { path = "../pcb-place" }
 sch-floorplan = { path = "../sch-floorplan" }
 sch-io = { path = "../sch-io" }
 anneal-place = { path = "../anneal-place" }
+greedy-place = { path = "../greedy-place" }
 
 anyhow.workspace = true
 async-trait.workspace = true
@@ -40,7 +41,6 @@ prost = "0.13"
 prost-types = "0.13"
 
 [dev-dependencies]
-greedy-place = { path = "../greedy-place" }
 tokio.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true

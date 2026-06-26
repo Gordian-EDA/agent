@@ -6,7 +6,7 @@
 //! just the structured facts the gate's choreography needs:
 //!
 //! - [`ToolEffect`] classifies a tool name (`ReadOnly` | `Authoring` | `Gated`).
-//! - A [`ToolEffect::Gated`] write (`apply_design` with `commit:true`) is driven
+//! - A [`ToolEffect::Gated`] write (`apply_design`) is driven
 //!   through preview → approve → commit ([`RunMode`]), reporting via [`ApplyInfo`].
 //! - An independent post-turn review comes back as a [`ReviewOutcome`].
 //!

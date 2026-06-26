@@ -108,7 +108,7 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({
             "ok": false,
             "unapplied_draft_footprints": unapplied_footprints,
-            "note": "footprint fields live in circuit-YAML/schematic state; call apply_design(commit:true) to write the draft, then regenerate_board again",
+            "note": "footprint fields live in circuit-YAML/schematic state; call apply_design() to write the draft, then regenerate_board again",
         }));
     }
     let mut pad_nets_by_ref: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
@@ -179,7 +179,7 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "ok": false,
             "part_count": part_count,
             "missing_footprints": missing_footprints,
-            "note": "some schematic symbols have no footprint field — assign footprints in the circuit-YAML draft, apply_design(commit:true), then regenerate_board again",
+            "note": "some schematic symbols have no footprint field — assign footprints in the circuit-YAML draft, apply_design(), then regenerate_board again",
         }));
     }
 

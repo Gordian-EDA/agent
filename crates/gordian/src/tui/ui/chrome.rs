@@ -1,6 +1,6 @@
-//! The frame furniture around the transcript and composer: the [`draw_header`]
-//! brand/status row, the [`draw_status`] footer, the [`draw_running`] in-flight
-//! indicator, and the [`draw_help`] overlay.
+//! The frame furniture around the transcript and composer: the [`draw_status`]
+//! footer, the [`draw_running`] in-flight indicator, the [`draw_scroll_indicator`]
+//! badge, and the [`draw_help`] overlay.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -20,70 +20,33 @@ const SPINNER: [&str; 4] = ["▘", "▝", "▗", "▖"];
 /// models on Bedrock).
 const CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 
-pub(super) fn draw_header(f: &mut Frame, area: Rect, app: &App) {
-    let dot = if app.status.kicad_connected {
-        "●"
-    } else {
-        "○"
-    };
-    let area = body(area);
-    let dim = Style::default().fg(Color::DarkGray);
-    let sep = || Span::styled("  ·  ", dim);
-    let mut spans = vec![
-        // The brand carries the accent; everything else is metadata, so it dims.
-        Span::styled(
-            "Gordian",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        sep(),
-        Span::styled(
-            file_name(&app.status.sch_path),
-            Style::default().fg(Color::Gray),
-        ),
-        sep(),
-        Span::styled(
-            format!("KiCAD {dot}"),
-            Style::default().fg(if app.status.kicad_connected {
-                Color::Green
-            } else {
-                Color::Red
-            }),
-        ),
-    ];
-    // `auto` only appears when it's ON — the default (off) is silent, not chrome.
-    if app.auto {
-        spans.push(sep());
-        spans.push(Span::styled("auto on", Style::default().fg(Color::Yellow)));
+pub(super) fn draw_scroll_indicator(f: &mut Frame, area: Rect, app: &App) {
+    if app.scroll == 0 {
+        return;
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
 
-    // The `↑n` scrolled-back indicator sits at the header's right edge, overlaid
-    // so it stays visible even when the title overflows a narrow terminal.
-    if app.scroll > 0 {
-        let ind = format!(" ↑{} ", app.scroll);
-        let iw = (ind.chars().count() as u16).min(area.width);
-        let ind_area = Rect {
-            x: area.x + area.width - iw,
-            y: area.y,
-            width: iw,
-            height: 1,
-        };
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                ind,
-                Style::default().fg(Color::DarkGray),
-            ))),
-            ind_area,
-        );
-    }
+    let area = body(area);
+    let ind = format!(" ↑{} ", app.scroll);
+    let iw = (ind.chars().count() as u16).min(area.width);
+    let ind_area = Rect {
+        x: area.x + area.width - iw,
+        y: area.y,
+        width: iw,
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            ind,
+            Style::default().fg(Color::DarkGray),
+        ))),
+        ind_area,
+    );
 }
 
 /// The running indicator that replaces the old transcript-title spinner: an
 /// animated frame, elapsed seconds, the output tokens streamed this turn, and
-/// the interrupt hint, plus a second detail row naming the tool now executing.
-/// Drawn only while a turn is in flight.
+/// the interrupt hint, plus a second detail row naming the active tool or review
+/// phase. Drawn only while a turn is in flight.
 pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
     let frame = SPINNER[app.spinner % SPINNER.len()];
     let secs = app.turn_elapsed_secs().unwrap_or(0);
@@ -115,13 +78,13 @@ pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
     }
 
     let mut lines = vec![Line::from(spans)];
-    // The detail row names the tool now executing, so a long call reads as
-    // progress rather than a stall.
-    if let Some(tool) = &app.active_tool {
+    // The detail row names the current unit of work, so a long call or async
+    // review pass reads as progress rather than a stall.
+    if let Some(work) = &app.active_work {
         lines.push(Line::from(vec![
             Span::styled("  ↳ ", dim),
             Span::styled(
-                format!("{tool}…"),
+                format!("{work}…"),
                 Style::default()
                     .fg(Color::Gray)
                     .add_modifier(Modifier::ITALIC),
@@ -133,12 +96,14 @@ pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
 
 pub(super) fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let area = body(area);
+    let dim = Style::default().fg(Color::DarkGray);
+    let armed_quit = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
     // The right side only carries a hint that isn't already on screen. A pending
     // change shows its actions on the card, so the footer stays quiet there.
     let right = if app.ctrl_c_armed {
         "Ctrl-C again to quit"
-    } else if app.running {
-        "Ctrl-C Ctrl-C quit"
     } else if app.esc_armed {
         "Esc again to unwind"
     } else {
@@ -150,20 +115,25 @@ pub(super) fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     // than let the two collide. (Char counts, not bytes — multibyte punctuation.)
     let width = area.width as usize;
     let right_len = right.chars().count();
-    let text = if width <= right_len {
-        right.chars().take(width).collect::<String>()
+    let right_style = if app.ctrl_c_armed { armed_quit } else { dim };
+    let line = if width <= right_len {
+        Line::from(Span::styled(
+            right.chars().take(width).collect::<String>(),
+            right_style,
+        ))
     } else {
         let avail = width - right_len; // columns to the left of the hint
         let left = status_left(app, avail);
         let pad = avail.saturating_sub(left.chars().count());
-        format!("{left}{}{right}", " ".repeat(pad))
+        Line::from(vec![
+            Span::styled(left, dim),
+            Span::styled(" ".repeat(pad), dim),
+            Span::styled(right, right_style),
+        ])
     };
     // A recessed footer (dim, no bar) rather than a heavy inverted band — it
     // carries the cost/context HUD and hints without competing with the transcript.
-    let para = Paragraph::new(Line::from(Span::styled(
-        text,
-        Style::default().fg(Color::DarkGray),
-    )));
+    let para = Paragraph::new(line);
     f.render_widget(para, area);
 }
 
@@ -184,23 +154,10 @@ fn status_left(app: &App, avail: usize) -> String {
         fields.push(format!("{} applied", s.applied_count));
     }
     if l.total_tokens() > 0 {
-        fields.push(format!(
-            "{} tok ({}/{})",
-            fmt_tokens(l.total_tokens()),
-            fmt_tokens(l.input + l.cache_read + l.cache_write),
-            fmt_tokens(l.output),
-        ));
+        fields.push(format!("{} tok", fmt_tokens(l.total_tokens())));
     }
     if let Some(cost) = l.cost(&s.model) {
         fields.push(format!("${cost:.2}"));
-    } else if l.total_tokens() > 0 {
-        // Priced model unknown — show a placeholder, never a wrong number.
-        fields.push("—".into());
-    }
-    // A small "cached" badge when the cache is doing non-trivial work (showcases
-    // the prompt-caching win). Threshold avoids noise on tiny warmups.
-    if l.cache_read >= 1_000 {
-        fields.push(format!("⚡{} cached", fmt_tokens(l.cache_read)));
     }
     if s.ctx_tokens > 0 {
         let used = s.ctx_tokens.min(CONTEXT_WINDOW_TOKENS);
@@ -256,9 +213,11 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect) {
         kv("Shift/Alt-Enter", "newline (multi-line prompt)"),
         kv("Tab", "complete a /command"),
         kv("a / r", "approve / reject a proposed change"),
-        kv("Up / Down", "recall prompt history"),
+        kv("Up / Down", "scroll empty prompt / recall while editing"),
+        kv("Shift-Up/Down", "scroll the transcript one line"),
         kv("PgUp / PgDn", "jump the transcript by a screenful"),
         kv("Ctrl-U/W/A/E", "line editing (kill line/word, home/end)"),
+        kv("Ctrl-Left/Right", "move by word"),
         kv("Esc", "close help / reject gate / clear input"),
         kv("Esc Esc", "unwind the last turn (context only)"),
         kv("Ctrl-C Ctrl-C", "exit"),
@@ -296,14 +255,6 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect) {
             .wrap(Wrap { trim: true }),
         popup,
     );
-}
-
-/// The trailing file name of a path string (for the header).
-fn file_name(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string())
 }
 
 /// A short model label for the status bar: the last dotted segment, trimmed.

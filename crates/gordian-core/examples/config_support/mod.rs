@@ -7,7 +7,7 @@ pub fn load_config() -> Result<GordianConfig> {
     let path = dirs.config_dir().join("config.toml");
     let text = std::fs::read_to_string(&path).with_context(|| {
         format!(
-            "reading {}; run `gordian tui` once to create it, then set llm.model and llm.apiKey",
+            "reading {}; run `gordian tui` once to create it, then set llm.adapter, llm.model, and llm.apiKey",
             path.display()
         )
     })?;

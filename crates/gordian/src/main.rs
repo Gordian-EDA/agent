@@ -199,7 +199,7 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     // 2. Build the LLM client from TOML config.
     let client = gordian_core::GenaiProvider::from_config(&config.llm).with_context(|| {
         format!(
-            "could not build the LLM client — set llm.model and llm.apiKey in {}",
+            "could not build the LLM client — set llm.adapter, llm.model, and llm.apiKey in {}",
             loaded.path.display()
         )
     })?;

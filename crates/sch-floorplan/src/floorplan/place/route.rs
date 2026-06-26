@@ -8,7 +8,7 @@ use std::io;
 use kicad_env::KicadEnv;
 
 use crate::write::SchematicWriter;
-use geom::{Dir, EPS, ParentForest};
+use geom::{Dir, EPS, ParentForest, Rect};
 
 use super::*;
 use sch_place::item::{Incidence, Item};
@@ -67,6 +67,11 @@ pub(crate) fn wire(
     } else {
         BTreeMap::new()
     };
+
+    // Solid symbol bodies for local power-glyph orientation. Unlike the padded
+    // placement rectangles, these put pin tips on the boundary, so an outward power
+    // marker merely touches its served body while an inward marker overlaps it.
+    let power_keepouts: Vec<Rect> = items.iter().map(item_solid_rect).collect();
 
     // 2-pin body segments (finalize-only, so the per-move scorer is untouched) so a
     // rail riser can JOG around a part body it would otherwise be drawn straight
@@ -148,6 +153,7 @@ pub(crate) fn wire(
                 flag,
                 &riser_offsets,
                 &bodies,
+                &power_keepouts,
                 driver,
                 fan_risers,
             )?;
@@ -1030,6 +1036,44 @@ pub(crate) const RAIL_LEAD: f64 = 2.54;
 /// rather than landing on a neighbouring pin.
 pub(crate) const RAIL_LANE: f64 = geom::GRID_50_MIL.pitch();
 
+pub(crate) fn split_flag_power_pair(eps: &[([f64; 2], Dir)], merge: f64) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize, f64)> = None;
+    for i in 0..eps.len() {
+        for j in (i + 1)..eps.len() {
+            let (a, b) = (eps[i].0, eps[j].0);
+            let d = (a[0] - b[0]).abs() + (a[1] - b[1]).abs();
+            if d <= EPS || d > merge {
+                continue;
+            }
+            if (a[0] - b[0]).abs() >= EPS && (a[1] - b[1]).abs() >= EPS {
+                continue;
+            }
+            if best.is_none_or(|(_, _, bd)| d < bd - EPS) {
+                let (flag, power) = if geom::Point2::from(a).cmp_xy(b.into()).is_le() {
+                    (i, j)
+                } else {
+                    (j, i)
+                };
+                best = Some((flag, power, d));
+            }
+        }
+    }
+    best.map(|(flag, power, _)| (flag, power))
+}
+
+fn item_solid_rect(item: &Item) -> Rect {
+    let s = item.geom.approx_size();
+    let h = geom::Point2::new(s.x / 2.0, s.y / 2.0).rotated_half_extents(item.angle);
+    let hx = (h[0] - 2.54).max(1.27);
+    let hy = (h[1] - 2.54).max(1.27);
+    Rect::new(
+        item.at[0] - hx,
+        item.at[1] - hy,
+        item.at[0] + hx,
+        item.at[1] + hy,
+    )
+}
+
 /// The x a pin's vertical riser sits at, before any anti-collision offset: side
 /// pins lead out, top/bottom pins climb straight up. Must match `emit_rail`.
 pub(crate) fn riser_base_x(ep: &[f64; 2], dir: Dir) -> f64 {
@@ -1182,6 +1226,7 @@ pub(crate) fn emit_rail(
     flag: Option<&mut BTreeMap<String, ([f64; 2], f64)>>,
     riser_offsets: &BTreeMap<(String, i64), f64>,
     bodies: &[([f64; 2], [f64; 2])],
+    power_keepouts: &[Rect],
     driver: Option<[f64; 2]>,
     fan_risers: bool,
 ) -> io::Result<()> {
@@ -1221,14 +1266,8 @@ pub(crate) fn emit_rail(
                 .copied()
                 .find(|(p, _)| (p[0] - dp[0]).abs() < EPS && (p[1] - dp[1]).abs() < EPS)
         {
-            w.add_power_symbol(
-                env,
-                &lib,
-                &format!("#PWR_{net}"),
-                net,
-                dp,
-                power_angle(ddir),
-            )?;
+            let angle = choose_power_angle(net, ddir, dp, power_keepouts);
+            w.add_power_symbol(env, &lib, &format!("#PWR_{net}"), net, dp, angle)?;
             for (ep, _) in eps.iter() {
                 if (ep[0] - dp[0]).abs() >= EPS || (ep[1] - dp[1]).abs() >= EPS {
                     // Manhattan two-segment hop from the driver to this pin (a single
@@ -1241,14 +1280,14 @@ pub(crate) fn emit_rail(
                     }
                 }
             }
-            if let (Some(flag_points), Some((_, dir))) = (
+            if let (Some(flag_points), Some(_)) = (
                 flag,
                 eps.iter()
                     .find(|(p, _)| (p[0] - dp[0]).abs() < EPS && (p[1] - dp[1]).abs() < EPS),
             ) {
                 flag_points
                     .entry(net.to_string())
-                    .or_insert((dp, flag_angle(*dir)));
+                    .or_insert((dp, flag_angle(power_glyph_dir(net, angle))));
             }
             return Ok(());
         }
@@ -1270,14 +1309,23 @@ pub(crate) fn emit_rail(
         // ground (the recurring eyesore); V+ side ties keep their outward arrow.
         let drop_side_gnd =
             is_ground(net) && fan_risers && std::env::var_os("MULTISHEET_REFINE").is_some();
-        let mut syms: Vec<[f64; 2]> = Vec::new();
+        let split_flag = flag
+            .as_ref()
+            .and_then(|_| split_flag_power_pair(eps, MERGE));
+        let mut rail_taps: Vec<[f64; 2]> = Vec::new();
         let mut idx = 0usize;
-        for (ep, dir) in eps.iter() {
-            if let Some(&near) = syms.iter().find(|&&p| {
+        let mut first_flag: Option<([f64; 2], f64)> = None;
+        for (k, (ep, dir)) in eps.iter().enumerate() {
+            if split_flag.is_some_and(|(flag_idx, _)| k == flag_idx) {
+                continue;
+            }
+            if let Some(&near) = rail_taps.iter().find(|&&p| {
                 let d = (p[0] - ep[0]).abs() + (p[1] - ep[1]).abs();
                 d > EPS && d <= MERGE && ((p[0] - ep[0]).abs() < EPS || (p[1] - ep[1]).abs() < EPS)
             }) {
                 w.add_wire_on_net(*ep, near, net);
+                w.add_junction(*ep);
+                w.add_junction(near);
                 continue;
             }
             // A GND symbol on an E/W pin points SIDEWAYS (angle 90/270), reading as a dangling port.
@@ -1286,12 +1334,23 @@ pub(crate) fn emit_rail(
             // unchanged and the placement is not perturbed. The triangle's connection point stays at
             // the pin tip, so connectivity is identical.
             let angle = if drop_side_gnd && matches!(dir, Dir::East | Dir::West) {
-                0.0
+                choose_power_angle_preferred(net, *dir, *ep, power_keepouts, 0.0)
             } else {
-                power_angle(*dir)
+                choose_power_angle(net, *dir, *ep, power_keepouts)
             };
+            if let Some((flag_idx, symbol_idx)) = split_flag
+                && k == symbol_idx
+            {
+                let flag_ep = eps[flag_idx].0;
+                w.add_wire_on_net(flag_ep, *ep, net);
+                w.add_junction(flag_ep);
+                w.add_junction(*ep);
+                rail_taps.push(flag_ep);
+                first_flag.get_or_insert((flag_ep, flag_angle(power_glyph_dir(net, angle))));
+            }
             w.add_power_symbol(env, &lib, &format!("#PWR_{net}_{idx}"), net, *ep, angle)?;
-            syms.push(*ep);
+            first_flag.get_or_insert((*ep, flag_angle(power_glyph_dir(net, angle))));
+            rail_taps.push(*ep);
             idx += 1;
         }
         // One ERC flag per net (KiCAD treats an undriven power-input pin as an
@@ -1299,10 +1358,8 @@ pub(crate) fn emit_rail(
         // so its diamond extends the SAME outward direction as that symbol's
         // arrow/triangle — into the open space the power symbol already claims,
         // so the flag reads as part of the supply marker, never a floating leash.
-        if let (Some(flag_points), Some((ep, dir))) = (flag, eps.first()) {
-            flag_points
-                .entry(net.to_string())
-                .or_insert((*ep, flag_angle(*dir)));
+        if let (Some(flag_points), Some((ep, angle))) = (flag, first_flag) {
+            flag_points.entry(net.to_string()).or_insert((ep, angle));
         }
         return Ok(());
     };
@@ -1378,17 +1435,125 @@ pub(crate) fn emit_rail(
     Ok(())
 }
 
-/// Angle for a per-pin power symbol given the pin's outward direction.
+/// Angle for a non-ground per-pin power symbol given the pin's outward direction.
 ///
-/// KiCAD power symbols (`GND`, `+5V`, …) have their connection pin facing the
-/// way the rail naturally attaches: at angle 0 a GND triangle hangs below a
-/// downward (South) part pin and a VCC arrow rises above an upward (North) part
-/// pin — both correct at angle 0. Horizontal pins rotate ±90°.
+/// KiCAD's VCC/VDD-family glyph extends north at angle 0, so side pins need the
+/// opposite horizontal mapping from GND-family symbols.
 pub(crate) fn power_angle(dir: Dir) -> f64 {
     match dir {
-        Dir::North | Dir::South => 0.0,
+        Dir::North => 0.0,
+        Dir::South => 180.0,
+        Dir::East => 270.0,
+        Dir::West => 90.0,
+    }
+}
+
+fn ground_power_angle(dir: Dir) -> f64 {
+    match dir {
+        Dir::North => 180.0,
+        Dir::South => 0.0,
         Dir::East => 90.0,
         Dir::West => 270.0,
+    }
+}
+
+fn conventional_power_angle(net: &str, dir: Dir) -> f64 {
+    if is_ground(net) {
+        ground_power_angle(dir)
+    } else {
+        power_angle(dir)
+    }
+}
+
+fn power_angle_candidates(net: &str, dir: Dir, preferred: Option<f64>) -> Vec<f64> {
+    let mut out = Vec::new();
+    for a in [
+        preferred.unwrap_or_else(|| conventional_power_angle(net, dir)),
+        conventional_power_angle(net, dir),
+        0.0,
+        90.0,
+        180.0,
+        270.0,
+    ] {
+        if !out.iter().any(|b: &f64| (*b - a).abs() < EPS) {
+            out.push(a);
+        }
+    }
+    out
+}
+
+pub(crate) fn choose_power_angle(net: &str, dir: Dir, at: [f64; 2], keepouts: &[Rect]) -> f64 {
+    choose_power_angle_inner(net, dir, at, keepouts, None)
+}
+
+pub(crate) fn choose_power_angle_preferred(
+    net: &str,
+    dir: Dir,
+    at: [f64; 2],
+    keepouts: &[Rect],
+    preferred: f64,
+) -> f64 {
+    choose_power_angle_inner(net, dir, at, keepouts, Some(preferred))
+}
+
+fn choose_power_angle_inner(
+    net: &str,
+    dir: Dir,
+    at: [f64; 2],
+    keepouts: &[Rect],
+    preferred: Option<f64>,
+) -> f64 {
+    let candidates = power_angle_candidates(net, dir, preferred);
+    let mut best = candidates[0];
+    let mut best_score = power_glyph_overlap_score(net, at, best, keepouts);
+    for &angle in &candidates[1..] {
+        let score = power_glyph_overlap_score(net, at, angle, keepouts);
+        if score + EPS < best_score {
+            best = angle;
+            best_score = score;
+        }
+    }
+    best
+}
+
+fn power_glyph_overlap_score(net: &str, at: [f64; 2], angle: f64, keepouts: &[Rect]) -> f64 {
+    let glyph = power_glyph_box(net, at, angle);
+    keepouts
+        .iter()
+        .filter_map(|body| glyph.intersection(body))
+        .map(|r| 1000.0 + r.width() * r.height())
+        .sum()
+}
+
+pub(crate) fn power_glyph_box(net: &str, at: [f64; 2], angle: f64) -> Rect {
+    const REACH: f64 = 3.0;
+    const HALF: f64 = 1.5;
+    let x = at[0];
+    let y = at[1];
+    match power_glyph_dir(net, angle) {
+        Dir::East => Rect::new(x, y - HALF, x + REACH, y + HALF),
+        Dir::West => Rect::new(x - REACH, y - HALF, x, y + HALF),
+        Dir::North => Rect::new(x - HALF, y - REACH, x + HALF, y),
+        Dir::South => Rect::new(x - HALF, y, x + HALF, y + REACH),
+    }
+}
+
+pub(crate) fn power_glyph_dir(net: &str, angle: f64) -> Dir {
+    let q = ((angle / 90.0).round() as i64).rem_euclid(4);
+    if is_ground(net) {
+        match q {
+            0 => Dir::South,
+            1 => Dir::East,
+            2 => Dir::North,
+            _ => Dir::West,
+        }
+    } else {
+        match q {
+            0 => Dir::North,
+            1 => Dir::West,
+            2 => Dir::South,
+            _ => Dir::East,
+        }
     }
 }
 

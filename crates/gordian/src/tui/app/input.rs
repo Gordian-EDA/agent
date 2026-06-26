@@ -182,6 +182,30 @@ impl App {
         self.cursor = new_cursor;
     }
 
+    pub(super) fn move_word_left(&mut self) {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut new_cursor = self.cursor.min(chars.len());
+        while new_cursor > 0 && chars[new_cursor - 1].is_whitespace() {
+            new_cursor -= 1;
+        }
+        while new_cursor > 0 && !chars[new_cursor - 1].is_whitespace() {
+            new_cursor -= 1;
+        }
+        self.cursor = new_cursor;
+    }
+
+    pub(super) fn move_word_right(&mut self) {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut new_cursor = self.cursor.min(chars.len());
+        while new_cursor < chars.len() && chars[new_cursor].is_whitespace() {
+            new_cursor += 1;
+        }
+        while new_cursor < chars.len() && !chars[new_cursor].is_whitespace() {
+            new_cursor += 1;
+        }
+        self.cursor = new_cursor;
+    }
+
     pub(super) fn clear_input(&mut self) {
         self.input.clear();
         self.cursor = 0;

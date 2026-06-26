@@ -47,12 +47,13 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    // COMPOSE the single committable sheet (refine into groups, per-group anneal, tile each as
+    // COMPOSE the single committable sheet (refine into groups, per-group placement, tile each as
     // a labeled bounding box, join cross-block nets via global labels) — the production path.
     let root = gordian_core::multisheet::compose_single_sheet(
         &env,
         &design,
         std::path::Path::new(&out_dir),
+        gordian_core::SchematicPlacementEngine::Anneal,
     )?;
     println!("wrote composed sheet -> {}", root.display());
 

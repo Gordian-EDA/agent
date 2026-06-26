@@ -314,8 +314,8 @@ fn seed_conversation(app: &mut App) {
     push(
         app,
         Speaker::System,
-        "turn finished · 6 tool calls · 12.4k tokens",
-        NoticeLevel::Success,
+        "Worked for 1m 38s",
+        NoticeLevel::Plain,
     );
 }
 
@@ -347,7 +347,7 @@ fn tui_screenshots() {
     app.running = true;
     app.spinner = 3;
     app.turn_tool_calls = 4;
-    app.active_tool = Some("route_board".into());
+    app.active_work = Some("route_board".into());
     shoot("03_running", 96, 32, &mut app);
 
     // 4. Empty / first-launch state.
@@ -408,13 +408,13 @@ fn tui_screenshots() {
     push(
         &mut app,
         Speaker::System,
-        "Hit the per-turn step limit after 41s · 8 tool calls — send \"continue\" to resume",
+        "Worked for 41s — hit the per-turn step limit; send \"continue\" to resume",
         NoticeLevel::Warn,
     );
     push(
         &mut app,
         Speaker::System,
-        "Stopped after 12s — provider throttled the request (429)",
+        "Worked for 12s — provider throttled the request (429)",
         NoticeLevel::Error,
     );
     shoot("08_markdown", 96, 32, &mut app);

@@ -124,6 +124,28 @@ fn apply_design_dry_run_returns_diff_without_writing() {
 }
 
 #[test]
+fn apply_design_rejects_public_commit_argument() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+
+    let out = run_tool(
+        "apply_design",
+        serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+        &ctx,
+    )
+    .unwrap();
+
+    assert!(
+        out["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("commit") && e.contains("removed")),
+        "old commit arg should be rejected clearly: {out}"
+    );
+}
+
+#[test]
 fn apply_design_commit_writes_file_and_runs_erc() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
@@ -133,7 +155,7 @@ fn apply_design_commit_writes_file_and_runs_erc() {
 
     let out = run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -260,6 +282,14 @@ fn defs_lists_all_tools() {
             "{} schema root must be an object",
             def.name
         );
+        if def.name.to_string() == "apply_design" {
+            let props = schema["properties"].as_object().expect("properties object");
+            assert!(props.contains_key("yaml"));
+            assert!(
+                !props.contains_key("commit"),
+                "apply_design commit flag must not be model-facing: {schema}"
+            );
+        }
     }
 }
 
@@ -282,7 +312,7 @@ fn project_info_reports_paths_and_state() {
     // After a commit the same tool reports the file as present.
     run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -343,7 +373,7 @@ fn read_schematic_lifts_an_external_file_by_absolute_path() {
     // an arbitrary external path.
     run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -363,7 +393,7 @@ fn read_schematic_resolves_relative_to_the_project_dir() {
     };
     run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -418,7 +448,7 @@ fn apply_design_commit_reports_the_written_path() {
     };
     let out = run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -502,8 +532,8 @@ blocks:
     assert_eq!(out["ok"], serde_json::json!(true));
     assert_eq!(out["mode"], serde_json::json!("full_replace"));
 
-    // apply_design with NO yaml applies the draft.
-    let out = run_tool("apply_design", serde_json::json!({"commit": true}), &ctx).unwrap();
+    // apply_design with NO yaml applies the draft when the gate's commit phase invokes it.
+    let out = run_tool("apply_design", serde_json::json!({"__commit": true}), &ctx).unwrap();
     assert_eq!(out["written"], serde_json::json!(true));
 
     // read_schematic(draft) prefers the draft and returns plain YAML text.
@@ -536,7 +566,7 @@ blocks:
     // Write a schematic with explicit yaml (no draft involved).
     run_tool(
         "apply_design",
-        serde_json::json!({"yaml": yaml, "commit": true}),
+        serde_json::json!({"yaml": yaml, "__commit": true}),
         &ctx,
     )
     .unwrap();
@@ -599,7 +629,7 @@ blocks:
 ";
     let applied = run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": yaml, "commit": true }),
+        serde_json::json!({ "yaml": yaml, "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -633,7 +663,7 @@ blocks:
     // Commit so a prior schematic exists for the re-apply below.
     let out = run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": yaml, "commit": true }),
+        serde_json::json!({ "yaml": yaml, "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -762,7 +792,7 @@ blocks:
     assert_eq!(assigned["edit"], serde_json::json!("inserted"));
     assert_eq!(
         assigned["next"],
-        serde_json::json!("apply_design({commit:true}), then regenerate_board")
+        serde_json::json!("apply_design(), then regenerate_board")
     );
     assert!(
         assigned.get("diagnostics").is_none(),
@@ -791,7 +821,7 @@ fn regenerate_board_rejects_unapplied_draft_footprints() {
 
     let written = run_tool(
         "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
+        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -830,7 +860,7 @@ fn regenerate_board_rejects_unapplied_draft_footprints() {
     assert!(
         out["note"]
             .as_str()
-            .is_some_and(|n| n.contains("apply_design(commit:true)")),
+            .is_some_and(|n| n.contains("apply_design()")),
         "derive note should name the required commit: {out}"
     );
 }

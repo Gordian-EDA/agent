@@ -11,8 +11,9 @@
 //! cargo run --release -p agent --example board_agent -- <out.kicad_pcb> "<prompt>"
 //! ```
 //!
-//! Needs the platform Gordian TOML config populated with `llm.model` and
-//! `llm.apiKey`, and an installed KiCAD (footprint library + `kicad-cli pcb drc`).
+//! Needs the platform Gordian TOML config populated with `llm.adapter`,
+//! `llm.model`, and `llm.apiKey`, plus an installed KiCAD (footprint library +
+//! `kicad-cli pcb drc`).
 
 mod config_support;
 

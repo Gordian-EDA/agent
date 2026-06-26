@@ -5,9 +5,9 @@
 //! Usage:
 //!   cargo run --release -p agent --example agent_design -- <out.png> "<prompt>"
 //!
-//! Needs the platform Gordian TOML config populated with `llm.model` and
-//! `llm.apiKey`. Prints the model's final reply, the tool-call count, and the
-//! engine's layout-warning list.
+//! Needs the platform Gordian TOML config populated with `llm.adapter`,
+//! `llm.model`, and `llm.apiKey`. Prints the model's final reply, the tool-call
+//! count, and the engine's layout-warning list.
 
 mod config_support;
 

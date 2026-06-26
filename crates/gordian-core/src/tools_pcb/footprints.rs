@@ -153,7 +153,7 @@ pub fn assign_footprint(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Valu
         "reference": reference,
         "footprint": footprint,
         "edit": edit_kind,
-        "next": "apply_design({commit:true}), then regenerate_board",
+        "next": "apply_design(), then regenerate_board",
     });
     if errors > 0 || warnings > 0 {
         out["errors"] = json!(errors);

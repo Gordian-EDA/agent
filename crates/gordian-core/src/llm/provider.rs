@@ -2,8 +2,9 @@
 //!
 //! [`GenaiProvider`] is a streaming [`Provider`](super::Provider) (it overrides
 //! only [`Provider::stream`](super::Provider::stream); `complete` is derived by
-//! draining it). genai is provider-agnostic — it picks the wire adapter from the
-//! model name. Gordian supplies model/auth/endpoint from
+//! draining it). genai is provider-agnostic. Gordian can bind its wire adapter
+//! explicitly from config, or let genai infer the adapter from the model name
+//! for older configs. Gordian supplies model/auth/endpoint from
 //! [`crate::config::LlmConfig`], so core does not read provider environment
 //! variables.
 //!
@@ -16,19 +17,25 @@ use async_trait::async_trait;
 use futures::StreamExt;
 
 use genai::Client;
-use genai::chat::{CacheControl, ChatMessage, ChatOptions, ChatRequest, StreamEnd, Tool};
+use genai::adapter::AdapterKind;
+use genai::chat::{
+    CacheControl, ChatMessage, ChatOptions, ChatRequest, ReasoningEffort, StreamEnd, Tool,
+};
 use genai::resolver::{AuthData, Endpoint};
 
 use super::seam::{EventStream, Provider};
-use crate::config::LlmConfig;
+use crate::config::{LlmConfig, LlmReasoningEffort};
 
 /// The one production [`Provider`], over genai: the configured [`Client`] and the
-/// model id. genai routes by the model name.
+/// model id. When `llm.adapter` is set, the client is bound to that adapter;
+/// otherwise genai routes by the model name.
 pub struct GenaiProvider {
     client: Client,
     model: String,
     max_tokens: u32,
     ephemeral_cache: bool,
+    reasoning_effort: Option<ReasoningEffort>,
+    capture_reasoning: bool,
 }
 
 impl GenaiProvider {
@@ -40,6 +47,11 @@ impl GenaiProvider {
             .model
             .clone()
             .context("llm.model not set in Gordian config")?;
+        let adapter_kind = config
+            .adapter
+            .as_deref()
+            .map(parse_adapter_kind)
+            .transpose()?;
         let api_key = config.api_key.clone();
         let endpoint = config.endpoint.clone();
         let mut builder = Client::builder().with_auth_resolver_fn(
@@ -50,6 +62,9 @@ impl GenaiProvider {
                 }))
             },
         );
+        if let Some(adapter_kind) = adapter_kind {
+            builder = builder.with_adapter_kind(adapter_kind);
+        }
         if let Some(endpoint) = endpoint {
             builder = builder.with_service_target_resolver_fn(
                 move |mut target: genai::ServiceTarget| -> std::result::Result<
@@ -66,23 +81,33 @@ impl GenaiProvider {
             model,
             max_tokens: config.max_tokens,
             ephemeral_cache: config.ephemeral_cache,
+            reasoning_effort: config
+                .reasoning_effort
+                .as_ref()
+                .map(to_genai_reasoning_effort),
+            capture_reasoning: config.capture_reasoning,
         })
     }
 }
 
 #[async_trait]
 impl Provider for GenaiProvider {
-    /// A `(provider, model)` pair for status display: `provider` is the genai
-    /// adapter the model routes to (`Anthropic`, `OpenAI`, `Bedrock`, ...),
-    /// resolved from the model name by [`Client::default_model`] (the same
-    /// name-sniffing / `namespace::` rule genai routes by - no network, no
-    /// credentials); `model` is the configured `llm.model`.
+    /// A `(provider, model)` pair for status display: `provider` is either the
+    /// configured genai adapter or the adapter inferred from the model name
+    /// (`Anthropic`, `OpenAI`, `Bedrock`, ...). This is local routing metadata:
+    /// no network or credentials are needed.
     fn status(&self) -> (String, String) {
         let provider = self
             .client
-            .default_model(&self.model)
-            .map(|iden| iden.adapter_kind.to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
+            .adapter_kind()
+            .map(|kind| kind.to_string())
+            .or_else(|| {
+                self.client
+                    .default_model(&self.model)
+                    .map(|iden| iden.adapter_kind.to_string())
+                    .ok()
+            })
+            .unwrap_or_else(|| "unknown".to_string());
         (provider, self.model.clone())
     }
 
@@ -147,6 +172,14 @@ impl GenaiProvider {
             .with_max_tokens(self.max_tokens)
             .with_capture_tool_calls(true)
             .with_capture_usage(true);
+        if let Some(effort) = self.reasoning_effort.clone() {
+            opts = opts.with_reasoning_effort(effort);
+        }
+        if self.capture_reasoning {
+            opts = opts
+                .with_capture_reasoning_content(true)
+                .with_normalize_reasoning_content(true);
+        }
         if self.ephemeral_cache {
             opts = opts.with_cache_control(CacheControl::Ephemeral);
         }
@@ -154,7 +187,31 @@ impl GenaiProvider {
     }
 }
 
+fn to_genai_reasoning_effort(effort: &LlmReasoningEffort) -> ReasoningEffort {
+    match effort {
+        LlmReasoningEffort::None => ReasoningEffort::None,
+        LlmReasoningEffort::Minimal => ReasoningEffort::Minimal,
+        LlmReasoningEffort::Low => ReasoningEffort::Low,
+        LlmReasoningEffort::Medium => ReasoningEffort::Medium,
+        LlmReasoningEffort::High => ReasoningEffort::High,
+        LlmReasoningEffort::XHigh => ReasoningEffort::XHigh,
+        LlmReasoningEffort::Max => ReasoningEffort::Max,
+        LlmReasoningEffort::Budget(tokens) => ReasoningEffort::Budget(*tokens),
+    }
+}
+
 fn validate_llm_config(config: &LlmConfig) -> Result<()> {
+    if config
+        .adapter
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(str::is_empty)
+    {
+        anyhow::bail!("llm.adapter must not be empty when set");
+    }
+    if let Some(adapter) = config.adapter.as_deref() {
+        parse_adapter_kind(adapter)?;
+    }
     if config
         .model
         .as_deref()
@@ -182,6 +239,17 @@ fn validate_llm_config(config: &LlmConfig) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn parse_adapter_kind(adapter: &str) -> Result<AdapterKind> {
+    let adapter = adapter.trim().to_ascii_lowercase().replace('-', "_");
+    if adapter.contains("::") || adapter.chars().any(char::is_whitespace) {
+        anyhow::bail!(
+            "llm.adapter must be a provider namespace like openai, anthropic, or open_router"
+        );
+    }
+    AdapterKind::from_lower_str(adapter.as_str())
+        .with_context(|| format!("unsupported llm.adapter `{adapter}`"))
 }
 
 /// Reply text captured at stream end, all text parts concatenated. Empty when the
@@ -232,6 +300,93 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn explicit_adapter_binds_provider_status() {
+        let provider = GenaiProvider::from_config(&LlmConfig {
+            adapter: Some("openai".to_string()),
+            model: Some("custom-chat-model".to_string()),
+            ..LlmConfig::default()
+        })
+        .unwrap();
+
+        assert_eq!(
+            provider.status(),
+            ("OpenAI".to_string(), "custom-chat-model".to_string())
+        );
+    }
+
+    #[test]
+    fn adapter_accepts_hyphenated_aliases() {
+        let provider = GenaiProvider::from_config(&LlmConfig {
+            adapter: Some("open-router".to_string()),
+            model: Some("anthropic/claude-sonnet-4-5".to_string()),
+            ..LlmConfig::default()
+        })
+        .unwrap();
+
+        assert_eq!(
+            provider.status(),
+            (
+                "OpenRouter".to_string(),
+                "anthropic/claude-sonnet-4-5".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn unsupported_adapter_errors() {
+        let result = GenaiProvider::from_config(&LlmConfig {
+            adapter: Some("not_a_provider".to_string()),
+            model: Some("gpt-4o".to_string()),
+            ..LlmConfig::default()
+        });
+        let err = match result {
+            Ok(_) => panic!("unsupported adapter should error"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("unsupported llm.adapter `not_a_provider`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn chat_options_include_reasoning_effort_when_configured() {
+        let provider = GenaiProvider::from_config(&LlmConfig {
+            adapter: Some("openai".to_string()),
+            model: Some("gpt-5".to_string()),
+            reasoning_effort: Some(LlmReasoningEffort::High),
+            ..LlmConfig::default()
+        })
+        .unwrap();
+
+        let opts = provider.chat_options();
+        assert!(matches!(opts.reasoning_effort, Some(ReasoningEffort::High)));
+        assert_eq!(opts.capture_reasoning_content, None);
+    }
+
+    #[test]
+    fn chat_options_include_reasoning_budget_and_capture_when_configured() {
+        let provider = GenaiProvider::from_config(&LlmConfig {
+            adapter: Some("gemini".to_string()),
+            model: Some("gemini-2.5-pro".to_string()),
+            reasoning_effort: Some(LlmReasoningEffort::Budget(8000)),
+            capture_reasoning: true,
+            ..LlmConfig::default()
+        })
+        .unwrap();
+
+        let opts = provider.chat_options();
+        assert!(matches!(
+            opts.reasoning_effort,
+            Some(ReasoningEffort::Budget(8000))
+        ));
+        assert_eq!(opts.capture_reasoning_content, Some(true));
+        assert_eq!(opts.normalize_reasoning_content, Some(true));
     }
 
     #[test]

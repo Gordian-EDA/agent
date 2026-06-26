@@ -9,7 +9,7 @@
 use gordian_core::AgentEvent;
 use serde_json::Value;
 
-use super::{App, Entry, NoticeLevel, PendingDiff};
+use super::{App, Entry, PendingDiff};
 
 /// An input event or async arrival the [`App`] reacts to.
 #[derive(Clone, Debug)]
@@ -23,6 +23,8 @@ pub enum Msg {
     /// Move the input cursor.
     CursorLeft,
     CursorRight,
+    WordLeft,
+    WordRight,
     Home,
     End,
     /// Ctrl-U — kill from the line start to the cursor.
@@ -218,6 +220,14 @@ impl App {
                 self.cursor = (self.cursor + 1).min(self.char_len());
                 Action::None
             }
+            Msg::WordLeft => {
+                self.move_word_left();
+                Action::None
+            }
+            Msg::WordRight => {
+                self.move_word_right();
+                Action::None
+            }
             Msg::Home => {
                 self.cursor = 0;
                 Action::None
@@ -332,7 +342,7 @@ impl App {
             Action::None
         } else if self.running {
             // The shell aborts the task and replies with `TurnEnded(Interrupted)`,
-            // which posts the "⊘ Interrupted after …" indicator — no separate
+            // which posts the "Worked for …" indicator — no separate
             // note needed here.
             Action::CancelTurn
         } else if self.esc_armed {
@@ -344,7 +354,7 @@ impl App {
         }
     }
 
-    /// First Ctrl-C posts a visible guard; the second exits.
+    /// First Ctrl-C arms the footer guard; the second exits.
     fn request_quit(&mut self) -> Action {
         if self.ctrl_c_armed {
             self.should_quit = true;
@@ -352,10 +362,6 @@ impl App {
         }
         self.ctrl_c_armed = true;
         self.esc_armed = false;
-        self.transcript.push(Entry::notice(
-            NoticeLevel::Warn,
-            "Press Ctrl-C again to exit",
-        ));
         Action::None
     }
 

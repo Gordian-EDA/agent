@@ -86,13 +86,11 @@ impl SchematicWriter {
         // Falls back to A4 when there is no content to measure.
         match self.content_extent() {
             Some([w, h]) => {
-                // A multi-sheet sub-sheet carries a title block, which KiCAD draws at the page
-                // bottom-right; the tight content-fit page leaves no room, so it overprints the
-                // lowest parts (the committed-sheet defect — content-only renders hide it).
-                // Reserve a bottom band so content sits above it. Gated on MULTISHEET_REFINE +
-                // a title, so single-sheet references (no MULTISHEET_REFINE) stay byte-identical.
+                // KiCAD draws the title block inside the page at bottom-right; a tight
+                // content-fit page leaves no room, so metadata overprints the lowest parts.
+                // Reserve a bottom band whenever we emit a title block.
                 const TITLE_BLOCK_RESERVE: f64 = 33.0;
-                let reserve = self.title.is_some() && std::env::var("MULTISHEET_REFINE").is_ok();
+                let reserve = self.title.is_some();
                 let h = if reserve { h + TITLE_BLOCK_RESERVE } else { h };
                 let _ = writeln!(out, "\t(paper \"User\" {} {})", fmt_coord(w), fmt_coord(h));
             }
@@ -537,6 +535,33 @@ mod tests {
         // A literal backslash-n stays distinct: `\` is doubled, the `n` is left
         // alone, so it cannot be confused with an escaped newline.
         assert_eq!(escape_sexpr_string("a\\nb"), "a\\\\nb");
+    }
+
+    #[test]
+    fn titled_user_page_reserves_bottom_title_block() {
+        let mut w = SchematicWriter::new();
+        w.set_title("my_board");
+        w.add_junction([25.4, 25.4]);
+
+        let text = w.finish();
+        let paper = text
+            .lines()
+            .find(|line| line.contains("(paper \"User\""))
+            .expect("titled content should emit a custom User page");
+        let nums: Vec<f64> = paper
+            .split_whitespace()
+            .filter_map(|token| token.trim_end_matches(')').parse::<f64>().ok())
+            .collect();
+
+        assert_eq!(
+            nums.len(),
+            2,
+            "paper dimensions should parse from {paper:?}"
+        );
+        assert!(
+            nums[1] >= 70.0,
+            "title block reserve must extend page height, got line {paper:?}"
+        );
     }
 
     #[test]

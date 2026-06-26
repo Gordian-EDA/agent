@@ -19,6 +19,8 @@ use super::{RenderCtx, body};
 /// The most rows an inline image preview may occupy, so a render can never eat the
 /// viewport (mirrors the apply-gate's `diff_height` cap).
 const MAX_IMAGE_ROWS: u16 = 20;
+const IMAGE_PREVIEW_COLS: u16 = 60;
+const TOP_PADDING_ROWS: u16 = 1;
 
 /// One vertical band of the transcript document: a run of styled text rows, or an
 /// inline image (indexed into [`App::images`]) with the row height it occupies.
@@ -37,7 +39,7 @@ impl Block {
 }
 
 pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App, ctx: &mut RenderCtx) {
-    let inner = body(area);
+    let inner = transcript_body(area);
     app.viewport_h = inner.height;
     // Before the first real exchange, fill the pane with a welcome splash rather
     // than leaving it blank (the Codex first-launch idiom).
@@ -46,6 +48,7 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App, ctx: &mu
         .iter()
         .any(|e| matches!(e.speaker, Speaker::User | Speaker::Assistant));
     if !started {
+        app.scroll_max = 0;
         draw_welcome(f, inner);
         return;
     }
@@ -58,6 +61,7 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App, ctx: &mu
     // the content.
     let total: u16 = blocks.iter().map(Block::height).sum();
     let max_top = total.saturating_sub(inner.height);
+    app.scroll_max = max_top;
     app.scroll = app.scroll.min(max_top);
     let top = max_top - app.scroll; // first visible document row
     let bottom = top + inner.height; // one past the last visible row
@@ -93,6 +97,18 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App, ctx: &mu
     }
 }
 
+fn transcript_body(area: Rect) -> Rect {
+    let inner = body(area);
+    if inner.height <= TOP_PADDING_ROWS {
+        return inner;
+    }
+    Rect {
+        y: inner.y + TOP_PADDING_ROWS,
+        height: inner.height - TOP_PADDING_ROWS,
+        ..inner
+    }
+}
+
 /// Build the interleaved [`Block`] document: text entries wrapped into rows (with
 /// the inter-turn rhythm and the live-stream cursor), broken by image previews
 /// pinned after their transcript position.
@@ -102,23 +118,31 @@ fn layout_blocks(app: &App, body_w: usize, ctx: &RenderCtx) -> Vec<Block> {
     let mut prev: Option<Speaker> = None;
     let mut img = 0usize; // next un-emitted image (images are sorted by `after`)
 
-    let mut flush_images_after =
-        |n: usize, blocks: &mut Vec<Block>, text: &mut Vec<Line<'static>>| {
-            while img < app.images.len() && app.images[img].after <= n {
-                if !text.is_empty() {
-                    blocks.push(Block::Text(std::mem::take(text)));
-                }
-                let rows = image_rows(&app.images[img], body_w, ctx);
-                blocks.push(Block::Image { idx: img, rows });
-                img += 1;
-            }
-        };
-
-    for (i, e) in app.transcript.iter().enumerate() {
+    let mut i = 0usize;
+    while i < app.transcript.len() {
+        let e = &app.transcript[i];
         // Emit any images pinned at this transcript position (after == i) before
         // the entry that now sits at index i.
-        flush_images_after(i, &mut blocks, &mut text);
-        if gap_above(prev, e.speaker) {
+        flush_images_after(app, body_w, ctx, i, &mut img, &mut blocks, &mut text);
+        if e.speaker == Speaker::Tool {
+            if gap_above(prev, e) {
+                text.push(Line::from(""));
+            }
+
+            let mut end = i + 1;
+            while end < app.transcript.len()
+                && app.transcript[end].speaker == Speaker::Tool
+                && !(img < app.images.len() && app.images[img].after <= end)
+            {
+                end += 1;
+            }
+            text.extend(render_tool_group(&app.transcript[i..end], body_w));
+            prev = Some(Speaker::Tool);
+            i = end;
+            continue;
+        }
+
+        if gap_above(prev, e) {
             text.push(Line::from(""));
         }
         // The entry still being streamed gets a trailing cursor so live prose
@@ -132,13 +156,41 @@ fn layout_blocks(app: &App, body_w: usize, ctx: &RenderCtx) -> Vec<Block> {
             text.extend(render_entry(e, body_w));
         }
         prev = Some(e.speaker);
+        i += 1;
     }
     // Trailing images pinned at or after the transcript tail.
-    flush_images_after(app.transcript.len(), &mut blocks, &mut text);
+    flush_images_after(
+        app,
+        body_w,
+        ctx,
+        app.transcript.len(),
+        &mut img,
+        &mut blocks,
+        &mut text,
+    );
     if !text.is_empty() {
         blocks.push(Block::Text(text));
     }
     blocks
+}
+
+fn flush_images_after(
+    app: &App,
+    body_w: usize,
+    ctx: &RenderCtx,
+    n: usize,
+    img: &mut usize,
+    blocks: &mut Vec<Block>,
+    text: &mut Vec<Line<'static>>,
+) {
+    while *img < app.images.len() && app.images[*img].after <= n {
+        if !text.is_empty() {
+            blocks.push(Block::Text(std::mem::take(text)));
+        }
+        let rows = image_rows(&app.images[*img], body_w, ctx);
+        blocks.push(Block::Image { idx: *img, rows });
+        *img += 1;
+    }
 }
 
 /// The row height an image preview claims: one row for its caption, plus the
@@ -152,10 +204,10 @@ fn image_rows(cell: &super::super::app::ImageCell, body_w: usize, ctx: &RenderCt
     if matches!(cell.state, ImageState::Failed) {
         return 1;
     }
-    // Width in cells: the image's own width, capped to the pane. Height follows
+    // Width in cells: a fixed preview width capped to the pane. Height follows
     // the pixel aspect, converted px→cells through the cell font size, then capped.
     let (fw, fh) = picker.font_size();
-    let cols = (body_w as u16).min(60).max(1);
+    let cols = image_preview_cols(body_w as u16);
     let rows = match image_pixel_size(&cell.path) {
         Some((pw, ph)) if pw > 0 && fw > 0 && fh > 0 => {
             let target_px_w = cols as u32 * fw as u32;
@@ -201,7 +253,8 @@ fn draw_image(f: &mut Frame, rect: Rect, app: &mut App, idx: usize, ctx: &mut Re
     // A dim caption on row 0; the image fills the rest of the band. The caption
     // is read before the protocol is borrowed mutably (disjoint fields).
     let caption = format!("▸ board preview · {}", app.images[idx].caption);
-    let (cap_rect, img_rect) = split_caption(rect);
+    let preview_rect = image_preview_rect(rect);
+    let (cap_rect, img_rect) = split_caption(preview_rect);
     f.render_widget(text_label(&caption, Color::Cyan), cap_rect);
     if img_rect.height > 0 {
         if let ImageState::Ready(proto) = &mut app.images[idx].state {
@@ -211,6 +264,17 @@ fn draw_image(f: &mut Frame, rect: Rect, app: &mut App, idx: usize, ctx: &mut Re
                 proto.as_mut(),
             );
         }
+    }
+}
+
+fn image_preview_cols(width: u16) -> u16 {
+    width.min(IMAGE_PREVIEW_COLS).max(1)
+}
+
+fn image_preview_rect(rect: Rect) -> Rect {
+    Rect {
+        width: image_preview_cols(rect.width),
+        ..rect
     }
 }
 
@@ -252,6 +316,9 @@ fn decode(
 /// the brand, a tagline, a few example prompts, and the key hints — vertically
 /// centred so an empty cockpit feels intentional rather than blank.
 fn draw_welcome(f: &mut Frame, area: Rect) {
+    let logo = Style::default()
+        .fg(Color::Rgb(184, 112, 50))
+        .add_modifier(Modifier::BOLD);
     let accent = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
@@ -263,7 +330,13 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
             Span::styled(s, Style::default()),
         ])
     };
-    let lines = vec![
+
+    let mut lines: Vec<Line<'static>> = ["   ⣠⣴⣾⣿⣷⣦⣄", " ⢀⣾⣿⠟⠉⠙⣿⣿⣷", " ⣿⣿⣧⡀ ⢀⣾⣿⠟", "  ⠙⠿⣿⣿⣿⠿⠋"]
+        .into_iter()
+        .map(|row| Line::from(Span::styled(row, logo)))
+        .collect();
+    lines.extend([
+        Line::from(""),
         Line::from(Span::styled("Gordian", accent)),
         Line::from(Span::styled("the schematic & PCB design copilot", dim)),
         Line::from(""),
@@ -276,7 +349,7 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
             "  /help for commands  ·  Tab completes  ·  /auto toggles auto-apply",
             dim,
         )),
-    ];
+    ]);
 
     // Centre vertically; the splash shares the header's left edge (its area is
     // already inset by the body margin — no extra indent).
@@ -297,22 +370,33 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
 /// markdown, and tool / system lines recede (dim, italic) so they read as
 /// sub-steps of the turn above them.
 ///
-/// Whether a blank rhythm row belongs *before* an entry of class `cur` that
-/// follows one of class `prev` (`None` = top of the transcript): a new
-/// user/assistant turn, the first tool card of a run, and the turn-summary line
-/// all open with a gap; consecutive same-class lines stay tight.
-fn gap_above(prev: Option<Speaker>, cur: Speaker) -> bool {
+/// Whether a blank rhythm row belongs *before* `cur` when it follows class
+/// `prev` (`None` = top of the transcript): a new user/assistant turn, the first
+/// tool cards, loud system notices, and turn-summary lines after
+/// assistant/tool output all open with a gap; other consecutive same-class lines
+/// stay tight.
+fn gap_above(prev: Option<Speaker>, cur: &Entry) -> bool {
     let Some(prev) = prev else { return false };
-    match cur {
+    match cur.speaker {
         Speaker::User => true,
         Speaker::Assistant => prev != Speaker::Assistant,
-        Speaker::Tool => prev != Speaker::Tool,
-        Speaker::System => matches!(prev, Speaker::Assistant | Speaker::Tool),
+        Speaker::Tool => true,
+        Speaker::System => {
+            matches!(cur.level, NoticeLevel::Warn | NoticeLevel::Error)
+                || matches!(prev, Speaker::Assistant | Speaker::Tool)
+        }
     }
 }
 
 /// `first` is the row-0 marker, `cont` the indent repeated on wrapped rows.
 fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
+    if e.speaker == Speaker::System
+        && e.level == NoticeLevel::Plain
+        && e.text.starts_with("Worked for ")
+    {
+        return vec![render_worked_divider(&e.text, width, e.level)];
+    }
+
     // (first_marker, cont_marker, marker_style, body_style, markdown) — the
     // inter-entry blank is owned by `draw_transcript` (see `gap_above`).
     let (first, cont, marker_style, body_style, markdown) = match e.speaker {
@@ -331,14 +415,13 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
         // the user's text. No bullet — the user's caret alone marks the turns, so
         // the transcript stays lean (the Codex idiom).
         Speaker::Assistant => ("  ", "  ", Style::default(), Style::default(), true),
-        // Tool calls cluster under the assistant turn and recede.
+        // Tool calls are grouped by `render_tool_group`; this fallback is only for
+        // direct unit use of `render_entry`.
         Speaker::Tool => (
-            "  ▸ ",
-            "    ",
+            "  ",
+            "  ",
             Style::default().fg(Color::DarkGray),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
+            Style::default().fg(Color::DarkGray),
             false,
         ),
         Speaker::System => {
@@ -422,6 +505,141 @@ fn render_entry(e: &Entry, width: usize) -> Vec<Line<'static>> {
         lines.push(Line::from(Span::styled(first, marker_style)));
     }
     lines
+}
+
+fn render_worked_divider(text: &str, width: usize, level: NoticeLevel) -> Line<'static> {
+    let color = match level {
+        NoticeLevel::Warn => Color::Yellow,
+        NoticeLevel::Error => Color::Red,
+        NoticeLevel::Plain | NoticeLevel::Success => Color::DarkGray,
+    };
+    let style = Style::default().fg(color).add_modifier(Modifier::DIM);
+    let label = format!(" {text} ");
+    let label_w = label.chars().count();
+    if width <= 1 {
+        return Line::from(Span::styled("─", style));
+    }
+    if width <= label_w + 1 {
+        return Line::from(Span::styled(
+            label.chars().take(width).collect::<String>(),
+            style,
+        ));
+    }
+    let right = width.saturating_sub(1 + label_w);
+    Line::from(vec![
+        Span::styled("─", style),
+        Span::styled(label, style),
+        Span::styled("─".repeat(right), style),
+    ])
+}
+
+fn render_tool_group(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
+    let title = tool_group_title(entries);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("• ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+
+    for (idx, e) in entries.iter().enumerate() {
+        let last = idx + 1 == entries.len();
+        lines.extend(render_tool_row(e, last, width));
+    }
+    lines
+}
+
+fn tool_group_title(entries: &[Entry]) -> &'static str {
+    let mut title = None;
+    for e in entries {
+        let (name, _) = split_tool_text(&e.text);
+        let candidate = tool_title_for_name(name);
+        if title.is_some_and(|seen| seen != candidate) {
+            return "Used tools";
+        }
+        title = Some(candidate);
+    }
+    title.unwrap_or("Used tools")
+}
+
+fn tool_title_for_name(name: &str) -> &'static str {
+    match name
+        .split_once('_')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(name)
+    {
+        "apply" | "edit" | "update" | "write" => "Updated",
+        "check" | "drc" | "erc" | "lint" | "review" | "validate" => "Checked",
+        "create" | "make" | "new" => "Created",
+        "export" | "save" => "Exported",
+        "footprint" | "get" | "list" | "load" | "open" | "read" | "search" => "Searched",
+        "place" => "Placed",
+        "render" | "screenshot" => "Rendered",
+        "route" => "Routed",
+        "seed" => "Seeded",
+        "summarize" => "Summarized",
+        _ => "Explored",
+    }
+}
+
+fn render_tool_row(e: &Entry, last: bool, width: usize) -> Vec<Line<'static>> {
+    let first_prefix = if last { "  └ " } else { "  ├ " };
+    let cont_prefix = if last { "    " } else { "  │ " };
+    let (name, detail) = split_tool_text(&e.text);
+    let action = human_tool_name(name);
+    let mut segments = vec![(
+        action,
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if !detail.is_empty() {
+        segments.push((format!(" {detail}"), Style::default().fg(Color::Gray)));
+    }
+
+    let body_w = width.saturating_sub(first_prefix.chars().count()).max(1);
+    wrap_segments(&segments, body_w, false)
+        .into_iter()
+        .enumerate()
+        .map(|(row, spans)| {
+            let prefix = if row == 0 { first_prefix } else { cont_prefix };
+            let mut out = vec![Span::styled(prefix, Style::default().fg(Color::DarkGray))];
+            out.extend(spans);
+            Line::from(out)
+        })
+        .collect()
+}
+
+fn split_tool_text(text: &str) -> (&str, String) {
+    if let Some((name, summary)) = text.split_once(" → ") {
+        return (name, format!("→ {summary}"));
+    }
+    if let Some(name) = text.strip_suffix("(…) running…") {
+        return (name, "running...".into());
+    }
+    (text, String::new())
+}
+
+fn human_tool_name(name: &str) -> String {
+    let mut out = String::new();
+    for (i, part) in name.split('_').filter(|p| !p.is_empty()).enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            if i == 0 {
+                out.extend(first.to_uppercase());
+            } else {
+                out.extend(first.to_lowercase());
+            }
+            out.extend(chars.flat_map(char::to_lowercase));
+        }
+    }
+    if out.is_empty() { name.into() } else { out }
 }
 
 /// Frame one wrapped row of a fenced code block: a slate background across the
@@ -572,6 +790,87 @@ mod tests {
 
     fn plain(s: &str) -> Vec<(String, Style)> {
         vec![(s.to_string(), Style::default())]
+    }
+
+    #[test]
+    fn transcript_body_keeps_a_top_margin() {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+        let inner = transcript_body(area);
+        assert_eq!(inner.y, 1);
+        assert_eq!(inner.height, 23);
+    }
+
+    #[test]
+    fn tool_calls_get_a_gap_even_in_a_run() {
+        let tool = Entry::tool("search_symbols -> 5 hits");
+        assert!(gap_above(Some(Speaker::Tool), &tool));
+    }
+
+    #[test]
+    fn tool_group_title_varies_by_tool_kind() {
+        assert_eq!(
+            tool_group_title(&[Entry::tool("search_symbols → 5 hits")]),
+            "Searched"
+        );
+        assert_eq!(
+            tool_group_title(&[Entry::tool("route_board → ok")]),
+            "Routed"
+        );
+        assert_eq!(
+            tool_group_title(&[
+                Entry::tool("search_symbols → 5 hits"),
+                Entry::tool("route_board → ok"),
+            ]),
+            "Used tools"
+        );
+    }
+
+    #[test]
+    fn loud_system_notices_get_a_gap_after_user_messages() {
+        let user = Entry::user("hey");
+        let error = Entry::notice(NoticeLevel::Error, "Stopped after 0s");
+        let warn = Entry::notice(NoticeLevel::Warn, "try again");
+        let plain = Entry::system("agent unavailable");
+
+        assert!(gap_above(Some(user.speaker), &error));
+        assert!(gap_above(Some(user.speaker), &warn));
+        assert!(!gap_above(Some(user.speaker), &plain));
+    }
+
+    #[test]
+    fn worked_notice_renders_as_codex_divider() {
+        let rows = render_entry(&Entry::notice(NoticeLevel::Plain, "Worked for 1m 38s"), 48);
+        assert_eq!(rows.len(), 1);
+        let text = row_text(&rows[0].spans);
+        assert!(text.starts_with("─ Worked for 1m 38s "), "{text}");
+        assert_eq!(text.chars().count(), 48);
+    }
+
+    #[test]
+    fn worked_error_wraps_instead_of_truncating() {
+        let rows = render_entry(
+            &Entry::notice(
+                NoticeLevel::Error,
+                "Worked for 2s — Web stream error for model 'openai/gpt-5.4-nano (adapter: OpenAI)'. Caused by: response body ended unexpectedly",
+            ),
+            40,
+        );
+        let text = rows
+            .iter()
+            .map(|row| row_text(&row.spans))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let flat_text = text.replace('\n', " ");
+
+        assert!(rows.len() > 1, "{text}");
+        assert!(text.contains("Caused by:"), "{text}");
+        assert!(flat_text.contains("response body"), "{text}");
+        assert!(flat_text.contains("ended unexpectedly"), "{text}");
     }
 
     #[test]

@@ -344,15 +344,7 @@ pub fn raw_metrics(
         let prefer_vertical: Option<bool> = match rail_count {
             0 => Some(false),
             2 => Some(true),
-            _ => {
-                let nonrail = it
-                    .pins
-                    .iter()
-                    .filter_map(|(_, _, n)| n.as_deref())
-                    .find(|n| !ir.rails.contains_key(*n));
-                let degree = nonrail.and_then(|n| inc.get(n)).map_or(0, |p| p.len());
-                Some(degree >= 2)
-            }
+            _ => None,
         };
         let Some(prefer_vertical) = prefer_vertical else {
             continue;

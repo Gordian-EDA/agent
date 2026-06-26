@@ -34,7 +34,7 @@ async fn live_layout_review_smoke() {
         \x20     C2: {part: Device:C, pins: {1: VCC, 2: GND}}\n";
     let out = run_tool(
         "apply_design",
-        json!({ "yaml": yaml, "commit": true }),
+        json!({ "yaml": yaml, "__commit": true }),
         &ctx,
     )
     .unwrap();
@@ -49,9 +49,7 @@ async fn live_layout_review_smoke() {
     let (tx, mut rx) = unbounded_channel();
     agent
         .run_turn_reviewed(
-            &format!(
-                "Re-apply this exact design with apply_design(commit:true), no change:\n{yaml}"
-            ),
+            &format!("Re-apply this exact design with apply_design, no change:\n{yaml}"),
             "a decoupled supply rail",
             &mut approvals,
             Some(&tx),

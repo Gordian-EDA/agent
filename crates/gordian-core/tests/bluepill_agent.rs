@@ -7,7 +7,7 @@
 //! self-repair off the structured diagnostics).
 //!
 //! It is `#[ignore]` because it costs live LLM round-trips (a minute+) and needs
-//! a platform Gordian TOML config with `llm.model` / `llm.apiKey` and a KiCAD
+//! a platform Gordian TOML config with `llm.adapter` / `llm.model` / `llm.apiKey` and a KiCAD
 //! install. It also SKIPs gracefully when either is absent, so an
 //! accidental `--ignored` run on a machine without credentials does not fail.
 //!

@@ -1,5 +1,5 @@
-//! Deterministic test of apply_design's COMMIT path on a dense multi-block draft (no live
-//! LLM): create_design → apply_design{commit:true}; assert the committed sch is a
+//! Deterministic test of apply_design's internal commit path on a dense multi-block draft
+//! (no live LLM): create_design → apply_design; assert the committed sch is a
 //! multi-sheet root. Usage: cargo run -p agent --example test_apply_multisheet -- <draft.yaml>
 
 use gordian_core::AgentRuntime;
@@ -19,8 +19,8 @@ fn main() -> anyhow::Result<()> {
     let r1 = run_tool("create_design", json!({ "yaml": yaml }), &ctx);
     println!("create_design -> {}", summarize(&r1));
 
-    let r2 = run_tool("apply_design", json!({ "commit": true }), &ctx);
-    println!("apply_design(commit) -> {}", summarize(&r2));
+    let r2 = run_tool("apply_design", json!({ "__commit": true }), &ctx);
+    println!("apply_design(write) -> {}", summarize(&r2));
 
     let sch = ctx.sch_path();
     let exists = sch.exists();

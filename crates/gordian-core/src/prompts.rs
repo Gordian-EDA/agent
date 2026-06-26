@@ -118,12 +118,12 @@ Schematic flow:
 2. If a PCB is requested, choose footprints now with `search_footprints` / `get_footprint_info` and put `footprint:` fields in circuit-YAML before `apply_design`.
 3. `validate_design(yaml)` until 0 errors.
 4. Optional/costly: `review_design(intent)` once.
-5. `apply_design(commit:false)` only if a preview is useful; otherwise go directly to `apply_design(commit:true)`.
+5. `apply_design()` to submit the schematic diff for approval and write it after approval.
 6. `run_erc()` only if you need a separate fresh ERC after commit.
 
 # PCB flow
 GEOMETRY IS THE ENGINEERING: placement, layers, trace width, and route shape matter.
-Footprints are schematic/YAML state. `assign_footprint` edits the draft; after any footprint assignment, call `apply_design(commit:true)` before `regenerate_board`. `regenerate_board` is destructive seed/regeneration, NOT KiCAD F8 sync: it may replace an existing PCB's placement/routing. Use it for a fresh board or explicit regeneration, not incremental schematic-to-PCB merge.
+Footprints are schematic/YAML state. `assign_footprint` edits the draft; after any footprint assignment, call `apply_design()` before `regenerate_board`. `regenerate_board` is destructive seed/regeneration, NOT KiCAD F8 sync: it may replace an existing PCB's placement/routing. Use it for a fresh board or explicit regeneration, not incremental schematic-to-PCB merge.
 
 PCB order:
 1. `regenerate_board({bounds?, rules?})` from committed schematic only when starting/regenerating the board. Put power widths in `rules.net_widths` before routing when possible (wide copper for power, thin signals). Use more layers/bigger bounds for density.
@@ -161,7 +161,9 @@ mod tests {
         assert!(p.contains("read_schematic"));
         assert!(p.contains("validate_design"));
         assert!(p.contains("apply_design"));
-        assert!(p.contains("commit:false"));
+        assert!(p.contains("apply_design()"));
+        assert!(!p.contains("commit:false"));
+        assert!(!p.contains("commit:true"));
         assert!(p.contains("C_VCAP1")); // plain-refdes guidance
     }
 

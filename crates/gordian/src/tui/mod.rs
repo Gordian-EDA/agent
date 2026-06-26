@@ -143,18 +143,9 @@ pub async fn run(project_dir: PathBuf, config: GordianConfig, config_path: PathB
         status.kicad_connected = false;
     }
     let mut app = App::new(status);
-    app.transcript.push(app::Entry::system(format!(
-        "project: {} — schematic: {}",
-        project_dir.display(),
-        sch_path.display()
-    )));
-    app.transcript.push(app::Entry::system(format!(
-        "config: {}",
-        config_path.display()
-    )));
     if agent_handle.is_none() {
         app.transcript.push(app::Entry::system(format!(
-            "agent unavailable: need KiCAD + llm.model and provider credentials in {}. UI is read-only.",
+            "agent unavailable: need KiCAD + llm.adapter, llm.model, and provider credentials in {}. UI is read-only.",
             config_path.display()
         )));
     }
@@ -236,7 +227,8 @@ impl Shell {
             // high-confidence defects into one follow-up fix turn. The reviewer is
             // skipped on read-only/conversational turns (nothing applied). The
             // user's prompt is the design intent the reviewer judges against;
-            // `Reviewed` events flow through `events_tx` to the transcript.
+            // `ReviewStarted` / `Reviewed` events flow through `events_tx` to the
+            // running detail row and transcript.
             let result = if post_commit_review {
                 agent
                     .run_turn_reviewed(

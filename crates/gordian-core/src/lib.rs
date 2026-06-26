@@ -49,8 +49,9 @@ pub mod workspace;
 pub use agent::{Agent, AgentEvent, Approvals, AutoApprove, ContextStats, StopReason, TurnOutcome};
 pub use config::{
     AgentConfig, CONFIG_SCHEMA_VERSION, ConfigError, DEFAULT_MAX_TOKENS, DEFAULT_REFERENCE_COUNT,
-    DEFAULT_RENDER_MAX_PX, DEFAULT_SCHEMATIC_FILENAME, DEFAULT_SEARCH_LIMIT, GordianConfig,
-    KicadConfig, LlmConfig, ProjectConfig, RetrievalConfig, ReviewConfig, ToolConfig,
+    DEFAULT_RENDER_MAX_PX, DEFAULT_SCHEMATIC_FILENAME, DEFAULT_SEARCH_LIMIT, EngineConfig,
+    GordianConfig, KicadConfig, LlmConfig, LlmReasoningEffort, PcbRouterEngine, ProjectConfig,
+    RetrievalConfig, ReviewConfig, SchematicPlacementEngine, ToolConfig,
 };
 pub use review::{review, review_image};
 pub use runtime::AgentRuntime;

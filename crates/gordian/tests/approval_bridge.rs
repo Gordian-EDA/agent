@@ -57,11 +57,7 @@ async fn bridge_approval_a_keypress_commits_the_write() -> Result<()> {
     assert!(!sch_path.exists());
 
     let script = vec![
-        tool_call(
-            "t1",
-            "apply_design",
-            json!({ "yaml": TINY_YAML, "commit": true }),
-        ),
+        tool_call("t1", "apply_design", json!({ "yaml": TINY_YAML })),
         final_text("done"),
     ];
     let mut agent = agent(ctx, script);
@@ -100,11 +96,7 @@ async fn bridge_rejection_r_keypress_blocks_the_write() -> Result<()> {
     let sch_path = ctx.sch_path().to_path_buf();
 
     let script = vec![
-        tool_call(
-            "t1",
-            "apply_design",
-            json!({ "yaml": TINY_YAML, "commit": true }),
-        ),
+        tool_call("t1", "apply_design", json!({ "yaml": TINY_YAML })),
         final_text("done"),
     ];
     let mut agent = agent(ctx, script);

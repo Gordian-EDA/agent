@@ -114,9 +114,10 @@ pub struct App {
     /// can report a count even when the turn was interrupted or errored — paths
     /// that never return an outcome.
     pub turn_tool_calls: usize,
-    /// The tool currently running, for the working row's detail line. Set on
-    /// `ToolStarted`, cleared on `ToolFinished` / turn end.
-    pub active_tool: Option<String>,
+    /// The current unit of agent work for the working row's detail line. Tool
+    /// calls set this from `ToolStarted`; the post-commit reviewer sets it from
+    /// `ReviewStarted` without counting as a tool call.
+    pub active_work: Option<String>,
     /// Animation frame counter, advanced by [`super::Msg::Tick`] while running.
     pub spinner: usize,
     /// The unwind picker, while the user is choosing how far to roll back.
@@ -126,6 +127,10 @@ pub struct App {
     /// Lines scrolled up from the bottom of the transcript (0 = follow tail).
     /// The renderer clamps this to the real maximum for the viewport.
     pub scroll: u16,
+    /// Maximum legal transcript scroll offset from the last draw. This lets the
+    /// event mapper route empty-prompt Up/Down keys to scrollback only when
+    /// there is scrollback to move through.
+    pub scroll_max: u16,
     /// The transcript viewport height the renderer last drew, so a PgUp/PgDn
     /// can jump by a screenful. The renderer writes it; `map_key` reads it.
     pub viewport_h: u16,
@@ -163,11 +168,12 @@ impl App {
             paused_since: None,
             turn_output_base: 0,
             turn_tool_calls: 0,
-            active_tool: None,
+            active_work: None,
             spinner: 0,
             unwind: None,
             help: false,
             scroll: 0,
+            scroll_max: 0,
             viewport_h: 0,
             status,
             should_quit: false,
@@ -189,7 +195,7 @@ impl App {
         self.paused_since = None;
         self.turn_output_base = self.status.ledger.output;
         self.turn_tool_calls = 0;
-        self.active_tool = None;
+        self.active_work = None;
         self.scroll = 0;
     }
 
@@ -219,11 +225,11 @@ impl App {
     /// harmless because `turn_started` is already cleared.
     pub(super) fn end_turn(&mut self, reason: TurnEndReason) {
         let secs = self.turn_elapsed_secs().unwrap_or(0);
-        let calls = Self::count_phrase(self.turn_tool_calls, "tool call");
+        let elapsed = format_duration(secs);
         self.running = false;
         self.turn_started = None;
         self.paused_since = None;
-        self.active_tool = None;
+        self.active_work = None;
         self.pending = None;
 
         // The level glyph is the renderer's job (it tints the whole notice as a
@@ -231,36 +237,26 @@ impl App {
         let entry = match reason {
             TurnEndReason::Compacted => None,
             TurnEndReason::Completed => Some(Entry::notice(
-                NoticeLevel::Success,
-                format!("Cogitated for {secs}s · {calls}"),
+                NoticeLevel::Plain,
+                format!("Worked for {elapsed}"),
             )),
             TurnEndReason::IterationCap => Some(Entry::notice(
                 NoticeLevel::Warn,
                 format!(
-                    "Hit the per-turn step limit after {secs}s · {calls} \
-                     — send \"continue\" to resume"
+                    "Worked for {elapsed} — hit the per-turn step limit; send \"continue\" to resume"
                 ),
             )),
             TurnEndReason::Interrupted => Some(Entry::notice(
                 NoticeLevel::Plain,
-                format!("Interrupted after {secs}s · {calls}"),
+                format!("Worked for {elapsed}"),
             )),
             TurnEndReason::Error(e) => Some(Entry::notice(
                 NoticeLevel::Error,
-                format!("Stopped after {secs}s — {e}"),
+                format!("Worked for {elapsed} — {e}"),
             )),
         };
         if let Some(entry) = entry {
             self.transcript.push(entry);
-        }
-    }
-
-    /// `"1 tool call"` / `"3 tool calls"` — pluralize a count for the indicator.
-    fn count_phrase(n: usize, noun: &str) -> String {
-        if n == 1 {
-            format!("1 {noun}")
-        } else {
-            format!("{n} {noun}s")
         }
     }
 
@@ -284,5 +280,20 @@ impl App {
             .ledger
             .output
             .saturating_sub(self.turn_output_base)
+    }
+}
+
+fn format_duration(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    match (h, m, s) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, 0) => format!("{m}m"),
+        (0, m, s) => format!("{m}m {s}s"),
+        (h, 0, 0) => format!("{h}h"),
+        (h, m, 0) => format!("{h}h {m}m"),
+        (h, 0, s) => format!("{h}h {s}s"),
+        (h, m, s) => format!("{h}h {m}m {s}s"),
     }
 }

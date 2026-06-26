@@ -122,6 +122,20 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_arrows_move_by_words() {
+        let mut a = app();
+        type_str(&mut a, "add a resistor now");
+        a.update(Msg::WordLeft);
+        assert_eq!(a.cursor, "add a resistor ".chars().count());
+        a.update(Msg::WordLeft);
+        assert_eq!(a.cursor, "add a ".chars().count());
+        a.update(Msg::WordRight);
+        assert_eq!(a.cursor, "add a resistor".chars().count());
+        a.update(Msg::WordRight);
+        assert_eq!(a.cursor, "add a resistor now".chars().count());
+    }
+
+    #[test]
     fn history_recall_round_trips() {
         let mut a = app();
         type_str(&mut a, "first");
@@ -302,10 +316,10 @@ mod tests {
         assert!(b.ctrl_c_armed);
         assert!(!b.should_quit, "first Ctrl-C only arms quit");
         assert!(
-            b.transcript
+            !b.transcript
                 .iter()
                 .any(|e| e.text.contains("Press Ctrl-C again to exit")),
-            "first Ctrl-C posts a visible guard: {:?}",
+            "first Ctrl-C leaves the transcript alone: {:?}",
             b.transcript
         );
         assert_eq!(b.update(Msg::ForceQuit), Action::Quit);
@@ -480,7 +494,7 @@ mod tests {
         a.update(Msg::TurnEnded(TurnEndReason::Compacted));
         assert!(!a.running);
         assert!(
-            !a.transcript.iter().any(|e| e.text.contains("Cogitated")),
+            !a.transcript.iter().any(|e| e.text.contains("Worked for")),
             "compaction posts no end indicator (it has its own shrink note)"
         );
     }
@@ -636,7 +650,7 @@ mod tests {
         assert!(
             a.transcript
                 .iter()
-                .any(|e| e.text.contains("Interrupted") && e.level == NoticeLevel::Plain),
+                .any(|e| e.text.contains("Worked for") && e.level == NoticeLevel::Plain),
             "interruption indicator posted: {:?}",
             a.transcript
         );
@@ -741,16 +755,15 @@ mod tests {
             name: "search_symbols".into(),
         }));
         assert!(
-            a.transcript
-                .iter()
-                .any(|e| e.speaker == Speaker::Tool && e.text.contains("running"))
+            !a.transcript.iter().any(|e| e.speaker == Speaker::Tool),
+            "active tools are shown in the status row, not duplicated in the transcript"
         );
         a.update(Msg::Agent(AgentEvent::ToolFinished {
             name: "search_symbols".into(),
             summary: "\"STM32\" → 4 hits".into(),
             image_path: None,
         }));
-        // The running placeholder is replaced in place by the finished card.
+        // The finished card is appended once.
         let cards: Vec<&Entry> = a
             .transcript
             .iter()
@@ -795,7 +808,7 @@ mod tests {
 
     #[test]
     fn turn_ended_posts_a_labelled_indicator_per_reason() {
-        // Completed → green "Cogitated", with a pluralized tool-call count.
+        // Completed → compact Codex-style worked-duration marker.
         let mut a = app();
         type_str(&mut a, "go");
         a.update(Msg::Submit);
@@ -804,9 +817,9 @@ mod tests {
         }));
         a.update(Msg::TurnEnded(TurnEndReason::Completed));
         let last = a.transcript.last().unwrap();
-        assert!(last.text.contains("Cogitated"), "{}", last.text);
-        assert!(last.text.contains("1 tool call"), "singular: {}", last.text);
-        assert_eq!(last.level, NoticeLevel::Success);
+        assert!(last.text.contains("Worked for"), "{}", last.text);
+        assert!(!last.text.contains("tool call"), "{}", last.text);
+        assert_eq!(last.level, NoticeLevel::Plain);
         assert!(!a.running && a.turn_started.is_none());
 
         // IterationCap → yellow warning with the resume hint.
@@ -817,7 +830,7 @@ mod tests {
         let last = a.transcript.last().unwrap();
         assert!(last.text.contains("step limit"), "{}", last.text);
         assert!(last.text.contains("continue"), "resume hint: {}", last.text);
-        assert!(last.text.contains("0 tool calls"), "plural: {}", last.text);
+        assert!(!last.text.contains("tool calls"), "{}", last.text);
         assert_eq!(last.level, NoticeLevel::Warn);
 
         // Error → red, carries the message.
@@ -849,7 +862,7 @@ mod tests {
             let indicators = a
                 .transcript
                 .iter()
-                .filter(|e| e.text.contains("Cogitated"))
+                .filter(|e| e.text.contains("Worked for"))
                 .count();
             assert_eq!(
                 indicators, 1,

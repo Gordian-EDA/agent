@@ -1,6 +1,6 @@
-//! The input composer and the panes that cluster around it: the rounded input
-//! box ([`draw_input`]), the apply-gate card just above it ([`draw_diff`]), and
-//! the two popups that float over it — the `/command` completion list
+//! The input composer and the panes that cluster around it: the flat input row
+//! ([`draw_input`]), the apply-gate card just above it ([`draw_diff`]), and the
+//! two popups that float over it — the `/command` completion list
 //! ([`draw_completions`]) and the double-Esc unwind picker ([`draw_unwind`]).
 
 use ratatui::Frame;
@@ -79,22 +79,13 @@ pub(super) fn draw_completions(f: &mut Frame, input_area: Rect, app: &App) {
     );
 }
 
-/// Rows the apply-gate pane needs for this diff at this terminal width (summary
-/// line wrapped + the hint line), capped so a huge diff can't squeeze out the
-/// transcript.
+/// Rows the apply-gate pane needs for this diff at this terminal width: action
+/// row, summary row, and a wrapped preview, capped so a huge diff can't squeeze
+/// out the transcript.
 pub(super) fn diff_height(d: &PendingDiff, width: u16) -> u16 {
-    let inner_w = width.saturating_sub(MARGIN + 2).max(1) as usize; // minus the border
-    let summary_w: usize = d
-        .added
-        .iter()
-        .chain(&d.removed)
-        .chain(&d.changed)
-        .map(|r| r.chars().count() + 4) // "+ r   "
-        .sum::<usize>()
-        + 16; // "nets nn → nn"
-    let summary_rows = summary_w.div_ceil(inner_w) as u16;
-    // content = summary rows + a blank + the hint; +2 for the rounded border.
-    (summary_rows + 2 + 2).clamp(5, 9)
+    let inner_w = width.saturating_sub(2 * MARGIN).max(1) as usize;
+    let preview_rows = diff_preview_text(d, 8).chars().count().div_ceil(inner_w) as u16;
+    (2 + preview_rows).clamp(3, 5)
 }
 
 pub(super) fn draw_diff(f: &mut Frame, area: Rect, app: &App) {
@@ -102,107 +93,173 @@ pub(super) fn draw_diff(f: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
-    // An actionable card: a caution-yellow rounded frame (matching the composer's
-    // shape) titled "proposed changes", so a pending write reads as a deliberate
-    // gate rather than another transcript line.
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title(Span::styled(
-            " proposed changes ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(body(area));
-    f.render_widget(block, body(area));
-
-    // Each refdes is a background-tinted chip: a soft green band for an add, red
-    // for a delete, neutral slate for a modify — so the eye reads the operation
-    // from the fill, not just a leading glyph. A plain gap separates chips so the
-    // bands don't merge into one bar.
-    let mut spans: Vec<Span> = Vec::new();
-    for r in &d.added {
-        spans.push(chip(format!("+ {r}"), Color::Green, Color::Rgb(22, 40, 26)));
-        spans.push(chip_gap());
-    }
-    for r in &d.removed {
-        spans.push(chip(format!("- {r}"), Color::Red, Color::Rgb(46, 24, 28)));
-        spans.push(chip_gap());
-    }
-    for r in &d.changed {
-        spans.push(chip(format!("~ {r}"), Color::Gray, Color::Rgb(38, 40, 51)));
-        spans.push(chip_gap());
-    }
-    spans.push(Span::styled(
-        format!("nets {} → {}", d.nets_before, d.nets_after),
-        Style::default().fg(Color::DarkGray),
-    ));
-
     // The key letters are sourced from the keybinding definitions, not hardcoded,
     // so the labels can never drift from what `event::map_key` actually accepts.
-    let hint = Line::from(vec![
+    let accent = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+    let action = Line::from(vec![
+        Span::styled("change pending", accent),
+        Span::styled("   ", dim),
         Span::styled(
             format!("[{}] approve", super::super::event::APPROVE_KEY),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("    "),
+        Span::styled("   ", dim),
         Span::styled(
             format!("[{}] reject", super::super::event::REJECT_KEY),
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("    Esc rejects", Style::default().fg(Color::DarkGray)),
+        Span::styled("   Esc cancel", dim),
     ]);
+    let summary = Line::from(vec![
+        Span::styled(
+            format!("+{} added", d.added.len()),
+            Style::default().fg(Color::Green),
+        ),
+        Span::styled("   ", dim),
+        Span::styled(
+            format!("-{} removed", d.removed.len()),
+            Style::default().fg(Color::Red),
+        ),
+        Span::styled("   ", dim),
+        Span::styled(
+            format!("~{} changed", d.changed.len()),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::styled("   ", dim),
+        Span::styled(
+            format!("nets {} -> {}", d.nets_before, d.nets_after),
+            Style::default().fg(Color::Gray),
+        ),
+    ]);
+    let preview = Line::from(diff_preview_spans(d, 8));
 
-    let para =
-        Paragraph::new(vec![Line::from(spans), Line::from(""), hint]).wrap(Wrap { trim: true });
-    f.render_widget(para, inner);
+    let para = Paragraph::new(vec![action, summary, preview]).wrap(Wrap { trim: true });
+    f.render_widget(para, body(area));
 }
 
-/// One background-tinted diff chip: bold `fg` label on a soft dark `bg` band, with
-/// a one-cell pad on each side so the fill frames the refdes.
-fn chip(label: String, fg: Color, bg: Color) -> Span<'static> {
-    Span::styled(
-        format!(" {label} "),
-        Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
-    )
+fn diff_preview_text(d: &PendingDiff, limit: usize) -> String {
+    let mut parts = Vec::new();
+    let mut total = 0usize;
+    for (prefix, refs) in [("+", &d.added), ("-", &d.removed), ("~", &d.changed)] {
+        for r in refs {
+            total += 1;
+            if parts.len() < limit {
+                parts.push(format!("{prefix}{r}"));
+            }
+        }
+    }
+    if total > parts.len() {
+        parts.push(format!("+{} more", total - parts.len()));
+    }
+    if parts.is_empty() {
+        "no component changes".into()
+    } else {
+        parts.join("  ")
+    }
 }
 
-/// The un-tinted gap between two chips, so their background bands stay distinct.
-fn chip_gap() -> Span<'static> {
-    Span::raw("  ")
+fn diff_preview_spans(d: &PendingDiff, limit: usize) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled("refs  ", Style::default().fg(Color::DarkGray))];
+    let mut shown = 0usize;
+    let mut total = 0usize;
+    for (prefix, refs, color) in [
+        ("+", &d.added, Color::Green),
+        ("-", &d.removed, Color::Red),
+        ("~", &d.changed, Color::Yellow),
+    ] {
+        for r in refs {
+            total += 1;
+            if shown < limit {
+                if shown > 0 {
+                    spans.push(Span::styled("  ", Style::default().fg(Color::DarkGray)));
+                }
+                spans.push(Span::styled(
+                    format!("{prefix}{r}"),
+                    Style::default().fg(color),
+                ));
+                shown += 1;
+            }
+        }
+    }
+    if total == 0 {
+        spans.push(Span::styled(
+            "no component changes",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else if total > shown {
+        spans.push(Span::styled("  ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            format!("+{} more", total - shown),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    spans
 }
 
-/// Rows the composer needs: one per draft line (split on `\n`), inside the
-/// rounded border (+2), floored at 3 (one content row) and capped at a third of
-/// the screen so a giant paste can't swallow the transcript.
-pub(super) fn composer_height(app: &App, screen_h: u16) -> u16 {
-    let draft_rows = app.input.split('\n').count().max(1) as u16;
+/// Rows the composer needs: top/bottom separators plus one row per draft line
+/// (split on `\n`), capped so a giant paste can't swallow the transcript.
+pub(super) fn composer_height(app: &App, screen_h: u16, screen_w: u16) -> u16 {
+    let input_area = Rect {
+        x: 0,
+        y: 0,
+        width: screen_w,
+        height: screen_h,
+    };
+    let content_w = body(input_area).width.saturating_sub(2).max(1) as usize;
+    let draft_rows = wrapped_input_rows(&app.input, content_w).len().max(1) as u16;
     let cap = (screen_h / 3).max(3);
     (draft_rows + 2).clamp(3, cap)
 }
 
 pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
-    // A rounded composer box (Codex idiom). The border brightens to the accent
-    // while typing is live and dims otherwise, so the eye knows where focus is.
+    // Claude Code style: full-width border lines with footer-aligned input text.
+    // No box; the border touches the terminal edge while typing follows the
+    // chrome margin.
     let focused = app.input_active() && app.pending.is_none();
-    let border = if focused {
+    let rule = if focused {
         Color::Cyan
     } else {
         Color::DarkGray
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border));
-    let inner = block.inner(body(area));
-    f.render_widget(block, body(area));
+    let outer = area;
+    let rule_text = "─".repeat(outer.width as usize);
+    let rule_line = || {
+        Paragraph::new(Line::from(Span::styled(
+            rule_text.clone(),
+            Style::default().fg(rule),
+        )))
+    };
+    f.render_widget(rule_line(), Rect { height: 1, ..outer });
+    if outer.height > 1 {
+        f.render_widget(
+            rule_line(),
+            Rect {
+                y: outer.y + outer.height - 1,
+                height: 1,
+                ..outer
+            },
+        );
+    }
+    let inner = body(Rect {
+        y: outer.y + 1,
+        height: outer.height.saturating_sub(2),
+        ..outer
+    });
+    let marker = Rect {
+        x: outer.x,
+        y: inner.y,
+        width: inner.x.saturating_sub(outer.x).max(1),
+        height: inner.height,
+    };
 
-    let avail = (inner.width as usize).saturating_sub(2).max(1); // minus the "› " prompt
-    let caret = || Span::styled("› ", Style::default().fg(Color::Cyan));
+    let avail = inner.width.max(1) as usize;
+    let caret = || Span::styled("›", Style::default().fg(Color::Cyan));
+    f.render_widget(Paragraph::new(Line::from(caret())), marker);
 
     if app.pending.is_some() {
         f.render_widget(
@@ -233,55 +290,83 @@ pub(super) fn draw_input(f: &mut Frame, area: Rect, app: &App) {
             "type a prompt — /help for commands, ⏎ sends · ⇧⏎ newline"
         };
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                caret(),
-                Span::styled(
-                    placeholder,
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            ])),
+            Paragraph::new(Line::from(Span::styled(
+                placeholder,
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ))),
             inner,
         );
         if app.input_active() {
-            f.set_cursor_position((inner.x + 2, inner.y));
+            f.set_cursor_position((inner.x, inner.y));
         }
         return;
     }
 
-    // A multi-line draft: each `\n`-separated logical line gets its own visible
-    // row (the caret marks only the first), each windowed horizontally so its
-    // own tail stays in view. Locate the cursor's line/column to place the
-    // terminal cursor on the right row.
-    let logical: Vec<&str> = app.input.split('\n').collect();
+    // A multi-line draft wraps visually instead of scrolling horizontally.
     let (cur_line, cur_col) = cursor_line_col(&app.input, app.cursor);
+    let wrapped = wrapped_input_rows(&app.input, avail);
+    let cursor_row = cursor_visual_row(&wrapped, cur_line, cur_col, avail);
     let rows = inner.height as usize;
-    let first = logical.len().saturating_sub(rows); // show the tail if it overflows
+    let first = cursor_row.saturating_add(1).saturating_sub(rows);
     let mut lines: Vec<Line> = Vec::new();
-    for (i, text) in logical.iter().enumerate().skip(first) {
-        let chars: Vec<char> = text.chars().collect();
-        // Window this line so the cursor (on its own row) or its tail is visible.
-        let focus = if i == cur_line { cur_col } else { chars.len() };
-        let start = focus.saturating_sub(avail.saturating_sub(1));
-        let visible: String = chars.iter().skip(start).take(avail).collect();
-        let prefix = if i == 0 { caret() } else { Span::raw("  ") };
-        lines.push(Line::from(vec![prefix, Span::raw(visible)]));
+    for row in wrapped.iter().skip(first).take(rows) {
+        lines.push(Line::from(Span::raw(row.text.clone())));
     }
     f.render_widget(Paragraph::new(lines), inner);
 
-    // The terminal cursor on the cursor's row, windowed to match its line.
+    // The terminal cursor on the wrapped visual row.
     if app.input_active() {
-        let chars = logical
-            .get(cur_line)
-            .map(|l| l.chars().count())
-            .unwrap_or(0);
-        let start = cur_col.min(chars).saturating_sub(avail.saturating_sub(1));
-        let row = cur_line.saturating_sub(first) as u16;
-        let x = inner.x + 2 + (cur_col - start) as u16;
-        let y = (inner.y + row).min(inner.y + inner.height.saturating_sub(1));
+        let visible_row = cursor_row.saturating_sub(first) as u16;
+        let row_start = wrapped.get(cursor_row).map(|r| r.start).unwrap_or(0);
+        let x = inner.x + cur_col.saturating_sub(row_start) as u16;
+        let y = (inner.y + visible_row).min(inner.y + inner.height.saturating_sub(1));
         f.set_cursor_position((x.min(inner.x + inner.width.saturating_sub(1)), y));
     }
+}
+
+#[derive(Clone, Debug)]
+struct DraftRow {
+    line: usize,
+    start: usize,
+    text: String,
+}
+
+fn wrapped_input_rows(input: &str, width: usize) -> Vec<DraftRow> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    for (line, logical) in input.split('\n').enumerate() {
+        let chars: Vec<char> = logical.chars().collect();
+        if chars.is_empty() {
+            rows.push(DraftRow {
+                line,
+                start: 0,
+                text: String::new(),
+            });
+            continue;
+        }
+        let mut start = 0;
+        while start < chars.len() {
+            let end = (start + width).min(chars.len());
+            rows.push(DraftRow {
+                line,
+                start,
+                text: chars[start..end].iter().collect(),
+            });
+            start = end;
+        }
+    }
+    rows
+}
+
+fn cursor_visual_row(rows: &[DraftRow], line: usize, col: usize, width: usize) -> usize {
+    let width = width.max(1);
+    let target_start = col.saturating_sub(1) / width * width;
+    rows.iter()
+        .position(|r| r.line == line && r.start == target_start)
+        .or_else(|| rows.iter().rposition(|r| r.line == line))
+        .unwrap_or_else(|| rows.len().saturating_sub(1))
 }
 
 /// The (line, column) of a char-offset cursor in a `\n`-split string — the
@@ -387,16 +472,14 @@ mod tests {
             added: vec!["U1".into()],
             ..Default::default()
         };
-        // One summary row + a blank + the hint row, inside a rounded border (+2):
-        // floored at 5 so the card always frames cleanly.
-        assert_eq!(diff_height(&small, 80), 5);
+        assert_eq!(diff_height(&small, 80), 3);
         let big = PendingDiff {
-            added: (0..60).map(|i| format!("U{i}")).collect(),
+            added: (0..60).map(|i| format!("LONG_REF_{i}")).collect(),
             ..Default::default()
         };
         assert_eq!(
-            diff_height(&big, 80),
-            9,
+            diff_height(&big, 24),
+            5,
             "capped so it can't eat the transcript"
         );
     }

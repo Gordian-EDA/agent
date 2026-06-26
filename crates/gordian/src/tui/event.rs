@@ -3,8 +3,9 @@
 //! Kept separate from the shell so the mapping is a pure function and easy to
 //! reason about: the gate keys (`a`/`r`) are only special while a diff is
 //! pending; otherwise everything routes to the input line. Up/Down recall
-//! prompt history (like a shell); PageUp/PageDown and the mouse wheel scroll
-//! the transcript.
+//! prompt history while editing, but scroll the transcript from an empty prompt
+//! when scrollback exists; modified arrows, PageUp/PageDown, and the mouse wheel
+//! scroll the transcript.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -35,6 +36,20 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
         return Some(Msg::Newline);
     }
 
+    // Dedicated transcript scroll chords. They are handled before the generic
+    // Control block so Ctrl-Up/Down do not get swallowed as unknown control
+    // chords.
+    if key
+        .modifiers
+        .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        match key.code {
+            KeyCode::Up => return Some(Msg::ScrollUp),
+            KeyCode::Down => return Some(Msg::ScrollDown),
+            _ => {}
+        }
+    }
+
     // Control chords (readline-style line editing + hard quit).
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
@@ -44,6 +59,8 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
             KeyCode::Char('w') => Some(Msg::KillWordBack),
             KeyCode::Char('a') => Some(Msg::Home),
             KeyCode::Char('e') => Some(Msg::End),
+            KeyCode::Left => Some(Msg::WordLeft),
+            KeyCode::Right => Some(Msg::WordRight),
             _ => None,
         };
     }
@@ -63,8 +80,15 @@ pub fn map_key(app: &App, key: KeyEvent) -> Option<Msg> {
         // A full screenful jump; the height tracks the last-drawn viewport.
         KeyCode::PageUp => Some(Msg::PageUp(app.viewport_h)),
         KeyCode::PageDown => Some(Msg::PageDown(app.viewport_h)),
-        // Up/Down edit history while the input line is live; with the gate
-        // open they fall back to scrolling the transcript.
+        // Up/Down edit history while the input line is live. With an empty
+        // prompt and scrollback available, they move the transcript instead;
+        // this also makes wheel-as-arrow terminals useful without mouse capture.
+        KeyCode::Up if app.input_active() && app.input.is_empty() && app.scroll_max > 0 => {
+            Some(Msg::ScrollUp)
+        }
+        KeyCode::Down if app.input_active() && app.input.is_empty() && app.scroll > 0 => {
+            Some(Msg::ScrollDown)
+        }
         KeyCode::Up if app.input_active() => Some(Msg::HistoryPrev),
         KeyCode::Down if app.input_active() => Some(Msg::HistoryNext),
         KeyCode::Up => Some(Msg::ScrollUp),
@@ -141,6 +165,14 @@ mod tests {
         assert!(matches!(map_key(&a, ctrl('w')), Some(Msg::KillWordBack)));
         assert!(matches!(map_key(&a, ctrl('a')), Some(Msg::Home)));
         assert!(matches!(map_key(&a, ctrl('e')), Some(Msg::End)));
+        assert!(matches!(
+            map_key(&a, KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL)),
+            Some(Msg::WordLeft)
+        ));
+        assert!(matches!(
+            map_key(&a, KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL)),
+            Some(Msg::WordRight)
+        ));
     }
 
     #[test]
@@ -169,6 +201,46 @@ mod tests {
             map_key(&a, key(KeyCode::Down)),
             Some(Msg::HistoryNext)
         ));
+    }
+
+    #[test]
+    fn up_down_scroll_from_an_empty_prompt_when_scrollback_exists() {
+        let mut a = app();
+        a.scroll_max = 10;
+        assert!(matches!(map_key(&a, key(KeyCode::Up)), Some(Msg::ScrollUp)));
+
+        a.scroll = 3;
+        assert!(matches!(
+            map_key(&a, key(KeyCode::Down)),
+            Some(Msg::ScrollDown)
+        ));
+    }
+
+    #[test]
+    fn up_down_keep_history_when_the_prompt_has_text() {
+        let mut a = app();
+        a.scroll_max = 10;
+        a.input = "draft".to_string();
+        a.cursor = a.input.chars().count();
+
+        assert!(matches!(
+            map_key(&a, key(KeyCode::Up)),
+            Some(Msg::HistoryPrev)
+        ));
+        assert!(matches!(
+            map_key(&a, key(KeyCode::Down)),
+            Some(Msg::HistoryNext)
+        ));
+    }
+
+    #[test]
+    fn modified_arrows_scroll_even_when_input_is_live() {
+        let a = app();
+        let shift_up = KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT);
+        let ctrl_down = KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL);
+
+        assert!(matches!(map_key(&a, shift_up), Some(Msg::ScrollUp)));
+        assert!(matches!(map_key(&a, ctrl_down), Some(Msg::ScrollDown)));
     }
 
     #[test]

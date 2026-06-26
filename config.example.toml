@@ -4,11 +4,14 @@
 schemaVersion = 1
 
 [llm]
+adapter = "openai"
 model = "gpt-4o"
 apiKey = "replace-me"
 # endpoint = "https://your-openai-compatible-gateway/v1"
 maxTokens = 16384
 ephemeralCache = true
+# reasoningEffort = "medium" # none|minimal|low|medium|high|xhigh|max|<token budget>
+# captureReasoning = false
 
 [kicad]
 # symbolDir = "/usr/share/kicad/symbols"
@@ -36,3 +39,9 @@ layout = true
 [tools]
 defaultSearchLimit = 8
 renderMaxPx = 1600
+
+[engines]
+# schematicPlacer: "anneal" (alias: "sa") or "greedy"
+schematicPlacer = "anneal"
+# pcbRouter: "auto" (A* + mesh selector), "astar", or "mesh"
+pcbRouter = "auto"

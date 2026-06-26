@@ -5,7 +5,6 @@
 //! Layout (spec §11):
 //!
 //! ```text
-//! ┌─ Gordian ── design.kicad_sch ──────── [KiCAD ●] [auto OFF] ─┐
 //! │ chat transcript (scrollable; tool cards collapsed)           │
 //! ├──────────────────────────────────────────────────────────────┤
 //! │ ◆ PROPOSED CHANGES  +U1 +R7  ~C2   nets 3→12   [a]pprove [r]…  │  (only when a diff is pending)
@@ -19,8 +18,8 @@
 //! Split by pane: [`transcript`] draws the scrollable chat (and owns the styled
 //! word-wrap that keeps the scroll math exact); [`composer`] draws the input box
 //! plus the floating popups and the apply-gate card that sit just above it;
-//! [`chrome`] draws the frame furniture (header, status footer, running
-//! indicator, help overlay). The transcript is wrapped by
+//! [`chrome`] draws the frame furniture (status footer, running indicator,
+//! scrollback badge, help overlay). The transcript is wrapped by
 //! [`transcript::wrap_segments`] (not `Paragraph::wrap`) so the scroll arithmetic
 //! — tail-following, clamping, the `↑n` indicator — is exact in visual rows.
 
@@ -37,7 +36,7 @@ use super::app::App;
 /// Symmetric horizontal margin (in columns) applied to every pane via [`body`],
 /// so the header, transcript, composer, diff card, and footer all share one left
 /// edge and none of them hugs the terminal edge (the Codex layout discipline).
-pub(super) const MARGIN: u16 = 2;
+pub(super) const MARGIN: u16 = 4;
 
 /// Everything the renderer needs that the testable [`App`] deliberately does not
 /// hold: the image [`Picker`] (terminal graphics capability + cell font size).
@@ -77,40 +76,39 @@ pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
         .map(|d| composer::diff_height(d, area.width))
         .unwrap_or(0);
     // The running indicator takes a row while a turn is in flight, plus a second
-    // detail row when a named tool is currently executing.
+    // detail row when a named unit of work is currently executing.
     let running_h = if app.running {
-        1 + u16::from(app.active_tool.is_some())
+        1 + u16::from(app.active_work.is_some())
     } else {
         0
     };
     // The composer grows with a multi-line draft (capped), so a pasted or
     // Shift-Enter'd prompt stays visible instead of scrolling under the border.
-    let input_h = composer::composer_height(app, area.height);
+    let input_h = composer::composer_height(app, area.height, area.width);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),         // header
             Constraint::Min(3),            // transcript
             Constraint::Length(diff_h),    // proposed-changes pane
             Constraint::Length(running_h), // running indicator
-            Constraint::Length(input_h),   // input composer (rounded box)
+            Constraint::Length(input_h),   // input composer
             Constraint::Length(1),         // status bar
         ])
         .split(area);
 
-    chrome::draw_header(f, chunks[0], app);
-    transcript::draw_transcript(f, chunks[1], app, ctx);
+    transcript::draw_transcript(f, chunks[0], app, ctx);
+    chrome::draw_scroll_indicator(f, chunks[0], app);
     if app.pending.is_some() {
-        composer::draw_diff(f, chunks[2], app);
+        composer::draw_diff(f, chunks[1], app);
     }
     if app.running {
-        chrome::draw_running(f, chunks[3], app);
+        chrome::draw_running(f, chunks[2], app);
     }
-    composer::draw_input(f, chunks[4], app);
-    chrome::draw_status(f, chunks[5], app);
-    composer::draw_completions(f, chunks[4], app);
-    composer::draw_unwind(f, chunks[4], app);
+    composer::draw_input(f, chunks[3], app);
+    chrome::draw_status(f, chunks[4], app);
+    composer::draw_completions(f, chunks[3], app);
+    composer::draw_unwind(f, chunks[3], app);
 
     if app.help {
         chrome::draw_help(f, area);
@@ -144,6 +142,7 @@ mod tests {
     use gordian_core::AgentEvent;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::{Color, Modifier};
     use serde_json::json;
 
     /// Render an app to a TestBackend and return the buffer's text as one string.
@@ -233,8 +232,11 @@ mod tests {
             "user msg should render:\n{text}"
         );
         assert!(
-            text.contains("search_symbols") && text.contains("4 hits"),
-            "tool card should render:\n{text}"
+            text.contains("Searched")
+                && text.contains("Search symbols")
+                && text.contains("4 hits")
+                && text.contains("└"),
+            "tool group should render:\n{text}"
         );
     }
 
@@ -329,6 +331,10 @@ mod tests {
             text.contains("route_board"),
             "active tool named under spinner:\n{text}"
         );
+        assert!(
+            !text.contains("Route board"),
+            "active tool should not be duplicated as a transcript card:\n{text}"
+        );
         // When the tool finishes, the detail row clears.
         a.update(Msg::Agent(AgentEvent::ToolFinished {
             name: "route_board".into(),
@@ -336,8 +342,33 @@ mod tests {
             image_path: None,
         }));
         assert!(
-            a.active_tool.is_none(),
+            a.active_work.is_none(),
             "detail clears when the tool finishes"
+        );
+    }
+
+    #[test]
+    fn running_row_shows_async_review_detail_without_tool_count() {
+        let mut a = app();
+        for c in "go".chars() {
+            a.update(Msg::Char(c));
+        }
+        a.update(Msg::Submit);
+        a.update(Msg::Agent(AgentEvent::ReviewStarted { round: 0 }));
+        let text = render_to_string(&mut a, 80, 24);
+        assert!(
+            text.contains("design review round 0"),
+            "active review named under spinner:\n{text}"
+        );
+        assert_eq!(a.turn_tool_calls, 0, "review progress is not a tool call");
+        a.update(Msg::Agent(AgentEvent::Reviewed {
+            round: 0,
+            score: 10.0,
+            defects: vec![],
+        }));
+        assert!(
+            a.active_work.is_none(),
+            "finished review clears active detail"
         );
     }
 
@@ -381,8 +412,9 @@ mod tests {
             "diff": { "added": ["U1"], "removed": [], "changed": [], "nets_before": 0, "nets_after": 5 }
         })));
         let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("proposed changes"), "diff header:\n{text}");
-        assert!(text.contains("+ U1"), "added refdes:\n{text}");
+        assert!(text.contains("change pending"), "diff header:\n{text}");
+        assert!(text.contains("+1 added"), "diff summary:\n{text}");
+        assert!(text.contains("+U1"), "added refdes:\n{text}");
         assert!(text.contains("approve"), "approve hint:\n{text}");
         assert!(text.contains("reject"), "reject hint:\n{text}");
     }
@@ -392,6 +424,63 @@ mod tests {
         let mut a = app();
         let text = render_to_string(&mut a, 80, 24);
         assert!(text.contains("type a prompt"), "placeholder:\n{text}");
+    }
+
+    #[test]
+    fn input_borders_span_width_and_prompt_aligns_with_status() {
+        let mut a = app();
+        let text = render_to_string(&mut a, 80, 24);
+        let rows: Vec<&str> = text.lines().collect();
+        let top_rule = rows[rows.len() - 4];
+        let prompt_row = rows[rows.len() - 3];
+        let bottom_rule = rows[rows.len() - 2];
+        let status_row = rows[rows.len() - 1];
+        assert_eq!(
+            col_of(prompt_row, "type a prompt"),
+            col_of(status_row, "bedrock"),
+            "input text and footer should share a left edge:\n{text}"
+        );
+        assert_eq!(
+            col_of(prompt_row, "›"),
+            Some(0),
+            "chevron stays at edge:\n{text}"
+        );
+        assert!(
+            top_rule.starts_with('─'),
+            "top rule starts at edge:\n{text}"
+        );
+        assert!(
+            top_rule.ends_with('─'),
+            "top rule reaches right edge:\n{text}"
+        );
+        assert!(
+            bottom_rule.starts_with('─'),
+            "bottom rule starts at edge:\n{text}"
+        );
+        assert!(
+            bottom_rule.ends_with('─'),
+            "bottom rule reaches right edge:\n{text}"
+        );
+    }
+
+    fn col_of(row: &str, needle: &str) -> Option<usize> {
+        row.find(needle).map(|byte| row[..byte].chars().count())
+    }
+
+    #[test]
+    fn long_input_wraps_inside_the_composer() {
+        let mut a = app();
+        for c in
+            "This text should wrap inside the input area instead of scrolling horizontally".chars()
+        {
+            a.update(Msg::Char(c));
+        }
+        let text = render_to_string(&mut a, 36, 24);
+        assert!(text.contains("This text should wrap"), "first row:\n{text}");
+        assert!(
+            text.contains("input area instead"),
+            "wrapped continuation row:\n{text}"
+        );
     }
 
     #[test]
@@ -433,7 +522,10 @@ mod tests {
         // here we want the full token/cost/context/elapsed run).
         let text = render_to_string(&mut a, 120, 24);
         assert!(text.contains("23.4k tok"), "total tokens:\n{text}");
-        assert!(text.contains("(23.0k/400)"), "in/out split:\n{text}");
+        assert!(
+            !text.contains("(23.0k/400)"),
+            "footer hides raw token split:\n{text}"
+        );
         // 23000 in / 1M * $5 + 400 out / 1M * $25 = $0.115 + $0.01 = $0.12 (2dp).
         assert!(text.contains("$0.12"), "session cost:\n{text}");
         // ctx 23.4k of a 200k window → ~88% left.
@@ -444,8 +536,9 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_shows_a_cached_badge_and_dash_for_unpriced_models() {
-        // An unknown model id has no price → cost renders "—", never wrong.
+    fn status_bar_hides_cache_and_unknown_cost_noise() {
+        // An unknown model id has no price, so the footer omits cost instead of
+        // rendering a placeholder dash. Cache accounting is intentionally hidden.
         let mut a = App::new(Status::new(
             "openai",
             "some/unknown-model-9",
@@ -456,13 +549,15 @@ mod tests {
             input_tokens: 10_000,
             output_tokens: 500,
             cache_write_tokens: 0,
-            cache_read_tokens: 8_000, // non-trivial cache read → "cached" badge
+            cache_read_tokens: 8_000,
         }));
         let text = render_to_string(&mut a, 120, 24);
-        assert!(text.contains("cached"), "cache indicator shows:\n{text}");
+        let bar = text.lines().last().expect("status row");
+        assert!(bar.contains("10.5k tok"), "total tokens still show:\n{bar}");
+        assert!(!bar.contains("cached"), "cache indicator is hidden:\n{bar}");
         assert!(
-            text.contains('—'),
-            "unpriced model renders a dash, not a number:\n{text}"
+            !bar.contains('—'),
+            "unpriced model omits cost placeholder:\n{bar}"
         );
     }
 
@@ -521,6 +616,58 @@ mod tests {
     }
 
     #[test]
+    fn empty_landing_page_shows_colored_logo_art() {
+        let mut a = app();
+        let backend = TestBackend::new(96, 32);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut a)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text = buffer_text(&buf);
+
+        assert!(text.contains("⣠⣴⣾⣿⣷⣦⣄"), "logo art appears:\n{text}");
+        assert!(text.contains("Gordian"), "brand text appears:\n{text}");
+
+        let logo_color = Some(Color::Rgb(184, 112, 50));
+        let colored_logo_cells = buf
+            .content()
+            .iter()
+            .filter(|cell| cell.symbol() != " " && cell.style().fg == logo_color);
+        assert!(
+            colored_logo_cells.count() > 20,
+            "logo cells carry the bronze foreground color"
+        );
+    }
+
+    #[test]
+    fn armed_quit_hint_is_emphasized_in_the_status_bar() {
+        let mut a = app();
+        a.update(Msg::ForceQuit);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &mut a)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("Ctrl-C again to quit"),
+            "armed quit hint appears in footer:\n{text}"
+        );
+        assert!(
+            !text.contains("Press Ctrl-C again to exit"),
+            "armed quit hint is not duplicated in the transcript:\n{text}"
+        );
+
+        let y = buf.area.height - 1;
+        let first_hint_cell = (0..buf.area.width)
+            .find(|x| buf[(*x, y)].symbol() == "C")
+            .expect("hint starts with C");
+        let style = buf[(first_hint_cell, y)].style();
+        assert_eq!(style.fg, Some(Color::Yellow));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        assert!(!style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
     fn status_bar_hints_follow_the_mode() {
         let mut a = app();
         let idle = render_to_string(&mut a, 80, 24);
@@ -539,15 +686,14 @@ mod tests {
         }
         a.update(Msg::Submit);
         let running = render_to_string(&mut a, 80, 24);
-        // The interrupt hint now lives on the running line; the bar keeps the
-        // double-quit reminder.
+        // The interrupt hint lives on the running line; the footer keeps quiet.
         assert!(
             running.contains("esc to interrupt"),
             "running line hint:\n{running}"
         );
         assert!(
-            running.contains("Ctrl-C Ctrl-C quit"),
-            "running bar hint:\n{running}"
+            !running.contains("Ctrl-C Ctrl-C quit"),
+            "running footer hides double-quit hint:\n{running}"
         );
 
         a.update(Msg::PendingDiff(json!({
@@ -626,11 +772,12 @@ mod tests {
     }
 
     #[test]
-    fn header_shows_schematic_and_kicad_state() {
+    fn top_status_bar_is_removed() {
         let mut a = app();
         let text = render_to_string(&mut a, 80, 24);
-        assert!(text.contains("design.kicad_sch"), "sch path:\n{text}");
-        assert!(text.contains("KiCAD"), "kicad indicator:\n{text}");
+        assert!(!text.contains("design.kicad_sch"), "no sch header:\n{text}");
+        assert!(!text.contains("KiCAD"), "no kicad header:\n{text}");
+        assert!(text.contains("bedrock"), "bottom status remains:\n{text}");
     }
 
     #[test]

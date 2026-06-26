@@ -81,7 +81,7 @@ fn base_cost(m: &RawMetrics) -> f64 {
     let base = correctness
         + neat * (5.0 * m.crossings as f64 + 7.0 * m.congestion as f64 + 7.0 * m.corners as f64)
         + 1.0 * m.junctions as f64
-        + 0.5 * m.stray
+        + 0.7 * m.stray
         + 0.15 * m.length
         + 0.45 * m.spread;
     let multiunit = SIB_COHESION * m.sib_spread;
@@ -106,7 +106,7 @@ fn amplified_energy(m: &RawMetrics) -> f64 {
     let base = correctness
         + neat * (5.0 * m.crossings as f64 + 7.0 * m.congestion as f64 + 7.0 * m.corners as f64)
         + 1.0 * m.junctions as f64
-        + 0.5 * m.stray
+        + 0.7 * m.stray
         + 0.15 * m.length
         + 0.45 * m.spread;
     let multiunit = SIB_COHESION * m.sib_spread;
@@ -1102,7 +1102,7 @@ fn proxy_cost(
         + 1200.0 * grid_order as f64
         + 0.15 * hpwl
         + PROXY_SPREAD_W * spread
-        + 0.5 * cohere
+        + 0.7 * cohere
         + ZBIAS_W * zbias
 }
 /// Locality-aware anneal (see `docs/specs/locality-aware-placement-search.md`). Two

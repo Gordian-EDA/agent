@@ -56,9 +56,10 @@ fn write_default_config(path: &Path, config: &GordianConfig) -> Result<()> {
 
     let body = format!(
         "# Gordian config. Persistence is owned by the CLI/TUI; gordian-core only consumes this typed model.\n\
-         # Fill in llm.model and llm.apiKey for hosted providers. Local/no-auth endpoints may omit apiKey.\n\
+         # Fill in llm.adapter, llm.model, and llm.apiKey for hosted providers. Local/no-auth endpoints may omit apiKey.\n\
          # Example:\n\
          # [llm]\n\
+         # adapter = \"openai\"\n\
          # model = \"gpt-4o\"\n\
          # apiKey = \"sk-...\"\n\
          # endpoint = \"https://your-openai-compatible-gateway/v1\"\n\n{}",

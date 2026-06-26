@@ -10,12 +10,12 @@ use drc_lint::connectivity::Violation as ConnViolation;
 use drc_lint::lint::{DrcViolation, lint};
 use kicad_ipc::snapshot::ImportedPart;
 use negotiated_mesh::pathing::global_route;
-use negotiated_mesh::pipeline::route_auto;
+use negotiated_mesh::pipeline::{NegotiatedMeshRouter, route_auto, select_best};
 use pcb_model::{
     FailedNet, LayerRef, Point2, RouteProblem, RouteResult, RouteSolution, Trace, ViaSpan,
 };
 
-use crate::AgentRuntime;
+use crate::{AgentRuntime, PcbRouterEngine};
 
 // ── route_board ──────────────────────────────────────────────────────────────
 
@@ -177,7 +177,7 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     }
 
     let rp = board.problem.clone();
-    let mut result = route_auto(&rp);
+    let mut result = route_with_engine(&rp, ctx.config().engines.pcb_router);
     let _used_direct_fallback = apply_direct_two_pin_fallback(&rp, &mut result);
     let original_solution = result.solution.clone();
     let mut pruned_spurs = prune_dangling_spurs(&rp, &mut result.solution);
@@ -237,6 +237,20 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
             "routed and saved the KiCAD board with honest failed nets"
         },
     }))
+}
+
+fn route_with_engine(rp: &RouteProblem, engine: PcbRouterEngine) -> RouteResult {
+    match engine {
+        PcbRouterEngine::Auto => route_auto(rp),
+        PcbRouterEngine::Astar => {
+            let grid = grid_astar::router::GridAStarRouter;
+            select_best(rp, &[&grid])
+        }
+        PcbRouterEngine::Mesh => {
+            let mesh = NegotiatedMeshRouter;
+            select_best(rp, &[&mesh])
+        }
+    }
 }
 
 fn apply_direct_two_pin_fallback(rp: &RouteProblem, result: &mut RouteResult) -> bool {
