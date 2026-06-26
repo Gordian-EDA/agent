@@ -452,6 +452,49 @@ fn decoupling_caps_seed_beside_their_anchor_ic() {
     }
 }
 
+#[test]
+fn fanout_keeps_crystal_cluster_near_dense_ic() {
+    let mut ic = dense_anchor("U1", 24);
+    ic.pads[0].net = Some("V3V3".to_string());
+    ic.pads[1].net = Some("GND".to_string());
+    ic.pads[10].net = Some("XTAL_IN".to_string());
+    ic.pads[11].net = Some("XTAL_OUT".to_string());
+    let problem = PlaceProblem {
+        bounds: board(80.0, 60.0),
+        clearance: 0.15,
+        layer_count: 6,
+        min_trace_width: 0.15,
+        keepouts: vec![],
+        parts: vec![
+            ic,
+            r0603("C1", Some("XTAL_IN"), Some("GND")),
+            r0603("C2", Some("XTAL_OUT"), Some("GND")),
+            r0603("Y1", Some("XTAL_IN"), Some("XTAL_OUT")),
+            r0603("C3", Some("V3V3"), Some("GND")),
+        ],
+        outline: None,
+    };
+
+    let res = place_board(&problem, &PlacementHints::default());
+    assert!(res.legal, "fanout crystal placement must be legal: {res:?}");
+    let at = |r: &str| {
+        res.placements
+            .iter()
+            .find(|p| p.reference == r)
+            .unwrap()
+            .at
+            .clone()
+    };
+    let u1 = at("U1");
+    for reference in ["C1", "C2", "Y1"] {
+        let dist = at(reference).dist(u1);
+        assert!(
+            dist < 10.0,
+            "{reference} should stay in the inner oscillator cluster near U1, dist {dist:.1}"
+        );
+    }
+}
+
 // ── grid hint: tight footprint-sized pitch, centred ─────────────────────
 
 #[test]

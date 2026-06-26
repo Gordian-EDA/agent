@@ -168,7 +168,7 @@ impl Session {
 
         let launch_cwd = board.parent().unwrap_or_else(|| Path::new("/tmp"));
         let (display, xvfb) = launch_xvfb()?;
-        let child = Command::new("pcbnew")
+        let mut child = Command::new("pcbnew")
             .arg(board)
             .current_dir(launch_cwd)
             .env("DISPLAY", &display)
@@ -179,12 +179,25 @@ impl Session {
             .spawn()
             .map_err(|e| Error::Spawn(format!("launch pcbnew: {e}")))?;
 
-        Self::await_socket(Duration::from_secs(90))?;
+        if let Err(err) = Self::await_socket(Duration::from_secs(90)) {
+            cleanup_launch(&mut child, xvfb);
+            return Err(err);
+        }
         // Let the server finish binding before the first request.
         std::thread::sleep(Duration::from_millis(500));
 
-        let mut kicad = Kicad::connect()?;
-        kicad.open_board_path(board)?;
+        let mut kicad = match Kicad::connect_launch_probe() {
+            Ok(kicad) => kicad,
+            Err(err) => {
+                cleanup_launch(&mut child, xvfb);
+                return Err(err);
+            }
+        };
+        if let Err(err) = kicad.open_board_path(board) {
+            cleanup_launch(&mut child, xvfb);
+            return Err(err);
+        }
+        kicad.use_default_timeouts();
         std::thread::sleep(Duration::from_millis(1_500));
         Ok(Self {
             child: Some(child),
@@ -234,6 +247,13 @@ impl Session {
         }
         Ok(())
     }
+}
+
+fn cleanup_launch(child: &mut Child, mut xvfb: Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = xvfb.kill();
+    let _ = xvfb.wait();
 }
 
 fn same_board(a: &Path, b: &Path) -> bool {

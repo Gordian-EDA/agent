@@ -759,6 +759,20 @@ impl Placer for RoutabilityOracle {
             })
             .collect();
         scored.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        if std::env::var_os("PLACE_ORACLE_DEBUG").is_some() {
+            for (idx, key, result) in &scored {
+                eprintln!(
+                    "[place-oracle] idx={idx} key={key:?} legal={} hpwl={:.2} layout_cost={:.2}",
+                    result.legal, result.report.hpwl, result.report.layout_cost
+                );
+            }
+        }
+        if let Ok(pick) = std::env::var("PLACE_ORACLE_PICK")
+            && let Ok(pick) = pick.parse::<usize>()
+            && let Some(pos) = scored.iter().position(|(idx, _, _)| *idx == pick)
+        {
+            return scored.swap_remove(pos).2;
+        }
         scored.swap_remove(0).2
     }
 }

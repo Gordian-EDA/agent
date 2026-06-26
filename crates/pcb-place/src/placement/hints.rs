@@ -4,8 +4,8 @@
 
 use super::geometry::rotated_courtyard_half;
 use super::model::{LockedAt, Part, PlaceProblem, PlacementHints};
-use super::pairs::{decoupling_pairs, series_fanout_order, series_pairs};
-use crate::problem::{Point2, Rect};
+use super::pairs::{decoupling_pairs, series_pairs};
+use crate::problem::Point2;
 
 /// Lock each member of a `grid` group at a computed cell of a regular grid (row-major,
 /// member order), centred in the group's region. The column count is sized from the
@@ -278,6 +278,347 @@ fn ring_pos(cx: f64, cy: f64, rw: f64, rh: f64, pos: f64) -> Point2 {
     }
 }
 
+fn fanout_order_by_ic_pad_angle(problem: &PlaceProblem, ic: usize, parts: &[usize]) -> Vec<usize> {
+    let mut keyed: Vec<(f64, String, usize)> = parts
+        .iter()
+        .map(|&part| {
+            (
+                part_angle_around_ic(problem, ic, part),
+                problem.parts[part].reference.clone(),
+                part,
+            )
+        })
+        .collect();
+    keyed.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    keyed.into_iter().map(|(_, _, part)| part).collect()
+}
+
+fn part_angle_around_ic(problem: &PlaceProblem, ic: usize, part: usize) -> f64 {
+    let part_nets: std::collections::BTreeSet<&str> = problem.parts[part]
+        .pads
+        .iter()
+        .filter_map(|pad| pad.net.as_deref())
+        .collect();
+    let mut signal_angles = Vec::new();
+    let mut all_angles = Vec::new();
+    for pad in &problem.parts[ic].pads {
+        let Some(net) = pad.net.as_deref() else {
+            continue;
+        };
+        if !part_nets.contains(net) {
+            continue;
+        }
+        let angle = pad.offset.y.atan2(pad.offset.x);
+        all_angles.push(angle);
+        if !is_powerish_net(net) {
+            signal_angles.push(angle);
+        }
+    }
+    mean_angle(if signal_angles.is_empty() {
+        &all_angles
+    } else {
+        &signal_angles
+    })
+    .unwrap_or(0.0)
+}
+
+fn mean_angle(angles: &[f64]) -> Option<f64> {
+    if angles.is_empty() {
+        return None;
+    }
+    let (sin, cos) = angles.iter().fold((0.0, 0.0), |(sin, cos), angle| {
+        (sin + angle.sin(), cos + angle.cos())
+    });
+    Some(sin.atan2(cos))
+}
+
+fn resonator_parts(problem: &PlaceProblem, ic: usize) -> Vec<usize> {
+    let ic_nets: std::collections::BTreeSet<&str> = problem.parts[ic]
+        .pads
+        .iter()
+        .filter_map(|pad| pad.net.as_deref())
+        .collect();
+    problem
+        .parts
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, part)| {
+            if idx == ic || part.pads.len() != 2 {
+                return None;
+            }
+            let nets: Vec<&str> = part
+                .pads
+                .iter()
+                .filter_map(|pad| pad.net.as_deref())
+                .collect();
+            if nets.len() != 2
+                || nets[0] == nets[1]
+                || nets.iter().any(|net| is_powerish_net(net))
+                || !nets.iter().all(|net| ic_nets.contains(net))
+            {
+                return None;
+            }
+            Some(idx)
+        })
+        .collect()
+}
+
+fn bus_peripherals(problem: &PlaceProblem, ic: usize) -> Vec<usize> {
+    let ic_nets: std::collections::BTreeSet<&str> = problem.parts[ic]
+        .pads
+        .iter()
+        .filter_map(|pad| pad.net.as_deref())
+        .filter(|net| !is_powerish_net(net))
+        .collect();
+    (0..problem.parts.len())
+        .filter(|&idx| idx != ic && problem.parts[idx].pads.len() >= 4)
+        .filter(|&idx| {
+            problem.parts[idx]
+                .pads
+                .iter()
+                .filter_map(|pad| pad.net.as_deref())
+                .filter(|net| !is_powerish_net(net) && ic_nets.contains(net))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                >= 3
+        })
+        .collect()
+}
+
+fn resonator_load_caps(problem: &PlaceProblem, resonator: usize) -> Vec<usize> {
+    let resonator_nets: std::collections::BTreeSet<&str> = problem.parts[resonator]
+        .pads
+        .iter()
+        .filter_map(|pad| pad.net.as_deref())
+        .collect();
+    problem
+        .parts
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, part)| {
+            if idx == resonator || part.pads.len() != 2 {
+                return None;
+            }
+            let nets: Vec<&str> = part
+                .pads
+                .iter()
+                .filter_map(|pad| pad.net.as_deref())
+                .collect();
+            if nets.len() != 2 {
+                return None;
+            }
+            let touches_resonator = nets.iter().any(|net| resonator_nets.contains(net));
+            let touches_power = nets.iter().any(|net| is_powerish_net(net));
+            (touches_resonator && touches_power).then_some(idx)
+        })
+        .collect()
+}
+
+fn place_resonator_clusters(
+    problem: &mut PlaceProblem,
+    ic: usize,
+    resonators: &[usize],
+    ic_hw: f64,
+    ic_hh: f64,
+) {
+    for &resonator in resonators {
+        let mut members = resonator_load_caps(problem, resonator);
+        members.sort_by(|&a, &b| {
+            part_angle_around_ic(problem, ic, a)
+                .partial_cmp(&part_angle_around_ic(problem, ic, b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| problem.parts[a].reference.cmp(&problem.parts[b].reference))
+        });
+        let insert = members.len() / 2;
+        members.insert(insert, resonator);
+        place_tangent_cluster(
+            problem,
+            ic,
+            &members,
+            part_angle_around_ic(problem, ic, resonator),
+            ic_hw,
+            ic_hh,
+        );
+    }
+}
+
+fn place_bus_clusters(
+    problem: &mut PlaceProblem,
+    ic: usize,
+    buses: &[usize],
+    ic_hw: f64,
+    ic_hh: f64,
+) {
+    for &bus in buses {
+        place_tangent_cluster(
+            problem,
+            ic,
+            &[bus],
+            part_angle_around_ic(problem, ic, bus),
+            ic_hw,
+            ic_hh,
+        );
+    }
+}
+
+fn place_tangent_cluster(
+    problem: &mut PlaceProblem,
+    _ic: usize,
+    members: &[usize],
+    angle: f64,
+    ic_hw: f64,
+    ic_hh: f64,
+) {
+    if members.is_empty() {
+        return;
+    }
+    let dir = Point2 {
+        x: angle.cos(),
+        y: angle.sin(),
+    };
+    let tangent = Point2 {
+        x: -dir.y,
+        y: dir.x,
+    };
+    let radial_half = |part: &Part| -> f64 {
+        dir.x.abs() * part.courtyard_w / 2.0 + dir.y.abs() * part.courtyard_h / 2.0
+    };
+    let tangent_half = |part: &Part| -> f64 {
+        tangent.x.abs() * part.courtyard_w / 2.0 + tangent.y.abs() * part.courtyard_h / 2.0
+    };
+    let cluster_radial = members
+        .iter()
+        .map(|&idx| radial_half(&problem.parts[idx]))
+        .fold(0.0, f64::max);
+    let boundary = (if dir.x.abs() > 1e-9 {
+        ic_hw / dir.x.abs()
+    } else {
+        f64::INFINITY
+    })
+    .min(if dir.y.abs() > 1e-9 {
+        ic_hh / dir.y.abs()
+    } else {
+        f64::INFINITY
+    });
+    let base_r = boundary + cluster_radial + 0.8;
+    let total_tangent: f64 = members
+        .iter()
+        .map(|&idx| 2.0 * tangent_half(&problem.parts[idx]) + 0.6)
+        .sum::<f64>()
+        - 0.6;
+    let mut cursor = -total_tangent / 2.0;
+    for &idx in members {
+        let th = tangent_half(&problem.parts[idx]);
+        cursor += th;
+        problem.parts[idx].locked = Some(LockedAt {
+            at: Point2 {
+                x: dir.x * base_r + tangent.x * cursor,
+                y: dir.y * base_r + tangent.y * cursor,
+            },
+            rotation: 0.0,
+        });
+        cursor += th + 0.6;
+    }
+}
+
+fn locked_max_extent(problem: &PlaceProblem) -> f64 {
+    problem
+        .parts
+        .iter()
+        .filter_map(|part| part.locked.as_ref().map(|loc| (part, loc)))
+        .map(|(part, loc)| {
+            (loc.at.x.abs() + part.courtyard_w / 2.0).max(loc.at.y.abs() + part.courtyard_h / 2.0)
+        })
+        .fold(0.0, f64::max)
+}
+
+fn resolve_locked_overlaps_radially(problem: &mut PlaceProblem, fixed: usize) {
+    for _ in 0..2000 {
+        let mut hit = None;
+        'pairs: for a in 0..problem.parts.len() {
+            for b in (a + 1)..problem.parts.len() {
+                if locked_overlap(problem, a, b) {
+                    hit = Some((a, b));
+                    break 'pairs;
+                }
+            }
+        }
+        let Some((a, b)) = hit else {
+            return;
+        };
+        let move_idx = match (a == fixed, b == fixed) {
+            (true, true) => return,
+            (true, false) => b,
+            (false, true) => a,
+            (false, false) => {
+                if locked_radius(problem, a) >= locked_radius(problem, b) {
+                    a
+                } else {
+                    b
+                }
+            }
+        };
+        push_locked_outward(problem, move_idx, 1.0);
+    }
+}
+
+fn locked_overlap(problem: &PlaceProblem, a: usize, b: usize) -> bool {
+    let (Some(la), Some(lb)) = (&problem.parts[a].locked, &problem.parts[b].locked) else {
+        return false;
+    };
+    let (ahw, ahh) = rotated_locked_half(&problem.parts[a], la.rotation);
+    let (bhw, bhh) = rotated_locked_half(&problem.parts[b], lb.rotation);
+    (la.at.x - lb.at.x).abs() < ahw + bhw && (la.at.y - lb.at.y).abs() < ahh + bhh
+}
+
+fn locked_radius(problem: &PlaceProblem, idx: usize) -> f64 {
+    problem.parts[idx]
+        .locked
+        .as_ref()
+        .map(|loc| loc.at.x.hypot(loc.at.y))
+        .unwrap_or(0.0)
+}
+
+fn push_locked_outward(problem: &mut PlaceProblem, idx: usize, step: f64) {
+    let Some(loc) = problem.parts[idx].locked.as_mut() else {
+        return;
+    };
+    let len = loc.at.x.hypot(loc.at.y);
+    if len <= 1e-9 {
+        loc.at.x += step;
+    } else {
+        loc.at.x += loc.at.x / len * step;
+        loc.at.y += loc.at.y / len * step;
+    }
+}
+
+fn rotated_locked_half(part: &Part, rotation: f64) -> (f64, f64) {
+    if matches!(geom::snap_quadrant(rotation) as i32, 90 | 270) {
+        (part.courtyard_h / 2.0, part.courtyard_w / 2.0)
+    } else {
+        (part.courtyard_w / 2.0, part.courtyard_h / 2.0)
+    }
+}
+
+fn is_powerish_net(net: &str) -> bool {
+    let n = net.trim_start_matches('/').to_ascii_uppercase();
+    n == "GND"
+        || n == "GNDA"
+        || n.starts_with("VCC")
+        || n.starts_with("VDD")
+        || n.starts_with("VSS")
+        || n.starts_with("VBUS")
+        || n.starts_with("VREG")
+        || n.starts_with("VREF")
+        || n.starts_with("V3V")
+        || n.starts_with("3V3")
+        || n.starts_with("+")
+}
+
 /// UNIFIED radial fan-out placement: the dominant IC centred, its decoupling caps
 /// then series resistors (in IC-pad order) then other passives on density-aware
 /// CONCENTRIC rings, and connectors on the outer frame — EVERYTHING placed
@@ -290,6 +631,8 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
     if problem.parts.iter().any(|p| p.locked.is_some()) {
         return false; // respect any agent-pinned layout
     }
+    let original = problem.clone();
+    let original_bounds = problem.bounds.clone();
     let Some(ic) = (0..n)
         .filter(|&i| problem.parts[i].pads.len() >= 16)
         .max_by_key(|&i| problem.parts[i].pads.len())
@@ -315,20 +658,39 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
         .filter(|(r, a)| *a == ic && !is_connector(*r))
         .map(|(r, _)| *r)
         .collect();
+    let resonators: Vec<usize> = resonator_parts(problem, ic)
+        .into_iter()
+        .filter(|r| !is_connector(*r))
+        .collect();
+    let bus_parts: Vec<usize> = bus_peripherals(problem, ic)
+        .into_iter()
+        .filter(|p| !is_connector(*p))
+        .collect();
+    let resonator_loads: std::collections::BTreeSet<usize> = resonators
+        .iter()
+        .flat_map(|&r| resonator_load_caps(problem, r))
+        .collect();
     // Engage when the dominant IC has enough fan-out members to ring (decoupling caps
     // and/or series elements). Caps alone <3 isn't enough, but caps+series ≥3 is — so
     // boards with few caps but a series/connector fan-out still get the neat ring.
-    if caps.len() + res.len() < 3 {
+    if caps.len() + res.len() + resonators.len() + bus_parts.len() < 3 {
         return false;
     }
-    let res_ordered: Vec<usize> = series_fanout_order(problem, ic, &res)
+    let caps_ordered = fanout_order_by_ic_pad_angle(problem, ic, &caps);
+    let cap_ring_ordered: Vec<usize> = caps_ordered
         .iter()
-        .filter_map(|r| problem.parts.iter().position(|p| &p.reference == r))
+        .copied()
+        .filter(|idx| !resonator_loads.contains(idx))
         .collect();
+    let res_ordered = fanout_order_by_ic_pad_angle(problem, ic, &res);
+    let resonators_ordered = fanout_order_by_ic_pad_angle(problem, ic, &resonators);
+    let bus_ordered = fanout_order_by_ic_pad_angle(problem, ic, &bus_parts);
 
     let used: std::collections::BTreeSet<usize> = std::iter::once(ic)
-        .chain(caps.iter().copied())
+        .chain(caps_ordered.iter().copied())
         .chain(res_ordered.iter().copied())
+        .chain(resonators_ordered.iter().copied())
+        .chain(bus_ordered.iter().copied())
         .collect();
     let (mut connectors, mut others) = (Vec::new(), Vec::new());
     for i in 0..n {
@@ -353,14 +715,40 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
     });
 
     // Concentric rings: caps (innermost), then pad-ordered resistors, then others.
-    let mut ring_order = caps.clone();
+    let mut ring_order = cap_ring_ordered;
     ring_order.extend(res_ordered.iter().copied());
     ring_order.extend(others.iter().copied());
-    let spacing = 3.0_f64; // generous: locked parts can't be nudged, so never overlap
+    let original_ring_len = ring_order.len();
+    ring_order.retain(|&idx| {
+        problem.parts[idx]
+            .courtyard_w
+            .max(problem.parts[idx].courtyard_h)
+            + 0.8
+            <= 8.0
+    });
+    if std::env::var("FANOUT_DEBUG").is_ok() && ring_order.len() != original_ring_len {
+        eprintln!(
+            "[fanout] deferred {} oversized ring parts",
+            original_ring_len - ring_order.len()
+        );
+    }
+    let spacing = ring_order
+        .iter()
+        .map(|&idx| {
+            problem.parts[idx]
+                .courtyard_w
+                .max(problem.parts[idx].courtyard_h)
+                + 0.8
+        })
+        .fold(3.0_f64, f64::max);
+    if spacing > 8.0 || ring_order.is_empty() {
+        *problem = original;
+        return false;
+    }
     let mut max_extent = ihw.max(ihh);
     let (mut k, mut ring) = (0usize, 0usize);
     while k < ring_order.len() {
-        let g = 1.5 + ring as f64 * spacing;
+        let g = 3.0 + ring as f64 * spacing;
         let (rw, rh) = (ihw + g, ihh + g);
         let perim = 4.0 * (rw + rh);
         let cap = ((perim / spacing).floor() as usize).max(1);
@@ -377,6 +765,10 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
         k += m;
         ring += 1;
     }
+    place_resonator_clusters(problem, ic, &resonators_ordered, ihw, ihh);
+    place_bus_clusters(problem, ic, &bus_ordered, ihw, ihh);
+    resolve_locked_overlaps_radially(problem, ic);
+    max_extent = max_extent.max(locked_max_extent(problem));
 
     // Connectors on the outer frame, each ROTATED to lie flat along its edge (long
     // dim along the edge, SHORT dim pointing outward) and packed per-side by its long
@@ -393,8 +785,8 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
     let frame = max_extent + conn_out + 3.0;
     // Group connectors per side, then CENTRE each side's run on its edge so none sit
     // at a corner (where adjacent-edge connectors would collide).
-    // Use only the OPPOSITE top/bottom edges (sides 0 and 2): adjacent edges would
-    // collide at the shared corner when the headers are large vs the cluster.
+    // Use only the opposite top/bottom edges: adjacent edges can collide at the shared
+    // corner when headers are large relative to the fanout cluster.
     let mut by_side: [Vec<usize>; 4] = Default::default();
     for (j, &i) in connectors.iter().enumerate() {
         by_side[(j % 2) * 2].push(i);
@@ -507,19 +899,31 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
             mxy = mxy.max(l.at.y + phh);
         }
     }
-    let (dx, dy) = (margin - mnx, margin - mny);
+    let placed_w = (mxx - mnx) + 2.0 * margin;
+    let placed_h = (mxy - mny) + 2.0 * margin;
+    let board_w = original_bounds.max_x - original_bounds.min_x;
+    let board_h = original_bounds.max_y - original_bounds.min_y;
+    if std::env::var("FANOUT_DEBUG").is_ok() {
+        eprintln!(
+            "[fanout] placed {:.1}x{:.1} into board {:.1}x{:.1}",
+            placed_w, placed_h, board_w, board_h
+        );
+    }
+    if placed_w > board_w + 1e-9 || placed_h > board_h + 1e-9 {
+        *problem = original;
+        return false;
+    }
+    let (dx, dy) = (
+        original_bounds.min_x + margin - mnx + (board_w - placed_w) / 2.0,
+        original_bounds.min_y + margin - mny + (board_h - placed_h) / 2.0,
+    );
     for p in &mut problem.parts {
         if let Some(l) = &mut p.locked {
             l.at.x += dx;
             l.at.y += dy;
         }
     }
-    problem.bounds = Rect {
-        min_x: 0.0,
-        min_y: 0.0,
-        max_x: (mxx - mnx) + 2.0 * margin,
-        max_y: (mxy - mny) + 2.0 * margin,
-    };
+    problem.bounds = original_bounds;
     if std::env::var("FANOUT_DEBUG").is_ok() {
         let rh = |p: &Part, r: f64| {
             if matches!(geom::snap_quadrant(r) as i32, 90 | 270) {

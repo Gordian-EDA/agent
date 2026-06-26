@@ -65,8 +65,8 @@ fn default_layers() -> u32 {
 impl Default for BoardSeedRules {
     fn default() -> Self {
         BoardSeedRules {
-            clearance: 0.2,
-            min_trace_width: 0.2,
+            clearance: 0.15,
+            min_trace_width: 0.15,
             via_diameter: 0.6,
             via_drill: 0.3,
             layer_count: 2,

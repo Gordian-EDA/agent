@@ -287,7 +287,32 @@ pub fn tool_defs() -> Vec<Tool> {
                                 "min_y": { "type": "number" }, "max_y": { "type": "number" }
                             }
                         },
-                        "rules": { "type": "object", "description": "{layers, net_widths, clearance, min_trace_width}." }
+                        "rules": {
+                            "type": "object",
+                            "description": "{layers, net_widths, clearance, min_trace_width, via_diameter, via_drill, pours}. net_widths is {GND: 0.6, V3V3: 0.5} in mm. pours is [{net:'GND', layer:'bottom'}] on top/bottom/innerN signal layers; on 6+ layers omitted pours default to GND/V3V3 power pours when those nets exist.",
+                            "properties": {
+                                "layers": { "type": "integer", "enum": [2, 4, 6, 8] },
+                                "clearance": { "type": "number" },
+                                "min_trace_width": { "type": "number" },
+                                "via_diameter": { "type": "number" },
+                                "via_drill": { "type": "number" },
+                                "net_widths": {
+                                    "type": "object",
+                                    "additionalProperties": { "type": "number" }
+                                },
+                                "pours": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "net": { "type": "string" },
+                                            "layer": { "type": "string", "description": "top, bottom, or innerN signal layer" }
+                                        },
+                                        "required": ["net", "layer"]
+                                    }
+                                }
+                            }
+                        }
                     }
                 }),
             },
@@ -567,7 +592,24 @@ fn validate_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// Build the `{ok, diagnostics, errors, warnings}` report a compile yields.
 pub(crate) fn compile_report(diags: &circuit_lang::Diagnostics) -> Value {
     use circuit_lang::Severity;
-    let strings: Vec<String> = diags.0.iter().map(|d| d.to_string()).collect();
+    const MAX_DIAGNOSTICS: usize = 40;
+    const MAX_WARNINGS_WHEN_ERROR_FREE: usize = 20;
+
+    let mut strings = Vec::new();
+    let mut omitted = 0usize;
+    for d in &diags.0 {
+        let is_warning = d.severity == Severity::Warning;
+        let cap = if is_warning {
+            MAX_WARNINGS_WHEN_ERROR_FREE
+        } else {
+            MAX_DIAGNOSTICS
+        };
+        if strings.len() < cap || d.severity == Severity::Error {
+            strings.push(d.to_string());
+        } else {
+            omitted += 1;
+        }
+    }
     let errors = diags
         .0
         .iter()
@@ -578,12 +620,19 @@ pub(crate) fn compile_report(diags: &circuit_lang::Diagnostics) -> Value {
         .iter()
         .filter(|d| d.severity == Severity::Warning)
         .count();
-    json!({
+    let mut report = json!({
         "ok": errors == 0,
         "diagnostics": strings,
         "errors": errors,
         "warnings": warnings,
-    })
+    });
+    if omitted > 0 {
+        report["diagnostics_omitted"] = json!(omitted);
+        report["note"] = json!(
+            "diagnostics truncated for context efficiency; fix errors first, then run validate_design again if warning detail is needed"
+        );
+    }
+    report
 }
 
 // ── 5. apply_design ────────────────────────────────────────────────────────
@@ -638,23 +687,53 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         None
     };
 
-    // The floorplan engine re-lays-out from scratch via the connectivity-driven
-    // inferred IR; the human-style layout always re-flows the whole sheet.
-    let ir = ctx.layout_for(&design);
-    let emitted = sch_floorplan::floorplan::emit_strategy(
-        ctx.env(),
-        &design,
-        &ir,
-        schematic_placement_engine(ctx.config().engines.schematic_placer),
-    )
-    .context("rendering schematic")?;
-    let rendered = emitted.sch;
     let diff = design_diff(prior_design.as_ref(), &design);
 
+    let n_blocks = design
+        .blocks
+        .values()
+        .filter(|b| !b.components.is_empty())
+        .count();
+    let composed_layout = n_blocks >= 2 || needs_fast_schematic_placer(&design);
+
+    // Multi-block and complex single-block commits use the composed-sheet path
+    // below, where each refined group is laid out independently. Running those
+    // designs through the single-sheet placer first is wasted work and can time
+    // out on realistic MCU boards. For preview, compile + diff are enough to
+    // gate approval; commit does the actual composed layout.
+    let single_sheet_emit = if composed_layout {
+        None
+    } else {
+        let ir = ctx.layout_for(&design);
+        Some(
+            sch_floorplan::floorplan::emit_strategy(
+                ctx.env(),
+                &design,
+                &ir,
+                schematic_placement_engine_for_design(
+                    ctx.config().engines.schematic_placer,
+                    &design,
+                ),
+            )
+            .context("rendering schematic")?,
+        )
+    };
+
+    let rendered_len = single_sheet_emit
+        .as_ref()
+        .map(|emitted| emitted.sch.len())
+        .unwrap_or(0);
+    let layout_warnings = single_sheet_emit
+        .as_ref()
+        .map(|emitted| emitted.layout_warnings.clone())
+        .unwrap_or_default();
     // Idioms the engine recognized + co-placed (crystal, decoupling, …), surfaced so
     // the LLM can confirm the layout matched its intent — detection is automatic from
     // the netlist, no new authoring syntax.
-    let detected_idioms = serde_json::to_value(&emitted.detected_idioms).unwrap_or(json!([]));
+    let detected_idioms = single_sheet_emit
+        .as_ref()
+        .and_then(|emitted| serde_json::to_value(&emitted.detected_idioms).ok())
+        .unwrap_or(json!([]));
 
     if !commit {
         return Ok(json!({
@@ -662,9 +741,13 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "would_write": true,
             "stale_draft_warning": stale,
             "diff": diff,
-            "rendered_len": rendered.len(),
-            "layout_warnings": emitted.layout_warnings,
-            "wire_through_body": emitted.crossings.body + emitted.crossings.ic,
+            "layout_mode": if composed_layout { "composed_blocks" } else { "single_sheet" },
+            "rendered_len": rendered_len,
+            "layout_warnings": layout_warnings,
+            "wire_through_body": single_sheet_emit
+                .as_ref()
+                .map(|emitted| emitted.crossings.body + emitted.crossings.ic)
+                .unwrap_or(0),
             "detected_idioms": detected_idioms,
         }));
     }
@@ -678,13 +761,7 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // cross-border global SA; cross-block nets join via matching global labels on the one
     // sheet. Only a single-block design takes the plain single-sheet emit. The composed
     // .kicad_sch is written at ctx.sch_path(); downstream render/ERC operate on it.
-    let n_blocks = design
-        .blocks
-        .values()
-        .filter(|b| !b.components.is_empty())
-        .count();
-    let multisheet = n_blocks >= 2;
-    if multisheet {
+    if composed_layout {
         let dir = ctx
             .sch_path()
             .parent()
@@ -702,7 +779,12 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             })?;
         }
     } else {
-        std::fs::write(ctx.sch_path(), &rendered)
+        let rendered = single_sheet_emit
+            .as_ref()
+            .expect("single-sheet commit should have emitted schematic")
+            .sch
+            .as_str();
+        std::fs::write(ctx.sch_path(), rendered)
             .with_context(|| format!("writing {}", ctx.sch_path().display()))?;
     }
 
@@ -724,9 +806,13 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "path": ctx.sch_path().display().to_string(),
         "stale_draft_warning": stale,
         "diff": diff,
+        "layout_mode": if composed_layout { "composed_blocks" } else { "single_sheet" },
         "erc": { "errors": erc.error_count(), "warnings": erc.warning_count() },
-        "layout_warnings": emitted.layout_warnings,
-        "wire_through_body": emitted.crossings.body + emitted.crossings.ic,
+        "layout_warnings": layout_warnings,
+        "wire_through_body": single_sheet_emit
+            .as_ref()
+            .map(|emitted| emitted.crossings.body + emitted.crossings.ic)
+            .unwrap_or(0),
         "detected_idioms": detected_idioms,
     }))
 }
@@ -738,6 +824,45 @@ pub(crate) fn schematic_placement_engine(
         SchematicPlacementEngine::Anneal => Box::new(anneal_place::Anneal),
         SchematicPlacementEngine::Greedy => Box::new(greedy_place::Greedy),
     }
+}
+
+pub(crate) fn schematic_placement_engine_for_design(
+    engine: SchematicPlacementEngine,
+    design: &Design,
+) -> Box<dyn sch_floorplan::contract::PlacementEngine> {
+    if engine == SchematicPlacementEngine::Anneal && needs_fast_schematic_placer(design) {
+        return Box::new(greedy_place::Greedy);
+    }
+    schematic_placement_engine(engine)
+}
+
+fn needs_fast_schematic_placer(design: &Design) -> bool {
+    let (components, pins) = design_complexity(design);
+    components >= 10 || pins >= 60
+}
+
+fn design_complexity(design: &Design) -> (usize, usize) {
+    let components = design
+        .blocks
+        .values()
+        .map(|block| block.components.len())
+        .sum();
+    let pins = design
+        .blocks
+        .values()
+        .flat_map(|block| block.components.values())
+        .map(component_pin_count)
+        .sum();
+    (components, pins)
+}
+
+fn component_pin_count(component: &Component) -> usize {
+    component.pins.len()
+        + component
+            .units
+            .values()
+            .map(indexmap::IndexMap::len)
+            .sum::<usize>()
 }
 
 /// A per-refdes signature used to detect a *changed* component across a re-apply.

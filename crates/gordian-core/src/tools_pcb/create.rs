@@ -43,17 +43,19 @@ struct SeedRules {
     via_drill: f64,
     layer_count: u32,
     net_widths: BTreeMap<String, f64>,
+    pours: Vec<PourSpec>,
 }
 
 impl Default for SeedRules {
     fn default() -> Self {
         Self {
-            clearance: 0.2,
-            min_trace_width: 0.2,
+            clearance: 0.15,
+            min_trace_width: 0.15,
             via_diameter: 0.6,
             via_drill: 0.3,
             layer_count: 2,
             net_widths: BTreeMap::new(),
+            pours: Vec::new(),
         }
     }
 }
@@ -67,6 +69,7 @@ impl From<&BoardSeedRules> for SeedRules {
             via_drill: rules.via_drill,
             layer_count: rules.layer_count,
             net_widths: rules.net_widths.clone(),
+            pours: rules.pours.clone(),
         }
     }
 }
@@ -83,6 +86,30 @@ fn resolve_pour_layer(layer: &str, layer_count: u32) -> Option<(u32, String)> {
             .map(|idx| (idx, format!("In{idx}.Cu"))),
         _ => None,
     }
+}
+
+fn blocking_erc_warnings(report: &kicad_cli::ErcReport) -> Vec<Value> {
+    report
+        .violations
+        .iter()
+        .filter(|v| {
+            v.severity == "warning"
+                && !v.kind.starts_with("lib_symbol")
+                && v.kind != "global_label_dangling"
+        })
+        .map(|v| {
+            let items: Vec<_> = v
+                .items
+                .iter()
+                .map(|item| item.description.clone())
+                .collect();
+            json!({
+                "type": v.kind,
+                "description": v.description,
+                "items": items,
+            })
+        })
+        .collect()
 }
 
 /// `regenerate_board` — seed the PCB from KiCAD's own schematic netlist export.
@@ -109,6 +136,55 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "ok": false,
             "unapplied_draft_footprints": unapplied_footprints,
             "note": "footprint fields live in circuit-YAML/schematic state; call apply_design() to write the draft, then regenerate_board again",
+        }));
+    }
+    let erc = match KicadCli::new(ctx.env()).erc(ctx.sch_path()) {
+        Ok(report) => report,
+        Err(e) => {
+            return Ok(
+                json!({ "error": format!("could not run ERC before regenerating the board: {e}") }),
+            );
+        }
+    };
+    if erc.error_count() > 0 {
+        let violations: Vec<Value> = erc
+            .violations
+            .iter()
+            .filter(|v| v.severity == "error")
+            .map(|v| {
+                json!({
+                    "type": v.kind,
+                    "description": v.description,
+                })
+            })
+            .collect();
+        return Ok(json!({
+            "ok": false,
+            "error": format!(
+                "schematic ERC has {} error(s); fix and apply_design before regenerate_board",
+                erc.error_count()
+            ),
+            "erc": {
+                "errors": erc.error_count(),
+                "warnings": erc.warning_count(),
+                "violations": violations,
+            },
+        }));
+    }
+    let blocking_warnings = blocking_erc_warnings(&erc);
+    if !blocking_warnings.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "error": format!(
+                "schematic ERC has {} actionable warning(s); fix and apply_design before regenerate_board",
+                blocking_warnings.len()
+            ),
+            "erc": {
+                "errors": erc.error_count(),
+                "warnings": erc.warning_count(),
+                "blocking_warnings": blocking_warnings,
+            },
+            "note": "Library symbol warnings and composed-sheet dangling global-label artifacts are allowed; same local/global labels and other connectivity warnings must be fixed before PCB work.",
         }));
     }
     let mut pad_nets_by_ref: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
@@ -161,18 +237,12 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             max_y: 40.0,
         }
     };
-    let rules = match parse_seed_rules(input.get("rules")) {
+    let mut rules = match parse_seed_rules(input.get("rules")) {
         Ok(r) => r,
         Err(msg) => return Ok(json!({ "error": msg })),
     };
 
-    let spec = BoardSeedSpec {
-        bounds,
-        rules,
-        parts,
-        outline: None,
-    };
-    let part_count = spec.parts.len();
+    let part_count = parts.len();
 
     if !missing_footprints.is_empty() {
         return Ok(json!({
@@ -183,21 +253,64 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     }
 
+    add_default_power_pours(&mut rules, &parts);
+
+    let spec = BoardSeedSpec {
+        bounds,
+        rules,
+        parts,
+        outline: None,
+    };
+
     match write_seed_board(&spec, ctx) {
         Ok(()) => {}
         Err(msg) => return Ok(json!({ "error": msg })),
     }
-    if let Err(e) = ctx.kicad().open(&ctx.pcb_path()) {
-        return Ok(
-            json!({ "error": format!("board was written, but KiCAD could not open it over IPC: {e}") }),
-        );
+    if let Err(msg) = persist_board_seed(&spec, ctx) {
+        return Ok(json!({ "error": msg }));
     }
     Ok(json!({
         "ok": true,
         "part_count": part_count,
         "path": ctx.pcb_path().display().to_string(),
-        "note": "board regenerated from the committed schematic into the live KiCAD session (not F8 sync; existing placement/routing may be replaced) — run place_board, then route_board, then check_board",
+        "note": "board regenerated from the committed schematic file (not F8 sync; existing placement/routing may be replaced) — run place_board, then route_board, then check_board",
     }))
+}
+
+pub(super) fn board_seed_path(ctx: &AgentRuntime) -> std::path::PathBuf {
+    ctx.project_dir().join(".gordian").join("board.seed.json")
+}
+
+fn persist_board_seed(spec: &BoardSeedSpec, ctx: &AgentRuntime) -> std::result::Result<(), String> {
+    let seed = BoardSeed {
+        bounds: spec.bounds.clone(),
+        rules: BoardSeedRules {
+            clearance: spec.rules.clearance,
+            min_trace_width: spec.rules.min_trace_width,
+            via_diameter: spec.rules.via_diameter,
+            via_drill: spec.rules.via_drill,
+            layer_count: spec.rules.layer_count,
+            net_widths: spec.rules.net_widths.clone(),
+            pours: spec.rules.pours.clone(),
+        },
+        parts: spec
+            .parts
+            .iter()
+            .map(|part| BoardSeedPart {
+                reference: part.reference.clone(),
+                footprint: part.footprint.clone(),
+                pad_nets: part.pad_nets.clone(),
+                locked: part.locked.clone(),
+            })
+            .collect(),
+        keepouts: Vec::new(),
+        hints: PlacementHints::default(),
+        outline: spec.outline.clone(),
+    };
+    let text = serde_json::to_string_pretty(&seed)
+        .map_err(|e| format!("could not serialize board seed metadata: {e}"))?;
+    std::fs::write(board_seed_path(ctx), format!("{text}\n"))
+        .map_err(|e| format!("could not write board seed metadata: {e}"))
 }
 
 fn unapplied_draft_footprint_changes(
@@ -291,22 +404,52 @@ fn write_seed_board(spec: &BoardSeedSpec, ctx: &AgentRuntime) -> std::result::Re
 }
 
 fn write_initial_board(seed: &BoardSeed, ctx: &AgentRuntime) -> std::result::Result<(), String> {
+    let parts: Vec<SeedPart> = seed
+        .parts
+        .iter()
+        .map(|part| SeedPart {
+            reference: part.reference.clone(),
+            footprint: part.footprint.clone(),
+            pad_nets: part.pad_nets.clone(),
+            locked: part.locked.clone(),
+        })
+        .collect();
+    let mut rules = SeedRules::from(&seed.rules);
+    add_default_power_pours(&mut rules, &parts);
     let spec = BoardSeedSpec {
         bounds: seed.bounds.clone(),
-        rules: SeedRules::from(&seed.rules),
-        parts: seed
-            .parts
-            .iter()
-            .map(|part| SeedPart {
-                reference: part.reference.clone(),
-                footprint: part.footprint.clone(),
-                pad_nets: part.pad_nets.clone(),
-                locked: part.locked.clone(),
-            })
-            .collect(),
+        rules,
+        parts,
         outline: seed.outline.clone(),
     };
-    write_seed_board(&spec, ctx)
+    write_seed_board(&spec, ctx)?;
+    persist_board_seed(&spec, ctx)
+}
+
+fn add_default_power_pours(rules: &mut SeedRules, parts: &[SeedPart]) {
+    if !rules.pours.is_empty() || rules.layer_count < 6 {
+        return;
+    }
+    let nets: std::collections::BTreeSet<&str> = parts
+        .iter()
+        .flat_map(|part| part.pad_nets.values().map(String::as_str))
+        .collect();
+    if nets.contains("GND") {
+        rules.pours.push(PourSpec {
+            net: "GND".to_string(),
+            layer: "bottom".to_string(),
+        });
+        rules.pours.push(PourSpec {
+            net: "GND".to_string(),
+            layer: format!("inner{}", rules.layer_count - 2),
+        });
+    }
+    if nets.contains("V3V3") {
+        rules.pours.push(PourSpec {
+            net: "V3V3".to_string(),
+            layer: "inner1".to_string(),
+        });
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -420,6 +563,7 @@ impl<'a> SeedBoardWriter<'a> {
         self.push_nets(&mut out);
         self.push_net_classes(&mut out);
         self.push_edge_cuts(&mut out);
+        self.push_zones(&mut out)?;
         for part in self.parts {
             out.push_str(&self.emit_footprint(part)?);
         }
@@ -512,6 +656,66 @@ impl<'a> SeedBoardWriter<'a> {
              \t\t(stroke\n\t\t\t(width 0.1)\n\t\t\t(type default)\n\t\t)\n\
              \t\t(fill no)\n\t\t(layer \"Edge.Cuts\")\n\t\t(uuid \"{uuid}\")\n\t)\n"
         );
+    }
+
+    fn push_zones(&self, out: &mut String) -> io::Result<()> {
+        for (idx, pour) in self.rules.pours.iter().enumerate() {
+            let net_code = self.net_codes.get(&pour.net).copied().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "rules.pours[{idx}] net {:?} is not present on any pad",
+                        pour.net
+                    ),
+                )
+            })?;
+            let Some((_, layer_name)) = resolve_pour_layer(&pour.layer, self.rules.layer_count)
+            else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "rules.pours[{idx}] layer {:?} is invalid for {} layers",
+                        pour.layer, self.rules.layer_count
+                    ),
+                ));
+            };
+            let clearance = fmt_num(self.rules.clearance);
+            let min_thickness = fmt_num(self.rules.min_trace_width.max(0.1));
+            let thermal_gap = fmt_num((self.rules.clearance * 2.0).max(0.2));
+            let thermal_bridge_width = fmt_num(self.rules.min_trace_width.max(0.25));
+            let x0 = fmt_num(self.bounds.min_x);
+            let y0 = fmt_num(self.bounds.min_y);
+            let x1 = fmt_num(self.bounds.max_x);
+            let y1 = fmt_num(self.bounds.max_y);
+            let uuid = seed_uuid(&format!("zone:{idx}:{}:{}", pour.net, layer_name));
+            let _ = write!(
+                out,
+                "\t(zone\n\
+                 \t\t(net {net_code})\n\
+                 \t\t(net_name \"{}\")\n\
+                 \t\t(layer \"{layer_name}\")\n\
+                 \t\t(uuid \"{uuid}\")\n\
+                 \t\t(name \"{}\")\n\
+                 \t\t(hatch full 0.508)\n\
+                 \t\t(connect_pads\n\
+                 \t\t\t(clearance {clearance})\n\
+                 \t\t)\n\
+                 \t\t(min_thickness {min_thickness})\n\
+                 \t\t(filled_areas_thickness no)\n\
+                 \t\t(fill\n\
+                 \t\t\t(thermal_gap {thermal_gap})\n\
+                 \t\t\t(thermal_bridge_width {thermal_bridge_width})\n\
+                 \t\t)\n\
+                 \t\t(polygon\n\
+                 \t\t\t(pts\n\
+                 \t\t\t\t(xy {x0} {y0}) (xy {x1} {y0}) (xy {x1} {y1}) (xy {x0} {y1})\n\
+                 \t\t\t)\n\
+                 \t\t)\n\
+                 \t)\n",
+                pour.net, pour.net
+            );
+        }
+        Ok(())
     }
 
     fn emit_footprint(&self, part: &SeedFootprint) -> io::Result<String> {
@@ -946,10 +1150,8 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
         let map = nw
             .as_object()
             .ok_or_else(|| "rules.net_widths must be an object {net: width_mm}".to_string())?;
-        for (net, w) in map {
-            let w = w
-                .as_f64()
-                .ok_or_else(|| format!("rules.net_widths[{net}] must be a number (mm)"))?;
+        for (net, value) in map {
+            let w = parse_net_width_value(net, value)?;
             if w <= 0.0 {
                 return Err(format!("rules.net_widths[{net}] must be > 0, got {w}"));
             }
@@ -1008,6 +1210,20 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
         net_widths,
         pours,
     })
+}
+
+fn parse_net_width_value(net: &str, value: &Value) -> std::result::Result<f64, String> {
+    if let Some(width) = value.as_f64() {
+        return Ok(width);
+    }
+    if let Some(obj) = value.as_object()
+        && let Some(width) = obj.get("width").and_then(Value::as_f64)
+    {
+        return Ok(width);
+    }
+    Err(format!(
+        "rules.net_widths[{net}] must be a number in mm, e.g. {{\"{net}\": 0.6}}"
+    ))
 }
 
 /// KiCAD 9 built-in (standard-fab) minimums, verified against `kicad-cli pcb drc`:
@@ -1405,4 +1621,161 @@ pub(super) fn parse_keepout(
         layers.push(layer);
     }
     Ok(Keepout { rect, layers })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_seed_rules_accepts_plain_and_object_net_widths() {
+        let rules = parse_seed_rules(Some(&json!({
+            "layers": 4,
+            "net_widths": {
+                "GND": 0.6,
+                "V3V3": { "width": 0.5 }
+            }
+        })))
+        .unwrap();
+
+        assert_eq!(rules.layer_count, 4);
+        assert_eq!(rules.net_widths["GND"], 0.6);
+        assert_eq!(rules.net_widths["V3V3"], 0.5);
+    }
+
+    #[test]
+    fn parse_seed_rules_keeps_requested_pours() {
+        let rules = parse_seed_rules(Some(&json!({
+            "layers": 6,
+            "pours": [
+                { "net": "GND", "layer": "bottom" },
+                { "net": "V3V3", "layer": "inner1" }
+            ]
+        })))
+        .unwrap();
+
+        assert_eq!(
+            rules.pours,
+            vec![
+                PourSpec {
+                    net: "GND".to_string(),
+                    layer: "bottom".to_string(),
+                },
+                PourSpec {
+                    net: "V3V3".to_string(),
+                    layer: "inner1".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn seed_writer_emits_requested_pour_zone() {
+        let mut pad_nets = BTreeMap::new();
+        pad_nets.insert("1".to_string(), "GND".to_string());
+        let parts = vec![SeedFootprint {
+            reference: "TP1".to_string(),
+            lib_id: "Test:Pad".to_string(),
+            source:
+                "(footprint \"Pad\" (pad \"1\" smd circle (at 0 0) (size 1 1) (layers \"F.Cu\")))"
+                    .to_string(),
+            pad_nets,
+            at: Point2 { x: 5.0, y: 5.0 },
+            rotation: 0.0,
+            locked: false,
+        }];
+        let bounds = Rect {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 20.0,
+            max_y: 10.0,
+        };
+        let mut rules = SeedRules::default();
+        rules.pours.push(PourSpec {
+            net: "GND".to_string(),
+            layer: "bottom".to_string(),
+        });
+
+        let board = SeedBoardWriter::new(&parts, &bounds, &rules, None)
+            .emit()
+            .unwrap();
+
+        assert!(board.contains("\n\t(zone\n"));
+        assert!(board.contains("\n\t\t(net_name \"GND\")\n"));
+        assert!(board.contains("\n\t\t(layer \"B.Cu\")\n"));
+        assert!(board.contains("(xy 0 0) (xy 20 0) (xy 20 10) (xy 0 10)"));
+    }
+
+    #[test]
+    fn default_power_pours_are_added_on_dense_stackups() {
+        let mut rules = SeedRules {
+            layer_count: 6,
+            ..SeedRules::default()
+        };
+        let parts = vec![SeedPart {
+            reference: "U1".to_string(),
+            footprint: "Test:U".to_string(),
+            pad_nets: BTreeMap::from([
+                ("1".to_string(), "GND".to_string()),
+                ("2".to_string(), "V3V3".to_string()),
+            ]),
+            locked: None,
+        }];
+
+        add_default_power_pours(&mut rules, &parts);
+
+        assert_eq!(
+            rules.pours,
+            vec![
+                PourSpec {
+                    net: "GND".to_string(),
+                    layer: "bottom".to_string(),
+                },
+                PourSpec {
+                    net: "GND".to_string(),
+                    layer: "inner4".to_string(),
+                },
+                PourSpec {
+                    net: "V3V3".to_string(),
+                    layer: "inner1".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn blocking_erc_warnings_allow_only_library_mismatch() {
+        let report = kicad_cli::ErcReport {
+            violations: vec![
+                kicad_cli::Violation {
+                    severity: "warning".to_string(),
+                    kind: "lib_symbol_mismatch".to_string(),
+                    description: "cached symbol differs".to_string(),
+                    items: vec![],
+                },
+                kicad_cli::Violation {
+                    severity: "warning".to_string(),
+                    kind: "lib_symbol_issues".to_string(),
+                    description: "library unavailable".to_string(),
+                    items: vec![],
+                },
+                kicad_cli::Violation {
+                    severity: "warning".to_string(),
+                    kind: "same_local_global_label".to_string(),
+                    description: "Local and global labels have same name".to_string(),
+                    items: vec![kicad_cli::ViolationItem {
+                        description: "Label 'USB_DP'".to_string(),
+                        uuid: None,
+                    }],
+                },
+            ],
+        };
+
+        let warnings = blocking_erc_warnings(&report);
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0]["type"], "same_local_global_label");
+        assert_eq!(warnings[0]["items"][0], "Label 'USB_DP'");
+    }
 }

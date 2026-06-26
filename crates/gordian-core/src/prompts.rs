@@ -41,6 +41,7 @@ NEW: create one complete draft with `create_design(yaml)`. EDIT: call `read_sche
 After `create_design`, do not call `read_schematic({source:"draft"})` unless the tool reported an error; you already know the draft you wrote.
 Avoid repeated exact patches. For multiple changes, call `edit_design({yaml: full_corrected_yaml})` once. Use `old_string`/`new_string` only for one small snippet copied exactly from `read_schematic({source:"draft"})`.
 Batch changes, then `validate_design`; do not validate after every tiny edit. Call `review_design(intent)` at most once when the draft is complete, and fix only high-confidence defects.
+Treat validation warnings as work, not success. Do not proceed to `apply_design` with many warnings. Single-pin GPIO/control nets usually mean a mistake: either connect them to a requested header/peripheral, mark unused pins `nc`, or add a `label:global` component for intentional board I/O. Do not silence GPIO warnings by adding a header for every spare MCU pin; satisfy the requested I/O count and mark the rest `nc`.
 
 Schematic flow:
 1. Search parts (`search_symbols`) and read pins (`get_symbol_info`) only as needed; reuse results. Use stable built-ins directly: `Device:R`, `Device:C`, `Device:LED`, `power:GND`, `power:+3V3`, `Connector:Conn_01x02_Pin`.
@@ -48,14 +49,14 @@ Schematic flow:
 3. `validate_design(yaml)` until 0 errors.
 4. Optional/costly: `review_design(intent)` once.
 5. `apply_design()` to submit the schematic diff for approval and write it after approval.
-6. `run_erc()` only if you need a separate fresh ERC after commit.
+6. `run_erc()` only if you need a separate fresh ERC after commit. If apply/run_erc reports any ERC errors, fix and re-apply before PCB work.
 
 # PCB flow
 GEOMETRY IS THE ENGINEERING: placement, layers, trace width, and route shape matter.
 Footprints are schematic/YAML state. `assign_footprint` edits the draft; after any footprint assignment, call `apply_design()` before `regenerate_board`. `regenerate_board` is destructive seed/regeneration, NOT KiCAD F8 sync: it may replace an existing PCB's placement/routing. Use it for a fresh board or explicit regeneration, not incremental schematic-to-PCB merge.
 
 PCB order:
-1. `regenerate_board({bounds?, rules?})` from committed schematic only when starting/regenerating the board. Put power widths in `rules.net_widths` before routing when possible (wide copper for power, thin signals). Use more layers/bigger bounds for density.
+1. `regenerate_board({bounds?, rules?})` from an ERC-clean committed schematic only when starting/regenerating the board. For USB-C/QFN boards, use fine-pitch-capable rules such as `clearance: 0.15` and `minTraceWidth: 0.15`. Put wide copper for power in `rules.net_widths` as plain numbers before routing when possible, e.g. `{GND: 0.6, V3V3: 0.5}`. For dense RP2040/USB-C boards, prefer `layers: 6` and generous bounds on the first PCB attempt.
 2. `place_board()`.
 3. `route_board()`.
 4. `check_board()`.
@@ -67,6 +68,8 @@ Hard rules:
 - Do not assign schematic symbol ids as footprints.
 - `autoroute` is disabled; use `route_board`.
 - Report honest unrouted nets instead of looping.
+- For RP2040-style MCUs, use a real QFN-56 7x7mm P0.4 footprint (not BGA), connect all VDD/IOVDD/USB_VDD/ADC_AVDD supply pins to the actual 3.3V rail unless you explicitly add a ferrite/filter source; tie TESTEN low; include an external QSPI flash for production boot unless the user explicitly excludes flash; BOOTSEL must pull the QSPI flash chip-select / QSPI_SS low during reset, not an arbitrary GPIO; expose only the requested practical GPIO headers (usually 2-4 compact headers, not one header per spare pin) and mark unused GPIO/QSPI pins `nc` instead of creating orphan one-pin nets.
+- For USB-C device receptacles, use the receptacle symbol, wire VBUS/GND/D+/D-, add 5.1k pulldowns on CC1/CC2, and include ESD protection on D+/D-.
 
 When done, reply briefly with what was written/exported and key DRC/unrouted counts."#;
 
@@ -91,6 +94,7 @@ mod tests {
         assert!(p.contains("validate_design"));
         assert!(p.contains("apply_design"));
         assert!(p.contains("apply_design()"));
+        assert!(p.contains("Treat validation warnings as work"));
         assert!(!p.contains("commit:false"));
         assert!(!p.contains("commit:true"));
         assert!(p.contains("C_VCAP1")); // plain-refdes guidance
@@ -136,6 +140,17 @@ mod tests {
         // The PCB doctrine: geometry IS the engineering; wide copper for power.
         assert!(p.contains("GEOMETRY IS THE ENGINEERING"));
         assert!(p.contains("wide copper for power"));
+        assert!(p.contains("ERC-clean committed schematic"));
+        assert!(p.contains("clearance: 0.15"));
+        assert!(p.contains("minTraceWidth: 0.15"));
+        assert!(p.contains("{GND: 0.6, V3V3: 0.5}"));
+        assert!(p.contains("prefer `layers: 6`"));
         assert!(p.contains("NEVER guess a footprint lib_id"));
+        assert!(p.contains("RP2040"));
+        assert!(p.contains("external QSPI flash"));
+        assert!(p.contains("BOOTSEL must pull the QSPI flash chip-select"));
+        assert!(p.contains("not one header per spare pin"));
+        assert!(p.contains("mark unused GPIO/QSPI pins `nc`"));
+        assert!(p.contains("USB-C device receptacles"));
     }
 }

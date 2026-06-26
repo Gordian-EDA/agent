@@ -718,6 +718,27 @@ impl SchematicWriter {
         }
     }
 
+    /// In a composed multi-block sheet, a cross-block net is represented by global
+    /// port labels. If the local router also fell back to plain labels on that
+    /// same net, KiCAD warns that local and global labels share a name. Promote the
+    /// local fallbacks so the net has one label scope.
+    pub fn promote_local_labels_for_global_nets(&mut self) -> usize {
+        let global_nets: std::collections::HashSet<String> = self
+            .labels
+            .iter()
+            .filter(|label| label.global)
+            .map(|label| label.net.clone())
+            .collect();
+        let mut promoted = 0usize;
+        for label in &mut self.labels {
+            if !label.global && global_nets.contains(&label.net) {
+                label.global = true;
+                promoted += 1;
+            }
+        }
+        promoted
+    }
+
     /// Rigidly shift EVERY drawn element (instances + their solved field text,
     /// wires, labels + stubs, junctions, no-connects, free text, rects) by
     /// `(dx, dy)`. The typed sibling of `reframe`'s shift block: connectivity is

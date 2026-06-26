@@ -85,6 +85,7 @@ impl AgentRuntime {
         config: GordianConfig,
     ) -> Result<Self> {
         let project = ProjectContext::for_project(project_dir, sch_path)?;
+        ensure_project_files(&env, &project.project_dir, &project.sch_path)?;
         let provider = SymbolTable::from_env(&env);
         Ok(Self {
             env,
@@ -232,6 +233,160 @@ impl AgentRuntime {
             .footprint_catalog
             .get()
             .expect("footprint catalog just set"))
+    }
+}
+
+fn ensure_project_files(env: &KicadEnv, project_dir: &Path, sch_path: &Path) -> Result<()> {
+    write_project_file(sch_path)?;
+    write_sym_lib_table(env, project_dir)?;
+    write_fp_lib_table(env, project_dir)?;
+    Ok(())
+}
+
+fn write_project_file(sch_path: &Path) -> Result<()> {
+    let stem = sch_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("project");
+    let path = sch_path.with_file_name(format!("{stem}.kicad_pro"));
+    if path.exists() {
+        return Ok(());
+    }
+    let filename = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("project.kicad_pro");
+    let project = serde_json::json!({
+        "board": {
+            "design_settings": {
+                "rules": {
+                    "min_clearance": 0.0,
+                    "min_track_width": 0.0,
+                    "min_via_diameter": 0.0,
+                    "min_hole_clearance": 0.0,
+                    "min_hole_to_hole": 0.0
+                }
+            }
+        },
+        "net_settings": {
+            "classes": [
+                {
+                    "name": "Default",
+                    "clearance": 0.2,
+                    "track_width": 0.25,
+                    "via_diameter": 0.8,
+                    "via_drill": 0.4,
+                    "microvia_diameter": 0.3,
+                    "microvia_drill": 0.1,
+                    "diff_pair_gap": 0.25,
+                    "diff_pair_width": 0.2,
+                    "priority": 2147483647
+                }
+            ],
+            "meta": { "version": 3 }
+        },
+        "meta": { "filename": filename, "version": 1 }
+    });
+    let out = serde_json::to_string_pretty(&project)?;
+    std::fs::write(&path, format!("{out}\n")).with_context(|| format!("writing {}", path.display()))
+}
+
+fn write_sym_lib_table(env: &KicadEnv, project_dir: &Path) -> Result<()> {
+    let path = project_dir.join("sym-lib-table");
+    if path.exists() {
+        return Ok(());
+    }
+    let mut libs = Vec::new();
+    for entry in std::fs::read_dir(&env.symbol_dir)
+        .with_context(|| format!("reading symbol dir {}", env.symbol_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("kicad_sym") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        libs.push((name.to_string(), path));
+    }
+    libs.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = String::from("(sym_lib_table\n");
+    for (name, path) in libs {
+        out.push_str(&format!(
+            "  (lib (name \"{}\") (type \"KiCad\") (uri \"{}\") (options \"\") (descr \"\"))\n",
+            sexpr_escape(&name),
+            sexpr_escape(&path.display().to_string())
+        ));
+    }
+    out.push_str(")\n");
+    std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))
+}
+
+fn write_fp_lib_table(env: &KicadEnv, project_dir: &Path) -> Result<()> {
+    let path = project_dir.join("fp-lib-table");
+    if path.exists() {
+        return Ok(());
+    }
+    let mut libs = Vec::new();
+    for entry in std::fs::read_dir(&env.footprint_dir)
+        .with_context(|| format!("reading footprint dir {}", env.footprint_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("pretty") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        libs.push((name.to_string(), path));
+    }
+    libs.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = String::from("(fp_lib_table\n");
+    for (name, path) in libs {
+        out.push_str(&format!(
+            "  (lib (name \"{}\") (type \"KiCad\") (uri \"{}\") (options \"\") (descr \"\"))\n",
+            sexpr_escape(&name),
+            sexpr_escape(&path.display().to_string())
+        ));
+    }
+    out.push_str(")\n");
+    std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))
+}
+
+fn sexpr_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_scaffold_writes_project_and_library_tables() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let libs = temp.path().join("libs");
+        let symbols = libs.join("symbols");
+        let footprints = libs.join("footprints");
+        std::fs::create_dir_all(&symbols).expect("symbols dir");
+        std::fs::create_dir_all(&footprints).expect("footprints dir");
+        std::fs::write(symbols.join("Device.kicad_sym"), "").expect("symbol lib");
+        std::fs::create_dir_all(footprints.join("Resistor_SMD.pretty")).expect("fp lib");
+
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let env = KicadEnv::with_library_dirs(symbols, footprints);
+
+        ensure_project_files(&env, &project, &project.join("design.kicad_sch"))
+            .expect("project files");
+
+        let pro = std::fs::read_to_string(project.join("design.kicad_pro")).expect("project file");
+        assert!(pro.contains("\"filename\": \"design.kicad_pro\""));
+        let sym = std::fs::read_to_string(project.join("sym-lib-table")).expect("sym table");
+        assert!(sym.contains("(name \"Device\")"));
+        let fp = std::fs::read_to_string(project.join("fp-lib-table")).expect("fp table");
+        assert!(fp.contains("(name \"Resistor_SMD\")"));
     }
 }
 

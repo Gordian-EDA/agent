@@ -71,15 +71,16 @@ impl KicadCli {
             .suffix(".json")
             .tempfile()?;
 
-        let output = Command::new(&self.cli_path)
-            .args([
-                "pcb",
-                "drc",
-                "--format",
-                "json",
-                "--all-track-errors",
-                "--exit-code-violations",
-            ])
+        let board_has_zones = std::fs::read_to_string(pcb)
+            .map(|text| text.contains("\n\t(zone") || text.contains("\n  (zone"))
+            .unwrap_or(false);
+        let mut cmd = Command::new(&self.cli_path);
+        cmd.args(["pcb", "drc", "--format", "json", "--all-track-errors"]);
+        if board_has_zones && self.supports_pcb_drc_refill_zones() {
+            cmd.arg("--refill-zones");
+        }
+        let output = cmd
+            .arg("--exit-code-violations")
             .arg("--output")
             .arg(out.path())
             .arg(pcb)
@@ -99,6 +100,18 @@ impl KicadCli {
                 Err(io::Error::new(io::ErrorKind::InvalidData, detail))
             }
         }
+    }
+
+    fn supports_pcb_drc_refill_zones(&self) -> bool {
+        Command::new(&self.cli_path)
+            .args(["pcb", "drc", "--help"])
+            .output()
+            .ok()
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout).contains("--refill-zones")
+                    || String::from_utf8_lossy(&output.stderr).contains("--refill-zones")
+            })
+            .unwrap_or(false)
     }
 
     /// Run `kicad-cli sch export netlist --format kicadxml` on `schematic`.

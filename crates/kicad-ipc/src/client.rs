@@ -27,6 +27,7 @@ pub struct Kicad {
     socket: nng::Socket,
     token: String,
     client_name: String,
+    retry_budget: Duration,
     /// The open PCB document, cached by [`Kicad::open_board`].
     pub(crate) board_doc: Option<proto::kiapi::common::types::DocumentSpecifier>,
 }
@@ -39,26 +40,61 @@ impl Kicad {
 
     /// Connect to a specific NNG socket URL (e.g. `ipc:///tmp/kicad/api.sock`).
     pub fn connect_to(socket_url: &str) -> Result<Self, Error> {
+        Self::connect_to_with_timeouts(
+            socket_url,
+            Duration::from_secs(45),
+            Duration::from_secs(30),
+            RETRY_BUDGET,
+        )
+    }
+
+    pub(crate) fn connect_launch_probe() -> Result<Self, Error> {
+        Self::connect_to_with_timeouts(
+            DEFAULT_SOCKET,
+            Duration::from_secs(20),
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+        )
+    }
+
+    fn connect_to_with_timeouts(
+        socket_url: &str,
+        recv_timeout: Duration,
+        send_timeout: Duration,
+        retry_budget: Duration,
+    ) -> Result<Self, Error> {
         let socket = nng::Socket::new(nng::Protocol::Req0)?;
         // Don't hang forever if KiCAD is wedged, but allow slow ops (save with
         // zone refill, autoroute) to complete.
         use nng::options::Options;
-        let _ = socket.set_opt::<nng::options::RecvTimeout>(Some(Duration::from_secs(120)));
-        let _ = socket.set_opt::<nng::options::SendTimeout>(Some(Duration::from_secs(30)));
+        let _ = socket.set_opt::<nng::options::RecvTimeout>(Some(recv_timeout));
+        let _ = socket.set_opt::<nng::options::SendTimeout>(Some(send_timeout));
         socket.dial(socket_url)?;
         Ok(Self {
             socket,
             token: String::new(),
             client_name: format!("gordian-agent-{}", std::process::id()),
+            retry_budget,
             board_doc: None,
         })
+    }
+
+    pub(crate) fn use_default_timeouts(&mut self) {
+        use nng::options::Options;
+        let _ = self
+            .socket
+            .set_opt::<nng::options::RecvTimeout>(Some(Duration::from_secs(45)));
+        let _ = self
+            .socket
+            .set_opt::<nng::options::SendTimeout>(Some(Duration::from_secs(30)));
+        self.retry_budget = RETRY_BUDGET;
     }
 
     /// Send a command (wrapped in `Any`), return the raw [`ApiResponse`]. Bootstraps
     /// the instance token from the first reply and surfaces API-level errors.
     fn send_request<C: Message + Name>(&mut self, cmd: &C) -> Result<ApiResponse, Error> {
         let any = prost_types::Any::from_msg(cmd)?;
-        let deadline = std::time::Instant::now() + RETRY_BUDGET;
+        let deadline = std::time::Instant::now() + self.retry_budget;
         loop {
             let req = ApiRequest {
                 header: Some(ApiRequestHeader {

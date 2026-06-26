@@ -63,17 +63,23 @@ pub fn export_fab(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .iter()
         .filter(|v| !super::export::is_non_copper(v))
         .count();
-    if copper_violations > 0 || !drc.unconnected_items.is_empty() {
+    let meaningful_unconnected: Vec<_> = drc
+        .unconnected_items
+        .iter()
+        .filter(|v| !super::export::is_zone_self_unconnected(v))
+        .collect();
+    if copper_violations > 0 || !meaningful_unconnected.is_empty() {
         return Ok(json!({
             "ok": false,
             "error": "PCB DRC is not clean; fix copper violations/unconnected items before export_fab",
             "copper_violations": copper_violations,
-            "unconnected_items": drc.unconnected_items.len(),
+            "unconnected_items": meaningful_unconnected.len(),
+            "ignored_zone_self_unconnected": drc.unconnected_items.len().saturating_sub(meaningful_unconnected.len()),
             "top_violations": super::export::violation_summaries(
                 drc.violations.iter().filter(|v| !super::export::is_non_copper(v)),
                 5,
             ),
-            "top_unconnected": super::export::violation_summaries(drc.unconnected_items.iter(), 5),
+            "top_unconnected": super::export::violation_summaries(meaningful_unconnected, 5),
         }));
     }
 

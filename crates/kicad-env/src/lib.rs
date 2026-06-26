@@ -90,6 +90,9 @@ fn detect_symbol_dir(configured: Option<&Path>) -> Option<PathBuf> {
     if let Some(dir) = configured {
         return dir.is_dir().then(|| dir.to_path_buf());
     }
+    if let Some(dir) = env_dir("KICAD_SYMBOL_DIR") {
+        return Some(dir);
+    }
     KNOWN_SYMBOL_DIRS
         .iter()
         .map(PathBuf::from)
@@ -99,6 +102,9 @@ fn detect_symbol_dir(configured: Option<&Path>) -> Option<PathBuf> {
 fn detect_footprint_dir(symbol_dir: &Path, configured: Option<&Path>) -> Option<PathBuf> {
     if let Some(dir) = configured {
         return dir.is_dir().then(|| dir.to_path_buf());
+    }
+    if let Some(dir) = env_dir("KICAD_FOOTPRINT_DIR") {
+        return Some(dir);
     }
     let sibling = sibling_footprint_dir(symbol_dir);
     if sibling.is_dir() {
@@ -118,10 +124,27 @@ fn sibling_footprint_dir(symbol_dir: &Path) -> PathBuf {
 }
 
 fn find_in_path(name: &str) -> Option<PathBuf> {
+    if name == "kicad-cli"
+        && let Some(path) = env_file("KICAD_CLI_PATH")
+    {
+        return Some(path);
+    }
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())
+}
+
+fn env_dir(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+}
+
+fn env_file(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
 }
 
 fn cli_version(cli_path: &Path) -> Option<String> {

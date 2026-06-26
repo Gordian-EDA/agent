@@ -13,6 +13,8 @@ use pcb_place::placement::{LockedAt, Part, PlaceProblem, Placement, PlacementHin
 
 use crate::AgentRuntime;
 
+use super::seed::BoardSeed;
+
 fn part_from_footprint_layers(
     footprint: &Footprint,
     reference: &str,
@@ -36,11 +38,13 @@ fn part_from_footprint_layers(
 }
 
 fn part_pad(pad: &FootprintPad, net_map: &BTreeMap<String, String>, layer_count: u32) -> PartPad {
+    let half =
+        geom::Point2::new(pad.size.x / 2.0, pad.size.y / 2.0).rotated_half_extents(pad.rotation);
     PartPad {
         number: pad.number.clone(),
         offset: pad.at,
-        width: pad.size.x,
-        height: pad.size.y,
+        width: half.x * 2.0,
+        height: half.y * 2.0,
         layers: pad_layers(pad, layer_count),
         net: net_map.get(&pad.number).cloned(),
     }
@@ -301,6 +305,10 @@ fn is_mounting_hole(footprint: &str) -> bool {
 }
 
 pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    if let Some(seed) = read_board_seed(ctx) {
+        return Ok(place_seed_board(ctx, &seed));
+    }
+
     let board = match super::active::board_problem(ctx) {
         Ok(board) => board,
         Err(live_err) => return Ok(json!({ "error": live_err })),
@@ -479,6 +487,230 @@ pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(out)
 }
 
+fn read_board_seed(ctx: &AgentRuntime) -> Option<BoardSeed> {
+    let text = std::fs::read_to_string(super::create::board_seed_path(ctx)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn place_seed_board(ctx: &AgentRuntime, seed: &BoardSeed) -> Value {
+    let problem = match debug_place_problem_from_seed(seed, ctx) {
+        Ok(problem) => problem,
+        Err(msg) => return json!({ "error": msg }),
+    };
+    let hints = placement_hints_for_seed(seed);
+    let result = pcb_place::placement::place_board(&problem, &hints);
+    if result.legal {
+        if let Err(msg) = persist_placements(ctx, &result.placements) {
+            return json!({ "error": msg });
+        }
+        let moves: Vec<FootprintMove> = result
+            .placements
+            .iter()
+            .map(|p| FootprintMove {
+                reference: p.reference.clone(),
+                x_nm: (p.at.x * 1_000_000.0).round() as i64,
+                y_nm: (p.at.y * 1_000_000.0).round() as i64,
+                rotation_deg: Some(p.rotation),
+            })
+            .collect();
+        if let Err(msg) = write_placement_to_board_file(ctx, &moves) {
+            return json!({ "error": msg });
+        }
+    }
+    let positions: Vec<Value> = result.placements.iter().map(placement_json).collect();
+    json!({
+        "legal": result.legal,
+        "hpwl": result.report.hpwl,
+        "overlaps_resolved": result.report.overlaps_resolved,
+        "out_of_bounds_clamps": result.report.out_of_bounds_clamps,
+        "positions": positions,
+        "note": if result.legal {
+            "placement is legal and was written directly to the board file. Call route_board next, or render_board to see it."
+        } else {
+            "placement is NOT legal — enlarge the board with regenerate_board bounds and retry."
+        },
+    })
+}
+
+fn placement_hints_for_seed(seed: &BoardSeed) -> PlacementHints {
+    let mut hints = seed.hints.clone();
+    for part in &seed.parts {
+        if is_mounting_hole(&part.footprint) {
+            if !hints.corner_seek.contains(&part.reference) {
+                hints.corner_seek.push(part.reference.clone());
+            }
+            if !hints.edge_seek.contains(&part.reference) {
+                hints.edge_seek.push(part.reference.clone());
+            }
+        } else if is_connector(&part.footprint, &part.reference)
+            && !hints.edge_seek.contains(&part.reference)
+        {
+            hints.edge_seek.push(part.reference.clone());
+        }
+    }
+    hints
+}
+
+pub(super) fn board_placement_path(ctx: &AgentRuntime) -> std::path::PathBuf {
+    ctx.project_dir()
+        .join(".gordian")
+        .join("board.placement.json")
+}
+
+fn persist_placements(
+    ctx: &AgentRuntime,
+    placements: &[Placement],
+) -> std::result::Result<(), String> {
+    let text = serde_json::to_string_pretty(placements)
+        .map_err(|e| format!("could not serialize board placement metadata: {e}"))?;
+    std::fs::write(board_placement_path(ctx), format!("{text}\n"))
+        .map_err(|e| format!("could not write board placement metadata: {e}"))
+}
+
+pub fn debug_place_problem_from_seed(
+    seed: &BoardSeed,
+    ctx: &AgentRuntime,
+) -> std::result::Result<PlaceProblem, String> {
+    let catalog = ctx
+        .footprint_catalog()
+        .map_err(|e| format!("footprint catalog unavailable: {e}"))?;
+    let mut parts = Vec::with_capacity(seed.parts.len());
+    for part in &seed.parts {
+        let id = FootprintId::parse(&part.footprint).map_err(|e| {
+            format!(
+                "part {}: invalid footprint id `{}`: {e}",
+                part.reference, part.footprint
+            )
+        })?;
+        let footprint = catalog.footprint(&id).map_err(|e| {
+            format!(
+                "part {}: footprint `{}` is not resolvable: {e}",
+                part.reference, part.footprint
+            )
+        })?;
+        parts.push(part_from_footprint_layers(
+            &footprint,
+            &part.reference,
+            &part.pad_nets,
+            seed.rules.layer_count,
+            part.locked.clone(),
+        ));
+    }
+    Ok(PlaceProblem {
+        bounds: seed.bounds.clone(),
+        clearance: seed.rules.clearance,
+        layer_count: seed.rules.layer_count,
+        min_trace_width: seed.rules.min_trace_width,
+        parts,
+        keepouts: seed.keepouts.iter().map(|k| k.rect.clone()).collect(),
+        outline: seed.outline.clone(),
+    })
+}
+
+fn write_placement_to_board_file(
+    ctx: &AgentRuntime,
+    moves: &[FootprintMove],
+) -> std::result::Result<(), String> {
+    let path = ctx.pcb_path();
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let updated = update_footprint_positions(&text, moves)?;
+    std::fs::write(&path, updated).map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
+fn update_footprint_positions(
+    board: &str,
+    moves: &[FootprintMove],
+) -> std::result::Result<String, String> {
+    let by_ref: BTreeMap<&str, &FootprintMove> =
+        moves.iter().map(|m| (m.reference.as_str(), m)).collect();
+    let mut out = String::with_capacity(board.len());
+    let mut pos = 0usize;
+    while let Some(rel) = board[pos..].find("(footprint ") {
+        let start = pos + rel;
+        out.push_str(&board[pos..start]);
+        let Some(end) = sexpr_end(board, start) else {
+            return Err("could not parse footprint block in board file".to_owned());
+        };
+        let block = &board[start..end];
+        if let Some(reference) = footprint_reference_in_block(block)
+            && let Some(mv) = by_ref.get(reference.as_str())
+        {
+            out.push_str(&replace_first_at(block, mv));
+        } else {
+            out.push_str(block);
+        }
+        pos = end;
+    }
+    out.push_str(&board[pos..]);
+    Ok(out)
+}
+
+fn sexpr_end(text: &str, start: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    for (offset, ch) in text[start..].char_indices() {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if ch == '\\' {
+                esc = true;
+            } else if ch == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_str = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(start + offset + ch.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn footprint_reference_in_block(block: &str) -> Option<String> {
+    let marker = "(property \"Reference\" \"";
+    let start = block.find(marker)? + marker.len();
+    let rest = &block[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_owned())
+}
+
+fn replace_first_at(block: &str, mv: &FootprintMove) -> String {
+    let x = mv.x_nm as f64 / 1e6;
+    let y = mv.y_nm as f64 / 1e6;
+    let rotation = mv.rotation_deg.unwrap_or(0.0);
+    let mut replaced = false;
+    let mut out = String::with_capacity(block.len());
+    for line in block.lines() {
+        if !replaced && line.trim_start().starts_with("(at ") {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            out.push_str(&format!(
+                "{indent}(at {} {} {})\n",
+                super::fmt_num(x),
+                super::fmt_num(y),
+                super::fmt_num(rotation)
+            ));
+            replaced = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !block.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 fn write_placement(
     ctx: &AgentRuntime,
     moves: &[FootprintMove],
@@ -488,4 +720,33 @@ fn write_placement(
         session.kicad().move_footprints(moves)?;
         session.kicad().save()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use geom::Point2;
+    use kicad_footprint::PadTechnology;
+
+    #[test]
+    fn footprint_pad_rotation_affects_route_obstacle_size() {
+        let pad = FootprintPad {
+            number: "2".to_string(),
+            at: Point2 { x: -3.81, y: 6.25 },
+            rotation: 90.0,
+            size: Point2 { x: 2.5, y: 1.2 },
+            shape: "rect".to_string(),
+            layers: vec!["F.Cu".to_string()],
+            technology: PadTechnology::Smd,
+            drill: None,
+        };
+        let mut nets = BTreeMap::new();
+        nets.insert("2".to_string(), "GND".to_string());
+
+        let got = part_pad(&pad, &nets, 2);
+
+        assert!((got.width - 1.2).abs() < 1e-9);
+        assert!((got.height - 2.5).abs() < 1e-9);
+        assert_eq!(got.net.as_deref(), Some("GND"));
+    }
 }

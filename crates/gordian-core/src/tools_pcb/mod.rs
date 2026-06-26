@@ -56,7 +56,7 @@ pub use footprints::{assign_footprint, get_footprint_info, search_footprints};
 pub use interactive::{
     autoroute, board_state, move_part, open_board, route_track, save_session_if_open, set_net_width,
 };
-pub use place::{get_board, place_board};
+pub use place::{debug_place_problem_from_seed, get_board, place_board};
 pub use render::render_board;
 pub use route::route_board;
 pub use seed::{BoardSeed, BoardSeedPart, BoardSeedRules, Keepout, PourSpec, apply_seed_extras};

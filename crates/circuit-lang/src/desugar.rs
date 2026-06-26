@@ -28,10 +28,11 @@ pub fn desugar(s: &SurfaceDesign, provider: &SymbolTable) -> (Design, Diagnostic
         ..Default::default()
     };
 
-    // Power nets are no longer declared by a `power:` list — they are DERIVED from
-    // the power-symbol COMPONENTS the author places (a part in KiCAD's `power:`
+    // Power nets can be declared with `class: power` and are also DERIVED from
+    // power-symbol COMPONENTS the author places (a part in KiCAD's `power:`
     // library, e.g. `power:GND`). The net each such symbol drives is a power net.
-    // Marked after `resolve_pins` below, once the symbols' pins resolve to nets.
+    // Symbol-derived nets are marked after `resolve_pins` below, once the symbols'
+    // pins resolve to nets.
     for (net, attrs) in &s.nets {
         d.nets.entry(net.clone()).or_default().class = attrs.class.clone();
     }
@@ -187,6 +188,11 @@ fn mark_power_nets(d: &mut Design) {
     }
     for net in power_nets {
         d.nets.entry(net).or_default().power = true;
+    }
+    for attrs in d.nets.values_mut() {
+        if attrs.class.as_deref() == Some("power") {
+            attrs.power = true;
+        }
     }
 }
 
@@ -880,6 +886,23 @@ blocks:
             PinTarget::Net("3V3".into())
         );
         assert_eq!(main.components["U1"].pins["EN"], PinTarget::NoConnect);
+    }
+
+    #[test]
+    fn class_power_marks_net_as_power_rail() {
+        let (d, diags) = run("
+version: 1
+blocks:
+  main:
+    components:
+      R1: {part: R, between: [VBUS_FUSED, GND]}
+nets:
+  VBUS_FUSED: {class: power}
+  GND: {class: power}
+");
+        assert!(!diags.has_errors(), "{:?}", diags);
+        assert!(d.nets["VBUS_FUSED"].power);
+        assert!(d.nets["GND"].power);
     }
 
     #[test]

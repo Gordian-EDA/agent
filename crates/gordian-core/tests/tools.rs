@@ -743,6 +743,32 @@ fn search_footprints_finds_vendored_fixture() {
 }
 
 #[test]
+fn search_footprints_guides_rp2040_to_qfn_not_bga() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let out = run_tool(
+        "search_footprints",
+        serde_json::json!({ "query": "RP2040 BGA", "limit": 8 }),
+        &ctx,
+    )
+    .unwrap();
+    assert!(
+        out["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("not substitute a BGA")),
+        "expected RP2040 package guidance, got: {out}"
+    );
+    let hits = out["hits"].as_array().expect("hits array");
+    assert!(
+        hits.iter()
+            .any(|h| h["lib_id"].as_str().is_some_and(|id| id.contains("QFN-56"))),
+        "expected QFN-56 hits, got: {out}"
+    );
+}
+
+#[test]
 fn assign_footprint_edits_the_working_draft() {
     let (ctx, _guard) = fixture_ctx();
     let yaml = "\

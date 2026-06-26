@@ -496,6 +496,7 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
         );
         out.absorb(w);
     }
+    out.promote_local_labels_for_global_nets();
     // Already laid out per group + tiled here; a global reframe would only re-snap.
     out.set_frame(false);
     out.finish()

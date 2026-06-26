@@ -16,15 +16,30 @@ pub fn search_footprints(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Val
         .and_then(Value::as_u64)
         .map(|n| n as usize)
         .unwrap_or(ctx.config().tools.default_search_limit);
+    let normalized = query.to_ascii_lowercase();
+    let (search_query, note) = if normalized.contains("rp2040") {
+        (
+            "QFN-56 7x7 0.4".to_string(),
+            Some(
+                "RP2040 uses a 56-pin QFN package in KiCad libraries; do not substitute a BGA footprint.",
+            ),
+        )
+    } else {
+        (query.clone(), None)
+    };
 
     let hits: Vec<Value> = ctx
         .footprint_catalog()?
-        .search(SearchQuery::new(query).limit(limit))
+        .search(SearchQuery::new(search_query).limit(limit))
         .into_iter()
         .map(|h| json!({ "lib_id": h.id.to_string(), "pad_count": h.pad_count }))
         .collect();
 
-    Ok(json!({ "hits": hits }))
+    let mut out = json!({ "hits": hits });
+    if let Some(note) = note {
+        out["note"] = json!(note);
+    }
+    Ok(out)
 }
 
 pub fn get_footprint_info(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Value> {

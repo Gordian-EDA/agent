@@ -7,6 +7,9 @@ use crate::provider::{PinType, SymbolTable};
 pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
     let mut diags = Diagnostics::default();
     let mut net_pins: indexmap::IndexMap<&str, Vec<String>> = indexmap::IndexMap::new();
+    let mut net_parts: indexmap::IndexMap<&str, Vec<String>> = indexmap::IndexMap::new();
+    let mut net_power_inputs: indexmap::IndexMap<String, Vec<String>> = indexmap::IndexMap::new();
+    let mut net_power_sources: indexmap::IndexMap<String, Vec<String>> = indexmap::IndexMap::new();
     // Net-sanity: nets carrying a crystal/oscillator pin, and nets carrying a
     // reset/boot control pin. A net with BOTH shorts the oscillator to reset —
     // almost always a mis-wire (an OSC_OUT net the model named after a reset pin).
@@ -22,6 +25,10 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
                         .entry(n.as_str())
                         .or_default()
                         .push(format!("{refdes}.{key}"));
+                    net_parts
+                        .entry(n.as_str())
+                        .or_default()
+                        .push(comp.part.clone());
                 }
             }
 
@@ -78,6 +85,29 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
                                 p.number
                             ),
                         ));
+                    }
+                    if let Some(PinTarget::Net(n)) = pin_target_for(comp, key) {
+                        match p.etype {
+                            PinType::PowerInput => {
+                                net_power_inputs
+                                    .entry(n.clone())
+                                    .or_default()
+                                    .push(format!("{refdes}.{}", p.name));
+                            }
+                            PinType::PowerOutput => {
+                                net_power_sources
+                                    .entry(n.clone())
+                                    .or_default()
+                                    .push(format!("{refdes}.{}", p.name));
+                            }
+                            _ => {}
+                        }
+                        if comp.part.starts_with("power:") || is_connector_part(&comp.part) {
+                            net_power_sources
+                                .entry(n.clone())
+                                .or_default()
+                                .push(refdes.to_string());
+                        }
                     }
                 }
             }
@@ -143,6 +173,48 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
 
     let allow = |code: &str| d.lint_allow.contains(code);
 
+    if !allow("control-passive-island") {
+        for (net, parts) in &net_parts {
+            let attrs = d.nets.get(*net);
+            let exempt = attrs.map(|a| a.power || a.port).unwrap_or(false);
+            let pins = net_pins.get(net).map(Vec::as_slice).unwrap_or(&[]);
+            if exempt || pins.len() < 2 || !is_control_net_name(net) {
+                continue;
+            }
+            if parts.iter().all(|part| is_passive_control_part(part)) {
+                diags.push(Diagnostic::warning(
+                    "control-passive-island",
+                    format!(
+                        "control net `{net}` only touches passive/switch parts ({}) — likely missing an MCU/control pin connection",
+                        pins.join(", ")
+                    ),
+                ));
+            }
+        }
+    }
+
+    if !allow("unsourced-power-net") {
+        for (net, consumers) in &net_power_inputs {
+            let attrs = d.nets.get(net.as_str());
+            if !attrs.map(|a| a.power).unwrap_or(false) && !is_power_like_net_name(net) {
+                continue;
+            }
+            if net_power_sources
+                .get(net)
+                .is_some_and(|sources| !sources.is_empty())
+            {
+                continue;
+            }
+            diags.push(Diagnostic::warning(
+                "unsourced-power-net",
+                format!(
+                    "power net `{net}` feeds power-input pins ({}) but has no power symbol, connector, or power-output pin source",
+                    consumers.join(", ")
+                ),
+            ));
+        }
+    }
+
     if !allow("single-pin-net") {
         for (net, pins) in &net_pins {
             // A power rail or an author-marked PORT legitimately has one pin (the
@@ -197,6 +269,38 @@ pub fn lint(d: &Design, provider: &SymbolTable) -> Diagnostics {
     diags
 }
 
+fn is_control_net_name(net: &str) -> bool {
+    let u = net.to_ascii_uppercase();
+    u.contains("BOOT") || u.contains("RESET") || u.contains("RST") || u.contains("RUN")
+}
+
+fn is_passive_control_part(part: &str) -> bool {
+    part.starts_with("Switch:")
+        || matches!(
+            part,
+            "Device:R"
+                | "Device:C"
+                | "Device:L"
+                | "Device:FerriteBead"
+                | "Device:FerriteBead_Small"
+        )
+}
+
+fn is_connector_part(part: &str) -> bool {
+    part.starts_with("Connector:")
+}
+
+fn is_power_like_net_name(net: &str) -> bool {
+    let u = net.to_ascii_uppercase();
+    u == "VIN"
+        || u == "VOUT"
+        || u == "VBUS"
+        || u.contains("VDD")
+        || u.contains("VCC")
+        || u.contains("AVDD")
+        || u.contains("VBUS")
+}
+
 /// Resolve a component pin map key to its `PinTarget`, searching the top-level
 /// pin map first and then any unit pin maps.
 fn pin_target_for<'a>(comp: &'a Component, key: &str) -> Option<&'a PinTarget> {
@@ -229,6 +333,22 @@ mod tests {
         p.mock_add(
             "Device:Crystal",
             vec![("1", "1", Other, 1), ("2", "2", Other, 1)],
+        );
+        p.mock_add(
+            "Switch:SW_Push",
+            vec![("1", "1", Passive, 1), ("2", "2", Passive, 1)],
+        );
+        p.mock_add(
+            "M:REG",
+            vec![
+                ("1", "IN", PowerInput, 1),
+                ("2", "OUT", PowerOutput, 1),
+                ("3", "GND", PowerInput, 1),
+            ],
+        );
+        p.mock_add(
+            "Connector:Conn_01x02_Pin",
+            vec![("1", "Pin_1", Passive, 1), ("2", "Pin_2", Passive, 1)],
         );
         p
     }
@@ -362,6 +482,67 @@ nets:
         assert!(
             diags.0.iter().any(|d| d.code == "near-name"),
             "declared-only net one edit away must warn"
+        );
+    }
+
+    #[test]
+    fn control_passive_island_warns() {
+        let diags = run("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: M:CPU, pins: {VDD: 3V3, VSS: GND, PB6: UART_TX, PB7: UART_RX}}
+      R1: {part: R, between: [GPIO0_BOOT, 3V3]}
+      S1: {part: Switch:SW_Push, pins: {1: GPIO0_BOOT, 2: GND}}
+");
+        let w = diags
+            .0
+            .iter()
+            .find(|d| d.code == "control-passive-island")
+            .expect("control-passive-island warning");
+        assert!(w.message.contains("GPIO0_BOOT"));
+    }
+
+    #[test]
+    fn unsourced_power_net_warns_for_power_input_island() {
+        let diags = run("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: M:CPU, pins: {VDD: DVDD, VSS: GND, PB6: A, PB7: B}}
+      C1: {part: C, between: [DVDD, GND]}
+nets:
+  DVDD: {class: power}
+  GND: {class: power}
+");
+        let w = diags
+            .0
+            .iter()
+            .find(|d| d.code == "unsourced-power-net")
+            .expect("unsourced-power-net warning");
+        assert!(w.message.contains("DVDD"));
+    }
+
+    #[test]
+    fn sourced_power_net_does_not_warn() {
+        let diags = run("
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: M:CPU, pins: {VDD: 3V3, VSS: GND, PB6: A, PB7: B}}
+      U2: {part: M:REG, pins: {IN: VIN, OUT: 3V3, GND: GND}}
+      J1: {part: Connector:Conn_01x02_Pin, pins: {1: VIN, 2: GND}}
+nets:
+  3V3: {class: power}
+  GND: {class: power}
+  VIN: {class: power}
+");
+        assert!(
+            !diags.0.iter().any(|d| d.code == "unsourced-power-net"),
+            "sourced rails must not warn: {diags:?}"
         );
     }
 

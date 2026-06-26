@@ -100,8 +100,8 @@ pub type SheetGroup = (String, Vec<(String, Block)>);
 /// components and split at a near-zero signal cut, while a half-bridge sharing a high-degree
 /// rail stays intact.
 fn split_block(bname: &str, block: &Block) -> Vec<(String, Block)> {
-    const SPLIT_MAX: usize = 16;
-    const TARGET: usize = 11;
+    const SPLIT_MAX: usize = 10;
+    const TARGET: usize = 6;
     const RAIL_DEG: usize = 4;
     if block.components.len() <= SPLIT_MAX {
         return vec![(bname.to_string(), block.clone())];
@@ -144,7 +144,19 @@ fn split_block(bname: &str, block: &Block) -> Vec<(String, Block)> {
         let r = uf.find(i);
         comps.entry(r).or_default().push(i);
     }
-    let comp_list: Vec<Vec<usize>> = comps.into_values().collect();
+    let comp_list: Vec<Vec<usize>> = comps
+        .into_values()
+        .flat_map(|component| {
+            if component.len() <= TARGET {
+                vec![component]
+            } else {
+                component
+                    .chunks(TARGET)
+                    .map(|chunk| chunk.to_vec())
+                    .collect::<Vec<_>>()
+            }
+        })
+        .collect();
     if comp_list.len() < 2 {
         return vec![(bname.to_string(), block.clone())]; // one tightly-coupled component — don't split
     }
@@ -203,11 +215,17 @@ pub fn refine_blocks(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
 
     // ── SPLIT ── into the effective (post-split) blocks, keyed by name, in deterministic order.
     let mut eff: IndexMap<String, Block> = IndexMap::new();
+    let mut split_fragments: HashSet<String> = HashSet::new();
     for (bname, block) in blocks {
         if block.components.is_empty() {
             continue;
         }
-        for (mname, frag) in split_block(bname, block) {
+        let split = split_block(bname, block);
+        let was_split = split.len() > 1;
+        for (mname, frag) in split {
+            if was_split {
+                split_fragments.insert(mname.clone());
+            }
             eff.insert(mname, frag);
         }
     }
@@ -235,6 +253,9 @@ pub fn refine_blocks(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
     };
     let mut merge_into: HashMap<String, String> = HashMap::new();
     for n in &bnames {
+        if split_fragments.contains(n) {
+            continue;
+        }
         if bsize(n) >= MERGE_MIN || port_rich(n) {
             continue;
         }
@@ -286,7 +307,7 @@ pub fn compose_single_sheet(
     env: &KicadEnv,
     design: &Design,
     out_dir: &Path,
-    engine: SchematicPlacementEngine,
+    _engine: SchematicPlacementEngine,
 ) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(out_dir)?;
     // SAFETY: process-wide flag read by the engine to opt each group into route-aware
@@ -307,13 +328,15 @@ pub fn compose_single_sheet(
         // Lay out each group INDEPENDENTLY and keep its TYPED writer (not a rendered
         // string): the engine composer translates each group's items to its tile in mm
         // and folds them into one sheet — no string-level geometry math here.
-        let w = sch_floorplan::floorplan::emit_writer(
-            env,
-            &sub,
-            &ir,
-            crate::tools::schematic_placement_engine(engine),
-        )
-        .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
+        // Multi-block composition runs several independent emits in one apply.
+        // The route-aware annealer can dominate a live agent turn even on small
+        // connector/power groups, while the greedy placer remains deterministic
+        // and fast enough for repeated e2e repair loops.
+        let placer = crate::tools::schematic_placement_engine(SchematicPlacementEngine::Greedy);
+        eprintln!("  [emit] group '{gname}' with {}", placer.name());
+        let w = sch_floorplan::floorplan::emit_writer(env, &sub, &ir, placer)
+            .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
+        eprintln!("  [emit] group '{gname}' done");
         groups_w.push((sanitize(&gname), w));
     }
     let composed = sch_floorplan::floorplan::compose_writers(groups_w, design.name.as_deref());

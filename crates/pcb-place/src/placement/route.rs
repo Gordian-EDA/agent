@@ -218,17 +218,89 @@ impl Placer for FanoutPlacer {
         // Stage 1 — structured fan-out fast-path.
         let mut p = problem.clone();
         let fanned = std::env::var("NO_UNIFIED").is_err() && unified_fanout_place(&mut p);
+        if std::env::var("FANOUT_DEBUG").is_ok() {
+            eprintln!("[fanout] fanned={fanned}");
+        }
         if !fanned {
             apply_grid_hints(&mut p, hints);
         }
-        let result = place_best(&p, hints);
-        // Stage 2 — optimize fallback when the fan-out couldn't seat legally.
-        if fanned && !result.legal {
+        if fanned {
+            let result = place(&p, hints);
+            if std::env::var("FANOUT_DEBUG").is_ok() {
+                eprintln!(
+                    "[fanout] result legal={} hpwl={:.2} overlaps={}",
+                    result.legal, result.report.hpwl, result.report.overlaps_resolved
+                );
+            }
+            if result.legal {
+                return result;
+            }
+            if std::env::var("FANOUT_DEBUG").is_ok() {
+                debug_overlaps(&p, &result);
+            }
+            let optimized = place_best(&p, hints);
+            if std::env::var("FANOUT_DEBUG").is_ok() {
+                eprintln!(
+                    "[fanout] optimized legal={} hpwl={:.2} overlaps={}",
+                    optimized.legal, optimized.report.hpwl, optimized.report.overlaps_resolved
+                );
+                if !optimized.legal {
+                    debug_overlaps(&p, &optimized);
+                }
+            }
+            if optimized.legal {
+                return optimized;
+            }
             let mut base = problem.clone();
             apply_grid_hints(&mut base, hints);
+            if std::env::var("FANOUT_DEBUG").is_ok() {
+                eprintln!("[fanout] falling back to non-fanned placement");
+            }
             return place_best(&base, hints);
         }
-        result
+        place_best(&p, hints)
+    }
+}
+
+fn debug_overlaps(problem: &PlaceProblem, result: &PlaceResult) {
+    let margin = courtyard_margin(problem.clearance);
+    let mut pos = std::collections::BTreeMap::new();
+    let mut rot = std::collections::BTreeMap::new();
+    for p in &result.placements {
+        pos.insert(p.reference.as_str(), p.at.clone());
+        rot.insert(p.reference.as_str(), p.rotation);
+    }
+    let mut printed = 0usize;
+    for i in 0..problem.parts.len() {
+        let Some(pi) = pos.get(problem.parts[i].reference.as_str()) else {
+            continue;
+        };
+        let hi = rotated_courtyard_half(
+            &problem.parts[i],
+            *rot.get(problem.parts[i].reference.as_str()).unwrap_or(&0.0),
+        );
+        let ri = Rect::from_center_half(*pi, hi).inflate(margin / 2.0);
+        for j in (i + 1)..problem.parts.len() {
+            let Some(pj) = pos.get(problem.parts[j].reference.as_str()) else {
+                continue;
+            };
+            let hj = rotated_courtyard_half(
+                &problem.parts[j],
+                *rot.get(problem.parts[j].reference.as_str()).unwrap_or(&0.0),
+            );
+            let rj = Rect::from_center_half(*pj, hj).inflate(margin / 2.0);
+            let (ox, oy) = ri.axis_penetration(&rj);
+            if ox > 1e-9 && oy > 1e-9 {
+                eprintln!(
+                    "[fanout] overlap {} {} ox={:.2} oy={:.2}",
+                    problem.parts[i].reference, problem.parts[j].reference, ox, oy
+                );
+                printed += 1;
+                if printed >= 12 {
+                    return;
+                }
+            }
+        }
     }
 }
 

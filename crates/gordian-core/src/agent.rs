@@ -53,6 +53,14 @@ use crate::tools::{IMAGE_PATH_KEY, run_tool, tool_defs};
 /// legitimate flow, bounded so a misbehaving model can't loop forever.
 const MAX_ITERATIONS: usize = 90;
 
+/// Hard cap on actual tool executions per turn. This keeps failed real-LLM loops
+/// from exceeding the practical token budget through dozens of retries.
+const MAX_TOOL_CALLS_PER_TURN: usize = 50;
+
+/// After this many route attempts with failed nets, block further blind PCB
+/// regenerate/place/route retries in the same turn and force an honest report.
+const MAX_FAILED_ROUTE_RETRIES: usize = 3;
+
 /// How many times a turn that ended WITHOUT committing (the model researched or
 /// drafted but never applied) is re-prompted to finish + commit before we give
 /// up. Bounded so a model that genuinely can't finish doesn't loop forever.
@@ -174,6 +182,7 @@ type Events<'a> = Option<&'a UnboundedSender<AgentEvent>>;
 /// every old base64 render on each model call.
 const RECENT_RENDER_IMAGE_MESSAGES_TO_KEEP: usize = 2;
 const STALE_RENDER_IMAGE_PLACEHOLDER: &str = "[earlier render image omitted from model context; call render_schematic/render_board again if needed]";
+const LARGE_TOOL_ARGUMENT_TEXT_LIMIT: usize = 512;
 
 /// Best-effort emit: a closed receiver (UI gone) is ignored.
 fn emit(events: Events<'_>, ev: AgentEvent) {
@@ -408,6 +417,7 @@ impl<P: Provider> Agent<P> {
         // Bounded re-prompts that push a stalled model past a premature stop.
         let mut nudges_left = MAX_COMMIT_NUDGES;
         let mut final_text = String::new();
+        let mut failed_route_attempts = 0usize;
 
         for _ in 0..MAX_ITERATIONS {
             // Drive the provider's stream so assistant prose renders token-by-token
@@ -497,7 +507,18 @@ impl<P: Provider> Agent<P> {
             let mut tool_responses: Vec<ToolResponse> = Vec::new();
             let mut result_images: Vec<ContentPart> = Vec::new();
             for call in &tool_calls {
-                tool_calls_made += 1;
+                if tool_calls_made >= MAX_TOOL_CALLS_PER_TURN {
+                    tool_responses.push(ToolResponse::new(
+                        call.call_id.clone(),
+                        json!({
+                            "error": "turn tool-call budget exhausted",
+                            "note": "Stop calling tools this turn. Report the current ERC/DRC/unrouted status and the next concrete fix instead of continuing to search or retry.",
+                            "max_tool_calls": MAX_TOOL_CALLS_PER_TURN,
+                        })
+                        .to_string(),
+                    ));
+                    continue;
+                }
                 let gated_commit =
                     tool_effect(&call.fn_name) == ToolEffect::Gated && wants_apply(call);
                 if gated_commit {
@@ -512,9 +533,40 @@ impl<P: Provider> Agent<P> {
                         name: call.fn_name.clone(),
                     },
                 );
-                let (content, images, image_path) = self
-                    .run_tool_call(call, gated_commit, approvals, &mut applied, events)
-                    .await;
+                let retry_blocked = failed_route_attempts >= MAX_FAILED_ROUTE_RETRIES
+                    && matches!(
+                        call.fn_name.as_str(),
+                        "regenerate_board" | "place_board" | "route_board"
+                    );
+                let (mut content, images, image_path) = if retry_blocked {
+                    (
+                        json!({
+                            "error": "PCB route retry budget exhausted",
+                            "note": "route_board has already reported failed nets several times this turn. Do not regenerate/place/route again without a schematic or tool fix; run check_board if needed, then report the honest status.",
+                            "failed_route_attempts": failed_route_attempts,
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else {
+                    tool_calls_made += 1;
+                    self.run_tool_call(call, gated_commit, approvals, &mut applied, events)
+                        .await
+                };
+                if call.fn_name == "route_board" {
+                    let parsed = parse_or_null(&content);
+                    if route_result_is_retry_failure(&parsed) {
+                        if parsed.get("error").is_some() {
+                            failed_route_attempts = MAX_FAILED_ROUTE_RETRIES;
+                        } else {
+                            failed_route_attempts += 1;
+                        }
+                        if failed_route_attempts >= 2 {
+                            content = add_route_retry_guidance(&content, failed_route_attempts);
+                        }
+                    }
+                }
                 emit(
                     events,
                     AgentEvent::ToolFinished {
@@ -539,6 +591,7 @@ impl<P: Provider> Agent<P> {
                     .push(ChatMessage::user(MessageContent::from_parts(result_images)));
                 prune_stale_images(&mut self.history);
             }
+            prune_large_tool_arguments(&mut self.history);
 
             // Carry any text the model emitted alongside its tool calls so a turn
             // that ends without a trailing text-only completion still has a reply.
@@ -703,6 +756,32 @@ fn parse_or_null(result_json: &str) -> Value {
     serde_json::from_str(result_json).unwrap_or(Value::Null)
 }
 
+fn route_result_is_retry_failure(value: &Value) -> bool {
+    if value.get("error").is_some() {
+        return true;
+    }
+    value
+        .get("failed")
+        .and_then(Value::as_array)
+        .is_some_and(|failed| !failed.is_empty())
+}
+
+fn add_route_retry_guidance(content: &str, failed_route_attempts: usize) -> String {
+    let mut value = parse_or_null(content);
+    if let Value::Object(obj) = &mut value {
+        obj.insert(
+            "agent_guidance".to_string(),
+            json!({
+                "failed_route_attempts": failed_route_attempts,
+                "note": "Do not keep regenerating/place/routing blindly. Try at most one concrete change with a stated reason; otherwise run check_board and report the current failed nets/unconnected count."
+            }),
+        );
+        value.to_string()
+    } else {
+        content.to_string()
+    }
+}
+
 /// Drop old base64 render payloads from the prompt while preserving a stable
 /// textual breadcrumb. The UI still has the on-disk PNG paths from tool events.
 fn prune_stale_images(history: &mut [ChatMessage]) {
@@ -715,6 +794,56 @@ fn prune_stale_images(history: &mut [ChatMessage]) {
         if kept > RECENT_RENDER_IMAGE_MESSAGES_TO_KEEP {
             *msg = ChatMessage::user(STALE_RENDER_IMAGE_PLACEHOLDER);
         }
+    }
+}
+
+/// Replace large historical tool-call arguments with compact placeholders after
+/// their tool results have been recorded. The authoritative draft lives on disk,
+/// and retaining every old full-YAML `create_design`/`edit_design`/`validate`
+/// payload makes later LLM requests grow by thousands of tokens per repair pass.
+fn prune_large_tool_arguments(history: &mut [ChatMessage]) {
+    for msg in history {
+        if msg.role != ChatRole::Assistant {
+            continue;
+        }
+        for part in msg.content.iter_mut() {
+            let ContentPart::ToolCall(call) = part else {
+                continue;
+            };
+            if !tool_args_can_be_pruned(&call.fn_name) {
+                continue;
+            }
+            prune_large_json_strings(&mut call.fn_arguments);
+        }
+    }
+}
+
+fn tool_args_can_be_pruned(name: &str) -> bool {
+    matches!(
+        name,
+        "create_design" | "edit_design" | "validate_design" | "apply_design"
+    )
+}
+
+fn prune_large_json_strings(value: &mut Value) {
+    match value {
+        Value::String(s) if s.len() > LARGE_TOOL_ARGUMENT_TEXT_LIMIT => {
+            *s = format!(
+                "[omitted {} chars from prior tool call; use read_schematic({{\"source\":\"draft\"}}) only if exact text is needed]",
+                s.len()
+            );
+        }
+        Value::Array(items) => {
+            for item in items {
+                prune_large_json_strings(item);
+            }
+        }
+        Value::Object(map) => {
+            for value in map.values_mut() {
+                prune_large_json_strings(value);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -856,6 +985,7 @@ async fn run_kicad_tool(
 /// interactive caller redrawing.
 async fn run_blocking(ctx: &Arc<AgentRuntime>, name: &str, input: Value) -> Result<Value> {
     let ctx = Arc::clone(ctx);
+    let timeout_ctx = Arc::clone(&ctx);
     let name = name.to_string();
     let timeout = tool_timeout(&name);
     let handle = tokio::task::spawn_blocking({
@@ -865,12 +995,31 @@ async fn run_blocking(ctx: &Arc<AgentRuntime>, name: &str, input: Value) -> Resu
     match tokio::time::timeout(timeout, handle).await {
         Ok(joined) => joined.map_err(|e| anyhow::anyhow!("tool execution task failed: {e}"))?,
         Err(_) => {
+            if is_kicad_session_tool(&name) {
+                timeout_ctx.close_kicad_session();
+            }
             anyhow::bail!(
                 "{name} timed out after {}s; close any KiCAD dialogs/processes touching the project and retry, or simplify/batch the draft before applying",
                 timeout.as_secs()
             );
         }
     }
+}
+
+fn is_kicad_session_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "regenerate_board"
+            | "place_board"
+            | "route_board"
+            | "check_board"
+            | "export_fab"
+            | "open_board"
+            | "render_board"
+            | "move_part"
+            | "route_track"
+            | "board_state"
+    )
 }
 
 fn tool_timeout(name: &str) -> Duration {
@@ -1103,6 +1252,15 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 .unwrap_or(0);
             format!("\"{q}\" → {n} hits")
         }
+        "search_footprints" => {
+            let q = input.get("query").and_then(Value::as_str).unwrap_or("");
+            let n = result
+                .get("hits")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            format!("\"{q}\" → {n} hits")
+        }
         "get_symbol_info" => {
             let lib = input.get("lib_id").and_then(Value::as_str).unwrap_or("");
             let n = result
@@ -1112,11 +1270,50 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 .unwrap_or(0);
             format!("{lib} → {n} pins")
         }
+        "get_footprint_info" => {
+            let lib = result
+                .get("lib_id")
+                .or_else(|| input.get("lib_id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let n = result.get("pad_count").and_then(Value::as_u64).unwrap_or(0);
+            format!("{lib} → {n} pads")
+        }
         "read_schematic" => "read schematic YAML".to_string(),
         "validate_design" => {
             let errors = result.get("errors").and_then(Value::as_u64).unwrap_or(0);
             let warnings = result.get("warnings").and_then(Value::as_u64).unwrap_or(0);
-            format!("{errors} errors, {warnings} warnings")
+            let omitted = result
+                .get("diagnostics_omitted")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if omitted > 0 {
+                format!("{errors} errors, {warnings} warnings ({omitted} omitted)")
+            } else {
+                format!("{errors} errors, {warnings} warnings")
+            }
+        }
+        "create_design" | "edit_design" => {
+            let errors = result.get("errors").and_then(Value::as_u64).unwrap_or(0);
+            let warnings = result.get("warnings").and_then(Value::as_u64).unwrap_or(0);
+            let omitted = result
+                .get("diagnostics_omitted")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let mode =
+                result
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or(if name == "create_design" {
+                        "created"
+                    } else {
+                        "patched"
+                    });
+            if omitted > 0 {
+                format!("{mode}: {errors} errors, {warnings} warnings ({omitted} omitted)")
+            } else {
+                format!("{mode}: {errors} errors, {warnings} warnings")
+            }
         }
         "apply_design" => {
             if result.get("written").and_then(Value::as_bool) == Some(true) {
@@ -1138,7 +1335,11 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                     .and_then(Value::as_array)
                     .map(Vec::len)
                     .unwrap_or(0);
-                format!("preview: +{added} -{removed}")
+                let mode = result
+                    .get("layout_mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("layout");
+                format!("preview {mode}: +{added} -{removed}")
             } else {
                 "ok".to_string()
             }
@@ -1166,6 +1367,17 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
             } else {
                 format!("score {score:.0}/10 — {n} defect(s) to fix")
             }
+        }
+        "assign_footprint" => {
+            let reference = result
+                .get("reference")
+                .and_then(Value::as_str)
+                .unwrap_or("component");
+            let footprint = result
+                .get("footprint")
+                .and_then(Value::as_str)
+                .unwrap_or("footprint");
+            format!("{reference} → {footprint}")
         }
         _ => "done".to_string(),
     }
@@ -1320,13 +1532,47 @@ mod tests {
         );
         assert_eq!(s, "\"STM32\" → 3 hits");
         let s = tool_summary(
+            "search_footprints",
+            &json!({ "query": "0603" }),
+            &json!({ "hits": [1, 2] }),
+        );
+        assert_eq!(s, "\"0603\" → 2 hits");
+        let s = tool_summary(
+            "edit_design",
+            &json!({}),
+            &json!({ "mode": "full_replace", "errors": 0, "warnings": 151, "diagnostics_omitted": 131 }),
+        );
+        assert_eq!(s, "full_replace: 0 errors, 151 warnings (131 omitted)");
+        let s = tool_summary(
             "apply_design",
             &json!({}),
-            &json!({ "written": true, "erc": { "errors": 0 } }),
+            &json!({ "written": true, "erc": { "errors": 0 }, "layout_mode": "composed_blocks" }),
         );
         assert!(s.contains("written"), "got: {s}");
         let s = tool_summary("read_schematic", &json!({}), &json!({ "error": "boom" }));
         assert_eq!(s, "error: boom");
+    }
+
+    #[test]
+    fn prune_large_tool_arguments_keeps_history_compact() {
+        let big_yaml = "version: 1\n".repeat(80);
+        let mut history = vec![ChatMessage::assistant(MessageContent::from_parts(vec![
+            ContentPart::ToolCall(ToolCall {
+                call_id: "tu_big".into(),
+                fn_name: "edit_design".into(),
+                fn_arguments: json!({ "yaml": big_yaml }),
+                thought_signatures: None,
+            }),
+        ]))];
+
+        prune_large_tool_arguments(&mut history);
+
+        let ContentPart::ToolCall(call) = &history[0].content.parts()[0] else {
+            panic!("expected tool call");
+        };
+        let yaml = call.fn_arguments["yaml"].as_str().unwrap();
+        assert!(yaml.contains("omitted"), "{yaml}");
+        assert!(yaml.len() < 200, "{yaml}");
     }
 
     #[test]
@@ -1479,5 +1725,28 @@ mod tests {
             0,
             "nothing left to pop"
         );
+    }
+
+    #[test]
+    fn detects_route_results_with_failed_nets() {
+        assert!(route_result_is_retry_failure(&json!({
+            "failed": [{"connection": "GND", "reason": "blocked"}]
+        })));
+        assert!(route_result_is_retry_failure(&json!({
+            "error": "route_board timed out after 180s"
+        })));
+        assert!(!route_result_is_retry_failure(&json!({ "failed": [] })));
+        assert!(!route_result_is_retry_failure(&json!({ "ok": true })));
+    }
+
+    #[test]
+    fn route_retry_guidance_is_added_to_json_results() {
+        let with_guidance = add_route_retry_guidance(r#"{"failed":[{"connection":"GND"}]}"#, 2);
+        let parsed: Value = serde_json::from_str(&with_guidance).unwrap();
+        assert_eq!(
+            parsed["agent_guidance"]["failed_route_attempts"].as_u64(),
+            Some(2)
+        );
+        assert_eq!(add_route_retry_guidance("not json", 2), "not json");
     }
 }
