@@ -224,7 +224,7 @@ fn defs_lists_all_tools() {
         "export_fab",
         "review_design",
         "regenerate_board",
-        "assign_footprint",
+        "assign_footprints",
         "open_board",
         "board_state",
         "move_part",
@@ -235,7 +235,7 @@ fn defs_lists_all_tools() {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
     // The Board-DSL authoring surface (design_board/import_board) and the old
-    // batch mutators are GONE — the board is seeded from the schematic
+    // board mutators are GONE — the board is seeded from the schematic
     // (regenerate_board) and edited INTERACTIVELY over KiCAD IPC (open_board +
     // move_part/route_track/set_net_width).
     for gone in [
@@ -243,7 +243,6 @@ fn defs_lists_all_tools() {
         "set_constraints",
         "resize_board",
         "unlock_part",
-        "assign_footprints",
         "design_board",
         "import_board",
     ] {
@@ -769,7 +768,7 @@ fn search_footprints_guides_rp2040_to_qfn_not_bga() {
 }
 
 #[test]
-fn assign_footprint_edits_the_working_draft() {
+fn assign_footprints_edits_the_working_draft() {
     let (ctx, _guard) = fixture_ctx();
     let yaml = "\
 version: 1
@@ -796,10 +795,11 @@ blocks:
     );
 
     let assigned = run_tool(
-        "assign_footprint",
+        "assign_footprints",
         serde_json::json!({
-            "reference": "R1",
-            "footprint": "Fixtures:R_0603_1608Metric",
+            "assignments": [
+                { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric" }
+            ],
         }),
         &ctx,
     )
@@ -809,12 +809,15 @@ blocks:
         serde_json::json!(true),
         "assign footprint: {assigned}"
     );
-    assert_eq!(assigned["reference"], serde_json::json!("R1"));
+    assert_eq!(assigned["count"], serde_json::json!(1));
+    let items = assigned["assigned"].as_array().expect("assigned array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["reference"], serde_json::json!("R1"));
     assert_eq!(
-        assigned["footprint"],
+        items[0]["footprint"],
         serde_json::json!("Fixtures:R_0603_1608Metric")
     );
-    assert_eq!(assigned["edit"], serde_json::json!("inserted"));
+    assert_eq!(items[0]["edit"], serde_json::json!("inserted"));
     assert_eq!(
         assigned["next"],
         serde_json::json!("apply_design(), then regenerate_board")
@@ -834,6 +837,60 @@ blocks:
     assert!(
         draft.contains("footprint: \"Fixtures:R_0603_1608Metric\""),
         "draft was not edited:\n{draft}"
+    );
+}
+
+#[test]
+fn assign_footprints_accepts_batch_assignments() {
+    let (ctx, _guard) = fixture_ctx();
+    let yaml = "\
+version: 1
+blocks:
+  main:
+    components:
+      R1:
+        part: R
+        between: [NET_A, NET_B]
+      R2:
+        part: R
+        between: [NET_A, NET_B]
+";
+    run_tool(
+        "create_design",
+        serde_json::json!({ "yaml": yaml, "overwrite": true }),
+        &ctx,
+    )
+    .unwrap();
+
+    let assigned = run_tool(
+        "assign_footprints",
+        serde_json::json!({
+            "assignments": [
+                { "reference": "R1", "footprint": "Fixtures:R_0603_1608Metric" },
+                { "reference": "R2", "footprint": "Fixtures:R_0603_1608Metric" }
+            ],
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(assigned["ok"], serde_json::json!(true), "{assigned}");
+    assert_eq!(assigned["count"], serde_json::json!(2));
+    assert_eq!(
+        assigned["next"],
+        serde_json::json!("apply_design(), then regenerate_board")
+    );
+    let items = assigned["assigned"].as_array().expect("assigned array");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["reference"], serde_json::json!("R1"));
+    assert_eq!(items[1]["reference"], serde_json::json!("R2"));
+
+    let draft = ctx.workspace().read_draft().expect("draft after batch");
+    assert_eq!(
+        draft
+            .matches("footprint: \"Fixtures:R_0603_1608Metric\"")
+            .count(),
+        2,
+        "draft was not batch-edited:\n{draft}"
     );
 }
 
@@ -864,10 +921,11 @@ fn regenerate_board_rejects_unapplied_draft_footprints() {
         "draft seeded from committed schematic: {draft}"
     );
     let assigned = run_tool(
-        "assign_footprint",
+        "assign_footprints",
         serde_json::json!({
-            "reference": "R1",
-            "footprint": "Resistor_SMD:R_0603_1608Metric",
+            "assignments": [
+                { "reference": "R1", "footprint": "Resistor_SMD:R_0603_1608Metric" }
+            ],
         }),
         &ctx,
     )
@@ -883,16 +941,17 @@ fn regenerate_board_rejects_unapplied_draft_footprints() {
         "regenerate_board should ask to apply draft footprint changes first: {out}"
     );
     assert!(
-        out["note"]
+        out["next"]
             .as_str()
             .is_some_and(|n| n.contains("apply_design()")),
         "derive note should name the required commit: {out}"
     );
+    assert_eq!(out["next_tool"], serde_json::json!("apply_design"));
 }
 
 #[test]
 #[ignore = "live KiCAD IPC: regenerate_board opens the project board through the session manager"]
-fn regenerate_board_seeds_board_from_schematic_then_assign_footprint() {
+fn regenerate_board_seeds_board_from_schematic_then_assign_footprints() {
     // Needs a real KiCAD env (lift runs kicad-cli + resolves real footprints).
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP regenerate_board: no KiCAD env");
@@ -923,22 +982,30 @@ fn regenerate_board_seeds_board_from_schematic_then_assign_footprint() {
         "R1 + C1 seeded: {seed}"
     );
 
-    // Fill any footprint the schematic symbol didn't carry, via assign_footprint
-    // (the interactive replacement for the old DSL footprint field).
-    for r in seed["missing_footprints"].as_array().unwrap() {
-        let reference = r.as_str().unwrap();
-        let fp = if reference.starts_with('R') {
-            "Resistor_SMD:R_0603_1608Metric"
-        } else {
-            "Capacitor_SMD:C_0603_1608Metric"
-        };
+    // Fill any footprint the schematic symbol didn't carry, via one batch
+    // assignment (the interactive replacement for the old DSL footprint field).
+    let assignments: Vec<_> = seed["missing_footprints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            let reference = r.as_str().unwrap();
+            let footprint = if reference.starts_with('R') {
+                "Resistor_SMD:R_0603_1608Metric"
+            } else {
+                "Capacitor_SMD:C_0603_1608Metric"
+            };
+            serde_json::json!({ "reference": reference, "footprint": footprint })
+        })
+        .collect();
+    if !assignments.is_empty() {
         let a = run_tool(
-            "assign_footprint",
-            serde_json::json!({ "reference": reference, "footprint": fp }),
+            "assign_footprints",
+            serde_json::json!({ "assignments": assignments }),
             &ctx,
         )
         .unwrap();
-        assert_eq!(a["ok"], serde_json::json!(true), "assign {reference}: {a}");
+        assert_eq!(a["ok"], serde_json::json!(true), "assign footprints: {a}");
     }
 
     // The seed board carries R1 + C1, derived (not retyped).

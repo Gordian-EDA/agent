@@ -53,7 +53,7 @@ Schematic flow:
 
 # PCB flow
 GEOMETRY IS THE ENGINEERING: placement, layers, trace width, and route shape matter.
-Footprints are schematic/YAML state. `assign_footprint` edits the draft; after any footprint assignment, call `apply_design()` before `regenerate_board`. `regenerate_board` is destructive seed/regeneration, NOT KiCAD F8 sync: it may replace an existing PCB's placement/routing. Use it for a fresh board or explicit regeneration, not incremental schematic-to-PCB merge.
+Footprints are schematic/YAML state. `assign_footprints({assignments:[...]})` edits the draft in batch; use it even for one footprint. After any footprint assignment, call `apply_design()` before `regenerate_board`. If `regenerate_board` reports `missing_footprints` or `unapplied_draft_footprints`, do not retry it unchanged: assign/apply the footprints first, then regenerate. `regenerate_board` is destructive seed/regeneration, NOT KiCAD F8 sync: it may replace an existing PCB's placement/routing. Use it for a fresh board or explicit regeneration, not incremental schematic-to-PCB merge.
 
 PCB order:
 1. `regenerate_board({bounds?, rules?})` from an ERC-clean committed schematic only when starting/regenerating the board. For USB-C/QFN boards, use fine-pitch-capable rules such as `clearance: 0.15` and `minTraceWidth: 0.15`. Put wide copper for power in `rules.net_widths` as plain numbers before routing when possible, e.g. `{GND: 0.6, V3V3: 0.5}`. For dense RP2040/USB-C boards, prefer `layers: 6` and generous bounds on the first PCB attempt.
@@ -108,7 +108,7 @@ mod tests {
         for tool in [
             "search_footprints",
             "regenerate_board",
-            "assign_footprint",
+            "assign_footprints",
             "place_board",
             "route_board",
             "autoroute",
@@ -122,11 +122,10 @@ mod tests {
         ] {
             assert!(p.contains(tool), "prompt missing the `{tool}` tool");
         }
-        // The Board-DSL authoring surface + old batch mutators are GONE.
+        // The Board-DSL authoring surface + old board mutators are GONE.
         for gone in [
             "design_board",
             "import_board",
-            "assign_footprints",
             "set_placement_hints",
             "set_constraints",
             "resize_board",

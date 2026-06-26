@@ -135,7 +135,9 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         return Ok(json!({
             "ok": false,
             "unapplied_draft_footprints": unapplied_footprints,
-            "note": "footprint fields live in circuit-YAML/schematic state; call apply_design() to write the draft, then regenerate_board again",
+            "next_tool": "apply_design",
+            "next": "call apply_design() to write the draft footprint fields, then regenerate_board again",
+            "note": "footprint fields live in circuit-YAML/schematic state; do not retry regenerate_board until the draft footprint changes are applied",
         }));
     }
     let erc = match KicadCli::new(ctx.env()).erc(ctx.sch_path()) {
@@ -249,7 +251,9 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "ok": false,
             "part_count": part_count,
             "missing_footprints": missing_footprints,
-            "note": "some schematic symbols have no footprint field — assign footprints in the circuit-YAML draft, apply_design(), then regenerate_board again",
+            "next_tool": "assign_footprints",
+            "next": "call assign_footprints({assignments:[{reference, footprint}, ...]}), then apply_design(), then regenerate_board again",
+            "note": "some schematic symbols have no footprint field — do not retry regenerate_board until footprints are assigned in the circuit-YAML draft and applied",
         }));
     }
 

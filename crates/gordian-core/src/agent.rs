@@ -1368,7 +1368,10 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 format!("score {score:.0}/10 — {n} defect(s) to fix")
             }
         }
-        "assign_footprint" => {
+        "assign_footprints" => {
+            if let Some(count) = result.get("count").and_then(Value::as_u64) {
+                return format!("{count} footprint(s) assigned");
+            }
             let reference = result
                 .get("reference")
                 .and_then(Value::as_str)

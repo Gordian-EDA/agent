@@ -18,7 +18,7 @@
 //! - [`active`] — live-session snapshot/save helpers.
 //! - [`seed`] — create/derive [`BoardSeed`] input types.
 //! - [`footprints`] — footprint discovery + assignment: `search_footprints`,
-//!   `get_footprint_info`, `assign_footprint`.
+//!   `get_footprint_info`, `assign_footprints`.
 //! - [`create`] — board construction + input parsing: `regenerate_board`,
 //!   `build_seed_board`, rules / bounds / keepout / group parsing.
 //! - [`place`] — `get_board`, IPC snapshot→`PlaceProblem`, and `place_board`.
@@ -52,7 +52,7 @@ pub(super) fn fmt_num(v: f64) -> String {
 pub use create::{build_seed_board, regenerate_board};
 pub use export::check_board;
 pub use fab::export_fab;
-pub use footprints::{assign_footprint, get_footprint_info, search_footprints};
+pub use footprints::{assign_footprints, get_footprint_info, search_footprints};
 pub use interactive::{
     autoroute, board_state, move_part, open_board, route_track, save_session_if_open, set_net_width,
 };

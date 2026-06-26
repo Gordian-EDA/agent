@@ -202,16 +202,27 @@ pub fn tool_defs() -> Vec<Tool> {
                 }),
             },
             Def {
-                name: "assign_footprint".into(),
-                description: "Set one component's footprint field in the circuit-YAML draft. After assignments, apply_design before regenerate_board."
+                name: "assign_footprints".into(),
+                description: "Set component footprint fields in the circuit-YAML draft. Batch-only: pass `assignments`. After assignments, apply_design before regenerate_board."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "reference": { "type": "string", "description": "Refdes." },
-                        "footprint": { "type": "string", "description": "Footprint id." }
+                        "assignments": {
+                            "type": "array",
+                            "description": "Batch assignments; each item has reference and footprint. Use this even for one component.",
+                            "minItems": 1,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "reference": { "type": "string", "description": "Refdes." },
+                                    "footprint": { "type": "string", "description": "Footprint id." }
+                                },
+                                "required": ["reference", "footprint"]
+                            }
+                        }
                     },
-                    "required": ["reference", "footprint"]
+                    "required": ["assignments"]
                 }),
             },
             Def {
@@ -401,7 +412,7 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "search_footprints" => crate::tools_pcb::search_footprints(input, ctx),
         "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
         "regenerate_board" => crate::tools_pcb::regenerate_board(input, ctx),
-        "assign_footprint" => crate::tools_pcb::assign_footprint(input, ctx),
+        "assign_footprints" => crate::tools_pcb::assign_footprints(input, ctx),
         "get_board" => crate::tools_pcb::get_board(ctx),
         "place_board" => crate::tools_pcb::place_board(input, ctx),
         "route_board" => crate::tools_pcb::route_board(input, ctx),

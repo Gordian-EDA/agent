@@ -1,6 +1,6 @@
 //! Footprint discovery + assignment tools: `search_footprints`,
-//! `get_footprint_info`, and `assign_footprint` (fill a part's missing footprint
-//! before placement).
+//! `get_footprint_info`, and `assign_footprints` (fill missing footprints before
+//! placement).
 
 use serde_json::{Value, json};
 
@@ -126,26 +126,38 @@ fn bbox_json(b: &geom::Rect) -> Value {
 /// treated as a completed state change and then looped on regenerate_board. It now
 /// performs the draft edit directly and returns a compact edit result, adding
 /// compile diagnostics only when the edited draft has errors or warnings.
-pub fn assign_footprint(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Value> {
-    let reference = require_str(&input, "reference")?;
-    let footprint = require_str(&input, "footprint")?;
+pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Value> {
+    let assignments = footprint_assignments(&input)?;
     let catalog = ctx.footprint_catalog()?;
-    let id = match FootprintId::parse(&footprint) {
-        Ok(id) => id,
-        Err(_) => {
-            return Ok(json!({ "error": format!("invalid footprint id `{footprint}`") }));
-        }
-    };
-    if let Err(e) = catalog.footprint(&id) {
-        if e.is_not_found() {
+    for assignment in &assignments {
+        let id = match FootprintId::parse(&assignment.footprint) {
+            Ok(id) => id,
+            Err(_) => {
+                return Ok(json!({
+                    "error": format!(
+                        "part {}: invalid footprint id `{}`",
+                        assignment.reference, assignment.footprint
+                    )
+                }));
+            }
+        };
+        if let Err(e) = catalog.footprint(&id) {
+            if e.is_not_found() {
+                return Ok(json!({
+                    "error": format!(
+                        "part {}: unknown footprint `{}`",
+                        assignment.reference, assignment.footprint
+                    ),
+                    "suggestions": catalog.suggest(&id).iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+                }));
+            }
             return Ok(json!({
-                "error": format!("unknown footprint `{footprint}`"),
-                "suggestions": catalog.suggest(&id).iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+                "error": format!(
+                    "part {}: footprint `{}` could not be read: {e}",
+                    assignment.reference, assignment.footprint
+                ),
             }));
         }
-        return Ok(json!({
-            "error": format!("footprint `{footprint}` could not be read: {e}"),
-        }));
     }
 
     let Some(draft) = ctx.workspace().read_draft() else {
@@ -153,10 +165,21 @@ pub fn assign_footprint(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Valu
             "error": "no draft exists — call read_schematic({source:\"draft\"}) (seeds a draft from the current schematic) or create_design first",
         }));
     };
-    let (edited, edit_kind) = match patch_footprint(&draft, &reference, &footprint) {
-        Ok(patched) => patched,
-        Err(msg) => return Ok(json!({ "error": msg })),
-    };
+    let mut edited = draft;
+    let mut applied = Vec::new();
+    for assignment in &assignments {
+        let (next, edit_kind) =
+            match patch_footprint(&edited, &assignment.reference, &assignment.footprint) {
+                Ok(patched) => patched,
+                Err(msg) => return Ok(json!({ "error": msg })),
+            };
+        edited = next;
+        applied.push(json!({
+            "reference": assignment.reference,
+            "footprint": assignment.footprint,
+            "edit": edit_kind,
+        }));
+    }
     ctx.workspace()
         .write_draft(&edited, current_sch_text(ctx).as_deref())?;
 
@@ -165,9 +188,8 @@ pub fn assign_footprint(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Valu
     let warnings = report.get("warnings").and_then(Value::as_u64).unwrap_or(0);
     let mut out = json!({
         "ok": errors == 0,
-        "reference": reference,
-        "footprint": footprint,
-        "edit": edit_kind,
+        "assigned": applied,
+        "count": assignments.len(),
         "next": "apply_design(), then regenerate_board",
     });
     if errors > 0 || warnings > 0 {
@@ -176,6 +198,37 @@ pub fn assign_footprint(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Valu
         out["diagnostics"] = report["diagnostics"].clone();
     }
     Ok(out)
+}
+
+struct FootprintAssignment {
+    reference: String,
+    footprint: String,
+}
+
+fn footprint_assignments(input: &Value) -> anyhow::Result<Vec<FootprintAssignment>> {
+    let Some(items) = input.get("assignments") else {
+        anyhow::bail!("missing required `assignments` array");
+    };
+    let Some(items) = items.as_array() else {
+        anyhow::bail!("assignments must be an array of {{reference, footprint}}");
+    };
+    if items.is_empty() {
+        anyhow::bail!("assignments must contain at least one item");
+    }
+    items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let reference = require_str(item, "reference")
+                .map_err(|e| anyhow::anyhow!("assignments[{idx}].reference: {e}"))?;
+            let footprint = require_str(item, "footprint")
+                .map_err(|e| anyhow::anyhow!("assignments[{idx}].footprint: {e}"))?;
+            Ok(FootprintAssignment {
+                reference,
+                footprint,
+            })
+        })
+        .collect()
 }
 
 fn patch_footprint(
