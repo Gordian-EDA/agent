@@ -44,9 +44,9 @@ pub(super) fn draw_scroll_indicator(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The running indicator that replaces the old transcript-title spinner: an
-/// animated frame, elapsed seconds, the output tokens streamed this turn, and
-/// the interrupt hint, plus a second detail row naming the active tool or review
-/// phase. Drawn only while a turn is in flight.
+/// animated frame, elapsed seconds, and the interrupt hint, plus a second detail
+/// row naming the active tool or review phase. Drawn only while a turn is in
+/// flight.
 pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
     let frame = SPINNER[app.spinner % SPINNER.len()];
     let secs = app.turn_elapsed_secs().unwrap_or(0);
@@ -69,10 +69,6 @@ pub(super) fn draw_running(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(verb, Style::default().fg(Color::Yellow)),
         Span::styled(format!(" · {secs}s"), dim),
     ];
-    let toks = app.turn_output_tokens();
-    if toks > 0 {
-        spans.push(Span::styled(format!(" · ↓{} tok", fmt_tokens(toks)), dim));
-    }
     if !gated {
         spans.push(Span::styled(" · esc to interrupt", dim));
     }
@@ -137,7 +133,7 @@ pub(super) fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(para, area);
 }
 
-/// Build the footer's left run — model identity plus the live TOKEN / COST /
+/// Build the footer's left run — model identity plus the live TOKENS / COST /
 /// CONTEXT / elapsed HUD — to fit within `avail` columns. Fields are joined by
 /// ` · ` and dropped from the tail (least essential first) until the run fits;
 /// the model anchor is ellipsized only as a last resort, matching the rest of
@@ -153,8 +149,12 @@ fn status_left(app: &App, avail: usize) -> String {
     if s.applied_count > 0 {
         fields.push(format!("{} applied", s.applied_count));
     }
-    if l.total_tokens() > 0 {
-        fields.push(format!("{} tok", fmt_tokens(l.total_tokens())));
+    if l.input_tokens() > 0 || l.output > 0 {
+        fields.push(format!(
+            "in {} / out {}",
+            fmt_tokens(l.input_tokens()),
+            fmt_tokens(l.output)
+        ));
     }
     if let Some(cost) = l.cost(&s.model) {
         fields.push(format!("${cost:.2}"));

@@ -144,9 +144,9 @@ impl Ledger {
         self.cache_read += cache_read;
     }
 
-    /// Total prompt + completion tokens billed this session.
-    pub fn total_tokens(&self) -> u64 {
-        self.input + self.output + self.cache_write + self.cache_read
+    /// Provider-reported prompt/input tokens accumulated this session.
+    pub fn input_tokens(&self) -> u64 {
+        self.input + self.cache_write + self.cache_read
     }
 
     /// Session cost in USD for `model`, or `None` when the model isn't priced.
@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(l.output, 300);
         assert_eq!(l.cache_write, 800);
         assert_eq!(l.cache_read, 1800);
-        assert_eq!(l.total_tokens(), 650 + 300 + 800 + 1800);
+        assert_eq!(l.input_tokens(), 1000 + 1050 + 1200);
     }
 
     #[test]

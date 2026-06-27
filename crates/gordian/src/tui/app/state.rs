@@ -1,6 +1,5 @@
 //! The [`App`] struct itself, its [`Status`] sidebar data, and the turn-lifecycle
-//! helpers that bracket an in-flight turn (begin/end + the elapsed/token readouts
-//! the renderer shows).
+//! helpers that bracket an in-flight turn.
 
 use std::time::{Duration, Instant};
 
@@ -106,9 +105,6 @@ pub struct App {
     /// When the current pause began, if a gate is open right now. `None` between
     /// gates; folded into `paused_total` when the gate resolves.
     pub paused_since: Option<Instant>,
-    /// `ledger.output` snapshot at turn start, so the running line can show
-    /// the output tokens streamed *this* turn ([`App::turn_output_tokens`]).
-    pub turn_output_base: u64,
     /// Tool calls started during the current turn, counted from `ToolStarted`
     /// events. Tracked here (not read from `TurnOutcome`) so the end indicator
     /// can report a count even when the turn was interrupted or errored — paths
@@ -166,7 +162,6 @@ impl App {
             turn_started: None,
             paused_total: Duration::ZERO,
             paused_since: None,
-            turn_output_base: 0,
             turn_tool_calls: 0,
             active_work: None,
             spinner: 0,
@@ -187,13 +182,12 @@ impl App {
     }
 
     /// Mark a turn (a prompt or `/compact`) as started: spin up the running
-    /// flag, the elapsed clock, the per-turn token baseline, and follow the tail.
+    /// flag, the elapsed clock, and follow the tail.
     pub(super) fn begin_turn(&mut self) {
         self.running = true;
         self.turn_started = Some(Instant::now());
         self.paused_total = Duration::ZERO;
         self.paused_since = None;
-        self.turn_output_base = self.status.ledger.output;
         self.turn_tool_calls = 0;
         self.active_work = None;
         self.scroll = 0;
@@ -240,12 +234,6 @@ impl App {
                 NoticeLevel::Plain,
                 format!("Worked for {elapsed}"),
             )),
-            TurnEndReason::IterationCap => Some(Entry::notice(
-                NoticeLevel::Warn,
-                format!(
-                    "Worked for {elapsed} — hit the per-turn step limit; send \"continue\" to resume"
-                ),
-            )),
             TurnEndReason::Interrupted => Some(Entry::notice(
                 NoticeLevel::Plain,
                 format!("Worked for {elapsed}"),
@@ -272,14 +260,6 @@ impl App {
             }
             t.elapsed().saturating_sub(paused).as_secs()
         })
-    }
-
-    /// Output tokens streamed during the current turn (for the running line).
-    pub fn turn_output_tokens(&self) -> u64 {
-        self.status
-            .ledger
-            .output
-            .saturating_sub(self.turn_output_base)
     }
 }
 

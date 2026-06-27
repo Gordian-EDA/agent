@@ -400,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn running_line_shows_streamed_output_tokens() {
+    fn running_line_hides_token_counter() {
         let mut a = app();
         for c in "go".chars() {
             a.update(Msg::Char(c));
@@ -415,8 +415,8 @@ mod tests {
         a.update(Msg::Tick);
         let text = render_to_string(&mut a, 80, 24);
         assert!(
-            text.contains("↓1.2k tok"),
-            "per-turn output tokens:\n{text}"
+            !text.contains("↓"),
+            "running line should not show a per-turn token counter:\n{text}"
         );
     }
 
@@ -546,12 +546,15 @@ mod tests {
             cache_read_tokens: 0,
         }));
         // Wide enough that every HUD field fits (narrow terminals drop fields;
-        // here we want the full token/cost/context/elapsed run).
+        // here we want the full token split/cost/context/elapsed run).
         let text = render_to_string(&mut a, 120, 24);
-        assert!(text.contains("23.4k tok"), "total tokens:\n{text}");
         assert!(
-            !text.contains("(23.0k/400)"),
-            "footer hides raw token split:\n{text}"
+            text.contains("in 23.0k / out 400"),
+            "input/output token split:\n{text}"
+        );
+        assert!(
+            !text.contains("23.4k tok"),
+            "footer should not show a single total token counter:\n{text}"
         );
         // 23000 in / 1M * $5 + 400 out / 1M * $25 = $0.115 + $0.01 = $0.12 (2dp).
         assert!(text.contains("$0.12"), "session cost:\n{text}");
@@ -580,7 +583,10 @@ mod tests {
         }));
         let text = render_to_string(&mut a, 120, 24);
         let bar = text.lines().last().expect("status row");
-        assert!(bar.contains("10.5k tok"), "total tokens still show:\n{bar}");
+        assert!(
+            bar.contains("in 10.0k / out 500"),
+            "input/output token split still shows:\n{bar}"
+        );
         assert!(!bar.contains("cached"), "cache indicator is hidden:\n{bar}");
         assert!(
             !bar.contains('—'),
@@ -769,7 +775,7 @@ mod tests {
             cache_write_tokens: 0,
             cache_read_tokens: 0,
         }));
-        // Wide: the full HUD (tokens, cost, context-left) is present.
+        // Wide: the full HUD (token split, cost, context-left) is present.
         let wide = render_to_string(&mut a, 120, 24);
         let wide_bar = wide.lines().last().expect("status row");
         assert!(
@@ -781,7 +787,7 @@ mod tests {
             "wide bar keeps cost field:\n{wide_bar}"
         );
         assert!(
-            wide_bar.contains("tok"),
+            wide_bar.contains("in 23.0k / out 400"),
             "wide bar keeps token field:\n{wide_bar}"
         );
 
