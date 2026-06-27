@@ -27,7 +27,7 @@
 //! - [`fab`] — `export_fab`: bundle a routed board into Gerbers/drill/pos/BOM.
 //! - [`render`] — `render_board`.
 //! - [`interactive`] — live IPC board editing (`open_board`, `move_parts`,
-//!   `route_track`, `set_net_width`).
+//!   `route_track`, `delete_copper`, `set_net_width`).
 
 mod active;
 mod create;
@@ -50,7 +50,9 @@ pub use create::regenerate_board;
 pub use export::check_board;
 pub use fab::export_fab;
 pub use footprints::{assign_footprints, get_footprint_info, search_footprints};
-pub use interactive::{move_parts, open_board, route_track, save_session_if_open, set_net_width};
+pub use interactive::{
+    delete_copper, move_parts, open_board, route_track, save_session_if_open, set_net_width,
+};
 pub use outline::update_board_outline;
 pub use place::{get_board, place_board};
 pub use render::render_board;

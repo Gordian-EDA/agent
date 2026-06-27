@@ -877,6 +877,7 @@ fn tool_effect(name: &str) -> ToolEffect {
         | "open_board"
         | "move_parts"
         | "route_track"
+        | "delete_copper"
         | "set_net_width"
         | "update_board_outline" => ToolEffect::Authoring,
         // Everything else reads only.
@@ -1024,6 +1025,7 @@ fn is_kicad_session_tool(name: &str) -> bool {
             | "render_board"
             | "move_parts"
             | "route_track"
+            | "delete_copper"
             | "update_board_outline"
     )
 }

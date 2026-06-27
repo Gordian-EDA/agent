@@ -205,6 +205,7 @@ fn defs_lists_all_tools() {
         "open_board",
         "move_parts",
         "route_track",
+        "delete_copper",
         "set_net_width",
         "update_board_outline",
     ];
@@ -243,6 +244,19 @@ fn defs_lists_all_tools() {
         if def.name.to_string() == "apply_design" {
             let props = schema["properties"].as_object().expect("properties object");
             assert!(props.contains_key("yaml"));
+        }
+        if def.name.to_string() == "route_track" {
+            let props = schema["properties"].as_object().expect("properties object");
+            assert!(props.contains_key("from"));
+            assert!(props.contains_key("to"));
+            assert!(props.contains_key("net"));
+            assert!(!props.contains_key("start"));
+            assert!(!props.contains_key("end"));
+        }
+        if def.name.to_string() == "delete_copper" {
+            let props = schema["properties"].as_object().expect("properties object");
+            assert!(props.contains_key("at"));
+            assert!(props.contains_key("kinds"));
         }
     }
 }

@@ -8,11 +8,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use geom::{Point2, Rect};
+use geom::{Point2, Rect, Segment};
 use serde_json::{Value, json};
 
 use kicad_ipc::{
-    FootprintMove, proto::kiapi::board::types::BoardLayer, snapshot::IpcBoardSnapshot,
+    FootprintMove,
+    proto::kiapi::{
+        board::types::{BoardLayer, PadStackShape, Track, Via as IpcVia},
+        common::types::{KiCadObjectType, Vector2},
+    },
+    snapshot::IpcBoardSnapshot,
+};
+use pcb_model::{
+    Connection, LayerRef, RoutePoint, RouteProblem, RouteSolution, Router, Trace, Via, ViaSpan,
 };
 
 use crate::AgentRuntime;
@@ -26,23 +34,6 @@ fn mm_to_nm(mm: f64) -> i64 {
     (mm * 1_000_000.0).round() as i64
 }
 
-/// Parse a copper-layer name ("F.Cu", "B.Cu", "In1.Cu", "top", "bottom").
-fn parse_copper_layer(name: &str) -> std::result::Result<BoardLayer, String> {
-    Ok(match name.to_ascii_lowercase().replace('.', "_").as_str() {
-        "f_cu" | "top" | "front" => BoardLayer::BlFCu,
-        "b_cu" | "bottom" | "back" => BoardLayer::BlBCu,
-        "in1_cu" | "in1" => BoardLayer::BlIn1Cu,
-        "in2_cu" | "in2" => BoardLayer::BlIn2Cu,
-        "in3_cu" | "in3" => BoardLayer::BlIn3Cu,
-        "in4_cu" | "in4" => BoardLayer::BlIn4Cu,
-        other => {
-            return Err(format!(
-                "unknown copper layer `{other}` (use F.Cu / B.Cu / In1.Cu …)"
-            ));
-        }
-    })
-}
-
 /// Open the project board in a live headless KiCAD for interactive editing.
 pub fn open_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
@@ -50,7 +41,7 @@ pub fn open_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(()) => {}
         Err(e) => return Ok(json!({ "error": format!("could not open the board in KiCAD: {e}") })),
     };
-    super::place::get_board(ctx)
+    super::place::get_board(json!({}), ctx)
 }
 
 /// Move one or more live-board parts in a single KiCAD IPC commit.
@@ -419,37 +410,58 @@ fn rotation_swaps_extents(from: f64, to: f64) -> bool {
     (rounded as i64).rem_euclid(2) == 1
 }
 
-/// Route a straight track segment: start `[x,y]`, end `[x,y]` (mm), width (mm),
-/// layer (F.Cu/…), optional net.
+/// Route a single live-board connection with grid-A* obstacle avoidance.
 pub fn route_track(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let start = input.get("start").and_then(|v| v.as_array());
-    let end = input.get("end").and_then(|v| v.as_array());
-    let (Some(s), Some(e)) = (start, end) else {
-        return Ok(json!({ "error": "route_track needs `start` and `end` as [x,y] mm arrays" }));
-    };
-    let coord = |a: &[Value], i: usize| a.get(i).and_then(Value::as_f64);
-    let (Some(sx), Some(sy), Some(ex), Some(ey)) =
-        (coord(s, 0), coord(s, 1), coord(e, 0), coord(e, 1))
-    else {
-        return Ok(json!({ "error": "start/end must be [x,y] numbers (mm)" }));
-    };
-    let width = input.get("width").and_then(Value::as_f64).unwrap_or(0.2);
-    let layer =
-        match parse_copper_layer(input.get("layer").and_then(Value::as_str).unwrap_or("F.Cu")) {
-            Ok(l) => l,
-            Err(err) => return Ok(json!({ "error": err })),
+    let path = ctx.pcb_path();
+    match ctx.kicad().with_session(&path, |session| {
+        let snapshot = session.kicad().board_snapshot()?;
+        let request = match parse_route_track_request(&input, &snapshot.problem) {
+            Ok(request) => request,
+            Err(err) => return Ok(Err(err)),
         };
-    let net = input.get("net").and_then(Value::as_str);
-    match ctx.kicad().with_session(&ctx.pcb_path(), |session| {
-        session.kicad().add_track(
-            (mm_to_nm(sx), mm_to_nm(sy)),
-            (mm_to_nm(ex), mm_to_nm(ey)),
-            mm_to_nm(width),
-            layer,
-            net,
-        )
+        let (problem, solution) = match manual_route_solution(&snapshot.problem, &request) {
+            Ok(route) => route,
+            Err(err) => return Ok(Err(err)),
+        };
+        session
+            .kicad()
+            .create_route_solution(&problem, &solution, &snapshot.layer_names)?;
+        Ok(Ok(route_track_output(&problem, &solution, &request)))
     }) {
-        Ok(()) => Ok(json!({ "ok": true })),
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(err)) => Ok(json!({ "error": err })),
+        Err(e) => Ok(json!({ "error": e.to_string() })),
+    }
+}
+
+/// Delete live-board track/via copper near a click point.
+pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    let path = ctx.pcb_path();
+    match ctx.kicad().with_session(&path, |session| {
+        let snapshot = session.kicad().board_snapshot()?;
+        let request = match parse_delete_copper_request(&input, snapshot.layer_names.len() as u32) {
+            Ok(request) => request,
+            Err(err) => return Ok(Err(err)),
+        };
+        let mut types = Vec::new();
+        if request.kinds.contains(&CopperKind::Track) {
+            types.push(KiCadObjectType::KotPcbTrace);
+        }
+        if request.kinds.contains(&CopperKind::Via) {
+            types.push(KiCadObjectType::KotPcbVia);
+        }
+        let packed = session.kicad().get_items(&types)?;
+        let plan = resolve_delete_copper(&request, &packed, &snapshot.layer_names);
+        if !plan.items.is_empty() {
+            session
+                .kicad()
+                .commit("delete copper", |k| k.delete_packed_items(&plan.items))?;
+            session.kicad().save()?;
+        }
+        Ok(Ok(delete_copper_output(&request, &plan)))
+    }) {
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(err)) => Ok(json!({ "error": err })),
         Err(e) => Ok(json!({ "error": e.to_string() })),
     }
 }
@@ -489,9 +501,746 @@ pub fn save_session_if_open(ctx: &AgentRuntime) -> Result<bool> {
     ctx.kicad().save_if_open().map_err(ipc_err)
 }
 
+#[derive(Debug, Clone)]
+struct RouteTrackRequest {
+    from: Point2,
+    to: Point2,
+    net: String,
+    from_layer: LayerRef,
+    to_layer: LayerRef,
+    width: f64,
+    vias: Vec<RouteViaAnchor>,
+}
+
+#[derive(Debug, Clone)]
+struct RouteViaAnchor {
+    at: Point2,
+    to_layer: LayerRef,
+}
+
+fn parse_route_track_request(
+    input: &Value,
+    problem: &RouteProblem,
+) -> std::result::Result<RouteTrackRequest, String> {
+    let ctx = "route_track";
+    if input.get("start").is_some() || input.get("end").is_some() || input.get("layer").is_some() {
+        return Err(
+            "route_track now uses `from`, `to`, `net`, `from_layer`, and `to_layer`; legacy `start`/`end`/`layer` are not accepted"
+                .to_owned(),
+        );
+    }
+    let from = parse_point(input, "from", ctx)?;
+    let to = parse_point(input, "to", ctx)?;
+    let net = input
+        .get("net")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "route_track needs non-empty string `net`".to_owned())?
+        .to_owned();
+    let from_layer = parse_route_layer_ref(
+        input
+            .get("from_layer")
+            .and_then(Value::as_str)
+            .unwrap_or("F.Cu"),
+        problem.layer_count,
+    )?;
+    let to_layer = match input.get("to_layer").and_then(Value::as_str) {
+        Some(layer) => parse_route_layer_ref(layer, problem.layer_count)?,
+        None => from_layer.clone(),
+    };
+    let width = optional_num(input, "width", ctx)?.unwrap_or_else(|| problem.net_width(&net));
+    if width <= 0.0 {
+        return Err("route_track `width` must be positive".to_owned());
+    }
+    if width + geom::EPS < problem.min_trace_width {
+        return Err(format!(
+            "route_track width {width} mm is below board minimum trace width {} mm",
+            problem.min_trace_width
+        ));
+    }
+
+    let vias = input
+        .get("vias")
+        .map(|v| {
+            let array = v
+                .as_array()
+                .ok_or_else(|| "route_track `vias` must be an array".to_owned())?;
+            array
+                .iter()
+                .enumerate()
+                .map(|(idx, via)| {
+                    let via_ctx = format!("vias[{idx}]");
+                    let at = parse_point(via, "at", &via_ctx)?;
+                    let to_layer = via
+                        .get("to_layer")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| format!("{via_ctx}: missing string `to_layer`"))
+                        .and_then(|layer| parse_route_layer_ref(layer, problem.layer_count))?;
+                    Ok(RouteViaAnchor { at, to_layer })
+                })
+                .collect::<std::result::Result<Vec<_>, String>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    Ok(RouteTrackRequest {
+        from,
+        to,
+        net,
+        from_layer,
+        to_layer,
+        width,
+        vias,
+    })
+}
+
+fn manual_route_solution(
+    base: &RouteProblem,
+    request: &RouteTrackRequest,
+) -> std::result::Result<(RouteProblem, RouteSolution), String> {
+    let mut solution = RouteSolution {
+        traces: Vec::new(),
+        vias: Vec::new(),
+    };
+    let mut current_at = request.from;
+    let mut current_layer = request.from_layer.clone();
+
+    for anchor in &request.vias {
+        if current_layer == anchor.to_layer {
+            return Err(format!(
+                "explicit via at [{}, {}] does not change layers",
+                anchor.at.x, anchor.at.y
+            ));
+        }
+        let leg = route_leg(
+            base,
+            &request.net,
+            request.width,
+            current_at,
+            current_layer.clone(),
+            anchor.at,
+            current_layer.clone(),
+        )?;
+        extend_solution(&mut solution, leg);
+        solution.vias.push(Via {
+            connection: request.net.clone(),
+            at: anchor.at,
+            diameter: base.via_diameter,
+            drill: base.via_drill,
+            span: via_span_between(&current_layer, &anchor.to_layer, base.layer_count)?,
+        });
+        current_at = anchor.at;
+        current_layer = anchor.to_layer.clone();
+    }
+
+    let leg = route_leg(
+        base,
+        &request.net,
+        request.width,
+        current_at,
+        current_layer,
+        request.to,
+        request.to_layer.clone(),
+    )?;
+    extend_solution(&mut solution, leg);
+
+    let problem = validation_problem(base, request);
+    validate_manual_solution(&problem, &solution)?;
+    Ok((problem, solution))
+}
+
+fn route_leg(
+    base: &RouteProblem,
+    net: &str,
+    width: f64,
+    from: Point2,
+    from_layer: LayerRef,
+    to: Point2,
+    to_layer: LayerRef,
+) -> std::result::Result<RouteSolution, String> {
+    let exact_problem = single_connection_problem(
+        base,
+        net,
+        width,
+        from,
+        from_layer.clone(),
+        to,
+        to_layer.clone(),
+    );
+    let grid_from = snapped_route_point(&exact_problem, from);
+    let grid_to = snapped_route_point(&exact_problem, to);
+    let grid_problem =
+        single_connection_problem(base, net, width, grid_from, from_layer, grid_to, to_layer);
+    let router = grid_astar::router::GridAStarRouter;
+    let result = router.route(&grid_problem);
+    if !result.failed.is_empty() {
+        let reasons = result
+            .failed
+            .iter()
+            .map(|f| f.reason.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!("route_track could not route `{net}`: {reasons}"));
+    }
+    let mut solution = result.solution;
+    add_manual_terminal_stubs(&exact_problem, &mut solution);
+    validate_manual_solution(&exact_problem, &solution)?;
+    Ok(solution)
+}
+
+fn snapped_route_point(problem: &RouteProblem, point: Point2) -> Point2 {
+    let pitch = grid_astar::grid::grid_pitch(problem);
+    Point2::new(
+        route_cell_center(problem.bounds.min_x, point.x, pitch),
+        route_cell_center(problem.bounds.min_y, point.y, pitch),
+    )
+}
+
+fn single_connection_problem(
+    base: &RouteProblem,
+    net: &str,
+    width: f64,
+    from: Point2,
+    from_layer: LayerRef,
+    to: Point2,
+    to_layer: LayerRef,
+) -> RouteProblem {
+    let mut problem = base.clone();
+    problem.connections = vec![Connection {
+        name: net.to_owned(),
+        points_to_connect: vec![
+            RoutePoint {
+                x: from.x,
+                y: from.y,
+                layer: from_layer,
+            },
+            RoutePoint {
+                x: to.x,
+                y: to.y,
+                layer: to_layer,
+            },
+        ],
+    }];
+    problem.net_widths.insert(net.to_owned(), width);
+    problem.escape_layers.clear();
+    problem
+}
+
+fn validation_problem(base: &RouteProblem, request: &RouteTrackRequest) -> RouteProblem {
+    single_connection_problem(
+        base,
+        &request.net,
+        request.width,
+        request.from,
+        request.from_layer.clone(),
+        request.to,
+        request.to_layer.clone(),
+    )
+}
+
+fn extend_solution(dst: &mut RouteSolution, src: RouteSolution) {
+    dst.traces.extend(src.traces);
+    dst.vias.extend(src.vias);
+}
+
+fn add_manual_terminal_stubs(problem: &RouteProblem, solution: &mut RouteSolution) {
+    let pitch = grid_astar::grid::grid_pitch(problem);
+    for conn in &problem.connections {
+        let width = problem.net_width(&conn.name);
+        for point in &conn.points_to_connect {
+            let exact = Point2::new(point.x, point.y);
+            let center = Point2::new(
+                route_cell_center(problem.bounds.min_x, point.x, pitch),
+                route_cell_center(problem.bounds.min_y, point.y, pitch),
+            );
+            if exact.near_eq(center, geom::EPS) {
+                continue;
+            }
+            solution.traces.push(Trace {
+                connection: conn.name.clone(),
+                layer: point.layer.clone(),
+                width,
+                path: vec![exact, center],
+            });
+        }
+    }
+}
+
+fn route_cell_center(min: f64, value: f64, pitch: f64) -> f64 {
+    let idx = ((value - min) / pitch).floor().max(0.0);
+    min + (idx + 0.5) * pitch
+}
+
+fn validate_manual_solution(
+    problem: &RouteProblem,
+    solution: &RouteSolution,
+) -> std::result::Result<(), String> {
+    let violations = drc_lint::lint::lint(problem, solution);
+    if violations.is_empty() {
+        return Ok(());
+    }
+    let first = violations
+        .first()
+        .and_then(|v| serde_json::to_string(v).ok())
+        .unwrap_or_else(|| "unknown violation".to_owned());
+    Err(format!(
+        "route_track validation failed with {} DRC/connectivity violation(s); first: {first}",
+        violations.len()
+    ))
+}
+
+fn via_span_between(
+    from: &LayerRef,
+    to: &LayerRef,
+    layer_count: u32,
+) -> std::result::Result<ViaSpan, String> {
+    let from = from
+        .index(layer_count)
+        .ok_or_else(|| format!("invalid via start layer `{}`", from.0))?;
+    let to = to
+        .index(layer_count)
+        .ok_or_else(|| format!("invalid via target layer `{}`", to.0))?;
+    if from == to {
+        return Err("via start and target layers are the same".to_owned());
+    }
+    let (lo, hi) = (from.min(to), from.max(to));
+    if lo == 0 && hi + 1 == layer_count.max(1) {
+        Ok(ViaSpan::Through)
+    } else {
+        Ok(ViaSpan::Partial {
+            from,
+            to,
+            micro: false,
+        })
+    }
+}
+
+fn route_track_output(
+    problem: &RouteProblem,
+    solution: &RouteSolution,
+    request: &RouteTrackRequest,
+) -> Value {
+    let metrics = solution.metrics();
+    json!({
+        "ok": true,
+        "router": "grid-astar",
+        "net": request.net,
+        "from_layer": route_layer_name(&request.from_layer, problem.layer_count),
+        "to_layer": route_layer_name(&request.to_layer, problem.layer_count),
+        "width": request.width,
+        "tracks": solution.traces.len(),
+        "vias": solution.vias.len(),
+        "metrics": {
+            "wirelength": metrics.wirelength,
+            "vias": metrics.via_count,
+            "traces": metrics.trace_count,
+        },
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CopperKind {
+    Track,
+    Via,
+}
+
+#[derive(Debug, Clone)]
+struct DeleteCopperRequest {
+    at: Point2,
+    radius: f64,
+    kinds: BTreeSet<CopperKind>,
+    net: Option<String>,
+    layer: Option<u32>,
+    all: bool,
+}
+
+#[derive(Debug, Clone)]
+struct DeleteCopperPlan {
+    items: Vec<prost_types::Any>,
+    hits: Vec<CopperHit>,
+}
+
+#[derive(Debug, Clone)]
+struct CopperHit {
+    kind: CopperKind,
+    distance: f64,
+    net: Option<String>,
+    layer: Option<String>,
+    layers: Vec<String>,
+    at: Option<Point2>,
+    start: Option<Point2>,
+    end: Option<Point2>,
+}
+
+fn parse_delete_copper_request(
+    input: &Value,
+    layer_count: u32,
+) -> std::result::Result<DeleteCopperRequest, String> {
+    let ctx = "delete_copper";
+    let at = parse_point(input, "at", ctx)?;
+    let radius = optional_num(input, "radius", ctx)?.unwrap_or(0.4);
+    if radius < 0.0 {
+        return Err("delete_copper `radius` must be non-negative".to_owned());
+    }
+    let kinds = parse_copper_kinds(input)?;
+    let net = input
+        .get("net")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let layer = input
+        .get("layer")
+        .and_then(Value::as_str)
+        .map(|layer| {
+            parse_route_layer_ref(layer, layer_count).and_then(|layer_ref| {
+                layer_ref
+                    .index(layer_count)
+                    .ok_or_else(|| format!("unknown copper layer `{layer}`"))
+            })
+        })
+        .transpose()?;
+    let all = input.get("all").and_then(Value::as_bool).unwrap_or(false);
+    Ok(DeleteCopperRequest {
+        at,
+        radius,
+        kinds,
+        net,
+        layer,
+        all,
+    })
+}
+
+fn parse_copper_kinds(input: &Value) -> std::result::Result<BTreeSet<CopperKind>, String> {
+    let Some(kinds) = input.get("kinds") else {
+        return Ok([CopperKind::Track, CopperKind::Via].into_iter().collect());
+    };
+    let array = kinds
+        .as_array()
+        .ok_or_else(|| "delete_copper `kinds` must be an array".to_owned())?;
+    if array.is_empty() {
+        return Err("delete_copper `kinds` must not be empty".to_owned());
+    }
+    let mut out = BTreeSet::new();
+    for kind in array {
+        match kind.as_str() {
+            Some("track") => {
+                out.insert(CopperKind::Track);
+            }
+            Some("via") => {
+                out.insert(CopperKind::Via);
+            }
+            Some(other) => {
+                return Err(format!(
+                    "delete_copper unknown kind `{other}` (use track/via)"
+                ));
+            }
+            None => return Err("delete_copper `kinds` entries must be strings".to_owned()),
+        }
+    }
+    Ok(out)
+}
+
+fn resolve_delete_copper(
+    request: &DeleteCopperRequest,
+    packed: &[prost_types::Any],
+    layer_names: &[String],
+) -> DeleteCopperPlan {
+    let mut matches: Vec<(prost_types::Any, CopperHit)> = packed
+        .iter()
+        .filter_map(|any| copper_hit(any, request, layer_names).map(|hit| (any.clone(), hit)))
+        .filter(|(_, hit)| hit.distance <= request.radius + geom::EPS)
+        .collect();
+    matches.sort_by(|a, b| {
+        a.1.distance
+            .total_cmp(&b.1.distance)
+            .then_with(|| a.1.kind.cmp(&b.1.kind))
+    });
+    if !request.all {
+        matches.truncate(1);
+    }
+    let (items, hits): (Vec<_>, Vec<_>) = matches.into_iter().unzip();
+    DeleteCopperPlan { items, hits }
+}
+
+fn copper_hit(
+    any: &prost_types::Any,
+    request: &DeleteCopperRequest,
+    layer_names: &[String],
+) -> Option<CopperHit> {
+    if request.kinds.contains(&CopperKind::Track)
+        && let Ok(track) = any.to_msg::<Track>()
+    {
+        return track_hit(&track, request, layer_names);
+    }
+    if request.kinds.contains(&CopperKind::Via)
+        && let Ok(via) = any.to_msg::<IpcVia>()
+    {
+        return via_hit(&via, request, layer_names);
+    }
+    None
+}
+
+fn track_hit(
+    track: &Track,
+    request: &DeleteCopperRequest,
+    layer_names: &[String],
+) -> Option<CopperHit> {
+    let (Some(start), Some(end)) = (&track.start, &track.end) else {
+        return None;
+    };
+    let net = track
+        .net
+        .as_ref()
+        .map(|n| n.name.clone())
+        .filter(|n| !n.is_empty());
+    if let Some(filter) = &request.net
+        && net.as_deref() != Some(filter.as_str())
+    {
+        return None;
+    }
+    let layer_idx = board_layer_index(track.layer, layer_names)?;
+    if let Some(filter) = request.layer
+        && filter != layer_idx
+    {
+        return None;
+    }
+    let start = point_from_ipc(start);
+    let end = point_from_ipc(end);
+    let width = nm_to_mm(track.width.as_ref().map(|w| w.value_nm).unwrap_or(0));
+    let distance = (Segment::new(start, end).dist_to_point(request.at) - width / 2.0).max(0.0);
+    Some(CopperHit {
+        kind: CopperKind::Track,
+        distance,
+        net,
+        layer: Some(layer_name_from_index(layer_idx, layer_names)),
+        layers: Vec::new(),
+        at: None,
+        start: Some(start),
+        end: Some(end),
+    })
+}
+
+fn via_hit(
+    via: &IpcVia,
+    request: &DeleteCopperRequest,
+    layer_names: &[String],
+) -> Option<CopperHit> {
+    let position = via.position.as_ref()?;
+    let net = via
+        .net
+        .as_ref()
+        .map(|n| n.name.clone())
+        .filter(|n| !n.is_empty());
+    if let Some(filter) = &request.net
+        && net.as_deref() != Some(filter.as_str())
+    {
+        return None;
+    }
+    let indices = via_layer_indices(via, layer_names);
+    if let Some(filter) = request.layer
+        && !indices.contains(&filter)
+    {
+        return None;
+    }
+    let at = point_from_ipc(position);
+    let diameter = via_diameter(via);
+    let distance = (at.dist(request.at) - diameter / 2.0).max(0.0);
+    Some(CopperHit {
+        kind: CopperKind::Via,
+        distance,
+        net,
+        layer: None,
+        layers: indices
+            .iter()
+            .map(|idx| layer_name_from_index(*idx, layer_names))
+            .collect(),
+        at: Some(at),
+        start: None,
+        end: None,
+    })
+}
+
+fn delete_copper_output(request: &DeleteCopperRequest, plan: &DeleteCopperPlan) -> Value {
+    let matches: Vec<Value> = plan.hits.iter().map(copper_hit_json).collect();
+    json!({
+        "ok": true,
+        "deleted": plan.items.len(),
+        "all": request.all,
+        "matches": matches,
+    })
+}
+
+fn copper_hit_json(hit: &CopperHit) -> Value {
+    let kind = match hit.kind {
+        CopperKind::Track => "track",
+        CopperKind::Via => "via",
+    };
+    json!({
+        "kind": kind,
+        "distance": hit.distance,
+        "net": hit.net,
+        "layer": hit.layer,
+        "layers": hit.layers,
+        "at": hit.at.map(|p| json!([p.x, p.y])),
+        "start": hit.start.map(|p| json!([p.x, p.y])),
+        "end": hit.end.map(|p| json!([p.x, p.y])),
+    })
+}
+
+fn parse_route_layer_ref(name: &str, layer_count: u32) -> std::result::Result<LayerRef, String> {
+    let canonical = canonical_layer_name(name).ok_or_else(|| {
+        format!("unknown copper layer `{name}` (use F.Cu / B.Cu / In1.Cu / top / bottom)")
+    })?;
+    let (idx, _) = LayerRef::resolve(&canonical, layer_count).ok_or_else(|| {
+        format!(
+            "copper layer `{name}` is not available on a {}-layer board",
+            layer_count.max(1)
+        )
+    })?;
+    Ok(layer_ref_from_index(idx, layer_count))
+}
+
+fn canonical_layer_name(name: &str) -> Option<String> {
+    let raw = name.trim();
+    let norm = raw.to_ascii_lowercase().replace(['.', '-'], "_");
+    match norm.as_str() {
+        "f_cu" | "top" | "front" => return Some("F.Cu".to_owned()),
+        "b_cu" | "bottom" | "back" => return Some("B.Cu".to_owned()),
+        _ => {}
+    }
+    if let Some(num) = norm
+        .strip_prefix("inner")
+        .and_then(|s| s.parse::<u32>().ok())
+    {
+        return Some(format!("inner{num}"));
+    }
+    let inner = norm
+        .strip_prefix("in")?
+        .strip_suffix("_cu")
+        .unwrap_or_else(|| {
+            // `in1` has no suffix; `in1_cu` was handled by strip_suffix above.
+            norm.strip_prefix("in").unwrap_or("")
+        });
+    inner.parse::<u32>().ok().map(|idx| format!("In{idx}.Cu"))
+}
+
+fn layer_ref_from_index(idx: u32, layer_count: u32) -> LayerRef {
+    if idx == 0 {
+        LayerRef::top()
+    } else if idx + 1 == layer_count.max(1) {
+        LayerRef::bottom()
+    } else {
+        LayerRef(format!("inner{idx}"))
+    }
+}
+
+fn route_layer_name(layer: &LayerRef, layer_count: u32) -> String {
+    layer
+        .index(layer_count)
+        .map(|idx| layer_name_from_index(idx, &copper_layer_names(layer_count)))
+        .unwrap_or_else(|| layer.0.clone())
+}
+
+fn copper_layer_names(layer_count: u32) -> Vec<String> {
+    let count = layer_count.max(2);
+    let mut names = Vec::with_capacity(count as usize);
+    names.push("F.Cu".to_owned());
+    for idx in 1..count.saturating_sub(1) {
+        names.push(format!("In{idx}.Cu"));
+    }
+    names.push("B.Cu".to_owned());
+    names
+}
+
+fn board_layer_index(layer: i32, layer_names: &[String]) -> Option<u32> {
+    let name = board_layer_name(layer);
+    layer_names
+        .iter()
+        .position(|n| n == &name)
+        .map(|i| i as u32)
+}
+
+fn board_layer_name(layer: i32) -> String {
+    match BoardLayer::try_from(layer).ok() {
+        Some(BoardLayer::BlFCu) => "F.Cu".to_owned(),
+        Some(BoardLayer::BlBCu) => "B.Cu".to_owned(),
+        Some(inner)
+            if (BoardLayer::BlIn1Cu as i32..=BoardLayer::BlIn30Cu as i32)
+                .contains(&(inner as i32)) =>
+        {
+            format!("In{}.Cu", inner as i32 - BoardLayer::BlFCu as i32)
+        }
+        _ => format!("layer:{layer}"),
+    }
+}
+
+fn layer_name_from_index(idx: u32, layer_names: &[String]) -> String {
+    layer_names.get(idx as usize).cloned().unwrap_or_else(|| {
+        if idx == 0 {
+            "F.Cu".to_owned()
+        } else {
+            format!("In{idx}.Cu")
+        }
+    })
+}
+
+fn via_layer_indices(via: &IpcVia, layer_names: &[String]) -> Vec<u32> {
+    let Some(stack) = &via.pad_stack else {
+        return (0..layer_names.len().max(2) as u32).collect();
+    };
+    let Some(drill) = &stack.drill else {
+        return (0..layer_names.len().max(2) as u32).collect();
+    };
+    let Some(start) = board_layer_index(drill.start_layer, layer_names) else {
+        return (0..layer_names.len().max(2) as u32).collect();
+    };
+    let Some(end) = board_layer_index(drill.end_layer, layer_names) else {
+        return (0..layer_names.len().max(2) as u32).collect();
+    };
+    let (lo, hi) = (start.min(end), start.max(end));
+    (lo..=hi).collect()
+}
+
+fn via_diameter(via: &IpcVia) -> f64 {
+    via.pad_stack
+        .as_ref()
+        .and_then(|s| {
+            s.copper_layers
+                .iter()
+                .find(|l| {
+                    matches!(
+                        PadStackShape::try_from(l.shape),
+                        Ok(PadStackShape::PssCircle
+                            | PadStackShape::PssRectangle
+                            | PadStackShape::PssOval
+                            | PadStackShape::PssRoundrect)
+                    )
+                })
+                .or_else(|| s.copper_layers.iter().find(|l| l.size.is_some()))
+        })
+        .and_then(|l| l.size.as_ref())
+        .map(|s| nm_to_mm(s.x_nm.max(s.y_nm)))
+        .unwrap_or(0.6)
+}
+
+fn point_from_ipc(v: &Vector2) -> Point2 {
+    Point2::new(nm_to_mm(v.x_nm), nm_to_mm(v.y_nm))
+}
+
+fn nm_to_mm(nm: i64) -> f64 {
+    nm as f64 / 1_000_000.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kicad_ipc::proto::kiapi::{
+        board::types::{
+            DrillProperties, DrillShape, Net, NetCode, PadStack, PadStackLayer, PadStackType,
+            ViaType,
+        },
+        common::types::{Distance, Kiid},
+    };
 
     fn fixture_board() -> MoveBoard {
         MoveBoard {
@@ -687,5 +1436,285 @@ mod tests {
                 .unwrap_err()
                 .contains("needs a movement mode")
         );
+    }
+
+    fn route_problem(obstacles: Vec<pcb_model::Obstacle>) -> RouteProblem {
+        RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles,
+            connections: vec![],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 10.0,
+                max_y: 5.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        }
+    }
+
+    fn obstacle(
+        center: Point2,
+        width: f64,
+        height: f64,
+        layers: Vec<LayerRef>,
+    ) -> pcb_model::Obstacle {
+        pcb_model::Obstacle {
+            kind: "keepout".to_owned(),
+            layers,
+            center,
+            width,
+            height,
+            connected_to: vec!["OTHER".to_owned()],
+        }
+    }
+
+    #[test]
+    fn manual_route_avoids_foreign_obstacle() {
+        let problem = route_problem(vec![obstacle(
+            Point2::new(5.0, 1.0),
+            0.8,
+            2.0,
+            vec![LayerRef::top(), LayerRef::bottom()],
+        )]);
+        let request = parse_route_track_request(
+            &json!({
+                "from": [1.0, 1.0],
+                "to": [9.0, 1.0],
+                "net": "SIG",
+                "from_layer": "F.Cu",
+                "width": 0.2
+            }),
+            &problem,
+        )
+        .unwrap();
+
+        let (routed_problem, solution) = manual_route_solution(&problem, &request).unwrap();
+
+        assert!(
+            drc_lint::lint::lint(&routed_problem, &solution).is_empty(),
+            "manual route must validate cleanly"
+        );
+        assert!(
+            solution.metrics().wirelength > 8.0,
+            "route should detour around the obstacle: {:?}",
+            solution.metrics()
+        );
+    }
+
+    #[test]
+    fn manual_route_places_explicit_via_anchor() {
+        let problem = route_problem(vec![]);
+        let request = parse_route_track_request(
+            &json!({
+                "from": [1.0, 1.0],
+                "to": [9.0, 1.0],
+                "net": "SIG",
+                "from_layer": "F.Cu",
+                "to_layer": "B.Cu",
+                "vias": [{ "at": [5.0, 1.0], "to_layer": "B.Cu" }]
+            }),
+            &problem,
+        )
+        .unwrap();
+
+        let (routed_problem, solution) = manual_route_solution(&problem, &request).unwrap();
+
+        assert!(
+            drc_lint::lint::lint(&routed_problem, &solution).is_empty(),
+            "explicit-via route must validate cleanly"
+        );
+        let via = solution
+            .vias
+            .iter()
+            .find(|via| via.at.near_eq(Point2::new(5.0, 1.0), 1e-9))
+            .expect("explicit via at requested coordinate");
+        assert_eq!(via.span, ViaSpan::Through);
+    }
+
+    #[test]
+    fn manual_route_reports_unroutable_without_solution() {
+        let problem = route_problem(vec![obstacle(
+            Point2::new(5.0, 2.5),
+            0.8,
+            5.0,
+            vec![LayerRef::top(), LayerRef::bottom()],
+        )]);
+        let request = parse_route_track_request(
+            &json!({
+                "from": [1.0, 2.0],
+                "to": [9.0, 2.0],
+                "net": "SIG"
+            }),
+            &problem,
+        )
+        .unwrap();
+
+        let err = manual_route_solution(&problem, &request).unwrap_err();
+
+        assert!(err.contains("could not route"), "{err}");
+    }
+
+    #[test]
+    fn route_track_rejects_legacy_start_end_layer_input() {
+        let problem = route_problem(vec![]);
+
+        let err = parse_route_track_request(
+            &json!({
+                "start": [1.0, 1.0],
+                "end": [9.0, 1.0],
+                "layer": "F.Cu",
+                "net": "SIG"
+            }),
+            &problem,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("legacy `start`/`end`/`layer`"), "{err}");
+    }
+
+    fn ipc_point(x: f64, y: f64) -> Vector2 {
+        Vector2 {
+            x_nm: mm_to_nm(x),
+            y_nm: mm_to_nm(y),
+        }
+    }
+
+    fn ipc_net(name: &str) -> Net {
+        Net {
+            code: Some(NetCode { value: 1 }),
+            name: name.to_owned(),
+        }
+    }
+
+    fn packed_track(
+        id: &str,
+        net: &str,
+        layer: BoardLayer,
+        start: Point2,
+        end: Point2,
+    ) -> prost_types::Any {
+        prost_types::Any::from_msg(&Track {
+            id: Some(Kiid {
+                value: id.to_owned(),
+            }),
+            start: Some(ipc_point(start.x, start.y)),
+            end: Some(ipc_point(end.x, end.y)),
+            width: Some(Distance {
+                value_nm: mm_to_nm(0.2),
+            }),
+            layer: layer as i32,
+            net: Some(ipc_net(net)),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn packed_via(id: &str, net: &str, at: Point2) -> prost_types::Any {
+        prost_types::Any::from_msg(&IpcVia {
+            id: Some(Kiid {
+                value: id.to_owned(),
+            }),
+            position: Some(ipc_point(at.x, at.y)),
+            pad_stack: Some(PadStack {
+                r#type: PadStackType::PstNormal as i32,
+                layers: vec![BoardLayer::BlFCu as i32, BoardLayer::BlBCu as i32],
+                drill: Some(DrillProperties {
+                    start_layer: BoardLayer::BlFCu as i32,
+                    end_layer: BoardLayer::BlBCu as i32,
+                    diameter: Some(ipc_point(0.3, 0.3)),
+                    shape: DrillShape::DsCircle as i32,
+                }),
+                copper_layers: vec![PadStackLayer {
+                    layer: BoardLayer::BlFCu as i32,
+                    shape: PadStackShape::PssCircle as i32,
+                    size: Some(ipc_point(0.6, 0.6)),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            net: Some(ipc_net(net)),
+            r#type: ViaType::VtThrough as i32,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn delete_copper_picks_nearest_unless_all_is_set() {
+        let layer_names = vec!["F.Cu".to_owned(), "B.Cu".to_owned()];
+        let items = vec![
+            packed_track(
+                "track-1",
+                "SIG",
+                BoardLayer::BlFCu,
+                Point2::new(0.0, 0.0),
+                Point2::new(10.0, 0.0),
+            ),
+            packed_via("via-1", "SIG", Point2::new(5.0, 1.0)),
+        ];
+        let nearest =
+            parse_delete_copper_request(&json!({ "at": [5.0, 0.05], "radius": 1.0 }), 2).unwrap();
+
+        let plan = resolve_delete_copper(&nearest, &items, &layer_names);
+
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.hits[0].kind, CopperKind::Track);
+
+        let all = parse_delete_copper_request(
+            &json!({ "at": [5.0, 0.05], "radius": 1.0, "all": true }),
+            2,
+        )
+        .unwrap();
+        let plan = resolve_delete_copper(&all, &items, &layer_names);
+
+        assert_eq!(plan.items.len(), 2);
+    }
+
+    #[test]
+    fn delete_copper_honors_kind_net_and_layer_filters() {
+        let layer_names = vec!["F.Cu".to_owned(), "B.Cu".to_owned()];
+        let items = vec![
+            packed_track(
+                "track-1",
+                "SIG",
+                BoardLayer::BlFCu,
+                Point2::new(0.0, 0.0),
+                Point2::new(10.0, 0.0),
+            ),
+            packed_track(
+                "track-2",
+                "OTHER",
+                BoardLayer::BlBCu,
+                Point2::new(0.0, 0.0),
+                Point2::new(10.0, 0.0),
+            ),
+            packed_via("via-1", "SIG", Point2::new(5.0, 0.0)),
+        ];
+        let request = parse_delete_copper_request(
+            &json!({
+                "at": [5.0, 0.0],
+                "radius": 0.2,
+                "kinds": ["track"],
+                "net": "SIG",
+                "layer": "F.Cu",
+                "all": true
+            }),
+            2,
+        )
+        .unwrap();
+
+        let plan = resolve_delete_copper(&request, &items, &layer_names);
+
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.hits[0].kind, CopperKind::Track);
+        assert_eq!(plan.hits[0].net.as_deref(), Some("SIG"));
+        assert_eq!(plan.hits[0].layer.as_deref(), Some("F.Cu"));
     }
 }

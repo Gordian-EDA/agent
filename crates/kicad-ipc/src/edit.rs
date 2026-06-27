@@ -86,39 +86,6 @@ impl Kicad {
         self.commit("place board", |k| k.update_items(updates))
     }
 
-    /// Route a straight track segment on `layer` with `width_nm`, optionally on a
-    /// named net (matched by name). One commit.
-    pub fn add_track(
-        &mut self,
-        start_nm: (i64, i64),
-        end_nm: (i64, i64),
-        width_nm: i64,
-        layer: BoardLayer,
-        net_name: Option<&str>,
-    ) -> Result<(), Error> {
-        let net = match net_name {
-            Some(name) => self.net_list()?.into_iter().find(|n| n.name == name),
-            None => None,
-        };
-        let track = Track {
-            start: Some(Vector2 {
-                x_nm: start_nm.0,
-                y_nm: start_nm.1,
-            }),
-            end: Some(Vector2 {
-                x_nm: end_nm.0,
-                y_nm: end_nm.1,
-            }),
-            width: Some(Distance { value_nm: width_nm }),
-            layer: layer as i32,
-            net,
-            ..Default::default()
-        };
-        self.commit("add track", |k| {
-            k.create_items(vec![prost_types::Any::from_msg(&track)?])
-        })
-    }
-
     /// Delete every track segment and via on the board, then save it.
     pub fn delete_tracks_and_vias(&mut self) -> Result<(usize, usize), Error> {
         let mut items = self.get_items(&[KiCadObjectType::KotPcbTrace])?;

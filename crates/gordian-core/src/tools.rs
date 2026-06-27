@@ -277,18 +277,75 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "route_track".into(),
-                description: "Add one straight live-board track: start/end [x,y] mm, width, layer, optional net. Opens the project board if needed."
+                description: "Route one live-board connection with grid-A* obstacle avoidance, optional layer change, and explicit via anchors."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "start": { "type": "array", "items": {"type":"number"}, "description": "[x, y] mm." },
-                        "end": { "type": "array", "items": {"type":"number"}, "description": "[x, y] mm." },
-                        "width": { "type": "number", "description": "mm, default 0.2." },
-                        "layer": { "type": "string", "description": "F.Cu/B.Cu/etc." },
-                        "net": { "type": "string", "description": "Net name." }
+                        "from": {
+                            "type": "array",
+                            "items": {"type":"number"},
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "description": "Start [x, y] in mm."
+                        },
+                        "to": {
+                            "type": "array",
+                            "items": {"type":"number"},
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "description": "End [x, y] in mm."
+                        },
+                        "net": { "type": "string", "description": "Net name to route." },
+                        "from_layer": { "type": "string", "description": "F.Cu/B.Cu/In1.Cu/top/bottom; default F.Cu." },
+                        "to_layer": { "type": "string", "description": "F.Cu/B.Cu/In1.Cu/top/bottom; default from_layer." },
+                        "width": { "type": "number", "description": "Track width in mm; default board net width." },
+                        "vias": {
+                            "type": "array",
+                            "description": "Explicit via anchors. Each via is placed at `at` and changes from the current layer to `to_layer`.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "at": {
+                                        "type": "array",
+                                        "items": {"type":"number"},
+                                        "minItems": 2,
+                                        "maxItems": 2
+                                    },
+                                    "to_layer": { "type": "string" }
+                                },
+                                "required": ["at", "to_layer"]
+                            }
+                        }
                     },
-                    "required": ["start", "end"]
+                    "required": ["from", "to", "net"]
+                }),
+            },
+            Def {
+                name: "delete_copper".into(),
+                description: "Delete live-board track/via copper near a click point, with optional kind/net/layer filters."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "at": {
+                            "type": "array",
+                            "items": {"type":"number"},
+                            "minItems": 2,
+                            "maxItems": 2,
+                            "description": "Click point [x, y] in mm."
+                        },
+                        "radius": { "type": "number", "description": "Search radius in mm; default 0.4." },
+                        "kinds": {
+                            "type": "array",
+                            "items": { "type": "string", "enum": ["track", "via"] },
+                            "description": "Copper kinds to consider; default both."
+                        },
+                        "net": { "type": "string", "description": "Optional net name filter." },
+                        "layer": { "type": "string", "description": "Optional layer filter for tracks or vias spanning that layer." },
+                        "all": { "type": "boolean", "description": "Delete all matches in radius instead of only the nearest." }
+                    },
+                    "required": ["at"]
                 }),
             },
             Def {
@@ -386,9 +443,21 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "get_board".into(),
-                description: "Return live board parts/summary/state."
+                description: "Return live board parts/summary/state, optionally including filtered copper geometry."
                     .into(),
-                input_schema: json!({ "type": "object", "properties": {} }),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "include_copper": { "type": "boolean", "description": "Include track/via geometry for inspection." },
+                        "kinds": {
+                            "type": "array",
+                            "items": { "type": "string", "enum": ["track", "via"] },
+                            "description": "Copper kinds to include when include_copper is true; default both."
+                        },
+                        "net": { "type": "string", "description": "Optional copper net filter." },
+                        "layer": { "type": "string", "description": "Optional copper layer filter." }
+                    }
+                }),
             },
             Def {
                 name: "place_board".into(),
@@ -455,7 +524,7 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "get_footprint_info" => crate::tools_pcb::get_footprint_info(input, ctx),
         "regenerate_board" => crate::tools_pcb::regenerate_board(input, ctx),
         "assign_footprints" => crate::tools_pcb::assign_footprints(input, ctx),
-        "get_board" => crate::tools_pcb::get_board(ctx),
+        "get_board" => crate::tools_pcb::get_board(input, ctx),
         "place_board" => crate::tools_pcb::place_board(input, ctx),
         "route_board" => crate::tools_pcb::route_board(input, ctx),
         "check_board" => crate::tools_pcb::check_board(input, ctx),
@@ -463,6 +532,7 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "open_board" => crate::tools_pcb::open_board(input, ctx),
         "move_parts" => crate::tools_pcb::move_parts(input, ctx),
         "route_track" => crate::tools_pcb::route_track(input, ctx),
+        "delete_copper" => crate::tools_pcb::delete_copper(input, ctx),
         "set_net_width" => crate::tools_pcb::set_net_width(input, ctx),
         "update_board_outline" => crate::tools_pcb::update_board_outline(input, ctx),
         "render_board" => crate::tools_pcb::render_board(input, ctx),

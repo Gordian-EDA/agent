@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 
 use kicad_footprint::{Footprint, FootprintId, FootprintPad, PadTechnology};
 use kicad_ipc::{FootprintMove, snapshot::IpcBoardSnapshot};
-use pcb_model::LayerRef;
 use pcb_model::place::PartPad;
+use pcb_model::{LayerRef, ViaSpan};
 use pcb_place::placement::{LockedAt, Part, PlaceProblem, Placement, PlacementHints, Rect};
 
 use crate::AgentRuntime;
@@ -119,7 +119,7 @@ fn pad_aabb(pad: &FootprintPad) -> Rect {
 
 // ── get_board ────────────────────────────────────────────────────────────────
 
-pub fn get_board(ctx: &AgentRuntime) -> Result<Value> {
+pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let board = match super::active::board_problem(ctx) {
         Ok(board) => board,
         Err(err) => return Ok(json!({ "error": err })),
@@ -148,7 +148,7 @@ pub fn get_board(ctx: &AgentRuntime) -> Result<Value> {
             })
         })
         .collect();
-    let board_json = json!({
+    let mut board_json = json!({
         "bounds": board.imported.bounds,
         "outline": board.problem.outline,
         "rules": {
@@ -161,6 +161,23 @@ pub fn get_board(ctx: &AgentRuntime) -> Result<Value> {
         },
         "parts": parts,
     });
+    let include_copper = input
+        .get("include_copper")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if include_copper {
+        if let Some(layer) = input.get("layer").and_then(Value::as_str)
+            && layer_filter_index(layer, board.problem.layer_count).is_none()
+        {
+            return Ok(json!({
+                "error": format!(
+                    "unknown copper layer `{layer}` for a {}-layer board",
+                    board.problem.layer_count
+                )
+            }));
+        }
+        board_json["copper"] = copper_json(&board, &input);
+    }
 
     Ok(json!({
         "board": board_json,
@@ -173,6 +190,138 @@ pub fn get_board(ctx: &AgentRuntime) -> Result<Value> {
             "routed": routed,
         },
     }))
+}
+
+fn copper_json(board: &IpcBoardSnapshot, input: &Value) -> Value {
+    let net_filter = input
+        .get("net")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let layer_filter = input
+        .get("layer")
+        .and_then(Value::as_str)
+        .and_then(|layer| layer_filter_index(layer, board.problem.layer_count));
+    let include_tracks = copper_kind_enabled(input, "track");
+    let include_vias = copper_kind_enabled(input, "via");
+
+    let tracks: Vec<Value> = if include_tracks {
+        board
+            .copper
+            .traces
+            .iter()
+            .filter(|trace| net_filter.is_none_or(|net| trace.connection == net))
+            .filter(|trace| {
+                layer_filter
+                    .is_none_or(|layer| trace.layer.index(board.problem.layer_count) == Some(layer))
+            })
+            .map(|trace| {
+                json!({
+                    "net": trace.connection,
+                    "layer": layer_name(&trace.layer, board.problem.layer_count),
+                    "width": trace.width,
+                    "path": trace.path.iter().map(|p| json!([p.x, p.y])).collect::<Vec<_>>(),
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let vias: Vec<Value> = if include_vias {
+        board
+            .copper
+            .vias
+            .iter()
+            .filter(|via| net_filter.is_none_or(|net| via.connection == net))
+            .filter(|via| {
+                layer_filter.is_none_or(|layer| {
+                    via_span_indices(&via.span, board.problem.layer_count).contains(&layer)
+                })
+            })
+            .map(|via| {
+                let layers: Vec<Value> = via_span_indices(&via.span, board.problem.layer_count)
+                    .into_iter()
+                    .map(|idx| json!(layer_name_from_index(idx, board.problem.layer_count)))
+                    .collect();
+                json!({
+                    "net": via.connection,
+                    "at": [via.at.x, via.at.y],
+                    "diameter": via.diameter,
+                    "drill": via.drill,
+                    "layers": layers,
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    json!({
+        "tracks": tracks,
+        "vias": vias,
+        "track_count": tracks.len(),
+        "via_count": vias.len(),
+    })
+}
+
+fn copper_kind_enabled(input: &Value, kind: &str) -> bool {
+    input
+        .get("kinds")
+        .and_then(Value::as_array)
+        .map(|kinds| kinds.iter().any(|v| v.as_str() == Some(kind)))
+        .unwrap_or(true)
+}
+
+fn layer_filter_index(layer: &str, layer_count: u32) -> Option<u32> {
+    canonical_layer_name(layer)
+        .as_deref()
+        .and_then(|layer| LayerRef::resolve(layer, layer_count))
+        .map(|(idx, _)| idx)
+}
+
+fn canonical_layer_name(name: &str) -> Option<String> {
+    let norm = name.trim().to_ascii_lowercase().replace(['.', '-'], "_");
+    match norm.as_str() {
+        "f_cu" | "top" | "front" => return Some("F.Cu".to_owned()),
+        "b_cu" | "bottom" | "back" => return Some("B.Cu".to_owned()),
+        _ => {}
+    }
+    if let Some(num) = norm
+        .strip_prefix("inner")
+        .and_then(|s| s.parse::<u32>().ok())
+    {
+        return Some(format!("inner{num}"));
+    }
+    let rest = norm.strip_prefix("in")?;
+    let num = rest.strip_suffix("_cu").unwrap_or(rest);
+    num.parse::<u32>().ok().map(|idx| format!("In{idx}.Cu"))
+}
+
+fn layer_name(layer: &LayerRef, layer_count: u32) -> String {
+    layer
+        .index(layer_count)
+        .map(|idx| layer_name_from_index(idx, layer_count))
+        .unwrap_or_else(|| layer.0.clone())
+}
+
+fn layer_name_from_index(idx: u32, layer_count: u32) -> String {
+    if idx == 0 {
+        "F.Cu".to_owned()
+    } else if idx + 1 == layer_count.max(1) {
+        "B.Cu".to_owned()
+    } else {
+        format!("In{idx}.Cu")
+    }
+}
+
+fn via_span_indices(span: &ViaSpan, layer_count: u32) -> Vec<u32> {
+    match *span {
+        ViaSpan::Through => (0..layer_count.max(1)).collect(),
+        ViaSpan::Partial { from, to, .. } => {
+            let (lo, hi) = (from.min(to), from.max(to));
+            (lo..=hi).filter(|idx| *idx < layer_count.max(1)).collect()
+        }
+    }
 }
 
 fn snapshot_net_pin_counts(board: &IpcBoardSnapshot) -> BTreeMap<String, usize> {
@@ -497,6 +646,8 @@ mod tests {
     use super::*;
     use geom::Point2;
     use kicad_footprint::PadTechnology;
+    use kicad_ipc::snapshot::{ImportedBoard, IpcBoardSnapshot};
+    use pcb_model::{RouteProblem, RouteSolution, Trace, Via};
 
     #[test]
     fn footprint_pad_rotation_affects_route_obstacle_size() {
@@ -518,5 +669,78 @@ mod tests {
         assert!((got.width - 1.2).abs() < 1e-9);
         assert!((got.height - 2.5).abs() < 1e-9);
         assert_eq!(got.net.as_deref(), Some("GND"));
+    }
+
+    #[test]
+    fn copper_json_filters_tracks_and_vias_for_inspection() {
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 10.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+        let board = IpcBoardSnapshot {
+            imported: ImportedBoard {
+                layer_count: 2,
+                bounds: problem.bounds,
+                parts: vec![],
+            },
+            problem,
+            copper: RouteSolution {
+                traces: vec![
+                    Trace {
+                        connection: "SIG".to_owned(),
+                        layer: LayerRef::top(),
+                        width: 0.2,
+                        path: vec![Point2::new(1.0, 1.0), Point2::new(5.0, 1.0)],
+                    },
+                    Trace {
+                        connection: "GND".to_owned(),
+                        layer: LayerRef::bottom(),
+                        width: 0.4,
+                        path: vec![Point2::new(1.0, 2.0), Point2::new(5.0, 2.0)],
+                    },
+                ],
+                vias: vec![Via {
+                    connection: "SIG".to_owned(),
+                    at: Point2::new(5.0, 1.0),
+                    diameter: 0.6,
+                    drill: 0.3,
+                    span: ViaSpan::Through,
+                }],
+            },
+            net_codes: Default::default(),
+            layer_names: vec!["F.Cu".to_owned(), "B.Cu".to_owned()],
+        };
+
+        let out = copper_json(
+            &board,
+            &json!({ "include_copper": true, "net": "SIG", "layer": "F.Cu" }),
+        );
+
+        assert_eq!(out["track_count"], json!(1));
+        assert_eq!(out["via_count"], json!(1));
+        assert_eq!(out["tracks"][0]["net"], json!("SIG"));
+        assert_eq!(out["tracks"][0]["layer"], json!("F.Cu"));
+        assert_eq!(out["vias"][0]["net"], json!("SIG"));
+
+        let tracks_only = copper_json(
+            &board,
+            &json!({ "include_copper": true, "kinds": ["track"] }),
+        );
+        assert_eq!(tracks_only["track_count"], json!(2));
+        assert_eq!(tracks_only["via_count"], json!(0));
     }
 }

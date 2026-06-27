@@ -61,7 +61,7 @@ PCB order:
 3. `route_board()`.
 4. `check_board()`.
 5. `export_fab()` only after DRC passes.
-6. Use `open_board`, `get_board`, `update_board_outline`, `move_parts`, `route_track`, `set_net_width`, and `render_board` only for deliberate live refinements. For placement refinements, prefer `get_board` → `move_parts` → `route_board` → inspect/check → repeat. For "board too large" tasks, call `update_board_outline({fit_to_geometry:true, margin: ...})` to shrink/center Edge.Cuts around the existing design. Rerunning `route_board` replaces all existing tracks/vias with a fresh autoroute from the current KiCAD IPC board state.
+6. Use `open_board`, `get_board`, `update_board_outline`, `move_parts`, `route_track`, `delete_copper`, `set_net_width`, and `render_board` only for deliberate live refinements. For placement refinements, prefer `get_board` → `move_parts` → `route_board` → inspect/check → repeat. For "board too large" tasks, call `update_board_outline({fit_to_geometry:true, margin: ...})` to shrink/center Edge.Cuts around the existing design. Rerunning `route_board` replaces all existing tracks/vias with a fresh autoroute from the current KiCAD IPC board state.
 
 Hard rules:
 - NEVER guess a footprint lib_id; use `search_footprints`.
@@ -113,6 +113,7 @@ mod tests {
             "get_board",
             "move_parts",
             "route_track",
+            "delete_copper",
             "set_net_width",
             "update_board_outline",
             "render_board",
