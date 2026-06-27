@@ -1,22 +1,21 @@
 //! Composed single-sheet commit — the validated answer to the single-sheet density
-//! ceiling: each functional block is laid out INDEPENDENTLY (8-9 each), then the blocks
+//! ceiling: each authored functional block is laid out INDEPENDENTLY, then the blocks
 //! are tiled onto ONE `.kicad_sch` as labeled bounding-box regions. No hierarchy, no
 //! sub-sheet files, no root nav page: cross-block nets connect via GLOBAL LABELS only
 //! (matching names auto-join on a single sheet, so no wire ever crosses a block border).
 //!
 //! Per-block independent layout is the RULE here, not a dense-only special case.
-//! [`refine_blocks`] first normalizes the agent's blocks into uniform-sized SHEET GROUPS
-//! (split over-crammed blocks, merge tiny fragments), then [`compose_single_sheet`] runs a
-//! SEPARATE placement pass per group (each in its own coordinate space), shelf-packs the group
-//! regions onto one sheet with margins so they never touch, translates each group's
-//! geometry to its tile, and frames each with a graphic rectangle + a name label. The page
-//! is enlarged to fit; global labels mean a large sheet still has no long wires.
+//! [`refine_blocks`] may merge tiny fragments, then [`compose_single_sheet`] runs a SEPARATE
+//! placement pass per group (each in its own coordinate space), shelf-packs the group regions
+//! onto one sheet with margins so they never touch, translates each group's geometry to its tile,
+//! and frames each with a graphic rectangle + a name label. The page is enlarged to fit; global
+//! labels mean a large sheet still has no long wires.
 
 use circuit_lang::model::{Block, Design, PinTarget};
 use indexmap::IndexMap;
 use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::SchematicPlacementEngine;
@@ -55,8 +54,6 @@ pub fn sanitize(name: &str) -> String {
         .collect()
 }
 
-use geom::ParentForest;
-
 /// The non-GND nets a block touches (component- and unit-level pins). A net shared by ≥2
 /// blocks is a cross-block PORT; GND/VSS are excluded (every sheet carries them, so they'd
 /// drown out the signal coupling that drives the merge target).
@@ -86,148 +83,25 @@ fn block_nets(b: &Block) -> HashSet<String> {
 /// One sheet group from [`refine_blocks`]: a name (the sub-sheet / file stem) and the member
 /// blocks (each a `(block_name, Block)`) to lay out TOGETHER on that sheet. A single-block
 /// group → one sub-sheet; a multi-block group is emitted as a sub-design (Tier-B keeps the
-/// members disjoint). Carrying the `Block` bodies means the split partition is computed ONCE
-/// here — callers never re-derive it.
+/// members disjoint).
 pub type SheetGroup = (String, Vec<(String, Block)>);
 
-/// SPLIT a single block along its CONNECTED COMPONENTS (rail-excluded graph) into effective
-/// blocks, the shared primitive behind [`refine_blocks`]. Returns `(name, Block)` pairs:
-/// ≤ SPLIT_MAX parts (or one tightly-coupled component) → the block unchanged (`[(name, b)]`);
-/// else → `ceil(parts/TARGET)` bin-packed fragments named `{bname}_{g}`.
+/// Normalize the agent's authored blocks into SHEET GROUPS — the single source of truth
+/// for per-block independent layout. The only refinement is:
 ///
-/// "Coupled" = sharing a LOW-degree (deg ≤ `RAIL_DEG`) point-to-point signal net; high-degree
-/// rail/bus nets (VCC/GND/VM/…) are excluded, so independent sub-circuits fall into separate
-/// components and split at a near-zero signal cut, while a half-bridge sharing a high-degree
-/// rail stays intact.
-fn split_block(bname: &str, block: &Block) -> Vec<(String, Block)> {
-    const SPLIT_MAX: usize = 10;
-    const TARGET: usize = 6;
-    const RAIL_DEG: usize = 4;
-    if block.components.len() <= SPLIT_MAX {
-        return vec![(bname.to_string(), block.clone())];
-    }
-    let refs: Vec<String> = block.components.keys().cloned().collect();
-    // net -> indices of parts on it (any net, rail or signal).
-    let mut net_refs: HashMap<String, Vec<usize>> = HashMap::new();
-    for (i, rd) in refs.iter().enumerate() {
-        let c = &block.components[rd];
-        let mut nets = HashSet::new();
-        for t in c.pins.values() {
-            if let PinTarget::Net(n) = t {
-                nets.insert(n.clone());
-            }
-        }
-        for u in c.units.values() {
-            for t in u.values() {
-                if let PinTarget::Net(n) = t {
-                    nets.insert(n.clone());
-                }
-            }
-        }
-        for n in nets {
-            net_refs.entry(n).or_default().push(i);
-        }
-    }
-    // Union parts that share a LOW-degree (point-to-point signal) net; skip rails/buses.
-    let mut parent: Vec<usize> = (0..refs.len()).collect();
-    let mut uf = ParentForest::new(&mut parent);
-    for ids in net_refs.values() {
-        if ids.len() > RAIL_DEG {
-            continue;
-        }
-        for w in ids.windows(2) {
-            uf.union_to(w[0], w[1]);
-        }
-    }
-    let mut comps: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for i in 0..refs.len() {
-        let r = uf.find(i);
-        comps.entry(r).or_default().push(i);
-    }
-    let comp_list: Vec<Vec<usize>> = comps
-        .into_values()
-        .flat_map(|component| {
-            if component.len() <= TARGET {
-                vec![component]
-            } else {
-                component
-                    .chunks(TARGET)
-                    .map(|chunk| chunk.to_vec())
-                    .collect::<Vec<_>>()
-            }
-        })
-        .collect();
-    if comp_list.len() < 2 {
-        return vec![(bname.to_string(), block.clone())]; // one tightly-coupled component — don't split
-    }
-    // Bin-pack components into ceil(parts/TARGET) groups, largest component to the smallest group.
-    let ngroups = block
-        .components
-        .len()
-        .div_ceil(TARGET)
-        .clamp(2, comp_list.len());
-    let mut order: Vec<usize> = (0..comp_list.len()).collect();
-    order.sort_by_key(|&ci| std::cmp::Reverse(comp_list[ci].len()));
-    let mut groups_idx: Vec<Vec<usize>> = vec![Vec::new(); ngroups];
-    let mut sizes = vec![0usize; ngroups];
-    for &ci in &order {
-        let g = (0..ngroups).min_by_key(|&g| sizes[g]).unwrap();
-        groups_idx[g].extend(&comp_list[ci]);
-        sizes[g] += comp_list[ci].len();
-    }
-    println!(
-        "  [split] block '{bname}' ({} parts, {} signal-components) -> {ngroups} sheets",
-        block.components.len(),
-        comp_list.len()
-    );
-    let mut out = Vec::new();
-    let mut g = 0;
-    for ris in &groups_idx {
-        if ris.is_empty() {
-            continue;
-        }
-        g += 1;
-        let mut sub = block.clone();
-        sub.components = IndexMap::new();
-        for &ri in ris {
-            let rd = &refs[ri];
-            sub.components
-                .insert(rd.clone(), block.components[rd].clone());
-        }
-        out.push((format!("{bname}_{g}"), sub));
-    }
-    out
-}
-
-/// Normalize the agent's blocks into uniform-sized SHEET GROUPS — the single source of truth
-/// for per-block independent layout. Each [`SheetGroup`] carries the actual member blocks, so
-/// the split partition is computed exactly once. Two refinements, both connectivity-based and
-/// deterministic (the agent over/under-partitions despite the ~6-10 parts/block prompt):
-///
-/// - **SPLIT** (see `split_block`): any block with > 16 parts bisects along its rail-excluded
-///   connected components into ~11-part fragments. A single tightly-coupled component is left
-///   intact, so half-bridge / one-MCU motifs never split.
 /// - **MERGE** any block with < `MERGE_MIN` parts into the block it shares the most non-GND
 ///   nets with, UNLESS it is PORT-RICH (≥5 cross-block nets — a real breakout/header sheet
 ///   that reads cleanly on its own, e.g. an SWD/GPIO pinout). Only the smallest blocks move.
 pub fn refine_blocks(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
     const MERGE_MIN: usize = 4;
 
-    // ── SPLIT ── into the effective (post-split) blocks, keyed by name, in deterministic order.
+    // ── COLLECT ── authored non-empty blocks, keyed by name, in deterministic order.
     let mut eff: IndexMap<String, Block> = IndexMap::new();
-    let mut split_fragments: HashSet<String> = HashSet::new();
     for (bname, block) in blocks {
         if block.components.is_empty() {
             continue;
         }
-        let split = split_block(bname, block);
-        let was_split = split.len() > 1;
-        for (mname, frag) in split {
-            if was_split {
-                split_fragments.insert(mname.clone());
-            }
-            eff.insert(mname, frag);
-        }
+        eff.insert(bname.clone(), block.clone());
     }
 
     // ── MERGE ── fold each tiny, non-port-rich block into its strongest neighbour.
@@ -253,9 +127,6 @@ pub fn refine_blocks(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
     };
     let mut merge_into: HashMap<String, String> = HashMap::new();
     for n in &bnames {
-        if split_fragments.contains(n) {
-            continue;
-        }
         if bsize(n) >= MERGE_MIN || port_rich(n) {
             continue;
         }
@@ -270,7 +141,7 @@ pub fn refine_blocks(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
     }
 
     // ── ASSEMBLE ── sheet groups keyed by surviving block, members carrying their Block body.
-    // Preserve the (split) block order; merged blocks fold into their target's group.
+    // Preserve authored block order; merged blocks fold into their target's group.
     let mut groups: IndexMap<String, Vec<String>> = IndexMap::new();
     for n in &bnames {
         if !merge_into.contains_key(n) {
@@ -295,7 +166,7 @@ pub fn refine_blocks(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
 }
 
 /// Emit a multi-block `Design` as ONE composed `.kicad_sch` under `out_dir` (file
-/// `root.kicad_sch`). Refines the blocks into uniform sheet GROUPS ([`refine_blocks`]), runs
+/// `root.kicad_sch`). Refines the authored blocks into sheet GROUPS ([`refine_blocks`]), runs
 /// a SEPARATE placement pass per group (each in its own coordinate space, as a TYPED writer), then
 /// hands the group writers to the engine's `compose_writers`, which tiles the group regions
 /// onto a single enlarged page (translating each writer's items in mm) and frames each with a
@@ -307,7 +178,7 @@ pub fn compose_single_sheet(
     env: &KicadEnv,
     design: &Design,
     out_dir: &Path,
-    _engine: SchematicPlacementEngine,
+    engine: SchematicPlacementEngine,
 ) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(out_dir)?;
     // SAFETY: process-wide flag read by the engine to opt each group into route-aware
@@ -328,11 +199,7 @@ pub fn compose_single_sheet(
         // Lay out each group INDEPENDENTLY and keep its TYPED writer (not a rendered
         // string): the engine composer translates each group's items to its tile in mm
         // and folds them into one sheet — no string-level geometry math here.
-        // Multi-block composition runs several independent emits in one apply.
-        // The route-aware annealer can dominate a live agent turn even on small
-        // connector/power groups, while the greedy placer remains deterministic
-        // and fast enough for repeated e2e repair loops.
-        let placer = crate::tools::schematic_placement_engine(SchematicPlacementEngine::Greedy);
+        let placer = crate::tools::schematic_placement_engine(engine);
         eprintln!("  [emit] group '{gname}' with {}", placer.name());
         let w = sch_floorplan::floorplan::emit_writer(env, &sub, &ir, placer)
             .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
@@ -398,4 +265,36 @@ pub fn emit_and_check(
         Err(_) => (usize::MAX, 0),
     };
     Ok((root, e, w))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use circuit_lang::model::{Component, PinTarget};
+
+    #[test]
+    fn refine_blocks_preserves_large_authored_blocks() {
+        let mut block = Block::default();
+        for i in 1..=12 {
+            let mut c = Component {
+                part: "Device:R".to_owned(),
+                ..Component::default()
+            };
+            c.pins
+                .insert("1".to_owned(), PinTarget::Net(format!("N{i}")));
+            c.pins
+                .insert("2".to_owned(), PinTarget::Net(format!("N{}", i + 1)));
+            block.components.insert(format!("R{i}"), c);
+        }
+
+        let mut blocks = IndexMap::new();
+        blocks.insert("main".to_owned(), block);
+
+        let groups = refine_blocks(&blocks);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "main");
+        assert_eq!(groups[0].1.len(), 1);
+        assert_eq!(groups[0].1[0].0, "main");
+        assert_eq!(groups[0].1[0].1.components.len(), 12);
+    }
 }

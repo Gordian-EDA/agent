@@ -227,34 +227,57 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "open_board".into(),
-                description: "Open the project .kicad_pcb in headless KiCAD for live IPC edits; returns board_state."
+                description: "Open the project .kicad_pcb in headless KiCAD for live IPC edits; returns the same rich state as get_board."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
-                name: "board_state".into(),
-                description: "Read live board refs/positions, track count, and nets. Requires open_board."
-                    .into(),
-                input_schema: json!({ "type": "object", "properties": {} }),
-            },
-            Def {
-                name: "move_part".into(),
-                description: "Move a live-board part to x/y mm, optional rotation. Requires open_board."
+                name: "move_parts".into(),
+                description: "Batch move live-board footprints in one commit. Supports absolute `to`, relative `by`, `near` another footprint, board `edge`, offsets, and rotation."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "reference": { "type": "string", "description": "Refdes." },
-                        "x": { "type": "number", "description": "mm." },
-                        "y": { "type": "number", "description": "mm." },
-                        "rotation": { "type": "number", "description": "Degrees." }
+                        "moves": {
+                            "type": "array",
+                            "description": "Sequential footprint moves. Each move requires reference and may use one movement mode plus optional rotation/horizontal_offset/vertical_offset.",
+                            "minItems": 1,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "reference": { "type": "string", "description": "Refdes." },
+                                    "to": {
+                                        "type": "array",
+                                        "description": "Absolute [x, y] footprint position in mm.",
+                                        "items": { "type": "number" },
+                                        "minItems": 2,
+                                        "maxItems": 2
+                                    },
+                                    "by": {
+                                        "type": "array",
+                                        "description": "Nudge [dx, dy] from current position in mm.",
+                                        "items": { "type": "number" },
+                                        "minItems": 2,
+                                        "maxItems": 2
+                                    },
+                                    "near": { "type": "string", "description": "Reference of target footprint for relative placement." },
+                                    "side": { "type": "string", "enum": ["left", "right", "above", "below"] },
+                                    "edge": { "type": "string", "enum": ["left", "right", "top", "bottom"] },
+                                    "gap": { "type": "number", "description": "Gap in mm for near/edge placement." },
+                                    "rotation": { "type": "number", "description": "Absolute rotation in degrees." },
+                                    "horizontal_offset": { "type": "number", "description": "Post-placement mm shift; positive right." },
+                                    "vertical_offset": { "type": "number", "description": "Post-placement mm shift; positive down." }
+                                },
+                                "required": ["reference"]
+                            }
+                        }
                     },
-                    "required": ["reference", "x", "y"]
+                    "required": ["moves"]
                 }),
             },
             Def {
                 name: "route_track".into(),
-                description: "Add one straight live-board track: start/end [x,y] mm, width, layer, optional net. Requires open_board."
+                description: "Add one straight live-board track: start/end [x,y] mm, width, layer, optional net. Opens the project board if needed."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -334,9 +357,9 @@ pub fn tool_defs() -> Vec<Tool> {
                         },
                         "rules": {
                             "type": "object",
-                            "description": "{layers, net_widths, clearance, min_trace_width, via_diameter, via_drill, pours}. net_widths is {GND: 0.6, V3V3: 0.5} in mm. pours is [{net:'GND', layer:'bottom'}] on top/bottom/innerN signal layers; on 6+ layers omitted pours default to GND/V3V3 power pours when those nets exist.",
+                            "description": "{layer_count, net_widths, clearance, min_trace_width, via_diameter, via_drill, pours}. net_widths is {GND: 0.6, V3V3: 0.5} in mm. pours is [{net:'GND', layer:'bottom'}] on top/bottom/innerN signal layers; on 6+ layer boards omitted pours default to GND/V3V3 power pours when those nets exist.",
                             "properties": {
-                                "layers": { "type": "integer", "enum": [2, 4, 6, 8] },
+                                "layer_count": { "type": "integer", "enum": [2, 4, 6, 8] },
                                 "clearance": { "type": "number" },
                                 "min_trace_width": { "type": "number" },
                                 "via_diameter": { "type": "number" },
@@ -438,8 +461,7 @@ pub fn run_tool(name: &str, input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "check_board" => crate::tools_pcb::check_board(input, ctx),
         "export_fab" => crate::tools_pcb::export_fab(input, ctx),
         "open_board" => crate::tools_pcb::open_board(input, ctx),
-        "board_state" => crate::tools_pcb::board_state(ctx),
-        "move_part" => crate::tools_pcb::move_part(input, ctx),
+        "move_parts" => crate::tools_pcb::move_parts(input, ctx),
         "route_track" => crate::tools_pcb::route_track(input, ctx),
         "set_net_width" => crate::tools_pcb::set_net_width(input, ctx),
         "update_board_outline" => crate::tools_pcb::update_board_outline(input, ctx),
@@ -724,13 +746,11 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .values()
         .filter(|b| !b.components.is_empty())
         .count();
-    let composed_layout = n_blocks >= 2 || needs_fast_schematic_placer(&design);
+    let composed_layout = n_blocks >= 2;
 
-    // Multi-block and complex single-block commits use the composed-sheet path
-    // below, where each refined group is laid out independently. Running those
-    // designs through the single-sheet placer first is wasted work and can time
-    // out on realistic MCU boards. For preview, compile + diff are enough to
-    // gate approval; commit does the actual composed layout.
+    // Multi-block commits use the composed-sheet path below, where each authored
+    // block group is laid out independently. For preview, compile + diff are enough
+    // to gate approval; commit does the actual composed layout.
     let single_sheet_emit = if composed_layout {
         None
     } else {
@@ -740,10 +760,7 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 ctx.env(),
                 &design,
                 &ir,
-                schematic_placement_engine_for_design(
-                    ctx.config().engines.schematic_placer,
-                    &design,
-                ),
+                schematic_placement_engine(SchematicPlacementEngine::Anneal),
             )
             .context("rendering schematic")?,
         )
@@ -784,13 +801,11 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
     // Commit path: write, then ERC.
     // ANY multi-block design ships as ONE COMPOSED sheet: each functional block is laid out
-    // independently (8-9 each), then the block regions are tiled onto a single enlarged page
-    // as labeled bounding boxes — per-block independent layout is the RULE, not a dense-only
-    // special case. `multisheet::refine_blocks` first normalizes the blocks (split
-    // over-crammed, merge tiny) so even a 2-block design lays out per-block with no
-    // cross-border global SA; cross-block nets join via matching global labels on the one
-    // sheet. Only a single-block design takes the plain single-sheet emit. The composed
-    // .kicad_sch is written at ctx.sch_path(); downstream render/ERC operate on it.
+    // independently, then the block regions are tiled onto a single enlarged page as labeled
+    // bounding boxes. Cross-block nets join via matching global labels on the one sheet.
+    // Single-block designs take the plain single-sheet emit; the agent prompt is responsible
+    // for authoring large circuits as multiple blocks instead of relying on automatic splits.
+    // The composed .kicad_sch is written at ctx.sch_path(); downstream render/ERC operate on it.
     if composed_layout {
         let dir = ctx
             .sch_path()
@@ -800,7 +815,7 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             ctx.env(),
             &design,
             dir,
-            ctx.config().engines.schematic_placer,
+            SchematicPlacementEngine::Anneal,
         )
         .context("composing single-sheet schematic")?;
         if root != ctx.sch_path() {
@@ -854,45 +869,6 @@ pub(crate) fn schematic_placement_engine(
         SchematicPlacementEngine::Anneal => Box::new(anneal_place::Anneal),
         SchematicPlacementEngine::Greedy => Box::new(greedy_place::Greedy),
     }
-}
-
-pub(crate) fn schematic_placement_engine_for_design(
-    engine: SchematicPlacementEngine,
-    design: &Design,
-) -> Box<dyn sch_floorplan::contract::PlacementEngine> {
-    if engine == SchematicPlacementEngine::Anneal && needs_fast_schematic_placer(design) {
-        return Box::new(greedy_place::Greedy);
-    }
-    schematic_placement_engine(engine)
-}
-
-fn needs_fast_schematic_placer(design: &Design) -> bool {
-    let (components, pins) = design_complexity(design);
-    components >= 10 || pins >= 60
-}
-
-fn design_complexity(design: &Design) -> (usize, usize) {
-    let components = design
-        .blocks
-        .values()
-        .map(|block| block.components.len())
-        .sum();
-    let pins = design
-        .blocks
-        .values()
-        .flat_map(|block| block.components.values())
-        .map(component_pin_count)
-        .sum();
-    (components, pins)
-}
-
-fn component_pin_count(component: &Component) -> usize {
-    component.pins.len()
-        + component
-            .units
-            .values()
-            .map(indexmap::IndexMap::len)
-            .sum::<usize>()
 }
 
 /// A per-refdes signature used to detect a *changed* component across a re-apply.

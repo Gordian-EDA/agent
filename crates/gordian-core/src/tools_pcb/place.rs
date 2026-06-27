@@ -13,8 +13,6 @@ use pcb_place::placement::{LockedAt, Part, PlaceProblem, Placement, PlacementHin
 
 use crate::AgentRuntime;
 
-use super::seed::BoardSeed;
-
 fn part_from_footprint_layers(
     footprint: &Footprint,
     reference: &str,
@@ -155,11 +153,11 @@ pub fn get_board(ctx: &AgentRuntime) -> Result<Value> {
         "outline": board.problem.outline,
         "rules": {
             "clearance": board.problem.clearance,
-            "minTraceWidth": board.problem.min_trace_width,
-            "viaDiameter": board.problem.via_diameter,
-            "viaDrill": board.problem.via_drill,
-            "layerCount": board.problem.layer_count,
-            "netWidths": board.problem.net_widths,
+            "min_trace_width": board.problem.min_trace_width,
+            "via_diameter": board.problem.via_diameter,
+            "via_drill": board.problem.via_drill,
+            "layer_count": board.problem.layer_count,
+            "net_widths": board.problem.net_widths,
         },
         "parts": parts,
     });
@@ -305,10 +303,6 @@ fn is_mounting_hole(footprint: &str) -> bool {
 }
 
 pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    if let Some(seed) = read_board_seed(ctx) {
-        return Ok(place_seed_board(ctx, &seed));
-    }
-
     let board = match super::active::board_problem(ctx) {
         Ok(board) => board,
         Err(live_err) => return Ok(json!({ "error": live_err })),
@@ -360,7 +354,7 @@ pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // Run the placement PIPELINE — structured fan-out fast-path → optimize fallback.
     // The stages, the $NO_UNIFIED override, and the legality fallback all live in (and
     // are documented on) the single visible entry pcb_place::place_board. The agent
-    // overrides any of this with the interactive geometry tools (move_part/route_track).
+    // overrides any of this with the interactive geometry tools (move_parts/route_track).
     let result = pcb_place::placement::place_board(&problem, &hints);
 
     if result.legal {
@@ -412,9 +406,9 @@ pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
                     "target": ic_ref,
                     "members": cap_refs,
                     "note": format!(
-                        "{ic_ref} has {} decoupling caps the placer scattered. For a tidy ring, \
-                         add a `place.groups` entry to the DSL — {{<name>: {{members: [<the caps>], \
-                         surround: {ic_ref}}}}} — then apply_design, regenerate_board, and place_board.",
+                        "{ic_ref} has {} decoupling caps the placer scattered. Render the board \
+                         and, if the cluster is still poor, use `move_parts` for deliberate live \
+                         refinement rather than regenerating unchanged.",
                         caps.len()
                     ),
                 }));
@@ -485,230 +479,6 @@ pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         out["hint_suggestions"] = Value::Array(hint_suggestions);
     }
     Ok(out)
-}
-
-fn read_board_seed(ctx: &AgentRuntime) -> Option<BoardSeed> {
-    let text = std::fs::read_to_string(super::create::board_seed_path(ctx)).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-fn place_seed_board(ctx: &AgentRuntime, seed: &BoardSeed) -> Value {
-    let problem = match debug_place_problem_from_seed(seed, ctx) {
-        Ok(problem) => problem,
-        Err(msg) => return json!({ "error": msg }),
-    };
-    let hints = placement_hints_for_seed(seed);
-    let result = pcb_place::placement::place_board(&problem, &hints);
-    if result.legal {
-        if let Err(msg) = persist_placements(ctx, &result.placements) {
-            return json!({ "error": msg });
-        }
-        let moves: Vec<FootprintMove> = result
-            .placements
-            .iter()
-            .map(|p| FootprintMove {
-                reference: p.reference.clone(),
-                x_nm: (p.at.x * 1_000_000.0).round() as i64,
-                y_nm: (p.at.y * 1_000_000.0).round() as i64,
-                rotation_deg: Some(p.rotation),
-            })
-            .collect();
-        if let Err(msg) = write_placement_to_board_file(ctx, &moves) {
-            return json!({ "error": msg });
-        }
-    }
-    let positions: Vec<Value> = result.placements.iter().map(placement_json).collect();
-    json!({
-        "legal": result.legal,
-        "hpwl": result.report.hpwl,
-        "overlaps_resolved": result.report.overlaps_resolved,
-        "out_of_bounds_clamps": result.report.out_of_bounds_clamps,
-        "positions": positions,
-        "note": if result.legal {
-            "placement is legal and was written directly to the board file. Call route_board next, or render_board to see it."
-        } else {
-            "placement is NOT legal — enlarge the board with regenerate_board bounds and retry."
-        },
-    })
-}
-
-fn placement_hints_for_seed(seed: &BoardSeed) -> PlacementHints {
-    let mut hints = seed.hints.clone();
-    for part in &seed.parts {
-        if is_mounting_hole(&part.footprint) {
-            if !hints.corner_seek.contains(&part.reference) {
-                hints.corner_seek.push(part.reference.clone());
-            }
-            if !hints.edge_seek.contains(&part.reference) {
-                hints.edge_seek.push(part.reference.clone());
-            }
-        } else if is_connector(&part.footprint, &part.reference)
-            && !hints.edge_seek.contains(&part.reference)
-        {
-            hints.edge_seek.push(part.reference.clone());
-        }
-    }
-    hints
-}
-
-pub(super) fn board_placement_path(ctx: &AgentRuntime) -> std::path::PathBuf {
-    ctx.project_dir()
-        .join(".gordian")
-        .join("board.placement.json")
-}
-
-fn persist_placements(
-    ctx: &AgentRuntime,
-    placements: &[Placement],
-) -> std::result::Result<(), String> {
-    let text = serde_json::to_string_pretty(placements)
-        .map_err(|e| format!("could not serialize board placement metadata: {e}"))?;
-    std::fs::write(board_placement_path(ctx), format!("{text}\n"))
-        .map_err(|e| format!("could not write board placement metadata: {e}"))
-}
-
-pub fn debug_place_problem_from_seed(
-    seed: &BoardSeed,
-    ctx: &AgentRuntime,
-) -> std::result::Result<PlaceProblem, String> {
-    let catalog = ctx
-        .footprint_catalog()
-        .map_err(|e| format!("footprint catalog unavailable: {e}"))?;
-    let mut parts = Vec::with_capacity(seed.parts.len());
-    for part in &seed.parts {
-        let id = FootprintId::parse(&part.footprint).map_err(|e| {
-            format!(
-                "part {}: invalid footprint id `{}`: {e}",
-                part.reference, part.footprint
-            )
-        })?;
-        let footprint = catalog.footprint(&id).map_err(|e| {
-            format!(
-                "part {}: footprint `{}` is not resolvable: {e}",
-                part.reference, part.footprint
-            )
-        })?;
-        parts.push(part_from_footprint_layers(
-            &footprint,
-            &part.reference,
-            &part.pad_nets,
-            seed.rules.layer_count,
-            part.locked.clone(),
-        ));
-    }
-    Ok(PlaceProblem {
-        bounds: seed.bounds.clone(),
-        clearance: seed.rules.clearance,
-        layer_count: seed.rules.layer_count,
-        min_trace_width: seed.rules.min_trace_width,
-        parts,
-        keepouts: seed.keepouts.iter().map(|k| k.rect.clone()).collect(),
-        outline: seed.outline.clone(),
-    })
-}
-
-fn write_placement_to_board_file(
-    ctx: &AgentRuntime,
-    moves: &[FootprintMove],
-) -> std::result::Result<(), String> {
-    let path = ctx.pcb_path();
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
-    let updated = update_footprint_positions(&text, moves)?;
-    std::fs::write(&path, updated).map_err(|e| format!("could not write {}: {e}", path.display()))
-}
-
-fn update_footprint_positions(
-    board: &str,
-    moves: &[FootprintMove],
-) -> std::result::Result<String, String> {
-    let by_ref: BTreeMap<&str, &FootprintMove> =
-        moves.iter().map(|m| (m.reference.as_str(), m)).collect();
-    let mut out = String::with_capacity(board.len());
-    let mut pos = 0usize;
-    while let Some(rel) = board[pos..].find("(footprint ") {
-        let start = pos + rel;
-        out.push_str(&board[pos..start]);
-        let Some(end) = sexpr_end(board, start) else {
-            return Err("could not parse footprint block in board file".to_owned());
-        };
-        let block = &board[start..end];
-        if let Some(reference) = footprint_reference_in_block(block)
-            && let Some(mv) = by_ref.get(reference.as_str())
-        {
-            out.push_str(&replace_first_at(block, mv));
-        } else {
-            out.push_str(block);
-        }
-        pos = end;
-    }
-    out.push_str(&board[pos..]);
-    Ok(out)
-}
-
-fn sexpr_end(text: &str, start: usize) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut in_str = false;
-    let mut esc = false;
-    for (offset, ch) in text[start..].char_indices() {
-        if in_str {
-            if esc {
-                esc = false;
-            } else if ch == '\\' {
-                esc = true;
-            } else if ch == '"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_str = true,
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(start + offset + ch.len_utf8());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn footprint_reference_in_block(block: &str) -> Option<String> {
-    let marker = "(property \"Reference\" \"";
-    let start = block.find(marker)? + marker.len();
-    let rest = &block[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_owned())
-}
-
-fn replace_first_at(block: &str, mv: &FootprintMove) -> String {
-    let x = mv.x_nm as f64 / 1e6;
-    let y = mv.y_nm as f64 / 1e6;
-    let rotation = mv.rotation_deg.unwrap_or(0.0);
-    let mut replaced = false;
-    let mut out = String::with_capacity(block.len());
-    for line in block.lines() {
-        if !replaced && line.trim_start().starts_with("(at ") {
-            let indent = &line[..line.len() - line.trim_start().len()];
-            out.push_str(&format!(
-                "{indent}(at {} {} {})\n",
-                super::fmt_num(x),
-                super::fmt_num(y),
-                super::fmt_num(rotation)
-            ));
-            replaced = true;
-        } else {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    if !block.ends_with('\n') {
-        out.pop();
-    }
-    out
 }
 
 fn write_placement(

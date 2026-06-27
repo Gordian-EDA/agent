@@ -1,5 +1,5 @@
 //! Deterministic placement refinement over a LIVE board via the interactive IPC
-//! geometry tools — the move_part judgment the engine's routability-first placer
+//! geometry tools — the move_parts judgment the engine's routability-first placer
 //! misses: cluster each decoupling cap hugging its IC, pull connectors to the
 //! nearest board edge, keep the crystal by the MCU. Proves the refactored tools
 //! reach a clean (critic-9+) layout when driven.

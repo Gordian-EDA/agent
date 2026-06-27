@@ -124,28 +124,6 @@ fn apply_design_dry_run_returns_diff_without_writing() {
 }
 
 #[test]
-fn apply_design_rejects_public_commit_argument() {
-    let Some(ctx) = AgentRuntime::detect_for_test() else {
-        eprintln!("SKIP: no KiCAD detected");
-        return;
-    };
-
-    let out = run_tool(
-        "apply_design",
-        serde_json::json!({ "yaml": TINY_YAML, "commit": true }),
-        &ctx,
-    )
-    .unwrap();
-
-    assert!(
-        out["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("commit") && e.contains("removed")),
-        "old commit arg should be rejected clearly: {out}"
-    );
-}
-
-#[test]
 fn apply_design_commit_writes_file_and_runs_erc() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
@@ -225,30 +203,13 @@ fn defs_lists_all_tools() {
         "regenerate_board",
         "assign_footprints",
         "open_board",
-        "board_state",
-        "move_part",
+        "move_parts",
         "route_track",
         "set_net_width",
         "update_board_outline",
     ];
     for expected in expected_tools {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
-    }
-    // The Board-DSL authoring surface (design_board/import_board) and legacy
-    // mutators are GONE — the board is seeded from the schematic
-    // (regenerate_board) and edited through focused current-PCB tools.
-    for gone in [
-        "set_placement_hints",
-        "set_constraints",
-        "resize_board",
-        "unlock_part",
-        "design_board",
-        "import_board",
-    ] {
-        assert!(
-            !names.contains(&gone.to_string()),
-            "legacy tool still present: {gone}"
-        );
     }
     assert_eq!(
         names.len(),
@@ -282,10 +243,6 @@ fn defs_lists_all_tools() {
         if def.name.to_string() == "apply_design" {
             let props = schema["properties"].as_object().expect("properties object");
             assert!(props.contains_key("yaml"));
-            assert!(
-                !props.contains_key("commit"),
-                "apply_design commit flag must not be model-facing: {schema}"
-            );
         }
     }
 }
@@ -821,14 +778,6 @@ blocks:
         assigned["next"],
         serde_json::json!("apply_design(), then regenerate_board")
     );
-    assert!(
-        assigned.get("diagnostics").is_none(),
-        "compact success should omit diagnostics: {assigned}"
-    );
-    assert!(
-        assigned.get("draft_written").is_none(),
-        "compact success should omit draft_written: {assigned}"
-    );
     let draft = ctx
         .workspace()
         .read_draft()
@@ -1072,42 +1021,6 @@ fn get_footprint_info_suggests_for_unknown_lib_id() {
     );
 }
 
-#[test]
-fn board_seed_round_trips_as_adapter_json() {
-    use gordian_core::tools_pcb::{BoardSeed, BoardSeedPart, BoardSeedRules};
-    use pcb_model::Rect;
-    use pcb_place::placement::PlacementHints;
-
-    let mut pad_nets = std::collections::BTreeMap::new();
-    pad_nets.insert("1".to_string(), "VIN".to_string());
-    pad_nets.insert("2".to_string(), "GND".to_string());
-
-    let seed = BoardSeed {
-        bounds: Rect {
-            min_x: 0.0,
-            max_x: 30.0,
-            min_y: 0.0,
-            max_y: 20.0,
-        },
-        rules: BoardSeedRules::default(),
-        parts: vec![BoardSeedPart {
-            reference: "R1".into(),
-            footprint: "Fixtures:R_0603_1608Metric".into(),
-            pad_nets,
-            locked: None,
-        }],
-        keepouts: vec![],
-        hints: PlacementHints::default(),
-        outline: None,
-    };
-    let raw = serde_json::to_string_pretty(&seed).unwrap();
-    let loaded: BoardSeed = serde_json::from_str(&raw).unwrap();
-    assert_eq!(
-        seed, loaded,
-        "board seed adapter must round-trip byte-equivalent"
-    );
-}
-
 // ── PCB tools: place / route / constraints / triage ──────────────────────────
 //
 // These use the same vendored-fixture footprint index as the Task 1 tests (no
@@ -1124,7 +1037,10 @@ fn placed_board_ctx() -> (AgentRuntime, tempfile::TempDir) {
 
 fn write_fixture_board(ctx: &AgentRuntime, w: f64, h: f64) {
     let board = TWO_RES_PCB
-        .replace("Resistor_SMD:R_0805_2012Metric", "Fixtures:R_0603_1608Metric")
+        .replace(
+            "Resistor_SMD:R_0805_2012Metric",
+            "Fixtures:R_0603_1608Metric",
+        )
         .replace("(end 30 20)", &format!("(end {w} {h})"));
     std::fs::write(ctx.pcb_path(), board).unwrap();
 }

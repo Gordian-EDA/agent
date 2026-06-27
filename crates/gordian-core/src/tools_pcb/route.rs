@@ -2,8 +2,6 @@
 //! write-back, and route-result lint/triage.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -16,7 +14,6 @@ use negotiated_mesh::pipeline::{NegotiatedMeshRouter, route_auto, select_best};
 use pcb_model::{
     FailedNet, LayerRef, Point2, RouteProblem, RouteResult, RouteSolution, Trace, Via, ViaSpan,
 };
-use pcb_place::placement::Placement;
 
 use crate::{AgentRuntime, PcbRouterEngine};
 
@@ -159,400 +156,23 @@ fn escape_bottleneck(
 }
 
 pub fn route_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    if super::place::board_placement_path(ctx).exists() {
-        return Ok(route_file_board(ctx));
-    }
     match route_live_board(ctx) {
         Ok(out) => Ok(out),
         Err(err) => Ok(json!({ "error": err })),
     }
 }
 
-fn route_file_board(ctx: &AgentRuntime) -> Value {
-    let seed = match std::fs::read_to_string(super::create::board_seed_path(ctx))
-        .ok()
-        .and_then(|text| serde_json::from_str::<super::seed::BoardSeed>(&text).ok())
-    {
-        Some(seed) => seed,
-        None => {
-            return json!({ "error": "no board seed metadata — run regenerate_board, then place_board before route_board" });
-        }
-    };
-    let placements = match std::fs::read_to_string(super::place::board_placement_path(ctx))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Vec<Placement>>(&text).ok())
-    {
-        Some(placements) => placements,
-        None => {
-            return json!({ "error": "no board placement metadata — run place_board before route_board" });
-        }
-    };
-    let problem = match super::place::debug_place_problem_from_seed(&seed, ctx) {
-        Ok(problem) => problem,
-        Err(msg) => return json!({ "error": msg }),
-    };
-    let mut rp = pcb_model::place::to_route_problem(&problem, &placements);
-    rp.via_diameter = seed.rules.via_diameter;
-    rp.via_drill = seed.rules.via_drill;
-    rp.net_widths = seed.rules.net_widths.clone();
-    let poured_nets: BTreeSet<String> = seed
-        .rules
-        .pours
-        .iter()
-        .map(|pour| pour.net.clone())
-        .collect();
-    let poured_connections: Vec<_> = rp
-        .connections
-        .iter()
-        .filter(|conn| poured_nets.contains(&conn.name))
-        .cloned()
-        .collect();
-    let route_rp = if poured_nets.is_empty() {
-        rp.clone()
-    } else {
-        let mut filtered = rp.clone();
-        filtered
-            .connections
-            .retain(|conn| !poured_nets.contains(&conn.name));
-        filtered
-    };
-
-    let external_route_error = match route_file_board_with_freerouting(ctx) {
-        Ok(Some(out)) => return out,
-        Ok(None) => None,
-        Err(err) => Some(err),
-    };
-
-    let requested_engine = ctx.config().engines.pcb_router;
-    let engine = file_route_engine(requested_engine, &route_rp);
-    let mut result = route_with_engine(&route_rp, engine);
-    let used_direct_fallback = apply_direct_two_pin_fallback(&route_rp, &mut result);
-    let dropped_failed = drop_failed_net_copper(&mut result);
-    let failed = failed_connections(&result);
-    add_terminal_stubs(&route_rp, &mut result.solution, &failed);
-    let original_solution = result.solution.clone();
-    let mut pruned_spurs = prune_dangling_spurs_if_safe(&route_rp, &mut result);
-    let dropped = make_route_honest(&route_rp, &mut result);
-    let mut split = lint_summary(
-        &route_rp,
-        &result.solution,
-        &result.failed,
-        &Default::default(),
-    );
-    if split.real > 0 && pruned_spurs > 0 {
-        result.solution = original_solution;
-        pruned_spurs = 0;
-        split = lint_summary(
-            &route_rp,
-            &result.solution,
-            &result.failed,
-            &Default::default(),
-        );
-    }
-    if split.real > 0 {
-        return json!({
-            "error": format!("router produced {} real DRC violation(s); refusing to write copper to board file", split.real),
-            "lint_summary": split.by_kind,
-        });
-    }
-    if let Err(msg) =
-        append_route_to_board_file(ctx, &route_rp, &result.solution, &poured_connections)
-    {
-        return json!({ "error": msg });
-    }
-    let failed: Vec<Value> = result
-        .failed
-        .iter()
-        .map(|f| json!({ "connection": f.connection, "reason": f.reason }))
-        .collect();
-    let m = result.solution.metrics();
-    json!({
-        "router": result.engine,
-        "requested_router": format!("{requested_engine:?}"),
-        "router_note": if requested_engine != engine {
-            "Auto router skipped for a larger file-based route problem to avoid timeout; used Astar"
-        } else {
-            "used requested router"
-        },
-        "failed": failed,
-        "metrics": {
-            "wirelength": m.wirelength,
-            "vias": m.via_count,
-            "traces": m.trace_count,
-        },
-        "lint_summary": split.by_kind,
-        "expected_connectivity_gaps": split.expected_gaps,
-        "pruned_dangling_spurs": pruned_spurs,
-        "direct_two_pin_fallback": used_direct_fallback,
-        "dropped_failed_net_copper": dropped_failed,
-        "dropped_violating_nets": dropped,
-        "poured_nets": poured_nets.into_iter().collect::<Vec<_>>(),
-        "stitch_vias": stitch_via_count(&poured_connections, &route_rp),
-        "external_router_error": external_route_error,
-        "note": if result.failed.is_empty() {
-            "routed and wrote copper directly to the board file"
-        } else {
-            "wrote routeable copper to the board file with honest failed nets"
-        },
-    })
-}
-
-fn route_file_board_with_freerouting(
-    ctx: &AgentRuntime,
-) -> std::result::Result<Option<Value>, String> {
-    let Some(jar) = freerouting_jar_path() else {
-        return Ok(None);
-    };
-    let pcb = ctx.pcb_path();
-    let dsn = pcb.with_extension("dsn");
-    let ses = pcb.with_extension("ses");
-    let export = run_python(
-        FREEROUTING_EXPORT_DSN_PY,
-        &[pcb.as_path(), dsn.as_path()],
-        "exporting board to Specctra DSN",
-    )?;
-    if !export.lines().any(|line| line.trim() == "exported") {
-        return Err(format!(
-            "unexpected DSN export output: {}",
-            short_output(&export)
-        ));
-    }
-
-    let java = freerouting_java_path();
-    let mut cmd = Command::new("timeout");
-    cmd.arg("240")
-        .arg("xvfb-run")
-        .arg("-a")
-        .arg(java)
-        .arg("-jar")
-        .arg(&jar)
-        .arg("-de")
-        .arg(&dsn)
-        .arg("-do")
-        .arg(&ses)
-        .arg("-mp")
-        .arg(freerouting_pass_limit().to_string());
-    run_command(cmd, "running Freerouting")?;
-
-    let summary = run_python(
-        FREEROUTING_IMPORT_REPAIR_PY,
-        &[pcb.as_path(), ses.as_path()],
-        "importing Freerouting SES",
-    )?;
-    let summary = summary
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .ok_or_else(|| "Freerouting import produced no summary".to_string())?;
-    let summary: Value = serde_json::from_str(summary)
-        .map_err(|e| format!("could not parse Freerouting import summary: {e}: {summary}"))?;
-    Ok(Some(json!({
-        "router": "freerouting",
-        "requested_router": format!("{:?}", ctx.config().engines.pcb_router),
-        "failed": [],
-        "metrics": {
-            "tracks_and_vias": summary.get("tracks_and_vias").cloned().unwrap_or(Value::Null),
-            "zones": summary.get("zones").cloned().unwrap_or(Value::Null),
-        },
-        "postprocess": summary.get("postprocess").cloned().unwrap_or(Value::Null),
-        "dsn": dsn,
-        "ses": ses,
-        "note": "routed with Freerouting, imported SES, refilled zones, and saved the KiCad board file",
-    })))
-}
-
-fn freerouting_jar_path() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("GORDIAN_FREEROUTING_JAR") {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    let path = PathBuf::from("tools/vendor/freerouting.jar");
-    path.exists().then_some(path)
-}
-
-fn freerouting_java_path() -> PathBuf {
-    if let Ok(path) = std::env::var("GORDIAN_FREEROUTING_JAVA") {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return path;
-        }
-    }
-    let java21 = PathBuf::from("/usr/lib/jvm/java-21-openjdk-amd64/bin/java");
-    if java21.exists() {
-        return java21;
-    }
-    PathBuf::from("java")
-}
-
-fn freerouting_pass_limit() -> u32 {
-    std::env::var("GORDIAN_FREEROUTING_PASSES")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(300)
-}
-
-fn run_python(script: &str, args: &[&Path], what: &str) -> std::result::Result<String, String> {
-    let mut cmd = Command::new("python3");
-    cmd.arg("-c").arg(script);
-    for arg in args {
-        cmd.arg(arg);
-    }
-    run_command(cmd, what)
-}
-
-fn run_command(mut cmd: Command, what: &str) -> std::result::Result<String, String> {
-    let output = cmd
-        .output()
-        .map_err(|e| format!("{what} failed to start: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "{what} failed with status {}: stdout: {}; stderr: {}",
-            output.status,
-            short_output(&String::from_utf8_lossy(&output.stdout)),
-            short_output(&String::from_utf8_lossy(&output.stderr)),
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-fn short_output(text: &str) -> String {
-    const MAX: usize = 1200;
-    let text = text.trim();
-    if text.len() <= MAX {
-        text.to_string()
-    } else {
-        format!("...{}", &text[text.len() - MAX..])
-    }
-}
-
-const FREEROUTING_EXPORT_DSN_PY: &str = r#"
-import sys
-import pcbnew
-
-board_path, dsn_path = sys.argv[1], sys.argv[2]
-board = pcbnew.LoadBoard(board_path)
-if len(list(board.GetTracks())):
-    raise SystemExit("board already contains routed copper; regenerate_board before route_board")
-removed_zones = 0
-for zone in list(board.Zones()):
-    board.Remove(zone)
-    removed_zones += 1
-ok = pcbnew.ExportSpecctraDSN(board, dsn_path)
-if not ok:
-    raise SystemExit("pcbnew.ExportSpecctraDSN returned false")
-if removed_zones:
-    pcbnew.SaveBoard(board_path, board)
-print("exported")
-"#;
-
-const FREEROUTING_IMPORT_REPAIR_PY: &str = r#"
-import json
-import math
-import sys
-import pcbnew
-
-board_path, ses_path = sys.argv[1], sys.argv[2]
-board = pcbnew.LoadBoard(board_path)
-ok = pcbnew.ImportSpecctraSES(board, ses_path)
-if not ok:
-    raise SystemExit("pcbnew.ImportSpecctraSES returned false")
-
-IU = lambda mm: int(round(mm * 1_000_000))
-
-def point(obj):
-    return (obj.x / 1_000_000.0, obj.y / 1_000_000.0)
-
-def is_via(item):
-    return type(item).__name__ == "PCB_VIA"
-
-def add_track(net_name, a, b, width=0.15, layer=pcbnew.F_Cu):
-    net = board.FindNet(net_name)
-    if net is None:
-        return False
-    track = pcbnew.PCB_TRACK(board)
-    track.SetNet(net)
-    track.SetLayer(layer)
-    track.SetStart(pcbnew.VECTOR2I(IU(a[0]), IU(a[1])))
-    track.SetEnd(pcbnew.VECTOR2I(IU(b[0]), IU(b[1])))
-    track.SetWidth(IU(width))
-    board.Add(track)
-    return True
-
-def add_via(net_name, at, diameter=0.5, drill=0.3):
-    net = board.FindNet(net_name)
-    if net is None:
-        return False
-    via = pcbnew.PCB_VIA(board)
-    via.SetNet(net)
-    via.SetPosition(pcbnew.VECTOR2I(IU(at[0]), IU(at[1])))
-    via.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
-    try:
-        via.SetWidth(pcbnew.F_Cu, IU(diameter))
-    except TypeError:
-        via.SetWidth(IU(diameter))
-    via.SetDrill(IU(drill))
-    board.Add(via)
-    return True
-
-def pad_at(ref, number, net_name, x, y):
-    for fp in board.GetFootprints():
-        if fp.GetReference() != ref:
-            continue
-        for pad in fp.Pads():
-            pos = point(pad.GetPosition())
-            if (
-                pad.GetNumber() == str(number)
-                and pad.GetNetname() == net_name
-                and abs(pos[0] - x) < 0.01
-                and abs(pos[1] - y) < 0.01
-            ):
-                return True
-    return False
-
-def has_via(net_name, x, y):
-    for item in board.GetTracks():
-        if not is_via(item) or item.GetNetname() != net_name:
-            continue
-        pos = point(item.GetPosition())
-        if abs(pos[0] - x) < 0.01 and abs(pos[1] - y) < 0.01:
-            return True
-    return False
-
-post = {
-    "zones_filled": 0,
-}
-
-zones = list(board.Zones())
-if zones:
-    pcbnew.ZONE_FILLER(board).Fill(zones)
-    post["zones_filled"] = len(zones)
-
-pcbnew.SaveBoard(board_path, board)
-
-tracks = list(board.GetTracks())
-summary = {
-    "tracks_and_vias": len(tracks),
-    "zones": len(zones),
-    "postprocess": post,
-}
-print(json.dumps(summary, sort_keys=True))
-"#;
-
 fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
-    let board = super::active::board_problem(ctx)?;
+    let mut board = super::active::board_problem(ctx)?;
     if is_seed_placement(&board.imported.bounds, &board.imported.parts) {
         return Err("board has only the initial seed-row footprint positions — run place_board before route_board".to_owned());
     }
 
     let existing = (board.copper.traces.len(), board.copper.vias.len());
     if existing.0 > 0 || existing.1 > 0 {
-        return Err(format!(
-            "live board already has {} tracks and {} vias; refusing to replace copper until generated-item tagging is implemented",
-            existing.0, existing.1
-        ));
+        clear_existing_copper(ctx)
+            .map_err(|e| format!("could not clear existing copper before reroute: {e}"))?;
+        board = super::active::board_problem(ctx)?;
     }
 
     let rp = board.problem.clone();
@@ -614,6 +234,10 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
         "pruned_dangling_spurs": pruned_spurs,
         "dropped_failed_net_copper": dropped_failed,
         "dropped_violating_nets": dropped,
+        "cleared_existing_copper": {
+            "traces": existing.0,
+            "vias": existing.1,
+        },
         "congestion": congestion,
         "escape_bottleneck": escape,
         "note": if result.failed.is_empty() {
@@ -622,6 +246,14 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
             "routed and saved the KiCAD board with honest failed nets"
         },
     }))
+}
+
+fn clear_existing_copper(
+    ctx: &AgentRuntime,
+) -> std::result::Result<(usize, usize), kicad_ipc::Error> {
+    let path = ctx.pcb_path();
+    ctx.kicad()
+        .with_session(&path, |session| session.kicad().delete_tracks_and_vias())
 }
 
 fn make_route_honest(rp: &RouteProblem, result: &mut RouteResult) -> Vec<String> {
@@ -791,16 +423,6 @@ fn route_with_engine(rp: &RouteProblem, engine: PcbRouterEngine) -> RouteResult 
             let mesh = NegotiatedMeshRouter;
             select_best(rp, &[&mesh])
         }
-    }
-}
-
-fn file_route_engine(requested: PcbRouterEngine, rp: &RouteProblem) -> PcbRouterEngine {
-    const AUTO_FILE_ROUTE_CONNECTION_LIMIT: usize = 20;
-    if requested == PcbRouterEngine::Auto && rp.connections.len() > AUTO_FILE_ROUTE_CONNECTION_LIMIT
-    {
-        PcbRouterEngine::Astar
-    } else {
-        requested
     }
 }
 
@@ -1249,207 +871,6 @@ fn write_route(
     })
 }
 
-fn append_route_to_board_file(
-    ctx: &AgentRuntime,
-    rp: &RouteProblem,
-    solution: &RouteSolution,
-    poured_connections: &[pcb_model::Connection],
-) -> std::result::Result<(), String> {
-    let path = ctx.pcb_path();
-    let board = std::fs::read_to_string(&path)
-        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
-    if board.contains("\n\t(segment ") || board.contains("\n\t(via ") {
-        return Err("board already contains routed copper; regenerate_board before route_board to replace it".to_owned());
-    }
-    let net_codes = parse_board_net_codes(&board);
-    let mut copper = String::new();
-    let mut item = 0usize;
-    for trace in &solution.traces {
-        let net = resolve_board_net_code(&net_codes, &trace.connection)
-            .ok_or_else(|| format!("board has no KiCad net code for {}", trace.connection))?;
-        let layer = LayerRef::resolve(&trace.layer.0, rp.layer_count)
-            .map(|(_, name)| name)
-            .unwrap_or_else(|| "F.Cu".to_string());
-        for pair in trace.path.windows(2) {
-            let a = pair[0];
-            let b = pair[1];
-            copper.push_str(&format!(
-                "\t(segment (start {} {}) (end {} {}) (width {}) (layer \"{}\") (net {}) (uuid {}))\n",
-                super::fmt_num(a.x),
-                super::fmt_num(a.y),
-                super::fmt_num(b.x),
-                super::fmt_num(b.y),
-                super::fmt_num(trace.width),
-                layer,
-                net,
-                route_uuid(item),
-            ));
-            item += 1;
-        }
-    }
-    for via in &solution.vias {
-        let net = resolve_board_net_code(&net_codes, &via.connection)
-            .ok_or_else(|| format!("board has no KiCad net code for {}", via.connection))?;
-        let layers = match via.span {
-            ViaSpan::Through => ("F.Cu".to_string(), "B.Cu".to_string(), None),
-            ViaSpan::Partial { from, to, micro } => {
-                let from = layer_name(from, rp.layer_count).unwrap_or_else(|| "F.Cu".to_string());
-                let to = layer_name(to, rp.layer_count).unwrap_or_else(|| "B.Cu".to_string());
-                (from, to, Some(if micro { "micro" } else { "blind" }))
-            }
-        };
-        let kind = layers.2.map(|kind| format!(" {kind}")).unwrap_or_default();
-        copper.push_str(&format!(
-            "\t(via{} (at {} {}) (size {}) (drill {}) (layers \"{}\" \"{}\") (net {}) (uuid {}))\n",
-            kind,
-            super::fmt_num(via.at.x),
-            super::fmt_num(via.at.y),
-            super::fmt_num(via.diameter),
-            super::fmt_num(via.drill),
-            layers.0,
-            layers.1,
-            net,
-            route_uuid(item),
-        ));
-        item += 1;
-    }
-    append_poured_net_stitch_vias(&mut copper, &net_codes, poured_connections, rp, &mut item)?;
-    let insert = board
-        .rfind("\n)")
-        .ok_or_else(|| "could not find end of KiCad board file".to_string())?;
-    let mut out = String::with_capacity(board.len() + copper.len());
-    out.push_str(&board[..insert]);
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(&copper);
-    out.push_str(&board[insert..]);
-    std::fs::write(&path, out).map_err(|e| format!("could not write {}: {e}", path.display()))
-}
-
-fn append_poured_net_stitch_vias(
-    copper: &mut String,
-    net_codes: &BTreeMap<String, i32>,
-    poured_connections: &[pcb_model::Connection],
-    rp: &RouteProblem,
-    item: &mut usize,
-) -> std::result::Result<(), String> {
-    let mut seen = BTreeSet::new();
-    for conn in poured_connections {
-        let net = resolve_board_net_code(net_codes, &conn.name)
-            .ok_or_else(|| format!("board has no KiCad net code for {}", conn.name))?;
-        for point in &conn.points_to_connect {
-            let key = (
-                conn.name.clone(),
-                quantize_mm(point.x),
-                quantize_mm(point.y),
-            );
-            if !seen.insert(key) {
-                continue;
-            }
-            if !stitch_via_clears_foreign_obstacles(&conn.name, point.point(), rp) {
-                continue;
-            }
-            copper.push_str(&format!(
-                "\t(via (at {} {}) (size {}) (drill {}) (layers \"F.Cu\" \"B.Cu\") (net {}) (uuid {}))\n",
-                super::fmt_num(point.x),
-                super::fmt_num(point.y),
-                super::fmt_num(rp.via_diameter),
-                super::fmt_num(rp.via_drill),
-                net,
-                route_uuid(*item),
-            ));
-            *item += 1;
-        }
-    }
-    Ok(())
-}
-
-fn stitch_via_count(poured_connections: &[pcb_model::Connection], rp: &RouteProblem) -> usize {
-    poured_connections
-        .iter()
-        .flat_map(|conn| {
-            conn.points_to_connect.iter().filter_map(move |point| {
-                stitch_via_clears_foreign_obstacles(&conn.name, point.point(), rp).then_some((
-                    conn.name.clone(),
-                    quantize_mm(point.x),
-                    quantize_mm(point.y),
-                ))
-            })
-        })
-        .collect::<BTreeSet<_>>()
-        .len()
-}
-
-fn stitch_via_clears_foreign_obstacles(net: &str, at: Point2, rp: &RouteProblem) -> bool {
-    let required = rp.via_diameter / 2.0 + rp.clearance;
-    rp.obstacles.iter().all(|obstacle| {
-        if obstacle.connected_to.iter().any(|owned| owned == net) {
-            return true;
-        }
-        let dx = (at.x - obstacle.center.x).abs() - obstacle.width / 2.0;
-        let dy = (at.y - obstacle.center.y).abs() - obstacle.height / 2.0;
-        let outside_x = dx.max(0.0);
-        let outside_y = dy.max(0.0);
-        let distance = if dx <= 0.0 && dy <= 0.0 {
-            0.0
-        } else {
-            outside_x.hypot(outside_y)
-        };
-        distance + geom::EPS >= required
-    })
-}
-
-fn parse_board_net_codes(board: &str) -> BTreeMap<String, i32> {
-    let mut out = BTreeMap::new();
-    for line in board.lines().map(str::trim) {
-        if !line.starts_with("(net ") {
-            continue;
-        }
-        let rest = &line["(net ".len()..];
-        let Some((code, rest)) = rest.split_once(' ') else {
-            continue;
-        };
-        let Ok(code) = code.parse::<i32>() else {
-            continue;
-        };
-        let Some(name_start) = rest.find('"') else {
-            continue;
-        };
-        let rest = &rest[name_start + 1..];
-        let Some(name_end) = rest.find('"') else {
-            continue;
-        };
-        out.insert(rest[..name_end].to_string(), code);
-    }
-    out
-}
-
-fn resolve_board_net_code(net_codes: &BTreeMap<String, i32>, connection: &str) -> Option<i32> {
-    net_codes
-        .get(connection)
-        .copied()
-        .or_else(|| {
-            connection
-                .strip_prefix('/')
-                .and_then(|name| net_codes.get(name).copied())
-        })
-        .or_else(|| net_codes.get(&format!("/{connection}")).copied())
-}
-
-fn layer_name(index: u32, layer_count: u32) -> Option<String> {
-    match index {
-        0 => Some("F.Cu".to_string()),
-        i if i + 1 == layer_count => Some("B.Cu".to_string()),
-        i if i > 0 && i + 1 < layer_count => Some(format!("In{i}.Cu")),
-        _ => None,
-    }
-}
-
-fn route_uuid(item: usize) -> String {
-    format!("00000000-0000-4000-8000-{item:012x}")
-}
-
 fn is_seed_placement(bounds: &pcb_model::Rect, parts: &[ImportedPart]) -> bool {
     if parts.is_empty() {
         return false;
@@ -1530,107 +951,6 @@ mod escape_bottleneck_tests {
         // "<N plane stitching vias>" is not a net name → matches no pad → no bottleneck.
         let parts = vec![part("U1", "fp", &[("1", "GND")])];
         assert!(escape_bottleneck(&parts, &failed(&["<7 plane stitching vias>"])).is_none());
-    }
-
-    #[test]
-    fn poured_net_stitch_count_deduplicates_pad_points() {
-        let connections = vec![pcb_model::Connection {
-            name: "GND".to_string(),
-            points_to_connect: vec![
-                pcb_model::RoutePoint {
-                    x: 1.0,
-                    y: 2.0,
-                    layer: LayerRef::top(),
-                },
-                pcb_model::RoutePoint {
-                    x: 1.0,
-                    y: 2.0,
-                    layer: LayerRef::top(),
-                },
-                pcb_model::RoutePoint {
-                    x: 3.0,
-                    y: 4.0,
-                    layer: LayerRef::top(),
-                },
-            ],
-        }];
-
-        let problem = RouteProblem {
-            layer_count: 2,
-            min_trace_width: 0.2,
-            obstacles: vec![
-                pcb_model::Obstacle {
-                    kind: "rect".to_string(),
-                    layers: vec![LayerRef::top()],
-                    center: Point2 { x: 1.0, y: 1.0 },
-                    width: 0.6,
-                    height: 0.6,
-                    connected_to: vec!["SIG".to_string()],
-                },
-                pcb_model::Obstacle {
-                    kind: "rect".to_string(),
-                    layers: vec![LayerRef::top()],
-                    center: Point2 { x: 5.0, y: 1.0 },
-                    width: 0.6,
-                    height: 0.6,
-                    connected_to: vec!["SIG".to_string()],
-                },
-            ],
-            connections: vec![],
-            bounds: pcb_model::Rect {
-                min_x: 0.0,
-                min_y: 0.0,
-                max_x: 10.0,
-                max_y: 10.0,
-            },
-            clearance: 0.2,
-            via_diameter: 0.6,
-            via_drill: 0.3,
-            net_widths: Default::default(),
-            outline: None,
-            escape_layers: Default::default(),
-        };
-
-        assert_eq!(stitch_via_count(&connections, &problem), 2);
-    }
-
-    #[test]
-    fn poured_net_stitch_count_skips_foreign_pad_clearance() {
-        let problem = RouteProblem {
-            layer_count: 2,
-            min_trace_width: 0.2,
-            obstacles: vec![pcb_model::Obstacle {
-                kind: "rect".to_string(),
-                layers: vec![LayerRef::top()],
-                center: Point2 { x: 1.4, y: 2.0 },
-                width: 0.25,
-                height: 0.25,
-                connected_to: vec!["GPIO0".to_string()],
-            }],
-            connections: vec![],
-            bounds: pcb_model::Rect {
-                min_x: 0.0,
-                min_y: 0.0,
-                max_x: 10.0,
-                max_y: 10.0,
-            },
-            clearance: 0.15,
-            via_diameter: 0.6,
-            via_drill: 0.3,
-            net_widths: Default::default(),
-            outline: None,
-            escape_layers: Default::default(),
-        };
-        let connections = vec![pcb_model::Connection {
-            name: "GND".to_string(),
-            points_to_connect: vec![pcb_model::RoutePoint {
-                x: 1.0,
-                y: 2.0,
-                layer: LayerRef::top(),
-            }],
-        }];
-
-        assert_eq!(stitch_via_count(&connections, &problem), 0);
     }
 
     #[test]
@@ -2041,57 +1361,5 @@ mod escape_bottleneck_tests {
         assert_eq!(result.solution.traces.len(), 1);
         assert_eq!(result.solution.traces[0].connection, "OK");
         assert!(result.solution.vias.is_empty());
-    }
-
-    #[test]
-    fn board_net_lookup_accepts_leading_slash_variants() {
-        let mut codes = BTreeMap::new();
-        codes.insert("/HOLD_N".to_string(), 3);
-        codes.insert("RUN".to_string(), 22);
-
-        assert_eq!(resolve_board_net_code(&codes, "/HOLD_N"), Some(3));
-        assert_eq!(resolve_board_net_code(&codes, "HOLD_N"), Some(3));
-        assert_eq!(resolve_board_net_code(&codes, "/RUN"), Some(22));
-        assert_eq!(resolve_board_net_code(&codes, "MISSING"), None);
-    }
-
-    #[test]
-    fn file_route_auto_downgrades_only_for_larger_problems() {
-        let mut problem = RouteProblem {
-            layer_count: 2,
-            min_trace_width: 0.15,
-            obstacles: vec![],
-            connections: vec![],
-            bounds: pcb_model::Rect {
-                min_x: 0.0,
-                min_y: 0.0,
-                max_x: 100.0,
-                max_y: 100.0,
-            },
-            clearance: 0.15,
-            via_diameter: 0.6,
-            via_drill: 0.3,
-            net_widths: Default::default(),
-            outline: None,
-            escape_layers: Default::default(),
-        };
-        assert_eq!(
-            file_route_engine(PcbRouterEngine::Auto, &problem),
-            PcbRouterEngine::Auto
-        );
-        problem.connections = (0..21)
-            .map(|idx| pcb_model::Connection {
-                name: format!("N{idx}"),
-                points_to_connect: vec![],
-            })
-            .collect();
-        assert_eq!(
-            file_route_engine(PcbRouterEngine::Auto, &problem),
-            PcbRouterEngine::Astar
-        );
-        assert_eq!(
-            file_route_engine(PcbRouterEngine::Mesh, &problem),
-            PcbRouterEngine::Mesh
-        );
     }
 }

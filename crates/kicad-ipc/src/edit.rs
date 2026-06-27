@@ -7,7 +7,7 @@ use proto::kiapi::board::types::{
     BoardLayer, DrillProperties, DrillShape, FootprintInstance, Net, PadStack, PadStackLayer,
     PadStackShape, PadStackType, Track, UnconnectedLayerRemoval, Via, ViaType,
 };
-use proto::kiapi::common::types::{Angle, Distance, Vector2};
+use proto::kiapi::common::types::{Angle, Distance, KiCadObjectType, Vector2};
 
 #[derive(Debug, Clone)]
 pub struct FootprintMove {
@@ -117,6 +117,18 @@ impl Kicad {
         self.commit("add track", |k| {
             k.create_items(vec![prost_types::Any::from_msg(&track)?])
         })
+    }
+
+    /// Delete every track segment and via on the board, then save it.
+    pub fn delete_tracks_and_vias(&mut self) -> Result<(usize, usize), Error> {
+        let mut items = self.get_items(&[KiCadObjectType::KotPcbTrace])?;
+        let tracks = items.len();
+        let vias = self.get_items(&[KiCadObjectType::KotPcbVia])?;
+        let via_count = vias.len();
+        items.extend(vias);
+        self.commit("clear copper", |k| k.delete_packed_items(&items))?;
+        self.save()?;
+        Ok((tracks, via_count))
     }
 
     /// Create every track/via in a routed solution as native KiCAD board items.

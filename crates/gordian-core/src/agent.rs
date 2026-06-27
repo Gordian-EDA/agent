@@ -869,8 +869,15 @@ fn tool_effect(name: &str) -> ToolEffect {
         // The one human-gated write.
         "apply_design" => ToolEffect::Gated,
         // Tools that mutate draft schematic text or the live IPC board.
-        "create_design" | "edit_design" | "regenerate_board" | "place_board" | "route_board"
-        | "open_board" | "move_part" | "route_track" | "set_net_width"
+        "create_design"
+        | "edit_design"
+        | "regenerate_board"
+        | "place_board"
+        | "route_board"
+        | "open_board"
+        | "move_parts"
+        | "route_track"
+        | "set_net_width"
         | "update_board_outline" => ToolEffect::Authoring,
         // Everything else reads only.
         _ => ToolEffect::ReadOnly,
@@ -1015,9 +1022,8 @@ fn is_kicad_session_tool(name: &str) -> bool {
             | "export_fab"
             | "open_board"
             | "render_board"
-            | "move_part"
+            | "move_parts"
             | "route_track"
-            | "board_state"
             | "update_board_outline"
     )
 }

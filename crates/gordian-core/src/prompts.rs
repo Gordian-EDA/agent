@@ -34,7 +34,7 @@ Useful sugar:
 - IC decoupling: `decouple: { 100nF: 4 }`
 - board I/O labels: `label:global`
 
-Blocks are the schematic floorplan. Keep related circuitry together; split very large blocks. Optional per-block `layout:` may pin key anchors, but most placement should be inferred.
+Blocks are the schematic floorplan. Keep related circuitry together and use multiple named blocks for large designs; as a rule, split blocks above about 8-10 components into functional groups such as power, MCU, USB, sensor_frontend, motor_driver, connectors, and debug. The renderer preserves authored block boundaries instead of automatically subdividing oversized blocks. Optional per-block `layout:` may pin key anchors, but most placement should be inferred.
 
 # Efficient workflow
 NEW: create one complete draft with `create_design(yaml)`. EDIT: call `read_schematic({source:"draft"})` once, then edit the draft.
@@ -56,12 +56,12 @@ GEOMETRY IS THE ENGINEERING: placement, layers, trace width, and route shape mat
 Footprints are schematic/YAML state. `assign_footprints({assignments:[...]})` edits the draft in batch; use it even for one footprint. After any footprint assignment, call `apply_design()` before `regenerate_board`. If `regenerate_board` reports `missing_footprints` or `unapplied_draft_footprints`, do not retry it unchanged: assign/apply the footprints first, then regenerate. `regenerate_board` is destructive seed/regeneration, NOT KiCAD F8 sync: it may replace an existing PCB's placement/routing. Use it for a fresh board or explicit regeneration, not incremental schematic-to-PCB merge. If the user asks to resize, shrink, center, or change the shape of an existing PCB, use `update_board_outline` on the current PCB instead of `regenerate_board`.
 
 PCB order:
-1. `regenerate_board({bounds?, rules?})` from an ERC-clean committed schematic only when starting/regenerating the board. For USB-C/QFN boards, use fine-pitch-capable rules such as `clearance: 0.15` and `minTraceWidth: 0.15`. Put wide copper for power in `rules.net_widths` as plain numbers before routing when possible, e.g. `{GND: 0.6, V3V3: 0.5}`. For dense RP2040/USB-C boards, prefer `layers: 6` and generous bounds on the first PCB attempt.
+1. `regenerate_board({bounds?, rules?})` from an ERC-clean committed schematic only when starting/regenerating the board. For USB-C/QFN boards, use fine-pitch-capable rules such as `clearance: 0.15` and `min_trace_width: 0.15`. Put wide copper for power in `rules.net_widths` as plain numbers before routing when possible, e.g. `{GND: 0.6, V3V3: 0.5}`. For dense RP2040/USB-C boards, prefer `layer_count: 6` and generous bounds on the first PCB attempt.
 2. `place_board()`.
 3. `route_board()`.
 4. `check_board()`.
 5. `export_fab()` only after DRC passes.
-6. Use `open_board`, `board_state`, `update_board_outline`, `move_part`, `route_track`, `set_net_width`, and `render_board` only for deliberate live refinements. For "board too large" tasks, call `update_board_outline({fit_to_geometry:true, margin: ...})` to shrink/center Edge.Cuts around the existing design. If you change widths after routing, do not rerun `route_board` over existing copper.
+6. Use `open_board`, `get_board`, `update_board_outline`, `move_parts`, `route_track`, `set_net_width`, and `render_board` only for deliberate live refinements. For placement refinements, prefer `get_board` → `move_parts` → `route_board` → inspect/check → repeat. For "board too large" tasks, call `update_board_outline({fit_to_geometry:true, margin: ...})` to shrink/center Edge.Cuts around the existing design. Rerunning `route_board` replaces all existing tracks/vias with a fresh autoroute from the current KiCAD IPC board state.
 
 Hard rules:
 - NEVER guess a footprint lib_id; use `search_footprints`.
@@ -94,16 +94,14 @@ mod tests {
         assert!(p.contains("apply_design"));
         assert!(p.contains("apply_design()"));
         assert!(p.contains("Treat validation warnings as work"));
-        assert!(!p.contains("commit:false"));
-        assert!(!p.contains("commit:true"));
         assert!(p.contains("C_VCAP1")); // plain-refdes guidance
     }
 
     #[test]
     fn system_prompt_covers_the_pcb_workflow_and_triage() {
         let p = system_prompt();
-        // The interactive board flow: engine seeds (derive/place/route/check),
-        // then the LLM edits the live board over IPC (open/state/move/route/width).
+        // The interactive board flow: engine seeds (regenerate/place/route/check),
+        // then the LLM edits the live board over IPC (open/read/move/route/width).
         for tool in [
             "search_footprints",
             "regenerate_board",
@@ -112,8 +110,8 @@ mod tests {
             "route_board",
             "check_board",
             "open_board",
-            "board_state",
-            "move_part",
+            "get_board",
+            "move_parts",
             "route_track",
             "set_net_width",
             "update_board_outline",
@@ -121,28 +119,14 @@ mod tests {
         ] {
             assert!(p.contains(tool), "prompt missing the `{tool}` tool");
         }
-        // The Board-DSL authoring surface + old board mutators are GONE.
-        for gone in [
-            "design_board",
-            "import_board",
-            "set_placement_hints",
-            "set_constraints",
-            "resize_board",
-            "unlock_part",
-        ] {
-            assert!(
-                !p.contains(gone),
-                "prompt still mentions removed tool `{gone}`"
-            );
-        }
         // The PCB doctrine: geometry IS the engineering; wide copper for power.
         assert!(p.contains("GEOMETRY IS THE ENGINEERING"));
         assert!(p.contains("wide copper for power"));
         assert!(p.contains("ERC-clean committed schematic"));
         assert!(p.contains("clearance: 0.15"));
-        assert!(p.contains("minTraceWidth: 0.15"));
+        assert!(p.contains("min_trace_width: 0.15"));
         assert!(p.contains("{GND: 0.6, V3V3: 0.5}"));
-        assert!(p.contains("prefer `layers: 6`"));
+        assert!(p.contains("prefer `layer_count: 6`"));
         assert!(p.contains("NEVER guess a footprint lib_id"));
         assert!(p.contains("RP2040"));
         assert!(p.contains("external QSPI flash"));

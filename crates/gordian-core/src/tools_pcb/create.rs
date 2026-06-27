@@ -9,13 +9,13 @@ use kicad_cli::KicadCli;
 use serde_json::{Value, json};
 
 use kicad_footprint::FootprintId;
-use pcb_model::{LayerRef, Point2, Polygon};
-use pcb_place::placement::{Edge, GroupHint, LockedAt, PlacementHints, Rect};
+use pcb_model::{Point2, Polygon};
+use pcb_place::placement::{LockedAt, Rect};
 
 use crate::AgentRuntime;
 
 use super::fmt_num;
-use super::seed::{BoardSeed, BoardSeedPart, BoardSeedRules, Keepout, PourSpec};
+use super::seed::{BoardSeedRules, PourSpec};
 
 // ── regenerate_board ──────────────────────────────────────────────────────────────
 
@@ -270,51 +270,12 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Ok(()) => {}
         Err(msg) => return Ok(json!({ "error": msg })),
     }
-    if let Err(msg) = persist_board_seed(&spec, ctx) {
-        return Ok(json!({ "error": msg }));
-    }
     Ok(json!({
         "ok": true,
         "part_count": part_count,
         "path": ctx.pcb_path().display().to_string(),
         "note": "board regenerated from the committed schematic file (not F8 sync; existing placement/routing may be replaced) — run place_board, then route_board, then check_board",
     }))
-}
-
-pub(super) fn board_seed_path(ctx: &AgentRuntime) -> std::path::PathBuf {
-    ctx.project_dir().join(".gordian").join("board.seed.json")
-}
-
-fn persist_board_seed(spec: &BoardSeedSpec, ctx: &AgentRuntime) -> std::result::Result<(), String> {
-    let seed = BoardSeed {
-        bounds: spec.bounds.clone(),
-        rules: BoardSeedRules {
-            clearance: spec.rules.clearance,
-            min_trace_width: spec.rules.min_trace_width,
-            via_diameter: spec.rules.via_diameter,
-            via_drill: spec.rules.via_drill,
-            layer_count: spec.rules.layer_count,
-            net_widths: spec.rules.net_widths.clone(),
-            pours: spec.rules.pours.clone(),
-        },
-        parts: spec
-            .parts
-            .iter()
-            .map(|part| BoardSeedPart {
-                reference: part.reference.clone(),
-                footprint: part.footprint.clone(),
-                pad_nets: part.pad_nets.clone(),
-                locked: part.locked.clone(),
-            })
-            .collect(),
-        keepouts: Vec::new(),
-        hints: PlacementHints::default(),
-        outline: spec.outline.clone(),
-    };
-    let text = serde_json::to_string_pretty(&seed)
-        .map_err(|e| format!("could not serialize board seed metadata: {e}"))?;
-    std::fs::write(board_seed_path(ctx), format!("{text}\n"))
-        .map_err(|e| format!("could not write board seed metadata: {e}"))
 }
 
 fn unapplied_draft_footprint_changes(
@@ -1061,8 +1022,7 @@ pub(super) fn req_num(obj: &Value, key: &str, ctx: &str) -> std::result::Result<
 }
 
 /// Parse the board `bounds` from snake_case model input into the engine's
-/// [`Rect`] (whose serde is camelCase, so we read fields explicitly rather than
-/// deserializing directly — the tool API stays snake_case like the others).
+/// [`Rect`] explicitly so the tool API owns its field names.
 fn parse_bounds(v: Option<&Value>) -> std::result::Result<Rect, String> {
     let Some(obj) = v else {
         return Err("missing required `bounds` ({min_x, max_x, min_y, max_y} in mm)".into());
@@ -1084,20 +1044,36 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
     let d = BoardSeedRules::default();
     let obj = match v {
         None | Some(Value::Null) => return Ok(d),
-        Some(obj) => obj,
+        Some(Value::Object(obj)) => obj,
+        Some(_) => return Err("rules must be an object".to_string()),
     };
+    for key in obj.keys() {
+        if !matches!(
+            key.as_str(),
+            "clearance"
+                | "min_trace_width"
+                | "via_diameter"
+                | "via_drill"
+                | "layer_count"
+                | "net_widths"
+                | "pours"
+        ) {
+            return Err(format!(
+                "rules.{key} is not supported; use snake_case rule names"
+            ));
+        }
+    }
     // Partial rules are allowed: any omitted field falls back to the engine
-    // default, so a caller can pass just `{ "layers": 4 }` or `{ "clearance": 0.15 }`.
+    // default, so a caller can pass just `{ "layer_count": 4 }` or `{ "clearance": 0.15 }`.
     let num = |k: &str, fallback: f64| obj.get(k).and_then(Value::as_f64).unwrap_or(fallback);
     let layer_count = obj
-        .get("layers")
-        .or_else(|| obj.get("layer_count"))
+        .get("layer_count")
         .and_then(Value::as_u64)
         .map(|n| n as u32)
         .unwrap_or(d.layer_count);
     if !matches!(layer_count, 2 | 4 | 6 | 8) {
         return Err(format!(
-            "rules.layers must be 2, 4, 6, or 8, got {layer_count}"
+            "rules.layer_count must be 2, 4, 6, or 8, got {layer_count}"
         ));
     }
     let via_diameter = num("via_diameter", d.via_diameter);
@@ -1213,171 +1189,6 @@ const KICAD_MIN_VIA_DIAMETER: f64 = 0.5;
 const KICAD_MIN_VIA_DRILL: f64 = 0.3;
 const KICAD_MIN_ANNULAR: f64 = 0.1;
 
-// ── placement-hint helpers (group parsing for the DSL) ───────────────────────
-
-/// Parse one group hint from snake_case model input, validating its members
-/// against known references. Returns the engine [`GroupHint`] on
-/// success or a model-readable error string.
-pub(super) fn parse_group_hint(
-    v: &Value,
-    known_refs: &[&str],
-) -> std::result::Result<GroupHint, String> {
-    let name = v
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "each group needs a string `name`".to_string())?
-        .to_string();
-    let members_json = v
-        .get("members")
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("group `{name}`: needs a `members` array of references"))?;
-    let mut members = Vec::with_capacity(members_json.len());
-    for m in members_json {
-        let r = m
-            .as_str()
-            .ok_or_else(|| format!("group `{name}`: members must be reference strings"))?;
-        if !known_refs.contains(&r) {
-            return Err(format!(
-                "group `{name}`: member `{r}` is not a part on this board — known references: {}",
-                known_refs.join(", ")
-            ));
-        }
-        members.push(r.to_string());
-    }
-    // region / edge are optional; reuse the engine serde so the vocabulary stays
-    // single-sourced (these are camelCase-or-simple shapes the LLM can author).
-    let region = match v.get("region") {
-        None | Some(Value::Null) => None,
-        Some(r) => Some(parse_rect(r).map_err(|e| format!("group `{name}`: region {e}"))?),
-    };
-    let edge = match v.get("edge") {
-        None | Some(Value::Null) => None,
-        Some(e) => Some(parse_edge(e).map_err(|err| format!("group `{name}`: {err}"))?),
-    };
-    let grid = v.get("grid").and_then(Value::as_bool).unwrap_or(false);
-    if grid && region.is_none() {
-        return Err(format!(
-            "group `{name}`: `grid` requires a `region` to tile into"
-        ));
-    }
-    let surround = match v.get("surround") {
-        None | Some(Value::Null) => None,
-        Some(s) => {
-            let r = s.as_str().ok_or_else(|| {
-                format!("group `{name}`: `surround` must be a part-reference string")
-            })?;
-            if !known_refs.contains(&r) {
-                return Err(format!(
-                    "group `{name}`: surround target `{r}` is not a part on this board"
-                ));
-            }
-            Some(r.to_string())
-        }
-    };
-    Ok(GroupHint {
-        name,
-        members,
-        region,
-        edge,
-        grid,
-        surround,
-    })
-}
-
-/// Parse a `{min_x,max_x,min_y,max_y}` rect from snake_case model input.
-fn parse_rect(v: &Value) -> std::result::Result<Rect, String> {
-    Ok(Rect {
-        min_x: req_num(v, "min_x", "rect")?,
-        max_x: req_num(v, "max_x", "rect")?,
-        min_y: req_num(v, "min_y", "rect")?,
-        max_y: req_num(v, "max_y", "rect")?,
-    })
-}
-
-/// Parse an edge hint ("n"/"s"/"e"/"w", case-insensitive).
-fn parse_edge(v: &Value) -> std::result::Result<Edge, String> {
-    let s = v
-        .as_str()
-        .ok_or_else(|| "edge must be a string \"n\"/\"s\"/\"e\"/\"w\"".to_string())?;
-    match s.to_ascii_lowercase().as_str() {
-        "n" => Ok(Edge::N),
-        "s" => Ok(Edge::S),
-        "e" => Ok(Edge::E),
-        "w" => Ok(Edge::W),
-        other => Err(format!(
-            "edge must be \"n\"/\"s\"/\"e\"/\"w\", got {other:?}"
-        )),
-    }
-}
-
-// ── keepout helpers (rect parsing for the DSL) ───────────────────────────────
-
-/// Validate a keepout rectangle lies within the board bounds and lists only
-/// known copper layers, then return the engine [`Keepout`].
-pub(super) fn parse_keepout(
-    v: &Value,
-    bounds: &Rect,
-    layer_count: u32,
-    idx: usize,
-) -> std::result::Result<Keepout, String> {
-    let ctxstr = format!("keepouts[{idx}]");
-    let rect_v = v
-        .get("rect")
-        .ok_or_else(|| format!("{ctxstr}: missing `rect` {{min_x,max_x,min_y,max_y}}"))?;
-    let rect = parse_rect(rect_v).map_err(|e| format!("{ctxstr}: rect {e}"))?;
-    if rect.min_x >= rect.max_x || rect.min_y >= rect.max_y {
-        return Err(format!("{ctxstr}: rect is degenerate (min must be < max)"));
-    }
-    // Within bounds (a keepout outside the board is almost certainly a mistake).
-    if rect.min_x < bounds.min_x - geom::EPS
-        || rect.max_x > bounds.max_x + geom::EPS
-        || rect.min_y < bounds.min_y - geom::EPS
-        || rect.max_y > bounds.max_y + geom::EPS
-    {
-        return Err(format!(
-            "{ctxstr}: rect [{},{}]x[{},{}] is outside the board bounds [{},{}]x[{},{}]",
-            rect.min_x,
-            rect.max_x,
-            rect.min_y,
-            rect.max_y,
-            bounds.min_x,
-            bounds.max_x,
-            bounds.min_y,
-            bounds.max_y
-        ));
-    }
-    let layers_json = v
-        .get("layers")
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("{ctxstr}: missing `layers` array (e.g. [\"top\",\"bottom\"])"))?;
-    if layers_json.is_empty() {
-        return Err(format!(
-            "{ctxstr}: `layers` must name at least one copper layer"
-        ));
-    }
-    let mut layers = Vec::with_capacity(layers_json.len());
-    for l in layers_json {
-        let name = l
-            .as_str()
-            .ok_or_else(|| format!("{ctxstr}: layer names must be strings"))?;
-        let layer = LayerRef(name.to_string());
-        // Resolve against THIS board's stackup: "top"/"bottom" always, plus
-        // "inner1".."inner{layer_count-2}" on a multilayer board.
-        if layer.index(layer_count).is_none() {
-            let inners = if layer_count >= 4 {
-                format!(", \"inner1\"..\"inner{}\"", layer_count - 2)
-            } else {
-                String::new()
-            };
-            return Err(format!(
-                "{ctxstr}: unknown layer `{name}` — this board has \"top\", \"bottom\"{inners}"
-            ));
-        }
-        layers.push(layer);
-    }
-    Ok(Keepout { rect, layers })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1386,7 +1197,7 @@ mod tests {
     #[test]
     fn parse_seed_rules_accepts_plain_and_object_net_widths() {
         let rules = parse_seed_rules(Some(&json!({
-            "layers": 4,
+            "layer_count": 4,
             "net_widths": {
                 "GND": 0.6,
                 "V3V3": { "width": 0.5 }
@@ -1402,7 +1213,7 @@ mod tests {
     #[test]
     fn parse_seed_rules_keeps_requested_pours() {
         let rules = parse_seed_rules(Some(&json!({
-            "layers": 6,
+            "layer_count": 6,
             "pours": [
                 { "net": "GND", "layer": "bottom" },
                 { "net": "V3V3", "layer": "inner1" }
@@ -1423,6 +1234,23 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn parse_seed_rules_rejects_legacy_rule_names() {
+        let err = parse_seed_rules(Some(&json!({
+            "minTraceWidth": 0.15,
+        })))
+        .unwrap_err();
+
+        assert!(err.contains("rules.minTraceWidth is not supported"));
+
+        let err = parse_seed_rules(Some(&json!({
+            "layers": 4,
+        })))
+        .unwrap_err();
+
+        assert!(err.contains("rules.layers is not supported"));
     }
 
     #[test]
