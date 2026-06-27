@@ -9,7 +9,7 @@
 
 use super::cost::place_cost;
 use super::geometry::PLACEMENT_GRID;
-use super::model::{LogicalNet, PlaceProblem, PlacementHints};
+use super::model::{LogicalNet, Pin, PlaceProblem, PlacementHints};
 use super::pairs::coplacement_pairs;
 use crate::problem::Point2;
 
@@ -43,8 +43,9 @@ impl SaRng {
 
 /// Anneal `pos` (the force-directed seed) to a lower [`place_cost`]. Metropolis
 /// acceptance with a linearly-cooled temperature; move set = relocate a part,
-/// swap two parts, or shift a whole decoupling cluster (anchor + its caps).
-/// Locked parts never move. Deterministic.
+/// swap two parts, or shift a whole decoupling cluster (anchor + its caps). A final
+/// deterministic swap polish accepts any pairwise swap that still lowers the same
+/// cost after the random search cools. Locked parts never move. Deterministic.
 pub(crate) fn anneal_placement(
     problem: &PlaceProblem,
     hints: &PlacementHints,
@@ -71,7 +72,11 @@ pub(crate) fn anneal_placement(
     let mut clusters: std::collections::BTreeMap<usize, Vec<usize>> =
         std::collections::BTreeMap::new();
     for &(cap, ic) in &pairs {
-        if problem.parts[cap].locked.is_none() {
+        // A rigid cluster move includes the anchor and its caps. Only build it
+        // when the anchor is movable; a locked IC may still attract caps through
+        // the cohesion term and ordinary cap relocations, but it must never be
+        // translated by a block move.
+        if problem.parts[cap].locked.is_none() && problem.parts[ic].locked.is_none() {
             clusters.entry(ic).or_default().push(cap);
         }
     }
@@ -133,4 +138,247 @@ pub(crate) fn anneal_placement(
             }
         }
     }
+
+    let swap_order = routing_aware_swap_order(problem, nets, rotations, pos, &movable);
+    greedy_swap_polish_with_order(problem, half, &swap_order, pos, &mut cost, cost_of);
+}
+
+/// Deterministic 2-opt polish: SA can cool with two movable parts assigned to
+/// crossed ratlines or suboptimal sides of a local cluster. Sweep pairs in input
+/// order and keep only strict cost improvements. Two passes are enough to cascade
+/// a local improvement without turning this into another O(n^3) search.
+#[allow(dead_code)]
+pub(crate) fn greedy_swap_polish<F>(
+    problem: &PlaceProblem,
+    half: &[(f64, f64)],
+    movable: &[usize],
+    pos: &mut [Point2],
+    cost: &mut f64,
+    cost_of: F,
+) where
+    F: Fn(&[Point2]) -> f64,
+{
+    let mut swap_order = Vec::new();
+    for ai in 0..movable.len() {
+        for bi in ai + 1..movable.len() {
+            swap_order.push((movable[ai], movable[bi]));
+        }
+    }
+    greedy_swap_polish_with_order(problem, half, &swap_order, pos, cost, cost_of);
+}
+
+pub(crate) fn greedy_swap_polish_with_order<F>(
+    problem: &PlaceProblem,
+    half: &[(f64, f64)],
+    swap_order: &[(usize, usize)],
+    pos: &mut [Point2],
+    cost: &mut f64,
+    cost_of: F,
+) where
+    F: Fn(&[Point2]) -> f64,
+{
+    for _ in 0..2 {
+        let mut improved = false;
+        for &(a, b) in swap_order {
+            let old_a = pos[a].clone();
+            let old_b = pos[b].clone();
+            pos.swap(a, b);
+            pos[a] = problem.bounds.clamp_center_for_half(pos[a], half[a]);
+            pos[b] = problem.bounds.clamp_center_for_half(pos[b], half[b]);
+            let new_cost = cost_of(pos);
+            if new_cost + 1e-9 < *cost {
+                *cost = new_cost;
+                improved = true;
+            } else {
+                pos[a] = old_a;
+                pos[b] = old_b;
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+}
+
+pub(crate) fn routing_aware_swap_order(
+    problem: &PlaceProblem,
+    nets: &[LogicalNet],
+    rotations: &[f64],
+    pos: &[Point2],
+    movable: &[usize],
+) -> Vec<(usize, usize)> {
+    let movable_set: std::collections::BTreeSet<usize> = movable.iter().copied().collect();
+    let mut connected = std::collections::BTreeSet::new();
+    for net in nets {
+        for i in 0..net.pins.len() {
+            for j in i + 1..net.pins.len() {
+                push_pair_if_movable(
+                    &mut connected,
+                    &movable_set,
+                    net.pins[i].part,
+                    net.pins[j].part,
+                );
+            }
+        }
+    }
+
+    let edges: Vec<_> = nets
+        .iter()
+        .enumerate()
+        .flat_map(|(net_idx, net)| ratline_tree_edges(problem, rotations, pos, net_idx, net))
+        .collect();
+    let mut crossing_related = std::collections::BTreeSet::new();
+    for i in 0..edges.len() {
+        let a = edges[i];
+        for &b in &edges[i + 1..] {
+            if a.net_idx == b.net_idx {
+                continue;
+            }
+            if a.a_part == b.a_part
+                || a.a_part == b.b_part
+                || a.b_part == b.a_part
+                || a.b_part == b.b_part
+            {
+                continue;
+            }
+            if geom::Segment::new(a.a_pos, a.b_pos).intersects(geom::Segment::new(b.a_pos, b.b_pos))
+            {
+                for pa in [a.a_part, a.b_part] {
+                    for pb in [b.a_part, b.b_part] {
+                        push_pair_if_movable(&mut crossing_related, &movable_set, pa, pb);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut pairs = Vec::new();
+    for ai in 0..movable.len() {
+        for bi in ai + 1..movable.len() {
+            let a = movable[ai];
+            let b = movable[bi];
+            let key = ordered_pair(a, b);
+            let rank = if connected.contains(&key) {
+                0
+            } else if crossing_related.contains(&key) {
+                1
+            } else {
+                2
+            };
+            pairs.push((rank, a, b));
+        }
+    }
+    pairs.sort_unstable();
+    pairs.into_iter().map(|(_, a, b)| (a, b)).collect()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RatlineEdge {
+    net_idx: usize,
+    a_part: usize,
+    b_part: usize,
+    a_pos: Point2,
+    b_pos: Point2,
+}
+
+fn ratline_tree_edges<'a>(
+    problem: &'a PlaceProblem,
+    rotations: &'a [f64],
+    pos: &'a [Point2],
+    net_idx: usize,
+    net: &'a LogicalNet,
+) -> Vec<RatlineEdge> {
+    match net.pins.as_slice() {
+        [] | [_] => Vec::new(),
+        [a, b] => ratline_edge(problem, rotations, pos, net_idx, a, b)
+            .into_iter()
+            .collect(),
+        pins => {
+            let pin_positions: Vec<Point2> = pins
+                .iter()
+                .map(|pin| pin_world_pos(problem, rotations, pos, pin))
+                .collect();
+            let mut edges = Vec::with_capacity(pins.len().saturating_sub(1));
+            let mut in_tree = vec![false; pins.len()];
+            in_tree[0] = true;
+            for _ in 1..pins.len() {
+                let mut best: Option<(usize, usize)> = None;
+                for (ai, _) in pins.iter().enumerate() {
+                    if !in_tree[ai] {
+                        continue;
+                    }
+                    let pa = pin_positions[ai];
+                    for (bi, _) in pins.iter().enumerate() {
+                        if in_tree[bi] {
+                            continue;
+                        }
+                        let dist = pa.dist(pin_positions[bi]);
+                        let replace = best.is_none_or(|(old_a, old_b)| {
+                            let old_dist = pin_positions[old_a].dist(pin_positions[old_b]);
+                            dist < old_dist - 1e-9
+                                || ((dist - old_dist).abs() <= 1e-9 && (ai, bi) < (old_a, old_b))
+                        });
+                        if replace {
+                            best = Some((ai, bi));
+                        }
+                    }
+                }
+                let Some((ai, bi)) = best else {
+                    break;
+                };
+                in_tree[bi] = true;
+                if let Some(edge) =
+                    ratline_edge(problem, rotations, pos, net_idx, &pins[ai], &pins[bi])
+                {
+                    edges.push(edge);
+                }
+            }
+            edges
+        }
+    }
+}
+
+fn ratline_edge(
+    problem: &PlaceProblem,
+    rotations: &[f64],
+    pos: &[Point2],
+    net_idx: usize,
+    a: &Pin,
+    b: &Pin,
+) -> Option<RatlineEdge> {
+    if a.part == b.part {
+        return None;
+    }
+    Some(RatlineEdge {
+        net_idx,
+        a_part: a.part,
+        b_part: b.part,
+        a_pos: pin_world_pos(problem, rotations, pos, a),
+        b_pos: pin_world_pos(problem, rotations, pos, b),
+    })
+}
+
+fn pin_world_pos(problem: &PlaceProblem, rotations: &[f64], pos: &[Point2], pin: &Pin) -> Point2 {
+    let off = problem.parts[pin.part].pads[pin.pad]
+        .offset
+        .rotate(rotations[pin.part]);
+    Point2 {
+        x: pos[pin.part].x + off.x,
+        y: pos[pin.part].y + off.y,
+    }
+}
+
+fn push_pair_if_movable(
+    pairs: &mut std::collections::BTreeSet<(usize, usize)>,
+    movable: &std::collections::BTreeSet<usize>,
+    a: usize,
+    b: usize,
+) {
+    if a != b && movable.contains(&a) && movable.contains(&b) {
+        pairs.insert(ordered_pair(a, b));
+    }
+}
+
+fn ordered_pair(a: usize, b: usize) -> (usize, usize) {
+    if a < b { (a, b) } else { (b, a) }
 }

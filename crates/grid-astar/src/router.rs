@@ -37,8 +37,8 @@
 use crate::astar::{self, AStarCosts, DIAG_COST, State};
 use crate::grid::{self, RouteGrid};
 use crate::problem::{
-    Capabilities, LayerRef, Point2, RouteProblem, RouteResult, RouteSolution, Router, Trace, Via,
-    ViaSpan,
+    Capabilities, Connection, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult,
+    RouteSolution, Router, Trace, Via, ViaSpan,
 };
 
 #[doc(inline)]
@@ -141,40 +141,90 @@ pub fn route_orthogonal_lenient(problem: &RouteProblem) -> RouteResult {
 
 /// Route, then RIP-UP RETRY: if any nets failed, re-route from a fresh grid with those
 /// nets prioritised (they claim corridors before their neighbours), keeping the pass
-/// that routes more. Iterated a few times while it keeps improving. Purely additive —
-/// the first pass is the old behaviour and a worse retry is discarded — so a board can
-/// only gain routed nets, never lose them. This relieves the greedy router's corridor
-/// contention (e.g. a few more inner BGA balls escape) without a full rip-up engine.
+/// that routes better by shared route quality. Purely additive on routability — a
+/// retry may replace the incumbent only when it improves faults/failed-net count, or
+/// ties those and reduces vias/wirelength. This relieves the greedy router's corridor
+/// contention without a full rip-up engine.
 fn route_iterated(problem: &RouteProblem, costs: AStarCosts) -> RouteResult {
     let empty = std::collections::BTreeSet::new();
-    let mut best = route_with(problem, costs, &empty);
-    reconcile(problem, &mut best);
-    let mut best_n = best.failed.len();
-    let mut best_w = crate::problem::failed_pad_weight(problem, &best.failed);
+    let mut best = route_order_portfolio(problem, costs, &empty);
     for _ in 0..3 {
         if best.failed.is_empty() {
             break;
         }
         let pri: std::collections::BTreeSet<String> =
             best.failed.iter().map(|f| f.connection.clone()).collect();
-        let mut cand = route_with(problem, costs, &pri);
-        reconcile(problem, &mut cand);
-        let cn = cand.failed.len();
-        let cw = crate::problem::failed_pad_weight(problem, &cand.failed);
-        // PARETO improvement only: never worse on EITHER failed-net count or
-        // unconnected-pad weight, and strictly better on at least one. The pad-weight
-        // proxy is not exactly KiCAD's unconnected count, so requiring both metrics to
-        // hold stops a retry that reduces one while worsening the other (which had
-        // regressed a couple of stress boards). Stop once no Pareto gain remains.
-        if cn <= best_n && cw <= best_w && (cn < best_n || cw < best_w) {
+        let cand = route_order_portfolio(problem, costs, &pri);
+        if grid_candidate_better(problem, &cand, &best) {
             best = cand;
-            best_n = cn;
-            best_w = cw;
         } else {
             break;
         }
     }
     best
+}
+
+/// Try a small deterministic net-order portfolio on a fresh grid. The legacy
+/// shortest-first order is always first; extra orders are paid only if it leaves
+/// failures, and are accepted only when the shared route-quality key improves.
+/// This borrows the same "route-order portfolio" idea used by negotiated routing
+/// while preserving the grid router's greedy semantics and fast clean-board path.
+fn route_order_portfolio(
+    problem: &RouteProblem,
+    costs: AStarCosts,
+    priority: &std::collections::BTreeSet<String>,
+) -> RouteResult {
+    let mut orders = net_order_portfolio(problem, priority);
+    let first = orders
+        .next()
+        .expect("net_order_portfolio always yields the legacy order");
+    let mut best = route_with_order(problem, costs, first);
+    reconcile(problem, &mut best);
+
+    if best.failed.is_empty() {
+        return best;
+    }
+
+    for order in orders {
+        let mut cand = route_with_order(problem, costs, order);
+        reconcile(problem, &mut cand);
+        if grid_candidate_better(problem, &cand, &best) {
+            best = cand;
+            if best.failed.is_empty() {
+                break;
+            }
+        }
+    }
+    best
+}
+
+fn grid_quality(problem: &RouteProblem, result: &RouteResult) -> RouteQuality {
+    RouteQuality::of(
+        problem,
+        result,
+        geometry_violations(problem, &result.solution),
+    )
+}
+
+/// Is `candidate` a better grid-router result than `incumbent`? Routability is
+/// primary, then failed-net count, then fewer vias, then shorter copper. Exact
+/// ties keep the incumbent so strict/legacy order remains the deterministic path.
+fn grid_candidate_better(
+    problem: &RouteProblem,
+    candidate: &RouteResult,
+    incumbent: &RouteResult,
+) -> bool {
+    let c = grid_quality(problem, candidate);
+    let i = grid_quality(problem, incumbent);
+    if c.faults() != i.faults() {
+        c.faults() < i.faults()
+    } else if c.failed_nets != i.failed_nets {
+        c.failed_nets < i.failed_nets
+    } else if c.via_count != i.via_count {
+        c.via_count < i.via_count
+    } else {
+        c.wirelength + 1e-9 < i.wirelength
+    }
 }
 
 /// The naive router WITHOUT the via-barrel clearance scan (a more permissive sibling of
@@ -229,6 +279,10 @@ pub fn route_with(
     costs: AStarCosts,
     priority: &std::collections::BTreeSet<String>,
 ) -> RouteResult {
+    route_with_order(problem, costs, net_order(problem, priority))
+}
+
+fn route_with_order(problem: &RouteProblem, costs: AStarCosts, order: Vec<usize>) -> RouteResult {
     let mut grid = RouteGrid::build(problem);
     let layer_count = problem.layer_count.max(1) as usize;
 
@@ -254,7 +308,7 @@ pub fn route_with(
     let mut vias: Vec<Via> = Vec::new();
     let mut failed: Vec<FailedNet> = Vec::new();
 
-    for ci in net_order(problem, priority) {
+    for ci in order {
         let conn = &problem.connections[ci];
         let conn_idx = match grid.connection_index(&conn.name) {
             Some(i) => i,
@@ -322,7 +376,15 @@ pub fn route_with(
 
         let mut net_failed: Option<String> = None;
 
-        for (pi, pt) in conn.points_to_connect.iter().enumerate().skip(1) {
+        let mut remaining: Vec<usize> = (1..conn.points_to_connect.len()).collect();
+        while !remaining.is_empty() {
+            remaining.sort_by_key(|&pi| {
+                let target = point_cell(&grid, &conn.points_to_connect[pi], layer_count);
+                let (layer_hops, distance) = terminal_tree_route_key(&tree_cells, target);
+                (layer_hops, distance, pi)
+            });
+            let pi = remaining.remove(0);
+            let pt = &conn.points_to_connect[pi];
             let start_pad = point_cell(&grid, pt, layer_count);
             let starts = escape_cells(
                 &mut grid,
@@ -372,28 +434,244 @@ pub fn route_with(
     }
 }
 
+fn terminal_tree_route_key(tree_cells: &[State], terminal: State) -> (usize, u64) {
+    tree_cells
+        .iter()
+        .map(|cell| {
+            let layer_hops = cell.layer.abs_diff(terminal.layer);
+            let dx = cell.ix.abs_diff(terminal.ix) as u64;
+            let dy = cell.iy.abs_diff(terminal.iy) as u64;
+            // Same metric family as the octilinear A* heuristic: diagonal progress
+            // counts cheaper than two orthogonal steps, so the tree grows toward the
+            // terminal the router can plausibly reach with least new copper.
+            let diag = dx.min(dy) * DIAG_COST as u64;
+            let straight = dx.max(dy) - dx.min(dy);
+            (layer_hops, diag + straight)
+        })
+        .min()
+        .unwrap_or((usize::MAX, u64::MAX))
+}
+
 /// Connection indices in routing order: any net in `priority` first (so a rip-up retry
 /// can give the previously-failed nets the empty grid), then ascending bounding-box
 /// half-perimeter, ties by name. Deterministic. With an empty `priority` this is exactly
 /// the shortest-half-perimeter-first order.
 fn net_order(problem: &RouteProblem, priority: &std::collections::BTreeSet<String>) -> Vec<usize> {
+    net_order_by(problem, priority, NetOrderKind::ShortestFirst)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct NetOrderMetric {
+    pin_count: usize,
+    half_perimeter: f64,
+    obstacle_pressure: u64,
+}
+
+fn net_order_metrics(problem: &RouteProblem) -> Vec<NetOrderMetric> {
+    problem
+        .connections
+        .iter()
+        .map(|conn| NetOrderMetric {
+            pin_count: conn.points_to_connect.len(),
+            half_perimeter: conn.half_perimeter(),
+            obstacle_pressure: connection_obstacle_pressure(problem, conn),
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum NetOrderKind {
+    ShortestFirst,
+    ObstaclePressure,
+    LongestFirst,
+    MostPinsFirst,
+    Name,
+}
+
+fn net_order_by(
+    problem: &RouteProblem,
+    priority: &std::collections::BTreeSet<String>,
+    kind: NetOrderKind,
+) -> Vec<usize> {
+    let metrics = net_order_metrics(problem);
+    net_order_by_with_metrics(problem, priority, kind, &metrics)
+}
+
+fn net_order_by_with_metrics(
+    problem: &RouteProblem,
+    priority: &std::collections::BTreeSet<String>,
+    kind: NetOrderKind,
+    metrics: &[NetOrderMetric],
+) -> Vec<usize> {
     let mut order: Vec<usize> = (0..problem.connections.len()).collect();
     order.sort_by(|&a, &b| {
         let pa = priority.contains(&problem.connections[a].name);
         let pb = priority.contains(&problem.connections[b].name);
-        pb.cmp(&pa) // priority nets first
+        pb.cmp(&pa).then_with(|| {
+            if pa && pb {
+                priority_net_cmp(problem, metrics, a, b)
+            } else {
+                net_order_kind_cmp(problem, metrics, kind, a, b)
+            }
+        })
+    });
+    order
+}
+
+fn priority_net_cmp(
+    problem: &RouteProblem,
+    metrics: &[NetOrderMetric],
+    a: usize,
+    b: usize,
+) -> std::cmp::Ordering {
+    metrics[b]
+        .pin_count
+        .cmp(&metrics[a].pin_count)
+        .then_with(|| {
+            metrics[b]
+                .obstacle_pressure
+                .cmp(&metrics[a].obstacle_pressure)
+        })
+        .then_with(|| {
+            metrics[b]
+                .half_perimeter
+                .total_cmp(&metrics[a].half_perimeter)
+        })
+        .then_with(|| {
+            problem.connections[a]
+                .name
+                .cmp(&problem.connections[b].name)
+        })
+}
+
+fn net_order_kind_cmp(
+    problem: &RouteProblem,
+    metrics: &[NetOrderMetric],
+    kind: NetOrderKind,
+    a: usize,
+    b: usize,
+) -> std::cmp::Ordering {
+    match kind {
+        NetOrderKind::ShortestFirst => metrics[a]
+            .half_perimeter
+            .total_cmp(&metrics[b].half_perimeter)
             .then_with(|| {
-                let ka = problem.connections[a].half_perimeter();
-                let kb = problem.connections[b].half_perimeter();
-                ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal)
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            }),
+        NetOrderKind::ObstaclePressure => metrics[b]
+            .obstacle_pressure
+            .cmp(&metrics[a].obstacle_pressure)
+            .then_with(|| {
+                metrics[b]
+                    .half_perimeter
+                    .total_cmp(&metrics[a].half_perimeter)
             })
             .then_with(|| {
                 problem.connections[a]
                     .name
                     .cmp(&problem.connections[b].name)
+            }),
+        NetOrderKind::LongestFirst => metrics[b]
+            .half_perimeter
+            .total_cmp(&metrics[a].half_perimeter)
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            }),
+        NetOrderKind::MostPinsFirst => metrics[b]
+            .pin_count
+            .cmp(&metrics[a].pin_count)
+            .then_with(|| {
+                metrics[b]
+                    .half_perimeter
+                    .total_cmp(&metrics[a].half_perimeter)
             })
-    });
-    order
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            }),
+        NetOrderKind::Name => problem.connections[a]
+            .name
+            .cmp(&problem.connections[b].name),
+    }
+}
+
+fn net_order_portfolio(
+    problem: &RouteProblem,
+    priority: &std::collections::BTreeSet<String>,
+) -> std::vec::IntoIter<Vec<usize>> {
+    let metrics = net_order_metrics(problem);
+    let mut orders = Vec::new();
+    for kind in [
+        NetOrderKind::ShortestFirst,
+        NetOrderKind::ObstaclePressure,
+        NetOrderKind::LongestFirst,
+        NetOrderKind::MostPinsFirst,
+        NetOrderKind::Name,
+    ] {
+        push_unique_order(
+            &mut orders,
+            net_order_by_with_metrics(problem, priority, kind, &metrics),
+        );
+    }
+    orders.into_iter()
+}
+
+fn connection_obstacle_pressure(problem: &RouteProblem, conn: &Connection) -> u64 {
+    let Some(first) = conn.points_to_connect.first() else {
+        return 0;
+    };
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (first.x, first.x, first.y, first.y);
+    let mut terminal_layers = Vec::new();
+    for pt in &conn.points_to_connect {
+        min_x = min_x.min(pt.x);
+        max_x = max_x.max(pt.x);
+        min_y = min_y.min(pt.y);
+        max_y = max_y.max(pt.y);
+        if !terminal_layers.iter().any(|layer| layer == &pt.layer) {
+            terminal_layers.push(pt.layer.clone());
+        }
+    }
+
+    let expand = problem.clearance + problem.net_width(&conn.name) / 2.0;
+    min_x -= expand;
+    max_x += expand;
+    min_y -= expand;
+    max_y += expand;
+
+    let mut pressure = 0;
+    for obstacle in &problem.obstacles {
+        if obstacle.connected_to.iter().any(|net| net == &conn.name) {
+            continue;
+        }
+        if !obstacle
+            .layers
+            .iter()
+            .any(|layer| terminal_layers.iter().any(|terminal| terminal == layer))
+        {
+            continue;
+        }
+        let ob_min_x = obstacle.center.x - obstacle.width / 2.0 - expand;
+        let ob_max_x = obstacle.center.x + obstacle.width / 2.0 + expand;
+        let ob_min_y = obstacle.center.y - obstacle.height / 2.0 - expand;
+        let ob_max_y = obstacle.center.y + obstacle.height / 2.0 + expand;
+        let overlap_x = max_x.min(ob_max_x) - min_x.max(ob_min_x);
+        let overlap_y = max_y.min(ob_max_y) - min_y.max(ob_min_y);
+        if overlap_x > 0.0 && overlap_y > 0.0 {
+            pressure += 1_000_000 + ((overlap_x + overlap_y) * 1000.0).round() as u64;
+        }
+    }
+    pressure
+}
+
+fn push_unique_order(orders: &mut Vec<Vec<usize>>, order: Vec<usize>) {
+    if !orders.iter().any(|seen| seen == &order) {
+        orders.push(order);
+    }
 }
 
 /// Entry cells for a terminal `pt` (already mapped to `pad_cell`), pre-routing a
@@ -827,16 +1105,15 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
 ///
 /// Both variants reconcile their copper through the DRC oracle before scoring, so
 /// the result is geometry-clean; the better variant is the one that leaves fewer
-/// unconnected pads (the lenient variant routes more on a board with room; the
-/// strict variant is needed where a via would overhang a foreign pad). Strict
-/// wins exact ties as the more conservative path.
+/// unconnected pads/nets, then fewer vias/shorter copper. Strict wins exact ties
+/// as the more conservative path.
 ///
 /// **Per-board diagonal arbiter.** 8-way wins the bulk-maze boards but can leave a
 /// few escape nets unrouted on a dense, lattice-aligned via field where a 45° run
 /// costs more lateral room than an axis-aligned one. When the 8-way candidate left
 /// faults, the router also runs the ORTHOGONAL pair ([`route_orthogonal`] /
-/// [`route_orthogonal_lenient`]) and keeps it only when it is STRICTLY better on
-/// `(score, failed-net count)` — so diagonals are a pure capability ADD, never a
+/// [`route_orthogonal_lenient`]) and keeps it only when it is STRICTLY better by
+/// the same route-quality key — so diagonals are a pure capability ADD, never a
 /// via-field regression. Paid only on a board the 8-way pass did not already ace.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GridAStarRouter;
@@ -860,44 +1137,30 @@ impl Router for GridAStarRouter {
     fn route(&self, problem: &RouteProblem) -> RouteResult {
         let strict = route(problem);
         let lenient = route_lenient(problem);
-        let diag = if score(problem, &lenient) < score(problem, &strict) {
+        let diag = if grid_candidate_better(problem, &lenient, &strict) {
             lenient
         } else {
             strict
         };
-        // Arbiter key: primary the fault score (pad-weight + geom), then the FAILED-NET
-        // COUNT. The net-count tie-break is load-bearing: the pad-weight score can TIE
-        // when the diagonal route strands more, smaller nets that sum to the same pins as
-        // the orthogonal route's fewer, fatter ones — keeping the diagonal would then
-        // leave more nets unrouted (the metric the corpus reports), a regression.
-        let arb_key = |r: &RouteResult| (score(problem, r), r.failed.len());
-        if arb_key(&diag).0.0 == 0 {
+        if grid_quality(problem, &diag).faults() == 0 {
             return diag; // the 8-way pass aced the board — skip the orthogonal fallback
         }
         // The ORTHOGONAL candidate: the better-scoring of its strict (via-scan) and lenient
-        // (no-scan) variants, by the SAME key. Keep it only when STRICTLY better on
-        // (score, net-count); a genuine tie keeps the neater 45° diagonal.
+        // (no-scan) variants, by the SAME key. Keep it only when STRICTLY better;
+        // a genuine tie keeps the neater 45° diagonal.
         let os = route_orthogonal(problem);
         let ol = route_orthogonal_lenient(problem);
-        let ortho = if arb_key(&ol) < arb_key(&os) { ol } else { os };
-        if arb_key(&ortho) < arb_key(&diag) {
+        let ortho = if grid_candidate_better(problem, &ol, &os) {
+            ol
+        } else {
+            os
+        };
+        if grid_candidate_better(problem, &ortho, &diag) {
             ortho
         } else {
             diag
         }
     }
-}
-
-/// `(unconnected-pad weight + geometry violations, geometry violations)` for a
-/// grid-router result — the strict-vs-lenient tiebreak key. Both variants are
-/// reconciled to geometry-clean copper, so `geom` is 0 in practice; it is kept in
-/// the key as the same robustness guard the cross-engine selector uses.
-fn score(problem: &RouteProblem, r: &RouteResult) -> (usize, usize) {
-    let geom = geometry_violations(problem, &r.solution);
-    (
-        crate::problem::failed_pad_weight(problem, &r.failed) + geom,
-        geom,
-    )
 }
 
 /// Count the GEOMETRY DRC violations of a solution (clearance / width / via /
@@ -1400,6 +1663,93 @@ mod tests {
     }
 
     #[test]
+    fn multi_terminal_net_routes_nearest_remaining_terminal_first() {
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![Connection {
+                name: "TREE".to_owned(),
+                points_to_connect: vec![
+                    RoutePoint {
+                        x: 4.0,
+                        y: 4.0,
+                        layer: LayerRef::top(),
+                    },
+                    // Deliberately listed before the nearer terminal.
+                    RoutePoint {
+                        x: 14.0,
+                        y: 14.0,
+                        layer: LayerRef::top(),
+                    },
+                    RoutePoint {
+                        x: 5.0,
+                        y: 4.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 20.0,
+                min_y: 0.0,
+                max_y: 20.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+
+        let result = route_with_order(
+            &problem,
+            AStarCosts {
+                diag: DIAG_COST,
+                ..AStarCosts::default()
+            },
+            vec![0],
+        );
+        assert!(
+            result.failed.is_empty(),
+            "open-board multi-terminal net should route: {:?}",
+            result.failed
+        );
+
+        let grid = RouteGrid::build(&problem);
+        let near = point_cell(&grid, &problem.connections[0].points_to_connect[2], 2);
+        let far = point_cell(&grid, &problem.connections[0].points_to_connect[1], 2);
+        let near_mm = Point2 {
+            x: grid.cell_center_x(near.ix),
+            y: grid.cell_center_y(near.iy),
+        };
+        let far_mm = Point2 {
+            x: grid.cell_center_x(far.ix),
+            y: grid.cell_center_y(far.iy),
+        };
+
+        let first = result
+            .solution
+            .traces
+            .iter()
+            .find(|trace| trace.connection == "TREE")
+            .expect("the first branch should emit a trace");
+        assert!(
+            first.path.iter().any(|p| point_eq(*p, near_mm)),
+            "nearest remaining terminal should route before the farther input-order terminal: {first:?}"
+        );
+        assert!(
+            first.path.iter().all(|p| !point_eq(*p, far_mm)),
+            "farther terminal should not be part of the first emitted branch: {first:?}"
+        );
+    }
+
+    fn point_eq(a: Point2, b: Point2) -> bool {
+        (a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9
+    }
+
+    #[test]
     fn net_order_is_shortest_half_perimeter_first_then_name() {
         let p = load("quad.json");
         let order = net_order(&p, &std::collections::BTreeSet::new());
@@ -1417,6 +1767,403 @@ mod tests {
             );
             prev = hp;
         }
+    }
+
+    #[test]
+    fn net_order_portfolio_keeps_legacy_first_and_dedupes_variants() {
+        let p = load("quad.json");
+        let priority = std::collections::BTreeSet::new();
+        let orders: Vec<Vec<usize>> = net_order_portfolio(&p, &priority).collect();
+        assert_eq!(
+            orders.first(),
+            Some(&net_order(&p, &priority)),
+            "legacy shortest-first order must remain the first grid candidate"
+        );
+        for order in &orders {
+            let mut sorted = order.clone();
+            sorted.sort();
+            assert_eq!(
+                sorted,
+                (0..p.connections.len()).collect::<Vec<_>>(),
+                "every order must be a full permutation"
+            );
+        }
+        for (i, a) in orders.iter().enumerate() {
+            assert!(
+                orders.iter().skip(i + 1).all(|b| b != a),
+                "portfolio orders must be deduped"
+            );
+        }
+    }
+
+    #[test]
+    fn net_order_portfolio_includes_obstacle_pressure_order() {
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![pad(&[], (7.0, 10.0), 1.0, 4.0, &["top"])],
+            connections: vec![
+                Connection {
+                    name: "OPEN".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 2.0,
+                            y: 2.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 6.0,
+                            y: 2.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                Connection {
+                    name: "PINCHED".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 2.0,
+                            y: 10.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 12.0,
+                            y: 10.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                Connection {
+                    name: "MID".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 2.0,
+                            y: 16.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 10.0,
+                            y: 16.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+            ],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 20.0,
+                min_y: 0.0,
+                max_y: 20.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+        let priority = std::collections::BTreeSet::new();
+        let shortest = net_order(&p, &priority);
+        let pressure = net_order_by(&p, &priority, NetOrderKind::ObstaclePressure);
+        let orders: Vec<Vec<usize>> = net_order_portfolio(&p, &priority).collect();
+
+        assert_eq!(
+            shortest[0], 0,
+            "legacy shortest-first order stays open-net first"
+        );
+        assert_eq!(
+            pressure[0], 1,
+            "obstacle pressure should prioritize the pinched corridor"
+        );
+        assert!(
+            orders.iter().any(|order| order == &pressure),
+            "portfolio should include the pressure-first variant"
+        );
+    }
+
+    #[test]
+    fn obstacle_pressure_uses_active_net_width_and_ignores_own_pads() {
+        let mut p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![
+                pad(&["SIG"], (2.0, 1.0), 0.5, 0.5, &["top"]),
+                pad(&[], (5.2, 1.0), 0.5, 0.5, &["top"]),
+            ],
+            connections: vec![Connection {
+                name: "SIG".to_owned(),
+                points_to_connect: vec![
+                    RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    RoutePoint {
+                        x: 4.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 10.0,
+                min_y: 0.0,
+                max_y: 4.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+
+        let thin_pressure = connection_obstacle_pressure(&p, &p.connections[0]);
+        p.net_widths.insert("FAT_POWER".to_owned(), 4.0);
+        let with_unrelated_fat_net = connection_obstacle_pressure(&p, &p.connections[0]);
+
+        assert_eq!(
+            thin_pressure, 0,
+            "own pads and obstacles outside SIG's active-width corridor should not add pressure"
+        );
+        assert_eq!(
+            with_unrelated_fat_net, thin_pressure,
+            "an unrelated wide net must not widen the pressure window for SIG"
+        );
+    }
+
+    #[test]
+    fn net_order_metrics_cache_grid_order_signals() {
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![pad(&[], (7.0, 10.0), 1.0, 4.0, &["top"])],
+            connections: vec![
+                Connection {
+                    name: "OPEN".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 2.0,
+                            y: 2.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 6.0,
+                            y: 2.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                Connection {
+                    name: "PINCHED".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 2.0,
+                            y: 10.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 12.0,
+                            y: 10.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+            ],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 20.0,
+                min_y: 0.0,
+                max_y: 20.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+
+        let metrics = net_order_metrics(&p);
+
+        assert_eq!(metrics[1].pin_count, 2);
+        assert_eq!(metrics[1].half_perimeter, p.connections[1].half_perimeter());
+        assert_eq!(
+            metrics[1].obstacle_pressure,
+            connection_obstacle_pressure(&p, &p.connections[1])
+        );
+        assert!(metrics[1].obstacle_pressure > metrics[0].obstacle_pressure);
+    }
+
+    #[test]
+    fn net_order_portfolio_preserves_priority_prefix_for_every_variant() {
+        let p = load("quad.json");
+        let mut priority = std::collections::BTreeSet::new();
+        priority.insert(p.connections[1].name.clone());
+        priority.insert(p.connections[3].name.clone());
+        for order in net_order_portfolio(&p, &priority) {
+            let prefix: std::collections::BTreeSet<&str> = order
+                .iter()
+                .take(priority.len())
+                .map(|&i| p.connections[i].name.as_str())
+                .collect();
+            assert_eq!(
+                prefix,
+                priority.iter().map(String::as_str).collect(),
+                "priority nets must stay first for every portfolio order"
+            );
+        }
+    }
+
+    #[test]
+    fn net_order_portfolio_prioritizes_higher_impact_failed_nets() {
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![
+                Connection {
+                    name: "SIG".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 1.0,
+                            y: 1.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 2.0,
+                            y: 1.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                Connection {
+                    name: "BUS".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 1.0,
+                            y: 2.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 5.0,
+                            y: 2.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 5.0,
+                            y: 5.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                Connection {
+                    name: "OPEN".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 10.0,
+                            y: 10.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 11.0,
+                            y: 10.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+            ],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 20.0,
+                min_y: 0.0,
+                max_y: 20.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+        let mut priority = std::collections::BTreeSet::new();
+        priority.insert("SIG".to_owned());
+        priority.insert("BUS".to_owned());
+
+        for order in net_order_portfolio(&p, &priority) {
+            assert_eq!(
+                &order[..priority.len()],
+                &[1, 0],
+                "higher-pin failed BUS should claim retry corridors before smaller SIG"
+            );
+        }
+    }
+
+    fn result_with(vias: usize, wirelength: f64) -> RouteResult {
+        RouteResult {
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "N".to_owned(),
+                    layer: LayerRef::top(),
+                    width: 0.2,
+                    path: vec![
+                        Point2 { x: 10.0, y: 10.0 },
+                        Point2 {
+                            x: 10.0 + wirelength,
+                            y: 10.0,
+                        },
+                    ],
+                }],
+                vias: (0..vias)
+                    .map(|i| Via {
+                        connection: "N".to_owned(),
+                        at: Point2 {
+                            x: 12.0 + i as f64,
+                            y: 10.0,
+                        },
+                        diameter: 0.6,
+                        drill: 0.3,
+                        span: ViaSpan::Through,
+                    })
+                    .collect(),
+            },
+            failed: vec![],
+            engine: ENGINE.to_owned(),
+        }
+    }
+
+    #[test]
+    fn grid_candidate_quality_prefers_fewer_vias_then_wirelength() {
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 40.0,
+                min_y: 0.0,
+                max_y: 20.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+        let via_heavy_short = result_with(2, 10.0);
+        let via_free_long = result_with(0, 11.0);
+        let shorter = result_with(0, 9.0);
+
+        assert!(grid_candidate_better(&p, &via_free_long, &via_heavy_short));
+        assert!(!grid_candidate_better(&p, &via_heavy_short, &via_free_long));
+        assert!(grid_candidate_better(&p, &shorter, &via_free_long));
+        assert!(
+            !grid_candidate_better(&p, &via_free_long, &via_free_long),
+            "exact ties keep the incumbent"
+        );
     }
 
     #[test]

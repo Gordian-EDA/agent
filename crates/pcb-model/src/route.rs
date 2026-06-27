@@ -171,7 +171,8 @@ pub fn failed_pad_weight(problem: &RouteProblem, failed: &[FailedNet]) -> usize 
 /// [`fault_weight`](RouteQuality::fault_weight) + [`geom`](RouteQuality::geom)
 /// pair is the routability cost (lower is better), then the
 /// [`failed_nets`](RouteQuality::failed_nets) count, then
-/// [`wirelength`](RouteQuality::wirelength) is the tidiness tiebreaker.
+/// [`via_count`](RouteQuality::via_count) and [`wirelength`](RouteQuality::wirelength)
+/// are the manufacturability/tidiness tiebreakers.
 ///
 /// `geom` (geometry DRC violations) is supplied by the caller because the DRC
 /// oracle lives in `drc-lint`, which depends on `pcb-model` — so this kernel
@@ -190,7 +191,10 @@ pub struct RouteQuality {
     /// net count, so without this tiebreak the diagonal route's shorter wirelength
     /// would flip an equal-pad-weight tie toward the route that connects FEWER nets.
     pub failed_nets: usize,
-    /// Total copper wirelength (mm) — the tidiness tiebreaker.
+    /// Number of vias in the solution. At equal routability, fewer vias generally
+    /// means easier fabrication and less risk than a slightly shorter via-heavy route.
+    pub via_count: usize,
+    /// Total copper wirelength (mm) — the final tidiness tiebreaker.
     pub wirelength: f64,
 }
 
@@ -198,11 +202,13 @@ impl RouteQuality {
     /// Summarise `result` for `problem`, given its geometry-violation count
     /// `geom` (the caller computes it; reconciled clean copper passes `0`).
     pub fn of(problem: &RouteProblem, result: &RouteResult, geom: usize) -> Self {
+        let metrics = result.solution.metrics();
         RouteQuality {
             fault_weight: failed_pad_weight(problem, &result.failed),
             geom,
             failed_nets: result.failed.len(),
-            wirelength: result.solution.metrics().wirelength,
+            via_count: metrics.via_count,
+            wirelength: metrics.wirelength,
         }
     }
 
@@ -332,6 +338,30 @@ mod tests {
         assert!((m.wirelength - 7.0).abs() < 1e-9, "3 + 4 = 7mm");
         assert_eq!(m.via_count, 1);
         assert_eq!(m.trace_count, 1);
+    }
+
+    #[test]
+    fn route_quality_records_via_count() {
+        let p = empty_problem(2);
+        let r = RouteResult {
+            solution: RouteSolution {
+                traces: vec![],
+                vias: vec![Via {
+                    connection: "A".into(),
+                    at: Point2 { x: 1.0, y: 1.0 },
+                    diameter: 0.6,
+                    drill: 0.3,
+                    span: ViaSpan::Through,
+                }],
+            },
+            failed: vec![],
+            engine: "test".into(),
+        };
+
+        let q = RouteQuality::of(&p, &r, 0);
+
+        assert_eq!(q.via_count, 1);
+        assert_eq!(q.wirelength, 0.0);
     }
 
     #[test]

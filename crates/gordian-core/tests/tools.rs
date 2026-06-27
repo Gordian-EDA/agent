@@ -1212,11 +1212,14 @@ fn full_flow_create_place_route_is_clean() {
         "{out}"
     );
     assert!(out["metrics"]["traces"].as_u64().unwrap() > 0, "{out}");
-    // Either engine may win (route_auto picks the fewer-failed result); just
-    // assert the provenance tag is one of the two honest values.
+    // Any portfolio engine may win (route_auto picks the fewer-failed result); just
+    // assert the provenance tag is one of the known honest values.
     assert!(
-        matches!(out["router"].as_str(), Some("naive") | Some("detailed")),
-        "router must be naive or detailed: {out}"
+        matches!(
+            out["router"].as_str(),
+            Some("direct") | Some("naive") | Some("detailed")
+        ),
+        "router must be direct, naive, or detailed: {out}"
     );
 
     // The solution persisted; get_board reports routed=true.

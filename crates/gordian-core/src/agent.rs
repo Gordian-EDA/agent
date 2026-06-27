@@ -418,6 +418,7 @@ impl<P: Provider> Agent<P> {
         let mut nudges_left = MAX_COMMIT_NUDGES;
         let mut final_text = String::new();
         let mut failed_route_attempts = 0usize;
+        let mut last_route_failure: Option<Value> = None;
 
         for _ in 0..MAX_ITERATIONS {
             // Drive the provider's stream so assistant prose renders token-by-token
@@ -533,17 +534,15 @@ impl<P: Provider> Agent<P> {
                         name: call.fn_name.clone(),
                     },
                 );
-                let retry_blocked = failed_route_attempts >= MAX_FAILED_ROUTE_RETRIES
-                    && matches!(
-                        call.fn_name.as_str(),
-                        "regenerate_board" | "place_board" | "route_board"
-                    );
+                let retry_blocked = route_retry_blocked(failed_route_attempts, &call.fn_name);
                 let (mut content, images, image_path) = if retry_blocked {
+                    let last_route_failure = last_route_failure.clone();
                     (
                         json!({
                             "error": "PCB route retry budget exhausted",
                             "note": "route_board has already reported failed nets several times this turn. Do not regenerate/place/route again without a schematic or tool fix; run check_board if needed, then report the honest status.",
                             "failed_route_attempts": failed_route_attempts,
+                            "last_route_failure": last_route_failure,
                         })
                         .to_string(),
                         Vec::new(),
@@ -554,9 +553,14 @@ impl<P: Provider> Agent<P> {
                     self.run_tool_call(call, gated_commit, approvals, &mut applied, events)
                         .await
                 };
+                let parsed = parse_or_null(&content);
+                if route_retry_budget_reset_by_fix(&call.fn_name, &parsed) {
+                    failed_route_attempts = 0;
+                    last_route_failure = None;
+                }
                 if call.fn_name == "route_board" {
-                    let parsed = parse_or_null(&content);
                     if route_result_is_retry_failure(&parsed) {
+                        last_route_failure = Some(route_failure_context(&parsed));
                         if parsed.get("error").is_some() {
                             failed_route_attempts = MAX_FAILED_ROUTE_RETRIES;
                         } else {
@@ -764,6 +768,33 @@ fn route_result_is_retry_failure(value: &Value) -> bool {
         .get("failed")
         .and_then(Value::as_array)
         .is_some_and(|failed| !failed.is_empty())
+}
+
+fn route_retry_blocked(failed_route_attempts: usize, fn_name: &str) -> bool {
+    failed_route_attempts >= MAX_FAILED_ROUTE_RETRIES
+        && matches!(fn_name, "regenerate_board" | "route_board")
+}
+
+fn route_retry_budget_reset_by_fix(fn_name: &str, value: &Value) -> bool {
+    fn_name == "place_board" && value.get("error").is_none()
+}
+
+fn route_failure_context(value: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    for key in [
+        "error",
+        "failed",
+        "router",
+        "metrics",
+        "congestion",
+        "escape_bottleneck",
+        "note",
+    ] {
+        if let Some(v) = value.get(key) {
+            out.insert(key.to_string(), v.clone());
+        }
+    }
+    Value::Object(out)
 }
 
 fn add_route_retry_guidance(content: &str, failed_route_attempts: usize) -> String {
@@ -1751,6 +1782,39 @@ mod tests {
     }
 
     #[test]
+    fn route_retry_guard_blocks_blind_reroute_but_allows_replacement() {
+        assert!(route_retry_blocked(MAX_FAILED_ROUTE_RETRIES, "route_board"));
+        assert!(route_retry_blocked(
+            MAX_FAILED_ROUTE_RETRIES,
+            "regenerate_board"
+        ));
+        assert!(
+            !route_retry_blocked(MAX_FAILED_ROUTE_RETRIES, "place_board"),
+            "placement is the concrete recovery action after a failed route"
+        );
+        assert!(!route_retry_blocked(
+            MAX_FAILED_ROUTE_RETRIES - 1,
+            "route_board"
+        ));
+    }
+
+    #[test]
+    fn successful_place_board_resets_route_retry_budget() {
+        assert!(route_retry_budget_reset_by_fix(
+            "place_board",
+            &json!({"ok": true})
+        ));
+        assert!(!route_retry_budget_reset_by_fix(
+            "place_board",
+            &json!({"error": "placement failed"})
+        ));
+        assert!(!route_retry_budget_reset_by_fix(
+            "route_board",
+            &json!({"failed": []})
+        ));
+    }
+
+    #[test]
     fn route_retry_guidance_is_added_to_json_results() {
         let with_guidance = add_route_retry_guidance(r#"{"failed":[{"connection":"GND"}]}"#, 2);
         let parsed: Value = serde_json::from_str(&with_guidance).unwrap();
@@ -1759,5 +1823,26 @@ mod tests {
             Some(2)
         );
         assert_eq!(add_route_retry_guidance("not json", 2), "not json");
+    }
+
+    #[test]
+    fn route_failure_context_keeps_actionable_retry_fields() {
+        let source = json!({
+            "router": "detailed",
+            "failed": [{"connection": "GND", "reason": "blocked"}],
+            "metrics": {"wirelength": 10.0, "vias": 1, "traces": 2},
+            "congestion": {"final_overflow": 3},
+            "escape_bottleneck": {"reference": "U1"},
+            "note": "routed and saved the KiCAD board with honest failed nets",
+            "cleared_existing_copper": {"traces": 99, "vias": 88}
+        });
+
+        let context = route_failure_context(&source);
+
+        assert_eq!(context["router"], "detailed");
+        assert_eq!(context["failed"][0]["connection"], "GND");
+        assert_eq!(context["congestion"]["final_overflow"], 3);
+        assert_eq!(context["escape_bottleneck"]["reference"], "U1");
+        assert!(context.get("cleared_existing_copper").is_none());
     }
 }

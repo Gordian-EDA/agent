@@ -33,8 +33,9 @@
 //!    order (half-perimeter ascending, name tie-break — the slice-1 order). Then,
 //!    while any edge's usage exceeds its capacity and we are under the iteration
 //!    cap: bump the history cost of every overflowed edge, rip up only the nets
-//!    crossing an overflowed edge, and reroute them in deterministic order. Each
-//!    iteration's total overflow is recorded so a stalled negotiation is visible.
+//!    crossing an overflowed edge, and reroute the most overflow-involved victims
+//!    first with deterministic tie-breaks. Each iteration's total overflow is
+//!    recorded so a stalled negotiation is visible.
 //!
 //! ## Determinism
 //!
@@ -44,7 +45,7 @@
 //! byte-for-byte (a determinism test asserts this).
 
 use crate::mesh::{CapacityMesh, LeafId};
-use crate::problem::{FailedNet, Point2, RouteProblem};
+use crate::problem::{Connection, FailedNet, Point2, RouteProblem};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap};
@@ -62,6 +63,11 @@ const CONGESTION_K: f64 = 8.0;
 /// around it).
 const HISTORY_INCREMENT: f64 = 1.0;
 
+/// Cap for adaptive history growth when rip-up iterations stop reducing overflow.
+/// Keeping the multiplier bounded preserves deterministic behaviour and avoids
+/// making one stubborn edge infinitely expensive relative to real route distance.
+const HISTORY_STALL_BOOST_MAX: usize = 8;
+
 /// Maximum negotiated rip-up iterations before the router gives up and reports
 /// the remaining overflow honestly (no infinite loop on an infeasible board).
 const MAX_ITERATIONS: usize = 40;
@@ -69,6 +75,17 @@ const MAX_ITERATIONS: usize = 40;
 /// Base cost of a layer change (via) inside a leaf, in mm-equivalent units. Small
 /// but nonzero so the router prefers staying on a layer when it is free to.
 const VIA_BASE_COST: f64 = 0.5;
+
+/// Small additive penalty for routing a global edge against the layer's preferred
+/// direction. This borrows the proven PCB-router idea of alternating horizontal /
+/// vertical layer preferences, but keeps it soft: congestion/history and topology
+/// still dominate, and the bias is not large enough to make a clean open two-pin
+/// same-layer route add vias just for style.
+const WRONG_WAY_K: f64 = 0.03;
+
+/// Above this many routed-tree cells, precompute exact nearest-target distance
+/// per leaf once instead of scanning every tree centre for every A* heap pop.
+const TARGET_DISTANCE_FIELD_THRESHOLD: usize = 32;
 
 /// How many edge hotspots the congestion report lists (top-N by load ratio).
 const HOTSPOT_TOP_N: usize = 8;
@@ -254,8 +271,27 @@ pub fn global_route(problem: &RouteProblem) -> GlobalRouteResult {
 /// As [`global_route`], but over a pre-built mesh (slice 4's SVG overlay builds
 /// the mesh once and shares it).
 pub fn global_route_with_mesh(problem: &RouteProblem, mesh: &CapacityMesh) -> GlobalRouteResult {
-    let mut router = Router::new(problem, mesh);
-    router.run()
+    let orders = net_order_portfolio(problem);
+    let mut best = Router::new(problem, mesh).run_order(&orders[0], VictimOrder::Legacy);
+    if best.is_feasible() {
+        return best;
+    }
+
+    // Freerouting-style negotiated routers are sensitive to net order on dense
+    // boards. Keep the old order as the fast path, but when it cannot clear
+    // congestion, try a tiny deterministic order portfolio before reporting
+    // failure to the caller's route retry loop.
+    for order in &orders {
+        let candidate = Router::new(problem, mesh).run_order(order, VictimOrder::OverflowPressure);
+        if global_result_better(&candidate, &best) {
+            let feasible = candidate.is_feasible();
+            best = candidate;
+            if feasible {
+                break;
+            }
+        }
+    }
+    best
 }
 
 // ── internals ────────────────────────────────────────────────────────────────
@@ -272,6 +308,12 @@ struct NetInput {
     conn: usize,
     name: String,
     endpoints: Vec<Endpoint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VictimOrder {
+    Legacy,
+    OverflowPressure,
 }
 
 /// Negotiated global router state over the mesh.
@@ -328,9 +370,8 @@ impl<'a> Router<'a> {
         }
     }
 
-    /// Run the full negotiated route and produce the result.
-    fn run(&mut self) -> GlobalRouteResult {
-        let order = net_order(self.problem);
+    /// Run the full negotiated route for one concrete net order and produce the result.
+    fn run_order(&mut self, order: &[usize], victim_order: VictimOrder) -> GlobalRouteResult {
         let inputs: Vec<NetInput> = order.iter().map(|&ci| self.net_input(ci)).collect();
 
         // Initial routing pass: every net in deterministic order.
@@ -347,10 +388,13 @@ impl<'a> Router<'a> {
         }
 
         let mut iterations = 0usize;
+        let mut best_overflow = self.total_overflow();
+        let mut stagnant_iterations = 0usize;
 
         // Negotiated rip-up & reroute.
         while self.total_overflow() > 0 && iterations < MAX_ITERATIONS {
             iterations += 1;
+            let history_increment = history_increment_for_stall(stagnant_iterations);
 
             // 1. Bump history on every overflowed (edge, layer); collect the
             //    overflowed edge indices.
@@ -363,7 +407,7 @@ impl<'a> Router<'a> {
                         .copied()
                         .unwrap_or(0);
                     if u > cap {
-                        self.edge_history[ei][layer] += HISTORY_INCREMENT;
+                        self.edge_history[ei][layer] += history_increment;
                         overflowed_edges.insert(ei);
                     }
                 }
@@ -376,13 +420,30 @@ impl<'a> Router<'a> {
                     victims.push(pos);
                 }
             }
+            if victim_order == VictimOrder::OverflowPressure {
+                order_victims_by_overflow_pressure(
+                    &mut victims,
+                    &self.net_edges,
+                    &overflowed_edges,
+                );
+            }
             for &pos in &victims {
                 self.rip_up(pos);
             }
 
-            // 3. Reroute the victims in deterministic (net-order) order.
+            // 3. Reroute the victims in deterministic order. The primary route
+            //    keeps legacy net order; fallback portfolio routes can use
+            //    congestion pressure to shake loose stalled negotiations.
             for &pos in &victims {
                 self.route_net(pos, &inputs[pos]);
+            }
+
+            let overflow_after = self.total_overflow();
+            if overflow_after < best_overflow {
+                best_overflow = overflow_after;
+                stagnant_iterations = 0;
+            } else {
+                stagnant_iterations += 1;
             }
         }
 
@@ -556,12 +617,22 @@ impl<'a> Router<'a> {
         let sidx = |leaf: LeafId, layer: usize| leaf * lc + layer;
         let n_states = n_leaves * lc;
 
+        let mut target_state = vec![false; n_states];
+        for &(layer, leaf) in tree {
+            target_state[sidx(leaf, layer)] = true;
+        }
+
         // Precompute tree leaf centres for the heuristic (nearest target centre).
         let tree_centers: Vec<Point2> = tree
             .iter()
             .map(|&(_, leaf)| self.mesh.leaves[leaf].rect.center())
             .collect();
+        let target_distance_field = (tree_centers.len() >= TARGET_DISTANCE_FIELD_THRESHOLD)
+            .then(|| self.target_distance_field(&tree_centers));
         let heuristic = |leaf: LeafId| -> f64 {
+            if let Some(field) = &target_distance_field {
+                return field[leaf];
+            }
             let c = self.mesh.leaves[leaf].rect.center();
             tree_centers
                 .iter()
@@ -599,7 +670,7 @@ impl<'a> Router<'a> {
             visited[s] = true;
 
             // Reached the tree? (the new endpoint searches toward the tree)
-            if tree.contains(&(item.layer, item.leaf)) {
+            if target_state[s] {
                 goal = Some((item.leaf, item.layer));
                 break;
             }
@@ -675,6 +746,20 @@ impl<'a> Router<'a> {
 
         let (goal_leaf, goal_layer) = goal?;
         Some(self.reconstruct(start, sidx(goal_leaf, goal_layer), lc, &came_from))
+    }
+
+    fn target_distance_field(&self, targets: &[Point2]) -> Vec<f64> {
+        self.mesh
+            .leaves
+            .iter()
+            .map(|leaf| {
+                let c = leaf.rect.center();
+                targets
+                    .iter()
+                    .map(|t| c.dist(*t))
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .collect()
     }
 
     /// Reconstruct the [`CellPath`] from the A\* came-from chain. The chain runs
@@ -788,12 +873,11 @@ impl<'a> Router<'a> {
     }
 
     /// The cost of crossing edge `ei` on `layer`, from `from` to `to`:
-    /// `centre_from.dist(centre_to) × (1 + congestion + history)`.
+    /// `centre_from.dist(centre_to) × (1 + congestion + history + preferred-dir)`.
     fn edge_cost(&self, ei: usize, layer: usize, from: LeafId, to: LeafId) -> f64 {
-        let dist = self.mesh.leaves[from]
-            .rect
-            .center()
-            .dist(self.mesh.leaves[to].rect.center());
+        let from_center = self.mesh.leaves[from].rect.center();
+        let to_center = self.mesh.leaves[to].rect.center();
+        let dist = from_center.dist(to_center);
         let cap = self.mesh.edges[ei]
             .capacity
             .get(layer)
@@ -805,7 +889,10 @@ impl<'a> Router<'a> {
         let prospective = usage + 1;
         let penalty = congestion_penalty(prospective, cap);
         let history = self.edge_history[ei][layer];
-        dist * (1.0 + penalty + history)
+        let movement_is_horizontal =
+            (to_center.x - from_center.x).abs() >= (to_center.y - from_center.y).abs();
+        let wrong_way = preferred_direction_penalty(movement_is_horizontal, layer);
+        dist * (1.0 + penalty + history + wrong_way)
     }
 
     /// The cost of a layer change inside `leaf` (a via): a fixed base plus a
@@ -933,6 +1020,80 @@ fn congestion_penalty(usage: u32, capacity: u32) -> f64 {
     load * load * CONGESTION_K
 }
 
+fn history_increment_for_stall(stagnant_iterations: usize) -> f64 {
+    HISTORY_INCREMENT * (1.0 + stagnant_iterations.min(HISTORY_STALL_BOOST_MAX) as f64)
+}
+
+/// Soft preferred-direction cost for a global mesh edge.
+///
+/// Even-numbered layers prefer horizontal movement, odd-numbered layers prefer
+/// vertical movement, matching a conventional alternating stack.
+fn preferred_direction_penalty(movement_is_horizontal: bool, layer: usize) -> f64 {
+    let layer_prefers_horizontal = layer.is_multiple_of(2);
+    if movement_is_horizontal == layer_prefers_horizontal {
+        0.0
+    } else {
+        WRONG_WAY_K
+    }
+}
+
+fn global_result_better(candidate: &GlobalRouteResult, incumbent: &GlobalRouteResult) -> bool {
+    let ck = (
+        !candidate.is_feasible(),
+        candidate.report.unrouted.len(),
+        candidate.report.final_overflow,
+        candidate.report.iterations,
+        global_plan_quality_key(&candidate.plan),
+    );
+    let ik = (
+        !incumbent.is_feasible(),
+        incumbent.report.unrouted.len(),
+        incumbent.report.final_overflow,
+        incumbent.report.iterations,
+        global_plan_quality_key(&incumbent.plan),
+    );
+    ck < ik
+}
+
+fn global_plan_quality_key(plan: &GlobalPlan) -> (usize, usize) {
+    let mut vias = 0usize;
+    let mut steps = 0usize;
+    for net in &plan.nets {
+        for path in &net.paths {
+            steps += path.steps.len();
+            vias += path.steps.iter().filter(|step| step.via).count();
+        }
+    }
+    (vias, steps)
+}
+
+fn order_victims_by_overflow_pressure(
+    victims: &mut [usize],
+    net_edges: &[BTreeSet<usize>],
+    overflowed_edges: &BTreeSet<usize>,
+) {
+    victims.sort_by(|&a, &b| {
+        let ap = victim_pressure(a, net_edges, overflowed_edges);
+        let bp = victim_pressure(b, net_edges, overflowed_edges);
+        bp.cmp(&ap).then_with(|| a.cmp(&b))
+    });
+}
+
+fn victim_pressure(
+    pos: usize,
+    net_edges: &[BTreeSet<usize>],
+    overflowed_edges: &BTreeSet<usize>,
+) -> (usize, usize) {
+    let edges = &net_edges[pos];
+    (
+        edges
+            .iter()
+            .filter(|edge| overflowed_edges.contains(edge))
+            .count(),
+        edges.len(),
+    )
+}
+
 /// Connection indices in routing order: ascending bounding-box half-perimeter,
 /// ties by name. The slice-1 order ([`crate::router`]), reproduced so pathing
 /// does not depend on the router's internals.
@@ -948,6 +1109,129 @@ fn net_order(problem: &RouteProblem) -> Vec<usize> {
         })
     });
     order
+}
+
+/// Tiny deterministic fallback portfolio for negotiated routing. The first
+/// order is the legacy fast path; the rest are only tried when that route is not
+/// feasible.
+fn net_order_portfolio(problem: &RouteProblem) -> Vec<Vec<usize>> {
+    let mut orders = Vec::new();
+    push_unique_order(&mut orders, net_order(problem));
+
+    let mut obstacle_pressure: Vec<usize> = (0..problem.connections.len()).collect();
+    obstacle_pressure.sort_by(|&a, &b| {
+        connection_obstacle_pressure(problem, &problem.connections[b])
+            .cmp(&connection_obstacle_pressure(
+                problem,
+                &problem.connections[a],
+            ))
+            .then_with(|| {
+                problem.connections[b]
+                    .half_perimeter()
+                    .total_cmp(&problem.connections[a].half_perimeter())
+            })
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            })
+    });
+    push_unique_order(&mut orders, obstacle_pressure);
+
+    let mut longest_first: Vec<usize> = (0..problem.connections.len()).collect();
+    longest_first.sort_by(|&a, &b| {
+        problem.connections[b]
+            .half_perimeter()
+            .total_cmp(&problem.connections[a].half_perimeter())
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            })
+    });
+    push_unique_order(&mut orders, longest_first);
+
+    let mut most_pins_first: Vec<usize> = (0..problem.connections.len()).collect();
+    most_pins_first.sort_by(|&a, &b| {
+        problem.connections[b]
+            .points_to_connect
+            .len()
+            .cmp(&problem.connections[a].points_to_connect.len())
+            .then_with(|| {
+                problem.connections[b]
+                    .half_perimeter()
+                    .total_cmp(&problem.connections[a].half_perimeter())
+            })
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            })
+    });
+    push_unique_order(&mut orders, most_pins_first);
+
+    let mut name_order: Vec<usize> = (0..problem.connections.len()).collect();
+    name_order.sort_by(|&a, &b| {
+        problem.connections[a]
+            .name
+            .cmp(&problem.connections[b].name)
+    });
+    push_unique_order(&mut orders, name_order);
+
+    orders
+}
+
+fn connection_obstacle_pressure(problem: &RouteProblem, conn: &Connection) -> u64 {
+    let Some(first) = conn.points_to_connect.first() else {
+        return 0;
+    };
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (first.x, first.x, first.y, first.y);
+    let mut terminal_layers = Vec::new();
+    for pt in &conn.points_to_connect {
+        min_x = min_x.min(pt.x);
+        max_x = max_x.max(pt.x);
+        min_y = min_y.min(pt.y);
+        max_y = max_y.max(pt.y);
+        if !terminal_layers.iter().any(|layer| layer == &pt.layer) {
+            terminal_layers.push(pt.layer.clone());
+        }
+    }
+
+    let expand = problem.clearance + problem.net_width(&conn.name) / 2.0;
+    min_x -= expand;
+    max_x += expand;
+    min_y -= expand;
+    max_y += expand;
+
+    let mut pressure = 0;
+    for obstacle in &problem.obstacles {
+        if obstacle.connected_to.iter().any(|net| net == &conn.name) {
+            continue;
+        }
+        if !obstacle
+            .layers
+            .iter()
+            .any(|layer| terminal_layers.iter().any(|terminal| terminal == layer))
+        {
+            continue;
+        }
+        let ob_min_x = obstacle.center.x - obstacle.width / 2.0 - expand;
+        let ob_max_x = obstacle.center.x + obstacle.width / 2.0 + expand;
+        let ob_min_y = obstacle.center.y - obstacle.height / 2.0 - expand;
+        let ob_max_y = obstacle.center.y + obstacle.height / 2.0 + expand;
+        let overlap_x = max_x.min(ob_max_x) - min_x.max(ob_min_x);
+        let overlap_y = max_y.min(ob_max_y) - min_y.max(ob_min_y);
+        if overlap_x > 0.0 && overlap_y > 0.0 {
+            pressure += 1_000_000 + ((overlap_x + overlap_y) * 1000.0).round() as u64;
+        }
+    }
+    pressure
+}
+
+fn push_unique_order(orders: &mut Vec<Vec<usize>>, order: Vec<usize>) {
+    if !orders.iter().any(|seen| seen == &order) {
+        orders.push(order);
+    }
 }
 
 #[cfg(test)]
@@ -1198,6 +1482,229 @@ mod tests {
         let ja = serde_json::to_string(&a).unwrap();
         let jb = serde_json::to_string(&b).unwrap();
         assert_eq!(ja, jb, "two runs must serialize byte-equal");
+    }
+
+    #[test]
+    fn preferred_direction_penalty_alternates_by_layer() {
+        assert_eq!(preferred_direction_penalty(true, 0), 0.0);
+        assert_eq!(preferred_direction_penalty(false, 1), 0.0);
+        assert_eq!(preferred_direction_penalty(false, 0), WRONG_WAY_K);
+        assert_eq!(preferred_direction_penalty(true, 1), WRONG_WAY_K);
+        assert_eq!(preferred_direction_penalty(true, 2), 0.0);
+    }
+
+    #[test]
+    fn net_order_portfolio_keeps_legacy_first_and_dedupes_variants() {
+        let p = base(
+            bounds(20.0, 20.0),
+            vec![],
+            vec![
+                conn("B_SHORT", &[(2.0, 2.0, "top"), (4.0, 2.0, "top")]),
+                conn("A_LONG", &[(1.0, 1.0, "top"), (19.0, 19.0, "top")]),
+                conn(
+                    "C_TREE",
+                    &[(3.0, 16.0, "top"), (10.0, 16.0, "top"), (17.0, 16.0, "top")],
+                ),
+            ],
+        );
+        let orders = net_order_portfolio(&p);
+        assert_eq!(orders[0], net_order(&p), "legacy order stays first");
+        assert!(
+            orders.len() > 1,
+            "nontrivial boards get fallback order variants"
+        );
+        for i in 0..orders.len() {
+            for j in i + 1..orders.len() {
+                assert_ne!(orders[i], orders[j], "portfolio orders are deduped");
+            }
+        }
+    }
+
+    #[test]
+    fn net_order_portfolio_includes_obstacle_pressure_order() {
+        let p = base(
+            bounds(20.0, 20.0),
+            vec![keepout((7.0, 10.0), 1.0, 4.0, &["top"])],
+            vec![
+                conn("OPEN", &[(2.0, 2.0, "top"), (6.0, 2.0, "top")]),
+                conn("PINCHED", &[(2.0, 10.0, "top"), (12.0, 10.0, "top")]),
+                conn("MID", &[(2.0, 16.0, "top"), (10.0, 16.0, "top")]),
+            ],
+        );
+        let legacy = net_order(&p);
+        let pressure = {
+            let mut order: Vec<usize> = (0..p.connections.len()).collect();
+            order.sort_by(|&a, &b| {
+                connection_obstacle_pressure(&p, &p.connections[b])
+                    .cmp(&connection_obstacle_pressure(&p, &p.connections[a]))
+                    .then_with(|| {
+                        p.connections[b]
+                            .half_perimeter()
+                            .total_cmp(&p.connections[a].half_perimeter())
+                    })
+                    .then_with(|| p.connections[a].name.cmp(&p.connections[b].name))
+            });
+            order
+        };
+        let orders = net_order_portfolio(&p);
+
+        assert_eq!(orders[0], legacy, "legacy order stays first");
+        assert_eq!(
+            legacy[0], 0,
+            "shortest-first starts with the open short net"
+        );
+        assert_eq!(
+            pressure[0], 1,
+            "pressure order starts with the corridor-overlapped net"
+        );
+        assert!(
+            orders.iter().any(|order| order == &pressure),
+            "fallback portfolio includes the pressure-first order"
+        );
+    }
+
+    fn result_with(unrouted: usize, overflow: u32, iterations: usize) -> GlobalRouteResult {
+        GlobalRouteResult {
+            plan: GlobalPlan { nets: Vec::new() },
+            report: CongestionReport {
+                iterations,
+                final_overflow: overflow,
+                edge_hotspots: Vec::new(),
+                unrouted: (0..unrouted)
+                    .map(|i| FailedNet {
+                        connection: format!("N{i}"),
+                        reason: "test".to_owned(),
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    fn result_with_plan(iterations: usize, vias: usize, steps: usize) -> GlobalRouteResult {
+        GlobalRouteResult {
+            plan: GlobalPlan {
+                nets: vec![NetPlan {
+                    connection: "N".to_owned(),
+                    paths: vec![CellPath {
+                        steps: (0..steps)
+                            .map(|i| CellStep {
+                                leaf: i,
+                                layer: 0,
+                                center: Point2 {
+                                    x: i as f64,
+                                    y: 0.0,
+                                },
+                                via: i < vias,
+                                exit: None,
+                            })
+                            .collect(),
+                    }],
+                }],
+            },
+            report: CongestionReport {
+                iterations,
+                final_overflow: 0,
+                edge_hotspots: Vec::new(),
+                unrouted: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn global_result_selector_prefers_feasible_then_less_bad_failures() {
+        let feasible = result_with(0, 0, 8);
+        let infeasible = result_with(0, 1, 1);
+        assert!(global_result_better(&feasible, &infeasible));
+
+        let fewer_unrouted = result_with(1, 4, 40);
+        let more_unrouted = result_with(2, 0, 0);
+        assert!(global_result_better(&fewer_unrouted, &more_unrouted));
+
+        let less_overflow = result_with(1, 2, 40);
+        let more_overflow = result_with(1, 3, 20);
+        assert!(global_result_better(&less_overflow, &more_overflow));
+
+        let tie = result_with(1, 2, 40);
+        assert!(!global_result_better(&tie, &less_overflow));
+    }
+
+    #[test]
+    fn global_result_selector_tiebreaks_by_plan_vias_then_steps() {
+        let short_with_via = result_with_plan(4, 1, 3);
+        let long_no_via = result_with_plan(4, 0, 8);
+        let short_no_via = result_with_plan(4, 0, 3);
+
+        assert!(
+            global_result_better(&long_no_via, &short_with_via),
+            "at equal routability and iterations, fewer planned vias should win"
+        );
+        assert!(
+            global_result_better(&short_no_via, &long_no_via),
+            "after planned vias tie, fewer coarse steps should win"
+        );
+
+        let fewer_iterations = result_with_plan(3, 1, 3);
+        assert!(
+            global_result_better(&fewer_iterations, &long_no_via),
+            "iteration count remains more important than plan tidiness"
+        );
+    }
+
+    #[test]
+    fn stalled_negotiation_history_increment_ramps_but_is_bounded() {
+        assert_eq!(history_increment_for_stall(0), HISTORY_INCREMENT);
+        assert_eq!(history_increment_for_stall(3), HISTORY_INCREMENT * 4.0);
+        assert_eq!(
+            history_increment_for_stall(HISTORY_STALL_BOOST_MAX + 20),
+            HISTORY_INCREMENT * (1.0 + HISTORY_STALL_BOOST_MAX as f64)
+        );
+    }
+
+    #[test]
+    fn victim_order_prioritizes_nets_touching_more_overflowed_edges() {
+        let net_edges: Vec<BTreeSet<usize>> = [
+            [1, 2, 9].into_iter().collect(),
+            [1].into_iter().collect(),
+            [1, 2, 3, 4].into_iter().collect(),
+            [5, 6, 7, 8].into_iter().collect(),
+        ]
+        .into_iter()
+        .collect();
+        let overflowed: BTreeSet<usize> = [1, 2, 3].into_iter().collect();
+        let mut victims = vec![3, 1, 0, 2];
+
+        order_victims_by_overflow_pressure(&mut victims, &net_edges, &overflowed);
+
+        assert_eq!(
+            victims,
+            vec![2, 0, 1, 3],
+            "more overflowed edges first, then total edge footprint, then net-order position"
+        );
+    }
+
+    #[test]
+    fn target_distance_field_matches_exact_nearest_tree_scan() {
+        let p = load("quad.json");
+        let mesh = CapacityMesh::build(&p);
+        let router = Router::new(&p, &mesh);
+        let targets: Vec<Point2> = mesh
+            .leaves
+            .iter()
+            .step_by(2)
+            .map(|leaf| leaf.rect.center())
+            .collect();
+        assert!(!targets.is_empty(), "fixture should expose target leaves");
+
+        let field = router.target_distance_field(&targets);
+        assert_eq!(field.len(), mesh.leaves.len());
+        for (leaf, cached) in mesh.leaves.iter().zip(field) {
+            let c = leaf.rect.center();
+            let scanned = targets
+                .iter()
+                .map(|t| c.dist(*t))
+                .fold(f64::INFINITY, f64::min);
+            assert_eq!(cached, scanned);
+        }
     }
 
     #[test]

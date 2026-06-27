@@ -341,6 +341,30 @@ pub fn pad_world(problem: &PlaceProblem, pos: &[Point2], pin: &Pin) -> Point2 {
     }
 }
 
+/// World position of a pin's pad center with explicit per-part rotations. This is
+/// the version a placer should use after it has polished rotations but has not
+/// mutated `Part::locked`; [`pad_world`] remains the compatibility helper for
+/// locked-input geometry.
+pub fn pad_world_with_rotation(
+    problem: &PlaceProblem,
+    pos: &[Point2],
+    rotations: &[f64],
+    pin: &Pin,
+) -> Point2 {
+    let part = &problem.parts[pin.part];
+    let rot = geom::snap_quadrant(
+        rotations
+            .get(pin.part)
+            .copied()
+            .unwrap_or_else(|| part.locked.as_ref().map_or(0.0, |l| l.rotation)),
+    );
+    let off = part.pads[pin.pad].offset.rotate(rot);
+    Point2 {
+        x: pos[pin.part].x + off.x,
+        y: pos[pin.part].y + off.y,
+    }
+}
+
 /// The placement analog of the lint: re-verify in exact geometry that no two
 /// courtyards overlap (with margin) and every part is in bounds. Never trusts
 /// the algorithm — a placer calls this to set [`PlaceResult::legal`] HONESTLY.
@@ -411,6 +435,23 @@ pub fn is_legal(
 /// net, `(maxX-minX) + (maxY-minY)` of its pad world positions, summed. The cheap
 /// placement-quality number a placer reports in [`PlaceReport::hpwl`].
 pub fn compute_hpwl(problem: &PlaceProblem, nets: &[LogicalNet], pos: &[Point2]) -> f64 {
+    let rotations: Vec<f64> = problem
+        .parts
+        .iter()
+        .map(|part| part.locked.as_ref().map_or(0.0, |l| l.rotation))
+        .collect();
+    compute_hpwl_with_rotations(problem, nets, pos, &rotations)
+}
+
+/// Half-perimeter wirelength over net bounding boxes with explicit final
+/// rotations. This is the honest report metric for placements whose unlocked
+/// parts were rotated during polish.
+pub fn compute_hpwl_with_rotations(
+    problem: &PlaceProblem,
+    nets: &[LogicalNet],
+    pos: &[Point2],
+    rotations: &[f64],
+) -> f64 {
     let mut total = 0.0;
     for net in nets {
         if net.pins.len() < 2 {
@@ -419,7 +460,7 @@ pub fn compute_hpwl(problem: &PlaceProblem, nets: &[LogicalNet], pos: &[Point2])
         let pts: Vec<Point2> = net
             .pins
             .iter()
-            .map(|pin| pad_world(problem, pos, pin))
+            .map(|pin| pad_world_with_rotation(problem, pos, rotations, pin))
             .collect();
         total += Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter());
     }
@@ -688,7 +729,18 @@ pub trait RouteRanker {
     /// The routability of `rp`: the fault count (unrouted nets + geometry DRC
     /// violations). A worse-routed layout is never chosen; lower is better.
     fn faults(&self, rp: &RouteProblem) -> usize;
+
+    /// Richer route-quality key for equally-faulty placements. Existing rankers
+    /// may rely on the default, which preserves the old fault-only behaviour.
+    /// Built-in rankers can override this to expose failed-net count, via count,
+    /// and routed wirelength without changing the oracle's injected-router shape.
+    fn rank_key(&self, rp: &RouteProblem) -> (usize, usize, usize, u64) {
+        (self.faults(rp), 0, 0, 0)
+    }
 }
+
+/// Full placement selection key: route quality first, then layout cost, then HPWL.
+pub type PlacementRankKey = ((usize, usize, usize, u64), u64, u64);
 
 /// The routability oracle: a [`Placer`] that runs a portfolio of inner [`Placer`]s,
 /// routes each candidate with the injected [`RouteRanker`], and KEEPS the one that
@@ -717,47 +769,74 @@ impl RoutabilityOracle {
     ) -> Self {
         Self { placers, ranker }
     }
-}
 
-impl Placer for RoutabilityOracle {
-    fn name(&self) -> &'static str {
-        "oracle"
-    }
-
-    /// Run every inner placer, route each LEGAL candidate via the injected ranker,
-    /// and return the lowest-ranked one. The rank key is `(faults, layout_cost,
-    /// hpwl)`: routing faults dominate (a worse-routed layout is never chosen), the
-    /// layout cost decides among equally-routable layouts (so a search engine's
-    /// compaction/cohesion gains are chosen), and HPWL breaks final ties. An illegal
-    /// candidate ranks saturated (it can never win). `placers[0]` wins exact ties.
-    fn place(&self, problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
-        let rank = |r: &PlaceResult| -> (usize, u64, u64) {
-            if !r.legal {
-                return (usize::MAX, u64::MAX, u64::MAX);
-            }
-            let rp = to_route_problem(problem, &r.placements);
-            let faults = self.ranker.faults(&rp);
-            (
-                faults,
-                (r.report.layout_cost * 1000.0) as u64,
-                (r.report.hpwl * 1000.0) as u64,
-            )
-        };
-        // Evaluate every candidate IN PARALLEL — each is an independent, pure
-        // place+rank (deterministic regardless of thread/order). We then pick the
-        // lowest-ranked; `placers[0]` wins exact ties via the index tie-break, so the
-        // selection is byte-identical to a sequential evaluation.
+    /// Run every inner placer, route each unique LEGAL placement via the injected ranker,
+    /// and return the lowest-ranked one. The rank key is `(route_rank,
+    /// layout_cost, hpwl)`: routing faults dominate (a worse-routed layout is
+    /// never chosen), richer route quality may decide among equally-routable
+    /// layouts, then layout cost/HPWL break final ties. Duplicate placements from
+    /// different placers share the route-ranker result, avoiding repeated routing
+    /// work while still keeping each candidate's own layout-cost tie-breaks. An
+    /// illegal candidate ranks saturated (it can never win). `placers[0]` wins
+    /// exact ties.
+    pub fn place_with_rank_key(
+        &self,
+        problem: &PlaceProblem,
+        hints: &PlacementHints,
+    ) -> (PlaceResult, PlacementRankKey) {
+        // Evaluate every placer IN PARALLEL — each is an independent, pure
+        // placement. Ranking then reuses route results for duplicate placement
+        // geometries before the deterministic winner sort.
         use rayon::prelude::*;
-        let mut scored: Vec<(usize, (usize, u64, u64), PlaceResult)> = self
+        let placed: Vec<(usize, PlaceResult)> = self
             .placers
             .par_iter()
             .enumerate()
             .map(|(i, p)| {
                 let r = p.place(problem, hints);
-                let key = rank(&r);
-                (i, key, r)
+                (i, r)
             })
             .collect();
+
+        let mut unique_routes: BTreeMap<Vec<(String, i64, i64, i64)>, RouteProblem> =
+            BTreeMap::new();
+        for (_, result) in &placed {
+            if result.legal {
+                let placement_key = placement_route_cache_key(&result.placements);
+                unique_routes
+                    .entry(placement_key)
+                    .or_insert_with(|| to_route_problem(problem, &result.placements));
+            }
+        }
+        let route_rank_cache: BTreeMap<Vec<(String, i64, i64, i64)>, (usize, usize, usize, u64)> =
+            unique_routes
+                .par_iter()
+                .map(|(placement_key, rp)| (placement_key.clone(), self.ranker.rank_key(rp)))
+                .collect();
+
+        let mut scored: Vec<(usize, PlacementRankKey, PlaceResult)> =
+            Vec::with_capacity(placed.len());
+        for (i, r) in placed {
+            let key = if r.legal {
+                let placement_key = placement_route_cache_key(&r.placements);
+                let route_key = route_rank_cache
+                    .get(&placement_key)
+                    .copied()
+                    .expect("legal placement was pre-ranked");
+                (
+                    route_key,
+                    (r.report.layout_cost * 1000.0) as u64,
+                    (r.report.hpwl * 1000.0) as u64,
+                )
+            } else {
+                (
+                    (usize::MAX, usize::MAX, usize::MAX, u64::MAX),
+                    u64::MAX,
+                    u64::MAX,
+                )
+            };
+            scored.push((i, key, r));
+        }
         scored.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         if std::env::var_os("PLACE_ORACLE_DEBUG").is_some() {
             for (idx, key, result) in &scored {
@@ -771,8 +850,217 @@ impl Placer for RoutabilityOracle {
             && let Ok(pick) = pick.parse::<usize>()
             && let Some(pos) = scored.iter().position(|(idx, _, _)| *idx == pick)
         {
-            return scored.swap_remove(pos).2;
+            let (_, key, result) = scored.swap_remove(pos);
+            return (result, key);
         }
-        scored.swap_remove(0).2
+        let (_, key, result) = scored.swap_remove(0);
+        (result, key)
+    }
+}
+
+impl Placer for RoutabilityOracle {
+    fn name(&self) -> &'static str {
+        "oracle"
+    }
+
+    fn place(&self, problem: &PlaceProblem, hints: &PlacementHints) -> PlaceResult {
+        self.place_with_rank_key(problem, hints).0
+    }
+}
+
+fn placement_route_cache_key(placements: &[Placement]) -> Vec<(String, i64, i64, i64)> {
+    let mut key: Vec<_> = placements
+        .iter()
+        .map(|p| {
+            (
+                p.reference.clone(),
+                quantize_place_mm(p.at.x),
+                quantize_place_mm(p.at.y),
+                quantize_place_mm(p.rotation),
+            )
+        })
+        .collect();
+    key.sort();
+    key
+}
+
+fn quantize_place_mm(v: f64) -> i64 {
+    (v * 1000.0).round() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct FixedPlacer {
+        x: f64,
+        layout_cost: f64,
+    }
+
+    impl Placer for FixedPlacer {
+        fn name(&self) -> &'static str {
+            "fixed"
+        }
+
+        fn place(&self, _problem: &PlaceProblem, _hints: &PlacementHints) -> PlaceResult {
+            PlaceResult {
+                placements: vec![Placement {
+                    reference: "P1".to_owned(),
+                    at: Point2 { x: self.x, y: 5.0 },
+                    rotation: 0.0,
+                }],
+                legal: true,
+                report: PlaceReport {
+                    overlaps_resolved: 0,
+                    out_of_bounds_clamps: 0,
+                    hpwl: self.layout_cost,
+                    layout_cost: self.layout_cost,
+                },
+            }
+        }
+    }
+
+    struct RichRanker;
+
+    impl RouteRanker for RichRanker {
+        fn faults(&self, _rp: &RouteProblem) -> usize {
+            0
+        }
+
+        fn rank_key(&self, rp: &RouteProblem) -> (usize, usize, usize, u64) {
+            let x = rp.obstacles.first().map_or(0.0, |o| o.center.x);
+            // Pretend left placement needs one via and right placement needs none.
+            (0, 0, if x < 5.0 { 1 } else { 0 }, 0)
+        }
+    }
+
+    #[test]
+    fn routability_oracle_uses_rich_rank_key_before_layout_cost() {
+        let problem = PlaceProblem {
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 10.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            parts: vec![Part {
+                reference: "P1".to_owned(),
+                courtyard_w: 1.0,
+                courtyard_h: 1.0,
+                pads: vec![PartPad {
+                    number: "1".to_owned(),
+                    offset: Point2 { x: 0.0, y: 0.0 },
+                    width: 0.4,
+                    height: 0.4,
+                    layers: vec![LayerRef::top()],
+                    net: Some("N".to_owned()),
+                }],
+                locked: None,
+            }],
+            keepouts: vec![],
+            outline: None,
+        };
+        let oracle = RoutabilityOracle::new(
+            vec![
+                Box::new(FixedPlacer {
+                    x: 2.0,
+                    layout_cost: 1.0,
+                }),
+                Box::new(FixedPlacer {
+                    x: 8.0,
+                    layout_cost: 100.0,
+                }),
+            ],
+            Box::new(RichRanker),
+        );
+
+        let result = oracle.place(&problem, &PlacementHints::default());
+
+        assert_eq!(
+            result.placements[0].at.x, 8.0,
+            "richer route quality should beat lower layout cost at equal faults"
+        );
+    }
+
+    struct CountingRanker {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RouteRanker for CountingRanker {
+        fn faults(&self, _rp: &RouteProblem) -> usize {
+            0
+        }
+
+        fn rank_key(&self, _rp: &RouteProblem) -> (usize, usize, usize, u64) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            (0, 0, 0, 0)
+        }
+    }
+
+    #[test]
+    fn routability_oracle_caches_duplicate_placement_route_ranks() {
+        let problem = PlaceProblem {
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 10.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            parts: vec![Part {
+                reference: "P1".to_owned(),
+                courtyard_w: 1.0,
+                courtyard_h: 1.0,
+                pads: vec![PartPad {
+                    number: "1".to_owned(),
+                    offset: Point2 { x: 0.0, y: 0.0 },
+                    width: 0.4,
+                    height: 0.4,
+                    layers: vec![LayerRef::top()],
+                    net: Some("N".to_owned()),
+                }],
+                locked: None,
+            }],
+            keepouts: vec![],
+            outline: None,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let oracle = RoutabilityOracle::new(
+            vec![
+                Box::new(FixedPlacer {
+                    x: 2.0,
+                    layout_cost: 10.0,
+                }),
+                Box::new(FixedPlacer {
+                    x: 2.0,
+                    layout_cost: 5.0,
+                }),
+            ],
+            Box::new(CountingRanker {
+                calls: calls.clone(),
+            }),
+        );
+
+        let (result, key) = oracle.place_with_rank_key(&problem, &PlacementHints::default());
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "identical placement geometry should be routed only once"
+        );
+        assert_eq!(key.0, (0, 0, 0, 0));
+        assert_eq!(
+            result.report.layout_cost, 5.0,
+            "duplicate route rank must still leave layout cost as the tie-break"
+        );
     }
 }

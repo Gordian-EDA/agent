@@ -30,10 +30,12 @@
 //!   where the cell is free for this connection on *every* layer (the
 //!   conservative through-via barrel check; correct for the v1 2-layer scope).
 //!
-//! The heuristic is layer-agnostic Manhattan distance to the nearest target,
-//! scaled by [`STEP_COST`] — admissible because the cheapest way to close one
-//! cell of distance is a single straight step. With via and bend costs
-//! non-negative and the heuristic never counting them, A* stays optimal.
+//! The heuristic is Manhattan distance to the nearest target on each layer,
+//! scaled by [`STEP_COST`], plus one via lower bound when the cheapest target is
+//! on another layer and vias are enabled. It never counts bends and never counts
+//! more than one via (the search can jump to any signal layer in one through-via),
+//! so it remains admissible while avoiding a zero heuristic directly above a
+//! different-layer target.
 //!
 //! ## Determinism
 //!
@@ -58,6 +60,12 @@ pub const STEP_COST: u32 = 1;
 /// diagonal closes two cells of Manhattan distance for cost 2 (= 1 per cell),
 /// never under-counting.
 pub const DIAG_COST: u32 = 2;
+
+/// Above this many distinct target cells, precompute an exact L1 distance field
+/// instead of scanning every target on each heuristic call. Multi-point nets grow
+/// a routed tree, so the target set can become hundreds of cells; the distance
+/// field is the same Manhattan heuristic at O(1) per state.
+const TARGET_DISTANCE_FIELD_THRESHOLD: usize = 32;
 
 /// Tunable A* movement costs, in grid-step units.
 #[derive(Debug, Clone, Copy)]
@@ -300,18 +308,30 @@ pub fn search_bounded(
         return None;
     }
     let in_bounds = |ix: usize, iy: usize| bounds.is_none_or(|b| b.contains(ix, iy));
-    // Target cell set for O(1) goal tests and the multi-target heuristic.
-    let target_cells: Vec<(usize, usize)> = {
-        let mut v: Vec<(usize, usize)> = targets.iter().map(|t| (t.ix, t.iy)).collect();
-        v.sort_unstable();
-        v.dedup();
-        v
-    };
-    let is_target = |s: &State| targets.iter().any(|t| t == s);
-
     let plane = grid.nx * grid.ny;
     let n = plane * grid.layer_count;
     let sid = |s: &State| s.layer * plane + s.iy * grid.nx + s.ix;
+
+    let target_states: Vec<State> = targets
+        .iter()
+        .copied()
+        .filter(|t| t.layer < grid.layer_count && t.ix < grid.nx && t.iy < grid.ny)
+        .collect();
+
+    // Exact layer-aware goal lookup. The old `targets.iter().any(...)` made every
+    // popped state pay O(targets), which hurts tree routing where the target set is
+    // every already-routed cell of the net.
+    let mut target_state = vec![false; n];
+    for t in &target_states {
+        target_state[sid(t)] = true;
+    }
+    let is_target = |s: &State| target_state[sid(s)];
+
+    let target_dist = (target_states.len() >= TARGET_DISTANCE_FIELD_THRESHOLD).then(|| {
+        target_distance_fields_by_layer(grid.layer_count, grid.nx, grid.ny, &target_states)
+    });
+    let trace_clear_offsets = disc_offsets(costs.trace_clear_radius_cells);
+    let via_clear_offsets = disc_offsets(costs.via_clear_radius_cells);
 
     // g-score per state index; u32::MAX == unvisited. came_from stores the
     // predecessor state index (usize::MAX == none).
@@ -325,15 +345,14 @@ pub fn search_bounded(
     let mut open: BinaryHeap<Reverse<(u32, u32, Heading, State)>> = BinaryHeap::new();
 
     let heuristic = |s: &State| -> u32 {
-        target_cells
-            .iter()
-            .map(|&(tx, ty)| {
-                let dx = s.ix.abs_diff(tx);
-                let dy = s.iy.abs_diff(ty);
-                ((dx + dy) as u32) * STEP_COST
-            })
-            .min()
-            .unwrap_or(0)
+        target_heuristic(
+            s,
+            &target_states,
+            target_dist.as_deref(),
+            grid.nx,
+            costs,
+            grid.layer_count,
+        )
     };
 
     for s in starts {
@@ -395,7 +414,7 @@ pub fn search_bounded(
                     next.layer,
                     next.ix,
                     next.iy,
-                    costs.trace_clear_radius_cells,
+                    &trace_clear_offsets,
                 )
             {
                 continue;
@@ -456,7 +475,7 @@ pub fn search_bounded(
         // single-layer net), which also skips the per-cell barrel-clearance scan.
         if costs.allow_via
             && grid.layer_count > 1
-            && via_barrel_clear(grid, conn, cur.ix, cur.iy, costs.via_clear_radius_cells)
+            && via_barrel_clear(grid, conn, cur.ix, cur.iy, &via_clear_offsets)
         {
             for layer in 0..grid.layer_count {
                 if layer == cur.layer {
@@ -495,6 +514,125 @@ pub fn search_bounded(
     }
 
     None
+}
+
+fn target_heuristic(
+    s: &State,
+    targets: &[State],
+    target_dist_by_layer: Option<&[Option<Vec<u32>>]>,
+    nx: usize,
+    costs: AStarCosts,
+    layer_count: usize,
+) -> u32 {
+    if let Some(fields) = target_dist_by_layer {
+        let id = s.iy * nx + s.ix;
+        return fields
+            .iter()
+            .enumerate()
+            .filter_map(|(target_layer, dist)| {
+                dist.as_ref().map(|dist| {
+                    dist[id]
+                        .saturating_mul(STEP_COST)
+                        .saturating_add(target_layer_penalty(
+                            s.layer,
+                            target_layer,
+                            costs,
+                            layer_count,
+                        ))
+                })
+            })
+            .min()
+            .unwrap_or(0);
+    }
+
+    targets
+        .iter()
+        .map(|target| {
+            let dx = s.ix.abs_diff(target.ix);
+            let dy = s.iy.abs_diff(target.iy);
+            ((dx + dy) as u32)
+                .saturating_mul(STEP_COST)
+                .saturating_add(target_layer_penalty(
+                    s.layer,
+                    target.layer,
+                    costs,
+                    layer_count,
+                ))
+        })
+        .min()
+        .unwrap_or(0)
+}
+
+fn target_layer_penalty(
+    state_layer: usize,
+    target_layer: usize,
+    costs: AStarCosts,
+    layer_count: usize,
+) -> u32 {
+    if state_layer == target_layer || !costs.allow_via || layer_count < 2 {
+        0
+    } else {
+        costs.via
+    }
+}
+
+fn target_distance_fields_by_layer(
+    layer_count: usize,
+    nx: usize,
+    ny: usize,
+    targets: &[State],
+) -> Vec<Option<Vec<u32>>> {
+    let mut by_layer: Vec<Vec<(usize, usize)>> = vec![Vec::new(); layer_count];
+    for target in targets {
+        if target.layer < layer_count {
+            by_layer[target.layer].push((target.ix, target.iy));
+        }
+    }
+    by_layer
+        .into_iter()
+        .map(|mut cells| {
+            cells.sort_unstable();
+            cells.dedup();
+            (!cells.is_empty()).then(|| manhattan_target_distances(nx, ny, &cells))
+        })
+        .collect()
+}
+
+/// Exact Manhattan distance from every grid cell to the nearest target cell,
+/// ignoring obstacles/layers. This is the same admissible heuristic as scanning
+/// `target_cells`, computed once with a two-pass L1 distance transform.
+fn manhattan_target_distances(nx: usize, ny: usize, target_cells: &[(usize, usize)]) -> Vec<u32> {
+    let inf = u32::MAX / 4;
+    let mut dist = vec![inf; nx * ny];
+    for &(tx, ty) in target_cells {
+        if tx < nx && ty < ny {
+            dist[ty * nx + tx] = 0;
+        }
+    }
+
+    for y in 0..ny {
+        for x in 0..nx {
+            let id = y * nx + x;
+            if x > 0 {
+                dist[id] = dist[id].min(dist[id - 1].saturating_add(1));
+            }
+            if y > 0 {
+                dist[id] = dist[id].min(dist[id - nx].saturating_add(1));
+            }
+        }
+    }
+    for y in (0..ny).rev() {
+        for x in (0..nx).rev() {
+            let id = y * nx + x;
+            if x + 1 < nx {
+                dist[id] = dist[id].min(dist[id + 1].saturating_add(1));
+            }
+            if y + 1 < ny {
+                dist[id] = dist[id].min(dist[id + nx].saturating_add(1));
+            }
+        }
+    }
+    dist
 }
 
 /// Is the swept body of a DIAGONAL step from cell `(ix, iy)` to `(ix+dx, iy+dy)` clear of
@@ -579,23 +717,16 @@ fn planar_clear(
     layer: usize,
     ix: usize,
     iy: usize,
-    radius_cells: usize,
+    offsets: &[(isize, isize)],
 ) -> bool {
-    let r = radius_cells as isize;
-    let r2 = (radius_cells * radius_cells) as isize;
-    for dy in -r..=r {
-        for dx in -r..=r {
-            if dx * dx + dy * dy > r2 {
-                continue;
-            }
-            let hx = ix as isize + dx;
-            let hy = iy as isize + dy;
-            if hx < 0 || hy < 0 || hx >= grid.nx as isize || hy >= grid.ny as isize {
-                return false;
-            }
-            if !grid.is_free_for(layer, hx as usize, hy as usize, conn) {
-                return false;
-            }
+    for &(dx, dy) in offsets {
+        let hx = ix as isize + dx;
+        let hy = iy as isize + dy;
+        if hx < 0 || hy < 0 || hx >= grid.nx as isize || hy >= grid.ny as isize {
+            return false;
+        }
+        if !grid.is_free_for(layer, hx as usize, hy as usize, conn) {
+            return false;
         }
     }
     true
@@ -606,28 +737,36 @@ fn via_barrel_clear(
     conn: usize,
     ix: usize,
     iy: usize,
-    radius_cells: usize,
+    offsets: &[(isize, isize)],
 ) -> bool {
-    let r = radius_cells as isize;
-    let r2 = (radius_cells * radius_cells) as isize;
-    for dy in -r..=r {
-        for dx in -r..=r {
-            if dx * dx + dy * dy > r2 {
-                continue; // outside the Euclidean clearance disc
-            }
-            let hx = ix as isize + dx;
-            let hy = iy as isize + dy;
-            if hx < 0 || hy < 0 || hx >= grid.nx as isize || hy >= grid.ny as isize {
-                // Off-grid (off-board) reads blocked: a via barrel may not poke
-                // past the board edge.
-                return false;
-            }
-            if !(0..grid.layer_count).all(|l| grid.is_free_for(l, hx as usize, hy as usize, conn)) {
-                return false;
-            }
+    for &(dx, dy) in offsets {
+        let hx = ix as isize + dx;
+        let hy = iy as isize + dy;
+        if hx < 0 || hy < 0 || hx >= grid.nx as isize || hy >= grid.ny as isize {
+            // Off-grid (off-board) reads blocked: a via barrel may not poke
+            // past the board edge.
+            return false;
+        }
+        if !(0..grid.layer_count).all(|l| grid.is_free_for(l, hx as usize, hy as usize, conn)) {
+            return false;
         }
     }
     true
+}
+
+fn disc_offsets(radius_cells: usize) -> Vec<(isize, isize)> {
+    let r = radius_cells as isize;
+    let r2 = (radius_cells * radius_cells) as isize;
+    let mut offsets = Vec::new();
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy > r2 {
+                continue;
+            }
+            offsets.push((dx, dy));
+        }
+    }
+    offsets
 }
 
 /// Relax the edge into `next` with cost `tentative`, arriving by `arrive_dir`.
@@ -736,6 +875,101 @@ mod tests {
 
     fn st(layer: usize, ix: usize, iy: usize) -> State {
         State { layer, ix, iy }
+    }
+
+    #[test]
+    fn target_distance_field_matches_exact_manhattan_scan() {
+        let targets = vec![(0, 0), (6, 2), (3, 5)];
+        let nx = 8;
+        let ny = 7;
+        let dist = manhattan_target_distances(nx, ny, &targets);
+        for y in 0..ny {
+            for x in 0..nx {
+                let exact = targets
+                    .iter()
+                    .map(|&(tx, ty)| x.abs_diff(tx) + y.abs_diff(ty))
+                    .min()
+                    .unwrap() as u32;
+                assert_eq!(dist[y * nx + x], exact, "cell ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn target_heuristic_charges_one_via_for_other_layer_target() {
+        let costs = AStarCosts {
+            via: 25,
+            ..AStarCosts::default()
+        };
+        let targets = vec![st(1, 3, 4)];
+
+        assert_eq!(
+            target_heuristic(&st(1, 3, 4), &targets, None, 8, costs, 2),
+            0,
+            "same-layer target cell has zero heuristic"
+        );
+        assert_eq!(
+            target_heuristic(&st(0, 3, 4), &targets, None, 8, costs, 2),
+            25,
+            "same x/y but different layer still needs one via"
+        );
+        assert_eq!(
+            target_heuristic(&st(0, 2, 4), &targets, None, 8, costs, 2),
+            26,
+            "other-layer target adds one via to planar distance"
+        );
+
+        let no_via = AStarCosts {
+            allow_via: false,
+            via: 25,
+            ..AStarCosts::default()
+        };
+        assert_eq!(
+            target_heuristic(&st(0, 3, 4), &targets, None, 8, no_via, 2),
+            0,
+            "when vias are forbidden, do not add an unreachable-layer penalty"
+        );
+    }
+
+    #[test]
+    fn disc_offsets_match_euclidean_radius_cells() {
+        assert_eq!(disc_offsets(0), vec![(0, 0)]);
+
+        let r1: std::collections::BTreeSet<_> = disc_offsets(1).into_iter().collect();
+        assert_eq!(
+            r1,
+            [(-1, 0), (0, -1), (0, 0), (0, 1), (1, 0)]
+                .into_iter()
+                .collect()
+        );
+
+        let r2 = disc_offsets(2);
+        assert!(r2.contains(&(1, 1)), "sqrt(2) is inside radius 2");
+        assert!(!r2.contains(&(2, 1)), "sqrt(5) is outside radius 2");
+        assert_eq!(r2.len(), 13);
+    }
+
+    #[test]
+    fn layer_target_distance_fields_match_exact_layer_aware_scan() {
+        let targets = vec![st(0, 0, 0), st(1, 6, 2), st(1, 3, 5)];
+        let nx = 8;
+        let ny = 7;
+        let costs = AStarCosts {
+            via: 13,
+            ..AStarCosts::default()
+        };
+        let fields = target_distance_fields_by_layer(2, nx, ny, &targets);
+
+        for layer in 0..2 {
+            for y in 0..ny {
+                for x in 0..nx {
+                    let state = st(layer, x, y);
+                    let exact = target_heuristic(&state, &targets, None, nx, costs, 2);
+                    let field = target_heuristic(&state, &targets, Some(&fields), nx, costs, 2);
+                    assert_eq!(field, exact, "state {state:?}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -6,16 +6,23 @@
 //! `pcb-model` [`Router`](pcb_model::Router) trait. The generic
 //! [`pipeline::select_best`] selector ranks any injected `&[&dyn Router]` by
 //! routability then tidiness; [`pipeline::route_auto`] is the premium-portfolio
-//! convenience (grid-astar + negotiated-mesh). Builds on `grid-astar` (the naive
-//! router + grid/astar primitives); DRC via `drc-lint`; shared types from
-//! `pcb-model`.
+//! convenience (direct line-of-sight + via-escape + channel + negotiated-mesh +
+//! grid-astar).
+//! Builds on `grid-astar` (the fallback router + grid/astar primitives); DRC via
+//! `drc-lint`; shared types from `pcb-model`.
 
 pub use drc_lint::{connectivity, lint};
 pub use grid_astar::{astar, grid, router};
 pub use pcb_model as problem;
 
+pub mod channel;
 pub mod crossing;
 pub mod detail;
+pub mod direct;
+pub mod layer_hop;
 pub mod mesh;
 pub mod pathing;
+pub mod pattern;
 pub mod pipeline;
+pub mod sequential;
+pub mod via_escape;

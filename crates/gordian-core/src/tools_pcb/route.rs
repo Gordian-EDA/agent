@@ -9,8 +9,10 @@ use serde_json::{Value, json};
 use drc_lint::connectivity::Violation as ConnViolation;
 use drc_lint::lint::{DrcViolation, drop_unconnected_copper, lint};
 use kicad_ipc::snapshot::ImportedPart;
-use negotiated_mesh::pathing::global_route;
-use negotiated_mesh::pipeline::{NegotiatedMeshRouter, route_auto, select_best};
+use negotiated_mesh::pathing::{GlobalRouteResult, global_route};
+use negotiated_mesh::pipeline::{
+    route_auto_with_diagnostics, route_mesh_with_diagnostics, select_best,
+};
 use pcb_model::{
     FailedNet, LayerRef, Point2, RouteProblem, RouteResult, RouteSolution, Trace, Via, ViaSpan,
 };
@@ -93,15 +95,9 @@ fn lint_summary(
     }
 }
 
-/// Build the congestion-hotspot enrichment for a FAILED route. `route_auto` does
-/// not expose the global stage's congestion report, so we re-run the global
-/// router here ONLY on failure to recover the hotspots/iterations for the model's
-/// triage. NOTE (duplication cost): this repeats the global-routing pass that
-/// `route_auto` already ran internally; it is paid only on the failure path, on
-/// boards small enough that one extra global route is cheap. If `route_auto`
-/// later surfaces the congestion report directly, drop this.
-fn congestion_json(rp: &RouteProblem) -> Value {
-    let g = global_route(rp);
+/// Build the congestion-hotspot enrichment for a FAILED route from a global
+/// routing report already produced by the negotiated router.
+fn congestion_json_from_global(g: &GlobalRouteResult) -> Value {
     let hotspots: Vec<Value> = g
         .report
         .edge_hotspots
@@ -122,6 +118,13 @@ fn congestion_json(rp: &RouteProblem) -> Value {
         "final_overflow": g.report.final_overflow,
         "hotspots": hotspots,
     })
+}
+
+fn congestion_json(rp: &RouteProblem) -> Value {
+    // Fallback for explicit non-auto engines, which do not surface negotiated
+    // global diagnostics through their simple `RouteResult`.
+    let g = global_route(rp);
+    congestion_json_from_global(&g)
 }
 
 /// When routing leaves nets unrouted, decide whether they CONCENTRATE on one part (a fine-pitch
@@ -176,8 +179,10 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     }
 
     let rp = board.problem.clone();
-    let mut result = route_with_engine(&rp, ctx.config().engines.pcb_router);
-    let _used_direct_fallback = apply_direct_two_pin_fallback(&rp, &mut result);
+    let routed = route_with_engine(&rp, ctx.config().engines.pcb_router);
+    let global_diagnostics = routed.global;
+    let mut result = routed.result;
+    let _used_direct_fallback = apply_direct_rescue_fallback(&rp, &mut result);
     let dropped_failed = drop_failed_net_copper(&mut result);
     let failed = failed_connections(&result);
     add_terminal_stubs(&rp, &mut result.solution, &failed);
@@ -207,6 +212,8 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
         .collect();
     let congestion = if result.failed.is_empty() {
         Value::Null
+    } else if let Some(global) = &global_diagnostics {
+        congestion_json_from_global(global)
     } else {
         congestion_json(&rp)
     };
@@ -412,21 +419,38 @@ fn append_failed(result: &mut RouteResult, connection: &str, reason: &str) {
     });
 }
 
-fn route_with_engine(rp: &RouteProblem, engine: PcbRouterEngine) -> RouteResult {
+struct RouteRun {
+    result: RouteResult,
+    global: Option<GlobalRouteResult>,
+}
+
+fn route_with_engine(rp: &RouteProblem, engine: PcbRouterEngine) -> RouteRun {
     match engine {
-        PcbRouterEngine::Auto => route_auto(rp),
+        PcbRouterEngine::Auto => {
+            let run = route_auto_with_diagnostics(rp);
+            RouteRun {
+                result: run.result,
+                global: run.global,
+            }
+        }
         PcbRouterEngine::Astar => {
             let grid = grid_astar::router::GridAStarRouter;
-            select_best(rp, &[&grid])
+            RouteRun {
+                result: select_best(rp, &[&grid]),
+                global: None,
+            }
         }
         PcbRouterEngine::Mesh => {
-            let mesh = NegotiatedMeshRouter;
-            select_best(rp, &[&mesh])
+            let run = route_mesh_with_diagnostics(rp);
+            RouteRun {
+                result: run.result,
+                global: run.global,
+            }
         }
     }
 }
 
-fn apply_direct_two_pin_fallback(rp: &RouteProblem, result: &mut RouteResult) -> bool {
+fn apply_direct_rescue_fallback(rp: &RouteProblem, result: &mut RouteResult) -> bool {
     if result.failed.is_empty() {
         return false;
     }
@@ -440,28 +464,36 @@ fn apply_direct_two_pin_fallback(rp: &RouteProblem, result: &mut RouteResult) ->
         return false;
     }
     let mut applied = BTreeSet::new();
+    let mut rescue_solution = result.solution.clone();
+    rescue_solution
+        .traces
+        .retain(|trace| !failed.contains(&trace.connection));
+    rescue_solution
+        .vias
+        .retain(|via| !failed.contains(&via.connection));
     for conn in &rp.connections {
         if !failed.contains(&conn.name) {
             continue;
         }
         let candidate = if conn.points_to_connect.len() == 2 {
-            direct_two_pin_candidate(rp, &result.solution, conn)
+            direct_two_pin_candidate(rp, &rescue_solution, conn)
         } else if (3..=6).contains(&conn.points_to_connect.len()) {
-            direct_multi_pin_candidate(rp, &result.solution, conn)
+            direct_multi_pin_candidate(rp, &rescue_solution, conn)
         } else {
             None
         };
         if let Some(solution) = candidate {
-            result.solution = solution;
+            rescue_solution = solution;
             applied.insert(conn.name.clone());
         }
     }
     if applied.is_empty() {
         return false;
     }
+    result.solution = rescue_solution;
     result.failed.retain(|f| !applied.contains(&f.connection));
-    if result.engine != "direct-two-pin" {
-        result.engine = format!("{}+direct-two-pin", result.engine);
+    if result.engine != "direct-rescue" {
+        result.engine = format!("{}+direct-rescue", result.engine);
     }
     true
 }
@@ -473,8 +505,8 @@ fn direct_two_pin_candidate(
 ) -> Option<RouteSolution> {
     let a = conn.points_to_connect[0].point();
     let b = conn.points_to_connect[1].point();
-    for layer in direct_candidate_layers(rp.layer_count) {
-        for path in direct_candidate_paths(rp, a, b) {
+    for layer in direct_candidate_layers_for_conn(rp, conn) {
+        for path in direct_candidate_paths(rp, solution, &conn.name, &layer, a, b) {
             let mut candidate = direct_candidate_solution(rp, solution, conn, layer.clone(), path);
             simplify_candidate_paths(&mut candidate);
             if direct_candidate_is_clean(rp, &candidate, &conn.name) {
@@ -491,23 +523,17 @@ fn direct_multi_pin_candidate(
     conn: &pcb_model::Connection,
 ) -> Option<RouteSolution> {
     let anchor = conn.points_to_connect[0].point();
-    for layer in direct_candidate_layers(rp.layer_count) {
+    for layer in direct_candidate_layers_for_conn(rp, conn) {
         let mut candidate = solution.clone();
-        if layer.index(rp.layer_count) != Some(0) {
-            for point in &conn.points_to_connect {
-                candidate.vias.push(Via {
-                    connection: conn.name.clone(),
-                    at: point.point(),
-                    diameter: rp.via_diameter,
-                    drill: rp.via_drill,
-                    span: ViaSpan::Through,
-                });
-            }
+        for point in &conn.points_to_connect {
+            push_terminal_via_if_needed(rp, &mut candidate, conn, point, &layer);
         }
         let mut ok = true;
         for point in conn.points_to_connect.iter().skip(1) {
             let mut routed_leg = false;
-            for path in direct_candidate_paths(rp, anchor, point.point()) {
+            for path in
+                direct_candidate_paths(rp, &candidate, &conn.name, &layer, anchor, point.point())
+            {
                 let mut leg = candidate.clone();
                 leg.traces.push(Trace {
                     connection: conn.name.clone(),
@@ -534,20 +560,63 @@ fn direct_multi_pin_candidate(
     None
 }
 
-fn direct_candidate_paths(rp: &RouteProblem, a: Point2, b: Point2) -> Vec<Vec<Point2>> {
+fn direct_candidate_paths(
+    rp: &RouteProblem,
+    solution: &RouteSolution,
+    connection: &str,
+    layer: &LayerRef,
+    a: Point2,
+    b: Point2,
+) -> Vec<Vec<Point2>> {
     let mut paths = Vec::new();
     let mut seen = BTreeSet::new();
     push_candidate_path(&mut paths, &mut seen, vec![a, b]);
     let mut xs = vec![a.x, b.x, (a.x + b.x) / 2.0];
     let mut ys = vec![a.y, b.y, (a.y + b.y) / 2.0];
-    let inset = (rp.clearance + rp.min_trace_width + 0.5).max(1.0);
+    let route_width = rp.net_width(connection);
+    let axis_clearance = route_width.max(rp.min_trace_width);
+    let route_radius = axis_clearance / 2.0;
+    let inset = (rp.clearance + axis_clearance + 0.5).max(1.0);
     xs.extend([rp.bounds.min_x + inset, rp.bounds.max_x - inset]);
     ys.extend([rp.bounds.min_y + inset, rp.bounds.max_y - inset]);
     for obstacle in &rp.obstacles {
-        let dx = obstacle.width / 2.0 + rp.clearance + rp.min_trace_width;
-        let dy = obstacle.height / 2.0 + rp.clearance + rp.min_trace_width;
+        if !obstacle
+            .layers
+            .iter()
+            .any(|ob_layer| same_layer_ref(ob_layer, layer, rp.layer_count))
+        {
+            continue;
+        }
+        let dx = obstacle.width / 2.0 + rp.clearance + axis_clearance;
+        let dy = obstacle.height / 2.0 + rp.clearance + axis_clearance;
         xs.extend([obstacle.center.x - dx, obstacle.center.x + dx]);
         ys.extend([obstacle.center.y - dy, obstacle.center.y + dy]);
+    }
+    for trace in &solution.traces {
+        if trace.connection == connection || !same_layer_ref(&trace.layer, layer, rp.layer_count) {
+            continue;
+        }
+        let Some(first) = trace.path.first() else {
+            continue;
+        };
+        let (mut min_x, mut max_x, mut min_y, mut max_y) = (first.x, first.x, first.y, first.y);
+        for point in &trace.path {
+            min_x = min_x.min(point.x);
+            max_x = max_x.max(point.x);
+            min_y = min_y.min(point.y);
+            max_y = max_y.max(point.y);
+        }
+        let d = trace.width / 2.0 + rp.clearance + route_radius;
+        xs.extend([min_x - d, max_x + d]);
+        ys.extend([min_y - d, max_y + d]);
+    }
+    for via in &solution.vias {
+        if via.connection == connection {
+            continue;
+        }
+        let d = rp.via_diameter / 2.0 + rp.clearance + route_radius;
+        xs.extend([via.at.x - d, via.at.x + d]);
+        ys.extend([via.at.y - d, via.at.y + d]);
     }
     xs.retain(|x| *x >= rp.bounds.min_x + inset && *x <= rp.bounds.max_x - inset);
     ys.retain(|y| *y >= rp.bounds.min_y + inset && *y <= rp.bounds.max_y - inset);
@@ -581,9 +650,9 @@ fn direct_candidate_paths(rp: &RouteProblem, a: Point2, b: Point2) -> Vec<Vec<Po
 fn push_candidate_path(
     paths: &mut Vec<Vec<Point2>>,
     seen: &mut BTreeSet<Vec<(i64, i64)>>,
-    mut path: Vec<Point2>,
+    path: Vec<Point2>,
 ) {
-    path.dedup_by(|a, b| a.dist(*b) < geom::EPS);
+    let path = geom::Polyline::new(path).simplify().into_points();
     if path.len() < 2 {
         return;
     }
@@ -604,24 +673,8 @@ fn direct_candidate_solution(
     path: Vec<Point2>,
 ) -> RouteSolution {
     let mut candidate = solution.clone();
-    let a = conn.points_to_connect[0].point();
-    let b = conn.points_to_connect[1].point();
-    if layer.index(rp.layer_count) != Some(0) {
-        candidate.vias.push(Via {
-            connection: conn.name.clone(),
-            at: a,
-            diameter: rp.via_diameter,
-            drill: rp.via_drill,
-            span: ViaSpan::Through,
-        });
-        candidate.vias.push(Via {
-            connection: conn.name.clone(),
-            at: b,
-            diameter: rp.via_diameter,
-            drill: rp.via_drill,
-            span: ViaSpan::Through,
-        });
-    }
+    push_terminal_via_if_needed(rp, &mut candidate, conn, &conn.points_to_connect[0], &layer);
+    push_terminal_via_if_needed(rp, &mut candidate, conn, &conn.points_to_connect[1], &layer);
     candidate.traces.push(Trace {
         connection: conn.name.clone(),
         layer,
@@ -631,9 +684,42 @@ fn direct_candidate_solution(
     candidate
 }
 
+fn push_terminal_via_if_needed(
+    rp: &RouteProblem,
+    solution: &mut RouteSolution,
+    conn: &pcb_model::Connection,
+    point: &pcb_model::RoutePoint,
+    route_layer: &LayerRef,
+) {
+    if same_layer_ref(&point.layer, route_layer, rp.layer_count) {
+        return;
+    }
+    let at = point.point();
+    if solution.vias.iter().any(|via| {
+        via.connection == conn.name
+            && quantize_mm(via.at.x) == quantize_mm(at.x)
+            && quantize_mm(via.at.y) == quantize_mm(at.y)
+    }) {
+        return;
+    }
+    solution.vias.push(Via {
+        connection: conn.name.clone(),
+        at,
+        diameter: rp.via_diameter,
+        drill: rp.via_drill,
+        span: ViaSpan::Through,
+    });
+}
+
+fn same_layer_ref(a: &LayerRef, b: &LayerRef, layer_count: u32) -> bool {
+    a == b || (a.index(layer_count).is_some() && a.index(layer_count) == b.index(layer_count))
+}
+
 fn simplify_candidate_paths(solution: &mut RouteSolution) {
     for trace in &mut solution.traces {
-        trace.path.dedup_by(|a, b| a.dist(*b) < geom::EPS);
+        trace.path = geom::Polyline::new(std::mem::take(&mut trace.path))
+            .simplify()
+            .into_points();
     }
 }
 
@@ -653,6 +739,35 @@ fn direct_candidate_layers(layer_count: u32) -> Vec<LayerRef> {
         });
     }
     layers
+}
+
+fn direct_candidate_layers_for_conn(
+    rp: &RouteProblem,
+    conn: &pcb_model::Connection,
+) -> Vec<LayerRef> {
+    let all = direct_candidate_layers(rp.layer_count);
+    let mut ordered = Vec::new();
+    for point in &conn.points_to_connect {
+        if let Some(layer) = all
+            .iter()
+            .find(|layer| same_layer_ref(&point.layer, layer, rp.layer_count))
+        {
+            push_layer_once(&mut ordered, layer.clone(), rp.layer_count);
+        }
+    }
+    for layer in all {
+        push_layer_once(&mut ordered, layer, rp.layer_count);
+    }
+    ordered
+}
+
+fn push_layer_once(layers: &mut Vec<LayerRef>, layer: LayerRef, layer_count: u32) {
+    if !layers
+        .iter()
+        .any(|existing| same_layer_ref(existing, &layer, layer_count))
+    {
+        layers.push(layer);
+    }
 }
 
 fn direct_candidate_is_clean(
@@ -920,6 +1035,33 @@ mod escape_bottleneck_tests {
     }
 
     #[test]
+    fn direct_rescue_candidate_path_simplifies_before_dedupe() {
+        let mut paths = Vec::new();
+        let mut seen = BTreeSet::new();
+
+        push_candidate_path(
+            &mut paths,
+            &mut seen,
+            vec![
+                Point2 { x: 1.0, y: 1.0 },
+                Point2 { x: 1.0, y: 1.0 },
+                Point2 { x: 3.0, y: 1.0 },
+                Point2 { x: 5.0, y: 1.0 },
+            ],
+        );
+        push_candidate_path(
+            &mut paths,
+            &mut seen,
+            vec![Point2 { x: 1.0, y: 1.0 }, Point2 { x: 5.0, y: 1.0 }],
+        );
+
+        assert_eq!(
+            paths,
+            vec![vec![Point2 { x: 1.0, y: 1.0 }, Point2 { x: 5.0, y: 1.0 }]]
+        );
+    }
+
+    #[test]
     fn concentrated_failures_on_one_part_are_an_escape_bottleneck() {
         // A BGA whose 4 inner pins fail + a cap with 1 unrelated fail → 4/5 on U1 (≥60%) → flagged.
         let parts = vec![
@@ -954,7 +1096,7 @@ mod escape_bottleneck_tests {
     }
 
     #[test]
-    fn direct_two_pin_fallback_rescues_clean_failed_net() {
+    fn direct_rescue_fallback_rescues_clean_failed_net() {
         let problem = RouteProblem {
             layer_count: 2,
             min_trace_width: 0.2,
@@ -983,7 +1125,7 @@ mod escape_bottleneck_tests {
             clearance: 0.15,
             via_diameter: 0.6,
             via_drill: 0.3,
-            net_widths: Default::default(),
+            net_widths: [("FAT_POWER".to_string(), 2.0)].into_iter().collect(),
             outline: None,
             escape_layers: Default::default(),
         };
@@ -996,13 +1138,74 @@ mod escape_bottleneck_tests {
             engine: "naive".to_string(),
         };
 
-        assert!(apply_direct_two_pin_fallback(&problem, &mut result));
+        assert!(apply_direct_rescue_fallback(&problem, &mut result));
         assert!(result.failed.is_empty());
         assert_eq!(result.solution.traces.len(), 1);
+        assert_eq!(result.engine, "naive+direct-rescue");
     }
 
     #[test]
-    fn direct_two_pin_fallback_rescues_clean_dogleg() {
+    fn direct_fallback_ignores_stale_failed_net_copper() {
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![pcb_model::Connection {
+                name: "SIG".to_string(),
+                points_to_connect: vec![
+                    pcb_model::RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    pcb_model::RoutePoint {
+                        x: 5.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 6.0,
+                max_y: 2.0,
+            },
+            clearance: 0.15,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+        let mut result = RouteResult {
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "SIG".to_string(),
+                    layer: LayerRef::top(),
+                    width: 0.2,
+                    path: vec![Point2 { x: -2.0, y: -2.0 }, Point2 { x: -1.0, y: -1.0 }],
+                }],
+                vias: vec![],
+            },
+            failed: failed(&["SIG"]),
+            engine: "naive".to_string(),
+        };
+
+        assert!(apply_direct_rescue_fallback(&problem, &mut result));
+        assert!(result.failed.is_empty());
+        assert_eq!(result.solution.traces.len(), 1);
+        assert!(
+            result.solution.traces[0]
+                .path
+                .iter()
+                .all(|p| p.x >= 0.0 && p.y >= 0.0),
+            "stale out-of-bounds failed copper must not survive"
+        );
+    }
+
+    #[test]
+    fn direct_rescue_fallback_rescues_clean_dogleg() {
         let problem = RouteProblem {
             layer_count: 2,
             min_trace_width: 0.2,
@@ -1051,14 +1254,166 @@ mod escape_bottleneck_tests {
             engine: "naive".to_string(),
         };
 
-        assert!(apply_direct_two_pin_fallback(&problem, &mut result));
+        assert!(apply_direct_rescue_fallback(&problem, &mut result));
         assert!(result.failed.is_empty());
         assert_eq!(result.solution.traces.len(), 1);
         assert!(result.solution.traces[0].path.len() >= 3);
     }
 
     #[test]
-    fn direct_two_pin_fallback_rejects_foreign_copper() {
+    fn direct_rescue_fallback_uses_existing_copper_axes_for_local_detour() {
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![
+                pcb_model::Connection {
+                    name: "SIG".to_string(),
+                    points_to_connect: vec![
+                        pcb_model::RoutePoint {
+                            x: 1.0,
+                            y: 5.0,
+                            layer: LayerRef::top(),
+                        },
+                        pcb_model::RoutePoint {
+                            x: 9.0,
+                            y: 5.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                pcb_model::Connection {
+                    name: "OTHER".to_string(),
+                    points_to_connect: vec![
+                        pcb_model::RoutePoint {
+                            x: 4.0,
+                            y: 2.0,
+                            layer: LayerRef::top(),
+                        },
+                        pcb_model::RoutePoint {
+                            x: 4.0,
+                            y: 8.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+            ],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 10.0,
+                max_y: 10.0,
+            },
+            clearance: 0.15,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+        let mut result = RouteResult {
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "OTHER".to_string(),
+                    layer: LayerRef::top(),
+                    width: 0.2,
+                    path: vec![Point2 { x: 4.0, y: 2.0 }, Point2 { x: 4.0, y: 8.0 }],
+                }],
+                vias: vec![],
+            },
+            failed: failed(&["SIG"]),
+            engine: "detailed".to_string(),
+        };
+
+        assert!(apply_direct_rescue_fallback(&problem, &mut result));
+
+        assert!(result.failed.is_empty());
+        let sig = result
+            .solution
+            .traces
+            .iter()
+            .find(|trace| trace.connection == "SIG")
+            .expect("rescue should add SIG trace");
+        assert!(
+            sig.path.iter().any(|point| (point.y - 1.65).abs() < 0.05),
+            "rescue should use the local clearance axis generated from OTHER copper, got {:?}",
+            sig.path
+        );
+        assert!(lint(&problem, &result.solution).is_empty());
+    }
+
+    #[test]
+    fn direct_rescue_fallback_sizes_obstacle_axes_for_fat_net_width() {
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![pcb_model::Obstacle {
+                kind: "rect".to_string(),
+                layers: vec![LayerRef::top()],
+                center: Point2 { x: 4.0, y: 4.0 },
+                width: 0.8,
+                height: 0.8,
+                connected_to: vec!["OTHER".to_string()],
+            }],
+            connections: vec![pcb_model::Connection {
+                name: "SIG".to_string(),
+                points_to_connect: vec![
+                    pcb_model::RoutePoint {
+                        x: 1.0,
+                        y: 4.0,
+                        layer: LayerRef::top(),
+                    },
+                    pcb_model::RoutePoint {
+                        x: 7.0,
+                        y: 4.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 8.0,
+                max_y: 8.0,
+            },
+            clearance: 0.15,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: [("SIG".to_string(), 1.0)].into_iter().collect(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+        let mut result = RouteResult {
+            solution: RouteSolution {
+                traces: vec![],
+                vias: vec![],
+            },
+            failed: failed(&["SIG"]),
+            engine: "detailed".to_string(),
+        };
+
+        assert!(apply_direct_rescue_fallback(&problem, &mut result));
+
+        assert!(result.failed.is_empty());
+        let sig = result
+            .solution
+            .traces
+            .iter()
+            .find(|trace| trace.connection == "SIG")
+            .expect("rescue should add SIG trace");
+        assert_eq!(sig.width, 1.0);
+        assert!(
+            sig.path
+                .iter()
+                .any(|point| (point.y - 2.45).abs() < 0.05 || (point.y - 5.55).abs() < 0.05),
+            "fat-net rescue should use width-aware local obstacle axes instead of board-edge axes: {:?}",
+            sig.path
+        );
+        assert!(lint(&problem, &result.solution).is_empty());
+    }
+
+    #[test]
+    fn direct_rescue_fallback_rejects_foreign_copper() {
         let problem = RouteProblem {
             layer_count: 2,
             min_trace_width: 0.2,
@@ -1107,9 +1462,179 @@ mod escape_bottleneck_tests {
             engine: "naive".to_string(),
         };
 
-        assert!(!apply_direct_two_pin_fallback(&problem, &mut result));
+        assert!(!apply_direct_rescue_fallback(&problem, &mut result));
         assert_eq!(result.failed.len(), 1);
         assert!(result.solution.traces.is_empty());
+    }
+
+    #[test]
+    fn direct_rescue_fallback_can_escape_to_bottom_layer_with_vias() {
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![pcb_model::Obstacle {
+                kind: "rect".to_string(),
+                layers: vec![LayerRef::top()],
+                center: Point2 { x: 3.0, y: 3.0 },
+                width: 0.8,
+                height: 6.5,
+                connected_to: vec!["OTHER".to_string()],
+            }],
+            connections: vec![pcb_model::Connection {
+                name: "SIG".to_string(),
+                points_to_connect: vec![
+                    pcb_model::RoutePoint {
+                        x: 1.0,
+                        y: 3.0,
+                        layer: LayerRef::top(),
+                    },
+                    pcb_model::RoutePoint {
+                        x: 5.0,
+                        y: 3.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 6.0,
+                max_y: 6.0,
+            },
+            clearance: 0.15,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+        let direct = negotiated_mesh::direct::route_direct(&problem);
+        assert!(!direct.failed.is_empty(), "direct router must not add vias");
+        assert!(direct.solution.vias.is_empty());
+
+        let mut result = RouteResult {
+            solution: RouteSolution {
+                traces: vec![],
+                vias: vec![],
+            },
+            failed: failed(&["SIG"]),
+            engine: "detailed".to_string(),
+        };
+
+        assert!(apply_direct_rescue_fallback(&problem, &mut result));
+        assert!(result.failed.is_empty());
+        assert_eq!(result.solution.traces.len(), 1);
+        assert_eq!(result.solution.traces[0].layer, LayerRef::bottom());
+        assert_eq!(result.solution.vias.len(), 2);
+        assert_eq!(result.engine, "detailed+direct-rescue");
+    }
+
+    #[test]
+    fn direct_rescue_fallback_keeps_bottom_layer_net_via_free() {
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![pcb_model::Connection {
+                name: "SIG".to_string(),
+                points_to_connect: vec![
+                    pcb_model::RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::bottom(),
+                    },
+                    pcb_model::RoutePoint {
+                        x: 5.0,
+                        y: 1.0,
+                        layer: LayerRef::bottom(),
+                    },
+                ],
+            }],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 6.0,
+                max_y: 2.0,
+            },
+            clearance: 0.15,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+        let mut result = RouteResult {
+            solution: RouteSolution {
+                traces: vec![],
+                vias: vec![],
+            },
+            failed: failed(&["SIG"]),
+            engine: "detailed".to_string(),
+        };
+
+        assert!(apply_direct_rescue_fallback(&problem, &mut result));
+
+        assert!(result.failed.is_empty());
+        assert_eq!(result.solution.traces.len(), 1);
+        assert_eq!(result.solution.traces[0].layer, LayerRef::bottom());
+        assert!(
+            result.solution.vias.is_empty(),
+            "bottom-layer terminals already on the rescued route layer should not get redundant vias"
+        );
+    }
+
+    #[test]
+    fn direct_rescue_fallback_uses_one_via_for_mixed_layer_pair() {
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![pcb_model::Connection {
+                name: "SIG".to_string(),
+                points_to_connect: vec![
+                    pcb_model::RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    pcb_model::RoutePoint {
+                        x: 5.0,
+                        y: 1.0,
+                        layer: LayerRef::bottom(),
+                    },
+                ],
+            }],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 6.0,
+                max_y: 2.0,
+            },
+            clearance: 0.15,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        };
+        let mut result = RouteResult {
+            solution: RouteSolution {
+                traces: vec![],
+                vias: vec![],
+            },
+            failed: failed(&["SIG"]),
+            engine: "detailed".to_string(),
+        };
+
+        assert!(apply_direct_rescue_fallback(&problem, &mut result));
+
+        assert!(result.failed.is_empty());
+        assert_eq!(result.solution.traces.len(), 1);
+        assert_eq!(
+            result.solution.vias.len(),
+            1,
+            "only the off-layer terminal should receive a rescue via"
+        );
     }
 
     #[test]
@@ -1160,7 +1685,7 @@ mod escape_bottleneck_tests {
             engine: "naive".to_string(),
         };
 
-        assert!(apply_direct_two_pin_fallback(&problem, &mut result));
+        assert!(apply_direct_rescue_fallback(&problem, &mut result));
         assert!(result.failed.is_empty());
         assert_eq!(result.solution.traces.len(), 2);
     }
