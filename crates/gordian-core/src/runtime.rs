@@ -9,12 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
-use circuit_lang::model::Design;
 use kicad_env::KicadEnv;
 use kicad_footprint::FootprintCatalog;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::search::SymbolIndex;
-use sch_floorplan::floorplan::{LayoutIr, infer_ir};
 
 use crate::config::{DEFAULT_SCHEMATIC_FILENAME, GordianConfig};
 
@@ -155,11 +153,6 @@ impl AgentRuntime {
             config: GordianConfig::default(),
             _tempdir: Some(tempdir),
         })
-    }
-
-    /// The Layout IR for `design`.
-    pub(crate) fn layout_for(&self, design: &Design) -> LayoutIr {
-        infer_ir(&self.env, design)
     }
 
     /// The project's `.kicad_sch` path.

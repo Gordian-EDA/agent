@@ -44,7 +44,7 @@ blocks:
 
     // Emit through the floorplan engine to a temp .kicad_sch.
     let ir = floorplan::baseline_ir(&design);
-    let out = floorplan::emit_strategy(&env, &design, &ir, Box::new(greedy_place::Greedy))
+    let out = floorplan::emit_strategy(&env, &design, Box::new(anneal_place::Anneal), Some(ir))
         .expect("emit a .kicad_sch");
     let dir = tempfile::tempdir().unwrap();
     let sch_path = dir.path().join("rt.kicad_sch");

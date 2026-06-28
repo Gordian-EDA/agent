@@ -71,8 +71,12 @@ fn render_fixture(
             Err(_) => sch_floorplan::floorplan::baseline_ir(&design),
         }
     };
-    let emit =
-        sch_floorplan::floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy))
+    let emit = sch_floorplan::floorplan::emit_strategy(
+        env,
+        &design,
+        Box::new(anneal_place::Anneal),
+        Some(ir),
+    )
             .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
 
     let tmp = tempfile::tempdir()?;

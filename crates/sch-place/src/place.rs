@@ -1,23 +1,11 @@
-//! The placement VOCABULARY: the [`PlaceProblem`] an engine reads, the [`PlaceResult`]
-//! it returns, the caller's [`PlaceOptions`], and the [`Crossings`] triple. These are
-//! pure DATA and live in the neutral kernel (`sch-place`); the engine TRAIT
-//! (`PlacementEngine`) lives in `sch-floorplan` beside the measurement library, because
-//! every production engine scores routed sheets and so needs that library to place.
-//!
-//! [`PlaceProblem`] describes ONLY the problem — the connectivity, the intent, a seed,
-//! the caller's [`PlaceOptions`] — and is SILENT on METHOD. It carries no cost, no
-//! evaluator, no objective, no search knob: a force-directed, analytical, ML, or
-//! constraint-solver placer has no cost-candidate loop, so baking one into the problem
-//! would be a category error. An engine reads the problem, writes final positions into
-//! the `items` slice, and returns a [`PlaceResult`]; *how* (cost-search, learned,
-//! template, portfolio) is the engine's own business.
+//! The placement vocabulary shared by schematic engines: caller knobs
+//! ([`PlaceOptions`]), emitted crossing counts ([`Crossings`]), and engine diagnostics
+//! ([`PlaceResult`]). The neutral placement+routing problem itself lives in
+//! `sch-floorplan`, beside the routing/measurement library it uses.
 
 use serde::{Deserialize, Serialize};
 
-use crate::ir::LayoutIr;
-use crate::item::Incidence;
-
-/// Caller-chosen knobs an engine reads from the [`PlaceProblem`]. Replaces the
+/// Caller-chosen knobs an engine reads from the placement problem. Replaces the
 /// ad-hoc `std::env` flags the engines used to read directly (`DEBUG_SA_TIME`,
 /// `MULTISHEET_REFINE`, `MOTIF_TILE`) so the engine never touches the environment;
 /// the agent sets these fields, and `sch-floorplan` derives them from the
@@ -53,20 +41,6 @@ impl Crossings {
     pub fn total(&self) -> usize {
         self.body + self.ic + self.wire
     }
-}
-
-/// The placement problem an engine works on: the connectivity (`inc`), the intent
-/// (`ir` — rails/frozen/zones/grid/groups, the DECLARATIVE constraints + hints), a
-/// `seed` for stochastic engines, and the caller's [`PlaceOptions`]. It describes the
-/// PROBLEM and nothing about METHOD — no cost, no evaluator, no objective, no search
-/// knob. The parts' geometry every engine needs to place at all lives on each [`Item`]
-/// (the slice the engine writes into); the connectivity + intent live here. It is
-/// SELF-SUFFICIENT against `sch-place` alone: no `KicadEnv`, no CLI handle, no scorer.
-pub struct PlaceProblem<'a> {
-    pub inc: &'a Incidence,
-    pub ir: &'a LayoutIr,
-    pub seed: u64,
-    pub options: PlaceOptions,
 }
 
 /// What a placement engine reports about the placement it just wrote into

@@ -12,6 +12,7 @@ readme = "README.md"
 rust-version = "1.85"
 
 [workspace.dependencies]
+kasuari = "0.4"
 saphyr = "0.0.6"
 saphyr-parser = "0.0.6"
 indexmap = "2"

@@ -54,6 +54,7 @@ dependencies = [
 name = "anneal-place"
 version = "0.1.0"
 dependencies = [
+ "circuit-lang",
  "geom",
  "rayon",
  "sch-floorplan",
@@ -1027,7 +1028,6 @@ dependencies = [
  "futures",
  "genai",
  "geom",
- "greedy-place",
  "grid-astar",
  "indexmap 2.14.0",
  "kicad-cli",
@@ -1044,20 +1044,12 @@ dependencies = [
  "resvg",
  "sch-floorplan",
  "sch-io",
+ "sch-place",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "toml",
-]
-
-[[package]]
-name = "greedy-place"
-version = "0.1.0"
-dependencies = [
- "geom",
- "sch-floorplan",
- "sch-place",
 ]
 
 [[package]]
@@ -2868,10 +2860,10 @@ dependencies = [
 name = "sch-floorplan"
 version = "0.1.0"
 dependencies = [
+ "anneal-place",
  "circuit-graph",
  "circuit-lang",
  "geom",
- "greedy-place",
  "indexmap 2.14.0",
  "kicad-cli",
  "kicad-env",

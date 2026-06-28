@@ -5,60 +5,203 @@
 //! measure a sheet* — not a cost, an objective, or a search. It bakes in no weights and
 //! no `premium` policy: a measuring engine calls it and applies ITS OWN objective.
 //!
-//! Two surfaces:
-//! - [`Realizer`] — captures the per-problem realization context (`KicadEnv`,
-//!   connectivity, intent IR, the ERC PWR_FLAG set it computes itself) and exposes the
-//!   measurements an engine reads: [`Realizer::measure`] (the raw 16 terms from the
-//!   `fan_risers=false` routed build), [`Realizer::warnings`] / [`Realizer::crossings`]
-//!   / [`Realizer::truthfulness_breaks`] (the `fan_risers=true` shipped-sheet builds).
+//! Three surfaces:
+//! - [`RoutedSheetRealizer`] — build + route a candidate into a [`SchematicWriter`].
+//! - [`RoutedEvaluator`] — read metrics from routed realizations.
 //! - [`RawMetrics`] — the 16 raw count/length terms, weight-free. An engine's objective
 //!   multiplies these by its own weights and sums them.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
+use circuit_lang::model::Design;
 use geom::{EPS, Point2, Rect};
 use kicad_env::KicadEnv;
 
 use crate::write::SchematicWriter;
+use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
 use sch_place::netclass::is_ground;
 use sch_place::place::Crossings;
 
-use sch_place::place::{PlaceProblem, PlaceResult};
+use sch_place::place::PlaceResult;
 
+use super::problem::SchematicPlaceProblem;
 use super::score::{
     count_body_crossings, count_close_wires, count_collinear_body_crossings, count_congestion,
     count_corners, count_crossings, count_foreign_taps, count_ic_body_crossings, count_merges,
     count_parallel_body_crossings, count_shorts, count_stray, grid_order_viol, item_rect,
 };
 use super::*;
+use super::emit::{build_writer, compute_needs_flag};
 
-/// A schematic placement ENGINE: given the per-problem [`Realizer`] (to build, route, and
-/// score candidate sheets) and the [`PlaceProblem`], write final positions into `items`
-/// and return the [`PlaceResult`] describing them. The only contract is "produce a
-/// placement"; the OBJECTIVE (the weights) and the SEARCH are the engine's own business.
+/// A schematic placement+routing ENGINE: searches over a neutral
+/// [`SchematicPlaceProblem`] plus optional layout intent, and writes the final
+/// placement into `problem.items`.
 ///
 /// ## Contract
-/// - **Deterministic given the [`PlaceProblem`].** No clock; a fixed `seed` reproduces.
+/// - **Deterministic given the problem.** No clock; a fixed `seed` reproduces.
 /// - **Never panics.** A unit it cannot place reports through the result's counts, never
 ///   by unwinding.
-/// - The returned [`PlaceResult`] describes the FINAL `items` it wrote — the placement
+/// - The returned [`PlaceResult`] describes the FINAL `problem.items` — the placement
 ///   the caller will ship.
-///
-/// The trait lives HERE, beside the measurement library, rather than in the `sch-place`
-/// vocabulary kernel: every production engine scores routed sheets, so its one method
-/// takes the [`Realizer`] this module defines.
 pub trait PlacementEngine {
-    /// Open provenance: the engine's stable name (e.g. `"greedy"`, `"anneal"`).
+    /// Open provenance: the engine's stable name (e.g. `"anneal"`, `"constraint"`).
     fn name(&self) -> &'static str;
 
-    /// Write the final placement into `items` (scoring candidates through `r`) and return
-    /// its diagnostics.
-    fn place(&self, r: &Realizer, p: &PlaceProblem, items: &mut [Item]) -> PlaceResult;
+    /// Search placement+routing and write the final geometry into `problem.items`.
+    ///
+    /// Engines may use `ir` as hints/constraints, or ignore it entirely.
+    fn place(
+        &self,
+        env: &KicadEnv,
+        design: &Design,
+        problem: &mut SchematicPlaceProblem,
+        ir: Option<LayoutIr>,
+    ) -> PlacementOutput;
+}
+
+/// Result of engine-owned placement orchestration: final item geometry lives in
+/// `problem.items`; `ir` is the sheet intent the routed realizer should use.
+pub struct PlacementOutput {
+    pub result: PlaceResult,
+    pub ir: LayoutIr,
+}
+
+/// Which routed realization to build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteRealization {
+    /// Fast objective build used while scoring candidate moves.
+    CandidateScore,
+    /// Final shipped-sheet build, including riser fanning repairs.
+    ShippedSheet,
+}
+
+impl RouteRealization {
+    fn fan_risers(self) -> bool {
+        matches!(self, Self::ShippedSheet)
+    }
+}
+
+/// Builds/routes a candidate placement into a [`SchematicWriter`].
+pub struct RoutedSheetRealizer<'a> {
+    env: &'a KicadEnv,
+    inc: &'a Incidence,
+    ir: &'a LayoutIr,
+}
+
+impl<'a> RoutedSheetRealizer<'a> {
+    pub fn new(env: &'a KicadEnv, inc: &'a Incidence, ir: &'a LayoutIr) -> Self {
+        Self { env, inc, ir }
+    }
+
+    pub fn env(&self) -> &'a KicadEnv {
+        self.env
+    }
+
+    pub fn realize_writer(
+        &self,
+        title: Option<&str>,
+        items: &[Item],
+        mode: RouteRealization,
+    ) -> std::io::Result<SchematicWriter> {
+        let needs_flag = compute_needs_flag(self.env, items, self.ir);
+        build_writer(
+            self.env,
+            title,
+            items,
+            self.inc,
+            self.ir,
+            &needs_flag,
+            mode.fan_risers(),
+        )
+    }
+}
+
+/// Routed metrics for candidate placements.
+pub struct RoutedEvaluator<'a> {
+    realizer: &'a RoutedSheetRealizer<'a>,
+}
+
+impl<'a> RoutedEvaluator<'a> {
+    pub fn new(realizer: &'a RoutedSheetRealizer<'a>) -> Self {
+        Self { realizer }
+    }
+
+    pub fn measure(&self, items: &[Item]) -> RawMetrics {
+        match self
+            .realizer
+            .realize_writer(None, items, RouteRealization::CandidateScore)
+        {
+            Ok(w) => raw_metrics(
+                self.realizer.env,
+                &w,
+                items,
+                self.realizer.inc,
+                self.realizer.ir,
+            ),
+            Err(_) => RawMetrics {
+                fallbacks: usize::MAX,
+                junctions: usize::MAX,
+                length: f64::INFINITY,
+                crossings: usize::MAX,
+                corners: usize::MAX,
+                merges: usize::MAX,
+                overlaps: usize::MAX,
+                congestion: usize::MAX,
+                body_cross: usize::MAX,
+                stray: f64::INFINITY,
+                orient_viol: usize::MAX,
+                leg_viol: usize::MAX,
+                spine_viol: usize::MAX,
+                spread: f64::INFINITY,
+                grid_order: usize::MAX,
+                sib_spread: f64::INFINITY,
+            },
+        }
+    }
+
+    pub fn warnings(&self, items: &[Item]) -> usize {
+        match self
+            .realizer
+            .realize_writer(None, items, RouteRealization::ShippedSheet)
+        {
+            Ok(mut w) => {
+                w.set_frame(true);
+                w.prepare();
+                w.layout_warnings().len()
+            }
+            Err(_) => usize::MAX,
+        }
+    }
+
+    pub fn crossings(&self, items: &[Item]) -> Crossings {
+        match self
+            .realizer
+            .realize_writer(None, items, RouteRealization::ShippedSheet)
+        {
+            Ok(w) => shipped_crossings(self.realizer.env, &w, items),
+            Err(_) => Crossings::default(),
+        }
+    }
+
+    pub fn truthfulness_breaks(&self, items: &[Item]) -> usize {
+        match self
+            .realizer
+            .realize_writer(None, items, RouteRealization::ShippedSheet)
+        {
+            Ok(w) => {
+                let wires = w.wires_with_nets();
+                count_merges(&wires, &w.junction_positions())
+                    + count_shorts(self.realizer.env, &w, items, self.realizer.inc, &wires)
+                    + count_foreign_taps(&wires)
+            }
+            Err(_) => usize::MAX,
+        }
+    }
 }
 
 /// The raw, weight-FREE measurements of a routed candidate placement — the 16 terms an
-/// engine's objective combines under its own weights. Built by [`Realizer::measure`]
+/// engine's objective combines under its own weights. Built by [`SchematicPlaceProblem::measure`]
 /// from the `fan_risers=false` routed build (the per-move objective build, which differs
 /// from the shipped `fan_risers=true` sheet `warnings`/`crossings` measure). Splitting
 /// the raw extraction (shared infrastructure) from the weighting (engine-owned method) is
@@ -99,162 +242,22 @@ pub struct RawMetrics {
     pub sib_spread: f64,
 }
 
-/// The routed-sheet realization context for one placement problem: the env (to load
-/// symbol geometry for routing), the connectivity, the intent IR, and the ERC PWR_FLAG
-/// set it computes once at construction. A measuring engine constructs a `Realizer` from
-/// the problem's data and calls its measurements — it is NOT injected through the
-/// problem, and it is NOT a cost/objective object (it bakes in no weights). Borrows the
-/// scoring state for the lifetime of one placement search.
-pub struct Realizer<'a> {
-    env: &'a KicadEnv,
-    inc: &'a Incidence,
-    ir: &'a LayoutIr,
-    needs_flag: BTreeSet<String>,
-}
-
-impl<'a> Realizer<'a> {
-    /// Capture the realization context, computing the ERC PWR_FLAG set from `items`
-    /// (the undriven power nets that need a flag) so the caller need not plumb it.
-    pub fn new(env: &'a KicadEnv, inc: &'a Incidence, ir: &'a LayoutIr, items: &[Item]) -> Self {
-        let needs_flag = compute_needs_flag(env, items, ir);
-        Self {
-            env,
-            inc,
-            ir,
-            needs_flag,
-        }
-    }
-
-    /// The KiCAD environment (to load symbol geometry for routing).
-    pub fn env(&self) -> &'a KicadEnv {
-        self.env
-    }
-    /// The net→pins incidence the realization wires from.
-    pub fn incidence(&self) -> &'a Incidence {
-        self.inc
-    }
-    /// The intent IR (rails/frozen/zones/grid/groups).
-    pub fn ir(&self) -> &'a LayoutIr {
-        self.ir
-    }
-    /// The ERC PWR_FLAG set this realizer computed at construction.
-    pub fn needs_flag(&self) -> &BTreeSet<String> {
-        &self.needs_flag
-    }
-
-    /// The raw 16-term measurement of `items` as the per-move objective build sees them
-    /// (`fan_risers=false`): build + route the sheet, then read off every count/length —
-    /// no weights, no `premium` policy. A build failure saturates every count to the
-    /// worst (so any min-based objective rejects it); the engine prices it as it likes.
-    pub fn measure(&self, items: &[Item]) -> RawMetrics {
-        match build_writer(
-            self.env,
-            None,
-            items,
-            self.inc,
-            self.ir,
-            &self.needs_flag,
-            false,
-        ) {
-            Ok(w) => raw_metrics(self.env, &w, items, self.inc, self.ir),
-            Err(_) => RawMetrics {
-                fallbacks: usize::MAX,
-                junctions: usize::MAX,
-                length: f64::INFINITY,
-                crossings: usize::MAX,
-                corners: usize::MAX,
-                merges: usize::MAX,
-                overlaps: usize::MAX,
-                congestion: usize::MAX,
-                body_cross: usize::MAX,
-                stray: f64::INFINITY,
-                orient_viol: usize::MAX,
-                leg_viol: usize::MAX,
-                spine_viol: usize::MAX,
-                spread: f64::INFINITY,
-                grid_order: usize::MAX,
-                sib_spread: f64::INFINITY,
-            },
-        }
-    }
-
-    /// Readability warnings (overlapping symbol/label pairs) on the SHIPPED sheet — the
-    /// `fan_risers=true` build + the real finalize (split wires, solve text, reframe) +
-    /// count. A build failure saturates to [`usize::MAX`].
-    pub fn warnings(&self, items: &[Item]) -> usize {
-        match build_writer(
-            self.env,
-            None,
-            items,
-            self.inc,
-            self.ir,
-            &self.needs_flag,
-            true,
-        ) {
-            Ok(mut w) => {
-                w.set_frame(true);
-                w.prepare();
-                w.layout_warnings().len()
-            }
-            Err(_) => usize::MAX,
-        }
-    }
-
-    /// The body / IC / wire crossing triple of the SHIPPED sheet (`fan_risers=true`): the
-    /// finalize riser jog clears trunk-through-body crossings, so this reflects the jogged
-    /// sheet, not the raw per-move build. A DIAGNOSTIC tiebreaker; reports zero on an
-    /// un-buildable unit.
-    pub fn crossings(&self, items: &[Item]) -> Crossings {
-        let Ok(w) = build_writer(
-            self.env,
-            None,
-            items,
-            self.inc,
-            self.ir,
-            &self.needs_flag,
-            true,
-        ) else {
-            return Crossings::default();
-        };
-        let wires = w.wires_with_nets();
-        let (bodies, ic_rects) = bodies_and_ic_rects(self.env, &w, items);
-        Crossings {
-            body: count_body_crossings(&bodies, &wires)
-                + count_collinear_body_crossings(&bodies, &wires)
-                + count_parallel_body_crossings(&bodies, &wires),
-            ic: count_ic_body_crossings(&ic_rects, &wires),
-            wire: count_crossings(&wires),
-        }
-    }
-
-    /// Geometric TRUTHFULNESS breaks (net merges / shorts / foreign taps) of the SHIPPED
-    /// sheet — a HARD count an engine's candidate pick uses to REJECT a mis-wiring
-    /// placement (readability `warnings` do NOT detect a merge). Saturates to
-    /// [`usize::MAX`] on a build failure.
-    pub fn truthfulness_breaks(&self, items: &[Item]) -> usize {
-        match build_writer(
-            self.env,
-            None,
-            items,
-            self.inc,
-            self.ir,
-            &self.needs_flag,
-            true,
-        ) {
-            Ok(w) => {
-                let wires = w.wires_with_nets();
-                count_merges(&wires, &w.junction_positions())
-                    + count_shorts(self.env, &w, items, self.inc, &wires)
-                    + count_foreign_taps(&wires)
-            }
-            Err(_) => usize::MAX,
-        }
+/// Body / IC / wire crossing triple read from a shipped (`fan_risers=true`) writer.
+pub(crate) fn shipped_crossings(env: &KicadEnv, w: &SchematicWriter, items: &[Item]) -> Crossings {
+    let wires = w.wires_with_nets();
+    let (bodies, ic_rects) = bodies_and_ic_rects(env, w, items);
+    Crossings {
+        body: count_body_crossings(&bodies, &wires)
+            + count_collinear_body_crossings(&bodies, &wires)
+            + count_parallel_body_crossings(&bodies, &wires),
+        ic: count_ic_body_crossings(&ic_rects, &wires),
+        wire: count_crossings(&wires),
     }
 }
 
 /// The 2-pin part body axes and the IC (3+ pin) body-interior rects of a placed item set
-/// — the wire-through-body obstacles. Shared by [`Realizer::measure`] and
-/// [`Realizer::crossings`] so both extract identical geometry.
+/// — the wire-through-body obstacles. Shared by the routed measurements so every
+/// crossing count extracts identical geometry.
 fn bodies_and_ic_rects(
     env: &KicadEnv,
     w: &SchematicWriter,

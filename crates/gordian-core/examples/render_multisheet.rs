@@ -53,7 +53,6 @@ fn main() -> anyhow::Result<()> {
         &env,
         &design,
         std::path::Path::new(&out_dir),
-        gordian_core::SchematicPlacementEngine::Anneal,
     )?;
     println!("wrote composed sheet -> {}", root.display());
 

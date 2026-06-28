@@ -3,15 +3,17 @@
 //! verbatim):
 //!
 //! - [`emit`] — gather + grid seed + engine orchestration + `SchematicWriter` assembly.
-//! - [`idioms`] — circuit-idiom gather/align + the anchor-block/cohesion helpers.
+//! - [`idioms`] — idiom align passes and anchor-block helpers.
 //! - [`refine`] — the overlap relaxers (`decongest`/`normalize`/keepout passes) the emit
 //!   finalize and the engines drive.
 //! - [`score`] — the routed `count_*` crossing/merge/short terms + the geometry primitives
 //!   the [`measure`] library reads off a built sheet.
-//! - [`measure`] — the MEASUREMENT library: [`Realizer`] (build+route+read raw counts) +
-//!   [`RawMetrics`] (the weight-free 16 terms) + the [`PlacementEngine`] trait an engine
-//!   implements. A measurement-based engine CALLS this because IT chose measurement; the
-//!   OBJECTIVE (the weights) and the SEARCH live in the engine crates, not here.
+//! - [`problem`] — the neutral [`SchematicPlaceProblem`]: gathered items, connectivity,
+//!   route/build/measure helpers.
+//! - [`measure`] — [`RawMetrics`] (the weight-free 16 terms) + the [`PlacementEngine`]
+//!   trait an engine implements. A measurement-based engine CALLS this because IT chose
+//!   measurement; the OBJECTIVE (the weights) and the SEARCH live in the engine crates,
+//!   not here.
 //! - [`route`] — the orthogonal elbow router + power-rail riser planning.
 //!
 //! Realizing a sheet is heavy + non-algorithmic (how to draw and measure), so it lives
@@ -20,6 +22,7 @@
 mod emit;
 mod idioms;
 mod measure;
+mod problem;
 mod refine;
 mod route;
 mod score;
@@ -27,22 +30,12 @@ mod score;
 pub use emit::*;
 pub use idioms::*;
 pub use measure::*;
+pub use problem::SchematicPlaceProblem;
 pub use refine::*;
 pub use score::*;
 // `route` is the orthogonal router — every item is crate-internal (none was `pub`
 // pre-split), so re-export it crate-visibly, not publicly.
 pub(crate) use route::*;
-
-// The placement vocabulary — `PlaceProblem` (what an engine reads) and `PlaceResult`
-// (what it returns) — is pure data in `sch_place::place`; the `PlacementEngine` trait
-// itself lives in [`measure`] alongside `Realizer` (re-exported via `pub use measure::*`),
-// because every engine measures routed sheets. Re-export the problem type here so this
-// module's paths resolve unchanged.
-pub use sch_place::place::PlaceProblem;
-
-// `measure` reads `LayoutIr` through `super::*` (every other submodule imports the ir
-// types it uses directly); `super` is this `place` module, so this resolves verbatim.
-pub use sch_place::ir::LayoutIr;
 
 #[cfg(test)]
 mod grid_tests {
@@ -194,61 +187,6 @@ mod grid_tests {
             mirror: false,
             frozen: false,
         }
-    }
-
-    /// A 3-pin regulator with only TWO bulk caps on its V+ rail forms NO decoupling bank (gather's ≥3
-    /// floor), so those caps must NOT be deferred — `align_rail_cap_rows` keeps them in the bulk row
-    /// instead of stranding them. The regression for align_rail_cap_rows defer-vs-gather drift.
-    #[test]
-    fn three_pin_anchor_with_two_caps_is_not_a_deferred_bank() {
-        let ir = LayoutIr::default();
-        let items = vec![
-            item(
-                "VR1",
-                "Regulator_Linear:AMS1117",
-                [0.0, 0.0],
-                &["VIN", "GND", "VCC"],
-            ),
-            item("C1", "Device:C", [10.0, 0.0], &["VCC", "GND"]),
-            item("C2", "Device:C", [20.0, 0.0], &["VCC", "GND"]),
-        ];
-        // Two caps < 3 ⇒ no bank ⇒ nothing deferred.
-        assert!(decoupling_bank_caps(&items, &ir).is_empty());
-    }
-
-    /// Three+ bypass caps on a 3-pin anchor's V+ rail DO form a bank gather will re-seat, so every member
-    /// is deferred (and `align_rail_cap_rows` leaves them for the gather rather than rowing them).
-    #[test]
-    fn three_pin_anchor_with_three_caps_is_a_deferred_bank() {
-        let ir = LayoutIr::default();
-        let items = vec![
-            item("U1", "MCU_ST:STM32", [0.0, 0.0], &["VIN", "GND", "VCC"]),
-            item("C1", "Device:C", [10.0, 0.0], &["VCC", "GND"]),
-            item("C2", "Device:C", [20.0, 0.0], &["VCC", "GND"]),
-            item("C3", "Device:C", [30.0, 0.0], &["VCC", "GND"]),
-        ];
-        let deferred = decoupling_bank_caps(&items, &ir);
-        assert_eq!(deferred.len(), 3);
-        assert_eq!(deferred, [1usize, 2, 3].into_iter().collect());
-    }
-
-    /// A connector touching the rail is the supply ENTRY, not a decoupling target: its caps never form a
-    /// deferred bank even at ≥3 (mirrors gather's `Not(Connector)` exclusion).
-    #[test]
-    fn connector_anchor_never_forms_a_deferred_bank() {
-        let ir = LayoutIr::default();
-        let items = vec![
-            item(
-                "J1",
-                "Connector:Conn_01x03",
-                [0.0, 0.0],
-                &["VIN", "GND", "VCC"],
-            ),
-            item("C1", "Device:C", [10.0, 0.0], &["VCC", "GND"]),
-            item("C2", "Device:C", [20.0, 0.0], &["VCC", "GND"]),
-            item("C3", "Device:C", [30.0, 0.0], &["VCC", "GND"]),
-        ];
-        assert!(decoupling_bank_caps(&items, &ir).is_empty());
     }
 
     #[test]

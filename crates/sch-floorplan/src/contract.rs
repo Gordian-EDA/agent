@@ -1,8 +1,10 @@
 //! `contract` — THE engine API. This is the one stable surface a measurement-based
-//! placement ENGINE (`greedy-place`, `anneal-place`) is allowed to depend on. The
+//! placement ENGINE (`anneal-place` today) is allowed to depend on. The
 //! engines own their objective (the weights) and their search; this module hands them
-//! the realization library they measure against plus the engine-independent layout
-//! geometry both need to realize a candidate — and NOTHING ELSE.
+//! the neutral [`SchematicPlaceProblem`] (items + connectivity), optional routed
+//! realization/evaluation via [`RoutedSheetRealizer`] and [`RoutedEvaluator`],
+//! caller-supplied layout intent via the trait method, plus the engine-independent
+//! layout geometry both need — and NOTHING ELSE.
 //!
 //! The golden rule this enforces: the layout team owns every module under
 //! [`crate::floorplan::place`] and may rename its internals freely. The engines never
@@ -13,10 +15,9 @@
 //!
 //! The surface, in three groups:
 //!
-//! - **Measurement library** — [`Realizer`] (build + route + read a candidate),
-//!   [`RawMetrics`] (the weight-free 16 terms an engine weights into its objective), and
-//!   the [`PlacementEngine`] trait a routed-sheet engine implements (its `place` scores
-//!   candidates through the `Realizer`).
+//! - **Placement problem + optional routed realization/evaluation** —
+//!   [`SchematicPlaceProblem`], [`RoutedSheetRealizer`], [`RoutedEvaluator`],
+//!   [`RawMetrics`], and the [`PlacementEngine`] trait.
 //! - **Pad geometry** — [`pin_endpoint`] (a placed pin's world position), the input every
 //!   geometric proxy needs to reason about wiring without re-routing.
 //! - **Layout geometry / scaffold** — the engine-independent realization helpers both
@@ -31,10 +32,14 @@
 //!   [`COL_GAP`] / [`ROW_GAP`] / [`GRID_KEY`] / [`FAST_PINS`].
 
 pub use crate::floorplan::place::{
-    COL_GAP, FAST_PINS, GRID_KEY, PlacementEngine, ROW_GAP, RawMetrics, Realizer,
-    align_idiom_clusters, align_led_chains, body_overlap_count, build_anchor_blocks, build_writer,
-    cluster_group, cohesion_targets, decongest, grid_order_viol, item_rect, multi_unit_siblings,
-    orient_angle, overlaps_any, signal_anchor_centroid, supply_pin_target,
+    COL_GAP, FAST_PINS, GRID_KEY, PlacementEngine, PlacementOutput, ROW_GAP, RawMetrics,
+    RouteRealization, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
+    align_idiom_clusters, align_led_chains, align_rail_cap_rows, apply_cells,
+    body_overlap_count, build_anchor_blocks, build_writer, cluster_group, cohesion_targets,
+    decongest, grid_order_viol, item_rect, multi_unit_siblings, normalize, orient_angle,
+    overlaps_any, signal_anchor_centroid, supply_pin_target, assign_cells,
 };
 
+pub use crate::floorplan::infer_ir;
+pub use kicad_env::KicadEnv;
 pub use sch_io::write::pin_endpoint;

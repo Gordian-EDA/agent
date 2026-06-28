@@ -2,9 +2,9 @@
 //! `circuit_lang::Design` into a real `.kicad_sch` (and back).
 //!
 //! Owns the [`floorplan`] pipeline: **infer → place → wire → write**. It is
-//! engine-agnostic by design — the placement ENGINES (`greedy-place`,
-//! `anneal-place`) depend on this core and drive it through the
-//! [`sch_place::place`] boundary, never the reverse. The cost a placement engine
+//! engine-agnostic by design — placement engines (`anneal-place` today)
+//! depend on this core and drive it through the
+//! [`contract`] boundary, never the reverse. The cost a placement engine
 //! minimises *is* a routed-sheet score, so the cost/scaffold and the router/writer
 //! assembly stay together here.
 //!

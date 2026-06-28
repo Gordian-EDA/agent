@@ -19,6 +19,6 @@ serde_json.workspace = true
 rayon.workspace = true
 
 [dev-dependencies]
-greedy-place = { path = "../greedy-place" }
+anneal-place = { path = "../anneal-place" }
 kicad-cli = { path = "../kicad-cli" }
 tempfile.workspace = true

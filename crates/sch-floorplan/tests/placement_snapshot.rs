@@ -2,9 +2,7 @@
 //! "byte-identical to the historical hand-tuned references" once the placement
 //! search produces re-baselined geometry (the emit-flow refactor). Renders the
 //! aesthetic targets through the PRODUCTION path (sidecar IR if hand-tuned, else
-//! `infer_ir`) and diffs the emitted `.kicad_sch` against a committed snapshot.
-//!
-//! Bless an intentional, visually-reviewed change with `UPDATE_SNAPSHOTS=1`.
+//! connectivity-inferred IR inside [`SchematicPlaceProblem`]).
 //! Correctness of the hard challenge fixtures is covered by the geometry-invariant
 //! truthfulness oracle (`floorplan_netlist.rs`); this gate guards the *aesthetic*
 //! placement the oracle can't see.
@@ -15,7 +13,6 @@ use sch_floorplan::floorplan::{self, LayoutIr};
 use std::path::{Path, PathBuf};
 
 /// The aesthetic targets: the 4 tuned references (sidecar IR) + the grid demo
-/// (authored `layout:` grid via `infer_ir`).
 const TARGETS: &[&str] = &[
     "divider-filter",
     "mcp1703-power-entry",
@@ -50,7 +47,7 @@ fn render(env: &KicadEnv, provider: &SymbolTable, name: &str) -> String {
         Ok(s) => LayoutIr::from_json(&s).unwrap(),
         Err(_) => floorplan::infer_ir(env, &design),
     };
-    floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy))
+    floorplan::emit_strategy(env, &design, Box::new(anneal_place::Anneal), Some(ir))
         .unwrap_or_else(|e| panic!("{name}: {e}"))
         .sch
 }
