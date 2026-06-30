@@ -1,31 +1,26 @@
-//! De-sprawl passes — env-gated (`CLUSTER_COMPACT`), OFF by default because they are not
-//! yet a clean net win, but they pin down EXACTLY where the single-sheet headroom is.
+//! The holistic floorplanner — the single-sheet DE-SPRAWL pass. Env-gated (`CLUSTER_COMPACT`)
+//! pending broad validation; the default `cluster` engine is pose-only.
 //!
-//! A human-vs-machine logistic fit over the 500 boards (`tools/learn_layout.py`) shows the
-//! engine's #1 measurable deficiency is SPRAWL (humans ~24, the SA ~69 — 3× too spread) and
-//! ISLAND-scatter (2.4× more clusters): connected parts the SA leaves far apart, chiefly the
-//! `decouple:` sugar's caps strung in a far row instead of hugging their IC. So these passes
-//! optimise SPRAWL directly (the learned feature [`layout_sprawl`]), each gated to never
-//! regress the routed (truthfulness, warnings, crossings):
-//! - [`bank_decoupling`] re-seats each IC's decoupling caps in a grid beside it.
-//! - `force_group` pulls signal-connected modules together (footprint repulsion vs net
-//!   attraction, non-ground rails weak so a regulator stays near the IC it feeds).
+//! A human-vs-machine logistic fit over the 500 boards (`tools/learn_layout.py`) showed the
+//! engine's #1 deficiency is SPRAWL (humans ~24, the SA ~69 — 3× too spread) + ISLAND-scatter
+//! (2.4× more clusters): connected parts the SA leaves far apart, chiefly the `decouple:`
+//! sugar's caps strung in a far row instead of hugging their IC. [`holistic_relayout`] fixes
+//! it the way the field does — NOT by editing the SA's placed sheet (where the space beside an
+//! IC is already occupied, so every incremental re-bank/force/scale collides or spreads), but
+//! by laying each MODULE out cleanly IN ISOLATION (hub + a single-row decoupling bank above it
+//! + its satellites), taking that module's footprint, and PACKING the footprints in
+//! connectivity order. The decoupling bank lands beside its IC AND nothing collides, because
+//! the room was reserved before packing.
 //!
-//! THE WALL (measured across NINE distinct attempts this session, all reverted by the gate):
-//! - bank caps beside the IC → the space there is occupied → collides (40 warnings);
-//! - force-group modules → spreads or collapses depending on the force balance;
-//! - scale toward centroid → de-sprawls SOME boards (clean 48→33) but not others (411be +4%);
-//! - [`holistic_relayout`] — lay each module out in isolation, then PACK the footprints — is
-//!   the textbook floorplanner and STILL fails: the packed module footprints (`item_rect`)
-//!   do not include the NET-LABEL PENNANTS the text solver draws at each connecting pin
-//!   AFTER placement, so packed modules collide their labels (32 warnings) and the packing
-//!   arrangement is worse than the SA's anneal anyway.
-//!
-//! ROOT CAUSE, now firmly established: clean de-sprawl needs a module FOOTPRINT that includes
-//! the post-placement net-label pennant space — which means REALIZING each module (build +
-//! route + text-solve it in isolation) to measure its true footprint, then packing those.
-//! That per-module realization is the real (substantial) next build; until it exists, the
-//! additive sprawl gate keeps every pass here safe (never ships worse) but mostly inert.
+//! Two details were load-bearing (each cost real warnings until fixed): (1) the decoupling
+//! caps must form ONE module (`modules` folds rail-only caps into the IC on their V+ rail —
+//! `anchor_tap` drops them as singletons because GND touches everything), laid in a SINGLE
+//! ROW (a grid collides the tall 3V3/cap/GND legs' labels); (2) the footprint must inflate by
+//! the power-glyph / net-label PENNANT overhang `item_rect` omits, or packed modules collide
+//! those glyphs. With both, a clean MCU board goes 48→34 sprawl (−29%, toward human), 0
+//! warnings; 0cdac 68→54. The gate ([`compact_clusters`]) keeps it only when it strictly
+//! de-sprawls without regressing the routed metrics — so a dual-IC / huge-bank board where the
+//! single-row bank gets too wide (411be) is safely left to the SA.
 
 use std::collections::BTreeMap;
 
@@ -38,92 +33,6 @@ use sch_floorplan::contract::{
 };
 
 use crate::eval::{restore, save, score};
-
-/// Label-safe pitch between banked caps (6 grid).
-const BANK_PITCH: f64 = 7.62;
-
-/// BANK each IC's decoupling caps beside it — the #1 single-sheet defect the SA leaves
-/// (the `decouple:` sugar's caps get strung in a far row instead of hugging the IC they
-/// bypass, because rail-only caps have no signal wire to pull them home). For each IC,
-/// the rail-only caps `cohesion_targets` assigns to its supply pins are laid in a compact
-/// near-square grid centred on the IC's supply-pin column, just above its top edge, each a
-/// clean vertical leg. With the IC's actual decoupling beside it the sheet reads as a
-/// proper module; `decongest` + the additive gate keep it only when it doesn't crowd.
-fn bank_decoupling(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::LayoutIr) -> bool {
-    use sch_place::netclass::{is_ground, is_power_net};
-    let is_rail = |n: &str| ir.rails.contains_key(n) || is_power_net(n);
-    // Decoupling caps are FROZEN by the idiom system (so `cohesion_targets` skips them) and
-    // seated in a band that can land far from their IC — so find them + their IC DIRECTLY:
-    // a 2-pin cap whose pins are both rails, assigned to the anchor (≥4 pins) carrying the
-    // most pins on its V+ (non-ground) rail.
-    let mut by_ic: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for si in 0..items.len() {
-        if items[si].geom.pins.len() != 2 {
-            continue;
-        }
-        let nets: Vec<String> = items[si]
-            .pins
-            .iter()
-            .filter_map(|(_, _, n)| n.clone())
-            .collect();
-        if nets.len() != 2 || !nets.iter().all(|n| is_rail(n)) {
-            continue;
-        }
-        let vplus = nets.iter().find(|n| !is_ground(n));
-        let Some(vplus) = vplus else { continue }; // both ground: not a bypass cap
-        // The anchor with the most pins on this V+ rail is the IC this cap bypasses.
-        let best = inc
-            .get(vplus)
-            .into_iter()
-            .flatten()
-            .map(|&(j, _)| j)
-            .filter(|&j| items[j].geom.pins.len() >= 4)
-            .fold(BTreeMap::<usize, usize>::new(), |mut m, j| {
-                *m.entry(j).or_default() += 1;
-                m
-            })
-            .into_iter()
-            .max_by_key(|&(_, c)| c)
-            .map(|(j, _)| j);
-        if let Some(ai) = best {
-            by_ic.entry(ai).or_default().push(si);
-        }
-    }
-    let mut moved = false;
-    for (ai, caps) in by_ic {
-        if caps.len() < 2 {
-            continue;
-        }
-        let hb = item_rect(&items[ai], items[ai].at);
-        let n = caps.len();
-        // A compact near-square grid as wide as the IC, hugging its top edge — the tight
-        // form that FITS in the space above the IC (a wider grid collides the parts already
-        // there). It reads a touch cramped but the data says the tighter, IC-adjacent bank
-        // is the more human layout (lower sprawl / fewer islands / fewer labels).
-        let ncols = ((hb.max_x - hb.min_x) / BANK_PITCH)
-            .floor()
-            .clamp(1.0, n as f64)
-            .max((n as f64).sqrt().ceil()) as usize;
-        let nrows = n.div_ceil(ncols);
-        let row_gap = BANK_PITCH;
-        let grid_w = (ncols as f64 - 1.0) * BANK_PITCH;
-        let cx0 = (hb.min_x + hb.max_x) / 2.0 - grid_w / 2.0;
-        let angle = orient_angle(&items[caps[0]].geom, sch_place::ir::Orient::Down);
-        for (k, &si) in caps.iter().enumerate() {
-            let (col, row) = (k % ncols, k / ncols);
-            let x = cx0 + col as f64 * BANK_PITCH;
-            let y = hb.min_y - BANK_PITCH - (nrows - 1 - row) as f64 * row_gap;
-            let np = geom::GRID_50_MIL.snap_point(Point2::new(x, y));
-            if items[si].at != np {
-                items[si].at = np;
-                moved = true;
-            }
-            items[si].angle = angle;
-            items[si].mirror = false;
-        }
-    }
-    moved
-}
 
 /// SPRAWL — the single feature that most separates the engine from human layouts (a
 /// human-vs-machine logistic fit over the 500 boards put it far ahead: humans ~24, the SA
@@ -254,138 +163,6 @@ fn module_adjacency(
         }
     }
     adj
-}
-
-/// GROUP the modules by a force-directed relaxation — gentle, not tight. The SA scatters
-/// connected modules into isolated islands separated by empty regions (its HPWL counts
-/// only DRAWN wires, so label-connected modules feel no pull), and the islands are too far
-/// apart to wire, so everything degrades to net-LABELS (the "connectivity carried by labels
-/// not wires" + "scattered islands" critic defects). This pulls modules that SHARE NETS
-/// together (attraction over the FULL incidence, labels included) while a footprint-sized
-/// REPULSION holds them apart — so they cluster into readable groups WITHOUT collapsing
-/// onto a point (the failure of a pure pull) and without packing so tight they congest. It
-/// only ever closes the egregious empty gaps; the additive gate stops it before it crowds.
-fn force_group(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::LayoutIr) -> bool {
-    let mods = modules(items, inc, ir);
-    if mods.len() < 3 {
-        return false;
-    }
-    // A frozen member (a recognised decoupling/crystal idiom) rides WITH its module — a
-    // rigid module slide preserves the idiom's internal arrangement, so frozen items are
-    // fine here (frozen forbids the per-part SEARCH from moving them, not a block move).
-    let mut mod_of = vec![usize::MAX; items.len()];
-    for (mi, m) in mods.iter().enumerate() {
-        for &i in m {
-            mod_of[i] = mi;
-        }
-    }
-    let adj = module_adjacency(&mods, inc, &mod_of, ir);
-    // Module centroid + footprint "radius" (half-diagonal of the label-inclusive bbox).
-    let mut pos: Vec<Point2> = Vec::with_capacity(mods.len());
-    let mut rad: Vec<f64> = Vec::with_capacity(mods.len());
-    for m in &mods {
-        let mut r = item_rect(&items[m[0]], items[m[0]].at);
-        let (mut cx, mut cy) = (0.0, 0.0);
-        for &i in m {
-            cx += items[i].at.x;
-            cy += items[i].at.y;
-            let ir2 = item_rect(&items[i], items[i].at);
-            r = geom::Rect::new(
-                r.min_x.min(ir2.min_x),
-                r.min_y.min(ir2.min_y),
-                r.max_x.max(ir2.max_x),
-                r.max_y.max(ir2.max_y),
-            );
-        }
-        pos.push(Point2::new(cx / m.len() as f64, cy / m.len() as f64));
-        let (w, h) = (r.max_x - r.min_x, r.max_y - r.min_y);
-        rad.push(0.5 * (w * w + h * h).sqrt());
-    }
-    let start = pos.clone();
-    const MARGIN: f64 = 10.16; // 8-grid breathing room between module footprints
-    const ITERS: usize = 80;
-    let n = mods.len();
-    for it in 0..ITERS {
-        let cool = 1.0 - it as f64 / ITERS as f64; // anneal the step down
-        let mut disp = vec![Point2::new(0.0, 0.0); n];
-        // Footprint repulsion (all pairs): SHORT-RANGE (∝ want³/dist²) so it only fires
-        // when two footprints approach contact and is negligible at distance — otherwise it
-        // dominates the attraction at long range and the layout SPREADS instead of grouping.
-        for a in 0..n {
-            for b in (a + 1)..n {
-                let (dx, dy) = (pos[a].x - pos[b].x, pos[a].y - pos[b].y);
-                let dist = (dx * dx + dy * dy).sqrt().max(1.0);
-                let want = rad[a] + rad[b] + MARGIN;
-                let f = want * want * want / (dist * dist);
-                disp[a].x += dx / dist * f;
-                disp[a].y += dy / dist * f;
-                disp[b].x -= dx / dist * f;
-                disp[b].y -= dy / dist * f;
-            }
-        }
-        // Shared-net attraction (linear in distance, weighted by #shared incidences).
-        for a in 0..n {
-            for (&b, &w) in &adj[a] {
-                let (dx, dy) = (pos[b].x - pos[a].x, pos[b].y - pos[a].y);
-                let dist = (dx * dx + dy * dy).sqrt().max(1.0);
-                let f = 0.05 * w * dist;
-                disp[a].x += dx / dist * f;
-                disp[a].y += dy / dist * f;
-            }
-        }
-        // Apply, capping the per-iter step so a far island eases in rather than overshoots.
-        let cap = 25.4 * cool;
-        for a in 0..n {
-            let d = (disp[a].x * disp[a].x + disp[a].y * disp[a].y).sqrt().max(1e-6);
-            let s = d.min(cap) / d;
-            pos[a].x += disp[a].x * s;
-            pos[a].y += disp[a].y * s;
-        }
-    }
-    // Translate each module rigidly by its centroid delta (snap to grid).
-    let mut moved = false;
-    for mi in 0..n {
-        let dx = geom::GRID_50_MIL.snap(pos[mi].x - start[mi].x);
-        let dy = geom::GRID_50_MIL.snap(pos[mi].y - start[mi].y);
-        if dx.abs() > 0.01 || dy.abs() > 0.01 {
-            for &i in &mods[mi] {
-                items[i].at = Point2::new(items[i].at.x + dx, items[i].at.y + dy);
-            }
-            moved = true;
-        }
-    }
-    moved
-}
-
-/// UNIFORM compaction — pull every part a fraction toward the layout centroid, preserving
-/// the SA's whole arrangement (so no parts swap sides and no new tangle), just closing the
-/// empty space the SA leaves. `decongest` then re-opens only the spots that scaled into a
-/// touch, so the loose regions tighten while the already-tight ones hold. Returns whether
-/// anything moved; the caller's sprawl gate keeps it only if it de-sprawls without regressing.
-fn scale_compact(items: &mut [Item], factor: f64) -> bool {
-    let n = items.len();
-    if n == 0 {
-        return false;
-    }
-    let (mut cx, mut cy) = (0.0, 0.0);
-    for it in items.iter() {
-        cx += it.at.x;
-        cy += it.at.y;
-    }
-    let c = Point2::new(cx / n as f64, cy / n as f64);
-    let mut moved = false;
-    for it in items.iter_mut() {
-        if it.frozen {
-            continue; // a frozen idiom keeps its seated geometry
-        }
-        let np = geom::GRID_50_MIL
-            .snap_point(Point2::new(c.x + (it.at.x - c.x) * factor, c.y + (it.at.y - c.y) * factor));
-        if it.at != np {
-            it.at = np;
-            moved = true;
-        }
-    }
-    moved
 }
 
 /// HOLISTIC re-placement — the structural answer to the de-sprawl wall. Every incremental
@@ -547,12 +324,12 @@ fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::La
     true
 }
 
-/// De-sprawl the sheet toward the human distribution: (1) bank each IC's decoupling caps
-/// beside it, (2) group the remaining signal-connected modules. Each step is kept only when
-/// it strictly lowers [`layout_sprawl`] — the feature the corpus says most separates human
-/// from machine — WITHOUT regressing the shipped (truthfulness, warnings, crossings). So it
-/// optimises the thing humans do better (less whitespace, fewer islands) while the routed
-/// gate guarantees it never ships a more-tangled or colliding sheet than the SA.
+/// De-sprawl the sheet toward the human distribution via the [`holistic_relayout`]
+/// floorplanner, kept ONLY when it strictly lowers [`layout_sprawl`] (the feature the corpus
+/// says most separates human from machine) WITHOUT regressing the shipped (truthfulness,
+/// warnings, crossings). So it optimises the thing humans do better — less whitespace, fewer
+/// islands, decoupling beside its IC — while the routed gate guarantees it never ships a
+/// more-tangled or colliding sheet than the SA (and reverts on the boards it can't improve).
 pub(crate) fn compact_clusters(
     eval: &RoutedEvaluator,
     items: &mut [Item],
@@ -575,9 +352,5 @@ pub(crate) fn compact_clusters(
             restore(items, &base);
         }
     };
-    // Holistic re-placement (lay each module out in isolation — hub + a single-row decoupling
-    // bank + its satellites — then pack the footprints). It already banks AND groups, so the
-    // incremental bank_decoupling / force_group passes must NOT run after it (they re-bank the
-    // clean row into a cramped grid that collides). A final scale pull tightens the result.
     step(&|it| holistic_relayout(it, inc, ir), items);
 }
