@@ -353,10 +353,14 @@ pub(crate) fn rail_relayout(
 ) -> Option<String> {
     use sch_place::netclass::{is_ground, is_power_net};
     let is_rail = |n: &str| ir.rails.contains_key(n) || is_power_net(n);
-    // Dominant non-ground power rail = the one the most ≥4-pin ICs tap.
+    // Dominant non-ground power rail = the one the most ≥4-pin ICs tap. Only ACTIVE ICs
+    // (refdes "U") qualify as row members: the "modules between rails" geometry stands ICs in a
+    // row with their power pins facing UP to the trunk, which fits chips — NOT connectors (whose
+    // pins face the sheet edge as ports) or switches. Counting a single MCU's connectors as
+    // "ICs" would fire the idiom on a board it can't lay out, then waste a realize reverting it.
     let mut tally: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for i in 0..items.len() {
-        if items[i].geom.pins.len() < 4 {
+        if items[i].geom.pins.len() < 4 || !items[i].refdes.starts_with('U') {
             continue;
         }
         let mut seen = std::collections::BTreeSet::new();
