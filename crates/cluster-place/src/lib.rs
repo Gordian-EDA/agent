@@ -54,7 +54,11 @@ impl PlacementEngine for ClusterPlace {
         //    route-aware refinement). The pose lever is layered ON TOP so it is isolated —
         //    where pose finds nothing the result is byte-identical to the SA.
         let mut out = anneal_place::Anneal.place(env, design, problem, ir);
-        if problem.items.is_empty() {
+        // The pose search + density sweep + gate each realize the sheet several times; on a
+        // huge board (hundreds of parts) that text-solve cost dominates and can time out, for a
+        // de-sprawl the floorplanner rarely lands there anyway. Ship the (already-computed)
+        // anneal result directly above a size cap so the engine never regresses on latency.
+        if problem.items.is_empty() || problem.items.len() > 70 {
             return out;
         }
         let realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir);
