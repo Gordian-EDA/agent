@@ -136,8 +136,8 @@ impl PlacementEngine for ClusterPlace {
         //    carries `rail_force`; anneal never sets it ⇒ references unaffected.
         let cur = eval.shipped(design, &problem.items).map(|(_, w, r)| (w, compact::rendered_sprawl(&r, n)));
         out.result = report(self.name(), &problem.items, &eval);
-        drop(eval);
-        drop(realizer);
+        // `eval`/`realizer` borrow `out.ir`; their last use is the `report` above, so NLL frees
+        // that borrow here, letting the rail step below reassign `out.ir`.
         if let Some((cur_w, cur_spr)) = cur {
             let pre = crate::eval::save(&problem.items);
             if let Some(rail) = compact::rail_relayout(&mut problem.items, &problem.inc, &out.ir) {
