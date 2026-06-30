@@ -402,13 +402,15 @@ fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::La
             .collect();
         let hb = item_rect(&items[hub], items[hub].at);
         let (hw, hh) = (hb.max_x - hb.min_x, hb.max_y - hb.min_y);
-        // Bank grid for the caps, just above the hub, centred on it.
+        // Bank grid for the caps, just above the hub, centred on it. The pitch must clear a
+        // cap's VALUE label (e.g. "100nF" extends ~8mm right), or the caps collide their own
+        // labels — the real cause of the bank's warnings. ~12.7mm columns / rows do it.
+        const BANK_COL: f64 = 12.7;
+        const BANK_ROW: f64 = 20.32; // 16 grid — a cap renders as a tall 3V3/cap/GND leg
         let ncap = caps.len();
-        let ncols = if ncap == 0 {
-            1
-        } else {
-            ((hw / BANK_PITCH).floor().clamp(1.0, ncap as f64).max((ncap as f64).sqrt().ceil())) as usize
-        };
+        // A SINGLE ROW of vertical cap legs reads cleanest (the classic decoupling row beside
+        // the IC) and side-stacks value labels with no collision; wrap to a 2nd row only past 10.
+        let ncols = if ncap == 0 { 1 } else { ncap.min(10) };
         let nrows = ncap.div_ceil(ncols.max(1));
         let mut off = Vec::with_capacity(m.len());
         let mut ang = Vec::with_capacity(m.len());
@@ -418,8 +420,8 @@ fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::La
         for &i in m {
             if let Some(k) = caps.iter().position(|&c| c == i) {
                 let (col, row) = (k % ncols, k / ncols);
-                let gx = (col as f64 - (ncols as f64 - 1.0) / 2.0) * BANK_PITCH;
-                let gy = -hh / 2.0 - BANK_PITCH * (1.0 + (nrows - 1 - row) as f64);
+                let gx = (col as f64 - (ncols as f64 - 1.0) / 2.0) * BANK_COL;
+                let gy = -hh / 2.0 - BANK_ROW * (1.0 + (nrows - 1 - row) as f64);
                 off.push(Point2::new(gx, gy));
                 ang.push(cap_angle.unwrap_or(items[i].angle));
             } else {
@@ -480,7 +482,7 @@ fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::La
     };
     let total_area: f64 = placed.iter().map(|p| p.w * p.h).sum();
     let widest = placed.iter().map(|p| p.w).fold(0.0, f64::max);
-    let target_w = (total_area.sqrt() * 1.7).max(widest);
+    let target_w = (total_area.sqrt() * 1.15).max(widest);
     // Wide gutter: item_rect footprints DON'T include the net-label pennants the text solver
     // draws at each connecting pin, so the inter-module gap must reserve that pennant + the
     // channel for inter-module wires, or packed modules collide their labels.
