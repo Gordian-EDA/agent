@@ -127,9 +127,9 @@ pub struct LayoutIr {
     /// HYBRID VLM placement: refdes → a COARSE target position as a fraction of the
     /// board bbox, `[fx, fy]` in 0..1 (fx: 0=left,1=right; fy: 0=top,1=bottom). A vision
     /// LLM is good at rough DIRECTION ("power left, MCU centre") but not millimetre
-    /// positions, so this is applied as a SOFT bias in the placement cost (`zone_bias`),
-    /// NOT a forced cell — the engine still does the precise placement, just nudged
-    /// toward the LLM's zones. Empty on every existing path ⇒ no bias ⇒ unchanged.
+    /// positions, so this is applied as a SOFT bias in the annealer's placement cost (its
+    /// `zbias` term), NOT a forced cell — the engine still does the precise placement, just
+    /// nudged toward the LLM's zones. Empty on every existing path ⇒ no bias ⇒ unchanged.
     #[serde(default)]
     pub zone: BTreeMap<String, [f64; 2]>,
 }
