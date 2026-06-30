@@ -69,14 +69,6 @@ pub(crate) fn score(
     (tb, w, cr.total(), base_cost(&eval.measure(&m)))
 }
 
-/// True when candidate score `s` is an acceptable replacement for incumbent `best`:
-/// strictly fewer (truthfulness, warnings, crossings), or equal on those and strictly
-/// straighter. Keeps every accepted step STRICTLY ADDITIVE on the shipped metrics.
-pub(crate) fn improves(s: (usize, usize, usize, f64), best: (usize, usize, usize, f64)) -> bool {
-    (s.0, s.1, s.2) < (best.0, best.1, best.2)
-        || ((s.0, s.1, s.2) == (best.0, best.1, best.2) && s.3 + 0.5 < best.3)
-}
-
 /// A saved `(at, angle, mirror)` snapshot of every item, for trial/restore.
 pub(crate) type Snap = Vec<(Point2, f64, bool)>;
 
