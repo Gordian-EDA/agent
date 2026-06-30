@@ -863,7 +863,13 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 }
 
 pub(crate) fn schematic_placement_engine() -> Box<dyn sch_floorplan::contract::PlacementEngine> {
-    Box::new(anneal_place::Anneal)
+    // `SCH_ENGINE=cluster` selects the cluster-pose engine (SA placement + a strictly-
+    // additive hub rotation/mirror refinement, the lever the SA never searches); anything
+    // else keeps the default annealer.
+    match std::env::var("SCH_ENGINE").as_deref() {
+        Ok("cluster") => Box::new(cluster_place::ClusterPlace),
+        _ => Box::new(anneal_place::Anneal),
+    }
 }
 
 /// A per-refdes signature used to detect a *changed* component across a re-apply.

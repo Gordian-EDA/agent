@@ -23,6 +23,7 @@ sch-floorplan = { path = "../sch-floorplan" }
 sch-io = { path = "../sch-io" }
 sch-place = { path = "../sch-place" }
 anneal-place = { path = "../anneal-place" }
+cluster-place = { path = "../cluster-place" }
 
 anyhow.workspace = true
 async-trait.workspace = true

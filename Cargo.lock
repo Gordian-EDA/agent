@@ -356,6 +356,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cluster-place"
+version = "0.1.0"
+dependencies = [
+ "anneal-place",
+ "circuit-lang",
+ "geom",
+ "rayon",
+ "sch-floorplan",
+ "sch-place",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1023,6 +1035,7 @@ dependencies = [
  "async-trait",
  "base64",
  "circuit-lang",
+ "cluster-place",
  "directories",
  "drc-lint",
  "futures",
