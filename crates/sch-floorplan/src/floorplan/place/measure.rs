@@ -192,6 +192,23 @@ impl<'a> RoutedEvaluator<'a> {
         w.content_bbox().map(|r| (warnings, r))
     }
 
+    /// `(crossings, warnings, content extent)` of the shipped sheet in ONE realize pass — the
+    /// whole-placement gate (`lib.rs`) needs all three, and crossings are wire-based (invariant
+    /// to the orphan label-columns + text-solve that `rendered` adds), so they share a writer.
+    /// Halves the gate's realize cost vs calling `crossings` and `rendered` separately.
+    pub fn shipped(&self, design: &Design, items: &[Item]) -> Option<(Crossings, usize, Rect)> {
+        let mut w = self
+            .realizer
+            .realize_writer(design.name.as_deref(), items, RouteRealization::ShippedSheet)
+            .ok()?;
+        let cr = shipped_crossings(self.realizer.env, &w, items);
+        super::emit::add_orphan_label_columns(&mut w, design, self.realizer.inc);
+        w.set_frame(true);
+        w.prepare();
+        let warnings = w.layout_warnings().len();
+        w.content_bbox().map(|r| (cr, warnings, r))
+    }
+
     pub fn crossings(&self, items: &[Item]) -> Crossings {
         match self
             .realizer

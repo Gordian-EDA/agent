@@ -64,15 +64,13 @@ impl PlacementEngine for ClusterPlace {
         // same way as the candidate so the comparison is apples-to-apples (a pose move that
         // spreads an IC can't lower the bar either).
         let n = problem.items.len();
-        let (sa_warnings, baseline_rendered) = eval
-            .rendered(design, &problem.items)
-            .map(|(w, r)| (w, compact::rendered_sprawl(&r, n)))
-            .unwrap_or((usize::MAX, f64::MAX));
+        let (sa_crossings, sa_warnings, baseline_rendered) = match eval.shipped(design, &problem.items) {
+            Some((cr, w, r)) => (cr.total(), w, compact::rendered_sprawl(&r, n)),
+            None => (usize::MAX, usize::MAX, f64::MAX),
+        };
         let baseline_parts = compact::part_sprawl(&problem.items);
-        // Snapshot the SA placement + its crossings so the whole pose+compact result can fall
-        // back to it (the final safety net below).
+        // Snapshot the SA placement so the whole pose+compact result can fall back to it.
         let sa_snap = crate::eval::save(&problem.items);
-        let sa_crossings = eval.crossings(&problem.items).total();
         // 2. THE lever the SA never searches: re-pose each hub (+ its satellite cluster,
         //    moved rigidly), keeping a pose only when it strictly cuts shipped crossings.
         pose::search_hub_poses(&eval, &mut problem.items, &problem.inc, &out.ir);
@@ -95,11 +93,10 @@ impl PlacementEngine for ClusterPlace {
         //    1→4 warnings, crossings unchanged). Pose's genuine value is CROSSINGS, so measure
         //    the SHIPPED result and fall back to the SA snapshot unless pose/compact earned its
         //    keep: a real crossing cut, no new warnings, and no sprawl bloat.
-        let final_crossings = eval.crossings(&problem.items).total();
-        let (final_warnings, final_rendered) = eval
-            .rendered(design, &problem.items)
-            .map(|(w, r)| (w, compact::rendered_sprawl(&r, n)))
-            .unwrap_or((usize::MAX, f64::MAX));
+        let (final_crossings, final_warnings, final_rendered) = match eval.shipped(design, &problem.items) {
+            Some((cr, w, r)) => (cr.total(), w, compact::rendered_sprawl(&r, n)),
+            None => (usize::MAX, usize::MAX, f64::MAX),
+        };
         // STRICT PARETO: ship pose+compact only if it regresses NOTHING — warnings, crossings,
         // and BOTH sprawl measures (the label-inclusive rendered extent AND the part-origin
         // spread). Two measures because each is blind where the other sees: rendered catches the
