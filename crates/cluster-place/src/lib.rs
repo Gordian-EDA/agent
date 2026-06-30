@@ -68,6 +68,7 @@ impl PlacementEngine for ClusterPlace {
             .rendered(design, &problem.items)
             .map(|(w, r)| (w, compact::rendered_sprawl(&r, n)))
             .unwrap_or((usize::MAX, f64::MAX));
+        let baseline_parts = compact::part_sprawl(&problem.items);
         // Snapshot the SA placement + its crossings so the whole pose+compact result can fall
         // back to it (the final safety net below).
         let sa_snap = crate::eval::save(&problem.items);
@@ -99,19 +100,23 @@ impl PlacementEngine for ClusterPlace {
             .rendered(design, &problem.items)
             .map(|(w, r)| (w, compact::rendered_sprawl(&r, n)))
             .unwrap_or((usize::MAX, f64::MAX));
-        // STRICT PARETO: ship pose+compact only if it regresses NOTHING — not warnings, not
-        // crossings, not sprawl. A mixed result (pose cut crossings on a messy board but
-        // ballooned sprawl +67%) is NOT an improvement in a human-like sheet (sprawl is the #1
-        // human feature), so revert it. This makes the cluster engine Pareto-dominate the SA.
+        // STRICT PARETO: ship pose+compact only if it regresses NOTHING — warnings, crossings,
+        // and BOTH sprawl measures (the label-inclusive rendered extent AND the part-origin
+        // spread). Two measures because each is blind where the other sees: rendered catches the
+        // orphan-column balloon a dense pack causes; part-spread catches a pose splaying an IC,
+        // which leaves the label-padded extent flat. A mixed result (pose cut crossings but
+        // spread the parts +20%) is NOT a more human-like sheet, so revert it.
+        let final_parts = compact::part_sprawl(&problem.items);
         let earned_keep = final_warnings <= sa_warnings
             && final_crossings <= sa_crossings
-            && final_rendered <= baseline_rendered + 1e-3;
+            && final_rendered <= baseline_rendered + 1e-3
+            && final_parts <= baseline_parts + 1e-3;
         if !earned_keep {
             crate::eval::restore(&mut problem.items, &sa_snap);
         }
         if std::env::var_os("CLUSTER_DEBUG").is_some() {
             eprintln!(
-                "[cluster] x {sa_crossings}->{final_crossings}  w {sa_warnings}->{final_warnings}  rendered {baseline_rendered:.1}->{final_rendered:.1}  keep={earned_keep}"
+                "[cluster] x {sa_crossings}->{final_crossings}  w {sa_warnings}->{final_warnings}  rendered {baseline_rendered:.1}->{final_rendered:.1}  parts {baseline_parts:.1}->{final_parts:.1}  keep={earned_keep}"
             );
         }
         out.result = report(self.name(), &problem.items, &eval);

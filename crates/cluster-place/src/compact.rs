@@ -37,11 +37,31 @@ use sch_floorplan::contract::{
 use crate::eval::{restore, save, score};
 
 /// Whitespace per part of a RENDERED extent — the same `bbox_area / (n·cell)` ratio the
-/// validation oracle uses, but on [`RoutedEvaluator::rendered_extent`] (post text-solve +
-/// orphan label-columns), so it reflects what actually ships.
+/// validation oracle uses, but on [`RoutedEvaluator::rendered`] (post text-solve + orphan
+/// label-columns), so it reflects the SHIPPED label-inclusive sheet. Captures the orphan-column
+/// balloon a part-origin bbox misses — but is conversely dominated by label width, so it can
+/// MISS a pure part-spread (a pose move). The safety net Pareto-checks this AND [`part_sprawl`].
 pub(crate) fn rendered_sprawl(extent: &Rect, n: usize) -> f64 {
     const CELL: f64 = 6.35 * 5.08;
     (extent.max_x - extent.min_x) * (extent.max_y - extent.min_y) / (n.max(1) as f64 * CELL)
+}
+
+/// Whitespace per part over part ORIGINS (`item.at`) — exactly the validation oracle's
+/// symbol-instance bbox. Sensitive to part SPREAD (a pose move that splays a dual IC) where
+/// [`rendered_sprawl`] is not, so the two together are a complete sprawl guard.
+pub(crate) fn part_sprawl(items: &[Item]) -> f64 {
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for it in items {
+        x0 = x0.min(it.at.x);
+        y0 = y0.min(it.at.y);
+        x1 = x1.max(it.at.x);
+        y1 = y1.max(it.at.y);
+    }
+    if items.is_empty() || x1 <= x0 || y1 <= y0 {
+        return 0.0;
+    }
+    const CELL: f64 = 6.35 * 5.08;
+    (x1 - x0) * (y1 - y0) / (items.len() as f64 * CELL)
 }
 
 /// A module = a hub + the satellites that tap it, or a lone unclustered part. Frozen items
