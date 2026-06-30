@@ -1,0 +1,18 @@
+[package]
+name = "cola"
+version.workspace = true
+edition.workspace = true
+
+# Constraint-based layout — a Rust subset-port of adaptagrams/libcola + libvpsc.
+#
+# `vpsc` (Variable Placement with Separation Constraints) is Dwyer's block solver:
+# minimise  Σ wᵢ(xᵢ − dᵢ)²  subject to  left + gap ≤ right  (or == for equality),
+# the 1-D projection used by constrained stress-majorization 2-D placement. Faithful
+# to the libvpsc algorithm (satisfy via block-merge on the most-violated constraint,
+# then refine via block-split on the most-negative Lagrange multiplier) but
+# index/arena-based instead of a pointer graph, and linear-scan instead of a pairing
+# heap (right for schematic-sheet scale, ≤ a few dozen variables/axis). Pure +
+# dependency-free so it unit-tests in isolation, mirroring crossmin/forceplace.
+[dependencies]
+
+[dev-dependencies]
