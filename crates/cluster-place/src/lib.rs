@@ -76,8 +76,12 @@ impl PlacementEngine for ClusterPlace {
         // Snapshot the SA placement so the whole pose+compact result can fall back to it.
         let sa_snap = crate::eval::save(&problem.items);
         // 2. THE lever the SA never searches: re-pose each hub (+ its satellite cluster,
-        //    moved rigidly), keeping a pose only when it strictly cuts shipped crossings.
-        pose::search_hub_poses(&eval, &mut problem.items, &problem.inc, &out.ir);
+        //    moved rigidly), keeping a pose only when it strictly cuts shipped crossings. Pose
+        //    can only REDUCE crossings, so when the anneal already routed the sheet crossing-free
+        //    (the common case) the whole search is wasted realizes — skip it.
+        if sa_crossings > 0 {
+            pose::search_hub_poses(&eval, &mut problem.items, &problem.inc, &out.ir);
+        }
         // 3. (Env-gated) de-sprawl floorplanner: lay each module out in isolation + pack, kept
         //    only when it strictly out-de-sprawls the SA without regressing the routed metrics.
         if std::env::var_os("CLUSTER_COMPACT").is_some() {
