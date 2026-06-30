@@ -209,30 +209,6 @@ impl<'a> RoutedEvaluator<'a> {
         w.content_bbox().map(|r| (cr, warnings, r))
     }
 
-    /// Like [`shipped`] but ALSO returns the truthfulness-break count (merges + shorts + foreign
-    /// taps) from the SAME realize — so a caller gating on truthfulness AND sprawl pays ONE emit,
-    /// not two. Returns `(breaks, crossings, warnings, content_bbox)`.
-    pub fn shipped_truthful(
-        &self,
-        design: &Design,
-        items: &[Item],
-    ) -> Option<(usize, Crossings, usize, Rect)> {
-        let mut w = self
-            .realizer
-            .realize_writer(design.name.as_deref(), items, RouteRealization::ShippedSheet)
-            .ok()?;
-        let wires = w.wires_with_nets();
-        let breaks = count_merges(&wires, &w.junction_positions())
-            + count_shorts(self.realizer.env, &w, items, self.realizer.inc, &wires)
-            + count_foreign_taps(&wires);
-        let cr = shipped_crossings(self.realizer.env, &w, items);
-        super::emit::add_orphan_label_columns(&mut w, design, self.realizer.inc);
-        w.set_frame(true);
-        w.prepare();
-        let warnings = w.layout_warnings().len();
-        w.content_bbox().map(|r| (breaks, cr, warnings, r))
-    }
-
     pub fn crossings(&self, items: &[Item]) -> Crossings {
         match self
             .realizer

@@ -24,7 +24,6 @@
 //! It owns its objective and search; it measures candidates through `sch-floorplan`'s
 //! [`RoutedEvaluator`] and implements the published [`PlacementEngine`] trait.
 
-mod cola_place;
 mod compact;
 mod eval;
 mod pose;
@@ -77,39 +76,8 @@ impl PlacementEngine for ClusterPlace {
             None => (usize::MAX, usize::MAX, f64::MAX),
         };
         let baseline_parts = compact::part_sprawl(&problem.items);
-        // Snapshot the SA placement (and its IR) so the whole pose+compact result — or an
-        // untruthful final sheet — can fall back to the bare anneal.
+        // Snapshot the SA placement so the whole pose+compact result can fall back to it.
         let sa_snap = crate::eval::save(&problem.items);
-        let sa_ir = out.ir.clone();
-        // COLA compaction (default; `CLUSTER_NO_COLA` opts out): re-place via constraint stress
-        // (connected parts adjacent ⇒ wires; gravity pulls interface parts in; cap-bank). Ship it
-        // ONLY when it emits a TRUTHFUL netlist (zero merges/shorts — the hard correctness gate;
-        // tight packs can starve the router of channels and short nets, so this is REQUIRED) AND it
-        // is strictly tighter with a better weighted score. The anneal is untouched, so the
-        // truthfulness gate (which exercises the anneal) stays green; this guards the cola candidate.
-        if std::env::var_os("CLUSTER_NO_COLA").is_none() {
-            cola_place::cola_place(&mut problem.items, &problem.inc, &out.ir);
-            // One realize gives both the truthfulness-break count and the shipped (crossings,
-            // warnings, sprawl) — so the gate costs a single extra emit, not two.
-            let (truthful, co_x, co_w, co_r) = match eval.shipped_truthful(design, &problem.items) {
-                Some((b, cr, w, r)) => (b == 0, cr.total(), w, compact::rendered_sprawl(&r, n)),
-                None => (false, usize::MAX, usize::MAX, f64::MAX),
-            };
-            let score = |x: usize, w: usize, r: f64| w as f64 * 5.0 + x as f64 * 3.0 + r;
-            let cola_wins = truthful
-                && co_r + 1e-3 < baseline_rendered
-                && score(co_x, co_w, co_r) < score(sa_crossings, sa_warnings, baseline_rendered);
-            if std::env::var_os("CLUSTER_DEBUG").is_some() {
-                eprintln!(
-                    "[cola] truthful={truthful} co_rendered={co_r:.1} (sa {baseline_rendered:.1}) co_w={co_w} co_x={co_x} -> wins={cola_wins}"
-                );
-            }
-            if cola_wins {
-                out.result = report(self.name(), &problem.items, &eval);
-                return out;
-            }
-            crate::eval::restore(&mut problem.items, &sa_snap);
-        }
         // 2. THE lever the SA never searches: re-pose each hub (+ its satellite cluster,
         //    moved rigidly), keeping a pose only when it strictly cuts shipped crossings. Pose
         //    can only REDUCE crossings, so when the anneal already routed the sheet crossing-free
@@ -189,25 +157,6 @@ impl PlacementEngine for ClusterPlace {
                 }
             } else {
                 crate::eval::restore(&mut problem.items, &pre);
-            }
-        }
-        // FINAL TRUTHFULNESS BACKSTOP: the SA-side passes (pose/de-sprawl/rail) are gated on
-        // sprawl/warnings/crossings but NOT truthfulness, so as a hard correctness floor — if the
-        // final sheet would emit an untruthful netlist (any merge/short) — fall back to the bare
-        // anneal, which is spread enough that the router never starves for channels and shorts.
-        // The engine must NEVER ship a wrong netlist. (The cola path above already returns only
-        // truthful layouts, so this only guards the SA-side.)
-        let final_untruthful = {
-            let rz = RoutedSheetRealizer::new(env, &problem.inc, &out.ir);
-            RoutedEvaluator::new(&rz).truthfulness_breaks(&problem.items) > 0
-        };
-        if final_untruthful {
-            crate::eval::restore(&mut problem.items, &sa_snap);
-            out.ir = sa_ir;
-            let rz = RoutedSheetRealizer::new(env, &problem.inc, &out.ir);
-            out.result = report(self.name(), &problem.items, &RoutedEvaluator::new(&rz));
-            if std::env::var_os("CLUSTER_DEBUG").is_some() {
-                eprintln!("[cluster] FINAL untruthful -> restored bare anneal");
             }
         }
         out
