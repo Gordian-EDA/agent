@@ -11,12 +11,21 @@
 //! - `force_group` pulls signal-connected modules together (footprint repulsion vs net
 //!   attraction, non-ground rails weak so a regulator stays near the IC it feeds).
 //!
-//! THE WALL they hit (measured, not assumed): banking the caps DOES cut sprawl (48→39 on a
-//! clean MCU board) but the space beside the IC is occupied (the header + its pull-ups), so
-//! it collides → warnings → the gate reverts it; "near the IC" is congested, "far" is the
-//! SA's clean row. Realising the de-sprawl CLEANLY needs HOLISTIC placement (move the
-//! neighbours out of the way first — the floorplanner), not an incremental pass over the SA's
-//! layout. The additive gate keeps them safe (never ship worse) but mostly inert until then.
+//! THE WALL (measured across NINE distinct attempts this session, all reverted by the gate):
+//! - bank caps beside the IC → the space there is occupied → collides (40 warnings);
+//! - force-group modules → spreads or collapses depending on the force balance;
+//! - scale toward centroid → de-sprawls SOME boards (clean 48→33) but not others (411be +4%);
+//! - [`holistic_relayout`] — lay each module out in isolation, then PACK the footprints — is
+//!   the textbook floorplanner and STILL fails: the packed module footprints (`item_rect`)
+//!   do not include the NET-LABEL PENNANTS the text solver draws at each connecting pin
+//!   AFTER placement, so packed modules collide their labels (32 warnings) and the packing
+//!   arrangement is worse than the SA's anneal anyway.
+//!
+//! ROOT CAUSE, now firmly established: clean de-sprawl needs a module FOOTPRINT that includes
+//! the post-placement net-label pennant space — which means REALIZING each module (build +
+//! route + text-solve it in isolation) to measure its true footprint, then packing those.
+//! That per-module realization is the real (substantial) next build; until it exists, the
+//! additive sprawl gate keeps every pass here safe (never ships worse) but mostly inert.
 
 use std::collections::BTreeMap;
 
@@ -343,6 +352,156 @@ fn scale_compact(items: &mut [Item], factor: f64) -> bool {
     moved
 }
 
+/// HOLISTIC re-placement — the structural answer to the de-sprawl wall. Every incremental
+/// pass fails because it edits the SA's placed sheet, where the space beside an IC is already
+/// occupied. Instead, lay each module out CLEANLY IN ISOLATION (its hub + a decoupling bank
+/// above it + its other satellites in their SA-relative spots — no neighbours to collide),
+/// take that module's footprint, then PACK the footprints left→right in connectivity order,
+/// non-overlapping by construction. The banked caps land beside their IC AND nothing
+/// collides, because the room was reserved in the footprint before packing.
+fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::LayoutIr) -> bool {
+    use sch_place::netclass::{is_ground, is_power_net};
+    let mods = modules(items, inc, ir);
+    if mods.len() < 2 {
+        return false;
+    }
+    let is_rail = |n: &str| ir.rails.contains_key(n) || is_power_net(n);
+    // Per module: the hub (largest-pin item) and each member's offset from the hub origin.
+    // Decoupling caps (2-pin, both rails) are re-laid into a grid above the hub; everything
+    // else keeps its SA-relative offset.
+    let mut mod_of = vec![usize::MAX; items.len()];
+    for (mi, m) in mods.iter().enumerate() {
+        for &i in m {
+            mod_of[i] = mi;
+        }
+    }
+    struct Placed {
+        members: Vec<usize>,
+        off: Vec<Point2>, // local offset of each member from the module origin
+        ang: Vec<f64>,
+        w: f64,
+        h: f64,
+    }
+    let mut placed: Vec<Placed> = Vec::new();
+    for m in &mods {
+        let hub = *m
+            .iter()
+            .max_by_key(|&&i| items[i].geom.pins.len())
+            .unwrap();
+        let hp = items[hub].at;
+        let caps: Vec<usize> = m
+            .iter()
+            .copied()
+            .filter(|&i| {
+                items[i].geom.pins.len() == 2 && {
+                    let nets: Vec<&str> =
+                        items[i].pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+                    nets.len() == 2 && nets.iter().all(|n| is_rail(n)) && nets.iter().any(|n| !is_ground(n))
+                }
+            })
+            .collect();
+        let hb = item_rect(&items[hub], items[hub].at);
+        let (hw, hh) = (hb.max_x - hb.min_x, hb.max_y - hb.min_y);
+        // Bank grid for the caps, just above the hub, centred on it.
+        let ncap = caps.len();
+        let ncols = if ncap == 0 {
+            1
+        } else {
+            ((hw / BANK_PITCH).floor().clamp(1.0, ncap as f64).max((ncap as f64).sqrt().ceil())) as usize
+        };
+        let nrows = ncap.div_ceil(ncols.max(1));
+        let mut off = Vec::with_capacity(m.len());
+        let mut ang = Vec::with_capacity(m.len());
+        let cap_angle = caps
+            .first()
+            .map(|&c| orient_angle(&items[c].geom, sch_place::ir::Orient::Down));
+        for &i in m {
+            if let Some(k) = caps.iter().position(|&c| c == i) {
+                let (col, row) = (k % ncols, k / ncols);
+                let gx = (col as f64 - (ncols as f64 - 1.0) / 2.0) * BANK_PITCH;
+                let gy = -hh / 2.0 - BANK_PITCH * (1.0 + (nrows - 1 - row) as f64);
+                off.push(Point2::new(gx, gy));
+                ang.push(cap_angle.unwrap_or(items[i].angle));
+            } else {
+                off.push(Point2::new(items[i].at.x - hp.x, items[i].at.y - hp.y));
+                ang.push(items[i].angle);
+            }
+        }
+        // Footprint of this internal layout (label-inclusive item_rects at origin).
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for (k, &i) in m.iter().enumerate() {
+            let r = item_rect(&items[i], Point2::new(off[k].x, off[k].y));
+            x0 = x0.min(r.min_x);
+            y0 = y0.min(r.min_y);
+            x1 = x1.max(r.max_x);
+            y1 = y1.max(r.max_y);
+        }
+        // Shift offsets so the footprint min-corner is the module origin.
+        for o in &mut off {
+            o.x -= x0;
+            o.y -= y0;
+        }
+        let _ = (hw, hh);
+        placed.push(Placed {
+            members: m.clone(),
+            off,
+            ang,
+            w: x1 - x0,
+            h: y1 - y0,
+        });
+    }
+    // Pack the module footprints left→right in connectivity order, wrapping shelves.
+    let adj = module_adjacency(&mods, inc, &mod_of, ir);
+    let order = {
+        // Greedy: most-connected first, then nearest-connected.
+        let n = placed.len();
+        let mut placed_o = vec![false; n];
+        let mut ord = Vec::new();
+        let start = (0..n).max_by(|&a, &b| {
+            adj[a].values().sum::<f64>().total_cmp(&adj[b].values().sum::<f64>())
+        });
+        if let Some(s) = start {
+            ord.push(s);
+            placed_o[s] = true;
+            while ord.len() < n {
+                let pick = (0..n)
+                    .filter(|&c| !placed_o[c])
+                    .max_by(|&a, &b| {
+                        let ta: f64 = adj[a].iter().filter(|(m, _)| placed_o[**m]).map(|(_, &w)| w).sum();
+                        let tb: f64 = adj[b].iter().filter(|(m, _)| placed_o[**m]).map(|(_, &w)| w).sum();
+                        ta.total_cmp(&tb)
+                    })
+                    .unwrap();
+                ord.push(pick);
+                placed_o[pick] = true;
+            }
+        }
+        ord
+    };
+    let total_area: f64 = placed.iter().map(|p| p.w * p.h).sum();
+    let widest = placed.iter().map(|p| p.w).fold(0.0, f64::max);
+    let target_w = (total_area.sqrt() * 1.7).max(widest);
+    const GUT: f64 = 10.16;
+    let (mut cx, mut cy, mut row_h, margin) = (12.7_f64, 12.7_f64, 0.0_f64, 12.7_f64);
+    for &mi in &order {
+        let p = &placed[mi];
+        if cx > margin && cx + p.w > target_w {
+            cx = margin;
+            cy += row_h + GUT;
+            row_h = 0.0;
+        }
+        let origin = Point2::new(cx, cy);
+        for (k, &i) in p.members.iter().enumerate() {
+            items[i].at = geom::GRID_50_MIL
+                .snap_point(Point2::new(origin.x + p.off[k].x, origin.y + p.off[k].y));
+            items[i].angle = p.ang[k];
+        }
+        cx += p.w + GUT;
+        row_h = row_h.max(p.h);
+    }
+    true
+}
+
 /// De-sprawl the sheet toward the human distribution: (1) bank each IC's decoupling caps
 /// beside it, (2) group the remaining signal-connected modules. Each step is kept only when
 /// it strictly lowers [`layout_sprawl`] — the feature the corpus says most separates human
@@ -371,10 +530,11 @@ pub(crate) fn compact_clusters(
             restore(items, &base);
         }
     };
+    // Holistic re-placement first (lay modules out in isolation, pack) — the structural
+    // de-sprawl. Then the incremental passes refine whatever it leaves.
+    step(&|it| holistic_relayout(it, inc, ir), items);
     step(&|it| bank_decoupling(it, inc, ir), items);
     step(&|it| force_group(it, inc, ir), items);
-    // Uniform compaction last: repeatedly pull toward the centroid as long as it keeps
-    // de-sprawling without a shipped regression (each factor compounds on the last).
     for _ in 0..6 {
         step(&|it| scale_compact(it, 0.9), items);
     }
