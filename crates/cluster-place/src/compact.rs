@@ -1,5 +1,7 @@
-//! The holistic floorplanner — the single-sheet DE-SPRAWL pass. Env-gated (`CLUSTER_COMPACT`)
-//! pending broad validation; the default `cluster` engine is pose-only.
+//! The holistic floorplanner — the single-sheet DE-SPRAWL pass. DEFAULT-ON in the `cluster`
+//! engine (`CLUSTER_NO_COMPACT` opts out); validated full-dataset (13/40 liftable boards
+//! de-sprawl, 0 regressions). Repetitive power-IC arrays go a step further via the rail idiom
+//! ([`rail_relayout`]); everything else stops here.
 //!
 //! A human-vs-machine logistic fit over the 500 boards (`tools/learn_layout.py`) showed the
 //! engine's #1 deficiency is SPRAWL (humans ~24, the SA ~69 — 3× too spread) + ISLAND-scatter
@@ -18,7 +20,8 @@
 //! ROW (a grid collides the tall 3V3/cap/GND legs' labels); (2) the footprint must inflate by
 //! the power-glyph / net-label PENNANT overhang `item_rect` omits, or packed modules collide
 //! those glyphs. With both, a clean MCU board goes 48→34 sprawl (−29%, toward human), 0
-//! warnings; 0cdac 68→54. The gate ([`compact_clusters`]) keeps it only when it strictly
+//! warnings; on the gate-driver array 0cdac the holistic pass reaches 54, then [`rail_relayout`]
+//! finishes it at sprawl ~11. The gate ([`compact_clusters`]) keeps it only when it strictly
 //! de-sprawls without regressing the routed metrics — so a dual-IC / huge-bank board where the
 //! single-row bank gets too wide (411be) is safely left to the SA.
 

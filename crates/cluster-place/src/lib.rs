@@ -12,11 +12,14 @@
 //! result is strictly additive — never worse than the SA, better where an IC was facing
 //! the wrong way.
 //!
-//! What this engine deliberately does NOT do is part-level COMPACTION. Pulling stranded
-//! satellites tight to their hub congests the labels every time (the additive gate then
-//! reverts it) — the clean-vs-compact Pareto wall the SA already sits against. That
-//! scaffold lives in [`compact`] behind `CLUSTER_COMPACT` for the standalone-floorplanner
-//! work (where modules would carry reserved label-inclusive footprints), off by default.
+//! Beyond pose it runs a DE-SPRAWL floorplanner ([`compact`], DEFAULT-ON; `CLUSTER_NO_COMPACT`
+//! opts out): each module is laid out cleanly IN ISOLATION (hub + a single-row decoupling bank)
+//! and the footprints re-packed, kept only when it strictly out-de-sprawls the SA on BOTH sprawl
+//! measures (label-inclusive rendered extent AND part-origin spread) with no new warnings or
+//! crossings — else it reverts, so the result is never worse. On repetitive power-IC ARRAYS it
+//! then applies the "modules between rails" idiom ([`compact::rail_relayout`]): stand the ICs
+//! sharing the dominant rail in one row so a shared trunk replaces their distributed power
+//! glyphs. Full-dataset validation: 13/40 liftable boards de-sprawl, 0 regressions.
 //!
 //! It owns its objective and search; it measures candidates through `sch-floorplan`'s
 //! [`RoutedEvaluator`] and implements the published [`PlacementEngine`] trait.
