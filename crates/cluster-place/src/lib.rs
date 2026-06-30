@@ -99,8 +99,13 @@ impl PlacementEngine for ClusterPlace {
             .rendered(design, &problem.items)
             .map(|(w, r)| (w, compact::rendered_sprawl(&r, n)))
             .unwrap_or((usize::MAX, f64::MAX));
+        // STRICT PARETO: ship pose+compact only if it regresses NOTHING — not warnings, not
+        // crossings, not sprawl. A mixed result (pose cut crossings on a messy board but
+        // ballooned sprawl +67%) is NOT an improvement in a human-like sheet (sprawl is the #1
+        // human feature), so revert it. This makes the cluster engine Pareto-dominate the SA.
         let earned_keep = final_warnings <= sa_warnings
-            && (final_crossings < sa_crossings || final_rendered <= baseline_rendered + 1e-3);
+            && final_crossings <= sa_crossings
+            && final_rendered <= baseline_rendered + 1e-3;
         if !earned_keep {
             crate::eval::restore(&mut problem.items, &sa_snap);
         }
