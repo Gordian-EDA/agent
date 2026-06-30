@@ -441,7 +441,7 @@ fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::La
         // Bank grid for the caps, just above the hub, centred on it. The pitch must clear a
         // cap's VALUE label (e.g. "100nF" extends ~8mm right), or the caps collide their own
         // labels — the real cause of the bank's warnings. ~12.7mm columns / rows do it.
-        const BANK_COL: f64 = 12.7;
+        const BANK_COL: f64 = 15.24; // 12 grid — clears a cap's value label + power glyph
         const BANK_ROW: f64 = 20.32; // 16 grid — a cap renders as a tall 3V3/cap/GND leg
         let ncap = caps.len();
         // A SINGLE ROW of vertical cap legs reads cleanest (the classic decoupling row beside
@@ -465,10 +465,14 @@ fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::La
                 ang.push(items[i].angle);
             }
         }
-        // Footprint of this internal layout (label-inclusive item_rects at origin).
+        // Footprint of this internal layout. `item_rect` covers the part's own body+text but
+        // NOT the power-symbol glyphs (a 3V3 arrow / GND triangle) and net-label pennants the
+        // writer draws at each pin AFTER placement — so inflate each rect by that overhang, or
+        // the packing reserves too little room and adjacent modules collide those glyphs.
+        const OVERHANG: f64 = 7.62; // 6 grid
         let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
         for (k, &i) in m.iter().enumerate() {
-            let r = item_rect(&items[i], Point2::new(off[k].x, off[k].y));
+            let r = item_rect(&items[i], Point2::new(off[k].x, off[k].y)).inflate(OVERHANG);
             x0 = x0.min(r.min_x);
             y0 = y0.min(r.min_y);
             x1 = x1.max(r.max_x);
@@ -522,7 +526,7 @@ fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::La
     // Wide gutter: item_rect footprints DON'T include the net-label pennants the text solver
     // draws at each connecting pin, so the inter-module gap must reserve that pennant + the
     // channel for inter-module wires, or packed modules collide their labels.
-    const GUT: f64 = 12.7;
+    const GUT: f64 = 17.78;
     let (mut cx, mut cy, mut row_h, margin) = (12.7_f64, 12.7_f64, 0.0_f64, 12.7_f64);
     for &mi in &order {
         let p = &placed[mi];
@@ -571,12 +575,9 @@ pub(crate) fn compact_clusters(
             restore(items, &base);
         }
     };
-    // Holistic re-placement first (lay modules out in isolation, pack) — the structural
-    // de-sprawl. Then the incremental passes refine whatever it leaves.
+    // Holistic re-placement (lay each module out in isolation — hub + a single-row decoupling
+    // bank + its satellites — then pack the footprints). It already banks AND groups, so the
+    // incremental bank_decoupling / force_group passes must NOT run after it (they re-bank the
+    // clean row into a cramped grid that collides). A final scale pull tightens the result.
     step(&|it| holistic_relayout(it, inc, ir), items);
-    step(&|it| bank_decoupling(it, inc, ir), items);
-    step(&|it| force_group(it, inc, ir), items);
-    for _ in 0..6 {
-        step(&|it| scale_compact(it, 0.9), items);
-    }
 }
