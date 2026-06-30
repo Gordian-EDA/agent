@@ -1,31 +1,35 @@
 #!/usr/bin/env python3
-"""Audit whether the placement engine's COMPACTION preserves the netlist.
+"""Audit whether the placement engine PRESERVES a board's netlist when it re-lays it.
 
-The de-sprawl / cola compaction can pack a sheet tight enough that the writer
-silently drops a connection (an OPEN) or fuses two (a SHORT) — an untruthful
-netlist with NO warning. The engine's own `truthfulness_breaks` measure misses
-OPENS, and the de-sprawl was validated on SPRAWL, never connectivity, so this
-shipped undetected on ~30% of liftable boards.
+A placement engine only MOVES parts; it must never change which pins are
+electrically connected. But the de-sprawl/cola compaction can pack a sheet tight
+enough that the writer silently drops a connection (an OPEN) or fuses two (a
+SHORT) — with no warning. The engine's own `truthfulness_breaks` measure misses
+opens, and de-sprawl was validated on SPRAWL, never connectivity, so this shipped
+undetected.
 
-The complete check this tool performs: re-lay a board two ways and compare the
-EMITTED net counts (via `kicad-cli`, the ground truth) —
+THE CHECK (ground-truth): re-lay the board with the engine, then compare the
+emitted netlist's PIN-GROUPINGS to the ORIGINAL board's pin-groupings. The
+original board IS the intended netlist; the engine must reproduce it exactly.
 
-  * BARE ANNEAL  (CLUSTER_NO_COLA=1 CLUSTER_NO_COMPACT=1): spread, truthful baseline.
-  * ENGINE       (default cluster, i.e. de-sprawl + pose + rail): what ships.
+  * A group in ORIGINAL but not the engine output = an OPEN (a connection dropped).
+  * A group in the engine output but not ORIGINAL  = a SHORT (pins wrongly fused).
 
-Equal net count  => the compaction preserved connectivity (truthful).
-ENGINE > BARE    => an OPEN (a net split).
-ENGINE < BARE    => a SHORT (two nets fused).
+We compare GROUPINGS (the frozenset of (refdes,pin) on each multi-pin net), not
+net counts or names: net auto-names and power re-representation (PWR_FLAG / #FLG
+helper symbols, single-pin stubs) differ harmlessly between source and re-emit, so
+those are excluded — only real component-to-component connectivity is compared.
 
-The bare anneal — not the ORIGINAL board — is the reference, because the relayout
-re-represents power nets (adds PWR_FLAG / per-pin power symbols) so the absolute
-count differs from the source even when connectivity is sound; the bare anneal
-carries the SAME re-representation, isolating the compaction's effect.
+NOTE: an earlier version of this tool compared net COUNTS against a "bare anneal"
+baseline. That was WRONG — the bare anneal can itself break a net, so it is not a
+trustworthy reference. The ORIGINAL board is the only correct reference.
 
 Usage:
   truthfulness_audit.py <board.kicad_sch> [<board.kicad_sch> ...]
-  truthfulness_audit.py --all <dataset_dir>     # scan, skip non-liftable (0 nets)
+  truthfulness_audit.py --all <dataset_dir>    # scan; non-liftable boards are skipped
 """
+import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -35,62 +39,72 @@ REPO = Path(__file__).resolve().parent.parent
 RELAYOUT = REPO / "target/release/examples/relayout"
 
 
-def net_count(sch: Path) -> int:
-    """Distinct nets kicad-cli resolves from the sheet geometry (the ground truth)."""
+def groupings(sch: Path) -> set[frozenset]:
+    """The component-to-component connectivity: the frozenset of (refdes,pin) on each
+    multi-pin net, excluding power-helper refs (#FLG/#PWR) and single-pin stubs."""
     out = subprocess.run(
         ["kicad-cli", "sch", "export", "netlist", "--output", "/dev/stdout", str(sch)],
         capture_output=True, text=True,
     ).stdout
-    return out.count("(net ")
+    groups = set()
+    for block in re.split(r"\(net ", out):
+        nodes = frozenset(
+            (r, p)
+            for r, p in re.findall(r'\(node \(ref "([^"]+)"\) \(pin "([^"]+)"', block)
+            if not r.startswith("#")
+        )
+        if len(nodes) >= 2:
+            groups.add(nodes)
+    return groups
 
 
-def relayout(board: Path, outdir: Path, tag: str, env_extra: dict) -> Path | None:
-    import os
-    env = {**os.environ, "SCH_ENGINE": "cluster", **env_extra}
-    r = subprocess.run(
-        [str(RELAYOUT), str(board), "--engine", "cluster", "--out", str(outdir), "--tag", tag],
-        capture_output=True, text=True, env=env, timeout=300,
+def relayout(board: Path, outdir: Path) -> Path | None:
+    env = {**os.environ, "SCH_ENGINE": "cluster"}
+    subprocess.run(
+        [str(RELAYOUT), str(board), "--engine", "cluster", "--out", str(outdir), "--tag", "eng"],
+        capture_output=True, text=True, env=env, timeout=400,
     )
-    sch = outdir / f"{tag}.kicad_sch"
+    sch = outdir / "eng.kicad_sch"
     return sch if sch.exists() else None
 
 
 def audit_board(board: Path) -> str:
+    orig = groupings(board)
+    if not orig:
+        return "skip(not-liftable/empty)"
     with tempfile.TemporaryDirectory() as td:
-        out = Path(td)
-        bare = relayout(board, out, "bare", {"CLUSTER_NO_COLA": "1", "CLUSTER_NO_COMPACT": "1"})
-        eng = relayout(board, out, "eng", {})
-        if bare is None or eng is None:
-            return "skip(not-liftable)"
-        b, e = net_count(bare), net_count(eng)
-        if b == 0:
-            return "skip(empty)"
-        if b == e:
-            return f"TRUTHFUL ({e} nets)"
-        kind = "OPEN(s)" if e > b else "SHORT(s)"
-        return f"*** UNTRUTHFUL *** {kind}: engine={e} vs bare={b} ({abs(e-b)} broken)"
+        eng = relayout(board, Path(td))
+        if eng is None:
+            return "skip(engine-empty)"
+        out = groupings(eng)
+    opens = orig - out          # in original, lost by the engine
+    shorts = out - orig         # invented by the engine
+    if not opens and not shorts:
+        return f"TRUTHFUL ({len(orig)} nets)"
+    parts = []
+    if opens:
+        parts.append(f"{len(opens)} OPEN(s)")
+    if shorts:
+        parts.append(f"{len(shorts)} SHORT(s)")
+    return f"*** UNTRUTHFUL *** {', '.join(parts)}"
 
 
 def main(argv: list[str]) -> int:
     if not RELAYOUT.exists():
-        print(f"build first: cargo build --release -p gordian-core --example relayout", file=sys.stderr)
+        print("build first: cargo build --release -p gordian-core --example relayout", file=sys.stderr)
         return 2
-    if argv[:1] == ["--all"]:
-        boards = sorted(Path(argv[1]).glob("*.kicad_sch"))
-    else:
-        boards = [Path(a) for a in argv]
+    boards = sorted(Path(argv[1]).glob("*.kicad_sch")) if argv[:1] == ["--all"] else [Path(a) for a in argv]
     bad = liftable = 0
     for b in boards:
-        verdict = audit_board(b)
-        if verdict.startswith("skip"):
+        v = audit_board(b)
+        if v.startswith("skip"):
             continue
         liftable += 1
-        if "UNTRUTHFUL" in verdict:
-            bad += 1
-        print(f"{b.stem}: {verdict}")
+        bad += "UNTRUTHFUL" in v
+        print(f"{b.stem}: {v}")
     if liftable:
         print(f"\n=== {bad}/{liftable} liftable boards UNTRUTHFUL "
-              f"({100 * bad // liftable}%) — the compaction's hidden netlist bug ===")
+              f"({100 * bad // liftable}%) — engine changed the netlist ===")
     return 1 if bad else 0
 
 
