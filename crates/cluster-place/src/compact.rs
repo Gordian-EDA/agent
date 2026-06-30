@@ -156,17 +156,53 @@ fn modules(items: &[Item], inc: &Incidence, ir: &sch_place::ir::LayoutIr) -> Vec
         .filter(|&i| items[i].geom.pins.len() < 3)
         .collect();
     let blocks = build_anchor_blocks(items, inc, &hubs, &sats, ir);
+    // Fold each rail-only DECOUPLING cap into the module of the IC it bypasses — `anchor_tap`
+    // (and thus build_anchor_blocks) drops them because their only nets are rails (GND touches
+    // everything), so without this they become singleton modules and the bank never forms.
+    let mut extra: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    {
+        use sch_place::netclass::{is_ground, is_power_net};
+        let is_rail = |n: &str| ir.rails.contains_key(n) || is_power_net(n);
+        let assigned: std::collections::BTreeSet<usize> =
+            blocks.values().flatten().copied().collect();
+        for &si in &sats {
+            if assigned.contains(&si) || items[si].geom.pins.len() != 2 {
+                continue;
+            }
+            let nets: Vec<&str> = items[si].pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+            if nets.len() != 2 || !nets.iter().all(|n| is_rail(n)) {
+                continue;
+            }
+            let Some(vplus) = nets.iter().find(|n| !is_ground(n)) else {
+                continue;
+            };
+            let ic = inc
+                .get(*vplus)
+                .into_iter()
+                .flatten()
+                .map(|&(j, _)| j)
+                .filter(|&j| items[j].geom.pins.len() >= 4)
+                .fold(BTreeMap::<usize, usize>::new(), |mut m, j| {
+                    *m.entry(j).or_default() += 1;
+                    m
+                })
+                .into_iter()
+                .max_by_key(|&(_, c)| c)
+                .map(|(j, _)| j);
+            if let Some(ic) = ic {
+                extra.entry(ic).or_default().push(si);
+            }
+        }
+    }
     let mut in_module = vec![false; items.len()];
     let mut out = Vec::new();
     for &h in &hubs {
         let mut m = vec![h];
         in_module[h] = true;
-        if let Some(b) = blocks.get(&h) {
-            for &s in b {
-                if !in_module[s] {
-                    m.push(s);
-                    in_module[s] = true;
-                }
+        for &s in blocks.get(&h).into_iter().flatten().chain(extra.get(&h).into_iter().flatten()) {
+            if !in_module[s] {
+                m.push(s);
+                in_module[s] = true;
             }
         }
         out.push(m);
