@@ -12,5 +12,4 @@ geom = { path = "../geom" }
 sch-place = { path = "../sch-place" }
 sch-floorplan = { path = "../sch-floorplan" }
 anneal-place = { path = "../anneal-place" }
-cola = { path = "../cola" }
 rayon.workspace = true

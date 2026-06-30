@@ -55,29 +55,13 @@ pub fn item_rect(it: &Item, at: impl Into<::geom::Point2>) -> ::geom::Rect {
     r
 }
 
-/// The SOLID body extent — `approx_size` with its 2.54 mm/side text-padding REMOVED. This is the
-/// hard "two bodies must not collide" wall; it deliberately does NOT reserve side-mounted text, so
-/// the search can pack to human density (text-over-body is a SOFT readability concern already
-/// priced by the warning term, not a hard collision). [`item_rect`]'s fat text-aware extent is for
-/// the soft score only.
-pub fn solid_rect(it: &Item, at: impl Into<::geom::Point2>) -> ::geom::Rect {
-    let at = at.into();
-    let s = it.geom.approx_size();
-    let quarter = ((it.angle / 90.0).round() as i64).rem_euclid(2) == 1;
-    let (w, h) = if quarter { (s[1], s[0]) } else { (s[0], s[1]) };
-    let hw = (w / 2.0 - 2.54).max(1.27);
-    let hh = (h / 2.0 - 2.54).max(1.27);
-    ::geom::Rect::new(at[0] - hw, at[1] - hh, at[0] + hw, at[1] + hh)
-}
-
-/// Count pairs of items whose SOLID bodies overlap — the hard "never let two symbols
-/// collide" wall (uses [`solid_rect`], NOT the fat text-aware [`item_rect`], so a tight
-/// human-density pack is reachable).
+/// Count pairs of items whose bodies overlap — the hard "never let two symbols
+/// collide" wall. Catches adjacent-cell collisions the same-cell check misses.
 pub fn body_overlap_count(items: &[Item]) -> usize {
     let mut n = 0;
     for i in 0..items.len() {
         for j in (i + 1)..items.len() {
-            if solid_rect(&items[i], items[i].at).overlaps(&solid_rect(&items[j], items[j].at)) {
+            if item_rect(&items[i], items[i].at).overlaps(&item_rect(&items[j], items[j].at)) {
                 n += 1;
             }
         }

@@ -24,7 +24,6 @@
 //! It owns its objective and search; it measures candidates through `sch-floorplan`'s
 //! [`RoutedEvaluator`] and implements the published [`PlacementEngine`] trait.
 
-mod cola_place;
 mod compact;
 mod eval;
 mod pose;
@@ -58,13 +57,6 @@ impl PlacementEngine for ClusterPlace {
         //    route-aware refinement). The pose lever is layered ON TOP so it is isolated —
         //    where pose finds nothing the result is byte-identical to the SA.
         let mut out = anneal_place::Anneal.place(env, design, problem, ir);
-        // EXPERIMENTAL wire-first path (`COLA_PLACE`): re-place via the constraint-based stress
-        // solver (connected parts adjacent ⇒ wires), warm-started from the SA. Returns the cola
-        // layout in isolation for A/B against the SA on the wired-axis metrics.
-        if std::env::var_os("COLA_PLACE").is_some() {
-            cola_place::cola_place(&mut problem.items, &problem.inc, &out.ir);
-            return out;
-        }
         // The pose search + density sweep + gate each realize the sheet several times; on a
         // huge board (hundreds of parts) that text-solve cost dominates and can time out, for a
         // de-sprawl the floorplanner rarely lands there anyway. Ship the (already-computed)
@@ -96,10 +88,7 @@ impl PlacementEngine for ClusterPlace {
         // 3. De-sprawl floorplanner (DEFAULT-ON; `CLUSTER_NO_COMPACT` opts out): lay each module
         //    out in isolation + pack, kept only when it strictly out-de-sprawls the SA on both
         //    sprawl measures without regressing warnings/crossings — else it reverts.
-        // The area de-sprawl floorplanner is now OPT-IN (`CLUSTER_COMPACT`): the user rejected its
-        // output as free-floating (it banks caps + packs modules with gutters → connections become
-        // labels), and it would undo the wirelength SA's tight wiring. Kept gated for A/B only.
-        if std::env::var_os("CLUSTER_COMPACT").is_some() {
+        if std::env::var_os("CLUSTER_NO_COMPACT").is_none() {
             compact::compact_clusters(
                 &eval,
                 design,

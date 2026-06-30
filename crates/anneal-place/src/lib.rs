@@ -94,7 +94,7 @@ const ORIENT_BOOST: f64 = 50.0;
 const COMPACT_BOOST: f64 = 2.0;
 /// Weight on the whole-board bbox half-perimeter in `proxy_cost` (the dense fast-lane SA
 /// inner loop).
-const PROXY_SPREAD_W: f64 = 0.05;
+const PROXY_SPREAD_W: f64 = 0.45;
 /// Weight on the LLM zone bias in `proxy_cost`.
 const ZBIAS_W: f64 = 0.8;
 
@@ -117,8 +117,8 @@ fn base_cost(m: &RawMetrics) -> f64 {
         + neat * (5.0 * m.crossings as f64 + 7.0 * m.congestion as f64 + 7.0 * m.corners as f64)
         + 1.0 * m.junctions as f64
         + 0.7 * m.stray
-        + 0.6 * m.length
-        + 0.05 * m.spread;
+        + 0.15 * m.length
+        + 0.45 * m.spread;
     let multiunit = SIB_COHESION * m.sib_spread;
     base + multiunit
 }
@@ -142,11 +142,11 @@ fn amplified_energy(m: &RawMetrics) -> f64 {
         + neat * (5.0 * m.crossings as f64 + 7.0 * m.congestion as f64 + 7.0 * m.corners as f64)
         + 1.0 * m.junctions as f64
         + 0.7 * m.stray
-        + 0.6 * m.length
-        + 0.05 * m.spread;
+        + 0.15 * m.length
+        + 0.45 * m.spread;
     let multiunit = SIB_COHESION * m.sib_spread;
     base + multiunit
-        + COMPACT_BOOST * (0.6 * m.length)
+        + COMPACT_BOOST * (0.15 * m.length + 0.45 * m.spread)
         + ORIENT_BOOST * m.leg_viol as f64
 }
 
@@ -1190,7 +1190,7 @@ fn proxy_cost(
     }
     1500.0 * overlaps as f64
         + 1200.0 * grid_order as f64
-        + 0.6 * hpwl
+        + 0.15 * hpwl
         + PROXY_SPREAD_W * spread
         + 0.7 * cohere
         + ZBIAS_W * zbias
