@@ -10,7 +10,7 @@
 use geom::Point2;
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
-use sch_place::netclass::is_power_net;
+use sch_place::netclass::{is_ground, is_power_net};
 
 /// Target length of a directly-connected edge (~10 grid) — short enough that the connection
 /// renders as a wire, long enough to clear the bodies.
@@ -38,6 +38,41 @@ pub fn cola_place(items: &mut [Item], inc: &Incidence, ir: &LayoutIr) {
                     }
                 }
             }
+        }
+    }
+    // CAP-BANK cohesion: a decoupling cap (2-pin, one V+ pin + one GND pin) gets a stress edge to
+    // the nearest IC on its V+ rail, so it banks NEXT to the IC it bypasses (the human idiom). The
+    // rail net itself is skipped above (it couples everything), so this restores the ONE coupling
+    // that matters — without it the cap only gravitates to the sheet centroid, far from its IC.
+    for i in 0..n {
+        if items[i].geom.pins.len() != 2 {
+            continue;
+        }
+        let nets: Vec<&str> = items[i].pins.iter().filter_map(|(_, _, nn)| nn.as_deref()).collect();
+        if nets.len() != 2 {
+            continue;
+        }
+        let vp = match (is_ground(nets[0]), is_ground(nets[1])) {
+            (true, false) => nets[1],
+            (false, true) => nets[0],
+            _ => continue,
+        };
+        if !(ir.rails.contains_key(vp) || is_power_net(vp)) {
+            continue;
+        }
+        let ic = inc
+            .get(vp)
+            .into_iter()
+            .flatten()
+            .map(|p| p.0)
+            .filter(|&a| a != i && items[a].geom.pins.len() >= 3)
+            .min_by(|&a, &b| {
+                let da = (items[a].at.x - items[i].at.x).hypot(items[a].at.y - items[i].at.y);
+                let db = (items[b].at.x - items[i].at.x).hypot(items[b].at.y - items[i].at.y);
+                da.total_cmp(&db)
+            });
+        if let Some(ic) = ic {
+            edges.push((i, ic));
         }
     }
     if edges.is_empty() {
