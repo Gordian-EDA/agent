@@ -312,10 +312,37 @@ fn force_group(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::LayoutIr
     moved
 }
 
-/// Pack the modules if it does not regress the shipped sheet. Snapshot, pack, decongest,
-/// score the finalized clone; keep only when it ties-or-beats truthfulness/warnings/crossings
-/// and is strictly tighter — otherwise restore. On a real board the missing footprint /
-/// templating (see module docs) makes it regress, so it reverts.
+/// UNIFORM compaction — pull every part a fraction toward the layout centroid, preserving
+/// the SA's whole arrangement (so no parts swap sides and no new tangle), just closing the
+/// empty space the SA leaves. `decongest` then re-opens only the spots that scaled into a
+/// touch, so the loose regions tighten while the already-tight ones hold. Returns whether
+/// anything moved; the caller's sprawl gate keeps it only if it de-sprawls without regressing.
+fn scale_compact(items: &mut [Item], factor: f64) -> bool {
+    let n = items.len();
+    if n == 0 {
+        return false;
+    }
+    let (mut cx, mut cy) = (0.0, 0.0);
+    for it in items.iter() {
+        cx += it.at.x;
+        cy += it.at.y;
+    }
+    let c = Point2::new(cx / n as f64, cy / n as f64);
+    let mut moved = false;
+    for it in items.iter_mut() {
+        if it.frozen {
+            continue; // a frozen idiom keeps its seated geometry
+        }
+        let np = geom::GRID_50_MIL
+            .snap_point(Point2::new(c.x + (it.at.x - c.x) * factor, c.y + (it.at.y - c.y) * factor));
+        if it.at != np {
+            it.at = np;
+            moved = true;
+        }
+    }
+    moved
+}
+
 /// De-sprawl the sheet toward the human distribution: (1) bank each IC's decoupling caps
 /// beside it, (2) group the remaining signal-connected modules. Each step is kept only when
 /// it strictly lowers [`layout_sprawl`] — the feature the corpus says most separates human
@@ -346,4 +373,9 @@ pub(crate) fn compact_clusters(
     };
     step(&|it| bank_decoupling(it, inc, ir), items);
     step(&|it| force_group(it, inc, ir), items);
+    // Uniform compaction last: repeatedly pull toward the centroid as long as it keeps
+    // de-sprawling without a shipped regression (each factor compounds on the last).
+    for _ in 0..6 {
+        step(&|it| scale_compact(it, 0.9), items);
+    }
 }
