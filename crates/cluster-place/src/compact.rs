@@ -481,7 +481,10 @@ fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::La
     let total_area: f64 = placed.iter().map(|p| p.w * p.h).sum();
     let widest = placed.iter().map(|p| p.w).fold(0.0, f64::max);
     let target_w = (total_area.sqrt() * 1.7).max(widest);
-    const GUT: f64 = 10.16;
+    // Wide gutter: item_rect footprints DON'T include the net-label pennants the text solver
+    // draws at each connecting pin, so the inter-module gap must reserve that pennant + the
+    // channel for inter-module wires, or packed modules collide their labels.
+    const GUT: f64 = 12.7;
     let (mut cx, mut cy, mut row_h, margin) = (12.7_f64, 12.7_f64, 0.0_f64, 12.7_f64);
     for &mi in &order {
         let p = &placed[mi];
