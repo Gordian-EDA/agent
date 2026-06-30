@@ -69,13 +69,7 @@ impl PlacementEngine for ClusterPlace {
         // huge board (hundreds of parts) that text-solve cost dominates and can time out, for a
         // de-sprawl the floorplanner rarely lands there anyway. Ship the (already-computed)
         // anneal result directly above a size cap so the engine never regresses on latency.
-        if problem.items.is_empty() {
-            return out;
-        }
-        // Big board: the A/B's double-emit (and cola's crowded-sheet text-solve) can time out, so
-        // ship the SA directly. Big-sheet compaction is future work (cola wins large sheets in
-        // principle, but needs a faster emit path before it can run here without the A/B guard).
-        if problem.items.len() > 70 {
+        if problem.items.is_empty() || problem.items.len() > 70 {
             return out;
         }
         let realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir);
@@ -92,29 +86,6 @@ impl PlacementEngine for ClusterPlace {
         let baseline_parts = compact::part_sprawl(&problem.items);
         // Snapshot the SA placement so the whole pose+compact result can fall back to it.
         let sa_snap = crate::eval::save(&problem.items);
-        // COLA A/B (default; `CLUSTER_NO_COLA` opts out): also try the constraint-stress placement
-        // (gravity-anchored, cap-banked). Keep it over the SA when it ships a CLEANER + TIGHTER
-        // sheet by a weighted score (a warning costs 5 sprawl-units, a crossing 3) — so cola's big
-        // compactness wins on cross-cutting-net boards are captured while the SA keeps the boards it
-        // already routes clean. When cola wins, skip the SA-side pose/compact/rail pipeline.
-        if std::env::var_os("CLUSTER_NO_COLA").is_none() {
-            cola_place::cola_place(&mut problem.items, &problem.inc, &out.ir);
-            let (co_x, co_w, co_r) = match eval.shipped(design, &problem.items) {
-                Some((cr, w, r)) => (cr.total(), w, compact::rendered_sprawl(&r, n)),
-                None => (usize::MAX, usize::MAX, f64::MAX),
-            };
-            let score = |x: usize, w: usize, r: f64| w as f64 * 5.0 + x as f64 * 3.0 + r;
-            // Keep cola only if it is genuinely TIGHTER (compactness is the whole point) AND wins
-            // the weighted score — never trade the SA's lower sprawl for cola's on a board where
-            // cola merely had fewer warnings but spread more.
-            let cola_wins = co_r <= baseline_rendered + 1e-3
-                && score(co_x, co_w, co_r) < score(sa_crossings, sa_warnings, baseline_rendered);
-            if cola_wins {
-                out.result = report(self.name(), &problem.items, &eval);
-                return out;
-            }
-            crate::eval::restore(&mut problem.items, &sa_snap);
-        }
         // 2. THE lever the SA never searches: re-pose each hub (+ its satellite cluster,
         //    moved rigidly), keeping a pose only when it strictly cuts shipped crossings. Pose
         //    can only REDUCE crossings, so when the anneal already routed the sheet crossing-free
