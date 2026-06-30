@@ -592,6 +592,15 @@ pub(crate) fn route_signal(
         }
     }
     let port_root = port_idx.map(|pi| uf.find(pi));
+    if std::env::var_os("ROUTE_DEBUG").is_some() {
+        let unlabeled = roots.values().filter(|p| p.is_none()).count();
+        eprintln!(
+            "[route] net {net}: uf-components={} terms={} unlabeled(no-pin)={}",
+            roots.len(),
+            terms.len(),
+            unlabeled
+        );
+    }
     if roots.len() > 1 {
         for (root, pin) in &roots {
             if Some(*root) == port_root {
