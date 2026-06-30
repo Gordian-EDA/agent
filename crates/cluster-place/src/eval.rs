@@ -69,17 +69,23 @@ pub(crate) fn score(
     (tb, w, cr.total(), base_cost(&eval.measure(&m)))
 }
 
-/// A saved `(at, angle, mirror)` snapshot of every item, for trial/restore.
-pub(crate) type Snap = Vec<(Point2, f64, bool)>;
+/// A saved `(at, angle, mirror, frozen)` snapshot of every item, for trial/restore. Frozen
+/// is included so a reverted compaction also restores the original freeze state (the
+/// floorplanner freezes its placed items so the emit's gather pile can't re-arrange them).
+pub(crate) type Snap = Vec<(Point2, f64, bool, bool)>;
 
 pub(crate) fn save(items: &[Item]) -> Snap {
-    items.iter().map(|it| (it.at, it.angle, it.mirror)).collect()
+    items
+        .iter()
+        .map(|it| (it.at, it.angle, it.mirror, it.frozen))
+        .collect()
 }
 
 pub(crate) fn restore(items: &mut [Item], snap: &Snap) {
-    for (it, &(at, a, m)) in items.iter_mut().zip(snap) {
+    for (it, &(at, a, m, f)) in items.iter_mut().zip(snap) {
         it.at = at;
         it.angle = a;
         it.mirror = m;
+        it.frozen = f;
     }
 }

@@ -348,6 +348,21 @@ pub(crate) fn compact_clusters(
     if !holistic_relayout(items, inc, ir) {
         return;
     }
+    // FREEZE just the decoupling caps the floorplanner banked: the emit's post-`place()`
+    // gather pile (align_rail_cap_rows, gather_banked_decoupling) would otherwise re-row them
+    // and collide the clean single-row bank. Freezing ONLY the caps stops that while leaving
+    // every other part mutable so `decongest` can still clear residual overlaps.
+    {
+        use sch_place::netclass::is_power_net;
+        let is_rail = |n: &str| ir.rails.contains_key(n) || is_power_net(n);
+        for it in items.iter_mut() {
+            let rail_cap = it.geom.pins.len() == 2
+                && it.pins.iter().filter_map(|(_, _, n)| n.as_deref()).filter(|n| is_rail(n)).count() == 2;
+            if rail_cap {
+                it.frozen = true;
+            }
+        }
+    }
     decongest(items);
     let s = score(eval, inc, ir, items);
     // No shipped regression AND a real de-sprawl vs the SA baseline (the learned human feature).
