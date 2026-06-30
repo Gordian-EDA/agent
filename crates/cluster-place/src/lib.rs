@@ -105,17 +105,6 @@ impl PlacementEngine for ClusterPlace {
                 );
             }
             if cola_wins {
-                // The cola's stress placement isn't crossing-aware; re-pose hubs to cut crossings
-                // (the same lever the SA-side uses), but ONLY when it has crossings, and re-verify
-                // truthfulness afterward — the pose moves parts and this path returns before the
-                // final backstop, so a pose that broke the netlist must be reverted here.
-                if co_x > 0 {
-                    let cola_snap = crate::eval::save(&problem.items);
-                    pose::search_hub_poses(&eval, &mut problem.items, &problem.inc, &out.ir);
-                    if eval.truthfulness_breaks(&problem.items) > 0 {
-                        crate::eval::restore(&mut problem.items, &cola_snap);
-                    }
-                }
                 out.result = report(self.name(), &problem.items, &eval);
                 return out;
             }
