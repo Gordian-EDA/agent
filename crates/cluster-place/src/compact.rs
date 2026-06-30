@@ -263,13 +263,15 @@ fn force_group(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::LayoutIr
     for it in 0..ITERS {
         let cool = 1.0 - it as f64 / ITERS as f64; // anneal the step down
         let mut disp = vec![Point2::new(0.0, 0.0); n];
-        // Footprint repulsion (all pairs): strong inside the touching distance, fading out.
+        // Footprint repulsion (all pairs): SHORT-RANGE (∝ want³/dist²) so it only fires
+        // when two footprints approach contact and is negligible at distance — otherwise it
+        // dominates the attraction at long range and the layout SPREADS instead of grouping.
         for a in 0..n {
             for b in (a + 1)..n {
                 let (dx, dy) = (pos[a].x - pos[b].x, pos[a].y - pos[b].y);
                 let dist = (dx * dx + dy * dy).sqrt().max(1.0);
                 let want = rad[a] + rad[b] + MARGIN;
-                let f = (want * want) / dist; // ~want at touching, fades with distance
+                let f = want * want * want / (dist * dist);
                 disp[a].x += dx / dist * f;
                 disp[a].y += dy / dist * f;
                 disp[b].x -= dx / dist * f;
