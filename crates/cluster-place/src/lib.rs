@@ -63,10 +63,11 @@ impl PlacementEngine for ClusterPlace {
         // pose, is the baseline the de-sprawl floorplanner must beat outright — measured the
         // same way as the candidate so the comparison is apples-to-apples (a pose move that
         // spreads an IC can't lower the bar either).
-        let baseline_rendered = eval
-            .rendered_extent(design, &problem.items)
-            .map(|r| compact::rendered_sprawl(&r, problem.items.len()))
-            .unwrap_or(f64::MAX);
+        let n = problem.items.len();
+        let (sa_warnings, baseline_rendered) = eval
+            .rendered(design, &problem.items)
+            .map(|(w, r)| (w, compact::rendered_sprawl(&r, n)))
+            .unwrap_or((usize::MAX, f64::MAX));
         // Snapshot the SA placement + its crossings so the whole pose+compact result can fall
         // back to it (the final safety net below).
         let sa_snap = crate::eval::save(&problem.items);
@@ -87,21 +88,24 @@ impl PlacementEngine for ClusterPlace {
             );
         }
         // 4. SAFETY NET: pose gates on gate-time (truthfulness, warnings, crossings), which is
-        //    blind to the emit's orphan label-columns — so it can chase a phantom gate-time
-        //    warning win that ships a more-sprawled sheet (54→78 on a dense board). Its genuine
-        //    value is CROSSINGS; if the final result didn't cut crossings AND its rendered
-        //    sprawl is worse than the SA's, pose/compact gave nothing but bloat — ship the SA.
+        //    blind to the emit's orphan label-columns — so it can chase a phantom gate-time win
+        //    that ships a MORE-SPRAWLED or MORE-COLLIDING sheet (a dense board: 54→78 sprawl, or
+        //    1→4 warnings, crossings unchanged). Pose's genuine value is CROSSINGS, so measure
+        //    the SHIPPED result and fall back to the SA snapshot unless pose/compact earned its
+        //    keep: a real crossing cut, no new warnings, and no sprawl bloat.
         let final_crossings = eval.crossings(&problem.items).total();
-        let final_rendered = eval
-            .rendered_extent(design, &problem.items)
-            .map(|r| compact::rendered_sprawl(&r, problem.items.len()))
-            .unwrap_or(f64::MAX);
-        if final_crossings >= sa_crossings && final_rendered > baseline_rendered + 1e-3 {
+        let (final_warnings, final_rendered) = eval
+            .rendered(design, &problem.items)
+            .map(|(w, r)| (w, compact::rendered_sprawl(&r, n)))
+            .unwrap_or((usize::MAX, f64::MAX));
+        let earned_keep = final_warnings <= sa_warnings
+            && (final_crossings < sa_crossings || final_rendered <= baseline_rendered + 1e-3);
+        if !earned_keep {
             crate::eval::restore(&mut problem.items, &sa_snap);
         }
-        if let Some(b) = std::env::var_os("CLUSTER_DEBUG").map(|_| sa_crossings) {
+        if std::env::var_os("CLUSTER_DEBUG").is_some() {
             eprintln!(
-                "[cluster] crossings {b} -> {final_crossings}  rendered {baseline_rendered:.1} -> {final_rendered:.1}"
+                "[cluster] x {sa_crossings}->{final_crossings}  w {sa_warnings}->{final_warnings}  rendered {baseline_rendered:.1}->{final_rendered:.1}  keep={earned_keep}"
             );
         }
         out.result = report(self.name(), &problem.items, &eval);

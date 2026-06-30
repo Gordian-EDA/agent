@@ -174,11 +174,13 @@ impl<'a> RoutedEvaluator<'a> {
         }
     }
 
-    /// The rendered content extent of `items` AS THE EMIT SHIPS IT — realized, with the emit's
-    /// orphan label-columns added (edge labels for cross-ref nets), then text-solved and
-    /// reframed. The only faithful measure of a placement's final sprawl: a gate reading the
-    /// raw pre-emit geometry misses the orphan columns, which balloon a dense board's bbox.
-    pub fn rendered_extent(&self, design: &Design, items: &[Item]) -> Option<Rect> {
+    /// The `(warning count, content extent)` of `items` AS THE EMIT SHIPS IT — realized with
+    /// the emit's orphan label-columns added (edge labels for cross-ref nets), then text-solved
+    /// and reframed. The only faithful measure of a placement's final sprawl AND warnings: a
+    /// gate reading the raw pre-emit geometry misses the orphan columns, which both balloon a
+    /// dense board's bbox and collide into warnings. One realize pass serves both. `None` if
+    /// the route can't be built or the sheet is empty.
+    pub fn rendered(&self, design: &Design, items: &[Item]) -> Option<(usize, Rect)> {
         let mut w = self
             .realizer
             .realize_writer(design.name.as_deref(), items, RouteRealization::ShippedSheet)
@@ -186,7 +188,8 @@ impl<'a> RoutedEvaluator<'a> {
         super::emit::add_orphan_label_columns(&mut w, design, self.realizer.inc);
         w.set_frame(true);
         w.prepare();
-        w.content_bbox()
+        let warnings = w.layout_warnings().len();
+        w.content_bbox().map(|r| (warnings, r))
     }
 
     pub fn crossings(&self, items: &[Item]) -> Crossings {

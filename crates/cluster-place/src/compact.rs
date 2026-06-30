@@ -372,8 +372,8 @@ pub(crate) fn compact_clusters(
     // measure that finally matches what ships). Keep only a clear win (>=10% under the SA),
     // never a routed regression. A 5% margin guards float/measurement noise.
     let hol = eval
-        .rendered_extent(design, items)
-        .map(|r| rendered_sprawl(&r, items.len()))
+        .rendered(design, items)
+        .map(|(_, r)| rendered_sprawl(&r, items.len()))
         .unwrap_or(f64::MAX);
     let keep = (s.0, s.1, s.2) <= (s0.0, s0.1, s0.2) && hol < 0.90 * baseline_rendered;
     if std::env::var_os("CLUSTER_DEBUG").is_some() {
