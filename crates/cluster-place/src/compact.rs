@@ -29,17 +29,21 @@ use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
 
 use sch_floorplan::contract::{
-    RoutedEvaluator, build_anchor_blocks, decongest, item_rect, orient_angle,
+    RoutedEvaluator, align_idiom_clusters, align_led_chains, build_anchor_blocks, decongest,
+    item_rect, orient_angle,
 };
 
 use crate::eval::{restore, save, score};
 
 /// SPRAWL — the single feature that most separates the engine from human layouts (a
 /// human-vs-machine logistic fit over the 500 boards put it far ahead: humans ~24, the SA
-/// ~69). It is the part bounding-box AREA per part (whitespace proxy), which the engine's
+/// ~69). It is the bounding-box AREA per part (whitespace proxy), which the engine's
 /// half-perimeter `spread` + wire-length cost does NOT capture — so a regrouping that
 /// genuinely de-sprawls can leave the base cost flat and get wrongly reverted. Gating
 /// compaction on THIS makes the search optimise the thing humans actually do better.
+///
+/// Measured over part ORIGINS (`item.at`), matching the validation oracle
+/// (`layout_metrics.py`, which takes the symbol-instance bbox excluding power symbols).
 pub(crate) fn layout_sprawl(items: &[Item]) -> f64 {
     let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for it in items {
@@ -363,10 +367,33 @@ pub(crate) fn compact_clusters(
             }
         }
     }
+    // Apply the SAME finalize the gate's `score` clone runs (decongest + idiom/LED re-seat) to
+    // the REAL items — the emit realizes these directly without re-running it, so without this
+    // the gate would judge a cleaner aligned layout than actually ships (the score-clone≠emit
+    // blindness that let dense boards regress unseen). Now the gate measures the ship.
     decongest(items);
+    if align_idiom_clusters(items, ir) {
+        decongest(items);
+    }
+    if align_led_chains(items, inc, ir) {
+        decongest(items);
+    }
     let s = score(eval, inc, ir, items);
-    // No shipped regression AND a real de-sprawl vs the SA baseline (the learned human feature).
-    let keep = (s.0, s.1, s.2) <= (s0.0, s0.1, s0.2) && layout_sprawl(items) + 1e-3 < baseline_sprawl;
+    // Keep only a CLEAR de-sprawl win (≥15% under the SA baseline), never a routed regression.
+    // The margin is a safety net for the one blindness left: the emit runs
+    // `add_orphan_label_columns` AFTER place() (edge label-columns for cross-ref nets), which
+    // this gate can't see, so on an orphan-label-heavy board the RENDERED bbox can balloon past
+    // a marginal gate-time win. Requiring a clear margin rejects those marginal cases; the real
+    // fix is to thread `design` in and measure the post-orphan-column rendered bbox here.
+    let hol = layout_sprawl(items);
+    if std::env::var_os("CLUSTER_DEBUG").is_some() {
+        eprintln!(
+            "[holistic] sprawl baseline={baseline_sprawl:.1} -> {hol:.1}  tb/w/x {:?} (base {:?})",
+            (s.0, s.1, s.2),
+            (s0.0, s0.1, s0.2)
+        );
+    }
+    let keep = (s.0, s.1, s.2) <= (s0.0, s0.1, s0.2) && hol < 0.85 * baseline_sprawl;
     if !keep && !force {
         restore(items, &base);
     }
