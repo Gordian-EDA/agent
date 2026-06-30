@@ -757,6 +757,55 @@ impl SchematicWriter {
         self.translate(dx, dy);
     }
 
+    /// The rendered content bounding box over every drawn element — symbol bodies (rotated
+    /// half-extents), reference/value fields, wires, labels (text width both ways), junctions,
+    /// no-connects, texts and rects. Same geometry [`Self::reframe`] scans for its min corner,
+    /// but BOTH corners, so a caller can size the rendered sheet AFTER `prepare` (e.g. to gate
+    /// a placement on its true post-text-solve extent, edge label-columns included). `None`
+    /// for an empty sheet.
+    pub fn content_bbox(&self) -> Option<geom::Rect> {
+        use crate::label::text_width;
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        let mut acc = |lx: f64, ly: f64, hx: f64, hy: f64| {
+            x0 = x0.min(lx);
+            y0 = y0.min(ly);
+            x1 = x1.max(hx);
+            y1 = y1.max(hy);
+        };
+        for i in &self.instances {
+            let h = i.half_extents.rotated_half_extents(i.angle);
+            acc(i.at[0] - h[0], i.at[1] - h[1], i.at[0] + h[0], i.at[1] + h[1]);
+            for p in [i.ref_pos, i.val_pos].into_iter().flatten() {
+                acc(p.at[0] - 5.0, p.at[1] - 1.6, p.at[0] + 5.0, p.at[1] + 1.6);
+            }
+        }
+        for w in &self.wires {
+            acc(w.a[0].min(w.b[0]), w.a[1].min(w.b[1]), w.a[0].max(w.b[0]), w.a[1].max(w.b[1]));
+        }
+        for l in &self.labels {
+            let tw = text_width(&l.net);
+            acc(l.at[0] - tw, l.at[1] - 1.6, l.at[0] + tw, l.at[1] + 1.6);
+        }
+        for j in &self.junctions {
+            acc(j.at[0], j.at[1], j.at[0], j.at[1]);
+        }
+        for nc in &self.no_connects {
+            acc(nc.at[0], nc.at[1], nc.at[0], nc.at[1]);
+        }
+        for t in &self.texts {
+            acc(t.at[0], t.at[1] - 1.6, t.at[0], t.at[1] + 1.6);
+        }
+        for r in &self.rects {
+            acc(
+                r.start[0].min(r.end[0]),
+                r.start[1].min(r.end[1]),
+                r.start[0].max(r.end[0]),
+                r.start[1].max(r.end[1]),
+            );
+        }
+        (x0 != f64::MAX).then(|| geom::Rect::new(x0, y0, x1, y1))
+    }
+
     /// Run every geometry-finalizing pass: stub retraction, wire splitting at
     /// taps, text placement, and reframing. All four are idempotent, so calling
     /// this before [`Self::layout_warnings`] (to lint the *final* geometry) and

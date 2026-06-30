@@ -57,27 +57,52 @@ impl PlacementEngine for ClusterPlace {
         if problem.items.is_empty() {
             return out;
         }
-        // The SA's sprawl, captured BEFORE pose, is the baseline the de-sprawl floorplanner
-        // must beat outright (so a pose move that spreads an IC can't lower the bar).
-        let sa_sprawl = compact::layout_sprawl(&problem.items);
         let realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir);
         let eval = RoutedEvaluator::new(&realizer);
-        let before =
-            std::env::var_os("CLUSTER_DEBUG").map(|_| eval.crossings(&problem.items).total());
+        // The SA's RENDERED sprawl (post text-solve + orphan label-columns), captured BEFORE
+        // pose, is the baseline the de-sprawl floorplanner must beat outright — measured the
+        // same way as the candidate so the comparison is apples-to-apples (a pose move that
+        // spreads an IC can't lower the bar either).
+        let baseline_rendered = eval
+            .rendered_extent(design, &problem.items)
+            .map(|r| compact::rendered_sprawl(&r, problem.items.len()))
+            .unwrap_or(f64::MAX);
+        // Snapshot the SA placement + its crossings so the whole pose+compact result can fall
+        // back to it (the final safety net below).
+        let sa_snap = crate::eval::save(&problem.items);
+        let sa_crossings = eval.crossings(&problem.items).total();
         // 2. THE lever the SA never searches: re-pose each hub (+ its satellite cluster,
         //    moved rigidly), keeping a pose only when it strictly cuts shipped crossings.
         pose::search_hub_poses(&eval, &mut problem.items, &problem.inc, &out.ir);
-        if let Some(b) = before {
-            let now = eval.crossings(&problem.items).total();
-            eprintln!(
-                "[cluster] crossings {b} -> {now} (pose {})",
-                if now < b { "WIN" } else { "tie" }
-            );
-        }
         // 3. (Env-gated) de-sprawl floorplanner: lay each module out in isolation + pack, kept
         //    only when it strictly out-de-sprawls the SA without regressing the routed metrics.
         if std::env::var_os("CLUSTER_COMPACT").is_some() {
-            compact::compact_clusters(&eval, &mut problem.items, &problem.inc, &out.ir, sa_sprawl);
+            compact::compact_clusters(
+                &eval,
+                design,
+                &mut problem.items,
+                &problem.inc,
+                &out.ir,
+                baseline_rendered,
+            );
+        }
+        // 4. SAFETY NET: pose gates on gate-time (truthfulness, warnings, crossings), which is
+        //    blind to the emit's orphan label-columns — so it can chase a phantom gate-time
+        //    warning win that ships a more-sprawled sheet (54→78 on a dense board). Its genuine
+        //    value is CROSSINGS; if the final result didn't cut crossings AND its rendered
+        //    sprawl is worse than the SA's, pose/compact gave nothing but bloat — ship the SA.
+        let final_crossings = eval.crossings(&problem.items).total();
+        let final_rendered = eval
+            .rendered_extent(design, &problem.items)
+            .map(|r| compact::rendered_sprawl(&r, problem.items.len()))
+            .unwrap_or(f64::MAX);
+        if final_crossings >= sa_crossings && final_rendered > baseline_rendered + 1e-3 {
+            crate::eval::restore(&mut problem.items, &sa_snap);
+        }
+        if let Some(b) = std::env::var_os("CLUSTER_DEBUG").map(|_| sa_crossings) {
+            eprintln!(
+                "[cluster] crossings {b} -> {final_crossings}  rendered {baseline_rendered:.1} -> {final_rendered:.1}"
+            );
         }
         out.result = report(self.name(), &problem.items, &eval);
         out

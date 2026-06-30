@@ -24,7 +24,8 @@
 
 use std::collections::BTreeMap;
 
-use geom::Point2;
+use circuit_lang::model::Design;
+use geom::{Point2, Rect};
 use sch_place::ir::LayoutIr;
 use sch_place::item::{Incidence, Item};
 
@@ -35,28 +36,12 @@ use sch_floorplan::contract::{
 
 use crate::eval::{restore, save, score};
 
-/// SPRAWL — the single feature that most separates the engine from human layouts (a
-/// human-vs-machine logistic fit over the 500 boards put it far ahead: humans ~24, the SA
-/// ~69). It is the bounding-box AREA per part (whitespace proxy), which the engine's
-/// half-perimeter `spread` + wire-length cost does NOT capture — so a regrouping that
-/// genuinely de-sprawls can leave the base cost flat and get wrongly reverted. Gating
-/// compaction on THIS makes the search optimise the thing humans actually do better.
-///
-/// Measured over part ORIGINS (`item.at`), matching the validation oracle
-/// (`layout_metrics.py`, which takes the symbol-instance bbox excluding power symbols).
-pub(crate) fn layout_sprawl(items: &[Item]) -> f64 {
-    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-    for it in items {
-        x0 = x0.min(it.at.x);
-        y0 = y0.min(it.at.y);
-        x1 = x1.max(it.at.x);
-        y1 = y1.max(it.at.y);
-    }
-    if items.is_empty() || x1 <= x0 || y1 <= y0 {
-        return 0.0;
-    }
+/// Whitespace per part of a RENDERED extent — the same `bbox_area / (n·cell)` ratio the
+/// validation oracle uses, but on [`RoutedEvaluator::rendered_extent`] (post text-solve +
+/// orphan label-columns), so it reflects what actually ships.
+pub(crate) fn rendered_sprawl(extent: &Rect, n: usize) -> f64 {
     const CELL: f64 = 6.35 * 5.08;
-    (x1 - x0) * (y1 - y0) / (items.len() as f64 * CELL)
+    (extent.max_x - extent.min_x) * (extent.max_y - extent.min_y) / (n.max(1) as f64 * CELL)
 }
 
 /// A module = a hub + the satellites that tap it, or a lone unclustered part. Frozen items
@@ -330,21 +315,25 @@ fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::La
 }
 
 /// De-sprawl the sheet toward the human distribution via the [`holistic_relayout`]
-/// floorplanner, kept ONLY when it strictly lowers [`layout_sprawl`] (the feature the corpus
+/// floorplanner, kept ONLY when it clearly lowers the RENDERED sprawl (the feature the corpus
 /// says most separates human from machine) WITHOUT regressing the shipped (truthfulness,
 /// warnings, crossings). So it optimises the thing humans do better — less whitespace, fewer
 /// islands, decoupling beside its IC — while the routed gate guarantees it never ships a
 /// more-tangled or colliding sheet than the SA (and reverts on the boards it can't improve).
-/// `baseline_sprawl` is the SA placement's [`layout_sprawl`] (before pose) — the holistic is
-/// kept only when it beats THAT, not just the current (post-pose) state, so on a board where
-/// the pose move happened to spread an IC the floorplanner can't merely improve on the spread,
-/// it must out-de-sprawl the SA outright or it reverts.
+///
+/// `baseline_rendered` is the SA placement's [`rendered_sprawl`] (before pose) — measured the
+/// SAME way as the candidate, through [`RoutedEvaluator::rendered_extent`], so BOTH include the
+/// emit's post-`place()` orphan label-columns. That closes the last blindness: the floorplanner
+/// packs modules with gutters so inter-module nets become edge labels, which on a dense board
+/// balloon the rendered bbox far past the raw geometry — invisible to an origin-bbox gate, so
+/// such boards used to regress unseen; now the gate sees the true shipped extent and reverts.
 pub(crate) fn compact_clusters(
     eval: &RoutedEvaluator,
+    design: &Design,
     items: &mut [Item],
     inc: &Incidence,
     ir: &LayoutIr,
-    baseline_sprawl: f64,
+    baseline_rendered: f64,
 ) {
     let force = std::env::var_os("CLUSTER_FORCE").is_some();
     let base = save(items);
@@ -379,21 +368,21 @@ pub(crate) fn compact_clusters(
         decongest(items);
     }
     let s = score(eval, inc, ir, items);
-    // Keep only a CLEAR de-sprawl win (≥15% under the SA baseline), never a routed regression.
-    // The margin is a safety net for the one blindness left: the emit runs
-    // `add_orphan_label_columns` AFTER place() (edge label-columns for cross-ref nets), which
-    // this gate can't see, so on an orphan-label-heavy board the RENDERED bbox can balloon past
-    // a marginal gate-time win. Requiring a clear margin rejects those marginal cases; the real
-    // fix is to thread `design` in and measure the post-orphan-column rendered bbox here.
-    let hol = layout_sprawl(items);
+    // The SHIPPED sprawl: the rendered extent INCLUDING the emit's orphan label-columns (the
+    // measure that finally matches what ships). Keep only a clear win (>=10% under the SA),
+    // never a routed regression. A 5% margin guards float/measurement noise.
+    let hol = eval
+        .rendered_extent(design, items)
+        .map(|r| rendered_sprawl(&r, items.len()))
+        .unwrap_or(f64::MAX);
+    let keep = (s.0, s.1, s.2) <= (s0.0, s0.1, s0.2) && hol < 0.90 * baseline_rendered;
     if std::env::var_os("CLUSTER_DEBUG").is_some() {
         eprintln!(
-            "[holistic] sprawl baseline={baseline_sprawl:.1} -> {hol:.1}  tb/w/x {:?} (base {:?})",
+            "[holistic] rendered sprawl baseline={baseline_rendered:.1} -> {hol:.1}  tb/w/x {:?} (base {:?})  keep={keep}",
             (s.0, s.1, s.2),
             (s0.0, s0.1, s0.2)
         );
     }
-    let keep = (s.0, s.1, s.2) <= (s0.0, s0.1, s0.2) && hol < 0.85 * baseline_sprawl;
     if !keep && !force {
         restore(items, &base);
     }
