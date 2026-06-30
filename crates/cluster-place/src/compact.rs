@@ -40,7 +40,7 @@ use crate::eval::{restore, save, score};
 /// half-perimeter `spread` + wire-length cost does NOT capture — so a regrouping that
 /// genuinely de-sprawls can leave the base cost flat and get wrongly reverted. Gating
 /// compaction on THIS makes the search optimise the thing humans actually do better.
-fn layout_sprawl(items: &[Item]) -> f64 {
+pub(crate) fn layout_sprawl(items: &[Item]) -> f64 {
     let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for it in items {
         x0 = x0.min(it.at.x);
@@ -222,8 +222,9 @@ fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::La
         const BANK_ROW: f64 = 20.32; // 16 grid — a cap renders as a tall 3V3/cap/GND leg
         let ncap = caps.len();
         // A SINGLE ROW of vertical cap legs reads cleanest (the classic decoupling row beside
-        // the IC) and side-stacks value labels with no collision; wrap to a 2nd row only past 10.
-        let ncols = if ncap == 0 { 1 } else { ncap.min(10) };
+        // the IC) for a small bank; a LARGE bank (a DDR's 24 caps) in one row gets absurdly
+        // wide and re-sprawls, so cap the width at 6 and let it wrap (BANK_ROW clears the legs).
+        let ncols = if ncap == 0 { 1 } else if ncap <= 8 { ncap } else { 6 };
         let nrows = ncap.div_ceil(ncols.max(1));
         let mut off = Vec::with_capacity(m.len());
         let mut ang = Vec::with_capacity(m.len());
@@ -330,27 +331,28 @@ fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::La
 /// warnings, crossings). So it optimises the thing humans do better — less whitespace, fewer
 /// islands, decoupling beside its IC — while the routed gate guarantees it never ships a
 /// more-tangled or colliding sheet than the SA (and reverts on the boards it can't improve).
+/// `baseline_sprawl` is the SA placement's [`layout_sprawl`] (before pose) — the holistic is
+/// kept only when it beats THAT, not just the current (post-pose) state, so on a board where
+/// the pose move happened to spread an IC the floorplanner can't merely improve on the spread,
+/// it must out-de-sprawl the SA outright or it reverts.
 pub(crate) fn compact_clusters(
     eval: &RoutedEvaluator,
     items: &mut [Item],
     inc: &Incidence,
     ir: &LayoutIr,
+    baseline_sprawl: f64,
 ) {
     let force = std::env::var_os("CLUSTER_FORCE").is_some();
-    let step = |apply: &dyn Fn(&mut [Item]) -> bool, items: &mut [Item]| {
-        let base = save(items);
-        let s0 = score(eval, inc, ir, items);
-        let spr0 = layout_sprawl(items);
-        if !apply(items) {
-            return;
-        }
-        decongest(items);
-        let s = score(eval, inc, ir, items);
-        // No shipped regression AND a real sprawl reduction (the learned human feature).
-        let keep = (s.0, s.1, s.2) <= (s0.0, s0.1, s0.2) && layout_sprawl(items) + 1e-3 < spr0;
-        if !keep && !force {
-            restore(items, &base);
-        }
-    };
-    step(&|it| holistic_relayout(it, inc, ir), items);
+    let base = save(items);
+    let s0 = score(eval, inc, ir, items);
+    if !holistic_relayout(items, inc, ir) {
+        return;
+    }
+    decongest(items);
+    let s = score(eval, inc, ir, items);
+    // No shipped regression AND a real de-sprawl vs the SA baseline (the learned human feature).
+    let keep = (s.0, s.1, s.2) <= (s0.0, s0.1, s0.2) && layout_sprawl(items) + 1e-3 < baseline_sprawl;
+    if !keep && !force {
+        restore(items, &base);
+    }
 }

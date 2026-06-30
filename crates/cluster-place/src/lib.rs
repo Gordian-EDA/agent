@@ -57,6 +57,9 @@ impl PlacementEngine for ClusterPlace {
         if problem.items.is_empty() {
             return out;
         }
+        // The SA's sprawl, captured BEFORE pose, is the baseline the de-sprawl floorplanner
+        // must beat outright (so a pose move that spreads an IC can't lower the bar).
+        let sa_sprawl = compact::layout_sprawl(&problem.items);
         let realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir);
         let eval = RoutedEvaluator::new(&realizer);
         let before =
@@ -71,10 +74,10 @@ impl PlacementEngine for ClusterPlace {
                 if now < b { "WIN" } else { "tie" }
             );
         }
-        // 3. (Experimental, env-gated) cluster compaction — the WIP floorplanner; off by
-        //    default (it congests labels and the additive gate reverts it: the Pareto wall).
+        // 3. (Env-gated) de-sprawl floorplanner: lay each module out in isolation + pack, kept
+        //    only when it strictly out-de-sprawls the SA without regressing the routed metrics.
         if std::env::var_os("CLUSTER_COMPACT").is_some() {
-            compact::compact_clusters(&eval, &mut problem.items, &problem.inc, &out.ir);
+            compact::compact_clusters(&eval, &mut problem.items, &problem.inc, &out.ir, sa_sprawl);
         }
         out.result = report(self.name(), &problem.items, &eval);
         out
