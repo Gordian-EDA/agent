@@ -339,6 +339,168 @@ fn holistic_relayout(
     true
 }
 
+/// "MODULES BETWEEN RAILS" — the layout that lets a shared power trunk replace the distributed
+/// per-pin power glyphs (the dominant residual-sprawl source). Find the power net the most ICs
+/// share, stand those ICs UPRIGHT in a single TOP-ALIGNED row (so their supply pins land at a
+/// common Y, the trunk a clean horizontal line above them), and shelf-pack everything else
+/// below. Returns the rail net for the caller to `rail_force` + gate; `None` if no group of ≥3
+/// ICs shares a non-ground rail. Mutates `items` in place — the caller snapshots first so a
+/// colliding result reverts.
+pub(crate) fn rail_relayout(
+    items: &mut [Item],
+    inc: &Incidence,
+    ir: &sch_place::ir::LayoutIr,
+) -> Option<String> {
+    use sch_place::netclass::{is_ground, is_power_net};
+    let is_rail = |n: &str| ir.rails.contains_key(n) || is_power_net(n);
+    // Dominant non-ground power rail = the one the most ≥4-pin ICs tap.
+    let mut tally: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for i in 0..items.len() {
+        if items[i].geom.pins.len() < 4 {
+            continue;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for n in items[i].pins.iter().filter_map(|(_, _, n)| n.as_deref()) {
+            if is_rail(n) && !is_ground(n) && seen.insert(n.to_string()) {
+                tally.entry(n.to_string()).or_default().push(i);
+            }
+        }
+    }
+    let (rail, rail_ics) = tally.into_iter().max_by_key(|(_, v)| v.len())?;
+    if rail_ics.len() < 3 {
+        return None;
+    }
+    let mods = modules(items, inc, ir);
+    let rail_set: std::collections::BTreeSet<usize> = rail_ics.iter().copied().collect();
+    // Partition modules: those whose hub is a rail IC go in the row; the rest pack below.
+    let mut row: Vec<&Vec<usize>> = Vec::new();
+    let mut rest: Vec<&Vec<usize>> = Vec::new();
+    for m in &mods {
+        let hub = *m.iter().max_by_key(|&&i| items[i].geom.pins.len()).unwrap();
+        if rail_set.contains(&hub) {
+            row.push(m);
+        } else {
+            rest.push(m);
+        }
+    }
+    const MARGIN: f64 = 12.7;
+    const ROW_Y: f64 = 30.48; // leave a band above for the trunk
+    const GUT: f64 = 10.16;
+    const CAP_PITCH: f64 = 12.7; // clears a cap's value label
+    let is_decouple = |it: &Item| {
+        it.geom.pins.len() == 2
+            && it.pins.iter().filter_map(|(_, _, n)| n.as_deref()).filter(|n| is_rail(n)).count() == 2
+    };
+    // The rail's decoupling caps (often ALL folded onto one IC since they share the rail) are
+    // pooled and DISTRIBUTED evenly across the inter-IC gaps as upright legs, so their supply
+    // pin reaches the trunk straight up without crossing any IC body and no two labels collide.
+    let hubs: Vec<usize> = row
+        .iter()
+        .map(|m| *m.iter().max_by_key(|&&i| items[i].geom.pins.len()).unwrap())
+        .collect();
+    let hub_set: std::collections::BTreeSet<usize> = hubs.iter().copied().collect();
+    let mut caps: Vec<usize> = Vec::new();
+    let mut others: Vec<usize> = Vec::new();
+    let mut hub_of: Vec<usize> = vec![usize::MAX; items.len()]; // satellite → its row index
+    for (idx, m) in row.iter().enumerate() {
+        for &i in *m {
+            if hub_set.contains(&i) {
+                continue;
+            } else if is_decouple(&items[i]) {
+                caps.push(i);
+            } else {
+                others.push(i);
+                hub_of[i] = idx;
+            }
+        }
+    }
+    let cap_angle = caps
+        .first()
+        .map(|&i| orient_angle(&items[i].geom, sch_place::ir::Orient::Down));
+    let per_gap = caps.len().div_ceil(hubs.len().max(1));
+    let mut cap_iter = caps.iter();
+    let mut cx = MARGIN;
+    let mut below_y: f64 = ROW_Y;
+    let mut hub_x = vec![MARGIN; hubs.len()];
+    for (idx, &hub) in hubs.iter().enumerate() {
+        let hb = item_rect(&items[hub], items[hub].at);
+        let hw = hb.max_x - hb.min_x;
+        items[hub].angle = 0.0;
+        items[hub].mirror = false;
+        let hx = cx + hw / 2.0;
+        hub_x[idx] = hx;
+        items[hub].at = geom::GRID_50_MIL.snap_point(Point2::new(hx, ROW_Y));
+        below_y = below_y.max(item_rect(&items[hub], items[hub].at).max_y);
+        cx += hw + GUT;
+        for _ in 0..per_gap {
+            if let Some(&c) = cap_iter.next() {
+                items[c].angle = cap_angle.unwrap_or(items[c].angle);
+                items[c].mirror = false;
+                items[c].at = geom::GRID_50_MIL.snap_point(Point2::new(cx, ROW_Y));
+                cx += CAP_PITCH;
+            }
+        }
+        cx += GUT;
+    }
+    for &c in cap_iter {
+        items[c].angle = cap_angle.unwrap_or(items[c].angle);
+        items[c].mirror = false;
+        items[c].at = geom::GRID_50_MIL.snap_point(Point2::new(cx, ROW_Y));
+        cx += CAP_PITCH;
+    }
+    // Each non-cap satellite stacks straight BELOW the IC PIN it shares a net with, so its wire
+    // drops down to that pin without angling across the body (the residual IC crossings).
+    let mut stack_y = vec![below_y + GUT + 7.62; hubs.len()];
+    for &i in &others {
+        let idx = hub_of[i];
+        let hub = hubs[idx];
+        let i_nets: std::collections::BTreeSet<&str> =
+            items[i].pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+        let px = items[hub]
+            .pins
+            .iter()
+            .position(|(_, _, n)| n.as_deref().is_some_and(|nn| i_nets.contains(nn)))
+            .and_then(|k| items[hub].geom.pins.get(k))
+            .map_or(hub_x[idx], |gp| items[hub].at.x + gp.at.x);
+        items[i].angle = 0.0;
+        items[i].mirror = false;
+        items[i].at = geom::GRID_50_MIL.snap_point(Point2::new(px, stack_y[idx]));
+        let h = item_rect(&items[i], items[i].at);
+        stack_y[idx] = h.max_y + GUT;
+        below_y = below_y.max(h.max_y);
+    }
+    // Shelf-pack the rest below the rail row.
+    let total_w = (cx - MARGIN).max(1.0);
+    let (mut px, mut py, mut row_h) = (MARGIN, below_y + GUT, 0.0_f64);
+    for m in &rest {
+        let hub = *m.iter().max_by_key(|&&i| items[i].geom.pins.len()).unwrap();
+        let hp = items[hub].at;
+        let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        for &i in *m {
+            let r = item_rect(&items[i], items[i].at);
+            x0 = x0.min(r.min_x);
+            x1 = x1.max(r.max_x);
+            y0 = y0.min(r.min_y);
+            y1 = y1.max(r.max_y);
+        }
+        let (mw, mh) = (x1 - x0, y1 - y0);
+        if px > MARGIN && px + mw > MARGIN + total_w {
+            px = MARGIN;
+            py += row_h + GUT;
+            row_h = 0.0;
+        }
+        let shift = Point2::new(px - x0, py - y0);
+        let _ = hp;
+        for &i in *m {
+            items[i].at = geom::GRID_50_MIL
+                .snap_point(Point2::new(items[i].at.x + shift.x, items[i].at.y + shift.y));
+        }
+        px += mw + GUT;
+        row_h = row_h.max(mh);
+    }
+    Some(rail)
+}
+
 /// De-sprawl the sheet toward the human distribution via the [`holistic_relayout`]
 /// floorplanner, kept ONLY when it clearly lowers the RENDERED sprawl (the feature the corpus
 /// says most separates human from machine) WITHOUT regressing the shipped (truthfulness,

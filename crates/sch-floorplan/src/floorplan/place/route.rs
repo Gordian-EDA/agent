@@ -138,9 +138,10 @@ pub(crate) fn wire(
                     }
                     (hi[0] - lo[0]) + (hi[1] - lo[1]) > 38.0
                 };
-            let distribute = ir.rail_locals.contains(net)
-                || (pin_total > FAST_PINS && rail_should_distribute(eps))
-                || multisheet_spread;
+            let distribute = !ir.rail_force.contains(net)
+                && (ir.rail_locals.contains(net)
+                    || (pin_total > FAST_PINS && rail_should_distribute(eps))
+                    || multisheet_spread);
             let rail_y = rail_y_map.get(net).copied().filter(|_| !distribute);
             let driver = rail_drivers.get(net).copied();
             emit_rail(

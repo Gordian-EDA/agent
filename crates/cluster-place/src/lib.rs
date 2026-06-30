@@ -125,7 +125,38 @@ impl PlacementEngine for ClusterPlace {
                 "[cluster] x {sa_crossings}->{final_crossings}  w {sa_warnings}->{final_warnings}  rendered {baseline_rendered:.1}->{final_rendered:.1}  parts {baseline_parts:.1}->{final_parts:.1}  keep={earned_keep}"
             );
         }
+        // 5. POWER RAILS: try the "modules between rails" idiom — stand the ICs sharing the
+        //    dominant power net in one top-aligned row so a shared trunk replaces their
+        //    distributed per-pin power glyphs (the dominant residual sprawl). Snapshot first;
+        //    keep it only if the SHIPPED rendered sheet (with the trunk forced) shrinks with no
+        //    new warnings — a colliding trunk reverts. Gate measures via a fresh realizer that
+        //    carries `rail_force`; anneal never sets it ⇒ references unaffected.
+        let cur = eval.shipped(design, &problem.items).map(|(_, w, r)| (w, compact::rendered_sprawl(&r, n)));
         out.result = report(self.name(), &problem.items, &eval);
+        drop(eval);
+        drop(realizer);
+        if let Some((cur_w, cur_spr)) = cur {
+            let pre = crate::eval::save(&problem.items);
+            if let Some(rail) = compact::rail_relayout(&mut problem.items, &problem.inc, &out.ir) {
+                let mut ir_rail = out.ir.clone();
+                ir_rail.rail_force.insert(rail);
+                let rz = RoutedSheetRealizer::new(env, &problem.inc, &ir_rail);
+                let ev = RoutedEvaluator::new(&rz);
+                let got = ev.rendered(design, &problem.items).map(|(w, r)| (w, compact::rendered_sprawl(&r, n)));
+                let keep = std::env::var_os("CLUSTER_RAIL_FORCE").is_some()
+                    || matches!(got, Some((w, s)) if w <= cur_w && s + 1e-3 < cur_spr);
+                if std::env::var_os("CLUSTER_DEBUG").is_some() {
+                    eprintln!("[cluster] rails: {cur_spr:.1} -> {:?}  keep={keep}", got.map(|g| g.1));
+                }
+                if keep {
+                    out.ir = ir_rail;
+                } else {
+                    crate::eval::restore(&mut problem.items, &pre);
+                }
+            } else {
+                crate::eval::restore(&mut problem.items, &pre);
+            }
+        }
         out
     }
 }

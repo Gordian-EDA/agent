@@ -42,6 +42,7 @@ pub fn baseline_ir(design: &Design) -> LayoutIr {
         idioms: Vec::new(),
         frozen: BTreeSet::new(),
         rail_locals: local_rail_nets(design),
+        rail_force: Default::default(),
         zone: BTreeMap::new(),
     }
 }
@@ -548,6 +549,7 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         idioms: idiom_reports,
         frozen: placed,
         rail_locals: local_rail_nets(design),
+        rail_force: Default::default(),
         zone,
     }
 }
