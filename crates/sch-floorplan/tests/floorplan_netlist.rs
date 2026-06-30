@@ -57,7 +57,7 @@ const CHALLENGE_FIXTURES: &[&str] = &[
 ];
 
 fn doc(name: &str, ext: &str) -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../docs/validation/{name}.{ext}"))
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/validation/{name}.{ext}"))
 }
 
 /// The YAML keys pins by NAME; the KiCAD netlist reports pins by NUMBER. Resolve

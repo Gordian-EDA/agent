@@ -26,7 +26,7 @@ const TARGETS: &[&str] = &[
 ];
 
 fn doc(name: &str, ext: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../docs/validation/{name}.{ext}"))
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/validation/{name}.{ext}"))
 }
 fn snap_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/snapshots/{name}.kicad_sch"))
