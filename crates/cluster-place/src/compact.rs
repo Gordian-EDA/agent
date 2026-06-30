@@ -357,7 +357,7 @@ pub(crate) fn compact_clusters(
     // rendering ships no new warnings, no routed regression, and a real de-sprawl — it is the
     // tightest acceptable one. If none qualifies, revert to the SA (post-pose) placement.
     let mut kept: Option<crate::eval::Snap> = None;
-    for gut in [7.62_f64, 10.16, 12.7, 15.24, 17.78, 20.32] {
+    for (idx, gut) in [7.62_f64, 10.16, 12.7, 15.24, 17.78, 20.32].into_iter().enumerate() {
         restore(items, &base);
         if !holistic_relayout(items, inc, ir, gut) {
             return; // fewer than 2 modules — nothing to pack, on any gutter
@@ -391,6 +391,11 @@ pub(crate) fn compact_clusters(
         }
         if ok {
             kept = Some(save(items));
+            break;
+        }
+        // The tightest gutter is the minimum-sprawl pack; if even IT can't beat the SA's
+        // rendered sprawl, no looser gutter will — skip the remaining trials and revert.
+        if idx == 0 && spr >= baseline_rendered {
             break;
         }
     }
