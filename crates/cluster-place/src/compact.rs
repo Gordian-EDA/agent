@@ -9,8 +9,8 @@
 //! sugar's caps strung in a far row instead of hugging their IC. [`holistic_relayout`] fixes
 //! it the way the field does — NOT by editing the SA's placed sheet (where the space beside an
 //! IC is already occupied, so every incremental re-bank/force/scale collides or spreads), but
-//! by laying each MODULE out cleanly IN ISOLATION (hub + a single-row decoupling bank above it
-//! + its satellites), taking that module's footprint, and PACKING the footprints in
+//! by laying each MODULE out cleanly IN ISOLATION (hub, a single-row decoupling bank above it,
+//! and its satellites), taking that module's footprint, and PACKING the footprints in
 //! connectivity order. The decoupling bank lands beside its IC AND nothing collides, because
 //! the room was reserved before packing.
 //!
@@ -128,8 +128,8 @@ fn modules(items: &[Item], inc: &Incidence, ir: &sch_place::ir::LayoutIr) -> Vec
         }
         out.push(m);
     }
-    for i in 0..items.len() {
-        if !in_module[i] {
+    for (i, &in_mod) in in_module.iter().enumerate() {
+        if !in_mod {
             out.push(vec![i]);
         }
     }
@@ -362,12 +362,12 @@ pub(crate) fn rail_relayout(
     // pins face the sheet edge as ports) or switches. Counting a single MCU's connectors as
     // "ICs" would fire the idiom on a board it can't lay out, then waste a realize reverting it.
     let mut tally: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for i in 0..items.len() {
-        if items[i].geom.pins.len() < 4 || !items[i].refdes.starts_with('U') {
+    for (i, it) in items.iter().enumerate() {
+        if it.geom.pins.len() < 4 || !it.refdes.starts_with('U') {
             continue;
         }
         let mut seen = std::collections::BTreeSet::new();
-        for n in items[i].pins.iter().filter_map(|(_, _, n)| n.as_deref()) {
+        for n in it.pins.iter().filter_map(|(_, _, n)| n.as_deref()) {
             if is_rail(n) && !is_ground(n) && seen.insert(n.to_string()) {
                 tally.entry(n.to_string()).or_default().push(i);
             }
