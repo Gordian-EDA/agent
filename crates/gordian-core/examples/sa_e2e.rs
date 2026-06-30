@@ -20,7 +20,7 @@ const FIXTURES: &[&str] = &[
 ];
 
 fn render(env: &KicadEnv, provider: &SymbolTable, name: &str) -> anyhow::Result<usize> {
-    let dir = std::path::Path::new("docs/validation");
+    let dir = std::path::Path::new("crates/sch-floorplan/tests/fixtures/validation");
     let src = std::fs::read_to_string(dir.join(format!("{name}.circuit.yaml")))?;
     let result = circuit_lang::compile(&src, provider);
     let design = result
