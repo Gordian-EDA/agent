@@ -82,9 +82,10 @@ impl PlacementEngine for ClusterPlace {
         if sa_crossings > 0 {
             pose::search_hub_poses(&eval, &mut problem.items, &problem.inc, &out.ir);
         }
-        // 3. (Env-gated) de-sprawl floorplanner: lay each module out in isolation + pack, kept
-        //    only when it strictly out-de-sprawls the SA without regressing the routed metrics.
-        if std::env::var_os("CLUSTER_COMPACT").is_some() {
+        // 3. De-sprawl floorplanner (DEFAULT-ON; `CLUSTER_NO_COMPACT` opts out): lay each module
+        //    out in isolation + pack, kept only when it strictly out-de-sprawls the SA on both
+        //    sprawl measures without regressing warnings/crossings — else it reverts.
+        if std::env::var_os("CLUSTER_NO_COMPACT").is_none() {
             compact::compact_clusters(
                 &eval,
                 design,
