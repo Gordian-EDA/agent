@@ -864,9 +864,10 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
 pub(crate) fn schematic_placement_engine() -> Box<dyn sch_floorplan::contract::PlacementEngine> {
     // The cluster engine is the DEFAULT: it runs the annealer, then a strictly-additive
-    // pose+floorplanner pass that PARETO-DOMINATES it (a 24-board validation found 8 de-sprawl
-    // wins up to −75% and ZERO regressions on warnings/crossings/sprawl — it can only revert to
-    // the anneal result, never ship worse). `SCH_ENGINE=anneal` opts back out to the bare SA.
+    // pose+floorplanner pass (and the "modules between rails" idiom on power-IC arrays) that
+    // PARETO-DOMINATES it. Full-dataset validation: of 40 liftable boards, 13 de-sprawl (the
+    // gate-driver array 0cdac −84%) and ZERO regress on warnings/crossings/sprawl — it can only
+    // revert to the anneal result, never ship worse. `SCH_ENGINE=anneal` opts back to the bare SA.
     match std::env::var("SCH_ENGINE").as_deref() {
         Ok("anneal") | Ok("sa") => Box::new(anneal_place::Anneal),
         _ => Box::new(cluster_place::ClusterPlace),
