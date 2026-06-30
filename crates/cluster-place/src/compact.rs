@@ -161,7 +161,12 @@ fn module_adjacency(
 /// take that module's footprint, then PACK the footprints left→right in connectivity order,
 /// non-overlapping by construction. The banked caps land beside their IC AND nothing
 /// collides, because the room was reserved in the footprint before packing.
-fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::LayoutIr) -> bool {
+fn holistic_relayout(
+    items: &mut [Item],
+    inc: &Incidence,
+    ir: &sch_place::ir::LayoutIr,
+    gut: f64,
+) -> bool {
     use sch_place::netclass::{is_ground, is_power_net};
     let mods = modules(items, inc, ir);
     if mods.len() < 2 {
@@ -290,16 +295,16 @@ fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::La
     let total_area: f64 = placed.iter().map(|p| p.w * p.h).sum();
     let widest = placed.iter().map(|p| p.w).fold(0.0, f64::max);
     let target_w = (total_area.sqrt() * 1.15).max(widest);
-    // Wide gutter: item_rect footprints DON'T include the net-label pennants the text solver
-    // draws at each connecting pin, so the inter-module gap must reserve that pennant + the
-    // channel for inter-module wires, or packed modules collide their labels.
-    const GUT: f64 = 17.78;
+    // `gut` (the inter-module gap) reserves the net-label pennants + inter-module wire channel
+    // that `item_rect` footprints omit. It is SEARCHED by the caller (tightening per board until
+    // the rendered sheet would collide), so a loosely-coupled board packs dense while a dense
+    // one stays loose — the only collision-free way to push sprawl toward the human ~24.
     let (mut cx, mut cy, mut row_h, margin) = (12.7_f64, 12.7_f64, 0.0_f64, 12.7_f64);
     for &mi in &order {
         let p = &placed[mi];
         if cx > margin && cx + p.w > target_w {
             cx = margin;
-            cy += row_h + GUT;
+            cy += row_h + gut;
             row_h = 0.0;
         }
         let origin = Point2::new(cx, cy);
@@ -308,7 +313,7 @@ fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::La
                 .snap_point(Point2::new(origin.x + p.off[k].x, origin.y + p.off[k].y));
             items[i].angle = p.ang[k];
         }
-        cx += p.w + GUT;
+        cx += p.w + gut;
         row_h = row_h.max(p.h);
     }
     true
@@ -321,12 +326,17 @@ fn holistic_relayout(items: &mut [Item], inc: &Incidence, ir: &sch_place::ir::La
 /// islands, decoupling beside its IC — while the routed gate guarantees it never ships a
 /// more-tangled or colliding sheet than the SA (and reverts on the boards it can't improve).
 ///
-/// `baseline_rendered` is the SA placement's [`rendered_sprawl`] (before pose) — measured the
-/// SAME way as the candidate, through [`RoutedEvaluator::rendered_extent`], so BOTH include the
-/// emit's post-`place()` orphan label-columns. That closes the last blindness: the floorplanner
-/// packs modules with gutters so inter-module nets become edge labels, which on a dense board
-/// balloon the rendered bbox far past the raw geometry — invisible to an origin-bbox gate, so
-/// such boards used to regress unseen; now the gate sees the true shipped extent and reverts.
+/// `baseline_rendered` / `sa_warnings` are the SA placement's [`rendered_sprawl`] and shipped
+/// warning count (before pose) — measured the SAME way as each candidate, through
+/// [`RoutedEvaluator::rendered`], so BOTH include the emit's post-`place()` orphan label-columns.
+/// That closes the last blindness: the floorplanner packs modules with gutters so inter-module
+/// nets become edge labels, which on a dense board balloon the rendered bbox far past the raw
+/// geometry — invisible to an origin-bbox gate. Now the gate sees the true shipped extent.
+///
+/// DENSITY SEARCH: human sheets are ~3× tighter than the SA, but how tight a board can pack
+/// before its labels collide is board-specific (a loosely-coupled board packs dense; a dense
+/// signal-coupled one balloons). So sweep the inter-module gutter tight→loose and keep the
+/// TIGHTEST rendering that ships no new warnings, no routed regression, and a real de-sprawl.
 pub(crate) fn compact_clusters(
     eval: &RoutedEvaluator,
     design: &Design,
@@ -334,20 +344,25 @@ pub(crate) fn compact_clusters(
     inc: &Incidence,
     ir: &LayoutIr,
     baseline_rendered: f64,
+    sa_warnings: usize,
 ) {
+    use sch_place::netclass::is_power_net;
     let force = std::env::var_os("CLUSTER_FORCE").is_some();
+    let debug = std::env::var_os("CLUSTER_DEBUG").is_some();
     let base = save(items);
     let s0 = score(eval, inc, ir, items);
-    if !holistic_relayout(items, inc, ir) {
-        return;
-    }
-    // FREEZE just the decoupling caps the floorplanner banked: the emit's post-`place()`
-    // gather pile (align_rail_cap_rows, gather_banked_decoupling) would otherwise re-row them
-    // and collide the clean single-row bank. Freezing ONLY the caps stops that while leaving
-    // every other part mutable so `decongest` can still clear residual overlaps.
-    {
-        use sch_place::netclass::is_power_net;
-        let is_rail = |n: &str| ir.rails.contains_key(n) || is_power_net(n);
+    let is_rail = |n: &str| ir.rails.contains_key(n) || is_power_net(n);
+    // Tightest collision-free pack wins. Warnings rise monotonically as the gutter tightens
+    // (denser ⇒ more label collisions), so sweep tight→loose and TAKE THE FIRST gutter whose
+    // rendering ships no new warnings, no routed regression, and a real de-sprawl — it is the
+    // tightest acceptable one. If none qualifies, revert to the SA (post-pose) placement.
+    let mut kept: Option<crate::eval::Snap> = None;
+    for gut in [7.62_f64, 10.16, 12.7, 15.24, 17.78, 20.32] {
+        restore(items, &base);
+        if !holistic_relayout(items, inc, ir, gut) {
+            return; // fewer than 2 modules — nothing to pack, on any gutter
+        }
+        // Freeze the banked decoupling caps so the emit's gather pile can't re-row them.
         for it in items.iter_mut() {
             let rail_cap = it.geom.pins.len() == 2
                 && it.pins.iter().filter_map(|(_, _, n)| n.as_deref()).filter(|n| is_rail(n)).count() == 2;
@@ -355,35 +370,33 @@ pub(crate) fn compact_clusters(
                 it.frozen = true;
             }
         }
-    }
-    // Apply the SAME finalize the gate's `score` clone runs (decongest + idiom/LED re-seat) to
-    // the REAL items — the emit realizes these directly without re-running it, so without this
-    // the gate would judge a cleaner aligned layout than actually ships (the score-clone≠emit
-    // blindness that let dense boards regress unseen). Now the gate measures the ship.
-    decongest(items);
-    if align_idiom_clusters(items, ir) {
+        // Apply the finalize the emit realizes directly (decongest + idiom/LED re-seat).
         decongest(items);
+        if align_idiom_clusters(items, ir) {
+            decongest(items);
+        }
+        if align_led_chains(items, inc, ir) {
+            decongest(items);
+        }
+        let s = score(eval, inc, ir, items);
+        let (w, spr) = match eval.rendered(design, items) {
+            Some((w, rect)) => (w, rendered_sprawl(&rect, items.len())),
+            None => continue,
+        };
+        let ok = (s.0, s.1, s.2) <= (s0.0, s0.1, s0.2)
+            && w <= sa_warnings
+            && spr + 1e-3 < baseline_rendered;
+        if debug {
+            eprintln!("[holistic] gut={gut:.1} rendered={spr:.1} w={w} routed={:?} ok={ok}", (s.0, s.1, s.2));
+        }
+        if ok {
+            kept = Some(save(items));
+            break;
+        }
     }
-    if align_led_chains(items, inc, ir) {
-        decongest(items);
-    }
-    let s = score(eval, inc, ir, items);
-    // The SHIPPED sprawl: the rendered extent INCLUDING the emit's orphan label-columns (the
-    // measure that finally matches what ships). Keep only a clear win (>=10% under the SA),
-    // never a routed regression. A 5% margin guards float/measurement noise.
-    let hol = eval
-        .rendered(design, items)
-        .map(|(_, r)| rendered_sprawl(&r, items.len()))
-        .unwrap_or(f64::MAX);
-    let keep = (s.0, s.1, s.2) <= (s0.0, s0.1, s0.2) && hol < 0.90 * baseline_rendered;
-    if std::env::var_os("CLUSTER_DEBUG").is_some() {
-        eprintln!(
-            "[holistic] rendered sprawl baseline={baseline_rendered:.1} -> {hol:.1}  tb/w/x {:?} (base {:?})  keep={keep}",
-            (s.0, s.1, s.2),
-            (s0.0, s0.1, s0.2)
-        );
-    }
-    if !keep && !force {
-        restore(items, &base);
+    match kept {
+        Some(snap) => restore(items, &snap),
+        None if !force => restore(items, &base),
+        None => {}
     }
 }

@@ -85,6 +85,7 @@ impl PlacementEngine for ClusterPlace {
                 &problem.inc,
                 &out.ir,
                 baseline_rendered,
+                sa_warnings,
             );
         }
         // 4. SAFETY NET: pose gates on gate-time (truthfulness, warnings, crossings), which is
