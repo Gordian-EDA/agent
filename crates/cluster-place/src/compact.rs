@@ -387,9 +387,11 @@ pub(crate) fn rail_relayout(
     const ROW_Y: f64 = 30.48; // leave a band above for the trunk
     const GUT: f64 = 10.16;
     const CAP_PITCH: f64 = 12.7; // clears a cap's value label
+    // A "rail leg" is any 2-pin part touching the trunk net (decoupling caps AND bootstrap
+    // diodes): it MUST go in an inter-IC gap so its supply pin reaches the trunk straight up —
+    // placed below the IC its riser would route up THROUGH the body (the residual crossings).
     let is_decouple = |it: &Item| {
-        it.geom.pins.len() == 2
-            && it.pins.iter().filter_map(|(_, _, n)| n.as_deref()).filter(|n| is_rail(n)).count() == 2
+        it.geom.pins.len() == 2 && it.pins.iter().any(|(_, _, n)| n.as_deref() == Some(rail.as_str()))
     };
     // The rail's decoupling caps (often ALL folded onto one IC since they share the rail) are
     // pooled and DISTRIBUTED evenly across the inter-IC gaps as upright legs, so their supply
@@ -399,19 +401,21 @@ pub(crate) fn rail_relayout(
         .map(|m| *m.iter().max_by_key(|&&i| items[i].geom.pins.len()).unwrap())
         .collect();
     let hub_set: std::collections::BTreeSet<usize> = hubs.iter().copied().collect();
-    let mut caps: Vec<usize> = Vec::new();
+    // Pool EVERY rail-leg (even a bulk cap that `modules` left an off-rail singleton) into the
+    // gaps — any part touching the trunk that sits below an IC routes its riser up through it.
+    let caps: Vec<usize> = (0..items.len())
+        .filter(|&i| !hub_set.contains(&i) && is_decouple(&items[i]))
+        .collect();
+    let cap_set: std::collections::BTreeSet<usize> = caps.iter().copied().collect();
     let mut others: Vec<usize> = Vec::new();
     let mut hub_of: Vec<usize> = vec![usize::MAX; items.len()]; // satellite → its row index
     for (idx, m) in row.iter().enumerate() {
         for &i in *m {
-            if hub_set.contains(&i) {
+            if hub_set.contains(&i) || cap_set.contains(&i) {
                 continue;
-            } else if is_decouple(&items[i]) {
-                caps.push(i);
-            } else {
-                others.push(i);
-                hub_of[i] = idx;
             }
+            others.push(i);
+            hub_of[i] = idx;
         }
     }
     let cap_angle = caps
@@ -473,10 +477,13 @@ pub(crate) fn rail_relayout(
     let total_w = (cx - MARGIN).max(1.0);
     let (mut px, mut py, mut row_h) = (MARGIN, below_y + GUT, 0.0_f64);
     for m in &rest {
-        let hub = *m.iter().max_by_key(|&&i| items[i].geom.pins.len()).unwrap();
-        let hp = items[hub].at;
+        // Rail-leg parts (incl. bulk caps) were already pooled into the gaps; skip them here,
+        // and skip a module that was nothing BUT rail legs.
+        if m.iter().all(|i| cap_set.contains(i)) {
+            continue;
+        }
         let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-        for &i in *m {
+        for &i in m.iter().filter(|i| !cap_set.contains(i)) {
             let r = item_rect(&items[i], items[i].at);
             x0 = x0.min(r.min_x);
             x1 = x1.max(r.max_x);
@@ -490,8 +497,7 @@ pub(crate) fn rail_relayout(
             row_h = 0.0;
         }
         let shift = Point2::new(px - x0, py - y0);
-        let _ = hp;
-        for &i in *m {
+        for &i in m.iter().filter(|i| !cap_set.contains(i)) {
             items[i].at = geom::GRID_50_MIL
                 .snap_point(Point2::new(items[i].at.x + shift.x, items[i].at.y + shift.y));
         }

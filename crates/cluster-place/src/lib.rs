@@ -143,8 +143,7 @@ impl PlacementEngine for ClusterPlace {
                 let rz = RoutedSheetRealizer::new(env, &problem.inc, &ir_rail);
                 let ev = RoutedEvaluator::new(&rz);
                 let got = ev.rendered(design, &problem.items).map(|(w, r)| (w, compact::rendered_sprawl(&r, n)));
-                let keep = std::env::var_os("CLUSTER_RAIL_FORCE").is_some()
-                    || matches!(got, Some((w, s)) if w <= cur_w && s + 1e-3 < cur_spr);
+                let keep = matches!(got, Some((w, s)) if w <= cur_w && s + 1e-3 < cur_spr);
                 if std::env::var_os("CLUSTER_DEBUG").is_some() {
                     eprintln!("[cluster] rails: {cur_spr:.1} -> {:?}  keep={keep}", got.map(|g| g.1));
                 }
