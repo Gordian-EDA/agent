@@ -1424,6 +1424,9 @@ pub(crate) fn emit_rail(
                     lnet != net && (lx - x).abs() < EPS && rlo < hi - EPS && *lo < rhi - EPS
                 })
             };
+            if conflict(ax, used_lanes) && std::env::var_os("RISER_DEBUG").is_some() {
+                eprintln!("[lane] conflict for {net} at x={ax}");
+            }
             if conflict(ax, used_lanes)
                 && let Some(clear) = (1..=8)
                     .flat_map(|k| [k as f64, -(k as f64)])
