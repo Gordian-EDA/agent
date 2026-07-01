@@ -197,7 +197,14 @@ fn validate_fixture(env: &KicadEnv, provider: &SymbolTable, name: &str, strict_w
             Ok(s) => LayoutIr::from_json(&s).unwrap(),
             Err(_) => floorplan::baseline_ir(&design),
         };
-        let out = floorplan::emit_strategy(env, &design, Box::new(anneal_place::Anneal), Some(ir))
+        // `SCH_ENGINE=spine` runs the same oracle over the spine engine; the
+        // default stays anneal so existing runs are untouched.
+        let engine: Box<dyn sch_floorplan::contract::PlacementEngine> =
+            match std::env::var("SCH_ENGINE").as_deref() {
+                Ok("spine") => Box::new(spine_place::SpinePlace),
+                _ => Box::new(anneal_place::Anneal),
+            };
+        let out = floorplan::emit_strategy(env, &design, engine, Some(ir))
             .unwrap_or_else(|e| panic!("{name}: {e}"));
 
         // Readability invariant (tier-1 only): the reference fixtures emit with ZERO

@@ -19,7 +19,7 @@ pub enum PinDir {
 }
 
 /// Column gap between node envelopes (channel width added per crossing chain).
-const COL_GAP: f64 = 10.16;
+const COL_GAP: f64 = 7.62;
 /// Vertical gap between stacked nodes in a column.
 const ROW_GAP: f64 = 7.62;
 const GRID: f64 = 1.27;
@@ -46,11 +46,24 @@ pub fn arrange(
 ) -> Vec<Point2> {
     let n_scene = scene.nodes.len();
 
-    // ── Junction vertices: one per Junction node in the reduced graph.
+    // ── Junction vertices: one per Junction node — EXCEPT high-fanout nets,
+    // which the realizer will label at each pin anyway; letting them pull the
+    // ordering (or widen channels) contorts the layout for wires that will
+    // never be drawn.
+    const LABEL_FANOUT: usize = 4;
     let mut junction_vertex: BTreeMap<usize, usize> = BTreeMap::new();
     let mut n_total = n_scene;
     for (ni, nk) in g.nodes.iter().enumerate() {
-        if matches!(nk, NodeKind::Junction(_)) {
+        if let NodeKind::Junction(net) = nk {
+            let fanout = g
+                .chains
+                .iter()
+                .filter(|c| c.a.node == ni || c.b.node == ni)
+                .count();
+            let _ = net;
+            if fanout >= LABEL_FANOUT {
+                continue;
+            }
             junction_vertex.insert(ni, n_total);
             n_total += 1;
         }
@@ -261,21 +274,41 @@ pub fn arrange(
         .filter(|c| !c.is_empty())
         .collect();
 
+    // Column of each vertex (needed for channel sizing before coordinates).
+    let mut col_of = vec![0usize; n_total];
+    for (l, col) in cols.iter().enumerate() {
+        for &v in col {
+            col_of[v] = l;
+        }
+    }
+
+    // Channel width between adjacent columns grows with the nets that must
+    // cross it — parallel wires need lanes, and their labels need air.
+    let mut spans = vec![0usize; cols.len().saturating_sub(1)];
+    for (v, adj) in ar.adj.iter().enumerate() {
+        for &(w, _, _) in adj {
+            if v < w {
+                let (lo, hi) = (col_of[v].min(col_of[w]), col_of[v].max(col_of[w]));
+                for b in spans.iter_mut().take(hi).skip(lo) {
+                    *b += 1;
+                }
+            }
+        }
+    }
     let mut col_x = vec![0.0f64; cols.len()];
     let mut edge = 0.0;
     for (l, col) in cols.iter().enumerate() {
         let w = col.iter().map(|&v| width(v)).fold(0.0, f64::max);
         col_x[l] = edge + w / 2.0;
-        edge += w + COL_GAP;
+        let channel = COL_GAP + 2.54 * spans.get(l).map_or(0, |&n| n.min(6)) as f64;
+        edge += w + channel;
     }
 
     // Stack in columns; origin = node origin (env asymmetric, so shift).
     let mut origin = vec![Point2::new(0.0, 0.0); n_total];
-    let mut col_of = vec![0usize; n_total];
     for (l, col) in cols.iter().enumerate() {
         let mut y = 0.0;
         for &v in col {
-            col_of[v] = l;
             if v < n_scene {
                 let n = &scene.nodes[v];
                 origin[v] = Point2::new(snap(col_x[l] - (n.env_min.x + n.env_max.x) / 2.0),

@@ -44,6 +44,17 @@ impl PlacementEngine for SpinePlace {
         problem: &mut SchematicPlaceProblem,
         ir: Option<LayoutIr>,
     ) -> PlacementOutput {
+        // A caller-AUTHORED layout (sidecar/LLM cells or a relative grid) is the
+        // author's arrangement, not a hint — half-honoring it reads worse than
+        // either engine. Those boards keep the tuned anneal path. Our own
+        // inferred frame below doesn't count: its cells are seeds, not intent.
+        if let Some(authored) = ir
+            .as_ref()
+            .filter(|ir| !ir.place.is_empty() || !ir.grid.is_empty())
+        {
+            let authored = authored.clone();
+            return anneal_place::Anneal.place(env, design, problem, Some(authored));
+        }
         let ir = ir.unwrap_or_else(|| infer_ir(env, design));
         let t0 = std::time::Instant::now();
 
@@ -97,14 +108,17 @@ impl PlacementEngine for SpinePlace {
         let origins = arrange(&problem.items, &g, &scene, &dirs);
 
         let mut placed = vec![false; problem.items.len()];
-        for (sn, node) in scene.nodes.iter().enumerate() {
-            for p in &node.places {
-                problem.items[p.item].at =
-                    [origins[sn].x + p.offset.x, origins[sn].y + p.offset.y].into();
-                problem.items[p.item].angle = p.angle;
-                placed[p.item] = true;
+        let commit = |origins: &[Point2], items: &mut [sch_place::item::Item], placed: &mut [bool]| {
+            for (sn, node) in scene.nodes.iter().enumerate() {
+                for p in &node.places {
+                    items[p.item].at =
+                        [origins[sn].x + p.offset.x, origins[sn].y + p.offset.y].into();
+                    items[p.item].angle = p.angle;
+                    placed[p.item] = true;
+                }
             }
-        }
+        };
+        commit(&origins, &mut problem.items, &mut placed);
 
         // ── Orphan sweep: EVERY item gets a position. Multi-unit stragglers sit
         // under a placed sibling; the rest stack in a column right of the sheet.
@@ -141,7 +155,10 @@ impl PlacementEngine for SpinePlace {
         }
         debug_assert!(placed.iter().all(|&p| p), "orphan sweep must place all");
 
-        // ── Safety passes shared with the incumbent engines.
+        // ── Safety passes shared with the incumbent engines. Crystal clusters
+        // re-seat onto their IC in the hardened canonical arrangement (a bridge
+        // between 2.54-apart pins can't fit the crystal's own pin span).
+        sch_floorplan::contract::align_idiom_clusters(&mut problem.items, &ir);
         if std::env::var_os("SPINE_DEBUG").is_some() {
             eprintln!("[spine] overlaps pre-decongest: {}", body_overlap_count(&problem.items));
         }
@@ -151,7 +168,26 @@ impl PlacementEngine for SpinePlace {
         // ── Routed self-check; fall back to anneal on correctness failure.
         let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
         let eval = RoutedEvaluator::new(&realizer);
-        let breaks = eval.truthfulness_breaks(&problem.items);
+        let mut breaks = eval.truthfulness_breaks(&problem.items);
+
+        // Exact-collinearity repair: modules stacked in one column can land leg
+        // risers of DIFFERENT nets on one x, which KiCAD merges. Stagger
+        // co-columnar scene nodes one grid step apart and re-check — cheap,
+        // deterministic, and it removes the coincidence class wholesale.
+        if breaks > 0 {
+            let mut staggered = origins.clone();
+            for (sn, o) in staggered.iter_mut().enumerate() {
+                o.x += (sn % 5) as f64 * 1.27;
+            }
+            commit(&staggered, &mut problem.items, &mut placed);
+            decongest(&mut problem.items);
+            normalize(&mut problem.items);
+            let b2 = eval.truthfulness_breaks(&problem.items);
+            if problem.options.debug_timing {
+                eprintln!("[spine] collinearity stagger: breaks {breaks} -> {b2}");
+            }
+            breaks = b2;
+        }
         let overlaps = body_overlap_count(&problem.items);
         if overlaps > 0 && std::env::var_os("SPINE_DEBUG").is_some() {
             use sch_floorplan::contract::item_rect;
@@ -176,15 +212,20 @@ impl PlacementEngine for SpinePlace {
                 t0.elapsed()
             );
         }
-        if (breaks > 0 || overlaps > 0) && std::env::var_os("SPINE_NO_FALLBACK").is_none() {
+        let crossings = eval.crossings(&problem.items);
+        let through_body = crossings.body + crossings.ic;
+        if (breaks > 0 || overlaps > 0 || through_body > 4)
+            && std::env::var_os("SPINE_NO_FALLBACK").is_none()
+        {
             if problem.options.debug_timing {
-                eprintln!("[spine] falling back to anneal (breaks={breaks}, overlaps={overlaps})");
+                eprintln!(
+                    "[spine] falling back to anneal (breaks={breaks}, overlaps={overlaps}, through_body={through_body})"
+                );
             }
             return anneal_place::Anneal.place(env, design, problem, Some(ir));
         }
 
         let warnings = eval.warnings(&problem.items);
-        let crossings = eval.crossings(&problem.items);
         if warnings > 0 && std::env::var_os("SPINE_DEBUG").is_some() {
             if let Ok(mut w) = realizer.realize_writer(
                 None,

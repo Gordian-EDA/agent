@@ -320,7 +320,14 @@ fn bodies_and_ic_rects(
         .filter(|it| it.geom.pins.len() >= 3)
         .filter_map(|it| {
             let mut pts = Vec::new();
+            // Only THIS unit's pins: a multi-unit part places one Item per unit,
+            // and `pin_dirs` resolves a foreign unit's pin number to that OTHER
+            // instance's position — bounding all units would fabricate a rect
+            // spanning every placed unit (a sheet-wide phantom "body").
             for pg in &it.geom.pins {
+                if pg.unit.max(1) != it.unit.max(1) {
+                    continue;
+                }
                 if let Ok(d) = w.pin_dirs(env, &it.refdes, &pg.number)
                     && let Some((p, _)) = d.first()
                 {

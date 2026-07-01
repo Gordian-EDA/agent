@@ -255,6 +255,8 @@ pub fn form_modules(
     // bridge, and bank cap lands in genuinely free space — the claims use the
     // FULL text-inclusive rect, which is what the overlap wall measures.
     let mut claims: BTreeMap<usize, Vec<geom::Rect>> = BTreeMap::new();
+    // Vertical/horizontal wire runs per module: (column key, lo, hi).
+    let mut runs: BTreeMap<usize, Vec<(i64, f64, f64)>> = BTreeMap::new();
     for (&a, &mi) in &mod_of_anchor {
         claims
             .entry(mi)
@@ -308,31 +310,43 @@ pub fn form_modules(
             PinSide::West => at.x - LEAD - PITCH,
         }
     };
-    // Slide a column build outward until its rects clear the module's claims.
+    // Slide a build along `step` until its rects clear the module's claims AND
+    // its vertical wire run doesn't overlap another run in the same column —
+    // two legs sharing a column with overlapping riser intervals is exactly the
+    // collinear geometry KiCAD merges into one net.
+    #[allow(clippy::too_many_arguments)]
     fn commit_free(
         items: &[Item],
         claims: &mut Vec<geom::Rect>,
+        runs: &mut Vec<(i64, f64, f64)>,
         module: &mut ModulePlan,
-        build: impl Fn(f64) -> Vec<SatPlace>,
-        x0: f64,
-        outward: f64,
+        build: impl Fn(Point2) -> Vec<SatPlace>,
+        run_of: impl Fn(Point2) -> (i64, f64, f64),
+        at0: Point2,
+        step: Point2,
     ) {
-        let mut x = x0;
+        let mut at = at0;
         for _ in 0..64 {
-            let sats = build(x);
-            let rects: Vec<geom::Rect> = sats.iter().map(|s| placed_rect(items, s)).collect();
-            if !rects
+            let sats = build(at);
+            let body: Vec<geom::Rect> = sats.iter().map(|s| placed_rect(items, s)).collect();
+            let (ck, lo, hi) = run_of(at);
+            let blocked = body
                 .iter()
                 .any(|r| claims.iter().any(|c| c.overlaps(r)))
-            {
-                claims.extend(rects);
+                || runs
+                    .iter()
+                    .any(|&(k, rlo, rhi)| k == ck && lo < rhi && rlo < hi);
+            if !blocked {
+                claims.extend(body);
+                runs.push((ck, lo, hi));
                 module.sats.extend(sats);
                 return;
             }
-            x += outward;
+            at = Point2::new(at.x + step.x, at.y + step.y);
         }
-        let sats = build(x0);
+        let sats = build(at0);
         claims.extend(sats.iter().map(|s| placed_rect(items, s)));
+        runs.push(run_of(at0));
         module.sats.extend(sats);
     }
 
@@ -345,6 +359,56 @@ pub fn form_modules(
         let mi = mod_of_anchor[anchor];
         let pa = pin_offset(&items[*anchor], pin_a, 0.0);
         let pb = pin_offset(&items[*anchor], pin_b, 0.0);
+        let (sa, sb) = (pin_side_of(*anchor, pin_a), pin_side_of(*anchor, pin_b));
+        let opposite = matches!(
+            (sa, sb),
+            (PinSide::East, PinSide::West) | (PinSide::West, PinSide::East)
+        );
+        if opposite {
+            // Feedback across the body (op-amp out → in): a HORIZONTAL run
+            // ABOVE the anchor, wires looping over the top — a vertical column
+            // would drag its approach wire straight through the package.
+            let anchor_rect = sch_floorplan::contract::item_rect(&items[*anchor], [0.0, 0.0]);
+            let (parts, nets) = (c.parts.clone(), c.nets.clone());
+            let build = |at: Point2| -> Vec<SatPlace> {
+                let mut x = at.x;
+                let mut out = Vec::new();
+                for (k, &p) in parts.iter().enumerate() {
+                    let item = &items[p];
+                    let angle = orient_for(item, &nets[k], Orient::Right);
+                    let entry = pin_on(item, &nets[k]).unwrap_or_default();
+                    let exit = pin_on(item, &nets[k + 1]).unwrap_or_default();
+                    let e_off = pin_offset(item, &entry, angle);
+                    let x_off = pin_offset(item, &exit, angle);
+                    out.push(SatPlace {
+                        item: p,
+                        offset: Point2::new(snap(x - e_off.x), snap(at.y - e_off.y)),
+                        angle,
+                    });
+                    x += (x_off.x - e_off.x).abs() + LEAD;
+                }
+                out
+            };
+            let at0 = Point2::new((pa.x + pb.x) / 2.0, anchor_rect.min_y - LEAD * 2.0);
+            // Horizontal feedback runs live in a disjoint key space (row keys
+            // offset far from any column key).
+            let run_of = |at: Point2| {
+                (1_000_000 + (snap(at.y) / GRID).round() as i64, pa.x.min(pb.x), pa.x.max(pb.x))
+            };
+            let module = &mut form.modules[mi];
+            commit_free(
+                items,
+                claims.entry(mi).or_default(),
+                runs.entry(mi).or_default(),
+                module,
+                build,
+                run_of,
+                at0,
+                Point2::new(0.0, -PITCH),
+            );
+            form.consumed.insert(*chain, mi);
+            continue;
+        }
         let x0 = pin_col(*anchor, pin_a).max(pin_col(*anchor, pin_b));
         let outward = if x0 >= 0.0 { PITCH } else { -PITCH };
         // Stack parts vertically from the higher pin toward the lower one,
@@ -370,7 +434,7 @@ pub fn form_modules(
             })
             .collect();
         let content: f64 = spans.iter().sum();
-        let build = |x: f64| -> Vec<SatPlace> {
+        let build = |at: Point2| -> Vec<SatPlace> {
             let mut y = top + ((bot - top) - content) / 2.0;
             let mut out = Vec::new();
             for (k, &p) in parts.iter().enumerate() {
@@ -380,20 +444,53 @@ pub fn form_modules(
                 let e_off = pin_offset(item, &entry, angle);
                 out.push(SatPlace {
                     item: p,
-                    offset: Point2::new(snap(x - e_off.x), snap(y - e_off.y)),
+                    offset: Point2::new(snap(at.x - e_off.x), snap(y - e_off.y)),
                     angle,
                 });
                 y += spans[k];
             }
             out
         };
+        let run_of = |at: Point2| ((snap(at.x) / GRID).round() as i64, top, bot);
         let module = &mut form.modules[mi];
-        commit_free(items, claims.entry(mi).or_default(), module, build, x0, outward);
+        commit_free(
+            items,
+            claims.entry(mi).or_default(),
+            runs.entry(mi).or_default(),
+            module,
+            build,
+            run_of,
+            Point2::new(x0, 0.0),
+            Point2::new(outward, 0.0),
+        );
         form.consumed.insert(*chain, mi);
     }
 
     // ── Ladders: vertical legs at the pin column, up to supplies, down to ground.
-    for at in &attach {
+    // Processing order decides who gets the near column. An UP leg's body spans
+    // the rows of pins ABOVE its own, so those pins must take NEARER columns:
+    // up-legs go top-pin-first, down-legs bottom-pin-first — then every
+    // horizontal approach wire stops short of the farther legs' bodies.
+    let ladder_order: Vec<&Attach> = {
+        let mut v: Vec<&Attach> = attach
+            .iter()
+            .filter(|at| matches!(at, Attach::Ladder { .. }))
+            .collect();
+        v.sort_by(|x, y| {
+            let key = |at: &&Attach| match at {
+                Attach::Ladder { anchor, pin, up, .. } => {
+                    let py = pin_offset(&items[*anchor], pin, 0.0).y;
+                    (*anchor, *up, if *up { py } else { -py })
+                }
+                _ => unreachable!(),
+            };
+            let (ax, ux, kx) = key(x);
+            let (ay, uy, ky) = key(y);
+            ax.cmp(&ay).then(ux.cmp(&uy)).then(kx.total_cmp(&ky))
+        });
+        v
+    };
+    for at in ladder_order {
         let Attach::Ladder { chain, anchor, pin, a_near, up } = at else {
             continue;
         };
@@ -412,8 +509,16 @@ pub fn form_modules(
         };
         let dirn = if *up { -1.0 } else { 1.0 };
         let dir = if *up { Orient::Up } else { Orient::Down };
-        let build = |x: f64| -> Vec<SatPlace> {
-            let mut y = pin_at.y + dirn * LEAD;
+        let side = pin_side_of(*anchor, pin);
+        // N/S legs lead away from the pin; E/W legs START ON the pin's row so
+        // the approach wire is a straight horizontal — leading vertically first
+        // would hug the pin column and run through the 2.54-pitch neighbours.
+        let y_start = match side {
+            PinSide::South | PinSide::North => pin_at.y + dirn * LEAD,
+            _ => pin_at.y,
+        };
+        let build = |at: Point2| -> Vec<SatPlace> {
+            let mut y = y_start;
             let mut out = Vec::new();
             for (k, &p) in parts.iter().enumerate() {
                 let item = &items[p];
@@ -423,15 +528,44 @@ pub fn form_modules(
                 let e_off = pin_offset(item, &entry, angle);
                 out.push(SatPlace {
                     item: p,
-                    offset: Point2::new(snap(x - e_off.x), snap(y - e_off.y)),
+                    offset: Point2::new(snap(at.x - e_off.x), snap(y - e_off.y)),
                     angle,
                 });
                 y += dirn * (part_span(item, angle, &entry, &exit) + LEAD);
             }
             out
         };
+        // The leg's vertical wire run: pin row to past the last part + glyph.
+        let leg_len: f64 = {
+            let mut total = 0.0;
+            for (k, &p) in parts.iter().enumerate() {
+                let item = &items[p];
+                let angle = orient_for(item, &nets[k], dir);
+                let entry = pin_on(item, &nets[k]).unwrap_or_default();
+                let exit = pin_on(item, &nets[k + 1]).unwrap_or_default();
+                total += part_span(item, angle, &entry, &exit) + LEAD;
+            }
+            total + 5.08
+        };
+        let run_of = |at: Point2| {
+            let (lo, hi) = if *up {
+                (y_start - leg_len, pin_at.y)
+            } else {
+                (pin_at.y, y_start + leg_len)
+            };
+            ((snap(at.x) / GRID).round() as i64, lo, hi)
+        };
         let module = &mut form.modules[mi];
-        commit_free(items, claims.entry(mi).or_default(), module, build, x0, outward);
+        commit_free(
+            items,
+            claims.entry(mi).or_default(),
+            runs.entry(mi).or_default(),
+            module,
+            build,
+            run_of,
+            Point2::new(x0, 0.0),
+            Point2::new(outward, 0.0),
+        );
         form.consumed.insert(*chain, mi);
     }
 
@@ -481,16 +615,31 @@ pub fn form_modules(
         };
         let angle = orient_for(item, &supply_net, Orient::Down);
         let h = half_size(item, angle);
-        let k = *bank_count.entry(mi).or_default();
-        bank_count.insert(mi, k + 1);
         let anchor_half = half_size(&items[anchor], 0.0);
-        let x0 = anchor_half.x + LEAD + h.x + (k % BANK_ROW) as f64 * PITCH;
-        let y = -anchor_half.y + h.y + (k / BANK_ROW) as f64 * (h.y * 2.0 + LEAD * 2.0);
-        let build = |x: f64| -> Vec<SatPlace> {
-            vec![SatPlace { item: p, offset: Point2::new(snap(x), snap(y)), angle }]
-        };
+        // Bank grid: slots advance rightward at CAP_PITCH and WRAP into a new
+        // row past the width budget, so a many-cap MCU gets a 2-3 row bank
+        // instead of a sheet-wide strip.
+        const CAP_PITCH: f64 = 12.7;
+        let bank_x0 = anchor_half.x + LEAD + h.x;
+        let bank_w = (anchor_half.x * 2.0).max(CAP_PITCH * 4.0);
+        let row_h = h.y * 2.0 + LEAD * 2.0;
+        let mut slot = *bank_count.entry(mi).or_default();
+        let cl = claims.entry(mi).or_default();
         let module = &mut form.modules[mi];
-        commit_free(items, claims.entry(mi).or_default(), module, build, x0, PITCH);
+        for _ in 0..64 {
+            let per_row = (bank_w / CAP_PITCH).max(1.0) as usize;
+            let x = bank_x0 + (slot % per_row) as f64 * CAP_PITCH;
+            let y = -anchor_half.y + h.y + (slot / per_row) as f64 * row_h;
+            let sat = SatPlace { item: p, offset: Point2::new(snap(x), snap(y)), angle };
+            let r = placed_rect(items, &sat);
+            if !cl.iter().any(|c| c.overlaps(&r)) {
+                cl.push(r);
+                module.sats.push(sat);
+                break;
+            }
+            slot += 1;
+        }
+        bank_count.insert(mi, slot + 1);
         form.consumed.insert(ci, mi);
     }
 

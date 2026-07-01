@@ -110,7 +110,11 @@ pub(crate) fn wire(
     };
 
     // Phase A — rails (shared wires + stubs + power symbols), so their wires are
-    // in the writer before we build the routing scene.
+    // in the writer before we build the routing scene. `used_lanes` records every
+    // drawn riser (x, y_lo, y_hi, net) so no later rail's riser can land exactly
+    // collinear with a DIFFERENT net's — the post-jog re-collision the fan alone
+    // cannot see.
+    let mut used_lanes: Vec<(f64, f64, f64, String)> = Vec::new();
     for (net, eps) in &net_eps {
         if let Some(band) = ir.rails.get(net) {
             let flag = needs_flag.contains(net).then_some(&mut *flag_points);
@@ -157,6 +161,7 @@ pub(crate) fn wire(
                 &power_keepouts,
                 driver,
                 fan_risers,
+                &mut used_lanes,
             )?;
         }
     }
@@ -1144,6 +1149,12 @@ pub(crate) fn plan_riser_offsets(
             nets.insert(nb.clone());
         }
     }
+    if std::env::var_os("RISER_DEBUG").is_some() {
+        eprintln!("[riser] {} risers, contested: {:?}", risers.len(), contested);
+        for r in &risers {
+            eprintln!("[riser]   {:?}", r);
+        }
+    }
     let mut offsets = BTreeMap::new();
     for (col, nets) in &contested {
         // Fan the contested nets into distinct lanes, deterministic by name:
@@ -1239,6 +1250,7 @@ pub(crate) fn emit_rail(
     power_keepouts: &[Rect],
     driver: Option<[f64; 2]>,
     fan_risers: bool,
+    used_lanes: &mut Vec<(f64, f64, f64, String)>,
 ) -> io::Result<()> {
     let lib = power_lib_id(net);
     let Some(rail_y) = rail_y.filter(|_| eps.len() >= 3) else {
@@ -1385,29 +1397,48 @@ pub(crate) fn emit_rail(
     // the pin and descends in a clear lane — clearing both its own body and a
     // neighbour's. `bodies` is empty on the per-move scorer (finalize-only), so the
     // placement is never churned by this.
-    let attaches: Vec<f64> = eps
-        .iter()
-        .map(|(ep, dir)| {
-            let base = riser_base_x(ep, *dir);
-            let mut ax = base
-                + riser_offsets
-                    .get(&(net.to_string(), col_key(base)))
-                    .copied()
-                    .unwrap_or(0.0);
-            if !bodies.is_empty() {
-                let (rlo, rhi) = (ep[1].min(rail_y), ep[1].max(rail_y));
-                if riser_hits_body(ax, rlo, rhi, bodies)
-                    && let Some(clear) = (1..=8)
-                        .flat_map(|k| [k as f64, -(k as f64)])
-                        .map(|m| ax + m * RAIL_LANE)
-                        .find(|&c| !riser_hits_body(c, rlo, rhi, bodies))
-                {
-                    ax = clear;
-                }
+    let mut attaches: Vec<f64> = Vec::with_capacity(eps.len());
+    for (ep, dir) in eps {
+        let base = riser_base_x(ep, *dir);
+        let mut ax = base
+            + riser_offsets
+                .get(&(net.to_string(), col_key(base)))
+                .copied()
+                .unwrap_or(0.0);
+        let (rlo, rhi) = (ep[1].min(rail_y), ep[1].max(rail_y));
+        if !bodies.is_empty()
+            && riser_hits_body(ax, rlo, rhi, bodies)
+            && let Some(clear) = (1..=8)
+                .flat_map(|k| [k as f64, -(k as f64)])
+                .map(|m| ax + m * RAIL_LANE)
+                .find(|&c| !riser_hits_body(c, rlo, rhi, bodies))
+        {
+            ax = clear;
+        }
+        // The fan plans against BASE columns and the body-jog moves risers
+        // independently, so two different nets can still land one lane. The
+        // shared registry is the last word: shift until the lane is clean.
+        if fan_risers {
+            let conflict = |x: f64, lanes: &[(f64, f64, f64, String)]| {
+                lanes.iter().any(|(lx, lo, hi, lnet)| {
+                    lnet != net && (lx - x).abs() < EPS && rlo < hi - EPS && *lo < rhi - EPS
+                })
+            };
+            if conflict(ax, used_lanes)
+                && let Some(clear) = (1..=8)
+                    .flat_map(|k| [k as f64, -(k as f64)])
+                    .map(|m| ax + m * RAIL_LANE)
+                    .find(|&c| {
+                        !conflict(c, used_lanes)
+                            && (bodies.is_empty() || !riser_hits_body(c, rlo, rhi, bodies))
+                    })
+            {
+                ax = clear;
             }
-            ax
-        })
-        .collect();
+            used_lanes.push((ax, rlo, rhi, net.to_string()));
+        }
+        attaches.push(ax);
+    }
     let span_lo = attaches.iter().copied().fold(f64::MAX, f64::min);
     let span_hi = attaches.iter().copied().fold(f64::MIN, f64::max);
     w.add_wire_on_net([span_lo, rail_y], [span_hi, rail_y], net);
