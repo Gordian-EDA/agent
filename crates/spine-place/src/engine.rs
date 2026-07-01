@@ -87,6 +87,23 @@ impl PlacementEngine for SpinePlace {
         let dirs = pin_dirs(env, problem);
         let problem_inc = problem.inc.clone();
         let form = form_modules(&problem.items, &problem_inc, &classes, &g, &anchors, None);
+        if std::env::var_os("SPINE_DEBUG").is_some() {
+            for (ci, c) in g.chains.iter().enumerate() {
+                if !c.parts.is_empty() && !form.consumed.contains_key(&ci) {
+                    let refs: Vec<&str> = c
+                        .parts
+                        .iter()
+                        .map(|&p| problem.items[p].refdes.as_str())
+                        .collect();
+                    eprintln!(
+                        "[spine] unconsumed chain {ci}: {refs:?} {} .. {} ({:?})",
+                        c.a.net,
+                        c.b.net,
+                        c.role(&classes)
+                    );
+                }
+            }
+        }
         let scene = build_scene(&problem.items, &g, form, &classes);
         let origins = arrange(&problem.items, &g, &scene, &dirs);
 
