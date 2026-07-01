@@ -5,4 +5,10 @@
 //! spines with corpus-mined human conventions. No stochastic search.
 
 pub mod chain;
+pub mod engine;
+pub mod module;
 pub mod net;
+pub mod order;
+pub mod scene;
+
+pub use engine::SpinePlace;

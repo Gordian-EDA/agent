@@ -90,9 +90,13 @@ fn two_nets(item: &Item) -> Option<(String, String)> {
 }
 
 /// A chainable series part: exactly two connected pins on two DIFFERENT nets,
-/// and not connector-like (a 2-pin jumper/header is a terminal, not an element).
+/// not connector-like (a 2-pin jumper/header is a terminal, not an element), and
+/// a genuine 2-pin SYMBOL — a multi-unit IC's 2-pin unit (an op-amp power unit)
+/// is an IC fragment, not a series element.
 fn chainable(item: &Item) -> bool {
-    two_nets(item).is_some() && !is_connector_like(&item.part)
+    two_nets(item).is_some()
+        && item.geom.pins.len() <= 2
+        && !is_connector_like(&item.part)
 }
 
 /// Contract `items`+`inc` into the reduced graph.

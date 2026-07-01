@@ -1060,6 +1060,7 @@ dependencies = [
  "sch-place",
  "serde",
  "serde_json",
+ "spine-place",
  "tempfile",
  "tokio",
  "toml",
@@ -3190,6 +3191,7 @@ dependencies = [
 name = "spine-place"
 version = "0.1.0"
 dependencies = [
+ "anneal-place",
  "circuit-lang",
  "geom",
  "kicad-env",

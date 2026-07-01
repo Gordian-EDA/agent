@@ -870,6 +870,7 @@ pub(crate) fn schematic_placement_engine() -> Box<dyn sch_floorplan::contract::P
     // revert to the anneal result, never ship worse. `SCH_ENGINE=anneal` opts back to the bare SA.
     match std::env::var("SCH_ENGINE").as_deref() {
         Ok("anneal") | Ok("sa") => Box::new(anneal_place::Anneal),
+        Ok("spine") => Box::new(spine_place::SpinePlace),
         _ => Box::new(cluster_place::ClusterPlace),
     }
 }

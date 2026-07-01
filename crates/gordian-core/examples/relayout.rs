@@ -19,7 +19,8 @@ fn engine_of(name: &str) -> Box<dyn sch_floorplan::contract::PlacementEngine> {
     match name {
         "anneal" | "sa" => Box::new(anneal_place::Anneal),
         "cluster" | "cluster-place" => Box::new(cluster_place::ClusterPlace),
-        other => panic!("unknown engine `{other}` (anneal|cluster)"),
+        "spine" | "spine-place" => Box::new(spine_place::SpinePlace),
+        other => panic!("unknown engine `{other}` (anneal|cluster|spine)"),
     }
 }
 
