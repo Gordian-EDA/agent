@@ -199,12 +199,23 @@ impl SchematicWriter {
                     if pick == 1 {
                         let pin_at = self.labels[i].stub.unwrap().pin_at;
                         let end = self.labels[i].at;
-                        // Drop the stub wire retract_colliding_stubs
-                        // materialized (content-derived key).
+                        // Drop the now-unneeded stub wire retract_colliding_stubs
+                        // materialized — but ONLY if its far end DANGLES. When the
+                        // stub end is a routing junction (a bridge label on a pin
+                        // the MST also wires, whose route `split_wires_at_nodes`
+                        // fragmented at the stub end), deleting it severs the route
+                        // and floats every downstream pin. A surviving stub is
+                        // already same-net and foreign-clear, so keeping it is safe.
                         let a = GRID_50_MIL.snap_point(pin_at);
                         let b = GRID_50_MIL.snap_point(end);
-                        let key = format!("{}:{}:{}:{}", a[0], a[1], b[0], b[1]);
-                        self.wires.retain(|w| w.uuid_key != key);
+                        let key = format!("{}:{}:{}:{}", a.x, a.y, b.x, b.y);
+                        let end_is_junction = self
+                            .wires
+                            .iter()
+                            .any(|w| w.uuid_key != key && (w.a == b || w.b == b));
+                        if !end_is_junction {
+                            self.wires.retain(|w| w.uuid_key != key);
+                        }
                         self.labels[i].at = pin_at;
                         self.labels[i].stub = None;
                     }
