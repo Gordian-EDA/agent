@@ -134,10 +134,11 @@ fn part_span(item: &Item, angle: f64, entry: &str, exit: &str) -> f64 {
 /// order (callers pass most-connected-first).
 pub fn form_modules(
     items: &[Item],
-    _inc: &Incidence,
+    inc: &Incidence,
     classes: &BTreeMap<String, NetClass>,
     g: &Reduced,
     anchors: &[usize],
+    labeled: Option<&BTreeSet<String>>,
 ) -> ModuleForm {
     let mut form = ModuleForm::default();
     let class = |net: &str| *classes.get(net).unwrap_or(&NetClass::Signal);
@@ -279,7 +280,37 @@ pub fn form_modules(
 
     // Reserve the realizer's PIN TEXT footprint: an unattached signal pin grows a
     // net-name label outward; a rail pin grows a power glyph. Satellites must
-    // never sit in those strips (the "symbol overlaps label" lint).
+    // never sit in those strips (the "symbol overlaps label" lint). Reserve the
+    // FULL name only where a label is near-certain (fanout ≥ 3 — bus/GPIO
+    // distribution); a 2-pin inter-module net usually WIRES, and reserving its
+    // whole auto-generated name inflates every envelope until the labels it
+    // predicted become real (the lifted-board label-garden spiral).
+    // Bundle detection: many parallel nets between one anchor PAIR (an MCU↔header
+    // harness) always realize as labels, however short the span.
+    let mut pair_nets: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    let mut net_pair: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for (net, pins) in inc {
+        if class(net).is_rail() {
+            continue;
+        }
+        let mut owners: Vec<usize> = pins
+            .iter()
+            .filter_map(|(i, _)| anchors.contains(i).then_some(*i))
+            .collect();
+        owners.sort_unstable();
+        owners.dedup();
+        if let [a, b] = owners.as_slice() {
+            *pair_nets.entry((*a, *b)).or_default() += 1;
+            net_pair.insert(net.as_str(), (*a, *b));
+        }
+    }
+
+    // Which nets get label reservations. Pass 1 (`labeled == None`) is
+    // OPTIMISTIC: only certain labels reserve (rails, fanout >= 3, harness
+    // bundles). Pass 2 receives the nets whose realized spans actually exceed
+    // the wire threshold, breaking the reserve→spread→label fixpoint the
+    // one-shot policy could never satisfy for both wire-first and label-first
+    // boards at once.
     let mut label_boxes: BTreeMap<usize, Vec<geom::Rect>> = BTreeMap::new();
     for (&a, &mi) in &mod_of_anchor {
         for (num, _name, net) in &items[a].pins {
@@ -289,7 +320,19 @@ pub fn form_modules(
             }
             let at = pin_offset(&items[a], num, 0.0);
             let is_rail = class(net).is_rail();
-            let text = if is_rail { 7.62 } else { 2.54 + 1.4 * net.chars().count() as f64 };
+            let fanout = inc.get(net).map_or(0, |v| v.len());
+            let bundled = net_pair
+                .get(net.as_str())
+                .is_some_and(|p| pair_nets.get(p).copied().unwrap_or(0) >= 4);
+            let certain = fanout >= 3 || bundled;
+            let predicted = labeled.is_some_and(|set| set.contains(net.as_str()));
+            let text = if is_rail {
+                7.62
+            } else if certain || predicted {
+                2.54 + 1.4 * net.chars().count() as f64
+            } else {
+                7.62_f64.min(2.54 + 1.4 * net.chars().count() as f64)
+            };
             let r = match pin_side_of(a, num) {
                 PinSide::East => geom::Rect::new(at.x, at.y - 1.27, at.x + text, at.y + 1.27),
                 PinSide::West => geom::Rect::new(at.x - text, at.y - 1.27, at.x, at.y + 1.27),

@@ -84,27 +84,10 @@ impl PlacementEngine for SpinePlace {
         });
 
         // ── Modules + scene + ordering + coordinates.
-        let form = form_modules(&problem.items, &problem.inc, &classes, &g, &anchors);
-        if std::env::var_os("SPINE_DEBUG").is_some() {
-            for (ci, c) in g.chains.iter().enumerate() {
-                if !c.parts.is_empty() && !form.consumed.contains_key(&ci) {
-                    let refs: Vec<&str> = c
-                        .parts
-                        .iter()
-                        .map(|&p| problem.items[p].refdes.as_str())
-                        .collect();
-                    eprintln!(
-                        "[spine] unconsumed chain {ci}: {:?} {} .. {} ({:?})",
-                        refs,
-                        c.a.net,
-                        c.b.net,
-                        c.role(&classes)
-                    );
-                }
-            }
-        }
-        let scene = build_scene(&problem.items, &g, form, &classes);
         let dirs = pin_dirs(env, problem);
+        let problem_inc = problem.inc.clone();
+        let form = form_modules(&problem.items, &problem_inc, &classes, &g, &anchors, None);
+        let scene = build_scene(&problem.items, &g, form, &classes);
         let origins = arrange(&problem.items, &g, &scene, &dirs);
 
         let mut placed = vec![false; problem.items.len()];
@@ -157,8 +140,21 @@ impl PlacementEngine for SpinePlace {
 
         // ── Safety passes shared with the incumbent engines. Crystal clusters
         // re-seat onto their IC in the hardened canonical arrangement (a bridge
-        // between 2.54-apart pins can't fit the crystal's own pin span).
-        sch_floorplan::contract::align_idiom_clusters(&mut problem.items, &ir);
+        // between 2.54-apart pins can't fit the crystal's own pin span) — kept
+        // only if it doesn't ADD body overlaps (dual-crystal boards collide).
+        if std::env::var_os("SPINE_IDIOM").is_some() {
+            let before: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
+            let overlaps_before = body_overlap_count(&problem.items);
+            if sch_floorplan::contract::align_idiom_clusters(&mut problem.items, &ir) {
+                decongest(&mut problem.items);
+                if body_overlap_count(&problem.items) > overlaps_before {
+                    for (it, (at, angle)) in problem.items.iter_mut().zip(before) {
+                        it.at = at;
+                        it.angle = angle;
+                    }
+                }
+            }
+        }
         if std::env::var_os("SPINE_DEBUG").is_some() {
             eprintln!("[spine] overlaps pre-decongest: {}", body_overlap_count(&problem.items));
         }

@@ -295,19 +295,53 @@ pub fn arrange(
             }
         }
     }
+    // Row folding: a deep series graph makes one very wide layer sequence;
+    // humans wrap the chain into rows like text (the corpus RF sheets). Fold
+    // consecutive layers into rows once the running width passes the landscape
+    // target; each row restarts at x = 0.
+    let col_w: Vec<f64> = cols
+        .iter()
+        .map(|col| col.iter().map(|&v| width(v)).fold(0.0, f64::max))
+        .collect();
+    let col_h: Vec<f64> = cols
+        .iter()
+        .map(|col| col.iter().map(|&v| height(v) + ROW_GAP).sum::<f64>())
+        .collect();
+    let total_w: f64 = col_w
+        .iter()
+        .enumerate()
+        .map(|(l, w)| w + COL_GAP + 2.54 * spans.get(l).map_or(0, |&n| n.min(6)) as f64)
+        .sum();
+    let target_w = (area * 1.4).sqrt().max(160.0);
+    let fold = total_w > target_w * 2.0 && std::env::var_os("SPINE_FOLD").is_some();
+
     let mut col_x = vec![0.0f64; cols.len()];
+    let mut row_of_col = vec![0usize; cols.len()];
     let mut edge = 0.0;
-    for (l, col) in cols.iter().enumerate() {
-        let w = col.iter().map(|&v| width(v)).fold(0.0, f64::max);
-        col_x[l] = edge + w / 2.0;
+    let mut row = 0usize;
+    for (l, _) in cols.iter().enumerate() {
         let channel = COL_GAP + 2.54 * spans.get(l).map_or(0, |&n| n.min(6)) as f64;
-        edge += w + channel;
+        if fold && edge > 0.0 && edge + col_w[l] > target_w {
+            row += 1;
+            edge = 0.0;
+        }
+        row_of_col[l] = row;
+        col_x[l] = edge + col_w[l] / 2.0;
+        edge += col_w[l] + channel;
+    }
+    let mut row_base = vec![0.0f64; row + 1];
+    for r in 1..=row {
+        let prev_h = (0..cols.len())
+            .filter(|&l| row_of_col[l] == r - 1)
+            .map(|l| col_h[l])
+            .fold(0.0, f64::max);
+        row_base[r] = row_base[r - 1] + prev_h + ROW_GAP * 2.0;
     }
 
     // Stack in columns; origin = node origin (env asymmetric, so shift).
     let mut origin = vec![Point2::new(0.0, 0.0); n_total];
     for (l, col) in cols.iter().enumerate() {
-        let mut y = 0.0;
+        let mut y = row_base[row_of_col[l]];
         for &v in col {
             if v < n_scene {
                 let n = &scene.nodes[v];

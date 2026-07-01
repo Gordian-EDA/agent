@@ -58,10 +58,13 @@ def groupings(sch: Path) -> set[frozenset]:
     return groups
 
 
+ENGINE = os.environ.get("AUDIT_ENGINE", "cluster")
+
+
 def relayout(board: Path, outdir: Path) -> Path | None:
-    env = {**os.environ, "SCH_ENGINE": "cluster"}
+    env = {**os.environ, "SCH_ENGINE": ENGINE}
     subprocess.run(
-        [str(RELAYOUT), str(board), "--engine", "cluster", "--out", str(outdir), "--tag", "eng"],
+        [str(RELAYOUT), str(board), "--engine", ENGINE, "--out", str(outdir), "--tag", "eng"],
         capture_output=True, text=True, env=env, timeout=400,
     )
     sch = outdir / "eng.kicad_sch"
