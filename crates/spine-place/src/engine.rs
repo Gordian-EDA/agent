@@ -378,7 +378,7 @@ impl PlacementEngine for SpinePlace {
         // Band A/B: same-type modules align into refdes-sorted columns/grids —
         // the "same things share an axis" aesthetic humans read first. Each
         // band gates INDIVIDUALLY: one colliding band must not veto the rest.
-        let mut kept_bands: Vec<(String, Vec<usize>)> = Vec::new();
+        let mut kept_bands: Vec<(String, usize, Vec<usize>)> = Vec::new();
         for band in crate::bands::plan(&problem.items, &scene) {
             if std::env::var_os("SPINE_DEBUG").is_some() {
                 let refs: Vec<&str> = band
@@ -417,6 +417,7 @@ impl PlacementEngine for SpinePlace {
                 breaks = b_breaks;
                 kept_bands.push((
                     band.key.clone(),
+                    band.members.len(),
                     band.members
                         .iter()
                         .flat_map(|&sn| scene.nodes[sn].places.iter().map(|p| p.item))
@@ -510,7 +511,7 @@ impl PlacementEngine for SpinePlace {
                 }
                 r.map(|r| [r.min_x - 2.54, r.min_y - 3.81, r.max_x + 2.54, r.max_y + 2.54])
             };
-            let title = |key: &str, members: &[usize]| -> String {
+            let title = |key: &str, members: &[usize], n: usize| -> String {
                 match key {
                     "conn" => "CONNECTORS".into(),
                     "mount" => "MECHANICAL".into(),
@@ -542,16 +543,19 @@ impl PlacementEngine for SpinePlace {
                         } else {
                             k.rsplit(':').next().unwrap_or(k).to_uppercase()
                         };
-                        format!("{} x{}", base, members.len())
+                        format!("{} x{n}", base)
                     }
                 }
             };
             let mut boxes: Vec<sch_place::ir::SectionBox> = Vec::new();
-            for (key, members) in &kept_bands {
-                if members.len() >= 3
+            for (key, n_nodes, members) in &kept_bands {
+                if *n_nodes >= 3
                     && let Some(rect) = sec_rect(members)
                 {
-                    boxes.push(sch_place::ir::SectionBox { name: title(key, members), rect });
+                    boxes.push(sch_place::ir::SectionBox {
+                        name: title(key, members, *n_nodes),
+                        rect,
+                    });
                 }
             }
             if strap_on {
