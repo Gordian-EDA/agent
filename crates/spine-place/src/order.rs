@@ -426,9 +426,10 @@ pub fn arrange(
     // Strap column members order by refdes (numeric-aware), not barycenter.
     {
         let strap_l = cols.len() - 1;
-        let is_strap_col = cols[strap_l]
-            .iter()
-            .all(|&v| v < n_scene && scene.nodes[v].anchor.is_some());
+        let is_strap_col = strap_col
+            && cols[strap_l]
+                .iter()
+                .all(|&v| v < n_scene && scene.nodes[v].anchor.is_some() && is_strapish(scene, v));
         if is_strap_col && cols[strap_l].len() >= 2 {
             let key = |v: usize| {
                 let a = scene.nodes[v].anchor.unwrap_or(0);

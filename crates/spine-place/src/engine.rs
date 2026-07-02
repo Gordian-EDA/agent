@@ -516,19 +516,33 @@ impl PlacementEngine for SpinePlace {
                     "mount" => "MECHANICAL".into(),
                     "tp" => "TEST POINTS".into(),
                     k => {
-                        // Prefer the members' shared VALUE ("100n x8"); else the
-                        // part name suffix; single letters read as noise.
+                        // Shared VALUE first ("100N x8"); else the refdes class
+                        // in human words; else the part suffix.
                         let vals: std::collections::BTreeSet<&str> = members
                             .iter()
                             .map(|&i| problem.items[i].value.as_str())
                             .filter(|v| !v.is_empty())
                             .collect();
+                        let prefixes: std::collections::BTreeSet<char> = members
+                            .iter()
+                            .filter_map(|&i| problem.items[i].refdes.chars().next())
+                            .collect();
                         let base = if vals.len() == 1 {
-                            (*vals.iter().next().unwrap()).to_string()
+                            (*vals.iter().next().unwrap()).to_uppercase()
+                        } else if prefixes.len() == 1 {
+                            match prefixes.iter().next().unwrap() {
+                                'R' => "RESISTORS".into(),
+                                'C' => "CAPACITORS".into(),
+                                'D' => "DIODES".into(),
+                                'L' => "INDUCTORS".into(),
+                                'Q' => "TRANSISTORS".into(),
+                                'U' => k.rsplit(':').next().unwrap_or(k).to_uppercase(),
+                                _ => k.rsplit(':').next().unwrap_or(k).to_uppercase(),
+                            }
                         } else {
-                            k.rsplit(':').next().unwrap_or(k).to_string()
+                            k.rsplit(':').next().unwrap_or(k).to_uppercase()
                         };
-                        format!("{} x{}", base.to_uppercase(), members.len())
+                        format!("{} x{}", base, members.len())
                     }
                 }
             };
