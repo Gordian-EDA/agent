@@ -72,15 +72,6 @@ pub struct Cell {
     pub orient: Orient,
 }
 
-/// A titled section frame the emitter draws around a region (dashed box +
-/// bold name, the human "functional section" idiom). Engine-computed from the
-/// FINAL placement; rect is `[min_x, min_y, max_x, max_y]` in sheet mm.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SectionBox {
-    pub name: String,
-    pub rect: [f64; 4],
-}
-
 /// The geometry-free floorplan. Four keys; everything else is inferred from
 /// connectivity by the compiler's fixed rule set.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -133,11 +124,6 @@ pub struct LayoutIr {
     /// elsewhere ⇒ references byte-identical.
     #[serde(default)]
     pub rail_force: BTreeSet<String>,
-    /// Titled section frames to draw around aligned regions (motif grids, the
-    /// strap column, connector banks). Empty everywhere except engines that
-    /// compute them ⇒ existing paths byte-identical.
-    #[serde(default)]
-    pub sections: Vec<SectionBox>,
     /// HYBRID VLM placement: refdes → a COARSE target position as a fraction of the
     /// board bbox, `[fx, fy]` in 0..1 (fx: 0=left,1=right; fy: 0=top,1=bottom). A vision
     /// LLM is good at rough DIRECTION ("power left, MCU centre") but not millimetre

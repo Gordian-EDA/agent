@@ -60,6 +60,7 @@ pub fn arrange(
     dirs: &BTreeMap<(usize, String), PinDir>,
     fold: bool,
     strap_col: bool,
+    shelf: bool,
 ) -> Vec<Point2> {
     let n_scene = scene.nodes.len();
 
@@ -320,6 +321,53 @@ pub fn arrange(
     // dedicated trailing column, refdes-sorted — the human "straps region",
     // decided here so packing and channels respect it from the start.
     let mut layer = layer;
+
+    // Shelf packing: FREE module nodes (label islands — no wired inter-module
+    // chain) are strung wide by weak junction edges on label-heavy boards; a
+    // page reads better with them shelved into a ~square block of columns,
+    // refdes-ordered (infer.rs shelves inferred anchors the same way).
+    if shelf {
+        let wired: std::collections::BTreeSet<usize> = scene
+            .ends
+            .values()
+            .filter_map(|(a, b)| match (a, b) {
+                (Some(x), Some(y)) => Some([*x, *y]),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let mut free: Vec<usize> = (0..n_scene)
+            .filter(|&v| {
+                scene.nodes[v].anchor.is_some()
+                    && !wired.contains(&v)
+                    && !(strap_col && is_strapish(scene, v))
+            })
+            .collect();
+        if free.len() >= 4 {
+            let key = |v: usize| {
+                let a = scene.nodes[v].anchor.unwrap_or(0);
+                let r = &items[a].refdes;
+                let split = r.find(|c: char| c.is_ascii_digit()).unwrap_or(r.len());
+                let (alpha, num) = r.split_at(split);
+                (alpha.to_string(), num.parse::<u64>().unwrap_or(0))
+            };
+            free.sort_by_key(|&v| key(v));
+            let base_layer = layer
+                .iter()
+                .enumerate()
+                .filter(|&(v, _)| v < n_scene && wired.contains(&v))
+                .map(|(_, &l)| l)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let ncols = (free.len() as f64).sqrt().ceil() as usize;
+            let rows = free.len().div_ceil(ncols);
+            for (k, &v) in free.iter().enumerate() {
+                layer[v] = base_layer + k / rows;
+            }
+        }
+    }
+
     if strap_col {
         let strap_layer = layer.iter().copied().max().unwrap_or(0) + 1;
         for v in 0..n_scene {

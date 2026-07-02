@@ -141,9 +141,10 @@ impl PlacementEngine for SpinePlace {
         let eval = RoutedEvaluator::new(&realizer);
         let mut run_variant = |items: &mut Vec<sch_place::item::Item>,
                                fold: bool,
-                               strap_col: bool|
+                               strap_col: bool,
+                               shelf: bool|
          -> usize {
-            let origins = arrange(items, &g, &scene, &dirs, fold, strap_col);
+            let origins = arrange(items, &g, &scene, &dirs, fold, strap_col, shelf);
             let mut placed = vec![false; items.len()];
             let commit = |origins: &[Point2],
                           items: &mut [sch_place::item::Item],
@@ -226,8 +227,21 @@ impl PlacementEngine for SpinePlace {
             breaks
         };
 
+        let sheet_area = |items: &[sch_place::item::Item]| -> i64 {
+            use sch_floorplan::contract::item_rect;
+            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+            for it in items {
+                let r = item_rect(it, it.at);
+                lo[0] = lo[0].min(r.min_x);
+                lo[1] = lo[1].min(r.min_y);
+                hi[0] = hi[0].max(r.max_x);
+                hi[1] = hi[1].max(r.max_y);
+            }
+            (((hi[0] - lo[0]) * (hi[1] - lo[1])) / 100.0) as i64
+        };
         let mut strap_on = false;
-        let mut breaks = run_variant(&mut problem.items, false, false);
+        let mut shelf_on = false;
+        let mut breaks = run_variant(&mut problem.items, false, false, false);
 
         // Strap-column A/B: stub islets in one dedicated refdes-sorted column
         // (the human "straps region") — kept only when the sheet metrics hold.
@@ -241,7 +255,7 @@ impl PlacementEngine for SpinePlace {
                 eval.warnings(&problem.items),
                 crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
             );
-            let b_breaks = run_variant(&mut problem.items, false, true);
+            let b_breaks = run_variant(&mut problem.items, false, true, false);
             let xb = eval.crossings(&problem.items);
             let b = (
                 b_breaks,
@@ -263,6 +277,47 @@ impl PlacementEngine for SpinePlace {
                 }
                 if problem.options.debug_timing {
                     eprintln!("[spine] strap column rejected: {a:?} vs {b:?}");
+                }
+            }
+        }
+
+        // Shelf A/B: free label-island modules shelve into a ~square block of
+        // refdes-ordered columns instead of the wide banner their weak junction
+        // edges produce. Area breaks gate ties, so the page shape can win.
+        {
+            let before: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
+            let xa = eval.crossings(&problem.items);
+            let a = (
+                breaks,
+                body_overlap_count(&problem.items),
+                xa.body + xa.ic,
+                eval.warnings(&problem.items),
+                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
+                sheet_area(&problem.items),
+            );
+            let b_breaks = run_variant(&mut problem.items, false, strap_on, true);
+            let xb = eval.crossings(&problem.items);
+            let b = (
+                b_breaks,
+                body_overlap_count(&problem.items),
+                xb.body + xb.ic,
+                eval.warnings(&problem.items),
+                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
+                sheet_area(&problem.items),
+            );
+            if b <= a {
+                breaks = b_breaks;
+                shelf_on = true;
+                if problem.options.debug_timing {
+                    eprintln!("[spine] shelf kept: {a:?} -> {b:?}");
+                }
+            } else {
+                for (it, (at, angle)) in problem.items.iter_mut().zip(before) {
+                    it.at = at;
+                    it.angle = angle;
+                }
+                if problem.options.debug_timing {
+                    eprintln!("[spine] shelf rejected: {a:?} vs {b:?}");
                 }
             }
         }
@@ -291,7 +346,7 @@ impl PlacementEngine for SpinePlace {
                     eval.warnings(&problem.items),
                     crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
                 );
-                let b_breaks = run_variant(&mut problem.items, true, strap_on);
+                let b_breaks = run_variant(&mut problem.items, true, strap_on, shelf_on);
                 let xb = eval.crossings(&problem.items);
                 let b = (
                     b_breaks,
@@ -378,7 +433,6 @@ impl PlacementEngine for SpinePlace {
         // Band A/B: same-type modules align into refdes-sorted columns/grids —
         // the "same things share an axis" aesthetic humans read first. Each
         // band gates INDIVIDUALLY: one colliding band must not veto the rest.
-        let mut kept_bands: Vec<(String, usize, Vec<usize>)> = Vec::new();
         for band in crate::bands::plan(&problem.items, &scene) {
             if std::env::var_os("SPINE_DEBUG").is_some() {
                 let refs: Vec<&str> = band
@@ -415,14 +469,6 @@ impl PlacementEngine for SpinePlace {
             );
             if b <= a {
                 breaks = b_breaks;
-                kept_bands.push((
-                    band.key.clone(),
-                    band.members.len(),
-                    band.members
-                        .iter()
-                        .flat_map(|&sn| scene.nodes[sn].places.iter().map(|p| p.item))
-                        .collect(),
-                ));
                 if problem.options.debug_timing {
                     eprintln!("[spine] band {} kept: {a:?} -> {b:?}", band.key);
                 }
@@ -489,100 +535,6 @@ impl PlacementEngine for SpinePlace {
                 }
             }
         }
-        // Titled section frames around the deliberate formations: kept type/motif
-        // bands with 3+ members, and the strap column when it won.
-        let mut ir = ir;
-        {
-            let sec_rect = |members: &[usize]| -> Option<[f64; 4]> {
-                use sch_floorplan::contract::item_rect;
-                let mut r: Option<geom::Rect> = None;
-                for &i in members {
-                    let it = &problem.items[i];
-                    let b = item_rect(it, it.at);
-                    r = Some(match r {
-                        None => b,
-                        Some(acc) => geom::Rect::new(
-                            acc.min_x.min(b.min_x),
-                            acc.min_y.min(b.min_y),
-                            acc.max_x.max(b.max_x),
-                            acc.max_y.max(b.max_y),
-                        ),
-                    });
-                }
-                r.map(|r| [r.min_x - 2.54, r.min_y - 3.81, r.max_x + 2.54, r.max_y + 2.54])
-            };
-            let title = |key: &str, members: &[usize], n: usize| -> String {
-                match key {
-                    "conn" => "CONNECTORS".into(),
-                    "mount" => "MECHANICAL".into(),
-                    "tp" => "TEST POINTS".into(),
-                    k => {
-                        // Shared VALUE first ("100N x8"); else the refdes class
-                        // in human words; else the part suffix.
-                        let vals: std::collections::BTreeSet<&str> = members
-                            .iter()
-                            .map(|&i| problem.items[i].value.as_str())
-                            .filter(|v| !v.is_empty())
-                            .collect();
-                        let prefixes: std::collections::BTreeSet<char> = members
-                            .iter()
-                            .filter_map(|&i| problem.items[i].refdes.chars().next())
-                            .collect();
-                        let base = if vals.len() == 1 {
-                            (*vals.iter().next().unwrap()).to_uppercase()
-                        } else if prefixes.len() == 1 {
-                            match prefixes.iter().next().unwrap() {
-                                'R' => "RESISTORS".into(),
-                                'C' => "CAPACITORS".into(),
-                                'D' => "DIODES".into(),
-                                'L' => "INDUCTORS".into(),
-                                'Q' => "TRANSISTORS".into(),
-                                'U' => k.rsplit(':').next().unwrap_or(k).to_uppercase(),
-                                _ => k.rsplit(':').next().unwrap_or(k).to_uppercase(),
-                            }
-                        } else {
-                            k.rsplit(':').next().unwrap_or(k).to_uppercase()
-                        };
-                        format!("{} x{n}", base)
-                    }
-                }
-            };
-            let mut boxes: Vec<sch_place::ir::SectionBox> = Vec::new();
-            for (key, n_nodes, members) in &kept_bands {
-                if *n_nodes >= 3
-                    && let Some(rect) = sec_rect(members)
-                {
-                    boxes.push(sch_place::ir::SectionBox {
-                        name: title(key, members, *n_nodes),
-                        rect,
-                    });
-                }
-            }
-            if strap_on {
-                let strap_members: Vec<usize> = (0..scene.nodes.len())
-                    .filter(|&v| crate::order::is_strapish(&scene, v))
-                    .flat_map(|v| scene.nodes[v].places.iter().map(|p| p.item))
-                    .collect();
-                if strap_members.len() >= 3
-                    && let Some(rect) = sec_rect(&strap_members)
-                {
-                    boxes.push(sch_place::ir::SectionBox { name: "MISC".into(), rect });
-                }
-            }
-            // No overlapping frames: keep earlier boxes, drop a late collider.
-            let mut final_boxes: Vec<sch_place::ir::SectionBox> = Vec::new();
-            for b in boxes {
-                let br = geom::Rect::new(b.rect[0], b.rect[1], b.rect[2], b.rect[3]);
-                let clash = final_boxes.iter().any(|f| {
-                    geom::Rect::new(f.rect[0], f.rect[1], f.rect[2], f.rect[3]).overlaps(&br)
-                });
-                if !clash {
-                    final_boxes.push(b);
-                }
-            }
-            ir.sections = final_boxes;
-        }
-
         PlacementOutput {
             result: PlaceResult {
                 engine: "spine".into(),

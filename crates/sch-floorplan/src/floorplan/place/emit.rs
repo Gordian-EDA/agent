@@ -403,13 +403,6 @@ pub fn build_writer(
             w.add_power_flag_at(env, &format!("#FLG_{net}"), *at, *angle)?;
         }
     }
-    // Titled section frames (engine-computed): dashed box hugging the region
-    // plus a bold name above its top-left — the compose_writers group style.
-    for sec in &ir.sections {
-        let [x0, y0, x1, y1] = sec.rect;
-        w.add_rect([x0, y0], [x1, y1], &format!("frame:{}", sec.name));
-        w.add_text(&sec.name, [x0 + 1.0, y0 - 1.5], 2.0, true, &format!("label:{}", sec.name));
-    }
     Ok(w)
 }
 
