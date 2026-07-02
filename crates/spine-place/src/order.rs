@@ -43,6 +43,7 @@ pub fn arrange(
     g: &Reduced,
     scene: &Scene,
     dirs: &BTreeMap<(usize, String), PinDir>,
+    fold: bool,
 ) -> Vec<Point2> {
     let n_scene = scene.nodes.len();
 
@@ -50,7 +51,7 @@ pub fn arrange(
     // which the realizer will label at each pin anyway; letting them pull the
     // ordering (or widen channels) contorts the layout for wires that will
     // never be drawn.
-    const LABEL_FANOUT: usize = 4;
+    const LABEL_FANOUT: usize = 5;
     let mut junction_vertex: BTreeMap<usize, usize> = BTreeMap::new();
     let mut n_total = n_scene;
     for (ni, nk) in g.nodes.iter().enumerate() {
@@ -143,63 +144,161 @@ pub fn arrange(
         }
     }
 
-    // ── Layering: seeds = vertices whose typed edges all point OUT (pure
-    // sources); fall back to connector-anchored nodes, then vertex 0. Longest
-    // path from seeds over ALL edges (typed edges honored, untyped follow BFS).
-    let mut layer = vec![usize::MAX; n_total];
-    let seeds: Vec<usize> = {
-        let mut typed_out: Vec<usize> = (0..n_total)
-            .filter(|&v| {
-                let hints: Vec<bool> =
-                    ar.adj[v].iter().filter_map(|(_, h, _)| *h).collect();
-                !hints.is_empty() && hints.iter().all(|&h| h)
-            })
-            .collect();
-        if typed_out.is_empty() {
-            typed_out = (0..n_scene)
-                .filter(|&v| {
-                    scene.nodes[v].anchor.is_some_and(|a| {
-                        sch_place::netclass::is_connector_like(&items[a].part)
-                    })
-                })
-                .collect();
+    // ── Layering. Three steps, classic Sugiyama shape:
+    // 1. Seeds: connectors, plus TRUE typed sources (typed-out edges, no
+    //    typed-in) — a mid-chain part with one typed edge is NOT a source.
+    // 2. BFS distance from the seeds over all edges; untyped edges get
+    //    directed downhill (toward greater distance).
+    // 3. Longest-path layering over the resulting DAG (cycle edges dropped).
+    let mut typed_in = vec![0usize; n_total];
+    let mut typed_out = vec![0usize; n_total];
+    for (v, adjs) in ar.adj.iter().enumerate() {
+        for &(_, hint, _) in adjs {
+            match hint {
+                Some(true) => typed_out[v] += 1,
+                Some(false) => typed_in[v] += 1,
+                None => {}
+            }
         }
-        if typed_out.is_empty() && n_total > 0 {
-            typed_out.push(0);
-        }
-        typed_out
-    };
-    // BFS longest-path-ish: relax repeatedly (graphs are tiny; O(V·E) fine).
-    for &s in &seeds {
-        layer[s] = 0;
     }
-    for _ in 0..n_total {
-        let mut changed = false;
-        for v in 0..n_total {
-            if layer[v] == usize::MAX {
+    // Only MODULE nodes can be sources — a chain run or junction sits between
+    // its terminals by construction, whatever its local edge typing says.
+    let mut seeds: Vec<usize> = (0..n_scene)
+        .filter(|&v| {
+            scene.nodes[v].anchor.is_some() && typed_out[v] > 0 && typed_in[v] == 0
+        })
+        .collect();
+    // Connectors seed only when NO typed source exists: with a real source the
+    // BFS naturally pushes output connectors to the far end; force-seeding them
+    // at 0 runs their chain backwards through the source chain's columns.
+    if seeds.is_empty() {
+        seeds.extend((0..n_scene).filter(|&v| {
+            !ar.adj[v].is_empty()
+                && scene.nodes[v]
+                    .anchor
+                    .is_some_and(|a| sch_place::netclass::is_connector_like(&items[a].part))
+        }));
+    }
+    seeds.sort_unstable();
+    seeds.dedup();
+    if seeds.is_empty() && n_total > 0 {
+        seeds.push(0);
+    }
+
+    let mut dist = vec![usize::MAX; n_total];
+    let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    for &s in &seeds {
+        dist[s] = 0;
+        queue.push_back(s);
+    }
+    while let Some(v) = queue.pop_front() {
+        for &(w, _, _) in &ar.adj[v] {
+            if dist[w] == usize::MAX {
+                dist[w] = dist[v] + 1;
+                queue.push_back(w);
+            }
+        }
+    }
+
+    // Directed edge list: typed edges keep their direction; untyped run
+    // downhill by BFS distance (ties by index, deterministic).
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for (v, adjs) in ar.adj.iter().enumerate() {
+        for &(w, hint, _) in adjs {
+            match hint {
+                Some(true) => edges.push((v, w)),
+                Some(false) => {}          // recorded from the other side
+                None if v < w => {
+                    let (dv, dw) = (dist[v], dist[w]);
+                    if dv <= dw { edges.push((v, w)) } else { edges.push((w, v)) }
+                }
+                None => {}
+            }
+        }
+    }
+    edges.sort_unstable();
+    edges.dedup();
+
+    // Kahn longest-path; edges that would close a cycle are dropped (greedy
+    // Eades-lite: process in deterministic order, skip back edges).
+    let mut layer = vec![0usize; n_total];
+    {
+        let mut indeg = vec![0usize; n_total];
+        let mut out: Vec<Vec<usize>> = vec![Vec::new(); n_total];
+        for &(u, v) in &edges {
+            out[u].push(v);
+            indeg[v] += 1;
+        }
+        let mut ready: std::collections::BTreeSet<usize> =
+            (0..n_total).filter(|&v| indeg[v] == 0).collect();
+        let mut done = vec![false; n_total];
+        let mut remaining = n_total;
+        while remaining > 0 {
+            let v = match ready.iter().next().copied() {
+                Some(v) => v,
+                // Cycle: force the lowest not-done vertex (drops its back edges).
+                None => (0..n_total).find(|&v| !done[v]).unwrap(),
+            };
+            ready.remove(&v);
+            if done[v] {
                 continue;
             }
-            for &(w, hint, _) in &ar.adj[v] {
-                let want = match hint {
-                    Some(true) => layer[v] + 1,          // v → w
-                    Some(false) => layer[v].saturating_sub(1),
-                    None => layer[v] + 1,                // untyped flows outward
-                };
-                if layer[w] == usize::MAX || (hint == Some(true) && layer[w] < want) {
-                    layer[w] = want.min(n_total);
-                    changed = true;
+            done[v] = true;
+            remaining -= 1;
+            for &w in &out[v] {
+                if done[w] {
+                    continue;
+                }
+                layer[w] = layer[w].max(layer[v] + 1);
+                indeg[w] -= 1;
+                if indeg[w] == 0 {
+                    ready.insert(w);
                 }
             }
         }
-        if !changed {
-            break;
+    }
+
+    if std::env::var_os("SPINE_DEBUG").is_some() {
+        for v in 0..n_total {
+            let name = if v < n_scene {
+                scene.nodes[v]
+                    .anchor
+                    .map(|a| items[a].refdes.clone())
+                    .unwrap_or_else(|| {
+                        scene.nodes[v]
+                            .places
+                            .first()
+                            .map(|p| format!("run:{}", items[p.item].refdes))
+                            .unwrap_or_else(|| format!("v{v}"))
+                    })
+            } else {
+                format!("junction#{v}")
+            };
+            let adj: Vec<String> = ar.adj[v]
+                .iter()
+                .map(|(w, h, _)| format!("{w}{}", match h { Some(true) => ">", Some(false) => "<", None => "-" }))
+                .collect();
+            eprintln!("[layer] v{v} {name} layer={} adj={adj:?}", layer[v]);
         }
     }
-    for l in layer.iter_mut() {
-        if *l == usize::MAX {
-            *l = 0; // isolated (rail-only) nodes: power-entry column
+
+    // ── Compress layers: only layers holding a SCENE node become physical
+    // columns — a junction is a routing point, not a column; giving it its own
+    // layer inserts an empty column whose gaps push every chain hop past the
+    // wire threshold. Junction layers collapse onto the nearest scene column.
+    let scene_layers: Vec<usize> = {
+        let mut v: Vec<usize> = (0..n_scene).map(|n| layer[n]).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let compress = |l: usize| -> usize {
+        match scene_layers.binary_search(&l) {
+            Ok(i) => i,
+            Err(i) => i.min(scene_layers.len().saturating_sub(1)),
         }
-    }
+    };
+    let layer: Vec<usize> = layer.iter().map(|&l| compress(l)).collect();
 
     // ── In-layer order: barycenter sweeps over neighbor mean positions.
     let max_layer = layer.iter().copied().max().unwrap_or(0);
@@ -313,14 +412,14 @@ pub fn arrange(
         .map(|(l, w)| w + COL_GAP + 2.54 * spans.get(l).map_or(0, |&n| n.min(6)) as f64)
         .sum();
     let target_w = (area * 1.4).sqrt().max(160.0);
-    let fold = total_w > target_w * 2.0 && std::env::var_os("SPINE_FOLD").is_some();
+    let fold = fold && total_w > target_w * 1.3;
 
     let mut col_x = vec![0.0f64; cols.len()];
     let mut row_of_col = vec![0usize; cols.len()];
     let mut edge = 0.0;
     let mut row = 0usize;
     for (l, _) in cols.iter().enumerate() {
-        let channel = COL_GAP + 2.54 * spans.get(l).map_or(0, |&n| n.min(6)) as f64;
+        let channel = COL_GAP + 2.54 * spans.get(l).map_or(0, |&n| n.min(4)) as f64;
         if fold && edge > 0.0 && edge + col_w[l] > target_w {
             row += 1;
             edge = 0.0;

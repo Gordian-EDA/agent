@@ -369,7 +369,7 @@ pub fn form_modules(
         step: Point2,
     ) {
         let mut at = at0;
-        for _ in 0..64 {
+        for tries in 0..64 {
             let sats = build(at);
             let body: Vec<geom::Rect> = sats.iter().map(|s| placed_rect(items, s)).collect();
             let (ck, lo, hi) = run_of(at);
@@ -380,6 +380,15 @@ pub fn form_modules(
                     .iter()
                     .any(|&(k, rlo, rhi)| k == ck && lo < rhi && rlo < hi);
             if !blocked {
+                if tries > 2 && std::env::var_os("SPINE_DEBUG").is_some() {
+                    let refs: Vec<&str> =
+                        sats.iter().map(|s| items[s.item].refdes.as_str()).collect();
+                    eprintln!(
+                        "[slide] {refs:?} slid {tries} steps: {:?} -> {:?}",
+                        (at0.x, at0.y),
+                        (at.x, at.y)
+                    );
+                }
                 claims.extend(body);
                 runs.push((ck, lo, hi));
                 module.sats.extend(sats);

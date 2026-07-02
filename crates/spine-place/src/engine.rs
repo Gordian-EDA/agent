@@ -87,7 +87,8 @@ impl PlacementEngine for SpinePlace {
         let dirs = pin_dirs(env, problem);
         let problem_inc = problem.inc.clone();
         let form = form_modules(&problem.items, &problem_inc, &classes, &g, &anchors, None);
-        if std::env::var_os("SPINE_DEBUG").is_some() {
+        let debug = std::env::var_os("SPINE_DEBUG").is_some();
+        if debug {
             for (ci, c) in g.chains.iter().enumerate() {
                 if !c.parts.is_empty() && !form.consumed.contains_key(&ci) {
                     let refs: Vec<&str> = c
@@ -104,103 +105,170 @@ impl PlacementEngine for SpinePlace {
                 }
             }
         }
+        if std::env::var_os("SPINE_DEBUG").is_some() {
+            for &a in &anchors {
+                let it = &problem.items[a];
+                let conn = it.pins.iter().filter(|(_, _, n)| n.is_some()).count();
+                eprintln!(
+                    "[anchor] {} part={} geom_pins={} connected={} pins={:?}",
+                    it.refdes, it.part, it.geom.pins.len(), conn, it.pins
+                );
+            }
+            for m in &form.modules {
+                let sats: Vec<String> = m
+                    .sats
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "{}@({:.0},{:.0})",
+                            problem.items[s.item].refdes, s.offset.x, s.offset.y
+                        )
+                    })
+                    .collect();
+                eprintln!(
+                    "[module] {} env=({:.0},{:.0})..({:.0},{:.0}) sats={sats:?}",
+                    problem.items[m.anchor].refdes,
+                    m.env_min.x, m.env_min.y, m.env_max.x, m.env_max.y
+                );
+            }
+        }
         let scene = build_scene(&problem.items, &g, form, &classes);
-        let origins = arrange(&problem.items, &g, &scene, &dirs);
 
-        let mut placed = vec![false; problem.items.len()];
-        let commit = |origins: &[Point2], items: &mut [sch_place::item::Item], placed: &mut [bool]| {
-            for (sn, node) in scene.nodes.iter().enumerate() {
-                for p in &node.places {
-                    items[p.item].at =
-                        [origins[sn].x + p.offset.x, origins[sn].y + p.offset.y].into();
-                    items[p.item].angle = p.angle;
-                    placed[p.item] = true;
+        // One full placement variant: arrange (folded or not), commit, orphan
+        // sweep, safety passes, truthfulness self-check with collinearity
+        // stagger. Returns the metrics the fold A/B decides on.
+        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
+        let eval = RoutedEvaluator::new(&realizer);
+        let mut run_variant = |items: &mut Vec<sch_place::item::Item>, fold: bool| -> usize {
+            let origins = arrange(items, &g, &scene, &dirs, fold);
+            let mut placed = vec![false; items.len()];
+            let commit = |origins: &[Point2],
+                          items: &mut [sch_place::item::Item],
+                          placed: &mut [bool]| {
+                for (sn, node) in scene.nodes.iter().enumerate() {
+                    for p in &node.places {
+                        items[p.item].at =
+                            [origins[sn].x + p.offset.x, origins[sn].y + p.offset.y].into();
+                        items[p.item].angle = p.angle;
+                        placed[p.item] = true;
+                    }
+                }
+            };
+            commit(&origins, items, &mut placed);
+
+            // Orphan sweep: EVERY item gets a position. Multi-unit stragglers
+            // sit under a placed sibling; the rest stack right of the sheet.
+            let mut max_x: f64 = 0.0;
+            for (i, it) in items.iter().enumerate() {
+                if placed[i] {
+                    max_x = max_x.max(it.at[0]);
                 }
             }
+            let mut orphan_y = 0.0;
+            let sibling: BTreeMap<String, usize> = items
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| placed[*i])
+                .map(|(i, it)| (it.refdes.clone(), i))
+                .collect();
+            for i in 0..items.len() {
+                if placed[i] {
+                    continue;
+                }
+                let refdes = items[i].refdes.clone();
+                if let Some(&s) = sibling.get(refdes.as_str()) {
+                    let base = items[s].at;
+                    let h = items[s].geom.approx_size();
+                    items[i].at = [base[0], base[1] + h[1] + ROW_GAP].into();
+                } else {
+                    items[i].at = [max_x + COL_GAP * 2.0, orphan_y].into();
+                    orphan_y += items[i].geom.approx_size()[1] + ROW_GAP;
+                }
+                placed[i] = true;
+            }
+            debug_assert!(placed.iter().all(|&p| p), "orphan sweep must place all");
+
+            // Crystal clusters re-seat canonically (opt-in; kept only if it
+            // doesn't ADD body overlaps — dual-crystal boards collide).
+            if std::env::var_os("SPINE_IDIOM").is_some() {
+                let before: Vec<_> = items.iter().map(|it| (it.at, it.angle)).collect();
+                let overlaps_before = body_overlap_count(items);
+                if sch_floorplan::contract::align_idiom_clusters(items, &ir) {
+                    decongest(items);
+                    if body_overlap_count(items) > overlaps_before {
+                        for (it, (at, angle)) in items.iter_mut().zip(before) {
+                            it.at = at;
+                            it.angle = angle;
+                        }
+                    }
+                }
+            }
+            decongest(items);
+            normalize(items);
+
+            let mut breaks = eval.truthfulness_breaks(items);
+            // Exact-collinearity repair: stagger co-columnar scene nodes one
+            // grid step and re-check — removes the coincidence class wholesale.
+            if breaks > 0 {
+                let mut staggered = origins.clone();
+                for (sn, o) in staggered.iter_mut().enumerate() {
+                    o.x += (sn % 5) as f64 * 1.27;
+                }
+                let mut placed2 = vec![false; items.len()];
+                commit(&staggered, items, &mut placed2);
+                decongest(items);
+                normalize(items);
+                breaks = eval.truthfulness_breaks(items);
+            }
+            breaks
         };
-        commit(&origins, &mut problem.items, &mut placed);
 
-        // ── Orphan sweep: EVERY item gets a position. Multi-unit stragglers sit
-        // under a placed sibling; the rest stack in a column right of the sheet.
-        let mut max_x: f64 = 0.0;
-        let mut max_y: f64 = 0.0;
-        for (i, it) in problem.items.iter().enumerate() {
-            if placed[i] {
-                max_x = max_x.max(it.at[0]);
-                max_y = max_y.max(it.at[1]);
-            }
-        }
-        let mut orphan_y = 0.0;
-        let sibling: BTreeMap<String, usize> = problem
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| placed[*i])
-            .map(|(i, it)| (it.refdes.clone(), i))
-            .collect();
-        for i in 0..problem.items.len() {
-            if placed[i] {
-                continue;
-            }
-            let refdes = problem.items[i].refdes.clone();
-            if let Some(&s) = sibling.get(refdes.as_str()) {
-                let base = problem.items[s].at;
-                let h = problem.items[s].geom.approx_size();
-                problem.items[i].at = [base[0], base[1] + h[1] + ROW_GAP].into();
-            } else {
-                problem.items[i].at = [max_x + COL_GAP * 2.0, orphan_y].into();
-                orphan_y += problem.items[i].geom.approx_size()[1] + ROW_GAP;
-            }
-            placed[i] = true;
-        }
-        debug_assert!(placed.iter().all(|&p| p), "orphan sweep must place all");
+        let mut breaks = run_variant(&mut problem.items, false);
 
-        // ── Safety passes shared with the incumbent engines. Crystal clusters
-        // re-seat onto their IC in the hardened canonical arrangement (a bridge
-        // between 2.54-apart pins can't fit the crystal's own pin span) — kept
-        // only if it doesn't ADD body overlaps (dual-crystal boards collide).
-        if std::env::var_os("SPINE_IDIOM").is_some() {
-            let before: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
-            let overlaps_before = body_overlap_count(&problem.items);
-            if sch_floorplan::contract::align_idiom_clusters(&mut problem.items, &ir) {
-                decongest(&mut problem.items);
-                if body_overlap_count(&problem.items) > overlaps_before {
-                    for (it, (at, angle)) in problem.items.iter_mut().zip(before) {
+        // Fold A/B: a wide sheet re-runs with the layer sequence folded into
+        // rows (the human page-wrap); kept only when strictly no worse on
+        // breaks/overlaps/warnings — folding helps chain boards and can hurt
+        // label-island boards, so it must prove itself per sheet.
+        {
+            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+            for it in problem.items.iter() {
+                lo[0] = lo[0].min(it.at[0]);
+                lo[1] = lo[1].min(it.at[1]);
+                hi[0] = hi[0].max(it.at[0]);
+                hi[1] = hi[1].max(it.at[1]);
+            }
+            let (w, h) = (hi[0] - lo[0], hi[1] - lo[1]);
+            if w > 1.8 * h.max(30.0) {
+                let unfolded: Vec<_> =
+                    problem.items.iter().map(|it| (it.at, it.angle)).collect();
+                let a = (
+                    breaks,
+                    body_overlap_count(&problem.items),
+                    eval.warnings(&problem.items),
+                );
+                let b_breaks = run_variant(&mut problem.items, true);
+                let b = (
+                    b_breaks,
+                    body_overlap_count(&problem.items),
+                    eval.warnings(&problem.items),
+                );
+                if b <= a {
+                    breaks = b_breaks;
+                    if problem.options.debug_timing {
+                        eprintln!("[spine] fold kept: {a:?} -> {b:?}");
+                    }
+                } else {
+                    for (it, (at, angle)) in problem.items.iter_mut().zip(unfolded) {
                         it.at = at;
                         it.angle = angle;
+                    }
+                    if problem.options.debug_timing {
+                        eprintln!("[spine] fold rejected: {a:?} vs {b:?}");
                     }
                 }
             }
         }
-        if std::env::var_os("SPINE_DEBUG").is_some() {
-            eprintln!("[spine] overlaps pre-decongest: {}", body_overlap_count(&problem.items));
-        }
-        decongest(&mut problem.items);
-        normalize(&mut problem.items);
 
-        // ── Routed self-check; fall back to anneal on correctness failure.
-        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
-        let eval = RoutedEvaluator::new(&realizer);
-        let mut breaks = eval.truthfulness_breaks(&problem.items);
-
-        // Exact-collinearity repair: modules stacked in one column can land leg
-        // risers of DIFFERENT nets on one x, which KiCAD merges. Stagger
-        // co-columnar scene nodes one grid step apart and re-check — cheap,
-        // deterministic, and it removes the coincidence class wholesale.
-        if breaks > 0 {
-            let mut staggered = origins.clone();
-            for (sn, o) in staggered.iter_mut().enumerate() {
-                o.x += (sn % 5) as f64 * 1.27;
-            }
-            commit(&staggered, &mut problem.items, &mut placed);
-            decongest(&mut problem.items);
-            normalize(&mut problem.items);
-            let b2 = eval.truthfulness_breaks(&problem.items);
-            if problem.options.debug_timing {
-                eprintln!("[spine] collinearity stagger: breaks {breaks} -> {b2}");
-            }
-            breaks = b2;
-        }
         let overlaps = body_overlap_count(&problem.items);
         if overlaps > 0 && std::env::var_os("SPINE_DEBUG").is_some() {
             use sch_floorplan::contract::item_rect;
