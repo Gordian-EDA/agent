@@ -246,6 +246,7 @@ impl PlacementEngine for SpinePlace {
                     breaks,
                     body_overlap_count(&problem.items),
                     xa.body + xa.ic,
+                    crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
                     eval.warnings(&problem.items),
                 );
                 let b_breaks = run_variant(&mut problem.items, true);
@@ -254,6 +255,7 @@ impl PlacementEngine for SpinePlace {
                     b_breaks,
                     body_overlap_count(&problem.items),
                     xb.body + xb.ic,
+                    crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
                     eval.warnings(&problem.items),
                 );
                 if b <= a {
@@ -283,6 +285,7 @@ impl PlacementEngine for SpinePlace {
                 breaks,
                 body_overlap_count(&problem.items),
                 xa.body + xa.ic,
+                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
                 eval.warnings(&problem.items),
             );
             let mut groups: Vec<Vec<usize>> = scene
@@ -311,6 +314,7 @@ impl PlacementEngine for SpinePlace {
                 b_breaks,
                 body_overlap_count(&problem.items),
                 xb.body + xb.ic,
+                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
                 eval.warnings(&problem.items),
             );
             if b <= a {

@@ -15,8 +15,9 @@ use sch_place::item::{Incidence, Item};
 use crate::net::NetClass;
 
 const GRID: f64 = 1.27;
-/// Clearance kept between packed obstacle rects: two routing lanes.
-const GAP: f64 = 5.08;
+/// Clearance kept between packed obstacle rects: a column gap's worth — the
+/// strip estimates run ~a text-height of error, so a two-lane cushion collides.
+const GAP: f64 = 7.62;
 
 fn snap(v: f64) -> f64 {
     (v / GRID).round() * GRID
@@ -24,8 +25,9 @@ fn snap(v: f64) -> f64 {
 
 /// Nets whose CURRENT pin span exceeds the realizer's wire threshold — these
 /// will carry labels, so their pins need name-width strips; wired pins need
-/// only a lead.
-fn labeled_nets(
+/// only a lead. Doubles as the wire-first gate term: a layout change that
+/// grows this count is trading wires for labels.
+pub fn labeled_nets(
     items: &[Item],
     inc: &Incidence,
     classes: &BTreeMap<String, NetClass>,
@@ -80,9 +82,10 @@ fn obstacle(
         let (px, py) = (item.at[0] + off[0], item.at[1] + off[1]);
         let class = *classes.get(net).unwrap_or(&NetClass::Signal);
         let _ = inc;
+        let connectorish = sch_place::netclass::is_connector_like(&item.part);
         let text = if class.is_rail() {
             7.62
-        } else if labeled.contains(net.as_str()) {
+        } else if labeled.contains(net.as_str()) || connectorish {
             2.54 + 1.4 * net.chars().count() as f64
         } else {
             2.54

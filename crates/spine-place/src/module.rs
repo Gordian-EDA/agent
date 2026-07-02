@@ -324,7 +324,11 @@ pub fn form_modules(
             let bundled = net_pair
                 .get(net.as_str())
                 .is_some_and(|p| pair_nets.get(p).copied().unwrap_or(0) >= 4);
-            let certain = fanout >= 3 || bundled;
+            // Connector pins label by convention regardless of span (a header
+            // is a harness boundary), so their names always reserve.
+            let connectorish =
+                sch_place::netclass::is_connector_like(&items[a].part);
+            let certain = fanout >= 3 || bundled || connectorish;
             let predicted = labeled.is_some_and(|set| set.contains(net.as_str()));
             let text = if is_rail {
                 7.62
