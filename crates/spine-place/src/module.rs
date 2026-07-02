@@ -633,9 +633,10 @@ pub fn form_modules(
         }
     }
     let mut served: BTreeMap<(usize, String), usize> = BTreeMap::new();
-    let mut bank_count: BTreeMap<usize, usize> = BTreeMap::new();
-    /// Caps per bank row before wrapping to a second row.
-    const BANK_ROW: usize = 6;
+    // Assign every cap to a module first; each module's bank then places as ONE
+    // rigid grid block, so claims collisions slide the whole bank (rhythm kept)
+    // instead of scattering individual caps.
+    let mut bank_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for ci in decouple {
         let c = &g.chains[ci];
         let supply = if class(&c.a.net) == NetClass::Supply {
@@ -654,45 +655,69 @@ pub fn form_modules(
             .copied();
         let Some(anchor) = target else { continue };
         *served.entry((anchor, supply.clone())).or_default() += 1;
+        bank_of.entry(mod_of_anchor[&anchor]).or_default().push(ci);
+    }
 
-        let mi = mod_of_anchor[&anchor];
-        let p = c.parts[0];
-        let item = &items[p];
-        // Vertical cap, supply pin up, banked in rows off the anchor's top-right
-        // corner (fixed anchor extents, so the bank origin never compounds).
-        let supply_net = if class(&c.a.net) == NetClass::Supply {
-            c.nets.first().unwrap().clone()
+    /// Human bank pitch: 9 grid columns (value text clears the neighbour's
+    /// glyph label), single-lead row gap.
+    const CAP_PITCH: f64 = 11.43;
+    for (mi, chains) in &bank_of {
+        let module_anchor = form.modules[*mi].anchor;
+        let anchor_half = half_size(&items[module_anchor], 0.0);
+        // Per-cap orientation (supply pin up) computed once, in chain order.
+        let caps: Vec<(usize, f64)> = chains
+            .iter()
+            .map(|&ci| {
+                let c = &g.chains[ci];
+                let p = c.parts[0];
+                let supply_net = if class(&c.a.net) == NetClass::Supply {
+                    c.nets.first().unwrap().clone()
+                } else {
+                    c.nets.last().unwrap().clone()
+                };
+                (p, orient_for(&items[p], &supply_net, Orient::Down))
+            })
+            .collect();
+        let h = half_size(&items[caps[0].0], caps[0].1);
+        // A tall anchor (MCU) hosts a narrow bank down its right flank; a wide
+        // one (regulator) a row along its top-right. The grid is rigid either
+        // way — collisions slide the WHOLE block.
+        let per_row = if anchor_half.y > anchor_half.x {
+            2.min(caps.len().max(1))
         } else {
-            c.nets.last().unwrap().clone()
+            caps.len().clamp(1, 4)
         };
-        let angle = orient_for(item, &supply_net, Orient::Down);
-        let h = half_size(item, angle);
-        let anchor_half = half_size(&items[anchor], 0.0);
-        // Bank grid: slots advance rightward at CAP_PITCH and WRAP into a new
-        // row past the width budget, so a many-cap MCU gets a 2-3 row bank
-        // instead of a sheet-wide strip.
-        const CAP_PITCH: f64 = 12.7;
-        let bank_x0 = anchor_half.x + LEAD + h.x;
-        let bank_w = (anchor_half.x * 2.0).max(CAP_PITCH * 4.0);
-        let row_h = h.y * 2.0 + LEAD * 2.0;
-        let mut slot = *bank_count.entry(mi).or_default();
-        let cl = claims.entry(mi).or_default();
-        let module = &mut form.modules[mi];
-        for _ in 0..64 {
-            let per_row = (bank_w / CAP_PITCH).max(1.0) as usize;
-            let x = bank_x0 + (slot % per_row) as f64 * CAP_PITCH;
-            let y = -anchor_half.y + h.y + (slot / per_row) as f64 * row_h;
-            let sat = SatPlace { item: p, offset: Point2::new(snap(x), snap(y)), angle };
-            let r = placed_rect(items, &sat);
-            if !cl.iter().any(|c| c.overlaps(&r)) {
-                cl.push(r);
-                module.sats.push(sat);
-                break;
-            }
-            slot += 1;
+        let row_h = h.y * 2.0 + LEAD;
+        let y0 = -anchor_half.y + h.y;
+        let x0 = anchor_half.x + LEAD + h.x;
+        let build = |at: Point2| -> Vec<SatPlace> {
+            caps.iter()
+                .enumerate()
+                .map(|(k, &(p, angle))| SatPlace {
+                    item: p,
+                    offset: Point2::new(
+                        snap(at.x + (k % per_row) as f64 * CAP_PITCH),
+                        snap(at.y + (k / per_row) as f64 * row_h),
+                    ),
+                    angle,
+                })
+                .collect()
+        };
+        let run_of = |_at: Point2| (i64::MIN / 2 + *mi as i64, 0.0, 0.0);
+        let module = &mut form.modules[*mi];
+        commit_free(
+            items,
+            claims.entry(*mi).or_default(),
+            runs.entry(*mi).or_default(),
+            module,
+            build,
+            run_of,
+            Point2::new(x0, y0),
+            Point2::new(PITCH, 0.0),
+        );
+        for &ci in chains {
+            form.consumed.insert(ci, *mi);
         }
-        bank_count.insert(mi, slot + 1);
-        form.consumed.insert(ci, mi);
     }
 
     // ── Recompute envelopes from FULL placement rects (body + text), padded for

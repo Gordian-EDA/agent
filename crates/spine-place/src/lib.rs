@@ -5,6 +5,7 @@
 //! spines with corpus-mined human conventions. No stochastic search.
 
 pub mod chain;
+pub mod compact;
 pub mod engine;
 pub mod module;
 pub mod net;

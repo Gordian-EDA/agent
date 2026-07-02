@@ -241,15 +241,19 @@ impl PlacementEngine for SpinePlace {
             if w > 1.8 * h.max(30.0) {
                 let unfolded: Vec<_> =
                     problem.items.iter().map(|it| (it.at, it.angle)).collect();
+                let xa = eval.crossings(&problem.items);
                 let a = (
                     breaks,
                     body_overlap_count(&problem.items),
+                    xa.body + xa.ic,
                     eval.warnings(&problem.items),
                 );
                 let b_breaks = run_variant(&mut problem.items, true);
+                let xb = eval.crossings(&problem.items);
                 let b = (
                     b_breaks,
                     body_overlap_count(&problem.items),
+                    xb.body + xb.ic,
                     eval.warnings(&problem.items),
                 );
                 if b <= a {
@@ -265,6 +269,62 @@ impl PlacementEngine for SpinePlace {
                     if problem.options.debug_timing {
                         eprintln!("[spine] fold rejected: {a:?} vs {b:?}");
                     }
+                }
+            }
+        }
+
+        // Node-pack A/B: slide whole scene nodes left then up until they rest
+        // against the packed field (the human sprawl gap), keep only if
+        // breaks/overlaps/warnings hold.
+        {
+            let before: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
+            let xa = eval.crossings(&problem.items);
+            let a = (
+                breaks,
+                body_overlap_count(&problem.items),
+                xa.body + xa.ic,
+                eval.warnings(&problem.items),
+            );
+            let mut groups: Vec<Vec<usize>> = scene
+                .nodes
+                .iter()
+                .map(|n| n.places.iter().map(|p| p.item).collect())
+                .filter(|g: &Vec<usize>| !g.is_empty())
+                .collect();
+            let mut grouped = vec![false; problem.items.len()];
+            for g in &groups {
+                for &i in g {
+                    grouped[i] = true;
+                }
+            }
+            for i in 0..problem.items.len() {
+                if !grouped[i] {
+                    groups.push(vec![i]);
+                }
+            }
+            crate::compact::pack_nodes(&mut problem.items, &groups, &problem_inc, &classes);
+            decongest(&mut problem.items);
+            normalize(&mut problem.items);
+            let b_breaks = eval.truthfulness_breaks(&problem.items);
+            let xb = eval.crossings(&problem.items);
+            let b = (
+                b_breaks,
+                body_overlap_count(&problem.items),
+                xb.body + xb.ic,
+                eval.warnings(&problem.items),
+            );
+            if b <= a {
+                breaks = b_breaks;
+                if problem.options.debug_timing {
+                    eprintln!("[spine] squash kept: {a:?} -> {b:?}");
+                }
+            } else {
+                for (it, (at, angle)) in problem.items.iter_mut().zip(before) {
+                    it.at = at;
+                    it.angle = angle;
+                }
+                if problem.options.debug_timing {
+                    eprintln!("[spine] squash rejected: {a:?} vs {b:?}");
                 }
             }
         }
