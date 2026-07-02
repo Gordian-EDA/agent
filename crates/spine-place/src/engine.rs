@@ -378,6 +378,7 @@ impl PlacementEngine for SpinePlace {
         // Band A/B: same-type modules align into refdes-sorted columns/grids —
         // the "same things share an axis" aesthetic humans read first. Each
         // band gates INDIVIDUALLY: one colliding band must not veto the rest.
+        let mut kept_bands: Vec<(String, Vec<usize>)> = Vec::new();
         for band in crate::bands::plan(&problem.items, &scene) {
             if std::env::var_os("SPINE_DEBUG").is_some() {
                 let refs: Vec<&str> = band
@@ -414,6 +415,13 @@ impl PlacementEngine for SpinePlace {
             );
             if b <= a {
                 breaks = b_breaks;
+                kept_bands.push((
+                    band.key.clone(),
+                    band.members
+                        .iter()
+                        .flat_map(|&sn| scene.nodes[sn].places.iter().map(|p| p.item))
+                        .collect(),
+                ));
                 if problem.options.debug_timing {
                     eprintln!("[spine] band {} kept: {a:?} -> {b:?}", band.key);
                 }
@@ -480,6 +488,83 @@ impl PlacementEngine for SpinePlace {
                 }
             }
         }
+        // Titled section frames around the deliberate formations: kept type/motif
+        // bands with 3+ members, and the strap column when it won.
+        let mut ir = ir;
+        {
+            let sec_rect = |members: &[usize]| -> Option<[f64; 4]> {
+                use sch_floorplan::contract::item_rect;
+                let mut r: Option<geom::Rect> = None;
+                for &i in members {
+                    let it = &problem.items[i];
+                    let b = item_rect(it, it.at);
+                    r = Some(match r {
+                        None => b,
+                        Some(acc) => geom::Rect::new(
+                            acc.min_x.min(b.min_x),
+                            acc.min_y.min(b.min_y),
+                            acc.max_x.max(b.max_x),
+                            acc.max_y.max(b.max_y),
+                        ),
+                    });
+                }
+                r.map(|r| [r.min_x - 2.54, r.min_y - 3.81, r.max_x + 2.54, r.max_y + 2.54])
+            };
+            let title = |key: &str, members: &[usize]| -> String {
+                match key {
+                    "conn" => "CONNECTORS".into(),
+                    "mount" => "MECHANICAL".into(),
+                    "tp" => "TEST POINTS".into(),
+                    k => {
+                        // Prefer the members' shared VALUE ("100n x8"); else the
+                        // part name suffix; single letters read as noise.
+                        let vals: std::collections::BTreeSet<&str> = members
+                            .iter()
+                            .map(|&i| problem.items[i].value.as_str())
+                            .filter(|v| !v.is_empty())
+                            .collect();
+                        let base = if vals.len() == 1 {
+                            (*vals.iter().next().unwrap()).to_string()
+                        } else {
+                            k.rsplit(':').next().unwrap_or(k).to_string()
+                        };
+                        format!("{} x{}", base.to_uppercase(), members.len())
+                    }
+                }
+            };
+            let mut boxes: Vec<sch_place::ir::SectionBox> = Vec::new();
+            for (key, members) in &kept_bands {
+                if members.len() >= 3
+                    && let Some(rect) = sec_rect(members)
+                {
+                    boxes.push(sch_place::ir::SectionBox { name: title(key, members), rect });
+                }
+            }
+            if strap_on {
+                let strap_members: Vec<usize> = (0..scene.nodes.len())
+                    .filter(|&v| crate::order::is_strapish(&scene, v))
+                    .flat_map(|v| scene.nodes[v].places.iter().map(|p| p.item))
+                    .collect();
+                if strap_members.len() >= 3
+                    && let Some(rect) = sec_rect(&strap_members)
+                {
+                    boxes.push(sch_place::ir::SectionBox { name: "MISC".into(), rect });
+                }
+            }
+            // No overlapping frames: keep earlier boxes, drop a late collider.
+            let mut final_boxes: Vec<sch_place::ir::SectionBox> = Vec::new();
+            for b in boxes {
+                let br = geom::Rect::new(b.rect[0], b.rect[1], b.rect[2], b.rect[3]);
+                let clash = final_boxes.iter().any(|f| {
+                    geom::Rect::new(f.rect[0], f.rect[1], f.rect[2], f.rect[3]).overlaps(&br)
+                });
+                if !clash {
+                    final_boxes.push(b);
+                }
+            }
+            ir.sections = final_boxes;
+        }
+
         PlacementOutput {
             result: PlaceResult {
                 engine: "spine".into(),

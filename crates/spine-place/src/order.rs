@@ -28,6 +28,21 @@ fn snap(v: f64) -> f64 {
     (v / GRID).round() * GRID
 }
 
+/// A strap islet: a stub module or a small free module — the population of the
+/// dedicated strap column and the "Misc" section box.
+pub fn is_strapish(scene: &Scene, v: usize) -> bool {
+    v < scene.nodes.len()
+        && (scene.nodes[v].strap
+            || (scene.nodes[v].places.len() <= 2
+                && scene.nodes[v].anchor.is_some()
+                && !scene
+                    .ends
+                    .values()
+                    .any(|(a, b)| matches!((a, b), (Some(x), Some(y)) if *x == v || *y == v))
+                && (scene.nodes[v].env_max.x - scene.nodes[v].env_min.x) < 22.0
+                && (scene.nodes[v].env_max.y - scene.nodes[v].env_min.y) < 22.0))
+}
+
 /// The arrangement graph: scene nodes plus zero-size junction vertices.
 struct Arrange {
     /// scene-node count (junctions appended after).
@@ -306,27 +321,12 @@ pub fn arrange(
     // decided here so packing and channels respect it from the start.
     let mut layer = layer;
     if strap_col {
-        let strapish = |v: usize| -> bool {
-            v < n_scene
-                && (scene.nodes[v].strap
-                    || (scene.nodes[v].places.len() <= 2
-                        && scene.nodes[v].anchor.is_some()
-                        && !scene
-                            .ends
-                            .values()
-                            .any(|(a, b)| matches!((a, b), (Some(x), Some(y)) if *x == v || *y == v))
-                        && (scene.nodes[v].env_max.x - scene.nodes[v].env_min.x) < 22.0
-                        && (scene.nodes[v].env_max.y - scene.nodes[v].env_min.y) < 22.0))
-        };
         let strap_layer = layer.iter().copied().max().unwrap_or(0) + 1;
-        let mut any = false;
         for v in 0..n_scene {
-            if strapish(v) {
+            if is_strapish(scene, v) {
                 layer[v] = strap_layer;
-                any = true;
             }
         }
-        let _ = any;
     }
 
     // ── In-layer order: barycenter sweeps over neighbor mean positions.
