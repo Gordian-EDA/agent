@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use geom::Point2;
 use sch_place::ir::Orient;
 use sch_place::item::{Incidence, Item};
-use sch_place::netclass::PinSide;
+use sch_place::netclass::{PinSide, is_connector_like as is_connector_like_part};
 
 use crate::chain::{ChainRole, NodeKind, Reduced};
 use crate::net::NetClass;
@@ -55,6 +55,9 @@ pub struct ModuleForm {
     pub modules: Vec<ModulePlan>,
     /// chain index → consumed by module (index into `modules`).
     pub consumed: BTreeMap<usize, usize>,
+    /// Stub modules (2-pin islets nothing adopted): the arrange stage collects
+    /// these into the dedicated strap column.
+    pub strap_items: BTreeSet<usize>,
 }
 
 /// Orientation angle for a 2-pin `item` so that the pin on `first_net` points
@@ -142,6 +145,43 @@ pub fn form_modules(
 ) -> ModuleForm {
     let mut form = ModuleForm::default();
     let class = |net: &str| *classes.get(net).unwrap_or(&NetClass::Signal);
+
+    // Stub adoption: a 0-part chain from a big anchor's pin straight to a small
+    // 2-pin part (single-connected LED, pull resistor) — the part belongs
+    // BESIDE that pin, wired, not floating behind a label.
+    let mut adopts: Vec<(usize, usize, String, String)> = Vec::new(); // (stub, anchor, anchor_pin, net)
+    for c in g.chains.iter() {
+        if !c.parts.is_empty() {
+            continue;
+        }
+        let (pa, pb) = match (&g.nodes[c.a.node], &g.nodes[c.b.node]) {
+            (NodeKind::Part(x), NodeKind::Part(y)) => (*x, *y),
+            _ => continue,
+        };
+        let small = |i: usize| {
+            items[i].geom.pins.len() <= 2 && !is_connector_like_part(&items[i].part)
+        };
+        // Connectors never adopt: their flanks are label columns by convention.
+        let big = |i: usize| {
+            items[i].geom.pins.len() >= 3 && !is_connector_like_part(&items[i].part)
+        };
+        if small(pa) && big(pb) {
+            adopts.push((pa, pb, c.b.pin.clone(), c.b.net.clone()));
+        } else if small(pb) && big(pa) {
+            adopts.push((pb, pa, c.a.pin.clone(), c.a.net.clone()));
+        }
+    }
+
+    // Adopted stubs leave the anchor set entirely: they are satellites now, and
+    // any resolver that still treated them as anchors would double-place them.
+    let adopted_set: BTreeSet<usize> = adopts.iter().map(|(st, _, _, _)| *st).collect();
+    let anchors_vec: Vec<usize> = anchors
+        .iter()
+        .copied()
+        .filter(|a| !adopted_set.contains(a))
+        .collect();
+    let anchors = &anchors_vec[..];
+
 
     // ── Resolve a chain terminal to an anchor pin, directly or via junction.
     // Junction choices are memoized so every chain on one junction shares a
@@ -239,7 +279,7 @@ pub fn form_modules(
         }
     }
 
-    // ── Seed one module per anchor.
+    // ── Seed one module per anchor (adopted stubs are already filtered out).
     let mut mod_of_anchor: BTreeMap<usize, usize> = BTreeMap::new();
     for &a in anchors {
         mod_of_anchor.insert(a, form.modules.len());
@@ -371,9 +411,27 @@ pub fn form_modules(
         run_of: impl Fn(Point2) -> (i64, f64, f64),
         at0: Point2,
         step: Point2,
-    ) {
+    ) -> bool {
+        commit_free_opt(items, claims, runs, module, build, run_of, at0, step, 64, true)
+    }
+
+    /// `commit_free` with a slide budget and optional give-up: `must == false`
+    /// returns false instead of force-committing a colliding fallback.
+    #[allow(clippy::too_many_arguments)]
+    fn commit_free_opt(
+        items: &[Item],
+        claims: &mut Vec<geom::Rect>,
+        runs: &mut Vec<(i64, f64, f64)>,
+        module: &mut ModulePlan,
+        build: impl Fn(Point2) -> Vec<SatPlace>,
+        run_of: impl Fn(Point2) -> (i64, f64, f64),
+        at0: Point2,
+        step: Point2,
+        budget: usize,
+        must: bool,
+    ) -> bool {
         let mut at = at0;
-        for tries in 0..64 {
+        for tries in 0..budget {
             let sats = build(at);
             let body: Vec<geom::Rect> = sats.iter().map(|s| placed_rect(items, s)).collect();
             let (ck, lo, hi) = run_of(at);
@@ -396,14 +454,18 @@ pub fn form_modules(
                 claims.extend(body);
                 runs.push((ck, lo, hi));
                 module.sats.extend(sats);
-                return;
+                return true;
             }
             at = Point2::new(at.x + step.x, at.y + step.y);
+        }
+        if !must {
+            return false;
         }
         let sats = build(at0);
         claims.extend(sats.iter().map(|s| placed_rect(items, s)));
         runs.push(run_of(at0));
         module.sats.extend(sats);
+        true
     }
 
     // ── Bridges first: they own the pin column between their two pins.
@@ -623,6 +685,83 @@ pub fn form_modules(
             Point2::new(outward, 0.0),
         );
         form.consumed.insert(*chain, mi);
+    }
+
+    // ── Adopted stubs: one part beside its pin, pointing outward, wired short.
+    // A stub that finds no clean nearby spot (label-dense pin columns) reverts
+    // to its own module — labeled islets beat force-fit collisions.
+    let mut unadopted: Vec<usize> = Vec::new();
+    for (stub, anchor, pin, net) in adopts {
+        let Some(&mi) = mod_of_anchor.get(&anchor) else { continue };
+        let pin_at = pin_offset(&items[anchor], &pin, 0.0);
+        let side = pin_side_of(anchor, &pin);
+        let item = &items[stub];
+        let (dir, step) = match side {
+            PinSide::East => (Orient::Right, Point2::new(PITCH, 0.0)),
+            PinSide::West => (Orient::Left, Point2::new(-PITCH, 0.0)),
+            PinSide::North => (Orient::Up, Point2::new(0.0, -PITCH)),
+            PinSide::South => (Orient::Down, Point2::new(0.0, PITCH)),
+        };
+        let angle = orient_for(item, &net, dir);
+        let entry = pin_on(item, &net).unwrap_or_default();
+        let e_off = pin_offset(item, &entry, angle);
+        let at0 = match side {
+            PinSide::East => Point2::new(pin_at.x + LEAD * 2.0, pin_at.y),
+            PinSide::West => Point2::new(pin_at.x - LEAD * 2.0, pin_at.y),
+            PinSide::North => Point2::new(pin_at.x, pin_at.y - LEAD * 2.0),
+            PinSide::South => Point2::new(pin_at.x, pin_at.y + LEAD * 2.0),
+        };
+        let build = |at: Point2| -> Vec<SatPlace> {
+            vec![SatPlace {
+                item: stub,
+                offset: Point2::new(snap(at.x - e_off.x), snap(at.y - e_off.y)),
+                angle,
+            }]
+        };
+        let run_of = |at: Point2| match side {
+            PinSide::East | PinSide::West => {
+                (1_000_000 + (snap(pin_at.y) / GRID).round() as i64,
+                 pin_at.x.min(at.x), pin_at.x.max(at.x))
+            }
+            _ => ((snap(pin_at.x) / GRID).round() as i64,
+                  pin_at.y.min(at.y), pin_at.y.max(at.y)),
+        };
+        let module = &mut form.modules[mi];
+        let ok = commit_free_opt(
+            items,
+            claims.entry(mi).or_default(),
+            runs.entry(mi).or_default(),
+            module,
+            build,
+            run_of,
+            at0,
+            step,
+            6,
+            false,
+        );
+        if !ok {
+            unadopted.push(stub);
+        }
+    }
+    for a in unadopted {
+        form.strap_items.insert(a);
+        mod_of_anchor.insert(a, form.modules.len());
+        let h = half_size(&items[a], 0.0);
+        form.modules.push(ModulePlan {
+            anchor: a,
+            sats: Vec::new(),
+            env_min: Point2::new(-h.x, -h.y),
+            env_max: Point2::new(h.x, h.y),
+        });
+    }
+    // Never-adoptable 2-pin stub modules are straps too.
+    for (&a, _) in &mod_of_anchor {
+        if items[a].geom.pins.len() <= 2
+            && !is_connector_like_part(&items[a].part)
+            && form.modules[mod_of_anchor[&a]].sats.is_empty()
+        {
+            form.strap_items.insert(a);
+        }
     }
 
     // ── Decoupling banks: round-robin caps onto anchors sharing the supply net.

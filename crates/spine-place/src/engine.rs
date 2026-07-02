@@ -139,8 +139,11 @@ impl PlacementEngine for SpinePlace {
         // stagger. Returns the metrics the fold A/B decides on.
         let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
         let eval = RoutedEvaluator::new(&realizer);
-        let mut run_variant = |items: &mut Vec<sch_place::item::Item>, fold: bool| -> usize {
-            let origins = arrange(items, &g, &scene, &dirs, fold);
+        let mut run_variant = |items: &mut Vec<sch_place::item::Item>,
+                               fold: bool,
+                               strap_col: bool|
+         -> usize {
+            let origins = arrange(items, &g, &scene, &dirs, fold, strap_col);
             let mut placed = vec![false; items.len()];
             let commit = |origins: &[Point2],
                           items: &mut [sch_place::item::Item],
@@ -223,7 +226,46 @@ impl PlacementEngine for SpinePlace {
             breaks
         };
 
-        let mut breaks = run_variant(&mut problem.items, false);
+        let mut strap_on = false;
+        let mut breaks = run_variant(&mut problem.items, false, false);
+
+        // Strap-column A/B: stub islets in one dedicated refdes-sorted column
+        // (the human "straps region") — kept only when the sheet metrics hold.
+        {
+            let before: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
+            let xa = eval.crossings(&problem.items);
+            let a = (
+                breaks,
+                body_overlap_count(&problem.items),
+                xa.body + xa.ic,
+                eval.warnings(&problem.items),
+                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
+            );
+            let b_breaks = run_variant(&mut problem.items, false, true);
+            let xb = eval.crossings(&problem.items);
+            let b = (
+                b_breaks,
+                body_overlap_count(&problem.items),
+                xb.body + xb.ic,
+                eval.warnings(&problem.items),
+                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
+            );
+            if b <= a {
+                breaks = b_breaks;
+                strap_on = true;
+                if problem.options.debug_timing {
+                    eprintln!("[spine] strap column kept: {a:?} -> {b:?}");
+                }
+            } else {
+                for (it, (at, angle)) in problem.items.iter_mut().zip(before) {
+                    it.at = at;
+                    it.angle = angle;
+                }
+                if problem.options.debug_timing {
+                    eprintln!("[spine] strap column rejected: {a:?} vs {b:?}");
+                }
+            }
+        }
 
         // Fold A/B: a wide sheet re-runs with the layer sequence folded into
         // rows (the human page-wrap); kept only when strictly no worse on
@@ -246,17 +288,17 @@ impl PlacementEngine for SpinePlace {
                     breaks,
                     body_overlap_count(&problem.items),
                     xa.body + xa.ic,
-                    crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
                     eval.warnings(&problem.items),
+                    crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
                 );
-                let b_breaks = run_variant(&mut problem.items, true);
+                let b_breaks = run_variant(&mut problem.items, true, strap_on);
                 let xb = eval.crossings(&problem.items);
                 let b = (
                     b_breaks,
                     body_overlap_count(&problem.items),
                     xb.body + xb.ic,
-                    crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
                     eval.warnings(&problem.items),
+                    crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
                 );
                 if b <= a {
                     breaks = b_breaks;
@@ -285,8 +327,8 @@ impl PlacementEngine for SpinePlace {
                 breaks,
                 body_overlap_count(&problem.items),
                 xa.body + xa.ic,
-                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
                 eval.warnings(&problem.items),
+                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
             );
             let mut groups: Vec<Vec<usize>> = scene
                 .nodes
@@ -314,8 +356,8 @@ impl PlacementEngine for SpinePlace {
                 b_breaks,
                 body_overlap_count(&problem.items),
                 xb.body + xb.ic,
-                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
                 eval.warnings(&problem.items),
+                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
             );
             if b <= a {
                 breaks = b_breaks;
@@ -337,14 +379,27 @@ impl PlacementEngine for SpinePlace {
         // the "same things share an axis" aesthetic humans read first. Each
         // band gates INDIVIDUALLY: one colliding band must not veto the rest.
         for band in crate::bands::plan(&problem.items, &scene) {
+            if std::env::var_os("SPINE_DEBUG").is_some() {
+                let refs: Vec<&str> = band
+                    .members
+                    .iter()
+                    .filter_map(|&sn| {
+                        scene.nodes[sn]
+                            .places
+                            .first()
+                            .map(|p| problem.items[p.item].refdes.as_str())
+                    })
+                    .collect();
+                eprintln!("[band] {} members: {refs:?}", band.key);
+            }
             let before: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
             let xa = eval.crossings(&problem.items);
             let a = (
                 breaks,
                 body_overlap_count(&problem.items),
                 xa.body + xa.ic,
-                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
                 eval.warnings(&problem.items),
+                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
             );
             crate::bands::apply(&mut problem.items, &scene, &band);
             normalize(&mut problem.items);
@@ -354,8 +409,8 @@ impl PlacementEngine for SpinePlace {
                 b_breaks,
                 body_overlap_count(&problem.items),
                 xb.body + xb.ic,
-                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
                 eval.warnings(&problem.items),
+                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
             );
             if b <= a {
                 breaks = b_breaks;

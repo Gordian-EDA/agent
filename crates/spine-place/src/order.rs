@@ -44,6 +44,7 @@ pub fn arrange(
     scene: &Scene,
     dirs: &BTreeMap<(usize, String), PinDir>,
     fold: bool,
+    strap_col: bool,
 ) -> Vec<Point2> {
     let n_scene = scene.nodes.len();
 
@@ -300,6 +301,34 @@ pub fn arrange(
     };
     let layer: Vec<usize> = layer.iter().map(|&l| compress(l)).collect();
 
+    // ── Strap column: stub islets and small free modules gather in ONE
+    // dedicated trailing column, refdes-sorted — the human "straps region",
+    // decided here so packing and channels respect it from the start.
+    let mut layer = layer;
+    if strap_col {
+        let strapish = |v: usize| -> bool {
+            v < n_scene
+                && (scene.nodes[v].strap
+                    || (scene.nodes[v].places.len() <= 2
+                        && scene.nodes[v].anchor.is_some()
+                        && !scene
+                            .ends
+                            .values()
+                            .any(|(a, b)| matches!((a, b), (Some(x), Some(y)) if *x == v || *y == v))
+                        && (scene.nodes[v].env_max.x - scene.nodes[v].env_min.x) < 22.0
+                        && (scene.nodes[v].env_max.y - scene.nodes[v].env_min.y) < 22.0))
+        };
+        let strap_layer = layer.iter().copied().max().unwrap_or(0) + 1;
+        let mut any = false;
+        for v in 0..n_scene {
+            if strapish(v) {
+                layer[v] = strap_layer;
+                any = true;
+            }
+        }
+        let _ = any;
+    }
+
     // ── In-layer order: barycenter sweeps over neighbor mean positions.
     let max_layer = layer.iter().copied().max().unwrap_or(0);
     let mut cols: Vec<Vec<usize>> = vec![Vec::new(); max_layer + 1];
@@ -355,7 +384,7 @@ pub fn arrange(
     // flow structure otherwise degenerates into one endless stack).
     let area: f64 = (0..n_scene).map(|v| width(v) * height(v)).sum();
     let target_h = (area / 1.4).sqrt().max(80.0);
-    let cols: Vec<Vec<usize>> = cols
+    let mut cols: Vec<Vec<usize>> = cols
         .into_iter()
         .flat_map(|col| {
             let mut out: Vec<Vec<usize>> = vec![Vec::new()];
@@ -394,6 +423,25 @@ pub fn arrange(
             }
         }
     }
+    // Strap column members order by refdes (numeric-aware), not barycenter.
+    {
+        let strap_l = cols.len() - 1;
+        let is_strap_col = cols[strap_l]
+            .iter()
+            .all(|&v| v < n_scene && scene.nodes[v].anchor.is_some());
+        if is_strap_col && cols[strap_l].len() >= 2 {
+            let key = |v: usize| {
+                let a = scene.nodes[v].anchor.unwrap_or(0);
+                let r = &items[a].refdes;
+                let split = r.find(|c: char| c.is_ascii_digit()).unwrap_or(r.len());
+                let (alpha, num) = r.split_at(split);
+                (alpha.to_string(), num.parse::<u64>().unwrap_or(0))
+            };
+            cols[strap_l].sort_by_key(|&v| key(v));
+        }
+    }
+
+
     // Row folding: a deep series graph makes one very wide layer sequence;
     // humans wrap the chain into rows like text (the corpus RF sheets). Fold
     // consecutive layers into rows once the running width passes the landscape

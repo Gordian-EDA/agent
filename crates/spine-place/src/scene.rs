@@ -11,7 +11,7 @@ use sch_place::ir::Orient;
 use sch_place::item::Item;
 
 use crate::chain::{Chain, ChainRole, NodeKind, Reduced};
-use crate::module::{ModuleForm, SatPlace, half_size, orient_for, pin_offset};
+use crate::module::{ModuleForm, SatPlace, orient_for, pin_offset};
 use crate::net::NetClass;
 
 const GRID: f64 = 1.27;
@@ -34,6 +34,8 @@ pub struct SceneNode {
     pub ports: Vec<Port>,
     /// Module anchor item (None for free chain runs).
     pub anchor: Option<usize>,
+    /// A strap islet: belongs in the dedicated strap column at arrange time.
+    pub strap: bool,
 }
 
 /// A chain terminal's attachment on a scene node.
@@ -104,6 +106,7 @@ fn typeset_chain_run(
         env_max: Point2::new(0.0, 0.0),
         ports: Vec::new(),
         anchor: None,
+        strap: false,
     };
     envelope(items, &mut node);
     node
@@ -136,6 +139,7 @@ pub fn build_scene(
     let mut scene = Scene::default();
 
     // Modules become scene nodes 1:1 (anchor at the node origin).
+    let strap_items = form.strap_items.clone();
     let mut node_of_anchor: BTreeMap<usize, usize> = BTreeMap::new();
     for m in form.modules {
         node_of_anchor.insert(m.anchor, scene.nodes.len());
@@ -153,6 +157,7 @@ pub fn build_scene(
             env_max: m.env_max,
             ports: Vec::new(),
             anchor: Some(m.anchor),
+            strap: strap_items.contains(&m.anchor),
         });
     }
 
