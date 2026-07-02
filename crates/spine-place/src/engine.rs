@@ -333,6 +333,47 @@ impl PlacementEngine for SpinePlace {
             }
         }
 
+        // Band A/B: same-type modules align into refdes-sorted columns/grids —
+        // the "same things share an axis" aesthetic humans read first. Each
+        // band gates INDIVIDUALLY: one colliding band must not veto the rest.
+        for band in crate::bands::plan(&problem.items, &scene) {
+            let before: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
+            let xa = eval.crossings(&problem.items);
+            let a = (
+                breaks,
+                body_overlap_count(&problem.items),
+                xa.body + xa.ic,
+                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
+                eval.warnings(&problem.items),
+            );
+            crate::bands::apply(&mut problem.items, &scene, &band);
+            normalize(&mut problem.items);
+            let b_breaks = eval.truthfulness_breaks(&problem.items);
+            let xb = eval.crossings(&problem.items);
+            let b = (
+                b_breaks,
+                body_overlap_count(&problem.items),
+                xb.body + xb.ic,
+                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
+                eval.warnings(&problem.items),
+            );
+            if b <= a {
+                breaks = b_breaks;
+                if problem.options.debug_timing {
+                    eprintln!("[spine] band {} kept: {a:?} -> {b:?}", band.key);
+                }
+            } else {
+                for (it, (at, angle)) in problem.items.iter_mut().zip(before) {
+                    it.at = at;
+                    it.angle = angle;
+                }
+                if problem.options.debug_timing {
+                    eprintln!("[spine] band {} rejected: {a:?} vs {b:?}", band.key);
+                }
+            }
+        }
+
+
         let overlaps = body_overlap_count(&problem.items);
         if overlaps > 0 && std::env::var_os("SPINE_DEBUG").is_some() {
             use sch_floorplan::contract::item_rect;

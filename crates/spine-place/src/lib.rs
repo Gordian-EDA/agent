@@ -4,6 +4,7 @@
 //! into chains over a reduced node graph ([`chain`]), then typesets modules and
 //! spines with corpus-mined human conventions. No stochastic search.
 
+pub mod bands;
 pub mod chain;
 pub mod compact;
 pub mod engine;
