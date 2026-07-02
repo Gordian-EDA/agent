@@ -279,9 +279,73 @@ pub fn form_modules(
         }
     }
 
+    // Cluster adoption: a small multi-pin part (4-pin crystal, sensor) whose
+    // SIGNAL nets all resolve to pins of ONE other anchor belongs beside those
+    // pins, like its load caps already do.
+    let mut cluster_adopts: Vec<(usize, usize, Vec<String>)> = Vec::new(); // (item, anchor, anchor pins)
+    {
+        let small_rect = |i: usize| {
+            let sz = items[i].geom.approx_size();
+            sz[0] <= 18.0 && sz[1] <= 18.0
+        };
+        let candidates: Vec<usize> = anchors
+            .iter()
+            .copied()
+            .filter(|&i| {
+                items[i].geom.pins.len() >= 3
+                    && items[i].geom.pins.len() <= 4
+                    && small_rect(i)
+                    && !is_connector_like_part(&items[i].part)
+            })
+            .collect();
+        for i in candidates {
+            let mut host: Option<usize> = None;
+            let mut host_pins: Vec<String> = Vec::new();
+            let mut ok = true;
+            for (_, _, net) in &items[i].pins {
+                let Some(net) = net else { continue };
+                if class(net).is_rail() {
+                    continue;
+                }
+                // Resolve the net to an anchor pin on some OTHER anchor.
+                let found = anchors.iter().copied().filter(|&a| a != i).find_map(|a| {
+                    items[a]
+                        .pins
+                        .iter()
+                        .find(|(_, _, n)| n.as_deref() == Some(net.as_str()))
+                        .map(|(num, _, _)| (a, num.clone()))
+                });
+                match found {
+                    Some((a, pin)) => {
+                        if host.is_some_and(|h| h != a) {
+                            ok = false;
+                            break;
+                        }
+                        host = Some(a);
+                        host_pins.push(pin);
+                    }
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok && let Some(a) = host
+                && !host_pins.is_empty()
+                && items[a].geom.pins.len() > items[i].geom.pins.len()
+            {
+                cluster_adopts.push((i, a, host_pins));
+            }
+        }
+    }
+    let cluster_set: BTreeSet<usize> = cluster_adopts.iter().map(|(i, _, _)| *i).collect();
+
     // ── Seed one module per anchor (adopted stubs are already filtered out).
     let mut mod_of_anchor: BTreeMap<usize, usize> = BTreeMap::new();
     for &a in anchors {
+        if cluster_set.contains(&a) {
+            continue;
+        }
         mod_of_anchor.insert(a, form.modules.len());
         let h = half_size(&items[a], 0.0);
         form.modules.push(ModulePlan {
@@ -761,6 +825,69 @@ pub fn form_modules(
             && form.modules[mod_of_anchor[&a]].sats.is_empty()
         {
             form.strap_items.insert(a);
+        }
+    }
+
+    // ── Cluster adoptions: beside the mean of their host pins, one side out.
+    for (item_i, anchor, host_pins) in cluster_adopts {
+        let Some(&mi) = mod_of_anchor.get(&anchor) else { continue };
+        let pts: Vec<Point2> = host_pins
+            .iter()
+            .map(|p| pin_offset(&items[anchor], p, 0.0))
+            .collect();
+        let mean_y = pts.iter().map(|p| p.y).sum::<f64>() / pts.len() as f64;
+        let side = pin_side_of(anchor, &host_pins[0]);
+        let h = half_size(&items[item_i], 0.0);
+        let (at0, step) = match side {
+            PinSide::West => (
+                Point2::new(pts.iter().map(|p| p.x).fold(f64::MAX, f64::min)
+                    - LEAD * 2.0 - h.x, mean_y),
+                Point2::new(-PITCH, 0.0),
+            ),
+            PinSide::East => (
+                Point2::new(pts.iter().map(|p| p.x).fold(f64::MIN, f64::max)
+                    + LEAD * 2.0 + h.x, mean_y),
+                Point2::new(PITCH, 0.0),
+            ),
+            PinSide::North => (
+                Point2::new(pts.iter().map(|p| p.x).sum::<f64>() / pts.len() as f64,
+                    pts.iter().map(|p| p.y).fold(f64::MAX, f64::min) - LEAD * 2.0 - h.y),
+                Point2::new(0.0, -PITCH),
+            ),
+            PinSide::South => (
+                Point2::new(pts.iter().map(|p| p.x).sum::<f64>() / pts.len() as f64,
+                    pts.iter().map(|p| p.y).fold(f64::MIN, f64::max) + LEAD * 2.0 + h.y),
+                Point2::new(0.0, PITCH),
+            ),
+        };
+        let build = |at: Point2| -> Vec<SatPlace> {
+            vec![SatPlace { item: item_i, offset: Point2::new(snap(at.x), snap(at.y)), angle: 0.0 }]
+        };
+        let run_of = |_at: Point2| (i64::MIN / 4 + item_i as i64, 0.0, 0.0);
+        let module = &mut form.modules[mi];
+        let ok = commit_free_opt(
+            items,
+            claims.entry(mi).or_default(),
+            runs.entry(mi).or_default(),
+            module,
+            build,
+            run_of,
+            at0,
+            step,
+            8,
+            false,
+        );
+        if !ok {
+            // Revert to a standalone module (strap column will collect it).
+            form.strap_items.insert(item_i);
+            mod_of_anchor.insert(item_i, form.modules.len());
+            let h2 = half_size(&items[item_i], 0.0);
+            form.modules.push(ModulePlan {
+                anchor: item_i,
+                sats: Vec::new(),
+                env_min: Point2::new(-h2.x, -h2.y),
+                env_max: Point2::new(h2.x, h2.y),
+            });
         }
     }
 
