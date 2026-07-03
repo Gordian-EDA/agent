@@ -777,7 +777,11 @@ pub fn form_modules(
 
     // ── Tails: the chain part sits beside its anchor pin, pointing outward;
     // the free end keeps its label. A tail that finds no clean spot stays a
-    // free run (two labels beat a force-fit collision).
+    // free run (two labels beat a force-fit collision). A committed tail gives
+    // its free-end JUNCTION a physical home (module, tap position) — the
+    // junction's other legs ladder there in the pass below, turning a column
+    // of labeled islets into one wired divider.
+    let mut tail_home: BTreeMap<String, (usize, Point2, f64)> = BTreeMap::new(); // (module, tap, outward sign)
     for at in attach.iter().filter(|at| matches!(at, Attach::Tail { .. })) {
         let Attach::Tail { chain, anchor, pin, a_near } = at else {
             unreachable!()
@@ -838,6 +842,108 @@ pub fn form_modules(
         );
         if ok {
             form.consumed.insert(*chain, mi);
+            let free_net = if *a_near { &c.nets[1] } else { &c.nets[c.nets.len() - 2] };
+            let outward = match side {
+                PinSide::West => -1.0,
+                PinSide::East => 1.0,
+                _ => 0.0,
+            };
+            if outward != 0.0
+                && let Some(free_pin) = pin_on(item, free_net)
+                && let Some(sat) = form.modules[mi].sats.last()
+            {
+                let f_off = pin_offset(item, &free_pin, sat.angle);
+                tail_home.insert(
+                    free_net.clone(),
+                    (mi, Point2::new(sat.offset.x + f_off.x, sat.offset.y + f_off.y), outward),
+                );
+            }
+        }
+    }
+
+    // ── Junction-adopted legs: a ShuntLeg whose signal end is a junction with
+    // a tail home ladders at the TAP — R3 up to the supply, R5/C9 down to
+    // ground, the human divider — instead of floating as labeled islets.
+    for (ci, c) in g.chains.iter().enumerate() {
+        if c.parts.is_empty()
+            || form.consumed.contains_key(&ci)
+            || c.role(classes) != ChainRole::ShuntLeg
+        {
+            continue;
+        }
+        let (sig_t, a_near, rail_net) = if class(&c.a.net).is_rail() {
+            (&c.b, false, c.a.net.clone())
+        } else {
+            (&c.a, true, c.b.net.clone())
+        };
+        let NodeKind::Junction(jnet) = &g.nodes[sig_t.node] else {
+            continue;
+        };
+        let Some(&(mi, tap_at, outward)) = tail_home.get(jnet) else {
+            continue;
+        };
+        let (mut parts, mut nets) = (c.parts.clone(), c.nets.clone());
+        if !a_near {
+            parts.reverse();
+            nets.reverse();
+        }
+        let up = class(&rail_net) == NetClass::Supply;
+        let dirn = if up { -1.0 } else { 1.0 };
+        let dir = if up { Orient::Up } else { Orient::Down };
+        let y_start = tap_at.y + dirn * LEAD;
+        let build = |at: Point2| -> Vec<SatPlace> {
+            let mut y = y_start;
+            let mut out = Vec::new();
+            for (k, &p) in parts.iter().enumerate() {
+                let item = &items[p];
+                let angle = orient_for(item, &nets[k], dir);
+                let entry = pin_on(item, &nets[k]).unwrap_or_default();
+                let exit = pin_on(item, &nets[k + 1]).unwrap_or_default();
+                let e_off = pin_offset(item, &entry, angle);
+                out.push(SatPlace {
+                    item: p,
+                    offset: Point2::new(snap(at.x - e_off.x), snap(y - e_off.y)),
+                    angle,
+                });
+                y += dirn * (part_span(item, angle, &entry, &exit) + LEAD);
+            }
+            out
+        };
+        let leg_len: f64 = parts
+            .iter()
+            .enumerate()
+            .map(|(k, &p)| {
+                let item = &items[p];
+                let angle = orient_for(item, &nets[k], dir);
+                let entry = pin_on(item, &nets[k]).unwrap_or_default();
+                let exit = pin_on(item, &nets[k + 1]).unwrap_or_default();
+                part_span(item, angle, &entry, &exit) + LEAD
+            })
+            .sum::<f64>()
+            + 5.08;
+        let run_of = |at: Point2| {
+            let (lo, hi) = if up {
+                (y_start - leg_len, tap_at.y)
+            } else {
+                (tap_at.y, y_start + leg_len)
+            };
+            ((snap(at.x) / GRID).round() as i64, lo, hi)
+        };
+        let module = &mut form.modules[mi];
+        let ok = commit_free_opt(
+            items,
+            claims.entry(mi).or_default(),
+            runs.entry(mi).or_default(),
+            module,
+            build,
+            run_of,
+            Point2::new(tap_at.x, 0.0),
+            Point2::new(outward * PITCH, 0.0),
+            8,
+            false,
+        );
+        if ok {
+            form.consumed.insert(ci, mi);
         }
     }
 
