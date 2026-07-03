@@ -124,6 +124,10 @@ enum Attach {
     Ladder { chain: usize, anchor: usize, pin: String, a_near: bool, up: bool },
     /// Vertical run between two pins of the SAME anchor (chain `a` end at `pin_a`).
     Bridge { chain: usize, anchor: usize, pin_a: String, pin_b: String },
+    /// One-part series chain wired at ONE anchor pin; the other end is free
+    /// (labeled). The part sits beside the pin instead of floating as a
+    /// two-label islet. `a_near` = chain terminal `a` is the anchor end.
+    Tail { chain: usize, anchor: usize, pin: String, a_near: bool },
 }
 
 /// The vertical span of a chain part along a leg, entry pin to exit pin.
@@ -268,13 +272,19 @@ pub fn form_modules(
             }
             ChainRole::Series => {
                 let (ra, rb) = (resolve(&c.a), resolve(&c.b));
-                if let (Some((ia, pa)), Some((ib, pb))) = (ra, rb)
-                    && ia == ib
-                    && pa != pb
-                {
-                    attach.push(Attach::Bridge { chain: ci, anchor: ia, pin_a: pa, pin_b: pb });
+                match (ra, rb) {
+                    (Some((ia, pa)), Some((ib, pb))) if ia == ib && pa != pb => {
+                        attach.push(Attach::Bridge { chain: ci, anchor: ia, pin_a: pa, pin_b: pb });
+                    }
+                    (Some((ia, pa)), None) if c.parts.len() == 1 => {
+                        attach.push(Attach::Tail { chain: ci, anchor: ia, pin: pa, a_near: true });
+                    }
+                    (None, Some((ib, pb))) if c.parts.len() == 1 => {
+                        attach.push(Attach::Tail { chain: ci, anchor: ib, pin: pb, a_near: false });
+                    }
+                    // Different anchors: spine content (inter-module chain).
+                    _ => {}
                 }
-                // Different anchors: spine content (inter-module chain).
             }
         }
     }
@@ -375,6 +385,7 @@ pub fn form_modules(
         .map(|at| match at {
             Attach::Ladder { anchor, pin, .. } => (*anchor, pin.clone()),
             Attach::Bridge { anchor, pin_a, .. } => (*anchor, pin_a.clone()),
+            Attach::Tail { anchor, pin, .. } => (*anchor, pin.clone()),
         })
         .chain(attach.iter().filter_map(|at| match at {
             Attach::Bridge { anchor, pin_b, .. } => Some((*anchor, pin_b.clone())),
@@ -749,6 +760,68 @@ pub fn form_modules(
             Point2::new(outward, 0.0),
         );
         form.consumed.insert(*chain, mi);
+    }
+
+    // ── Tails: the chain part sits beside its anchor pin, pointing outward;
+    // the free end keeps its label. A tail that finds no clean spot stays a
+    // free run (two labels beat a force-fit collision).
+    for at in attach.iter().filter(|at| matches!(at, Attach::Tail { .. })) {
+        let Attach::Tail { chain, anchor, pin, a_near } = at else {
+            unreachable!()
+        };
+        let Some(&mi) = mod_of_anchor.get(anchor) else { continue };
+        let c = &g.chains[*chain];
+        let part = c.parts[0];
+        let near_net = if *a_near { &c.nets[0] } else { &c.nets[c.nets.len() - 1] };
+        let pin_at = pin_offset(&items[*anchor], pin, 0.0);
+        let side = pin_side_of(*anchor, pin);
+        let item = &items[part];
+        let (dir, step) = match side {
+            PinSide::East => (Orient::Right, Point2::new(PITCH, 0.0)),
+            PinSide::West => (Orient::Left, Point2::new(-PITCH, 0.0)),
+            PinSide::North => (Orient::Up, Point2::new(0.0, -PITCH)),
+            PinSide::South => (Orient::Down, Point2::new(0.0, PITCH)),
+        };
+        let angle = orient_for(item, near_net, dir);
+        let entry = pin_on(item, near_net).unwrap_or_default();
+        let e_off = pin_offset(item, &entry, angle);
+        let at0 = match side {
+            PinSide::East => Point2::new(pin_at.x + LEAD * 2.0, pin_at.y),
+            PinSide::West => Point2::new(pin_at.x - LEAD * 2.0, pin_at.y),
+            PinSide::North => Point2::new(pin_at.x, pin_at.y - LEAD * 2.0),
+            PinSide::South => Point2::new(pin_at.x, pin_at.y + LEAD * 2.0),
+        };
+        let build = |at: Point2| -> Vec<SatPlace> {
+            vec![SatPlace {
+                item: part,
+                offset: Point2::new(snap(at.x - e_off.x), snap(at.y - e_off.y)),
+                angle,
+            }]
+        };
+        let run_of = |at: Point2| match side {
+            PinSide::East | PinSide::West => {
+                (1_000_000 + (snap(pin_at.y) / GRID).round() as i64,
+                 pin_at.x.min(at.x), pin_at.x.max(at.x))
+            }
+            _ => ((snap(pin_at.x) / GRID).round() as i64,
+                  pin_at.y.min(at.y), pin_at.y.max(at.y)),
+        };
+        let module = &mut form.modules[mi];
+        let ok = commit_free_opt(
+            items,
+            claims.entry(mi).or_default(),
+            runs.entry(mi).or_default(),
+            module,
+            build,
+            run_of,
+            at0,
+            step,
+            6,
+            false,
+        );
+        if ok {
+            form.consumed.insert(*chain, mi);
+        }
     }
 
     // ── Adopted stubs: one part beside its pin, pointing outward, wired short.

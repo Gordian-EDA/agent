@@ -61,6 +61,7 @@ pub fn arrange(
     fold: bool,
     strap_col: bool,
     shelf: bool,
+    bundle_free: &std::collections::BTreeSet<usize>,
 ) -> Vec<Point2> {
     let n_scene = scene.nodes.len();
 
@@ -339,11 +340,13 @@ pub fn arrange(
         let mut free: Vec<usize> = (0..n_scene)
             .filter(|&v| {
                 scene.nodes[v].anchor.is_some()
-                    && !wired.contains(&v)
+                    && (!wired.contains(&v)
+                        || (bundle_free.contains(&v)
+                            && (scene.nodes[v].env_max.y - scene.nodes[v].env_min.y) < 40.0))
                     && !(strap_col && is_strapish(scene, v))
             })
             .collect();
-        if free.len() >= 4 {
+        if free.len() >= 3 {
             let key = |v: usize| {
                 let a = scene.nodes[v].anchor.unwrap_or(0);
                 let r = &items[a].refdes;
@@ -360,10 +363,44 @@ pub fn arrange(
                 .max()
                 .unwrap_or(0)
                 + 1;
-            let ncols = (free.len() as f64).sqrt().ceil() as usize;
-            let rows = free.len().div_ceil(ncols);
-            for (k, &v) in free.iter().enumerate() {
-                layer[v] = base_layer + k / rows;
+            // First-fit-decreasing by HEIGHT into the column count whose packed
+            // block lands nearest a landscape page: mixed-size islands (a tall
+            // header next to a 3-pin sensor) pack tight this way, where a
+            // uniform grid inflates every cell to the largest member.
+            let size = |v: usize| {
+                (
+                    scene.nodes[v].env_max.x - scene.nodes[v].env_min.x,
+                    scene.nodes[v].env_max.y - scene.nodes[v].env_min.y,
+                )
+            };
+            let ffd = |ncols: usize| -> (Vec<Vec<usize>>, f64) {
+                let mut order = free.clone();
+                order.sort_by(|&a, &b| size(b).1.total_cmp(&size(a).1).then(a.cmp(&b)));
+                let mut bins: Vec<(f64, Vec<usize>)> = vec![(0.0, Vec::new()); ncols];
+                for v in order {
+                    let bin = bins
+                        .iter_mut()
+                        .min_by(|a, b| a.0.total_cmp(&b.0))
+                        .expect("ncols >= 1");
+                    bin.0 += size(v).1 + 7.62;
+                    bin.1.push(v);
+                }
+                let w: f64 = bins
+                    .iter()
+                    .map(|(_, m)| m.iter().map(|&v| size(v).0).fold(0.0, f64::max) + 7.62)
+                    .sum();
+                let h = bins.iter().map(|(h, _)| *h).fold(1.0, f64::max);
+                (bins.into_iter().map(|(_, m)| m).collect(), w / h)
+            };
+            let ncols = (1..=free.len())
+                .min_by(|&a, &b| {
+                    (ffd(a).1 - 1.4).abs().total_cmp(&(ffd(b).1 - 1.4).abs())
+                })
+                .unwrap_or(1);
+            for (col, members) in ffd(ncols).0.into_iter().enumerate() {
+                for v in members {
+                    layer[v] = base_layer + col;
+                }
             }
         }
     }
@@ -472,7 +509,7 @@ pub fn arrange(
         }
     }
     // Strap column members order by refdes (numeric-aware), not barycenter.
-    {
+    if !cols.is_empty() {
         let strap_l = cols.len() - 1;
         let is_strap_col = strap_col
             && cols[strap_l]

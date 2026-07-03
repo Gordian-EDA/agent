@@ -8,6 +8,11 @@
 //! Usage:
 //!   cargo run --release -p gordian-core --example relayout -- \
 //!       <file.kicad_sch|file.yaml> [--engine anneal|cluster] [--out DIR] [--tag NAME]
+//!       [--compose]
+//!
+//! `--compose` lays out each authored block independently and tiles them onto one
+//! sheet as framed regions (the real multi-block commit path); the engine comes
+//! from SCH_ENGINE, matching `compose_design`.
 
 use std::path::PathBuf;
 
@@ -45,6 +50,9 @@ fn main() -> anyhow::Result<()> {
         engine_name = v;
     }
     let tag = take("--tag", &mut args);
+    let compose = args.iter().position(|a| a == "--compose").map(|p| {
+        args.remove(p);
+    });
     std::fs::create_dir_all(&out_dir)?;
 
     let path = PathBuf::from(args.first().expect("need an input file"));
@@ -73,8 +81,14 @@ fn main() -> anyhow::Result<()> {
     })?;
 
     let t0 = std::time::Instant::now();
-    let emit = sch_floorplan::floorplan::emit_strategy(&env, &design, engine_of(&engine_name), None)
-        .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
+    let emit = if compose.is_some() {
+        // SAFETY: single-threaded example setup; compose_design reads SCH_ENGINE.
+        unsafe { std::env::set_var("SCH_ENGINE", &engine_name) };
+        gordian_core::multisheet::compose_design(&env, &design)?
+    } else {
+        sch_floorplan::floorplan::emit_strategy(&env, &design, engine_of(&engine_name), None)
+            .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?
+    };
     let secs = t0.elapsed().as_secs_f64();
 
     let parts: usize = design.blocks.values().map(|b| b.components.len()).sum();

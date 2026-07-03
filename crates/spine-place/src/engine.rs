@@ -139,12 +139,61 @@ impl PlacementEngine for SpinePlace {
         // stagger. Returns the metrics the fold A/B decides on.
         let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
         let eval = RoutedEvaluator::new(&realizer);
+        // Bundle-freed nodes: every wired chain of the node rides a BUNDLE (>=4
+        // parallel nets between one item pair — always realized as labels), so
+        // the node is effectively free for shelf packing, whatever its spans.
+        let bundle_free: std::collections::BTreeSet<usize> = {
+            let mut pair_count: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+            for (net, pins) in problem_inc.iter() {
+                if classes.get(net).is_some_and(|c| c.is_rail()) || pins.len() != 2 {
+                    continue;
+                }
+                let (a, b) = (pins[0].0, pins[1].0);
+                if a != b {
+                    *pair_count.entry((a.min(b), a.max(b))).or_default() += 1;
+                }
+            }
+            // A pair is label-bound when it is a BUNDLE (>=4 parallel nets) or
+            // when both sides are connectors — a connector panel interlinks by
+            // labels by convention, never by drawn harness wires.
+            let bundled_pair = |a: usize, b: usize| {
+                pair_count.get(&(a.min(b), a.max(b))).copied().unwrap_or(0) >= 4
+                    || (sch_place::netclass::is_connector_like(&problem.items[a].part)
+                        && sch_place::netclass::is_connector_like(&problem.items[b].part))
+            };
+            let node_anchor_item = |v: usize| scene.nodes[v].anchor;
+            (0..scene.nodes.len())
+                .filter(|&v| {
+                    let mut any = false;
+                    for (ci, (ea, eb)) in scene.ends.iter() {
+                        let (Some(x), Some(y)) = (ea, eb) else { continue };
+                        if *x != v && *y != v {
+                            continue;
+                        }
+                        any = true;
+                        let c = &g.chains[*ci];
+                        if !c.parts.is_empty() {
+                            return false;
+                        }
+                        let (Some(ia), Some(ib)) = (node_anchor_item(*x), node_anchor_item(*y))
+                        else {
+                            return false;
+                        };
+                        if !bundled_pair(ia, ib) {
+                            return false;
+                        }
+                    }
+                    any
+                })
+                .collect()
+        };
+
         let mut run_variant = |items: &mut Vec<sch_place::item::Item>,
                                fold: bool,
                                strap_col: bool,
                                shelf: bool|
          -> usize {
-            let origins = arrange(items, &g, &scene, &dirs, fold, strap_col, shelf);
+            let origins = arrange(items, &g, &scene, &dirs, fold, strap_col, shelf, &bundle_free);
             let mut placed = vec![false; items.len()];
             let commit = |origins: &[Point2],
                           items: &mut [sch_place::item::Item],
@@ -227,6 +276,9 @@ impl PlacementEngine for SpinePlace {
             breaks
         };
 
+        // Shape-weighted sheet area (cm², landscape-1.4 target): the tie-break
+        // that lets a page-shaped layout beat an equally-clean BANNER — raw
+        // area always prefers the banner and shape never wins.
         let sheet_area = |items: &[sch_place::item::Item]| -> i64 {
             use sch_floorplan::contract::item_rect;
             let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
@@ -237,7 +289,10 @@ impl PlacementEngine for SpinePlace {
                 hi[0] = hi[0].max(r.max_x);
                 hi[1] = hi[1].max(r.max_y);
             }
-            (((hi[0] - lo[0]) * (hi[1] - lo[1])) / 100.0) as i64
+            let (w, h) = ((hi[0] - lo[0]).max(1.0), (hi[1] - lo[1]).max(1.0));
+            let aspect = w / h;
+            let shape = 1.0 + (aspect / 1.4 - 1.0).abs().min(3.0);
+            ((w * h * shape) / 100.0) as i64
         };
         let mut strap_on = false;
         let mut shelf_on = false;

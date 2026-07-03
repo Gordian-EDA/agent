@@ -73,11 +73,18 @@ fn block_nets(b: &Block) -> HashSet<String> {
 /// One sheet group: a block name and its single authored block body.
 pub type SheetGroup = (String, Vec<(String, Block)>);
 
-/// Non-empty authored blocks, one group each, in declaration order.
+/// Non-empty authored blocks, one group each, in declaration order. A block of
+/// ONLY `power:` symbols declares rails, not layout — it would tile as an empty
+/// frame, so it joins no group (the symbols realize at their usage sites).
 pub fn authored_groups(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
     blocks
         .iter()
-        .filter(|(_, block)| !block.components.is_empty())
+        .filter(|(_, block)| {
+            block
+                .components
+                .values()
+                .any(|c| !c.part.starts_with("power:"))
+        })
         .map(|(name, block)| (name.clone(), vec![(name.clone(), block.clone())]))
         .collect()
 }

@@ -63,15 +63,14 @@ fn local_rail_nets(design: &Design) -> BTreeSet<String> {
             }
         }
     }
-    // Distribute only GROUND nets (the original intent: the many ground RETURNS are what
-    // tangle a dense board into long rails). Keep POSITIVE supplies as a single rail so their
-    // decoupling caps hang off it in a tidy ROW (as on the 9-scoring idiom-stm32) instead of
-    // every cap getting its own local symbol and SCATTERING (the #1 critic defect —
-    // "decoupling caps parked in empty space"). Env-gated to restore the old all-rails behaviour.
-    let all = std::env::var("DISTRIBUTE_ALL_RAILS").is_ok();
+    // ≥2 authored symbols on a net = the author drew per-use arrows (the human
+    // convention on dense sheets); ONE symbol = one spanning rail, keeping
+    // decoupling caps in a tidy row (the 9-scoring idiom-stm32 declares each
+    // positive rail once). Every checked-in fixture declares positives once, so
+    // this is authored-intent, not a behaviour change for them.
     count
         .into_iter()
-        .filter(|(net, n)| *n >= 2 && (all || is_ground(net)))
+        .filter(|(_, n)| *n >= 2)
         .map(|(net, _)| net)
         .collect()
 }
