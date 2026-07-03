@@ -186,6 +186,7 @@ pub(crate) fn wire(
             // the label actually lands (clear of the IC's long pin-name text).
             let (side, at) = ic_port_exit_override(env, w, items, inc, net, eps, side)
                 .unwrap_or((side, port_exit_point(eps, side)));
+            let at = nudge_port_exit(&scene, at, side, net);
             scene
                 .label_solids
                 .push((port_label_obstacle(at, side, net), net.clone()));
@@ -290,6 +291,7 @@ pub(crate) fn route_signal(
         let at = ic_exit
             .map(|(_, at)| at)
             .unwrap_or_else(|| port_exit_point(eps, side));
+        let at = nudge_port_exit(scene, at, side, net);
         terms.push((at, None));
         terms.len() - 1
     });
@@ -918,6 +920,48 @@ pub(crate) fn ic_port_exit_override(
 /// (a wire drawn across someone else's edge tag). Directional: the pennant + text
 /// extend OUTWARD from the exit anchor along `side`; `BACK` covers the connecting
 /// vertex that reaches slightly back toward the wire. `HALF` is the text half-height.
+/// Slide a pennant's exit outward along its side until its box clears every
+/// body solid: the exit-extent heuristic measures the NET's pins, so it can
+/// land the pennant inside an unrelated neighbour's body. No overlap, no move
+/// — clean sheets stay byte-identical.
+pub(crate) fn nudge_port_exit(
+    scene: &sch_io::wire::RouteScene,
+    mut at: [f64; 2],
+    side: Side,
+    net: &str,
+) -> [f64; 2] {
+    // A candidate is bad if the pennant box sits on a BODY, or if its anchor
+    // would touch a FOREIGN net's wire — a global label's anchor point on a
+    // wire JOINS that net (the preamp breaks=2 regression).
+    let bad = |at: [f64; 2]| {
+        let r = port_label_obstacle(at, side, net);
+        solids_hit(&scene.solids, &r)
+            || scene.segments.iter().any(|seg| {
+                seg.net != net && seg.segment.dist2_to_point(at.into()) < 0.01
+            })
+    };
+    if !bad(at) {
+        return at;
+    }
+    let start = at;
+    for _ in 0..10 {
+        match side {
+            Side::Right => at[0] += 2.54,
+            Side::Left => at[0] -= 2.54,
+            Side::Top => at[1] -= 2.54,
+            Side::Bottom => at[1] += 2.54,
+        }
+        if !bad(at) {
+            return at;
+        }
+    }
+    start
+}
+
+fn solids_hit(solids: &[::geom::Rect], r: &::geom::Rect) -> bool {
+    solids.iter().any(|s| s.overlaps(r))
+}
+
 pub(crate) fn port_label_obstacle(at: [f64; 2], side: Side, net: &str) -> ::geom::Rect {
     let w = crate::label::text_width(net) + 2.54;
     const BACK: f64 = geom::GRID_50_MIL.pitch();
