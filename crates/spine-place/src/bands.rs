@@ -155,11 +155,26 @@ pub fn apply(items: &mut [Item], scene: &Scene, band: &BandPlan) {
     let cell_w = rects.iter().map(|r| r.width()).fold(0.0, f64::max) + PITCH_GAP;
     let cell_h = rects.iter().map(|r| r.height()).fold(0.0, f64::max) + PITCH_GAP;
 
-    let mut xs: Vec<f64> = rects.iter().map(|r| r.min_x).collect();
-    let mut ys: Vec<f64> = rects.iter().map(|r| r.min_y).collect();
-    xs.sort_by(|a, b| a.total_cmp(b));
-    ys.sort_by(|a, b| a.total_cmp(b));
-    let (mut bx, mut by) = (snap(xs[xs.len() / 2]), snap(ys[ys.len() / 2]));
+    // Mechanical bands live in the sheet's bottom-right CORNER (the human
+    // convention for fiducials and mounting holes); everything else anchors at
+    // its members' median so it stays in its neighbourhood.
+    let (mut bx, mut by) = if band.key == "mount" {
+        let (mut mx, mut my) = (f64::MIN, f64::MIN);
+        for o in &others {
+            mx = mx.max(o.max_x);
+            my = my.max(o.max_y);
+        }
+        (
+            snap(mx - cols as f64 * cell_w + PITCH_GAP),
+            snap(my - rows as f64 * cell_h + PITCH_GAP),
+        )
+    } else {
+        let mut xs: Vec<f64> = rects.iter().map(|r| r.min_x).collect();
+        let mut ys: Vec<f64> = rects.iter().map(|r| r.min_y).collect();
+        xs.sort_by(|a, b| a.total_cmp(b));
+        ys.sort_by(|a, b| a.total_cmp(b));
+        (snap(xs[xs.len() / 2]), snap(ys[ys.len() / 2]))
+    };
 
     // Slide the whole formation in half-cell steps until its box clears every
     // non-member body (right, then down, alternating outward).
