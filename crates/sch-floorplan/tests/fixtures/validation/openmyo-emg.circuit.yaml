@@ -1,0 +1,286 @@
+version: 1
+name: openmyo_emg
+blocks:
+  power_supply:
+    components:
+      PWR1: {part: "power:+3V3", pins: {"1": "+3V3"}}
+      PWR2: {part: "power:+9V", pins: {"1": "+9V"}}
+      PWR3: {part: "power:+9V", pins: {"1": "+9V"}}
+      PWR4: {part: "power:-9V", pins: {"1": "-9V"}}
+      PWR5: {part: "power:-9V", pins: {"1": "-9V"}}
+      PWR6: {part: "power:GND", pins: {"1": GND}}
+      PWR7: {part: "power:GND", pins: {"1": GND}}
+      J1:
+        part: "Connector:Conn_01x05_Pin"
+        pins:
+          "1": "-9V"
+          "2": GND
+          "3": "+9V"
+          "4": GND
+          "5": "+3V3"
+      C1:
+        part: "Device:C"
+        value: "10u"
+        pins:
+          "1": "+9V"
+          "2": GND
+      C2:
+        part: "Device:C"
+        value: "0.1u"
+        pins:
+          "1": "+9V"
+          "2": GND
+      C6:
+        part: "Device:C"
+        value: "0.1u"
+        pins:
+          "1": "-9V"
+          "2": GND
+      C7:
+        part: "Device:C"
+        value: "10u"
+        pins:
+          "1": "-9V"
+          "2": GND
+      H1:
+        part: "Mechanical:MountingHole_Pad"
+        pins:
+          "1": GND
+  inputs:
+    components:
+      PWR8: {part: "power:GND", pins: {"1": GND}}
+      J2:
+        part: "Connector:Conn_01x03_Pin"
+        pins:
+          "1": IN_N
+          "2": IN_P
+          "3": GND
+  outputs:
+    components:
+      J3:
+        part: "Connector:Conn_01x05_Pin"
+        pins:
+          "1": PRE_AMP
+          "2": HPF
+          "3": LPF
+          "4": OUT
+          "5": DCO
+  dcoffset:
+    components:
+      PWR9: {part: "power:+3V3", pins: {"1": "+3V3"}}
+      PWR10: {part: "power:GND", pins: {"1": GND}}
+      C14:
+        part: "Device:C"
+        value: "0.1u"
+        pins:
+          "1": OUT
+          "2": DCO
+      R9:
+        part: "Device:R"
+        value: "10K"
+        pins:
+          "1": "+3V3"
+          "2": DCO
+      R10:
+        part: "Device:R"
+        value: "10K"
+        pins:
+          "1": DCO
+          "2": DCO_POT
+      RV1:
+        part: "Device:R_Potentiometer"
+        pins:
+          "1": DCO_POT
+          "2": GND
+  preamp:
+    components:
+      PWR11: {part: "power:+9V", pins: {"1": "+9V"}}
+      PWR12: {part: "power:+9V", pins: {"1": "+9V"}}
+      PWR13: {part: "power:-9V", pins: {"1": "-9V"}}
+      PWR14: {part: "power:-9V", pins: {"1": "-9V"}}
+      PWR15: {part: "power:GND", pins: {"1": GND}}
+      PWR16: {part: "power:GND", pins: {"1": GND}}
+      U2:
+        part: "Amplifier_Instrumentation:AD620"
+        pins:
+          "1": RG_B
+          "2": INA_N
+          "3": INA_P
+          "4": "-9V"
+          "5": GND
+          "6": PRE_AMP
+          "7": "+9V"
+          "8": RG_A
+      R1:
+        part: "Device:R"
+        value: "1K"
+        pins:
+          "1": IN_N
+          "2": INA_N
+      R2:
+        part: "Device:R"
+        value: "1K"
+        pins:
+          "1": IN_P
+          "2": INA_P
+      R3:
+        part: "Device:R"
+        value: "1K"
+        pins:
+          "1": RG_A
+          "2": RG_B
+      C3:
+        part: "Device:C"
+        value: "1n"
+        pins:
+          "1": GND
+          "2": INA_N
+      C4:
+        part: "Device:C"
+        value: "10n"
+        pins:
+          "1": INA_N
+          "2": INA_P
+      C5:
+        part: "Device:C"
+        value: "1n"
+        pins:
+          "1": INA_P
+          "2": GND
+      C8:
+        part: "Device:C"
+        value: "10u"
+        pins:
+          "1": "+9V"
+          "2": GND
+      C9:
+        part: "Device:C"
+        value: "10u"
+        pins:
+          "1": "-9V"
+          "2": GND
+      C10:
+        part: "Device:C"
+        value: "0.1u"
+        pins:
+          "1": "+9V"
+          "2": GND
+      C11:
+        part: "Device:C"
+        value: "0.1u"
+        pins:
+          "1": "-9V"
+          "2": GND
+  hpf_lpf:
+    components:
+      PWR17: {part: "power:+9V", pins: {"1": "+9V"}}
+      PWR18: {part: "power:-9V", pins: {"1": "-9V"}}
+      PWR19: {part: "power:GND", pins: {"1": GND}}
+      PWR20: {part: "power:GND", pins: {"1": GND}}
+      U1:
+        part: "Amplifier_Operational:LM324"
+        pins:
+          "1": HPF
+          "2": FLT_A_N
+          "3": FLT_A_P
+          "4": "+9V"
+          "8": LPF
+          "9": FLT_C_N
+          "10": FLT_C_P
+          "11": "-9V"
+          "12": LPF
+          "13": FB_D_N
+          "14": OUT
+      C12:
+        part: "Device:C"
+        value: "0.1u"
+        pins:
+          "1": PRE_AMP
+          "2": HPF_TAP
+      C13:
+        part: "Device:C"
+        value: "0.1u"
+        pins:
+          "1": HPF_TAP
+          "2": FLT_A_P
+      R4:
+        part: "Device:R"
+        value: "56K"
+        pins:
+          "1": FLT_A_P
+          "2": GND
+      R5:
+        part: "Device:R"
+        value: "10K"
+        pins:
+          "1": FLT_A_N
+          "2": GND
+      R6:
+        part: "Device:R"
+        value: "56K"
+        pins:
+          "1": HPF_TAP
+          "2": HPF
+      R7:
+        part: "Device:R"
+        value: "6.2K"
+        pins:
+          "1": FLT_A_N
+          "2": HPF
+      R8:
+        part: "Device:R"
+        value: "2.7K"
+        pins:
+          "1": HPF
+          "2": LPF_TAP
+      R11:
+        part: "Device:R"
+        value: "2.7K"
+        pins:
+          "1": LPF_TAP
+          "2": FLT_C_P
+      C15:
+        part: "Device:C"
+        value: "0.1u"
+        pins:
+          "1": GND
+          "2": FLT_C_P
+      C16:
+        part: "Device:C"
+        value: "0.1u"
+        pins:
+          "1": LPF_TAP
+          "2": LPF
+      R12:
+        part: "Device:R"
+        value: "10K"
+        pins:
+          "1": GND
+          "2": FLT_C_N
+      R13:
+        part: "Device:R"
+        value: "6.2K"
+        pins:
+          "1": FLT_C_N
+          "2": LPF
+  postamp:
+    components:
+      PWR21: {part: "power:GND", pins: {"1": GND}}
+      R14:
+        part: "Device:R"
+        value: "2K"
+        pins:
+          "1": FB_D_N
+          "2": GND
+      RV2:
+        part: "Device:R_Potentiometer"
+        pins:
+          "1": FB_D_N
+          "2": OUT_POT
+          "3": OUT_POT
+      R15:
+        part: "Device:R"
+        value: "10K"
+        pins:
+          "1": OUT
+          "2": OUT_POT
