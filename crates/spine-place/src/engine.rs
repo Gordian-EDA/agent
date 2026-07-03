@@ -56,6 +56,65 @@ impl PlacementEngine for SpinePlace {
             return anneal_place::Anneal.place(env, design, problem, Some(authored));
         }
         let ir = ir.unwrap_or_else(|| infer_ir(env, design));
+
+        // Two-pass label fixpoint: pass 1 reserves optimistically (wire-first).
+        // If warnings remain, pass 2 re-forms with the nets that ACTUALLY
+        // realized as labels reserving their full names — breaking the
+        // reserve→spread→label fixpoint (designed into form_modules, wired
+        // here). Keep whichever pass measures better.
+        let out1 = self.place_pass(env, design, problem, ir.clone(), None);
+        if out1.result.warnings == 0 || out1.result.engine != "spine" {
+            return out1;
+        }
+        let classes = classify_nets(&problem.inc, &ir);
+        let labeled =
+            crate::compact::labeled_nets(&problem.items, &problem.inc, &classes);
+        if labeled.is_empty() {
+            return out1;
+        }
+        let items1: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
+        let out2 = self.place_pass(env, design, problem, ir, Some(labeled));
+        let key = |o: &PlacementOutput| {
+            (
+                o.result.truthfulness_breaks,
+                o.result.warnings,
+                o.result.crossings.total(),
+            )
+        };
+        if out2.result.engine == "spine" && key(&out2) < key(&out1) {
+            if problem.options.debug_timing {
+                eprintln!(
+                    "[spine] label pass-2 kept: warn {} -> {}",
+                    out1.result.warnings, out2.result.warnings
+                );
+            }
+            out2
+        } else {
+            for (it, (at, angle)) in problem.items.iter_mut().zip(items1) {
+                it.at = at;
+                it.angle = angle;
+            }
+            if problem.options.debug_timing {
+                eprintln!(
+                    "[spine] label pass-2 rejected: {:?} vs {:?}",
+                    key(&out1),
+                    key(&out2)
+                );
+            }
+            out1
+        }
+    }
+}
+
+impl SpinePlace {
+    fn place_pass(
+        &self,
+        env: &KicadEnv,
+        design: &Design,
+        problem: &mut SchematicPlaceProblem,
+        ir: LayoutIr,
+        labeled: Option<std::collections::BTreeSet<String>>,
+    ) -> PlacementOutput {
         let t0 = std::time::Instant::now();
 
         // ── Parse: net classes, chain contraction, anchor set.
@@ -93,7 +152,7 @@ impl PlacementEngine for SpinePlace {
             &classes,
             &g,
             &anchors,
-            None,
+            labeled.as_ref(),
             &port_nets,
         );
         let debug = std::env::var_os("SPINE_DEBUG").is_some();
@@ -141,7 +200,7 @@ impl PlacementEngine for SpinePlace {
                 );
             }
         }
-        let scene = build_scene(&problem.items, &g, form, &classes);
+        let scene = build_scene(&problem.items, &g, form, &classes, labeled.as_ref());
 
         // One full placement variant: arrange (folded or not), commit, orphan
         // sweep, safety passes, truthfulness self-check with collinearity

@@ -60,11 +60,14 @@ pub struct Scene {
 
 /// Typeset one free chain as a run: series chains run horizontally (in-line
 /// parts, corpus law), rail-touching chains run vertically (ladder). Offsets are
-/// relative to the FIRST pin endpoint of the run (the node origin).
+/// relative to the FIRST pin endpoint of the run (the node origin). Outer nets
+/// known to LABEL (pass-2 knowledge) extend the envelope by their text width so
+/// neighbours never sit on the pennant.
 fn typeset_chain_run(
     items: &[Item],
     chain: &Chain,
     classes: &BTreeMap<String, NetClass>,
+    labeled: Option<&std::collections::BTreeSet<String>>,
 ) -> SceneNode {
     let vertical = chain.role(classes) != ChainRole::Series;
     let mut places = Vec::new();
@@ -109,6 +112,28 @@ fn typeset_chain_run(
         strap: false,
     };
     envelope(items, &mut node);
+    if let Some(labeled) = labeled {
+        for (net, at_start) in [
+            (&chain.nets[0], true),
+            (&chain.nets[chain.nets.len() - 1], false),
+        ] {
+            if !labeled.contains(net.as_str()) {
+                continue;
+            }
+            let text = 2.54 + 1.4 * net.chars().count() as f64;
+            if vertical {
+                if at_start {
+                    node.env_min.y -= text.min(12.7);
+                } else {
+                    node.env_max.y += text.min(12.7);
+                }
+            } else if at_start {
+                node.env_min.x -= text;
+            } else {
+                node.env_max.x += text;
+            }
+        }
+    }
     node
 }
 
@@ -135,6 +160,7 @@ pub fn build_scene(
     g: &Reduced,
     form: ModuleForm,
     classes: &BTreeMap<String, NetClass>,
+    labeled: Option<&std::collections::BTreeSet<String>>,
 ) -> Scene {
     let mut scene = Scene::default();
 
@@ -168,7 +194,7 @@ pub fn build_scene(
             continue;
         }
         run_of_chain.insert(ci, scene.nodes.len());
-        scene.nodes.push(typeset_chain_run(items, c, classes));
+        scene.nodes.push(typeset_chain_run(items, c, classes, labeled));
     }
 
     // Terminal → scene node resolution + port registration.
