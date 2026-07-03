@@ -726,6 +726,18 @@ pub fn form_modules(
         })
         .collect();
 
+    // How many deferred legs each tail-claimed junction is waiting to hang:
+    // the tail leaves that much extra wire between pin and part so the legs'
+    // taps land ON the wire (an off-wire tap forces a labeled stub).
+    let mut deferred_legs: BTreeMap<&str, usize> = BTreeMap::new();
+    for at in &attach {
+        if let Attach::Ladder { sig_net, .. } = at
+            && tail_claimed.contains(sig_net.as_str())
+        {
+            *deferred_legs.entry(sig_net.as_str()).or_default() += 1;
+        }
+    }
+
     let ladder_order: Vec<&Attach> = {
         let mut v: Vec<&Attach> = attach
             .iter()
@@ -878,11 +890,16 @@ pub fn form_modules(
             if pick(cand) { cand } else { flipped }
         };
         let e_off = pin_offset(item, &entry, angle);
+        let near_gap = LEAD * 2.0
+            + via_junction
+                .as_ref()
+                .and_then(|j: &String| deferred_legs.get(j.as_str()))
+                .map_or(0.0, |&n| n as f64 * 12.7);
         let at0 = match side {
-            PinSide::East => Point2::new(pin_at.x + LEAD * 2.0, pin_at.y),
-            PinSide::West => Point2::new(pin_at.x - LEAD * 2.0, pin_at.y),
-            PinSide::North => Point2::new(pin_at.x, pin_at.y - LEAD * 2.0),
-            PinSide::South => Point2::new(pin_at.x, pin_at.y + LEAD * 2.0),
+            PinSide::East => Point2::new(pin_at.x + near_gap, pin_at.y),
+            PinSide::West => Point2::new(pin_at.x - near_gap, pin_at.y),
+            PinSide::North => Point2::new(pin_at.x, pin_at.y - near_gap),
+            PinSide::South => Point2::new(pin_at.x, pin_at.y + near_gap),
         };
         let build = |at: Point2| -> Vec<SatPlace> {
             vec![SatPlace {
@@ -1013,7 +1030,14 @@ pub fn form_modules(
             let far_flow = match &g.nodes[far_t.node] {
                 NodeKind::Part(_) => true,
                 NodeKind::Junction(_) => {
-                    matches!(junction_pin.get(&far_t.net), Some(Some(_)))
+                    let fanout = g
+                        .chains
+                        .iter()
+                        .filter(|cc| cc.a.node == far_t.node || cc.b.node == far_t.node)
+                        .count();
+                    // A label-fanout junction pennants no matter where its
+                    // pins sit — chaining onto it loses nothing.
+                    fanout < 5 && matches!(junction_pin.get(&far_t.net), Some(Some(_)))
                 }
                 NodeKind::Rail(_) => true,
             };
