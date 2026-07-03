@@ -497,7 +497,8 @@ pub fn form_modules(
             let certain = fanout >= 3 || bundled || connectorish;
             let predicted = labeled.is_some_and(|set| set.contains(net.as_str()));
             let text = if is_rail {
-                7.62
+                // Long rail names (+3V3A) outgrow the one-size glyph strip.
+                7.62_f64.max(2.0 + 1.4 * net.chars().count() as f64)
             } else if certain || predicted {
                 2.54 + 1.4 * net.chars().count() as f64
             } else {
@@ -1476,6 +1477,7 @@ pub fn form_modules(
         let module_anchor = form.modules[*mi].anchor;
         let anchor_half = half_size(&items[module_anchor], 0.0);
         // Per-cap orientation (supply pin up) computed once, in chain order.
+        let mut rail_chars = 0usize;
         let caps: Vec<(usize, f64)> = chains
             .iter()
             .map(|&ci| {
@@ -1486,9 +1488,13 @@ pub fn form_modules(
                 } else {
                     c.nets.last().unwrap().clone()
                 };
+                rail_chars = rail_chars.max(supply_net.chars().count());
                 (p, orient_for(&items[p], &supply_net, Orient::Down))
             })
             .collect();
+        // A long rail name (+3V3A) outgrows the human 9-column pitch: widen so
+        // the glyph's value text clears the neighbour cap's field.
+        let cap_pitch = CAP_PITCH.max(2.54 + 1.4 * rail_chars as f64 + 2.54);
         let h = half_size(&items[caps[0].0], caps[0].1);
         // A tall anchor (MCU) hosts a narrow bank down its right flank; a wide
         // one (regulator) a row along its top-right. The grid is rigid either
@@ -1498,7 +1504,9 @@ pub fn form_modules(
         } else {
             caps.len().clamp(1, 4)
         };
-        let row_h = h.y * 2.0 + LEAD;
+        // Row gap carries the rail glyph plus its VALUE text (a long +3V3A
+        // name collides with the next row's refdes at a bare lead).
+        let row_h = h.y * 2.0 + LEAD + if rail_chars >= 4 { 2.54 } else { 0.0 };
         let y0 = -anchor_half.y + h.y;
         let x0 = anchor_half.x + LEAD + h.x;
         let build = |at: Point2| -> Vec<SatPlace> {
@@ -1507,7 +1515,7 @@ pub fn form_modules(
                 .map(|(k, &(p, angle))| SatPlace {
                     item: p,
                     offset: Point2::new(
-                        snap(at.x + (k % per_row) as f64 * CAP_PITCH),
+                        snap(at.x + (k % per_row) as f64 * cap_pitch),
                         snap(at.y + (k / per_row) as f64 * row_h),
                     ),
                     angle,

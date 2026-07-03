@@ -12,7 +12,7 @@ blocks:
         part: "Device:Polyfuse_Small"
         value: "500mA"
         pins:
-          "1": P__12
+          "1": "+12V"
           "2": N_Q1_D
       Q1:
         part: "Transistor_FET:AO3401A"
@@ -304,7 +304,7 @@ blocks:
       J1:
         part: "Connector:Screw_Terminal_01x02"
         pins:
-          "1": P__12
+          "1": "+12V"
           "2": GND
       J2:
         part: "Connector:USB_B_Micro"
