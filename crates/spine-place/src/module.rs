@@ -803,8 +803,28 @@ pub fn form_modules(
             PinSide::North => (Orient::Up, Point2::new(0.0, -PITCH)),
             PinSide::South => (Orient::Down, Point2::new(0.0, PITCH)),
         };
-        let angle = orient_for(item, near_net, dir);
         let entry = pin_on(item, near_net).unwrap_or_default();
+        let free_net_for_angle =
+            if *a_near { &c.nets[1] } else { &c.nets[c.nets.len() - 2] };
+        let free_pin_for_angle = pin_on(item, free_net_for_angle).unwrap_or_default();
+        // Pick the rotation whose NEAR pin actually faces the anchor —
+        // orient_for infers from pins-Vec order, which need not match the
+        // geometry (the flipped-R9 bug: wire over the body, label in the gap).
+        let angle = {
+            let cand = orient_for(item, near_net, dir);
+            let flipped = (cand + 180.0).rem_euclid(360.0);
+            let pick = |a: f64| {
+                let n = pin_offset(item, &entry, a);
+                let f = pin_offset(item, &free_pin_for_angle, a);
+                match side {
+                    PinSide::West => n.x >= f.x,
+                    PinSide::East => n.x <= f.x,
+                    PinSide::North => n.y >= f.y,
+                    PinSide::South => n.y <= f.y,
+                }
+            };
+            if pick(cand) { cand } else { flipped }
+        };
         let e_off = pin_offset(item, &entry, angle);
         let at0 = match side {
             PinSide::East => Point2::new(pin_at.x + LEAD * 2.0, pin_at.y),
@@ -843,6 +863,32 @@ pub fn form_modules(
         if ok {
             form.consumed.insert(*chain, mi);
             let free_net = if *a_near { &c.nets[1] } else { &c.nets[c.nets.len() - 2] };
+            // A PORT free end carries its label for certain: reserve the text
+            // footprint (envelope + claims) or the neighbouring module lands
+            // on it.
+            if port_nets.contains(free_net.as_str())
+                && let Some(free_pin) = pin_on(item, free_net)
+                && let Some(sat) = form.modules[mi].sats.last()
+            {
+                let f = pin_offset(item, &free_pin, sat.angle);
+                let (fx, fy) = (sat.offset.x + f.x, sat.offset.y + f.y);
+                let text = 2.54 + 1.4 * free_net.chars().count() as f64;
+                let dir = match side {
+                    PinSide::West => -1.0,
+                    PinSide::East => 1.0,
+                    _ => 0.0,
+                };
+                if dir != 0.0 {
+                    let r = geom::Rect::new(
+                        fx + (dir * text).min(0.0),
+                        fy - 2.54,
+                        fx + (dir * text).max(0.0),
+                        fy + 2.54,
+                    );
+                    claims.entry(mi).or_default().push(r);
+                    label_boxes.entry(mi).or_default().push(r);
+                }
+            }
             let outward = match side {
                 PinSide::West => -1.0,
                 PinSide::East => 1.0,

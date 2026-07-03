@@ -102,6 +102,11 @@ fn main() -> anyhow::Result<()> {
     let png_out = out_dir.join(format!("{label}.png"));
     std::fs::write(&png_out, png)?;
 
+    if std::env::var_os("WARN_TEXT").is_some() {
+        for w in &emit.layout_warnings {
+            eprintln!("  [warn] {w}");
+        }
+    }
     println!(
         "{label:<28} parts={parts:>3} warn={:>3} body={:>3} ic={:>3} xing={:>3} t={secs:>5.2}s -> {}",
         emit.layout_warnings.len(),

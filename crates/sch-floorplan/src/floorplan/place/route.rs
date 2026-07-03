@@ -799,12 +799,22 @@ pub(crate) fn dir_to_side(dir: Dir) -> Side {
     }
 }
 
-/// The sheet edge a port net actually exits toward. A SINGLE-pin port follows its
-/// pin's real direction (geometry beats the name heuristic that picks Left/Right
-/// from the net name); a multi-pin port keeps the name-inferred side from `ir.ports`.
+/// The sheet edge a port net actually exits toward: when EVERY pin faces the
+/// same HORIZONTAL way, geometry beats the name heuristic that picks
+/// Left/Right from the net name — a pennant on the name side of two
+/// west-facing tail stubs lands in the wire to the next symbol. Vertical or
+/// mixed facings keep the `ir.ports` side (pennants read horizontally; a
+/// divider tap's north/south pins still exit left/right by name).
 pub(crate) fn effective_port_side(port: Option<Side>, eps: &[([f64; 2], Dir)]) -> Option<Side> {
     match port {
         Some(_) if eps.len() == 1 => Some(dir_to_side(eps[0].1)),
+        Some(_)
+            if !eps.is_empty()
+                && matches!(eps[0].1, Dir::East | Dir::West)
+                && eps.iter().all(|(_, d)| *d == eps[0].1) =>
+        {
+            Some(dir_to_side(eps[0].1))
+        }
         other => other,
     }
 }
