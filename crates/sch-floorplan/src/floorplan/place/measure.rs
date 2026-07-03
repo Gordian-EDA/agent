@@ -226,9 +226,13 @@ impl<'a> RoutedEvaluator<'a> {
         {
             Ok(w) => {
                 let wires = w.wires_with_nets();
-                count_merges(&wires, &w.junction_positions())
-                    + count_shorts(self.realizer.env, &w, items, self.realizer.inc, &wires)
-                    + count_foreign_taps(&wires)
+                let m = count_merges(&wires, &w.junction_positions());
+                let sh = count_shorts(self.realizer.env, &w, items, self.realizer.inc, &wires);
+                let ft = count_foreign_taps(&wires);
+                if (m + sh + ft) > 0 && std::env::var_os("BREAK_DEBUG").is_some() {
+                    eprintln!("[break] merges={m} shorts={sh} foreign_taps={ft}");
+                }
+                m + sh + ft
             }
             Err(_) => usize::MAX,
         }

@@ -537,7 +537,7 @@ pub fn form_modules(
         run_of: impl Fn(Point2) -> (i64, f64, f64),
         at0: Point2,
         step: Point2,
-    ) -> bool {
+    ) -> Option<Point2> {
         commit_free_opt(items, claims, runs, module, build, run_of, at0, step, 64, true)
     }
 
@@ -555,15 +555,43 @@ pub fn form_modules(
         step: Point2,
         budget: usize,
         must: bool,
-    ) -> bool {
+    ) -> Option<Point2> {
         let mut at = at0;
         for tries in 0..budget {
             let sats = build(at);
             let body: Vec<geom::Rect> = sats.iter().map(|s| placed_rect(items, s)).collect();
             let (ck, lo, hi) = run_of(at);
-            let blocked = body
-                .iter()
-                .any(|r| claims.iter().any(|c| c.overlaps(r)))
+            // A satellite PIN landing on a previously committed wire run is an
+            // electrical tap onto a foreign net (the bootstrap-approach short)
+            // — cross-axis, so interval keys never catch it. The commit anchor
+            // itself is exempt: that coincidence IS the intentional tap.
+            let ep_on_wire = sats.iter().any(|sp| {
+                let it = &items[sp.item];
+                it.geom.pins.iter().any(|pg| {
+                    let off = pg.at.transform_offset(sp.angle, false);
+                    let (ex, ey) = (sp.offset.x + off[0], sp.offset.y + off[1]);
+                    if (ex - at.x).abs() < 0.1 && (ey - at.y).abs() < 0.1 {
+                        return false;
+                    }
+                    runs.iter().any(|&(k, rlo, rhi)| {
+                        if k <= -900_000 {
+                            false
+                        } else if k >= 900_000 {
+                            (snap(ey) / GRID).round() as i64 + 1_000_000 == k
+                                && ex > rlo - 0.1
+                                && ex < rhi + 0.1
+                        } else {
+                            (snap(ex) / GRID).round() as i64 == k
+                                && ey > rlo - 0.1
+                                && ey < rhi + 0.1
+                        }
+                    })
+                })
+            });
+            let blocked = ep_on_wire
+                || body
+                    .iter()
+                    .any(|r| claims.iter().any(|c| c.overlaps(r)))
                 || runs
                     .iter()
                     .any(|&(k, rlo, rhi)| k == ck && lo < rhi && rlo < hi);
@@ -580,18 +608,18 @@ pub fn form_modules(
                 claims.extend(body);
                 runs.push((ck, lo, hi));
                 module.sats.extend(sats);
-                return true;
+                return Some(at);
             }
             at = Point2::new(at.x + step.x, at.y + step.y);
         }
         if !must {
-            return false;
+            return None;
         }
         let sats = build(at0);
         claims.extend(sats.iter().map(|s| placed_rect(items, s)));
         runs.push(run_of(at0));
         module.sats.extend(sats);
-        true
+        Some(at0)
     }
 
     // ── Bridges first: they own the pin column between their two pins.
@@ -640,7 +668,7 @@ pub fn form_modules(
                 (1_000_000 + (snap(at.y) / GRID).round() as i64, pa.x.min(pb.x), pa.x.max(pb.x))
             };
             let module = &mut form.modules[mi];
-            commit_free(
+            let committed = commit_free(
                 items,
                 claims.entry(mi).or_default(),
                 runs.entry(mi).or_default(),
@@ -650,6 +678,19 @@ pub fn form_modules(
                 at0,
                 Point2::new(0.0, -PITCH),
             );
+            // The VERTICAL pin approaches (each pin up to the bridge row) are
+            // wires: register their column intervals or a same-column tail
+            // pin lands on them (the BUCK_EN / bootstrap short).
+            if let Some(at) = committed {
+                let rr = runs.entry(mi).or_default();
+                for p in [pa, pb] {
+                    rr.push((
+                        (snap(p.x) / GRID).round() as i64,
+                        p.y.min(at.y),
+                        p.y.max(at.y),
+                    ));
+                }
+            }
             form.consumed.insert(*chain, mi);
             continue;
         }
@@ -697,7 +738,7 @@ pub fn form_modules(
         };
         let run_of = |at: Point2| ((snap(at.x) / GRID).round() as i64, top, bot);
         let module = &mut form.modules[mi];
-        commit_free(
+        let committed = commit_free(
             items,
             claims.entry(mi).or_default(),
             runs.entry(mi).or_default(),
@@ -707,6 +748,19 @@ pub fn form_modules(
             Point2::new(x0, 0.0),
             Point2::new(outward, 0.0),
         );
+        // The two horizontal PIN APPROACHES are wires too: register their row
+        // intervals or a same-row tail lands its pin on them (the BUCK_EN /
+        // bootstrap short).
+        if let Some(at) = committed {
+            let rr = runs.entry(mi).or_default();
+            for p in [pa, pb] {
+                rr.push((
+                    1_000_000 + (snap(p.y) / GRID).round() as i64,
+                    p.x.min(at.x),
+                    p.x.max(at.x),
+                ));
+            }
+        }
         form.consumed.insert(*chain, mi);
     }
 
@@ -917,6 +971,8 @@ pub fn form_modules(
                   pin_at.y.min(at.y), pin_at.y.max(at.y)),
         };
         let module = &mut form.modules[mi];
+        // Budget 10: a connector's neighbouring pin strips reserve full label
+        // widths (~26mm); 6 slides stop just short of clearing them.
         let ok = commit_free_opt(
             items,
             claims.entry(mi).or_default(),
@@ -926,10 +982,10 @@ pub fn form_modules(
             run_of,
             at0,
             step,
-            6,
+            10,
             false,
         );
-        if ok {
+        if ok.is_some() {
             form.consumed.insert(*chain, mi);
             // The near-side junction (if any) now lives on the tail's wire at
             // the entry pin: its deferred shunt legs hang there.
@@ -1093,7 +1149,7 @@ pub fn form_modules(
                 8,
                 false,
             );
-            if ok {
+            if ok.is_some() {
                 form.consumed.insert(ci, mi);
                 if let Some(sat) = form.modules[mi].sats.last() {
                     let f_off = pin_offset(item, &far_pin, sat.angle);
@@ -1207,18 +1263,21 @@ pub fn form_modules(
                 Point2::new(outward * PITCH, 0.0),
                 8,
                 false,
-            ) || commit_free_opt(
-                items,
-                claims.entry(mi).or_default(),
-                runs.entry(mi).or_default(),
-                &mut form.modules[mi],
-                build,
-                run_of,
-                Point2::new(tap_at.x - outward * PITCH, 0.0),
-                Point2::new(-outward * PITCH, 0.0),
-                2,
-                false,
-            );
+            )
+            .is_some()
+                || commit_free_opt(
+                    items,
+                    claims.entry(mi).or_default(),
+                    runs.entry(mi).or_default(),
+                    &mut form.modules[mi],
+                    build,
+                    run_of,
+                    Point2::new(tap_at.x - outward * PITCH, 0.0),
+                    Point2::new(-outward * PITCH, 0.0),
+                    2,
+                    false,
+                )
+                .is_some();
             if ok {
                 break;
             }
@@ -1285,7 +1344,7 @@ pub fn form_modules(
             6,
             false,
         );
-        if !ok {
+        if ok.is_none() {
             unadopted.push(stub);
         }
     }
@@ -1359,7 +1418,7 @@ pub fn form_modules(
             8,
             false,
         );
-        if !ok {
+        if ok.is_none() {
             // Revert to a standalone module (strap column will collect it).
             form.strap_items.insert(item_i);
             mod_of_anchor.insert(item_i, form.modules.len());
