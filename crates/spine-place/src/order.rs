@@ -61,6 +61,7 @@ pub fn arrange(
     fold: bool,
     strap_col: bool,
     shelf: bool,
+    hop_align: bool,
     bundle_free: &std::collections::BTreeSet<usize>,
 ) -> Vec<Point2> {
     let n_scene = scene.nodes.len();
@@ -597,6 +598,46 @@ pub fn arrange(
         let pb = scene.nodes[*b].ports.iter().find(|p| p.chain == *ci && !p.is_a);
         if let (Some(pa), Some(pb)) = (pa, pb) {
             chain_list.push((*a, *b, pa.at.y, pb.at.y));
+        }
+    }
+    // One junction hop: two chains that meet at the same low-fanout junction,
+    // each with ONE placed node, align those nodes (a pot feeding an amp input
+    // through its coupling cap reads as one row, exactly as a direct chain
+    // would). GATED (hop_align): snapping rows can merge nets — the caller's
+    // breaks-first A/B keeps it only where the netlist survives.
+    if hop_align {
+        let mut at_junction: BTreeMap<usize, Vec<(usize, f64)>> = BTreeMap::new();
+        for (ci, (ea, eb)) in &scene.ends {
+            let c = &g.chains[*ci];
+            let (node, is_a, jt) = match (ea, eb) {
+                (Some(a), None) => (*a, true, &c.b),
+                (None, Some(b)) => (*b, false, &c.a),
+                _ => continue,
+            };
+            if !matches!(&g.nodes[jt.node], NodeKind::Junction(_))
+                || !junction_vertex.contains_key(&jt.node)
+            {
+                continue;
+            }
+            let py = scene.nodes[node]
+                .ports
+                .iter()
+                .find(|p| p.chain == *ci && p.is_a == is_a)
+                .map(|p| p.at.y);
+            if let Some(py) = py {
+                at_junction.entry(jt.node).or_default().push((node, py));
+            }
+        }
+        for members in at_junction.values() {
+            if let [(a, ya), (b, yb)] = members[..]
+                && a != b
+                // Neighbouring columns only: a same-column snap can land two
+                // stubs collinear and MERGE nets (the uart breaks=1); far-apart
+                // columns aren't a visual row anyway.
+                && (1..=2).contains(&col_of[a].abs_diff(col_of[b]))
+            {
+                chain_list.push((a, b, ya, yb));
+            }
         }
     }
     chain_list.sort_by(|x, y| {

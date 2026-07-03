@@ -200,9 +200,12 @@ impl PlacementEngine for SpinePlace {
         let mut run_variant = |items: &mut Vec<sch_place::item::Item>,
                                fold: bool,
                                strap_col: bool,
-                               shelf: bool|
+                               shelf: bool,
+                               hop_align: bool|
          -> usize {
-            let origins = arrange(items, &g, &scene, &dirs, fold, strap_col, shelf, &bundle_free);
+            let origins = arrange(
+                items, &g, &scene, &dirs, fold, strap_col, shelf, hop_align, &bundle_free,
+            );
             let mut placed = vec![false; items.len()];
             let commit = |origins: &[Point2],
                           items: &mut [sch_place::item::Item],
@@ -305,7 +308,8 @@ impl PlacementEngine for SpinePlace {
         };
         let mut strap_on = false;
         let mut shelf_on = false;
-        let mut breaks = run_variant(&mut problem.items, false, false, false);
+        let mut hop_on = false;
+        let mut breaks = run_variant(&mut problem.items, false, false, false, false);
 
         // Strap-column A/B: stub islets in one dedicated refdes-sorted column
         // (the human "straps region") — kept only when the sheet metrics hold.
@@ -319,7 +323,7 @@ impl PlacementEngine for SpinePlace {
                 eval.warnings(&problem.items),
                 crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
             );
-            let b_breaks = run_variant(&mut problem.items, false, true, false);
+            let b_breaks = run_variant(&mut problem.items, false, true, false, false);
             let xb = eval.crossings(&problem.items);
             let b = (
                 b_breaks,
@@ -359,7 +363,7 @@ impl PlacementEngine for SpinePlace {
                 crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
                 sheet_area(&problem.items),
             );
-            let b_breaks = run_variant(&mut problem.items, false, strap_on, true);
+            let b_breaks = run_variant(&mut problem.items, false, strap_on, true, false);
             let xb = eval.crossings(&problem.items);
             let b = (
                 b_breaks,
@@ -382,6 +386,47 @@ impl PlacementEngine for SpinePlace {
                 }
                 if problem.options.debug_timing {
                     eprintln!("[spine] shelf rejected: {a:?} vs {b:?}");
+                }
+            }
+        }
+
+        // Hop-align A/B: junction-hop port alignment (pot—cap—junction—amp as
+        // one row). Vertical snaps can merge nets; breaks lead the tuple, so a
+        // merging alignment self-rejects.
+        {
+            let before: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
+            let xa = eval.crossings(&problem.items);
+            let a = (
+                breaks,
+                body_overlap_count(&problem.items),
+                xa.body + xa.ic,
+                eval.warnings(&problem.items),
+                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
+                sheet_area(&problem.items),
+            );
+            let b_breaks = run_variant(&mut problem.items, false, strap_on, shelf_on, true);
+            let xb = eval.crossings(&problem.items);
+            let b = (
+                b_breaks,
+                body_overlap_count(&problem.items),
+                xb.body + xb.ic,
+                eval.warnings(&problem.items),
+                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
+                sheet_area(&problem.items),
+            );
+            if b <= a {
+                breaks = b_breaks;
+                hop_on = true;
+                if problem.options.debug_timing {
+                    eprintln!("[spine] hop-align kept: {a:?} -> {b:?}");
+                }
+            } else {
+                for (it, (at, angle)) in problem.items.iter_mut().zip(before) {
+                    it.at = at;
+                    it.angle = angle;
+                }
+                if problem.options.debug_timing {
+                    eprintln!("[spine] hop-align rejected: {a:?} vs {b:?}");
                 }
             }
         }
@@ -410,7 +455,7 @@ impl PlacementEngine for SpinePlace {
                     eval.warnings(&problem.items),
                     crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
                 );
-                let b_breaks = run_variant(&mut problem.items, true, strap_on, shelf_on);
+                let b_breaks = run_variant(&mut problem.items, true, strap_on, shelf_on, hop_on);
                 let xb = eval.crossings(&problem.items);
                 let b = (
                     b_breaks,
