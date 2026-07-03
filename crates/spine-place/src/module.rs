@@ -146,6 +146,7 @@ pub fn form_modules(
     g: &Reduced,
     anchors: &[usize],
     labeled: Option<&BTreeSet<String>>,
+    port_nets: &BTreeSet<String>,
 ) -> ModuleForm {
     let mut form = ModuleForm::default();
     let class = |net: &str| *classes.get(net).unwrap_or(&NetClass::Signal);
@@ -280,6 +281,18 @@ pub fn form_modules(
                         attach.push(Attach::Tail { chain: ci, anchor: ia, pin: pa, a_near: true });
                     }
                     (None, Some((ib, pb))) if c.parts.len() == 1 => {
+                        attach.push(Attach::Tail { chain: ci, anchor: ib, pin: pb, a_near: false });
+                    }
+                    // Two anchors bridged by a 2-part chain whose midpoint net
+                    // is a PORT (forced label): the wire between them will never
+                    // draw, so each part belongs at ITS anchor's pin — split
+                    // into two tails, the port label lands on the free ends.
+                    (Some((ia, pa)), Some((ib, pb)))
+                        if ia != ib
+                            && c.parts.len() == 2
+                            && port_nets.contains(c.nets[1].as_str()) =>
+                    {
+                        attach.push(Attach::Tail { chain: ci, anchor: ia, pin: pa, a_near: true });
                         attach.push(Attach::Tail { chain: ci, anchor: ib, pin: pb, a_near: false });
                     }
                     // Different anchors: spine content (inter-module chain).
@@ -771,7 +784,11 @@ pub fn form_modules(
         };
         let Some(&mi) = mod_of_anchor.get(anchor) else { continue };
         let c = &g.chains[*chain];
-        let part = c.parts[0];
+        let part = if *a_near {
+            c.parts[0]
+        } else {
+            *c.parts.last().expect("tail chain has parts")
+        };
         let near_net = if *a_near { &c.nets[0] } else { &c.nets[c.nets.len() - 1] };
         let pin_at = pin_offset(&items[*anchor], pin, 0.0);
         let side = pin_side_of(*anchor, pin);

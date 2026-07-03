@@ -340,9 +340,7 @@ pub fn arrange(
         let mut free: Vec<usize> = (0..n_scene)
             .filter(|&v| {
                 scene.nodes[v].anchor.is_some()
-                    && (!wired.contains(&v)
-                        || (bundle_free.contains(&v)
-                            && (scene.nodes[v].env_max.y - scene.nodes[v].env_min.y) < 40.0))
+                    && (!wired.contains(&v) || bundle_free.contains(&v))
                     && !(strap_col && is_strapish(scene, v))
             })
             .collect();

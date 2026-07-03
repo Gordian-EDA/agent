@@ -173,9 +173,6 @@ pub fn build_scene(
 
     // Terminal → scene node resolution + port registration.
     for (ci, c) in g.chains.iter().enumerate() {
-        if form.consumed.contains_key(&ci) {
-            continue; // module-internal
-        }
         let resolve = |t: &crate::chain::Terminal| -> Option<usize> {
             match &g.nodes[t.node] {
                 NodeKind::Part(i) => node_of_anchor.get(i).copied(),
@@ -184,6 +181,20 @@ pub fn build_scene(
             }
         };
         let (na, nb) = (resolve(&c.a), resolve(&c.b));
+        if form.consumed.contains_key(&ci) {
+            // Module-internal — no ports, no run. But a TAIL-style consumption
+            // must keep its terminal mapping: the junction's arrange-edge
+            // through the consumed part is what holds the junction's OTHER
+            // chains in the module's neighborhood — sever it and they strand
+            // in the first column (the hollow-middle audio bug). Junction-to-
+            // junction tails register as (None, None); the edge builder still
+            // reads both g-terminals. Only the both-ends-same-module case
+            // stays hidden (a bridge is genuinely internal).
+            if na != nb || na.is_none() {
+                scene.ends.insert(ci, (na, nb));
+            }
+            continue;
+        }
         // Ports on module nodes: the anchor pin's world offset at angle 0.
         for (t, n, is_a) in [(&c.a, na, true), (&c.b, nb, false)] {
             if let (Some(n), false) = (n, t.pin.is_empty())

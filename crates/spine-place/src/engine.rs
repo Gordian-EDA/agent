@@ -5,7 +5,7 @@
 //! anneal engine when the shipped self-check finds truthfulness breaks or body
 //! overlaps, so it is never worse than the incumbent on correctness.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use circuit_lang::model::Design;
 use geom::Point2;
@@ -86,7 +86,16 @@ impl PlacementEngine for SpinePlace {
         // ── Modules + scene + ordering + coordinates.
         let dirs = pin_dirs(env, problem);
         let problem_inc = problem.inc.clone();
-        let form = form_modules(&problem.items, &problem_inc, &classes, &g, &anchors, None);
+        let port_nets: BTreeSet<String> = ir.ports.keys().cloned().collect();
+        let form = form_modules(
+            &problem.items,
+            &problem_inc,
+            &classes,
+            &g,
+            &anchors,
+            None,
+            &port_nets,
+        );
         let debug = std::env::var_os("SPINE_DEBUG").is_some();
         if debug {
             for (ci, c) in g.chains.iter().enumerate() {
