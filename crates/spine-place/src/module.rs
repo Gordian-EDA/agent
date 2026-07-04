@@ -271,21 +271,66 @@ pub fn form_modules(
                 };
                 if let Some((anchor, pin)) = resolve(sig_t) {
                     let up = class(rail_net) == NetClass::Supply;
-                    attach.push(Attach::Ladder {
-                        chain: ci,
-                        anchor,
-                        pin,
-                        a_near,
-                        up,
-                        sig_net: sig_t.net.clone(),
-                    });
+                    // A series-inductive part (L*, FB*) to a SUPPLY at an E/W
+                    // pin draws IN-LINE with the rail arrow at its far end
+                    // (the buck's SW→L→rail row) — a vertical leg jams the
+                    // flank the switching pins need.
+                    let inductive = c.parts.len() == 1
+                        && (items[c.parts[0]].refdes.starts_with('L')
+                            || items[c.parts[0]].refdes.starts_with("FB"))
+                        && up
+                        && matches!(pin_side_of(anchor, &pin), PinSide::East | PinSide::West);
+                    if inductive {
+                        let via = matches!(&g.nodes[sig_t.node], NodeKind::Junction(_))
+                            .then(|| sig_t.net.clone());
+                        attach.push(Attach::Tail {
+                            chain: ci,
+                            anchor,
+                            pin,
+                            a_near,
+                            via_junction: via,
+                        });
+                    } else {
+                        attach.push(Attach::Ladder {
+                            chain: ci,
+                            anchor,
+                            pin,
+                            a_near,
+                            up,
+                            sig_net: sig_t.net.clone(),
+                        });
+                    }
                 }
             }
             ChainRole::Series => {
                 let (ra, rb) = (resolve(&c.a), resolve(&c.b));
                 match (ra, rb) {
                     (Some((ia, pa)), Some((ib, pb))) if ia == ib && pa != pb => {
-                        attach.push(Attach::Bridge { chain: ci, anchor: ia, pin_a: pa, pin_b: pb });
+                        // Bridges wrap SAME-side pairs (vertical stack) or
+                        // opposite E/W pairs (horizontal above). A MIXED pair
+                        // (north IN to west EN) would stack across the body's
+                        // corner into neighbouring wiring — hang a TAIL at the
+                        // first pin instead, label at the second.
+                        let (sa, sb) = (pin_side_of(ia, &pa), pin_side_of(ib, &pb));
+                        let ew = |s: PinSide| matches!(s, PinSide::East | PinSide::West);
+                        if sa == sb || (ew(sa) && ew(sb)) {
+                            attach.push(Attach::Bridge {
+                                chain: ci,
+                                anchor: ia,
+                                pin_a: pa,
+                                pin_b: pb,
+                            });
+                        } else if c.parts.len() == 1 {
+                            let via = matches!(&g.nodes[c.a.node], NodeKind::Junction(_))
+                                .then(|| c.a.net.clone());
+                            attach.push(Attach::Tail {
+                                chain: ci,
+                                anchor: ia,
+                                pin: pa,
+                                a_near: true,
+                                via_junction: via,
+                            });
+                        }
                     }
                     (Some((ia, pa)), None) if c.parts.len() == 1 => {
                         let via = matches!(&g.nodes[c.a.node], NodeKind::Junction(_))
@@ -428,7 +473,7 @@ pub fn form_modules(
     // FULL text-inclusive rect, which is what the overlap wall measures.
     let mut claims: BTreeMap<usize, Vec<geom::Rect>> = BTreeMap::new();
     // Vertical/horizontal wire runs per module: (column key, lo, hi).
-    let mut runs: BTreeMap<usize, Vec<(i64, f64, f64)>> = BTreeMap::new();
+    let mut runs: BTreeMap<usize, Vec<(i64, f64, f64, Option<String>)>> = BTreeMap::new();
     for (&a, &mi) in &mod_of_anchor {
         claims
             .entry(mi)
@@ -538,10 +583,10 @@ pub fn form_modules(
     fn commit_free(
         items: &[Item],
         claims: &mut Vec<geom::Rect>,
-        runs: &mut Vec<(i64, f64, f64)>,
+        runs: &mut Vec<(i64, f64, f64, Option<String>)>,
         module: &mut ModulePlan,
         build: impl Fn(Point2) -> Vec<SatPlace>,
-        run_of: impl Fn(Point2) -> (i64, f64, f64),
+        run_of: impl Fn(Point2) -> (i64, f64, f64, Option<String>),
         at0: Point2,
         step: Point2,
     ) -> Option<Point2> {
@@ -554,10 +599,10 @@ pub fn form_modules(
     fn commit_free_opt(
         items: &[Item],
         claims: &mut Vec<geom::Rect>,
-        runs: &mut Vec<(i64, f64, f64)>,
+        runs: &mut Vec<(i64, f64, f64, Option<String>)>,
         module: &mut ModulePlan,
         build: impl Fn(Point2) -> Vec<SatPlace>,
-        run_of: impl Fn(Point2) -> (i64, f64, f64),
+        run_of: impl Fn(Point2) -> (i64, f64, f64, Option<String>),
         at0: Point2,
         step: Point2,
         budget: usize,
@@ -567,7 +612,7 @@ pub fn form_modules(
         for tries in 0..budget {
             let sats = build(at);
             let body: Vec<geom::Rect> = sats.iter().map(|s| placed_rect(items, s)).collect();
-            let (ck, lo, hi) = run_of(at);
+            let (ck, lo, hi, ref cnet) = run_of(at);
             // A satellite PIN landing on a previously committed wire run is an
             // electrical tap onto a foreign net (the bootstrap-approach short)
             // — cross-axis, so interval keys never catch it. The commit anchor
@@ -580,28 +625,49 @@ pub fn form_modules(
                     if (ex - at.x).abs() < 0.1 && (ey - at.y).abs() < 0.1 {
                         return false;
                     }
-                    runs.iter().any(|&(k, rlo, rhi)| {
+                    // The pin's own net may touch its own wires (that's the
+                    // same conductor); only FOREIGN wires are shorts.
+                    let pin_net = it
+                        .pins
+                        .iter()
+                        .find(|(num, _, _)| *num == pg.number)
+                        .and_then(|(_, _, n)| n.clone());
+                    runs.iter().any(|(k, rlo, rhi, rnet)| {
+                        let k = *k;
                         if k <= -900_000 {
-                            false
-                        } else if k >= 900_000 {
+                            return false;
+                        }
+                        if let (Some(a), Some(b)) = (&pin_net, rnet)
+                            && a == b
+                        {
+                            return false;
+                        }
+                        if k >= 900_000 {
                             (snap(ey) / GRID).round() as i64 + 1_000_000 == k
-                                && ex > rlo - 0.1
-                                && ex < rhi + 0.1
+                                && ex > *rlo - 0.1
+                                && ex < *rhi + 0.1
                         } else {
                             (snap(ex) / GRID).round() as i64 == k
-                                && ey > rlo - 0.1
-                                && ey < rhi + 0.1
+                                && ey > *rlo - 0.1
+                                && ey < *rhi + 0.1
                         }
                     })
                 })
             });
+            if ep_on_wire && std::env::var_os("SPINE_DEBUG").is_some() {
+                let refs: Vec<&str> = sats.iter().map(|s| items[s.item].refdes.as_str()).collect();
+                eprintln!("[ep-guard] blocked {refs:?} at ({:.1},{:.1})", at.x, at.y);
+            }
             let blocked = ep_on_wire
                 || body
                     .iter()
                     .any(|r| claims.iter().any(|c| c.overlaps(r)))
-                || runs
-                    .iter()
-                    .any(|&(k, rlo, rhi)| k == ck && lo < rhi && rlo < hi);
+                || runs.iter().any(|(k, rlo, rhi, rnet)| {
+                    *k == ck
+                        && lo < *rhi
+                        && *rlo < hi
+                        && !(cnet.is_some() && rnet.is_some() && cnet == rnet)
+                });
             if !blocked {
                 if tries > 2 && std::env::var_os("SPINE_DEBUG").is_some() {
                     let refs: Vec<&str> =
@@ -613,7 +679,7 @@ pub fn form_modules(
                     );
                 }
                 claims.extend(body);
-                runs.push((ck, lo, hi));
+                runs.push((ck, lo, hi, cnet.clone()));
                 module.sats.extend(sats);
                 return Some(at);
             }
@@ -671,8 +737,14 @@ pub fn form_modules(
             let at0 = Point2::new((pa.x + pb.x) / 2.0, anchor_rect.min_y - LEAD * 2.0);
             // Horizontal feedback runs live in a disjoint key space (row keys
             // offset far from any column key).
+            let bridge_net = c.nets.first().cloned();
             let run_of = |at: Point2| {
-                (1_000_000 + (snap(at.y) / GRID).round() as i64, pa.x.min(pb.x), pa.x.max(pb.x))
+                (
+                    1_000_000 + (snap(at.y) / GRID).round() as i64,
+                    pa.x.min(pb.x),
+                    pa.x.max(pb.x),
+                    bridge_net.clone(),
+                )
             };
             let module = &mut form.modules[mi];
             let committed = commit_free(
@@ -690,11 +762,12 @@ pub fn form_modules(
             // pin lands on them (the BUCK_EN / bootstrap short).
             if let Some(at) = committed {
                 let rr = runs.entry(mi).or_default();
-                for p in [pa, pb] {
+                for (p, n) in [(pa, c.nets.first()), (pb, c.nets.last())] {
                     rr.push((
                         (snap(p.x) / GRID).round() as i64,
                         p.y.min(at.y),
                         p.y.max(at.y),
+                        n.cloned(),
                     ));
                 }
             }
@@ -743,7 +816,9 @@ pub fn form_modules(
             }
             out
         };
-        let run_of = |at: Point2| ((snap(at.x) / GRID).round() as i64, top, bot);
+        let vb_net = c.nets.first().cloned();
+        let run_of =
+            |at: Point2| ((snap(at.x) / GRID).round() as i64, top, bot, vb_net.clone());
         let module = &mut form.modules[mi];
         let committed = commit_free(
             items,
@@ -760,11 +835,12 @@ pub fn form_modules(
         // bootstrap short).
         if let Some(at) = committed {
             let rr = runs.entry(mi).or_default();
-            for p in [pa, pb] {
+            for (p, n) in [(pa, c.nets.first()), (pb, c.nets.last())] {
                 rr.push((
                     1_000_000 + (snap(p.y) / GRID).round() as i64,
                     p.x.min(at.x),
                     p.x.max(at.x),
+                    n.cloned(),
                 ));
             }
         }
@@ -878,13 +954,14 @@ pub fn form_modules(
             }
             total + 5.08
         };
+        let ladder_net = nets.first().cloned();
         let run_of = |at: Point2| {
             let (lo, hi) = if *up {
                 (y_start - leg_len, pin_at.y)
             } else {
                 (pin_at.y, y_start + leg_len)
             };
-            ((snap(at.x) / GRID).round() as i64, lo, hi)
+            ((snap(at.x) / GRID).round() as i64, lo, hi, ladder_net.clone())
         };
         let module = &mut form.modules[mi];
         commit_free(
@@ -897,6 +974,13 @@ pub fn form_modules(
             Point2::new(x0, 0.0),
             Point2::new(outward, 0.0),
         );
+        if std::env::var_os("SPINE_DEBUG").is_some() {
+            let refs: Vec<&str> = parts.iter().map(|&p| items[p].refdes.as_str()).collect();
+            eprintln!(
+                "[attach] LADDER {refs:?} at {}:{} up={}",
+                items[*anchor].refdes, pin, up
+            );
+        }
         form.consumed.insert(*chain, mi);
     }
 
@@ -932,23 +1016,29 @@ pub fn form_modules(
         let free_net_for_angle =
             if *a_near { &c.nets[1] } else { &c.nets[c.nets.len() - 2] };
         let free_pin_for_angle = pin_on(item, free_net_for_angle).unwrap_or_default();
-        // Pick the rotation whose NEAR pin actually faces the anchor —
-        // orient_for infers from pins-Vec order, which need not match the
-        // geometry (the flipped-R9 bug: wire over the body, label in the gap).
+        // Pick the rotation whose NEAR pin faces the anchor ON THE RIGHT AXIS —
+        // orient_for infers from pins-Vec order, which need not match geometry
+        // (the flipped-R9 bug), and a `>=` tie once accepted a VERTICAL body
+        // for a horizontal tail (equal x!), laying it across the neighbour
+        // rows' wires (the buck R4/bootstrap short). Strict: the pin pair must
+        // be colinear along the tail's axis with the near pin toward the pin.
         let angle = {
             let cand = orient_for(item, near_net, dir);
-            let flipped = (cand + 180.0).rem_euclid(360.0);
             let pick = |a: f64| {
                 let n = pin_offset(item, &entry, a);
                 let f = pin_offset(item, &free_pin_for_angle, a);
                 match side {
-                    PinSide::West => n.x >= f.x,
-                    PinSide::East => n.x <= f.x,
-                    PinSide::North => n.y >= f.y,
-                    PinSide::South => n.y <= f.y,
+                    PinSide::West => n.x > f.x + 0.01 && (n.y - f.y).abs() < 0.01,
+                    PinSide::East => n.x < f.x - 0.01 && (n.y - f.y).abs() < 0.01,
+                    PinSide::North => n.y > f.y + 0.01 && (n.x - f.x).abs() < 0.01,
+                    PinSide::South => n.y < f.y - 0.01 && (n.x - f.x).abs() < 0.01,
                 }
             };
-            if pick(cand) { cand } else { flipped }
+            [0.0_f64, 90.0, 180.0, 270.0]
+                .iter()
+                .map(|d| (cand + d).rem_euclid(360.0))
+                .find(|&a| pick(a))
+                .unwrap_or(cand)
         };
         let e_off = pin_offset(item, &entry, angle);
         let near_gap = LEAD * 2.0
@@ -969,17 +1059,19 @@ pub fn form_modules(
                 angle,
             }]
         };
+        let tail_net = Some(near_net.clone());
         let run_of = |at: Point2| match side {
             PinSide::East | PinSide::West => {
                 (1_000_000 + (snap(pin_at.y) / GRID).round() as i64,
-                 pin_at.x.min(at.x), pin_at.x.max(at.x))
+                 pin_at.x.min(at.x), pin_at.x.max(at.x), tail_net.clone())
             }
             _ => ((snap(pin_at.x) / GRID).round() as i64,
-                  pin_at.y.min(at.y), pin_at.y.max(at.y)),
+                  pin_at.y.min(at.y), pin_at.y.max(at.y), tail_net.clone()),
         };
         let module = &mut form.modules[mi];
-        // Budget 10: a connector's neighbouring pin strips reserve full label
-        // widths (~26mm); 6 slides stop just short of clearing them.
+        // Budget 18: connector pin strips reserve ~26mm and a switching flank
+        // stacks bridge+banks ~40mm deep; the in-line elements (L2's SW row)
+        // must clear them rather than exile to the strap column.
         let ok = commit_free_opt(
             items,
             claims.entry(mi).or_default(),
@@ -989,10 +1081,13 @@ pub fn form_modules(
             run_of,
             at0,
             step,
-            10,
+            18,
             false,
         );
         if ok.is_some() {
+            if std::env::var_os("SPINE_DEBUG").is_some() {
+                eprintln!("[attach] TAIL {} at {}:{}", items[part].refdes, items[*anchor].refdes, pin);
+            }
             form.consumed.insert(*chain, mi);
             // The near-side junction (if any) now lives on the tail's wire at
             // the entry pin: its deferred shunt legs hang there.
@@ -1140,9 +1235,10 @@ pub fn form_modules(
                     angle,
                 }]
             };
+            let chain_net = Some(near_t.net.clone());
             let run_of = |at: Point2| {
                 (1_000_000 + (snap(home.y) / GRID).round() as i64,
-                 home.x.min(at.x), home.x.max(at.x))
+                 home.x.min(at.x), home.x.max(at.x), chain_net.clone())
             };
             let ok = commit_free_opt(
                 items,
@@ -1157,6 +1253,9 @@ pub fn form_modules(
                 false,
             );
             if ok.is_some() {
+                if std::env::var_os("SPINE_DEBUG").is_some() {
+                    eprintln!("[attach] CHAIN {} onto {} home", items[part].refdes, near_t.net);
+                }
                 form.consumed.insert(ci, mi);
                 if let Some(sat) = form.modules[mi].sats.last() {
                     let f_off = pin_offset(item, &far_pin, sat.angle);
@@ -1251,13 +1350,14 @@ pub fn form_modules(
                 })
                 .sum::<f64>()
                 + 5.08;
+            let leg_net = nets.first().cloned();
             let run_of = |at: Point2| {
                 let (lo, hi) = if up {
                     (y_start - leg_len, tap_at.y)
                 } else {
                     (tap_at.y, y_start + leg_len)
                 };
-                ((snap(at.x) / GRID).round() as i64, lo, hi)
+                ((snap(at.x) / GRID).round() as i64, lo, hi, leg_net.clone())
             };
             ok = commit_free_opt(
                 items,
@@ -1330,13 +1430,14 @@ pub fn form_modules(
                 angle,
             }]
         };
+        let stub_net = Some(net.clone());
         let run_of = |at: Point2| match side {
             PinSide::East | PinSide::West => {
                 (1_000_000 + (snap(pin_at.y) / GRID).round() as i64,
-                 pin_at.x.min(at.x), pin_at.x.max(at.x))
+                 pin_at.x.min(at.x), pin_at.x.max(at.x), stub_net.clone())
             }
             _ => ((snap(pin_at.x) / GRID).round() as i64,
-                  pin_at.y.min(at.y), pin_at.y.max(at.y)),
+                  pin_at.y.min(at.y), pin_at.y.max(at.y), stub_net.clone()),
         };
         let module = &mut form.modules[mi];
         let ok = commit_free_opt(
@@ -1411,7 +1512,7 @@ pub fn form_modules(
         let build = |at: Point2| -> Vec<SatPlace> {
             vec![SatPlace { item: item_i, offset: Point2::new(snap(at.x), snap(at.y)), angle: 0.0 }]
         };
-        let run_of = |_at: Point2| (i64::MIN / 4 + item_i as i64, 0.0, 0.0);
+        let run_of = |_at: Point2| (i64::MIN / 4 + item_i as i64, 0.0, 0.0, None);
         let module = &mut form.modules[mi];
         let ok = commit_free_opt(
             items,
@@ -1528,7 +1629,7 @@ pub fn form_modules(
                 })
                 .collect()
         };
-        let run_of = |_at: Point2| (i64::MIN / 2 + *mi as i64, 0.0, 0.0);
+        let run_of = |_at: Point2| (i64::MIN / 2 + *mi as i64, 0.0, 0.0, None);
         let module = &mut form.modules[*mi];
         commit_free(
             items,
