@@ -393,11 +393,17 @@ pub fn form_modules(
             }
             if ok && let Some(a) = host
                 && !host_pins.is_empty()
-                && items[a].geom.pins.len() > items[i].geom.pins.len()
             {
                 cluster_adopts.push((i, a, host_pins));
             }
         }
+    }
+    // No adoption CHAINS: a host that is itself adopted would leave its
+    // adoptee orphaned (both skip module seeding). Drop such entries — the
+    // remaining direct adoptions are cycle-free by construction.
+    {
+        let adoptees: BTreeSet<usize> = cluster_adopts.iter().map(|(i, _, _)| *i).collect();
+        cluster_adopts.retain(|(_, a, _)| !adoptees.contains(a));
     }
     let cluster_set: BTreeSet<usize> = cluster_adopts.iter().map(|(i, _, _)| *i).collect();
 
