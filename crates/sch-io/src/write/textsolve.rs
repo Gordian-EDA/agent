@@ -881,6 +881,57 @@ impl SchematicWriter {
         self.layout_warnings_excluding(&std::collections::BTreeSet::new())
     }
 
+    /// Would a net label anchored at `at` facing `dir` read CLEAR of every
+    /// symbol body, pin text, field, and existing label? EXACTLY the lint's
+    /// geometry (`label_box` vs the same item boxes `layout_warnings` builds),
+    /// so a placement this approves never trips the lint. `own_refdes` exempts
+    /// the label's own symbol (a stub label legitimately hugs its own pin).
+    pub fn label_landing_clear(
+        &self,
+        at: geom::Point2,
+        dir: geom::Dir,
+        net: &str,
+        own_refdes: &str,
+    ) -> bool {
+        use crate::label::{label_box, pin_text_boxes, text_width};
+        let b = label_box(at, dir, text_width(net));
+        for inst in &self.instances {
+            if inst.refdes.starts_with('#') || inst.refdes == own_refdes {
+                continue;
+            }
+            let h = inst.half_extents.rotated_half_extents(inst.angle);
+            let body: Rect = [
+                inst.at[0] - h[0],
+                inst.at[1] - h[1],
+                inst.at[0] + h[0],
+                inst.at[1] + h[1],
+            ]
+            .into();
+            if body.overlaps(&b) {
+                return false;
+            }
+            if let Some(pins) = self.sym_pins.get(&inst.lib_id) {
+                for pg in pins {
+                    for pb in pin_text_boxes(pg, inst.at, inst.angle, inst.mirror) {
+                        if pb.overlaps(&b) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        for label in &self.labels {
+            if label.net == net {
+                continue;
+            }
+            let lb = label_box(label.at, label.dir, text_width(&label.net));
+            if lb.overlaps(&b) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Same readability lint as [`Self::layout_warnings`], but suppresses an
     /// overlap warning for any symbol pair whose two owning refdes form an
     /// entry in `ignore_pairs` (stored normalized: sorted so `(A,B) == (B,A)`).

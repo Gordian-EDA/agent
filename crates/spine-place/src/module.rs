@@ -847,11 +847,6 @@ pub fn form_modules(
         form.consumed.insert(*chain, mi);
     }
 
-    // ── Ladders: vertical legs at the pin column, up to supplies, down to ground.
-    // Processing order decides who gets the near column. An UP leg's body spans
-    // the rows of pins ABOVE its own, so those pins must take NEARER columns:
-    // up-legs go top-pin-first, down-legs bottom-pin-first — then every
-    // horizontal approach wire stops short of the farther legs' bodies.
     // Junction nets claimed by a tail's NEAR side: their shunt legs defer to
     // the junction-adopted pass (they hang from the tail's wire, not the pin
     // flank the tail needs).
@@ -875,114 +870,6 @@ pub fn form_modules(
         }
     }
 
-    let ladder_order: Vec<&Attach> = {
-        let mut v: Vec<&Attach> = attach
-            .iter()
-            .filter(|at| matches!(at, Attach::Ladder { .. }))
-            .collect();
-        v.sort_by(|x, y| {
-            let key = |at: &&Attach| match at {
-                Attach::Ladder { anchor, pin, up, .. } => {
-                    let py = pin_offset(&items[*anchor], pin, 0.0).y;
-                    (*anchor, *up, if *up { py } else { -py })
-                }
-                _ => unreachable!(),
-            };
-            let (ax, ux, kx) = key(x);
-            let (ay, uy, ky) = key(y);
-            ax.cmp(&ay).then(ux.cmp(&uy)).then(kx.total_cmp(&ky))
-        });
-        v
-    };
-    for at in ladder_order {
-        let Attach::Ladder { chain, anchor, pin, a_near, up, sig_net } = at else {
-            continue;
-        };
-        if tail_claimed.contains(sig_net.as_str()) {
-            continue;
-        }
-        let c = &g.chains[*chain];
-        let mi = mod_of_anchor[anchor];
-        let (mut parts, mut nets) = (c.parts.clone(), c.nets.clone());
-        if !a_near {
-            parts.reverse();
-            nets.reverse();
-        }
-        let pin_at = pin_offset(&items[*anchor], pin, 0.0);
-        let x0 = pin_col(*anchor, pin);
-        let outward = match pin_side_of(*anchor, pin) {
-            PinSide::West => -PITCH,
-            _ => PITCH,
-        };
-        let dirn = if *up { -1.0 } else { 1.0 };
-        let dir = if *up { Orient::Up } else { Orient::Down };
-        let side = pin_side_of(*anchor, pin);
-        // N/S legs lead away from the pin; E/W legs START ON the pin's row so
-        // the approach wire is a straight horizontal — leading vertically first
-        // would hug the pin column and run through the 2.54-pitch neighbours.
-        let y_start = match side {
-            PinSide::South | PinSide::North => pin_at.y + dirn * LEAD,
-            _ => pin_at.y,
-        };
-        let build = |at: Point2| -> Vec<SatPlace> {
-            let mut y = y_start;
-            let mut out = Vec::new();
-            for (k, &p) in parts.iter().enumerate() {
-                let item = &items[p];
-                let angle = orient_for(item, &nets[k], dir);
-                let entry = pin_on(item, &nets[k]).unwrap_or_default();
-                let exit = pin_on(item, &nets[k + 1]).unwrap_or_default();
-                let e_off = pin_offset(item, &entry, angle);
-                out.push(SatPlace {
-                    item: p,
-                    offset: Point2::new(snap(at.x - e_off.x), snap(y - e_off.y)),
-                    angle,
-                });
-                y += dirn * (part_span(item, angle, &entry, &exit) + LEAD);
-            }
-            out
-        };
-        // The leg's vertical wire run: pin row to past the last part + glyph.
-        let leg_len: f64 = {
-            let mut total = 0.0;
-            for (k, &p) in parts.iter().enumerate() {
-                let item = &items[p];
-                let angle = orient_for(item, &nets[k], dir);
-                let entry = pin_on(item, &nets[k]).unwrap_or_default();
-                let exit = pin_on(item, &nets[k + 1]).unwrap_or_default();
-                total += part_span(item, angle, &entry, &exit) + LEAD;
-            }
-            total + 5.08
-        };
-        let ladder_net = nets.first().cloned();
-        let run_of = |at: Point2| {
-            let (lo, hi) = if *up {
-                (y_start - leg_len, pin_at.y)
-            } else {
-                (pin_at.y, y_start + leg_len)
-            };
-            ((snap(at.x) / GRID).round() as i64, lo, hi, ladder_net.clone())
-        };
-        let module = &mut form.modules[mi];
-        commit_free(
-            items,
-            claims.entry(mi).or_default(),
-            runs.entry(mi).or_default(),
-            module,
-            build,
-            run_of,
-            Point2::new(x0, 0.0),
-            Point2::new(outward, 0.0),
-        );
-        if std::env::var_os("SPINE_DEBUG").is_some() {
-            let refs: Vec<&str> = parts.iter().map(|&p| items[p].refdes.as_str()).collect();
-            eprintln!(
-                "[attach] LADDER {refs:?} at {}:{} up={}",
-                items[*anchor].refdes, pin, up
-            );
-        }
-        form.consumed.insert(*chain, mi);
-    }
 
     // ── Tails: the chain part sits beside its anchor pin, pointing outward;
     // the free end keeps its label. A tail that finds no clean spot stays a
@@ -1152,6 +1039,121 @@ pub fn form_modules(
                 ));
             }
         }
+    }
+
+
+    // ── Ladders: vertical legs at the pin column, up to supplies, down to ground.
+    // Processing order decides who gets the near column. An UP leg's body spans
+    // the rows of pins ABOVE its own, so those pins must take NEARER columns:
+    // up-legs go top-pin-first, down-legs bottom-pin-first — then every
+    // horizontal approach wire stops short of the farther legs' bodies.
+    let ladder_order: Vec<&Attach> = {
+        let mut v: Vec<&Attach> = attach
+            .iter()
+            .filter(|at| matches!(at, Attach::Ladder { .. }))
+            .collect();
+        v.sort_by(|x, y| {
+            let key = |at: &&Attach| match at {
+                Attach::Ladder { anchor, pin, up, .. } => {
+                    let py = pin_offset(&items[*anchor], pin, 0.0).y;
+                    (*anchor, *up, if *up { py } else { -py })
+                }
+                _ => unreachable!(),
+            };
+            let (ax, ux, kx) = key(x);
+            let (ay, uy, ky) = key(y);
+            ax.cmp(&ay).then(ux.cmp(&uy)).then(kx.total_cmp(&ky))
+        });
+        v
+    };
+    for at in ladder_order {
+        let Attach::Ladder { chain, anchor, pin, a_near, up, sig_net } = at else {
+            continue;
+        };
+        if tail_claimed.contains(sig_net.as_str()) {
+            continue;
+        }
+        let c = &g.chains[*chain];
+        let mi = mod_of_anchor[anchor];
+        let (mut parts, mut nets) = (c.parts.clone(), c.nets.clone());
+        if !a_near {
+            parts.reverse();
+            nets.reverse();
+        }
+        let pin_at = pin_offset(&items[*anchor], pin, 0.0);
+        let x0 = pin_col(*anchor, pin);
+        let outward = match pin_side_of(*anchor, pin) {
+            PinSide::West => -PITCH,
+            _ => PITCH,
+        };
+        let dirn = if *up { -1.0 } else { 1.0 };
+        let dir = if *up { Orient::Up } else { Orient::Down };
+        let side = pin_side_of(*anchor, pin);
+        // N/S legs lead away from the pin; E/W legs START ON the pin's row so
+        // the approach wire is a straight horizontal — leading vertically first
+        // would hug the pin column and run through the 2.54-pitch neighbours.
+        let y_start = match side {
+            PinSide::South | PinSide::North => pin_at.y + dirn * LEAD,
+            _ => pin_at.y,
+        };
+        let build = |at: Point2| -> Vec<SatPlace> {
+            let mut y = y_start;
+            let mut out = Vec::new();
+            for (k, &p) in parts.iter().enumerate() {
+                let item = &items[p];
+                let angle = orient_for(item, &nets[k], dir);
+                let entry = pin_on(item, &nets[k]).unwrap_or_default();
+                let exit = pin_on(item, &nets[k + 1]).unwrap_or_default();
+                let e_off = pin_offset(item, &entry, angle);
+                out.push(SatPlace {
+                    item: p,
+                    offset: Point2::new(snap(at.x - e_off.x), snap(y - e_off.y)),
+                    angle,
+                });
+                y += dirn * (part_span(item, angle, &entry, &exit) + LEAD);
+            }
+            out
+        };
+        // The leg's vertical wire run: pin row to past the last part + glyph.
+        let leg_len: f64 = {
+            let mut total = 0.0;
+            for (k, &p) in parts.iter().enumerate() {
+                let item = &items[p];
+                let angle = orient_for(item, &nets[k], dir);
+                let entry = pin_on(item, &nets[k]).unwrap_or_default();
+                let exit = pin_on(item, &nets[k + 1]).unwrap_or_default();
+                total += part_span(item, angle, &entry, &exit) + LEAD;
+            }
+            total + 5.08
+        };
+        let ladder_net = nets.first().cloned();
+        let run_of = |at: Point2| {
+            let (lo, hi) = if *up {
+                (y_start - leg_len, pin_at.y)
+            } else {
+                (pin_at.y, y_start + leg_len)
+            };
+            ((snap(at.x) / GRID).round() as i64, lo, hi, ladder_net.clone())
+        };
+        let module = &mut form.modules[mi];
+        commit_free(
+            items,
+            claims.entry(mi).or_default(),
+            runs.entry(mi).or_default(),
+            module,
+            build,
+            run_of,
+            Point2::new(x0, 0.0),
+            Point2::new(outward, 0.0),
+        );
+        if std::env::var_os("SPINE_DEBUG").is_some() {
+            let refs: Vec<&str> = parts.iter().map(|&p| items[p].refdes.as_str()).collect();
+            eprintln!(
+                "[attach] LADDER {refs:?} at {}:{} up={}",
+                items[*anchor].refdes, pin, up
+            );
+        }
+        form.consumed.insert(*chain, mi);
     }
 
     // ── Tail CHAINING: an unconsumed 1-part series chain whose junction sits

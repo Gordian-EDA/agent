@@ -195,7 +195,20 @@ impl SchematicWriter {
         pin: &str,
         net: &str,
     ) -> io::Result<()> {
-        const STUB_MM: f64 = 3.81;
+        self.add_signal_label_stub(env, refdes, pin, net, 3.81)
+    }
+
+    /// [`add_signal_label`] with a caller-chosen stub length — the router
+    /// extends the stub past whatever body the default landing would cover.
+    pub fn add_signal_label_stub(
+        &mut self,
+        env: &KicadEnv,
+        refdes: &str,
+        pin: &str,
+        net: &str,
+        stub_mm: f64,
+    ) -> io::Result<()> {
+        let STUB_MM: f64 = stub_mm;
         for (idx, (ep, dir)) in self.pin_dirs(env, refdes, pin)?.into_iter().enumerate() {
             let ep = GRID_50_MIL.snap_point(ep);
             let v = dir.vec();

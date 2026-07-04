@@ -614,7 +614,36 @@ pub(crate) fn route_signal(
                 continue; // named by the port label below
             }
             if let Some((i, num)) = pin {
-                w.add_signal_label(env, &items[*i].refdes, num, net)?;
+                // Clear-stub search under the LINT'S OWN geometry: keep the
+                // default 3.81 when that landing reads clear (references stay
+                // byte-identical); otherwise extend outward until the writer
+                // itself says the label box collides with nothing.
+                let stub = w
+                    .pin_dirs(env, &items[*i].refdes, num)
+                    .ok()
+                    .and_then(|ds| ds.first().copied())
+                    .map(|(ep, dir)| {
+                        let v = dir.vec();
+                        let landing = |s: f64| {
+                            geom::GRID_50_MIL.snap_point(::geom::Point2::new(
+                                ep[0] + v.x * s,
+                                ep[1] + v.y * s,
+                            ))
+                        };
+                        [3.81, 6.35, 8.89, 11.43, 13.97]
+                            .into_iter()
+                            .find(|&s| {
+                                w.label_landing_clear(
+                                    landing(s),
+                                    dir,
+                                    net,
+                                    &items[*i].refdes,
+                                )
+                            })
+                            .unwrap_or(3.81)
+                    })
+                    .unwrap_or(3.81);
+                w.add_signal_label_stub(env, &items[*i].refdes, num, net, stub)?;
                 if let Ok(ds) = w.pin_dirs(env, &items[*i].refdes, num) {
                     for (p, _) in ds {
                         scene.points.push((p.into(), net.to_string()));
