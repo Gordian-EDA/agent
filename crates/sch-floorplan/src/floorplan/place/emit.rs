@@ -238,11 +238,46 @@ pub(crate) fn pack_columns(sizes: &[[f64; 2]], margin: f64, target_aspect: f64) 
         ((tiles), if height > 0.0 { width / height } else { 1.0 })
     };
 
+    // ROW packing (transpose): widest-first into the currently-narrowest row.
+    // A BANNER tile (one very wide block among small ones) forces column
+    // packing into a portrait strip; rows lay the smalls in a band under it.
+    let mut worder: Vec<usize> = (0..n).collect();
+    worder.sort_by(|&a, &b| sizes[b][0].total_cmp(&sizes[a][0]).then(a.cmp(&b)));
+    let pack_rows = |nrow: usize| -> (Vec<[f64; 2]>, f64) {
+        let mut row_x = vec![0.0_f64; nrow];
+        let mut row_h = vec![0.0_f64; nrow];
+        let mut row_of = vec![0usize; n];
+        let mut xof = vec![0.0_f64; n];
+        for &i in &worder {
+            let r = (0..nrow)
+                .min_by(|&a, &b| row_x[a].total_cmp(&row_x[b]))
+                .unwrap();
+            xof[i] = row_x[r];
+            row_of[i] = r;
+            row_x[r] += sizes[i][0] + margin;
+            row_h[r] = row_h[r].max(sizes[i][1]);
+        }
+        let mut row_y = vec![0.0_f64; nrow];
+        let mut acc = 0.0_f64;
+        for r in 0..nrow {
+            row_y[r] = acc;
+            acc += row_h[r] + margin;
+        }
+        let width = row_x.iter().cloned().fold(0.0_f64, f64::max);
+        let height = row_y[nrow - 1] + row_h[nrow - 1];
+        let tiles: Vec<[f64; 2]> = (0..n).map(|i| [xof[i], row_y[row_of[i]]]).collect();
+        (tiles, if height > 0.0 { width / height } else { 1.0 })
+    };
+
     (1..=n)
         .map(|ncol| {
             let (tiles, aspect) = pack(ncol);
             (tiles, (aspect - target_aspect).abs())
         })
+        .chain((1..=n).map(|nrow| {
+            let (tiles, aspect) = pack_rows(nrow);
+            (tiles, (aspect - target_aspect).abs())
+        }))
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(tiles, _)| tiles)
         .unwrap()

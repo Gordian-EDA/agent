@@ -1542,7 +1542,10 @@ pub fn form_modules(
     // ── Recompute envelopes from FULL placement rects (body + text), padded for
     // wiring: leg stubs, power glyphs below ground legs / above supply taps, and
     // label pennants all need air.
-    const WIRE_MARGIN: f64 = 5.08;
+    // 3 grid: label boxes and pin strips are explicit claims now — the old
+    // 4-grid margin double-counted them; 2 grid lets router elbows clip
+    // neighbour bodies (mcp1703).
+    const WIRE_MARGIN: f64 = 3.81;
     for (mi, m) in form.modules.iter_mut().enumerate() {
         let anchor_rect = sch_floorplan::contract::item_rect(&items[m.anchor], [0.0, 0.0]);
         m.env_min.x = anchor_rect.min_x;

@@ -17,7 +17,7 @@ use crate::net::NetClass;
 const GRID: f64 = 1.27;
 /// Clearance kept between packed obstacle rects: a column gap's worth — the
 /// strip estimates run ~a text-height of error, so a two-lane cushion collides.
-const GAP: f64 = 7.62;
+const GAP: f64 = 5.08;
 
 fn snap(v: f64) -> f64 {
     (v / GRID).round() * GRID

@@ -542,7 +542,7 @@ pub fn arrange(
     let total_w: f64 = col_w
         .iter()
         .enumerate()
-        .map(|(l, w)| w + COL_GAP + 2.54 * spans.get(l).map_or(0, |&n| n.min(6)) as f64)
+        .map(|(l, w)| w + COL_GAP + 1.27 * spans.get(l).map_or(0, |&n| n.min(6)) as f64)
         .sum();
     let target_w = (area * 1.4).sqrt().max(160.0);
     let fold = fold && total_w > target_w * 1.3;
@@ -552,7 +552,7 @@ pub fn arrange(
     let mut edge = 0.0;
     let mut row = 0usize;
     for (l, _) in cols.iter().enumerate() {
-        let channel = COL_GAP + 2.54 * spans.get(l).map_or(0, |&n| n.min(4)) as f64;
+        let channel = COL_GAP + 1.27 * spans.get(l).map_or(0, |&n| n.min(4)) as f64;
         if fold && edge > 0.0 && edge + col_w[l] > target_w {
             row += 1;
             edge = 0.0;
