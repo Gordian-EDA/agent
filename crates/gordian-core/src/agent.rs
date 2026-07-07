@@ -561,7 +561,7 @@ impl<P: Provider> Agent<P> {
                 .push(ChatMessage::tool(MessageContent::from_tool_responses(
                     tool_responses,
                 )));
-            if !result_images.is_empty() {
+            if !result_images.is_empty() && self.client.vision() {
                 self.history
                     .push(ChatMessage::user(MessageContent::from_parts(result_images)));
                 prune_stale_images(&mut self.history);

@@ -119,6 +119,11 @@ pub struct LlmConfig {
     pub reasoning_effort: Option<LlmReasoningEffort>,
     /// Whether to request provider reasoning summaries/content when supported.
     pub capture_reasoning: bool,
+    /// Whether the model accepts image input. Text-only models (most open
+    /// models on OpenAI-compatible gateways) reject image parts outright, so
+    /// the agent keeps rendered-image tool results on disk and out of the
+    /// conversation when this is false.
+    pub vision_capable: bool,
 }
 
 impl Default for LlmConfig {
@@ -132,6 +137,7 @@ impl Default for LlmConfig {
             ephemeral_cache: true,
             reasoning_effort: None,
             capture_reasoning: false,
+            vision_capable: true,
         }
     }
 }
