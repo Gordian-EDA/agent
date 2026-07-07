@@ -13,7 +13,7 @@ use pcb_place::placement::{LockedAt, Part, PlaceProblem, Placement, PlacementHin
 
 use crate::AgentRuntime;
 
-fn part_from_footprint_layers(
+pub(super) fn part_from_footprint_layers(
     footprint: &Footprint,
     reference: &str,
     net_map: &BTreeMap<String, String>,
@@ -400,9 +400,9 @@ const EDGE_CLEAR_MM: f64 = 0.5;
 /// clearance so place + route keep copper off the edge; the exported Edge.Cuts stays the user's
 /// real outline. (Inset the bbox; the lint also checks distance to the outline POLYGON edges,
 /// catching the non-bbox edges of a non-rectangular outline.)
-fn routing_bounds(bounds: &Rect, outline: Option<&pcb_model::Polygon>) -> Rect {
+pub(super) fn routing_bounds(bounds: &Rect, outline: Option<&pcb_model::Polygon>) -> Rect {
     if outline.is_none() {
-        return bounds.clone();
+        return *bounds;
     }
     // Never invert a small board: clamp the inset so min stays < max.
     let inset = EDGE_CLEAR_MM
@@ -431,7 +431,7 @@ fn placement_json(p: &Placement) -> Value {
 /// Whether a part is a board-edge part (connector / header / terminal block /
 /// mounting hole) that should hug the perimeter. Detected from the footprint
 /// library id, with the conventional `J` reference prefix as a fallback.
-fn is_connector(footprint: &str, reference: &str) -> bool {
+pub(super) fn is_connector(footprint: &str, reference: &str) -> bool {
     let fp = footprint.to_ascii_lowercase();
     fp.contains("connector")
         || fp.contains("pinheader")
@@ -447,7 +447,7 @@ fn is_connector(footprint: &str, reference: &str) -> bool {
 /// A mounting hole / mechanical fixing: pulled to a board CORNER (not just an
 /// edge), where a screw clears the components. Checked before [`is_connector`]
 /// (which also matches mounting holes) so these corner-seek rather than edge-seek.
-fn is_mounting_hole(footprint: &str) -> bool {
+pub(super) fn is_mounting_hole(footprint: &str) -> bool {
     footprint.to_ascii_lowercase().contains("mountinghole")
 }
 
@@ -522,7 +522,7 @@ pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 reference: p.reference.clone(),
                 x_nm: (p.at.x * 1_000_000.0).round() as i64,
                 y_nm: (p.at.y * 1_000_000.0).round() as i64,
-                rotation_deg: Some(p.rotation as f64),
+                rotation_deg: Some(p.rotation),
             })
             .collect();
         if !moves.is_empty()

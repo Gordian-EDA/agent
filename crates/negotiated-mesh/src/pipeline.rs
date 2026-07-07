@@ -38,14 +38,19 @@
 //! so its cell routes are dropped and it is reported failed.
 
 use crate::channel::ChannelRouter;
+use crate::copper::copper_obstacles;
 use crate::crossing::assign_crossings;
 use crate::detail::{self, CellRoute, CellRouteResult};
 use crate::direct::DirectLineRouter;
+use crate::heuristics::{
+    connection_crossing_pressures, connection_obstacle_pressure_um,
+    connection_segment_obstacle_pressure_um, connection_span_um,
+};
 use crate::layer_hop::LayerHopRouter;
 use crate::pathing::{GlobalRouteResult, global_route_with_mesh};
 use crate::pattern::PatternRouter;
 use crate::problem::{
-    Capabilities, FailedNet, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult,
+    Capabilities, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteQuality, RouteResult,
     RouteSolution, Router, Trace, Via, ViaSpan,
 };
 use crate::router::{self, GridAStarRouter};
@@ -53,9 +58,15 @@ use crate::sequential::SequentialGridRouter;
 use crate::via_escape::ViaEscapeRouter;
 use geom::JOIN_EPS;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "detailed";
+const ADAPTIVE_GRID_RESCUE_ENGINE: &str = "adaptive-grid-rescue";
+const ADAPTIVE_GRID_RIPUP_RESCUE_ENGINE: &str = "adaptive-grid-ripup-rescue";
+const ADAPTIVE_RESCUE_PORTFOLIO_MAX_FAILED: usize = 8;
+const ADAPTIVE_RIPUP_MAX_BLOCKERS: usize = 3;
+const AUTO_DETAILED_MAX_MULTILAYER_CONNECTIONS: usize = 11;
 
 // ── pipeline entry points ──────────────────────────────────────────────────────
 
@@ -109,22 +120,43 @@ fn route_detailed_from_global(
                 ),
             });
         }
+        return RouteResult {
+            solution: RouteSolution {
+                traces: Vec::new(),
+                vias: Vec::new(),
+            },
+            failed,
+            engine: ENGINE.to_owned(),
+        };
     }
 
     // 2. Crossing assignment.
-    let assignment = assign_crossings(problem, &mesh, &global.plan);
+    let assignment = assign_crossings(problem, mesh, &global.plan);
     for f in &assignment.failures {
         // An assignment failure is per-boundary or per-via; surface it as a
         // board-level fault with assign provenance (its detailed payload is the
         // honest record).
-        failed.push(FailedNet {
-            connection: assignment_failure_connection(f),
-            reason: format!("assign: {}", assignment_failure_reason(f)),
-        });
+        let connection = assignment_failure_connection(f);
+        let reason = format!("assign: {}", assignment_failure_reason(f));
+        if connection.is_empty() {
+            failed.push(FailedNet { connection, reason });
+        } else {
+            fail(&mut failed, &mut failed_names, &connection, reason);
+        }
+    }
+    if !assignment.failures.is_empty() {
+        return RouteResult {
+            solution: RouteSolution {
+                traces: Vec::new(),
+                vias: Vec::new(),
+            },
+            failed,
+            engine: ENGINE.to_owned(),
+        };
     }
 
     // 3. Per-cell detailed routing.
-    let cells: CellRouteResult = detail::route_cells(problem, &mesh, &assignment);
+    let cells: CellRouteResult = detail::route_cells(problem, mesh, &assignment);
     for f in &cells.failed {
         // route_cells already prefixes the reason with "cell N: …"; keep that
         // provenance and mark the net as failed so its copper is dropped.
@@ -194,10 +226,10 @@ impl Router for NegotiatedMeshRouter {
 /// [`RouteQuality`] scorer (the geometry-violation count lives outside the kernel),
 /// the routability-then-tidiness [`better`] rule, and the clean-route
 /// short-circuit. The selector filters by [`Router::can_route`], runs each
-/// surviving router in injection order, and keeps the best — the FIRST router that
-/// routes with zero faults after the shared postroute cleanup short-circuits the
-/// rest, so heavier engines are never paid for on a board an earlier candidate
-/// already routes clean. Candidates are cleaned before scoring, so injected
+/// surviving router in injection order, and keeps the best: a clean via-free
+/// result after shared postroute cleanup short-circuits the rest, while a clean
+/// via-heavy result may still be beaten by a later injected router with fewer
+/// vias or shorter copper. Candidates are cleaned before scoring, so injected
 /// router portfolios use the same quality key as [`route_auto`].
 ///
 /// `routers` is injected by the caller, mirroring `Box<dyn PlacementEngine>`:
@@ -213,7 +245,8 @@ pub fn select_best(problem: &RouteProblem, routers: &[&dyn Router]) -> RouteResu
             continue;
         }
         let result = router.route(problem);
-        if consider_candidate(problem, &mut best, result) {
+        let _ = consider_candidate(problem, &mut best, result);
+        if route_best_is_clean_via_free(&best) {
             break;
         }
     }
@@ -232,23 +265,57 @@ pub fn select_best(problem: &RouteProblem, routers: &[&dyn Router]) -> RouteResu
 #[derive(Debug, Clone)]
 pub struct RouteAutoRun {
     pub result: RouteResult,
+    /// Per-engine candidate summaries in the order `route_auto` tried them. Each
+    /// entry is captured after the same postroute cleanup and quality scoring used
+    /// by the selector, so failure reports can show which engines were actually
+    /// attempted and why the selected result still failed.
+    pub attempts: Vec<RouteEngineAttempt>,
     /// Negotiated global-routing result from the detailed primary candidate, when
     /// that candidate ran. Failure callers can use this instead of rerunning
     /// global routing just to recover congestion hotspots.
     pub global: Option<GlobalRouteResult>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteEngineAttempt {
+    pub engine: String,
+    pub failed: Vec<FailedNet>,
+    pub elapsed_ms: u128,
+    pub fault_weight: usize,
+    pub geometry_violations: usize,
+    pub failed_nets: usize,
+    pub vias: usize,
+    pub wirelength: f64,
+}
+
 fn consider_candidate(
     problem: &RouteProblem,
     best: &mut Option<(RouteResult, RouteQuality)>,
-    mut result: RouteResult,
+    result: RouteResult,
 ) -> bool {
-    postroute_cleanup(problem, &mut result.solution);
-    let q = RouteQuality::of(
-        problem,
-        &result,
-        router::geometry_violations(problem, &result.solution),
-    );
+    consider_candidate_recording(problem, best, result, None, 0)
+}
+
+fn consider_candidate_recording(
+    problem: &RouteProblem,
+    best: &mut Option<(RouteResult, RouteQuality)>,
+    mut result: RouteResult,
+    attempts: Option<&mut Vec<RouteEngineAttempt>>,
+    elapsed_ms: u128,
+) -> bool {
+    let (q, geometry_violations) = cleaned_route_quality(problem, &mut result);
+    if let Some(attempts) = attempts {
+        attempts.push(RouteEngineAttempt {
+            engine: result.engine.clone(),
+            failed: result.failed.clone(),
+            elapsed_ms,
+            fault_weight: q.fault_weight,
+            geometry_violations,
+            failed_nets: q.failed_nets,
+            vias: q.via_count,
+            wirelength: q.wirelength,
+        });
+    }
     let stop = q.faults() == 0;
     *best = match best.take() {
         None => Some((result, q)),
@@ -256,6 +323,28 @@ fn consider_candidate(
         Some(_) => Some((result, q)),
     };
     stop
+}
+
+fn cleaned_route_quality(
+    problem: &RouteProblem,
+    result: &mut RouteResult,
+) -> (RouteQuality, usize) {
+    postroute_cleanup(problem, &mut result.solution);
+    let geometry_violations = router::geometry_violations(problem, &result.solution);
+    (
+        RouteQuality::of(problem, result, geometry_violations),
+        geometry_violations,
+    )
+}
+
+fn route_best_is_clean(best: &Option<(RouteResult, RouteQuality)>) -> bool {
+    best.as_ref()
+        .is_some_and(|(_, quality)| quality.faults() == 0)
+}
+
+fn route_best_is_clean_via_free(best: &Option<(RouteResult, RouteQuality)>) -> bool {
+    best.as_ref()
+        .is_some_and(|(_, quality)| quality.faults() == 0 && quality.via_count == 0)
 }
 
 /// Keep the incumbent? Routability is primary (fewer total faults wins outright);
@@ -285,11 +374,14 @@ fn better(_problem: &RouteProblem, incumbent: &RouteQuality, challenger: &RouteQ
 /// Route `problem` with the premium portfolio: direct line-of-sight for trivial
 /// clean nets, layer-hop for trivial different-layer nets, via-escape for simple
 /// same-layer escapes, a composite pattern router for heterogeneous simple
-/// boards, a directional channel router for two-pin crossing/channel cases, a
+/// boards, a directional channel router for crossing/channel cases, a
 /// contextual sequential-grid router for ordering-sensitive boards, the
 /// negotiated-mesh detailed router as the primary engine, and the free grid router
-/// as the fallback baseline. The convenience entry the agent's PCB tool uses; a
-/// free-tier caller injects only `[&GridAStarRouter]`.
+/// as the fallback baseline. Cheap clean via-free candidates stop immediately;
+/// cheap clean via-heavy candidates keep competing with the remaining cheap
+/// routers for fewer vias/shorter copper, but still avoid paying the detailed mesh.
+/// The convenience entry the agent's PCB tool uses; a free-tier caller injects only
+/// `[&GridAStarRouter]`.
 pub fn route_auto(problem: &RouteProblem) -> RouteResult {
     route_auto_with_diagnostics(problem).result
 }
@@ -308,16 +400,53 @@ pub fn route_mesh_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
                 failed: vec![],
                 engine: "none".to_owned(),
             },
+            attempts: vec![],
             global: None,
         };
     }
 
+    let started = Instant::now();
     let (mut result, global) = route_detailed_with_global(problem);
     reconcile_connectivity(problem, &mut result.solution, &mut result.failed);
-    postroute_cleanup(problem, &mut result.solution);
+    let elapsed_ms = started.elapsed().as_millis();
+    let mut best = None;
+    let mut attempts = Vec::new();
+    let _ =
+        consider_candidate_recording(problem, &mut best, result, Some(&mut attempts), elapsed_ms);
+    try_adaptive_grid_rescue(problem, &mut best, &mut attempts);
+    let result = best
+        .map(|(result, _)| result)
+        .expect("mesh candidate just populated best");
     RouteAutoRun {
         result,
+        attempts,
         global: Some(global),
+    }
+}
+
+/// Route only the contextual sequential-grid engine, preserving one-pass attempt
+/// diagnostics for callers that explicitly select this strategy.
+pub fn route_sequential_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
+    let sequential = SequentialGridRouter;
+    let started = Instant::now();
+    let result = sequential.route(problem);
+    let elapsed_ms = started.elapsed().as_millis();
+    let geometry_violations = router::geometry_violations(problem, &result.solution);
+    let quality = RouteQuality::of(problem, &result, geometry_violations);
+    let attempts = vec![RouteEngineAttempt {
+        engine: result.engine.clone(),
+        failed: result.failed.clone(),
+        elapsed_ms,
+        fault_weight: quality.fault_weight,
+        geometry_violations,
+        failed_nets: quality.failed_nets,
+        vias: quality.via_count,
+        wirelength: quality.wirelength,
+    }];
+    RouteAutoRun {
+        result,
+        attempts,
+        global: None,
     }
 }
 
@@ -334,71 +463,175 @@ pub fn route_auto_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
     let grid = GridAStarRouter;
 
     let mut best: Option<(RouteResult, RouteQuality)> = None;
+    let mut attempts = Vec::new();
     let mut global = None;
 
     if direct.can_route(problem) {
+        let started = Instant::now();
         let result = direct.route(problem);
-        if consider_candidate(problem, &mut best, result) {
+        let elapsed_ms = started.elapsed().as_millis();
+        let _ = consider_candidate_recording(
+            problem,
+            &mut best,
+            result,
+            Some(&mut attempts),
+            elapsed_ms,
+        );
+        if route_best_is_clean_via_free(&best) {
             let result = best.expect("direct candidate just populated best").0;
-            return RouteAutoRun { result, global };
+            return RouteAutoRun {
+                result,
+                attempts,
+                global,
+            };
         }
     }
 
     if layer_hop.can_route(problem) {
+        let started = Instant::now();
         let result = layer_hop.route(problem);
-        if consider_candidate(problem, &mut best, result) {
+        let elapsed_ms = started.elapsed().as_millis();
+        let _ = consider_candidate_recording(
+            problem,
+            &mut best,
+            result,
+            Some(&mut attempts),
+            elapsed_ms,
+        );
+        if route_best_is_clean_via_free(&best) {
             let result = best.expect("layer-hop candidate just populated best").0;
-            return RouteAutoRun { result, global };
+            return RouteAutoRun {
+                result,
+                attempts,
+                global,
+            };
         }
     }
 
     if via_escape.can_route(problem) {
+        let started = Instant::now();
         let result = via_escape.route(problem);
-        if consider_candidate(problem, &mut best, result) {
+        let elapsed_ms = started.elapsed().as_millis();
+        let _ = consider_candidate_recording(
+            problem,
+            &mut best,
+            result,
+            Some(&mut attempts),
+            elapsed_ms,
+        );
+        if route_best_is_clean_via_free(&best) {
             let result = best.expect("via-escape candidate just populated best").0;
-            return RouteAutoRun { result, global };
+            return RouteAutoRun {
+                result,
+                attempts,
+                global,
+            };
         }
     }
 
     if pattern.can_route(problem) {
+        let started = Instant::now();
         let result = pattern.route(problem);
-        if consider_candidate(problem, &mut best, result) {
+        let elapsed_ms = started.elapsed().as_millis();
+        let _ = consider_candidate_recording(
+            problem,
+            &mut best,
+            result,
+            Some(&mut attempts),
+            elapsed_ms,
+        );
+        if route_best_is_clean_via_free(&best) {
             let result = best.expect("pattern candidate just populated best").0;
-            return RouteAutoRun { result, global };
+            return RouteAutoRun {
+                result,
+                attempts,
+                global,
+            };
         }
     }
 
     if channel.can_route(problem) {
+        let started = Instant::now();
         let result = channel.route(problem);
-        if consider_candidate(problem, &mut best, result) {
+        let elapsed_ms = started.elapsed().as_millis();
+        let _ = consider_candidate_recording(
+            problem,
+            &mut best,
+            result,
+            Some(&mut attempts),
+            elapsed_ms,
+        );
+        if route_best_is_clean_via_free(&best) {
             let result = best.expect("channel candidate just populated best").0;
-            return RouteAutoRun { result, global };
+            return RouteAutoRun {
+                result,
+                attempts,
+                global,
+            };
         }
     }
 
     if sequential.can_route(problem) {
+        let started = Instant::now();
         let result = sequential.route(problem);
-        if consider_candidate(problem, &mut best, result) {
+        let elapsed_ms = started.elapsed().as_millis();
+        let _ = consider_candidate_recording(
+            problem,
+            &mut best,
+            result,
+            Some(&mut attempts),
+            elapsed_ms,
+        );
+        if route_best_is_clean(&best) {
             let result = best.expect("sequential candidate just populated best").0;
-            return RouteAutoRun { result, global };
+            return RouteAutoRun {
+                result,
+                attempts,
+                global,
+            };
         }
     }
 
-    if mesh.can_route(problem) {
+    if mesh.can_route(problem) && should_try_detailed_in_auto(problem) {
+        let started = Instant::now();
         let (mut result, g) = route_detailed_with_global(problem);
         reconcile_connectivity(problem, &mut result.solution, &mut result.failed);
+        let elapsed_ms = started.elapsed().as_millis();
         global = Some(g);
-        if consider_candidate(problem, &mut best, result) {
-            let result = best.expect("mesh candidate just populated best").0;
-            return RouteAutoRun { result, global };
+        let mut mesh_best = None;
+        let _ = consider_candidate_recording(
+            problem,
+            &mut mesh_best,
+            result,
+            Some(&mut attempts),
+            elapsed_ms,
+        );
+        try_adaptive_grid_rescue(problem, &mut mesh_best, &mut attempts);
+        let (mesh_result, _) = mesh_best.expect("mesh candidate just populated best");
+        if consider_candidate_recording(problem, &mut best, mesh_result, None, 0) {
+            let result = best.expect("mesh candidate just won best").0;
+            return RouteAutoRun {
+                result,
+                attempts,
+                global,
+            };
         }
     }
 
     if grid.can_route(problem) {
+        let started = Instant::now();
         let result = grid.route(problem);
-        let _ = consider_candidate(problem, &mut best, result);
+        let elapsed_ms = started.elapsed().as_millis();
+        let _ = consider_candidate_recording(
+            problem,
+            &mut best,
+            result,
+            Some(&mut attempts),
+            elapsed_ms,
+        );
     }
 
+    try_adaptive_grid_rescue(problem, &mut best, &mut attempts);
     let result = best.map(|(r, _)| r).unwrap_or_else(|| RouteResult {
         solution: RouteSolution {
             traces: vec![],
@@ -407,7 +640,912 @@ pub fn route_auto_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
         failed: vec![],
         engine: "none".to_owned(),
     });
-    RouteAutoRun { result, global }
+    RouteAutoRun {
+        result,
+        attempts,
+        global,
+    }
+}
+
+fn should_try_detailed_in_auto(problem: &RouteProblem) -> bool {
+    problem.layer_count <= 2
+        || problem.connections.len() <= AUTO_DETAILED_MAX_MULTILAYER_CONNECTIONS
+}
+
+fn try_adaptive_grid_rescue(
+    problem: &RouteProblem,
+    best: &mut Option<(RouteResult, RouteQuality)>,
+    attempts: &mut Vec<RouteEngineAttempt>,
+) {
+    let Some((result, q)) = best.as_ref() else {
+        return;
+    };
+    if q.faults() == 0 || result.failed.is_empty() {
+        return;
+    }
+    let started = Instant::now();
+    let Some(candidate) = adaptive_grid_rescue(problem, result) else {
+        return;
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    let _ = consider_candidate_recording(problem, best, candidate, Some(attempts), elapsed_ms);
+}
+
+fn adaptive_grid_rescue(problem: &RouteProblem, selected: &RouteResult) -> Option<RouteResult> {
+    let failed_names: BTreeSet<String> = selected
+        .failed
+        .iter()
+        .map(|f| f.connection.clone())
+        .filter(|name| !name.is_empty())
+        .collect();
+    if failed_names.is_empty() {
+        return None;
+    }
+
+    let mut best: Option<(RouteResult, RouteQuality)> = None;
+    let base = adaptive_rescue_base(problem, selected, &failed_names);
+    for order in adaptive_rescue_orders(problem, &failed_names) {
+        let Some(mut candidate) = adaptive_grid_rescue_order(problem, selected, &base, &order)
+        else {
+            continue;
+        };
+        let (quality, _) = cleaned_route_quality(problem, &mut candidate);
+        let done = adaptive_rescue_candidate_can_short_circuit(&quality);
+        best = match best.take() {
+            None => Some((candidate, quality)),
+            Some((incumbent, incumbent_quality))
+                if better(problem, &incumbent_quality, &quality) =>
+            {
+                Some((incumbent, incumbent_quality))
+            }
+            Some(_) => Some((candidate, quality)),
+        };
+        if done {
+            break;
+        }
+    }
+
+    let selected_quality = RouteQuality::of(
+        problem,
+        selected,
+        router::geometry_violations(problem, &selected.solution),
+    );
+    for order in adaptive_ripup_rescue_orders(problem, selected, &failed_names) {
+        let Some(mut candidate) =
+            adaptive_grid_ripup_rescue_order(problem, selected, &failed_names, &order)
+        else {
+            continue;
+        };
+        let (quality, _) = cleaned_route_quality(problem, &mut candidate);
+        if !adaptive_ripup_candidate_reduces_failures(&selected_quality, &quality) {
+            continue;
+        }
+        let done = adaptive_rescue_candidate_can_short_circuit(&quality);
+        best = match best.take() {
+            None => Some((candidate, quality)),
+            Some((incumbent, incumbent_quality))
+                if better(problem, &incumbent_quality, &quality) =>
+            {
+                Some((incumbent, incumbent_quality))
+            }
+            Some(_) => Some((candidate, quality)),
+        };
+        if done {
+            break;
+        }
+    }
+
+    if let Some((residual, residual_quality)) = best.clone()
+        && residual_quality.faults() > 0
+        && !residual.failed.is_empty()
+    {
+        let residual_failed_names: BTreeSet<String> = residual
+            .failed
+            .iter()
+            .map(|f| f.connection.clone())
+            .filter(|name| !name.is_empty())
+            .collect();
+        for order in adaptive_ripup_rescue_orders(problem, &residual, &residual_failed_names) {
+            let Some(mut candidate) = adaptive_grid_ripup_rescue_order(
+                problem,
+                &residual,
+                &residual_failed_names,
+                &order,
+            ) else {
+                continue;
+            };
+            let (quality, _) = cleaned_route_quality(problem, &mut candidate);
+            if !adaptive_ripup_candidate_reduces_failures(&residual_quality, &quality) {
+                continue;
+            }
+            let done = adaptive_rescue_candidate_can_short_circuit(&quality);
+            best = match best.take() {
+                None => Some((candidate, quality)),
+                Some((incumbent, incumbent_quality))
+                    if better(problem, &incumbent_quality, &quality) =>
+                {
+                    Some((incumbent, incumbent_quality))
+                }
+                Some(_) => Some((candidate, quality)),
+            };
+            if done {
+                break;
+            }
+        }
+    }
+
+    best.map(|(result, _)| result)
+}
+
+fn adaptive_ripup_candidate_reduces_failures(
+    selected: &RouteQuality,
+    candidate: &RouteQuality,
+) -> bool {
+    (candidate.faults(), candidate.failed_nets) < (selected.faults(), selected.failed_nets)
+}
+
+fn adaptive_rescue_candidate_can_short_circuit(quality: &RouteQuality) -> bool {
+    quality.faults() == 0 && quality.via_count == 0
+}
+
+#[derive(Clone)]
+struct AdaptiveRescueBase {
+    solution: RouteSolution,
+    failed: Vec<FailedNet>,
+    obstacles: Vec<Obstacle>,
+}
+
+fn adaptive_rescue_base(
+    problem: &RouteProblem,
+    selected: &RouteResult,
+    failed_names: &BTreeSet<String>,
+) -> AdaptiveRescueBase {
+    let mut solution = selected.solution.clone();
+    solution
+        .traces
+        .retain(|trace| !failed_names.contains(&trace.connection));
+    solution
+        .vias
+        .retain(|via| !failed_names.contains(&via.connection));
+    let obstacles = copper_obstacles(problem, &solution);
+    AdaptiveRescueBase {
+        solution,
+        failed: selected.failed.clone(),
+        obstacles,
+    }
+}
+
+fn adaptive_grid_rescue_order(
+    problem: &RouteProblem,
+    selected: &RouteResult,
+    base: &AdaptiveRescueBase,
+    order: &[usize],
+) -> Option<RouteResult> {
+    let grid = GridAStarRouter;
+    let mut solution = base.solution.clone();
+    let mut failed = base.failed.clone();
+    let mut rescued = BTreeSet::new();
+    let mut residual_obstacles = base.obstacles.clone();
+
+    for &idx in order {
+        let Some(conn) = problem.connections.get(idx) else {
+            continue;
+        };
+        if conn.points_to_connect.len() < 2 {
+            continue;
+        }
+
+        let subproblem =
+            problem_with_single_connection_and_obstacles(problem, idx, &residual_obstacles);
+        let routed = grid.route(&subproblem);
+        if !routed.failed.is_empty() {
+            continue;
+        }
+
+        let mut candidate = solution.clone();
+        let routed_obstacles = copper_obstacles(problem, &routed.solution);
+        candidate.traces.extend(routed.solution.traces);
+        candidate.vias.extend(routed.solution.vias);
+        let validation = problem_with_solution_connections(problem, &candidate);
+        crate::via_cleanup::normalize_redundant_vias(&validation, &mut candidate);
+        if !crate::lint::lint(&validation, &candidate).is_empty() {
+            continue;
+        }
+
+        solution = candidate;
+        residual_obstacles.extend(routed_obstacles);
+        rescued.insert(conn.name.clone());
+        failed.retain(|f| f.connection != conn.name);
+    }
+
+    if rescued.is_empty() {
+        return None;
+    }
+
+    Some(RouteResult {
+        solution,
+        failed,
+        engine: format!("{}+{}", selected.engine, ADAPTIVE_GRID_RESCUE_ENGINE),
+    })
+}
+
+fn adaptive_grid_ripup_rescue_order(
+    problem: &RouteProblem,
+    selected: &RouteResult,
+    failed_names: &BTreeSet<String>,
+    order: &[usize],
+) -> Option<RouteResult> {
+    let ripup_names: BTreeSet<String> = order
+        .iter()
+        .filter_map(|&idx| problem.connections.get(idx).map(|conn| conn.name.clone()))
+        .collect();
+    if ripup_names.is_empty() || ripup_names.iter().all(|name| failed_names.contains(name)) {
+        return None;
+    }
+
+    let mut solution = selected.solution.clone();
+    solution
+        .traces
+        .retain(|trace| !ripup_names.contains(&trace.connection));
+    solution
+        .vias
+        .retain(|via| !ripup_names.contains(&via.connection));
+    let mut failed = selected.failed.clone();
+    let mut residual_obstacles = copper_obstacles(problem, &solution);
+    let grid = GridAStarRouter;
+    let mut routed_any = false;
+
+    for &idx in order {
+        let Some(conn) = problem.connections.get(idx) else {
+            continue;
+        };
+        if conn.points_to_connect.len() < 2 {
+            continue;
+        }
+
+        let subproblem =
+            problem_with_single_connection_and_obstacles(problem, idx, &residual_obstacles);
+        let routed = grid.route(&subproblem);
+        if !routed.failed.is_empty() {
+            if !failed.iter().any(|f| f.connection == conn.name) {
+                failed.push(FailedNet {
+                    connection: conn.name.clone(),
+                    reason: "adaptive rip-up rescue could not reroute displaced net".to_owned(),
+                });
+            }
+            continue;
+        }
+
+        let mut candidate = solution.clone();
+        let routed_obstacles = copper_obstacles(problem, &routed.solution);
+        candidate.traces.extend(routed.solution.traces);
+        candidate.vias.extend(routed.solution.vias);
+        let validation = problem_with_solution_connections(problem, &candidate);
+        crate::via_cleanup::normalize_redundant_vias(&validation, &mut candidate);
+        if !crate::lint::lint(&validation, &candidate).is_empty() {
+            if !failed.iter().any(|f| f.connection == conn.name) {
+                failed.push(FailedNet {
+                    connection: conn.name.clone(),
+                    reason: "adaptive rip-up rescue reroute conflicted with fixed copper"
+                        .to_owned(),
+                });
+            }
+            continue;
+        }
+
+        solution = candidate;
+        residual_obstacles.extend(routed_obstacles);
+        failed.retain(|f| f.connection != conn.name);
+        routed_any = true;
+    }
+
+    if !routed_any {
+        return None;
+    }
+
+    Some(RouteResult {
+        solution,
+        failed,
+        engine: format!("{}+{}", selected.engine, ADAPTIVE_GRID_RIPUP_RESCUE_ENGINE),
+    })
+}
+
+fn adaptive_rescue_orders(
+    problem: &RouteProblem,
+    failed_names: &BTreeSet<String>,
+) -> Vec<Vec<usize>> {
+    let metrics = adaptive_rescue_order_metrics(problem);
+    let pressure_first = adaptive_rescue_order_with_metrics(problem, failed_names, &metrics);
+    if failed_names.len() > ADAPTIVE_RESCUE_PORTFOLIO_MAX_FAILED {
+        return vec![pressure_first];
+    }
+
+    let mut orders = Vec::new();
+    push_adaptive_rescue_order(&mut orders, pressure_first.clone());
+
+    let original: Vec<usize> = problem
+        .connections
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, conn)| failed_names.contains(&conn.name).then_some(idx))
+        .collect();
+    push_adaptive_rescue_order(&mut orders, original);
+    if orders.is_empty() {
+        return orders;
+    }
+
+    let mut reverse_pressure = pressure_first;
+    reverse_pressure.reverse();
+    push_adaptive_rescue_order(&mut orders, reverse_pressure);
+
+    let mut obstacle_first: Vec<usize> = orders[0].clone();
+    obstacle_first.sort_by(|&a, &b| {
+        metrics[b]
+            .obstacle_pressure_um
+            .cmp(&metrics[a].obstacle_pressure_um)
+            .then_with(|| metrics[b].pin_count.cmp(&metrics[a].pin_count))
+            .then_with(|| metrics[b].span_um.cmp(&metrics[a].span_um))
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            })
+    });
+    push_adaptive_rescue_order(&mut orders, obstacle_first);
+
+    let mut segment_obstacle_first: Vec<usize> = orders[0].clone();
+    segment_obstacle_first.sort_by(|&a, &b| {
+        metrics[b]
+            .segment_obstacle_pressure_um
+            .cmp(&metrics[a].segment_obstacle_pressure_um)
+            .then_with(|| {
+                metrics[b]
+                    .obstacle_pressure_um
+                    .cmp(&metrics[a].obstacle_pressure_um)
+            })
+            .then_with(|| metrics[b].pin_count.cmp(&metrics[a].pin_count))
+            .then_with(|| metrics[b].span_um.cmp(&metrics[a].span_um))
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            })
+    });
+    push_adaptive_rescue_order(&mut orders, segment_obstacle_first);
+
+    let mut short_span_first: Vec<usize> = orders[0].clone();
+    short_span_first.sort_by(|&a, &b| {
+        metrics[a]
+            .span_um
+            .cmp(&metrics[b].span_um)
+            .then_with(|| metrics[a].pin_count.cmp(&metrics[b].pin_count))
+            .then_with(|| {
+                metrics[a]
+                    .obstacle_pressure_um
+                    .cmp(&metrics[b].obstacle_pressure_um)
+            })
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            })
+    });
+    push_adaptive_rescue_order(&mut orders, short_span_first);
+
+    let mut many_pins_first: Vec<usize> = orders[0].clone();
+    many_pins_first.sort_by(|&a, &b| {
+        metrics[b]
+            .pin_count
+            .cmp(&metrics[a].pin_count)
+            .then_with(|| metrics[b].span_um.cmp(&metrics[a].span_um))
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            })
+    });
+    push_adaptive_rescue_order(&mut orders, many_pins_first);
+
+    orders
+}
+
+fn adaptive_ripup_rescue_orders(
+    problem: &RouteProblem,
+    selected: &RouteResult,
+    failed_names: &BTreeSet<String>,
+) -> Vec<Vec<usize>> {
+    if failed_names.is_empty() || failed_names.len() > ADAPTIVE_RESCUE_PORTFOLIO_MAX_FAILED {
+        return Vec::new();
+    }
+
+    let blockers = adaptive_ripup_blocker_scores(problem, selected, failed_names);
+    if blockers.is_empty() {
+        return Vec::new();
+    }
+
+    let metrics = adaptive_rescue_order_metrics(problem);
+    let failed_first = adaptive_rescue_order_with_metrics(problem, failed_names, &metrics);
+    let blocker_scores: BTreeMap<String, u64> = blockers.into_iter().collect();
+    let blocker_names: BTreeSet<String> = blocker_scores.keys().cloned().collect();
+    let mut blocker_order: Vec<usize> = problem
+        .connections
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, conn)| blocker_names.contains(&conn.name).then_some(idx))
+        .collect();
+    blocker_order.sort_by(|&a, &b| {
+        blocker_scores[&problem.connections[b].name]
+            .cmp(&blocker_scores[&problem.connections[a].name])
+            .then_with(|| {
+                metrics[b]
+                    .segment_obstacle_pressure_um
+                    .cmp(&metrics[a].segment_obstacle_pressure_um)
+            })
+            .then_with(|| {
+                metrics[b]
+                    .obstacle_pressure_um
+                    .cmp(&metrics[a].obstacle_pressure_um)
+            })
+            .then_with(|| metrics[b].pin_count.cmp(&metrics[a].pin_count))
+            .then_with(|| metrics[b].span_um.cmp(&metrics[a].span_um))
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            })
+    });
+
+    let mut orders = Vec::new();
+    let mut pressure_first = failed_first;
+    pressure_first.extend(blocker_order.iter().copied());
+    push_adaptive_rescue_order(&mut orders, pressure_first);
+
+    let original: Vec<usize> = problem
+        .connections
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, conn)| {
+            (failed_names.contains(&conn.name) || blocker_names.contains(&conn.name)).then_some(idx)
+        })
+        .collect();
+    push_adaptive_rescue_order(&mut orders, original);
+
+    orders
+}
+
+fn adaptive_ripup_blocker_scores(
+    problem: &RouteProblem,
+    selected: &RouteResult,
+    failed_names: &BTreeSet<String>,
+) -> Vec<(String, u64)> {
+    let failed_segments = failed_corridor_segments(problem, failed_names);
+    let mut failed_terminals = failed_terminal_points(problem, failed_names);
+    failed_terminals.extend(failed_reason_terminal_points(
+        problem,
+        failed_names,
+        &selected.failed,
+    ));
+    if failed_segments.is_empty() && failed_terminals.is_empty() {
+        return Vec::new();
+    }
+
+    let known_connections: BTreeSet<&str> = problem
+        .connections
+        .iter()
+        .map(|conn| conn.name.as_str())
+        .collect();
+    let mut scores: BTreeMap<String, u64> = BTreeMap::new();
+    for trace in &selected.solution.traces {
+        if failed_names.contains(&trace.connection)
+            || !known_connections.contains(trace.connection.as_str())
+        {
+            continue;
+        }
+        for window in trace.path.windows(2) {
+            let trace_segment = geom::Segment::new(window[0], window[1]);
+            for failed in &failed_segments {
+                if failed.layer != trace.layer {
+                    continue;
+                }
+                let clearance = problem.clearance + failed.width / 2.0 + trace.width / 2.0;
+                let dist = failed.segment.dist_to_segment(trace_segment);
+                if dist <= clearance + geom::EPS {
+                    let trace_um = (window[0].dist(window[1]) * 1000.0).round().max(0.0) as u64;
+                    let closeness_um = ((clearance - dist).max(0.0) * 1000.0).round() as u64;
+                    *scores.entry(trace.connection.clone()).or_default() +=
+                        1_000_000 + trace_um + closeness_um;
+                }
+            }
+        }
+        for failed in &failed_terminals {
+            if failed.layer != trace.layer {
+                continue;
+            }
+            let clearance = problem.clearance + failed.width / 2.0 + trace.width / 2.0;
+            let radius = terminal_relief_radius(problem, clearance);
+            for window in trace.path.windows(2) {
+                let trace_segment = geom::Segment::new(window[0], window[1]);
+                let dist = trace_segment.dist_to_point(failed.point);
+                if dist <= radius + geom::EPS {
+                    let trace_um = (window[0].dist(window[1]) * 1000.0).round().max(0.0) as u64;
+                    let closeness_um = ((radius - dist).max(0.0) * 1000.0).round() as u64;
+                    *scores.entry(trace.connection.clone()).or_default() +=
+                        1_500_000 + trace_um + closeness_um;
+                }
+            }
+        }
+    }
+    for via in &selected.solution.vias {
+        if failed_names.contains(&via.connection)
+            || !known_connections.contains(via.connection.as_str())
+        {
+            continue;
+        }
+        let via_obstacles = copper_obstacles(
+            problem,
+            &RouteSolution {
+                traces: Vec::new(),
+                vias: vec![via.clone()],
+            },
+        );
+        for via_obstacle in via_obstacles {
+            for failed in &failed_segments {
+                if !via_obstacle
+                    .layers
+                    .iter()
+                    .any(|layer| layer == &failed.layer)
+                {
+                    continue;
+                }
+                let clearance = problem.clearance + failed.width / 2.0 + via_obstacle.width / 2.0;
+                let dist = failed.segment.dist_to_point(via_obstacle.center);
+                if dist <= clearance + geom::EPS {
+                    let closeness_um = ((clearance - dist).max(0.0) * 1000.0).round() as u64;
+                    *scores.entry(via.connection.clone()).or_default() += 2_000_000 + closeness_um;
+                }
+            }
+            for failed in &failed_terminals {
+                if !via_obstacle
+                    .layers
+                    .iter()
+                    .any(|layer| layer == &failed.layer)
+                {
+                    continue;
+                }
+                let clearance = problem.clearance + failed.width / 2.0 + via_obstacle.width / 2.0;
+                let radius = terminal_relief_radius(problem, clearance);
+                let dist = failed.point.dist(via_obstacle.center);
+                if dist <= radius + geom::EPS {
+                    let closeness_um = ((radius - dist).max(0.0) * 1000.0).round() as u64;
+                    *scores.entry(via.connection.clone()).or_default() += 2_500_000 + closeness_um;
+                }
+            }
+        }
+    }
+
+    let mut blockers: Vec<(String, u64)> = scores.into_iter().collect();
+    blockers.sort_by(|(a_name, a_score), (b_name, b_score)| {
+        b_score.cmp(a_score).then_with(|| a_name.cmp(b_name))
+    });
+    blockers
+        .into_iter()
+        .take(ADAPTIVE_RIPUP_MAX_BLOCKERS)
+        .collect()
+}
+
+fn terminal_relief_radius(problem: &RouteProblem, clearance: f64) -> f64 {
+    clearance + problem.min_trace_width.max(problem.clearance) * 2.0
+}
+
+struct FailedCorridorSegment {
+    segment: geom::Segment,
+    layer: LayerRef,
+    width: f64,
+}
+
+struct FailedTerminalPoint {
+    point: Point2,
+    layer: LayerRef,
+    width: f64,
+}
+
+fn failed_terminal_points(
+    problem: &RouteProblem,
+    failed_names: &BTreeSet<String>,
+) -> Vec<FailedTerminalPoint> {
+    let mut out = Vec::new();
+    for conn in &problem.connections {
+        if !failed_names.contains(&conn.name) {
+            continue;
+        }
+        let width = problem.net_width(&conn.name);
+        for pt in &conn.points_to_connect {
+            out.push(FailedTerminalPoint {
+                point: pt.point(),
+                layer: pt.layer.clone(),
+                width,
+            });
+        }
+    }
+    out
+}
+
+fn failed_reason_terminal_points(
+    problem: &RouteProblem,
+    failed_names: &BTreeSet<String>,
+    failures: &[FailedNet],
+) -> Vec<FailedTerminalPoint> {
+    let layers = copper_layers(problem.layer_count);
+    let mut out = Vec::new();
+    for failure in failures {
+        if !failed_names.contains(&failure.connection) {
+            continue;
+        }
+        let Some(point) = parse_failed_terminal_point(&failure.reason) else {
+            continue;
+        };
+        let width = problem.net_width(&failure.connection);
+        for layer in &layers {
+            out.push(FailedTerminalPoint {
+                point,
+                layer: layer.clone(),
+                width,
+            });
+        }
+    }
+    out
+}
+
+fn parse_failed_terminal_point(reason: &str) -> Option<Point2> {
+    let (_, after) = reason.split_once(" at (")?;
+    let (coords, _) = after.split_once(')')?;
+    let (x, y) = coords.split_once(',')?;
+    Some(Point2 {
+        x: x.trim().parse().ok()?,
+        y: y.trim().parse().ok()?,
+    })
+}
+
+fn copper_layers(layer_count: u32) -> Vec<LayerRef> {
+    let layer_count = layer_count.max(1);
+    let mut layers = Vec::with_capacity(layer_count as usize);
+    for idx in 0..layer_count {
+        layers.push(if idx == 0 {
+            LayerRef::top()
+        } else if idx + 1 == layer_count {
+            LayerRef::bottom()
+        } else {
+            LayerRef(format!("inner{idx}"))
+        });
+    }
+    layers
+}
+
+fn failed_corridor_segments(
+    problem: &RouteProblem,
+    failed_names: &BTreeSet<String>,
+) -> Vec<FailedCorridorSegment> {
+    let mut out = Vec::new();
+    for conn in &problem.connections {
+        if !failed_names.contains(&conn.name) || conn.points_to_connect.len() < 2 {
+            continue;
+        }
+        let width = problem.net_width(&conn.name);
+        for (a_idx, b_idx) in failed_corridor_tree_pairs(conn) {
+            let a = &conn.points_to_connect[a_idx];
+            let b = &conn.points_to_connect[b_idx];
+            if a.layer == b.layer {
+                out.push(FailedCorridorSegment {
+                    segment: geom::Segment::new(a.point(), b.point()),
+                    layer: a.layer.clone(),
+                    width,
+                });
+            } else {
+                let segment = geom::Segment::new(a.point(), b.point());
+                out.push(FailedCorridorSegment {
+                    segment,
+                    layer: a.layer.clone(),
+                    width,
+                });
+                out.push(FailedCorridorSegment {
+                    segment,
+                    layer: b.layer.clone(),
+                    width,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn failed_corridor_tree_pairs(conn: &crate::problem::Connection) -> Vec<(usize, usize)> {
+    match conn.points_to_connect.as_slice() {
+        [] | [_] => Vec::new(),
+        [_, _] => vec![(0, 1)],
+        points => {
+            let positions: Vec<Point2> = points.iter().map(|pt| pt.point()).collect();
+            let mut pairs = Vec::with_capacity(points.len().saturating_sub(1));
+            let mut in_tree = vec![false; points.len()];
+            in_tree[0] = true;
+            for _ in 1..points.len() {
+                let mut best: Option<(usize, usize)> = None;
+                for (ai, &ai_in_tree) in in_tree.iter().enumerate() {
+                    if !ai_in_tree {
+                        continue;
+                    }
+                    for (bi, &bi_in_tree) in in_tree.iter().enumerate() {
+                        if bi_in_tree {
+                            continue;
+                        }
+                        let replace = best.is_none_or(|(old_a, old_b)| {
+                            failed_corridor_tree_pair_better(conn, &positions, ai, bi, old_a, old_b)
+                        });
+                        if replace {
+                            best = Some((ai, bi));
+                        }
+                    }
+                }
+                let Some((ai, bi)) = best else {
+                    break;
+                };
+                in_tree[bi] = true;
+                pairs.push((ai, bi));
+            }
+            pairs
+        }
+    }
+}
+
+fn failed_corridor_tree_pair_better(
+    conn: &crate::problem::Connection,
+    positions: &[Point2],
+    a: usize,
+    b: usize,
+    old_a: usize,
+    old_b: usize,
+) -> bool {
+    let dist = positions[a].dist(positions[b]);
+    let old_dist = positions[old_a].dist(positions[old_b]);
+    if dist < old_dist - 1e-9 {
+        return true;
+    }
+    if (dist - old_dist).abs() > 1e-9 {
+        return false;
+    }
+
+    let layer_change = failed_corridor_pair_requires_layer_change(conn, a, b);
+    let old_layer_change = failed_corridor_pair_requires_layer_change(conn, old_a, old_b);
+    if layer_change != old_layer_change {
+        return !layer_change;
+    }
+
+    (a, b) < (old_a, old_b)
+}
+
+fn failed_corridor_pair_requires_layer_change(
+    conn: &crate::problem::Connection,
+    a: usize,
+    b: usize,
+) -> bool {
+    conn.points_to_connect[a].layer != conn.points_to_connect[b].layer
+}
+
+fn push_adaptive_rescue_order(orders: &mut Vec<Vec<usize>>, order: Vec<usize>) {
+    if !order.is_empty() && !orders.iter().any(|existing| existing == &order) {
+        orders.push(order);
+    }
+}
+
+#[cfg(test)]
+fn problem_with_single_connection_and_copper(
+    problem: &RouteProblem,
+    idx: usize,
+    solution: &RouteSolution,
+) -> RouteProblem {
+    problem_with_single_connection_and_obstacles(problem, idx, &copper_obstacles(problem, solution))
+}
+
+fn problem_with_single_connection_and_obstacles(
+    problem: &RouteProblem,
+    idx: usize,
+    obstacles: &[Obstacle],
+) -> RouteProblem {
+    let mut out = problem.clone();
+    out.connections = problem
+        .connections
+        .get(idx)
+        .cloned()
+        .into_iter()
+        .collect::<Vec<_>>();
+    out.obstacles.extend(obstacles.iter().cloned());
+    out
+}
+
+fn problem_with_solution_connections(
+    problem: &RouteProblem,
+    solution: &RouteSolution,
+) -> RouteProblem {
+    let names: BTreeSet<&str> = solution
+        .traces
+        .iter()
+        .map(|trace| trace.connection.as_str())
+        .chain(solution.vias.iter().map(|via| via.connection.as_str()))
+        .collect();
+    let mut out = problem.clone();
+    out.connections = problem
+        .connections
+        .iter()
+        .filter(|conn| names.contains(conn.name.as_str()))
+        .cloned()
+        .collect();
+    out
+}
+
+#[cfg(test)]
+fn adaptive_rescue_order(problem: &RouteProblem, failed_names: &BTreeSet<String>) -> Vec<usize> {
+    let metrics = adaptive_rescue_order_metrics(problem);
+    adaptive_rescue_order_with_metrics(problem, failed_names, &metrics)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AdaptiveOrderMetric {
+    crossing_pressure: usize,
+    segment_obstacle_pressure_um: u64,
+    obstacle_pressure_um: u64,
+    pin_count: usize,
+    span_um: u64,
+}
+
+fn adaptive_rescue_order_metrics(problem: &RouteProblem) -> Vec<AdaptiveOrderMetric> {
+    let crossing_pressures = connection_crossing_pressures(problem);
+    problem
+        .connections
+        .iter()
+        .enumerate()
+        .map(|(idx, conn)| AdaptiveOrderMetric {
+            crossing_pressure: crossing_pressures.get(idx).copied().unwrap_or(0),
+            segment_obstacle_pressure_um: connection_segment_obstacle_pressure_um(problem, conn),
+            obstacle_pressure_um: connection_obstacle_pressure_um(problem, conn),
+            pin_count: conn.points_to_connect.len(),
+            span_um: connection_span_um(conn),
+        })
+        .collect()
+}
+
+fn adaptive_rescue_order_with_metrics(
+    problem: &RouteProblem,
+    failed_names: &BTreeSet<String>,
+    metrics: &[AdaptiveOrderMetric],
+) -> Vec<usize> {
+    let mut order: Vec<usize> = problem
+        .connections
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, conn)| failed_names.contains(&conn.name).then_some(idx))
+        .collect();
+    order.sort_by(|&a, &b| {
+        metrics[b]
+            .crossing_pressure
+            .cmp(&metrics[a].crossing_pressure)
+            .then_with(|| {
+                metrics[b]
+                    .segment_obstacle_pressure_um
+                    .cmp(&metrics[a].segment_obstacle_pressure_um)
+            })
+            .then_with(|| {
+                metrics[b]
+                    .obstacle_pressure_um
+                    .cmp(&metrics[a].obstacle_pressure_um)
+            })
+            .then_with(|| metrics[b].pin_count.cmp(&metrics[a].pin_count))
+            .then_with(|| metrics[b].span_um.cmp(&metrics[a].span_um))
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            })
+    });
+    order
 }
 
 /// Freerouter-style postroute cleanup for selected copper: drop redundant vias,
@@ -415,7 +1553,7 @@ pub fn route_auto_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
 /// when the exact DRC/connectivity oracle says the shortcut is equivalent.
 fn postroute_cleanup(problem: &RouteProblem, solution: &mut RouteSolution) {
     drop_redundant_thruhole_vias(problem, solution);
-    drop_duplicate_vias(solution);
+    crate::via_cleanup::normalize_redundant_vias(problem, solution);
     drop_dangling_vias(problem, solution);
     drop_duplicate_traces(solution);
     simplify_trace_paths(problem, solution);
@@ -424,7 +1562,9 @@ fn postroute_cleanup(problem: &RouteProblem, solution: &mut RouteSolution) {
     drop_covered_collinear_traces(problem, solution);
     merge_touching_traces(problem, solution);
     shortcut_octilinear_traces(problem, solution);
+    pull_orthogonal_trace_corners(problem, solution);
     drop_trace_spurs(problem, solution);
+    simplify_trace_paths(problem, solution);
     drop_duplicate_traces(solution);
     drop_covered_collinear_traces(problem, solution);
 }
@@ -446,29 +1586,6 @@ fn drop_redundant_thruhole_vias(problem: &RouteProblem, solution: &mut RouteSolu
                 && (v.at.y - ob.center.y).abs() <= ob.height / 2.0
         })
     });
-}
-
-/// Drop exact duplicate same-net vias. A second via with the same barrel geometry,
-/// same span, and same coordinate adds no connectivity beyond the first one, but
-/// does inflate via count and may trip hole-spacing checks downstream.
-fn drop_duplicate_vias(solution: &mut RouteSolution) {
-    let mut seen = BTreeSet::new();
-    solution.vias.retain(|v| {
-        seen.insert((
-            v.connection.clone(),
-            v.at.quantized_key(POINT_KEY_SCALE),
-            (v.diameter * 1000.0).round() as i64,
-            (v.drill * 1000.0).round() as i64,
-            via_span_key(&v.span),
-        ))
-    });
-}
-
-fn via_span_key(span: &ViaSpan) -> (u32, u32, bool, bool) {
-    match span {
-        ViaSpan::Through => (0, 0, false, false),
-        ViaSpan::Partial { from, to, micro } => (*from, *to, *micro, true),
-    }
 }
 
 /// Drop same-net vias that do not actually bridge copper on at least two layers.
@@ -588,7 +1705,8 @@ fn simplify_trace_paths(problem: &RouteProblem, solution: &mut RouteSolution) {
 /// Remove closed subpaths inside a trace: `... P -> ... -> P ...` carries a spur
 /// loop that adds copper but no connectivity. Every candidate goes through the
 /// full lint report, so via anchors, terminal reachability, and DRC invariants
-/// remain protected.
+/// remain protected; a loop may also be accepted when deleting it removes an
+/// existing detour-caused lint finding without adding any new one.
 fn drop_trace_spurs(problem: &RouteProblem, solution: &mut RouteSolution) {
     let mut baseline = crate::lint::lint(problem, solution);
     let mut lint_budget = 256usize;
@@ -625,7 +1743,7 @@ fn drop_trace_spurs(problem: &RouteProblem, solution: &mut RouteSolution) {
                     }
                     let findings = crate::lint::lint(problem, &candidate);
                     lint_budget -= 1;
-                    if findings == baseline {
+                    if !introduces_new_findings(&baseline, &findings) {
                         *solution = candidate;
                         baseline = findings;
                         improved = true;
@@ -807,9 +1925,14 @@ fn merge_touching_traces(problem: &RouteProblem, solution: &mut RouteSolution) {
 
 /// Pull trace corners tight with conservative octilinear shortcuts. A candidate
 /// replaces `p[i]..p[j]` with the direct segment `p[i]→p[j]` only when it shortens
-/// the trace and the full lint report is unchanged, which protects via anchors,
-/// T-junctions, clearance, board-edge, and connectivity invariants.
+/// the trace without introducing new lint findings, which protects via anchors,
+/// T-junctions, clearance, board-edge, and connectivity invariants while allowing
+/// cleanup to remove an existing detour-caused finding.
 fn shortcut_octilinear_traces(problem: &RouteProblem, solution: &mut RouteSolution) {
+    if !has_octilinear_shortcut_candidate_shape(solution) {
+        return;
+    }
+
     let mut baseline = crate::lint::lint(problem, solution);
     let mut lint_budget = 256usize;
 
@@ -842,7 +1965,7 @@ fn shortcut_octilinear_traces(problem: &RouteProblem, solution: &mut RouteSoluti
                     candidate.traces[ti].path.drain(i + 1..j);
                     let findings = crate::lint::lint(problem, &candidate);
                     lint_budget -= 1;
-                    if findings == baseline {
+                    if !introduces_new_findings(&baseline, &findings) {
                         *solution = candidate;
                         baseline = findings;
                         improved = true;
@@ -856,6 +1979,123 @@ fn shortcut_octilinear_traces(problem: &RouteProblem, solution: &mut RouteSoluti
             break;
         }
     }
+}
+
+fn has_octilinear_shortcut_candidate_shape(solution: &RouteSolution) -> bool {
+    solution.traces.iter().any(|trace| {
+        let n = trace.path.len();
+        if n < 3 {
+            return false;
+        }
+        for span in (2..n).rev() {
+            for i in 0..(n - span) {
+                let j = i + span;
+                let a = trace.path[i];
+                let b = trace.path[j];
+                if !is_octilinear_segment(a, b) {
+                    continue;
+                }
+                let old_len = path_len(&trace.path[i..=j]);
+                let new_len = a.dist(b);
+                if new_len + 0.01 < old_len {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+}
+
+/// Line-pull Manhattan detours that a direct straight/45-degree shortcut cannot
+/// express. For a subpath `a..b`, try both L-shaped replacements (`a -> (a.x,b.y)
+/// -> b` and `a -> (b.x,a.y) -> b`) and keep the first one that shortens copper
+/// without introducing new lint findings. This borrows freerouting-style
+/// post-optimization without changing the router's preferred orthogonal output.
+fn pull_orthogonal_trace_corners(problem: &RouteProblem, solution: &mut RouteSolution) {
+    if !has_orthogonal_pull_candidate_shape(solution) {
+        return;
+    }
+
+    let mut baseline = crate::lint::lint(problem, solution);
+    let mut lint_budget = 256usize;
+
+    loop {
+        let mut improved = false;
+        'candidate: for ti in 0..solution.traces.len() {
+            let n = solution.traces[ti].path.len();
+            if n < 4 {
+                continue;
+            }
+            for span in (3..n).rev() {
+                for i in 0..(n - span) {
+                    if lint_budget == 0 {
+                        return;
+                    }
+                    let j = i + span;
+                    let a = solution.traces[ti].path[i];
+                    let b = solution.traces[ti].path[j];
+                    if (a.x - b.x).abs() < geom::EPS || (a.y - b.y).abs() < geom::EPS {
+                        continue;
+                    }
+
+                    let old_len = path_len(&solution.traces[ti].path[i..=j]);
+                    for corner in [Point2 { x: a.x, y: b.y }, Point2 { x: b.x, y: a.y }] {
+                        let new_len = a.dist(corner) + corner.dist(b);
+                        if new_len + 0.01 >= old_len {
+                            continue;
+                        }
+
+                        let mut candidate = solution.clone();
+                        candidate.traces[ti].path.splice(i + 1..j, [corner]);
+                        candidate.traces[ti].path =
+                            geom::Polyline::new(candidate.traces[ti].path.clone())
+                                .simplify()
+                                .into_points();
+                        let findings = crate::lint::lint(problem, &candidate);
+                        lint_budget -= 1;
+                        if !introduces_new_findings(&baseline, &findings) {
+                            *solution = candidate;
+                            baseline = findings;
+                            improved = true;
+                            break 'candidate;
+                        }
+                        if lint_budget == 0 {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !improved {
+            break;
+        }
+    }
+}
+
+fn has_orthogonal_pull_candidate_shape(solution: &RouteSolution) -> bool {
+    solution.traces.iter().any(|trace| {
+        let n = trace.path.len();
+        if n < 4 {
+            return false;
+        }
+        for span in (3..n).rev() {
+            for i in 0..(n - span) {
+                let j = i + span;
+                let a = trace.path[i];
+                let b = trace.path[j];
+                if (a.x - b.x).abs() < geom::EPS || (a.y - b.y).abs() < geom::EPS {
+                    continue;
+                }
+                let old_len = path_len(&trace.path[i..=j]);
+                let new_len = (a.x - b.x).abs() + (a.y - b.y).abs();
+                if new_len + 0.01 < old_len {
+                    return true;
+                }
+            }
+        }
+        false
+    })
 }
 
 fn is_octilinear_segment(a: Point2, b: Point2) -> bool {
@@ -929,7 +2169,7 @@ fn stitch(
             nc.polylines_on(&t.layer.0).push(t.points.clone());
         }
         for v in &cr.vias {
-            nc.vias.push(v.at.clone());
+            nc.vias.push(v.at);
         }
     }
 
@@ -1159,6 +2399,9 @@ fn fail(
     connection: &str,
     reason: String,
 ) {
+    if failed_names.contains(connection) {
+        return;
+    }
     failed.push(FailedNet {
         connection: connection.to_owned(),
         reason,
@@ -1211,6 +2454,19 @@ mod tests {
         let json = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         serde_json::from_str(&json).unwrap_or_else(|e| panic!("parse {name}: {e}"))
+    }
+
+    #[test]
+    fn fail_helper_dedupes_repeated_net_failures() {
+        let mut failed = Vec::new();
+        let mut failed_names = std::collections::BTreeSet::new();
+
+        fail(&mut failed, &mut failed_names, "S1", "cell 1".to_owned());
+        fail(&mut failed, &mut failed_names, "S1", "cell 2".to_owned());
+
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].connection, "S1");
+        assert_eq!(failed[0].reason, "cell 1");
     }
 
     fn simple_two_point_problem() -> RouteProblem {
@@ -1422,6 +2678,77 @@ mod tests {
         }
     }
 
+    fn heterogeneous_multi_pin_channel_problem() -> RouteProblem {
+        RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![
+                pad_obstacle("L", 2.0, 6.0, LayerRef::top()),
+                pad_obstacle("L", 8.0, 6.0, LayerRef::bottom()),
+                pad_obstacle("BUS", 2.0, 14.0, LayerRef::top()),
+                pad_obstacle("BUS", 8.0, 14.0, LayerRef::top()),
+                pad_obstacle("BUS", 8.0, 18.0, LayerRef::top()),
+                crate::problem::Obstacle {
+                    kind: "rect".to_owned(),
+                    layers: vec![LayerRef::top()],
+                    center: Point2 { x: 8.0, y: 16.0 },
+                    width: 1.0,
+                    height: 3.0,
+                    connected_to: vec![],
+                },
+            ],
+            connections: vec![
+                crate::problem::Connection {
+                    name: "L".to_owned(),
+                    points_to_connect: vec![
+                        crate::problem::RoutePoint {
+                            x: 2.0,
+                            y: 6.0,
+                            layer: LayerRef::top(),
+                        },
+                        crate::problem::RoutePoint {
+                            x: 8.0,
+                            y: 6.0,
+                            layer: LayerRef::bottom(),
+                        },
+                    ],
+                },
+                crate::problem::Connection {
+                    name: "BUS".to_owned(),
+                    points_to_connect: vec![
+                        crate::problem::RoutePoint {
+                            x: 2.0,
+                            y: 14.0,
+                            layer: LayerRef::top(),
+                        },
+                        crate::problem::RoutePoint {
+                            x: 8.0,
+                            y: 14.0,
+                            layer: LayerRef::top(),
+                        },
+                        crate::problem::RoutePoint {
+                            x: 8.0,
+                            y: 18.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+            ],
+            bounds: crate::problem::Rect {
+                min_x: 0.0,
+                max_x: 30.0,
+                min_y: 0.0,
+                max_y: 20.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+        }
+    }
+
     // ── led-r: the strict gate that must pass through route_detailed today ──────
 
     #[test]
@@ -1468,6 +2795,36 @@ mod tests {
     }
 
     #[test]
+    fn route_detailed_short_circuits_infeasible_global_route() {
+        let p = load("quad.json");
+        let mesh = crate::mesh::CapacityMesh::build(&p);
+        let global = GlobalRouteResult {
+            plan: crate::pathing::GlobalPlan { nets: Vec::new() },
+            report: crate::pathing::CongestionReport {
+                iterations: 40,
+                final_overflow: 3,
+                edge_hotspots: Vec::new(),
+                unrouted: Vec::new(),
+            },
+        };
+
+        let r = route_detailed_from_global(&p, &mesh, &global);
+
+        assert_eq!(r.engine, ENGINE);
+        assert!(
+            r.solution.traces.is_empty() && r.solution.vias.is_empty(),
+            "infeasible global routes should not spend cell routing or emit partial copper"
+        );
+        assert!(
+            r.failed
+                .iter()
+                .any(|f| f.reason.contains("global: 3 unit(s)")),
+            "infeasible global route should be reported with global provenance: {:?}",
+            r.failed
+        );
+    }
+
+    #[test]
     fn quad_auto_is_clean() {
         // The premium auto portfolio is direct fast-path, layer-hop/via-escape
         // micro-routers, contextual sequential grid, negotiated detailed primary,
@@ -1498,6 +2855,10 @@ mod tests {
             r.global.is_none(),
             "direct short-circuit should not pay negotiated global routing"
         );
+        assert_eq!(r.attempts.len(), 1);
+        assert_eq!(r.attempts[0].engine, crate::direct::ENGINE);
+        assert_eq!(r.attempts[0].failed_nets, 0);
+        assert_eq!(r.attempts[0].geometry_violations, 0);
     }
 
     #[test]
@@ -1516,6 +2877,1373 @@ mod tests {
             "route_auto early return should keep the already-cleaned selected candidate"
         );
         assert!(lint(&p, &auto.solution).is_empty());
+    }
+
+    #[test]
+    fn route_auto_stop_policy_keeps_clean_via_heavy_cheap_routes_competing() {
+        let result = RouteResult {
+            solution: RouteSolution {
+                traces: Vec::new(),
+                vias: Vec::new(),
+            },
+            failed: Vec::new(),
+            engine: "synthetic".to_owned(),
+        };
+        let clean_via_free = Some((
+            result.clone(),
+            RouteQuality {
+                fault_weight: 0,
+                geom: 0,
+                failed_nets: 0,
+                via_count: 0,
+                wirelength: 10.0,
+            },
+        ));
+        let clean_via_heavy = Some((
+            result.clone(),
+            RouteQuality {
+                fault_weight: 0,
+                geom: 0,
+                failed_nets: 0,
+                via_count: 2,
+                wirelength: 8.0,
+            },
+        ));
+        let faulty = Some((
+            result,
+            RouteQuality {
+                fault_weight: 1,
+                geom: 0,
+                failed_nets: 1,
+                via_count: 0,
+                wirelength: 0.0,
+            },
+        ));
+
+        assert!(route_best_is_clean(&clean_via_free));
+        assert!(route_best_is_clean_via_free(&clean_via_free));
+        assert!(route_best_is_clean(&clean_via_heavy));
+        assert!(
+            !route_best_is_clean_via_free(&clean_via_heavy),
+            "clean via-heavy cheap results should keep competing with later cheap routers"
+        );
+        assert!(!route_best_is_clean(&faulty));
+        assert!(!route_best_is_clean_via_free(&faulty));
+    }
+
+    #[test]
+    fn adaptive_rescue_short_circuit_only_accepts_clean_via_free_candidates() {
+        let clean_via_free = RouteQuality {
+            fault_weight: 0,
+            geom: 0,
+            failed_nets: 0,
+            via_count: 0,
+            wirelength: 20.0,
+        };
+        let clean_via_heavy = RouteQuality {
+            via_count: 1,
+            ..clean_via_free
+        };
+        let failed = RouteQuality {
+            fault_weight: 1,
+            failed_nets: 1,
+            ..clean_via_free
+        };
+
+        assert!(adaptive_rescue_candidate_can_short_circuit(&clean_via_free));
+        assert!(
+            !adaptive_rescue_candidate_can_short_circuit(&clean_via_heavy),
+            "clean via-heavy rescue should keep competing with later rescue orders"
+        );
+        assert!(
+            !adaptive_rescue_candidate_can_short_circuit(&failed),
+            "failed rescue candidates must not stop the rescue portfolio"
+        );
+    }
+
+    #[test]
+    fn adaptive_ripup_candidate_must_reduce_failure_outcome_before_tidiness() {
+        let selected = RouteQuality {
+            fault_weight: 2,
+            geom: 0,
+            failed_nets: 1,
+            via_count: 2,
+            wirelength: 100.0,
+        };
+        let equal_failure_tidier = RouteQuality {
+            via_count: 0,
+            wirelength: 10.0,
+            ..selected
+        };
+        let lower_weight = RouteQuality {
+            fault_weight: 1,
+            failed_nets: 1,
+            via_count: 10,
+            wirelength: 200.0,
+            ..selected
+        };
+        let fewer_failed_nets = RouteQuality {
+            fault_weight: 2,
+            failed_nets: 0,
+            via_count: 10,
+            wirelength: 200.0,
+            ..selected
+        };
+
+        assert!(
+            !adaptive_ripup_candidate_reduces_failures(&selected, &equal_failure_tidier),
+            "rip-up rescue must not swap equivalent failures just for tidier surviving copper"
+        );
+        assert!(adaptive_ripup_candidate_reduces_failures(
+            &selected,
+            &lower_weight
+        ));
+        assert!(adaptive_ripup_candidate_reduces_failures(
+            &selected,
+            &fewer_failed_nets
+        ));
+    }
+
+    #[test]
+    fn adaptive_grid_rescue_routes_failed_net_against_selected_copper() {
+        let mut p = simple_two_point_problem();
+        p.connections = vec![
+            crate::problem::Connection {
+                name: "A".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 2.0,
+                        y: 5.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 18.0,
+                        y: 5.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "B".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 2.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 8.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+        ];
+        let selected = RouteResult {
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "A".to_owned(),
+                    layer: LayerRef::top(),
+                    width: p.min_trace_width,
+                    path: vec![pt(2.0, 5.0), pt(18.0, 5.0)],
+                }],
+                vias: vec![],
+            },
+            failed: vec![FailedNet {
+                connection: "B".to_owned(),
+                reason: "selected router failed B".to_owned(),
+            }],
+            engine: "synthetic".to_owned(),
+        };
+
+        let rescued = adaptive_grid_rescue(&p, &selected).expect("B should grid-rescue");
+
+        assert!(rescued.failed.is_empty(), "{:?}", rescued.failed);
+        assert_eq!(
+            rescued.engine,
+            format!("synthetic+{ADAPTIVE_GRID_RESCUE_ENGINE}")
+        );
+        assert!(
+            rescued
+                .solution
+                .traces
+                .iter()
+                .any(|trace| trace.connection == "A")
+        );
+        assert!(
+            rescued
+                .solution
+                .traces
+                .iter()
+                .any(|trace| trace.connection == "B")
+        );
+        assert!(
+            lint(&p, &rescued.solution).is_empty(),
+            "rescued hybrid must be clean"
+        );
+    }
+
+    #[test]
+    fn cached_residual_obstacles_match_solution_rebuild_subproblem() {
+        let p = simple_two_point_problem();
+        let solution = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: p.min_trace_width,
+                path: vec![pt(2.0, 5.0), pt(10.0, 5.0), pt(18.0, 5.0)],
+            }],
+            vias: vec![Via {
+                connection: "N".to_owned(),
+                at: pt(10.0, 5.0),
+                diameter: p.via_diameter,
+                drill: p.via_drill,
+                span: ViaSpan::Through,
+            }],
+        };
+        let rebuilt = problem_with_single_connection_and_copper(&p, 0, &solution);
+        let cached_obstacles = copper_obstacles(&p, &solution);
+        let cached = problem_with_single_connection_and_obstacles(&p, 0, &cached_obstacles);
+
+        assert_eq!(
+            serde_json::to_string(&cached).unwrap(),
+            serde_json::to_string(&rebuilt).unwrap(),
+            "cached residual copper obstacles must preserve the routed subproblem"
+        );
+    }
+
+    #[test]
+    fn adaptive_rescue_base_drops_failed_net_copper_once() {
+        let p = simple_two_point_problem();
+        let selected = RouteResult {
+            solution: RouteSolution {
+                traces: vec![
+                    Trace {
+                        connection: "KEEP".to_owned(),
+                        layer: LayerRef::top(),
+                        width: p.min_trace_width,
+                        path: vec![pt(2.0, 4.0), pt(18.0, 4.0)],
+                    },
+                    Trace {
+                        connection: "DROP".to_owned(),
+                        layer: LayerRef::top(),
+                        width: p.min_trace_width,
+                        path: vec![pt(2.0, 6.0), pt(18.0, 6.0)],
+                    },
+                ],
+                vias: vec![Via {
+                    connection: "DROP".to_owned(),
+                    at: pt(10.0, 6.0),
+                    diameter: p.via_diameter,
+                    drill: p.via_drill,
+                    span: ViaSpan::Through,
+                }],
+            },
+            failed: vec![FailedNet {
+                connection: "DROP".to_owned(),
+                reason: "failed".to_owned(),
+            }],
+            engine: "synthetic".to_owned(),
+        };
+        let failed_names = ["DROP".to_owned()].into_iter().collect();
+
+        let base = adaptive_rescue_base(&p, &selected, &failed_names);
+
+        assert!(
+            base.solution
+                .traces
+                .iter()
+                .all(|trace| trace.connection != "DROP")
+        );
+        assert!(
+            base.solution
+                .vias
+                .iter()
+                .all(|via| via.connection != "DROP")
+        );
+        assert!(
+            base.obstacles
+                .iter()
+                .all(|obstacle| !obstacle.connected_to.contains(&"DROP".to_owned())),
+            "base residual obstacles should only represent accepted copper"
+        );
+        assert!(
+            base.obstacles
+                .iter()
+                .any(|obstacle| obstacle.connected_to.contains(&"KEEP".to_owned())),
+            "accepted copper should remain as residual obstacles"
+        );
+        assert_eq!(base.failed, selected.failed);
+    }
+
+    #[test]
+    fn adaptive_ripup_rescue_orders_include_blocking_accepted_copper() {
+        let mut p = simple_two_point_problem();
+        p.bounds.max_y = 20.0;
+        p.connections = vec![
+            crate::problem::Connection {
+                name: "SIG".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 2.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 18.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "BLOCK".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 2.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 18.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+        ];
+        let selected = RouteResult {
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "BLOCK".to_owned(),
+                    layer: LayerRef::top(),
+                    width: p.min_trace_width,
+                    path: vec![pt(10.0, 2.0), pt(10.0, 18.0)],
+                }],
+                vias: vec![],
+            },
+            failed: vec![FailedNet {
+                connection: "SIG".to_owned(),
+                reason: "selected router failed SIG".to_owned(),
+            }],
+            engine: "synthetic".to_owned(),
+        };
+        let failed_names = ["SIG".to_owned()].into_iter().collect();
+
+        let orders = adaptive_ripup_rescue_orders(&p, &selected, &failed_names);
+
+        assert!(
+            orders.iter().any(|order| order == &[0, 1]),
+            "rip-up rescue should route the failed net before accepted copper blocking its corridor: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn adaptive_ripup_rescue_orders_include_terminal_enclosure_blocker() {
+        let mut p = simple_two_point_problem();
+        p.bounds.max_y = 20.0;
+        p.connections = vec![
+            crate::problem::Connection {
+                name: "SIG".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 2.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 18.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "BLOCK".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 1.5,
+                        y: 9.4,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 2.5,
+                        y: 9.4,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+        ];
+        let selected = RouteResult {
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "BLOCK".to_owned(),
+                    layer: LayerRef::top(),
+                    width: p.min_trace_width,
+                    path: vec![pt(1.5, 9.4), pt(2.5, 9.4)],
+                }],
+                vias: vec![],
+            },
+            failed: vec![FailedNet {
+                connection: "SIG".to_owned(),
+                reason: "selected router failed SIG".to_owned(),
+            }],
+            engine: "synthetic".to_owned(),
+        };
+        let failed_names = ["SIG".to_owned()].into_iter().collect();
+
+        let scores = adaptive_ripup_blocker_scores(&p, &selected, &failed_names);
+        let orders = adaptive_ripup_rescue_orders(&p, &selected, &failed_names);
+
+        assert!(
+            scores.iter().any(|(name, _)| name == "BLOCK"),
+            "terminal-neighborhood blocker should be scored even when it is outside strict corridor clearance: {scores:?}"
+        );
+        assert!(
+            orders.iter().any(|order| order == &[0, 1]),
+            "rip-up rescue should route the failed terminal before accepted copper enclosing it: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn adaptive_ripup_scores_failed_detail_via_location_on_all_layers() {
+        let mut p = simple_two_point_problem();
+        p.layer_count = 4;
+        p.bounds.max_y = 20.0;
+        p.connections = vec![
+            crate::problem::Connection {
+                name: "SIG".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 2.0,
+                        y: 2.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 18.0,
+                        y: 2.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "BOTTOM_BLOCK".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 8.0,
+                        y: 10.0,
+                        layer: LayerRef::bottom(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 12.0,
+                        y: 10.0,
+                        layer: LayerRef::bottom(),
+                    },
+                ],
+            },
+        ];
+        let selected = RouteResult {
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "BOTTOM_BLOCK".to_owned(),
+                    layer: LayerRef::bottom(),
+                    width: p.min_trace_width,
+                    path: vec![pt(8.0, 10.0), pt(12.0, 10.0)],
+                }],
+                vias: vec![],
+            },
+            failed: vec![FailedNet {
+                connection: "SIG".to_owned(),
+                reason: "cell 7: no in-cell path for terminal Via at (10.0000,10.0000) (congestion or enclosure)".to_owned(),
+            }],
+            engine: "synthetic".to_owned(),
+        };
+        let failed_names = ["SIG".to_owned()].into_iter().collect();
+
+        let scores = adaptive_ripup_blocker_scores(&p, &selected, &failed_names);
+        let orders = adaptive_ripup_rescue_orders(&p, &selected, &failed_names);
+
+        assert!(
+            scores.iter().any(|(name, _)| name == "BOTTOM_BLOCK"),
+            "failed detailed via coordinate should score blockers on non-endpoint layers: {scores:?}"
+        );
+        assert!(
+            orders.iter().any(|order| order == &[0, 1]),
+            "rip-up rescue should route the failed net before the detailed-via blocker: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn parse_failed_terminal_point_extracts_detail_coordinates() {
+        let point = parse_failed_terminal_point(
+            "cell 74: no in-cell path for terminal Via at (16.0875,15.6000) (congestion or enclosure)",
+        )
+        .expect("detail failure coordinate should parse");
+
+        assert_eq!(point, pt(16.0875, 15.6));
+        assert!(parse_failed_terminal_point("global: no path").is_none());
+    }
+
+    #[test]
+    fn adaptive_ripup_rescue_orders_include_blocking_accepted_via() {
+        let mut p = simple_two_point_problem();
+        p.bounds.max_y = 20.0;
+        p.connections = vec![
+            crate::problem::Connection {
+                name: "SIG".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 2.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 18.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "VIA_BLOCK".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 4.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 16.0,
+                        layer: LayerRef::bottom(),
+                    },
+                ],
+            },
+        ];
+        let selected = RouteResult {
+            solution: RouteSolution {
+                traces: vec![],
+                vias: vec![Via {
+                    connection: "VIA_BLOCK".to_owned(),
+                    at: pt(10.0, 10.0),
+                    diameter: p.via_diameter,
+                    drill: p.via_drill,
+                    span: ViaSpan::Through,
+                }],
+            },
+            failed: vec![FailedNet {
+                connection: "SIG".to_owned(),
+                reason: "selected router failed SIG".to_owned(),
+            }],
+            engine: "synthetic".to_owned(),
+        };
+        let failed_names = ["SIG".to_owned()].into_iter().collect();
+
+        let orders = adaptive_ripup_rescue_orders(&p, &selected, &failed_names);
+
+        assert!(
+            orders.iter().any(|order| order == &[0, 1]),
+            "rip-up rescue should reroute an accepted via whose barrel blocks the failed corridor: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn adaptive_ripup_rescue_orders_include_blockers_for_layer_changing_failed_net() {
+        let mut p = simple_two_point_problem();
+        p.bounds.max_y = 20.0;
+        p.connections = vec![
+            crate::problem::Connection {
+                name: "VIA_SIG".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 2.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 18.0,
+                        y: 10.0,
+                        layer: LayerRef::bottom(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "TOP_BLOCK".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 2.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 18.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+        ];
+        let selected = RouteResult {
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "TOP_BLOCK".to_owned(),
+                    layer: LayerRef::top(),
+                    width: p.min_trace_width,
+                    path: vec![pt(10.0, 2.0), pt(10.0, 18.0)],
+                }],
+                vias: vec![],
+            },
+            failed: vec![FailedNet {
+                connection: "VIA_SIG".to_owned(),
+                reason: "selected router failed layer change".to_owned(),
+            }],
+            engine: "synthetic".to_owned(),
+        };
+        let failed_names = ["VIA_SIG".to_owned()].into_iter().collect();
+
+        let orders = adaptive_ripup_rescue_orders(&p, &selected, &failed_names);
+
+        assert!(
+            orders.iter().any(|order| order == &[0, 1]),
+            "rip-up rescue should project layer-changing failed nets onto endpoint layers: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn adaptive_ripup_failed_corridors_ignore_non_tree_multi_pin_diagonals() {
+        let mut p = simple_two_point_problem();
+        p.bounds.max_y = 20.0;
+        p.connections = vec![
+            crate::problem::Connection {
+                name: "BUS".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 2.0,
+                        y: 2.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 18.0,
+                        y: 2.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 2.0,
+                        y: 18.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "DIAGONAL_FALSE_BLOCK".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 9.0,
+                        y: 9.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 11.0,
+                        y: 11.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+        ];
+        let selected = RouteResult {
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "DIAGONAL_FALSE_BLOCK".to_owned(),
+                    layer: LayerRef::top(),
+                    width: p.min_trace_width,
+                    path: vec![pt(9.0, 9.0), pt(11.0, 11.0)],
+                }],
+                vias: vec![],
+            },
+            failed: vec![FailedNet {
+                connection: "BUS".to_owned(),
+                reason: "selected router failed BUS".to_owned(),
+            }],
+            engine: "synthetic".to_owned(),
+        };
+        let failed_names = ["BUS".to_owned()].into_iter().collect();
+
+        let orders = adaptive_ripup_rescue_orders(&p, &selected, &failed_names);
+
+        assert!(
+            orders.is_empty(),
+            "multi-pin failed corridors should follow the nearest tree, not every pad-pair diagonal: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn adaptive_ripup_failed_corridor_tree_prefers_same_layer_edge_on_tie() {
+        let conn = crate::problem::Connection {
+            name: "BUS".to_owned(),
+            points_to_connect: vec![
+                crate::problem::RoutePoint {
+                    x: 2.0,
+                    y: 2.0,
+                    layer: LayerRef::top(),
+                },
+                crate::problem::RoutePoint {
+                    x: 12.0,
+                    y: 2.0,
+                    layer: LayerRef::bottom(),
+                },
+                crate::problem::RoutePoint {
+                    x: 2.0,
+                    y: 12.0,
+                    layer: LayerRef::top(),
+                },
+            ],
+        };
+
+        let pairs = failed_corridor_tree_pairs(&conn);
+
+        assert_eq!(
+            pairs.first().copied(),
+            Some((0, 2)),
+            "equal-length failed corridor tree edges should prefer same-layer endpoints: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn adaptive_ripup_rescue_orders_sort_blockers_by_corridor_pressure() {
+        let mut p = simple_two_point_problem();
+        p.bounds.max_y = 20.0;
+        p.connections = vec![
+            crate::problem::Connection {
+                name: "SIG".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 2.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 18.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "LONG_BLOCK".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 6.0,
+                        y: 6.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 14.0,
+                        y: 14.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "SHORT_BLOCK".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 9.5,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 10.5,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+        ];
+        let selected = RouteResult {
+            solution: RouteSolution {
+                traces: vec![
+                    Trace {
+                        connection: "SHORT_BLOCK".to_owned(),
+                        layer: LayerRef::top(),
+                        width: p.min_trace_width,
+                        path: vec![pt(10.0, 9.5), pt(10.0, 10.5)],
+                    },
+                    Trace {
+                        connection: "LONG_BLOCK".to_owned(),
+                        layer: LayerRef::top(),
+                        width: p.min_trace_width,
+                        path: vec![pt(6.0, 6.0), pt(14.0, 14.0)],
+                    },
+                ],
+                vias: vec![],
+            },
+            failed: vec![FailedNet {
+                connection: "SIG".to_owned(),
+                reason: "selected router failed SIG".to_owned(),
+            }],
+            engine: "synthetic".to_owned(),
+        };
+        let failed_names = ["SIG".to_owned()].into_iter().collect();
+
+        let orders = adaptive_ripup_rescue_orders(&p, &selected, &failed_names);
+
+        assert_eq!(
+            orders[0],
+            vec![0, 1, 2],
+            "larger actual corridor blocker should be rerouted before shorter blocker: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn adaptive_ripup_rescue_orders_sort_trace_blockers_by_corridor_proximity() {
+        let mut p = simple_two_point_problem();
+        p.bounds.max_y = 20.0;
+        p.connections = vec![
+            crate::problem::Connection {
+                name: "SIG".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 2.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 18.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "CENTER_TRACE".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 8.0,
+                        y: 9.5,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 8.0,
+                        y: 10.5,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "EDGE_TRACE".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 12.0,
+                        y: 9.95,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 12.0,
+                        y: 10.95,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+        ];
+        let selected = RouteResult {
+            solution: RouteSolution {
+                traces: vec![
+                    Trace {
+                        connection: "EDGE_TRACE".to_owned(),
+                        layer: LayerRef::top(),
+                        width: p.min_trace_width,
+                        path: vec![pt(12.0, 9.95), pt(12.0, 10.95)],
+                    },
+                    Trace {
+                        connection: "CENTER_TRACE".to_owned(),
+                        layer: LayerRef::top(),
+                        width: p.min_trace_width,
+                        path: vec![pt(8.0, 9.5), pt(8.0, 10.5)],
+                    },
+                ],
+                vias: vec![],
+            },
+            failed: vec![FailedNet {
+                connection: "SIG".to_owned(),
+                reason: "selected router failed SIG".to_owned(),
+            }],
+            engine: "synthetic".to_owned(),
+        };
+        let failed_names = ["SIG".to_owned()].into_iter().collect();
+
+        let orders = adaptive_ripup_rescue_orders(&p, &selected, &failed_names);
+
+        assert_eq!(
+            orders[0],
+            vec![0, 1, 2],
+            "trace centered on the failed corridor should be rerouted before an equal-length edge trace: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn adaptive_ripup_rescue_orders_sort_via_blockers_by_corridor_proximity() {
+        let mut p = simple_two_point_problem();
+        p.bounds.max_y = 20.0;
+        p.connections = vec![
+            crate::problem::Connection {
+                name: "SIG".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 2.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 18.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "CENTER_VIA".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 8.0,
+                        y: 4.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 8.0,
+                        y: 16.0,
+                        layer: LayerRef::bottom(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "EDGE_VIA".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 12.0,
+                        y: 4.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 12.0,
+                        y: 16.0,
+                        layer: LayerRef::bottom(),
+                    },
+                ],
+            },
+        ];
+        let selected = RouteResult {
+            solution: RouteSolution {
+                traces: vec![],
+                vias: vec![
+                    Via {
+                        connection: "EDGE_VIA".to_owned(),
+                        at: pt(12.0, 10.35),
+                        diameter: p.via_diameter,
+                        drill: p.via_drill,
+                        span: ViaSpan::Through,
+                    },
+                    Via {
+                        connection: "CENTER_VIA".to_owned(),
+                        at: pt(8.0, 10.0),
+                        diameter: p.via_diameter,
+                        drill: p.via_drill,
+                        span: ViaSpan::Through,
+                    },
+                ],
+            },
+            failed: vec![FailedNet {
+                connection: "SIG".to_owned(),
+                reason: "selected router failed SIG".to_owned(),
+            }],
+            engine: "synthetic".to_owned(),
+        };
+        let failed_names = ["SIG".to_owned()].into_iter().collect();
+
+        let orders = adaptive_ripup_rescue_orders(&p, &selected, &failed_names);
+
+        assert_eq!(
+            orders[0],
+            vec![0, 1, 2],
+            "via centered on the failed corridor should be rerouted before a merely nearby via: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn adaptive_rescue_order_prioritizes_crossing_pressure() {
+        let mut p = simple_two_point_problem();
+        p.bounds.max_y = 20.0;
+        p.connections = vec![
+            crate::problem::Connection {
+                name: "OPEN".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 4.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "HARD_H".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 2.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 18.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "HARD_V".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 2.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 18.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+        ];
+        let failed_names = ["OPEN".to_owned(), "HARD_H".to_owned()]
+            .into_iter()
+            .collect();
+
+        let order = adaptive_rescue_order(&p, &failed_names);
+
+        assert_eq!(
+            order,
+            vec![1, 0],
+            "adaptive rescue should let crossing-pressure nets claim residual space first"
+        );
+    }
+
+    #[test]
+    fn adaptive_rescue_order_cached_metrics_match_public_order() {
+        let mut p = simple_two_point_problem();
+        p.bounds.max_y = 20.0;
+        p.connections = vec![
+            crate::problem::Connection {
+                name: "OPEN".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 4.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "HARD_H".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 2.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 18.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "HARD_V".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 2.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 18.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+        ];
+        let failed_names = ["OPEN".to_owned(), "HARD_H".to_owned(), "HARD_V".to_owned()]
+            .into_iter()
+            .collect();
+
+        let metrics = adaptive_rescue_order_metrics(&p);
+
+        assert_eq!(
+            adaptive_rescue_order_with_metrics(&p, &failed_names, &metrics),
+            adaptive_rescue_order(&p, &failed_names),
+            "cached adaptive rescue metrics must preserve the public pressure-first order"
+        );
+    }
+
+    #[test]
+    fn adaptive_rescue_order_prefers_segment_obstacle_pressure_before_bbox_pressure() {
+        let mut p = simple_two_point_problem();
+        p.bounds.max_y = 12.0;
+        p.obstacles = vec![
+            Obstacle {
+                kind: "rect".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: pt(8.0, 2.0),
+                width: 0.5,
+                height: 0.5,
+                connected_to: vec![],
+            },
+            Obstacle {
+                kind: "rect".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: pt(5.0, 1.0),
+                width: 0.5,
+                height: 0.5,
+                connected_to: vec![],
+            },
+        ];
+        p.connections = vec![
+            crate::problem::Connection {
+                name: "BBOX_ONLY".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 1.0,
+                        y: 9.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 9.0,
+                        y: 9.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "SEGMENT_BLOCKED".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 9.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+        ];
+        let failed_names = ["BBOX_ONLY".to_owned(), "SEGMENT_BLOCKED".to_owned()]
+            .into_iter()
+            .collect();
+        let metrics = adaptive_rescue_order_metrics(&p);
+
+        assert_eq!(metrics[0].segment_obstacle_pressure_um, 0);
+        assert!(metrics[0].obstacle_pressure_um > 0);
+        assert!(metrics[1].segment_obstacle_pressure_um > 0);
+        assert_eq!(
+            adaptive_rescue_order(&p, &failed_names),
+            vec![1, 0],
+            "adaptive rescue should prioritize nets whose actual tree corridor is obstructed before broad bbox-only pressure"
+        );
+    }
+
+    #[test]
+    fn adaptive_rescue_orders_include_bounded_order_portfolio() {
+        let mut p = simple_two_point_problem();
+        p.bounds.max_y = 20.0;
+        p.connections = vec![
+            crate::problem::Connection {
+                name: "OPEN".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 4.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "HARD_H".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 2.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 18.0,
+                        y: 10.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "HARD_V".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 2.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 18.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+        ];
+        let failed_names = ["OPEN".to_owned(), "HARD_H".to_owned(), "HARD_V".to_owned()]
+            .into_iter()
+            .collect();
+
+        let orders = adaptive_rescue_orders(&p, &failed_names);
+
+        assert_eq!(orders[0], vec![1, 2, 0]);
+        assert!(
+            orders.iter().any(|order| order == &[0, 1, 2]),
+            "adaptive rescue should still try baseline/original order: {orders:?}"
+        );
+        assert!(
+            orders.len() > 1,
+            "small failed sets should get a bounded rescue order portfolio: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn adaptive_rescue_orders_include_short_span_first_order() {
+        let mut p = simple_two_point_problem();
+        p.bounds.max_y = 25.0;
+        p.connections = vec![
+            crate::problem::Connection {
+                name: "LONG".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 1.0,
+                        y: 22.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 19.0,
+                        y: 22.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "SHORT".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 3.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "CROSS_H".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 4.0,
+                        y: 5.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 16.0,
+                        y: 5.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+            crate::problem::Connection {
+                name: "CROSS_V".to_owned(),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 2.0,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 10.0,
+                        y: 18.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            },
+        ];
+        let failed_names = p.connections.iter().map(|conn| conn.name.clone()).collect();
+
+        let orders = adaptive_rescue_orders(&p, &failed_names);
+
+        assert!(
+            orders.iter().any(|order| order == &[1, 2, 3, 0]),
+            "small failed rescue sets should include a shortest-local-net-first pass: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn adaptive_rescue_orders_skip_portfolio_for_large_failed_sets() {
+        let mut p = simple_two_point_problem();
+        p.connections.clear();
+        for i in 0..=ADAPTIVE_RESCUE_PORTFOLIO_MAX_FAILED {
+            p.connections.push(crate::problem::Connection {
+                name: format!("N{i}"),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 1.0,
+                        y: 1.0 + i as f64,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 5.0,
+                        y: 1.0 + i as f64,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            });
+        }
+        let failed_names = p.connections.iter().map(|conn| conn.name.clone()).collect();
+
+        let orders = adaptive_rescue_orders(&p, &failed_names);
+
+        assert_eq!(
+            orders.len(),
+            1,
+            "large failed sets should avoid multiplying grid rescue retries"
+        );
     }
 
     struct RedundantViaRouter;
@@ -1588,6 +4316,89 @@ mod tests {
         }
     }
 
+    struct CleanViaHeavyRouter;
+
+    impl Router for CleanViaHeavyRouter {
+        fn name(&self) -> &'static str {
+            "clean-via-heavy"
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                max_layers: u32::MAX,
+                honors_escape_layers: true,
+                honors_net_widths: true,
+                honors_outline: true,
+            }
+        }
+
+        fn route(&self, problem: &RouteProblem) -> RouteResult {
+            RouteResult {
+                solution: RouteSolution {
+                    traces: vec![
+                        Trace {
+                            connection: "N".to_owned(),
+                            layer: LayerRef::top(),
+                            width: problem.min_trace_width,
+                            path: vec![pt(2.0, 5.0), pt(18.0, 5.0)],
+                        },
+                        Trace {
+                            connection: "N".to_owned(),
+                            layer: LayerRef::bottom(),
+                            width: problem.min_trace_width,
+                            path: vec![pt(10.0, 5.0), pt(10.4, 5.0)],
+                        },
+                    ],
+                    vias: vec![Via {
+                        connection: "N".to_owned(),
+                        at: pt(10.0, 5.0),
+                        diameter: problem.via_diameter,
+                        drill: problem.via_drill,
+                        span: ViaSpan::Through,
+                    }],
+                },
+                failed: vec![],
+                engine: self.name().to_owned(),
+            }
+        }
+    }
+
+    struct CleanViaFreeRouter {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Router for CleanViaFreeRouter {
+        fn name(&self) -> &'static str {
+            "clean-via-free"
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                max_layers: u32::MAX,
+                honors_escape_layers: true,
+                honors_net_widths: true,
+                honors_outline: true,
+            }
+        }
+
+        fn route(&self, problem: &RouteProblem) -> RouteResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            RouteResult {
+                solution: RouteSolution {
+                    traces: vec![Trace {
+                        connection: "N".to_owned(),
+                        layer: LayerRef::top(),
+                        width: problem.min_trace_width,
+                        path: vec![pt(2.0, 5.0), pt(18.0, 5.0)],
+                    }],
+                    vias: vec![],
+                },
+                failed: vec![],
+                engine: self.name().to_owned(),
+            }
+        }
+    }
+
     #[test]
     fn select_best_cleans_candidate_before_short_circuit_return() {
         let mut p = simple_two_point_problem();
@@ -1629,6 +4440,28 @@ mod tests {
     }
 
     #[test]
+    fn select_best_keeps_competing_after_clean_via_heavy_candidate() {
+        let p = simple_two_point_problem();
+        let via_heavy = CleanViaHeavyRouter;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let via_free = CleanViaFreeRouter {
+            calls: calls.clone(),
+        };
+
+        let selected = select_best(&p, &[&via_heavy, &via_free]);
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "clean via-heavy incumbent should not short-circuit before a later injected router"
+        );
+        assert_eq!(selected.engine, "clean-via-free");
+        assert!(selected.failed.is_empty(), "{:?}", selected.failed);
+        assert!(selected.solution.vias.is_empty());
+        assert!(lint(&p, &selected.solution).is_empty());
+    }
+
+    #[test]
     fn route_auto_diagnostics_skip_global_for_clean_layer_hop_route() {
         let p = layer_change_problem();
         assert!(
@@ -1649,6 +4482,23 @@ mod tests {
         assert!(
             r.global.is_none(),
             "layer-hop short-circuit should not pay negotiated global routing"
+        );
+        let engines: Vec<&str> = r
+            .attempts
+            .iter()
+            .map(|attempt| attempt.engine.as_str())
+            .collect();
+        assert_eq!(
+            engines,
+            vec![
+                crate::direct::ENGINE,
+                crate::layer_hop::ENGINE,
+                crate::via_escape::ENGINE,
+                crate::pattern::ENGINE,
+                crate::channel::ENGINE,
+                crate::sequential::ENGINE,
+            ],
+            "clean via-heavy cheap routes should keep competing with later cheap routers before skipping the mesh"
         );
     }
 
@@ -1746,6 +4596,33 @@ mod tests {
     }
 
     #[test]
+    fn route_auto_diagnostics_skip_global_for_multi_pin_channel_pattern_route() {
+        let p = heterogeneous_multi_pin_channel_problem();
+        assert!(!crate::direct::route_direct(&p).failed.is_empty());
+        assert!(!crate::layer_hop::route_layer_hop(&p).failed.is_empty());
+        assert!(!crate::via_escape::route_via_escape(&p).failed.is_empty());
+
+        let r = route_auto_with_diagnostics(&p);
+
+        assert_eq!(r.result.engine, crate::pattern::ENGINE);
+        assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
+        assert!(
+            r.result
+                .solution
+                .traces
+                .iter()
+                .any(|trace| trace.connection == "BUS" && trace.path.len() >= 5),
+            "BUS should be routed as a multi-leg preferred-direction path: {:?}",
+            r.result.solution
+        );
+        assert!(lint(&p, &r.result.solution).is_empty());
+        assert!(
+            r.global.is_none(),
+            "pattern router should compose multi-pin channel nets without negotiated global routing"
+        );
+    }
+
+    #[test]
     fn route_quality_tiebreak_prefers_fewer_vias_before_wirelength() {
         let p = simple_two_point_problem();
         let via_heavy_short = RouteQuality {
@@ -1796,6 +4673,209 @@ mod tests {
         assert_eq!(solution.traces[0].path, vec![pt(1.0, 1.0), pt(4.0, 4.0)]);
         assert!(solution.metrics().wirelength < before);
         assert!(lint(&p, &solution).is_empty());
+    }
+
+    #[test]
+    fn postroute_cleanup_octilinear_shortcut_can_remove_existing_clearance_finding() {
+        let mut p = simple_two_point_problem();
+        p.connections[0].points_to_connect[0].x = 1.0;
+        p.connections[0].points_to_connect[0].y = 1.0;
+        p.connections[0].points_to_connect[1].x = 4.0;
+        p.connections[0].points_to_connect[1].y = 4.0;
+        p.obstacles.push(crate::problem::Obstacle {
+            kind: "rect".to_owned(),
+            layers: vec![LayerRef::top()],
+            center: pt(2.0, 4.15),
+            width: 0.4,
+            height: 0.4,
+            connected_to: vec![],
+        });
+        let mut solution = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: p.min_trace_width,
+                path: vec![pt(1.0, 1.0), pt(1.0, 4.0), pt(4.0, 4.0)],
+            }],
+            vias: vec![],
+        };
+        let before = lint(&p, &solution);
+        assert!(
+            before.iter().any(|finding| matches!(
+                finding,
+                crate::lint::DrcViolation::ClearanceTraceObstacle { .. }
+            )),
+            "fixture should start with a trace-obstacle clearance finding: {before:?}"
+        );
+
+        postroute_cleanup(&p, &mut solution);
+
+        assert_eq!(solution.traces[0].path, vec![pt(1.0, 1.0), pt(4.0, 4.0)]);
+        assert!(
+            lint(&p, &solution).is_empty(),
+            "octilinear shortcut should be allowed to remove existing lint findings without adding new ones"
+        );
+    }
+
+    #[test]
+    fn postroute_cleanup_pulls_clean_orthogonal_detour() {
+        let mut p = simple_two_point_problem();
+        p.connections[0].points_to_connect[0].x = 1.0;
+        p.connections[0].points_to_connect[0].y = 1.0;
+        p.connections[0].points_to_connect[1].x = 5.0;
+        p.connections[0].points_to_connect[1].y = 4.0;
+        let mut solution = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: p.min_trace_width,
+                path: vec![
+                    pt(1.0, 1.0),
+                    pt(1.0, 5.0),
+                    pt(3.0, 5.0),
+                    pt(3.0, 4.0),
+                    pt(5.0, 4.0),
+                ],
+            }],
+            vias: vec![],
+        };
+        let before = solution.metrics().wirelength;
+
+        postroute_cleanup(&p, &mut solution);
+
+        assert_eq!(
+            solution.traces[0].path,
+            vec![pt(1.0, 1.0), pt(1.0, 4.0), pt(5.0, 4.0)]
+        );
+        assert!(solution.metrics().wirelength < before);
+        assert!(lint(&p, &solution).is_empty());
+    }
+
+    #[test]
+    fn postroute_cleanup_line_pull_can_remove_existing_clearance_finding() {
+        let mut p = simple_two_point_problem();
+        p.connections[0].points_to_connect[0].x = 1.0;
+        p.connections[0].points_to_connect[0].y = 1.0;
+        p.connections[0].points_to_connect[1].x = 5.0;
+        p.connections[0].points_to_connect[1].y = 4.0;
+        p.obstacles.push(crate::problem::Obstacle {
+            kind: "rect".to_owned(),
+            layers: vec![LayerRef::top()],
+            center: pt(2.0, 5.15),
+            width: 0.4,
+            height: 0.4,
+            connected_to: vec![],
+        });
+        let mut solution = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: p.min_trace_width,
+                path: vec![
+                    pt(1.0, 1.0),
+                    pt(1.0, 5.0),
+                    pt(3.0, 5.0),
+                    pt(3.0, 4.0),
+                    pt(5.0, 4.0),
+                ],
+            }],
+            vias: vec![],
+        };
+        let before = lint(&p, &solution);
+        assert!(
+            before.iter().any(|finding| matches!(
+                finding,
+                crate::lint::DrcViolation::ClearanceTraceObstacle { .. }
+            )),
+            "fixture should start with a trace-obstacle clearance finding: {before:?}"
+        );
+
+        postroute_cleanup(&p, &mut solution);
+
+        assert_eq!(
+            solution.traces[0].path,
+            vec![pt(1.0, 1.0), pt(1.0, 4.0), pt(5.0, 4.0)]
+        );
+        assert!(
+            lint(&p, &solution).is_empty(),
+            "line-pull should be allowed to remove existing lint findings without adding new ones"
+        );
+    }
+
+    #[test]
+    fn orthogonal_pull_candidate_shape_filters_trivial_routes() {
+        let straight = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![pt(1.0, 1.0), pt(5.0, 1.0)],
+            }],
+            vias: vec![],
+        };
+        let already_tight_l = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![pt(1.0, 1.0), pt(1.0, 4.0), pt(5.0, 4.0)],
+            }],
+            vias: vec![],
+        };
+        let detour = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![
+                    pt(1.0, 1.0),
+                    pt(1.0, 5.0),
+                    pt(3.0, 5.0),
+                    pt(3.0, 4.0),
+                    pt(5.0, 4.0),
+                ],
+            }],
+            vias: vec![],
+        };
+
+        assert!(!has_orthogonal_pull_candidate_shape(&straight));
+        assert!(!has_orthogonal_pull_candidate_shape(&already_tight_l));
+        assert!(has_orthogonal_pull_candidate_shape(&detour));
+    }
+
+    #[test]
+    fn octilinear_shortcut_candidate_shape_filters_trivial_routes() {
+        let straight = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![pt(1.0, 1.0), pt(5.0, 1.0)],
+            }],
+            vias: vec![],
+        };
+        let already_tight_l = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![pt(1.0, 1.0), pt(1.0, 4.0), pt(5.0, 4.0)],
+            }],
+            vias: vec![],
+        };
+        let diagonal_detour = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![pt(1.0, 1.0), pt(1.0, 4.0), pt(4.0, 4.0)],
+            }],
+            vias: vec![],
+        };
+
+        assert!(!has_octilinear_shortcut_candidate_shape(&straight));
+        assert!(!has_octilinear_shortcut_candidate_shape(&already_tight_l));
+        assert!(has_octilinear_shortcut_candidate_shape(&diagonal_detour));
     }
 
     #[test]
@@ -1929,6 +5009,55 @@ mod tests {
             "closed spur loop should be removed"
         );
         assert!(lint(&p, &solution).is_empty());
+    }
+
+    #[test]
+    fn postroute_cleanup_spur_removal_can_remove_existing_clearance_finding() {
+        let mut p = simple_two_point_problem();
+        p.connections[0].points_to_connect[0].x = 1.0;
+        p.connections[0].points_to_connect[0].y = 1.0;
+        p.connections[0].points_to_connect[1].x = 5.0;
+        p.connections[0].points_to_connect[1].y = 1.0;
+        p.obstacles.push(crate::problem::Obstacle {
+            kind: "rect".to_owned(),
+            layers: vec![LayerRef::top()],
+            center: pt(2.5, 3.15),
+            width: 0.4,
+            height: 0.4,
+            connected_to: vec![],
+        });
+        let mut solution = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: p.min_trace_width,
+                path: vec![
+                    pt(1.0, 1.0),
+                    pt(2.0, 1.0),
+                    pt(2.0, 3.0),
+                    pt(3.0, 3.0),
+                    pt(2.0, 1.0),
+                    pt(5.0, 1.0),
+                ],
+            }],
+            vias: vec![],
+        };
+        let before = lint(&p, &solution);
+        assert!(
+            before.iter().any(|finding| matches!(
+                finding,
+                crate::lint::DrcViolation::ClearanceTraceObstacle { .. }
+            )),
+            "fixture should start with a trace-obstacle clearance finding: {before:?}"
+        );
+
+        postroute_cleanup(&p, &mut solution);
+
+        assert_eq!(solution.traces[0].path, vec![pt(1.0, 1.0), pt(5.0, 1.0)]);
+        assert!(
+            lint(&p, &solution).is_empty(),
+            "spur removal should be allowed to remove existing lint findings without adding new ones"
+        );
     }
 
     #[test]
@@ -2159,6 +5288,60 @@ mod tests {
     }
 
     #[test]
+    fn postroute_cleanup_drops_partial_via_covered_by_through_via() {
+        let mut p = simple_two_point_problem();
+        p.layer_count = 4;
+        p.connections[0].points_to_connect[0].x = 1.0;
+        p.connections[0].points_to_connect[0].y = 1.0;
+        p.connections[0].points_to_connect[0].layer = LayerRef::top();
+        p.connections[0].points_to_connect[1].x = 5.0;
+        p.connections[0].points_to_connect[1].y = 1.0;
+        p.connections[0].points_to_connect[1].layer = LayerRef::bottom();
+        let mut solution = RouteSolution {
+            traces: vec![
+                Trace {
+                    connection: "N".to_owned(),
+                    layer: LayerRef::top(),
+                    width: p.min_trace_width,
+                    path: vec![pt(1.0, 1.0), pt(3.0, 1.0)],
+                },
+                Trace {
+                    connection: "N".to_owned(),
+                    layer: LayerRef::bottom(),
+                    width: p.min_trace_width,
+                    path: vec![pt(3.0, 1.0), pt(5.0, 1.0)],
+                },
+            ],
+            vias: vec![
+                Via {
+                    connection: "N".to_owned(),
+                    at: pt(3.0, 1.0),
+                    diameter: p.via_diameter,
+                    drill: p.via_drill,
+                    span: ViaSpan::Through,
+                },
+                Via {
+                    connection: "N".to_owned(),
+                    at: pt(3.0, 1.0),
+                    diameter: p.via_diameter,
+                    drill: p.via_drill,
+                    span: ViaSpan::Partial {
+                        from: 0,
+                        to: 1,
+                        micro: false,
+                    },
+                },
+            ],
+        };
+
+        postroute_cleanup(&p, &mut solution);
+
+        assert_eq!(solution.vias.len(), 1);
+        assert!(matches!(solution.vias[0].span, ViaSpan::Through));
+        assert!(lint(&p, &solution).is_empty());
+    }
+
+    #[test]
     fn postroute_cleanup_drops_dangling_same_net_via() {
         let mut p = simple_two_point_problem();
         p.connections[0].points_to_connect[0].x = 1.0;
@@ -2198,6 +5381,30 @@ mod tests {
         let r = route_auto_with_diagnostics(&p);
         assert_eq!(r.result.engine, crate::sequential::ENGINE);
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
+        let engines: Vec<&str> = r
+            .attempts
+            .iter()
+            .map(|attempt| attempt.engine.as_str())
+            .collect();
+        assert_eq!(
+            engines,
+            vec![
+                crate::direct::ENGINE,
+                crate::layer_hop::ENGINE,
+                crate::via_escape::ENGINE,
+                crate::pattern::ENGINE,
+                crate::channel::ENGINE,
+                crate::sequential::ENGINE,
+            ],
+            "route_auto diagnostics should preserve attempted engines until the clean winner"
+        );
+        assert!(
+            r.attempts
+                .iter()
+                .take(r.attempts.len() - 1)
+                .any(|attempt| attempt.failed_nets > 0),
+            "diagnostics should retain failed earlier attempts before the winner"
+        );
         assert!(
             r.global.is_none(),
             "clean sequential-grid route should not pay negotiated global routing"
@@ -2210,11 +5417,41 @@ mod tests {
         let r = route_mesh_with_diagnostics(&p);
         assert_eq!(r.result.engine, ENGINE);
         assert!(r.result.failed.is_empty(), "{:?}", r.result.failed);
+        assert_eq!(r.attempts.len(), 1);
+        assert_eq!(r.attempts[0].engine, ENGINE);
         assert!(
             r.global
                 .as_ref()
                 .is_some_and(GlobalRouteResult::is_feasible),
             "mesh diagnostics should include feasible global report"
+        );
+    }
+
+    #[test]
+    fn route_auto_skips_detailed_for_large_multilayer_boards() {
+        let mut p = simple_two_point_problem();
+        p.layer_count = 4;
+        p.connections = (0..=AUTO_DETAILED_MAX_MULTILAYER_CONNECTIONS)
+            .map(|idx| crate::problem::Connection {
+                name: format!("N{idx}"),
+                points_to_connect: vec![
+                    crate::problem::RoutePoint {
+                        x: 1.0,
+                        y: 1.0 + idx as f64,
+                        layer: LayerRef::top(),
+                    },
+                    crate::problem::RoutePoint {
+                        x: 8.0,
+                        y: 1.0 + idx as f64,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            })
+            .collect();
+
+        assert!(
+            !should_try_detailed_in_auto(&p),
+            "large multilayer boards should use bounded fallback routing unless mesh is explicitly requested"
         );
     }
 

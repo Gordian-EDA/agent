@@ -164,7 +164,7 @@ impl SchematicWriter {
                 net: net.to_string(),
                 at,
                 uuid_key: format!("{refdes}:{pin}:{net}:{idx}"),
-                // Legacy/no-stub path: East -> angle 0, justify left bottom,
+                // Direct/no-stub path: East -> angle 0, justify left bottom,
                 // byte-identical to pre-stub label output.
                 dir: Dir::East,
                 stub: None,

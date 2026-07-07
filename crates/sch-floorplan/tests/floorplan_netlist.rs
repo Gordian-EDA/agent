@@ -60,6 +60,12 @@ fn doc(name: &str, ext: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../docs/validation/{name}.{ext}"))
 }
 
+fn validation_corpus_available() -> bool {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/validation")
+        .is_dir()
+}
+
 /// The YAML keys pins by NAME; the KiCAD netlist reports pins by NUMBER. Resolve
 /// the authored token (number-first then name, `find_pin` order) and compare.
 fn nl_pin_matches(provider: &SymbolTable, lib_id: &str, authored: &str, nl_pin: &str) -> bool {
@@ -75,6 +81,10 @@ fn nl_pin_matches(provider: &SymbolTable, lib_id: &str, authored: &str, nl_pin: 
 #[test]
 fn floorplan_reference_fixtures_emit_truthful_netlists() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !validation_corpus_available() {
+        eprintln!("SKIP: docs/validation corpus not present");
+        return;
+    }
     let Some(env) = KicadEnv::detect() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;
@@ -127,6 +137,10 @@ fn floorplan_challenge_fixtures_emit_truthful_netlists_multisheet() {
 /// Run the challenge tier over every (or `FLOORPLAN_ONLY`-restricted) fixture in the
 /// CURRENT engine mode (single-sheet, or multisheet when the caller set the env var).
 fn run_challenge_fixtures() {
+    if !validation_corpus_available() {
+        eprintln!("SKIP: docs/validation corpus not present");
+        return;
+    }
     let Some(env) = KicadEnv::detect() else {
         eprintln!("SKIP: no KiCAD environment detected");
         return;

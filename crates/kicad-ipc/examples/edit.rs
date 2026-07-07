@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut fp = fps_before[0].clone();
-    let p0 = fp.position.clone().unwrap_or_default();
+    let p0 = fp.position.unwrap_or_default();
 
     k.commit("rust edit: move footprint + 1.0mm power track", |k| {
         // 1) move the first footprint +2 mm in x
@@ -60,11 +60,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter_map(|t| t.width.as_ref().map(|w| w.value_nm))
         .max()
         .unwrap_or(0);
+    let p1 = fps_after[0].position.unwrap_or_default();
     println!(
         "after:  fp0 x {} -> {} (delta {} nm); tracks {} -> {}; widest track {} nm",
         p0.x_nm,
-        fps_after[0].position.clone().unwrap_or_default().x_nm,
-        fps_after[0].position.clone().unwrap_or_default().x_nm - p0.x_nm,
+        p1.x_nm,
+        p1.x_nm - p0.x_nm,
         tracks_before,
         tracks_after.len(),
         widest

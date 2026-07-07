@@ -109,6 +109,7 @@ fn pair_clearance(x: &CopperItem, y: &CopperItem, clearance: f64) -> Option<Find
 
 /// Trace-segment (`seg`) against an obstacle rect, with `seg` as the trace
 /// item and `rect` as the obstacle item.
+#[allow(clippy::too_many_arguments)]
 fn trace_obstacle(
     seg: &CopperItem,
     rect: &CopperItem,

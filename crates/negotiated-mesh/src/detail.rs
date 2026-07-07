@@ -45,12 +45,20 @@
 
 use crate::astar::{self, AStarCosts, DIAG_COST, State};
 use crate::crossing::{CellJob, CrossingAssignment, Terminal, TerminalKind};
-use crate::grid::{self, RouteGrid};
+use crate::grid::{self, Cell, RouteGrid};
+use crate::heuristics::{
+    connection_crossing_pressures, connection_obstacle_pressure_um,
+    connection_segment_obstacle_pressure_um, connection_span_um,
+};
 use crate::mesh::{CapacityMesh, LeafId};
 use crate::problem::Rect;
-use crate::problem::{FailedNet, LayerRef, Point2, RouteProblem};
+use crate::problem::{
+    FailedNet, LayerRef, Point2, RouteProblem, RouteSolution, Trace, Via, ViaSpan,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+const FINISHER_MAX_MULTILAYER_CONNECTIONS: usize = 10;
 
 // ── public result types ──────────────────────────────────────────────────────
 
@@ -112,6 +120,26 @@ impl CellRouteResult {
     }
 }
 
+/// One detailed-route pass candidate considered before the optional finisher.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DetailPassDiagnostic {
+    /// Candidate index in the deterministic retry portfolio; zero is the ranked baseline.
+    pub index: usize,
+    /// Net order for this candidate, with duplicate per-cell jobs collapsed.
+    pub net_order: Vec<String>,
+    /// Geometry violations in the stitched successful-cell candidate.
+    pub geometry: usize,
+    /// Number of cell failures before any full-board finisher.
+    pub fail_count: usize,
+    /// Failed-pad weight, so multi-pin failures are visible.
+    pub failed_pad_weight: usize,
+    /// Failed net names for this candidate.
+    pub failed: Vec<String>,
+    /// Whether this candidate became the retained pre-finisher cell-route pass.
+    pub selected: bool,
+}
+
 // ── entry point ──────────────────────────────────────────────────────────────
 
 /// Route every cell job in `assignment` inside its leaf with octilinear A*.
@@ -123,6 +151,26 @@ pub fn route_cells(
     problem: &RouteProblem,
     mesh: &CapacityMesh,
     assignment: &CrossingAssignment,
+) -> CellRouteResult {
+    route_cells_impl(problem, mesh, assignment, None)
+}
+
+/// As [`route_cells`], plus pre-finisher retry candidate diagnostics for tooling.
+pub fn route_cells_with_diagnostics(
+    problem: &RouteProblem,
+    mesh: &CapacityMesh,
+    assignment: &CrossingAssignment,
+) -> (CellRouteResult, Vec<DetailPassDiagnostic>) {
+    let mut diagnostics = Vec::new();
+    let result = route_cells_impl(problem, mesh, assignment, Some(&mut diagnostics));
+    (result, diagnostics)
+}
+
+fn route_cells_impl(
+    problem: &RouteProblem,
+    mesh: &CapacityMesh,
+    assignment: &CrossingAssignment,
+    mut diagnostics: Option<&mut Vec<DetailPassDiagnostic>>,
 ) -> CellRouteResult {
     let layer_count = problem.layer_count.max(1) as usize;
     let track_pitch = mesh.track_pitch;
@@ -163,65 +211,75 @@ pub fn route_cells(
         ..AStarCosts::default()
     };
 
-    // Route jobs in global net-rank order (slice-1 half-perimeter rank, ties by
-    // name), and within a net by leaf id. Routing a whole net's cells before the
-    // next net's — rather than leaf-by-leaf — matches the slice-1 net order the
-    // global stage negotiated around, so a net's cells are laid as one connected
-    // run and later (higher-rank) nets see the earlier ones' copper on the shared
-    // grid and keep clearance / route around it.
+    // Route jobs in global net-rank order first (slice-1 half-perimeter rank,
+    // ties by name), and within a net by leaf id. If that first pass leaves
+    // failures, retry a bounded portfolio of pressure-aware net orders on fresh
+    // occupancy grids and keep the best. This mirrors the rip-up/order-variation
+    // trick used by mature autorouters: a net that succeeds early can still claim
+    // the only corridor a harder later net needed, and the finisher only repairs
+    // failed nets rather than re-routing the blocker.
     let net_rank = net_rank(problem);
-    let mut ordered_jobs: Vec<&CellJob> = assignment.jobs.iter().collect();
-    ordered_jobs.sort_by(|p, q| {
-        let rp = net_rank.get(&p.connection).copied().unwrap_or(usize::MAX);
-        let rq = net_rank.get(&q.connection).copied().unwrap_or(usize::MAX);
-        rp.cmp(&rq)
-            .then_with(|| p.connection.cmp(&q.connection))
-            .then_with(|| p.leaf.cmp(&q.leaf))
-    });
-
-    let mut cell_routes: Vec<CellRoute> = Vec::new();
-    let mut failed: Vec<FailedNet> = Vec::new();
-
-    // One shared full-board grid (at the fine detailed pitch) for the whole stage.
-    // Per-cell window grids are blind to each other's copper, so a net routed in
-    // one leaf cannot keep clearance from a foreign net in the abutting leaf, and a
-    // via barrel cannot avoid foreign copper laid down later. A single grid makes
-    // ALL routed copper — traces and via barrels alike — visible to every later
-    // job, so cross-cell clearance holds by construction. Each job's A* is bounded
-    // to its leaf window so routes stay cell-local; only the occupancy is shared.
-    let mut grid = RouteGrid::build_with_pitch(problem, pitch);
-
-    // Reserve every via barrel up front. A via site is assigned (in `crossing`)
-    // before any trace is routed, so a foreign trace could otherwise be laid right
-    // through where a via will later sit — order-dependent and unrepairable once
-    // the trace exists. Stamping each via's through-hole halo (every layer, owned
-    // by its net) before routing makes vias first-class obstacles: foreign traces
-    // route around them, the owning net still passes its own barrel.
-    for job in &assignment.jobs {
-        let Some(conn_idx) = grid.connection_index(&job.connection) else {
-            continue;
-        };
-        for t in &job.terminals {
-            if t.kind == TerminalKind::Via {
-                let (vx, vy) = grid.cell_of(t.at.x, t.at.y);
-                for l in 0..grid.layer_count {
-                    grid.mark_net_halo_euclid(l, vx, vy, conn_idx, via_halo);
-                }
+    let ranked_job_order = detail_ranked_job_order(assignment, &net_rank);
+    let (mut cell_routes, mut failed, blocker_edges) = route_detail_pass(
+        problem,
+        mesh,
+        assignment,
+        &ranked_job_order,
+        pitch,
+        layer_count,
+        track_pitch,
+        halo,
+        via_halo,
+        costs,
+    );
+    let mut best_key = cell_route_candidate_key(problem, &cell_routes, &failed);
+    let mut best_idx = 0usize;
+    record_detail_pass_diagnostic(
+        &mut diagnostics,
+        0,
+        &ranked_job_order,
+        assignment,
+        best_key,
+        &failed,
+    );
+    if !failed.is_empty() {
+        let mut retry_orders = detail_retry_job_orders(problem, assignment, &net_rank);
+        if let Some(order) = detail_blocker_retry_job_order(assignment, &net_rank, &blocker_edges) {
+            retry_orders.push(order);
+            retry_orders.dedup();
+        }
+        for (idx, order) in retry_orders.iter().enumerate().skip(1) {
+            let (candidate_routes, candidate_failed, _) = route_detail_pass(
+                problem,
+                mesh,
+                assignment,
+                order,
+                pitch,
+                layer_count,
+                track_pitch,
+                halo,
+                via_halo,
+                costs,
+            );
+            let candidate_key =
+                cell_route_candidate_key(problem, &candidate_routes, &candidate_failed);
+            record_detail_pass_diagnostic(
+                &mut diagnostics,
+                idx,
+                order,
+                assignment,
+                candidate_key,
+                &candidate_failed,
+            );
+            if keep_cell_route_candidate(candidate_key, idx, best_key, best_idx) {
+                best_key = candidate_key;
+                best_idx = idx;
+                cell_routes = candidate_routes;
+                failed = candidate_failed;
             }
         }
     }
-
-    for job in ordered_jobs {
-        let leaf_rect = &mesh.leaves[job.leaf].rect;
-        let window = leaf_rect.inflate_clamped_to(track_pitch, &problem.bounds);
-        match route_one_job(job, &mut grid, &window, layer_count, halo, via_halo, costs) {
-            Ok(route) => cell_routes.push(route),
-            Err(reason) => failed.push(FailedNet {
-                connection: job.connection.clone(),
-                reason: format!("cell {}: {reason}", job.leaf),
-            }),
-        }
-    }
+    mark_selected_detail_pass_diagnostic(&mut diagnostics, best_idx);
 
     // ── Hotspot repair: per-net full-board finisher (slice 3, Task 3.5) ──────────
     //
@@ -244,7 +302,7 @@ pub fn route_cells(
     // Nets that still cannot route stay honest `finisher: …` failures.
     let failed_names: std::collections::BTreeSet<String> =
         failed.iter().map(|f| f.connection.clone()).collect();
-    if !failed_names.is_empty() {
+    if !failed_names.is_empty() && should_try_finisher(problem) {
         // A failed net's partial in-cell copper must not survive into the stitched
         // solution: per the partial-net rule it was already dropped (Task 3 skips
         // `failed` nets), and the finisher re-routes the whole net from scratch, so
@@ -301,7 +359,7 @@ pub fn route_cells(
         let mut lanes: BTreeMap<String, Vec<Waypoint>> = BTreeMap::new();
         for x in &assignment.crossings {
             let w = Waypoint {
-                at: x.at.clone(),
+                at: x.at,
                 layer: x.layer.min(layer_count - 1),
             };
             let slot = lanes.entry(x.connection.clone()).or_default();
@@ -355,7 +413,8 @@ pub fn route_cells(
         let mut best_routes = Vec::new();
         let mut best_fail = Vec::new();
         let mut best_key = FinisherCandidateKey::worst();
-        for order in &orders {
+        let mut best_idx = usize::MAX;
+        for (idx, order) in orders.iter().enumerate() {
             let mut g = base_grid.clone();
             let (routes, finisher_fail) = run_finisher_pass(
                 problem,
@@ -368,14 +427,11 @@ pub fn route_cells(
                 finish_costs,
             );
             let key = finisher_candidate_key(problem, &routes, &finisher_fail);
-            if key < best_key {
-                let solved_all = key.fail_count == 0;
+            if keep_finisher_candidate(key, idx, best_key, best_idx) {
                 best_key = key;
+                best_idx = idx;
                 best_routes = routes;
                 best_fail = finisher_fail;
-                if solved_all && best_key.via_count == 0 {
-                    break;
-                }
             }
         }
 
@@ -384,12 +440,490 @@ pub fn route_cells(
         // reinstate it as a single honest finisher failure if it could not complete.
         failed.retain(|f| !failed_names.contains(&f.connection));
         failed.extend(best_fail);
+    } else if !failed_names.is_empty() {
+        let reason = finisher_skip_reason(problem);
+        for failure in &mut failed {
+            failure.reason = format!("{}; {reason}", failure.reason);
+        }
     }
 
     CellRouteResult {
         cell_routes,
         failed,
     }
+}
+
+fn detail_ranked_job_order(
+    assignment: &CrossingAssignment,
+    net_rank: &BTreeMap<String, usize>,
+) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..assignment.jobs.len()).collect();
+    order.sort_by(|&a, &b| {
+        let ja = &assignment.jobs[a];
+        let jb = &assignment.jobs[b];
+        let ra = net_rank.get(&ja.connection).copied().unwrap_or(usize::MAX);
+        let rb = net_rank.get(&jb.connection).copied().unwrap_or(usize::MAX);
+        ra.cmp(&rb)
+            .then_with(|| ja.connection.cmp(&jb.connection))
+            .then_with(|| ja.leaf.cmp(&jb.leaf))
+    });
+    order
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct DetailBlockerEdge {
+    blocked: String,
+    blocker: String,
+}
+
+fn detail_retry_job_orders(
+    problem: &RouteProblem,
+    assignment: &CrossingAssignment,
+    net_rank: &BTreeMap<String, usize>,
+) -> Vec<Vec<usize>> {
+    let names: std::collections::BTreeSet<String> = assignment
+        .jobs
+        .iter()
+        .map(|job| job.connection.clone())
+        .collect();
+    let mut orders: Vec<Vec<usize>> = finisher_orders(problem, &names, net_rank)
+        .into_iter()
+        .map(|net_order| detail_job_order(assignment, &net_order))
+        .collect();
+    orders.dedup();
+    if orders.is_empty() {
+        orders.push(Vec::new());
+    }
+    orders
+}
+
+fn detail_blocker_retry_job_order(
+    assignment: &CrossingAssignment,
+    net_rank: &BTreeMap<String, usize>,
+    blocker_edges: &[DetailBlockerEdge],
+) -> Option<Vec<usize>> {
+    if blocker_edges.is_empty() {
+        return None;
+    }
+    let net_order = detail_blocker_retry_net_order(assignment, net_rank, blocker_edges);
+    (!net_order.is_empty()).then(|| detail_job_order(assignment, &net_order))
+}
+
+fn detail_blocker_retry_net_order(
+    assignment: &CrossingAssignment,
+    net_rank: &BTreeMap<String, usize>,
+    blocker_edges: &[DetailBlockerEdge],
+) -> Vec<String> {
+    let mut names: BTreeSet<String> = assignment
+        .jobs
+        .iter()
+        .map(|job| job.connection.clone())
+        .collect();
+    let mut outgoing: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut indegree: BTreeMap<String, usize> =
+        names.iter().map(|name| (name.clone(), 0)).collect();
+
+    for edge in blocker_edges {
+        if edge.blocked == edge.blocker
+            || !names.contains(&edge.blocked)
+            || !names.contains(&edge.blocker)
+        {
+            continue;
+        }
+        if outgoing
+            .entry(edge.blocked.clone())
+            .or_default()
+            .insert(edge.blocker.clone())
+        {
+            *indegree.entry(edge.blocker.clone()).or_default() += 1;
+        }
+    }
+
+    if outgoing.is_empty() {
+        return Vec::new();
+    }
+
+    let mut order = Vec::with_capacity(names.len());
+    while !names.is_empty() {
+        let next = names
+            .iter()
+            .filter(|name| indegree.get(*name).copied().unwrap_or(0) == 0)
+            .min_by(|a, b| compare_detail_net_order(a, b, net_rank))
+            .cloned()
+            .or_else(|| {
+                names
+                    .iter()
+                    .min_by(|a, b| {
+                        indegree
+                            .get(*a)
+                            .copied()
+                            .unwrap_or(0)
+                            .cmp(&indegree.get(*b).copied().unwrap_or(0))
+                            .then_with(|| compare_detail_net_order(a, b, net_rank))
+                    })
+                    .cloned()
+            })
+            .expect("non-empty name set has a next item");
+        names.remove(&next);
+        if let Some(blockers) = outgoing.get(&next) {
+            for blocker in blockers {
+                if let Some(count) = indegree.get_mut(blocker) {
+                    *count = count.saturating_sub(1);
+                }
+            }
+        }
+        order.push(next);
+    }
+    order
+}
+
+fn compare_detail_net_order(
+    a: &str,
+    b: &str,
+    net_rank: &BTreeMap<String, usize>,
+) -> std::cmp::Ordering {
+    let ra = net_rank.get(a).copied().unwrap_or(usize::MAX);
+    let rb = net_rank.get(b).copied().unwrap_or(usize::MAX);
+    ra.cmp(&rb).then_with(|| a.cmp(b))
+}
+
+fn detail_job_order(assignment: &CrossingAssignment, net_order: &[String]) -> Vec<usize> {
+    let rank: BTreeMap<&str, usize> = net_order
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| (name.as_str(), idx))
+        .collect();
+    let mut order: Vec<usize> = (0..assignment.jobs.len()).collect();
+    order.sort_by(|&a, &b| {
+        let ja = &assignment.jobs[a];
+        let jb = &assignment.jobs[b];
+        rank.get(ja.connection.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+            .cmp(
+                &rank
+                    .get(jb.connection.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX),
+            )
+            .then_with(|| ja.connection.cmp(&jb.connection))
+            .then_with(|| ja.leaf.cmp(&jb.leaf))
+    });
+    order
+}
+
+fn record_detail_pass_diagnostic(
+    diagnostics: &mut Option<&mut Vec<DetailPassDiagnostic>>,
+    index: usize,
+    job_order: &[usize],
+    assignment: &CrossingAssignment,
+    key: DetailPassCandidateKey,
+    failures: &[FailedNet],
+) {
+    let Some(diagnostics) = diagnostics.as_mut() else {
+        return;
+    };
+    diagnostics.push(DetailPassDiagnostic {
+        index,
+        net_order: diagnostic_net_order(assignment, job_order),
+        geometry: key.geometry,
+        fail_count: key.fail_count,
+        failed_pad_weight: key.failed_pad_weight,
+        failed: failures
+            .iter()
+            .map(|failure| failure.connection.clone())
+            .collect(),
+        selected: false,
+    });
+}
+
+fn mark_selected_detail_pass_diagnostic(
+    diagnostics: &mut Option<&mut Vec<DetailPassDiagnostic>>,
+    selected_idx: usize,
+) {
+    if let Some(diagnostics) = diagnostics.as_mut() {
+        for diagnostic in diagnostics.iter_mut() {
+            diagnostic.selected = diagnostic.index == selected_idx;
+        }
+    }
+}
+
+fn diagnostic_net_order(assignment: &CrossingAssignment, job_order: &[usize]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for &idx in job_order {
+        let Some(job) = assignment.jobs.get(idx) else {
+            continue;
+        };
+        if seen.insert(job.connection.clone()) {
+            out.push(job.connection.clone());
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn route_detail_pass(
+    problem: &RouteProblem,
+    mesh: &CapacityMesh,
+    assignment: &CrossingAssignment,
+    job_order: &[usize],
+    pitch: f64,
+    layer_count: usize,
+    track_pitch: f64,
+    halo: f64,
+    via_halo: f64,
+    costs: AStarCosts,
+) -> (Vec<CellRoute>, Vec<FailedNet>, Vec<DetailBlockerEdge>) {
+    let mut cell_routes: Vec<CellRoute> = Vec::new();
+    let mut failed: Vec<FailedNet> = Vec::new();
+    let mut blocker_edges: Vec<DetailBlockerEdge> = Vec::new();
+
+    // One shared full-board grid (at the fine detailed pitch) for the whole pass.
+    // Per-cell window grids are blind to each other's copper; this shared grid
+    // makes all already-routed copper visible while each A* remains bounded to
+    // the leaf window.
+    let mut grid = RouteGrid::build_with_pitch(problem, pitch);
+
+    let rollback_failed_nets = !should_try_finisher(problem);
+
+    // Reserve every assigned via barrel up front so foreign traces in earlier
+    // jobs cannot claim a future via site. The owning net can still pass its own
+    // barrel because the occupancy is tagged by connection.
+    for job in &assignment.jobs {
+        reserve_job_vias(&mut grid, job, via_halo);
+    }
+
+    if rollback_failed_nets {
+        route_detail_pass_with_net_rollback(
+            problem,
+            mesh,
+            assignment,
+            job_order,
+            &mut grid,
+            &mut cell_routes,
+            &mut failed,
+            &mut blocker_edges,
+            track_pitch,
+            layer_count,
+            halo,
+            via_halo,
+            costs,
+        );
+    } else {
+        for &job_idx in job_order {
+            let Some(job) = assignment.jobs.get(job_idx) else {
+                continue;
+            };
+            let leaf_rect = &mesh.leaves[job.leaf].rect;
+            let window = leaf_rect.inflate_clamped_to(track_pitch, &problem.bounds);
+            match route_one_job(
+                problem,
+                job,
+                &mut grid,
+                &window,
+                layer_count,
+                halo,
+                via_halo,
+                costs,
+            ) {
+                Ok(route) => {
+                    cell_routes.push(route);
+                }
+                Err(err) => {
+                    record_detail_failure(job, err, &mut failed, &mut blocker_edges);
+                }
+            }
+        }
+    }
+
+    (cell_routes, failed, blocker_edges)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn route_detail_pass_with_net_rollback(
+    problem: &RouteProblem,
+    mesh: &CapacityMesh,
+    assignment: &CrossingAssignment,
+    job_order: &[usize],
+    grid: &mut RouteGrid,
+    cell_routes: &mut Vec<CellRoute>,
+    failed: &mut Vec<FailedNet>,
+    blocker_edges: &mut Vec<DetailBlockerEdge>,
+    track_pitch: f64,
+    layer_count: usize,
+    halo: f64,
+    via_halo: f64,
+    costs: AStarCosts,
+) {
+    let mut pos = 0usize;
+    while pos < job_order.len() {
+        let Some(first_job) = assignment.jobs.get(job_order[pos]) else {
+            pos += 1;
+            continue;
+        };
+        let connection = first_job.connection.clone();
+        let start = pos;
+        pos += 1;
+        while pos < job_order.len()
+            && assignment
+                .jobs
+                .get(job_order[pos])
+                .is_some_and(|job| job.connection == connection)
+        {
+            pos += 1;
+        }
+
+        let mut trial_grid = grid.clone();
+
+        let mut trial_routes = Vec::new();
+        let mut group_failed = false;
+        for &job_idx in &job_order[start..pos] {
+            let Some(job) = assignment.jobs.get(job_idx) else {
+                continue;
+            };
+            let leaf_rect = &mesh.leaves[job.leaf].rect;
+            let window = leaf_rect.inflate_clamped_to(track_pitch, &problem.bounds);
+            match route_one_job(
+                problem,
+                job,
+                &mut trial_grid,
+                &window,
+                layer_count,
+                halo,
+                via_halo,
+                costs,
+            ) {
+                Ok(route) => trial_routes.push(route),
+                Err(err) => {
+                    record_detail_failure(job, err, failed, blocker_edges);
+                    group_failed = true;
+                    break;
+                }
+            }
+        }
+
+        if !group_failed {
+            *grid = trial_grid;
+            cell_routes.extend(trial_routes);
+        }
+    }
+}
+
+fn record_detail_failure(
+    job: &CellJob,
+    err: DetailRouteError,
+    failed: &mut Vec<FailedNet>,
+    blocker_edges: &mut Vec<DetailBlockerEdge>,
+) {
+    for blocker in err.foreign_owners {
+        if blocker != job.connection {
+            blocker_edges.push(DetailBlockerEdge {
+                blocked: job.connection.clone(),
+                blocker,
+            });
+        }
+    }
+    failed.push(FailedNet {
+        connection: job.connection.clone(),
+        reason: format!("cell {}: {}", job.leaf, err.reason),
+    });
+}
+
+fn reserve_job_vias(grid: &mut RouteGrid, job: &CellJob, via_halo: f64) {
+    let Some(conn_idx) = grid.connection_index(&job.connection) else {
+        return;
+    };
+    for t in &job.terminals {
+        if t.kind == TerminalKind::Via {
+            let (vx, vy) = grid.cell_of(t.at.x, t.at.y);
+            for l in 0..grid.layer_count {
+                grid.mark_net_halo_euclid(l, vx, vy, conn_idx, via_halo);
+            }
+        }
+    }
+}
+
+fn should_try_finisher(problem: &RouteProblem) -> bool {
+    problem.layer_count <= 2 || problem.connections.len() <= FINISHER_MAX_MULTILAYER_CONNECTIONS
+}
+
+fn finisher_skip_reason(problem: &RouteProblem) -> String {
+    format!(
+        "finisher skipped for large multilayer board (layers={}, connections={} > cap={})",
+        problem.layer_count,
+        problem.connections.len(),
+        FINISHER_MAX_MULTILAYER_CONNECTIONS
+    )
+}
+
+fn keep_cell_route_candidate(
+    candidate: DetailPassCandidateKey,
+    candidate_idx: usize,
+    incumbent: DetailPassCandidateKey,
+    incumbent_idx: usize,
+) -> bool {
+    (candidate, candidate_idx) < (incumbent, incumbent_idx)
+}
+
+fn cell_route_candidate_key(
+    problem: &RouteProblem,
+    routes: &[CellRoute],
+    failures: &[FailedNet],
+) -> DetailPassCandidateKey {
+    let failed_names: BTreeSet<String> = failures
+        .iter()
+        .map(|failure| failure.connection.clone())
+        .collect();
+    let solution = cell_routes_to_solution(problem, routes, &failed_names);
+    DetailPassCandidateKey {
+        geometry: crate::router::geometry_violations(problem, &solution),
+        fail_count: failures.len(),
+        failed_pad_weight: crate::problem::failed_pad_weight(problem, failures),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+struct DetailPassCandidateKey {
+    geometry: usize,
+    fail_count: usize,
+    failed_pad_weight: usize,
+}
+
+fn cell_routes_to_solution(
+    problem: &RouteProblem,
+    routes: &[CellRoute],
+    failed_names: &BTreeSet<String>,
+) -> RouteSolution {
+    let mut solution = RouteSolution {
+        traces: Vec::new(),
+        vias: Vec::new(),
+    };
+    for route in routes {
+        if failed_names.contains(&route.connection) {
+            continue;
+        }
+        for trace in &route.traces {
+            if trace.points.len() >= 2 {
+                solution.traces.push(Trace {
+                    connection: route.connection.clone(),
+                    layer: trace.layer.clone(),
+                    width: problem.min_trace_width,
+                    path: trace.points.clone(),
+                });
+            }
+        }
+        for via in &route.vias {
+            solution.vias.push(Via {
+                connection: route.connection.clone(),
+                at: via.at,
+                diameter: problem.via_diameter,
+                drill: problem.via_drill,
+                span: ViaSpan::Through,
+            });
+        }
+    }
+    solution
 }
 
 /// The deterministic order the finisher repairs the failed nets in: ascending
@@ -409,8 +943,8 @@ fn finisher_order(
     names
 }
 
-/// Deterministic finisher order portfolio. The first order is the legacy slice-1
-/// rank order and remains the exact-tie winner. The alternatives target common
+/// Deterministic finisher order portfolio. The first order is the slice-1 rank
+/// order and remains the exact-tie winner. The alternatives target common
 /// hotspot cases: long/hard nets first, reverse corridor claiming, and pure name
 /// order to break rank ties differently while staying byte-stable.
 fn finisher_orders(
@@ -419,6 +953,7 @@ fn finisher_orders(
     net_rank: &BTreeMap<String, usize>,
 ) -> Vec<Vec<String>> {
     let mut orders: Vec<Vec<String>> = Vec::new();
+    let metrics = finisher_order_metrics(problem, names_set);
 
     let rank = finisher_order(names_set, net_rank);
     orders.push(rank.clone());
@@ -433,20 +968,110 @@ fn finisher_orders(
 
     let mut hardest_first: Vec<String> = names_set.iter().cloned().collect();
     hardest_first.sort_by(|a, b| {
-        let ca = problem.connections.iter().find(|c| c.name == *a);
-        let cb = problem.connections.iter().find(|c| c.name == *b);
-        let pa = ca.map(|c| c.points_to_connect.len()).unwrap_or(0);
-        let pb = cb.map(|c| c.points_to_connect.len()).unwrap_or(0);
-        let ha = ca.map(|c| c.half_perimeter()).unwrap_or(0.0);
-        let hb = cb.map(|c| c.half_perimeter()).unwrap_or(0.0);
-        pb.cmp(&pa)
-            .then_with(|| hb.total_cmp(&ha))
+        let ma = finisher_metric(&metrics, a);
+        let mb = finisher_metric(&metrics, b);
+        mb.pin_count
+            .cmp(&ma.pin_count)
+            .then_with(|| mb.crossing_pressure.cmp(&ma.crossing_pressure))
+            .then_with(|| {
+                mb.segment_obstacle_pressure_um
+                    .cmp(&ma.segment_obstacle_pressure_um)
+            })
+            .then_with(|| mb.obstacle_pressure_um.cmp(&ma.obstacle_pressure_um))
+            .then_with(|| mb.span_um.cmp(&ma.span_um))
             .then_with(|| a.cmp(b))
     });
     orders.push(hardest_first);
 
+    let mut crossing_first: Vec<String> = names_set.iter().cloned().collect();
+    crossing_first.sort_by(|a, b| {
+        let ma = finisher_metric(&metrics, a);
+        let mb = finisher_metric(&metrics, b);
+        mb.crossing_pressure
+            .cmp(&ma.crossing_pressure)
+            .then_with(|| {
+                mb.segment_obstacle_pressure_um
+                    .cmp(&ma.segment_obstacle_pressure_um)
+            })
+            .then_with(|| mb.obstacle_pressure_um.cmp(&ma.obstacle_pressure_um))
+            .then_with(|| mb.span_um.cmp(&ma.span_um))
+            .then_with(|| mb.pin_count.cmp(&ma.pin_count))
+            .then_with(|| a.cmp(b))
+    });
+    orders.push(crossing_first);
+
+    let mut segment_crowded_first: Vec<String> = names_set.iter().cloned().collect();
+    segment_crowded_first.sort_by(|a, b| {
+        let ma = finisher_metric(&metrics, a);
+        let mb = finisher_metric(&metrics, b);
+        mb.segment_obstacle_pressure_um
+            .cmp(&ma.segment_obstacle_pressure_um)
+            .then_with(|| mb.obstacle_pressure_um.cmp(&ma.obstacle_pressure_um))
+            .then_with(|| mb.crossing_pressure.cmp(&ma.crossing_pressure))
+            .then_with(|| mb.span_um.cmp(&ma.span_um))
+            .then_with(|| mb.pin_count.cmp(&ma.pin_count))
+            .then_with(|| a.cmp(b))
+    });
+    orders.push(segment_crowded_first);
+
+    let mut crowded_first: Vec<String> = names_set.iter().cloned().collect();
+    crowded_first.sort_by(|a, b| {
+        let ma = finisher_metric(&metrics, a);
+        let mb = finisher_metric(&metrics, b);
+        mb.obstacle_pressure_um
+            .cmp(&ma.obstacle_pressure_um)
+            .then_with(|| mb.crossing_pressure.cmp(&ma.crossing_pressure))
+            .then_with(|| mb.span_um.cmp(&ma.span_um))
+            .then_with(|| mb.pin_count.cmp(&ma.pin_count))
+            .then_with(|| a.cmp(b))
+    });
+    orders.push(crowded_first);
+
     orders.dedup();
     orders
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct FinisherOrderMetric {
+    pin_count: usize,
+    span_um: u64,
+    segment_obstacle_pressure_um: u64,
+    obstacle_pressure_um: u64,
+    crossing_pressure: usize,
+}
+
+fn finisher_order_metrics(
+    problem: &RouteProblem,
+    names_set: &std::collections::BTreeSet<String>,
+) -> BTreeMap<String, FinisherOrderMetric> {
+    let crossing_pressures = connection_crossing_pressures(problem);
+    problem
+        .connections
+        .iter()
+        .enumerate()
+        .filter(|(_, conn)| names_set.contains(&conn.name))
+        .map(|(idx, conn)| {
+            (
+                conn.name.clone(),
+                FinisherOrderMetric {
+                    pin_count: conn.points_to_connect.len(),
+                    span_um: connection_span_um(conn),
+                    segment_obstacle_pressure_um: connection_segment_obstacle_pressure_um(
+                        problem, conn,
+                    ),
+                    obstacle_pressure_um: connection_obstacle_pressure_um(problem, conn),
+                    crossing_pressure: crossing_pressures.get(idx).copied().unwrap_or(0),
+                },
+            )
+        })
+        .collect()
+}
+
+fn finisher_metric(
+    metrics: &BTreeMap<String, FinisherOrderMetric>,
+    name: &str,
+) -> FinisherOrderMetric {
+    metrics.get(name).copied().unwrap_or_default()
 }
 
 /// Run one finisher pass over `grid` (already a clone) routing the failed nets in
@@ -528,37 +1153,46 @@ fn run_finisher_pass(
     (routes, fails)
 }
 
+fn keep_finisher_candidate(
+    candidate: FinisherCandidateKey,
+    candidate_idx: usize,
+    incumbent: FinisherCandidateKey,
+    incumbent_idx: usize,
+) -> bool {
+    (candidate, candidate_idx) < (incumbent, incumbent_idx)
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum FinishAttempt {
-    FreeNoVia,
-    FreeWithVia,
-    GuidedWithVia,
+    Planar,
+    Free,
+    Guided,
 }
 
 impl FinishAttempt {
     fn allow_via(self) -> bool {
-        !matches!(self, FinishAttempt::FreeNoVia)
+        !matches!(self, FinishAttempt::Planar)
     }
 
     fn uses_waypoints(self) -> bool {
-        matches!(self, FinishAttempt::GuidedWithVia)
+        matches!(self, FinishAttempt::Guided)
     }
 }
 
 fn finisher_attempts(conn: &crate::problem::Connection, has_waypoints: bool) -> Vec<FinishAttempt> {
     let mut attempts = Vec::with_capacity(3);
     if same_terminal_layer(conn) {
-        attempts.push(FinishAttempt::FreeNoVia);
+        attempts.push(FinishAttempt::Planar);
     }
-    attempts.push(FinishAttempt::FreeWithVia);
+    attempts.push(FinishAttempt::Free);
     if has_waypoints {
-        attempts.push(FinishAttempt::GuidedWithVia);
+        attempts.push(FinishAttempt::Guided);
     }
     attempts
 }
 
 fn same_terminal_layer(conn: &crate::problem::Connection) -> bool {
-    conn.points_to_connect.first().map_or(true, |first| {
+    conn.points_to_connect.first().is_none_or(|first| {
         conn.points_to_connect
             .iter()
             .all(|pt| pt.layer == first.layer)
@@ -589,18 +1223,26 @@ fn finisher_candidate_key(
     routes: &[CellRoute],
     failures: &[FailedNet],
 ) -> FinisherCandidateKey {
+    FinisherCandidateKey {
+        fail_count: failures.len(),
+        failed_pad_weight: crate::problem::failed_pad_weight(problem, failures),
+        via_count: cell_route_via_count(routes),
+        wirelength_um: cell_route_wirelength_um(routes),
+    }
+}
+
+fn cell_route_via_count(routes: &[CellRoute]) -> usize {
+    routes.iter().map(|route| route.vias.len()).sum()
+}
+
+fn cell_route_wirelength_um(routes: &[CellRoute]) -> u64 {
     let wirelength = routes
         .iter()
         .flat_map(|route| route.traces.iter())
         .flat_map(|trace| trace.points.windows(2))
         .map(|w| w[1].dist(w[0]))
         .sum::<f64>();
-    FinisherCandidateKey {
-        fail_count: failures.len(),
-        failed_pad_weight: crate::problem::failed_pad_weight(problem, failures),
-        via_count: routes.iter().map(|route| route.vias.len()).sum(),
-        wirelength_um: (wirelength * 1000.0).round() as u64,
-    }
+    (wirelength * 1000.0).round() as u64
 }
 
 /// Stamp one [`CellRoute`]'s emitted copper into `grid` as its net's occupancy:
@@ -799,7 +1441,7 @@ fn finish_net(
                          what: &str|
      -> Result<(), String> {
         let bounds = leg_bounds(grid, tree_cells, targets, margin_cells);
-        let path = astar::search_bounded(grid, conn_idx, targets, tree_cells, costs, Some(bounds))
+        let path = route_full_board_leg(grid, conn_idx, targets, tree_cells, costs, bounds)
             .ok_or_else(|| format!("no full-board path to {what}"))?;
         // Mark the leg's swept-clearance capsule (diagonal-safe) so a later finisher
         // net keeps full clearance from this run's body, then fold it into the tree.
@@ -967,9 +1609,10 @@ struct Waypoint {
 /// single tree (terminal 0 seeds it; each further terminal is A*-routed to the
 /// nearest tree cell, allowing vias). Routed copper + a clearance halo are marked
 /// so later nets in the same cell avoid it. Returns the cell-local copper, or an
-/// error string (the caller adds the leaf id).
+/// structured error (the caller adds the leaf id).
 #[allow(clippy::too_many_arguments)]
 fn route_one_job(
+    problem: &RouteProblem,
     job: &CellJob,
     wgrid: &mut RouteGrid,
     window: &Rect,
@@ -977,10 +1620,10 @@ fn route_one_job(
     halo: f64,
     via_halo: f64,
     costs: AStarCosts,
-) -> Result<CellRoute, String> {
+) -> Result<CellRoute, DetailRouteError> {
     let conn_idx = wgrid
         .connection_index(&job.connection)
-        .ok_or_else(|| "connection has no grid index".to_string())?;
+        .ok_or_else(|| DetailRouteError::new("connection has no grid index"))?;
     // Confine this job's A* to the leaf window (one-track-pitch inflated leaf).
     let bounds = window_cell_bounds(wgrid, window);
 
@@ -995,6 +1638,10 @@ fn route_one_job(
                 terminals.push((t, s));
             }
         }
+    }
+    let seed_idx = detail_seed_terminal_index(&terminals);
+    if seed_idx != 0 {
+        terminals.swap(0, seed_idx);
     }
 
     let mut traces: Vec<CellTrace> = Vec::new();
@@ -1012,19 +1659,30 @@ fn route_one_job(
     }
 
     // Seed the tree with terminal 0 and mark its halo as this net's copper.
-    let mut tree_cells: Vec<State> = vec![terminals[0].1];
+    let mut tree_cells: Vec<State> = Vec::new();
+    append_terminal_tree_cells(&mut tree_cells, terminals[0], layer_count);
     // Exact mm snap position for each terminal cell, keyed by (layer, ix, iy):
     // when a routed path's endpoint sits on a terminal cell, replace the cell
     // centre with the terminal's exact mm coordinate.
     let mut snap: BTreeMap<(usize, usize, usize), Point2> = BTreeMap::new();
     for (t, s) in &terminals {
-        snap.entry((s.layer, s.ix, s.iy))
-            .or_insert_with(|| t.at.clone());
+        snap.entry((s.layer, s.ix, s.iy)).or_insert_with(|| t.at);
+        if t.kind == TerminalKind::Via {
+            for layer in 0..layer_count {
+                snap.entry((layer, s.ix, s.iy)).or_insert_with(|| t.at);
+            }
+        }
     }
 
     {
         let seed = terminals[0].1;
-        wgrid.mark_net_halo_euclid(seed.layer, seed.ix, seed.iy, conn_idx, halo);
+        if terminals[0].0.kind == TerminalKind::Via {
+            for layer in 0..layer_count {
+                wgrid.mark_net_halo_euclid(layer, seed.ix, seed.iy, conn_idx, halo);
+            }
+        } else {
+            wgrid.mark_net_halo_euclid(seed.layer, seed.ix, seed.iy, conn_idx, halo);
+        }
     }
 
     // Single-terminal job: nothing to connect, but record any pad/via the cell
@@ -1036,15 +1694,16 @@ fn route_one_job(
             push_via(&mut vias, &t.at);
         }
     }
+    let prefer_planar_leg = terminals
+        .iter()
+        .all(|(terminal, _)| terminal.kind == TerminalKind::Pad);
 
     let mut remaining: Vec<usize> = (1..terminals.len()).collect();
     while !remaining.is_empty() {
-        // First try confined to the leaf window (keeps routes cell-local). If that
-        // fails — a saturated tiny leaf can wall a crossing off at the detailed
-        // pitch — retry UNCONFINED on the shared grid: the route may dip into a
-        // neighbouring leaf to get around foreign copper. Cross-cell clearance still
-        // holds (the shared grid carries every net's halo), and the endpoint snap
-        // keeps the stitching contract; only the locality relaxes.
+        // Keep the per-cell pass confined to the leaf window. A saturated tiny
+        // leaf can still fail honestly; the bounded full-board finisher repairs
+        // whole failed nets afterward without letting every cell job launch an
+        // unbounded board-wide A* search.
         let mut ranked = remaining.clone();
         ranked.sort_by_key(|&idx| {
             let (_, state) = terminals[idx];
@@ -1056,23 +1715,37 @@ fn route_one_job(
         let mut routed = None;
         for idx in ranked {
             let (_, start) = terminals[idx];
-            if let Some(path) =
-                astar::search_bounded(wgrid, conn_idx, &[start], &tree_cells, costs, Some(bounds))
-                    .or_else(|| {
-                        astar::search_bounded(wgrid, conn_idx, &[start], &tree_cells, costs, None)
-                    })
-            {
+            if let Some(path) = route_one_job_leg(
+                wgrid,
+                conn_idx,
+                start,
+                &tree_cells,
+                costs,
+                bounds,
+                prefer_planar_leg,
+            ) {
                 routed = Some((idx, path));
                 break;
             }
         }
 
         let (routed_idx, path) = routed.ok_or_else(|| {
-            let (t, _) = terminals[first_ranked];
-            format!(
-                "no in-cell path for terminal {:?} at ({:.4},{:.4}) (congestion or enclosure)",
-                t.kind, t.at.x, t.at.y
-            )
+            let (t, state) = terminals[first_ranked];
+            let blockage = terminal_blockage(problem, wgrid, conn_idx, state, layer_count);
+            let seed_blockage =
+                terminal_blockage(problem, wgrid, conn_idx, terminals[0].1, layer_count);
+            DetailRouteError {
+                reason: format!(
+                    "no in-cell path for terminal {:?} at ({:.4},{:.4}) (congestion or enclosure); {}; seed {}",
+                    t.kind, t.at.x, t.at.y, blockage.summary, seed_blockage.summary
+                ),
+                foreign_owners: blockage
+                    .foreign_owners
+                    .iter()
+                    .chain(seed_blockage.foreign_owners.iter())
+                    .map(|&owner| connection_owner_label(problem, owner))
+                    .collect(),
+            }
         })?;
         remaining.retain(|&idx| idx != routed_idx);
 
@@ -1080,6 +1753,7 @@ fn route_one_job(
         // the tree.
         mark_path_capsule(wgrid, &path, conn_idx, halo);
         tree_cells.extend_from_slice(&path);
+        append_terminal_tree_cells(&mut tree_cells, terminals[routed_idx], layer_count);
 
         emit_path(wgrid, &path, &snap, &mut traces, &mut vias);
     }
@@ -1117,6 +1791,279 @@ fn terminal_tree_route_key(tree_cells: &[State], terminal: State) -> (usize, u64
         .unwrap_or((usize::MAX, u64::MAX))
 }
 
+#[derive(Debug)]
+struct DetailRouteError {
+    reason: String,
+    foreign_owners: BTreeSet<String>,
+}
+
+impl DetailRouteError {
+    fn new(reason: impl Into<String>) -> Self {
+        DetailRouteError {
+            reason: reason.into(),
+            foreign_owners: BTreeSet::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+fn terminal_blockage_summary(
+    problem: &RouteProblem,
+    grid: &RouteGrid,
+    conn_idx: usize,
+    terminal: State,
+    layer_count: usize,
+) -> String {
+    terminal_blockage(problem, grid, conn_idx, terminal, layer_count).summary
+}
+
+struct TerminalBlockage {
+    summary: String,
+    foreign_owners: BTreeSet<usize>,
+}
+
+fn terminal_blockage(
+    problem: &RouteProblem,
+    grid: &RouteGrid,
+    conn_idx: usize,
+    terminal: State,
+    layer_count: usize,
+) -> TerminalBlockage {
+    let layer = terminal.layer.min(layer_count.saturating_sub(1));
+    let cell = grid.cell(layer, terminal.ix, terminal.iy);
+    let counts = terminal_neighborhood_counts(grid, conn_idx, layer, terminal.ix, terminal.iy, 1);
+    let foreign_owners = format_foreign_owners(problem, &counts.foreign_owners);
+    let summary = format!(
+        "terminal_cell layer={} ix={} iy={} occ={} neighborhood(r=1 free={} own={} foreign={} blocked={} foreign_owners={})",
+        layer_ref(layer, layer_count).0,
+        terminal.ix,
+        terminal.iy,
+        occupancy_label(problem, cell, conn_idx),
+        counts.free,
+        counts.own,
+        counts.foreign,
+        counts.blocked,
+        foreign_owners
+    );
+    TerminalBlockage {
+        summary,
+        foreign_owners: counts.foreign_owners,
+    }
+}
+
+#[derive(Default)]
+struct OccupancyCounts {
+    free: usize,
+    own: usize,
+    foreign: usize,
+    blocked: usize,
+    foreign_owners: BTreeSet<usize>,
+}
+
+fn terminal_neighborhood_counts(
+    grid: &RouteGrid,
+    conn_idx: usize,
+    layer: usize,
+    ix: usize,
+    iy: usize,
+    radius: usize,
+) -> OccupancyCounts {
+    let mut counts = OccupancyCounts::default();
+    let r = radius as isize;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let x = ix as isize + dx;
+            let y = iy as isize + dy;
+            let cell = if x < 0 || y < 0 {
+                Cell::BlockedAll
+            } else {
+                grid.cell(layer, x as usize, y as usize)
+            };
+            match cell {
+                Cell::Free => counts.free += 1,
+                Cell::Net(owner) if owner == conn_idx => counts.own += 1,
+                Cell::Net(owner) => {
+                    counts.foreign += 1;
+                    counts.foreign_owners.insert(owner);
+                }
+                Cell::BlockedAll => counts.blocked += 1,
+            }
+        }
+    }
+    counts
+}
+
+fn occupancy_label(problem: &RouteProblem, cell: Cell, conn_idx: usize) -> String {
+    match cell {
+        Cell::Free => "free".to_owned(),
+        Cell::Net(owner) if owner == conn_idx => "own".to_owned(),
+        Cell::Net(owner) => format!("foreign({})", connection_owner_label(problem, owner)),
+        Cell::BlockedAll => "blocked".to_owned(),
+    }
+}
+
+fn format_foreign_owners(problem: &RouteProblem, owners: &BTreeSet<usize>) -> String {
+    if owners.is_empty() {
+        return "-".to_owned();
+    }
+    owners
+        .iter()
+        .map(|&owner| connection_owner_label(problem, owner))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn connection_owner_label(problem: &RouteProblem, owner: usize) -> String {
+    problem
+        .connections
+        .get(owner)
+        .map(|conn| conn.name.clone())
+        .unwrap_or_else(|| format!("#{owner}"))
+}
+
+fn detail_seed_terminal_index(terminals: &[(&Terminal, State)]) -> usize {
+    if terminals.len() <= 2 {
+        return 0;
+    }
+    terminals
+        .iter()
+        .enumerate()
+        .map(|(idx, (terminal, state))| {
+            let mut layer_hops = 0usize;
+            let mut distance = 0u64;
+            for (other_idx, (_, other)) in terminals.iter().enumerate() {
+                if idx == other_idx {
+                    continue;
+                }
+                let (hops, dist) = terminal_tree_route_key(&[*state], *other);
+                layer_hops = layer_hops.saturating_add(hops);
+                distance = distance.saturating_add(dist);
+            }
+            (
+                layer_hops,
+                distance,
+                detail_seed_terminal_kind_rank(terminal.kind),
+                idx,
+            )
+        })
+        .min()
+        .map(|(_, _, _, idx)| idx)
+        .unwrap_or(0)
+}
+
+fn detail_seed_terminal_kind_rank(kind: TerminalKind) -> usize {
+    match kind {
+        TerminalKind::Via => 0,
+        TerminalKind::Pad => 1,
+        TerminalKind::Entry | TerminalKind::Exit => 2,
+    }
+}
+
+fn append_terminal_tree_cells(
+    tree_cells: &mut Vec<State>,
+    terminal_state: (&Terminal, State),
+    layer_count: usize,
+) {
+    let (terminal, state) = terminal_state;
+    if terminal.kind == TerminalKind::Via {
+        for layer in 0..layer_count {
+            let expanded = State {
+                layer,
+                ix: state.ix,
+                iy: state.iy,
+            };
+            if !tree_cells.contains(&expanded) {
+                tree_cells.push(expanded);
+            }
+        }
+    } else if !tree_cells.contains(&state) {
+        tree_cells.push(state);
+    }
+}
+
+#[cfg(test)]
+fn seed_terminal_tree_cells(seed: (&Terminal, State), layer_count: usize) -> Vec<State> {
+    let mut tree_cells = Vec::new();
+    append_terminal_tree_cells(&mut tree_cells, seed, layer_count);
+    tree_cells
+}
+
+#[cfg(test)]
+fn terminal_tree_cells_after_connection(
+    tree_cells: &[State],
+    terminal_state: (&Terminal, State),
+    layer_count: usize,
+) -> Vec<State> {
+    let mut out = tree_cells.to_vec();
+    append_terminal_tree_cells(&mut out, terminal_state, layer_count);
+    out
+}
+
+fn route_full_board_leg(
+    grid: &RouteGrid,
+    conn_idx: usize,
+    starts: &[State],
+    tree_cells: &[State],
+    costs: AStarCosts,
+    bounds: astar::CellBounds,
+) -> Option<Vec<State>> {
+    if costs.allow_via && any_same_layer_reachable(starts, tree_cells) {
+        let planar_costs = AStarCosts {
+            allow_via: false,
+            ..costs
+        };
+        if let Some(path) = astar::search_bounded(
+            grid,
+            conn_idx,
+            starts,
+            tree_cells,
+            planar_costs,
+            Some(bounds),
+        ) {
+            return Some(path);
+        }
+    }
+    astar::search_bounded(grid, conn_idx, starts, tree_cells, costs, Some(bounds))
+}
+
+fn route_one_job_leg(
+    grid: &RouteGrid,
+    conn_idx: usize,
+    start: State,
+    tree_cells: &[State],
+    costs: AStarCosts,
+    bounds: astar::CellBounds,
+    prefer_planar: bool,
+) -> Option<Vec<State>> {
+    if prefer_planar && costs.allow_via && same_layer_reachable(start, tree_cells) {
+        let planar_costs = AStarCosts {
+            allow_via: false,
+            ..costs
+        };
+        if let Some(path) = astar::search_bounded(
+            grid,
+            conn_idx,
+            &[start],
+            tree_cells,
+            planar_costs,
+            Some(bounds),
+        ) {
+            return Some(path);
+        }
+    }
+    astar::search_bounded(grid, conn_idx, &[start], tree_cells, costs, Some(bounds))
+}
+
+fn any_same_layer_reachable(starts: &[State], targets: &[State]) -> bool {
+    starts
+        .iter()
+        .any(|start| same_layer_reachable(*start, targets))
+}
+
+fn same_layer_reachable(start: State, targets: &[State]) -> bool {
+    targets.iter().any(|target| start.layer == target.layer)
+}
+
 /// Convert one cell path into per-layer mm polylines (split at layer changes,
 /// with a via at each transition), snapping any endpoint that sits on a terminal
 /// cell to that terminal's exact mm position. Mirrors the slice-1 `emit_path`
@@ -1136,7 +2083,7 @@ fn emit_path(
     // the state's cell is a terminal cell (endpoint exactness contract).
     let mm = |s: &State| -> Point2 {
         if let Some(p) = snap.get(&(s.layer, s.ix, s.iy)) {
-            p.clone()
+            *p
         } else {
             Point2 {
                 x: grid.cell_center_x(s.ix),
@@ -1187,7 +2134,7 @@ fn push_via(vias: &mut Vec<CellVia>, at: &Point2) {
     {
         return;
     }
-    vias.push(CellVia { at: at.clone() });
+    vias.push(CellVia { at: *at });
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -1328,6 +2275,20 @@ mod tests {
         }
     }
 
+    fn keepout(center: (f64, f64), w: f64, h: f64, layers: &[&str]) -> Obstacle {
+        Obstacle {
+            kind: "rect".to_owned(),
+            layers: layers.iter().map(|l| LayerRef((*l).to_owned())).collect(),
+            center: Point2 {
+                x: center.0,
+                y: center.1,
+            },
+            width: w,
+            height: h,
+            connected_to: vec![],
+        }
+    }
+
     fn run(p: &RouteProblem) -> (CapacityMesh, CellRouteResult) {
         let mesh = CapacityMesh::build(p);
         let plan = global_route(p).plan;
@@ -1337,11 +2298,61 @@ mod tests {
     }
 
     #[test]
+    fn finisher_skips_large_multilayer_boards() {
+        let mut p = base(bounds(30.0, 30.0), vec![], Vec::new());
+        p.layer_count = 4;
+        p.connections = (0..=FINISHER_MAX_MULTILAYER_CONNECTIONS)
+            .map(|idx| {
+                conn(
+                    &format!("N{idx}"),
+                    &[(1.0, 1.0, "top"), (29.0, 29.0, "top")],
+                )
+            })
+            .collect();
+
+        assert!(
+            !should_try_finisher(&p),
+            "large multilayer boards should report detailed cell failures instead of launching the expensive finisher portfolio"
+        );
+        p.layer_count = 2;
+        assert!(
+            should_try_finisher(&p),
+            "two-layer boards keep the finisher regardless of connection count"
+        );
+    }
+
+    #[test]
+    fn finisher_skip_reason_reports_multilayer_cap() {
+        let mut p = base(bounds(30.0, 30.0), vec![], Vec::new());
+        p.layer_count = 4;
+        p.connections = (0..=FINISHER_MAX_MULTILAYER_CONNECTIONS)
+            .map(|idx| {
+                conn(
+                    &format!("N{idx}"),
+                    &[(1.0, 1.0, "top"), (29.0, 29.0, "top")],
+                )
+            })
+            .collect();
+
+        let reason = finisher_skip_reason(&p);
+
+        assert!(reason.contains("layers=4"), "{reason}");
+        assert!(
+            reason.contains(&format!(
+                "connections={} > cap={}",
+                FINISHER_MAX_MULTILAYER_CONNECTIONS + 1,
+                FINISHER_MAX_MULTILAYER_CONNECTIONS
+            )),
+            "{reason}"
+        );
+    }
+
+    #[test]
     fn finisher_attempts_skip_duplicate_guided_pass_without_waypoint() {
         let c = conn("N", &[(1.0, 1.0, "top"), (5.0, 1.0, "top")]);
         assert_eq!(
             finisher_attempts(&c, false),
-            vec![FinishAttempt::FreeNoVia, FinishAttempt::FreeWithVia]
+            vec![FinishAttempt::Planar, FinishAttempt::Free]
         );
     }
 
@@ -1350,7 +2361,86 @@ mod tests {
         let c = conn("N", &[(1.0, 1.0, "top"), (5.0, 1.0, "bottom")]);
         assert_eq!(
             finisher_attempts(&c, true),
-            vec![FinishAttempt::FreeWithVia, FinishAttempt::GuidedWithVia]
+            vec![FinishAttempt::Free, FinishAttempt::Guided]
+        );
+    }
+
+    #[test]
+    fn finisher_orders_include_crossing_pressure_order() {
+        let p = base(
+            bounds(10.0, 10.0),
+            vec![],
+            vec![
+                conn("VERT", &[(5.0, 1.0, "top"), (5.0, 9.0, "top")]),
+                conn("H_HIGH", &[(1.0, 3.0, "top"), (9.0, 3.0, "top")]),
+                conn("H_LOW", &[(1.0, 7.0, "top"), (9.0, 7.0, "top")]),
+            ],
+        );
+        let names = ["VERT", "H_HIGH", "H_LOW"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let orders = finisher_orders(&p, &names, &net_rank(&p));
+
+        assert!(
+            orders
+                .iter()
+                .any(|order| order
+                    == &vec!["VERT".to_owned(), "H_HIGH".to_owned(), "H_LOW".to_owned()]),
+            "the finisher should try a crossing-pressure order for failed hotspot nets: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn finisher_orders_include_segment_obstacle_pressure_order() {
+        let p = base(
+            bounds(20.0, 20.0),
+            vec![
+                keepout((8.0, 10.0), 1.0, 1.0, &["top"]),
+                keepout((8.0, 4.0), 1.0, 1.0, &["top"]),
+            ],
+            vec![
+                conn("OPEN", &[(2.0, 2.0, "top"), (6.0, 2.0, "top")]),
+                conn("SEG_PINCHED", &[(2.0, 10.0, "top"), (12.0, 10.0, "top")]),
+                conn(
+                    "BBOX_ONLY",
+                    &[(2.0, 4.0, "top"), (2.0, 14.0, "top"), (12.0, 14.0, "top")],
+                ),
+            ],
+        );
+        let names = ["OPEN", "SEG_PINCHED", "BBOX_ONLY"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let metrics = finisher_order_metrics(&p, &names);
+        let mut segment_order = vec![
+            "OPEN".to_owned(),
+            "SEG_PINCHED".to_owned(),
+            "BBOX_ONLY".to_owned(),
+        ];
+        segment_order.sort_by(|a, b| {
+            let ma = finisher_metric(&metrics, a);
+            let mb = finisher_metric(&metrics, b);
+            mb.segment_obstacle_pressure_um
+                .cmp(&ma.segment_obstacle_pressure_um)
+                .then_with(|| mb.obstacle_pressure_um.cmp(&ma.obstacle_pressure_um))
+                .then_with(|| mb.crossing_pressure.cmp(&ma.crossing_pressure))
+                .then_with(|| mb.span_um.cmp(&ma.span_um))
+                .then_with(|| mb.pin_count.cmp(&ma.pin_count))
+                .then_with(|| a.cmp(b))
+        });
+
+        let orders = finisher_orders(&p, &names, &net_rank(&p));
+
+        assert_eq!(segment_order[0], "SEG_PINCHED");
+        assert_eq!(
+            finisher_metric(&metrics, "BBOX_ONLY").segment_obstacle_pressure_um,
+            0,
+            "bbox-only keepouts away from tree segments should not count as segment pressure"
+        );
+        assert!(
+            orders.iter().any(|order| order == &segment_order),
+            "the finisher should try segment-obstacle order for corridor-pinched failed nets: {orders:?}"
         );
     }
 
@@ -1426,6 +2516,371 @@ mod tests {
     }
 
     #[test]
+    fn finisher_candidate_selection_checks_later_zero_via_wirelength() {
+        let incumbent = FinisherCandidateKey {
+            fail_count: 0,
+            failed_pad_weight: 0,
+            via_count: 0,
+            wirelength_um: 10_000,
+        };
+        let shorter_later = FinisherCandidateKey {
+            wirelength_um: 5_000,
+            ..incumbent
+        };
+        let exact_tie_later = incumbent;
+
+        assert!(
+            keep_finisher_candidate(shorter_later, 3, incumbent, 0),
+            "a later all-routed zero-via pass should still win if it emits shorter copper"
+        );
+        assert!(
+            !keep_finisher_candidate(exact_tie_later, 3, incumbent, 0),
+            "exact ties should keep the earlier deterministic order"
+        );
+    }
+
+    fn assignment_for_connections(problem: &RouteProblem) -> CrossingAssignment {
+        CrossingAssignment {
+            jobs: problem
+                .connections
+                .iter()
+                .map(|conn| CellJob {
+                    leaf: 0,
+                    connection: conn.name.clone(),
+                    terminals: Vec::new(),
+                })
+                .collect(),
+            crossings: Vec::new(),
+            failures: Vec::new(),
+        }
+    }
+
+    fn names_for_job_order(assignment: &CrossingAssignment, order: &[usize]) -> Vec<String> {
+        order
+            .iter()
+            .map(|&idx| assignment.jobs[idx].connection.clone())
+            .collect()
+    }
+
+    #[test]
+    fn detail_ranked_order_is_cheap_and_retry_orders_include_crossing_pressure() {
+        let p = base(
+            bounds(10.0, 10.0),
+            vec![],
+            vec![
+                conn("VERT", &[(5.0, 1.0, "top"), (5.0, 9.0, "top")]),
+                conn("H_HIGH", &[(1.0, 3.0, "top"), (9.0, 3.0, "top")]),
+                conn("H_LOW", &[(1.0, 7.0, "top"), (9.0, 7.0, "top")]),
+            ],
+        );
+        let assignment = assignment_for_connections(&p);
+        let rank = net_rank(&p);
+        let baseline = detail_ranked_job_order(&assignment, &rank);
+        let retry_orders = detail_retry_job_orders(&p, &assignment, &rank);
+
+        assert_eq!(
+            names_for_job_order(&assignment, &baseline),
+            vec!["H_HIGH".to_owned(), "H_LOW".to_owned(), "VERT".to_owned()],
+            "clean detailed boards should only pay for the ranked shortest/name order"
+        );
+        assert_eq!(
+            names_for_job_order(&assignment, &retry_orders[0]),
+            names_for_job_order(&assignment, &baseline),
+            "retry portfolio must keep the ranked baseline order as the exact-tie winner"
+        );
+        assert!(
+            retry_orders
+                .iter()
+                .any(|order| names_for_job_order(&assignment, order)
+                    == vec!["VERT".to_owned(), "H_HIGH".to_owned(), "H_LOW".to_owned()]),
+            "failed detailed passes should be able to retry high-crossing nets first: {retry_orders:?}"
+        );
+    }
+
+    #[test]
+    fn detail_blocker_retry_order_routes_blocked_net_before_owner() {
+        let p = base(
+            bounds(10.0, 10.0),
+            vec![],
+            vec![
+                conn("A", &[(1.0, 1.0, "top"), (9.0, 1.0, "top")]),
+                conn("B", &[(1.0, 2.0, "top"), (9.0, 2.0, "top")]),
+                conn("C", &[(1.0, 3.0, "top"), (9.0, 3.0, "top")]),
+            ],
+        );
+        let assignment = assignment_for_connections(&p);
+        let order = detail_blocker_retry_net_order(
+            &assignment,
+            &net_rank(&p),
+            &[DetailBlockerEdge {
+                blocked: "C".to_owned(),
+                blocker: "A".to_owned(),
+            }],
+        );
+
+        let c_pos = order.iter().position(|name| name == "C").unwrap();
+        let a_pos = order.iter().position(|name| name == "A").unwrap();
+        assert!(
+            c_pos < a_pos,
+            "a net blocked by foreign owner A should get a retry before A claims the corridor: {order:?}"
+        );
+    }
+
+    #[test]
+    fn detail_pass_candidate_selection_prefers_lower_failed_pad_weight() {
+        let p = base(
+            bounds(10.0, 10.0),
+            vec![],
+            vec![
+                conn("SIG", &[(1.0, 1.0, "top"), (2.0, 1.0, "top")]),
+                conn(
+                    "BUS",
+                    &[(1.0, 2.0, "top"), (2.0, 2.0, "top"), (3.0, 2.0, "top")],
+                ),
+            ],
+        );
+        let failed = |name: &str| {
+            vec![FailedNet {
+                connection: name.to_owned(),
+                reason: "test".to_owned(),
+            }]
+        };
+        let bus_failed = cell_route_candidate_key(&p, &[], &failed("BUS"));
+        let sig_failed = cell_route_candidate_key(&p, &[], &failed("SIG"));
+
+        assert!(
+            keep_cell_route_candidate(sig_failed, 1, bus_failed, 0),
+            "a later detailed pass that leaves fewer failed pads should beat the first pass"
+        );
+        assert!(
+            !keep_cell_route_candidate(bus_failed, 1, bus_failed, 0),
+            "exact ties should keep the first detailed pass"
+        );
+    }
+
+    #[test]
+    fn detail_pass_candidate_selection_rejects_geometry_regression() {
+        let p = base(
+            bounds(10.0, 10.0),
+            vec![],
+            vec![
+                conn("A", &[(1.0, 1.0, "top"), (9.0, 1.0, "top")]),
+                conn("B", &[(1.0, 1.2, "top"), (9.0, 1.2, "top")]),
+            ],
+        );
+        let geometry_bad_routes = vec![
+            CellRoute {
+                leaf: 0,
+                connection: "A".to_owned(),
+                traces: vec![CellTrace {
+                    layer: LayerRef::top(),
+                    points: vec![Point2 { x: 1.0, y: 1.0 }, Point2 { x: 9.0, y: 1.0 }],
+                }],
+                vias: Vec::new(),
+            },
+            CellRoute {
+                leaf: 0,
+                connection: "B".to_owned(),
+                traces: vec![CellTrace {
+                    layer: LayerRef::top(),
+                    points: vec![Point2 { x: 1.0, y: 1.2 }, Point2 { x: 9.0, y: 1.2 }],
+                }],
+                vias: Vec::new(),
+            },
+        ];
+        let clean_with_failure = vec![FailedNet {
+            connection: "B".to_owned(),
+            reason: "test".to_owned(),
+        }];
+        let geometry_bad = cell_route_candidate_key(&p, &geometry_bad_routes, &[]);
+        let clean = cell_route_candidate_key(&p, &[], &clean_with_failure);
+
+        assert!(
+            !keep_cell_route_candidate(geometry_bad, 1, clean, 0),
+            "a retry candidate must not trade DRC geometry faults for fewer failed nets"
+        );
+    }
+
+    #[test]
+    fn failed_detail_job_does_not_pollute_later_jobs() {
+        let mut p = base(
+            bounds(10.0, 10.0),
+            vec![keepout((8.0, 5.0), 1.0, 1.0, &["top"])],
+            (0..9)
+                .map(|idx| conn(&format!("D{idx}"), &[(5.0, 5.0, "top")]))
+                .chain(vec![
+                    conn("A", &[(2.0, 5.0, "top"), (8.0, 5.0, "top")]),
+                    conn("B", &[(1.0, 5.0, "top"), (3.0, 5.0, "top")]),
+                ])
+                .collect(),
+        );
+        p.layer_count = 4;
+        assert!(
+            !should_try_finisher(&p),
+            "the rollback path is scoped to large multilayer boards"
+        );
+        let mesh = CapacityMesh::build(&p);
+        let leaf = mesh.cell_at(&Point2 { x: 2.0, y: 5.0 });
+        let assignment = CrossingAssignment {
+            jobs: vec![
+                CellJob {
+                    leaf,
+                    connection: "A".to_owned(),
+                    terminals: vec![
+                        Terminal {
+                            kind: TerminalKind::Entry,
+                            at: Point2 { x: 2.0, y: 5.0 },
+                            layer: LayerRef::top(),
+                        },
+                        Terminal {
+                            kind: TerminalKind::Exit,
+                            at: Point2 { x: 8.0, y: 5.0 },
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                CellJob {
+                    leaf,
+                    connection: "B".to_owned(),
+                    terminals: vec![
+                        Terminal {
+                            kind: TerminalKind::Entry,
+                            at: Point2 { x: 1.0, y: 5.0 },
+                            layer: LayerRef::top(),
+                        },
+                        Terminal {
+                            kind: TerminalKind::Exit,
+                            at: Point2 { x: 3.0, y: 5.0 },
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+            ],
+            crossings: Vec::new(),
+            failures: Vec::new(),
+        };
+        let costs = AStarCosts {
+            diag: DIAG_COST,
+            allow_via: false,
+            ..AStarCosts::default()
+        };
+
+        let (routes, failed, _) = route_detail_pass(
+            &p,
+            &mesh,
+            &assignment,
+            &[0, 1],
+            grid::grid_pitch(&p),
+            p.layer_count as usize,
+            p.min_trace_width + p.clearance,
+            p.min_trace_width + p.clearance,
+            p.via_diameter / 2.0 + p.clearance + p.min_trace_width / 2.0,
+            costs,
+        );
+
+        assert!(
+            failed.iter().any(|f| f.connection == "A"),
+            "the first job should fail against the keepout target: {failed:?}"
+        );
+        assert!(
+            !failed.iter().any(|f| f.connection == "B"),
+            "the later job should not be blocked by A's rolled-back seed: {failed:?}"
+        );
+        assert!(
+            routes.iter().any(|r| r.connection == "B"),
+            "B should commit a route after A fails transactionally"
+        );
+    }
+
+    #[test]
+    fn failed_detail_net_discards_earlier_successful_cell_routes() {
+        let mut p = base(
+            bounds(10.0, 10.0),
+            vec![keepout((8.0, 5.0), 1.0, 1.0, &["top"])],
+            (0..10)
+                .map(|idx| conn(&format!("D{idx}"), &[(5.0, 5.0, "top")]))
+                .chain(vec![conn(
+                    "A",
+                    &[
+                        (1.0, 1.0, "top"),
+                        (2.0, 1.0, "top"),
+                        (7.0, 5.0, "top"),
+                        (8.0, 5.0, "top"),
+                    ],
+                )])
+                .collect(),
+        );
+        p.layer_count = 4;
+        assert!(!should_try_finisher(&p));
+        let mesh = CapacityMesh::build(&p);
+        let assignment = CrossingAssignment {
+            jobs: vec![
+                CellJob {
+                    leaf: mesh.cell_at(&Point2 { x: 1.0, y: 1.0 }),
+                    connection: "A".to_owned(),
+                    terminals: vec![
+                        Terminal {
+                            kind: TerminalKind::Entry,
+                            at: Point2 { x: 1.0, y: 1.0 },
+                            layer: LayerRef::top(),
+                        },
+                        Terminal {
+                            kind: TerminalKind::Exit,
+                            at: Point2 { x: 2.0, y: 1.0 },
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                CellJob {
+                    leaf: mesh.cell_at(&Point2 { x: 7.0, y: 5.0 }),
+                    connection: "A".to_owned(),
+                    terminals: vec![
+                        Terminal {
+                            kind: TerminalKind::Entry,
+                            at: Point2 { x: 7.0, y: 5.0 },
+                            layer: LayerRef::top(),
+                        },
+                        Terminal {
+                            kind: TerminalKind::Exit,
+                            at: Point2 { x: 8.0, y: 5.0 },
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+            ],
+            crossings: Vec::new(),
+            failures: Vec::new(),
+        };
+        let costs = AStarCosts {
+            diag: DIAG_COST,
+            allow_via: false,
+            ..AStarCosts::default()
+        };
+
+        let (routes, failed, _) = route_detail_pass(
+            &p,
+            &mesh,
+            &assignment,
+            &[0, 1],
+            grid::grid_pitch(&p),
+            p.layer_count as usize,
+            p.min_trace_width + p.clearance,
+            p.min_trace_width + p.clearance,
+            p.via_diameter / 2.0 + p.clearance + p.min_trace_width / 2.0,
+            costs,
+        );
+
+        assert!(
+            failed.iter().any(|f| f.connection == "A"),
+            "the later A job should fail against the keepout target: {failed:?}"
+        );
+        assert!(
+            !routes.iter().any(|route| route.connection == "A"),
+            "a failed no-finisher net must not leave earlier successful cell routes committed: {routes:?}"
+        );
+    }
+
+    #[test]
     fn route_one_job_connects_nearest_remaining_terminal_first() {
         let p = base(
             bounds(20.0, 20.0),
@@ -1459,6 +2914,7 @@ mod tests {
         };
 
         let route = route_one_job(
+            &p,
             &job,
             &mut grid,
             &p.bounds,
@@ -1484,6 +2940,248 @@ mod tests {
         assert!(
             !first.points.iter().any(|p| p.x == 14.5 && p.y == 14.5),
             "far terminal should no longer be the first routed leg: {:?}",
+            route.traces
+        );
+    }
+
+    #[test]
+    fn detail_seed_prefers_central_via_for_dense_multiterminal_job() {
+        let terminals = [
+            Terminal {
+                kind: TerminalKind::Entry,
+                at: Point2 { x: 10.0, y: 10.0 },
+                layer: LayerRef("inner1".to_owned()),
+            },
+            Terminal {
+                kind: TerminalKind::Via,
+                at: Point2 { x: 10.0, y: 10.0 },
+                layer: LayerRef("inner1".to_owned()),
+            },
+            Terminal {
+                kind: TerminalKind::Pad,
+                at: Point2 { x: 10.0, y: 11.0 },
+                layer: LayerRef::top(),
+            },
+            Terminal {
+                kind: TerminalKind::Exit,
+                at: Point2 { x: 18.0, y: 18.0 },
+                layer: LayerRef("inner1".to_owned()),
+            },
+        ];
+        let states = [
+            State {
+                layer: 1,
+                ix: 10,
+                iy: 10,
+            },
+            State {
+                layer: 1,
+                ix: 10,
+                iy: 10,
+            },
+            State {
+                layer: 0,
+                ix: 10,
+                iy: 11,
+            },
+            State {
+                layer: 1,
+                ix: 18,
+                iy: 18,
+            },
+        ];
+        let pairs = terminals.iter().zip(states).collect::<Vec<_>>();
+
+        assert_eq!(
+            detail_seed_terminal_index(&pairs),
+            1,
+            "central same-cell via should seed a dense detailed job before the arbitrary entry"
+        );
+    }
+
+    #[test]
+    fn via_seed_initializes_tree_on_every_layer() {
+        let terminal = Terminal {
+            kind: TerminalKind::Via,
+            at: Point2 { x: 10.0, y: 10.0 },
+            layer: LayerRef("inner1".to_owned()),
+        };
+        let cells = seed_terminal_tree_cells(
+            (
+                &terminal,
+                State {
+                    layer: 1,
+                    ix: 10,
+                    iy: 12,
+                },
+            ),
+            4,
+        );
+
+        assert_eq!(
+            cells,
+            vec![
+                State {
+                    layer: 0,
+                    ix: 10,
+                    iy: 12
+                },
+                State {
+                    layer: 1,
+                    ix: 10,
+                    iy: 12
+                },
+                State {
+                    layer: 2,
+                    ix: 10,
+                    iy: 12
+                },
+                State {
+                    layer: 3,
+                    ix: 10,
+                    iy: 12
+                },
+            ],
+            "a through via terminal should be reachable as the tree root on every copper layer"
+        );
+    }
+
+    #[test]
+    fn connected_via_expands_existing_tree_to_every_layer() {
+        let terminal = Terminal {
+            kind: TerminalKind::Via,
+            at: Point2 { x: 10.0, y: 10.0 },
+            layer: LayerRef("inner1".to_owned()),
+        };
+        let existing = vec![State {
+            layer: 0,
+            ix: 4,
+            iy: 5,
+        }];
+        let cells = terminal_tree_cells_after_connection(
+            &existing,
+            (
+                &terminal,
+                State {
+                    layer: 1,
+                    ix: 10,
+                    iy: 12,
+                },
+            ),
+            4,
+        );
+
+        assert!(cells.contains(&existing[0]));
+        for layer in 0..4 {
+            assert!(
+                cells.contains(&State {
+                    layer,
+                    ix: 10,
+                    iy: 12
+                }),
+                "connected through-via terminal should expand the existing tree to layer {layer}: {cells:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_blockage_summary_reports_cell_occupancy() {
+        let p = base(
+            bounds(12.0, 12.0),
+            vec![keepout((6.5, 6.5), 1.0, 1.0, &["top"])],
+            vec![
+                conn("A", &[(2.0, 2.0, "top")]),
+                conn("B", &[(9.0, 9.0, "top")]),
+            ],
+        );
+        let mut grid = RouteGrid::build_with_pitch(&p, 1.0);
+        let conn_idx = grid.connection_index("A").unwrap();
+        let (ix, iy) = grid.cell_of(6.5, 6.5);
+
+        let summary = terminal_blockage_summary(
+            &p,
+            &grid,
+            conn_idx,
+            State { layer: 0, ix, iy },
+            p.layer_count as usize,
+        );
+
+        assert!(summary.contains("terminal_cell layer=top"), "{summary}");
+        assert!(summary.contains("occ=blocked"), "{summary}");
+        assert!(summary.contains("neighborhood(r=1"), "{summary}");
+
+        let foreign_idx = grid.connection_index("B").unwrap();
+        let (fx, fy) = grid.cell_of(7.5, 7.5);
+        grid.mark_net_halo_euclid(0, fx, fy, foreign_idx, 0.0);
+
+        let summary = terminal_blockage_summary(
+            &p,
+            &grid,
+            conn_idx,
+            State {
+                layer: 0,
+                ix: fx,
+                iy: fy,
+            },
+            p.layer_count as usize,
+        );
+
+        assert!(summary.contains("occ=foreign(B)"), "{summary}");
+        assert!(summary.contains("foreign_owners=B"), "{summary}");
+    }
+
+    #[test]
+    fn route_one_job_tries_planar_before_cheap_via_hop() {
+        let p = base(
+            bounds(30.0, 20.0),
+            vec![keepout((15.5, 10.5), 1.0, 8.0, &["top"])],
+            vec![conn("N", &[(2.5, 10.5, "top"), (28.5, 10.5, "top")])],
+        );
+        let mut grid = RouteGrid::build_with_pitch(&p, 1.0);
+        let job = CellJob {
+            leaf: 0,
+            connection: "N".to_owned(),
+            terminals: vec![
+                Terminal {
+                    kind: TerminalKind::Pad,
+                    at: Point2 { x: 2.5, y: 10.5 },
+                    layer: LayerRef::top(),
+                },
+                Terminal {
+                    kind: TerminalKind::Pad,
+                    at: Point2 { x: 28.5, y: 10.5 },
+                    layer: LayerRef::top(),
+                },
+            ],
+        };
+
+        let route = route_one_job(
+            &p,
+            &job,
+            &mut grid,
+            &p.bounds,
+            p.layer_count as usize,
+            p.min_trace_width + p.clearance,
+            p.via_diameter / 2.0 + p.clearance + p.min_trace_width / 2.0,
+            AStarCosts {
+                via: 1,
+                diag: DIAG_COST,
+                ..AStarCosts::default()
+            },
+        )
+        .expect("same-layer detailed leg should route around the keepout");
+
+        assert!(
+            route.vias.is_empty(),
+            "same-layer detailed leg should take the planar detour before considering a cheap via hop: {:?}",
+            route.vias
+        );
+        assert!(
+            route
+                .traces
+                .iter()
+                .all(|trace| trace.layer == LayerRef::top()),
+            "planar detailed detour should stay on the terminal layer: {:?}",
             route.traces
         );
     }
@@ -1526,6 +3224,45 @@ mod tests {
         assert!(
             !first.points.iter().any(|p| p.x == 14.5 && p.y == 14.5),
             "far route point should not be the first finisher leg: {:?}",
+            route.traces
+        );
+    }
+
+    #[test]
+    fn finish_net_tries_planar_before_cheap_via_hop() {
+        let p = base(
+            bounds(30.0, 20.0),
+            vec![keepout((15.5, 10.5), 1.0, 8.0, &["top"])],
+            vec![conn("N", &[(2.5, 10.5, "top"), (28.5, 10.5, "top")])],
+        );
+        let mut grid = RouteGrid::build_with_pitch(&p, 1.0);
+
+        let route = finish_net(
+            &p.connections[0],
+            &[],
+            &mut grid,
+            p.layer_count as usize,
+            p.min_trace_width + p.clearance,
+            p.via_diameter / 2.0 + p.clearance + p.min_trace_width / 2.0,
+            AStarCosts {
+                via: 1,
+                diag: DIAG_COST,
+                ..AStarCosts::default()
+            },
+        )
+        .expect("same-layer finisher leg should route around the keepout");
+
+        assert!(
+            route.vias.is_empty(),
+            "same-layer finisher leg should take the planar detour before considering a cheap via hop: {:?}",
+            route.vias
+        );
+        assert!(
+            route
+                .traces
+                .iter()
+                .all(|trace| trace.layer == LayerRef::top()),
+            "planar finisher detour should stay on the terminal layer: {:?}",
             route.traces
         );
     }
@@ -1750,6 +3487,32 @@ mod tests {
         let j1 = serde_json::to_string(&r1).unwrap();
         let j2 = serde_json::to_string(&r2).unwrap();
         assert_eq!(j1, j2, "two cell routings must serialize byte-equal");
+    }
+
+    #[test]
+    fn route_cells_with_diagnostics_matches_plain_result() {
+        let p = load("quad.json");
+        let mesh = CapacityMesh::build(&p);
+        let plan = global_route(&p).plan;
+        let a = assign_crossings(&p, &mesh, &plan);
+
+        let plain = route_cells(&p, &mesh, &a);
+        let (diagnosed, diagnostics) = route_cells_with_diagnostics(&p, &mesh, &a);
+
+        assert_eq!(diagnosed, plain);
+        assert!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.selected)
+                .count()
+                == 1,
+            "diagnostics should mark exactly one retained detailed pass: {diagnostics:?}"
+        );
+        assert_eq!(
+            diagnostics.first().map(|diagnostic| diagnostic.index),
+            Some(0),
+            "the ranked baseline should always be diagnostic candidate zero"
+        );
     }
 
     /// Crossing-point exactness (the stitching contract): on `led-r`, which

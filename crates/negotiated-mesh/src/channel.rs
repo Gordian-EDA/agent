@@ -3,19 +3,30 @@
 //! This is a narrow, non-A* portfolio member that borrows the classic PCB
 //! preferred-direction idea: horizontal spans prefer one signal layer, vertical
 //! spans prefer another, with vias only at terminal/bend transitions. It is meant
-//! to catch simple two-pin crossing/channel cases before the detailed negotiated
-//! mesh or the grid fallback are paid.
+//! to catch simple crossing/channel cases before the detailed negotiated mesh or
+//! the grid fallback are paid. Multi-pin nets grow a deterministic nearest-tree
+//! over the same preferred-direction leg candidates.
 
+use crate::heuristics::{
+    connection_crossing_pressures, connection_segment_obstacle_pressure_um, connection_span_um,
+};
 use crate::problem::{
-    Capabilities, Connection, FailedNet, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult,
-    RouteSolution, Router, Trace, Via, ViaSpan,
+    Capabilities, Connection, FailedNet, LayerRef, Point2, RoutePoint, RouteProblem, RouteQuality,
+    RouteResult, RouteSolution, Router, Trace, Via, ViaSpan,
+};
+use crate::quality::{
+    keep_route_candidate as keep_candidate, route_quality, trace_proximity_penalty_um,
+    trace_route_cost_um,
 };
 use std::collections::BTreeSet;
 
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "channel";
+const CHANNEL_MAX_MULTILAYER_CONNECTIONS: usize = 5;
+type ChannelLegKey = (usize, u64, u64, usize, usize);
+type ChannelBestLeg = (usize, RouteSolution, ChannelLegKey);
 
-/// Deterministic preferred-direction router for two-pin nets.
+/// Deterministic preferred-direction router for simple channel-shaped nets.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ChannelRouter;
 
@@ -31,6 +42,12 @@ impl Router for ChannelRouter {
             honors_net_widths: true,
             honors_outline: true,
         }
+    }
+
+    fn can_route(&self, problem: &RouteProblem) -> bool {
+        self.capabilities().can_route(problem)
+            && (problem.layer_count <= 2
+                || problem.connections.len() <= CHANNEL_MAX_MULTILAYER_CONNECTIONS)
     }
 
     fn route(&self, problem: &RouteProblem) -> RouteResult {
@@ -56,14 +73,15 @@ pub fn route_channel(problem: &RouteProblem) -> RouteResult {
 
 fn route_order(problem: &RouteProblem, order: &[usize]) -> RouteResult {
     let mut best = route_order_once(problem, order);
-    let mut tried = vec![order.to_vec()];
+    let mut current_order = order.to_vec();
+    let mut tried = vec![current_order.clone()];
 
     for _ in 0..2 {
         if best.failed.is_empty() {
             break;
         }
 
-        let retry_order = failed_priority_order(problem, order, &best.failed);
+        let retry_order = failed_priority_order(problem, &current_order, &best.failed);
         if tried.iter().any(|existing| existing == &retry_order) {
             break;
         }
@@ -76,6 +94,7 @@ fn route_order(problem: &RouteProblem, order: &[usize]) -> RouteResult {
             break;
         }
         best = candidate;
+        current_order = retry_order;
     }
 
     best
@@ -107,10 +126,17 @@ fn route_order_once(problem: &RouteProblem, order: &[usize]) -> RouteResult {
                     });
                 }
             }
-            _ => failed.push(FailedNet {
-                connection: conn.name.clone(),
-                reason: "channel router only handles two-pin nets".to_owned(),
-            }),
+            _ => {
+                if let Some(candidate) = route_multi_pin(problem, &solution, &routed, idx) {
+                    solution = candidate;
+                    routed.push(idx);
+                } else {
+                    failed.push(FailedNet {
+                        connection: conn.name.clone(),
+                        reason: "channel router found no clean preferred-direction tree".to_owned(),
+                    });
+                }
+            }
         }
     }
 
@@ -145,18 +171,27 @@ fn failed_priority_order(
         }
     }
 
-    promoted.sort_by(|&a, &b| failed_priority_cmp(problem, a, b));
+    let metrics = net_order_metrics(problem);
+    promoted.sort_by(|&a, &b| failed_priority_cmp_with_metrics(problem, &metrics, a, b));
     promoted.extend(rest);
     promoted
 }
 
-fn failed_priority_cmp(problem: &RouteProblem, a: usize, b: usize) -> std::cmp::Ordering {
-    connection_crossing_pressure(problem, b)
-        .cmp(&connection_crossing_pressure(problem, a))
+fn failed_priority_cmp_with_metrics(
+    problem: &RouteProblem,
+    metrics: &[ChannelOrderMetric],
+    a: usize,
+    b: usize,
+) -> std::cmp::Ordering {
+    metrics[b]
+        .crossing_pressure
+        .cmp(&metrics[a].crossing_pressure)
         .then_with(|| {
-            connection_span_um(&problem.connections[b])
-                .cmp(&connection_span_um(&problem.connections[a]))
+            metrics[b]
+                .segment_obstacle_pressure_um
+                .cmp(&metrics[a].segment_obstacle_pressure_um)
         })
+        .then_with(|| metrics[b].span_um.cmp(&metrics[a].span_um))
         .then_with(|| {
             problem.connections[a]
                 .name
@@ -171,21 +206,95 @@ fn route_two_pin(
     idx: usize,
 ) -> Option<RouteSolution> {
     let conn = problem.connections.get(idx)?;
-    let mut candidates: Vec<(RouteSolution, RouteQuality)> = Vec::new();
-    for candidate in two_pin_candidates(problem, solution, conn) {
+    let mut candidates: Vec<(RouteSolution, (usize, u64, u64, usize))> = Vec::new();
+    for mut candidate in two_pin_candidates(problem, solution, conn) {
         let validation = problem_with_connections_and_extra(problem, routed, idx);
+        crate::via_cleanup::normalize_redundant_vias(&validation, &mut candidate);
         if !crate::lint::lint(&validation, &candidate).is_empty() {
             continue;
         }
-        let result = RouteResult {
-            solution: candidate.clone(),
-            failed: Vec::new(),
-            engine: ENGINE.to_owned(),
-        };
-        candidates.push((candidate, RouteQuality::of(&validation, &result, 0)));
+        let key = solution_tree_key(problem, solution, &candidate);
+        candidates.push((candidate, key));
     }
-    candidates.sort_by(|(_, a), (_, b)| compare_quality(a, b));
+    candidates.sort_by(|(_, a), (_, b)| a.cmp(b));
     candidates.into_iter().next().map(|(solution, _)| solution)
+}
+
+fn route_multi_pin(
+    problem: &RouteProblem,
+    solution: &RouteSolution,
+    routed: &[usize],
+    idx: usize,
+) -> Option<RouteSolution> {
+    let conn = problem.connections.get(idx)?;
+    let validation = problem_with_connections_and_extra(problem, routed, idx);
+    let mut best: Option<(RouteSolution, (usize, u64, u64, usize))> = None;
+
+    for root in 0..conn.points_to_connect.len() {
+        let Some(candidate) = route_multi_pin_from_root(problem, &validation, solution, conn, root)
+        else {
+            continue;
+        };
+        let key = solution_tree_key(problem, solution, &candidate);
+        best = match best.take() {
+            None => Some((candidate, key)),
+            Some((incumbent, incumbent_key)) if incumbent_key <= key => {
+                Some((incumbent, incumbent_key))
+            }
+            Some(_) => Some((candidate, key)),
+        };
+    }
+
+    best.map(|(solution, _)| solution)
+}
+
+fn route_multi_pin_from_root(
+    problem: &RouteProblem,
+    validation: &RouteProblem,
+    solution: &RouteSolution,
+    conn: &Connection,
+    root: usize,
+) -> Option<RouteSolution> {
+    let mut candidate = solution.clone();
+    let mut connected = vec![root];
+    let mut remaining: BTreeSet<usize> = (0..conn.points_to_connect.len())
+        .filter(|idx| *idx != root)
+        .collect();
+
+    while !remaining.is_empty() {
+        let mut best_leg: Option<ChannelBestLeg> = None;
+        for &from in &connected {
+            for &to in &remaining {
+                for leg in point_pair_candidates(
+                    problem,
+                    &candidate,
+                    &conn.name,
+                    &conn.points_to_connect[from],
+                    &conn.points_to_connect[to],
+                ) {
+                    if !geometry_clean(validation, &leg) {
+                        continue;
+                    }
+                    let key = leg_key(problem, &candidate, &leg, from, to);
+                    best_leg = match best_leg.take() {
+                        None => Some((to, leg, key)),
+                        Some((best_to, best_solution, best_key)) if best_key <= key => {
+                            Some((best_to, best_solution, best_key))
+                        }
+                        Some(_) => Some((to, leg, key)),
+                    };
+                }
+            }
+        }
+        let (to, leg, _) = best_leg?;
+        candidate = leg;
+        connected.push(to);
+        remaining.remove(&to);
+    }
+
+    crate::lint::lint(validation, &candidate)
+        .is_empty()
+        .then_some(candidate)
 }
 
 fn two_pin_candidates(
@@ -193,8 +302,22 @@ fn two_pin_candidates(
     solution: &RouteSolution,
     conn: &Connection,
 ) -> Vec<RouteSolution> {
-    let a = &conn.points_to_connect[0];
-    let b = &conn.points_to_connect[1];
+    point_pair_candidates(
+        problem,
+        solution,
+        &conn.name,
+        &conn.points_to_connect[0],
+        &conn.points_to_connect[1],
+    )
+}
+
+fn point_pair_candidates(
+    problem: &RouteProblem,
+    solution: &RouteSolution,
+    connection: &str,
+    a: &RoutePoint,
+    b: &RoutePoint,
+) -> Vec<RouteSolution> {
     let start_layer = a.layer.index(problem.layer_count);
     let end_layer = b.layer.index(problem.layer_count);
     let Some((horizontal, vertical)) = preferred_layers(problem) else {
@@ -228,7 +351,9 @@ fn two_pin_candidates(
         push_candidate(
             problem,
             solution,
-            conn,
+            connection,
+            a,
+            b,
             &segments,
             &mut candidates,
             &mut seen,
@@ -245,7 +370,9 @@ fn two_pin_candidates(
             push_candidate(
                 problem,
                 solution,
-                conn,
+                connection,
+                a,
+                b,
                 &segments,
                 &mut candidates,
                 &mut seen,
@@ -258,7 +385,9 @@ fn two_pin_candidates(
                 push_candidate(
                     problem,
                     solution,
-                    conn,
+                    connection,
+                    a,
+                    b,
                     &segments,
                     &mut candidates,
                     &mut seen,
@@ -270,15 +399,19 @@ fn two_pin_candidates(
     candidates
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_candidate(
     problem: &RouteProblem,
     solution: &RouteSolution,
-    conn: &Connection,
+    connection: &str,
+    a: &RoutePoint,
+    b: &RoutePoint,
     segments: &[(Point2, Point2, LayerRef)],
     candidates: &mut Vec<RouteSolution>,
     seen: &mut BTreeSet<SolutionKey>,
 ) {
-    let Some(candidate) = build_segment_candidate(problem, solution, conn, segments) else {
+    let Some(candidate) = build_segment_candidate(problem, solution, connection, a, b, segments)
+    else {
         return;
     };
     let key = solution_key(&candidate, solution);
@@ -290,14 +423,16 @@ fn push_candidate(
 fn build_segment_candidate(
     problem: &RouteProblem,
     solution: &RouteSolution,
-    conn: &Connection,
+    connection: &str,
+    a: &RoutePoint,
+    b: &RoutePoint,
     segments: &[(Point2, Point2, LayerRef)],
 ) -> Option<RouteSolution> {
-    let start_layer = conn.points_to_connect[0].layer.index(problem.layer_count)?;
-    let target_layer = conn.points_to_connect[1].layer.index(problem.layer_count)?;
+    let start_layer = a.layer.index(problem.layer_count)?;
+    let target_layer = b.layer.index(problem.layer_count)?;
     let mut candidate = solution.clone();
     let mut current_layer = start_layer;
-    let width = problem.net_width(&conn.name);
+    let width = problem.net_width(connection);
     let mut emitted = false;
 
     for &(from, to, ref layer) in segments {
@@ -307,7 +442,7 @@ fn build_segment_candidate(
         let segment_layer = layer.index(problem.layer_count)?;
         if current_layer != segment_layer {
             candidate.vias.push(Via {
-                connection: conn.name.clone(),
+                connection: connection.to_owned(),
                 at: from,
                 diameter: problem.via_diameter,
                 drill: problem.via_drill,
@@ -316,7 +451,7 @@ fn build_segment_candidate(
             current_layer = segment_layer;
         }
         candidate.traces.push(Trace {
-            connection: conn.name.clone(),
+            connection: connection.to_owned(),
             layer: layer.clone(),
             width,
             path: vec![from, to],
@@ -330,14 +465,61 @@ fn build_segment_candidate(
 
     if current_layer != target_layer {
         candidate.vias.push(Via {
-            connection: conn.name.clone(),
-            at: conn.points_to_connect[1].point(),
+            connection: connection.to_owned(),
+            at: b.point(),
             diameter: problem.via_diameter,
             drill: problem.via_drill,
             span: ViaSpan::Through,
         });
     }
     Some(candidate)
+}
+
+fn solution_tree_key(
+    problem: &RouteProblem,
+    before: &RouteSolution,
+    after: &RouteSolution,
+) -> (usize, u64, u64, usize) {
+    let trace_base = before.traces.len();
+    let via_base = before.vias.len();
+    let added = &after.traces[trace_base..];
+    let wire_um: u64 = added.iter().map(trace_length_um).sum();
+    let proximity_um = added
+        .iter()
+        .map(|trace| trace_proximity_penalty_um(problem, before, trace))
+        .sum::<u64>();
+    let vias = after.vias[via_base..].len();
+    let traces = added.len();
+    (vias, wire_um.saturating_add(proximity_um), wire_um, traces)
+}
+
+fn leg_key(
+    problem: &RouteProblem,
+    before: &RouteSolution,
+    after: &RouteSolution,
+    from: usize,
+    to: usize,
+) -> (usize, u64, u64, usize, usize) {
+    let trace_base = before.traces.len();
+    let via_base = before.vias.len();
+    let added = &after.traces[trace_base..];
+    let wire_um: u64 = added.iter().map(trace_length_um).sum();
+    let route_cost_um = added
+        .iter()
+        .map(|trace| trace_route_cost_um(problem, before, trace, trace_length_um(trace)))
+        .sum::<u64>();
+    let vias = after.vias[via_base..].len();
+    (vias, route_cost_um, wire_um, to, from)
+}
+
+fn trace_length_um(trace: &Trace) -> u64 {
+    (trace.path.windows(2).map(|w| w[1].dist(w[0])).sum::<f64>() * 1000.0).round() as u64
+}
+
+fn geometry_clean(problem: &RouteProblem, solution: &RouteSolution) -> bool {
+    crate::lint::lint(problem, solution)
+        .iter()
+        .all(|v| matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
 }
 
 fn segment_layer(a: Point2, b: Point2, horizontal: &LayerRef, vertical: &LayerRef) -> LayerRef {
@@ -387,41 +569,55 @@ fn layer_ref_from_index(idx: u32, layer_count: u32) -> LayerRef {
 
 fn net_order_portfolio(problem: &RouteProblem) -> Vec<Vec<usize>> {
     let base: Vec<usize> = (0..problem.connections.len()).collect();
+    let metrics = net_order_metrics(problem);
     let mut orders = Vec::new();
     push_order(&mut orders, base.clone());
 
     let mut short_first = base.clone();
     short_first.sort_by(|&a, &b| {
-        connection_span_um(&problem.connections[a])
-            .cmp(&connection_span_um(&problem.connections[b]))
-            .then_with(|| {
-                problem.connections[a]
-                    .name
-                    .cmp(&problem.connections[b].name)
-            })
+        metrics[a].span_um.cmp(&metrics[b].span_um).then_with(|| {
+            problem.connections[a]
+                .name
+                .cmp(&problem.connections[b].name)
+        })
     });
     push_order(&mut orders, short_first);
 
     let mut long_first = base.clone();
     long_first.sort_by(|&a, &b| {
-        connection_span_um(&problem.connections[b])
-            .cmp(&connection_span_um(&problem.connections[a]))
+        metrics[b].span_um.cmp(&metrics[a].span_um).then_with(|| {
+            problem.connections[a]
+                .name
+                .cmp(&problem.connections[b].name)
+        })
+    });
+    push_order(&mut orders, long_first);
+
+    let mut segment_crowded_first = base.clone();
+    segment_crowded_first.sort_by(|&a, &b| {
+        metrics[b]
+            .segment_obstacle_pressure_um
+            .cmp(&metrics[a].segment_obstacle_pressure_um)
+            .then_with(|| metrics[b].span_um.cmp(&metrics[a].span_um))
             .then_with(|| {
                 problem.connections[a]
                     .name
                     .cmp(&problem.connections[b].name)
             })
     });
-    push_order(&mut orders, long_first);
+    push_order(&mut orders, segment_crowded_first);
 
     let mut crossing_first = base;
     crossing_first.sort_by(|&a, &b| {
-        connection_crossing_pressure(problem, b)
-            .cmp(&connection_crossing_pressure(problem, a))
+        metrics[b]
+            .crossing_pressure
+            .cmp(&metrics[a].crossing_pressure)
             .then_with(|| {
-                connection_span_um(&problem.connections[b])
-                    .cmp(&connection_span_um(&problem.connections[a]))
+                metrics[b]
+                    .segment_obstacle_pressure_um
+                    .cmp(&metrics[a].segment_obstacle_pressure_um)
             })
+            .then_with(|| metrics[b].span_um.cmp(&metrics[a].span_um))
             .then_with(|| {
                 problem.connections[a]
                     .name
@@ -433,62 +629,31 @@ fn net_order_portfolio(problem: &RouteProblem) -> Vec<Vec<usize>> {
     orders
 }
 
-fn push_order(orders: &mut Vec<Vec<usize>>, order: Vec<usize>) {
-    if !orders.iter().any(|existing| existing == &order) {
-        orders.push(order);
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChannelOrderMetric {
+    span_um: u64,
+    segment_obstacle_pressure_um: u64,
+    crossing_pressure: usize,
 }
 
-fn connection_span_um(conn: &Connection) -> u64 {
-    let Some(first) = conn.points_to_connect.first() else {
-        return 0;
-    };
-    let (mut min_x, mut max_x, mut min_y, mut max_y) = (first.x, first.x, first.y, first.y);
-    for pt in &conn.points_to_connect {
-        min_x = min_x.min(pt.x);
-        max_x = max_x.max(pt.x);
-        min_y = min_y.min(pt.y);
-        max_y = max_y.max(pt.y);
-    }
-    (((max_x - min_x) + (max_y - min_y)) * 1000.0).round() as u64
-}
-
-fn connection_crossing_pressure(problem: &RouteProblem, idx: usize) -> usize {
-    let Some(conn) = problem.connections.get(idx) else {
-        return 0;
-    };
-    let Some((a, b)) = two_pin_points(conn) else {
-        return 0;
-    };
+fn net_order_metrics(problem: &RouteProblem) -> Vec<ChannelOrderMetric> {
+    let crossing_pressures = connection_crossing_pressures(problem);
     problem
         .connections
         .iter()
         .enumerate()
-        .filter(|(other_idx, other)| *other_idx != idx && two_pin_points(other).is_some())
-        .filter_map(|(_, other)| two_pin_points(other))
-        .filter(|&(c, d)| segments_cross(a, b, c, d))
-        .count()
+        .map(|(idx, conn)| ChannelOrderMetric {
+            span_um: connection_span_um(conn),
+            segment_obstacle_pressure_um: connection_segment_obstacle_pressure_um(problem, conn),
+            crossing_pressure: crossing_pressures[idx],
+        })
+        .collect()
 }
 
-fn two_pin_points(conn: &Connection) -> Option<(Point2, Point2)> {
-    match conn.points_to_connect.as_slice() {
-        [a, b] => Some((a.point(), b.point())),
-        _ => None,
+fn push_order(orders: &mut Vec<Vec<usize>>, order: Vec<usize>) {
+    if !orders.iter().any(|existing| existing == &order) {
+        orders.push(order);
     }
-}
-
-fn segments_cross(a: Point2, b: Point2, c: Point2, d: Point2) -> bool {
-    let orient = |p: Point2, q: Point2, r: Point2| {
-        let v = (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
-        if v.abs() < geom::EPS {
-            0
-        } else if v > 0.0 {
-            1
-        } else {
-            -1
-        }
-    };
-    orient(a, b, c) * orient(a, b, d) < 0 && orient(c, d, a) * orient(c, d, b) < 0
 }
 
 fn problem_with_connections_and_extra(
@@ -507,6 +672,7 @@ fn problem_with_connections_and_extra(
 }
 
 fn reconcile(problem: &RouteProblem, solution: &mut RouteSolution, failed: &mut Vec<FailedNet>) {
+    crate::via_cleanup::normalize_redundant_vias(problem, solution);
     let mut dropped = crate::lint::drop_violating_copper(problem, solution);
     dropped.extend(crate::lint::drop_unconnected_copper(problem, solution));
     let known: BTreeSet<String> = failed.iter().map(|f| f.connection.clone()).collect();
@@ -520,34 +686,6 @@ fn reconcile(problem: &RouteProblem, solution: &mut RouteSolution, failed: &mut 
                 reason: "DRC oracle: channel route dropped".to_owned(),
             }),
     );
-}
-
-fn route_quality(problem: &RouteProblem, result: &RouteResult) -> RouteQuality {
-    RouteQuality::of(
-        problem,
-        result,
-        crate::router::geometry_violations(problem, &result.solution),
-    )
-}
-
-fn keep_candidate(incumbent: &RouteQuality, challenger: &RouteQuality) -> bool {
-    if incumbent.faults() != challenger.faults() {
-        incumbent.faults() < challenger.faults()
-    } else if incumbent.failed_nets != challenger.failed_nets {
-        incumbent.failed_nets < challenger.failed_nets
-    } else if incumbent.via_count != challenger.via_count {
-        incumbent.via_count < challenger.via_count
-    } else {
-        incumbent.wirelength <= challenger.wirelength
-    }
-}
-
-fn compare_quality(a: &RouteQuality, b: &RouteQuality) -> std::cmp::Ordering {
-    a.faults()
-        .cmp(&b.faults())
-        .then_with(|| a.failed_nets.cmp(&b.failed_nets))
-        .then_with(|| a.via_count.cmp(&b.via_count))
-        .then_with(|| a.wirelength.total_cmp(&b.wirelength))
 }
 
 type TraceKey = (String, String, Vec<(i64, i64)>);
@@ -625,6 +763,17 @@ mod tests {
         }
     }
 
+    fn keepout(at: (f64, f64)) -> Obstacle {
+        Obstacle {
+            kind: "rect".to_owned(),
+            layers: vec![LayerRef::top()],
+            center: Point2 { x: at.0, y: at.1 },
+            width: 0.5,
+            height: 0.5,
+            connected_to: vec![],
+        }
+    }
+
     fn problem(connections: Vec<Connection>) -> RouteProblem {
         let mut obstacles = Vec::new();
         for conn in &connections {
@@ -686,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_reports_multi_pin_nets_honestly() {
+    fn channel_routes_clean_multi_pin_tree() {
         let p = problem(vec![conn(
             "STAR",
             &[(2.0, 2.0, "top"), (8.0, 2.0, "top"), (8.0, 8.0, "top")],
@@ -694,10 +843,20 @@ mod tests {
 
         let result = route_channel(&p);
 
-        assert_eq!(result.failed.len(), 1);
-        assert_eq!(result.failed[0].connection, "STAR");
-        assert!(result.solution.traces.is_empty());
-        assert!(result.solution.vias.is_empty());
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert_eq!(result.engine, ENGINE);
+        assert!(crate::lint::lint(&p, &result.solution).is_empty());
+        assert!(
+            result
+                .solution
+                .traces
+                .iter()
+                .filter(|trace| trace.connection == "STAR")
+                .count()
+                >= 2,
+            "multi-pin channel tree should emit multiple clean legs: {:?}",
+            result.solution
+        );
     }
 
     #[test]
@@ -722,5 +881,81 @@ mod tests {
         let retry = failed_priority_order(&p, &[0, 1, 2, 3], &failed);
 
         assert_eq!(retry, vec![1, 0, 2, 3]);
+    }
+
+    #[test]
+    fn failed_priority_order_uses_segment_pressure_after_crossing_pressure() {
+        let mut p = problem(vec![
+            conn("BBOX_ONLY", &[(1.0, 3.0, "top"), (9.0, 9.0, "top")]),
+            conn("SEGMENT_BLOCKED", &[(1.0, 1.0, "top"), (9.0, 1.0, "top")]),
+            conn("TAIL", &[(1.0, 11.0, "top"), (4.0, 11.0, "top")]),
+        ]);
+        p.obstacles.push(keepout((8.0, 4.0)));
+        p.obstacles.push(keepout((5.0, 1.0)));
+        let failed = vec![
+            FailedNet {
+                connection: "BBOX_ONLY".to_owned(),
+                reason: "blocked".to_owned(),
+            },
+            FailedNet {
+                connection: "SEGMENT_BLOCKED".to_owned(),
+                reason: "blocked".to_owned(),
+            },
+        ];
+
+        let retry = failed_priority_order(&p, &[0, 1, 2], &failed);
+
+        assert_eq!(
+            &retry[..2],
+            &[1, 0],
+            "channel retry should prefer true segment-corridor blockage once crossing pressure ties"
+        );
+        assert_eq!(&retry[2..], &[2]);
+    }
+
+    #[test]
+    fn net_order_portfolio_includes_segment_obstacle_pressure_order() {
+        let mut p = problem(vec![
+            conn("BBOX_ONLY", &[(1.0, 3.0, "top"), (9.0, 9.0, "top")]),
+            conn("SEGMENT_BLOCKED", &[(1.0, 1.0, "top"), (9.0, 1.0, "top")]),
+            conn("TAIL", &[(1.0, 11.0, "top"), (4.0, 11.0, "top")]),
+        ]);
+        p.obstacles.push(keepout((8.0, 4.0)));
+        p.obstacles.push(keepout((5.0, 1.0)));
+        let metrics = net_order_metrics(&p);
+        let orders = net_order_portfolio(&p);
+
+        assert_eq!(metrics[0].segment_obstacle_pressure_um, 0);
+        assert!(metrics[1].segment_obstacle_pressure_um > 0);
+        assert!(
+            orders.iter().any(|order| order.as_slice() == [1, 0, 2]),
+            "channel portfolio should include segment-obstacle-pressure-first order: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn two_pin_candidate_key_prefers_roomier_l_bend() {
+        let mut p = problem(vec![conn("N", &[(2.0, 10.0, "top"), (18.0, 12.0, "top")])]);
+        p.obstacles.push(keepout((10.0, 9.2)));
+
+        let selected = route_two_pin(
+            &p,
+            &RouteSolution {
+                traces: Vec::new(),
+                vias: Vec::new(),
+            },
+            &[],
+            0,
+        )
+        .expect("both L-bend candidates should be legal");
+
+        assert!(
+            selected.traces.iter().any(|trace| trace.path
+                == vec![Point2 { x: 2.0, y: 10.0 }, Point2 { x: 2.0, y: 12.0 }]
+                || trace.path == vec![Point2 { x: 2.0, y: 12.0 }, Point2 { x: 18.0, y: 12.0 }]),
+            "channel should choose the L-bend away from the tight keepout margin: {:?}",
+            selected.traces
+        );
+        assert!(crate::lint::lint(&p, &selected).is_empty());
     }
 }

@@ -35,6 +35,12 @@ fn snap_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/snapshots/{name}.kicad_sch"))
 }
 
+fn validation_corpus_available() -> bool {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/validation")
+        .is_dir()
+}
+
 /// Render a fixture exactly as production would: sidecar IR if present, else the
 /// connectivity-inferred frame.
 fn render(env: &KicadEnv, provider: &SymbolTable, name: &str) -> String {
@@ -57,6 +63,10 @@ fn render(env: &KicadEnv, provider: &SymbolTable, name: &str) -> String {
 
 #[test]
 fn placement_snapshots_match() {
+    if !validation_corpus_available() {
+        eprintln!("docs/validation corpus not present; skipping placement snapshots");
+        return;
+    }
     let Some(env) = KicadEnv::detect() else {
         eprintln!("no KiCAD environment; skipping placement snapshots");
         return;
@@ -90,6 +100,10 @@ fn placement_snapshots_match() {
 
 #[test]
 fn emit_is_deterministic() {
+    if !validation_corpus_available() {
+        eprintln!("docs/validation corpus not present; skipping deterministic emit test");
+        return;
+    }
     let Some(env) = KicadEnv::detect() else {
         return;
     };

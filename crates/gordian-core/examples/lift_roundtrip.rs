@@ -1,7 +1,7 @@
 //! Round-trip checker: lift a `.kicad_sch` back to circuit YAML and re-compile it,
 //! asserting the lifted YAML is VALID (the schematic → YAML → schematic loop holds).
 //!
-//! Usage: cargo run --release -p agent --example lift_roundtrip -- <file.kicad_sch> [...]
+//! Usage: cargo run --release -p gordian-core --example lift_roundtrip -- <file.kicad_sch> [...]
 //! Exits nonzero if any lifted YAML fails to compile.
 
 use kicad_env::KicadEnv;

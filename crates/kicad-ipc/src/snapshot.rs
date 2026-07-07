@@ -197,6 +197,7 @@ pub fn snapshot_from_items(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn snapshot_from_items_with_context(
     footprints: Vec<FootprintInstance>,
     tracks: Vec<Track>,
@@ -710,13 +711,13 @@ fn infer_layer_names(
         }
         if let Some(definition) = &fp.definition {
             for item in &definition.items {
-                if let Ok(pad) = item.to_msg::<Pad>() {
-                    if let Some(stack) = &pad.pad_stack {
-                        layers.extend(stack.layers.iter().copied().filter(|l| is_copper(*l)));
-                        for copper in &stack.copper_layers {
-                            if is_copper(copper.layer) {
-                                layers.insert(copper.layer);
-                            }
+                if let Ok(pad) = item.to_msg::<Pad>()
+                    && let Some(stack) = &pad.pad_stack
+                {
+                    layers.extend(stack.layers.iter().copied().filter(|l| is_copper(*l)));
+                    for copper in &stack.copper_layers {
+                        if is_copper(copper.layer) {
+                            layers.insert(copper.layer);
                         }
                     }
                 }

@@ -86,7 +86,7 @@ pub(super) struct Instance {
     /// Footprint lib_id for the symbol's `Footprint` property, or `None` when the
     /// part is unassigned (emits an empty property, KiCAD's placeholder). Sourced
     /// from the kernel `Component.footprint` via `Item` (the schematic-side home
-    /// of footprint assignment — see docs/specs/unified-kicad-pcb-state.md).
+    /// of footprint assignment).
     pub(super) footprint: Option<String>,
     /// Grid-snapped sheet position.
     pub(super) at: Point2,
@@ -109,7 +109,7 @@ pub(super) struct Instance {
     /// Reference/Value field text clear of the body rather than a fixed offset.
     pub(super) half_extents: Point2,
     /// Solver-assigned Reference/Value positions (`solve_text_positions`).
-    /// `None` -> legacy fixed right-of-body offsets (kept for hidden fields
+    /// `None` -> fallback fixed right-of-body offsets (kept for hidden fields
     /// and as the fallback when the solver has not run).
     pub(super) ref_pos: Option<TextPos>,
     pub(super) val_pos: Option<TextPos>,
@@ -144,12 +144,12 @@ pub(super) struct PinLabel {
     pub(super) uuid_key: String,
     /// Direction the stub points (away from the symbol body). Drives the label's
     /// rotation angle + justification so the text reads away from the body. The
-    /// legacy `add_pin_label` path defaults to `Dir::East` (angle 0, justify
+    /// direct `add_pin_label` path defaults to `Dir::East` (angle 0, justify
     /// left), keeping its output byte-identical to pre-stub emission.
     pub(super) dir: Dir,
     /// Present for stub-mounted signal labels: the stub wire to emit and the
     /// pin endpoint to retract onto if the stub end collides with a foreign net.
-    /// `None` for legacy labels placed directly on the pin endpoint.
+    /// `None` for direct labels placed on the pin endpoint.
     pub(super) stub: Option<Stub>,
     /// Render as a KiCAD `global_label` (the off-sheet I/O pentagon) rather than
     /// a plain local label. Set for ports — board-edge / cross-sheet signals —
@@ -173,7 +173,7 @@ pub(super) struct Wire {
     /// Stable key for the wire uuid (content-derived from the endpoints).
     pub(super) uuid_key: String,
     /// The net this wire belongs to, when known (cluster-generated wires).
-    /// `None` for legacy power stubs/risers (treated as a reserved foreign net).
+    /// `None` for power stubs/risers (treated as a reserved foreign net).
     pub(super) net: Option<String>,
 }
 
@@ -247,7 +247,7 @@ pub struct SchematicWriter {
     pub(super) title: Option<String>,
     /// When set, [`Self::prepare`] reframes the drawing so its min corner sits at
     /// the page margin (the floorplan path, whose edge port labels / rail symbols
-    /// extend past the symbol bodies). Off for direct-writer and legacy paths,
+    /// extend past the symbol bodies). Off for direct-writer and fixed-coordinate paths,
     /// which place content at fixed absolute coordinates.
     pub(super) frame: bool,
     /// Refdes whose Reference/Value fields should be solved ABOVE the body in
@@ -270,17 +270,17 @@ impl SchematicWriter {
 }
 
 /// Resolved Reference/Value anchors for an instance: the solver's assignment
-/// when present, else the legacy fixed right-of-body offsets. The single
+/// when present, else the fallback fixed right-of-body offsets. The single
 /// source of truth shared by `render_instance` and the overlap lint, so the
 /// lint always boxes exactly what gets emitted.
 pub(super) fn field_anchors(inst: &Instance) -> (TextPos, TextPos) {
-    let legacy = |dy: f64| TextPos {
+    let fallback = |dy: f64| TextPos {
         at: [inst.at.x + inst.half_extents.x + 1.27, inst.at.y + dy],
         justify: Justify::Left,
     };
     (
-        inst.ref_pos.unwrap_or_else(|| legacy(-1.27)),
-        inst.val_pos.unwrap_or_else(|| legacy(1.27)),
+        inst.ref_pos.unwrap_or_else(|| fallback(-1.27)),
+        inst.val_pos.unwrap_or_else(|| fallback(1.27)),
     )
 }
 

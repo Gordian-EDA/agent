@@ -215,8 +215,8 @@ pub fn assign_crossings(
         for (pi, path) in net.paths.iter().enumerate() {
             for (si, step) in path.steps.iter().enumerate() {
                 let Some(x) = &step.exit else { continue };
-                let exit_center = step.center.clone();
-                let entry_center = path.steps[si + 1].center.clone();
+                let exit_center = step.center;
+                let entry_center = path.steps[si + 1].center;
                 uses.entry((x.edge, x.layer))
                     .or_default()
                     .push(CrossingUse {
@@ -310,7 +310,7 @@ pub fn assign_crossings(
                         step: si,
                         edge: cp.edge,
                         layer: cp.layer,
-                        at: cp.at.clone(),
+                        at: cp.at,
                     });
                 }
             }
@@ -322,7 +322,24 @@ pub fn assign_crossings(
     let obstacles = ForeignCopper::build(problem, mesh.layer_count.max(1));
     let via_radius = problem.via_diameter / 2.0;
     let via_clearance = problem.clearance + via_radius;
+    let via_site_spacing = problem.via_diameter + problem.clearance;
     let detail_pitch = grid_pitch(problem);
+    let detailed_route_pitch = detail_pitch / 2.0;
+    let snap_disp = detailed_route_pitch * std::f64::consts::SQRT_2 / 2.0;
+    let via_crossing_spacing =
+        via_radius + problem.clearance + problem.min_trace_width / 2.0 + snap_disp;
+    let name_index = name_index(problem);
+    let mut assigned_vias = AssignedViaSites::default();
+    let mut assigned_crossings = AssignedCrossingSites::default();
+    for ((net_pos, _, _), cp) in &point_of {
+        let conn_idx = plan
+            .nets
+            .get(*net_pos)
+            .and_then(|net| name_index.get(&net.connection))
+            .copied()
+            .unwrap_or(*net_pos);
+        assigned_crossings.push(cp.at, conn_idx);
+    }
 
     // (leaf, net_pos) → terminals, kept in a BTreeMap for deterministic order.
     let mut job_terminals: BTreeMap<(LeafId, usize), JobAcc> = BTreeMap::new();
@@ -343,7 +360,7 @@ pub fn assign_crossings(
                 {
                     acc.terminals.push(Terminal {
                         kind: TerminalKind::Entry,
-                        at: cp.at.clone(),
+                        at: cp.at,
                         layer: layer_ref(cp.layer, layer_count),
                     });
                 }
@@ -353,7 +370,7 @@ pub fn assign_crossings(
                 if let Some(cp) = point_of.get(&(net_pos, pi, si)) {
                     acc.terminals.push(Terminal {
                         kind: TerminalKind::Exit,
-                        at: cp.at.clone(),
+                        at: cp.at,
                         layer: layer_ref(cp.layer, layer_count),
                     });
                 }
@@ -362,12 +379,26 @@ pub fn assign_crossings(
                 // foreign copper; the via step's `layer` is the entry layer.
                 if step.via {
                     let leaf_rect = &mesh.leaves[step.leaf].rect;
-                    match place_via(leaf_rect, net_pos, &obstacles, via_clearance, detail_pitch) {
-                        Some(at) => acc.terminals.push(Terminal {
-                            kind: TerminalKind::Via,
-                            at,
-                            layer: layer_ref(step.layer, layer_count),
-                        }),
+                    let conn_idx = name_index.get(&net.connection).copied().unwrap_or(net_pos);
+                    match place_via(
+                        leaf_rect,
+                        conn_idx,
+                        &obstacles,
+                        &assigned_vias,
+                        &assigned_crossings,
+                        via_clearance,
+                        via_site_spacing,
+                        via_crossing_spacing,
+                        detail_pitch,
+                    ) {
+                        Some(at) => {
+                            assigned_vias.push(at, conn_idx);
+                            acc.terminals.push(Terminal {
+                                kind: TerminalKind::Via,
+                                at,
+                                layer: layer_ref(step.layer, layer_count),
+                            });
+                        }
                         None => failures.push(AssignmentFailure::ViaSite {
                             connection: net.connection.clone(),
                             leaf: step.leaf,
@@ -379,7 +410,6 @@ pub fn assign_crossings(
     }
 
     // 4. Pad terminals: a net's route points belong in the leaf containing them.
-    let name_index = name_index(problem);
     for (net_pos, net) in plan.nets.iter().enumerate() {
         // Resolve the connection's own pad points to their leaves. Skip nets the
         // plan did not route (no paths) — their pads have no cell job to join.
@@ -688,6 +718,48 @@ struct ForeignCopper {
     rects: Vec<Vec<(Rect, Vec<usize>)>>,
 }
 
+#[derive(Default)]
+struct AssignedViaSites {
+    sites: Vec<(Point2, usize)>,
+}
+
+impl AssignedViaSites {
+    fn push(&mut self, at: Point2, conn: usize) {
+        self.sites.push((at, conn));
+    }
+
+    fn clear_for(&self, p: &Point2, conn: usize, spacing: f64) -> bool {
+        self.sites
+            .iter()
+            .all(|(at, owner)| *owner == conn || p.dist(*at) >= spacing - EPS)
+    }
+}
+
+#[derive(Default)]
+struct AssignedCrossingSites {
+    sites: Vec<(Point2, usize)>,
+}
+
+impl AssignedCrossingSites {
+    fn push(&mut self, at: Point2, conn: usize) {
+        self.sites.push((at, conn));
+    }
+
+    fn clear_for(&self, p: &Point2, conn: usize, spacing: f64) -> bool {
+        self.sites
+            .iter()
+            .all(|(at, owner)| *owner == conn || p.dist(*at) >= spacing - EPS)
+    }
+
+    fn nearest_foreign_distance(&self, p: &Point2, conn: usize) -> Option<f64> {
+        self.sites
+            .iter()
+            .filter(|(_, owner)| *owner != conn)
+            .map(|(at, _)| p.dist(*at))
+            .min_by(|a, b| a.total_cmp(b))
+    }
+}
+
 impl ForeignCopper {
     fn build(problem: &RouteProblem, layer_count: usize) -> Self {
         let name_index = name_index(problem);
@@ -738,24 +810,84 @@ impl ForeignCopper {
 }
 
 /// Choose a via site inside `leaf_rect` clear of foreign copper by `clearance`.
-/// Default is the leaf centre; if blocked, spiral outward at `pitch` offsets
-/// (deterministic ring order) until a clear point is found, staying inside the
-/// leaf. `None` if no clear site exists within the spiral bound.
+/// Prefer a site that also clears foreign boundary-crossing terminals; if the leaf
+/// has no such site, fall back to the static-copper/via-site rule rather than
+/// turning a routable board into an assignment failure. Default is the leaf centre;
+/// if blocked, spiral outward at `pitch` offsets (deterministic ring order) until
+/// a clear point is found, staying inside the leaf. `None` if no clear site exists
+/// within the spiral bound.
+#[allow(clippy::too_many_arguments)]
 fn place_via(
     leaf_rect: &Rect,
     conn: usize,
     obstacles: &ForeignCopper,
+    assigned_vias: &AssignedViaSites,
+    assigned_crossings: &AssignedCrossingSites,
     clearance: f64,
+    via_site_spacing: f64,
+    via_crossing_spacing: f64,
     pitch: f64,
 ) -> Option<Point2> {
     let center = Point2 {
         x: (leaf_rect.min_x + leaf_rect.max_x) / 2.0,
         y: (leaf_rect.min_y + leaf_rect.max_y) / 2.0,
     };
-    if obstacles.via_clear(&center, conn, clearance) {
+    find_via_site(
+        leaf_rect,
+        center,
+        conn,
+        obstacles,
+        assigned_vias,
+        assigned_crossings,
+        clearance,
+        via_site_spacing,
+        via_crossing_spacing,
+        pitch,
+        true,
+    )
+    .or_else(|| {
+        find_fallback_via_site(
+            leaf_rect,
+            center,
+            conn,
+            obstacles,
+            assigned_vias,
+            assigned_crossings,
+            clearance,
+            via_site_spacing,
+            via_crossing_spacing,
+            pitch,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn find_via_site(
+    leaf_rect: &Rect,
+    center: Point2,
+    conn: usize,
+    obstacles: &ForeignCopper,
+    assigned_vias: &AssignedViaSites,
+    assigned_crossings: &AssignedCrossingSites,
+    clearance: f64,
+    via_site_spacing: f64,
+    via_crossing_spacing: f64,
+    pitch: f64,
+    require_crossing_clearance: bool,
+) -> Option<Point2> {
+    if via_site_clear(
+        &center,
+        conn,
+        obstacles,
+        assigned_vias,
+        assigned_crossings,
+        clearance,
+        via_site_spacing,
+        via_crossing_spacing,
+        require_crossing_clearance,
+    ) {
         return Some(center);
     }
-    let pitch = if pitch > 0.0 { pitch } else { 0.1 };
     for ring in 1..=VIA_SPIRAL_MAX_RING {
         // Walk the square ring at Chebyshev radius `ring`, in a fixed order:
         // increasing dy, then increasing dx, taking only the ring's perimeter.
@@ -777,13 +909,145 @@ fn place_via(
                 {
                     continue;
                 }
-                if obstacles.via_clear(&p, conn, clearance) {
+                if via_site_clear(
+                    &p,
+                    conn,
+                    obstacles,
+                    assigned_vias,
+                    assigned_crossings,
+                    clearance,
+                    via_site_spacing,
+                    via_crossing_spacing,
+                    require_crossing_clearance,
+                ) {
                     return Some(p);
                 }
             }
         }
     }
     None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn find_fallback_via_site(
+    leaf_rect: &Rect,
+    center: Point2,
+    conn: usize,
+    obstacles: &ForeignCopper,
+    assigned_vias: &AssignedViaSites,
+    assigned_crossings: &AssignedCrossingSites,
+    clearance: f64,
+    via_site_spacing: f64,
+    via_crossing_spacing: f64,
+    pitch: f64,
+) -> Option<Point2> {
+    let mut best: Option<Point2> = None;
+    for p in via_site_candidates(leaf_rect, center, pitch) {
+        if !via_site_clear(
+            &p,
+            conn,
+            obstacles,
+            assigned_vias,
+            assigned_crossings,
+            clearance,
+            via_site_spacing,
+            via_crossing_spacing,
+            false,
+        ) {
+            continue;
+        }
+        if best
+            .is_none_or(|old| fallback_via_site_better(&p, &old, center, conn, assigned_crossings))
+        {
+            best = Some(p);
+        }
+    }
+    best
+}
+
+fn via_site_candidates(leaf_rect: &Rect, center: Point2, pitch: f64) -> Vec<Point2> {
+    let mut out = Vec::new();
+    if inside_leaf(leaf_rect, &center) {
+        out.push(center);
+    }
+    for ring in 1..=VIA_SPIRAL_MAX_RING {
+        for dy in -ring..=ring {
+            for dx in -ring..=ring {
+                if dx.abs() != ring && dy.abs() != ring {
+                    continue;
+                }
+                let p = Point2 {
+                    x: center.x + dx as f64 * pitch,
+                    y: center.y + dy as f64 * pitch,
+                };
+                if inside_leaf(leaf_rect, &p) {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn inside_leaf(leaf_rect: &Rect, p: &Point2) -> bool {
+    p.x > leaf_rect.min_x + EPS
+        && p.x < leaf_rect.max_x - EPS
+        && p.y > leaf_rect.min_y + EPS
+        && p.y < leaf_rect.max_y - EPS
+}
+
+fn fallback_via_site_better(
+    candidate: &Point2,
+    incumbent: &Point2,
+    center: Point2,
+    conn: usize,
+    assigned_crossings: &AssignedCrossingSites,
+) -> bool {
+    let candidate_dist = assigned_crossings
+        .nearest_foreign_distance(candidate, conn)
+        .unwrap_or(f64::INFINITY);
+    let incumbent_dist = assigned_crossings
+        .nearest_foreign_distance(incumbent, conn)
+        .unwrap_or(f64::INFINITY);
+    if candidate_dist > incumbent_dist + EPS {
+        return true;
+    }
+    if incumbent_dist > candidate_dist + EPS {
+        return false;
+    }
+
+    let candidate_center = candidate.dist(center);
+    let incumbent_center = incumbent.dist(center);
+    if candidate_center < incumbent_center - EPS {
+        return true;
+    }
+    if incumbent_center < candidate_center - EPS {
+        return false;
+    }
+
+    candidate
+        .x
+        .total_cmp(&incumbent.x)
+        .then_with(|| candidate.y.total_cmp(&incumbent.y))
+        .is_lt()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn via_site_clear(
+    p: &Point2,
+    conn: usize,
+    obstacles: &ForeignCopper,
+    assigned_vias: &AssignedViaSites,
+    assigned_crossings: &AssignedCrossingSites,
+    clearance: f64,
+    via_site_spacing: f64,
+    via_crossing_spacing: f64,
+    require_crossing_clearance: bool,
+) -> bool {
+    obstacles.via_clear(p, conn, clearance)
+        && assigned_vias.clear_for(p, conn, via_site_spacing)
+        && (!require_crossing_clearance
+            || assigned_crossings.clear_for(p, conn, via_crossing_spacing))
 }
 
 /// Connection name → dense index (connections order, first-wins) — mirrors
@@ -812,7 +1076,7 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pathing::global_route;
+    use crate::pathing::{CellPath, CellStep, GlobalPlan, NetPlan, global_route};
     use crate::problem::{Connection, Obstacle, Rect, RoutePoint};
     use std::path::Path;
 
@@ -876,6 +1140,12 @@ mod tests {
             min_y: 0.0,
             max_y: h,
         }
+    }
+
+    fn via_crossing_spacing(problem: &RouteProblem) -> f64 {
+        let detailed_route_pitch = grid_pitch(problem) / 2.0;
+        let snap_disp = detailed_route_pitch * std::f64::consts::SQRT_2 / 2.0;
+        problem.via_diameter / 2.0 + problem.clearance + problem.min_trace_width / 2.0 + snap_disp
     }
 
     /// Assert: every plan crossing got exactly one concrete point; spacing on
@@ -1059,6 +1329,56 @@ mod tests {
     }
 
     #[test]
+    fn via_clearance_uses_problem_connection_index_not_plan_position() {
+        let p = base(
+            bounds(8.0, 8.0),
+            vec![Obstacle {
+                kind: "rect".to_owned(),
+                layers: vec![LayerRef::top(), LayerRef::bottom()],
+                center: Point2 { x: 4.0, y: 4.0 },
+                width: 8.0,
+                height: 8.0,
+                connected_to: vec!["SIG".to_owned()],
+            }],
+            vec![
+                conn("OTHER", &[(1.0, 1.0, "top"), (7.0, 7.0, "bottom")]),
+                conn("SIG", &[(2.0, 2.0, "top"), (6.0, 6.0, "bottom")]),
+            ],
+        );
+        let mesh = CapacityMesh::build(&p);
+        let plan = GlobalPlan {
+            nets: vec![NetPlan {
+                connection: "SIG".to_owned(),
+                paths: vec![CellPath {
+                    steps: vec![CellStep {
+                        leaf: 0,
+                        layer: 0,
+                        center: Point2 { x: 4.0, y: 4.0 },
+                        via: true,
+                        exit: None,
+                    }],
+                }],
+            }],
+        };
+
+        let assignment = assign_crossings(&p, &mesh, &plan);
+
+        assert!(
+            assignment.is_clean(),
+            "SIG owns the copper, even though it is not plan position 0: {:?}",
+            assignment.failures
+        );
+        assert!(
+            assignment
+                .jobs
+                .iter()
+                .flat_map(|job| &job.terminals)
+                .any(|terminal| terminal.kind == TerminalKind::Via),
+            "the reordered plan should still emit the via terminal"
+        );
+    }
+
+    #[test]
     fn slot_placement_spreads_and_respects_pitch() {
         // Three nets crossing one wide-open boundary should get three distinct
         // points spaced ≥ pitch, centred on the boundary.
@@ -1097,14 +1417,206 @@ mod tests {
             vec![conn("N", &[(1.0, 1.0, "top")])],
         );
         let fc = ForeignCopper::build(&p, 2);
+        let assigned_vias = AssignedViaSites::default();
+        let assigned_crossings = AssignedCrossingSites::default();
         let via_clearance = p.clearance + p.via_diameter / 2.0;
-        let site = place_via(&leaf, 0, &fc, via_clearance, grid_pitch(&p))
-            .expect("a clear via site exists in the corner");
+        let via_site_spacing = p.via_diameter + p.clearance;
+        let via_crossing_spacing = via_crossing_spacing(&p);
+        let site = place_via(
+            &leaf,
+            0,
+            &fc,
+            &assigned_vias,
+            &assigned_crossings,
+            via_clearance,
+            via_site_spacing,
+            via_crossing_spacing,
+            grid_pitch(&p),
+        )
+        .expect("a clear via site exists in the corner");
         assert!(
             fc.via_clear(&site, 0, via_clearance),
             "nudged via site clears the keepout"
         );
         // The centre itself was NOT clear (the keepout covers it).
         assert!(!fc.via_clear(&Point2 { x: 4.0, y: 4.0 }, 0, via_clearance));
+    }
+
+    #[test]
+    fn via_site_avoids_previously_assigned_foreign_via() {
+        let leaf = Rect {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 8.0,
+            max_y: 8.0,
+        };
+        let p = base(
+            bounds(8.0, 8.0),
+            vec![],
+            vec![
+                conn("A", &[(1.0, 1.0, "top")]),
+                conn("B", &[(7.0, 7.0, "top")]),
+            ],
+        );
+        let fc = ForeignCopper::build(&p, 2);
+        let via_clearance = p.clearance + p.via_diameter / 2.0;
+        let via_site_spacing = p.via_diameter + p.clearance;
+        let via_crossing_spacing = via_crossing_spacing(&p);
+        let mut assigned_vias = AssignedViaSites::default();
+        let assigned_crossings = AssignedCrossingSites::default();
+        assigned_vias.push(Point2 { x: 4.0, y: 4.0 }, 0);
+
+        let site = place_via(
+            &leaf,
+            1,
+            &fc,
+            &assigned_vias,
+            &assigned_crossings,
+            via_clearance,
+            via_site_spacing,
+            via_crossing_spacing,
+            grid_pitch(&p),
+        )
+        .expect("a second clear via site exists");
+
+        assert!(
+            site.dist(Point2 { x: 4.0, y: 4.0 }) >= via_site_spacing - EPS,
+            "second net's via must keep via-to-via clearance from the first site, got {site:?}"
+        );
+    }
+
+    #[test]
+    fn via_site_avoids_foreign_crossing_point() {
+        let leaf = Rect {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 8.0,
+            max_y: 8.0,
+        };
+        let p = base(
+            bounds(8.0, 8.0),
+            vec![],
+            vec![
+                conn("A", &[(1.0, 1.0, "top")]),
+                conn("B", &[(7.0, 7.0, "top")]),
+            ],
+        );
+        let fc = ForeignCopper::build(&p, 2);
+        let assigned_vias = AssignedViaSites::default();
+        let mut assigned_crossings = AssignedCrossingSites::default();
+        assigned_crossings.push(Point2 { x: 4.0, y: 4.0 }, 0);
+        let via_clearance = p.clearance + p.via_diameter / 2.0;
+        let via_site_spacing = p.via_diameter + p.clearance;
+        let via_crossing_spacing = via_crossing_spacing(&p);
+
+        let site = place_via(
+            &leaf,
+            1,
+            &fc,
+            &assigned_vias,
+            &assigned_crossings,
+            via_clearance,
+            via_site_spacing,
+            via_crossing_spacing,
+            grid_pitch(&p),
+        )
+        .expect("a via site clear of the foreign crossing exists");
+
+        assert!(
+            site.dist(Point2 { x: 4.0, y: 4.0 }) >= via_crossing_spacing - EPS,
+            "via must keep via-to-trace clearance from the foreign crossing point, got {site:?}"
+        );
+    }
+
+    #[test]
+    fn via_site_falls_back_when_no_crossing_clear_site_exists() {
+        let leaf = Rect {
+            min_x: 3.8,
+            min_y: 3.8,
+            max_x: 4.2,
+            max_y: 4.2,
+        };
+        let p = base(
+            bounds(8.0, 8.0),
+            vec![],
+            vec![
+                conn("A", &[(1.0, 1.0, "top")]),
+                conn("B", &[(7.0, 7.0, "top")]),
+            ],
+        );
+        let fc = ForeignCopper::build(&p, 2);
+        let assigned_vias = AssignedViaSites::default();
+        let mut assigned_crossings = AssignedCrossingSites::default();
+        assigned_crossings.push(Point2 { x: 4.0, y: 4.0 }, 0);
+        let via_clearance = p.clearance + p.via_diameter / 2.0;
+        let via_site_spacing = p.via_diameter + p.clearance;
+        let via_crossing_spacing = via_crossing_spacing(&p);
+
+        let site = place_via(
+            &leaf,
+            1,
+            &fc,
+            &assigned_vias,
+            &assigned_crossings,
+            via_clearance,
+            via_site_spacing,
+            via_crossing_spacing,
+            grid_pitch(&p),
+        )
+        .expect("fallback should still return a static-copper-clear via site");
+
+        assert!(
+            site.dist(Point2 { x: 4.0, y: 4.0 }) < via_crossing_spacing,
+            "fixture should require the crossing-clearance fallback, got {site:?}"
+        );
+    }
+
+    #[test]
+    fn via_site_fallback_prefers_farthest_static_clear_crossing_distance() {
+        let leaf = Rect {
+            min_x: 3.6,
+            min_y: 3.8,
+            max_x: 4.8,
+            max_y: 4.2,
+        };
+        let p = base(
+            bounds(8.0, 8.0),
+            vec![],
+            vec![
+                conn("A", &[(1.0, 1.0, "top")]),
+                conn("B", &[(7.0, 7.0, "top")]),
+            ],
+        );
+        let fc = ForeignCopper::build(&p, 2);
+        let assigned_vias = AssignedViaSites::default();
+        let mut assigned_crossings = AssignedCrossingSites::default();
+        let foreign_crossing = Point2 { x: 4.0, y: 4.0 };
+        assigned_crossings.push(foreign_crossing, 0);
+        let via_clearance = p.clearance + p.via_diameter / 2.0;
+        let via_site_spacing = p.via_diameter + p.clearance;
+        let via_crossing_spacing = via_crossing_spacing(&p);
+        let center = Point2 { x: 4.2, y: 4.0 };
+
+        let site = place_via(
+            &leaf,
+            1,
+            &fc,
+            &assigned_vias,
+            &assigned_crossings,
+            via_clearance,
+            via_site_spacing,
+            via_crossing_spacing,
+            grid_pitch(&p),
+        )
+        .expect("fallback should still find a static-clear site");
+
+        assert!(
+            site.dist(foreign_crossing) < via_crossing_spacing,
+            "fixture should require the crossing-clearance fallback, got {site:?}"
+        );
+        assert!(
+            site.dist(foreign_crossing) > center.dist(foreign_crossing) + EPS,
+            "fallback should maximize distance from the foreign crossing instead of taking the center: {site:?}"
+        );
     }
 }

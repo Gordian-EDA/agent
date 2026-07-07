@@ -276,7 +276,7 @@ pub struct Trace {
 
 /// The copper-layer span of a via. `Through` (the default) pierces the full stack
 /// (F.Cu → B.Cu); `Partial` is an HDI blind/buried or micro via spanning a sub-range
-/// of copper layers. See `docs/specs/hdi-microvia-feasibility.md`.
+/// of copper layers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum ViaSpan {

@@ -7,6 +7,12 @@ use kicad_symbol::SymbolTable;
 use sch_floorplan::floorplan;
 use std::path::Path;
 
+fn validation_corpus_available() -> bool {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/validation")
+        .is_dir()
+}
+
 fn compile_fixture(provider: &SymbolTable, name: &str) -> circuit_lang::Design {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(format!("../../docs/validation/{name}.circuit.yaml"));
@@ -22,6 +28,10 @@ fn compile_fixture(provider: &SymbolTable, name: &str) -> circuit_lang::Design {
 
 #[test]
 fn infer_ir_recognizes_crystal_and_decoupling_idioms() {
+    if !validation_corpus_available() {
+        eprintln!("docs/validation corpus not present; skipping idiom detection test");
+        return;
+    }
     let Some(env) = KicadEnv::detect() else {
         eprintln!("no KiCAD environment; skipping idiom detection test");
         return;
@@ -94,6 +104,10 @@ fn infer_ir_recognizes_crystal_and_decoupling_idioms() {
 /// disqualify a cap, never a shared rail.
 #[test]
 fn decoupling_bank_survives_a_shared_rail_to_a_second_ic() {
+    if !validation_corpus_available() {
+        eprintln!("docs/validation corpus not present; skipping idiom detection test");
+        return;
+    }
     let Some(env) = KicadEnv::detect() else {
         eprintln!("no KiCAD environment; skipping idiom detection test");
         return;

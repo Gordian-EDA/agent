@@ -65,7 +65,7 @@ pub(super) fn imported_placements(board: &ImportedBoard) -> Vec<Placement> {
         .iter()
         .map(|p| Placement {
             reference: p.reference.clone(),
-            at: p.at.clone(),
+            at: p.at,
             rotation: p.rotation as f64,
         })
         .collect()

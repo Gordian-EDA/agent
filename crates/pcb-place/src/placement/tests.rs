@@ -3,7 +3,8 @@ use super::cost::place_cost;
 use super::cost::ratline_crossings;
 use super::cost::ratline_obstruction_pressure;
 use super::geometry::{
-    EDGE_BAND, PLACE_GRID, courtyard_margin, rotated_copper_bbox, rotated_courtyard_half,
+    EDGE_BAND, PLACE_GRID, PLACEMENT_GRID, courtyard_margin, rotated_copper_bbox,
+    rotated_courtyard_half,
 };
 use super::hints::apply_grid_hints;
 use super::legalize::is_legal;
@@ -13,10 +14,15 @@ use super::model::{
 use super::pairs::series_pairs;
 use super::route::{
     EdgeLockedPlacer, GridAstarRanker, PlaceOpts, better_place_result,
-    net_centroid_position_candidates, place, place_board, place_variant, polish_positions,
-    polish_rotations, polish_swaps, rank_key_with_full_grid_fallback,
-    ratline_crossing_position_candidates, ratline_obstruction_position_candidates, route_rank_key,
-    route_rank_key_better, swap_pair_order, to_route_problem, unique_position_candidates,
+    edge_seek_position_candidates, net_centroid_position_candidates,
+    obstructing_part_position_candidates, obstructing_part_position_candidates_from_edges, place,
+    place_board, place_variant, polish_positions, polish_rotations, polish_swaps,
+    position_polish_part_order, rank_key_with_full_grid_fallback,
+    ratline_crossing_position_candidates, ratline_crossing_position_candidates_from_edges,
+    ratline_obstruction_position_candidates, ratline_obstruction_position_candidates_from_edges,
+    ratline_tree_edge_list, route_rank_key, route_rank_key_better, route_rank_key_clean_via_free,
+    should_try_full_grid_ranker_fallback, swap_pair_order, to_route_problem,
+    unique_position_candidates,
 };
 use crate::connectivity;
 use crate::problem::place::{Placer, RouteRanker, compute_hpwl, compute_hpwl_with_rotations};
@@ -97,6 +103,10 @@ fn single_pad(reference: &str, net: &str, offset: Point2) -> Part {
 }
 
 fn tiny_single_pad(reference: &str, net: &str, offset: Point2) -> Part {
+    tiny_single_pad_on(reference, net, offset, top())
+}
+
+fn tiny_single_pad_on(reference: &str, net: &str, offset: Point2, layers: Vec<LayerRef>) -> Part {
     Part {
         reference: reference.to_owned(),
         courtyard_w: 1.0,
@@ -106,7 +116,7 @@ fn tiny_single_pad(reference: &str, net: &str, offset: Point2) -> Part {
             offset,
             width: 0.4,
             height: 0.4,
-            layers: top(),
+            layers,
             net: Some(net.to_owned()),
         }],
         locked: None,
@@ -118,6 +128,15 @@ fn place_at(p: &mut Part, x: f64, y: f64, rotation: f64) {
         at: Point2 { x, y },
         rotation,
     });
+}
+
+fn sorted_points(points: Vec<Point2>) -> Vec<(i64, i64)> {
+    let mut out: Vec<_> = points
+        .into_iter()
+        .map(|p| ((p.x * 1000.0).round() as i64, (p.y * 1000.0).round() as i64))
+        .collect();
+    out.sort_unstable();
+    out
 }
 
 // ── empty hints: legal + deterministic ──────────────────────────────────
@@ -344,7 +363,7 @@ fn connected_parts_end_closer_than_unconnected() {
         res.placements
             .iter()
             .find(|p| p.reference == r)
-            .map(|p| p.at.clone())
+            .map(|p| p.at)
             .unwrap()
     };
     let d = |a: Point2, b: Point2| a.dist(b);
@@ -588,6 +607,7 @@ fn anneal_swap_order_prioritizes_connected_and_crossing_pairs() {
             r0603("C", Some("N2"), None),
             r0603("D", Some("N1"), None),
             r0603("E", None, None),
+            r0603("F", None, None),
             locked,
         ],
         outline: None,
@@ -600,9 +620,10 @@ fn anneal_swap_order_prioritizes_connected_and_crossing_pairs() {
         Point2 { x: 5.0, y: 35.0 },
         Point2 { x: 35.0, y: 35.0 },
         Point2 { x: 20.0, y: 20.0 },
+        Point2 { x: 8.0, y: 20.0 },
         Point2 { x: 15.0, y: 15.0 },
     ];
-    let order = routing_aware_swap_order(&problem, &nets, &rotations, &pos, &[0, 1, 2, 3, 4]);
+    let order = routing_aware_swap_order(&problem, &nets, &rotations, &pos, &[0, 1, 2, 3, 4, 5]);
 
     assert_eq!(
         &order[..2],
@@ -613,17 +634,174 @@ fn anneal_swap_order_prioritizes_connected_and_crossing_pairs() {
         .iter()
         .position(|pair| *pair == (0, 1))
         .expect("crossing-related pair should be present");
-    let unrelated = order
+    let obstructing = order
         .iter()
         .position(|pair| *pair == (0, 4))
-        .expect("unrelated fallback pair should still be present");
+        .expect("obstructing unrelated part should still be present");
     assert!(
-        crossing < unrelated,
-        "crossed ratline endpoints should be tried before unrelated fallback pairs: {order:?}"
+        crossing < obstructing,
+        "crossed ratline endpoints should be tried before obstruction fallback pairs: {order:?}"
+    );
+    let fallback = order
+        .iter()
+        .position(|pair| *pair == (0, 5))
+        .expect("non-obstructing unrelated part should still be present");
+    assert!(
+        obstructing < fallback,
+        "foreign parts sitting in a ratline corridor should be swapped before unrelated fallback pairs: {order:?}"
     );
     assert!(
-        order.iter().all(|(a, b)| *a != 5 && *b != 5),
+        order.iter().all(|(a, b)| *a != 6 && *b != 6),
         "locked parts excluded from movable set must not appear in anneal polish"
+    );
+}
+
+#[test]
+fn anneal_swap_order_ignores_disjoint_layer_crossings() {
+    let problem = PlaceProblem {
+        bounds: board(40.0, 40.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: vec![
+            tiny_single_pad_on("A", "TOP", Point2 { x: 0.0, y: 0.0 }, vec![LayerRef::top()]),
+            tiny_single_pad_on("B", "TOP", Point2 { x: 0.0, y: 0.0 }, vec![LayerRef::top()]),
+            tiny_single_pad_on(
+                "C",
+                "BOTTOM",
+                Point2 { x: 0.0, y: 0.0 },
+                vec![LayerRef::bottom()],
+            ),
+            tiny_single_pad_on(
+                "D",
+                "BOTTOM",
+                Point2 { x: 0.0, y: 0.0 },
+                vec![LayerRef::bottom()],
+            ),
+            tiny_single_pad("E", "FLOAT", Point2 { x: 0.0, y: 0.0 }),
+        ],
+        outline: None,
+    };
+    let nets = derive_nets(&problem);
+    let rotations = vec![0.0; problem.parts.len()];
+    let pos = vec![
+        Point2 { x: 5.0, y: 20.0 },
+        Point2 { x: 35.0, y: 20.0 },
+        Point2 { x: 20.0, y: 5.0 },
+        Point2 { x: 20.0, y: 35.0 },
+        Point2 { x: 20.0, y: 20.0 },
+    ];
+
+    let order = routing_aware_swap_order(&problem, &nets, &rotations, &pos, &[0, 1, 2, 3, 4]);
+
+    let disjoint_crossing = order
+        .iter()
+        .position(|pair| *pair == (0, 2))
+        .expect("geometrically crossing but layer-disjoint endpoint pair should be present");
+    let obstruction = order
+        .iter()
+        .position(|pair| *pair == (0, 4))
+        .expect("obstructing unrelated part should be present");
+    assert!(
+        obstruction < disjoint_crossing,
+        "layer-disjoint ratline crossings should not outrank true obstruction relief: {order:?}"
+    );
+}
+
+#[test]
+fn position_polish_order_prioritizes_crossing_parts_before_obstructors() {
+    let problem = PlaceProblem {
+        bounds: board(40.0, 40.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: vec![
+            tiny_single_pad("A", "N1", Point2 { x: 0.0, y: 0.0 }),
+            tiny_single_pad("B", "N2", Point2 { x: 0.0, y: 0.0 }),
+            tiny_single_pad("C", "N2", Point2 { x: 0.0, y: 0.0 }),
+            tiny_single_pad("D", "N1", Point2 { x: 0.0, y: 0.0 }),
+            tiny_single_pad("X", "FLOAT", Point2 { x: 0.0, y: 0.0 }),
+        ],
+        outline: None,
+    };
+    let nets = derive_nets(&problem);
+    let rotations = vec![0.0; problem.parts.len()];
+    let half: Vec<(f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &r)| rotated_courtyard_half(p, r))
+        .collect();
+    let margin = courtyard_margin(problem.clearance);
+    let pos = vec![
+        Point2 { x: 5.0, y: 5.0 },
+        Point2 { x: 35.0, y: 5.0 },
+        Point2 { x: 5.0, y: 35.0 },
+        Point2 { x: 35.0, y: 35.0 },
+        Point2 { x: 20.0, y: 20.0 },
+    ];
+
+    let order = position_polish_part_order(&problem, &nets, &rotations, &half, margin, &pos);
+
+    assert_eq!(
+        &order[..4],
+        &[0, 1, 2, 3],
+        "crossing ratline endpoints should be polished before a passive obstructor: {order:?}"
+    );
+    assert_eq!(order[4], 4);
+}
+
+#[test]
+fn position_polish_order_ignores_disjoint_layer_crossings() {
+    let problem = PlaceProblem {
+        bounds: board(40.0, 40.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: vec![
+            tiny_single_pad_on("A", "TOP", Point2 { x: 0.0, y: 0.0 }, vec![LayerRef::top()]),
+            tiny_single_pad_on("B", "TOP", Point2 { x: 0.0, y: 0.0 }, vec![LayerRef::top()]),
+            tiny_single_pad_on(
+                "C",
+                "BOTTOM",
+                Point2 { x: 0.0, y: 0.0 },
+                vec![LayerRef::bottom()],
+            ),
+            tiny_single_pad_on(
+                "D",
+                "BOTTOM",
+                Point2 { x: 0.0, y: 0.0 },
+                vec![LayerRef::bottom()],
+            ),
+            tiny_single_pad("X", "FLOAT", Point2 { x: 0.0, y: 0.0 }),
+        ],
+        outline: None,
+    };
+    let nets = derive_nets(&problem);
+    let rotations = vec![0.0; problem.parts.len()];
+    let half: Vec<(f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &r)| rotated_courtyard_half(p, r))
+        .collect();
+    let margin = courtyard_margin(problem.clearance);
+    let pos = vec![
+        Point2 { x: 5.0, y: 20.0 },
+        Point2 { x: 35.0, y: 20.0 },
+        Point2 { x: 20.0, y: 5.0 },
+        Point2 { x: 20.0, y: 35.0 },
+        Point2 { x: 20.0, y: 20.0 },
+    ];
+
+    let order = position_polish_part_order(&problem, &nets, &rotations, &half, margin, &pos);
+
+    assert_eq!(
+        order[0], 4,
+        "real obstruction pressure should outrank layer-disjoint geometric crossings: {order:?}"
     );
 }
 
@@ -916,6 +1094,111 @@ fn crossing_relief_candidates_include_multi_pin_tree_edges() {
 }
 
 #[test]
+fn crossing_relief_candidates_ignore_disjoint_pad_layers() {
+    let problem = PlaceProblem {
+        bounds: board(30.0, 30.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: vec![
+            tiny_single_pad_on("A", "TOP", Point2 { x: 0.0, y: 0.0 }, vec![LayerRef::top()]),
+            tiny_single_pad_on("B", "TOP", Point2 { x: 0.0, y: 0.0 }, vec![LayerRef::top()]),
+            tiny_single_pad_on(
+                "C",
+                "BOTTOM",
+                Point2 { x: 0.0, y: 0.0 },
+                vec![LayerRef::bottom()],
+            ),
+            tiny_single_pad_on(
+                "D",
+                "BOTTOM",
+                Point2 { x: 0.0, y: 0.0 },
+                vec![LayerRef::bottom()],
+            ),
+        ],
+        outline: None,
+    };
+    let nets = derive_nets(&problem);
+    let rotations = vec![0.0; problem.parts.len()];
+    let pos = vec![
+        Point2 { x: 5.0, y: 15.0 },
+        Point2 { x: 25.0, y: 15.0 },
+        Point2 { x: 15.0, y: 5.0 },
+        Point2 { x: 15.0, y: 25.0 },
+    ];
+    assert_eq!(
+        ratline_crossings(&problem, &rotations, &nets, &pos),
+        0,
+        "placement cost should not count top-only versus bottom-only crossings"
+    );
+
+    let relief = ratline_crossing_position_candidates(&problem, &nets, &rotations, &pos, 1);
+
+    assert!(
+        relief.is_empty(),
+        "crossing-relief candidates should ignore false conflicts on disjoint pad layers: {relief:?}"
+    );
+}
+
+#[test]
+fn crossing_relief_candidates_keep_mixed_layer_conflicts() {
+    let problem = PlaceProblem {
+        bounds: board(30.0, 30.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: vec![
+            tiny_single_pad_on("A", "TOP", Point2 { x: 0.0, y: 0.0 }, vec![LayerRef::top()]),
+            tiny_single_pad_on("B", "TOP", Point2 { x: 0.0, y: 0.0 }, vec![LayerRef::top()]),
+            tiny_single_pad_on("C", "MIX", Point2 { x: 0.0, y: 0.0 }, vec![LayerRef::top()]),
+            tiny_single_pad_on(
+                "D",
+                "MIX",
+                Point2 { x: 0.0, y: 0.0 },
+                vec![LayerRef::bottom()],
+            ),
+        ],
+        outline: None,
+    };
+    let nets = derive_nets(&problem);
+    let rotations = vec![0.0; problem.parts.len()];
+    let half: Vec<(f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &r)| rotated_courtyard_half(p, r))
+        .collect();
+    let copper_bbox: Vec<Rect> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &r)| rotated_copper_bbox(p, r))
+        .collect();
+    let margin = courtyard_margin(problem.clearance);
+    let pos = vec![
+        Point2 { x: 5.0, y: 15.0 },
+        Point2 { x: 25.0, y: 15.0 },
+        Point2 { x: 5.0, y: 5.0 },
+        Point2 { x: 25.0, y: 25.0 },
+    ];
+    assert_eq!(ratline_crossings(&problem, &rotations, &nets, &pos), 1);
+
+    let relief = ratline_crossing_position_candidates(&problem, &nets, &rotations, &pos, 1);
+
+    assert!(
+        relief.iter().any(|candidate| {
+            let mut candidate_pos = pos.clone();
+            candidate_pos[1] = *candidate;
+            is_legal(&problem, &half, &copper_bbox, margin, &candidate_pos)
+                && ratline_crossings(&problem, &rotations, &nets, &candidate_pos) == 0
+        }),
+        "mixed-layer ratline crossings should still produce a legal relief candidate: {relief:?}"
+    );
+}
+
+#[test]
 fn position_polish_can_take_ratline_obstruction_relief_move() {
     let mut a = tiny_single_pad("A", "N", Point2 { x: 0.0, y: 0.0 });
     let mut blocker = tiny_single_pad("X", "FLOAT", Point2 { x: 0.0, y: 0.0 });
@@ -1016,6 +1299,169 @@ fn position_polish_can_take_ratline_obstruction_relief_move() {
 }
 
 #[test]
+fn position_polish_can_move_foreign_obstructor_off_ratline() {
+    let mut a = tiny_single_pad("A", "N", Point2 { x: 0.0, y: 0.0 });
+    let mut b = tiny_single_pad("B", "N", Point2 { x: 0.0, y: 0.0 });
+    place_at(&mut a, 5.0, 10.0, 0.0);
+    place_at(&mut b, 25.0, 10.0, 0.0);
+    let problem = PlaceProblem {
+        bounds: board(30.0, 20.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: vec![
+            a,
+            b,
+            tiny_single_pad("X", "FLOAT", Point2 { x: 0.0, y: 0.0 }),
+        ],
+        outline: None,
+    };
+    let nets = derive_nets(&problem);
+    let rotations = vec![0.0; problem.parts.len()];
+    let half: Vec<(f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &r)| rotated_courtyard_half(p, r))
+        .collect();
+    let copper_bbox: Vec<Rect> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &r)| rotated_copper_bbox(p, r))
+        .collect();
+    let margin = courtyard_margin(problem.clearance);
+    let pairs = Vec::new();
+    let edge_idx = Vec::new();
+    let mut pos = vec![
+        Point2 { x: 5.0, y: 10.0 },
+        Point2 { x: 25.0, y: 10.0 },
+        Point2 { x: 15.0, y: 10.0 },
+    ];
+    assert_eq!(
+        ratline_obstruction_pressure(&problem, &rotations, &nets, &half, margin, &pos),
+        1
+    );
+
+    let relief =
+        obstructing_part_position_candidates(&problem, &nets, &rotations, &half, margin, &pos, 2);
+    assert!(
+        relief.iter().any(|candidate| {
+            let mut candidate_pos = pos.clone();
+            candidate_pos[2] = *candidate;
+            is_legal(&problem, &half, &copper_bbox, margin, &candidate_pos)
+                && ratline_obstruction_pressure(
+                    &problem,
+                    &rotations,
+                    &nets,
+                    &half,
+                    margin,
+                    &candidate_pos,
+                ) == 0
+        }),
+        "foreign-obstructor candidates should include a legal corridor-clearing move: {relief:?}"
+    );
+
+    let before = place_cost(
+        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+    );
+    polish_positions(
+        &problem,
+        &nets,
+        margin,
+        &pairs,
+        &edge_idx,
+        &rotations,
+        &half,
+        &copper_bbox,
+        &mut pos,
+    );
+    let after = place_cost(
+        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+    );
+
+    assert_eq!(
+        ratline_obstruction_pressure(&problem, &rotations, &nets, &half, margin, &pos),
+        0
+    );
+    assert!(
+        (pos[2].y - 10.0).abs() >= PLACEMENT_GRID.pitch() - 1e-9,
+        "movable foreign blocker should leave the locked ratline corridor, got {:?}",
+        pos[2]
+    );
+    assert!(
+        after + 1e-9 < before,
+        "foreign-obstructor move should lower placement cost: {before} -> {after}"
+    );
+    assert!(is_legal(&problem, &half, &copper_bbox, margin, &pos));
+}
+
+#[test]
+fn cached_ratline_edges_match_public_position_candidate_helpers() {
+    let problem = PlaceProblem {
+        bounds: board(30.0, 30.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: vec![
+            tiny_single_pad("A", "N1", Point2 { x: 0.0, y: 0.0 }),
+            tiny_single_pad("B", "N1", Point2 { x: 0.0, y: 0.0 }),
+            tiny_single_pad("C", "N2", Point2 { x: 0.0, y: 0.0 }),
+            tiny_single_pad("D", "N2", Point2 { x: 0.0, y: 0.0 }),
+            tiny_single_pad("X", "FLOAT", Point2 { x: 0.0, y: 0.0 }),
+        ],
+        outline: None,
+    };
+    let nets = derive_nets(&problem);
+    let rotations = vec![0.0; problem.parts.len()];
+    let half: Vec<(f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &r)| rotated_courtyard_half(p, r))
+        .collect();
+    let margin = courtyard_margin(problem.clearance);
+    let pos = vec![
+        Point2 { x: 5.0, y: 15.0 },
+        Point2 { x: 25.0, y: 15.0 },
+        Point2 { x: 15.0, y: 5.0 },
+        Point2 { x: 15.0, y: 25.0 },
+        Point2 { x: 15.0, y: 15.0 },
+    ];
+    let edges = ratline_tree_edge_list(&problem, &nets, &rotations, &pos);
+
+    assert_eq!(
+        sorted_points(ratline_crossing_position_candidates(
+            &problem, &nets, &rotations, &pos, 1
+        )),
+        sorted_points(ratline_crossing_position_candidates_from_edges(
+            &problem, &rotations, 1, &edges
+        )),
+        "cached ratline edges must preserve crossing-relief candidates"
+    );
+    assert_eq!(
+        sorted_points(ratline_obstruction_position_candidates(
+            &problem, &nets, &rotations, &half, margin, &pos, 1
+        )),
+        sorted_points(ratline_obstruction_position_candidates_from_edges(
+            &problem, &rotations, &half, margin, &pos, 1, &edges
+        )),
+        "cached ratline edges must preserve obstruction-relief candidates"
+    );
+    assert_eq!(
+        sorted_points(obstructing_part_position_candidates(
+            &problem, &nets, &rotations, &half, margin, &pos, 4
+        )),
+        sorted_points(obstructing_part_position_candidates_from_edges(
+            &problem, &half, margin, &pos, 4, &edges
+        )),
+        "cached ratline edges must preserve foreign-obstructor candidates"
+    );
+}
+
+#[test]
 fn position_polish_candidates_are_snapped_clamped_and_deduped() {
     let problem = PlaceProblem {
         bounds: board(10.0, 10.0),
@@ -1047,6 +1493,124 @@ fn position_polish_candidates_are_snapped_clamped_and_deduped() {
         vec![Point2 { x: 6.0, y: 6.0 }, Point2 { x: 1.0, y: 1.0 }],
         "position polish should evaluate each snapped/clamped target once"
     );
+}
+
+#[test]
+fn edge_seek_position_candidates_include_all_edge_band_targets() {
+    let problem = PlaceProblem {
+        bounds: board(30.0, 20.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: vec![tiny_single_pad("J1", "N", Point2 { x: 0.0, y: 0.0 })],
+        outline: None,
+    };
+    let rotations = vec![0.0; problem.parts.len()];
+    let half: Vec<(f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &r)| rotated_courtyard_half(p, r))
+        .collect();
+    let pos = vec![Point2 { x: 15.0, y: 10.0 }];
+
+    let candidates = edge_seek_position_candidates(&problem, &half, &pos, 0, &[0]);
+
+    assert_eq!(
+        candidates,
+        vec![
+            Point2 {
+                x: 15.0,
+                y: 0.5 + EDGE_BAND,
+            },
+            Point2 {
+                x: 15.0,
+                y: 20.0 - 0.5 - EDGE_BAND,
+            },
+            Point2 {
+                x: 0.5 + EDGE_BAND,
+                y: 10.0,
+            },
+            Point2 {
+                x: 30.0 - 0.5 - EDGE_BAND,
+                y: 10.0,
+            },
+        ],
+        "edge polish should offer direct non-local targets for every board edge"
+    );
+    assert!(
+        edge_seek_position_candidates(&problem, &half, &pos, 0, &[]).is_empty(),
+        "non-edge-seeking parts should not pay extra edge candidates"
+    );
+}
+
+#[test]
+fn position_polish_can_take_long_edge_seek_move() {
+    let problem = PlaceProblem {
+        bounds: board(30.0, 20.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: vec![tiny_single_pad("J1", "N", Point2 { x: 0.0, y: 0.0 })],
+        outline: None,
+    };
+    let nets = derive_nets(&problem);
+    let rotations = vec![0.0; problem.parts.len()];
+    let half: Vec<(f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &r)| rotated_courtyard_half(p, r))
+        .collect();
+    let copper_bbox: Vec<Rect> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &r)| rotated_copper_bbox(p, r))
+        .collect();
+    let margin = courtyard_margin(problem.clearance);
+    let pairs = Vec::new();
+    let edge_idx = vec![0];
+    let mut pos = vec![Point2 { x: 15.0, y: 10.0 }];
+    let before = place_cost(
+        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+    );
+
+    polish_positions(
+        &problem,
+        &nets,
+        margin,
+        &pairs,
+        &edge_idx,
+        &rotations,
+        &half,
+        &copper_bbox,
+        &mut pos,
+    );
+
+    let after = place_cost(
+        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+    );
+    let edge_gap = [
+        pos[0].x - half[0].0 - problem.bounds.min_x,
+        problem.bounds.max_x - pos[0].x - half[0].0,
+        pos[0].y - half[0].1 - problem.bounds.min_y,
+        problem.bounds.max_y - pos[0].y - half[0].1,
+    ]
+    .into_iter()
+    .fold(f64::MAX, f64::min);
+
+    assert!(
+        edge_gap <= PLACEMENT_GRID.pitch() + 1e-9,
+        "edge-seeking part should jump from the board middle to an edge, got {pos:?}"
+    );
+    assert!(
+        after + 1e-9 < before,
+        "edge-seek polish should lower placement cost: {before} -> {after}"
+    );
+    assert!(is_legal(&problem, &half, &copper_bbox, margin, &pos));
 }
 
 #[test]
@@ -1181,6 +1745,90 @@ fn position_candidates_include_pad_median_to_ignore_far_outlier_net() {
 }
 
 #[test]
+fn position_candidates_include_pad_median_axis_targets() {
+    let multi = Part {
+        reference: "U1".to_owned(),
+        courtyard_w: 1.0,
+        courtyard_h: 1.0,
+        pads: ["N1", "N2", "N3", "N4"]
+            .iter()
+            .map(|net| PartPad {
+                number: (*net).to_owned(),
+                offset: Point2 { x: 0.0, y: 0.0 },
+                width: 0.4,
+                height: 0.4,
+                layers: top(),
+                net: Some((*net).to_owned()),
+            })
+            .collect(),
+        locked: None,
+    };
+    let problem = PlaceProblem {
+        bounds: board(120.0, 40.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: vec![
+            multi,
+            tiny_single_pad("A", "N1", Point2 { x: 0.0, y: 0.0 }),
+            tiny_single_pad("B", "N2", Point2 { x: 0.0, y: 0.0 }),
+            tiny_single_pad("C", "N3", Point2 { x: 0.0, y: 0.0 }),
+            tiny_single_pad("D", "N4", Point2 { x: 0.0, y: 0.0 }),
+        ],
+        outline: None,
+    };
+    let nets = derive_nets(&problem);
+    let rotations = vec![0.0; problem.parts.len()];
+    let pos = vec![
+        Point2 { x: 80.0, y: 20.0 },
+        Point2 { x: 10.0, y: 10.0 },
+        Point2 { x: 12.0, y: 12.0 },
+        Point2 { x: 14.0, y: 14.0 },
+        Point2 { x: 100.0, y: 30.0 },
+    ];
+
+    let candidates = net_centroid_position_candidates(&problem, &nets, &rotations, &pos, 0);
+
+    assert!(
+        candidates
+            .iter()
+            .any(|p| (p.x - 34.0).abs() < 1e-9 && (p.y - 16.5).abs() < 1e-9),
+        "full mean target should still be present: {candidates:?}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|p| (p.x - 34.0).abs() < 1e-9 && (p.y - 20.0).abs() < 1e-9),
+        "mean x-axis alignment should preserve current y while targeting the net-average pad location: {candidates:?}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|p| (p.x - 80.0).abs() < 1e-9 && (p.y - 16.5).abs() < 1e-9),
+        "mean y-axis alignment should preserve current x while targeting the net-average pad location: {candidates:?}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|p| (p.x - 14.0).abs() < 1e-9 && (p.y - 14.0).abs() < 1e-9),
+        "full median target should still be present: {candidates:?}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|p| (p.x - 14.0).abs() < 1e-9 && (p.y - 20.0).abs() < 1e-9),
+        "median x-axis alignment should preserve current y while targeting the dense pad cluster: {candidates:?}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|p| (p.x - 80.0).abs() < 1e-9 && (p.y - 14.0).abs() < 1e-9),
+        "median y-axis alignment should preserve current x while targeting the dense pad cluster: {candidates:?}"
+    );
+}
+
+#[test]
 fn position_candidates_include_nearest_same_net_pad_target() {
     let movable = Part {
         reference: "U1".to_owned(),
@@ -1231,6 +1879,111 @@ fn position_candidates_include_nearest_same_net_pad_target() {
             .any(|p| (p.x - 8.0).abs() < 1e-9 && (p.y - 10.0).abs() < 1e-9),
         "nearest-pad target should align U1.1 with the near same-net pad: {candidates:?}"
     );
+}
+
+#[test]
+fn position_candidates_include_nearest_same_net_pad_axis_targets() {
+    let problem = PlaceProblem {
+        bounds: board(120.0, 30.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: vec![
+            tiny_single_pad("U1", "N", Point2 { x: 2.0, y: 1.0 }),
+            tiny_single_pad("J1", "N", Point2 { x: 0.0, y: 0.0 }),
+        ],
+        outline: None,
+    };
+    let nets = derive_nets(&problem);
+    let rotations = vec![0.0; problem.parts.len()];
+    let pos = vec![Point2 { x: 20.0, y: 10.0 }, Point2 { x: 10.0, y: 14.0 }];
+
+    let candidates = net_centroid_position_candidates(&problem, &nets, &rotations, &pos, 0);
+
+    assert!(
+        candidates
+            .iter()
+            .any(|p| (p.x - 8.0).abs() < 1e-9 && (p.y - 13.0).abs() < 1e-9),
+        "full nearest-pad target should still be present: {candidates:?}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|p| (p.x - 8.0).abs() < 1e-9 && (p.y - 10.0).abs() < 1e-9),
+        "x-axis pad alignment should preserve current y while lining up the pad: {candidates:?}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|p| (p.x - 20.0).abs() < 1e-9 && (p.y - 13.0).abs() < 1e-9),
+        "y-axis pad alignment should preserve current x while lining up the pad: {candidates:?}"
+    );
+}
+
+#[test]
+fn position_polish_can_take_axis_alignment_when_full_pad_target_is_illegal() {
+    let mut locked = tiny_single_pad("J1", "N", Point2 { x: 0.0, y: 0.0 });
+    place_at(&mut locked, 10.0, 14.0, 0.0);
+    let problem = PlaceProblem {
+        bounds: board(40.0, 30.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![],
+        parts: vec![
+            tiny_single_pad("U1", "N", Point2 { x: 0.0, y: 0.0 }),
+            locked,
+        ],
+        outline: None,
+    };
+    let nets = derive_nets(&problem);
+    let rotations = vec![0.0; problem.parts.len()];
+    let half: Vec<(f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &r)| rotated_courtyard_half(p, r))
+        .collect();
+    let copper_bbox: Vec<crate::problem::Rect> = problem
+        .parts
+        .iter()
+        .zip(&rotations)
+        .map(|(p, &r)| rotated_copper_bbox(p, r))
+        .collect();
+    let margin = courtyard_margin(problem.clearance);
+    let pairs = Vec::new();
+    let edge_idx = Vec::new();
+    let mut pos = vec![Point2 { x: 20.0, y: 10.0 }, Point2 { x: 10.0, y: 14.0 }];
+    let before = place_cost(
+        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+    );
+
+    polish_positions(
+        &problem,
+        &nets,
+        margin,
+        &pairs,
+        &edge_idx,
+        &rotations,
+        &half,
+        &copper_bbox,
+        &mut pos,
+    );
+
+    let after = place_cost(
+        &problem, &nets, &half, margin, &rotations, &pairs, &edge_idx, &pos,
+    );
+    assert!(
+        after + 1e-9 < before,
+        "axis pad alignment should lower placement cost when the full pad target overlaps: {before} -> {after}"
+    );
+    assert!(
+        (pos[0].x - 10.0).abs() < 1e-9 || (pos[0].y - 14.0).abs() < 1e-9,
+        "movable pad should align on one routing axis with the locked pad, got {:?}",
+        pos[0]
+    );
+    assert!(is_legal(&problem, &half, &copper_bbox, margin, &pos));
 }
 
 #[test]
@@ -1319,6 +2072,7 @@ fn swap_pair_order_prioritizes_connected_and_crossing_pairs() {
             r0603("C", Some("N2"), None),
             r0603("D", Some("N1"), None),
             r0603("E", None, None),
+            r0603("F", None, None),
             locked,
         ],
         outline: None,
@@ -1331,6 +2085,7 @@ fn swap_pair_order_prioritizes_connected_and_crossing_pairs() {
         Point2 { x: 5.0, y: 35.0 },
         Point2 { x: 35.0, y: 35.0 },
         Point2 { x: 20.0, y: 20.0 },
+        Point2 { x: 8.0, y: 20.0 },
         Point2 { x: 15.0, y: 15.0 },
     ];
 
@@ -1341,20 +2096,28 @@ fn swap_pair_order_prioritizes_connected_and_crossing_pairs() {
         &[(0, 3), (1, 2)],
         "same-net parts should be tried before unrelated swap pairs"
     );
-    let unrelated = order
+    let obstructing = order
         .iter()
         .position(|pair| *pair == (0, 4))
-        .expect("unrelated pair should still be covered by the full sweep");
+        .expect("obstructing unrelated part should still be covered by the full sweep");
     let crossing = order
         .iter()
         .position(|pair| *pair == (0, 1))
         .expect("crossing-related pair should be present");
     assert!(
-        crossing < unrelated,
-        "crossing-related swaps should be tried before unrelated fallback pairs: {order:?}"
+        crossing < obstructing,
+        "crossing-related swaps should be tried before obstruction fallback pairs: {order:?}"
+    );
+    let fallback = order
+        .iter()
+        .position(|pair| *pair == (0, 5))
+        .expect("non-obstructing unrelated part should still be paired");
+    assert!(
+        obstructing < fallback,
+        "foreign parts sitting in a ratline corridor should be swapped before unrelated fallback pairs: {order:?}"
     );
     assert!(
-        order.iter().all(|(a, b)| *a != 5 && *b != 5),
+        order.iter().all(|(a, b)| *a != 6 && *b != 6),
         "locked parts must not be considered for swap polish"
     );
 }
@@ -1564,7 +2327,7 @@ fn group_with_region_lands_members_inside() {
         groups: vec![GroupHint {
             name: "corner".to_owned(),
             members: vec!["R1".to_owned(), "R2".to_owned()],
-            region: Some(region.clone()),
+            region: Some(region),
             edge: None,
             grid: false,
             surround: None,
@@ -1652,14 +2415,7 @@ fn decoupling_caps_seed_beside_their_anchor_ic() {
         },
     );
     assert!(res.legal, "{res:?}");
-    let at = |r: &str| {
-        res.placements
-            .iter()
-            .find(|p| p.reference == r)
-            .unwrap()
-            .at
-            .clone()
-    };
+    let at = |r: &str| res.placements.iter().find(|p| p.reference == r).unwrap().at;
     let d = |a: Point2, b: Point2| a.dist(b);
     // Each cap must hug its OWN anchor (not the other IC). A generous bound: well
     // under the inter-IC span, proving the cap is clustered, not stranded.
@@ -1712,14 +2468,7 @@ fn fanout_keeps_crystal_cluster_near_dense_ic() {
 
     let res = place_board(&problem, &PlacementHints::default());
     assert!(res.legal, "fanout crystal placement must be legal: {res:?}");
-    let at = |r: &str| {
-        res.placements
-            .iter()
-            .find(|p| p.reference == r)
-            .unwrap()
-            .at
-            .clone()
-    };
+    let at = |r: &str| res.placements.iter().find(|p| p.reference == r).unwrap().at;
     let u1 = at("U1");
     for reference in ["C1", "C2", "Y1"] {
         let dist = at(reference).dist(u1);
@@ -1761,7 +2510,7 @@ fn grid_hint_spreads_members_within_region() {
         groups: vec![GroupHint {
             name: "array".to_owned(),
             members: vec!["D1".into(), "D2".into(), "D3".into(), "D4".into()],
-            region: Some(region.clone()),
+            region: Some(region),
             edge: None,
             grid: true,
             surround: None,
@@ -2005,7 +2754,7 @@ fn all_at_one_point_resolves_to_no_overlap() {
         .iter()
         .map(|p| rotated_copper_bbox(p, 0.0))
         .collect();
-    let pos: Vec<Point2> = res.placements.iter().map(|p| p.at.clone()).collect();
+    let pos: Vec<Point2> = res.placements.iter().map(|p| p.at).collect();
     assert!(is_legal(
         &problem,
         &half,
@@ -2264,26 +3013,46 @@ fn grid_ranker_uses_best_orthogonal_strictness_key() {
 }
 
 #[test]
-fn grid_ranker_skips_full_grid_fallback_when_orthogonal_is_clean() {
+fn grid_ranker_skips_full_grid_fallback_when_orthogonal_is_clean_and_via_free() {
     let called = std::cell::Cell::new(false);
-    let clean_orthogonal = (0, 0, 2, 30_000);
+    let clean_orthogonal = (0, 0, 0, 0, 30_000);
+
+    assert!(route_rank_key_clean_via_free(clean_orthogonal));
 
     let key = rank_key_with_full_grid_fallback(clean_orthogonal, true, || {
         called.set(true);
-        (0, 0, 1, 20_000)
+        (0, 0, 0, 1, 20_000)
     });
 
     assert_eq!(key, clean_orthogonal);
     assert!(
         !called.get(),
-        "clean orthogonal rank should avoid the expensive full-grid fallback"
+        "clean via-free orthogonal rank should avoid the expensive full-grid fallback"
+    );
+}
+
+#[test]
+fn grid_ranker_uses_full_grid_fallback_when_clean_orthogonal_spends_vias() {
+    let clean_via_orthogonal = (0, 0, 0, 2, 30_000);
+    let cleaner_full_grid = (0, 0, 0, 1, 20_000);
+
+    assert!(
+        !route_rank_key_clean_via_free(clean_via_orthogonal),
+        "clean but via-heavy orthogonal routes must continue into fallback comparison"
+    );
+
+    let key = rank_key_with_full_grid_fallback(clean_via_orthogonal, true, || cleaner_full_grid);
+
+    assert_eq!(
+        key, cleaner_full_grid,
+        "small clean placements should still compare full-grid quality when the proxy route spends vias"
     );
 }
 
 #[test]
 fn grid_ranker_uses_full_grid_fallback_when_orthogonal_still_faults() {
-    let faulty_orthogonal = (2, 1, 0, 0);
-    let routed_full_grid = (0, 0, 3, 40_000);
+    let faulty_orthogonal = (2, 0, 1, 0, 0);
+    let routed_full_grid = (0, 0, 0, 3, 40_000);
 
     let key = rank_key_with_full_grid_fallback(faulty_orthogonal, true, || routed_full_grid);
 
@@ -2296,17 +3065,91 @@ fn grid_ranker_uses_full_grid_fallback_when_orthogonal_still_faults() {
 #[test]
 fn grid_ranker_size_gate_can_skip_full_grid_fallback() {
     let called = std::cell::Cell::new(false);
-    let faulty_orthogonal = (2, 1, 0, 0);
+    let faulty_orthogonal = (2, 0, 1, 0, 0);
 
     let key = rank_key_with_full_grid_fallback(faulty_orthogonal, false, || {
         called.set(true);
-        (0, 0, 0, 0)
+        (0, 0, 0, 0, 0)
     });
 
     assert_eq!(key, faulty_orthogonal);
     assert!(
         !called.get(),
         "large-board gate should preserve placement-ranker runtime by skipping full grid"
+    );
+}
+
+fn ranker_gate_problem(connection_count: usize) -> RouteProblem {
+    RouteProblem {
+        layer_count: 2,
+        min_trace_width: 0.2,
+        obstacles: Vec::new(),
+        connections: (0..connection_count)
+            .map(|idx| Connection {
+                name: format!("N{idx}"),
+                points_to_connect: vec![
+                    RoutePoint {
+                        x: 1.0,
+                        y: 1.0 + idx as f64,
+                        layer: LayerRef::top(),
+                    },
+                    RoutePoint {
+                        x: 9.0,
+                        y: 1.0 + idx as f64,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            })
+            .collect(),
+        bounds: board(20.0, 20.0),
+        clearance: 0.2,
+        via_diameter: 0.6,
+        via_drill: 0.3,
+        net_widths: Default::default(),
+        outline: None,
+        escape_layers: Default::default(),
+    }
+}
+
+#[test]
+fn grid_ranker_faulty_proxy_gets_larger_full_grid_fallback_gate() {
+    let medium = ranker_gate_problem(6);
+    let faulty_orthogonal = (1, 0, 1, 0, 0);
+    let clean_via_orthogonal = (0, 0, 0, 1, 10_000);
+
+    assert!(
+        should_try_full_grid_ranker_fallback(&medium, faulty_orthogonal),
+        "faulty medium-size placement candidates should get a full-grid rescue check"
+    );
+    assert!(
+        !should_try_full_grid_ranker_fallback(&medium, clean_via_orthogonal),
+        "clean via-heavy medium candidates should keep the old tighter runtime gate"
+    );
+}
+
+#[test]
+fn grid_ranker_faulty_proxy_still_skips_large_full_grid_fallback() {
+    let large = ranker_gate_problem(7);
+    let faulty_orthogonal = (1, 0, 1, 0, 0);
+
+    assert!(
+        !should_try_full_grid_ranker_fallback(&large, faulty_orthogonal),
+        "faulty fallback expansion should remain bounded for placement-oracle runtime"
+    );
+}
+
+#[test]
+fn placement_route_rank_prefers_fewer_geometry_violations_before_failed_net_count() {
+    let failed_one_small_net = (2, 0, 1, 0, 10_000);
+    let emitted_two_geometry_errors = (2, 2, 0, 0, 1_000);
+
+    assert!(
+        route_rank_key_better(failed_one_small_net, emitted_two_geometry_errors),
+        "at equal total faults, placement ranking should prefer an honest failed net over emitted DRC geometry"
+    );
+    assert!(
+        !route_rank_key_better(emitted_two_geometry_errors, failed_one_small_net),
+        "geometry DRC must not win merely because fewer nets are reported failed"
     );
 }
 
@@ -2467,7 +3310,7 @@ fn place_result_selector_prefers_lower_via_route_before_layout_cost() {
         "cross-wall placement should also route cleanly"
     );
     assert!(
-        no_via_key.2 < via_key.2,
+        no_via_key.3 < via_key.3,
         "same-side route should need fewer vias: {no_via_key:?} vs {via_key:?}"
     );
 
@@ -2746,7 +3589,7 @@ fn oracle_placement_is_byte_identical_to_pinned_snapshot() {
 
     let res = place_board(&problem, &hints);
     let got = serde_json::to_string(&res).unwrap();
-    const PINNED: &str = r#"{"placements":[{"reference":"U1","at":{"x":6.5,"y":48.5},"rotation":180.0},{"reference":"U2","at":{"x":13.5,"y":48.5},"rotation":180.0},{"reference":"Ca0","at":{"x":6.5,"y":46.0},"rotation":180.0},{"reference":"Ca1","at":{"x":7.5,"y":44.0},"rotation":180.0},{"reference":"Ca2","at":{"x":7.5,"y":42.0},"rotation":180.0},{"reference":"Cb0","at":{"x":18.0,"y":47.5},"rotation":0.0},{"reference":"Cb1","at":{"x":18.0,"y":49.3},"rotation":0.0},{"reference":"Cb2","at":{"x":17.5,"y":44.0},"rotation":0.0},{"reference":"J1","at":{"x":1.2700000000000005,"y":44.5},"rotation":180.0},{"reference":"R1","at":{"x":12.5,"y":42.5},"rotation":0.0},{"reference":"R2","at":{"x":12.5,"y":45.5},"rotation":0.0}],"legal":true,"report":{"overlapsResolved":4,"outOfBoundsClamps":0,"hpwl":93.16499999999998,"layoutCost":340.74760540672537}}"#;
+    const PINNED: &str = r#"{"placements":[{"reference":"U1","at":{"x":8.0,"y":10.0},"rotation":270.0},{"reference":"U2","at":{"x":14.0,"y":10.0},"rotation":0.0},{"reference":"Ca0","at":{"x":3.5,"y":7.0},"rotation":270.0},{"reference":"Ca1","at":{"x":8.0,"y":6.5},"rotation":0.0},{"reference":"Ca2","at":{"x":8.0,"y":4.0},"rotation":0.0},{"reference":"Cb0","at":{"x":13.0,"y":7.5},"rotation":0.0},{"reference":"Cb1","at":{"x":9.5,"y":14.5},"rotation":180.0},{"reference":"Cb2","at":{"x":14.5,"y":14.5},"rotation":0.0},{"reference":"J1","at":{"x":1.2700000000000005,"y":14.5},"rotation":0.0},{"reference":"R1","at":{"x":19.5,"y":9.5},"rotation":270.0},{"reference":"R2","at":{"x":13.0,"y":4.0},"rotation":0.0}],"legal":true,"report":{"overlapsResolved":7,"outOfBoundsClamps":0,"hpwl":106.86500000000001,"layoutCost":289.98070765467514}}"#;
     assert_eq!(
         got, PINNED,
         "oracle placement drifted from the pinned byte-for-byte snapshot"

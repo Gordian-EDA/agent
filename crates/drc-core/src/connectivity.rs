@@ -161,7 +161,7 @@ fn build_elements(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Eleme
             owners: ob.connected_to.clone(),
             shared_pad: ob.connected_to.len() > 1,
             shape: Shape::Pad {
-                rect: geom::Rect::from_center_half(ob.center.into(), (hw, hh)),
+                rect: geom::Rect::from_center_half(ob.center, (hw, hh)),
                 layers: ob.layers.clone(),
             },
         });
@@ -177,7 +177,7 @@ fn build_elements(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Eleme
                 owners: vec![trace.connection.clone()],
                 shared_pad: false,
                 shape: Shape::Segment {
-                    segment: geom::Segment::new((*p).into(), (*p).into()),
+                    segment: geom::Segment::new(*p, *p),
                     half_w,
                     layer: trace.layer.clone(),
                 },
@@ -188,7 +188,7 @@ fn build_elements(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Eleme
                 owners: vec![trace.connection.clone()],
                 shared_pad: false,
                 shape: Shape::Segment {
-                    segment: geom::Segment::new(w[0].into(), w[1].into()),
+                    segment: geom::Segment::new(w[0], w[1]),
                     half_w,
                     layer: trace.layer.clone(),
                 },
@@ -202,7 +202,7 @@ fn build_elements(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Eleme
             owners: vec![via.connection.clone()],
             shared_pad: false,
             shape: Shape::Via {
-                at: via.at.into(),
+                at: via.at,
                 radius: via.diameter / 2.0,
             },
         });

@@ -76,6 +76,7 @@ fn build_circuit_graph(
 /// geometry can't be realized (e.g. an osc pin not on the IC) is silently dropped,
 /// so the generic rules place it instead — the engine never reports an idiom it
 /// did not actually freeze.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn detect_idioms(
     items: &[Item],
     inc: &Incidence,

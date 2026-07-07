@@ -10,7 +10,7 @@
 //! the exact function `apply_design` calls) and renders the result. Critic the PNG with
 //! tools/schematic_critic.py.
 //!
-//! Usage: cargo run --release -p agent --example render_multisheet -- <draft.yaml> <out_dir>
+//! Usage: cargo run --release -p gordian-core --example render_multisheet -- <draft.yaml> <out_dir>
 
 use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;

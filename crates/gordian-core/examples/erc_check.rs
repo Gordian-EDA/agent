@@ -2,7 +2,7 @@
 //! print the defect lines — the exact-math layer (feedback-divider ratios, LED current) that runs
 //! under the LLM review ensemble. Useful for debugging the checks on real generated designs.
 //!
-//! Usage: cargo run --release -p agent --example erc_check -- <design.yaml>
+//! Usage: cargo run --release -p gordian-core --example erc_check -- <design.yaml>
 
 use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;

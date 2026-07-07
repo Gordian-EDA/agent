@@ -5,7 +5,7 @@
 //! ([`pcb_model::place::compute_hpwl`]) and is re-exported here.
 
 use super::model::{LogicalNet, Pin, PlaceProblem};
-use crate::problem::{Point2, Rect};
+use crate::problem::{LayerRef, Point2, Rect};
 
 pub(crate) use crate::problem::place::compute_hpwl_with_rotations;
 
@@ -17,6 +17,7 @@ pub(crate) const SA_SILK_W: f64 = 6.0; // soft: parts crowding each other's refd
 pub(crate) const SA_WL_W: f64 = 0.4; // half-perimeter wirelength over physical pads
 pub(crate) const SA_CROSS_W: f64 = 4.0; // soft: two-pin ratline crossings (routeability proxy)
 pub(crate) const SA_OBSTRUCT_W: f64 = 1.5; // soft: ratline through foreign body / keepout
+pub(crate) const SA_LAYER_CHANGE_W: f64 = 2.0; // soft: prefer same-layer pad pairings before vias
 pub(crate) const SA_SPREAD_W: f64 = 0.25; // mild whole-board compaction
 pub(crate) const SA_COHERE_W: f64 = 8.0; // decoupling cap → nearest anchor power pad (hug the IC).
 // Deliberately ABOVE SA_SILK_W (refdes-crowding): a bypass cap hugging its IC is an
@@ -66,7 +67,6 @@ fn pin_pos(problem: &PlaceProblem, pos: &[Point2], rotations: &[f64], pin: &Pin)
         y: pos[pin.part].y + off.y,
     }
 }
-
 fn net_hpwl(problem: &PlaceProblem, rotations: &[f64], net: &LogicalNet, pos: &[Point2]) -> f64 {
     if net.pins.len() < 2 {
         return 0.0;
@@ -93,6 +93,7 @@ fn net_hpwl(problem: &PlaceProblem, rotations: &[f64], net: &LogicalNet, pos: &[
 /// nearest-neighbour tree, which is a cheap stand-in for the connection tree a
 /// router will eventually grow; without it a three-pin/common net can cut across
 /// unrelated signals with no crossing penalty at all.
+#[cfg(test)]
 pub(crate) fn ratline_crossings(
     problem: &PlaceProblem,
     rotations: &[f64],
@@ -100,21 +101,29 @@ pub(crate) fn ratline_crossings(
     pos: &[Point2],
 ) -> usize {
     let pin_positions = ratline_pin_positions(problem, rotations, nets, pos);
-    let segs = ratline_tree_segments(nets, &pin_positions);
+    let segs = ratline_tree_segments(problem, nets, &pin_positions);
 
+    ratline_crossings_from_segments(&segs)
+}
+
+fn ratline_crossings_from_segments(segs: &[RatlineSegment]) -> usize {
     let mut crossings = 0usize;
     for i in 0..segs.len() {
-        let (net_a, a0, a1, sa) = segs[i];
-        for &(net_b, b0, b1, sb) in &segs[i + 1..] {
-            if net_a == net_b {
+        let a = &segs[i];
+        for b in &segs[i + 1..] {
+            if a.net_idx == b.net_idx {
                 continue;
             }
             // Nets sharing a component naturally meet at that component; do not
             // charge those as crossings.
-            if a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1 {
+            if a.a_part == b.a_part
+                || a.a_part == b.b_part
+                || a.b_part == b.a_part
+                || a.b_part == b.b_part
+            {
                 continue;
             }
-            if sa.intersects(sb) {
+            if ratline_layers_overlap(a, b) && a.segment.intersects(b.segment) {
                 crossings += 1;
             }
         }
@@ -126,6 +135,7 @@ pub(crate) fn ratline_crossings(
 /// component courtyard or signal keepout. This catches the common placement shape
 /// where HPWL is short and ratlines do not cross each other, but the straight
 /// route corridor is occupied by another part and the router must detour.
+#[cfg(test)]
 pub(crate) fn ratline_obstruction_pressure(
     problem: &PlaceProblem,
     rotations: &[f64],
@@ -135,22 +145,50 @@ pub(crate) fn ratline_obstruction_pressure(
     pos: &[Point2],
 ) -> usize {
     let pin_positions = ratline_pin_positions(problem, rotations, nets, pos);
-    let segs = ratline_tree_segments(nets, &pin_positions);
+    let segs = ratline_tree_segments(problem, nets, &pin_positions);
+
+    ratline_obstruction_pressure_from_segments(problem, half, margin, pos, &segs)
+}
+
+#[cfg(test)]
+pub(crate) fn ratline_layer_change_pressure(
+    problem: &PlaceProblem,
+    rotations: &[f64],
+    nets: &[LogicalNet],
+    pos: &[Point2],
+) -> usize {
+    let pin_positions = ratline_pin_positions(problem, rotations, nets, pos);
+    let segs = ratline_tree_segments(problem, nets, &pin_positions);
+
+    ratline_layer_change_pressure_from_segments(&segs)
+}
+
+fn ratline_layer_change_pressure_from_segments(segs: &[RatlineSegment]) -> usize {
+    segs.iter().filter(|seg| seg.requires_layer_change).count()
+}
+
+fn ratline_obstruction_pressure_from_segments(
+    problem: &PlaceProblem,
+    half: &[(f64, f64)],
+    margin: f64,
+    pos: &[Point2],
+    segs: &[RatlineSegment],
+) -> usize {
     let mut pressure = 0usize;
 
-    for &(_, a_part, b_part, seg) in &segs {
+    for seg in segs {
         for part_idx in 0..problem.parts.len() {
-            if part_idx == a_part || part_idx == b_part {
+            if part_idx == seg.a_part || part_idx == seg.b_part {
                 continue;
             }
             let courtyard =
                 Rect::from_center_half(pos[part_idx], half[part_idx]).inflate(margin / 2.0);
-            if courtyard.dist_to_segment(seg) <= geom::EPS {
+            if courtyard.dist_to_segment(seg.segment) <= geom::EPS {
                 pressure += 1;
             }
         }
         for keepout in &problem.keepouts {
-            if keepout.dist_to_segment(seg) <= geom::EPS {
+            if keepout.dist_to_segment(seg.segment) <= geom::EPS {
                 pressure += 1;
             }
         }
@@ -175,16 +213,28 @@ fn ratline_pin_positions(
         .collect()
 }
 
+#[derive(Clone)]
+struct RatlineSegment {
+    net_idx: usize,
+    a_part: usize,
+    b_part: usize,
+    layers: Vec<LayerRef>,
+    requires_layer_change: bool,
+    segment: geom::Segment,
+}
+
 fn ratline_tree_segments(
+    problem: &PlaceProblem,
     nets: &[LogicalNet],
     pin_positions: &[Vec<Point2>],
-) -> Vec<(usize, usize, usize, geom::Segment)> {
+) -> Vec<RatlineSegment> {
     let mut segs = Vec::new();
     for (net_idx, net) in nets.iter().enumerate() {
         match net.pins.as_slice() {
             [] | [_] => {}
             [a, b] => push_ratline_segment(
                 &mut segs,
+                problem,
                 net_idx,
                 a,
                 b,
@@ -195,33 +245,38 @@ fn ratline_tree_segments(
                 let mut in_tree = vec![false; pins.len()];
                 in_tree[0] = true;
                 for _ in 1..pins.len() {
-                    let mut best: Option<(usize, usize, f64)> = None;
+                    let mut best: Option<(usize, usize)> = None;
                     for (ai, _) in pins.iter().enumerate() {
                         if !in_tree[ai] {
                             continue;
                         }
-                        let pa = pin_positions[net_idx][ai];
                         for (bi, _) in pins.iter().enumerate() {
                             if in_tree[bi] {
                                 continue;
                             }
-                            let dist = pa.dist(pin_positions[net_idx][bi]);
-                            let replace = best.is_none_or(|(old_a, old_b, old_dist)| {
-                                dist < old_dist - 1e-9
-                                    || ((dist - old_dist).abs() <= 1e-9
-                                        && (ai, bi) < (old_a, old_b))
+                            let replace = best.is_none_or(|(old_a, old_b)| {
+                                ratline_tree_edge_better(
+                                    problem,
+                                    pins,
+                                    &pin_positions[net_idx],
+                                    ai,
+                                    bi,
+                                    old_a,
+                                    old_b,
+                                )
                             });
                             if replace {
-                                best = Some((ai, bi, dist));
+                                best = Some((ai, bi));
                             }
                         }
                     }
-                    let Some((ai, bi, _)) = best else {
+                    let Some((ai, bi)) = best else {
                         break;
                     };
                     in_tree[bi] = true;
                     push_ratline_segment(
                         &mut segs,
+                        problem,
                         net_idx,
                         &pins[ai],
                         &pins[bi],
@@ -235,8 +290,43 @@ fn ratline_tree_segments(
     segs
 }
 
+fn ratline_tree_edge_better(
+    problem: &PlaceProblem,
+    pins: &[Pin],
+    pin_positions: &[Point2],
+    a: usize,
+    b: usize,
+    old_a: usize,
+    old_b: usize,
+) -> bool {
+    let dist = pin_positions[a].dist(pin_positions[b]);
+    let old_dist = pin_positions[old_a].dist(pin_positions[old_b]);
+    dist < old_dist - 1e-9
+        || ((dist - old_dist).abs() <= 1e-9
+            && ratline_tree_edge_tiebreak(problem, pins, a, b, old_a, old_b))
+}
+
+fn ratline_tree_edge_tiebreak(
+    problem: &PlaceProblem,
+    pins: &[Pin],
+    a: usize,
+    b: usize,
+    old_a: usize,
+    old_b: usize,
+) -> bool {
+    let layer_change = ratline_segment_requires_layer_change(problem, &pins[a], &pins[b]);
+    let old_layer_change =
+        ratline_segment_requires_layer_change(problem, &pins[old_a], &pins[old_b]);
+    if layer_change != old_layer_change {
+        !layer_change
+    } else {
+        (a, b) < (old_a, old_b)
+    }
+}
+
 fn push_ratline_segment(
-    segs: &mut Vec<(usize, usize, usize, geom::Segment)>,
+    segs: &mut Vec<RatlineSegment>,
+    problem: &PlaceProblem,
     net_idx: usize,
     a: &Pin,
     b: &Pin,
@@ -246,7 +336,40 @@ fn push_ratline_segment(
     if a.part == b.part {
         return;
     }
-    segs.push((net_idx, a.part, b.part, geom::Segment::new(a_pos, b_pos)));
+    segs.push(RatlineSegment {
+        net_idx,
+        a_part: a.part,
+        b_part: b.part,
+        layers: ratline_segment_layers(problem, a, b),
+        requires_layer_change: ratline_segment_requires_layer_change(problem, a, b),
+        segment: geom::Segment::new(a_pos, b_pos),
+    });
+}
+
+fn ratline_segment_layers(problem: &PlaceProblem, a: &Pin, b: &Pin) -> Vec<LayerRef> {
+    let mut layers = Vec::new();
+    for pin in [a, b] {
+        for layer in &problem.parts[pin.part].pads[pin.pad].layers {
+            if !layers.iter().any(|existing| existing == layer) {
+                layers.push(layer.clone());
+            }
+        }
+    }
+    layers
+}
+
+fn ratline_segment_requires_layer_change(problem: &PlaceProblem, a: &Pin, b: &Pin) -> bool {
+    let a_layers = &problem.parts[a.part].pads[a.pad].layers;
+    let b_layers = &problem.parts[b.part].pads[b.pad].layers;
+    !a_layers
+        .iter()
+        .any(|layer| b_layers.iter().any(|other| other == layer))
+}
+
+fn ratline_layers_overlap(a: &RatlineSegment, b: &RatlineSegment) -> bool {
+    a.layers
+        .iter()
+        .any(|layer| b.layers.iter().any(|other| other == layer))
 }
 
 /// The placement cost the SA minimizes (also the [`crate::placement::place_best`]
@@ -325,9 +448,14 @@ pub(crate) fn place_cost(
         }
         cost += SA_WL_W * net_hpwl(problem, rotations, net, pos);
     }
-    cost += SA_CROSS_W * ratline_crossings(problem, rotations, nets, pos) as f64;
+    let pin_positions = ratline_pin_positions(problem, rotations, nets, pos);
+    let ratline_segments = ratline_tree_segments(problem, nets, &pin_positions);
+    cost += SA_CROSS_W * ratline_crossings_from_segments(&ratline_segments) as f64;
     cost += SA_OBSTRUCT_W
-        * ratline_obstruction_pressure(problem, rotations, nets, half, margin, pos) as f64;
+        * ratline_obstruction_pressure_from_segments(problem, half, margin, pos, &ratline_segments)
+            as f64;
+    cost +=
+        SA_LAYER_CHANGE_W * ratline_layer_change_pressure_from_segments(&ratline_segments) as f64;
 
     // Decoupling cohesion + connector edge-seek.
     for &(cap, ic) in pairs {
@@ -342,4 +470,262 @@ pub(crate) fn place_cost(
         cost += SA_EDGE_W * dl.min(dr).min(dt).min(db).max(0.0);
     }
     cost
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::placement::geometry::courtyard_margin;
+    use crate::placement::model::{Part, PartPad, Rect};
+    use crate::problem::LayerRef;
+
+    fn part(reference: &str, net: &str) -> Part {
+        part_on(reference, net, vec![LayerRef::top()])
+    }
+
+    fn part_on(reference: &str, net: &str, layers: Vec<LayerRef>) -> Part {
+        Part {
+            reference: reference.to_owned(),
+            courtyard_w: 1.0,
+            courtyard_h: 1.0,
+            pads: vec![PartPad {
+                number: "1".to_owned(),
+                offset: Point2 { x: 0.0, y: 0.0 },
+                width: 0.4,
+                height: 0.4,
+                layers,
+                net: Some(net.to_owned()),
+            }],
+            locked: None,
+        }
+    }
+
+    #[test]
+    fn shared_ratline_segments_match_public_pressure_proxies() {
+        let problem = PlaceProblem {
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 30.0,
+                min_y: 0.0,
+                max_y: 30.0,
+            },
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts: vec![
+                part("A", "N1"),
+                part("B", "N1"),
+                part("C", "N2"),
+                part("D", "N2"),
+                part("X", "FLOAT"),
+            ],
+            outline: None,
+        };
+        let nets = crate::placement::model::derive_nets(&problem);
+        let rotations = vec![0.0; problem.parts.len()];
+        let half = vec![(0.5, 0.5); problem.parts.len()];
+        let margin = courtyard_margin(problem.clearance);
+        let pos = vec![
+            Point2 { x: 5.0, y: 5.0 },
+            Point2 { x: 25.0, y: 25.0 },
+            Point2 { x: 5.0, y: 25.0 },
+            Point2 { x: 25.0, y: 5.0 },
+            Point2 { x: 15.0, y: 15.0 },
+        ];
+        let pin_positions = ratline_pin_positions(&problem, &rotations, &nets, &pos);
+        let segments = ratline_tree_segments(&problem, &nets, &pin_positions);
+
+        assert_eq!(
+            ratline_crossings_from_segments(&segments),
+            ratline_crossings(&problem, &rotations, &nets, &pos)
+        );
+        assert_eq!(
+            ratline_obstruction_pressure_from_segments(&problem, &half, margin, &pos, &segments),
+            ratline_obstruction_pressure(&problem, &rotations, &nets, &half, margin, &pos)
+        );
+    }
+
+    #[test]
+    fn ratline_crossings_ignore_disjoint_pad_layers() {
+        let problem = PlaceProblem {
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 30.0,
+                min_y: 0.0,
+                max_y: 30.0,
+            },
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts: vec![
+                part_on("A", "TOP", vec![LayerRef::top()]),
+                part_on("B", "TOP", vec![LayerRef::top()]),
+                part_on("C", "BOT", vec![LayerRef::bottom()]),
+                part_on("D", "BOT", vec![LayerRef::bottom()]),
+                part_on("E", "MIXED", vec![LayerRef::top()]),
+                part_on("F", "MIXED", vec![LayerRef::bottom()]),
+            ],
+            outline: None,
+        };
+        let nets = crate::placement::model::derive_nets(&problem);
+        let rotations = vec![0.0; problem.parts.len()];
+        let pos = vec![
+            Point2 { x: 5.0, y: 15.0 },
+            Point2 { x: 25.0, y: 15.0 },
+            Point2 { x: 15.0, y: 5.0 },
+            Point2 { x: 15.0, y: 25.0 },
+            Point2 { x: 5.0, y: 5.0 },
+            Point2 { x: 25.0, y: 25.0 },
+        ];
+
+        assert_eq!(
+            ratline_crossings(&problem, &rotations, &nets, &pos),
+            2,
+            "top/bottom-only crossing should be ignored, while mixed-layer ratline crossings still count"
+        );
+    }
+
+    #[test]
+    fn ratline_layer_change_pressure_counts_disjoint_pad_layers() {
+        let problem = PlaceProblem {
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 30.0,
+                min_y: 0.0,
+                max_y: 30.0,
+            },
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts: vec![
+                part_on("A", "VIA", vec![LayerRef::top()]),
+                part_on("B", "VIA", vec![LayerRef::bottom()]),
+                part_on("C", "SAME", vec![LayerRef::top()]),
+                part_on("D", "SAME", vec![LayerRef::top()]),
+                part_on("E", "THRU", vec![LayerRef::top(), LayerRef::bottom()]),
+                part_on("F", "THRU", vec![LayerRef::bottom()]),
+            ],
+            outline: None,
+        };
+        let nets = crate::placement::model::derive_nets(&problem);
+        let rotations = vec![0.0; problem.parts.len()];
+        let pos = vec![
+            Point2 { x: 5.0, y: 5.0 },
+            Point2 { x: 25.0, y: 5.0 },
+            Point2 { x: 5.0, y: 15.0 },
+            Point2 { x: 25.0, y: 15.0 },
+            Point2 { x: 5.0, y: 25.0 },
+            Point2 { x: 25.0, y: 25.0 },
+        ];
+
+        assert_eq!(
+            ratline_layer_change_pressure(&problem, &rotations, &nets, &pos),
+            1,
+            "only the top-to-bottom SMD pair should require an unavoidable layer change"
+        );
+    }
+
+    #[test]
+    fn multi_pin_ratline_tree_prefers_same_layer_edge_on_distance_tie() {
+        let problem = PlaceProblem {
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 30.0,
+                min_y: 0.0,
+                max_y: 30.0,
+            },
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts: vec![
+                part_on("ROOT", "BUS", vec![LayerRef::top()]),
+                part_on("BOTTOM", "BUS", vec![LayerRef::bottom()]),
+                part_on("TOP", "BUS", vec![LayerRef::top()]),
+            ],
+            outline: None,
+        };
+        let nets = crate::placement::model::derive_nets(&problem);
+        let rotations = vec![0.0; problem.parts.len()];
+        let pos = vec![
+            Point2 { x: 5.0, y: 5.0 },
+            Point2 { x: 15.0, y: 5.0 },
+            Point2 { x: 5.0, y: 15.0 },
+        ];
+        let pin_positions = ratline_pin_positions(&problem, &rotations, &nets, &pos);
+
+        let segments = ratline_tree_segments(&problem, &nets, &pin_positions);
+
+        assert_eq!(
+            segments[0].b_part, 2,
+            "equal-distance BUS tree should first connect the same-layer pad"
+        );
+        assert!(
+            !segments[0].requires_layer_change,
+            "the preferred equal-distance edge should not spend a via"
+        );
+    }
+
+    #[test]
+    fn place_cost_penalizes_layer_change_ratlines() {
+        let same_layer = PlaceProblem {
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 20.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            keepouts: vec![],
+            parts: vec![
+                part_on("A", "N", vec![LayerRef::top()]),
+                part_on("B", "N", vec![LayerRef::top()]),
+            ],
+            outline: None,
+        };
+        let mut split_layer = same_layer.clone();
+        split_layer.parts[1].pads[0].layers = vec![LayerRef::bottom()];
+
+        let rotations = vec![0.0, 0.0];
+        let half = vec![(0.5, 0.5), (0.5, 0.5)];
+        let margin = courtyard_margin(same_layer.clearance);
+        let pos = vec![Point2 { x: 5.0, y: 5.0 }, Point2 { x: 15.0, y: 5.0 }];
+        let same_nets = crate::placement::model::derive_nets(&same_layer);
+        let split_nets = crate::placement::model::derive_nets(&split_layer);
+
+        let same_cost = place_cost(
+            &same_layer,
+            &same_nets,
+            &half,
+            margin,
+            &rotations,
+            &[],
+            &[],
+            &pos,
+        );
+        let split_cost = place_cost(
+            &split_layer,
+            &split_nets,
+            &half,
+            margin,
+            &rotations,
+            &[],
+            &[],
+            &pos,
+        );
+
+        assert!(
+            split_cost > same_cost,
+            "otherwise identical placement should prefer a same-layer route: {same_cost} vs {split_cost}"
+        );
+        assert!(
+            (split_cost - same_cost - SA_LAYER_CHANGE_W).abs() < 1e-9,
+            "layer-change pressure should add the configured soft via penalty"
+        );
+    }
 }

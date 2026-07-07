@@ -33,6 +33,8 @@ use super::score::{
 };
 use super::*;
 
+type BodyAxis = ([f64; 2], [f64; 2]);
+
 /// A schematic placement ENGINE: given the per-problem [`Realizer`] (to build, route, and
 /// score candidate sheets) and the [`PlaceProblem`], write final positions into `items`
 /// and return the [`PlaceResult`] describing them. The only contract is "produce a
@@ -259,8 +261,8 @@ fn bodies_and_ic_rects(
     env: &KicadEnv,
     w: &SchematicWriter,
     items: &[Item],
-) -> (Vec<([f64; 2], [f64; 2])>, Vec<Rect>) {
-    let bodies: Vec<([f64; 2], [f64; 2])> = items
+) -> (Vec<BodyAxis>, Vec<Rect>) {
+    let bodies: Vec<BodyAxis> = items
         .iter()
         .filter(|i| i.geom.pins.len() == 2)
         .filter_map(|it| {
@@ -440,10 +442,7 @@ pub fn raw_metrics(
     let grid_order = grid_order_viol(items, ir);
     let mut by_refdes: BTreeMap<&str, Vec<Point2>> = BTreeMap::new();
     for it in items {
-        by_refdes
-            .entry(&it.refdes)
-            .or_default()
-            .push(Point2::from(it.at));
+        by_refdes.entry(&it.refdes).or_default().push(it.at);
     }
     let sib_spread: f64 = by_refdes
         .values()

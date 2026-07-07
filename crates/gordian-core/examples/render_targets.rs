@@ -1,9 +1,9 @@
 //! Focused iteration harness: render the four target validation fixtures
 //! (compiled + emitted through the floorplan engine with their `*.layout.json`
 //! IR sidecar) to PNGs in `/tmp/renders/` for side-by-side review against
-//! `docs/validation/references/`.
+//! the optional validation corpus.
 //!
-//! Usage: cargo run --release -p agent --example render_targets [name ...]
+//! Usage: cargo run --release -p gordian-core --example render_targets [name ...]
 //! With no args, renders all four targets.
 
 use kicad_cli::KicadCli;
@@ -20,6 +20,11 @@ const TARGETS: &[&str] = &[
 fn main() -> anyhow::Result<()> {
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
     let dir = std::path::Path::new("docs/validation");
+    if !dir.is_dir() {
+        anyhow::bail!(
+            "docs/validation corpus is not present; provide the validation fixtures before running render_targets"
+        );
+    }
     let out_dir = std::path::Path::new("/tmp/renders");
     std::fs::create_dir_all(out_dir)?;
 
@@ -47,7 +52,7 @@ fn render_fixture(
     out: &std::path::Path,
 ) -> anyhow::Result<()> {
     let src = std::fs::read_to_string(yaml_path)?;
-    let provider = SymbolTable::from_env(&env);
+    let provider = SymbolTable::from_env(env);
     let result = circuit_lang::compile(&src, &provider);
     let design = result.design.ok_or_else(|| {
         let errs: Vec<String> = result

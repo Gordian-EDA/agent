@@ -1,0 +1,8 @@
+version: 1
+name: real-libs-smoke
+blocks:
+  main:
+    components:
+      PWR1: {part: power:VCC, pins: {1: 3V3}}
+      PWR2: {part: power:GND, pins: {1: GND}}
+      R1: {part: Device:R, value: 10k, between: [3V3, GND]}

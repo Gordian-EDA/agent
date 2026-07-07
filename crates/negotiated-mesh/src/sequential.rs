@@ -7,14 +7,22 @@
 //! nets see the exact copper chosen by earlier nets instead of only the grid
 //! occupancy produced inside one full-board pass.
 
-use crate::problem::{
-    Capabilities, Connection, FailedNet, LayerRef, Obstacle, Point2, RouteProblem, RouteQuality,
-    RouteResult, RouteSolution, Router, Trace, Via, ViaSpan,
+use crate::copper::copper_obstacles;
+#[cfg(test)]
+use crate::copper::trace_obstacles;
+use crate::heuristics::{
+    connection_crossing_pressures, connection_obstacle_pressure_um,
+    connection_segment_obstacle_pressure_um, connection_span_um,
 };
+use crate::problem::{
+    Capabilities, FailedNet, RouteProblem, RouteQuality, RouteResult, RouteSolution, Router,
+};
+use crate::quality::{keep_route_candidate as keep_candidate, route_quality};
 use crate::router::GridAStarRouter;
 
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "sequential-grid";
+const SEQUENTIAL_ORDER_PORTFOLIO_MAX_CONNECTIONS: usize = 6;
 
 /// Route nets one by one with grid A*, feeding accepted copper back as obstacles.
 #[derive(Debug, Clone, Copy, Default)]
@@ -32,6 +40,11 @@ impl Router for SequentialGridRouter {
             honors_net_widths: true,
             honors_outline: true,
         }
+    }
+
+    fn can_route(&self, problem: &RouteProblem) -> bool {
+        self.capabilities().can_route(problem)
+            && problem.connections.len() <= SEQUENTIAL_ORDER_PORTFOLIO_MAX_CONNECTIONS
     }
 
     fn route(&self, problem: &RouteProblem) -> RouteResult {
@@ -64,14 +77,15 @@ pub fn route_sequential(problem: &RouteProblem) -> RouteResult {
 
 fn route_order(problem: &RouteProblem, order: &[usize]) -> RouteResult {
     let mut best = route_order_once(problem, order);
-    let mut tried = vec![order.to_vec()];
+    let mut current_order = order.to_vec();
+    let mut tried = vec![current_order.clone()];
 
     for _ in 0..2 {
         if best.failed.is_empty() {
             break;
         }
 
-        let retry_order = failed_priority_order(problem, order, &best.failed);
+        let retry_order = failed_priority_order(problem, &current_order, &best.failed);
         if tried.iter().any(|existing| existing == &retry_order) {
             break;
         }
@@ -84,6 +98,7 @@ fn route_order(problem: &RouteProblem, order: &[usize]) -> RouteResult {
             break;
         }
         best = candidate;
+        current_order = retry_order;
     }
 
     best
@@ -120,6 +135,7 @@ fn route_order_once(problem: &RouteProblem, order: &[usize]) -> RouteResult {
         combined.traces.extend(candidate.solution.traces);
         combined.vias.extend(candidate.solution.vias);
         let validation = problem_with_connections(problem, &routed, idx);
+        crate::via_cleanup::normalize_redundant_vias(&validation, &mut combined);
         if !crate::lint::lint(&validation, &combined).is_empty() {
             failed.push(FailedNet {
                 connection: conn.name.clone(),
@@ -163,25 +179,37 @@ fn failed_priority_order(
         }
     }
 
-    promoted.sort_by(|&a, &b| failed_priority_cmp(problem, a, b));
+    let metrics = net_order_metrics(problem);
+    promoted.sort_by(|&a, &b| failed_priority_cmp_with_metrics(problem, &metrics, a, b));
     promoted.extend(rest);
     promoted
 }
 
-fn failed_priority_cmp(problem: &RouteProblem, a: usize, b: usize) -> std::cmp::Ordering {
-    problem.connections[b]
-        .points_to_connect
-        .len()
-        .cmp(&problem.connections[a].points_to_connect.len())
+fn failed_priority_cmp_with_metrics(
+    problem: &RouteProblem,
+    metrics: &[NetOrderMetric],
+    a: usize,
+    b: usize,
+) -> std::cmp::Ordering {
+    metrics[b]
+        .pin_count
+        .cmp(&metrics[a].pin_count)
         .then_with(|| {
-            connection_obstacle_pressure_um(problem, &problem.connections[b]).cmp(
-                &connection_obstacle_pressure_um(problem, &problem.connections[a]),
-            )
+            metrics[b]
+                .segment_obstacle_pressure_um
+                .cmp(&metrics[a].segment_obstacle_pressure_um)
         })
         .then_with(|| {
-            connection_span_um(&problem.connections[b])
-                .cmp(&connection_span_um(&problem.connections[a]))
+            metrics[b]
+                .obstacle_pressure_um
+                .cmp(&metrics[a].obstacle_pressure_um)
         })
+        .then_with(|| {
+            metrics[b]
+                .crossing_pressure
+                .cmp(&metrics[a].crossing_pressure)
+        })
+        .then_with(|| metrics[b].span_um.cmp(&metrics[a].span_um))
         .then_with(|| {
             problem.connections[a]
                 .name
@@ -191,9 +219,13 @@ fn failed_priority_cmp(problem: &RouteProblem, a: usize, b: usize) -> std::cmp::
 
 fn net_order_portfolio(problem: &RouteProblem) -> Vec<Vec<usize>> {
     let base: Vec<usize> = (0..problem.connections.len()).collect();
-    let metrics = net_order_metrics(problem);
     let mut orders = Vec::new();
     push_order(&mut orders, base.clone());
+    if base.len() > SEQUENTIAL_ORDER_PORTFOLIO_MAX_CONNECTIONS {
+        return orders;
+    }
+
+    let metrics = net_order_metrics(problem);
 
     let mut short_first = base.clone();
     short_first.sort_by(|&a, &b| {
@@ -222,6 +254,11 @@ fn net_order_portfolio(problem: &RouteProblem) -> Vec<Vec<usize>> {
             .cmp(&metrics[a].pin_count)
             .then_with(|| {
                 metrics[b]
+                    .segment_obstacle_pressure_um
+                    .cmp(&metrics[a].segment_obstacle_pressure_um)
+            })
+            .then_with(|| {
+                metrics[b]
                     .obstacle_pressure_um
                     .cmp(&metrics[a].obstacle_pressure_um)
             })
@@ -248,11 +285,35 @@ fn net_order_portfolio(problem: &RouteProblem) -> Vec<Vec<usize>> {
     });
     push_order(&mut orders, crowded_first);
 
+    let mut segment_crowded_first = base.clone();
+    segment_crowded_first.sort_by(|&a, &b| {
+        metrics[b]
+            .segment_obstacle_pressure_um
+            .cmp(&metrics[a].segment_obstacle_pressure_um)
+            .then_with(|| {
+                metrics[b]
+                    .obstacle_pressure_um
+                    .cmp(&metrics[a].obstacle_pressure_um)
+            })
+            .then_with(|| metrics[b].span_um.cmp(&metrics[a].span_um))
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            })
+    });
+    push_order(&mut orders, segment_crowded_first);
+
     let mut crossing_first = base;
     crossing_first.sort_by(|&a, &b| {
         metrics[b]
             .crossing_pressure
             .cmp(&metrics[a].crossing_pressure)
+            .then_with(|| {
+                metrics[b]
+                    .segment_obstacle_pressure_um
+                    .cmp(&metrics[a].segment_obstacle_pressure_um)
+            })
             .then_with(|| {
                 metrics[b]
                     .obstacle_pressure_um
@@ -274,11 +335,13 @@ fn net_order_portfolio(problem: &RouteProblem) -> Vec<Vec<usize>> {
 struct NetOrderMetric {
     pin_count: usize,
     span_um: u64,
+    segment_obstacle_pressure_um: u64,
     obstacle_pressure_um: u64,
     crossing_pressure: usize,
 }
 
 fn net_order_metrics(problem: &RouteProblem) -> Vec<NetOrderMetric> {
+    let crossing_pressures = connection_crossing_pressures(problem);
     problem
         .connections
         .iter()
@@ -286,8 +349,9 @@ fn net_order_metrics(problem: &RouteProblem) -> Vec<NetOrderMetric> {
         .map(|(idx, conn)| NetOrderMetric {
             pin_count: conn.points_to_connect.len(),
             span_um: connection_span_um(conn),
+            segment_obstacle_pressure_um: connection_segment_obstacle_pressure_um(problem, conn),
             obstacle_pressure_um: connection_obstacle_pressure_um(problem, conn),
-            crossing_pressure: connection_crossing_pressure(problem, idx),
+            crossing_pressure: crossing_pressures[idx],
         })
         .collect()
 }
@@ -329,204 +393,11 @@ fn problem_with_connections(
     out
 }
 
-fn copper_obstacles(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Obstacle> {
-    let mut obstacles = Vec::new();
-    for trace in &solution.traces {
-        obstacles.extend(trace_obstacles(problem, trace));
-    }
-    for via in &solution.vias {
-        obstacles.push(via_obstacle(problem, via));
-    }
-    obstacles
-}
-
-fn trace_obstacles(problem: &RouteProblem, trace: &Trace) -> Vec<Obstacle> {
-    let pitch = crate::grid::grid_pitch(problem);
-    trace
-        .path
-        .windows(2)
-        .flat_map(|segment| {
-            let a = segment[0];
-            let b = segment[1];
-            let len = a.dist(b);
-            if len <= 1e-9 {
-                return Vec::new();
-            }
-            let steps = (len / pitch).ceil().max(1.0) as usize;
-            let mut out = Vec::with_capacity(steps + 1);
-            for step in 0..=steps {
-                let t = step as f64 / steps as f64;
-                out.push(Obstacle {
-                    kind: "route-trace".to_owned(),
-                    layers: vec![trace.layer.clone()],
-                    center: Point2 {
-                        x: a.x + (b.x - a.x) * t,
-                        y: a.y + (b.y - a.y) * t,
-                    },
-                    width: trace.width,
-                    height: trace.width,
-                    connected_to: vec![trace.connection.clone()],
-                });
-            }
-            out
-        })
-        .collect()
-}
-
-fn via_obstacle(problem: &RouteProblem, via: &Via) -> Obstacle {
-    Obstacle {
-        kind: "route-via".to_owned(),
-        layers: via_layers(problem, &via.span),
-        center: via.at,
-        width: via.diameter,
-        height: via.diameter,
-        connected_to: vec![via.connection.clone()],
-    }
-}
-
-fn via_layers(problem: &RouteProblem, span: &ViaSpan) -> Vec<LayerRef> {
-    match span {
-        ViaSpan::Through => (0..problem.layer_count)
-            .map(|idx| layer_ref_from_index(idx, problem.layer_count))
-            .collect(),
-        ViaSpan::Partial { from, to, .. } => {
-            let lo = (*from).min(*to);
-            let hi = (*from).max(*to).min(problem.layer_count.saturating_sub(1));
-            (lo..=hi)
-                .map(|idx| layer_ref_from_index(idx, problem.layer_count))
-                .collect()
-        }
-    }
-}
-
-fn layer_ref_from_index(idx: u32, layer_count: u32) -> LayerRef {
-    if idx == 0 {
-        LayerRef::top()
-    } else if idx + 1 == layer_count {
-        LayerRef::bottom()
-    } else {
-        LayerRef(format!("inner{idx}"))
-    }
-}
-
-fn connection_span_um(conn: &Connection) -> u64 {
-    let Some(first) = conn.points_to_connect.first() else {
-        return 0;
-    };
-    let (mut min_x, mut max_x, mut min_y, mut max_y) = (first.x, first.x, first.y, first.y);
-    for pt in &conn.points_to_connect {
-        min_x = min_x.min(pt.x);
-        max_x = max_x.max(pt.x);
-        min_y = min_y.min(pt.y);
-        max_y = max_y.max(pt.y);
-    }
-    (((max_x - min_x) + (max_y - min_y)) * 1000.0).round() as u64
-}
-
-fn connection_obstacle_pressure_um(problem: &RouteProblem, conn: &Connection) -> u64 {
-    let Some(first) = conn.points_to_connect.first() else {
-        return 0;
-    };
-    let (mut min_x, mut max_x, mut min_y, mut max_y) = (first.x, first.x, first.y, first.y);
-    for pt in &conn.points_to_connect {
-        min_x = min_x.min(pt.x);
-        max_x = max_x.max(pt.x);
-        min_y = min_y.min(pt.y);
-        max_y = max_y.max(pt.y);
-    }
-    let expand = problem.clearance + problem.net_width(&conn.name) / 2.0;
-    min_x -= expand;
-    max_x += expand;
-    min_y -= expand;
-    max_y += expand;
-
-    let mut pressure = 0;
-    for obstacle in &problem.obstacles {
-        if obstacle.connected_to.iter().any(|net| net == &conn.name) {
-            continue;
-        }
-        if !conn
-            .points_to_connect
-            .iter()
-            .any(|pt| obstacle.layers.iter().any(|layer| layer == &pt.layer))
-        {
-            continue;
-        }
-        let ob_min_x = obstacle.center.x - obstacle.width / 2.0 - expand;
-        let ob_max_x = obstacle.center.x + obstacle.width / 2.0 + expand;
-        let ob_min_y = obstacle.center.y - obstacle.height / 2.0 - expand;
-        let ob_max_y = obstacle.center.y + obstacle.height / 2.0 + expand;
-        let overlap_x = max_x.min(ob_max_x) - min_x.max(ob_min_x);
-        let overlap_y = max_y.min(ob_max_y) - min_y.max(ob_min_y);
-        if overlap_x > 0.0 && overlap_y > 0.0 {
-            pressure += 1_000_000 + ((overlap_x + overlap_y) * 1000.0).round() as u64;
-        }
-    }
-    pressure
-}
-
-fn connection_crossing_pressure(problem: &RouteProblem, idx: usize) -> usize {
-    let Some(conn) = problem.connections.get(idx) else {
-        return 0;
-    };
-    let Some((a, b)) = two_pin_points(conn) else {
-        return 0;
-    };
-    problem
-        .connections
-        .iter()
-        .enumerate()
-        .filter(|(other_idx, other)| *other_idx != idx && two_pin_points(other).is_some())
-        .filter_map(|(_, other)| two_pin_points(other))
-        .filter(|&(c, d)| segments_cross(a, b, c, d))
-        .count()
-}
-
-fn two_pin_points(conn: &Connection) -> Option<(Point2, Point2)> {
-    match conn.points_to_connect.as_slice() {
-        [a, b] => Some((a.point(), b.point())),
-        _ => None,
-    }
-}
-
-fn segments_cross(a: Point2, b: Point2, c: Point2, d: Point2) -> bool {
-    let orient = |p: Point2, q: Point2, r: Point2| {
-        let v = (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
-        if v.abs() < geom::EPS {
-            0
-        } else if v > 0.0 {
-            1
-        } else {
-            -1
-        }
-    };
-    orient(a, b, c) * orient(a, b, d) < 0 && orient(c, d, a) * orient(c, d, b) < 0
-}
-
-fn route_quality(problem: &RouteProblem, result: &RouteResult) -> RouteQuality {
-    RouteQuality::of(
-        problem,
-        result,
-        crate::router::geometry_violations(problem, &result.solution),
-    )
-}
-
-fn keep_candidate(incumbent: &RouteQuality, challenger: &RouteQuality) -> bool {
-    if incumbent.faults() != challenger.faults() {
-        incumbent.faults() < challenger.faults()
-    } else if incumbent.failed_nets != challenger.failed_nets {
-        incumbent.failed_nets < challenger.failed_nets
-    } else if incumbent.via_count != challenger.via_count {
-        incumbent.via_count < challenger.via_count
-    } else {
-        incumbent.wirelength <= challenger.wirelength
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::problem::{Rect, RoutePoint};
+    use crate::heuristics::connection_crossing_pressure;
+    use crate::problem::{Connection, LayerRef, Obstacle, Point2, Rect, RoutePoint, Trace};
 
     fn conn(name: &str, pts: &[(f64, f64, &str)]) -> Connection {
         Connection {
@@ -596,6 +467,51 @@ mod tests {
     }
 
     #[test]
+    fn net_order_portfolio_bounds_large_boards_to_base_order() {
+        let mut p = base();
+        p.connections = (0..=SEQUENTIAL_ORDER_PORTFOLIO_MAX_CONNECTIONS)
+            .map(|idx| {
+                conn(
+                    &format!("N{idx}"),
+                    &[
+                        (1.0, 1.0 + idx as f64, "top"),
+                        (10.0, 1.0 + idx as f64, "top"),
+                    ],
+                )
+            })
+            .collect();
+
+        let orders = net_order_portfolio(&p);
+
+        assert_eq!(
+            orders,
+            vec![(0..=SEQUENTIAL_ORDER_PORTFOLIO_MAX_CONNECTIONS).collect::<Vec<_>>()],
+            "large boards should not pay the full sequential ordering portfolio before primary routing"
+        );
+    }
+
+    #[test]
+    fn sequential_router_declines_large_boards() {
+        let mut p = base();
+        p.connections = (0..=SEQUENTIAL_ORDER_PORTFOLIO_MAX_CONNECTIONS)
+            .map(|idx| {
+                conn(
+                    &format!("N{idx}"),
+                    &[
+                        (1.0, 1.0 + idx as f64, "top"),
+                        (10.0, 1.0 + idx as f64, "top"),
+                    ],
+                )
+            })
+            .collect();
+
+        assert!(
+            !SequentialGridRouter.can_route(&p),
+            "large boards should proceed to the primary/fallback routers instead of the contextual sequential portfolio"
+        );
+    }
+
+    #[test]
     fn failed_priority_order_promotes_failed_nets_by_routing_impact() {
         let mut p = base();
         p.connections = vec![
@@ -635,6 +551,84 @@ mod tests {
     }
 
     #[test]
+    fn failed_priority_order_uses_crossing_pressure_after_obstacle_pressure() {
+        let mut p = base();
+        p.bounds.max_y = 20.0;
+        p.connections = vec![
+            conn("OPEN", &[(1.0, 1.0, "top"), (4.0, 1.0, "top")]),
+            conn("CROSS_A", &[(2.0, 10.0, "top"), (18.0, 10.0, "top")]),
+            conn("CROSS_B", &[(10.0, 2.0, "top"), (10.0, 18.0, "top")]),
+            conn("TAIL", &[(1.0, 18.0, "top"), (4.0, 18.0, "top")]),
+        ];
+        let failed = vec![
+            FailedNet {
+                connection: "OPEN".to_owned(),
+                reason: "blocked".to_owned(),
+            },
+            FailedNet {
+                connection: "CROSS_A".to_owned(),
+                reason: "blocked".to_owned(),
+            },
+        ];
+
+        let retry = failed_priority_order(&p, &[0, 1, 2, 3], &failed);
+
+        assert_eq!(
+            &retry[..2],
+            &[1, 0],
+            "crossing failed nets should retry before otherwise equal open failed nets"
+        );
+        assert_eq!(&retry[2..], &[2, 3]);
+    }
+
+    #[test]
+    fn failed_priority_order_uses_segment_pressure_before_bbox_pressure() {
+        let mut p = base();
+        p.connections = vec![
+            conn("BBOX_ONLY", &[(1.0, 1.0, "top"), (9.0, 9.0, "top")]),
+            conn("SEGMENT_BLOCKED", &[(1.0, 1.0, "top"), (9.0, 1.0, "top")]),
+            conn("TAIL", &[(1.0, 11.0, "top"), (4.0, 11.0, "top")]),
+        ];
+        p.obstacles = vec![
+            Obstacle {
+                kind: "rect".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: Point2 { x: 8.0, y: 2.0 },
+                width: 0.5,
+                height: 0.5,
+                connected_to: vec![],
+            },
+            Obstacle {
+                kind: "rect".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: Point2 { x: 5.0, y: 1.0 },
+                width: 0.5,
+                height: 0.5,
+                connected_to: vec![],
+            },
+        ];
+        let failed = vec![
+            FailedNet {
+                connection: "BBOX_ONLY".to_owned(),
+                reason: "blocked".to_owned(),
+            },
+            FailedNet {
+                connection: "SEGMENT_BLOCKED".to_owned(),
+                reason: "blocked".to_owned(),
+            },
+        ];
+
+        let retry = failed_priority_order(&p, &[0, 1, 2], &failed);
+
+        assert_eq!(
+            &retry[..2],
+            &[1, 0],
+            "failed retry should prioritize actual segment-corridor blockage before bbox-only pressure"
+        );
+        assert_eq!(&retry[2..], &[2]);
+    }
+
+    #[test]
     fn net_order_portfolio_includes_crossing_pressure_order() {
         let mut p = base();
         p.bounds.max_y = 20.0;
@@ -653,6 +647,44 @@ mod tests {
         );
         assert_eq!(connection_crossing_pressure(&p, 0), 0);
         assert_eq!(connection_crossing_pressure(&p, 1), 1);
+    }
+
+    #[test]
+    fn net_order_portfolio_includes_segment_obstacle_pressure_order() {
+        let mut p = base();
+        p.connections = vec![
+            conn("BBOX_ONLY", &[(1.0, 1.0, "top"), (9.0, 9.0, "top")]),
+            conn("SEGMENT_BLOCKED", &[(1.0, 1.0, "top"), (9.0, 1.0, "top")]),
+            conn("TAIL", &[(1.0, 11.0, "top"), (4.0, 11.0, "top")]),
+        ];
+        p.obstacles = vec![
+            Obstacle {
+                kind: "rect".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: Point2 { x: 8.0, y: 2.0 },
+                width: 0.5,
+                height: 0.5,
+                connected_to: vec![],
+            },
+            Obstacle {
+                kind: "rect".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: Point2 { x: 5.0, y: 1.0 },
+                width: 0.5,
+                height: 0.5,
+                connected_to: vec![],
+            },
+        ];
+        let metrics = net_order_metrics(&p);
+        let orders = net_order_portfolio(&p);
+
+        assert_eq!(metrics[0].segment_obstacle_pressure_um, 0);
+        assert!(metrics[0].obstacle_pressure_um > 0);
+        assert!(metrics[1].segment_obstacle_pressure_um > 0);
+        assert!(
+            orders.iter().any(|order| order == &[1, 0, 2]),
+            "sequential portfolio should include the segment-obstacle-pressure-first order: {orders:?}"
+        );
     }
 
     #[test]
@@ -677,6 +709,10 @@ mod tests {
 
         assert_eq!(metrics[1].pin_count, 2);
         assert_eq!(metrics[1].span_um, connection_span_um(&p.connections[1]));
+        assert_eq!(
+            metrics[1].segment_obstacle_pressure_um,
+            connection_segment_obstacle_pressure_um(&p, &p.connections[1])
+        );
         assert_eq!(
             metrics[1].obstacle_pressure_um,
             connection_obstacle_pressure_um(&p, &p.connections[1])

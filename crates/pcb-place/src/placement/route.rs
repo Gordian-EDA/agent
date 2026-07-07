@@ -13,16 +13,16 @@ use super::anneal::anneal_placement;
 use super::cost::{compute_hpwl_with_rotations, place_cost};
 use super::force::{force_layout, snap_caps_to_anchor_ring};
 use super::geometry::{
-    PLACEMENT_GRID, courtyard_margin, rotated_copper_bbox, rotated_courtyard_half,
+    PLACEMENT_GRID, courtyard_margin, edge_target, rotated_copper_bbox, rotated_courtyard_half,
 };
 use super::hints::{apply_edge_lock, apply_grid_hints, unified_fanout_place};
 use super::legalize::{initial_grid, is_legal, legalize};
 use super::model::{
-    Pin, PlaceProblem, PlaceReport, PlaceResult, Placement, PlacementHints, derive_nets,
+    Edge, Pin, PlaceProblem, PlaceReport, PlaceResult, Placement, PlacementHints, derive_nets,
 };
 use super::pairs::decoupling_pairs;
 use crate::problem::place::{PlacementRankKey, Placer, RoutabilityOracle, RouteRanker};
-use crate::problem::{Point2, Rect, RouteProblem, Router, failed_pad_weight};
+use crate::problem::{LayerRef, Point2, Rect, RouteProblem, Router, failed_pad_weight};
 
 /// [`to_route_problem`] now lives in the kernel ([`pcb_model::place`]) so a
 /// third-party placer can build a [`RouteProblem`] from its own placement without
@@ -144,6 +144,8 @@ pub struct GridAstarRanker;
 
 const FULL_GRID_RANKER_FALLBACK_MAX_CONNECTIONS: usize = 4;
 const FULL_GRID_RANKER_FALLBACK_MAX_TERMINALS: usize = 12;
+const FAULTY_FULL_GRID_RANKER_FALLBACK_MAX_CONNECTIONS: usize = 6;
+const FAULTY_FULL_GRID_RANKER_FALLBACK_MAX_TERMINALS: usize = 18;
 
 impl RouteRanker for GridAstarRanker {
     /// Route with the fast naive router, count failed-pad weight + geometry DRC
@@ -157,18 +159,18 @@ impl RouteRanker for GridAstarRanker {
     /// Uses the ORTHOGONAL route as the first-pass stable proxy: it keeps the common
     /// clean-board placement choice invariant to the router's 8-way diagonal default.
     /// Within that orthogonal family it mirrors the grid router's strict/lenient
-    /// fallback. If the orthogonal proxy still leaves faults on a small local route
-    /// problem, the ranker pays for the full grid portfolio and keeps it when it
-    /// proves strictly better; full-board placement-oracle candidates stay on the
-    /// fast proxy.
+    /// fallback. If the orthogonal proxy still leaves faults, or routes a small
+    /// local problem cleanly only by spending vias, the ranker pays for the full
+    /// grid portfolio and keeps it when it proves strictly better; full-board
+    /// placement-oracle candidates stay on the fast proxy.
     fn faults(&self, rp: &RouteProblem) -> usize {
         self.rank_key(rp).0
     }
 
-    fn rank_key(&self, rp: &RouteProblem) -> (usize, usize, usize, u64) {
+    fn rank_key(&self, rp: &RouteProblem) -> (usize, usize, usize, usize, u64) {
         let routed = crate::router::route_orthogonal(rp);
         let strict_key = route_rank_key(rp, &routed);
-        if strict_key.0 == 0 {
+        if route_rank_key_clean_via_free(strict_key) {
             return strict_key;
         }
 
@@ -179,7 +181,7 @@ impl RouteRanker for GridAstarRanker {
         } else {
             strict_key
         };
-        if orthogonal_key.0 == 0 {
+        if route_rank_key_clean_via_free(orthogonal_key) {
             return orthogonal_key;
         }
 
@@ -194,7 +196,7 @@ impl RouteRanker for GridAstarRanker {
 pub(crate) fn route_rank_key(
     rp: &RouteProblem,
     routed: &crate::problem::RouteResult,
-) -> (usize, usize, usize, u64) {
+) -> (usize, usize, usize, usize, u64) {
     let geom = crate::lint::lint(rp, &routed.solution)
         .iter()
         .filter(|v| !matches!(v, crate::lint::DrcViolation::Connectivity { .. }))
@@ -202,6 +204,7 @@ pub(crate) fn route_rank_key(
     let metrics = routed.solution.metrics();
     (
         failed_pad_weight(rp, &routed.failed) + geom,
+        geom,
         routed.failed.len(),
         metrics.via_count,
         (metrics.wirelength * 1000.0).round() as u64,
@@ -209,21 +212,25 @@ pub(crate) fn route_rank_key(
 }
 
 pub(crate) fn route_rank_key_better(
-    candidate: (usize, usize, usize, u64),
-    incumbent: (usize, usize, usize, u64),
+    candidate: (usize, usize, usize, usize, u64),
+    incumbent: (usize, usize, usize, usize, u64),
 ) -> bool {
     candidate < incumbent
 }
 
+pub(crate) fn route_rank_key_clean_via_free(key: (usize, usize, usize, usize, u64)) -> bool {
+    key.0 == 0 && key.3 == 0
+}
+
 pub(crate) fn rank_key_with_full_grid_fallback<F>(
-    orthogonal_key: (usize, usize, usize, u64),
+    orthogonal_key: (usize, usize, usize, usize, u64),
     should_try_full_grid: bool,
     full_grid_key: F,
-) -> (usize, usize, usize, u64)
+) -> (usize, usize, usize, usize, u64)
 where
-    F: FnOnce() -> (usize, usize, usize, u64),
+    F: FnOnce() -> (usize, usize, usize, usize, u64),
 {
-    if orthogonal_key.0 == 0 || !should_try_full_grid {
+    if !should_try_full_grid || route_rank_key_clean_via_free(orthogonal_key) {
         return orthogonal_key;
     }
     let full_grid_key = full_grid_key();
@@ -234,23 +241,36 @@ where
     }
 }
 
-fn should_try_full_grid_ranker_fallback(
+pub(crate) fn should_try_full_grid_ranker_fallback(
     rp: &RouteProblem,
-    orthogonal_key: (usize, usize, usize, u64),
+    orthogonal_key: (usize, usize, usize, usize, u64),
 ) -> bool {
-    orthogonal_key.0 > 0
-        && rp.connections.len() <= FULL_GRID_RANKER_FALLBACK_MAX_CONNECTIONS
-        && rp
-            .connections
-            .iter()
-            .map(|conn| conn.points_to_connect.len())
-            .sum::<usize>()
-            <= FULL_GRID_RANKER_FALLBACK_MAX_TERMINALS
+    if route_rank_key_clean_via_free(orthogonal_key) {
+        return false;
+    }
+    let connection_count = rp.connections.len();
+    let terminal_count = rp
+        .connections
+        .iter()
+        .map(|conn| conn.points_to_connect.len())
+        .sum::<usize>();
+    let (max_connections, max_terminals) = if orthogonal_key.0 > 0 {
+        (
+            FAULTY_FULL_GRID_RANKER_FALLBACK_MAX_CONNECTIONS,
+            FAULTY_FULL_GRID_RANKER_FALLBACK_MAX_TERMINALS,
+        )
+    } else {
+        (
+            FULL_GRID_RANKER_FALLBACK_MAX_CONNECTIONS,
+            FULL_GRID_RANKER_FALLBACK_MAX_TERMINALS,
+        )
+    };
+    connection_count <= max_connections && terminal_count <= max_terminals
 }
 
 /// Build the routability oracle for THIS board: the baseline [`LegalizingPlacer`]
 /// (`placers[0]`, the exact-tie winner) plus the SA refine and, when they apply, the
-/// spring-idiom variants. The candidate set + order match the legacy `place_best`
+/// spring-idiom variants. The candidate set + order match the previous `place_best`
 /// portfolio exactly, so the oracle's selection is byte-identical.
 fn board_oracle(problem: &PlaceProblem, hints: &PlacementHints) -> RoutabilityOracle {
     let has_decouple = !decoupling_pairs(problem).is_empty();
@@ -403,7 +423,8 @@ impl Placer for FanoutPlacer {
 fn place_rank_key(problem: &PlaceProblem, result: &PlaceResult) -> PlacementRankKey {
     if !result.legal {
         return (
-            (usize::MAX, usize::MAX, usize::MAX, u64::MAX),
+            (usize::MAX, usize::MAX, usize::MAX, usize::MAX, u64::MAX),
+            u64::MAX,
             u64::MAX,
             u64::MAX,
         );
@@ -411,6 +432,7 @@ fn place_rank_key(problem: &PlaceProblem, result: &PlaceResult) -> PlacementRank
     let rp = to_route_problem(problem, &result.placements);
     (
         GridAstarRanker.rank_key(&rp),
+        0,
         (result.report.layout_cost * 1000.0) as u64,
         (result.report.hpwl * 1000.0) as u64,
     )
@@ -444,7 +466,7 @@ fn debug_overlaps(problem: &PlaceProblem, result: &PlaceResult) {
     let mut pos = std::collections::BTreeMap::new();
     let mut rot = std::collections::BTreeMap::new();
     for p in &result.placements {
-        pos.insert(p.reference.as_str(), p.at.clone());
+        pos.insert(p.reference.as_str(), p.at);
         rot.insert(p.reference.as_str(), p.rotation);
     }
     let mut printed = 0usize;
@@ -531,7 +553,7 @@ fn seat_corner_seek_parts(problem: &PlaceProblem, hints: &PlacementHints, best: 
         .zip(&rots)
         .map(|(p, &r)| rotated_copper_bbox(p, r))
         .collect();
-    let mut pos: Vec<Point2> = best.placements.iter().map(|p| p.at.clone()).collect();
+    let mut pos: Vec<Point2> = best.placements.iter().map(|p| p.at).collect();
     let b = &problem.bounds;
     let corners = [
         (b.min_x, b.min_y),
@@ -558,7 +580,7 @@ fn seat_corner_seek_parts(problem: &PlaceProblem, hints: &PlacementHints, best: 
         let mut order: Vec<usize> = (0..4).collect();
         let d = |c: (f64, f64)| (pos[i].x - c.0).powi(2) + (pos[i].y - c.1).powi(2);
         order.sort_by(|&a, &c| d(corners[a]).partial_cmp(&d(corners[c])).unwrap());
-        let saved = pos[i].clone();
+        let saved = pos[i];
         for &ci in &order {
             if used[ci] {
                 continue;
@@ -568,11 +590,11 @@ fn seat_corner_seek_parts(problem: &PlaceProblem, hints: &PlacementHints, best: 
                 used[ci] = true;
                 break;
             }
-            pos[i] = saved.clone();
+            pos[i] = saved;
         }
     }
     for (p, np) in best.placements.iter_mut().zip(&pos) {
-        p.at = np.clone();
+        p.at = *np;
     }
 }
 
@@ -637,7 +659,7 @@ pub(crate) fn place_variant(
     // Locked parts override with their pinned position immediately.
     for (i, part) in problem.parts.iter().enumerate() {
         if let Some(l) = &part.locked {
-            pos[i] = l.at.clone();
+            pos[i] = l.at;
         }
     }
 
@@ -717,7 +739,7 @@ pub(crate) fn place_variant(
     let placements: Vec<Placement> = (0..n)
         .map(|i| Placement {
             reference: problem.parts[i].reference.clone(),
-            at: pos[i].clone(),
+            at: pos[i],
             rotation: rotations[i],
         })
         .collect();
@@ -773,44 +795,26 @@ pub(crate) fn polish_positions(
 
     for _ in 0..4 {
         let mut improved = false;
-        for i in 0..problem.parts.len() {
-            if problem.parts[i].locked.is_some() {
-                continue;
-            }
-            let old = pos[i];
-            let mut best = old;
-            let mut best_cost = cost;
-            let mut candidates: Vec<Point2> = moves
-                .iter()
-                .map(|&(dx, dy)| Point2 {
-                    x: old.x + dx,
-                    y: old.y + dy,
-                })
-                .collect();
-            candidates.extend(net_centroid_position_candidates(
-                problem, nets, rotations, pos, i,
-            ));
-            candidates.extend(ratline_crossing_position_candidates(
-                problem, nets, rotations, pos, i,
-            ));
-            candidates.extend(ratline_obstruction_position_candidates(
-                problem, nets, rotations, half, margin, pos, i,
-            ));
-            for candidate in unique_position_candidates(problem, half[i], old, candidates) {
-                pos[i] = candidate;
-                if !is_legal(problem, half, copper_bbox, margin, pos) {
-                    continue;
-                }
-                let next_cost =
-                    place_cost(problem, nets, half, margin, rotations, pairs, edge_idx, pos);
-                if next_cost + 1e-9 < best_cost {
-                    best_cost = next_cost;
-                    best = candidate;
-                }
-            }
-            pos[i] = best;
-            if best_cost + 1e-9 < cost {
-                cost = best_cost;
+        let baseline_order: Vec<usize> = (0..problem.parts.len())
+            .filter(|&idx| problem.parts[idx].locked.is_none())
+            .collect();
+        let pressure_order =
+            position_polish_part_order(problem, nets, rotations, half, margin, pos);
+        for order in [baseline_order, pressure_order] {
+            if polish_positions_in_order(
+                problem,
+                nets,
+                margin,
+                pairs,
+                edge_idx,
+                rotations,
+                half,
+                copper_bbox,
+                pos,
+                &moves,
+                &order,
+                &mut cost,
+            ) {
                 improved = true;
             }
         }
@@ -818,6 +822,172 @@ pub(crate) fn polish_positions(
             break;
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn polish_positions_in_order(
+    problem: &PlaceProblem,
+    nets: &[super::model::LogicalNet],
+    margin: f64,
+    pairs: &[(usize, usize)],
+    edge_idx: &[usize],
+    rotations: &[f64],
+    half: &[(f64, f64)],
+    copper_bbox: &[Rect],
+    pos: &mut [Point2],
+    moves: &[(f64, f64)],
+    order: &[usize],
+    cost: &mut f64,
+) -> bool {
+    let mut improved = false;
+    for &i in order {
+        let old = pos[i];
+        let mut best = old;
+        let mut best_cost = *cost;
+        let ratline_edges = ratline_tree_edge_list(problem, nets, rotations, pos);
+        let mut candidates: Vec<Point2> = moves
+            .iter()
+            .map(|&(dx, dy)| Point2 {
+                x: old.x + dx,
+                y: old.y + dy,
+            })
+            .collect();
+        candidates.extend(net_centroid_position_candidates(
+            problem, nets, rotations, pos, i,
+        ));
+        candidates.extend(ratline_crossing_position_candidates_from_edges(
+            problem,
+            rotations,
+            i,
+            &ratline_edges,
+        ));
+        candidates.extend(ratline_obstruction_position_candidates_from_edges(
+            problem,
+            rotations,
+            half,
+            margin,
+            pos,
+            i,
+            &ratline_edges,
+        ));
+        candidates.extend(obstructing_part_position_candidates_from_edges(
+            problem,
+            half,
+            margin,
+            pos,
+            i,
+            &ratline_edges,
+        ));
+        candidates.extend(edge_seek_position_candidates(
+            problem, half, pos, i, edge_idx,
+        ));
+        for candidate in unique_position_candidates(problem, half[i], old, candidates) {
+            pos[i] = candidate;
+            if !is_legal(problem, half, copper_bbox, margin, pos) {
+                continue;
+            }
+            let next_cost =
+                place_cost(problem, nets, half, margin, rotations, pairs, edge_idx, pos);
+            if next_cost + 1e-9 < best_cost {
+                best_cost = next_cost;
+                best = candidate;
+            }
+        }
+        pos[i] = best;
+        if best_cost + 1e-9 < *cost {
+            *cost = best_cost;
+            improved = true;
+        }
+    }
+    improved
+}
+
+pub(crate) fn position_polish_part_order(
+    problem: &PlaceProblem,
+    nets: &[super::model::LogicalNet],
+    rotations: &[f64],
+    half: &[(f64, f64)],
+    margin: f64,
+    pos: &[Point2],
+) -> Vec<usize> {
+    let mut metrics = vec![PositionPolishMetric::default(); problem.parts.len()];
+    for net in nets {
+        for i in 0..net.pins.len() {
+            for j in i + 1..net.pins.len() {
+                metrics[net.pins[i].part].connected_degree += 1;
+                metrics[net.pins[j].part].connected_degree += 1;
+            }
+        }
+    }
+
+    let edges = ratline_tree_edge_list(problem, nets, rotations, pos);
+    for i in 0..edges.len() {
+        let a = &edges[i];
+        for b in &edges[i + 1..] {
+            if a.net_idx == b.net_idx {
+                continue;
+            }
+            if a.a.part == b.a.part
+                || a.a.part == b.b.part
+                || a.b.part == b.a.part
+                || a.b.part == b.b.part
+            {
+                continue;
+            }
+            if ratline_edge_layers_overlap(a, b)
+                && geom::Segment::new(a.a_pos, a.b_pos)
+                    .intersects(geom::Segment::new(b.a_pos, b.b_pos))
+            {
+                for part in [a.a.part, a.b.part, b.a.part, b.b.part] {
+                    metrics[part].crossing_pressure += 1;
+                }
+            }
+        }
+    }
+
+    for edge in &edges {
+        let segment = geom::Segment::new(edge.a_pos, edge.b_pos);
+        for part_idx in 0..problem.parts.len() {
+            if problem.parts[part_idx].locked.is_some()
+                || part_idx == edge.a.part
+                || part_idx == edge.b.part
+            {
+                continue;
+            }
+            let obstacle =
+                Rect::from_center_half(pos[part_idx], half[part_idx]).inflate(margin / 2.0);
+            if obstacle.dist_to_segment(segment) <= geom::EPS {
+                metrics[part_idx].obstruction_pressure += 1;
+            }
+        }
+        for keepout in &problem.keepouts {
+            if keepout.dist_to_segment(segment) <= geom::EPS {
+                metrics[edge.a.part].obstruction_pressure += 1;
+                metrics[edge.b.part].obstruction_pressure += 1;
+            }
+        }
+    }
+
+    let mut order: Vec<usize> = (0..problem.parts.len())
+        .filter(|&idx| problem.parts[idx].locked.is_none())
+        .collect();
+    order.sort_by_key(|&idx| {
+        let m = metrics[idx];
+        (
+            std::cmp::Reverse(m.crossing_pressure),
+            std::cmp::Reverse(m.obstruction_pressure),
+            std::cmp::Reverse(m.connected_degree),
+            idx,
+        )
+    });
+    order
+}
+
+#[derive(Clone, Copy, Default)]
+struct PositionPolishMetric {
+    crossing_pressure: usize,
+    obstruction_pressure: usize,
+    connected_degree: usize,
 }
 
 pub(crate) fn unique_position_candidates(
@@ -848,6 +1018,39 @@ pub(crate) fn unique_position_candidates(
         }
     }
     out
+}
+
+pub(crate) fn edge_seek_position_candidates(
+    problem: &PlaceProblem,
+    half: &[(f64, f64)],
+    pos: &[Point2],
+    part_idx: usize,
+    edge_idx: &[usize],
+) -> Vec<Point2> {
+    if !edge_idx.contains(&part_idx) {
+        return Vec::new();
+    }
+    let current = pos[part_idx];
+    let h = half[part_idx];
+    [
+        Point2 {
+            x: current.x,
+            y: edge_target(Edge::N, &problem.bounds, h),
+        },
+        Point2 {
+            x: current.x,
+            y: edge_target(Edge::S, &problem.bounds, h),
+        },
+        Point2 {
+            x: edge_target(Edge::W, &problem.bounds, h),
+            y: current.y,
+        },
+        Point2 {
+            x: edge_target(Edge::E, &problem.bounds, h),
+            y: current.y,
+        },
+    ]
+    .into()
 }
 
 pub(crate) fn net_centroid_position_candidates(
@@ -923,15 +1126,33 @@ pub(crate) fn net_centroid_position_candidates(
     }
 
     if all_own_n > 0 && all_other_n > 0 {
-        candidates.push(Point2 {
+        let mean_target = Point2 {
             x: all_other_x / all_other_n as f64 - all_own_x / all_own_n as f64,
             y: all_other_y / all_other_n as f64 - all_own_y / all_own_n as f64,
+        };
+        candidates.push(mean_target);
+        candidates.push(Point2 {
+            x: mean_target.x,
+            y: current_center.y,
         });
         candidates.push(Point2 {
+            x: current_center.x,
+            y: mean_target.y,
+        });
+        let median_target = Point2 {
             x: median_coord(all_other_positions.iter().map(|p| p.x))
                 - median_coord(all_own_offsets.iter().map(|p| p.x)),
             y: median_coord(all_other_positions.iter().map(|p| p.y))
                 - median_coord(all_own_offsets.iter().map(|p| p.y)),
+        };
+        candidates.push(median_target);
+        candidates.push(Point2 {
+            x: median_target.x,
+            y: current_center.y,
+        });
+        candidates.push(Point2 {
+            x: current_center.x,
+            y: median_target.y,
         });
     }
 
@@ -952,9 +1173,18 @@ fn add_nearest_pad_position_candidates(
         }) else {
             continue;
         };
-        candidates.push(Point2 {
+        let full_align = Point2 {
             x: nearest.x - own_offset.x,
             y: nearest.y - own_offset.y,
+        };
+        candidates.push(full_align);
+        candidates.push(Point2 {
+            x: full_align.x,
+            y: own_world.y - own_offset.y,
+        });
+        candidates.push(Point2 {
+            x: own_world.x - own_offset.x,
+            y: full_align.y,
         });
     }
 }
@@ -974,6 +1204,7 @@ fn median_coord(values: impl Iterator<Item = f64>) -> f64 {
         .unwrap_or(0.0)
 }
 
+#[cfg(test)]
 pub(crate) fn ratline_crossing_position_candidates(
     problem: &PlaceProblem,
     nets: &[super::model::LogicalNet],
@@ -981,15 +1212,20 @@ pub(crate) fn ratline_crossing_position_candidates(
     pos: &[Point2],
     part_idx: usize,
 ) -> Vec<Point2> {
+    let edges = ratline_tree_edge_list(problem, nets, rotations, pos);
+    ratline_crossing_position_candidates_from_edges(problem, rotations, part_idx, &edges)
+}
+
+pub(crate) fn ratline_crossing_position_candidates_from_edges(
+    problem: &PlaceProblem,
+    rotations: &[f64],
+    part_idx: usize,
+    edges: &[RatlineEdge<'_>],
+) -> Vec<Point2> {
     let mut candidates = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    let edges: Vec<_> = nets
-        .iter()
-        .enumerate()
-        .flat_map(|(net_idx, net)| ratline_tree_edges(problem, rotations, pos, net_idx, net))
-        .collect();
 
-    for own_edge in &edges {
+    for own_edge in edges {
         let Some((own_pin, partner_pin, own_pad, partner_pad)) = edge_for_part(own_edge, part_idx)
         else {
             continue;
@@ -998,7 +1234,7 @@ pub(crate) fn ratline_crossing_position_candidates(
             .offset
             .rotate(rotations[own_pin.part]);
 
-        for other_edge in &edges {
+        for other_edge in edges {
             if own_edge.net_idx == other_edge.net_idx {
                 continue;
             }
@@ -1007,6 +1243,9 @@ pub(crate) fn ratline_crossing_position_candidates(
                 || other_edge.a.part == partner_pin.part
                 || other_edge.b.part == partner_pin.part
             {
+                continue;
+            }
+            if !ratline_edge_layers_overlap(own_edge, other_edge) {
                 continue;
             }
 
@@ -1041,6 +1280,7 @@ pub(crate) fn ratline_crossing_position_candidates(
     candidates
 }
 
+#[cfg(test)]
 pub(crate) fn ratline_obstruction_position_candidates(
     problem: &PlaceProblem,
     nets: &[super::model::LogicalNet],
@@ -1050,15 +1290,25 @@ pub(crate) fn ratline_obstruction_position_candidates(
     pos: &[Point2],
     part_idx: usize,
 ) -> Vec<Point2> {
+    let edges = ratline_tree_edge_list(problem, nets, rotations, pos);
+    ratline_obstruction_position_candidates_from_edges(
+        problem, rotations, half, margin, pos, part_idx, &edges,
+    )
+}
+
+pub(crate) fn ratline_obstruction_position_candidates_from_edges(
+    problem: &PlaceProblem,
+    rotations: &[f64],
+    half: &[(f64, f64)],
+    margin: f64,
+    pos: &[Point2],
+    part_idx: usize,
+    edges: &[RatlineEdge<'_>],
+) -> Vec<Point2> {
     let mut candidates = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    let edges: Vec<_> = nets
-        .iter()
-        .enumerate()
-        .flat_map(|(net_idx, net)| ratline_tree_edges(problem, rotations, pos, net_idx, net))
-        .collect();
 
-    for edge in &edges {
+    for edge in edges {
         let Some((own_pin, partner_pin, own_pad, partner_pad)) = edge_for_part(edge, part_idx)
         else {
             continue;
@@ -1091,6 +1341,87 @@ pub(crate) fn ratline_obstruction_position_candidates(
     }
 
     candidates
+}
+
+#[cfg(test)]
+pub(crate) fn obstructing_part_position_candidates(
+    problem: &PlaceProblem,
+    nets: &[super::model::LogicalNet],
+    rotations: &[f64],
+    half: &[(f64, f64)],
+    margin: f64,
+    pos: &[Point2],
+    part_idx: usize,
+) -> Vec<Point2> {
+    let edges = ratline_tree_edge_list(problem, nets, rotations, pos);
+    obstructing_part_position_candidates_from_edges(problem, half, margin, pos, part_idx, &edges)
+}
+
+pub(crate) fn obstructing_part_position_candidates_from_edges(
+    problem: &PlaceProblem,
+    half: &[(f64, f64)],
+    margin: f64,
+    pos: &[Point2],
+    part_idx: usize,
+    edges: &[RatlineEdge<'_>],
+) -> Vec<Point2> {
+    let obstacle = Rect::from_center_half(pos[part_idx], half[part_idx]).inflate(margin / 2.0);
+    let mut candidates = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    for edge in edges {
+        if edge.a.part == part_idx || edge.b.part == part_idx {
+            continue;
+        }
+        let segment = geom::Segment::new(edge.a_pos, edge.b_pos);
+        if obstacle.dist_to_segment(segment) > geom::EPS {
+            continue;
+        }
+        for center in
+            move_center_away_from_segment(problem, half[part_idx], margin, pos[part_idx], segment)
+        {
+            let key = (
+                (center.x * 1000.0).round() as i64,
+                (center.y * 1000.0).round() as i64,
+            );
+            if seen.insert(key) {
+                candidates.push(center);
+            }
+        }
+    }
+
+    candidates
+}
+
+fn move_center_away_from_segment(
+    problem: &PlaceProblem,
+    half: (f64, f64),
+    margin: f64,
+    center: Point2,
+    segment: geom::Segment,
+) -> Vec<Point2> {
+    let dx = segment.b.x - segment.a.x;
+    let dy = segment.b.y - segment.a.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < geom::EPS {
+        return Vec::new();
+    }
+    let nx = -dy / len;
+    let ny = dx / len;
+    let signed = (center.x - segment.a.x) * nx + (center.y - segment.a.y) * ny;
+    let relief = half.0.hypot(half.1)
+        + margin / 2.0
+        + problem.clearance
+        + problem.min_trace_width
+        + PLACEMENT_GRID.pitch();
+
+    [-relief, relief]
+        .into_iter()
+        .map(|target| Point2 {
+            x: center.x + nx * (target - signed),
+            y: center.y + ny * (target - signed),
+        })
+        .collect()
 }
 
 fn ratline_obstacles(
@@ -1164,11 +1495,12 @@ fn obstruction_relief_pad_targets(
     out
 }
 
-#[derive(Clone, Copy)]
-struct RatlineEdge<'a> {
+#[derive(Clone)]
+pub(crate) struct RatlineEdge<'a> {
     net_idx: usize,
     a: &'a Pin,
     b: &'a Pin,
+    layers: Vec<LayerRef>,
     a_pos: Point2,
     b_pos: Point2,
 }
@@ -1186,6 +1518,18 @@ fn edge_for_part<'a>(
     }
 }
 
+pub(crate) fn ratline_tree_edge_list<'a>(
+    problem: &PlaceProblem,
+    nets: &'a [super::model::LogicalNet],
+    rotations: &[f64],
+    pos: &[Point2],
+) -> Vec<RatlineEdge<'a>> {
+    nets.iter()
+        .enumerate()
+        .flat_map(|(net_idx, net)| ratline_tree_edges(problem, rotations, pos, net_idx, net))
+        .collect()
+}
+
 fn ratline_tree_edges<'a>(
     problem: &PlaceProblem,
     rotations: &[f64],
@@ -1199,6 +1543,7 @@ fn ratline_tree_edges<'a>(
             net_idx,
             a,
             b,
+            layers: ratline_edge_layers(problem, a, b),
             a_pos: pin_world_pos(problem, rotations, pos, a),
             b_pos: pin_world_pos(problem, rotations, pos, b),
         }],
@@ -1216,16 +1561,20 @@ fn ratline_tree_edges<'a>(
                     if !in_tree[ai] {
                         continue;
                     }
-                    let pa = pin_positions[ai];
                     for (bi, _) in pins.iter().enumerate() {
                         if in_tree[bi] {
                             continue;
                         }
-                        let dist = pa.dist(pin_positions[bi]);
                         let replace = best.is_none_or(|(old_a, old_b)| {
-                            let old_dist = pin_positions[old_a].dist(pin_positions[old_b]);
-                            dist < old_dist - 1e-9
-                                || ((dist - old_dist).abs() <= 1e-9 && (ai, bi) < (old_a, old_b))
+                            ratline_tree_edge_better(
+                                problem,
+                                pins,
+                                &pin_positions,
+                                ai,
+                                bi,
+                                old_a,
+                                old_b,
+                            )
                         });
                         if replace {
                             best = Some((ai, bi));
@@ -1240,6 +1589,7 @@ fn ratline_tree_edges<'a>(
                     net_idx,
                     a: &pins[ai],
                     b: &pins[bi],
+                    layers: ratline_edge_layers(problem, &pins[ai], &pins[bi]),
                     a_pos: pin_positions[ai],
                     b_pos: pin_positions[bi],
                 });
@@ -1247,6 +1597,65 @@ fn ratline_tree_edges<'a>(
             edges
         }
     }
+}
+
+fn ratline_tree_edge_better(
+    problem: &PlaceProblem,
+    pins: &[Pin],
+    pin_positions: &[Point2],
+    a: usize,
+    b: usize,
+    old_a: usize,
+    old_b: usize,
+) -> bool {
+    let dist = pin_positions[a].dist(pin_positions[b]);
+    let old_dist = pin_positions[old_a].dist(pin_positions[old_b]);
+    dist < old_dist - 1e-9
+        || ((dist - old_dist).abs() <= 1e-9
+            && ratline_tree_edge_tiebreak(problem, pins, a, b, old_a, old_b))
+}
+
+fn ratline_tree_edge_tiebreak(
+    problem: &PlaceProblem,
+    pins: &[Pin],
+    a: usize,
+    b: usize,
+    old_a: usize,
+    old_b: usize,
+) -> bool {
+    let layer_change = ratline_edge_requires_layer_change(problem, &pins[a], &pins[b]);
+    let old_layer_change = ratline_edge_requires_layer_change(problem, &pins[old_a], &pins[old_b]);
+    if layer_change != old_layer_change {
+        !layer_change
+    } else {
+        (a, b) < (old_a, old_b)
+    }
+}
+
+fn ratline_edge_layers(problem: &PlaceProblem, a: &Pin, b: &Pin) -> Vec<LayerRef> {
+    let mut layers = Vec::new();
+    for pin in [a, b] {
+        for layer in &problem.parts[pin.part].pads[pin.pad].layers {
+            if !layers.iter().any(|existing| existing == layer) {
+                layers.push(layer.clone());
+            }
+        }
+    }
+    layers
+}
+
+fn ratline_edge_requires_layer_change(problem: &PlaceProblem, a: &Pin, b: &Pin) -> bool {
+    let a_layers = &problem.parts[a.part].pads[a.pad].layers;
+    let b_layers = &problem.parts[b.part].pads[b.pad].layers;
+    !a_layers
+        .iter()
+        .any(|layer| b_layers.iter().any(|other| other == layer))
+}
+
+fn ratline_edge_layers_overlap(a: &RatlineEdge<'_>, b: &RatlineEdge<'_>) -> bool {
+    a.layers
+        .iter()
+        .any(|layer| b.layers.iter().any(|other| other == layer))
 }
 
 fn pin_world_pos(
@@ -1351,8 +1760,8 @@ pub(crate) fn swap_pair_order(
         .collect();
     let mut crossing_related = std::collections::BTreeSet::new();
     for i in 0..edges.len() {
-        let a = edges[i];
-        for &b in &edges[i + 1..] {
+        let a = &edges[i];
+        for b in &edges[i + 1..] {
             if a.net_idx == b.net_idx {
                 continue;
             }
@@ -1363,13 +1772,40 @@ pub(crate) fn swap_pair_order(
             {
                 continue;
             }
-            if geom::Segment::new(a.a_pos, a.b_pos).intersects(geom::Segment::new(b.a_pos, b.b_pos))
+            if ratline_edge_layers_overlap(a, b)
+                && geom::Segment::new(a.a_pos, a.b_pos)
+                    .intersects(geom::Segment::new(b.a_pos, b.b_pos))
             {
                 for pa in [a.a.part, a.b.part] {
                     for pb in [b.a.part, b.b.part] {
                         push_pair(&mut crossing_related, pa, pb);
                     }
                 }
+            }
+        }
+    }
+
+    let half: Vec<(f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(rotations)
+        .map(|(part, &rotation)| rotated_courtyard_half(part, rotation))
+        .collect();
+    let margin = courtyard_margin(problem.clearance);
+    let mut obstructing_parts = std::collections::BTreeSet::new();
+    for edge in &edges {
+        let segment = geom::Segment::new(edge.a_pos, edge.b_pos);
+        for part_idx in 0..problem.parts.len() {
+            if problem.parts[part_idx].locked.is_some()
+                || part_idx == edge.a.part
+                || part_idx == edge.b.part
+            {
+                continue;
+            }
+            let obstacle =
+                Rect::from_center_half(pos[part_idx], half[part_idx]).inflate(margin / 2.0);
+            if obstacle.dist_to_segment(segment) <= geom::EPS {
+                obstructing_parts.insert(part_idx);
             }
         }
     }
@@ -1388,8 +1824,10 @@ pub(crate) fn swap_pair_order(
                 0
             } else if crossing_related.contains(&key) {
                 1
-            } else {
+            } else if obstructing_parts.contains(&a) || obstructing_parts.contains(&b) {
                 2
+            } else {
+                3
             };
             pairs.push((rank, a, b));
         }
@@ -1427,10 +1865,10 @@ pub(crate) fn polish_rotations(
             }
             let old_rot = rotations[i];
             let old_half = half[i];
-            let old_copper = copper_bbox[i].clone();
+            let old_copper = copper_bbox[i];
             let mut best_rot = old_rot;
             let mut best_half = old_half;
-            let mut best_copper = old_copper.clone();
+            let mut best_copper = old_copper;
             let mut best_cost = cost;
 
             for candidate in [0.0, 90.0, 180.0, 270.0] {
@@ -1450,7 +1888,7 @@ pub(crate) fn polish_rotations(
                     best_cost = next_cost;
                     best_rot = candidate;
                     best_half = half[i];
-                    best_copper = copper_bbox[i].clone();
+                    best_copper = copper_bbox[i];
                 }
             }
 

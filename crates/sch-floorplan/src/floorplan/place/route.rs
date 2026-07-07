@@ -20,6 +20,7 @@ use sch_place::ir::{Band, LayoutIr, Side};
 // Wiring: rails, signal routing, ports.
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn wire(
     env: &KicadEnv,
     w: &mut SchematicWriter,
@@ -227,6 +228,7 @@ pub(crate) fn wire(
 ///     a foreign wire, AND both endpoints could carry a body-clear label — a crossing
 ///     reads as clutter, so name it instead (but never if naming would just move the
 ///     defect to a label-over-body).
+///
 /// Local short hops (the bulk of a human sheet) stay drawn, so `label_per_part`
 /// climbs toward the human ~0.76 without labelling everything.
 #[derive(Clone, Copy)]
@@ -255,6 +257,7 @@ impl LabelPolicy {
 /// Route one signal/port net's terminals as a tree (MST) with the direction-
 /// aware elbow router. A port adds a virtual terminal just past the net's extent
 /// on the named side, then a label there; failure falls back to per-pin labels.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn route_signal(
     env: &KicadEnv,
     w: &mut SchematicWriter,
@@ -1216,6 +1219,7 @@ pub(crate) fn riser_hits_body(x: f64, ylo: f64, yhi: f64, bodies: &[([f64; 2], [
 /// scattered per-pin symbols into ONE symbol at the driver with a wire to each other
 /// pin, tying the output cap to the regulator output instead of leaving it a detached
 /// implicit-net island.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_rail(
     env: &KicadEnv,
     w: &mut SchematicWriter,

@@ -707,7 +707,7 @@ pub(crate) fn current_design_yaml(ctx: &AgentRuntime) -> Result<String> {
 
 fn validate_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let yaml = require_str(&input, "yaml")?;
-    let result = compile(&yaml, &ctx.provider());
+    let result = compile(&yaml, ctx.provider());
     Ok(compile_report(&result.diagnostics))
 }
 
@@ -792,7 +792,7 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .unwrap_or(false);
 
     // Compile first; never render or write a design with errors.
-    let result = compile(&yaml, &ctx.provider());
+    let result = compile(&yaml, ctx.provider());
     let Some(design) = result.design else {
         let mut report = compile_report(&result.diagnostics);
         // `ok` is already false here (errors > 0), but be explicit for the LLM.
@@ -804,7 +804,7 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let prior_design = if ctx.sch_path().exists() {
         let prior_yaml = lift(ctx.env(), ctx.sch_path())
             .with_context(|| format!("lifting prior {}", ctx.sch_path().display()))?;
-        compile(&prior_yaml, &ctx.provider()).design
+        compile(&prior_yaml, ctx.provider()).design
     } else {
         None
     };
@@ -1185,7 +1185,7 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     ctx.workspace()
         .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
-    let mut report = compile_report(&compile(&yaml, &ctx.provider()).diagnostics);
+    let mut report = compile_report(&compile(&yaml, ctx.provider()).diagnostics);
     report["draft_written"] = json!(true);
     Ok(report)
 }
@@ -1201,7 +1201,7 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Some(yaml) = full_yaml {
         ctx.workspace()
             .write_draft(yaml, current_sch_text(ctx).as_deref())?;
-        let mut report = compile_report(&compile(yaml, &ctx.provider()).diagnostics);
+        let mut report = compile_report(&compile(yaml, ctx.provider()).diagnostics);
         report["draft_written"] = json!(true);
         report["mode"] = json!("full_replace");
         return Ok(report);
@@ -1237,7 +1237,7 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     ctx.workspace()
         .write_draft(&edited, current_sch_text(ctx).as_deref())?;
 
-    let mut report = compile_report(&compile(&edited, &ctx.provider()).diagnostics);
+    let mut report = compile_report(&compile(&edited, ctx.provider()).diagnostics);
     report["replacements"] = json!(if replace_all { count } else { 1 });
     Ok(report)
 }

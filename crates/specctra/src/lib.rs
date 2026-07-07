@@ -88,7 +88,7 @@ impl RoutedGeometry {
             .iter()
             .map(|v| Via {
                 connection: v.net.clone(),
-                at: v.at.clone(),
+                at: v.at,
                 diameter: v.diameter_mm,
                 drill: v.drill_mm,
                 span: ViaSpan::Through,

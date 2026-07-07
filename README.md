@@ -44,6 +44,16 @@ cargo run --release -p gordian -- agent --project ./my_board "a 3.3V buck conver
 cargo run --release -p gordian -- tui --project ./my_board
 ```
 
+The default PCB router is the production `auto` portfolio. To isolate a routing strategy, set:
+
+```toml
+[engines]
+pcbRouter = "auto"        # auto | mesh | sequential | astar
+```
+
+`mesh` runs the negotiated capacity-mesh router plus adaptive rescue. `sequential` runs the
+contextual sequential grid router directly. `astar` is the grid A* baseline.
+
 ## Architecture
 
 A Rust workspace; the LLM orchestrates the deterministic crates:
@@ -62,18 +72,48 @@ A Rust workspace; the LLM orchestrates the deterministic crates:
 ## Testing
 
 ```sh
-cargo test --workspace          # unit + integration tests
-cargo clippy --workspace        # lints
+cargo test --workspace --quiet  # unit + integration tests
+cargo clippy --workspace --all-targets -- -D warnings
+                               # lints for libs, bins, examples, tests, and doctests
+cargo run -p gordian-core --example validate_pcb_corpus --quiet
+                               # PCB smoke: real KiCAD footprints, place + route + DRC lint
+cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --required
+                               # Required PCB gate: smoke boards plus power, LED, and dense BGA
+cargo run -p gordian-core --example validate_pcb_corpus --quiet -- power-buck led-array
+                               # Named ad-hoc real-board checks
+cargo run -p gordian-core --example validate_pcb_corpus --quiet -- bga25-route
+                               # Dense BGA auto-router qualification check
+cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router sequential -v bga25-route
+                               # Explicit non-A* sequential-grid diagnostic route
+cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router astar -v bga25-route
+                               # Explicit grid A* baseline diagnostic route
+cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router mesh-global -v bga25-route
+                               # Capacity-mesh global-routing isolation for heavy failures
+cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router mesh-assign -v bga25-route
+                               # Capacity-mesh crossing/via assignment isolation
+cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router mesh-detail -v bga25-route
+                               # Raw detailed cell-routing isolation; production rescue is intentionally disabled
+cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router mesh --inspect-net S1,S2 -v bga25-route
+                               # Bounded endpoint/copper inspection for failed or recently repaired nets
+cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router mesh-detail --inspect-failed-nets -v bga25-route
+                               # Automatically inspect every failed raw-detail net
+cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --router mesh-assign --inspect-detail-jobs --inspect-net S4,VCC bga25-route
+                               # Detailed crossing/cell-job inspection for dense-placement routing pressure
 ```
 
 PCB changes should be exercised through the same schematic-derived and current-board tools the
 agent uses; avoid privileged JSON-only board construction paths in tests.
+The schematic validation corpus under `docs/validation` is optional in this checkout; tests that
+need it skip cleanly when the corpus is absent.
 
 ## Status
 
-Active development (`0.1.0`). The PCB and schematic engines route/lay-out dense, real-world boards
-(including BGAs with 50+ components) DRC-clean; HDI micro-via escape and multi-sheet schematic layout
-are implemented. See `docs/specs/` for the design notes behind each subsystem.
+Active development (`0.1.0`). The PCB and schematic engines route/layout real KiCAD boards through
+the corpus smoke checks, with additional slower real-board checks for power, LED, and dense BGA
+examples. The required PCB gate is `validate_pcb_corpus --required`; it is intentionally smaller
+than `--all`, which includes scale/stress fixtures. Dense multilayer/BGA production routing is
+qualified through the `mesh` portfolio (detailed routing plus adaptive rescue); `mesh-detail` is a
+raw diagnostic isolation mode for tightening the per-cell detailed stage.
 
 ## License
 

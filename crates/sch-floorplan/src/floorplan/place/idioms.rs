@@ -15,6 +15,8 @@ use super::super::infer::anchor_tap;
 use geom::ParentForest;
 use sch_place::ir::{LayoutIr, Orient};
 
+type PinTarget = (usize, usize);
+
 /// each load cap two gaps out, level with its osc pin. Returns true if it moved
 /// anything (so the caller re-runs `decongest`). The cluster members are frozen, so
 /// the placement search has already finished around them and won't undo this.
@@ -1750,8 +1752,7 @@ pub(crate) fn gather_bridge_resistors(items: &mut [Item], ir: &LayoutIr) -> bool
         let seat_ok = |at: [f64; 2]| -> bool {
             let r = rect_at(ri, at, res_angle);
             (0..items.len()).all(|other| {
-                other == ri
-                    || !(r.overlaps(&settled(other)) && !settled(ri).overlaps(&settled(other)))
+                other == ri || !r.overlaps(&settled(other)) || settled(ri).overlaps(&settled(other))
             })
         };
         // SWEEP a small ladder of seats and take the FIRST overlap-free one (the way a human nudges the
@@ -2148,7 +2149,7 @@ pub(crate) fn gather_i2c_pullups(items: &mut [Item], ir: &LayoutIr) -> bool {
 /// each instance to its own evenly-spaced column.
 ///
 /// Why a FINAL pass works here where it failed for the bus-row (17 reverts, see
-/// docs/specs/flow-aware-global-placement.md): the bus-row tried to CRAM clusters into ONE shared
+/// flow-aware placement notes): the bus-row tried to CRAM clusters into ONE shared
 /// column and collided on dense sheets; this gives each instance a DISTINCT x and these sheets have
 /// EMPTY SPACE, so the overlap check passes. It runs DEAD LAST (after every decongest), carries each
 /// instance's satellites by the same Δx (no stranding), and COMMITS A GROUP ONLY if the proposed
@@ -2219,9 +2220,9 @@ pub(crate) fn align_repeated_columns(
         }
         // Collect columns: root -> member item indices.
         let mut cols_map: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        for k in 0..n {
+        for (k, &member) in members.iter().enumerate().take(n) {
             let r = uf.find(k);
-            cols_map.entry(r).or_default().push(members[k]);
+            cols_map.entry(r).or_default().push(member);
         }
         // Need ≥3 columns for this to be a "repeated columns" motif.
         if cols_map.len() < 3 {
@@ -2633,11 +2634,8 @@ pub fn cohesion_targets(
         if items[si].geom.pins.len() >= 3 || items[si].frozen {
             continue;
         }
-        let (mut sig, mut supply, mut gnd): (
-            Vec<(usize, usize)>,
-            Vec<(usize, usize)>,
-            Vec<(usize, usize)>,
-        ) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut sig, mut supply, mut gnd): (Vec<PinTarget>, Vec<PinTarget>, Vec<PinTarget>) =
+            (Vec::new(), Vec::new(), Vec::new());
         for (_, _, net) in &items[si].pins {
             let Some(net) = net else { continue };
             let is_rail = ir.rails.contains_key(net);
@@ -2705,12 +2703,9 @@ pub fn cohesion_targets(
     // fires when a refdes has ≥2 anchor units (single-unit boards/references untouched).
     let mut by_refdes: std::collections::BTreeMap<&str, Vec<usize>> =
         std::collections::BTreeMap::new();
-    for i in 0..items.len() {
-        if items[i].geom.pins.len() >= 3 {
-            by_refdes
-                .entry(items[i].refdes.as_str())
-                .or_default()
-                .push(i);
+    for (i, item) in items.iter().enumerate() {
+        if item.geom.pins.len() >= 3 {
+            by_refdes.entry(item.refdes.as_str()).or_default().push(i);
         }
     }
     for group in by_refdes.values() {

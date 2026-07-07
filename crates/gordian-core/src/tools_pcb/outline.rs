@@ -80,7 +80,7 @@ enum Outline {
 impl Outline {
     fn bounds(&self) -> Rect {
         match self {
-            Outline::Rect(rect) => rect.clone(),
+            Outline::Rect(rect) => *rect,
             Outline::Polygon(poly) => poly.bbox(),
         }
     }

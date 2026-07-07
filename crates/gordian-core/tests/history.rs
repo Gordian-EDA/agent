@@ -14,12 +14,14 @@ use gordian_core::prompts::system_prompt;
 use gordian_core::testing::{ScriptedClient, final_text};
 use gordian_core::{Agent, AutoApprove, ChatMessage, ChatRole, ContentPart};
 
+type SeenMessages = Arc<Mutex<Vec<Vec<ChatMessage>>>>;
+
 /// Build an agent over a [`AgentRuntime`] + a recording client, returning the agent
 /// and the shared handle to the recorded `messages` slices.
 fn recording_agent(
     ctx: AgentRuntime,
     completions: Vec<gordian_core::StreamEnd>,
-) -> (Agent<ScriptedClient>, Arc<Mutex<Vec<Vec<ChatMessage>>>>) {
+) -> (Agent<ScriptedClient>, SeenMessages) {
     let (client, seen) = ScriptedClient::recording(completions);
     let agent = Agent::new(client, ctx, system_prompt());
     (agent, seen)

@@ -306,7 +306,7 @@ fn compact(r: &Realizer, items: &mut [Item]) {
                 {
                     continue;
                 }
-                items[i].at = p.into();
+                items[i].at = p;
                 let sc = greedy_score(r, items);
                 if sc + 0.25 < best {
                     best = sc;
@@ -364,11 +364,11 @@ fn free_nudge(r: &Realizer, items: &mut [Item]) {
                 {
                     continue;
                 }
-                items[i].at = p.into();
+                items[i].at = p;
                 let c = greedy_score(r, items);
                 if c + 0.25 < best_cost {
                     best_cost = c;
-                    best_pos = p.into();
+                    best_pos = p;
                 }
             }
             items[i].at = best_pos;
@@ -431,11 +431,11 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
             if (p[axis] - goal) * dir > EPS || overlaps_any(items, si, p) {
                 break;
             }
-            items[si].at = p.into();
+            items[si].at = p;
             let c = greedy_score(r, items);
             if c + 0.5 < best_cost {
                 best_cost = c;
-                best_pos = p.into();
+                best_pos = p;
             }
         }
         items[si].at = best_pos;
@@ -877,6 +877,7 @@ fn small_path_search(
 /// scored by `score_items`; the best layout seen is kept. `broad` runs hotter and
 /// longer (a wider global search from the raw seed). ANCHORS are mobile here: an
 /// anchor nudge frees a whole block to slide.
+#[allow(clippy::too_many_arguments)]
 fn anneal_items(
     r: &Realizer,
     items: &mut [Item],
@@ -1052,13 +1053,10 @@ fn proxy_cost(
     let grid_order = grid_order_viol(items, ir);
     let mut hpwl = 0.0;
     for pins in inc.values() {
-        let pts: Vec<Point2> = pins
-            .iter()
-            .map(|(i, _)| Point2::from(items[*i].at))
-            .collect();
+        let pts: Vec<Point2> = pins.iter().map(|(i, _)| items[*i].at).collect();
         hpwl += Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter());
     }
-    let item_pts: Vec<Point2> = items.iter().map(|it| Point2::from(it.at)).collect();
+    let item_pts: Vec<Point2> = items.iter().map(|it| it.at).collect();
     let item_bbox = Rect::bounding(&item_pts);
     let spread = item_bbox.map_or(0.0, |r| r.half_perimeter());
     let mut cohere = 0.0;
@@ -1105,7 +1103,7 @@ fn proxy_cost(
         + 0.7 * cohere
         + ZBIAS_W * zbias
 }
-/// Locality-aware anneal (see `docs/specs/locality-aware-placement-search.md`). Two
+/// Locality-aware anneal. Two
 /// things the tuned full-route paths can't afford: (1) a cheap geometric `proxy_cost`
 /// per move (no whole-sheet reroute), so it runs a far larger iteration budget and
 /// only pays the true routed cost on a new proxy-best; (2) a RANGE-LIMITED CLUSTER
@@ -1290,11 +1288,11 @@ fn polish_proxy(items: &mut [Item], inc: &Incidence, ir: &LayoutIr, magnet: bool
                 {
                     continue;
                 }
-                items[i].at = p.into();
+                items[i].at = p;
                 let c = proxy_cost(items, inc, ir, &cohesion);
                 if c + 0.25 < best_cost {
                     best_cost = c;
-                    best_pos = p.into();
+                    best_pos = p;
                 }
             }
             items[i].at = best_pos;

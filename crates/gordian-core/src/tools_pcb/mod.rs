@@ -30,6 +30,7 @@
 //!   `route_track`, `delete_copper`, `set_net_width`).
 
 mod active;
+pub mod corpus;
 mod create;
 mod export;
 mod fab;
@@ -56,5 +57,5 @@ pub use interactive::{
 pub use outline::update_board_outline;
 pub use place::{get_board, place_board};
 pub use render::render_board;
-pub use route::route_board;
+pub use route::{apply_direct_rescue_fallback, route_board};
 pub use seed::{BoardSeedRules, PourSpec};

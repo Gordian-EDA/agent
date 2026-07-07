@@ -291,7 +291,7 @@ pub(crate) fn snap_caps_to_anchor_ring(
         .filter(|i| !moving.contains(i))
         .collect();
     for (cap, ic) in pairs {
-        let anchor = pos[ic].clone();
+        let anchor = pos[ic];
         // Ring radius starts just past both courtyards touching with margin and grows by
         // the grid; angular probes are evenly spaced and tried nearest-the-IC first.
         let base = (half[cap].0 + half[cap].1) / 2.0 + (half[ic].0 + half[ic].1) / 2.0 + margin;

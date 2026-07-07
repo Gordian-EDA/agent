@@ -8,10 +8,10 @@
 //! is already near-legal and the final `legalize` only nudges.
 
 use super::cost::place_cost;
-use super::geometry::PLACEMENT_GRID;
+use super::geometry::{PLACEMENT_GRID, courtyard_margin, rotated_courtyard_half};
 use super::model::{LogicalNet, Pin, PlaceProblem, PlacementHints};
 use super::pairs::coplacement_pairs;
-use crate::problem::Point2;
+use crate::problem::{LayerRef, Point2, Rect};
 
 /// Fixed seed — placement is deterministic (same board → same layout).
 const SA_SEED: u64 = 0xB5AD_C0DE_1234_5678;
@@ -97,7 +97,7 @@ pub(crate) fn anneal_placement(
         if kind < 7 {
             // Relocate one part; amplitude shrinks as the board cools.
             let k = movable[rng.below(movable.len())];
-            restore.push((k, pos[k].clone()));
+            restore.push((k, pos[k]));
             let amp = 0.5 + 5.0 * (t / t0);
             pos[k].x = PLACEMENT_GRID.snap(pos[k].x + rng.range(-amp, amp));
             pos[k].y = PLACEMENT_GRID.snap(pos[k].y + rng.range(-amp, amp));
@@ -109,8 +109,8 @@ pub(crate) fn anneal_placement(
             if a == b {
                 continue;
             }
-            restore.push((a, pos[a].clone()));
-            restore.push((b, pos[b].clone()));
+            restore.push((a, pos[a]));
+            restore.push((b, pos[b]));
             pos.swap(a, b);
             pos[a] = problem.bounds.clamp_center_for_half(pos[a], half[a]);
             pos[b] = problem.bounds.clamp_center_for_half(pos[b], half[b]);
@@ -122,7 +122,7 @@ pub(crate) fn anneal_placement(
             let mut members = vec![ic];
             members.extend(clusters.get(&ic).into_iter().flatten().copied());
             for &m in &members {
-                restore.push((m, pos[m].clone()));
+                restore.push((m, pos[m]));
                 pos[m].x = PLACEMENT_GRID.snap(pos[m].x + dx);
                 pos[m].y = PLACEMENT_GRID.snap(pos[m].y + dy);
                 pos[m] = problem.bounds.clamp_center_for_half(pos[m], half[m]);
@@ -180,8 +180,8 @@ pub(crate) fn greedy_swap_polish_with_order<F>(
     for _ in 0..2 {
         let mut improved = false;
         for &(a, b) in swap_order {
-            let old_a = pos[a].clone();
-            let old_b = pos[b].clone();
+            let old_a = pos[a];
+            let old_b = pos[b];
             pos.swap(a, b);
             pos[a] = problem.bounds.clamp_center_for_half(pos[a], half[a]);
             pos[b] = problem.bounds.clamp_center_for_half(pos[b], half[b]);
@@ -229,8 +229,8 @@ pub(crate) fn routing_aware_swap_order(
         .collect();
     let mut crossing_related = std::collections::BTreeSet::new();
     for i in 0..edges.len() {
-        let a = edges[i];
-        for &b in &edges[i + 1..] {
+        let a = &edges[i];
+        for b in &edges[i + 1..] {
             if a.net_idx == b.net_idx {
                 continue;
             }
@@ -241,13 +241,37 @@ pub(crate) fn routing_aware_swap_order(
             {
                 continue;
             }
-            if geom::Segment::new(a.a_pos, a.b_pos).intersects(geom::Segment::new(b.a_pos, b.b_pos))
+            if ratline_edge_layers_overlap(a, b)
+                && geom::Segment::new(a.a_pos, a.b_pos)
+                    .intersects(geom::Segment::new(b.a_pos, b.b_pos))
             {
                 for pa in [a.a_part, a.b_part] {
                     for pb in [b.a_part, b.b_part] {
                         push_pair_if_movable(&mut crossing_related, &movable_set, pa, pb);
                     }
                 }
+            }
+        }
+    }
+
+    let half: Vec<(f64, f64)> = problem
+        .parts
+        .iter()
+        .zip(rotations)
+        .map(|(part, &rotation)| rotated_courtyard_half(part, rotation))
+        .collect();
+    let margin = courtyard_margin(problem.clearance);
+    let mut obstructing_parts = std::collections::BTreeSet::new();
+    for edge in &edges {
+        let segment = geom::Segment::new(edge.a_pos, edge.b_pos);
+        for &part_idx in movable {
+            if part_idx == edge.a_part || part_idx == edge.b_part {
+                continue;
+            }
+            let obstacle =
+                Rect::from_center_half(pos[part_idx], half[part_idx]).inflate(margin / 2.0);
+            if obstacle.dist_to_segment(segment) <= geom::EPS {
+                obstructing_parts.insert(part_idx);
             }
         }
     }
@@ -262,8 +286,10 @@ pub(crate) fn routing_aware_swap_order(
                 0
             } else if crossing_related.contains(&key) {
                 1
-            } else {
+            } else if obstructing_parts.contains(&a) || obstructing_parts.contains(&b) {
                 2
+            } else {
+                3
             };
             pairs.push((rank, a, b));
         }
@@ -272,11 +298,12 @@ pub(crate) fn routing_aware_swap_order(
     pairs.into_iter().map(|(_, a, b)| (a, b)).collect()
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct RatlineEdge {
     net_idx: usize,
     a_part: usize,
     b_part: usize,
+    layers: Vec<LayerRef>,
     a_pos: Point2,
     b_pos: Point2,
 }
@@ -307,16 +334,20 @@ fn ratline_tree_edges<'a>(
                     if !in_tree[ai] {
                         continue;
                     }
-                    let pa = pin_positions[ai];
                     for (bi, _) in pins.iter().enumerate() {
                         if in_tree[bi] {
                             continue;
                         }
-                        let dist = pa.dist(pin_positions[bi]);
                         let replace = best.is_none_or(|(old_a, old_b)| {
-                            let old_dist = pin_positions[old_a].dist(pin_positions[old_b]);
-                            dist < old_dist - 1e-9
-                                || ((dist - old_dist).abs() <= 1e-9 && (ai, bi) < (old_a, old_b))
+                            ratline_tree_edge_better(
+                                problem,
+                                pins,
+                                &pin_positions,
+                                ai,
+                                bi,
+                                old_a,
+                                old_b,
+                            )
                         });
                         if replace {
                             best = Some((ai, bi));
@@ -338,6 +369,39 @@ fn ratline_tree_edges<'a>(
     }
 }
 
+fn ratline_tree_edge_better(
+    problem: &PlaceProblem,
+    pins: &[Pin],
+    pin_positions: &[Point2],
+    a: usize,
+    b: usize,
+    old_a: usize,
+    old_b: usize,
+) -> bool {
+    let dist = pin_positions[a].dist(pin_positions[b]);
+    let old_dist = pin_positions[old_a].dist(pin_positions[old_b]);
+    dist < old_dist - 1e-9
+        || ((dist - old_dist).abs() <= 1e-9
+            && ratline_tree_edge_tiebreak(problem, pins, a, b, old_a, old_b))
+}
+
+fn ratline_tree_edge_tiebreak(
+    problem: &PlaceProblem,
+    pins: &[Pin],
+    a: usize,
+    b: usize,
+    old_a: usize,
+    old_b: usize,
+) -> bool {
+    let layer_change = ratline_edge_requires_layer_change(problem, &pins[a], &pins[b]);
+    let old_layer_change = ratline_edge_requires_layer_change(problem, &pins[old_a], &pins[old_b]);
+    if layer_change != old_layer_change {
+        !layer_change
+    } else {
+        (a, b) < (old_a, old_b)
+    }
+}
+
 fn ratline_edge(
     problem: &PlaceProblem,
     rotations: &[f64],
@@ -353,9 +417,36 @@ fn ratline_edge(
         net_idx,
         a_part: a.part,
         b_part: b.part,
+        layers: ratline_edge_layers(problem, a, b),
         a_pos: pin_world_pos(problem, rotations, pos, a),
         b_pos: pin_world_pos(problem, rotations, pos, b),
     })
+}
+
+fn ratline_edge_requires_layer_change(problem: &PlaceProblem, a: &Pin, b: &Pin) -> bool {
+    let a_layers = &problem.parts[a.part].pads[a.pad].layers;
+    let b_layers = &problem.parts[b.part].pads[b.pad].layers;
+    !a_layers
+        .iter()
+        .any(|layer| b_layers.iter().any(|other| other == layer))
+}
+
+fn ratline_edge_layers(problem: &PlaceProblem, a: &Pin, b: &Pin) -> Vec<LayerRef> {
+    let mut layers = Vec::new();
+    for pin in [a, b] {
+        for layer in &problem.parts[pin.part].pads[pin.pad].layers {
+            if !layers.iter().any(|existing| existing == layer) {
+                layers.push(layer.clone());
+            }
+        }
+    }
+    layers
+}
+
+fn ratline_edge_layers_overlap(a: &RatlineEdge, b: &RatlineEdge) -> bool {
+    a.layers
+        .iter()
+        .any(|layer| b.layers.iter().any(|other| other == layer))
 }
 
 fn pin_world_pos(problem: &PlaceProblem, rotations: &[f64], pos: &[Point2], pin: &Pin) -> Point2 {

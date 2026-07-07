@@ -505,7 +505,7 @@ fn build_picker() -> Option<Picker> {
 ///
 /// On terminals that speak the Kitty keyboard protocol we push
 /// `DISAMBIGUATE_ESCAPE_CODES` so chords like Shift+Enter arrive distinct from a
-/// bare Enter; legacy terminals are left untouched (the composer hint still
+/// bare Enter; terminals without that protocol are left untouched (the composer hint still
 /// advertises ⇧⏎, it just won't fire there).
 fn setup_terminal() -> Result<(Terminal<CrosstermBackend<Stdout>>, bool)> {
     enable_raw_mode()?;

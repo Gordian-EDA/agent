@@ -256,7 +256,7 @@ fn compact(r: &Realizer, items: &mut [Item]) {
                 {
                     continue;
                 }
-                items[i].at = p.into();
+                items[i].at = p;
                 let sc = cost(r, items);
                 if sc + 0.25 < best {
                     best = sc;
@@ -330,7 +330,7 @@ fn free_nudge(r: &Realizer, items: &mut [Item]) {
                 {
                     continue;
                 }
-                items[i].at = p.into();
+                items[i].at = p;
                 let c = cost(r, items);
                 if c + 0.25 < best_cost {
                     best_cost = c;
@@ -411,7 +411,7 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
             if (p[axis] - goal) * dir > EPS || overlaps_any(items, si, p) {
                 break;
             }
-            items[si].at = p.into();
+            items[si].at = p;
             let c = cost(r, items);
             if c + 0.5 < best_cost {
                 best_cost = c;

@@ -39,7 +39,7 @@ pub(crate) fn legalize(
         if locked[i] {
             continue;
         }
-        let before = pos[i].clone();
+        let before = pos[i];
         pos[i].x = PLACEMENT_GRID.snap(pos[i].x);
         pos[i].y = PLACEMENT_GRID.snap(pos[i].y);
         pos[i] = problem.bounds.clamp_center_for_half(pos[i], half[i]);
@@ -79,7 +79,7 @@ pub(crate) fn legalize(
             continue;
         }
         // Spiral out from the snapped cell for the nearest free grid cell.
-        let origin = pos[i].clone();
+        let origin = pos[i];
         if let Some(found) = spiral_free_cell(problem, half, margin, i, &placed, &origin, pos) {
             pos[i] = found;
             overlaps_resolved += 1;
