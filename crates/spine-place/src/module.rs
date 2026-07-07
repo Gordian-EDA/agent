@@ -549,11 +549,11 @@ pub fn form_modules(
             let predicted = labeled.is_some_and(|set| set.contains(net.as_str()));
             let text = if is_rail {
                 // Long rail names (+3V3A) outgrow the one-size glyph strip.
-                7.62_f64.max(2.0 + 1.4 * net.chars().count() as f64)
+                7.62_f64.max(crate::net::label_text_width(net) - 0.54)
             } else if certain || predicted {
-                2.54 + 1.4 * net.chars().count() as f64
+                crate::net::label_text_width(net)
             } else {
-                7.62_f64.min(2.54 + 1.4 * net.chars().count() as f64)
+                7.62_f64.min(crate::net::label_text_width(net))
             };
             let r = match pin_side_of(a, num) {
                 PinSide::East => geom::Rect::new(at.x, at.y - 1.27, at.x + text, at.y + 1.27),
@@ -972,9 +972,6 @@ pub fn form_modules(
             false,
         );
         if ok.is_some() {
-            if std::env::var_os("SPINE_DEBUG").is_some() {
-                eprintln!("[attach] TAIL {} at {}:{}", items[part].refdes, items[*anchor].refdes, pin);
-            }
             form.consumed.insert(*chain, mi);
             // The near-side junction (if any) now lives on the tail's wire at
             // the entry pin: its deferred shunt legs hang there.
@@ -1005,7 +1002,7 @@ pub fn form_modules(
             {
                 let f = pin_offset(item, &free_pin, sat.angle);
                 let (fx, fy) = (sat.offset.x + f.x, sat.offset.y + f.y);
-                let text = 2.54 + 1.4 * free_net.chars().count() as f64;
+                let text = crate::net::label_text_width(free_net);
                 let dir = match side {
                     PinSide::West => -1.0,
                     PinSide::East => 1.0,
@@ -1170,10 +1167,10 @@ pub fn form_modules(
             {
                 continue;
             }
-            let (near_t, far_t, a_near) = if tail_home.contains_key(&c.a.net) {
-                (&c.a, &c.b, true)
+            let (near_t, far_t) = if tail_home.contains_key(&c.a.net) {
+                (&c.a, &c.b)
             } else if tail_home.contains_key(&c.b.net) {
-                (&c.b, &c.a, false)
+                (&c.b, &c.a)
             } else {
                 continue;
             };
@@ -1225,7 +1222,7 @@ pub fn form_modules(
             // junction: widen the gap to the pennant's text so it lands clear
             // of both bodies.
             let gap = if inc.get(&near_t.net).map_or(0, |v| v.len()) > 2 {
-                LEAD * 2.0 + 2.54 + 1.4 * near_t.net.chars().count() as f64
+                LEAD * 2.0 + crate::net::label_text_width(&near_t.net)
             } else {
                 LEAD * 2.0
             };
@@ -1255,9 +1252,6 @@ pub fn form_modules(
                 false,
             );
             if ok.is_some() {
-                if std::env::var_os("SPINE_DEBUG").is_some() {
-                    eprintln!("[attach] CHAIN {} onto {} home", items[part].refdes, near_t.net);
-                }
                 form.consumed.insert(ci, mi);
                 if let Some(sat) = form.modules[mi].sats.last() {
                     let f_off = pin_offset(item, &far_pin, sat.angle);
@@ -1269,7 +1263,7 @@ pub fn form_modules(
                     // A PORT far end labels for certain: reserve its text.
                     if port_nets.contains(far_t.net.as_str()) {
                         let (fx, fy) = (sat.offset.x + f_off.x, sat.offset.y + f_off.y);
-                        let text = 2.54 + 1.4 * far_t.net.chars().count() as f64;
+                        let text = crate::net::label_text_width(&far_t.net);
                         let r = geom::Rect::new(
                             fx + (outward * text).min(0.0),
                             fy - 2.54,
@@ -1393,11 +1387,6 @@ pub fn form_modules(
         }
         if ok {
             form.consumed.insert(ci, mi);
-        } else if std::env::var_os("SPINE_DEBUG").is_some() {
-            eprintln!(
-                "[adopt-leg] FAILED {} at net {} home=({:.1},{:.1}) outward={outward}",
-                items[c.parts[0]].refdes, jnet, tap_at.x, tap_at.y
-            );
         }
     }
 

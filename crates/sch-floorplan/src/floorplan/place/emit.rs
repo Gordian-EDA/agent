@@ -200,73 +200,56 @@ pub fn emit_writer(
 /// the resulting sheet width/height is measured, and the column count minimising
 /// `|width/height - target_aspect|` wins. Returns the per-input tile origin `(x, y)`,
 /// in original input order. A single block (or empty) trivially packs to one column.
+/// First-fit-decreasing column pack at a fixed column count: tallest tile
+/// first into the currently-shortest column. Returns per-input origins and the
+/// packed sheet's width/height aspect. Row packing is this on transposed axes.
+fn pack_ffd(sizes: &[[f64; 2]], margin: f64, ncol: usize) -> (Vec<[f64; 2]>, f64) {
+    let n = sizes.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| sizes[b][1].total_cmp(&sizes[a][1]).then(a.cmp(&b)));
+    let mut col_y = vec![0.0_f64; ncol];
+    let mut col_w = vec![0.0_f64; ncol];
+    let mut col_of = vec![0usize; n];
+    let mut yof = vec![0.0_f64; n];
+    for &i in &order {
+        let c = (0..ncol)
+            .min_by(|&a, &b| col_y[a].total_cmp(&col_y[b]))
+            .unwrap();
+        yof[i] = col_y[c];
+        col_of[i] = c;
+        col_y[c] += sizes[i][1] + margin;
+        col_w[c] = col_w[c].max(sizes[i][0]);
+    }
+    let mut col_x = vec![0.0_f64; ncol];
+    let mut acc = 0.0_f64;
+    for c in 0..ncol {
+        col_x[c] = acc;
+        acc += col_w[c] + margin;
+    }
+    let width = col_x[ncol - 1] + col_w[ncol - 1];
+    let height = col_y.iter().cloned().fold(0.0_f64, f64::max);
+    let tiles: Vec<[f64; 2]> = (0..n).map(|i| [col_x[col_of[i]], yof[i]]).collect();
+    (tiles, if height > 0.0 { width / height } else { 1.0 })
+}
+
 pub(crate) fn pack_columns(sizes: &[[f64; 2]], margin: f64, target_aspect: f64) -> Vec<[f64; 2]> {
     let n = sizes.len();
     if n == 0 {
         return Vec::new();
     }
-    // Tallest-first order; ties broken by input index for determinism.
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| sizes[b][1].total_cmp(&sizes[a][1]).then(a.cmp(&b)));
+    let pack = |ncol: usize| -> (Vec<[f64; 2]>, f64) { pack_ffd(sizes, margin, ncol) };
 
-    let pack = |ncol: usize| -> (Vec<[f64; 2]>, f64) {
-        // Per-column running height (next free y) and accumulated max width.
-        let mut col_y = vec![0.0_f64; ncol];
-        let mut col_w = vec![0.0_f64; ncol];
-        let mut col_of = vec![0usize; n];
-        let mut yof = vec![0.0_f64; n];
-        for &i in &order {
-            // Shortest column (lowest running y), ties to the leftmost.
-            let c = (0..ncol)
-                .min_by(|&a, &b| col_y[a].total_cmp(&col_y[b]))
-                .unwrap();
-            yof[i] = col_y[c];
-            col_of[i] = c;
-            col_y[c] += sizes[i][1] + margin;
-            col_w[c] = col_w[c].max(sizes[i][0]);
-        }
-        // Column x origins from the cumulative max widths.
-        let mut col_x = vec![0.0_f64; ncol];
-        let mut acc = 0.0_f64;
-        for c in 0..ncol {
-            col_x[c] = acc;
-            acc += col_w[c] + margin;
-        }
-        let width = col_x[ncol - 1] + col_w[ncol - 1];
-        let height = col_y.iter().cloned().fold(0.0_f64, f64::max);
-        let tiles: Vec<[f64; 2]> = (0..n).map(|i| [col_x[col_of[i]], yof[i]]).collect();
-        ((tiles), if height > 0.0 { width / height } else { 1.0 })
-    };
-
-    // ROW packing (transpose): widest-first into the currently-narrowest row.
-    // A BANNER tile (one very wide block among small ones) forces column
-    // packing into a portrait strip; rows lay the smalls in a band under it.
-    let mut worder: Vec<usize> = (0..n).collect();
-    worder.sort_by(|&a, &b| sizes[b][0].total_cmp(&sizes[a][0]).then(a.cmp(&b)));
+    // ROW packing is the exact transpose of column packing: swap the axes of
+    // every size, column-pack, swap the resulting origins back. A BANNER tile
+    // (one very wide block among small ones) forces column packing into a
+    // portrait strip; rows lay the smalls in a band under it.
+    let transposed: Vec<[f64; 2]> = sizes.iter().map(|s| [s[1], s[0]]).collect();
     let pack_rows = |nrow: usize| -> (Vec<[f64; 2]>, f64) {
-        let mut row_x = vec![0.0_f64; nrow];
-        let mut row_h = vec![0.0_f64; nrow];
-        let mut row_of = vec![0usize; n];
-        let mut xof = vec![0.0_f64; n];
-        for &i in &worder {
-            let r = (0..nrow)
-                .min_by(|&a, &b| row_x[a].total_cmp(&row_x[b]))
-                .unwrap();
-            xof[i] = row_x[r];
-            row_of[i] = r;
-            row_x[r] += sizes[i][0] + margin;
-            row_h[r] = row_h[r].max(sizes[i][1]);
-        }
-        let mut row_y = vec![0.0_f64; nrow];
-        let mut acc = 0.0_f64;
-        for r in 0..nrow {
-            row_y[r] = acc;
-            acc += row_h[r] + margin;
-        }
-        let width = row_x.iter().cloned().fold(0.0_f64, f64::max);
-        let height = row_y[nrow - 1] + row_h[nrow - 1];
-        let tiles: Vec<[f64; 2]> = (0..n).map(|i| [xof[i], row_y[row_of[i]]]).collect();
-        (tiles, if height > 0.0 { width / height } else { 1.0 })
+        let (tiles, aspect) = pack_ffd(&transposed, margin, nrow);
+        (
+            tiles.into_iter().map(|t| [t[1], t[0]]).collect(),
+            if aspect > 0.0 { 1.0 / aspect } else { 1.0 },
+        )
     };
 
     (1..=n)

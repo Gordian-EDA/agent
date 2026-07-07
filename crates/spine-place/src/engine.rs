@@ -173,7 +173,7 @@ impl SpinePlace {
                 }
             }
         }
-        if std::env::var_os("SPINE_DEBUG").is_some() {
+        if debug {
             for &a in &anchors {
                 let it = &problem.items[a];
                 let conn = it.pins.iter().filter(|(_, _, n)| n.is_some()).count();
@@ -256,15 +256,10 @@ impl SpinePlace {
                 .collect()
         };
 
-        let mut run_variant = |items: &mut Vec<sch_place::item::Item>,
-                               fold: bool,
-                               strap_col: bool,
-                               shelf: bool,
-                               hop_align: bool|
+        let run_variant = |items: &mut Vec<sch_place::item::Item>,
+                               v: crate::order::Variants|
          -> usize {
-            let origins = arrange(
-                items, &g, &scene, &dirs, fold, strap_col, shelf, hop_align, &bundle_free,
-            );
+            let origins = arrange(items, &g, &scene, &dirs, v, &bundle_free);
             let mut placed = vec![false; items.len()];
             let commit = |origins: &[Point2],
                           items: &mut [sch_place::item::Item],
@@ -365,135 +360,72 @@ impl SpinePlace {
             let shape = 1.0 + (aspect / 1.4 - 1.0).abs().min(3.0);
             ((w * h * shape) / 100.0) as i64
         };
-        let mut strap_on = false;
-        let mut shelf_on = false;
-        let mut hop_on = false;
-        let mut breaks = run_variant(&mut problem.items, false, false, false, false);
-
-        // Strap-column A/B: stub islets in one dedicated refdes-sorted column
-        // (the human "straps region") — kept only when the sheet metrics hold.
-        {
-            let before: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
-            let xa = eval.crossings(&problem.items);
-            let a = (
-                breaks,
-                body_overlap_count(&problem.items),
-                xa.body + xa.ic,
-                eval.warnings(&problem.items),
-                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
-            );
-            let b_breaks = run_variant(&mut problem.items, false, true, false, false);
-            let xb = eval.crossings(&problem.items);
-            let b = (
-                b_breaks,
-                body_overlap_count(&problem.items),
-                xb.body + xb.ic,
-                eval.warnings(&problem.items),
-                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
-            );
+        // One A/B gate serves every self-proving pass: snapshot, measure the
+        // 6-tuple (breaks, overlaps, through-body, warnings, labels, area —
+        // area zeroed when the pass shouldn't trade shape), apply, re-measure,
+        // keep on `b <= a` else restore. Returns whether the variant stuck.
+        let dbg = problem.options.debug_timing;
+        let mut breaks = run_variant(&mut problem.items, crate::order::Variants::default());
+        let measure = |items: &Vec<sch_place::item::Item>, brk: usize, with_area: bool| {
+            let x = eval.crossings(items);
+            (
+                brk,
+                body_overlap_count(items),
+                x.body + x.ic,
+                eval.warnings(items),
+                crate::compact::labeled_nets(items, &problem_inc, &classes).len(),
+                if with_area { sheet_area(items) } else { 0 },
+            )
+        };
+        let ab_gate = |items: &mut Vec<sch_place::item::Item>,
+                           breaks: &mut usize,
+                           name: &str,
+                           with_area: bool,
+                           apply: &mut dyn FnMut(&mut Vec<sch_place::item::Item>) -> usize|
+         -> bool {
+            let before: Vec<_> = items.iter().map(|it| (it.at, it.angle)).collect();
+            let a = measure(items, *breaks, with_area);
+            let b_breaks = apply(items);
+            let b = measure(items, b_breaks, with_area);
             if b <= a {
-                breaks = b_breaks;
-                strap_on = true;
-                if problem.options.debug_timing {
-                    eprintln!("[spine] strap column kept: {a:?} -> {b:?}");
+                *breaks = b_breaks;
+                if dbg {
+                    eprintln!("[spine] {name} kept: {a:?} -> {b:?}");
                 }
+                true
             } else {
-                for (it, (at, angle)) in problem.items.iter_mut().zip(before) {
+                for (it, (at, angle)) in items.iter_mut().zip(before) {
                     it.at = at;
                     it.angle = angle;
                 }
-                if problem.options.debug_timing {
-                    eprintln!("[spine] strap column rejected: {a:?} vs {b:?}");
+                if dbg {
+                    eprintln!("[spine] {name} rejected: {a:?} vs {b:?}");
                 }
+                false
             }
-        }
+        };
+        use crate::order::Variants;
 
-        // Shelf A/B: free label-island modules shelve into a ~square block of
-        // refdes-ordered columns instead of the wide banner their weak junction
-        // edges produce. Area breaks gate ties, so the page shape can win.
-        {
-            let before: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
-            let xa = eval.crossings(&problem.items);
-            let a = (
-                breaks,
-                body_overlap_count(&problem.items),
-                xa.body + xa.ic,
-                eval.warnings(&problem.items),
-                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
-                sheet_area(&problem.items),
-            );
-            let b_breaks = run_variant(&mut problem.items, false, strap_on, true, false);
-            let xb = eval.crossings(&problem.items);
-            let b = (
-                b_breaks,
-                body_overlap_count(&problem.items),
-                xb.body + xb.ic,
-                eval.warnings(&problem.items),
-                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
-                sheet_area(&problem.items),
-            );
-            if b <= a {
-                breaks = b_breaks;
-                shelf_on = true;
-                if problem.options.debug_timing {
-                    eprintln!("[spine] shelf kept: {a:?} -> {b:?}");
-                }
-            } else {
-                for (it, (at, angle)) in problem.items.iter_mut().zip(before) {
-                    it.at = at;
-                    it.angle = angle;
-                }
-                if problem.options.debug_timing {
-                    eprintln!("[spine] shelf rejected: {a:?} vs {b:?}");
-                }
-            }
-        }
-
-        // Hop-align A/B: junction-hop port alignment (pot—cap—junction—amp as
-        // one row). Vertical snaps can merge nets; breaks lead the tuple, so a
-        // merging alignment self-rejects.
-        {
-            let before: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
-            let xa = eval.crossings(&problem.items);
-            let a = (
-                breaks,
-                body_overlap_count(&problem.items),
-                xa.body + xa.ic,
-                eval.warnings(&problem.items),
-                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
-                sheet_area(&problem.items),
-            );
-            let b_breaks = run_variant(&mut problem.items, false, strap_on, shelf_on, true);
-            let xb = eval.crossings(&problem.items);
-            let b = (
-                b_breaks,
-                body_overlap_count(&problem.items),
-                xb.body + xb.ic,
-                eval.warnings(&problem.items),
-                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
-                sheet_area(&problem.items),
-            );
-            if b <= a {
-                breaks = b_breaks;
-                hop_on = true;
-                if problem.options.debug_timing {
-                    eprintln!("[spine] hop-align kept: {a:?} -> {b:?}");
-                }
-            } else {
-                for (it, (at, angle)) in problem.items.iter_mut().zip(before) {
-                    it.at = at;
-                    it.angle = angle;
-                }
-                if problem.options.debug_timing {
-                    eprintln!("[spine] hop-align rejected: {a:?} vs {b:?}");
-                }
-            }
-        }
-
-        // Fold A/B: a wide sheet re-runs with the layer sequence folded into
-        // rows (the human page-wrap); kept only when strictly no worse on
-        // breaks/overlaps/warnings — folding helps chain boards and can hurt
-        // label-island boards, so it must prove itself per sheet.
+        // Strap column: stub islets in one dedicated refdes-sorted column (the
+        // human "straps region").
+        let strap_on = ab_gate(&mut problem.items, &mut breaks, "strap column", false, &mut |it| {
+            run_variant(it, Variants { strap_col: true, ..Default::default() })
+        });
+        // Shelf: free label-island modules in a ~square block instead of the
+        // wide banner their weak junction edges produce; area breaks ties.
+        let shelf_on = ab_gate(&mut problem.items, &mut breaks, "shelf", true, &mut |it| {
+            run_variant(it, Variants { strap_col: strap_on, shelf: true, ..Default::default() })
+        });
+        // Hop-align: junction-hop port alignment; vertical snaps can merge
+        // nets, and breaks lead the tuple, so a merging alignment self-rejects.
+        let hop_on = ab_gate(&mut problem.items, &mut breaks, "hop-align", true, &mut |it| {
+            run_variant(
+                it,
+                Variants { strap_col: strap_on, shelf: shelf_on, hop_align: true, ..Default::default() },
+            )
+        });
+        // Fold: a wide sheet re-runs with the layer sequence folded into rows
+        // (the human page-wrap); only attempted past the banner threshold.
         {
             let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
             for it in problem.items.iter() {
@@ -504,105 +436,43 @@ impl SpinePlace {
             }
             let (w, h) = (hi[0] - lo[0], hi[1] - lo[1]);
             if w > 1.8 * h.max(30.0) {
-                let unfolded: Vec<_> =
-                    problem.items.iter().map(|it| (it.at, it.angle)).collect();
-                let xa = eval.crossings(&problem.items);
-                let a = (
-                    breaks,
-                    body_overlap_count(&problem.items),
-                    xa.body + xa.ic,
-                    eval.warnings(&problem.items),
-                    crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
-                );
-                let b_breaks = run_variant(&mut problem.items, true, strap_on, shelf_on, hop_on);
-                let xb = eval.crossings(&problem.items);
-                let b = (
-                    b_breaks,
-                    body_overlap_count(&problem.items),
-                    xb.body + xb.ic,
-                    eval.warnings(&problem.items),
-                    crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
-                );
-                if b <= a {
-                    breaks = b_breaks;
-                    if problem.options.debug_timing {
-                        eprintln!("[spine] fold kept: {a:?} -> {b:?}");
-                    }
-                } else {
-                    for (it, (at, angle)) in problem.items.iter_mut().zip(unfolded) {
-                        it.at = at;
-                        it.angle = angle;
-                    }
-                    if problem.options.debug_timing {
-                        eprintln!("[spine] fold rejected: {a:?} vs {b:?}");
-                    }
-                }
+                ab_gate(&mut problem.items, &mut breaks, "fold", false, &mut |it| {
+                    run_variant(
+                        it,
+                        Variants { fold: true, strap_col: strap_on, shelf: shelf_on, hop_align: hop_on },
+                    )
+                });
             }
         }
-
-        // Node-pack A/B: slide whole scene nodes left then up until they rest
-        // against the packed field (the human sprawl gap), keep only if
-        // breaks/overlaps/warnings hold.
-        {
-            let before: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
-            let xa = eval.crossings(&problem.items);
-            let a = (
-                breaks,
-                body_overlap_count(&problem.items),
-                xa.body + xa.ic,
-                eval.warnings(&problem.items),
-                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
-            );
+        // Node-pack: slide whole scene nodes left then up against the packed
+        // field (the human sprawl gap).
+        ab_gate(&mut problem.items, &mut breaks, "squash", false, &mut |it| {
             let mut groups: Vec<Vec<usize>> = scene
                 .nodes
                 .iter()
                 .map(|n| n.places.iter().map(|p| p.item).collect())
                 .filter(|g: &Vec<usize>| !g.is_empty())
                 .collect();
-            let mut grouped = vec![false; problem.items.len()];
+            let mut grouped = vec![false; it.len()];
             for g in &groups {
                 for &i in g {
                     grouped[i] = true;
                 }
             }
-            for i in 0..problem.items.len() {
+            for i in 0..it.len() {
                 if !grouped[i] {
                     groups.push(vec![i]);
                 }
             }
-            crate::compact::pack_nodes(&mut problem.items, &groups, &problem_inc, &classes);
-            decongest(&mut problem.items);
-            normalize(&mut problem.items);
-            let b_breaks = eval.truthfulness_breaks(&problem.items);
-            let xb = eval.crossings(&problem.items);
-            let b = (
-                b_breaks,
-                body_overlap_count(&problem.items),
-                xb.body + xb.ic,
-                eval.warnings(&problem.items),
-                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
-            );
-            if b <= a {
-                breaks = b_breaks;
-                if problem.options.debug_timing {
-                    eprintln!("[spine] squash kept: {a:?} -> {b:?}");
-                }
-            } else {
-                for (it, (at, angle)) in problem.items.iter_mut().zip(before) {
-                    it.at = at;
-                    it.angle = angle;
-                }
-                if problem.options.debug_timing {
-                    eprintln!("[spine] squash rejected: {a:?} vs {b:?}");
-                }
-            }
-        }
-
-        // Band A/B: same-type modules align into refdes-sorted columns/grids —
-        // the "same things share an axis" aesthetic humans read first. Each
-        // band gates INDIVIDUALLY: one colliding band must not veto the rest.
+            crate::compact::pack_nodes(it, &groups, &problem_inc, &classes);
+            decongest(it);
+            normalize(it);
+            eval.truthfulness_breaks(it)
+        });
+        // Bands: same-type modules align into refdes-sorted columns/grids —
+        // each band gates individually so one colliding band can't veto the rest.
         for band in crate::bands::plan(&problem.items, &scene) {
-            if std::env::var_os("SPINE_DEBUG").is_some() {
+            if debug {
                 let refs: Vec<&str> = band
                     .members
                     .iter()
@@ -615,42 +485,18 @@ impl SpinePlace {
                     .collect();
                 eprintln!("[band] {} members: {refs:?}", band.key);
             }
-            let before: Vec<_> = problem.items.iter().map(|it| (it.at, it.angle)).collect();
-            let xa = eval.crossings(&problem.items);
-            let a = (
-                breaks,
-                body_overlap_count(&problem.items),
-                xa.body + xa.ic,
-                eval.warnings(&problem.items),
-                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
+            ab_gate(
+                &mut problem.items,
+                &mut breaks,
+                &format!("band {}", band.key),
+                false,
+                &mut |it| {
+                    crate::bands::apply(it, &scene, &band);
+                    normalize(it);
+                    eval.truthfulness_breaks(it)
+                },
             );
-            crate::bands::apply(&mut problem.items, &scene, &band);
-            normalize(&mut problem.items);
-            let b_breaks = eval.truthfulness_breaks(&problem.items);
-            let xb = eval.crossings(&problem.items);
-            let b = (
-                b_breaks,
-                body_overlap_count(&problem.items),
-                xb.body + xb.ic,
-                eval.warnings(&problem.items),
-                crate::compact::labeled_nets(&problem.items, &problem_inc, &classes).len(),
-            );
-            if b <= a {
-                breaks = b_breaks;
-                if problem.options.debug_timing {
-                    eprintln!("[spine] band {} kept: {a:?} -> {b:?}", band.key);
-                }
-            } else {
-                for (it, (at, angle)) in problem.items.iter_mut().zip(before) {
-                    it.at = at;
-                    it.angle = angle;
-                }
-                if problem.options.debug_timing {
-                    eprintln!("[spine] band {} rejected: {a:?} vs {b:?}", band.key);
-                }
-            }
         }
-
 
         let overlaps = body_overlap_count(&problem.items);
         if overlaps > 0 && std::env::var_os("SPINE_DEBUG").is_some() {

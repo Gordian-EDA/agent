@@ -68,7 +68,6 @@ pub fn labeled_nets(
 /// closes — never correctness.
 fn obstacle(
     item: &Item,
-    inc: &Incidence,
     classes: &BTreeMap<String, NetClass>,
     labeled: &std::collections::BTreeSet<String>,
 ) -> Rect {
@@ -81,12 +80,11 @@ fn obstacle(
         let off = pg.at.transform_offset(item.angle, item.mirror);
         let (px, py) = (item.at[0] + off[0], item.at[1] + off[1]);
         let class = *classes.get(net).unwrap_or(&NetClass::Signal);
-        let _ = inc;
         let connectorish = sch_place::netclass::is_connector_like(&item.part);
         let text = if class.is_rail() {
             7.62
         } else if labeled.contains(net.as_str()) || connectorish {
-            2.54 + 1.4 * net.chars().count() as f64
+            crate::net::label_text_width(net)
         } else {
             2.54
         };
@@ -119,14 +117,13 @@ fn obstacle(
 fn group_rect(
     items: &[Item],
     group: &[usize],
-    inc: &Incidence,
     classes: &BTreeMap<String, NetClass>,
     labeled: &std::collections::BTreeSet<String>,
 ) -> Rect {
     let mut it = group.iter();
-    let first = obstacle(&items[*it.next().expect("non-empty group")], inc, classes, labeled);
+    let first = obstacle(&items[*it.next().expect("non-empty group")], classes, labeled);
     it.fold(first, |acc, &i| {
-        let r = obstacle(&items[i], inc, classes, labeled);
+        let r = obstacle(&items[i], classes, labeled);
         Rect::new(
             acc.min_x.min(r.min_x),
             acc.min_y.min(r.min_y),
@@ -161,7 +158,7 @@ fn pack_once(
     for axis in 0..2 {
         let mut rects: Vec<Rect> = groups
             .iter()
-            .map(|grp| group_rect(items, grp, inc, classes, &labeled))
+            .map(|grp| group_rect(items, grp, classes, &labeled))
             .collect();
         let mut order: Vec<usize> = (0..groups.len()).collect();
         order.sort_by(|&a, &b| {

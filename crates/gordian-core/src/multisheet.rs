@@ -71,7 +71,7 @@ fn block_nets(b: &Block) -> HashSet<String> {
 }
 
 /// One sheet group: a block name and its single authored block body.
-pub type SheetGroup = (String, Vec<(String, Block)>);
+pub type SheetGroup = (String, Block);
 
 /// Non-empty authored blocks, one group each, in declaration order. A block of
 /// ONLY `power:` symbols declares rails, not layout — it would tile as an empty
@@ -85,7 +85,7 @@ pub fn authored_groups(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
                 .values()
                 .any(|c| !c.part.starts_with("power:"))
         })
-        .map(|(name, block)| (name.clone(), vec![(name.clone(), block.clone())]))
+        .map(|(name, block)| (name.clone(), block.clone()))
         .collect()
 }
 
@@ -111,9 +111,9 @@ pub fn compose_design(
     let mut crossings = sch_place::place::Crossings::default();
     let mut detected_idioms = Vec::new();
     let placer = crate::tools::schematic_placement_engine();
-    for (gname, members) in groups {
+    for (gname, block) in groups {
         let mut sub = design.clone();
-        sub.blocks = members.into_iter().collect();
+        sub.blocks = std::iter::once((gname.clone(), block)).collect();
         mark_cross_sheet_ports(&mut sub, &cross_sheet);
         eprintln!("  [emit] group '{gname}' with {}", placer.name());
         let (w, out) = sch_floorplan::floorplan::emit_group(
@@ -156,8 +156,8 @@ pub fn compose_single_sheet(
 /// Nets that CROSS sheets: a signal net present in ≥2 sheet GROUPS.
 pub fn cross_sheet_nets(groups: &[SheetGroup]) -> HashSet<String> {
     let mut net_groups: HashMap<String, usize> = HashMap::new();
-    for (_, members) in groups {
-        let nets: HashSet<String> = members.iter().flat_map(|(_, b)| block_nets(b)).collect();
+    for (_, block) in groups {
+        let nets: HashSet<String> = block_nets(block).into_iter().collect();
         for net in nets {
             *net_groups.entry(net).or_default() += 1;
         }

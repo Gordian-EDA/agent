@@ -120,7 +120,7 @@ fn typeset_chain_run(
             if !labeled.contains(net.as_str()) {
                 continue;
             }
-            let text = 2.54 + 1.4 * net.chars().count() as f64;
+            let text = crate::net::label_text_width(net);
             if vertical {
                 if at_start {
                     node.env_min.y -= text.min(12.7);

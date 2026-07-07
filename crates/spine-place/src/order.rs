@@ -29,7 +29,7 @@ fn snap(v: f64) -> f64 {
 }
 
 /// A strap islet: a stub module or a small free module — the population of the
-/// dedicated strap column and the "Misc" section box.
+/// dedicated strap column.
 pub fn is_strapish(scene: &Scene, v: usize) -> bool {
     v < scene.nodes.len()
         && (scene.nodes[v].strap
@@ -44,24 +44,24 @@ pub fn is_strapish(scene: &Scene, v: usize) -> bool {
 }
 
 /// The arrangement graph: scene nodes plus zero-size junction vertices.
-struct Arrange {
-    /// scene-node count (junctions appended after).
-    n_scene: usize,
-    /// per-vertex edges: (other vertex, direction hint from self, port y offset on self).
-    adj: Vec<Vec<(usize, Option<bool>, f64)>>,
-}
-
 /// Final world origins for scene nodes (junction vertices are dropped — they
 /// guide ordering only; the realizer routes their nets).
+/// The gated layout variants one arrange run applies; each is proven per
+/// sheet by an A/B gate in the engine.
+#[derive(Clone, Copy, Default)]
+pub struct Variants {
+    pub fold: bool,
+    pub strap_col: bool,
+    pub shelf: bool,
+    pub hop_align: bool,
+}
+
 pub fn arrange(
     items: &[Item],
     g: &Reduced,
     scene: &Scene,
     dirs: &BTreeMap<(usize, String), PinDir>,
-    fold: bool,
-    strap_col: bool,
-    shelf: bool,
-    hop_align: bool,
+    variants: Variants,
     bundle_free: &std::collections::BTreeSet<usize>,
 ) -> Vec<Point2> {
     let n_scene = scene.nodes.len();
@@ -74,13 +74,12 @@ pub fn arrange(
     let mut junction_vertex: BTreeMap<usize, usize> = BTreeMap::new();
     let mut n_total = n_scene;
     for (ni, nk) in g.nodes.iter().enumerate() {
-        if let NodeKind::Junction(net) = nk {
+        if let NodeKind::Junction(_) = nk {
             let fanout = g
                 .chains
                 .iter()
                 .filter(|c| c.a.node == ni || c.b.node == ni)
                 .count();
-            let _ = net;
             if fanout >= LABEL_FANOUT {
                 continue;
             }
@@ -89,7 +88,8 @@ pub fn arrange(
         }
     }
 
-    let mut ar = Arrange { n_scene, adj: vec![Vec::new(); n_total] };
+    // Per-vertex edges: (other vertex, direction hint from self, port y offset on self).
+    let mut adj: Vec<Vec<(usize, Option<bool>, f64)>> = vec![Vec::new(); n_total];
 
     // Map a chain terminal to (vertex, direction hint at that end, port y).
     // Direction hint: Some(true) = this end is a SOURCE (flow leaves it).
@@ -149,8 +149,8 @@ pub fn arrange(
             {
                 // Direction: prefer x's hint, else invert y's.
                 let dir_xy = hx.or(hy.map(|s| !s));
-                ar.adj[vx].push((vy, dir_xy, px));
-                ar.adj[vy].push((vx, dir_xy.map(|d| !d), py));
+                adj[vx].push((vy, dir_xy, px));
+                adj[vy].push((vx, dir_xy.map(|d| !d), py));
             }
         };
         match run {
@@ -171,7 +171,7 @@ pub fn arrange(
     // 3. Longest-path layering over the resulting DAG (cycle edges dropped).
     let mut typed_in = vec![0usize; n_total];
     let mut typed_out = vec![0usize; n_total];
-    for (v, adjs) in ar.adj.iter().enumerate() {
+    for (v, adjs) in adj.iter().enumerate() {
         for &(_, hint, _) in adjs {
             match hint {
                 Some(true) => typed_out[v] += 1,
@@ -192,7 +192,7 @@ pub fn arrange(
     // at 0 runs their chain backwards through the source chain's columns.
     if seeds.is_empty() {
         seeds.extend((0..n_scene).filter(|&v| {
-            !ar.adj[v].is_empty()
+            !adj[v].is_empty()
                 && scene.nodes[v]
                     .anchor
                     .is_some_and(|a| sch_place::netclass::is_connector_like(&items[a].part))
@@ -211,7 +211,7 @@ pub fn arrange(
         queue.push_back(s);
     }
     while let Some(v) = queue.pop_front() {
-        for &(w, _, _) in &ar.adj[v] {
+        for &(w, _, _) in &adj[v] {
             if dist[w] == usize::MAX {
                 dist[w] = dist[v] + 1;
                 queue.push_back(w);
@@ -222,7 +222,7 @@ pub fn arrange(
     // Directed edge list: typed edges keep their direction; untyped run
     // downhill by BFS distance (ties by index, deterministic).
     let mut edges: Vec<(usize, usize)> = Vec::new();
-    for (v, adjs) in ar.adj.iter().enumerate() {
+    for (v, adjs) in adj.iter().enumerate() {
         for &(w, hint, _) in adjs {
             match hint {
                 Some(true) => edges.push((v, w)),
@@ -293,7 +293,7 @@ pub fn arrange(
             } else {
                 format!("junction#{v}")
             };
-            let adj: Vec<String> = ar.adj[v]
+            let adj: Vec<String> = adj[v]
                 .iter()
                 .map(|(w, h, _)| format!("{w}{}", match h { Some(true) => ">", Some(false) => "<", None => "-" }))
                 .collect();
@@ -328,7 +328,7 @@ pub fn arrange(
     // chain) are strung wide by weak junction edges on label-heavy boards; a
     // page reads better with them shelved into a ~square block of columns,
     // refdes-ordered (infer.rs shelves inferred anchors the same way).
-    if shelf {
+    if variants.shelf {
         let wired: std::collections::BTreeSet<usize> = scene
             .ends
             .values()
@@ -342,18 +342,13 @@ pub fn arrange(
             .filter(|&v| {
                 scene.nodes[v].anchor.is_some()
                     && (!wired.contains(&v) || bundle_free.contains(&v))
-                    && !(strap_col && is_strapish(scene, v))
+                    && !(variants.strap_col && is_strapish(scene, v))
             })
             .collect();
         if free.len() >= 3 {
-            let key = |v: usize| {
-                let a = scene.nodes[v].anchor.unwrap_or(0);
-                let r = &items[a].refdes;
-                let split = r.find(|c: char| c.is_ascii_digit()).unwrap_or(r.len());
-                let (alpha, num) = r.split_at(split);
-                (alpha.to_string(), num.parse::<u64>().unwrap_or(0))
-            };
-            free.sort_by_key(|&v| key(v));
+            free.sort_by_key(|&v| {
+                crate::bands::refdes_key(&items[scene.nodes[v].anchor.unwrap_or(0)].refdes)
+            });
             let base_layer = layer
                 .iter()
                 .enumerate()
@@ -404,7 +399,7 @@ pub fn arrange(
         }
     }
 
-    if strap_col {
+    if variants.strap_col {
         let strap_layer = layer.iter().copied().max().unwrap_or(0) + 1;
         for v in 0..n_scene {
             if is_strapish(scene, v) {
@@ -430,7 +425,7 @@ pub fn arrange(
             let mut keyed: Vec<(f64, usize)> = col
                 .iter()
                 .map(|&v| {
-                    let ns: Vec<f64> = ar.adj[v].iter().map(|&(w, _, _)| pos[w]).collect();
+                    let ns: Vec<f64> = adj[v].iter().map(|&(w, _, _)| pos[w]).collect();
                     let bc = if ns.is_empty() {
                         pos[v]
                     } else {
@@ -497,7 +492,7 @@ pub fn arrange(
     // Channel width between adjacent columns grows with the nets that must
     // cross it — parallel wires need lanes, and their labels need air.
     let mut spans = vec![0usize; cols.len().saturating_sub(1)];
-    for (v, adj) in ar.adj.iter().enumerate() {
+    for (v, adj) in adj.iter().enumerate() {
         for &(w, _, _) in adj {
             if v < w {
                 let (lo, hi) = (col_of[v].min(col_of[w]), col_of[v].max(col_of[w]));
@@ -510,19 +505,14 @@ pub fn arrange(
     // Strap column members order by refdes (numeric-aware), not barycenter.
     if !cols.is_empty() {
         let strap_l = cols.len() - 1;
-        let is_strap_col = strap_col
+        let is_strap_col = variants.strap_col
             && cols[strap_l]
                 .iter()
                 .all(|&v| v < n_scene && scene.nodes[v].anchor.is_some() && is_strapish(scene, v));
         if is_strap_col && cols[strap_l].len() >= 2 {
-            let key = |v: usize| {
-                let a = scene.nodes[v].anchor.unwrap_or(0);
-                let r = &items[a].refdes;
-                let split = r.find(|c: char| c.is_ascii_digit()).unwrap_or(r.len());
-                let (alpha, num) = r.split_at(split);
-                (alpha.to_string(), num.parse::<u64>().unwrap_or(0))
-            };
-            cols[strap_l].sort_by_key(|&v| key(v));
+            cols[strap_l].sort_by_key(|&v| {
+                crate::bands::refdes_key(&items[scene.nodes[v].anchor.unwrap_or(0)].refdes)
+            });
         }
     }
 
@@ -545,7 +535,7 @@ pub fn arrange(
         .map(|(l, w)| w + COL_GAP + 1.27 * spans.get(l).map_or(0, |&n| n.min(6)) as f64)
         .sum();
     let target_w = (area * 1.4).sqrt().max(160.0);
-    let fold = fold && total_w > target_w * 1.3;
+    let fold = variants.fold && total_w > target_w * 1.3;
 
     let mut col_x = vec![0.0f64; cols.len()];
     let mut row_of_col = vec![0usize; cols.len()];
@@ -605,7 +595,7 @@ pub fn arrange(
     // through its coupling cap reads as one row, exactly as a direct chain
     // would). GATED (hop_align): snapping rows can merge nets — the caller's
     // breaks-first A/B keeps it only where the netlist survives.
-    if hop_align {
+    if variants.hop_align {
         let mut at_junction: BTreeMap<usize, Vec<(usize, f64)>> = BTreeMap::new();
         for (ci, (ea, eb)) in &scene.ends {
             let c = &g.chains[*ci];

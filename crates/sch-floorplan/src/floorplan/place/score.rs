@@ -718,12 +718,6 @@ pub fn count_shorts(
                         || ep_point.near_eq(wire.segment.b, EPS)
                         || wire.segment.contains_point(ep.into())
                     {
-                        if std::env::var_os("BREAK_DEBUG").is_some() {
-                            eprintln!(
-                                "[short] pin {}:{} (net {net}) on wire of {:?} at ({:.1},{:.1})",
-                                items[*i].refdes, num, wire.net, ep[0], ep[1]
-                            );
-                        }
                         n += 1;
                     }
                 }

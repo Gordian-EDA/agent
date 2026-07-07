@@ -22,7 +22,7 @@ fn snap(v: f64) -> f64 {
 }
 
 /// Refdes sort key: alpha prefix + numeric suffix, so J2 < J10.
-fn refdes_key(r: &str) -> (String, u64) {
+pub(crate) fn refdes_key(r: &str) -> (String, u64) {
     let split = r.find(|c: char| c.is_ascii_digit()).unwrap_or(r.len());
     let (alpha, num) = r.split_at(split);
     (alpha.to_string(), num.parse().unwrap_or(0))

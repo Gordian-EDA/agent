@@ -208,12 +208,11 @@ impl SchematicWriter {
         net: &str,
         stub_mm: f64,
     ) -> io::Result<()> {
-        let STUB_MM: f64 = stub_mm;
         for (idx, (ep, dir)) in self.pin_dirs(env, refdes, pin)?.into_iter().enumerate() {
             let ep = GRID_50_MIL.snap_point(ep);
             let v = dir.vec();
             let end =
-                GRID_50_MIL.snap_point(Point2::new(ep.x + v.x * STUB_MM, ep.y + v.y * STUB_MM));
+                GRID_50_MIL.snap_point(Point2::new(ep.x + v.x * stub_mm, ep.y + v.y * stub_mm));
             self.labels.push(PinLabel {
                 net: net.to_string(),
                 at: end,

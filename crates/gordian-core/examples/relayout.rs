@@ -1,5 +1,5 @@
 //! Re-lay-out a netlist through a chosen placement ENGINE and render it — the A/B
-//! harness for comparing engines (anneal vs cluster) on the same circuit.
+//! harness for comparing engines (anneal, cluster, spine) on the same circuit.
 //!
 //! Input is either a human `.kicad_sch` (lifted to a netlist, discarding the human's
 //! placement) or an agent `circuit.yaml`. The chosen engine re-places it from scratch;
@@ -7,7 +7,7 @@
 //!
 //! Usage:
 //!   cargo run --release -p gordian-core --example relayout -- \
-//!       <file.kicad_sch|file.yaml> [--engine anneal|cluster] [--out DIR] [--tag NAME]
+//!       <file.kicad_sch|file.yaml> [--engine anneal|cluster|spine] [--out DIR] [--tag NAME]
 //!       [--compose]
 //!
 //! `--compose` lays out each authored block independently and tiles them onto one
