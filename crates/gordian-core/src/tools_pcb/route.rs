@@ -206,7 +206,7 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     }
 
     write_route(ctx, &rp, &result.solution, &board.layer_names)
-        .map_err(|e| format!("could not write route to live KiCAD board: {e}"))?;
+        .map_err(|e| format!("could not write route to the board: {e}"))?;
 
     let failed: Vec<Value> = result
         .failed
@@ -259,12 +259,23 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     }))
 }
 
-fn clear_existing_copper(
-    ctx: &AgentRuntime,
-) -> std::result::Result<(usize, usize), kicad_ipc::Error> {
+fn clear_existing_copper(ctx: &AgentRuntime) -> std::result::Result<(usize, usize), String> {
     let path = ctx.pcb_path();
-    ctx.kicad()
-        .with_session(&path, |session| session.kicad().delete_tracks_and_vias())
+    let live = ctx
+        .kicad()
+        .with_session(&path, |session| session.kicad().delete_tracks_and_vias());
+    let Err(live_err) = live else {
+        return live.map_err(|e| e.to_string());
+    };
+    // Headless fallback: strip the copper from the board file directly.
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("{live_err}; offline fallback could not read the board: {e}"))?;
+    let (stripped, tracks, vias) = super::patch::strip_copper(&text)
+        .map_err(|e| format!("{live_err}; offline fallback failed: {e}"))?;
+    std::fs::write(&path, stripped)
+        .map_err(|e| format!("{live_err}; offline fallback could not write the board: {e}"))?;
+    ctx.close_kicad_session();
+    Ok((tracks, vias))
 }
 
 fn make_route_honest(rp: &RouteProblem, result: &mut RouteResult) -> Vec<String> {
@@ -1110,13 +1121,23 @@ fn write_route(
     rp: &RouteProblem,
     solution: &RouteSolution,
     layer_names: &[String],
-) -> std::result::Result<(), kicad_ipc::Error> {
+) -> std::result::Result<(), String> {
     let path = ctx.pcb_path();
-    ctx.kicad().with_session(&path, |session| {
+    let live = ctx.kicad().with_session(&path, |session| {
         session
             .kicad()
             .create_route_solution(rp, solution, layer_names)
-    })
+    });
+    let Err(live_err) = live else { return Ok(()) };
+    // Headless fallback: append the copper to the board file directly.
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("{live_err}; offline fallback could not read the board: {e}"))?;
+    let appended = super::patch::append_copper(&text, solution, rp.layer_count, layer_names)
+        .map_err(|e| format!("{live_err}; offline fallback failed: {e}"))?;
+    std::fs::write(&path, appended)
+        .map_err(|e| format!("{live_err}; offline fallback could not write the board: {e}"))?;
+    ctx.close_kicad_session();
+    Ok(())
 }
 
 fn is_seed_placement(bounds: &pcb_model::Rect, parts: &[ImportedPart]) -> bool {

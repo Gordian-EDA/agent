@@ -528,7 +528,7 @@ pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         if !moves.is_empty()
             && let Err(e) = write_placement(ctx, &moves)
         {
-            return Ok(json!({ "error": format!("could not write placement to KiCAD: {e}") }));
+            return Ok(json!({ "error": format!("could not write placement: {e}") }));
         }
     }
     let positions: Vec<Value> = result.placements.iter().map(placement_json).collect();
@@ -633,12 +633,24 @@ pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
 fn write_placement(
     ctx: &AgentRuntime,
     moves: &[FootprintMove],
-) -> std::result::Result<(), kicad_ipc::Error> {
+) -> std::result::Result<(), String> {
     let path = ctx.pcb_path();
-    ctx.kicad().with_session(&path, |session| {
+    let live = ctx.kicad().with_session(&path, |session| {
         session.kicad().move_footprints(moves)?;
         session.kicad().save()
-    })
+    });
+    let Err(live_err) = live else { return Ok(()) };
+    // Headless / pre-9.0.3 fallback: apply the same moves to the board file
+    // as s-expression edits. Any open session now holds stale state — drop it
+    // so the next read reopens from disk.
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("{live_err}; offline fallback could not read the board: {e}"))?;
+    let patched = super::patch::patch_placements(&text, moves)
+        .map_err(|e| format!("{live_err}; offline fallback failed: {e}"))?;
+    std::fs::write(&path, patched)
+        .map_err(|e| format!("{live_err}; offline fallback could not write the board: {e}"))?;
+    ctx.close_kicad_session();
+    Ok(())
 }
 
 #[cfg(test)]

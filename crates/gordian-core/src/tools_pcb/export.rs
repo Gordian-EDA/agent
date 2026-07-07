@@ -60,12 +60,13 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     let note_prefix = if ctx.kicad().is_open() {
         match super::active::save_live_board(ctx) {
-            Ok(saved) => {
-                let _ = saved;
-                "Saved the live KiCAD board, then ran DRC. "
-            }
-            Err(err) => {
-                return Ok(json!({ "error": err }));
+            Ok(_) => "Saved the live KiCAD board, then ran DRC. ",
+            Err(_) => {
+                // A wedged live session must not block DRC: the offline write
+                // paths keep the file current, so lint the file itself and drop
+                // the session so the next tool reopens from disk.
+                ctx.close_kicad_session();
+                "Live KiCAD save failed; dropped the session and ran DRC on the board file. "
             }
         }
     } else {

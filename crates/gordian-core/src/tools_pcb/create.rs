@@ -1021,18 +1021,59 @@ pub(super) fn req_num(obj: &Value, key: &str, ctx: &str) -> std::result::Result<
         .ok_or_else(|| format!("{ctx}: missing or non-numeric `{key}`"))
 }
 
-/// Parse the board `bounds` from snake_case model input into the engine's
-/// [`Rect`] explicitly so the tool API owns its field names.
+/// Parse the board `bounds` from model input into the engine's [`Rect`].
+///
+/// This is a live LLM boundary: models send the rect in whatever shape their
+/// training favors, and a strict parser turns each guess into a dead retry
+/// loop (observed: DeepSeek burning 6+ calls on `missing max_x`). Accept the
+/// common shapes — snake_case/camelCase corners, `{x, y, width, height}`,
+/// `{width, height}` (origin 0), a `[min_x, min_y, max_x, max_y]` array,
+/// numbers-as-strings with an optional `mm` suffix — and teach the canonical
+/// shape in the error when nothing matches.
 fn parse_bounds(v: Option<&Value>) -> std::result::Result<Rect, String> {
-    let Some(obj) = v else {
-        return Err("missing required `bounds` ({min_x, max_x, min_y, max_y} in mm)".into());
+    const EXPECT: &str = r#"expected {"min_x":0,"min_y":0,"max_x":60,"max_y":40} in mm (or {x,y,width,height}, {width,height}, or [min_x,min_y,max_x,max_y])"#;
+    let Some(val) = v else {
+        return Err(format!("missing required `bounds`; {EXPECT}"));
     };
-    Ok(Rect {
-        min_x: req_num(obj, "min_x", "bounds")?,
-        max_x: req_num(obj, "max_x", "bounds")?,
-        min_y: req_num(obj, "min_y", "bounds")?,
-        max_y: req_num(obj, "max_y", "bounds")?,
-    })
+    fn num(v: &Value) -> Option<f64> {
+        v.as_f64().or_else(|| {
+            v.as_str()?
+                .trim()
+                .trim_end_matches("mm")
+                .trim()
+                .parse()
+                .ok()
+        })
+    }
+    let rect = |min_x: f64, min_y: f64, max_x: f64, max_y: f64| Rect {
+        min_x: min_x.min(max_x),
+        min_y: min_y.min(max_y),
+        max_x: min_x.max(max_x),
+        max_y: min_y.max(max_y),
+    };
+    if let Some(arr) = val.as_array() {
+        if let [a, b, c, d] = arr.as_slice()
+            && let (Some(a), Some(b), Some(c), Some(d)) = (num(a), num(b), num(c), num(d))
+        {
+            return Ok(rect(a, b, c, d));
+        }
+        return Err(format!("bounds: array must be 4 numbers; {EXPECT}"));
+    }
+    let get = |keys: &[&str]| keys.iter().find_map(|k| val.get(*k)).and_then(num);
+    let corners = (
+        get(&["min_x", "minX", "x0", "left"]),
+        get(&["min_y", "minY", "y0", "top"]),
+        get(&["max_x", "maxX", "x1", "right"]),
+        get(&["max_y", "maxY", "y1", "bottom"]),
+    );
+    if let (Some(x0), Some(y0), Some(x1), Some(y1)) = corners {
+        return Ok(rect(x0, y0, x1, y1));
+    }
+    if let (Some(w), Some(h)) = (get(&["width", "w"]), get(&["height", "h"])) {
+        let (x, y) = (get(&["x", "min_x", "minX"]).unwrap_or(0.0), get(&["y", "min_y", "minY"]).unwrap_or(0.0));
+        return Ok(rect(x, y, x + w, y + h));
+    }
+    Err(format!("bounds: could not read a rect from {val}; {EXPECT}"))
 }
 
 /// Parse optional `rules` from snake_case model input.

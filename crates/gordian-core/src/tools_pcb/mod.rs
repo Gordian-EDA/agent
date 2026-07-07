@@ -37,6 +37,7 @@ mod fab;
 mod footprints;
 mod interactive;
 mod outline;
+mod patch;
 mod place;
 mod render;
 mod route;
