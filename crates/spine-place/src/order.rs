@@ -183,9 +183,7 @@ pub fn arrange(
     // Only MODULE nodes can be sources — a chain run or junction sits between
     // its terminals by construction, whatever its local edge typing says.
     let mut seeds: Vec<usize> = (0..n_scene)
-        .filter(|&v| {
-            scene.nodes[v].anchor.is_some() && typed_out[v] > 0 && typed_in[v] == 0
-        })
+        .filter(|&v| scene.nodes[v].anchor.is_some() && typed_out[v] > 0 && typed_in[v] == 0)
         .collect();
     // Connectors seed only when NO typed source exists: with a real source the
     // BFS naturally pushes output connectors to the far end; force-seeding them
@@ -226,10 +224,14 @@ pub fn arrange(
         for &(w, hint, _) in adjs {
             match hint {
                 Some(true) => edges.push((v, w)),
-                Some(false) => {}          // recorded from the other side
+                Some(false) => {} // recorded from the other side
                 None if v < w => {
                     let (dv, dw) = (dist[v], dist[w]);
-                    if dv <= dw { edges.push((v, w)) } else { edges.push((w, v)) }
+                    if dv <= dw {
+                        edges.push((v, w))
+                    } else {
+                        edges.push((w, v))
+                    }
                 }
                 None => {}
             }
@@ -295,7 +297,16 @@ pub fn arrange(
             };
             let adj: Vec<String> = adj[v]
                 .iter()
-                .map(|(w, h, _)| format!("{w}{}", match h { Some(true) => ">", Some(false) => "<", None => "-" }))
+                .map(|(w, h, _)| {
+                    format!(
+                        "{w}{}",
+                        match h {
+                            Some(true) => ">",
+                            Some(false) => "<",
+                            None => "-",
+                        }
+                    )
+                })
                 .collect();
             eprintln!("[layer] v{v} {name} layer={} adj={adj:?}", layer[v]);
         }
@@ -387,9 +398,7 @@ pub fn arrange(
                 (bins.into_iter().map(|(_, m)| m).collect(), w / h)
             };
             let ncols = (1..=free.len())
-                .min_by(|&a, &b| {
-                    (ffd(a).1 - 1.4).abs().total_cmp(&(ffd(b).1 - 1.4).abs())
-                })
+                .min_by(|&a, &b| (ffd(a).1 - 1.4).abs().total_cmp(&(ffd(b).1 - 1.4).abs()))
                 .unwrap_or(1);
             for (col, members) in ffd(ncols).0.into_iter().enumerate() {
                 for v in members {
@@ -516,7 +525,6 @@ pub fn arrange(
         }
     }
 
-
     // Row folding: a deep series graph makes one very wide layer sequence;
     // humans wrap the chain into rows like text (the corpus RF sheets). Fold
     // consecutive layers into rows once the running width passes the landscape
@@ -567,8 +575,10 @@ pub fn arrange(
         for &v in col {
             if v < n_scene {
                 let n = &scene.nodes[v];
-                origin[v] = Point2::new(snap(col_x[l] - (n.env_min.x + n.env_max.x) / 2.0),
-                                        snap(y - n.env_min.y));
+                origin[v] = Point2::new(
+                    snap(col_x[l] - (n.env_min.x + n.env_max.x) / 2.0),
+                    snap(y - n.env_min.y),
+                );
                 y += height(v) + ROW_GAP;
             } else {
                 origin[v] = Point2::new(snap(col_x[l]), snap(y));
@@ -583,9 +593,17 @@ pub fn arrange(
     let mut aligned: Vec<bool> = vec![false; n_total];
     let mut chain_list: Vec<(usize, usize, f64, f64)> = Vec::new(); // (va, vb, ya, yb)
     for (ci, (ea, eb)) in &scene.ends {
-        let (Some(a), Some(b)) = (ea, eb) else { continue };
-        let pa = scene.nodes[*a].ports.iter().find(|p| p.chain == *ci && p.is_a);
-        let pb = scene.nodes[*b].ports.iter().find(|p| p.chain == *ci && !p.is_a);
+        let (Some(a), Some(b)) = (ea, eb) else {
+            continue;
+        };
+        let pa = scene.nodes[*a]
+            .ports
+            .iter()
+            .find(|p| p.chain == *ci && p.is_a);
+        let pb = scene.nodes[*b]
+            .ports
+            .iter()
+            .find(|p| p.chain == *ci && !p.is_a);
         if let (Some(pa), Some(pb)) = (pa, pb) {
             chain_list.push((*a, *b, pa.at.y, pb.at.y));
         }

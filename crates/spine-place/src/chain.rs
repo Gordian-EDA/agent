@@ -104,19 +104,11 @@ fn chainable(item: &Item) -> bool {
 }
 
 /// Contract `items`+`inc` into the reduced graph.
-pub fn contract(
-    items: &[Item],
-    inc: &Incidence,
-    classes: &BTreeMap<String, NetClass>,
-) -> Reduced {
+pub fn contract(items: &[Item], inc: &Incidence, classes: &BTreeMap<String, NetClass>) -> Reduced {
     let mut g = Reduced::default();
     let mut node_of: BTreeMap<NodeKind, usize> = BTreeMap::new();
 
-    fn intern(
-        g: &mut Reduced,
-        node_of: &mut BTreeMap<NodeKind, usize>,
-        kind: NodeKind,
-    ) -> usize {
+    fn intern(g: &mut Reduced, node_of: &mut BTreeMap<NodeKind, usize>, kind: NodeKind) -> usize {
         *node_of.entry(kind.clone()).or_insert_with(|| {
             g.nodes.push(kind);
             g.nodes.len() - 1
@@ -144,21 +136,31 @@ pub fn contract(
      -> Terminal {
         if class(net).is_rail() {
             let node = intern(g, node_of, NodeKind::Rail(net.to_string()));
-            return Terminal { node, pin: String::new(), net: net.to_string() };
+            return Terminal {
+                node,
+                pin: String::new(),
+                net: net.to_string(),
+            };
         }
-        let others: Vec<&(usize, String)> = att(net)
-            .iter()
-            .filter(|(i, _)| Some(*i) != from)
-            .collect();
+        let others: Vec<&(usize, String)> =
+            att(net).iter().filter(|(i, _)| Some(*i) != from).collect();
         if let [(i, pin)] = others.as_slice()
             && !chainable(&items[*i])
         {
             let node = intern(g, node_of, NodeKind::Part(*i));
-            return Terminal { node, pin: pin.clone(), net: net.to_string() };
+            return Terminal {
+                node,
+                pin: pin.clone(),
+                net: net.to_string(),
+            };
         }
         // Fan-out, dangling end, or a cycle seam: the net itself is the node.
         let node = intern(g, node_of, NodeKind::Junction(net.to_string()));
-        Terminal { node, pin: String::new(), net: net.to_string() }
+        Terminal {
+            node,
+            pin: String::new(),
+            net: net.to_string(),
+        }
     };
 
     // ── Chains through chainable parts. `walk(in_net, cur)`: `cur` was entered
@@ -177,7 +179,11 @@ pub fn contract(
             if !interior(&out) {
                 break;
             }
-            match att(&out).iter().map(|(i, _)| *i).find(|i| *i != cur && !taken[*i]) {
+            match att(&out)
+                .iter()
+                .map(|(i, _)| *i)
+                .find(|i| *i != cur && !taken[*i])
+            {
                 Some(next) => {
                     inbound = out;
                     cur = next;
@@ -197,7 +203,11 @@ pub fn contract(
         let (parts_r, nets_r) = walk(&n1, start, &mut taken);
         // Leftward: continue across n1 if it is interior and its far part is free.
         let (parts_l, nets_l) = if interior(&n1) {
-            match att(&n1).iter().map(|(i, _)| *i).find(|i| *i != start && !taken[*i]) {
+            match att(&n1)
+                .iter()
+                .map(|(i, _)| *i)
+                .find(|i| *i != start && !taken[*i])
+            {
                 Some(next) => walk(&n1, next, &mut taken),
                 None => (Vec::new(), Vec::new()),
             }
@@ -206,7 +216,12 @@ pub fn contract(
         };
 
         // Assemble a→b: reversed left, then right; nets bracket the parts.
-        let parts: Vec<usize> = parts_l.iter().rev().chain(parts_r.iter()).copied().collect();
+        let parts: Vec<usize> = parts_l
+            .iter()
+            .rev()
+            .chain(parts_r.iter())
+            .copied()
+            .collect();
         let nets: Vec<String> = parts_l
             .iter()
             .rev()
@@ -219,7 +234,12 @@ pub fn contract(
         debug_assert_eq!(nets.len(), parts.len() + 1, "chain nets must bracket parts");
 
         let a = terminal(&mut g, &mut node_of, &nets[0], parts.first().copied());
-        let b = terminal(&mut g, &mut node_of, &nets[nets.len() - 1], parts.last().copied());
+        let b = terminal(
+            &mut g,
+            &mut node_of,
+            &nets[nets.len() - 1],
+            parts.last().copied(),
+        );
         g.chains.push(Chain { a, b, parts, nets });
     }
 
@@ -238,8 +258,16 @@ pub fn contract(
             let na = intern(&mut g, &mut node_of, NodeKind::Part(i0));
             let nb = intern(&mut g, &mut node_of, NodeKind::Part(i1));
             g.chains.push(Chain {
-                a: Terminal { node: na, pin: p0, net: net.clone() },
-                b: Terminal { node: nb, pin: p1, net: net.clone() },
+                a: Terminal {
+                    node: na,
+                    pin: p0,
+                    net: net.clone(),
+                },
+                b: Terminal {
+                    node: nb,
+                    pin: p1,
+                    net: net.clone(),
+                },
                 parts: Vec::new(),
                 nets: vec![net.clone()],
             });
@@ -248,8 +276,16 @@ pub fn contract(
             for (i, pin) in non_chain {
                 let pn = intern(&mut g, &mut node_of, NodeKind::Part(*i));
                 g.chains.push(Chain {
-                    a: Terminal { node: j, pin: String::new(), net: net.clone() },
-                    b: Terminal { node: pn, pin: pin.clone(), net: net.clone() },
+                    a: Terminal {
+                        node: j,
+                        pin: String::new(),
+                        net: net.clone(),
+                    },
+                    b: Terminal {
+                        node: pn,
+                        pin: pin.clone(),
+                        net: net.clone(),
+                    },
                     parts: Vec::new(),
                     nets: vec![net.clone()],
                 });
@@ -339,11 +375,7 @@ mod tests {
             item("U2", "OPAMP", &[Some("C"), Some("W"), Some("Z")]),
         ];
         let (g, classes) = reduced(&items);
-        let series: Vec<&Chain> = g
-            .chains
-            .iter()
-            .filter(|c| !c.parts.is_empty())
-            .collect();
+        let series: Vec<&Chain> = g.chains.iter().filter(|c| !c.parts.is_empty()).collect();
         assert_eq!(series.len(), 1);
         let c = series[0];
         assert_eq!(c.parts.len(), 2);
@@ -424,8 +456,7 @@ mod tests {
             item("U2", "PHY", &[Some("N3"), Some("W"), Some("Z")]),
         ];
         let (g, _) = reduced(&items);
-        let with_parts: Vec<&Chain> =
-            g.chains.iter().filter(|c| !c.parts.is_empty()).collect();
+        let with_parts: Vec<&Chain> = g.chains.iter().filter(|c| !c.parts.is_empty()).collect();
         assert_eq!(with_parts.len(), 1);
         assert_eq!(with_parts[0].parts.len(), 3);
         let mut ns = with_parts[0].nets.clone();

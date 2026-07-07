@@ -122,15 +122,33 @@ pub(crate) fn placed_rect(items: &[Item], s: &SatPlace) -> geom::Rect {
 enum Attach {
     /// Vertical leg in the pin's column: `up` toward a supply, else down to ground.
     /// `sig_net` is the signal-side net (the junction the leg hangs from).
-    Ladder { chain: usize, anchor: usize, pin: String, a_near: bool, up: bool, sig_net: String },
+    Ladder {
+        chain: usize,
+        anchor: usize,
+        pin: String,
+        a_near: bool,
+        up: bool,
+        sig_net: String,
+    },
     /// Vertical run between two pins of the SAME anchor (chain `a` end at `pin_a`).
-    Bridge { chain: usize, anchor: usize, pin_a: String, pin_b: String },
+    Bridge {
+        chain: usize,
+        anchor: usize,
+        pin_a: String,
+        pin_b: String,
+    },
     /// One-part series chain wired at ONE anchor pin; the other end is free
     /// (labeled). The part sits beside the pin instead of floating as a
     /// two-label islet. `a_near` = chain terminal `a` is the anchor end.
     /// `via_junction` = the near side resolved THROUGH a junction (its net):
     /// that junction's shunt legs defer and hang from the tail's wire.
-    Tail { chain: usize, anchor: usize, pin: String, a_near: bool, via_junction: Option<String> },
+    Tail {
+        chain: usize,
+        anchor: usize,
+        pin: String,
+        a_near: bool,
+        via_junction: Option<String>,
+    },
 }
 
 /// The vertical span of a chain part along a leg, entry pin to exit pin.
@@ -138,6 +156,164 @@ fn part_span(item: &Item, angle: f64, entry: &str, exit: &str) -> f64 {
     let e = pin_offset(item, entry, angle);
     let x = pin_offset(item, exit, angle);
     (x.y - e.y).abs()
+}
+
+fn net_class(classes: &BTreeMap<String, NetClass>, net: &str) -> NetClass {
+    *classes.get(net).unwrap_or(&NetClass::Signal)
+}
+
+/// A pin's body side from its ANGLE (KiCAD pins point INTO the body: a
+/// left-side pin has angle 0/east). Position-based classification misreads
+/// tall symbols (an MCU's top-left pin looks "North" by magnitudes).
+/// The natural column of a pin: its own x for N/S pins, one pitch outward for
+/// E/W pins (the wire elbows out, then the leg runs vertical).
+fn pin_col_of(items: &[Item], a: usize, num: &str) -> f64 {
+    let at = pin_offset(&items[a], num, 0.0);
+    match pin_side_of_angle(items, a, num) {
+        PinSide::South | PinSide::North => at.x,
+        PinSide::East => at.x + LEAD + PITCH,
+        PinSide::West => at.x - LEAD - PITCH,
+    }
+}
+
+fn pin_side_of_angle(items: &[Item], a: usize, num: &str) -> PinSide {
+    items[a]
+        .geom
+        .pins
+        .iter()
+        .find(|p| p.number == num)
+        .map(|p| match p.angle.rem_euclid(360.0) as i64 {
+            0 => PinSide::West,
+            180 => PinSide::East,
+            90 => PinSide::South,
+            _ => PinSide::North,
+        })
+        .unwrap_or(PinSide::East)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_free(
+    items: &[Item],
+    claims: &mut Vec<geom::Rect>,
+    runs: &mut Vec<(i64, f64, f64, Option<String>)>,
+    module: &mut ModulePlan,
+    build: impl Fn(Point2) -> Vec<SatPlace>,
+    run_of: impl Fn(Point2) -> (i64, f64, f64, Option<String>),
+    at0: Point2,
+    step: Point2,
+) -> Option<Point2> {
+    commit_free_opt(
+        items, claims, runs, module, build, run_of, at0, step, 64, true,
+    )
+}
+
+/// `commit_free` with a slide budget and optional give-up: `must == false`
+/// returns false instead of force-committing a colliding fallback.
+#[allow(clippy::too_many_arguments)]
+fn commit_free_opt(
+    items: &[Item],
+    claims: &mut Vec<geom::Rect>,
+    runs: &mut Vec<(i64, f64, f64, Option<String>)>,
+    module: &mut ModulePlan,
+    build: impl Fn(Point2) -> Vec<SatPlace>,
+    run_of: impl Fn(Point2) -> (i64, f64, f64, Option<String>),
+    at0: Point2,
+    step: Point2,
+    budget: usize,
+    must: bool,
+) -> Option<Point2> {
+    let mut at = at0;
+    for tries in 0..budget {
+        let sats = build(at);
+        let body: Vec<geom::Rect> = sats.iter().map(|s| placed_rect(items, s)).collect();
+        let (ck, lo, hi, ref cnet) = run_of(at);
+        // A satellite PIN landing on a previously committed wire run is an
+        // electrical tap onto a foreign net (the bootstrap-approach short)
+        // — cross-axis, so interval keys never catch it. The commit anchor
+        // itself is exempt: that coincidence IS the intentional tap.
+        let ep_on_wire = sats.iter().any(|sp| {
+            let it = &items[sp.item];
+            it.geom.pins.iter().any(|pg| {
+                let off = pg.at.transform_offset(sp.angle, false);
+                let (ex, ey) = (sp.offset.x + off[0], sp.offset.y + off[1]);
+                if (ex - at.x).abs() < 0.1 && (ey - at.y).abs() < 0.1 {
+                    return false;
+                }
+                // The pin's own net may touch its own wires (that's the
+                // same conductor); only FOREIGN wires are shorts.
+                let pin_net = it
+                    .pins
+                    .iter()
+                    .find(|(num, _, _)| *num == pg.number)
+                    .and_then(|(_, _, n)| n.clone());
+                runs.iter().any(|(k, rlo, rhi, rnet)| {
+                    let k = *k;
+                    if k <= -900_000 {
+                        return false;
+                    }
+                    if let (Some(a), Some(b)) = (&pin_net, rnet)
+                        && a == b
+                    {
+                        return false;
+                    }
+                    if k >= 900_000 {
+                        (snap(ey) / GRID).round() as i64 + 1_000_000 == k
+                            && ex > *rlo - 0.1
+                            && ex < *rhi + 0.1
+                    } else {
+                        (snap(ex) / GRID).round() as i64 == k && ey > *rlo - 0.1 && ey < *rhi + 0.1
+                    }
+                })
+            })
+        });
+        if ep_on_wire && std::env::var_os("SPINE_DEBUG").is_some() {
+            let refs: Vec<&str> = sats.iter().map(|s| items[s.item].refdes.as_str()).collect();
+            eprintln!("[ep-guard] blocked {refs:?} at ({:.1},{:.1})", at.x, at.y);
+        }
+        let blocked = ep_on_wire
+            || body.iter().any(|r| claims.iter().any(|c| c.overlaps(r)))
+            || runs.iter().any(|(k, rlo, rhi, rnet)| {
+                *k == ck
+                    && lo < *rhi
+                    && *rlo < hi
+                    && !(cnet.is_some() && rnet.is_some() && cnet == rnet)
+            });
+        if !blocked {
+            if tries > 2 && std::env::var_os("SPINE_DEBUG").is_some() {
+                let refs: Vec<&str> = sats.iter().map(|s| items[s.item].refdes.as_str()).collect();
+                eprintln!(
+                    "[slide] {refs:?} slid {tries} steps: {:?} -> {:?}",
+                    (at0.x, at0.y),
+                    (at.x, at.y)
+                );
+            }
+            claims.extend(body);
+            runs.push((ck, lo, hi, cnet.clone()));
+            module.sats.extend(sats);
+            return Some(at);
+        }
+        at = Point2::new(at.x + step.x, at.y + step.y);
+    }
+    if !must {
+        return None;
+    }
+    let sats = build(at0);
+    claims.extend(sats.iter().map(|s| placed_rect(items, s)));
+    runs.push(run_of(at0));
+    module.sats.extend(sats);
+    Some(at0)
+}
+
+/// The cross-phase state module formation accumulates: the modules themselves
+/// plus the spatial ledgers (claims, wire runs, label reservations) and the
+/// tail-home registry every placement phase reads and extends.
+struct FormState {
+    form: ModuleForm,
+    mod_of_anchor: BTreeMap<usize, usize>,
+    claims: BTreeMap<usize, Vec<geom::Rect>>,
+    runs: BTreeMap<usize, Vec<(i64, f64, f64, Option<String>)>>,
+    label_boxes: BTreeMap<usize, Vec<geom::Rect>>,
+    tail_home: BTreeMap<String, (usize, Point2, f64)>,
 }
 
 /// Typeset all modules. `anchors` are the Part-node item indices in module-seed
@@ -151,8 +327,15 @@ pub fn form_modules(
     labeled: Option<&BTreeSet<String>>,
     port_nets: &BTreeSet<String>,
 ) -> ModuleForm {
-    let mut form = ModuleForm::default();
-    let class = |net: &str| *classes.get(net).unwrap_or(&NetClass::Signal);
+    let mut st = FormState {
+        form: ModuleForm::default(),
+        mod_of_anchor: BTreeMap::new(),
+        claims: BTreeMap::new(),
+        runs: BTreeMap::new(),
+        label_boxes: BTreeMap::new(),
+        tail_home: BTreeMap::new(),
+    };
+    let class = |net: &str| net_class(classes, net);
 
     // Stub adoption: a 0-part chain from a big anchor's pin straight to a small
     // 2-pin part (single-connected LED, pull resistor) — the part belongs
@@ -166,13 +349,11 @@ pub fn form_modules(
             (NodeKind::Part(x), NodeKind::Part(y)) => (*x, *y),
             _ => continue,
         };
-        let small = |i: usize| {
-            items[i].geom.pins.len() <= 2 && !is_connector_like_part(&items[i].part)
-        };
+        let small =
+            |i: usize| items[i].geom.pins.len() <= 2 && !is_connector_like_part(&items[i].part);
         // Connectors never adopt: their flanks are label columns by convention.
-        let big = |i: usize| {
-            items[i].geom.pins.len() >= 3 && !is_connector_like_part(&items[i].part)
-        };
+        let big =
+            |i: usize| items[i].geom.pins.len() >= 3 && !is_connector_like_part(&items[i].part);
         if small(pa) && big(pb) {
             adopts.push((pa, pb, c.b.pin.clone(), c.b.net.clone()));
         } else if small(pb) && big(pa) {
@@ -190,7 +371,6 @@ pub fn form_modules(
         .collect();
     let anchors = &anchors_vec[..];
 
-
     // ── Resolve a chain terminal to an anchor pin, directly or via junction.
     // Junction choices are memoized so every chain on one junction shares a
     // column; the preferred pin side order is E, S, W, N (flow reads rightward).
@@ -201,23 +381,7 @@ pub fn form_modules(
         PinSide::West => 2,
         PinSide::North => 3,
     };
-    // A pin's body side from its ANGLE (KiCAD pins point INTO the body: a
-    // left-side pin has angle 0/east). Position-based classification misreads
-    // tall symbols (an MCU's top-left pin looks "North" by magnitudes).
-    let pin_side_of = |a: usize, num: &str| {
-        items[a]
-            .geom
-            .pins
-            .iter()
-            .find(|p| p.number == num)
-            .map(|p| match p.angle.rem_euclid(360.0) as i64 {
-                0 => PinSide::West,
-                180 => PinSide::East,
-                90 => PinSide::South,
-                _ => PinSide::North,
-            })
-            .unwrap_or(PinSide::East)
-    };
+    let pin_side_of = |a: usize, num: &str| pin_side_of_angle(items, a, num);
     let mut resolve = |t: &crate::chain::Terminal| -> Option<(usize, String)> {
         match &g.nodes[t.node] {
             NodeKind::Part(i) if anchors.contains(i) => Some((*i, t.pin.clone())),
@@ -436,7 +600,8 @@ pub fn form_modules(
                     }
                 }
             }
-            if ok && let Some(a) = host
+            if ok
+                && let Some(a) = host
                 && !host_pins.is_empty()
             {
                 cluster_adopts.push((i, a, host_pins));
@@ -453,14 +618,13 @@ pub fn form_modules(
     let cluster_set: BTreeSet<usize> = cluster_adopts.iter().map(|(i, _, _)| *i).collect();
 
     // ── Seed one module per anchor (adopted stubs are already filtered out).
-    let mut mod_of_anchor: BTreeMap<usize, usize> = BTreeMap::new();
     for &a in anchors {
         if cluster_set.contains(&a) {
             continue;
         }
-        mod_of_anchor.insert(a, form.modules.len());
+        st.mod_of_anchor.insert(a, st.form.modules.len());
         let h = half_size(&items[a], 0.0);
-        form.modules.push(ModulePlan {
+        st.form.modules.push(ModulePlan {
             anchor: a,
             sats: Vec::new(),
             env_min: Point2::new(-h.x, -h.y),
@@ -469,13 +633,11 @@ pub fn form_modules(
     }
 
     // Claimed placement rects per module (anchor rect seeded), so every leg,
-    // bridge, and bank cap lands in genuinely free space — the claims use the
+    // bridge, and bank cap lands in genuinely free space — the st.claims use the
     // FULL text-inclusive rect, which is what the overlap wall measures.
-    let mut claims: BTreeMap<usize, Vec<geom::Rect>> = BTreeMap::new();
-    // Vertical/horizontal wire runs per module: (column key, lo, hi).
-    let mut runs: BTreeMap<usize, Vec<(i64, f64, f64, Option<String>)>> = BTreeMap::new();
-    for (&a, &mi) in &mod_of_anchor {
-        claims
+    // Vertical/horizontal wire st.runs per module: (column key, lo, hi).
+    for (&a, &mi) in &st.mod_of_anchor {
+        st.claims
             .entry(mi)
             .or_default()
             .push(sch_floorplan::contract::item_rect(&items[a], [0.0, 0.0]));
@@ -528,8 +690,7 @@ pub fn form_modules(
     // the wire threshold, breaking the reserve→spread→label fixpoint the
     // one-shot policy could never satisfy for both wire-first and label-first
     // boards at once.
-    let mut label_boxes: BTreeMap<usize, Vec<geom::Rect>> = BTreeMap::new();
-    for (&a, &mi) in &mod_of_anchor {
+    for (&a, &mi) in &st.mod_of_anchor {
         for (num, _name, net) in &items[a].pins {
             let Some(net) = net else { continue };
             if attached_pins.contains(&(a, num.clone())) {
@@ -543,8 +704,7 @@ pub fn form_modules(
                 .is_some_and(|p| pair_nets.get(p).copied().unwrap_or(0) >= 4);
             // Connector pins label by convention regardless of span (a header
             // is a harness boundary), so their names always reserve.
-            let connectorish =
-                sch_place::netclass::is_connector_like(&items[a].part);
+            let connectorish = sch_place::netclass::is_connector_like(&items[a].part);
             let certain = fanout >= 3 || bundled || connectorish;
             let predicted = labeled.is_some_and(|set| set.contains(net.as_str()));
             let text = if is_rail {
@@ -561,147 +721,68 @@ pub fn form_modules(
                 PinSide::North => geom::Rect::new(at.x - 1.9, at.y - 7.62, at.x + 1.9, at.y),
                 PinSide::South => geom::Rect::new(at.x - 1.9, at.y, at.x + 1.9, at.y + 7.62),
             };
-            claims.entry(mi).or_default().push(r);
-            label_boxes.entry(mi).or_default().push(r);
+            st.claims.entry(mi).or_default().push(r);
+            st.label_boxes.entry(mi).or_default().push(r);
         }
     }
-    // The natural column of a pin: its own x for N/S pins, one pitch outward for
-    // E/W pins (the wire elbows out, then the leg runs vertical).
-    let pin_col = |a: usize, num: &str| -> f64 {
-        let at = pin_offset(&items[a], num, 0.0);
-        match pin_side_of(a, num) {
-            PinSide::South | PinSide::North => at.x,
-            PinSide::East => at.x + LEAD + PITCH,
-            PinSide::West => at.x - LEAD - PITCH,
-        }
-    };
-    // Slide a build along `step` until its rects clear the module's claims AND
+    // Slide a build along `step` until its rects clear the module's st.claims AND
     // its vertical wire run doesn't overlap another run in the same column —
     // two legs sharing a column with overlapping riser intervals is exactly the
     // collinear geometry KiCAD merges into one net.
-    #[allow(clippy::too_many_arguments)]
-    fn commit_free(
-        items: &[Item],
-        claims: &mut Vec<geom::Rect>,
-        runs: &mut Vec<(i64, f64, f64, Option<String>)>,
-        module: &mut ModulePlan,
-        build: impl Fn(Point2) -> Vec<SatPlace>,
-        run_of: impl Fn(Point2) -> (i64, f64, f64, Option<String>),
-        at0: Point2,
-        step: Point2,
-    ) -> Option<Point2> {
-        commit_free_opt(items, claims, runs, module, build, run_of, at0, step, 64, true)
-    }
+    place_bridges(items, g, &attach, &mut st);
 
-    /// `commit_free` with a slide budget and optional give-up: `must == false`
-    /// returns false instead of force-committing a colliding fallback.
-    #[allow(clippy::too_many_arguments)]
-    fn commit_free_opt(
-        items: &[Item],
-        claims: &mut Vec<geom::Rect>,
-        runs: &mut Vec<(i64, f64, f64, Option<String>)>,
-        module: &mut ModulePlan,
-        build: impl Fn(Point2) -> Vec<SatPlace>,
-        run_of: impl Fn(Point2) -> (i64, f64, f64, Option<String>),
-        at0: Point2,
-        step: Point2,
-        budget: usize,
-        must: bool,
-    ) -> Option<Point2> {
-        let mut at = at0;
-        for tries in 0..budget {
-            let sats = build(at);
-            let body: Vec<geom::Rect> = sats.iter().map(|s| placed_rect(items, s)).collect();
-            let (ck, lo, hi, ref cnet) = run_of(at);
-            // A satellite PIN landing on a previously committed wire run is an
-            // electrical tap onto a foreign net (the bootstrap-approach short)
-            // — cross-axis, so interval keys never catch it. The commit anchor
-            // itself is exempt: that coincidence IS the intentional tap.
-            let ep_on_wire = sats.iter().any(|sp| {
-                let it = &items[sp.item];
-                it.geom.pins.iter().any(|pg| {
-                    let off = pg.at.transform_offset(sp.angle, false);
-                    let (ex, ey) = (sp.offset.x + off[0], sp.offset.y + off[1]);
-                    if (ex - at.x).abs() < 0.1 && (ey - at.y).abs() < 0.1 {
-                        return false;
-                    }
-                    // The pin's own net may touch its own wires (that's the
-                    // same conductor); only FOREIGN wires are shorts.
-                    let pin_net = it
-                        .pins
-                        .iter()
-                        .find(|(num, _, _)| *num == pg.number)
-                        .and_then(|(_, _, n)| n.clone());
-                    runs.iter().any(|(k, rlo, rhi, rnet)| {
-                        let k = *k;
-                        if k <= -900_000 {
-                            return false;
-                        }
-                        if let (Some(a), Some(b)) = (&pin_net, rnet)
-                            && a == b
-                        {
-                            return false;
-                        }
-                        if k >= 900_000 {
-                            (snap(ey) / GRID).round() as i64 + 1_000_000 == k
-                                && ex > *rlo - 0.1
-                                && ex < *rhi + 0.1
-                        } else {
-                            (snap(ex) / GRID).round() as i64 == k
-                                && ey > *rlo - 0.1
-                                && ey < *rhi + 0.1
-                        }
-                    })
-                })
-            });
-            if ep_on_wire && std::env::var_os("SPINE_DEBUG").is_some() {
-                let refs: Vec<&str> = sats.iter().map(|s| items[s.item].refdes.as_str()).collect();
-                eprintln!("[ep-guard] blocked {refs:?} at ({:.1},{:.1})", at.x, at.y);
-            }
-            let blocked = ep_on_wire
-                || body
-                    .iter()
-                    .any(|r| claims.iter().any(|c| c.overlaps(r)))
-                || runs.iter().any(|(k, rlo, rhi, rnet)| {
-                    *k == ck
-                        && lo < *rhi
-                        && *rlo < hi
-                        && !(cnet.is_some() && rnet.is_some() && cnet == rnet)
-                });
-            if !blocked {
-                if tries > 2 && std::env::var_os("SPINE_DEBUG").is_some() {
-                    let refs: Vec<&str> =
-                        sats.iter().map(|s| items[s.item].refdes.as_str()).collect();
-                    eprintln!(
-                        "[slide] {refs:?} slid {tries} steps: {:?} -> {:?}",
-                        (at0.x, at0.y),
-                        (at.x, at.y)
-                    );
-                }
-                claims.extend(body);
-                runs.push((ck, lo, hi, cnet.clone()));
-                module.sats.extend(sats);
-                return Some(at);
-            }
-            at = Point2::new(at.x + step.x, at.y + step.y);
-        }
-        if !must {
-            return None;
-        }
-        let sats = build(at0);
-        claims.extend(sats.iter().map(|s| placed_rect(items, s)));
-        runs.push(run_of(at0));
-        module.sats.extend(sats);
-        Some(at0)
-    }
+    let tail_claimed: BTreeSet<&str> = attach
+        .iter()
+        .filter_map(|at| match at {
+            Attach::Tail {
+                via_junction: Some(j),
+                ..
+            } => Some(j.as_str()),
+            _ => None,
+        })
+        .collect();
 
-    // ── Bridges first: they own the pin column between their two pins.
+    // How many deferred legs each tail-claimed junction is waiting to hang:
+    // the tail leaves that much extra wire between pin and part so the legs'
+    // taps land ON the wire (an off-wire tap forces a labeled stub).
+    let mut deferred_legs: BTreeMap<&str, usize> = BTreeMap::new();
     for at in &attach {
-        let Attach::Bridge { chain, anchor, pin_a, pin_b } = at else {
+        if let Attach::Ladder { sig_net, .. } = at
+            && tail_claimed.contains(sig_net.as_str())
+        {
+            *deferred_legs.entry(sig_net.as_str()).or_default() += 1;
+        }
+    }
+
+    place_tails(items, g, &attach, &deferred_legs, port_nets, &mut st);
+    place_ladders(items, g, &attach, &tail_claimed, &mut st);
+    chain_tails(items, g, classes, &junction_pin, inc, port_nets, &mut st);
+    adopt_junction_legs(items, g, classes, &mut st);
+    place_adopted_stubs(items, adopts, &mut st);
+    commit_cluster_adopts(items, cluster_adopts, &mut st);
+    place_banks(items, g, classes, anchors, &decouple, &mut st);
+    recompute_envelopes(items, &mut st);
+
+    st.form
+}
+
+#[allow(clippy::too_many_arguments)]
+fn place_bridges(items: &[Item], g: &Reduced, attach: &[Attach], st: &mut FormState) {
+    let pin_side_of = |a: usize, num: &str| pin_side_of_angle(items, a, num);
+    let pin_col = |a: usize, num: &str| pin_col_of(items, a, num);
+    // ── Bridges first: they own the pin column between their two pins.
+    for at in attach {
+        let Attach::Bridge {
+            chain,
+            anchor,
+            pin_a,
+            pin_b,
+        } = at
+        else {
             continue;
         };
         let c = &g.chains[*chain];
-        let mi = mod_of_anchor[anchor];
+        let mi = st.mod_of_anchor[anchor];
         let pa = pin_offset(&items[*anchor], pin_a, 0.0);
         let pb = pin_offset(&items[*anchor], pin_b, 0.0);
         let (sa, sb) = (pin_side_of(*anchor, pin_a), pin_side_of(*anchor, pin_b));
@@ -735,7 +816,7 @@ pub fn form_modules(
                 out
             };
             let at0 = Point2::new((pa.x + pb.x) / 2.0, anchor_rect.min_y - LEAD * 2.0);
-            // Horizontal feedback runs live in a disjoint key space (row keys
+            // Horizontal feedback st.runs live in a disjoint key space (row keys
             // offset far from any column key).
             let bridge_net = c.nets.first().cloned();
             let run_of = |at: Point2| {
@@ -746,11 +827,11 @@ pub fn form_modules(
                     bridge_net.clone(),
                 )
             };
-            let module = &mut form.modules[mi];
+            let module = &mut st.form.modules[mi];
             let committed = commit_free(
                 items,
-                claims.entry(mi).or_default(),
-                runs.entry(mi).or_default(),
+                st.claims.entry(mi).or_default(),
+                st.runs.entry(mi).or_default(),
                 module,
                 build,
                 run_of,
@@ -761,7 +842,7 @@ pub fn form_modules(
             // wires: register their column intervals or a same-column tail
             // pin lands on them (the BUCK_EN / bootstrap short).
             if let Some(at) = committed {
-                let rr = runs.entry(mi).or_default();
+                let rr = st.runs.entry(mi).or_default();
                 for (p, n) in [(pa, c.nets.first()), (pb, c.nets.last())] {
                     rr.push((
                         (snap(p.x) / GRID).round() as i64,
@@ -771,14 +852,18 @@ pub fn form_modules(
                     ));
                 }
             }
-            form.consumed.insert(*chain, mi);
+            st.form.consumed.insert(*chain, mi);
             continue;
         }
         let x0 = pin_col(*anchor, pin_a).max(pin_col(*anchor, pin_b));
         let outward = if x0 >= 0.0 { PITCH } else { -PITCH };
         // Stack parts vertically from the higher pin toward the lower one,
         // centered in the span.
-        let (top, bot) = if pa.y <= pb.y { (pa.y, pb.y) } else { (pb.y, pa.y) };
+        let (top, bot) = if pa.y <= pb.y {
+            (pa.y, pb.y)
+        } else {
+            (pb.y, pa.y)
+        };
         let (parts, nets): (Vec<usize>, Vec<String>) = if pa.y <= pb.y {
             (c.parts.clone(), c.nets.clone())
         } else {
@@ -817,13 +902,12 @@ pub fn form_modules(
             out
         };
         let vb_net = c.nets.first().cloned();
-        let run_of =
-            |at: Point2| ((snap(at.x) / GRID).round() as i64, top, bot, vb_net.clone());
-        let module = &mut form.modules[mi];
+        let run_of = |at: Point2| ((snap(at.x) / GRID).round() as i64, top, bot, vb_net.clone());
+        let module = &mut st.form.modules[mi];
         let committed = commit_free(
             items,
-            claims.entry(mi).or_default(),
-            runs.entry(mi).or_default(),
+            st.claims.entry(mi).or_default(),
+            st.runs.entry(mi).or_default(),
             module,
             build,
             run_of,
@@ -834,7 +918,7 @@ pub fn form_modules(
         // intervals or a same-row tail lands its pin on them (the BUCK_EN /
         // bootstrap short).
         if let Some(at) = committed {
-            let rr = runs.entry(mi).or_default();
+            let rr = st.runs.entry(mi).or_default();
             for (p, n) in [(pa, c.nets.first()), (pb, c.nets.last())] {
                 rr.push((
                     1_000_000 + (snap(p.y) / GRID).round() as i64,
@@ -844,52 +928,54 @@ pub fn form_modules(
                 ));
             }
         }
-        form.consumed.insert(*chain, mi);
+        st.form.consumed.insert(*chain, mi);
     }
 
     // Junction nets claimed by a tail's NEAR side: their shunt legs defer to
     // the junction-adopted pass (they hang from the tail's wire, not the pin
     // flank the tail needs).
-    let tail_claimed: BTreeSet<&str> = attach
-        .iter()
-        .filter_map(|at| match at {
-            Attach::Tail { via_junction: Some(j), .. } => Some(j.as_str()),
-            _ => None,
-        })
-        .collect();
+}
 
-    // How many deferred legs each tail-claimed junction is waiting to hang:
-    // the tail leaves that much extra wire between pin and part so the legs'
-    // taps land ON the wire (an off-wire tap forces a labeled stub).
-    let mut deferred_legs: BTreeMap<&str, usize> = BTreeMap::new();
-    for at in &attach {
-        if let Attach::Ladder { sig_net, .. } = at
-            && tail_claimed.contains(sig_net.as_str())
-        {
-            *deferred_legs.entry(sig_net.as_str()).or_default() += 1;
-        }
-    }
-
-
+fn place_tails<'a>(
+    items: &[Item],
+    g: &Reduced,
+    attach: &'a [Attach],
+    deferred_legs: &BTreeMap<&'a str, usize>,
+    port_nets: &BTreeSet<String>,
+    st: &mut FormState,
+) {
+    let pin_side_of = |a: usize, num: &str| pin_side_of_angle(items, a, num);
     // ── Tails: the chain part sits beside its anchor pin, pointing outward;
     // the free end keeps its label. A tail that finds no clean spot stays a
     // free run (two labels beat a force-fit collision). A committed tail gives
     // its free-end JUNCTION a physical home (module, tap position) — the
     // junction's other legs ladder there in the pass below, turning a column
     // of labeled islets into one wired divider.
-    let mut tail_home: BTreeMap<String, (usize, Point2, f64)> = BTreeMap::new(); // (module, tap, outward sign)
     for at in attach.iter().filter(|at| matches!(at, Attach::Tail { .. })) {
-        let Attach::Tail { chain, anchor, pin, a_near, via_junction } = at else {
+        let Attach::Tail {
+            chain,
+            anchor,
+            pin,
+            a_near,
+            via_junction,
+        } = at
+        else {
             unreachable!()
         };
-        let Some(&mi) = mod_of_anchor.get(anchor) else { continue };
+        let Some(&mi) = st.mod_of_anchor.get(anchor) else {
+            continue;
+        };
         let c = &g.chains[*chain];
         let part = if *a_near {
             c.parts[0]
         } else {
             *c.parts.last().expect("tail chain has parts")
         };
-        let near_net = if *a_near { &c.nets[0] } else { &c.nets[c.nets.len() - 1] };
+        let near_net = if *a_near {
+            &c.nets[0]
+        } else {
+            &c.nets[c.nets.len() - 1]
+        };
         let pin_at = pin_offset(&items[*anchor], pin, 0.0);
         let side = pin_side_of(*anchor, pin);
         let item = &items[part];
@@ -900,8 +986,11 @@ pub fn form_modules(
             PinSide::South => (Orient::Down, Point2::new(0.0, PITCH)),
         };
         let entry = pin_on(item, near_net).unwrap_or_default();
-        let free_net_for_angle =
-            if *a_near { &c.nets[1] } else { &c.nets[c.nets.len() - 2] };
+        let free_net_for_angle = if *a_near {
+            &c.nets[1]
+        } else {
+            &c.nets[c.nets.len() - 2]
+        };
         let free_pin_for_angle = pin_on(item, free_net_for_angle).unwrap_or_default();
         // Pick the rotation whose NEAR pin faces the anchor ON THE RIGHT AXIS —
         // orient_for infers from pins-Vec order, which need not match geometry
@@ -948,21 +1037,27 @@ pub fn form_modules(
         };
         let tail_net = Some(near_net.clone());
         let run_of = |at: Point2| match side {
-            PinSide::East | PinSide::West => {
-                (1_000_000 + (snap(pin_at.y) / GRID).round() as i64,
-                 pin_at.x.min(at.x), pin_at.x.max(at.x), tail_net.clone())
-            }
-            _ => ((snap(pin_at.x) / GRID).round() as i64,
-                  pin_at.y.min(at.y), pin_at.y.max(at.y), tail_net.clone()),
+            PinSide::East | PinSide::West => (
+                1_000_000 + (snap(pin_at.y) / GRID).round() as i64,
+                pin_at.x.min(at.x),
+                pin_at.x.max(at.x),
+                tail_net.clone(),
+            ),
+            _ => (
+                (snap(pin_at.x) / GRID).round() as i64,
+                pin_at.y.min(at.y),
+                pin_at.y.max(at.y),
+                tail_net.clone(),
+            ),
         };
-        let module = &mut form.modules[mi];
+        let module = &mut st.form.modules[mi];
         // Budget 18: connector pin strips reserve ~26mm and a switching flank
         // stacks bridge+banks ~40mm deep; the in-line elements (L2's SW row)
         // must clear them rather than exile to the strap column.
         let ok = commit_free_opt(
             items,
-            claims.entry(mi).or_default(),
-            runs.entry(mi).or_default(),
+            st.claims.entry(mi).or_default(),
+            st.runs.entry(mi).or_default(),
             module,
             build,
             run_of,
@@ -972,11 +1067,11 @@ pub fn form_modules(
             false,
         );
         if ok.is_some() {
-            form.consumed.insert(*chain, mi);
+            st.form.consumed.insert(*chain, mi);
             // The near-side junction (if any) now lives on the tail's wire at
             // the entry pin: its deferred shunt legs hang there.
             if let Some(jnet) = via_junction
-                && let Some(sat) = form.modules[mi].sats.last()
+                && let Some(sat) = st.form.modules[mi].sats.last()
             {
                 let n_off = pin_offset(item, &entry, sat.angle);
                 let outward = match side {
@@ -985,20 +1080,24 @@ pub fn form_modules(
                     _ => 0.0,
                 };
                 if outward != 0.0 {
-                    tail_home.entry(jnet.clone()).or_insert((
+                    st.tail_home.entry(jnet.clone()).or_insert((
                         mi,
                         Point2::new(sat.offset.x + n_off.x, sat.offset.y + n_off.y),
                         outward,
                     ));
                 }
             }
-            let free_net = if *a_near { &c.nets[1] } else { &c.nets[c.nets.len() - 2] };
+            let free_net = if *a_near {
+                &c.nets[1]
+            } else {
+                &c.nets[c.nets.len() - 2]
+            };
             // A PORT free end carries its label for certain: reserve the text
-            // footprint (envelope + claims) or the neighbouring module lands
+            // footprint (envelope + st.claims) or the neighbouring module lands
             // on it.
             if port_nets.contains(free_net.as_str())
                 && let Some(free_pin) = pin_on(item, free_net)
-                && let Some(sat) = form.modules[mi].sats.last()
+                && let Some(sat) = st.form.modules[mi].sats.last()
             {
                 let f = pin_offset(item, &free_pin, sat.angle);
                 let (fx, fy) = (sat.offset.x + f.x, sat.offset.y + f.y);
@@ -1015,8 +1114,8 @@ pub fn form_modules(
                         fx + (dir * text).max(0.0),
                         fy + 2.54,
                     );
-                    claims.entry(mi).or_default().push(r);
-                    label_boxes.entry(mi).or_default().push(r);
+                    st.claims.entry(mi).or_default().push(r);
+                    st.label_boxes.entry(mi).or_default().push(r);
                 }
             }
             let outward = match side {
@@ -1026,10 +1125,10 @@ pub fn form_modules(
             };
             if outward != 0.0
                 && let Some(free_pin) = pin_on(item, free_net)
-                && let Some(sat) = form.modules[mi].sats.last()
+                && let Some(sat) = st.form.modules[mi].sats.last()
             {
                 let f_off = pin_offset(item, &free_pin, sat.angle);
-                tail_home.entry(free_net.clone()).or_insert((
+                st.tail_home.entry(free_net.clone()).or_insert((
                     mi,
                     Point2::new(sat.offset.x + f_off.x, sat.offset.y + f_off.y),
                     outward,
@@ -1037,8 +1136,17 @@ pub fn form_modules(
             }
         }
     }
+}
 
-
+fn place_ladders<'a>(
+    items: &[Item],
+    g: &Reduced,
+    attach: &'a [Attach],
+    tail_claimed: &BTreeSet<&'a str>,
+    st: &mut FormState,
+) {
+    let pin_side_of = |a: usize, num: &str| pin_side_of_angle(items, a, num);
+    let pin_col = |a: usize, num: &str| pin_col_of(items, a, num);
     // ── Ladders: vertical legs at the pin column, up to supplies, down to ground.
     // Processing order decides who gets the near column. An UP leg's body spans
     // the rows of pins ABOVE its own, so those pins must take NEARER columns:
@@ -1051,7 +1159,9 @@ pub fn form_modules(
             .collect();
         v.sort_by(|x, y| {
             let key = |at: &&Attach| match at {
-                Attach::Ladder { anchor, pin, up, .. } => {
+                Attach::Ladder {
+                    anchor, pin, up, ..
+                } => {
                     let py = pin_offset(&items[*anchor], pin, 0.0).y;
                     (*anchor, *up, if *up { py } else { -py })
                 }
@@ -1064,14 +1174,22 @@ pub fn form_modules(
         v
     };
     for at in ladder_order {
-        let Attach::Ladder { chain, anchor, pin, a_near, up, sig_net } = at else {
+        let Attach::Ladder {
+            chain,
+            anchor,
+            pin,
+            a_near,
+            up,
+            sig_net,
+        } = at
+        else {
             continue;
         };
         if tail_claimed.contains(sig_net.as_str()) {
             continue;
         }
         let c = &g.chains[*chain];
-        let mi = mod_of_anchor[anchor];
+        let mi = st.mod_of_anchor[anchor];
         let (mut parts, mut nets) = (c.parts.clone(), c.nets.clone());
         if !a_near {
             parts.reverse();
@@ -1130,13 +1248,18 @@ pub fn form_modules(
             } else {
                 (pin_at.y, y_start + leg_len)
             };
-            ((snap(at.x) / GRID).round() as i64, lo, hi, ladder_net.clone())
+            (
+                (snap(at.x) / GRID).round() as i64,
+                lo,
+                hi,
+                ladder_net.clone(),
+            )
         };
-        let module = &mut form.modules[mi];
+        let module = &mut st.form.modules[mi];
         commit_free(
             items,
-            claims.entry(mi).or_default(),
-            runs.entry(mi).or_default(),
+            st.claims.entry(mi).or_default(),
+            st.runs.entry(mi).or_default(),
             module,
             build,
             run_of,
@@ -1150,9 +1273,20 @@ pub fn form_modules(
                 items[*anchor].refdes, pin, up
             );
         }
-        form.consumed.insert(*chain, mi);
+        st.form.consumed.insert(*chain, mi);
     }
+}
 
+#[allow(clippy::too_many_arguments)]
+fn chain_tails(
+    items: &[Item],
+    g: &Reduced,
+    classes: &BTreeMap<String, NetClass>,
+    junction_pin: &BTreeMap<String, Option<(usize, String)>>,
+    inc: &Incidence,
+    port_nets: &BTreeSet<String>,
+    st: &mut FormState,
+) {
     // ── Tail CHAINING: an unconsumed 1-part series chain whose junction sits
     // on a tail's wire (a recorded home) continues IN-LINE outward from it —
     // the analog cascade grammar: pin ← C13 ← HPF_TAP ← C12 ← PRE_AMP, one
@@ -1162,14 +1296,14 @@ pub fn form_modules(
         let mut progressed = false;
         for (ci, c) in g.chains.iter().enumerate() {
             if c.parts.len() != 1
-                || form.consumed.contains_key(&ci)
+                || st.form.consumed.contains_key(&ci)
                 || c.role(classes) != ChainRole::Series
             {
                 continue;
             }
-            let (near_t, far_t) = if tail_home.contains_key(&c.a.net) {
+            let (near_t, far_t) = if st.tail_home.contains_key(&c.a.net) {
                 (&c.a, &c.b)
-            } else if tail_home.contains_key(&c.b.net) {
+            } else if st.tail_home.contains_key(&c.b.net) {
                 (&c.b, &c.a)
             } else {
                 continue;
@@ -1201,10 +1335,14 @@ pub fn form_modules(
             if far_flow {
                 continue;
             }
-            let &(mi, home, outward) = &tail_home[&near_t.net];
+            let &(mi, home, outward) = &st.tail_home[&near_t.net];
             let part = c.parts[0];
             let item = &items[part];
-            let dir = if outward < 0.0 { Orient::Left } else { Orient::Right };
+            let dir = if outward < 0.0 {
+                Orient::Left
+            } else {
+                Orient::Right
+            };
             let entry = pin_on(item, &near_t.net).unwrap_or_default();
             let far_pin = pin_on(item, &far_t.net).unwrap_or_default();
             let angle = {
@@ -1213,7 +1351,11 @@ pub fn form_modules(
                 let pick = |a: f64| {
                     let n = pin_offset(item, &entry, a);
                     let f = pin_offset(item, &far_pin, a);
-                    if outward < 0.0 { n.x >= f.x } else { n.x <= f.x }
+                    if outward < 0.0 {
+                        n.x >= f.x
+                    } else {
+                        n.x <= f.x
+                    }
                 };
                 if pick(cand) { cand } else { flipped }
             };
@@ -1236,14 +1378,18 @@ pub fn form_modules(
             };
             let chain_net = Some(near_t.net.clone());
             let run_of = |at: Point2| {
-                (1_000_000 + (snap(home.y) / GRID).round() as i64,
-                 home.x.min(at.x), home.x.max(at.x), chain_net.clone())
+                (
+                    1_000_000 + (snap(home.y) / GRID).round() as i64,
+                    home.x.min(at.x),
+                    home.x.max(at.x),
+                    chain_net.clone(),
+                )
             };
             let ok = commit_free_opt(
                 items,
-                claims.entry(mi).or_default(),
-                runs.entry(mi).or_default(),
-                &mut form.modules[mi],
+                st.claims.entry(mi).or_default(),
+                st.runs.entry(mi).or_default(),
+                &mut st.form.modules[mi],
                 build,
                 run_of,
                 at0,
@@ -1252,10 +1398,10 @@ pub fn form_modules(
                 false,
             );
             if ok.is_some() {
-                form.consumed.insert(ci, mi);
-                if let Some(sat) = form.modules[mi].sats.last() {
+                st.form.consumed.insert(ci, mi);
+                if let Some(sat) = st.form.modules[mi].sats.last() {
                     let f_off = pin_offset(item, &far_pin, sat.angle);
-                    tail_home.entry(far_t.net.clone()).or_insert((
+                    st.tail_home.entry(far_t.net.clone()).or_insert((
                         mi,
                         Point2::new(sat.offset.x + f_off.x, sat.offset.y + f_off.y),
                         outward,
@@ -1270,8 +1416,8 @@ pub fn form_modules(
                             fx + (outward * text).max(0.0),
                             fy + 2.54,
                         );
-                        claims.entry(mi).or_default().push(r);
-                        label_boxes.entry(mi).or_default().push(r);
+                        st.claims.entry(mi).or_default().push(r);
+                        st.label_boxes.entry(mi).or_default().push(r);
                     }
                 }
                 progressed = true;
@@ -1281,13 +1427,21 @@ pub fn form_modules(
             break;
         }
     }
+}
 
+fn adopt_junction_legs(
+    items: &[Item],
+    g: &Reduced,
+    classes: &BTreeMap<String, NetClass>,
+    st: &mut FormState,
+) {
+    let class = |net: &str| net_class(classes, net);
     // ── Junction-adopted legs: a ShuntLeg whose signal end is a junction with
     // a tail home ladders at the TAP — R3 up to the supply, R5/C9 down to
     // ground, the human divider — instead of floating as labeled islets.
     for (ci, c) in g.chains.iter().enumerate() {
         if c.parts.is_empty()
-            || form.consumed.contains_key(&ci)
+            || st.form.consumed.contains_key(&ci)
             || c.role(classes) != ChainRole::ShuntLeg
         {
             continue;
@@ -1300,7 +1454,7 @@ pub fn form_modules(
         let NodeKind::Junction(jnet) = &g.nodes[sig_t.node] else {
             continue;
         };
-        let Some(&(mi, tap_at, outward)) = tail_home.get(jnet) else {
+        let Some(&(mi, tap_at, outward)) = st.tail_home.get(jnet) else {
             continue;
         };
         let (mut parts, mut nets) = (c.parts.clone(), c.nets.clone());
@@ -1357,9 +1511,9 @@ pub fn form_modules(
             };
             ok = commit_free_opt(
                 items,
-                claims.entry(mi).or_default(),
-                runs.entry(mi).or_default(),
-                &mut form.modules[mi],
+                st.claims.entry(mi).or_default(),
+                st.runs.entry(mi).or_default(),
+                &mut st.form.modules[mi],
                 build,
                 run_of,
                 Point2::new(tap_at.x, 0.0),
@@ -1370,9 +1524,9 @@ pub fn form_modules(
             .is_some()
                 || commit_free_opt(
                     items,
-                    claims.entry(mi).or_default(),
-                    runs.entry(mi).or_default(),
-                    &mut form.modules[mi],
+                    st.claims.entry(mi).or_default(),
+                    st.runs.entry(mi).or_default(),
+                    &mut st.form.modules[mi],
                     build,
                     run_of,
                     Point2::new(tap_at.x - outward * PITCH, 0.0),
@@ -1386,16 +1540,25 @@ pub fn form_modules(
             }
         }
         if ok {
-            form.consumed.insert(ci, mi);
+            st.form.consumed.insert(ci, mi);
         }
     }
+}
 
+fn place_adopted_stubs(
+    items: &[Item],
+    adopts: Vec<(usize, usize, String, String)>,
+    st: &mut FormState,
+) {
+    let pin_side_of = |a: usize, num: &str| pin_side_of_angle(items, a, num);
     // ── Adopted stubs: one part beside its pin, pointing outward, wired short.
     // A stub that finds no clean nearby spot (label-dense pin columns) reverts
     // to its own module — labeled islets beat force-fit collisions.
     let mut unadopted: Vec<usize> = Vec::new();
     for (stub, anchor, pin, net) in adopts {
-        let Some(&mi) = mod_of_anchor.get(&anchor) else { continue };
+        let Some(&mi) = st.mod_of_anchor.get(&anchor) else {
+            continue;
+        };
         let pin_at = pin_offset(&items[anchor], &pin, 0.0);
         let side = pin_side_of(anchor, &pin);
         let item = &items[stub];
@@ -1423,18 +1586,24 @@ pub fn form_modules(
         };
         let stub_net = Some(net.clone());
         let run_of = |at: Point2| match side {
-            PinSide::East | PinSide::West => {
-                (1_000_000 + (snap(pin_at.y) / GRID).round() as i64,
-                 pin_at.x.min(at.x), pin_at.x.max(at.x), stub_net.clone())
-            }
-            _ => ((snap(pin_at.x) / GRID).round() as i64,
-                  pin_at.y.min(at.y), pin_at.y.max(at.y), stub_net.clone()),
+            PinSide::East | PinSide::West => (
+                1_000_000 + (snap(pin_at.y) / GRID).round() as i64,
+                pin_at.x.min(at.x),
+                pin_at.x.max(at.x),
+                stub_net.clone(),
+            ),
+            _ => (
+                (snap(pin_at.x) / GRID).round() as i64,
+                pin_at.y.min(at.y),
+                pin_at.y.max(at.y),
+                stub_net.clone(),
+            ),
         };
-        let module = &mut form.modules[mi];
+        let module = &mut st.form.modules[mi];
         let ok = commit_free_opt(
             items,
-            claims.entry(mi).or_default(),
-            runs.entry(mi).or_default(),
+            st.claims.entry(mi).or_default(),
+            st.runs.entry(mi).or_default(),
             module,
             build,
             run_of,
@@ -1448,10 +1617,10 @@ pub fn form_modules(
         }
     }
     for a in unadopted {
-        form.strap_items.insert(a);
-        mod_of_anchor.insert(a, form.modules.len());
+        st.form.strap_items.insert(a);
+        st.mod_of_anchor.insert(a, st.form.modules.len());
         let h = half_size(&items[a], 0.0);
-        form.modules.push(ModulePlan {
+        st.form.modules.push(ModulePlan {
             anchor: a,
             sats: Vec::new(),
             env_min: Point2::new(-h.x, -h.y),
@@ -1459,18 +1628,27 @@ pub fn form_modules(
         });
     }
     // Never-adoptable 2-pin stub modules are straps too.
-    for (&a, _) in &mod_of_anchor {
+    for (&a, _) in &st.mod_of_anchor {
         if items[a].geom.pins.len() <= 2
             && !is_connector_like_part(&items[a].part)
-            && form.modules[mod_of_anchor[&a]].sats.is_empty()
+            && st.form.modules[st.mod_of_anchor[&a]].sats.is_empty()
         {
-            form.strap_items.insert(a);
+            st.form.strap_items.insert(a);
         }
     }
+}
 
+fn commit_cluster_adopts(
+    items: &[Item],
+    cluster_adopts: Vec<(usize, usize, Vec<String>)>,
+    st: &mut FormState,
+) {
+    let pin_side_of = |a: usize, num: &str| pin_side_of_angle(items, a, num);
     // ── Cluster adoptions: beside the mean of their host pins, one side out.
     for (item_i, anchor, host_pins) in cluster_adopts {
-        let Some(&mi) = mod_of_anchor.get(&anchor) else { continue };
+        let Some(&mi) = st.mod_of_anchor.get(&anchor) else {
+            continue;
+        };
         let pts: Vec<Point2> = host_pins
             .iter()
             .map(|p| pin_offset(&items[anchor], p, 0.0))
@@ -1480,35 +1658,47 @@ pub fn form_modules(
         let h = half_size(&items[item_i], 0.0);
         let (at0, step) = match side {
             PinSide::West => (
-                Point2::new(pts.iter().map(|p| p.x).fold(f64::MAX, f64::min)
-                    - LEAD * 2.0 - h.x, mean_y),
+                Point2::new(
+                    pts.iter().map(|p| p.x).fold(f64::MAX, f64::min) - LEAD * 2.0 - h.x,
+                    mean_y,
+                ),
                 Point2::new(-PITCH, 0.0),
             ),
             PinSide::East => (
-                Point2::new(pts.iter().map(|p| p.x).fold(f64::MIN, f64::max)
-                    + LEAD * 2.0 + h.x, mean_y),
+                Point2::new(
+                    pts.iter().map(|p| p.x).fold(f64::MIN, f64::max) + LEAD * 2.0 + h.x,
+                    mean_y,
+                ),
                 Point2::new(PITCH, 0.0),
             ),
             PinSide::North => (
-                Point2::new(pts.iter().map(|p| p.x).sum::<f64>() / pts.len() as f64,
-                    pts.iter().map(|p| p.y).fold(f64::MAX, f64::min) - LEAD * 2.0 - h.y),
+                Point2::new(
+                    pts.iter().map(|p| p.x).sum::<f64>() / pts.len() as f64,
+                    pts.iter().map(|p| p.y).fold(f64::MAX, f64::min) - LEAD * 2.0 - h.y,
+                ),
                 Point2::new(0.0, -PITCH),
             ),
             PinSide::South => (
-                Point2::new(pts.iter().map(|p| p.x).sum::<f64>() / pts.len() as f64,
-                    pts.iter().map(|p| p.y).fold(f64::MIN, f64::max) + LEAD * 2.0 + h.y),
+                Point2::new(
+                    pts.iter().map(|p| p.x).sum::<f64>() / pts.len() as f64,
+                    pts.iter().map(|p| p.y).fold(f64::MIN, f64::max) + LEAD * 2.0 + h.y,
+                ),
                 Point2::new(0.0, PITCH),
             ),
         };
         let build = |at: Point2| -> Vec<SatPlace> {
-            vec![SatPlace { item: item_i, offset: Point2::new(snap(at.x), snap(at.y)), angle: 0.0 }]
+            vec![SatPlace {
+                item: item_i,
+                offset: Point2::new(snap(at.x), snap(at.y)),
+                angle: 0.0,
+            }]
         };
         let run_of = |_at: Point2| (i64::MIN / 4 + item_i as i64, 0.0, 0.0, None);
-        let module = &mut form.modules[mi];
+        let module = &mut st.form.modules[mi];
         let ok = commit_free_opt(
             items,
-            claims.entry(mi).or_default(),
-            runs.entry(mi).or_default(),
+            st.claims.entry(mi).or_default(),
+            st.runs.entry(mi).or_default(),
             module,
             build,
             run_of,
@@ -1519,10 +1709,10 @@ pub fn form_modules(
         );
         if ok.is_none() {
             // Revert to a standalone module (strap column will collect it).
-            form.strap_items.insert(item_i);
-            mod_of_anchor.insert(item_i, form.modules.len());
+            st.form.strap_items.insert(item_i);
+            st.mod_of_anchor.insert(item_i, st.form.modules.len());
             let h2 = half_size(&items[item_i], 0.0);
-            form.modules.push(ModulePlan {
+            st.form.modules.push(ModulePlan {
                 anchor: item_i,
                 sats: Vec::new(),
                 env_min: Point2::new(-h2.x, -h2.y),
@@ -1530,7 +1720,17 @@ pub fn form_modules(
             });
         }
     }
+}
 
+fn place_banks(
+    items: &[Item],
+    g: &Reduced,
+    classes: &BTreeMap<String, NetClass>,
+    anchors: &[usize],
+    decouple: &[usize],
+    st: &mut FormState,
+) {
+    let class = |net: &str| net_class(classes, net);
     // ── Decoupling banks: round-robin caps onto anchors sharing the supply net.
     let mut supply_pins: BTreeMap<(usize, String), usize> = BTreeMap::new();
     for &a in anchors {
@@ -1544,10 +1744,10 @@ pub fn form_modules(
     }
     let mut served: BTreeMap<(usize, String), usize> = BTreeMap::new();
     // Assign every cap to a module first; each module's bank then places as ONE
-    // rigid grid block, so claims collisions slide the whole bank (rhythm kept)
+    // rigid grid block, so st.claims collisions slide the whole bank (rhythm kept)
     // instead of scattering individual caps.
     let mut bank_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for ci in decouple {
+    for &ci in decouple {
         let c = &g.chains[ci];
         let supply = if class(&c.a.net) == NetClass::Supply {
             c.a.net.clone()
@@ -1565,14 +1765,17 @@ pub fn form_modules(
             .copied();
         let Some(anchor) = target else { continue };
         *served.entry((anchor, supply.clone())).or_default() += 1;
-        bank_of.entry(mod_of_anchor[&anchor]).or_default().push(ci);
+        bank_of
+            .entry(st.mod_of_anchor[&anchor])
+            .or_default()
+            .push(ci);
     }
 
     /// Human bank pitch: 9 grid columns (value text clears the neighbour's
     /// glyph label), single-lead row gap.
     const CAP_PITCH: f64 = 11.43;
     for (mi, chains) in &bank_of {
-        let module_anchor = form.modules[*mi].anchor;
+        let module_anchor = st.form.modules[*mi].anchor;
         let anchor_half = half_size(&items[module_anchor], 0.0);
         // Per-cap orientation (supply pin up) computed once, in chain order.
         let mut rail_chars = 0usize;
@@ -1621,11 +1824,11 @@ pub fn form_modules(
                 .collect()
         };
         let run_of = |_at: Point2| (i64::MIN / 2 + *mi as i64, 0.0, 0.0, None);
-        let module = &mut form.modules[*mi];
+        let module = &mut st.form.modules[*mi];
         commit_free(
             items,
-            claims.entry(*mi).or_default(),
-            runs.entry(*mi).or_default(),
+            st.claims.entry(*mi).or_default(),
+            st.runs.entry(*mi).or_default(),
             module,
             build,
             run_of,
@@ -1633,25 +1836,27 @@ pub fn form_modules(
             Point2::new(PITCH, 0.0),
         );
         for &ci in chains {
-            form.consumed.insert(ci, *mi);
+            st.form.consumed.insert(ci, *mi);
         }
     }
+}
 
+fn recompute_envelopes(items: &[Item], st: &mut FormState) {
     // ── Recompute envelopes from FULL placement rects (body + text), padded for
     // wiring: leg stubs, power glyphs below ground legs / above supply taps, and
     // label pennants all need air.
-    // 3 grid: label boxes and pin strips are explicit claims now — the old
+    // 3 grid: label boxes and pin strips are explicit st.claims now — the old
     // 4-grid margin double-counted them; 2 grid lets router elbows clip
     // neighbour bodies (mcp1703).
     const WIRE_MARGIN: f64 = 3.81;
-    for (mi, m) in form.modules.iter_mut().enumerate() {
+    for (mi, m) in st.form.modules.iter_mut().enumerate() {
         let anchor_rect = sch_floorplan::contract::item_rect(&items[m.anchor], [0.0, 0.0]);
         m.env_min.x = anchor_rect.min_x;
         m.env_min.y = anchor_rect.min_y;
         m.env_max.x = anchor_rect.max_x;
         m.env_max.y = anchor_rect.max_y;
         let sat_rects = m.sats.iter().map(|s| placed_rect(items, s));
-        let pin_text = label_boxes.get(&mi).into_iter().flatten().copied();
+        let pin_text = st.label_boxes.get(&mi).into_iter().flatten().copied();
         for r in sat_rects.chain(pin_text) {
             m.env_min.x = m.env_min.x.min(r.min_x);
             m.env_min.y = m.env_min.y.min(r.min_y);
@@ -1663,5 +1868,4 @@ pub fn form_modules(
         m.env_max.x += WIRE_MARGIN;
         m.env_max.y += WIRE_MARGIN;
     }
-    form
 }

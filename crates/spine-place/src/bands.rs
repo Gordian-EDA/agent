@@ -39,7 +39,12 @@ fn band_key(part: &str, same_part_counts: &BTreeMap<&str, usize>) -> Option<Stri
     if is_connector_like(part) {
         return Some("conn".into());
     }
-    if same_part_counts.get(part_family(part).as_str()).copied().unwrap_or(0) >= 3 {
+    if same_part_counts
+        .get(part_family(part).as_str())
+        .copied()
+        .unwrap_or(0)
+        >= 3
+    {
         return Some(format!("part:{}", part_family(part)));
     }
     None
@@ -74,11 +79,15 @@ pub fn plan(items: &[Item], scene: &Scene) -> Vec<BandPlan> {
     let mut family_counts: BTreeMap<String, usize> = BTreeMap::new();
     for node in &scene.nodes {
         if let Some(a) = node.anchor {
-            *family_counts.entry(part_family(&items[a].part)).or_default() += 1;
+            *family_counts
+                .entry(part_family(&items[a].part))
+                .or_default() += 1;
         }
     }
-    let same_part_counts: BTreeMap<&str, usize> =
-        family_counts.iter().map(|(k, &v)| (k.as_str(), v)).collect();
+    let same_part_counts: BTreeMap<&str, usize> = family_counts
+        .iter()
+        .map(|(k, &v)| (k.as_str(), v))
+        .collect();
 
     // band key → members (scene node, anchor item). Label-islands band freely;
     // WIRED modules join only same-part MOTIF bands (repeated channels
@@ -189,7 +198,13 @@ pub fn apply(items: &mut [Item], scene: &Scene, band: &BandPlan) {
     };
     'search: for ring in 0..24 {
         let step = ring as f64 * 0.5;
-        for (ddx, ddy) in [(step, 0.0), (0.0, step), (step, step), (-step, 0.0), (0.0, -step)] {
+        for (ddx, ddy) in [
+            (step, 0.0),
+            (0.0, step),
+            (step, step),
+            (-step, 0.0),
+            (0.0, -step),
+        ] {
             let (cx, cy) = (snap(bx + ddx * cell_w), snap(by + ddy * cell_h));
             if fits(cx, cy) {
                 (bx, by) = (cx, cy);

@@ -74,7 +74,11 @@ fn typeset_chain_run(
     let mut cursor = Point2::new(0.0, 0.0);
     for (k, &p) in chain.parts.iter().enumerate() {
         let item = &items[p];
-        let dir = if vertical { Orient::Down } else { Orient::Right };
+        let dir = if vertical {
+            Orient::Down
+        } else {
+            Orient::Right
+        };
         let angle = orient_for(item, &chain.nets[k], dir);
         let entry = item
             .pins
@@ -91,7 +95,11 @@ fn typeset_chain_run(
         let e_off = pin_offset(item, &entry, angle);
         let x_off = pin_offset(item, &exit, angle);
         let origin = Point2::new(snap(cursor.x - e_off.x), snap(cursor.y - e_off.y));
-        places.push(SatPlace { item: p, offset: origin, angle });
+        places.push(SatPlace {
+            item: p,
+            offset: origin,
+            angle,
+        });
         let step = if vertical {
             (x_off.y - e_off.y).abs() + LEAD
         } else {
@@ -139,7 +147,10 @@ fn typeset_chain_run(
 
 /// Recompute a node's envelope from its placed items' FULL rects (body + text).
 pub fn envelope(items: &[Item], node: &mut SceneNode) {
-    let (mut min, mut max) = (Point2::new(f64::MAX, f64::MAX), Point2::new(f64::MIN, f64::MIN));
+    let (mut min, mut max) = (
+        Point2::new(f64::MAX, f64::MAX),
+        Point2::new(f64::MIN, f64::MIN),
+    );
     for s in &node.places {
         let r = crate::module::placed_rect(items, s);
         min.x = min.x.min(r.min_x);
@@ -194,7 +205,9 @@ pub fn build_scene(
             continue;
         }
         run_of_chain.insert(ci, scene.nodes.len());
-        scene.nodes.push(typeset_chain_run(items, c, classes, labeled));
+        scene
+            .nodes
+            .push(typeset_chain_run(items, c, classes, labeled));
     }
 
     // Terminal → scene node resolution + port registration.
@@ -227,7 +240,11 @@ pub fn build_scene(
                 && let Some(anchor) = scene.nodes[n].anchor
             {
                 let at = pin_offset(&items[anchor], &t.pin, 0.0);
-                scene.nodes[n].ports.push(Port { chain: ci, at, is_a });
+                scene.nodes[n].ports.push(Port {
+                    chain: ci,
+                    at,
+                    is_a,
+                });
             }
         }
         // Ports on a chain-run node itself (its two ends).
@@ -237,8 +254,16 @@ pub fn build_scene(
             if let (Some(f), Some(l)) = (first, last) {
                 let fe = chain_end_offset(items, c, f, true);
                 let le = chain_end_offset(items, c, l, false);
-                scene.nodes[rn].ports.push(Port { chain: ci, at: fe, is_a: true });
-                scene.nodes[rn].ports.push(Port { chain: ci, at: le, is_a: false });
+                scene.nodes[rn].ports.push(Port {
+                    chain: ci,
+                    at: fe,
+                    is_a: true,
+                });
+                scene.nodes[rn].ports.push(Port {
+                    chain: ci,
+                    at: le,
+                    is_a: false,
+                });
             }
         }
         scene.ends.insert(ci, (na, nb));
@@ -248,7 +273,11 @@ pub fn build_scene(
 
 /// World offset (within the run node) of a chain run's outer pin at end a/b.
 fn chain_end_offset(items: &[Item], c: &Chain, place: &SatPlace, a_end: bool) -> Point2 {
-    let net = if a_end { &c.nets[0] } else { &c.nets[c.nets.len() - 1] };
+    let net = if a_end {
+        &c.nets[0]
+    } else {
+        &c.nets[c.nets.len() - 1]
+    };
     let item = &items[place.item];
     let pin = item
         .pins

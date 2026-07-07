@@ -10,12 +10,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use circuit_lang::model::Design;
 use geom::Point2;
 use kicad_env::KicadEnv;
-use kicad_symbol::{PinDir as SymPinDir, SymbolMeta, find_pin};
 use kicad_symbol::SymbolTable;
+use kicad_symbol::{PinDir as SymPinDir, SymbolMeta, find_pin};
 
 use sch_floorplan::contract::{
-    PlacementEngine, PlacementOutput, RoutedEvaluator, RoutedSheetRealizer,
-    SchematicPlaceProblem, body_overlap_count, decongest, infer_ir, normalize,
+    PlacementEngine, PlacementOutput, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
+    body_overlap_count, decongest, infer_ir, normalize,
 };
 use sch_place::ir::LayoutIr;
 use sch_place::place::PlaceResult;
@@ -67,8 +67,7 @@ impl PlacementEngine for SpinePlace {
             return out1;
         }
         let classes = classify_nets(&problem.inc, &ir);
-        let labeled =
-            crate::compact::labeled_nets(&problem.items, &problem.inc, &classes);
+        let labeled = crate::compact::labeled_nets(&problem.items, &problem.inc, &classes);
         if labeled.is_empty() {
             return out1;
         }
@@ -126,9 +125,7 @@ impl SpinePlace {
                 in_chain[p] = true;
             }
         }
-        let mut anchors: Vec<usize> = (0..problem.items.len())
-            .filter(|&i| !in_chain[i])
-            .collect();
+        let mut anchors: Vec<usize> = (0..problem.items.len()).filter(|&i| !in_chain[i]).collect();
         let conn = |i: usize| {
             problem.items[i]
                 .pins
@@ -179,7 +176,11 @@ impl SpinePlace {
                 let conn = it.pins.iter().filter(|(_, _, n)| n.is_some()).count();
                 eprintln!(
                     "[anchor] {} part={} geom_pins={} connected={} pins={:?}",
-                    it.refdes, it.part, it.geom.pins.len(), conn, it.pins
+                    it.refdes,
+                    it.part,
+                    it.geom.pins.len(),
+                    conn,
+                    it.pins
                 );
             }
             for m in &form.modules {
@@ -196,7 +197,10 @@ impl SpinePlace {
                 eprintln!(
                     "[module] {} env=({:.0},{:.0})..({:.0},{:.0}) sats={sats:?}",
                     problem.items[m.anchor].refdes,
-                    m.env_min.x, m.env_min.y, m.env_max.x, m.env_max.y
+                    m.env_min.x,
+                    m.env_min.y,
+                    m.env_max.x,
+                    m.env_max.y
                 );
             }
         }
@@ -234,7 +238,9 @@ impl SpinePlace {
                 .filter(|&v| {
                     let mut any = false;
                     for (ci, (ea, eb)) in scene.ends.iter() {
-                        let (Some(x), Some(y)) = (ea, eb) else { continue };
+                        let (Some(x), Some(y)) = (ea, eb) else {
+                            continue;
+                        };
                         if *x != v && *y != v {
                             continue;
                         }
@@ -257,22 +263,21 @@ impl SpinePlace {
         };
 
         let run_variant = |items: &mut Vec<sch_place::item::Item>,
-                               v: crate::order::Variants|
+                           v: crate::order::Variants|
          -> usize {
             let origins = arrange(items, &g, &scene, &dirs, v, &bundle_free);
             let mut placed = vec![false; items.len()];
-            let commit = |origins: &[Point2],
-                          items: &mut [sch_place::item::Item],
-                          placed: &mut [bool]| {
-                for (sn, node) in scene.nodes.iter().enumerate() {
-                    for p in &node.places {
-                        items[p.item].at =
-                            [origins[sn].x + p.offset.x, origins[sn].y + p.offset.y].into();
-                        items[p.item].angle = p.angle;
-                        placed[p.item] = true;
+            let commit =
+                |origins: &[Point2], items: &mut [sch_place::item::Item], placed: &mut [bool]| {
+                    for (sn, node) in scene.nodes.iter().enumerate() {
+                        for p in &node.places {
+                            items[p.item].at =
+                                [origins[sn].x + p.offset.x, origins[sn].y + p.offset.y].into();
+                            items[p.item].angle = p.angle;
+                            placed[p.item] = true;
+                        }
                     }
-                }
-            };
+                };
             commit(&origins, items, &mut placed);
 
             // Orphan sweep: EVERY item gets a position. Multi-unit stragglers
@@ -378,10 +383,10 @@ impl SpinePlace {
             )
         };
         let ab_gate = |items: &mut Vec<sch_place::item::Item>,
-                           breaks: &mut usize,
-                           name: &str,
-                           with_area: bool,
-                           apply: &mut dyn FnMut(&mut Vec<sch_place::item::Item>) -> usize|
+                       breaks: &mut usize,
+                       name: &str,
+                       with_area: bool,
+                       apply: &mut dyn FnMut(&mut Vec<sch_place::item::Item>) -> usize|
          -> bool {
             let before: Vec<_> = items.iter().map(|it| (it.at, it.angle)).collect();
             let a = measure(items, *breaks, with_area);
@@ -408,22 +413,52 @@ impl SpinePlace {
 
         // Strap column: stub islets in one dedicated refdes-sorted column (the
         // human "straps region").
-        let strap_on = ab_gate(&mut problem.items, &mut breaks, "strap column", false, &mut |it| {
-            run_variant(it, Variants { strap_col: true, ..Default::default() })
-        });
+        let strap_on = ab_gate(
+            &mut problem.items,
+            &mut breaks,
+            "strap column",
+            false,
+            &mut |it| {
+                run_variant(
+                    it,
+                    Variants {
+                        strap_col: true,
+                        ..Default::default()
+                    },
+                )
+            },
+        );
         // Shelf: free label-island modules in a ~square block instead of the
         // wide banner their weak junction edges produce; area breaks ties.
         let shelf_on = ab_gate(&mut problem.items, &mut breaks, "shelf", true, &mut |it| {
-            run_variant(it, Variants { strap_col: strap_on, shelf: true, ..Default::default() })
+            run_variant(
+                it,
+                Variants {
+                    strap_col: strap_on,
+                    shelf: true,
+                    ..Default::default()
+                },
+            )
         });
         // Hop-align: junction-hop port alignment; vertical snaps can merge
         // nets, and breaks lead the tuple, so a merging alignment self-rejects.
-        let hop_on = ab_gate(&mut problem.items, &mut breaks, "hop-align", true, &mut |it| {
-            run_variant(
-                it,
-                Variants { strap_col: strap_on, shelf: shelf_on, hop_align: true, ..Default::default() },
-            )
-        });
+        let hop_on = ab_gate(
+            &mut problem.items,
+            &mut breaks,
+            "hop-align",
+            true,
+            &mut |it| {
+                run_variant(
+                    it,
+                    Variants {
+                        strap_col: strap_on,
+                        shelf: shelf_on,
+                        hop_align: true,
+                        ..Default::default()
+                    },
+                )
+            },
+        );
         // Fold: a wide sheet re-runs with the layer sequence folded into rows
         // (the human page-wrap); only attempted past the banner threshold.
         {
@@ -439,36 +474,47 @@ impl SpinePlace {
                 ab_gate(&mut problem.items, &mut breaks, "fold", false, &mut |it| {
                     run_variant(
                         it,
-                        Variants { fold: true, strap_col: strap_on, shelf: shelf_on, hop_align: hop_on },
+                        Variants {
+                            fold: true,
+                            strap_col: strap_on,
+                            shelf: shelf_on,
+                            hop_align: hop_on,
+                        },
                     )
                 });
             }
         }
         // Node-pack: slide whole scene nodes left then up against the packed
         // field (the human sprawl gap).
-        ab_gate(&mut problem.items, &mut breaks, "squash", false, &mut |it| {
-            let mut groups: Vec<Vec<usize>> = scene
-                .nodes
-                .iter()
-                .map(|n| n.places.iter().map(|p| p.item).collect())
-                .filter(|g: &Vec<usize>| !g.is_empty())
-                .collect();
-            let mut grouped = vec![false; it.len()];
-            for g in &groups {
-                for &i in g {
-                    grouped[i] = true;
+        ab_gate(
+            &mut problem.items,
+            &mut breaks,
+            "squash",
+            false,
+            &mut |it| {
+                let mut groups: Vec<Vec<usize>> = scene
+                    .nodes
+                    .iter()
+                    .map(|n| n.places.iter().map(|p| p.item).collect())
+                    .filter(|g: &Vec<usize>| !g.is_empty())
+                    .collect();
+                let mut grouped = vec![false; it.len()];
+                for g in &groups {
+                    for &i in g {
+                        grouped[i] = true;
+                    }
                 }
-            }
-            for i in 0..it.len() {
-                if !grouped[i] {
-                    groups.push(vec![i]);
+                for i in 0..it.len() {
+                    if !grouped[i] {
+                        groups.push(vec![i]);
+                    }
                 }
-            }
-            crate::compact::pack_nodes(it, &groups, &problem_inc, &classes);
-            decongest(it);
-            normalize(it);
-            eval.truthfulness_breaks(it)
-        });
+                crate::compact::pack_nodes(it, &groups, &problem_inc, &classes);
+                decongest(it);
+                normalize(it);
+                eval.truthfulness_breaks(it)
+            },
+        );
         // Bands: same-type modules align into refdes-sorted columns/grids —
         // each band gates individually so one colliding band can't veto the rest.
         for band in crate::bands::plan(&problem.items, &scene) {

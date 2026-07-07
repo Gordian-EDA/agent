@@ -92,9 +92,9 @@ fn obstacle(
         // INTO the body, so the strip extends the opposite way.
         let world = (pg.angle + item.angle).rem_euclid(360.0) as i64;
         let (dx, dy): (f64, f64) = match world {
-            0 => (-1.0, 0.0),   // pin points east into body → strip west
+            0 => (-1.0, 0.0), // pin points east into body → strip west
             180 => (1.0, 0.0),
-            90 => (0.0, 1.0),   // symbol-space up → sheet-space down strip
+            90 => (0.0, 1.0), // symbol-space up → sheet-space down strip
             _ => (0.0, -1.0),
         };
         let strip = Rect::new(
@@ -121,7 +121,11 @@ fn group_rect(
     labeled: &std::collections::BTreeSet<String>,
 ) -> Rect {
     let mut it = group.iter();
-    let first = obstacle(&items[*it.next().expect("non-empty group")], classes, labeled);
+    let first = obstacle(
+        &items[*it.next().expect("non-empty group")],
+        classes,
+        labeled,
+    );
     it.fold(first, |acc, &i| {
         let r = obstacle(&items[i], classes, labeled);
         Rect::new(
