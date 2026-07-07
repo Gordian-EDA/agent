@@ -222,8 +222,6 @@ mod tests {
         let groups = authored_groups(&blocks);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, "main");
-        assert_eq!(groups[0].1.len(), 1);
-        assert_eq!(groups[0].1[0].0, "main");
-        assert_eq!(groups[0].1[0].1.components.len(), 12);
+        assert_eq!(groups[0].1.components.len(), 12);
     }
 }
