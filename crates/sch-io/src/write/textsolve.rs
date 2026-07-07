@@ -199,12 +199,23 @@ impl SchematicWriter {
                     if pick == 1 {
                         let pin_at = self.labels[i].stub.unwrap().pin_at;
                         let end = self.labels[i].at;
-                        // Drop the stub wire retract_colliding_stubs
-                        // materialized (content-derived key).
+                        // Drop the now-unneeded stub wire retract_colliding_stubs
+                        // materialized — but ONLY if its far end DANGLES. When the
+                        // stub end is a routing junction (a bridge label on a pin
+                        // the MST also wires, whose route `split_wires_at_nodes`
+                        // fragmented at the stub end), deleting it severs the route
+                        // and floats every downstream pin. A surviving stub is
+                        // already same-net and foreign-clear, so keeping it is safe.
                         let a = GRID_50_MIL.snap_point(pin_at);
                         let b = GRID_50_MIL.snap_point(end);
-                        let key = format!("{}:{}:{}:{}", a[0], a[1], b[0], b[1]);
-                        self.wires.retain(|w| w.uuid_key != key);
+                        let key = format!("{}:{}:{}:{}", a.x, a.y, b.x, b.y);
+                        let end_is_junction = self
+                            .wires
+                            .iter()
+                            .any(|w| w.uuid_key != key && (w.a == b || w.b == b));
+                        if !end_is_junction {
+                            self.wires.retain(|w| w.uuid_key != key);
+                        }
                         self.labels[i].at = pin_at;
                         self.labels[i].stub = None;
                     }
@@ -757,6 +768,55 @@ impl SchematicWriter {
         self.translate(dx, dy);
     }
 
+    /// The rendered content bounding box over every drawn element — symbol bodies (rotated
+    /// half-extents), reference/value fields, wires, labels (text width both ways), junctions,
+    /// no-connects, texts and rects. Same geometry [`Self::reframe`] scans for its min corner,
+    /// but BOTH corners, so a caller can size the rendered sheet AFTER `prepare` (e.g. to gate
+    /// a placement on its true post-text-solve extent, edge label-columns included). `None`
+    /// for an empty sheet.
+    pub fn content_bbox(&self) -> Option<geom::Rect> {
+        use crate::label::text_width;
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        let mut acc = |lx: f64, ly: f64, hx: f64, hy: f64| {
+            x0 = x0.min(lx);
+            y0 = y0.min(ly);
+            x1 = x1.max(hx);
+            y1 = y1.max(hy);
+        };
+        for i in &self.instances {
+            let h = i.half_extents.rotated_half_extents(i.angle);
+            acc(i.at[0] - h[0], i.at[1] - h[1], i.at[0] + h[0], i.at[1] + h[1]);
+            for p in [i.ref_pos, i.val_pos].into_iter().flatten() {
+                acc(p.at[0] - 5.0, p.at[1] - 1.6, p.at[0] + 5.0, p.at[1] + 1.6);
+            }
+        }
+        for w in &self.wires {
+            acc(w.a[0].min(w.b[0]), w.a[1].min(w.b[1]), w.a[0].max(w.b[0]), w.a[1].max(w.b[1]));
+        }
+        for l in &self.labels {
+            let tw = text_width(&l.net);
+            acc(l.at[0] - tw, l.at[1] - 1.6, l.at[0] + tw, l.at[1] + 1.6);
+        }
+        for j in &self.junctions {
+            acc(j.at[0], j.at[1], j.at[0], j.at[1]);
+        }
+        for nc in &self.no_connects {
+            acc(nc.at[0], nc.at[1], nc.at[0], nc.at[1]);
+        }
+        for t in &self.texts {
+            acc(t.at[0], t.at[1] - 1.6, t.at[0], t.at[1] + 1.6);
+        }
+        for r in &self.rects {
+            acc(
+                r.start[0].min(r.end[0]),
+                r.start[1].min(r.end[1]),
+                r.start[0].max(r.end[0]),
+                r.start[1].max(r.end[1]),
+            );
+        }
+        (x0 != f64::MAX).then(|| geom::Rect::new(x0, y0, x1, y1))
+    }
+
     /// Run every geometry-finalizing pass: stub retraction, wire splitting at
     /// taps, text placement, and reframing. All four are idempotent, so calling
     /// this before [`Self::layout_warnings`] (to lint the *final* geometry) and
@@ -819,6 +879,57 @@ impl SchematicWriter {
     /// warning list regardless of the underlying Vec order.
     pub fn layout_warnings(&self) -> Vec<String> {
         self.layout_warnings_excluding(&std::collections::BTreeSet::new())
+    }
+
+    /// Would a net label anchored at `at` facing `dir` read CLEAR of every
+    /// symbol body, pin text, field, and existing label? EXACTLY the lint's
+    /// geometry (`label_box` vs the same item boxes `layout_warnings` builds),
+    /// so a placement this approves never trips the lint. `own_refdes` exempts
+    /// the label's own symbol (a stub label legitimately hugs its own pin).
+    pub fn label_landing_clear(
+        &self,
+        at: geom::Point2,
+        dir: geom::Dir,
+        net: &str,
+        own_refdes: &str,
+    ) -> bool {
+        use crate::label::{label_box, pin_text_boxes, text_width};
+        let b = label_box(at, dir, text_width(net));
+        for inst in &self.instances {
+            if inst.refdes.starts_with('#') || inst.refdes == own_refdes {
+                continue;
+            }
+            let h = inst.half_extents.rotated_half_extents(inst.angle);
+            let body: Rect = [
+                inst.at[0] - h[0],
+                inst.at[1] - h[1],
+                inst.at[0] + h[0],
+                inst.at[1] + h[1],
+            ]
+            .into();
+            if body.overlaps(&b) {
+                return false;
+            }
+            if let Some(pins) = self.sym_pins.get(&inst.lib_id) {
+                for pg in pins {
+                    for pb in pin_text_boxes(pg, inst.at, inst.angle, inst.mirror) {
+                        if pb.overlaps(&b) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        for label in &self.labels {
+            if label.net == net {
+                continue;
+            }
+            let lb = label_box(label.at, label.dir, text_width(&label.net));
+            if lb.overlaps(&b) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Same readability lint as [`Self::layout_warnings`], but suppresses an

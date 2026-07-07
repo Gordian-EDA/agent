@@ -16,7 +16,7 @@
 //! positive would make the agent "fix" a correct design, which is worse than a miss. Each topological
 //! check therefore leans conservative (high IC-pin threshold for decoupling, exact `SDA`/`SCL` token
 //! match, name-driven input/output vocabularies, a power-flag gate for undriven rails) and is
-//! calibrated to produce ZERO findings on the known-good `docs/validation/*` corpus. The per-check
+//! calibrated to produce ZERO findings on the known-good `crates/sch-floorplan/tests/fixtures/validation/*` corpus. The per-check
 //! rustdoc states the heuristic and its known limits.
 
 use crate::model::*;

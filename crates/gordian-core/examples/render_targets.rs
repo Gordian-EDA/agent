@@ -1,9 +1,9 @@
 //! Focused iteration harness: render the four target validation fixtures
 //! (compiled + emitted through the floorplan engine with their `*.layout.json`
 //! IR sidecar) to PNGs in `/tmp/renders/` for side-by-side review against
-//! the optional validation corpus.
+//! `crates/sch-floorplan/tests/fixtures/validation/references/`.
 //!
-//! Usage: cargo run --release -p gordian-core --example render_targets [name ...]
+//! Usage: cargo run --release -p agent --example render_targets [name ...]
 //! With no args, renders all four targets.
 
 use kicad_cli::KicadCli;
@@ -19,12 +19,7 @@ const TARGETS: &[&str] = &[
 
 fn main() -> anyhow::Result<()> {
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let dir = std::path::Path::new("docs/validation");
-    if !dir.is_dir() {
-        anyhow::bail!(
-            "docs/validation corpus is not present; provide the validation fixtures before running render_targets"
-        );
-    }
+    let dir = std::path::Path::new("crates/sch-floorplan/tests/fixtures/validation");
     let out_dir = std::path::Path::new("/tmp/renders");
     std::fs::create_dir_all(out_dir)?;
 
@@ -52,7 +47,7 @@ fn render_fixture(
     out: &std::path::Path,
 ) -> anyhow::Result<()> {
     let src = std::fs::read_to_string(yaml_path)?;
-    let provider = SymbolTable::from_env(env);
+    let provider = SymbolTable::from_env(&env);
     let result = circuit_lang::compile(&src, &provider);
     let design = result.design.ok_or_else(|| {
         let errs: Vec<String> = result
@@ -76,8 +71,12 @@ fn render_fixture(
             Err(_) => sch_floorplan::floorplan::baseline_ir(&design),
         }
     };
-    let emit =
-        sch_floorplan::floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy))
+    let emit = sch_floorplan::floorplan::emit_strategy(
+        env,
+        &design,
+        Box::new(anneal_place::Anneal),
+        Some(ir),
+    )
             .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
 
     let tmp = tempfile::tempdir()?;

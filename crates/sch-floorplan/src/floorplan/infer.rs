@@ -42,6 +42,7 @@ pub fn baseline_ir(design: &Design) -> LayoutIr {
         idioms: Vec::new(),
         frozen: BTreeSet::new(),
         rail_locals: local_rail_nets(design),
+        rail_force: Default::default(),
         zone: BTreeMap::new(),
     }
 }
@@ -62,15 +63,14 @@ fn local_rail_nets(design: &Design) -> BTreeSet<String> {
             }
         }
     }
-    // Distribute only GROUND nets (the original intent: the many ground RETURNS are what
-    // tangle a dense board into long rails). Keep POSITIVE supplies as a single rail so their
-    // decoupling caps hang off it in a tidy ROW (as on the 9-scoring idiom-stm32) instead of
-    // every cap getting its own local symbol and SCATTERING (the #1 critic defect —
-    // "decoupling caps parked in empty space"). Env-gated to restore the old all-rails behaviour.
-    let all = std::env::var("DISTRIBUTE_ALL_RAILS").is_ok();
+    // ≥2 authored symbols on a net = the author drew per-use arrows (the human
+    // convention on dense sheets); ONE symbol = one spanning rail, keeping
+    // decoupling caps in a tidy row (the 9-scoring idiom-stm32 declares each
+    // positive rail once). Every checked-in fixture declares positives once, so
+    // this is authored-intent, not a behaviour change for them.
     count
         .into_iter()
-        .filter(|(net, n)| *n >= 2 && (all || is_ground(net)))
+        .filter(|(_, n)| *n >= 2)
         .map(|(net, _)| net)
         .collect()
 }
@@ -354,12 +354,21 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
                 PinSide::West => acol - 1 - off,
                 _ => acol + off,
             };
+            // A tap on an EAST/WEST pin sits BESIDE that pin (its own rank row), so a
+            // ladder of same-side taps — a BMS's per-cell dividers, an ADC's input
+            // pull-downs — fans into a tidy adjacent column instead of every one
+            // collapsing onto the single band cell `arow ± 2`. A NORTH/SOUTH pin's tap
+            // still rises/drops into the V+/GND band as before (its rank, ranked by y,
+            // is not meaningful on a horizontal edge).
+            let side_pin = matches!(side, PinSide::East | PinSide::West);
             if is_vplus(other) {
-                // Pull-up / supply tap → vertical in the V+ band above its pin.
+                // Pull-up / supply tap → vertical; in the V+ band above (N/S) or level
+                // with its pin (E/W).
                 let c = col_for_side(side);
+                let row = if side_pin { arow + rank } else { arow - 2 };
                 Cell {
                     col: c,
-                    row: arow - 2,
+                    row,
                     orient: orient_for(&s.pins, &n1, true),
                 }
             } else if is_ground(other) || is_neg_supply(other) {
@@ -370,9 +379,10 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
                 // multi-sheet sub-design (the split-supply VEE↔GND cap drawn sideways). The
                 // references declare power symbols so is_rail(GND) held there → inert for them.
                 let c = col_for_side(side);
+                let row = if side_pin { arow + rank } else { arow + 2 };
                 Cell {
                     col: c,
-                    row: arow + 2,
+                    row,
                     orient: orient_for(&s.pins, &n1, true),
                 }
             } else {
@@ -538,6 +548,7 @@ pub fn infer_ir(env: &KicadEnv, design: &Design) -> LayoutIr {
         idioms: idiom_reports,
         frozen: placed,
         rail_locals: local_rail_nets(design),
+        rail_force: Default::default(),
         zone,
     }
 }
@@ -1042,44 +1053,54 @@ pub(super) fn anchor_tap(
     si: usize,
     rails: &BTreeMap<String, Band>,
 ) -> Option<(usize, String, String)> {
-    let mut hits = Vec::new();
+    // LOCALITY PRINCIPLE: a power RAIL (GND/V+) reaches nearly every anchor on the
+    // board, so it carries no positional information — the part's home is decided by
+    // its SIGNAL legs alone. (This is the same rule `order_anchors` uses when it
+    // excludes ground/weak-weights power from its adjacency graph.) Splitting hits by
+    // rail-ness lets a per-pin pull-down/pull-up/sense divider — whose other leg is a
+    // shared rail — still flank the one IC pin its signal leg taps.
+    let mut sig_hits = Vec::new();
+    let mut rail_hits = Vec::new();
     for (_, _, net) in &items[si].pins {
         let Some(net) = net else { continue };
         for (j, num) in inc.get(net).into_iter().flatten() {
             if anchors.contains(j) {
-                hits.push((*j, num.clone(), net.clone()));
+                let hit = (*j, num.clone(), net.clone());
+                if rails.contains_key(net) {
+                    rail_hits.push(hit);
+                } else {
+                    sig_hits.push(hit);
+                }
             }
         }
     }
-    // Resolve on a single distinct ANCHOR, not a single pin. A satellite whose
-    // rail leg ALSO lands on the same IC (its VCC/GND pins) used to be rejected
-    // as multi-hit, scattering it to a spare column. If every hit is on ONE
-    // anchor, prefer the tap on a NON-rail (signal) net — the meaningful pin — so
-    // the part flanks that pin. Only a tap spanning two DIFFERENT anchors is
-    // genuinely ambiguous.
-    let distinct: BTreeSet<usize> = hits.iter().map(|h| h.0).collect();
-    if distinct.len() != 1 {
+    // A satellite whose SIGNAL pin taps exactly one anchor flanks THAT anchor, even
+    // when its other leg is a rail shared with other anchors. Two distinct signal
+    // anchors is a genuine inter-IC series element: ambiguous, place generically.
+    let sig_anchors: BTreeSet<usize> = sig_hits.iter().map(|h| h.0).collect();
+    if sig_anchors.len() == 1 {
+        return Some(sig_hits.into_iter().next().unwrap());
+    }
+    if !sig_anchors.is_empty() {
         return None;
     }
-    hits.sort_by_key(|h| rails.contains_key(&h.2));
-    let chosen = hits.into_iter().next()?;
-    // A RAIL-ONLY tap doesn't make the part adjacent to the IC: a coax/connector
-    // that touches the chip only through GND (its signal goes elsewhere, via a
-    // DC-block cap) must NOT be tucked under the IC's GND pin. So if the chosen
-    // tap is a rail AND this satellite carries a non-rail signal net, it isn't a
-    // real tap — let it place elsewhere. A pure decoupler (both nets rails, no
-    // signal) keeps its rail tap and flanks the supply pin.
-    if rails.contains_key(&chosen.2) {
-        let has_signal = items[si]
-            .pins
-            .iter()
-            .filter_map(|(_, _, n)| n.as_deref())
-            .any(|n| !rails.contains_key(n));
-        if has_signal {
-            return None;
-        }
+    // No signal tap reaches an anchor. A part that nonetheless carries a signal net
+    // (a coax / DC-block cap whose signal exits elsewhere) is NOT made adjacent by a
+    // bare rail tap — let it place elsewhere. Only a PURE decoupler (every net a
+    // rail) flanks the supply pin of the single anchor its rail legs land on.
+    let has_signal = items[si]
+        .pins
+        .iter()
+        .filter_map(|(_, _, n)| n.as_deref())
+        .any(|n| !rails.contains_key(n));
+    if has_signal {
+        return None;
     }
-    Some(chosen)
+    let rail_anchors: BTreeSet<usize> = rail_hits.iter().map(|h| h.0).collect();
+    if rail_anchors.len() != 1 {
+        return None;
+    }
+    rail_hits.into_iter().next()
 }
 
 /// Whether an IC should be flipped left↔right: its EAST-side signal pins reach a

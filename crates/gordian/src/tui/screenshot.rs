@@ -408,12 +408,6 @@ fn tui_screenshots() {
     push(
         &mut app,
         Speaker::System,
-        "Worked for 41s — hit the per-turn step limit; send \"continue\" to resume",
-        NoticeLevel::Warn,
-    );
-    push(
-        &mut app,
-        Speaker::System,
         "Worked for 12s — provider throttled the request (429)",
         NoticeLevel::Error,
     );

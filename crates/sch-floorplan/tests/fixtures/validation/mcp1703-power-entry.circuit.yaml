@@ -1,0 +1,20 @@
+version: 1
+name: mcp1703-power-entry
+blocks:
+  power:
+    components:
+      PWR1: {part: power:VCC, pins: {1: 5V}}
+      PWR2: {part: power:VCC, pins: {1: 3V3}}
+      PWR3: {part: power:GND, pins: {1: GND}}
+  power_entry:
+    components:
+      F1: {part: Device:Polyfuse, value: Polyfuse, between: [5V_BUS, 5V]}
+      C1: {part: Device:C, value: 10u, between: [5V, GND]}
+      C2: {part: Device:C, value: 1u, between: [5V, GND]}
+      U1:
+        part: Regulator_Linear:MCP1703Ax-330xxTT
+        pins: {VI: 5V, VO: 3V3, GND: GND}
+      C3: {part: Device:C, value: 1u, between: [3V3, GND]}
+      C4: {part: Device:C, value: 10u, between: [3V3, GND]}
+      D1: {part: Device:LED, value: red, positive: 3V3, negative: LED_K}
+      R2: {part: Device:R, value: 330, between: [GND, LED_K]}

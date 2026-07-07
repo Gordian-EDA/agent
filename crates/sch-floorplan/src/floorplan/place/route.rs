@@ -111,7 +111,11 @@ pub(crate) fn wire(
     };
 
     // Phase A — rails (shared wires + stubs + power symbols), so their wires are
-    // in the writer before we build the routing scene.
+    // in the writer before we build the routing scene. `used_lanes` records every
+    // drawn riser (x, y_lo, y_hi, net) so no later rail's riser can land exactly
+    // collinear with a DIFFERENT net's — the post-jog re-collision the fan alone
+    // cannot see.
+    let mut used_lanes: Vec<(f64, f64, f64, String)> = Vec::new();
     for (net, eps) in &net_eps {
         if let Some(band) = ir.rails.get(net) {
             let flag = needs_flag.contains(net).then_some(&mut *flag_points);
@@ -139,9 +143,10 @@ pub(crate) fn wire(
                     }
                     (hi[0] - lo[0]) + (hi[1] - lo[1]) > 38.0
                 };
-            let distribute = ir.rail_locals.contains(net)
-                || (pin_total > FAST_PINS && rail_should_distribute(eps))
-                || multisheet_spread;
+            let distribute = !ir.rail_force.contains(net)
+                && (ir.rail_locals.contains(net)
+                    || (pin_total > FAST_PINS && rail_should_distribute(eps))
+                    || multisheet_spread);
             let rail_y = rail_y_map.get(net).copied().filter(|_| !distribute);
             let driver = rail_drivers.get(net).copied();
             emit_rail(
@@ -157,6 +162,7 @@ pub(crate) fn wire(
                 &power_keepouts,
                 driver,
                 fan_risers,
+                &mut used_lanes,
             )?;
         }
     }
@@ -181,6 +187,7 @@ pub(crate) fn wire(
             // the label actually lands (clear of the IC's long pin-name text).
             let (side, at) = ic_port_exit_override(env, w, items, inc, net, eps, side)
                 .unwrap_or((side, port_exit_point(eps, side)));
+            let at = nudge_port_exit(&scene, at, side, net);
             scene
                 .label_solids
                 .push((port_label_obstacle(at, side, net), net.clone()));
@@ -287,6 +294,7 @@ pub(crate) fn route_signal(
         let at = ic_exit
             .map(|(_, at)| at)
             .unwrap_or_else(|| port_exit_point(eps, side));
+        let at = nudge_port_exit(scene, at, side, net);
         terms.push((at, None));
         terms.len() - 1
     });
@@ -594,13 +602,51 @@ pub(crate) fn route_signal(
         }
     }
     let port_root = port_idx.map(|pi| uf.find(pi));
+    if std::env::var_os("ROUTE_DEBUG").is_some() {
+        let unlabeled = roots.values().filter(|p| p.is_none()).count();
+        eprintln!(
+            "[route] net {net}: uf-components={} terms={} unlabeled(no-pin)={}",
+            roots.len(),
+            terms.len(),
+            unlabeled
+        );
+    }
     if roots.len() > 1 {
         for (root, pin) in &roots {
             if Some(*root) == port_root {
                 continue; // named by the port label below
             }
             if let Some((i, num)) = pin {
-                w.add_signal_label(env, &items[*i].refdes, num, net)?;
+                // Clear-stub search under the LINT'S OWN geometry: keep the
+                // default 3.81 when that landing reads clear (references stay
+                // byte-identical); otherwise extend outward until the writer
+                // itself says the label box collides with nothing.
+                let stub = w
+                    .pin_dirs(env, &items[*i].refdes, num)
+                    .ok()
+                    .and_then(|ds| ds.first().copied())
+                    .map(|(ep, dir)| {
+                        let v = dir.vec();
+                        let landing = |s: f64| {
+                            geom::GRID_50_MIL.snap_point(::geom::Point2::new(
+                                ep[0] + v.x * s,
+                                ep[1] + v.y * s,
+                            ))
+                        };
+                        [3.81, 6.35, 8.89, 11.43, 13.97]
+                            .into_iter()
+                            .find(|&s| {
+                                w.label_landing_clear(
+                                    landing(s),
+                                    dir,
+                                    net,
+                                    &items[*i].refdes,
+                                )
+                            })
+                            .unwrap_or(3.81)
+                    })
+                    .unwrap_or(3.81);
+                w.add_signal_label_stub(env, &items[*i].refdes, num, net, stub)?;
                 if let Ok(ds) = w.pin_dirs(env, &items[*i].refdes, num) {
                     for (p, _) in ds {
                         scene.points.push((p.into(), net.to_string()));
@@ -787,12 +833,22 @@ pub(crate) fn dir_to_side(dir: Dir) -> Side {
     }
 }
 
-/// The sheet edge a port net actually exits toward. A SINGLE-pin port follows its
-/// pin's real direction (geometry beats the name heuristic that picks Left/Right
-/// from the net name); a multi-pin port keeps the name-inferred side from `ir.ports`.
+/// The sheet edge a port net actually exits toward: when EVERY pin faces the
+/// same HORIZONTAL way, geometry beats the name heuristic that picks
+/// Left/Right from the net name — a pennant on the name side of two
+/// west-facing tail stubs lands in the wire to the next symbol. Vertical or
+/// mixed facings keep the `ir.ports` side (pennants read horizontally; a
+/// divider tap's north/south pins still exit left/right by name).
 pub(crate) fn effective_port_side(port: Option<Side>, eps: &[([f64; 2], Dir)]) -> Option<Side> {
     match port {
         Some(_) if eps.len() == 1 => Some(dir_to_side(eps[0].1)),
+        Some(_)
+            if !eps.is_empty()
+                && matches!(eps[0].1, Dir::East | Dir::West)
+                && eps.iter().all(|(_, d)| *d == eps[0].1) =>
+        {
+            Some(dir_to_side(eps[0].1))
+        }
         other => other,
     }
 }
@@ -896,6 +952,48 @@ pub(crate) fn ic_port_exit_override(
 /// (a wire drawn across someone else's edge tag). Directional: the pennant + text
 /// extend OUTWARD from the exit anchor along `side`; `BACK` covers the connecting
 /// vertex that reaches slightly back toward the wire. `HALF` is the text half-height.
+/// Slide a pennant's exit outward along its side until its box clears every
+/// body solid: the exit-extent heuristic measures the NET's pins, so it can
+/// land the pennant inside an unrelated neighbour's body. No overlap, no move
+/// — clean sheets stay byte-identical.
+pub(crate) fn nudge_port_exit(
+    scene: &sch_io::wire::RouteScene,
+    mut at: [f64; 2],
+    side: Side,
+    net: &str,
+) -> [f64; 2] {
+    // A candidate is bad if the pennant box sits on a BODY, or if its anchor
+    // would touch a FOREIGN net's wire — a global label's anchor point on a
+    // wire JOINS that net (the preamp breaks=2 regression).
+    let bad = |at: [f64; 2]| {
+        let r = port_label_obstacle(at, side, net);
+        solids_hit(&scene.solids, &r)
+            || scene.segments.iter().any(|seg| {
+                seg.net != net && seg.segment.dist2_to_point(at.into()) < 0.01
+            })
+    };
+    if !bad(at) {
+        return at;
+    }
+    let start = at;
+    for _ in 0..10 {
+        match side {
+            Side::Right => at[0] += 2.54,
+            Side::Left => at[0] -= 2.54,
+            Side::Top => at[1] -= 2.54,
+            Side::Bottom => at[1] += 2.54,
+        }
+        if !bad(at) {
+            return at;
+        }
+    }
+    start
+}
+
+fn solids_hit(solids: &[::geom::Rect], r: &::geom::Rect) -> bool {
+    solids.iter().any(|s| s.overlaps(r))
+}
+
 pub(crate) fn port_label_obstacle(at: [f64; 2], side: Side, net: &str) -> ::geom::Rect {
     let w = crate::label::text_width(net) + 2.54;
     const BACK: f64 = geom::GRID_50_MIL.pitch();
@@ -1137,6 +1235,12 @@ pub(crate) fn plan_riser_offsets(
             nets.insert(nb.clone());
         }
     }
+    if std::env::var_os("RISER_DEBUG").is_some() {
+        eprintln!("[riser] {} risers, contested: {:?}", risers.len(), contested);
+        for r in &risers {
+            eprintln!("[riser]   {:?}", r);
+        }
+    }
     let mut offsets = BTreeMap::new();
     for (col, nets) in &contested {
         // Fan the contested nets into distinct lanes, deterministic by name:
@@ -1233,6 +1337,7 @@ pub(crate) fn emit_rail(
     power_keepouts: &[Rect],
     driver: Option<[f64; 2]>,
     fan_risers: bool,
+    used_lanes: &mut Vec<(f64, f64, f64, String)>,
 ) -> io::Result<()> {
     let lib = power_lib_id(net);
     let Some(rail_y) = rail_y.filter(|_| eps.len() >= 3) else {
@@ -1379,29 +1484,51 @@ pub(crate) fn emit_rail(
     // the pin and descends in a clear lane — clearing both its own body and a
     // neighbour's. `bodies` is empty on the per-move scorer (finalize-only), so the
     // placement is never churned by this.
-    let attaches: Vec<f64> = eps
-        .iter()
-        .map(|(ep, dir)| {
-            let base = riser_base_x(ep, *dir);
-            let mut ax = base
-                + riser_offsets
-                    .get(&(net.to_string(), col_key(base)))
-                    .copied()
-                    .unwrap_or(0.0);
-            if !bodies.is_empty() {
-                let (rlo, rhi) = (ep[1].min(rail_y), ep[1].max(rail_y));
-                if riser_hits_body(ax, rlo, rhi, bodies)
-                    && let Some(clear) = (1..=8)
-                        .flat_map(|k| [k as f64, -(k as f64)])
-                        .map(|m| ax + m * RAIL_LANE)
-                        .find(|&c| !riser_hits_body(c, rlo, rhi, bodies))
-                {
-                    ax = clear;
-                }
+    let mut attaches: Vec<f64> = Vec::with_capacity(eps.len());
+    for (ep, dir) in eps {
+        let base = riser_base_x(ep, *dir);
+        let mut ax = base
+            + riser_offsets
+                .get(&(net.to_string(), col_key(base)))
+                .copied()
+                .unwrap_or(0.0);
+        let (rlo, rhi) = (ep[1].min(rail_y), ep[1].max(rail_y));
+        if !bodies.is_empty()
+            && riser_hits_body(ax, rlo, rhi, bodies)
+            && let Some(clear) = (1..=8)
+                .flat_map(|k| [k as f64, -(k as f64)])
+                .map(|m| ax + m * RAIL_LANE)
+                .find(|&c| !riser_hits_body(c, rlo, rhi, bodies))
+        {
+            ax = clear;
+        }
+        // The fan plans against BASE columns and the body-jog moves risers
+        // independently, so two different nets can still land one lane. The
+        // shared registry is the last word: shift until the lane is clean.
+        if fan_risers {
+            let conflict = |x: f64, lanes: &[(f64, f64, f64, String)]| {
+                lanes.iter().any(|(lx, lo, hi, lnet)| {
+                    lnet != net && (lx - x).abs() < EPS && rlo < hi - EPS && *lo < rhi - EPS
+                })
+            };
+            if conflict(ax, used_lanes) && std::env::var_os("RISER_DEBUG").is_some() {
+                eprintln!("[lane] conflict for {net} at x={ax}");
             }
-            ax
-        })
-        .collect();
+            if conflict(ax, used_lanes)
+                && let Some(clear) = (1..=8)
+                    .flat_map(|k| [k as f64, -(k as f64)])
+                    .map(|m| ax + m * RAIL_LANE)
+                    .find(|&c| {
+                        !conflict(c, used_lanes)
+                            && (bodies.is_empty() || !riser_hits_body(c, rlo, rhi, bodies))
+                    })
+            {
+                ax = clear;
+            }
+            used_lanes.push((ax, rlo, rhi, net.to_string()));
+        }
+        attaches.push(ax);
+    }
     let span_lo = attaches.iter().copied().fold(f64::MAX, f64::min);
     let span_hi = attaches.iter().copied().fold(f64::MIN, f64::max);
     w.add_wire_on_net([span_lo, rail_y], [span_hi, rail_y], net);

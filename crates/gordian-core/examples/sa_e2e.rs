@@ -1,7 +1,4 @@
-//! End-to-end placement scoreboard across all 10 test circuits, BOTH strategies.
-//! Renders each fixture via greedy and via the SA (LAYOUT_SEARCH), reports the
-//! layout-warning count + truthfulness signal per fixture/strategy — the
-//! "SA perfect on all 10" dashboard.
+//! End-to-end placement scoreboard across validation fixtures (anneal engine).
 //!
 //! Usage: cargo run --release -p gordian-core --example sa_e2e [name ...]
 
@@ -23,7 +20,7 @@ const FIXTURES: &[&str] = &[
 ];
 
 fn render(env: &KicadEnv, provider: &SymbolTable, name: &str) -> anyhow::Result<usize> {
-    let dir = std::path::Path::new("docs/validation");
+    let dir = std::path::Path::new("crates/sch-floorplan/tests/fixtures/validation");
     let src = std::fs::read_to_string(dir.join(format!("{name}.circuit.yaml")))?;
     let result = circuit_lang::compile(&src, provider);
     let design = result
@@ -33,7 +30,7 @@ fn render(env: &KicadEnv, provider: &SymbolTable, name: &str) -> anyhow::Result<
         Ok(s) => LayoutIr::from_json(&s)?,
         Err(_) => floorplan::infer_ir(env, &design),
     };
-    let out = floorplan::emit_strategy(env, &design, &ir, Box::new(anneal_place::Anneal))?;
+    let out = floorplan::emit_strategy(env, &design, Box::new(anneal_place::Anneal), Some(ir))?;
     Ok(out.layout_warnings.len())
 }
 
@@ -53,41 +50,28 @@ fn main() -> anyhow::Result<()> {
         args.iter().map(String::as_str).collect()
     };
 
-    println!(
-        "{:<30} {:>8} {:>8} {:>10}",
-        "fixture", "greedy", "anneal", "anneal_s"
-    );
-    println!("{}", "-".repeat(60));
-    let (mut g_perfect, mut a_perfect) = (0, 0);
+    println!("{:<30} {:>8} {:>10}", "fixture", "warn", "anneal_s");
+    println!("{}", "-".repeat(52));
+    let mut perfect = 0;
     let mut slowest = 0.0_f64;
     for name in &names {
-        // SAFETY: single-threaded example; pick_strategy reads this env in emit.
-        unsafe { std::env::set_var("LAYOUT_SEARCH", "greedy") };
-        let g = render(&env, &provider, name)
-            .map(|n| n.to_string())
-            .unwrap_or_else(|e| format!("ERR:{e}"));
-        unsafe { std::env::set_var("LAYOUT_SEARCH", "anneal") };
         let t0 = std::time::Instant::now();
-        let a = render(&env, &provider, name)
+        let w = render(&env, &provider, name)
             .map(|n| n.to_string())
             .unwrap_or_else(|e| format!("ERR:{e}"));
         let secs = t0.elapsed().as_secs_f64();
         slowest = slowest.max(secs);
-        if g == "0" {
-            g_perfect += 1;
-        }
-        if a == "0" {
-            a_perfect += 1;
+        if w == "0" {
+            perfect += 1;
         }
         let flag = if secs > 5.0 { " !!>5s" } else { "" };
-        println!("{name:<30} {g:>8} {a:>8} {secs:>10.2}{flag}");
+        println!("{name:<30} {w:>8} {secs:>10.2}{flag}");
     }
-    println!("{}", "-".repeat(60));
+    println!("{}", "-".repeat(52));
     println!(
-        "{:<30} {:>8} {:>8} {:>10.2}",
-        "0-warn / slowest anneal_s",
-        format!("{g_perfect}/{}", names.len()),
-        format!("{a_perfect}/{}", names.len()),
+        "{:<30} {:>8} {:>10.2}",
+        "0-warn / slowest",
+        format!("{perfect}/{}", names.len()),
         slowest
     );
     Ok(())

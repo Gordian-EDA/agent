@@ -15,7 +15,7 @@ fn validation_corpus_available() -> bool {
 
 fn compile_fixture(provider: &SymbolTable, name: &str) -> circuit_lang::Design {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("../../docs/validation/{name}.circuit.yaml"));
+        .join(format!("tests/fixtures/validation/{name}.circuit.yaml"));
     let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
     let result = circuit_lang::compile(&src, provider);
     assert!(

@@ -76,14 +76,12 @@ pub enum Msg {
 }
 
 /// Why an in-flight turn stopped, carried on [`Msg::TurnEnded`]. The agent loop
-/// reports `Completed`/`IterationCap` (via its `StopReason`); the shell adds
-/// `Interrupted` (user abort) and `Error`; `/compact` reports `Compacted`.
+/// reports `Completed` (via its `StopReason`); the shell adds `Interrupted`
+/// (user abort) and `Error`; `/compact` reports `Compacted`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TurnEndReason {
     /// The model returned a final reply — a clean finish.
     Completed,
-    /// The loop hit its per-turn iteration cap and was cut off mid-work.
-    IterationCap,
     /// The user pressed Esc to abort the turn.
     Interrupted,
     /// The turn failed (provider/network/tool error); carries the message.

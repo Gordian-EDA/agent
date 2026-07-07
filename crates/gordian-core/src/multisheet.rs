@@ -1,24 +1,14 @@
-//! Composed single-sheet commit — the validated answer to the single-sheet density
-//! ceiling: each authored functional block is laid out INDEPENDENTLY, then the blocks
-//! are tiled onto ONE `.kicad_sch` as labeled bounding-box regions. No hierarchy, no
-//! sub-sheet files, no root nav page: cross-block nets connect via GLOBAL LABELS only
-//! (matching names auto-join on a single sheet, so no wire ever crosses a block border).
-//!
-//! Per-block independent layout is the RULE here, not a dense-only special case.
-//! [`refine_blocks`] may merge tiny fragments, then [`compose_single_sheet`] runs a SEPARATE
-//! placement pass per group (each in its own coordinate space), shelf-packs the group regions
-//! onto one sheet with margins so they never touch, translates each group's geometry to its tile,
-//! and frames each with a graphic rectangle + a name label. The page is enlarged to fit; global
-//! labels mean a large sheet still has no long wires.
+//! Composed single-sheet commit — each authored functional block is laid out
+//! independently, then the blocks are tiled onto ONE `.kicad_sch` as labeled
+//! bounding-box regions. Cross-block nets connect via global labels only.
 
 use circuit_lang::model::{Block, Design, PinTarget};
 use indexmap::IndexMap;
 use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;
+use sch_place::result::EmitOutput;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-
-use crate::SchematicPlacementEngine;
 
 /// Deterministic UUIDv5-style id from a seed (no randomness ⇒ stable re-emits).
 pub fn det_uuid(seed: &str) -> String {
@@ -80,152 +70,94 @@ fn block_nets(b: &Block) -> HashSet<String> {
     s
 }
 
-/// One sheet group from [`refine_blocks`]: a name (the sub-sheet / file stem) and the member
-/// blocks (each a `(block_name, Block)`) to lay out TOGETHER on that sheet. A single-block
-/// group → one sub-sheet; a multi-block group is emitted as a sub-design (Tier-B keeps the
-/// members disjoint).
-pub type SheetGroup = (String, Vec<(String, Block)>);
+/// One sheet group: a block name and its single authored block body.
+pub type SheetGroup = (String, Block);
 
-/// Normalize the agent's authored blocks into SHEET GROUPS — the single source of truth
-/// for per-block independent layout. The only refinement is:
-///
-/// - **MERGE** any block with < `MERGE_MIN` parts into the block it shares the most non-GND
-///   nets with, UNLESS it is PORT-RICH (≥5 cross-block nets — a real breakout/header sheet
-///   that reads cleanly on its own, e.g. an SWD/GPIO pinout). Only the smallest blocks move.
-pub fn refine_blocks(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
-    const MERGE_MIN: usize = 4;
-
-    // ── COLLECT ── authored non-empty blocks, keyed by name, in deterministic order.
-    let mut eff: IndexMap<String, Block> = IndexMap::new();
-    for (bname, block) in blocks {
-        if block.components.is_empty() {
-            continue;
-        }
-        eff.insert(bname.clone(), block.clone());
-    }
-
-    // ── MERGE ── fold each tiny, non-port-rich block into its strongest neighbour.
-    let bnames: Vec<String> = eff.keys().cloned().collect();
-    let bnets: HashMap<String, HashSet<String>> = bnames
+/// Non-empty authored blocks, one group each, in declaration order. A block of
+/// ONLY `power:` symbols declares rails, not layout — it would tile as an empty
+/// frame, so it joins no group (the symbols realize at their usage sites).
+pub fn authored_groups(blocks: &IndexMap<String, Block>) -> Vec<SheetGroup> {
+    blocks
         .iter()
-        .map(|n| (n.clone(), block_nets(&eff[n])))
-        .collect();
-    let bsize = |n: &str| eff[n].components.len();
-    // A net shared by ≥2 blocks is a cross-block PORT.
-    let mut net_blocks: HashMap<String, usize> = HashMap::new();
-    for n in &bnames {
-        for net in &bnets[n] {
-            *net_blocks.entry(net.clone()).or_default() += 1;
-        }
-    }
-    let port_rich = |n: &str| {
-        bnets[n]
-            .iter()
-            .filter(|net| net_blocks.get(*net).copied().unwrap_or(0) >= 2)
-            .count()
-            >= 5
-    };
-    let mut merge_into: HashMap<String, String> = HashMap::new();
-    for n in &bnames {
-        if bsize(n) >= MERGE_MIN || port_rich(n) {
-            continue;
-        }
-        if let Some(t) = bnames
-            .iter()
-            .filter(|m| m.as_str() != n.as_str() && bsize(m) >= MERGE_MIN)
-            .max_by_key(|m| (bnets[n].intersection(&bnets[*m]).count(), bsize(m)))
-        {
-            println!("  [merge] tiny block '{n}' ({} parts) -> '{t}'", bsize(n));
-            merge_into.insert(n.clone(), t.clone());
-        }
-    }
-
-    // ── ASSEMBLE ── sheet groups keyed by surviving block, members carrying their Block body.
-    // Preserve authored block order; merged blocks fold into their target's group.
-    let mut groups: IndexMap<String, Vec<String>> = IndexMap::new();
-    for n in &bnames {
-        if !merge_into.contains_key(n) {
-            groups.entry(n.clone()).or_default().push(n.clone());
-        }
-    }
-    for n in &bnames {
-        if let Some(t) = merge_into.get(n) {
-            groups.entry(t.clone()).or_default().push(n.clone());
-        }
-    }
-    groups
-        .into_iter()
-        .map(|(name, members)| {
-            let blocks = members
-                .into_iter()
-                .map(|m| (m.clone(), eff[&m].clone()))
-                .collect();
-            (name, blocks)
+        .filter(|(_, block)| {
+            block
+                .components
+                .values()
+                .any(|c| !c.part.starts_with("power:"))
         })
+        .map(|(name, block)| (name.clone(), block.clone()))
         .collect()
 }
 
+/// Lay out `design` block-by-block and compose one `.kicad_sch`.
+pub fn compose_design(
+    env: &KicadEnv,
+    design: &Design,
+) -> anyhow::Result<EmitOutput> {
+    let groups = authored_groups(&design.blocks);
+    if groups.is_empty() {
+        return sch_floorplan::floorplan::emit_strategy(
+            env,
+            design,
+            crate::tools::schematic_placement_engine(),
+            None,
+        )
+        .map_err(|e| anyhow::anyhow!("emit: {e}"));
+    }
+
+    let cross_sheet = cross_sheet_nets(&groups);
+    let mut groups_w: Vec<(String, sch_io::write::SchematicWriter)> = Vec::new();
+    let mut layout_warnings = Vec::new();
+    let mut crossings = sch_place::place::Crossings::default();
+    let mut detected_idioms = Vec::new();
+    let placer = crate::tools::schematic_placement_engine();
+    for (gname, block) in groups {
+        let mut sub = design.clone();
+        sub.blocks = std::iter::once((gname.clone(), block)).collect();
+        mark_cross_sheet_ports(&mut sub, &cross_sheet);
+        eprintln!("  [emit] group '{gname}' with {}", placer.name());
+        let (w, out) = sch_floorplan::floorplan::emit_group(
+            env,
+            &sub,
+            crate::tools::schematic_placement_engine(),
+        )
+            .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
+        eprintln!("  [emit] group '{gname}' done");
+        layout_warnings.extend(out.layout_warnings);
+        crossings.body += out.crossings.body;
+        crossings.ic += out.crossings.ic;
+        crossings.wire += out.crossings.wire;
+        detected_idioms.extend(out.detected_idioms);
+        groups_w.push((sanitize(&gname), w));
+    }
+
+    Ok(EmitOutput {
+        sch: sch_floorplan::floorplan::compose_writers(groups_w, design.name.as_deref()),
+        layout_warnings,
+        crossings,
+        detected_idioms,
+    })
+}
+
 /// Emit a multi-block `Design` as ONE composed `.kicad_sch` under `out_dir` (file
-/// `root.kicad_sch`). Refines the authored blocks into sheet GROUPS ([`refine_blocks`]), runs
-/// a SEPARATE placement pass per group (each in its own coordinate space, as a TYPED writer), then
-/// hands the group writers to the engine's `compose_writers`, which tiles the group regions
-/// onto a single enlarged page (translating each writer's items in mm) and frames each with a
-/// labeled bounding box. Cross-group nets auto-become global labels (single-pin ports) / power
-/// symbols, and matching global-label names join across the sheet — no wire crosses a block
-/// border. Sets `MULTISHEET_REFINE` so each group gets the route-aware crossing refinement.
-/// Returns the composed `.kicad_sch` path.
+/// `root.kicad_sch`). Returns the composed `.kicad_sch` path.
 pub fn compose_single_sheet(
     env: &KicadEnv,
     design: &Design,
     out_dir: &Path,
-    engine: SchematicPlacementEngine,
 ) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(out_dir)?;
-    // SAFETY: process-wide flag read by the engine to opt each group into route-aware
-    // refinement; this whole operation is a composed multi-block emit, the intended scope.
-    unsafe { std::env::set_var("MULTISHEET_REFINE", "1") };
-    let groups = refine_blocks(&design.blocks);
-    let cross_sheet = cross_sheet_nets(&groups);
-
-    let mut groups_w: Vec<(String, sch_io::write::SchematicWriter)> = Vec::new();
-    for (gname, members) in groups {
-        // A sub-design holding this group's block(s). Mark every cross-sheet net this group
-        // touches as a PORT so the engine emits one global label per group for the hop and
-        // wires any ≥2 local pins together (instead of duplicate local labels).
-        let mut sub = design.clone();
-        sub.blocks = members.into_iter().collect();
-        mark_cross_sheet_ports(&mut sub, &cross_sheet);
-        let ir = sch_floorplan::floorplan::infer_ir(env, &sub);
-        // Lay out each group INDEPENDENTLY and keep its TYPED writer (not a rendered
-        // string): the engine composer translates each group's items to its tile in mm
-        // and folds them into one sheet — no string-level geometry math here.
-        let placer = crate::tools::schematic_placement_engine(engine);
-        eprintln!("  [emit] group '{gname}' with {}", placer.name());
-        let w = sch_floorplan::floorplan::emit_writer(env, &sub, &ir, placer)
-            .map_err(|e| anyhow::anyhow!("emit group '{gname}': {e}"))?;
-        eprintln!("  [emit] group '{gname}' done");
-        groups_w.push((sanitize(&gname), w));
-    }
-    let composed = sch_floorplan::floorplan::compose_writers(groups_w, design.name.as_deref());
+    let composed = compose_design(env, design)?;
     let path = out_dir.join("root.kicad_sch");
-    std::fs::write(&path, &composed)?;
-    let _ = env; // reserved (validation hook); kept for signature symmetry
+    std::fs::write(&path, &composed.sch)?;
     Ok(path)
 }
 
-/// Nets that CROSS sheets: a signal net (`block_nets` excludes GND/VSS rails) present in ≥2
-/// sheet GROUPS. On the sheet where such a net has exactly one pin, the engine's degree-1 rule
-/// already makes it a global-label port. But where it has ≥2 LOCAL pins (an op-amp follower's
-/// OUT+IN-, any feedback loop), the degree-1 rule can't see it, so the engine either wires it
-/// locally with NO cross-sheet label (a silent disconnect) or — when a local tee can't form —
-/// drops a duplicate LOCAL label on each pin (the "confusing duplicate ISENSE_W label" defect,
-/// BLDC current_sense). [`mark_cross_sheet_ports`] flags these as ports so each sheet emits one
-/// global label for the hop and wires its local pins together. A purely single-sheet net (in one
-/// group only) is excluded, so its wiring is untouched.
+/// Nets that CROSS sheets: a signal net present in ≥2 sheet GROUPS.
 pub fn cross_sheet_nets(groups: &[SheetGroup]) -> HashSet<String> {
     let mut net_groups: HashMap<String, usize> = HashMap::new();
-    for (_, members) in groups {
-        let nets: HashSet<String> = members.iter().flat_map(|(_, b)| block_nets(b)).collect();
+    for (_, block) in groups {
+        let nets: HashSet<String> = block_nets(block).into_iter().collect();
         for net in nets {
             *net_groups.entry(net).or_default() += 1;
         }
@@ -237,10 +169,7 @@ pub fn cross_sheet_nets(groups: &[SheetGroup]) -> HashSet<String> {
         .collect()
 }
 
-/// Mark every cross-sheet net (see [`cross_sheet_nets`]) that `sub` touches as a PORT, so
-/// `infer_ir` treats it as one global-label hop per sheet instead of N local labels. Power nets
-/// are inert (`infer_ir` never makes a power net a port), and connectivity is unchanged: a local
-/// wire + one global label is electrically identical to a label on each local pin.
+/// Mark every cross-sheet net that `sub` touches as a PORT.
 pub fn mark_cross_sheet_ports(sub: &mut Design, cross_sheet: &HashSet<String>) {
     let touched: HashSet<String> = sub
         .blocks
@@ -259,7 +188,7 @@ pub fn emit_and_check(
     design: &Design,
     out_dir: &Path,
 ) -> anyhow::Result<(PathBuf, usize, usize)> {
-    let root = compose_single_sheet(env, design, out_dir, SchematicPlacementEngine::Anneal)?;
+    let root = compose_single_sheet(env, design, out_dir)?;
     let (e, w) = match KicadCli::new(env).erc(&root) {
         Ok(r) => (r.error_count(), r.warning_count()),
         Err(_) => (usize::MAX, 0),
@@ -273,7 +202,7 @@ mod tests {
     use circuit_lang::model::{Component, PinTarget};
 
     #[test]
-    fn refine_blocks_preserves_large_authored_blocks() {
+    fn authored_groups_one_per_block() {
         let mut block = Block::default();
         for i in 1..=12 {
             let mut c = Component {
@@ -290,7 +219,7 @@ mod tests {
         let mut blocks = IndexMap::new();
         blocks.insert("main".to_owned(), block);
 
-        let groups = refine_blocks(&blocks);
+        let groups = authored_groups(&blocks);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, "main");
         assert_eq!(groups[0].1.len(), 1);

@@ -618,7 +618,7 @@ mod tests {
         assert_eq!(l.output, 500);
         assert_eq!(l.cache_write, 800);
         assert_eq!(l.cache_read, 800);
-        assert_eq!(l.total_tokens(), 900 + 500 + 800 + 800);
+        assert_eq!(l.input_tokens(), 1000 + 1500);
     }
 
     #[test]
@@ -821,17 +821,6 @@ mod tests {
         assert!(!last.text.contains("tool call"), "{}", last.text);
         assert_eq!(last.level, NoticeLevel::Plain);
         assert!(!a.running && a.turn_started.is_none());
-
-        // IterationCap → yellow warning with the resume hint.
-        let mut a = app();
-        type_str(&mut a, "go");
-        a.update(Msg::Submit);
-        a.update(Msg::TurnEnded(TurnEndReason::IterationCap));
-        let last = a.transcript.last().unwrap();
-        assert!(last.text.contains("step limit"), "{}", last.text);
-        assert!(last.text.contains("continue"), "resume hint: {}", last.text);
-        assert!(!last.text.contains("tool calls"), "{}", last.text);
-        assert_eq!(last.level, NoticeLevel::Warn);
 
         // Error → red, carries the message.
         let mut a = app();

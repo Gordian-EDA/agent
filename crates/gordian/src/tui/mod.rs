@@ -247,7 +247,6 @@ impl Shell {
             let reason = match result {
                 Ok(o) => match o.stop_reason {
                     StopReason::Completed => TurnEndReason::Completed,
-                    StopReason::IterationCap => TurnEndReason::IterationCap,
                 },
                 Err(e) => TurnEndReason::Error(format!("{e:#}")),
             };
@@ -319,7 +318,10 @@ impl Shell {
                     .unwrap_or_else(|| "—".into());
                 format!(
                     "tokens: ctx {} · session {} in / {} out · {} cached · {cost}",
-                    s.ctx_tokens, l.input, l.output, l.cache_read
+                    s.ctx_tokens,
+                    l.input_tokens(),
+                    l.output,
+                    l.cache_read
                 )
             },
         ];

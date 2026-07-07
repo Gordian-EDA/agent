@@ -117,12 +117,19 @@ pub struct LayoutIr {
     /// symbol per rail) deserialize empty and the tuned references stay rails.
     #[serde(default)]
     pub rail_locals: BTreeSet<String>,
+    /// The inverse of [`Self::rail_locals`]: power nets to draw as ONE shared trunk even when
+    /// the per-pin heuristic would distribute them. The cluster engine sets this for a power
+    /// net whose pins it laid in a single aligned row (the "modules between rails" idiom), then
+    /// keeps it only if its safety net confirms the trunk de-sprawls without colliding. Empty
+    /// elsewhere ⇒ references byte-identical.
+    #[serde(default)]
+    pub rail_force: BTreeSet<String>,
     /// HYBRID VLM placement: refdes → a COARSE target position as a fraction of the
     /// board bbox, `[fx, fy]` in 0..1 (fx: 0=left,1=right; fy: 0=top,1=bottom). A vision
     /// LLM is good at rough DIRECTION ("power left, MCU centre") but not millimetre
-    /// positions, so this is applied as a SOFT bias in the placement cost (`zone_bias`),
-    /// NOT a forced cell — the engine still does the precise placement, just nudged
-    /// toward the LLM's zones. Empty on every existing path ⇒ no bias ⇒ unchanged.
+    /// positions, so this is applied as a SOFT bias in the annealer's placement cost (its
+    /// `zbias` term), NOT a forced cell — the engine still does the precise placement, just
+    /// nudged toward the LLM's zones. Empty on every existing path ⇒ no bias ⇒ unchanged.
     #[serde(default)]
     pub zone: BTreeMap<String, [f64; 2]>,
 }

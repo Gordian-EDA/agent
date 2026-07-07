@@ -1,0 +1,28 @@
+# Deliberate simplified SUBSET of the reference (omits some series resistors / components); used as a topology oracle, not a 1:1 reproduction.
+version: 1
+name: uart-level-translator
+blocks:
+  power:
+    components:
+      PWR1: {part: power:VCC, pins: {1: VCC3V3}}
+      PWR2: {part: power:VCC, pins: {1: VCCD}}
+      PWR3: {part: power:GND, pins: {1: GNDD}}
+  uart:
+    components:
+      J1:
+        part: Connector_Generic:Conn_01x05
+        pins: {Pin_1: TX_RAW, Pin_2: RX_RAW, Pin_3: NC_RTS, Pin_4: NC_CTS, Pin_5: GNDD}
+      R7: {part: Device:R, value: 62R, between: [TX_RAW, B1]}
+      R8: {part: Device:R, value: 62R, between: [RX_RAW, B2]}
+      R9: {part: Device:R, value: 10k, between: [B1, VCC3V3]}
+      R16: {part: Device:R, value: 10k, between: [B2, VCC3V3]}
+      U2:
+        part: Logic_LevelTranslator:SN74LVC2T45DCUR
+        pins: {VCCA: VCCD, VCCB: VCC3V3, GND: GNDD, A1: A1_OUT, A2: A2_OUT, B1: B1, B2: B2, DIR: VCCD}
+      R15: {part: Device:R, value: 62R, between: [A1_OUT, TXD1]}
+      R13: {part: Device:R, value: 62R, between: [A2_OUT, RXD1]}
+      C14: {part: Device:C, value: 100n, between: [VCC3V3, GNDD]}
+      C16: {part: Device:C, value: 100n, between: [VCCD, GNDD]}
+  mcu:
+    components:
+      R20: {part: Device:R, value: 0R, between: [TXD1, RXD1]}

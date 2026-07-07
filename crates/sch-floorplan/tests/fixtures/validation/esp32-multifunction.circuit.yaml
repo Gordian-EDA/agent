@@ -1,0 +1,447 @@
+version: 1
+name: esp32_multifunction
+blocks:
+  power_entry:
+    components:
+      PWR1: {part: "power:+12V", pins: {"1": "+12V"}}
+      PWR2: {part: "power:+5V", pins: {"1": "+5V"}}
+      PWR3: {part: "power:GND", pins: {"1": GND}}
+      PWR4: {part: "power:GND", pins: {"1": GND}}
+      J1:
+        part: "Connector:Conn_01x02_Pin"
+        value: xt60
+        pins:
+          "1": "+12V_SW"
+          "2": GND
+      SW1:
+        part: "Switch:SW_Wuerth_450301014042"
+        pins:
+          "1": "+12V"
+          "2": "+12V_SW"
+          "3": SW1_SENSE
+      R1:
+        part: "Device:R"
+        value: "22K"
+        pins:
+          "1": GND
+          "2": SW1_SENSE
+      J3:
+        part: "Connector:USB_B_Mini"
+        pins:
+          "1": USB_VBUS
+          "5": GND
+          "6": GND
+      D1:
+        part: "Diode:BAT60A"
+        pins:
+          "1": "+5V"
+          "2": USB_VBUS
+  regulators:
+    components:
+      PWR5: {part: "power:+12V", pins: {"1": "+12V"}}
+      PWR6: {part: "power:+12V", pins: {"1": "+12V"}}
+      PWR7: {part: "power:+3V3", pins: {"1": "+3V3"}}
+      PWR8: {part: "power:+3V3", pins: {"1": "+3V3"}}
+      PWR9: {part: "power:+5V", pins: {"1": "+5V"}}
+      PWR10: {part: "power:+5V", pins: {"1": "+5V"}}
+      PWR11: {part: "power:GND", pins: {"1": GND}}
+      PWR12: {part: "power:GND", pins: {"1": GND}}
+      U1:
+        part: "Regulator_Linear:AMS1117-3.3"
+        pins:
+          "1": GND
+          "2": "+3V3"
+          "3": "+5V"
+      U2:
+        part: "Regulator_Linear:AMS1117-5.0"
+        pins:
+          "1": GND
+          "2": "+5V"
+          "3": "+12V"
+      U3:
+        part: "Regulator_Linear:AMS1117-3.3"
+        pins:
+          "1": GND
+          "2": "+3V3"
+          "3": "+12V"
+      U4:
+        part: "Regulator_Linear:LM350_TO220"
+        pins:
+          "1": U4_ADJ
+          "2": VOUT_ADJ
+          "3": "+12V"
+      C1:
+        part: "Device:C_Polarized"
+        value: "10uF"
+        pins:
+          "1": "+5V"
+          "2": GND
+      C2:
+        part: "Device:C_Polarized"
+        value: "10uF"
+        pins:
+          "1": "+12V"
+          "2": GND
+      C3:
+        part: "Device:C_Polarized"
+        value: "10uF"
+        pins:
+          "1": "+12V"
+          "2": GND
+      C4:
+        part: "Device:C_Polarized"
+        value: "10uF"
+        pins:
+          "1": "+12V"
+          "2": GND
+      C5:
+        part: "Device:C_Polarized"
+        value: "22uF"
+        pins:
+          "1": "+3V3"
+          "2": GND
+      C6:
+        part: "Device:C_Polarized"
+        value: "22uF"
+        pins:
+          "1": "+5V"
+          "2": GND
+      C7:
+        part: "Device:C_Polarized"
+        value: "22uF"
+        pins:
+          "1": "+3V3"
+          "2": GND
+      C8:
+        part: "Device:C_Polarized"
+        value: "22uF"
+        pins:
+          "1": VOUT_ADJ
+          "2": GND
+      R2:
+        part: "Device:R"
+        value: "120"
+        pins:
+          "1": VOUT_ADJ
+          "2": U4_ADJ
+      RV1:
+        part: "Device:R_Potentiometer_Trim"
+        value: "1k trim"
+        pins:
+          "1": U4_ADJ
+          "2": GND
+          "3": GND
+  audio:
+    components:
+      PWR13: {part: "power:+12V", pins: {"1": "+12V"}}
+      PWR14: {part: "power:+12V", pins: {"1": "+12V"}}
+      PWR15: {part: "power:GND", pins: {"1": GND}}
+      PWR16: {part: "power:GND", pins: {"1": GND}}
+      U5:
+        part: "Amplifier_Audio:TDA2050"
+        pins:
+          "1": AMP_P
+          "2": AMP_N
+          "3": GND
+          "4": AMP_OUT
+          "5": "+12V"
+      RV2:
+        part: "Device:R_Potentiometer"
+        pins:
+          "1": "14_VI"
+          "2": POT_WIPER
+          "3": GND
+      C9:
+        part: "Device:C_Polarized"
+        value: "22u"
+        pins:
+          "1": AMP_FB_TAP
+          "2": GND
+      C10:
+        part: "Device:C_Polarized"
+        value: "1u"
+        pins:
+          "1": POT_WIPER
+          "2": AMP_P
+      C11:
+        part: "Device:C_Polarized"
+        value: "22uF"
+        pins:
+          "1": FB_LOW
+          "2": GND
+      C12:
+        part: "Device:C"
+        value: "0.1u"
+        pins:
+          "1": "+12V"
+          "2": GND
+      C13:
+        part: "Device:C_Polarized"
+        value: "1000u"
+        pins:
+          "1": "+12V"
+          "2": GND
+      C14:
+        part: "Device:C"
+        value: "0.47u"
+        pins:
+          "1": ZOBEL
+          "2": GND
+      C15:
+        part: "Device:C_Polarized"
+        value: "1000u"
+        pins:
+          "1": AMP_OUT
+          "2": SPK_AC
+      R3:
+        part: "Device:R"
+        value: "22K"
+        pins:
+          "1": AMP_FB_TAP
+          "2": "+12V"
+      R5:
+        part: "Device:R"
+        value: "22K"
+        pins:
+          "1": GND
+          "2": AMP_FB_TAP
+      R7:
+        part: "Device:R"
+        value: "22K"
+        pins:
+          "1": AMP_FB_TAP
+          "2": AMP_P
+      R8:
+        part: "Device:R"
+        value: "680R"
+        pins:
+          "1": FB_LOW
+          "2": AMP_N
+      R10:
+        part: "Device:R"
+        value: "22K"
+        pins:
+          "1": AMP_N
+          "2": AMP_OUT
+      R12:
+        part: "Device:R"
+        value: "2.2R"
+        pins:
+          "1": ZOBEL
+          "2": AMP_OUT
+      LS1:
+        part: "Device:Speaker"
+        pins:
+          "1": SPK_AC
+          "2": GND
+  peltier_fan:
+    components:
+      PWR17: {part: "power:+12V", pins: {"1": "+12V"}}
+      PWR18: {part: "power:GND", pins: {"1": GND}}
+      PWR19: {part: "power:GND", pins: {"1": GND}}
+      Q1:
+        part: "Transistor_BJT:TIP3055"
+        value: TIP142
+        pins:
+          "1": Q1_B
+          "2": V_PELT
+          "3": GND
+      Q2:
+        part: "Transistor_BJT:TIP3055"
+        value: TIP142
+        pins:
+          "1": Q2_B
+          "2": V_FAN
+          "3": GND
+      R4:
+        part: "Device:R"
+        value: "1.2k"
+        pins:
+          "1": "4_PELT"
+          "2": Q1_B
+      R6:
+        part: "Device:R"
+        value: "1.2k"
+        pins:
+          "1": V_PELT
+          "2": "+5V_BAT"
+      R9:
+        part: "Device:R"
+        value: "1.2k"
+        pins:
+          "1": "4_PELT"
+          "2": Q2_B
+      R11:
+        part: "Device:R"
+        value: "1.2k"
+        pins:
+          "1": V_FAN
+          "2": "+12V"
+      SW2:
+        part: "Switch:SW_Wuerth_450301014042"
+        pins:
+          "1": PELT_SW
+          "2": V_PELT
+          "3": GND
+      PE1:
+        part: "Device:PeltierElement"
+        pins:
+          "1": PELT_SW
+          "2": GND
+      M1:
+        part: "Motor:Fan"
+        pins:
+          "1": V_FAN
+          "2": GND
+      J4:
+        part: "Connector:Conn_01x02_Pin"
+        pins:
+          "1": "+5V_BAT"
+          "2": GND
+  connectors:
+    components:
+      PWR20: {part: "power:+12V", pins: {"1": "+12V"}}
+      PWR21: {part: "power:+3V3", pins: {"1": "+3V3"}}
+      PWR22: {part: "power:+3V3", pins: {"1": "+3V3"}}
+      PWR23: {part: "power:+5V", pins: {"1": "+5V"}}
+      PWR24: {part: "power:+5V", pins: {"1": "+5V"}}
+      PWR25: {part: "power:GND", pins: {"1": GND}}
+      PWR26: {part: "power:GND", pins: {"1": GND}}
+      J5:
+        part: "Connector:Conn_01x15_Pin"
+        value: Esp32_2
+        pins:
+          "1": "+5V"
+          "2": GND
+          "4": "14_VI"
+          "5": "27_PULSE"
+          "6": "25_X"
+          "7": "26_Y"
+          "8": "33_WS"
+          "9": "32_SD"
+          "10": "35_SCK"
+          "12": "39_TEMP_BODY_S"
+          "13": "36_TEMP_AMB_S"
+          "14": EN
+          "15": "+3V3"
+      J10:
+        part: "Connector:Conn_01x15_Pin"
+        value: Esp32_1
+        pins:
+          "1": GND
+          "2": "23_MISO"
+          "3": "22_SCL"
+          "4": TXD0
+          "5": RXD0
+          "6": "21_SDA"
+          "7": GND
+          "8": "19_MOSI"
+          "9": "18_SCK"
+          "10": "5_CS"
+          "11": "17_Y"
+          "12": "16_X"
+          "13": "4_PELT"
+          "15": "+12V"
+      J6:
+        part: "Connector:Conn_01x06_Pin"
+        value: Micro_SD
+        pins:
+          "1": "5_CS"
+          "2": "18_SCK"
+          "3": "19_MOSI"
+          "4": "23_MISO"
+          "5": "+3V3"
+          "6": GND
+      J7:
+        part: "Connector:Conn_01x08_Pin"
+        value: Gyro
+        pins:
+          "1": "+3V3"
+          "2": GND
+          "3": "22_SCL"
+          "4": "21_SDA"
+      J8:
+        part: "Connector:Conn_01x03_Pin"
+        value: Pulse
+        pins:
+          "1": GND
+          "2": "+3V3"
+          "3": "27_PULSE"
+      J9:
+        part: "Connector:Conn_01x04_Pin"
+        value: "TFT LCD"
+        pins:
+          "1": "+5V"
+          "2": RXD0
+          "3": TXD0
+          "4": GND
+      J11:
+        part: "Connector:Conn_01x03_Pin"
+        value: INMP441_2
+        pins:
+          "1": GND
+          "2": "+3V3"
+          "3": "32_SD"
+      J12:
+        part: "Connector:Conn_01x03_Pin"
+        value: "Ky-015 T-H Sensor"
+        pins:
+          "1": "36_TEMP_AMB_S"
+          "2": "+3V3"
+          "3": GND
+      J13:
+        part: "Connector:Conn_01x03_Pin"
+        value: "KY-013 Temp"
+        pins:
+          "1": "39_TEMP_BODY_S"
+          "2": "+3V3"
+          "3": GND
+      J14:
+        part: "Connector:Conn_01x05_Pin"
+        value: JSTICK1
+        pins:
+          "1": GND
+          "2": "+5V"
+          "3": "16_X"
+          "4": "17_Y"
+      J15:
+        part: "Connector:Conn_01x05_Pin"
+        value: JSTICK2
+        pins:
+          "1": GND
+          "2": "+5V"
+          "3": "25_X"
+          "4": "26_Y"
+      J16:
+        part: "Connector:Conn_01x03_Pin"
+        value: INMP441_1
+        pins:
+          "1": "35_SCK"
+          "2": "33_WS"
+          "3": "+3V3"
+      SW3:
+        part: "Switch:SW_Push"
+        value: Reset
+        pins:
+          "1": EN
+          "2": GND
+      FID1:
+        part: "Mechanical:Fiducial"
+      FID2:
+        part: "Mechanical:Fiducial"
+      FID3:
+        part: "Mechanical:Fiducial"
+      FID4:
+        part: "Mechanical:Fiducial"
+      H1:
+        part: "Mechanical:MountingHole"
+        value: "TFT LCD Mount"
+      H2:
+        part: "Mechanical:MountingHole"
+        value: "TFT LCD Mount"
+      H3:
+        part: "Mechanical:MountingHole"
+        value: "TFT LCD Mount"
+      H4:
+        part: "Mechanical:MountingHole"
+        value: "TFT LCD Mount"

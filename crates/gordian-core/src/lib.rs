@@ -49,8 +49,7 @@ pub use agent::{Agent, AgentEvent, Approvals, AutoApprove, ContextStats, StopRea
 pub use config::{
     AgentConfig, CONFIG_SCHEMA_VERSION, ConfigError, DEFAULT_MAX_TOKENS, DEFAULT_RENDER_MAX_PX,
     DEFAULT_SCHEMATIC_FILENAME, DEFAULT_SEARCH_LIMIT, EngineConfig, GordianConfig, KicadConfig,
-    LlmConfig, LlmReasoningEffort, PcbRouterEngine, ProjectConfig, ReviewConfig,
-    SchematicPlacementEngine, ToolConfig,
+    LlmConfig, LlmReasoningEffort, PcbRouterEngine, ProjectConfig, ReviewConfig, ToolConfig,
 };
 pub use review::{review, review_image};
 pub use runtime::AgentRuntime;

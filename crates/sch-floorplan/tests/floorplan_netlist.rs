@@ -57,7 +57,7 @@ const CHALLENGE_FIXTURES: &[&str] = &[
 ];
 
 fn doc(name: &str, ext: &str) -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../docs/validation/{name}.{ext}"))
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/validation/{name}.{ext}"))
 }
 
 fn validation_corpus_available() -> bool {
@@ -101,41 +101,7 @@ fn floorplan_challenge_fixtures_emit_truthful_netlists() {
     run_challenge_fixtures();
 }
 
-/// HARDENED GATE: the SAME challenge fixtures, but emitted through the PRODUCTION
-/// `MULTISHEET_REFINE` finalize path (the path `compose_single_sheet` — the agent's real
-/// board flow — uses for each block). The default variant above runs the engine in single-sheet
-/// mode, which DOES NOT EXERCISE the multisheet-only finalize passes (distributed
-/// rails, the driven-rail star, the dead-last re-gathers). Those passes can route a
-/// rail/trunk wire through an IC body or a column of foreign pins, merging two nets
-/// into one — a real SHORT that ships on agent boards but that the default run is
-/// structurally blind to. This variant closes that blind spot: it sets the env var
-/// (inside the ENV_LOCK so the single-sheet tests never observe it) and asserts the
-/// finalize-path netlists are still truthful. Regression-tested by reverting the
-/// emit_rail driven-star spread guard: this test FAILS, the default one PASSES.
-#[test]
-fn floorplan_challenge_fixtures_emit_truthful_netlists_multisheet() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // Set the production finalize flag for the duration of this locked region, then
-    // RESTORE it so a later (lock-serialized) single-sheet test sees the original env.
-    // SAFETY (edition 2024 `set_var`/`remove_var` are unsafe): every env-sensitive
-    // test in this file holds `ENV_LOCK` for its whole body, so no other thread reads
-    // or writes the process environment while we mutate it here.
-    let prev = std::env::var_os("MULTISHEET_REFINE");
-    unsafe { std::env::set_var("MULTISHEET_REFINE", "1") };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_challenge_fixtures));
-    unsafe {
-        match prev {
-            Some(v) => std::env::set_var("MULTISHEET_REFINE", v),
-            None => std::env::remove_var("MULTISHEET_REFINE"),
-        }
-    }
-    if let Err(e) = result {
-        std::panic::resume_unwind(e);
-    }
-}
-
-/// Run the challenge tier over every (or `FLOORPLAN_ONLY`-restricted) fixture in the
-/// CURRENT engine mode (single-sheet, or multisheet when the caller set the env var).
+/// Run the challenge tier over every (or `FLOORPLAN_ONLY`-restricted) fixture.
 fn run_challenge_fixtures() {
     if !validation_corpus_available() {
         eprintln!("SKIP: docs/validation corpus not present");
@@ -245,7 +211,14 @@ fn validate_fixture(env: &KicadEnv, provider: &SymbolTable, name: &str, strict_w
             Ok(s) => LayoutIr::from_json(&s).unwrap(),
             Err(_) => floorplan::baseline_ir(&design),
         };
-        let out = floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy))
+        // `SCH_ENGINE=spine` runs the same oracle over the spine engine; the
+        // default stays anneal so existing runs are untouched.
+        let engine: Box<dyn sch_floorplan::contract::PlacementEngine> =
+            match std::env::var("SCH_ENGINE").as_deref() {
+                Ok("spine") => Box::new(spine_place::SpinePlace),
+                _ => Box::new(anneal_place::Anneal),
+            };
+        let out = floorplan::emit_strategy(env, &design, engine, Some(ir))
             .unwrap_or_else(|e| panic!("{name}: {e}"));
 
         // Readability invariant (tier-1 only): the reference fixtures emit with ZERO

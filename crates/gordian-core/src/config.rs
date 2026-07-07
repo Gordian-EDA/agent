@@ -463,8 +463,6 @@ impl ToolConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct EngineConfig {
-    /// Schematic placement engine.
-    pub schematic_placer: SchematicPlacementEngine,
     /// PCB routing engine.
     pub pcb_router: PcbRouterEngine,
 }
@@ -472,7 +470,6 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
-            schematic_placer: SchematicPlacementEngine::Anneal,
             pcb_router: PcbRouterEngine::Auto,
         }
     }
@@ -482,18 +479,6 @@ impl EngineConfig {
     fn validate(&self, _path: &'static str) -> Result<(), ConfigError> {
         Ok(())
     }
-}
-
-/// Schematic placement engine.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum SchematicPlacementEngine {
-    /// Simulated annealing placement.
-    #[default]
-    #[serde(alias = "sa", alias = "SA", alias = "simulatedAnnealing")]
-    Anneal,
-    /// Greedy hill-climb placement.
-    Greedy,
 }
 
 /// PCB routing engine.
@@ -571,10 +556,6 @@ mod tests {
         assert_eq!(cfg.llm.reasoning_effort, None);
         assert!(!cfg.llm.capture_reasoning);
         assert_eq!(cfg.project.schematic_filename, DEFAULT_SCHEMATIC_FILENAME);
-        assert_eq!(
-            cfg.engines.schematic_placer,
-            SchematicPlacementEngine::Anneal
-        );
         assert_eq!(cfg.engines.pcb_router, PcbRouterEngine::Auto);
     }
 
@@ -657,16 +638,11 @@ mod tests {
         let cfg: GordianConfig = toml::from_str(
             r#"
             [engines]
-            schematicPlacer = "sa"
             pcbRouter = "astar"
             "#,
         )
         .unwrap();
 
-        assert_eq!(
-            cfg.engines.schematic_placer,
-            SchematicPlacementEngine::Anneal
-        );
         assert_eq!(cfg.engines.pcb_router, PcbRouterEngine::Astar);
 
         let cfg: GordianConfig = toml::from_str(
