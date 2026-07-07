@@ -1,23 +1,8 @@
-//! `place::refine` — the overlap RELAXERS the emit finalize and the placement engines
-//! drive: `decongest` (push colliding bodies apart), `normalize` (seed to the page
-//! margin), the multi-sheet `decongest_off_labels` / `collapse_empty_bands` /
-//! `port_label_keepouts` passes, and the placement `SEARCH_SEED` + `FAST_PINS` thresholds.
-//! These are pure geometry — no cost, no objective; the cost-driven scaffold (greedy's
-//! `refine`/`polish`) lives in the `greedy-place` engine, the SA in `anneal-place`.
+//! `place::refine` — overlap relaxers and placement thresholds.
 
-use std::io;
-
-use kicad_env::KicadEnv;
-
-use crate::write::SchematicWriter;
-use geom::Dir;
 
 use super::*;
-use sch_place::item::{Incidence, Item};
-
-// The disjoint-set forest (over a caller-owned `parent` slice) lives in
-// `geom::union_find`, shared with circuit-lang's pin reconciler.
-use sch_place::ir::LayoutIr;
+use sch_place::item::Item;
 
 /// Default deterministic seed for the placement search (a stochastic engine's PRNG).
 /// Threaded into the `PlaceProblem` by emit so a search is reproducible by seed.
@@ -60,6 +45,12 @@ pub fn decongest(items: &mut [Item]) {
         let mut hit = None;
         'scan: for i in 0..items.len() {
             for j in (i + 1)..items.len() {
+                // A pair of FROZEN parts can't be separated (a finalize gather pins both),
+                // so skip it — otherwise the loop spins on an immovable overlap. Pairs with
+                // no frozen part behave exactly as before (references freeze nothing).
+                if items[i].frozen && items[j].frozen {
+                    continue;
+                }
                 let (a, b) = (
                     item_rect(&items[i], items[i].at),
                     item_rect(&items[j], items[j].at),
@@ -84,113 +75,16 @@ pub fn decongest(items: &mut [Item]) {
         } else {
             -1.0
         };
+        // A FROZEN part (a finalize gather seated it precisely — a tap ladder, a
+        // decoupling bank) never moves; push only its partner. This lets a gather
+        // reserve its block and have the loose bystanders flow around it, instead of
+        // the gather having to abort whenever the scattered sheet leaves no clear lane.
+        // Inert for the references (nothing frozen) ⇒ snapshots byte-identical.
         let (i_anchor, j_anchor) = (items[i].geom.pins.len() >= 3, items[j].geom.pins.len() >= 3);
-        match (i_anchor, j_anchor) {
-            (false, true) => items[i].at[axis] -= dir * push,
+        match (items[i].frozen, items[j].frozen) {
             (true, false) => items[j].at[axis] += dir * push,
-            _ => {
-                let half = grid.snap_up(push / 2.0);
-                items[i].at[axis] -= dir * half;
-                items[j].at[axis] += dir * half;
-            }
-        }
-    }
-}
-
-/// Collapse a large EMPTY horizontal band between two clusters — the "sprawls with an empty
-/// mid-region" defect (two loosely-coupled sub-circuits, e.g. a USB connector block and its
-/// LDO/decoupling block, placed far apart on one sub-sheet). Surgical: finds the FIRST gap
-/// between part rows wider than `TRIGGER` and shifts everything below it UP to leave a clean
-/// `MIN_GAP`, preserving each cluster's internal layout. Repeats for further bands (capped).
-/// Returns whether anything moved. Gated by the caller on MULTISHEET_REFINE.
-pub(crate) fn collapse_empty_bands(items: &mut [Item]) -> bool {
-    const MIN_GAP: f64 = 12.7;
-    const TRIGGER: f64 = 25.4;
-    let mut any = false;
-    for _ in 0..8 {
-        let mut iv: Vec<(f64, f64)> = items
-            .iter()
-            .map(|it| {
-                let r = item_rect(it, it.at);
-                (r.min_y, r.max_y)
-            })
-            .collect();
-        iv.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let mut cover = f64::MIN;
-        let mut band = None;
-        for (lo, hi) in &iv {
-            if cover != f64::MIN && lo - cover > TRIGGER {
-                band = Some((cover, *lo));
-                break;
-            }
-            cover = cover.max(*hi);
-        }
-        let Some((top, bot)) = band else { break };
-        let dy = (bot - top) - MIN_GAP;
-        if dy <= 0.0 {
-            break;
-        }
-        for it in items.iter_mut() {
-            if it.at[1] > top {
-                it.at[1] = geom::GRID_50_MIL.snap(it.at[1] - dy);
-            }
-        }
-        any = true;
-    }
-    any
-}
-
-/// Multi-sheet relief: decongest that ALSO keeps free satellites off FOREIGN port-label
-/// boxes. Plain `decongest` (part-vs-part only) evicts a satellite off a connector straight
-/// back onto a neighbor's port-label pennant — the two passes fight and the label stays
-/// overprinted (the storage-sheet SD_MOSI/R8 defect). Resolving both in ONE loop lets a
-/// satellite settle where it clears parts AND foreign labels. Net-aware: a part is never
-/// pushed off its OWN port's label (that label extends away from it anyway). Gated by the
-/// caller on `MULTISHEET_REFINE`, so single-sheet references never reach it.
-pub(crate) fn decongest_off_labels(
-    items: &mut [Item],
-    inc: &Incidence,
-    keepouts: &[(::geom::Rect, String)],
-) {
-    let item_nets: Vec<Vec<String>> = (0..items.len())
-        .map(|i| {
-            inc.iter()
-                .filter(|(_, pins)| pins.iter().any(|(j, _)| *j == i))
-                .map(|(net, _)| net.clone())
-                .collect()
-        })
-        .collect();
-    const MAX_ITERS: usize = 4000;
-    for _ in 0..MAX_ITERS {
-        // (a) Resolve the first part-vs-part overlap (identical to `decongest`).
-        let mut part_hit = None;
-        'scan: for i in 0..items.len() {
-            for j in (i + 1)..items.len() {
-                let (a, b) = (
-                    item_rect(&items[i], items[i].at),
-                    item_rect(&items[j], items[j].at),
-                );
-                if a.overlaps(&b) {
-                    part_hit = Some((i, j, a, b));
-                    break 'scan;
-                }
-            }
-        }
-        if let Some((i, j, a, b)) = part_hit {
-            let Some((pen_x, pen_y)) = a.overlap_size(&b) else {
-                continue;
-            };
-            let axis = if pen_x <= pen_y { 0 } else { 1 };
-            let pen = if axis == 0 { pen_x } else { pen_y };
-            let grid = geom::GRID_50_MIL;
-            let push = grid.snap_up(pen).max(grid.pitch());
-            let dir = if items[j].at[axis] >= items[i].at[axis] {
-                1.0
-            } else {
-                -1.0
-            };
-            let (ia, ja) = (items[i].geom.pins.len() >= 3, items[j].geom.pins.len() >= 3);
-            match (ia, ja) {
+            (false, true) => items[i].at[axis] -= dir * push,
+            _ => match (i_anchor, j_anchor) {
                 (false, true) => items[i].at[axis] -= dir * push,
                 (true, false) => items[j].at[axis] += dir * push,
                 _ => {
@@ -198,73 +92,12 @@ pub(crate) fn decongest_off_labels(
                     items[i].at[axis] -= dir * half;
                     items[j].at[axis] += dir * half;
                 }
-            }
-            continue;
+            },
         }
-        // (b) Else push the first free satellite that sits on a FOREIGN port-label box out of
-        //     it, along the shorter exit, toward the side it is already closer to leaving.
-        let mut lab_hit = None;
-        'scan2: for i in 0..items.len() {
-            if items[i].geom.pins.len() >= 3 || items[i].frozen {
-                continue;
-            }
-            let a = item_rect(&items[i], items[i].at);
-            for (bx, net) in keepouts {
-                if !item_nets[i].contains(net) && a.overlaps(bx) {
-                    lab_hit = Some((i, a, *bx));
-                    break 'scan2;
-                }
-            }
-        }
-        let Some((i, a, b)) = lab_hit else { break };
-        let Some((pen_x, pen_y)) = a.overlap_size(&b) else {
-            continue;
-        };
-        let axis = if pen_x <= pen_y { 0 } else { 1 };
-        let pen = if axis == 0 { pen_x } else { pen_y };
-        let grid = geom::GRID_50_MIL;
-        let push = grid.snap_up(pen).max(grid.pitch());
-        let ci = a.center()[axis];
-        let cb = b.center()[axis];
-        let dir = if ci >= cb { 1.0 } else { -1.0 };
-        items[i].at[axis] = geom::GRID_50_MIL.snap(items[i].at[axis] + dir * push);
     }
 }
 
-/// Port-label keepout boxes: for each port net, the pennant box at its exit (the same box the router
-/// already reserves at emit, but computed here so PLACEMENT can keep satellites off it). Built from
-/// the writer's pin geometry; the port-owning part is an anchor that won't move, so these stay valid
-/// across the satellite nudge below.
-pub(crate) fn port_label_keepouts(
-    env: &KicadEnv,
-    w: &mut SchematicWriter,
-    items: &[Item],
-    inc: &Incidence,
-    ir: &LayoutIr,
-) -> io::Result<Vec<(::geom::Rect, String)>> {
-    let mut ks = Vec::new();
-    for (net, side) in &ir.ports {
-        let Some(pins) = inc.get(net) else { continue };
-        let mut eps: Vec<([f64; 2], Dir)> = Vec::new();
-        for (i, num) in pins {
-            for (ep, dir) in w.pin_dirs(env, &items[*i].refdes, num)? {
-                eps.push((ep, dir));
-            }
-        }
-        if eps.is_empty() {
-            continue;
-        }
-        if let Some(s) = effective_port_side(Some(*side), &eps) {
-            ks.push((
-                port_label_obstacle(port_exit_point(&eps, s), s, net),
-                net.clone(),
-            ));
-        }
-    }
-    Ok(ks)
-}
-
-pub(crate) fn normalize(items: &mut [Item]) {
+pub fn normalize(items: &mut [Item]) {
     let (mut min_x, mut min_y) = (f64::MAX, f64::MAX);
     for it in items.iter() {
         min_x = min_x.min(it.at[0]);

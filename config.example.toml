@@ -36,7 +36,5 @@ defaultSearchLimit = 8
 renderMaxPx = 1600
 
 [engines]
-# schematicPlacer: "anneal" (alias: "sa") or "greedy"
-schematicPlacer = "anneal"
 # pcbRouter: "auto" (A* + mesh selector), "astar", or "mesh"
 pcbRouter = "auto"

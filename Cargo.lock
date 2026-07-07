@@ -54,6 +54,7 @@ dependencies = [
 name = "anneal-place"
 version = "0.1.0"
 dependencies = [
+ "circuit-lang",
  "geom",
  "rayon",
  "sch-floorplan",
@@ -352,6 +353,18 @@ dependencies = [
  "saphyr",
  "saphyr-parser",
  "strsim",
+]
+
+[[package]]
+name = "cluster-place"
+version = "0.1.0"
+dependencies = [
+ "anneal-place",
+ "circuit-lang",
+ "geom",
+ "rayon",
+ "sch-floorplan",
+ "sch-place",
 ]
 
 [[package]]
@@ -1022,12 +1035,12 @@ dependencies = [
  "async-trait",
  "base64",
  "circuit-lang",
+ "cluster-place",
  "directories",
  "drc-lint",
  "futures",
  "genai",
  "geom",
- "greedy-place",
  "grid-astar",
  "indexmap 2.14.0",
  "kicad-cli",
@@ -1044,20 +1057,13 @@ dependencies = [
  "resvg",
  "sch-floorplan",
  "sch-io",
+ "sch-place",
  "serde",
  "serde_json",
+ "spine-place",
  "tempfile",
  "tokio",
  "toml",
-]
-
-[[package]]
-name = "greedy-place"
-version = "0.1.0"
-dependencies = [
- "geom",
- "sch-floorplan",
- "sch-place",
 ]
 
 [[package]]
@@ -2868,10 +2874,10 @@ dependencies = [
 name = "sch-floorplan"
 version = "0.1.0"
 dependencies = [
+ "anneal-place",
  "circuit-graph",
  "circuit-lang",
  "geom",
- "greedy-place",
  "indexmap 2.14.0",
  "kicad-cli",
  "kicad-env",
@@ -2880,6 +2886,7 @@ dependencies = [
  "sch-io",
  "sch-place",
  "serde_json",
+ "spine-place",
  "tempfile",
 ]
 
@@ -3179,6 +3186,19 @@ dependencies = [
  "pcb-model",
  "tempfile",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "spine-place"
+version = "0.1.0"
+dependencies = [
+ "anneal-place",
+ "circuit-lang",
+ "geom",
+ "kicad-env",
+ "kicad-symbol",
+ "sch-floorplan",
+ "sch-place",
 ]
 
 [[package]]

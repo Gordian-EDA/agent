@@ -49,14 +49,6 @@ use crate::AgentRuntime;
 use crate::tool::{ApplyInfo, ReviewOutcome, RunMode, ToolEffect, ToolOutcome};
 use crate::tools::{IMAGE_PATH_KEY, run_tool, tool_defs};
 
-/// Safety cap on LLM round-trips per turn. Generous enough for the longest
-/// legitimate flow, bounded so a misbehaving model can't loop forever.
-const MAX_ITERATIONS: usize = 90;
-
-/// Hard cap on actual tool executions per turn. This keeps failed real-LLM loops
-/// from exceeding the practical token budget through dozens of retries.
-const MAX_TOOL_CALLS_PER_TURN: usize = 50;
-
 /// After this many route attempts with failed nets, block further blind PCB
 /// regenerate/place/route retries in the same turn and force an honest report.
 const MAX_FAILED_ROUTE_RETRIES: usize = 3;
@@ -228,10 +220,6 @@ async fn stream_completion(
 pub enum StopReason {
     /// The model returned a final text with no pending tool calls — done.
     Completed,
-    /// The loop hit `MAX_ITERATIONS` before the model finished; the turn was cut
-    /// off mid-work. The conversation persists, so a follow-up "continue"
-    /// resumes it.
-    IterationCap,
 }
 
 /// The result of one [`Agent::run_turn`].
@@ -379,7 +367,7 @@ impl<P: Provider> Agent<P> {
     ///
     /// Loops: call the model → run any requested tools (gating gated-commit calls
     /// through `approvals`) → feed results back → repeat, until the model returns
-    /// a final text with no pending tool calls, or `MAX_ITERATIONS` is reached.
+    /// a final text with no pending tool calls.
     pub async fn run_turn(
         &mut self,
         user_msg: &str,
@@ -416,11 +404,10 @@ impl<P: Provider> Agent<P> {
         let mut did_authoring_work = false;
         // Bounded re-prompts that push a stalled model past a premature stop.
         let mut nudges_left = MAX_COMMIT_NUDGES;
-        let mut final_text = String::new();
         let mut failed_route_attempts = 0usize;
         let mut last_route_failure: Option<Value> = None;
 
-        for _ in 0..MAX_ITERATIONS {
+        loop {
             // Drive the provider's stream so assistant prose renders token-by-token
             // (each chunk forwarded as `AssistantDelta`), while the terminal End
             // event carries the assembled tool calls + usage. A non-streaming
@@ -481,8 +468,6 @@ impl<P: Provider> Agent<P> {
 
             // No tool calls → the model wants to stop.
             if tool_calls.is_empty() {
-                final_text = text;
-
                 // Catch the premature stop: the model did authoring work but ended
                 // the turn WITHOUT ever attempting a commit, so nothing ships.
                 // Re-prompt it to finish + commit (bounded). Excluded: a deliberate
@@ -496,7 +481,7 @@ impl<P: Provider> Agent<P> {
 
                 return Ok(TurnOutcome {
                     applied,
-                    final_text,
+                    final_text: text,
                     tool_calls_made,
                     stop_reason: StopReason::Completed,
                 });
@@ -508,18 +493,6 @@ impl<P: Provider> Agent<P> {
             let mut tool_responses: Vec<ToolResponse> = Vec::new();
             let mut result_images: Vec<ContentPart> = Vec::new();
             for call in &tool_calls {
-                if tool_calls_made >= MAX_TOOL_CALLS_PER_TURN {
-                    tool_responses.push(ToolResponse::new(
-                        call.call_id.clone(),
-                        json!({
-                            "error": "turn tool-call budget exhausted",
-                            "note": "Stop calling tools this turn. Report the current ERC/DRC/unrouted status and the next concrete fix instead of continuing to search or retry.",
-                            "max_tool_calls": MAX_TOOL_CALLS_PER_TURN,
-                        })
-                        .to_string(),
-                    ));
-                    continue;
-                }
                 let gated_commit =
                     tool_effect(&call.fn_name) == ToolEffect::Gated && wants_apply(call);
                 if gated_commit {
@@ -597,23 +570,7 @@ impl<P: Provider> Agent<P> {
             }
             prune_large_tool_arguments(&mut self.history);
 
-            // Carry any text the model emitted alongside its tool calls so a turn
-            // that ends without a trailing text-only completion still has a reply.
-            if !text.is_empty() {
-                final_text = text;
-            }
         }
-
-        // Hit the iteration cap without a clean finish.
-        if final_text.is_empty() {
-            final_text = "(agent reached its iteration limit without a final answer)".to_string();
-        }
-        Ok(TurnOutcome {
-            applied,
-            final_text,
-            tool_calls_made,
-            stop_reason: StopReason::IterationCap,
-        })
     }
 
     /// Run a turn, then — only if the turn actually COMMITTED a design change —
@@ -1588,7 +1545,7 @@ mod tests {
         let s = tool_summary(
             "apply_design",
             &json!({}),
-            &json!({ "written": true, "erc": { "errors": 0 }, "layout_mode": "composed_blocks" }),
+            &json!({ "written": true, "erc": { "errors": 0 }, "layout_mode": "composed" }),
         );
         assert!(s.contains("written"), "got: {s}");
         let s = tool_summary("read_schematic", &json!({}), &json!({ "error": "boom" }));

@@ -1,0 +1,15 @@
+[package]
+name = "cluster-place"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cluster-and-pack schematic placement engine: peels 2-pin satellites onto their hub IC, shapes each hub+satellites as a rigid templated module, then searches module poses (position + hub rotation/mirror) against the routed-sheet measurement library — so placement is crossing-faithful and satellites never sprawl."
+
+[dependencies]
+circuit-lang = { path = "../circuit-lang" }
+geom = { path = "../geom" }
+sch-place = { path = "../sch-place" }
+sch-floorplan = { path = "../sch-floorplan" }
+anneal-place = { path = "../anneal-place" }
+rayon.workspace = true

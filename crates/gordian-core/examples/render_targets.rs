@@ -1,7 +1,7 @@
 //! Focused iteration harness: render the four target validation fixtures
 //! (compiled + emitted through the floorplan engine with their `*.layout.json`
 //! IR sidecar) to PNGs in `/tmp/renders/` for side-by-side review against
-//! `docs/validation/references/`.
+//! `crates/sch-floorplan/tests/fixtures/validation/references/`.
 //!
 //! Usage: cargo run --release -p agent --example render_targets [name ...]
 //! With no args, renders all four targets.
@@ -19,7 +19,7 @@ const TARGETS: &[&str] = &[
 
 fn main() -> anyhow::Result<()> {
     let env = KicadEnv::detect().expect("no KiCAD environment detected");
-    let dir = std::path::Path::new("docs/validation");
+    let dir = std::path::Path::new("crates/sch-floorplan/tests/fixtures/validation");
     let out_dir = std::path::Path::new("/tmp/renders");
     std::fs::create_dir_all(out_dir)?;
 
@@ -71,8 +71,12 @@ fn render_fixture(
             Err(_) => sch_floorplan::floorplan::baseline_ir(&design),
         }
     };
-    let emit =
-        sch_floorplan::floorplan::emit_strategy(env, &design, &ir, Box::new(greedy_place::Greedy))
+    let emit = sch_floorplan::floorplan::emit_strategy(
+        env,
+        &design,
+        Box::new(anneal_place::Anneal),
+        Some(ir),
+    )
             .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
 
     let tmp = tempfile::tempdir()?;

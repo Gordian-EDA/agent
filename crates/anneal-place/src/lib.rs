@@ -2,10 +2,9 @@
 //! its objective (the amplified energy: the 16 terms under the straightness-amplified
 //! weights + the compaction/orientation boosts + the real-warning gate) and its
 //! search (the SA move-set + proxy costs + multi-start + route-aware refinement). It is a
-//! MEASUREMENT-based engine: it builds + routes candidates to score them, so it calls
-//! `sch-floorplan`'s measurement library ([`Realizer`]/[`RawMetrics`]) and the shared
-//! geometry/idiom primitives, and implements the `PlacementEngine` trait `sch-floorplan`
-//! publishes beside that library.
+//! MEASUREMENT-based engine: it builds + routes candidates to score them, so it searches
+//! over [`SchematicPlaceProblem`] plus caller-supplied layout intent and the shared
+//! geometry/idiom primitives from `sch-floorplan`'s contract.
 //!
 //! The amplified objective + the SA + the greedy-descent SEED candidate all live here. The
 //! greedy refine/polish below is a COPY of the free engine's descent (the SA uses a
@@ -14,17 +13,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use circuit_lang::model::Design;
 use geom::{EPS, Point2, Rect};
 use sch_place::ir::{LayoutIr, Orient};
 use sch_place::item::{Incidence, Item};
 use sch_place::netclass::is_power_net;
-use sch_place::place::{Crossings, PlaceProblem, PlaceResult};
+use sch_place::place::{Crossings, PlaceResult};
 
 use sch_floorplan::contract::{
-    COL_GAP, FAST_PINS, GRID_KEY, PlacementEngine, ROW_GAP, RawMetrics, Realizer,
-    align_idiom_clusters, align_led_chains, body_overlap_count, build_anchor_blocks, build_writer,
-    cluster_group, cohesion_targets, decongest, grid_order_viol, item_rect, multi_unit_siblings,
-    orient_angle, overlaps_any, pin_endpoint, signal_anchor_centroid, supply_pin_target,
+    COL_GAP, FAST_PINS, GRID_KEY, KicadEnv, PlacementEngine, PlacementOutput, ROW_GAP,
+    RawMetrics, RouteRealization, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
+    align_idiom_clusters, align_led_chains, align_rail_cap_rows, apply_cells, assign_cells,
+    body_overlap_count, build_anchor_blocks, cluster_group, cohesion_targets, decongest,
+    grid_order_viol, infer_ir, item_rect, multi_unit_siblings, normalize, orient_angle,
+    overlaps_any, pin_endpoint, signal_anchor_centroid, supply_pin_target,
 };
 
 /// Simulated annealing: a seeded refine→anneal AND a broad anneal from the
@@ -36,8 +38,41 @@ impl PlacementEngine for Anneal {
         "anneal"
     }
 
-    fn place(&self, r: &Realizer, p: &PlaceProblem, items: &mut [Item]) -> PlaceResult {
-        anneal_place(r, p, items, self.name())
+    fn place(
+        &self,
+        env: &KicadEnv,
+        design: &Design,
+        problem: &mut SchematicPlaceProblem,
+        ir: Option<LayoutIr>,
+    ) -> PlacementOutput {
+        let ir = ir.unwrap_or_else(|| infer_ir(env, design));
+        for it in &mut problem.items {
+            it.mirror = ir.mirror.contains(&it.refdes);
+            it.frozen = ir.frozen.contains(&it.refdes);
+        }
+        let cells = assign_cells(&problem.items, &ir);
+        apply_cells(&mut problem.items, &cells);
+        normalize(&mut problem.items);
+
+        let _ = anneal_place(env, problem, &ir, self.name());
+
+        decongest(&mut problem.items);
+        if align_idiom_clusters(&mut problem.items, &ir) {
+            decongest(&mut problem.items);
+        }
+        if align_led_chains(&mut problem.items, &problem.inc, &ir) {
+            decongest(&mut problem.items);
+        }
+        if align_rail_cap_rows(&mut problem.items, &ir) {
+            decongest(&mut problem.items);
+        }
+
+        let realizer = RoutedSheetRealizer::new(env, &problem.inc, &ir);
+        let eval = RoutedEvaluator::new(&realizer);
+        PlacementOutput {
+            result: report(self.name(), problem, &eval),
+            ir,
+        }
     }
 }
 
@@ -119,14 +154,18 @@ fn amplified_energy(m: &RawMetrics) -> f64 {
 /// small enough to afford the accurate per-move text solve (`pins <= 250 && nets <= 40`)
 /// — a heavy weight on the REAL post-solve warning count, so the SA directly minimises
 /// shipped warnings. Anneal's own copy of `amplified_score_items`.
-fn amplified_score(r: &Realizer, items: &[Item]) -> f64 {
-    let aes = amplified_energy(&r.measure(items));
+fn amplified_score(
+    problem: &SchematicPlaceProblem,
+    eval: &RoutedEvaluator,
+    items: &[Item],
+) -> f64 {
+    let aes = amplified_energy(&eval.measure(items));
     if !aes.is_finite() {
         return f64::INFINITY;
     }
     let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
-    if pins <= 250 && r.incidence().len() <= 40 {
-        10_000.0 * r.warnings(items) as f64 + aes
+    if pins <= 250 && problem.inc.len() <= 40 {
+        10_000.0 * eval.warnings(items) as f64 + aes
     } else {
         aes
     }
@@ -136,13 +175,18 @@ fn amplified_score(r: &Realizer, items: &[Item]) -> f64 {
 /// candidate pick computes it for the primary sort). Identical result, but skips the
 /// redundant second text-solving warning count. Anneal's own copy of
 /// `amplified_score_with_w`.
-fn amplified_score_with_w(r: &Realizer, items: &[Item], w: usize) -> f64 {
-    let aes = amplified_energy(&r.measure(items));
+fn amplified_score_with_w(
+    problem: &SchematicPlaceProblem,
+    eval: &RoutedEvaluator,
+    items: &[Item],
+    w: usize,
+) -> f64 {
+    let aes = amplified_energy(&eval.measure(items));
     if !aes.is_finite() {
         return f64::INFINITY;
     }
     let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
-    if pins <= 250 && r.incidence().len() <= 40 {
+    if pins <= 250 && problem.inc.len() <= 40 {
         10_000.0 * w as f64 + aes
     } else {
         aes
@@ -150,30 +194,32 @@ fn amplified_score_with_w(r: &Realizer, items: &[Item], w: usize) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
-// The greedy-descent SEED candidate — a COPY of the free engine's routed refine/polish
-// hill-climb, used as one multi-start candidate of the SA (`small_path_search`'s "greedy"
-// path + the per-candidate `polish`). Copied (not shared with `greedy-place`) so the two
-// engines evolve independently; byte-identical because the copy is character-identical and
-// minimises anneal's own `base_cost` (which equals the free objective today).
+// The descent SEED candidate — a local routed refine/polish hill-climb used as one
+// multi-start candidate of the SA (`small_path_search`'s "greedy" path + the
+// per-candidate `polish`). It lives inside anneal now; there is no separate greedy engine.
 // ---------------------------------------------------------------------------
 
 /// Score `items` under the base energy by measuring the routed sheet (the greedy
 /// descent's objective).
-fn greedy_score(r: &Realizer, items: &[Item]) -> f64 {
-    base_cost(&r.measure(items))
+fn greedy_score(eval: &RoutedEvaluator, items: &[Item]) -> f64 {
+    base_cost(&eval.measure(items))
 }
 
 /// Greedy hill-climb over the satellites' mm positions/orientation (the SA's seeded
 /// descent candidate). Local moves kept only on strict improvement of the base routed
 /// cost. Anchors hold.
-fn refine_items(r: &Realizer, items: &mut [Item]) {
+fn refine_items(
+    problem: &SchematicPlaceProblem,
+    eval: &RoutedEvaluator,
+    items: &mut [Item],
+) {
     let satellites: Vec<usize> = (0..items.len())
         .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
         .collect();
     if satellites.is_empty() {
         return;
     }
-    let mut best = greedy_score(r, items);
+    let mut best = greedy_score(eval, items);
     const MAX_ROUNDS: usize = 6;
     for _ in 0..MAX_ROUNDS {
         let mut improved = false;
@@ -190,7 +236,7 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
                     geom::GRID_50_MIL.snap(prev[1] + d[1]),
                 ]
                 .into();
-                let c = greedy_score(r, items);
+                let c = greedy_score(eval, items);
                 if c + 0.5 < best {
                     best = c;
                     improved = true;
@@ -205,7 +251,7 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
                 let (pi, pj) = (items[i].at, items[j].at);
                 items[i].at = pj;
                 items[j].at = pi;
-                let c = greedy_score(r, items);
+                let c = greedy_score(eval, items);
                 if c + 0.5 < best {
                     best = c;
                     improved = true;
@@ -223,7 +269,7 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
                     continue;
                 }
                 items[i].angle = a;
-                let c = greedy_score(r, items);
+                let c = greedy_score(eval, items);
                 if c + 0.5 < best {
                     best = c;
                     best_a = a;
@@ -233,12 +279,12 @@ fn refine_items(r: &Realizer, items: &mut [Item]) {
             items[i].angle = best_a;
         }
         for &i in &satellites {
-            if let Some(ax) = anchor_x(items, r.incidence(), i) {
+            if let Some(ax) = anchor_x(items, &problem.inc, i) {
                 let nx = geom::GRID_50_MIL.snap(2.0 * ax - items[i].at[0]);
                 if (nx - items[i].at[0]).abs() > EPS {
                     let prev = items[i].at;
                     items[i].at = [nx, prev[1]].into();
-                    let c = greedy_score(r, items);
+                    let c = greedy_score(eval, items);
                     if c + 0.5 < best {
                         best = c;
                         improved = true;
@@ -273,14 +319,14 @@ fn anchor_x(items: &[Item], inc: &Incidence, i: usize) -> Option<f64> {
 
 /// Sub-grid compaction: slide each satellite one grid step toward the centroid where it
 /// does not raise the base routed cost and creates no overlap.
-fn compact(r: &Realizer, items: &mut [Item]) {
+fn compact(eval: &RoutedEvaluator, items: &mut [Item]) {
     let sats: Vec<usize> = (0..items.len())
         .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
         .collect();
     if sats.is_empty() {
         return;
     }
-    let mut best = greedy_score(r, items);
+    let mut best = greedy_score(eval, items);
     for _ in 0..8 {
         let (mut cx, mut cy) = (0.0, 0.0);
         for it in items.iter() {
@@ -307,7 +353,7 @@ fn compact(r: &Realizer, items: &mut [Item]) {
                     continue;
                 }
                 items[i].at = p.into();
-                let sc = greedy_score(r, items);
+                let sc = greedy_score(eval, items);
                 if sc + 0.25 < best {
                     best = sc;
                     improved = true;
@@ -324,13 +370,19 @@ fn compact(r: &Realizer, items: &mut [Item]) {
 
 /// Continuous-placement polish: iterate {align → compact → free-nudge} to a fixpoint,
 /// gated by the base routed cost (the SA ships each candidate through this).
-fn polish(r: &Realizer, items: &mut [Item]) {
-    let mut prev = greedy_score(r, items);
+fn polish(
+    problem: &SchematicPlaceProblem,
+    realizer: &RoutedSheetRealizer,
+    eval: &RoutedEvaluator,
+    items: &mut [Item],
+    ir: &LayoutIr,
+) {
+    let mut prev = greedy_score(eval, items);
     for _ in 0..3 {
-        align_to_pins(r, items);
-        compact(r, items);
-        free_nudge(r, items);
-        let now = greedy_score(r, items);
+        align_to_pins(problem, realizer, eval, items, ir);
+        compact(eval, items);
+        free_nudge(eval, items);
+        let now = greedy_score(eval, items);
         if prev - now < 1.0 {
             break;
         }
@@ -340,14 +392,14 @@ fn polish(r: &Realizer, items: &mut [Item]) {
 
 /// Free per-axis nudge: slide each satellite ±1 grid in x and y, keeping any move that
 /// lowers the base routed cost without creating a clearance-padded overlap.
-fn free_nudge(r: &Realizer, items: &mut [Item]) {
+fn free_nudge(eval: &RoutedEvaluator, items: &mut [Item]) {
     let sats: Vec<usize> = (0..items.len())
         .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
         .collect();
     if sats.is_empty() {
         return;
     }
-    let mut best = greedy_score(r, items);
+    let mut best = greedy_score(eval, items);
     for _ in 0..2 {
         let mut improved = false;
         for &i in &sats {
@@ -365,7 +417,7 @@ fn free_nudge(r: &Realizer, items: &mut [Item]) {
                     continue;
                 }
                 items[i].at = p.into();
-                let c = greedy_score(r, items);
+                let c = greedy_score(eval, items);
                 if c + 0.25 < best_cost {
                     best_cost = c;
                     best_pos = p.into();
@@ -385,11 +437,16 @@ fn free_nudge(r: &Realizer, items: &mut [Item]) {
 
 /// Pin-alignment polish: slide each satellite onto the AXIS of the signal pin it wires
 /// to, kept only when it lowers the base routed cost and overlaps nothing.
-fn align_to_pins(r: &Realizer, items: &mut [Item]) {
-    let env = r.env();
-    let inc = r.incidence();
-    let ir = r.ir();
-    let Ok(w0) = build_writer(env, None, items, inc, ir, r.needs_flag(), false) else {
+fn align_to_pins(
+    problem: &SchematicPlaceProblem,
+    realizer: &RoutedSheetRealizer,
+    eval: &RoutedEvaluator,
+    items: &mut [Item],
+    ir: &LayoutIr,
+) {
+    let env = realizer.env();
+    let inc = &problem.inc;
+    let Ok(w0) = realizer.realize_writer(None, items, RouteRealization::CandidateScore) else {
         return;
     };
     let mut plans: Vec<(usize, bool, [f64; 2])> = Vec::new();
@@ -415,7 +472,7 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
     }
     drop(w0);
 
-    let mut best = greedy_score(r, items);
+    let mut best = greedy_score(eval, items);
     for (si, vertical, target) in plans {
         let axis = if vertical { 0 } else { 1 };
         let orig = items[si].at;
@@ -432,7 +489,7 @@ fn align_to_pins(r: &Realizer, items: &mut [Item]) {
                 break;
             }
             items[si].at = p.into();
-            let c = greedy_score(r, items);
+            let c = greedy_score(eval, items);
             if c + 0.5 < best_cost {
                 best_cost = c;
                 best_pos = p.into();
@@ -481,20 +538,23 @@ impl Rng {
 /// (the calling [`PlacementEngine`]'s name). Behaviour is byte-identical to the old
 /// inline `Anneal::place` body — this is code-MOTION, not a re-tune.
 pub fn anneal_place(
-    r: &Realizer,
-    p: &PlaceProblem,
-    items: &mut [Item],
+    env: &KicadEnv,
+    problem: &mut SchematicPlaceProblem,
+    ir: &LayoutIr,
     engine: &'static str,
 ) -> PlaceResult {
-    let (inc, ir, seed) = (r.incidence(), r.ir(), p.seed);
+    let inc = &problem.inc;
+    let realizer = RoutedSheetRealizer::new(env, inc, ir);
+    let eval = RoutedEvaluator::new(&realizer);
+    let seed = problem.seed;
     use rayon::prelude::*;
-    let timed_top = p.options.debug_timing;
+    let timed_top = problem.options.debug_timing;
 
-    // A group with no placed items (e.g. a sub-sheet holding only power/label
+    // A group with no placed problem.items (e.g. a sub-sheet holding only power/label
     // declarations, which `gather` skips) has nothing to search — and the fast
     // lane's `30_000 / pins` would divide by zero. Bail out cleanly.
-    if items.is_empty() {
-        return report(engine, r, items);
+    if problem.items.is_empty() {
+        return report(engine, problem, &eval);
     }
 
     // FAST LANE (large boards): the tuned routed paths below route the whole sheet
@@ -504,7 +564,7 @@ pub fn anneal_place(
     // selection + the one final emit. Strictly additive safety is preserved: the
     // RAW seed is always a candidate (a floor), and the pick takes fewest real
     // warnings then true cost, so the fast lane never ships worse than the seed.
-    let pins: usize = items.iter().map(|it| it.geom.pins.len()).sum();
+    let pins: usize = problem.items.iter().map(|it| it.geom.pins.len()).sum();
     // PORT-HEAVY sheet = a multi-sheet sub-sheet: its inter-block nets each touch only one
     // pin here, so they become single-pin signal PORTS (labels). Such a sheet is small but
     // its bus/port fanout tangles, and the small path leaves the crossings uncorrected (a
@@ -515,7 +575,7 @@ pub fn anneal_place(
     let port_heavy = {
         let mut npins: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
-        for it in items.iter() {
+        for it in problem.items.iter() {
             for (_, _, net) in &it.pins {
                 if let Some(net) = net {
                     *npins.entry(net.clone()).or_insert(0) += 1;
@@ -530,9 +590,9 @@ pub fn anneal_place(
         }
         signal_ports >= 6
     };
-    let force_fast = port_heavy || p.options.force_fast;
+    let force_fast = port_heavy || problem.options.force_fast;
     if pins > FAST_PINS || force_fast {
-        let raw: Vec<Item> = items.to_vec();
+        let raw: Vec<Item> = problem.items.to_vec();
         // Diverse proxy-anneal starts; fewer for very large boards (each candidate
         // costs two real routes at selection, ~1 s each on a 671-pin BGA).
         let n_starts = if pins > 250 { 1 } else { 3 };
@@ -544,7 +604,7 @@ pub fn anneal_place(
             .par_iter()
             .map(|&s| {
                 let mut st = raw.clone();
-                anneal_locality(r, &mut st, inc, ir, s);
+                anneal_locality(problem, &eval, &mut st, inc, ir, s);
                 st
             })
             .collect();
@@ -582,9 +642,9 @@ pub fn anneal_place(
             .map(|cand| {
                 // TRUTHFULNESS first: a magnet/gravity move can strand two nets onto
                 // one wire (a merge), which warnings DON'T see — reject those here.
-                let b = r.truthfulness_breaks(cand);
-                let w = r.warnings(cand);
-                let c = amplified_score_with_w(r, cand, w);
+                let b = eval.truthfulness_breaks(cand);
+                let w = eval.warnings(cand);
+                let c = amplified_score_with_w(problem, &eval, cand, w);
                 (b, w, c)
             })
             .collect();
@@ -634,10 +694,10 @@ pub fn anneal_place(
             if align_led_chains(&mut m, inc, ir) {
                 decongest(&mut m);
             }
-            let b = r.truthfulness_breaks(&m);
-            let w = r.warnings(&m);
-            let cr = r.crossings(&m);
-            (b, w, cr.total(), amplified_score_with_w(r, &m, w))
+            let b = eval.truthfulness_breaks(&m);
+            let w = eval.warnings(&m);
+            let cr = eval.crossings(&m);
+            (b, w, cr.total(), amplified_score_with_w(problem, &eval, &m, w))
         };
         let (bb, bw, bx, bc) = score(&candidates[best]);
         // SKIP the refinement when the winner is already clean (no breaks/warnings and
@@ -651,8 +711,8 @@ pub fn anneal_place(
         // amplified score improves). Cheap on a small sheet. A big board still skips when clean.
         let small_forced = force_fast && pins <= FAST_PINS;
         if !small_forced && bb == 0 && bw == 0 && bx <= 6 {
-            items.clone_from_slice(&candidates[best]);
-            return report(engine, r, items);
+            problem.items.clone_from_slice(&candidates[best]);
+            return report(engine, problem, &eval);
         }
         // ROUTE-AWARE REFINEMENT. The proxy is crossing-BLIND, so the fast-lane winner is
         // sprawl-optimal but not crossing-optimal — and no cheap router-free crossing
@@ -666,7 +726,8 @@ pub fn anneal_place(
         let t_ref = std::time::Instant::now();
         let ref_cap = (30_000 / pins).clamp(80, 300);
         anneal_items(
-            r,
+            problem,
+            &eval,
             &mut refined,
             inc,
             ir,
@@ -698,12 +759,18 @@ pub fn anneal_place(
         // (Validated NEUTRAL-or-better on motordrv: critic 6=6, convention dim +1, channels
         // visibly tiled; kept opt-in pending multi-board validation since layout-forcing can
         // hurt the critic in ways warnings don't catch — see the grid experiment.)
-        if p.options.motif_tile {
+        if problem.options.motif_tile {
             let mut cand = fast_final.clone();
             if align_repeated_motifs(&mut cand, inc, ir) {
                 decongest(&mut cand);
-                let before = (r.truthfulness_breaks(&fast_final), r.warnings(&fast_final));
-                let after = (r.truthfulness_breaks(&cand), r.warnings(&cand));
+                let before = (
+                    eval.truthfulness_breaks(&fast_final),
+                    eval.warnings(&fast_final),
+                );
+                let after = (
+                    eval.truthfulness_breaks(&cand),
+                    eval.warnings(&cand),
+                );
                 if after <= before {
                     fast_final = cand;
                 }
@@ -715,29 +782,48 @@ pub fn anneal_place(
         // `score` — so a congested sheet still gets the fast lane's refinement (io 16→13) while a
         // simple sheet gets the small path's cleaner routing. Cheap: only for force_fast smalls.
         if small_forced {
-            let sp = small_path_search(r, &bases[0], inc, ir, seed, timed_top);
+            let sp = small_path_search(
+                problem,
+                &realizer,
+                &eval,
+                &bases[0],
+                inc,
+                ir,
+                seed,
+                timed_top,
+            );
             let (fb, fw, fx, fc) = score(&fast_final);
             let (sb, sw, sx, sc) = score(&sp);
             let sp_wins = (sb, sw, sx).cmp(&(fb, fw, fx)) == std::cmp::Ordering::Less
                 || (sb == fb && sw == fw && sx == fx && sc + 0.5 < fc);
-            items.clone_from_slice(if sp_wins { &sp } else { &fast_final });
+            problem.items.clone_from_slice(if sp_wins { &sp } else { &fast_final });
         } else {
-            items.clone_from_slice(&fast_final);
+            problem.items.clone_from_slice(&fast_final);
         }
-        return report(engine, r, items);
+        return report(engine, problem, &eval);
     }
 
     // Small board: greedy + four parallel anneals, pick the polished winner.
     // Extracted to small_path_search so the force_fast fast lane can run it as a
     // rival candidate; this call reproduces the old inline behaviour exactly.
-    let placed = small_path_search(r, items, inc, ir, seed, timed_top);
-    items.clone_from_slice(&placed);
-    report(engine, r, items)
+    let placed = small_path_search(
+        problem,
+        &realizer,
+        &eval,
+        problem.items.as_slice(),
+        inc,
+        ir,
+        seed,
+        timed_top,
+    );
+    problem.items.clone_from_slice(&placed);
+    report(engine, problem, &eval)
 }
 
 /// Measure the FINAL placement against the injected cost, for the diagnostic
 /// [`PlaceResult`]. Empty placements report all-zero.
-fn report(engine: &str, r: &Realizer, items: &[Item]) -> PlaceResult {
+fn report(engine: &str, problem: &SchematicPlaceProblem, eval: &RoutedEvaluator) -> PlaceResult {
+    let items = &problem.items;
     if items.is_empty() {
         return PlaceResult {
             engine: engine.to_string(),
@@ -747,13 +833,13 @@ fn report(engine: &str, r: &Realizer, items: &[Item]) -> PlaceResult {
             cost: 0.0,
         };
     }
-    let warnings = r.warnings(items);
+    let warnings = eval.warnings(items);
     PlaceResult {
         engine: engine.to_string(),
-        truthfulness_breaks: r.truthfulness_breaks(items),
+        truthfulness_breaks: eval.truthfulness_breaks(items),
         warnings,
-        crossings: r.crossings(items),
-        cost: amplified_score_with_w(r, items, warnings),
+        crossings: eval.crossings(items),
+        cost: amplified_score_with_w(problem, eval, items, warnings),
     }
 }
 /// The small-board placement search, extracted so the fast lane can run it as a RIVAL
@@ -765,7 +851,9 @@ fn report(engine: &str, r: &Realizer, items: &[Item]) -> PlaceResult {
 /// POLISHED winner. Behaviour is byte-identical to the old inline else-branch (the
 /// placement_snapshot verifies it for the references that take the small path).
 fn small_path_search(
-    r: &Realizer,
+    problem: &SchematicPlaceProblem,
+    realizer: &RoutedSheetRealizer,
+    eval: &RoutedEvaluator,
     seed: &[Item],
     inc: &Incidence,
     ir: &LayoutIr,
@@ -789,11 +877,11 @@ fn small_path_search(
     let mut greedy_state: Vec<Item> = Vec::new();
     rayon::scope(|s| {
         s.spawn(|_| {
-            let mut f = || anneal_items(r, &mut state_b, inc, ir, true, false, rng_seed, None);
+            let mut f = || anneal_items(problem, eval, &mut state_b, inc, ir, true, false, rng_seed, None);
             tic("B broad", &mut f);
         });
         {
-            let mut f = || refine_items(r, &mut work);
+            let mut f = || refine_items(problem, eval, &mut work);
             tic("greedy", &mut f);
         }
         greedy_state = work.to_vec();
@@ -802,7 +890,7 @@ fn small_path_search(
         state_d = greedy_state.clone();
         rayon::join(
             || {
-                let mut f = || anneal_items(r, &mut state_a, inc, ir, false, false, rng_seed, None);
+                let mut f = || anneal_items(problem, eval, &mut state_a, inc, ir, false, false, rng_seed, None);
                 tic("A seeded", &mut f);
             },
             || {
@@ -810,7 +898,8 @@ fn small_path_search(
                     || {
                         let mut f = || {
                             anneal_items(
-                                r,
+                                problem,
+                                eval,
                                 &mut state_c,
                                 inc,
                                 ir,
@@ -824,7 +913,7 @@ fn small_path_search(
                     },
                     || {
                         let mut f = || {
-                            anneal_locality(r, &mut state_d, inc, ir, rng_seed ^ 0x517CC1B727220A95)
+                            anneal_locality(problem, eval, &mut state_d, inc, ir, rng_seed ^ 0x517CC1B727220A95)
                         };
                         tic("D locality", &mut f);
                     },
@@ -839,11 +928,11 @@ fn small_path_search(
         .par_iter()
         .map(|cand| {
             let mut shipped = cand.clone();
-            polish(r, &mut shipped);
+            polish(problem, realizer, eval, &mut shipped, ir);
             decongest(&mut shipped);
-            let b = r.truthfulness_breaks(&shipped);
-            let w = r.warnings(&shipped);
-            let c = amplified_score_with_w(r, &shipped, w);
+            let b = eval.truthfulness_breaks(&shipped);
+            let w = eval.warnings(&shipped);
+            let c = amplified_score_with_w(problem, eval, &shipped, w);
             (b, w, c, shipped)
         })
         .collect();
@@ -878,7 +967,8 @@ fn small_path_search(
 /// longer (a wider global search from the raw seed). ANCHORS are mobile here: an
 /// anchor nudge frees a whole block to slide.
 fn anneal_items(
-    r: &Realizer,
+    problem: &SchematicPlaceProblem,
+    eval: &RoutedEvaluator,
     items: &mut [Item],
     inc: &Incidence,
     ir: &LayoutIr,
@@ -892,9 +982,9 @@ fn anneal_items(
     // never displaces the base run's warning-free find — see `Anneal::search`.
     let objective = |items: &[Item]| {
         if amplified {
-            amplified_score(r, items)
+            amplified_score(problem, eval, items)
         } else {
-            base_cost(&r.measure(items))
+            base_cost(&eval.measure(items))
         }
     };
     let sats: Vec<usize> = (0..items.len())
@@ -1114,7 +1204,14 @@ fn proxy_cost(
 /// region in one step (the crystal/reset-cluster gap). Run as an EXTRA candidate in
 /// `Anneal::search`: the pick ships it only if it beats the tuned paths on the true
 /// cost, so it is purely additive and never regresses a tuned fixture.
-fn anneal_locality(r: &Realizer, items: &mut [Item], inc: &Incidence, ir: &LayoutIr, seed: u64) {
+fn anneal_locality(
+    problem: &SchematicPlaceProblem,
+    eval: &RoutedEvaluator,
+    items: &mut [Item],
+    inc: &Incidence,
+    ir: &LayoutIr,
+    seed: u64,
+) {
     let sats: Vec<usize> = (0..items.len())
         .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
         .collect();
@@ -1169,7 +1266,7 @@ fn anneal_locality(r: &Realizer, items: &mut [Item], inc: &Incidence, ir: &Layou
     let mut cur = proxy_cost(items, inc, ir, &cohesion);
     let mut proxy_best = cur;
     let mut proxy_best_items: Vec<Item> = items.to_vec();
-    let mut best_true = amplified_score(r, items);
+    let mut best_true = amplified_score(problem, eval, items);
     let mut best_items: Vec<Item> = items.to_vec();
 
     for it in 0..iters {
@@ -1228,7 +1325,7 @@ fn anneal_locality(r: &Realizer, items: &mut [Item], inc: &Incidence, ir: &Layou
                 // Pay the true routed cost only on a new proxy-best, throttled.
                 if it - last_verify >= verify_period {
                     last_verify = it;
-                    let tc = amplified_score(r, items);
+                    let tc = amplified_score(problem, eval, items);
                     if tc < best_true {
                         best_true = tc;
                         best_items.clone_from_slice(items);
@@ -1243,7 +1340,7 @@ fn anneal_locality(r: &Realizer, items: &mut [Item], inc: &Incidence, ir: &Layou
         }
     }
     // Always verify the final proxy-best against the true cost.
-    let tc = amplified_score(r, &proxy_best_items);
+    let tc = amplified_score(problem, eval, &proxy_best_items);
     if tc < best_true {
         best_items.clone_from_slice(&proxy_best_items);
     }

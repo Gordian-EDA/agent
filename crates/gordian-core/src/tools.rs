@@ -46,7 +46,7 @@ use circuit_lang::model::{Component, Design, PinTarget};
 use kicad_cli::KicadCli;
 use sch_io::read::lift;
 
-use crate::{AgentRuntime, SchematicPlacementEngine, Tool};
+use crate::{AgentRuntime, Tool};
 
 /// The JSON-Schema definitions for every tool, in a stable order. The
 /// [`crate::Agent`] loop hands these to the model as genai [`Tool`]s.
@@ -811,46 +811,13 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
     let diff = design_diff(prior_design.as_ref(), &design);
 
-    let n_blocks = design
-        .blocks
-        .values()
-        .filter(|b| !b.components.is_empty())
-        .count();
-    let composed_layout = n_blocks >= 2;
+    let composed = crate::multisheet::compose_design(
+        ctx.env(),
+        &design,
+    )
+    .context("composing schematic")?;
 
-    // Multi-block commits use the composed-sheet path below, where each authored
-    // block group is laid out independently. For preview, compile + diff are enough
-    // to gate approval; commit does the actual composed layout.
-    let single_sheet_emit = if composed_layout {
-        None
-    } else {
-        let ir = ctx.layout_for(&design);
-        Some(
-            sch_floorplan::floorplan::emit_strategy(
-                ctx.env(),
-                &design,
-                &ir,
-                schematic_placement_engine(SchematicPlacementEngine::Anneal),
-            )
-            .context("rendering schematic")?,
-        )
-    };
-
-    let rendered_len = single_sheet_emit
-        .as_ref()
-        .map(|emitted| emitted.sch.len())
-        .unwrap_or(0);
-    let layout_warnings = single_sheet_emit
-        .as_ref()
-        .map(|emitted| emitted.layout_warnings.clone())
-        .unwrap_or_default();
-    // Idioms the engine recognized + co-placed (crystal, decoupling, …), surfaced so
-    // the LLM can confirm the layout matched its intent — detection is automatic from
-    // the netlist, no new authoring syntax.
-    let detected_idioms = single_sheet_emit
-        .as_ref()
-        .and_then(|emitted| serde_json::to_value(&emitted.detected_idioms).ok())
-        .unwrap_or(json!([]));
+    let detected_idioms = serde_json::to_value(&composed.detected_idioms).ok();
 
     if !commit {
         return Ok(json!({
@@ -858,50 +825,16 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "would_write": true,
             "stale_draft_warning": stale,
             "diff": diff,
-            "layout_mode": if composed_layout { "composed_blocks" } else { "single_sheet" },
-            "rendered_len": rendered_len,
-            "layout_warnings": layout_warnings,
-            "wire_through_body": single_sheet_emit
-                .as_ref()
-                .map(|emitted| emitted.crossings.body + emitted.crossings.ic)
-                .unwrap_or(0),
-            "detected_idioms": detected_idioms,
+            "layout_mode": "composed",
+            "rendered_len": composed.sch.len(),
+            "layout_warnings": composed.layout_warnings,
+            "wire_through_body": composed.crossings.body + composed.crossings.ic,
+            "detected_idioms": detected_idioms.unwrap_or(json!([])),
         }));
     }
 
-    // Commit path: write, then ERC.
-    // ANY multi-block design ships as ONE COMPOSED sheet: each functional block is laid out
-    // independently, then the block regions are tiled onto a single enlarged page as labeled
-    // bounding boxes. Cross-block nets join via matching global labels on the one sheet.
-    // Single-block designs take the plain single-sheet emit; the agent prompt is responsible
-    // for authoring large circuits as multiple blocks instead of relying on automatic splits.
-    // The composed .kicad_sch is written at ctx.sch_path(); downstream render/ERC operate on it.
-    if composed_layout {
-        let dir = ctx
-            .sch_path()
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let root = crate::multisheet::compose_single_sheet(
-            ctx.env(),
-            &design,
-            dir,
-            SchematicPlacementEngine::Anneal,
-        )
-        .context("composing single-sheet schematic")?;
-        if root != ctx.sch_path() {
-            std::fs::rename(&root, ctx.sch_path()).with_context(|| {
-                format!("placing composed sheet at {}", ctx.sch_path().display())
-            })?;
-        }
-    } else {
-        let rendered = single_sheet_emit
-            .as_ref()
-            .expect("single-sheet commit should have emitted schematic")
-            .sch
-            .as_str();
-        std::fs::write(ctx.sch_path(), rendered)
-            .with_context(|| format!("writing {}", ctx.sch_path().display()))?;
-    }
+    std::fs::write(ctx.sch_path(), &composed.sch)
+        .with_context(|| format!("writing {}", ctx.sch_path().display()))?;
 
     let erc = KicadCli::new(ctx.env())
         .erc(ctx.sch_path())
@@ -921,23 +854,24 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "path": ctx.sch_path().display().to_string(),
         "stale_draft_warning": stale,
         "diff": diff,
-        "layout_mode": if composed_layout { "composed_blocks" } else { "single_sheet" },
+        "layout_mode": "composed",
         "erc": { "errors": erc.error_count(), "warnings": erc.warning_count() },
-        "layout_warnings": layout_warnings,
-        "wire_through_body": single_sheet_emit
-            .as_ref()
-            .map(|emitted| emitted.crossings.body + emitted.crossings.ic)
-            .unwrap_or(0),
-        "detected_idioms": detected_idioms,
+        "layout_warnings": composed.layout_warnings,
+        "wire_through_body": composed.crossings.body + composed.crossings.ic,
+        "detected_idioms": detected_idioms.unwrap_or(json!([])),
     }))
 }
 
-pub(crate) fn schematic_placement_engine(
-    engine: SchematicPlacementEngine,
-) -> Box<dyn sch_floorplan::contract::PlacementEngine> {
-    match engine {
-        SchematicPlacementEngine::Anneal => Box::new(anneal_place::Anneal),
-        SchematicPlacementEngine::Greedy => Box::new(greedy_place::Greedy),
+pub(crate) fn schematic_placement_engine() -> Box<dyn sch_floorplan::contract::PlacementEngine> {
+    // The cluster engine is the DEFAULT: it runs the annealer, then a strictly-additive
+    // pose+floorplanner pass (and the "modules between rails" idiom on power-IC arrays) that
+    // PARETO-DOMINATES it. Full-dataset validation: of 40 liftable boards, 13 de-sprawl (the
+    // gate-driver array 0cdac −84%) and ZERO regress on warnings/crossings/sprawl — it can only
+    // revert to the anneal result, never ship worse. `SCH_ENGINE=anneal` opts back to the bare SA.
+    match std::env::var("SCH_ENGINE").as_deref() {
+        Ok("anneal") | Ok("sa") => Box::new(anneal_place::Anneal),
+        Ok("spine") => Box::new(spine_place::SpinePlace),
+        _ => Box::new(cluster_place::ClusterPlace),
     }
 }
 

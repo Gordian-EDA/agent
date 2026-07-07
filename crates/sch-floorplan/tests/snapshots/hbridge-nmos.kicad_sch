@@ -3,7 +3,7 @@
 	(generator "gordian")
 	(generator_version "0.1")
 	(uuid "78c1c215-99f1-55bb-ac37-0886ad3d1a9e")
-	(paper "User" 69.17 75.9)
+	(paper "User" 69.17 79.3)
 	(lib_symbols
 		(symbol "Transistor_FET:Q_NMOS_GSD"
 		(pin_names
@@ -1131,12 +1131,12 @@
 		(dnp no)
 		(uuid "5f46e5aa-b40c-5829-86d7-f2f745e36302")
 		(property "Reference" "Q4"
-			(at 49.53 49.53 0)
-			(effects (font (size 1.27 1.27)) (justify left))
+			(at 41.91 64.06 0)
+			(effects (font (size 1.27 1.27)))
 		)
 		(property "Value" "Q_NMOS_GSD"
-			(at 49.53 52.07 0)
-			(effects (font (size 1.27 1.27)) (justify left))
+			(at 41.91 66.6 0)
+			(effects (font (size 1.27 1.27)))
 		)
 		(property "Footprint" ""
 			(at 41.91 50.800000000000004 0)

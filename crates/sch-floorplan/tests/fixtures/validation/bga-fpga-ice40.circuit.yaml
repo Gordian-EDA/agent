@@ -1,0 +1,127 @@
+version: 1
+name: ice40hx8k_bga_core
+blocks:
+  supply:
+    components:
+      PWR1: {part: power:VCC, pins: {1: 3V3}}
+      PWR2: {part: power:VCC, pins: {1: 1V2}}
+      PWR3: {part: power:GND, pins: {1: GND}}
+  power:
+    components:
+      # 3V3 I/O rail from a 5V input
+      U1:
+        part: Regulator_Linear:AMS1117-3.3
+        pins: {VI: VIN, VO: 3V3, GND: GND}
+      C1: {part: C, value: 10uF, between: [VIN, GND]}
+      C2: {part: C, value: 22uF, between: [3V3, GND]}
+      C3: {part: C, value: 100nF, between: [3V3, GND]}
+      # 1V2 FPGA core rail (adjustable LDO: Vout = 1.25V*(1+R_top/R_bot))
+      U2:
+        part: Regulator_Linear:AMS1117
+        pins: {VI: 3V3, VO: 1V2, ADJ: V12_FB}
+      R4: {part: R, value: 120, between: [1V2, V12_FB]}   # R_top
+      R5: {part: R, value: 1.5k, between: [V12_FB, GND]}  # R_bot -> ~1.2V
+      C4: {part: C, value: 10uF, between: [1V2, GND]}
+      C5: {part: C, value: 100nF, between: [1V2, GND]}
+
+  fpga:
+    components:
+      U3:
+        part: FPGA_Lattice:ICE40HX8K-BG121
+        pins:
+          # --- Core supply (1V2) ---
+          D4: 1V2          # VCC
+          D8: 1V2          # VCC
+          H4: 1V2          # VCC
+          H8: 1V2          # VCC
+          VCCPLL0: 1V2
+          VCCPLL1: 1V2
+          # --- I/O bank supply (3V3) ---
+          VCCIO_0: 3V3
+          VCCIO_1: 3V3
+          VCCIO_2: 3V3
+          E4: 3V3          # VCCIO_3 (ball 1)
+          G4: 3V3          # VCCIO_3 (ball 2)
+          VCC_SPI: 3V3
+          # --- Config / NVCM programming supply (2.5V class, tied to 3V3 here) ---
+          VPP_2V5: 3V3
+          VPP_FAST: 3V3
+          # --- Ground family ---
+          E5: GND
+          E6: GND
+          E7: GND
+          F5: GND
+          F6: GND
+          F7: GND
+          G5: GND
+          G6: GND
+          G7: GND
+          H5: GND
+          GNDPLL0: GND
+          GNDPLL1: GND
+          # --- SPI configuration interface (to config flash) ---
+          IOB_105_SDO: SPI_SO
+          IOB_106_SDI: SPI_SI
+          IOB_107_SCK: SPI_SCK
+          IOB_108_SS: SPI_SS
+          # --- Config control ---
+          "~{CRESET}": CRESET_B
+          CDONE: CDONE
+          # --- User GPIO to header ---
+          IOL_2A: GPIO0
+          IOL_2B: GPIO1
+          IOR_114: GPIO2
+          IOR_115: GPIO3
+          IOT_168: GPIO4
+          IOT_170: GPIO5
+      # CRESET_B pull-up + reset cap, CDONE pull-up (standard iCE40 config)
+      R1: {part: R, value: 10k, between: [CRESET_B, 3V3]}
+      R2: {part: R, value: 10k, between: [CDONE, 3V3]}
+      C6: {part: C, value: 10nF, between: [CRESET_B, GND]}
+      # Explicit decoupling bank: 8x 100nF (4 per rail) + 2x 4.7uF bulk
+      C10: {part: C, value: 100nF, between: [1V2, GND]}
+      C11: {part: C, value: 100nF, between: [1V2, GND]}
+      C12: {part: C, value: 100nF, between: [1V2, GND]}
+      C13: {part: C, value: 100nF, between: [1V2, GND]}
+      C14: {part: C, value: 100nF, between: [3V3, GND]}
+      C15: {part: C, value: 100nF, between: [3V3, GND]}
+      C16: {part: C, value: 100nF, between: [3V3, GND]}
+      C17: {part: C, value: 100nF, between: [3V3, GND]}
+      C18: {part: C, value: 4.7uF, between: [1V2, GND]}
+      C19: {part: C, value: 4.7uF, between: [3V3, GND]}
+
+  config_flash:
+    components:
+      U4:
+        part: Memory_Flash:W25Q32JVSS
+        pins:
+          "1": SPI_SS     # ~{CS}
+          "6": SPI_SCK    # CLK
+          "5": SPI_SI     # DI/IO0  <- FPGA SDO
+          "2": SPI_SO     # DO/IO1  -> FPGA SDI
+          "8": 3V3        # VCC
+          "4": GND        # GND
+          "3": 3V3        # ~{WP}/IO2  (write-protect disabled)
+          "7": 3V3        # ~{HOLD}/IO3 (hold disabled)
+      C7: {part: C, value: 100nF, between: [3V3, GND]}
+      R6: {part: R, value: 10k, between: [SPI_SS, 3V3]}
+
+  headers:
+    components:
+      J1:
+        part: Connector_Generic:Conn_01x08
+        pins:
+          "1": 3V3
+          "2": GND
+          "3": GPIO0
+          "4": GPIO1
+          "5": GPIO2
+          "6": GPIO3
+          "7": GPIO4
+          "8": GPIO5
+
+nets:
+  SPI_SI:  {class: spi}
+  SPI_SO:  {class: spi}
+  SPI_SCK: {class: spi}
+  SPI_SS:  {class: spi}

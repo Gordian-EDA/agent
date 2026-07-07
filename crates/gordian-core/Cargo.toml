@@ -21,8 +21,10 @@ pcb-model = { path = "../pcb-model" }
 pcb-place = { path = "../pcb-place" }
 sch-floorplan = { path = "../sch-floorplan" }
 sch-io = { path = "../sch-io" }
+sch-place = { path = "../sch-place" }
 anneal-place = { path = "../anneal-place" }
-greedy-place = { path = "../greedy-place" }
+cluster-place = { path = "../cluster-place" }
+spine-place = { path = "../spine-place" }
 
 anyhow.workspace = true
 async-trait.workspace = true

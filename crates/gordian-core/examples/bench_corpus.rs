@@ -1,5 +1,4 @@
 //! Benchmark + render a corpus of circuit YAMLs through the PREMIUM (forced anneal)
-//! path. For each: compile -> infer_ir -> emit_anneal (timed) -> export PNG.
 //! Reports parts/pins/nets, layout warnings, body/ic crossings, and anneal seconds
 //! (the 5s budget gate). PNGs land in the out dir (default /tmp/bench).
 //!
@@ -88,7 +87,7 @@ fn bench_one(
     }
     let t0 = std::time::Instant::now();
     let emit =
-        sch_floorplan::floorplan::emit_strategy(env, &design, &ir, Box::new(anneal_place::Anneal))
+        sch_floorplan::floorplan::emit_strategy(env, &design, Box::new(anneal_place::Anneal), None)
             .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
     let secs = t0.elapsed().as_secs_f64();
 
