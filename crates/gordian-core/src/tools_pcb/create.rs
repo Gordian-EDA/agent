@@ -78,11 +78,11 @@ fn resolve_pour_layer(layer: &str, layer_count: u32) -> Option<(u32, String)> {
     match layer {
         "top" => Some((0, "F.Cu".to_string())),
         "bottom" => Some((layer_count - 1, "B.Cu".to_string())),
-        _ if layer_count >= 6 && layer.starts_with("inner") => layer
+        _ if layer.starts_with("inner") => layer
             .trim_start_matches("inner")
             .parse::<u32>()
             .ok()
-            .filter(|idx| *idx > 0 && *idx < layer_count - 1)
+            .filter(|idx| *idx > 0 && *idx < layer_count.max(1) - 1)
             .map(|idx| (idx, format!("In{idx}.Cu"))),
         _ => None,
     }
@@ -1180,16 +1180,15 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
                 None => {
                     return Err(format!(
                         "rules.pours[].layer '{layer}' is not a valid copper layer on a \
-                         {layer_count}-layer board — use top/bottom, or innerN on a 6-layer board"
+                         {layer_count}-layer board — use top/bottom, or an existing innerN"
                     ));
                 }
                 Some((idx, _))
                     if grid_astar::router::plane_layers(layer_count as usize).contains(&idx) =>
                 {
-                    return Err(format!(
-                        "rules.pours[].layer '{layer}' is a GND/VCC PLANE on a {layer_count}-layer \
-                         board — a plane is already full copper; pour on a signal layer instead"
-                    ));
+                    // Already a full copper plane there — the pour request is
+                    // satisfied by construction; don't fail the regenerate.
+                    continue;
                 }
                 Some(_) => {}
             }
