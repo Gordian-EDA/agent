@@ -1088,11 +1088,15 @@ fn run_erc(ctx: &AgentRuntime) -> Result<Value> {
         .violations
         .iter()
         .map(|v| {
-            json!({
+            let mut item = json!({
                 "severity": v.severity,
                 "type": v.kind,
                 "description": v.description,
-            })
+            });
+            if let Some(hint) = erc_hint(&v.kind, &v.description) {
+                item["hint"] = json!(hint);
+            }
+            item
         })
         .collect();
 
@@ -1101,6 +1105,36 @@ fn run_erc(ctx: &AgentRuntime) -> Result<Value> {
         "warnings": report.warning_count(),
         "violations": violations,
     }))
+}
+
+/// A resolution hint for the ERC violation classes agents repeatedly fight
+/// blind (observed: a model burning 26 design iterations on a driver
+/// conflict). Only the classes with one clearly-right next move get a hint.
+fn erc_hint(kind: &str, description: &str) -> Option<&'static str> {
+    match kind {
+        "pin_to_pin" if description.contains("Output and Power output") => Some(
+            "Two driving pins share a net. Usual causes: a regulator/IC OUT pin tied \
+             directly to a power symbol whose library pin is power-output, or two \
+             outputs shorted. Fix by checking get_symbol_info pin types: use a plain \
+             net label (not a power symbol) on driven rails, or pick the symbol \
+             variant whose pin is power-out only where the rail is truly sourced.",
+        ),
+        "pin_not_connected" => Some(
+            "Mark intentionally-unused pins no-connect in the YAML (pin: NC) instead \
+             of leaving them dangling.",
+        ),
+        "pin_not_driven" | "power_pin_not_driven" => Some(
+            "The net has only inputs/power-in pins. Add the sourcing connection, or \
+             if the rail is sourced off-board (connector power), KiCAD wants a \
+             PWR_FLAG-style source: connect the rail to the connector pin that \
+             feeds it.",
+        ),
+        "different_unit_net" | "multiple_net_names" => Some(
+            "The same wire carries two names. Keep one label per net; rename the \
+             other uses to match.",
+        ),
+        _ => None,
+    }
 }
 
 // ── 9. create_design / edit_design ────────────────────────────────────────
