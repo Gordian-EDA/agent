@@ -2952,6 +2952,7 @@ fn grid_ranker_weights_failed_net_by_pin_count() {
         net_widths: Default::default(),
         outline: None,
         escape_layers: Default::default(),
+            plane_nets: Default::default(),
     };
 
     let faults = GridAstarRanker.faults(&rp);
@@ -2996,6 +2997,7 @@ fn grid_ranker_uses_best_orthogonal_strictness_key() {
         net_widths: Default::default(),
         outline: None,
         escape_layers: Default::default(),
+            plane_nets: Default::default(),
     };
     let strict_key = route_rank_key(&rp, &crate::router::route_orthogonal(&rp));
     let lenient_key = route_rank_key(&rp, &crate::router::route_orthogonal_lenient(&rp));
@@ -3108,6 +3110,7 @@ fn ranker_gate_problem(connection_count: usize) -> RouteProblem {
         net_widths: Default::default(),
         outline: None,
         escape_layers: Default::default(),
+            plane_nets: Default::default(),
     }
 }
 

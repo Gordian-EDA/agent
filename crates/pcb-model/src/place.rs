@@ -680,6 +680,7 @@ pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> Rou
         // Carry the custom outline so the router keeps copper inside the true shape.
         outline: problem.outline.clone(),
         escape_layers: Default::default(),
+            plane_nets: Default::default(),
     }
 }
 

@@ -404,7 +404,7 @@ impl SnapshotBuilder {
                 min_y: 0.0,
                 max_y: 0.0,
             });
-        let connections = self
+        let connections: Vec<Connection> = self
             .net_points
             .into_iter()
             .filter(|(_, points)| points.len() >= 2)
@@ -414,6 +414,12 @@ impl SnapshotBuilder {
             })
             .collect();
 
+        let plane_nets = pcb_model::default_plane_nets(
+            layer_count,
+            connections
+                .iter()
+                .map(|c| (c.name.clone(), c.points_to_connect.len())),
+        );
         let problem = RouteProblem {
             layer_count,
             min_trace_width: self.rules.min_trace_width,
@@ -426,6 +432,7 @@ impl SnapshotBuilder {
             net_widths: self.rules.net_widths,
             outline: self.outline,
             escape_layers: BTreeMap::new(),
+            plane_nets,
         };
         let imported = ImportedBoard {
             layer_count,

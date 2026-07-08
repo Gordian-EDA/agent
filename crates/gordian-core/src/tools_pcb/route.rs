@@ -1282,6 +1282,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
 
         let run = route_with_engine(&problem, PcbRouterEngine::Astar);
@@ -1325,6 +1326,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
 
         let run = route_with_engine(&problem, PcbRouterEngine::Sequential);
@@ -1368,6 +1370,7 @@ mod escape_bottleneck_tests {
             net_widths: [("FAT_POWER".to_string(), 2.0)].into_iter().collect(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1417,6 +1420,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1484,6 +1488,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1550,6 +1555,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1622,6 +1628,7 @@ mod escape_bottleneck_tests {
             net_widths: [("SIG".to_string(), 1.0)].into_iter().collect(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1692,6 +1699,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1747,6 +1755,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let direct = negotiated_mesh::direct::route_direct(&problem);
         assert!(!direct.failed.is_empty(), "direct router must not add vias");
@@ -1802,6 +1811,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1856,6 +1866,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1915,6 +1926,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -2027,6 +2039,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut solution = RouteSolution {
             traces: vec![
@@ -2107,6 +2120,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             engine: "test".to_string(),

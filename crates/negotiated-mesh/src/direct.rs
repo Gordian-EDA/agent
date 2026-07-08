@@ -1048,6 +1048,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         }
     }
 

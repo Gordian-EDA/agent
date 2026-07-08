@@ -57,8 +57,6 @@ impl Router for ViaEscapeRouter {
     }
 }
 
-/// Route eligible same-layer nets, using endpoint through-vias when an
-/// alternate signal layer is cleaner than the pad layer.
 thread_local! {
     /// Remaining full-solution geometry checks for the CURRENT route_via_escape
     /// call — the same deterministic count-based runaway guard as direct's
@@ -69,6 +67,8 @@ thread_local! {
 
 const VIA_ESCAPE_GEOMETRY_CHECK_BUDGET: usize = 30_000;
 
+/// Route eligible same-layer nets, using endpoint through-vias when an
+/// alternate signal layer is cleaner than the pad layer.
 pub fn route_via_escape(problem: &RouteProblem) -> RouteResult {
     GEOMETRY_CHECKS_LEFT.with(|b| b.set(VIA_ESCAPE_GEOMETRY_CHECK_BUDGET));
     let mut best: Option<(RouteResult, RouteQuality)> = None;
@@ -913,6 +913,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         }
     }
 

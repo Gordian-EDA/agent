@@ -1848,6 +1848,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
 
         // Without the stub these pins are unroutable (their own cell is BlockedAll);
@@ -1923,6 +1924,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let r = route(&p);
         assert!(
@@ -2007,6 +2009,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let r = route(&p);
         // Whatever routes (the body check may force B onto a non-parallel route) must be
@@ -2095,6 +2098,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers,
+            plane_nets: Default::default(),
         };
 
         let result = route(&problem);
@@ -2184,7 +2188,8 @@ mod tests {
             via_drill: 0.3,
             net_widths: Default::default(),
             outline: None,
-            escape_layers: Default::default(), // NO escape assignment
+            escape_layers: Default::default(),
+            plane_nets: Default::default(), // NO escape assignment
         };
         let result = route(&problem);
         assert_eq!(
@@ -2295,6 +2300,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
 
         let result = route_with_order(
@@ -2379,6 +2385,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
 
         let result = route_with_order(
@@ -2441,6 +2448,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
 
         let result = GridAStarRouter.route(&problem);
@@ -2588,6 +2596,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let priority = std::collections::BTreeSet::new();
         let shortest = net_order(&p, &priority);
@@ -2688,6 +2697,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let priority = std::collections::BTreeSet::new();
         let metrics = net_order_metrics(&p);
@@ -2743,6 +2753,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
 
         let thin_pressure = connection_obstacle_pressure(&p, &p.connections[0]);
@@ -2797,6 +2808,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
 
         assert!(connection_obstacle_pressure(&p, &p.connections[0]) > 0);
@@ -2897,6 +2909,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let priority = std::collections::BTreeSet::new();
         let metrics = net_order_metrics(&p);
@@ -2967,6 +2980,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
 
         let metrics = net_order_metrics(&p);
@@ -3052,6 +3066,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
 
         let metrics = net_order_metrics(&p);
@@ -3152,6 +3167,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut priority = std::collections::BTreeSet::new();
         priority.insert("SIG".to_owned());
@@ -3231,6 +3247,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut priority = std::collections::BTreeSet::new();
         priority.insert("OPEN".to_owned());
@@ -3316,6 +3333,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
 
         let metrics = net_order_metrics(&p);
@@ -3382,6 +3400,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let via_heavy_short = result_with(2, 10.0);
         let via_free_long = result_with(0, 11.0);
@@ -3517,6 +3536,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut routed = RouteResult {
             solution: RouteSolution {
@@ -3588,6 +3608,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut routed = RouteResult {
             solution: RouteSolution {
@@ -3658,6 +3679,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut routed = RouteResult {
             solution: RouteSolution {
@@ -3727,6 +3749,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let routed = RouteResult {
             solution: RouteSolution {
@@ -3785,6 +3808,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let via_free = RouteResult {
             solution: RouteSolution {

@@ -68,6 +68,12 @@ pub fn load_corpus_board(
 
 pub fn route_problem_for_placement(board: &CorpusBoard, placements: &[Placement]) -> RouteProblem {
     let mut rp = pcb_place::placement::to_route_problem(&board.problem, placements);
+    rp.plane_nets = pcb_model::default_plane_nets(
+        rp.layer_count,
+        rp.connections
+            .iter()
+            .map(|c| (c.name.clone(), c.points_to_connect.len())),
+    );
     rp.clearance = board.rules.clearance;
     rp.min_trace_width = board.rules.min_trace_width;
     rp.via_diameter = board.rules.via_diameter;

@@ -390,6 +390,10 @@ pub fn route_auto(problem: &RouteProblem) -> RouteResult {
 /// already computed. This is the diagnostics-preserving equivalent of injecting
 /// only [`NegotiatedMeshRouter`] into [`select_best`].
 pub fn route_mesh_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
+    with_plane_fanout(problem, route_mesh_with_diagnostics_inner)
+}
+
+fn route_mesh_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
     if !NegotiatedMeshRouter.can_route(problem) {
         return RouteAutoRun {
             result: RouteResult {
@@ -427,6 +431,10 @@ pub fn route_mesh_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
 /// Route only the contextual sequential-grid engine, preserving one-pass attempt
 /// diagnostics for callers that explicitly select this strategy.
 pub fn route_sequential_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
+    with_plane_fanout(problem, route_sequential_with_diagnostics_inner)
+}
+
+fn route_sequential_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
     let sequential = SequentialGridRouter;
     let started = Instant::now();
     let result = sequential.route(problem);
@@ -452,7 +460,127 @@ pub fn route_sequential_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun
 
 /// As [`route_auto`], but keeps the negotiated global-routing report from the
 /// primary detailed candidate when that candidate ran.
+
+/// Split plane-net connections out of `problem`: a net carried by a solid
+/// inner plane connects by ONE through-via per pad (the plane provides the
+/// tree), so the trace engines never see it — a 100-pad power net costs
+/// O(pads) instead of a board-wide multi-terminal search. Returns the
+/// engines' subproblem and the fanout vias to merge into its solution, or
+/// None when the problem has no routable plane connections.
+fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, Vec<Via>)> {
+    if problem.plane_nets.is_empty() {
+        return None;
+    }
+    let (plane_conns, rest): (Vec<_>, Vec<_>) = problem
+        .connections
+        .iter()
+        .cloned()
+        .partition(|c| problem.plane_nets.contains_key(&c.name));
+    if plane_conns.is_empty() {
+        return None;
+    }
+    let mut sub = problem.clone();
+    sub.connections = rest;
+    // A via only lands where its barrel clears FOREIGN copper (a 0.6mm via
+    // does not fit on a 0.5mm-pitch QFN pin). Pads that can't take a via keep
+    // a short stub connection to the net's nearest via site instead.
+    let via_r = problem.via_diameter / 2.0;
+    let via_fits = |at: Point2, net: &str| {
+        problem.obstacles.iter().all(|ob| {
+            if ob.connected_to.iter().any(|o| o == net) {
+                return true;
+            }
+            let (hw, hh) = (ob.width / 2.0, ob.height / 2.0);
+            let dx = (at.x - ob.center.x).abs() - hw;
+            let dy = (at.y - ob.center.y).abs() - hh;
+            let gap = match (dx > 0.0, dy > 0.0) {
+                (true, true) => (dx * dx + dy * dy).sqrt(),
+                (true, false) => dx,
+                (false, true) => dy,
+                (false, false) => f64::NEG_INFINITY,
+            };
+            gap >= via_r + problem.clearance
+        })
+    };
+    let all_layers: Vec<LayerRef> = {
+        let n = problem.layer_count.max(2);
+        std::iter::once(LayerRef::top())
+            .chain((1..=n.saturating_sub(2)).map(|i| LayerRef(format!("inner{i}"))))
+            .chain(std::iter::once(LayerRef::bottom()))
+            .collect()
+    };
+    let mut vias: Vec<Via> = Vec::new();
+    for c in &plane_conns {
+        let (viable, stubbed): (Vec<_>, Vec<_>) = c
+            .points_to_connect
+            .iter()
+            .partition(|pt| via_fits(pt.point(), &c.name));
+        // Mostly-unviable nets live on fine-pitch pads (0.5mm QFN rings) where
+        // via barrels and stub detours only add congestion — such geometry
+        // routes better as ordinary copper.
+        if viable.is_empty() || stubbed.len() * 4 > c.points_to_connect.len() {
+            sub.connections.push(c.clone());
+            continue;
+        }
+        for pt in &viable {
+            vias.push(Via {
+                connection: c.name.clone(),
+                at: pt.point(),
+                diameter: problem.via_diameter,
+                drill: problem.via_drill,
+                span: ViaSpan::Through,
+            });
+        }
+        for pt in stubbed {
+            let nearest = viable
+                .iter()
+                .min_by(|a, b| {
+                    a.point()
+                        .dist(pt.point())
+                        .total_cmp(&b.point().dist(pt.point()))
+                })
+                .expect("viable is non-empty");
+            sub.connections.push(crate::problem::Connection {
+                name: c.name.clone(),
+                points_to_connect: vec![pt.clone(), (*nearest).clone()],
+            });
+        }
+    }
+    if vias.is_empty() {
+        return None;
+    }
+    // The signal engines must SEE the fanout barrels, or they route straight
+    // through the via sites.
+    for via in &vias {
+        sub.obstacles.push(Obstacle {
+            kind: "rect".to_owned(),
+            layers: all_layers.clone(),
+            center: via.at,
+            width: via.diameter,
+            height: via.diameter,
+            connected_to: vec![via.connection.clone()],
+        });
+    }
+    Some((sub, vias))
+}
+
+fn with_plane_fanout(
+    problem: &RouteProblem,
+    route: impl Fn(&RouteProblem) -> RouteAutoRun,
+) -> RouteAutoRun {
+    let Some((sub, vias)) = plane_fanout(problem) else {
+        return route(problem);
+    };
+    let mut run = route(&sub);
+    run.result.solution.vias.extend(vias);
+    run
+}
+
 pub fn route_auto_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
+    with_plane_fanout(problem, route_auto_with_diagnostics_inner)
+}
+
+fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
     let direct = DirectLineRouter;
     let layer_hop = LayerHopRouter;
     let via_escape = ViaEscapeRouter;
@@ -2427,6 +2555,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         }
     }
 
@@ -2601,6 +2730,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         }
     }
 
@@ -2672,6 +2802,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         }
     }
 

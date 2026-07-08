@@ -110,6 +110,28 @@ pub fn check(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Violation>
         }
     }
 
+    // Plane stitching: a net carried by a solid inner plane joins every one of
+    // its through-vias (each barrel meets the plane copper). Foreign copper is
+    // relieved by anti-pads on a real board, so planes contribute ONLY same-net
+    // unions, never merges. Modeled as unions between the net's via elements —
+    // no geometry needed.
+    for net in problem.plane_nets.keys() {
+        let mut first: Option<usize> = None;
+        for (idx, el) in elements.iter().enumerate() {
+            let is_net_via = matches!(el.shape, Shape::Via { .. })
+                && el.owners.iter().any(|o| o == net);
+            if !is_net_via {
+                continue;
+            }
+            match first {
+                None => first = Some(idx),
+                Some(f) => {
+                    uf.union(f, idx);
+                }
+            }
+        }
+    }
+
     let mut violations = unconnected_violations(problem, &elements, &mut uf);
     violations.extend(cross_net_violations(&elements, &mut uf));
     violations
@@ -503,6 +525,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         }
     }
 
