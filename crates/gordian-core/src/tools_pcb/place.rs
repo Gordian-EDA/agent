@@ -20,9 +20,13 @@ pub(super) fn part_from_footprint_layers(
     layer_count: u32,
     locked: Option<LockedAt>,
 ) -> Part {
+    // Paste/mask-only apertures (KiCAD EP footprints carry unnumbered F.Paste
+    // stencil pads over the exposed pad) hold no copper: modeling them as pad
+    // obstacles walls the EP terminal in and makes every EP net unroutable.
     let pads = footprint
         .pads
         .iter()
+        .filter(|pad| has_copper(pad))
         .map(|pad| part_pad(pad, net_map, layer_count))
         .collect();
     let (courtyard_w, courtyard_h) = enclosing_courtyard(footprint);
@@ -56,6 +60,13 @@ fn all_copper_layers(layer_count: u32) -> Vec<LayerRef> {
     }
     layers.push(LayerRef::bottom());
     layers
+}
+
+fn has_copper(pad: &FootprintPad) -> bool {
+    matches!(
+        pad.technology,
+        PadTechnology::ThruHole | PadTechnology::NpThruHole
+    ) || pad.layers.iter().any(|l| l.ends_with(".Cu") || l == "*.Cu")
 }
 
 fn pad_layers(pad: &FootprintPad, layer_count: u32) -> Vec<LayerRef> {

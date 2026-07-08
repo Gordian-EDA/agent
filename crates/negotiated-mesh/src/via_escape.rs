@@ -59,7 +59,18 @@ impl Router for ViaEscapeRouter {
 
 /// Route eligible same-layer nets, using endpoint through-vias when an
 /// alternate signal layer is cleaner than the pad layer.
+thread_local! {
+    /// Remaining full-solution geometry checks for the CURRENT route_via_escape
+    /// call — the same deterministic count-based runaway guard as direct's
+    /// (each check clones the solution and runs the whole lint).
+    static GEOMETRY_CHECKS_LEFT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(VIA_ESCAPE_GEOMETRY_CHECK_BUDGET) };
+}
+
+const VIA_ESCAPE_GEOMETRY_CHECK_BUDGET: usize = 30_000;
+
 pub fn route_via_escape(problem: &RouteProblem) -> RouteResult {
+    GEOMETRY_CHECKS_LEFT.with(|b| b.set(VIA_ESCAPE_GEOMETRY_CHECK_BUDGET));
     let mut best: Option<(RouteResult, RouteQuality)> = None;
     for order in net_order_portfolio(problem) {
         let result = route_via_escape_order(problem, &order);
@@ -774,6 +785,14 @@ fn candidate_is_geometry_clean(
     solution: &RouteSolution,
     connection: &str,
 ) -> bool {
+    let exhausted = GEOMETRY_CHECKS_LEFT.with(|b| {
+        let left = b.get();
+        b.set(left.saturating_sub(1));
+        left == 0
+    });
+    if exhausted {
+        return false;
+    }
     for violation in crate::lint::lint(problem, solution) {
         match violation {
             crate::lint::DrcViolation::Connectivity {

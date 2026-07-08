@@ -61,9 +61,22 @@ impl Router for DirectLineRouter {
     }
 }
 
+thread_local! {
+    /// Remaining full-solution geometry checks for the CURRENT route_direct
+    /// call. Each check clones the solution and runs the whole lint (~100s of
+    /// µs), and the visibility search multiplies them: unbounded, a dense
+    /// board turns the portfolio's cheapest engine into a 10-minute runaway.
+    /// Count-based (never wall-clock) so results stay deterministic.
+    static GEOMETRY_CHECKS_LEFT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(DIRECT_GEOMETRY_CHECK_BUDGET) };
+}
+
+const DIRECT_GEOMETRY_CHECK_BUDGET: usize = 30_000;
+
 /// Route every eligible net as straight same-layer segments and reconcile the
 /// result through the same geometry/connectivity oracle used by the detailed router.
 pub fn route_direct(problem: &RouteProblem) -> RouteResult {
+    GEOMETRY_CHECKS_LEFT.with(|b| b.set(DIRECT_GEOMETRY_CHECK_BUDGET));
     let mut best: Option<(RouteResult, RouteQuality)> = None;
     for order in net_order_portfolio(problem) {
         let result = route_direct_order(problem, &order);
@@ -728,6 +741,15 @@ fn visibility_path(
     }
     let node_count = width * height;
     let state_count = node_count * VisibilityDir::ALL.len();
+    // Deterministic work budget (counts, never wall-clock): dense boards can
+    // grow the axis mesh quadratically, and each edge check runs a full lint —
+    // an unbounded search here is the portfolio's observed 10-minute runaway.
+    // Direct is the CHEAP first attempt; past this size the heavier engines
+    // are both faster and better.
+    const VISIBILITY_STATE_BUDGET: usize = 60_000;
+    if state_count > VISIBILITY_STATE_BUDGET {
+        return None;
+    }
     let node = |xi: usize, yi: usize| yi * width + xi;
     let state = |node: usize, dir: VisibilityDir| node * VisibilityDir::ALL.len() + dir.idx();
     let point = |node: usize| Point2 {
@@ -909,6 +931,14 @@ fn direct_candidate_is_geometry_clean(
     solution: &RouteSolution,
     connection: &str,
 ) -> bool {
+    let exhausted = GEOMETRY_CHECKS_LEFT.with(|b| {
+        let left = b.get();
+        b.set(left.saturating_sub(1));
+        left == 0
+    });
+    if exhausted {
+        return false;
+    }
     for violation in crate::lint::lint(problem, solution) {
         match violation {
             crate::lint::DrcViolation::Connectivity {

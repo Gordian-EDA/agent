@@ -466,30 +466,19 @@ pub fn route_auto_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
     let mut attempts = Vec::new();
     let mut global = None;
 
-    if direct.can_route(problem) {
-        let started = Instant::now();
-        let result = direct.route(problem);
-        let elapsed_ms = started.elapsed().as_millis();
-        let _ = consider_candidate_recording(
-            problem,
-            &mut best,
-            result,
-            Some(&mut attempts),
-            elapsed_ms,
-        );
-        if route_best_is_clean_via_free(&best) {
-            let result = best.expect("direct candidate just populated best").0;
-            return RouteAutoRun {
-                result,
-                attempts,
-                global,
-            };
+    // The cheap-engine ladder: each specialist targets a different failure
+    // mode (straight lines, layer hops, blocked-pad via escapes, composites,
+    // channels), so every one gets its shot, cheapest first — one engine's
+    // failure never predicts the next's. A clean via-free result ships
+    // immediately; sequential-grid then closes the cheap tier.
+    let specialists: [&dyn Router; 5] =
+        [&direct, &layer_hop, &via_escape, &pattern, &channel];
+    for engine in specialists {
+        if !engine.can_route(problem) {
+            continue;
         }
-    }
-
-    if layer_hop.can_route(problem) {
         let started = Instant::now();
-        let result = layer_hop.route(problem);
+        let result = engine.route(problem);
         let elapsed_ms = started.elapsed().as_millis();
         let _ = consider_candidate_recording(
             problem,
@@ -499,70 +488,7 @@ pub fn route_auto_with_diagnostics(problem: &RouteProblem) -> RouteAutoRun {
             elapsed_ms,
         );
         if route_best_is_clean_via_free(&best) {
-            let result = best.expect("layer-hop candidate just populated best").0;
-            return RouteAutoRun {
-                result,
-                attempts,
-                global,
-            };
-        }
-    }
-
-    if via_escape.can_route(problem) {
-        let started = Instant::now();
-        let result = via_escape.route(problem);
-        let elapsed_ms = started.elapsed().as_millis();
-        let _ = consider_candidate_recording(
-            problem,
-            &mut best,
-            result,
-            Some(&mut attempts),
-            elapsed_ms,
-        );
-        if route_best_is_clean_via_free(&best) {
-            let result = best.expect("via-escape candidate just populated best").0;
-            return RouteAutoRun {
-                result,
-                attempts,
-                global,
-            };
-        }
-    }
-
-    if pattern.can_route(problem) {
-        let started = Instant::now();
-        let result = pattern.route(problem);
-        let elapsed_ms = started.elapsed().as_millis();
-        let _ = consider_candidate_recording(
-            problem,
-            &mut best,
-            result,
-            Some(&mut attempts),
-            elapsed_ms,
-        );
-        if route_best_is_clean_via_free(&best) {
-            let result = best.expect("pattern candidate just populated best").0;
-            return RouteAutoRun {
-                result,
-                attempts,
-                global,
-            };
-        }
-    }
-
-    if channel.can_route(problem) {
-        let started = Instant::now();
-        let result = channel.route(problem);
-        let elapsed_ms = started.elapsed().as_millis();
-        let _ = consider_candidate_recording(
-            problem,
-            &mut best,
-            result,
-            Some(&mut attempts),
-            elapsed_ms,
-        );
-        if route_best_is_clean_via_free(&best) {
-            let result = best.expect("channel candidate just populated best").0;
+            let result = best.expect("specialist candidate just populated best").0;
             return RouteAutoRun {
                 result,
                 attempts,
