@@ -515,10 +515,17 @@ fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, Vec<Via>)> {
             .points_to_connect
             .iter()
             .partition(|pt| via_fits(pt.point(), &c.name));
-        // Mostly-unviable nets live on fine-pitch pads (0.5mm QFN rings) where
-        // via barrels and stub detours only add congestion — such geometry
-        // routes better as ordinary copper.
-        if viable.is_empty() || stubbed.len() * 4 > c.points_to_connect.len() {
+        // Every via-less pad must have a via site CLOSE BY (a 0.5mm-pitch QFN
+        // power pin stubs 1-2mm to its decoupling cap). A far stub would just
+        // re-create the long power trace the fanout exists to remove — such
+        // nets route better as ordinary copper.
+        const STUB_RADIUS_MM: f64 = 5.0;
+        let stub_reachable = |pt: &crate::problem::RoutePoint| {
+            viable
+                .iter()
+                .any(|v| v.point().dist(pt.point()) <= STUB_RADIUS_MM)
+        };
+        if viable.is_empty() || !stubbed.iter().all(|pt| stub_reachable(pt)) {
             sub.connections.push(c.clone());
             continue;
         }
