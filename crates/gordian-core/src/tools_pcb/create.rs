@@ -621,43 +621,73 @@ impl<'a> SeedBoardWriter<'a> {
                     ),
                 ));
             };
-            let clearance = fmt_num(self.rules.clearance);
-            let min_thickness = fmt_num(self.rules.min_trace_width.max(0.1));
-            let thermal_gap = fmt_num((self.rules.clearance * 2.0).max(0.2));
-            let thermal_bridge_width = fmt_num(self.rules.min_trace_width.max(0.25));
-            let x0 = fmt_num(self.bounds.min_x);
-            let y0 = fmt_num(self.bounds.min_y);
-            let x1 = fmt_num(self.bounds.max_x);
-            let y1 = fmt_num(self.bounds.max_y);
-            let uuid = seed_uuid(&format!("zone:{idx}:{}:{}", pour.net, layer_name));
-            let _ = write!(
-                out,
-                "\t(zone\n\
-                 \t\t(net {net_code})\n\
-                 \t\t(net_name \"{}\")\n\
-                 \t\t(layer \"{layer_name}\")\n\
-                 \t\t(uuid \"{uuid}\")\n\
-                 \t\t(name \"{}\")\n\
-                 \t\t(hatch full 0.508)\n\
-                 \t\t(connect_pads\n\
-                 \t\t\t(clearance {clearance})\n\
-                 \t\t)\n\
-                 \t\t(min_thickness {min_thickness})\n\
-                 \t\t(filled_areas_thickness no)\n\
-                 \t\t(fill\n\
-                 \t\t\t(thermal_gap {thermal_gap})\n\
-                 \t\t\t(thermal_bridge_width {thermal_bridge_width})\n\
-                 \t\t)\n\
-                 \t\t(polygon\n\
-                 \t\t\t(pts\n\
-                 \t\t\t\t(xy {x0} {y0}) (xy {x1} {y0}) (xy {x1} {y1}) (xy {x0} {y1})\n\
-                 \t\t\t)\n\
-                 \t\t)\n\
-                 \t)\n",
-                pour.net, pour.net
-            );
+            self.write_zone(out, net_code, &pour.net, &layer_name, &format!("{idx}"));
+        }
+        // Solid GND/VCC planes on the centred inner layers — the physical
+        // counterpart of the router's plane fanout (per-pad vias assume real
+        // plane copper, and kicad-cli DRC checks the file, not our oracle).
+        let pad_counts = self.parts.iter().flat_map(|p| p.pad_nets.values()).fold(
+            BTreeMap::<String, usize>::new(),
+            |mut acc, net| {
+                *acc.entry(net.clone()).or_default() += 1;
+                acc
+            },
+        );
+        for (net, layer_idx) in
+            pcb_model::default_plane_nets(self.rules.layer_count, pad_counts.into_iter())
+        {
+            let Some(net_code) = self.net_codes.get(&net).copied() else {
+                continue;
+            };
+            let layer_name = format!("In{layer_idx}.Cu");
+            self.write_zone(out, net_code, &net, &layer_name, "plane");
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_zone(
+        &self,
+        out: &mut String,
+        net_code: i32,
+        net: &str,
+        layer_name: &str,
+        tag: &str,
+    ) {
+        let clearance = fmt_num(self.rules.clearance);
+        let min_thickness = fmt_num(self.rules.min_trace_width.max(0.1));
+        let thermal_gap = fmt_num((self.rules.clearance * 2.0).max(0.2));
+        let thermal_bridge_width = fmt_num(self.rules.min_trace_width.max(0.25));
+        let x0 = fmt_num(self.bounds.min_x);
+        let y0 = fmt_num(self.bounds.min_y);
+        let x1 = fmt_num(self.bounds.max_x);
+        let y1 = fmt_num(self.bounds.max_y);
+        let uuid = seed_uuid(&format!("zone:{tag}:{net}:{layer_name}"));
+        let _ = write!(
+            out,
+            "\t(zone\n\
+             \t\t(net {net_code})\n\
+             \t\t(net_name \"{net}\")\n\
+             \t\t(layer \"{layer_name}\")\n\
+             \t\t(uuid \"{uuid}\")\n\
+             \t\t(name \"{net}\")\n\
+             \t\t(hatch full 0.508)\n\
+             \t\t(connect_pads\n\
+             \t\t\t(clearance {clearance})\n\
+             \t\t)\n\
+             \t\t(min_thickness {min_thickness})\n\
+             \t\t(filled_areas_thickness no)\n\
+             \t\t(fill\n\
+             \t\t\t(thermal_gap {thermal_gap})\n\
+             \t\t\t(thermal_bridge_width {thermal_bridge_width})\n\
+             \t\t)\n\
+             \t\t(polygon\n\
+             \t\t\t(pts\n\
+             \t\t\t\t(xy {x0} {y0}) (xy {x1} {y0}) (xy {x1} {y1}) (xy {x0} {y1})\n\
+             \t\t\t)\n\
+             \t\t)\n\
+             \t)\n",
+        );
     }
 
     fn emit_footprint(&self, part: &SeedFootprint) -> io::Result<String> {
