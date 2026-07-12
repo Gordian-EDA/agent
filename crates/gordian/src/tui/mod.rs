@@ -71,8 +71,14 @@ use app::{Action, App, Msg, Status, TurnEndReason};
 /// How often the shell wakes the app for spinner/elapsed redraws.
 const TICK: Duration = Duration::from_millis(120);
 
+/// Identity of a spawned turn/compaction task. Async messages carry this so a
+/// late gate or completion from an aborted task cannot affect its successor.
+type TaskId = u64;
+type TaskEvent = (TaskId, AgentEvent);
+type TaskDone = (TaskId, TurnEndReason);
+
 /// A pending mutation proposal and the channel the UI uses to answer it.
-type GateRequest = (Value, oneshot::Sender<bool>);
+type GateRequest = (TaskId, Value, oneshot::Sender<bool>);
 
 /// The [`Approvals`] implementation that bridges the agent's gate to the UI.
 ///
@@ -80,6 +86,7 @@ type GateRequest = (Value, oneshot::Sender<bool>);
 /// user's decision over a oneshot. If auto-approve is on, the loop answers
 /// immediately; otherwise it waits for an `a`/`r` keypress.
 struct TuiApprovals {
+    task_id: TaskId,
     gate_tx: UnboundedSender<GateRequest>,
 }
 
@@ -87,7 +94,11 @@ struct TuiApprovals {
 impl Approvals for TuiApprovals {
     async fn approve(&mut self, proposal: &Value) -> bool {
         let (tx, rx) = oneshot::channel();
-        if self.gate_tx.send((proposal.clone(), tx)).is_err() {
+        if self
+            .gate_tx
+            .send((self.task_id, proposal.clone(), tx))
+            .is_err()
+        {
             // UI is gone — fail safe (reject the write).
             return false;
         }
@@ -188,15 +199,20 @@ pub async fn run(project_dir: PathBuf, config: GordianConfig, config_path: PathB
 /// turn task, and project path).
 struct Shell {
     agent: Option<SharedAgent>,
-    events_tx: UnboundedSender<AgentEvent>,
+    events_tx: UnboundedSender<TaskEvent>,
     gate_tx: UnboundedSender<GateRequest>,
-    done_tx: UnboundedSender<TurnEndReason>,
+    done_tx: UnboundedSender<TaskDone>,
     post_commit_review: bool,
     review_fix_rounds: u8,
     /// The oneshot answering the currently open apply-gate, if any.
     pending_gate: Option<oneshot::Sender<bool>>,
     /// The in-flight turn task (aborted by [`Action::CancelTurn`]).
     turn_task: Option<JoinHandle<()>>,
+    /// Identity of `turn_task`; cleared before cancellation closes the App turn.
+    active_task_id: Option<TaskId>,
+    /// Monotonic source for task identities (wrapping is harmless in practice;
+    /// zero is skipped to keep the initial state visibly distinct).
+    next_task_id: TaskId,
 }
 
 impl Shell {
@@ -246,11 +262,18 @@ impl Shell {
         let done_tx = self.done_tx.clone();
         let post_commit_review = self.post_commit_review;
         let review_fix_rounds = self.review_fix_rounds as usize;
+        let task_id = self.begin_task();
         // spawn_local: the TUI shares the agent through Rc, so turns run on this
         // thread's LocalSet rather than the shared scheduler.
         self.turn_task = Some(tokio::task::spawn_local(async move {
+            let (task_events_tx, mut task_events_rx) = unbounded_channel();
+            let forwarder = tokio::task::spawn_local(async move {
+                while let Some(event) = task_events_rx.recv().await {
+                    let _ = events_tx.send((task_id, event));
+                }
+            });
             let reason = guard_turn_task(async move {
-                let mut approvals = TuiApprovals { gate_tx };
+                let mut approvals = TuiApprovals { task_id, gate_tx };
                 let mut agent = handle.lock().await;
                 // Route through the self-correction loop: after a turn that COMMITS a
                 // design change, an independent reviewer scores the netlist and feeds
@@ -265,13 +288,13 @@ impl Shell {
                             &prompt,
                             &prompt,
                             &mut approvals,
-                            Some(&events_tx),
+                            Some(&task_events_tx),
                             review_fix_rounds,
                         )
                         .await
                 } else {
                     agent
-                        .run_turn(&prompt, &mut approvals, Some(&events_tx))
+                        .run_turn(&prompt, &mut approvals, Some(&task_events_tx))
                         .await
                 };
                 match result {
@@ -285,14 +308,27 @@ impl Shell {
                 }
             })
             .await;
-            let _ = done_tx.send(reason);
+            // Close and fully drain the per-task event stream before publishing
+            // completion, preserving event-before-end ordering.
+            let _ = forwarder.await;
+            let _ = done_tx.send((task_id, reason));
         }));
+    }
+
+    /// Allocate and activate an identity before spawning a new local task.
+    fn begin_task(&mut self) -> TaskId {
+        self.next_task_id = self.next_task_id.wrapping_add(1).max(1);
+        self.active_task_id = Some(self.next_task_id);
+        self.next_task_id
     }
 
     /// Esc on a running turn: abort the task mid-flight. The agent gives up
     /// whatever it was doing (an LLM round-trip, a tool call). An open gate is
     /// answered "no" here, so no unapproved mutation begins.
     fn cancel_turn(&mut self, app: &mut App) {
+        // Invalidate async messages before aborting. A task can have queued its
+        // gate/completion immediately before this handler won the select race.
+        self.active_task_id = None;
         if let Some(task) = self.turn_task.take() {
             task.abort();
         }
@@ -386,17 +422,69 @@ impl Shell {
         };
         let events_tx = self.events_tx.clone();
         let done_tx = self.done_tx.clone();
+        let task_id = self.begin_task();
         self.turn_task = Some(tokio::task::spawn_local(async move {
+            let (task_events_tx, mut task_events_rx) = unbounded_channel();
+            let forwarder = tokio::task::spawn_local(async move {
+                while let Some(event) = task_events_rx.recv().await {
+                    let _ = events_tx.send((task_id, event));
+                }
+            });
             let reason = guard_turn_task(async move {
                 let mut agent = handle.lock().await;
-                match agent.compact(Some(&events_tx)).await {
+                match agent.compact(Some(&task_events_tx)).await {
                     Ok(_) => TurnEndReason::Compacted,
                     Err(e) => TurnEndReason::Error(format!("{e:#}")),
                 }
             })
             .await;
-            let _ = done_tx.send(reason);
+            let _ = forwarder.await;
+            let _ = done_tx.send((task_id, reason));
         }));
+    }
+
+    /// Accept a gate only from the active task. Rejected stale requests are
+    /// answered explicitly so their sender can finish if it has not been
+    /// aborted yet.
+    fn receive_gate(
+        &mut self,
+        app: &mut App,
+        task_id: TaskId,
+        proposal: Value,
+        reply: oneshot::Sender<bool>,
+    ) {
+        if self.active_task_id != Some(task_id) || !app.running {
+            let _ = reply.send(false);
+            return;
+        }
+        if app.auto {
+            let _ = reply.send(true);
+            app.transcript
+                .push(app::Entry::system("auto-approved (yolo)"));
+        } else {
+            self.pending_gate = Some(reply);
+            app.update(Msg::PendingApproval(proposal));
+        }
+    }
+
+    /// Drop buffered events from an aborted/finished task rather than letting
+    /// them append to or alter the counters of a later turn.
+    fn receive_agent_event(&self, app: &mut App, task_id: TaskId, event: AgentEvent) {
+        if self.active_task_id == Some(task_id) {
+            app.update(Msg::Agent(event));
+        }
+    }
+
+    /// Finish only the current task and execute any follow-up action returned by
+    /// the reducer (notably the next prompt queued with Tab).
+    fn finish_task(&mut self, app: &mut App, task_id: TaskId, reason: TurnEndReason) {
+        if self.active_task_id != Some(task_id) {
+            return;
+        }
+        self.active_task_id = None;
+        self.turn_task = None;
+        let follow_up = app.update(Msg::TurnEnded(reason));
+        self.handle(app, follow_up);
     }
 
     /// Run `f` over the agent when it exists and is idle (the turn task holds
@@ -425,15 +513,13 @@ async fn event_loop(
     review_fix_rounds: u8,
 ) -> Result<()> {
     let mut input = EventStream::new();
-    let (events_tx, mut events_rx): (UnboundedSender<AgentEvent>, UnboundedReceiver<AgentEvent>) =
+    let (events_tx, mut events_rx): (UnboundedSender<TaskEvent>, UnboundedReceiver<TaskEvent>) =
         unbounded_channel();
     let (gate_tx, mut gate_rx): (UnboundedSender<GateRequest>, UnboundedReceiver<GateRequest>) =
         unbounded_channel();
     // Joins back when the spawned turn finishes (so input unlocks even on error).
-    let (done_tx, mut done_rx): (
-        UnboundedSender<TurnEndReason>,
-        UnboundedReceiver<TurnEndReason>,
-    ) = unbounded_channel();
+    let (done_tx, mut done_rx): (UnboundedSender<TaskDone>, UnboundedReceiver<TaskDone>) =
+        unbounded_channel();
 
     let mut shell = Shell {
         agent: agent_handle,
@@ -444,6 +530,8 @@ async fn event_loop(
         review_fix_rounds,
         pending_gate: None,
         turn_task: None,
+        active_task_id: None,
+        next_task_id: 0,
     };
     let mut tick = tokio::time::interval(TICK);
 
@@ -492,24 +580,16 @@ async fn event_loop(
                 app.update(Msg::Tick);
             }
             // ── live agent events ─────────────────────────────────────
-            Some(ev) = events_rx.recv() => {
-                app.update(Msg::Agent(ev));
+            Some((task_id, ev)) = events_rx.recv() => {
+                shell.receive_agent_event(app, task_id, ev);
             }
             // ── apply-gate requests from the agent task ───────────────
-            Some((proposal, reply)) = gate_rx.recv() => {
-                if app.auto {
-                    // Yolo mode: approve immediately, never show the gate.
-                    let _ = reply.send(true);
-                    app.transcript.push(app::Entry::system("auto-approved (yolo)"));
-                } else {
-                    shell.pending_gate = Some(reply);
-                    app.update(Msg::PendingApproval(proposal));
-                }
+            Some((task_id, proposal, reply)) = gate_rx.recv() => {
+                shell.receive_gate(app, task_id, proposal, reply);
             }
             // ── spawned turn finished ─────────────────────────────────
-            Some(reason) = done_rx.recv() => {
-                shell.turn_task = None;
-                app.update(Msg::TurnEnded(reason));
+            Some((task_id, reason)) = done_rx.recv() => {
+                shell.finish_task(app, task_id, reason);
             }
         }
 
@@ -587,6 +667,33 @@ fn restore_terminal(
 mod shell_tests {
     use super::*;
 
+    fn app() -> App {
+        App::new(Status::new(
+            "bedrock",
+            "model",
+            "/tmp/design.kicad_sch",
+            true,
+        ))
+    }
+
+    fn shell() -> Shell {
+        let (events_tx, _events_rx) = unbounded_channel();
+        let (gate_tx, _gate_rx) = unbounded_channel();
+        let (done_tx, _done_rx) = unbounded_channel();
+        Shell {
+            agent: None,
+            events_tx,
+            gate_tx,
+            done_tx,
+            post_commit_review: false,
+            review_fix_rounds: 0,
+            pending_gate: None,
+            turn_task: None,
+            active_task_id: None,
+            next_task_id: 0,
+        }
+    }
+
     #[tokio::test]
     async fn dropping_shell_rejects_an_unanswered_approval() {
         let (events_tx, _events_rx) = unbounded_channel();
@@ -602,6 +709,8 @@ mod shell_tests {
             review_fix_rounds: 0,
             pending_gate: Some(reply),
             turn_task: None,
+            active_task_id: None,
+            next_task_id: 0,
         };
 
         drop(shell);
@@ -619,6 +728,79 @@ mod shell_tests {
         assert_eq!(
             reason,
             TurnEndReason::Error("agent task panicked: simulated turn panic".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_gate_after_cancellation_is_rejected_without_opening_the_card() {
+        let mut shell = shell();
+        let mut app = app();
+        shell.active_task_id = Some(2);
+        app.running = true;
+        let (reply, answer) = oneshot::channel();
+
+        shell.receive_gate(
+            &mut app,
+            1,
+            serde_json::json!({"operation": "write"}),
+            reply,
+        );
+
+        assert!(
+            !answer
+                .await
+                .expect("stale gate receives an explicit rejection")
+        );
+        assert!(app.pending.is_none());
+        assert_eq!(shell.active_task_id, Some(2));
+    }
+
+    #[test]
+    fn stale_completion_and_events_cannot_end_or_mutate_a_newer_turn() {
+        let mut shell = shell();
+        let mut app = app();
+        app.update(Msg::Char('x'));
+        app.update(Msg::Submit);
+        shell.active_task_id = Some(2);
+
+        shell.receive_agent_event(
+            &mut app,
+            1,
+            AgentEvent::ToolStarted {
+                name: "stale tool".into(),
+            },
+        );
+        shell.finish_task(&mut app, 1, TurnEndReason::Completed);
+
+        assert!(app.running);
+        assert_eq!(app.turn_tool_calls, 0);
+        assert_eq!(shell.active_task_id, Some(2));
+    }
+
+    #[test]
+    fn completion_dispatches_the_prompt_queued_during_the_turn() {
+        let mut shell = shell();
+        let mut app = app();
+        app.update(Msg::Char('x'));
+        app.update(Msg::Submit);
+        for c in "next".chars() {
+            app.update(Msg::Char(c));
+        }
+        app.update(Msg::Complete);
+        shell.active_task_id = Some(1);
+
+        shell.finish_task(&mut app, 1, TurnEndReason::Completed);
+
+        assert!(app.queued.is_none());
+        assert!(
+            app.transcript
+                .iter()
+                .any(|entry| entry.text.contains("agent unavailable — cannot run a turn")),
+            "the shell must execute the reducer's SpawnTurn follow-up"
+        );
+        assert!(
+            !app.running,
+            "failed spawning the follow-up closes its state"
         );
     }
 }

@@ -239,6 +239,21 @@ mod tests {
     }
 
     #[test]
+    fn a_second_queue_attempt_preserves_both_the_queue_and_live_draft() {
+        let mut a = app();
+        type_str(&mut a, "first");
+        a.update(Msg::Submit);
+        type_str(&mut a, "queued first");
+        a.update(Msg::Complete);
+        type_str(&mut a, "still editing");
+
+        a.update(Msg::Complete);
+
+        assert_eq!(a.queued.as_deref(), Some("queued first"));
+        assert_eq!(a.input, "still editing");
+    }
+
+    #[test]
     fn interrupting_a_turn_restores_the_queue_without_starting_a_phantom_turn() {
         let mut a = app();
         type_str(&mut a, "first");

@@ -24,12 +24,44 @@ use kicad_cli::KicadCli;
 /// Default project directory when `--project` is omitted.
 const DEFAULT_PROJECT_DIR: &str = "gordian-project";
 
+const USAGE: &str = "usage:
+  gordian                              print version
+  gordian agent [--project <dir>] [--no-review] \"<prompt>\"
+                                       run one agent turn
+  gordian tui [--project <dir>]        launch the copilot cockpit
+
+options:
+  -h, --help                           print help
+  -V, --version                        print version";
+
+fn print_version() {
+    println!("gordian {}", env!("CARGO_PKG_VERSION"));
+}
+
+fn is_help_request(args: &[String]) -> bool {
+    matches!(args, [arg] if arg == "--help" || arg == "-h")
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     match args.first().map(String::as_str) {
         None => {
-            println!("gordian {}", env!("CARGO_PKG_VERSION"));
+            print_version();
+            ExitCode::SUCCESS
+        }
+        Some("--help" | "-h" | "help") => {
+            println!("{USAGE}");
+            ExitCode::SUCCESS
+        }
+        Some("--version" | "-V" | "version") => {
+            print_version();
+            ExitCode::SUCCESS
+        }
+        Some("agent") if is_help_request(&args[1..]) => {
+            println!(
+                "usage: gordian agent [--project <dir>] [--no-review] \"<prompt>\"\n\nRun one headless agent turn."
+            );
             ExitCode::SUCCESS
         }
         Some("agent") => match run_agent_command(&args[1..]) {
@@ -39,6 +71,12 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("tui") if is_help_request(&args[1..]) => {
+            println!(
+                "usage: gordian tui [--project <dir>]\n\nLaunch the interactive copilot cockpit."
+            );
+            ExitCode::SUCCESS
+        }
         Some("tui") => match run_tui_command(&args[1..]) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -48,12 +86,7 @@ fn main() -> ExitCode {
         },
         Some(other) => {
             eprintln!("error: unknown command `{other}`");
-            eprintln!(
-                "usage:\n  \
-                 gordian                              print version\n  \
-                 gordian agent [--project <dir>] \"<prompt>\"   run one agent turn\n  \
-                 gordian tui [--project <dir>]                  launch the copilot cockpit"
-            );
+            eprintln!("{USAGE}");
             ExitCode::FAILURE
         }
     }
@@ -64,10 +97,15 @@ fn main() -> ExitCode {
 /// `./design.kicad_sch` right where you launched it.
 fn parse_tui_args(args: &[String]) -> Result<PathBuf> {
     let mut project_dir: Option<PathBuf> = None;
+    let mut parse_options = true;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--project" | "-p" => {
+            "--" if parse_options => {
+                parse_options = false;
+                i += 1;
+            }
+            "--project" | "-p" if parse_options => {
                 let dir = args
                     .get(i + 1)
                     .context("--project requires a directory argument")?;
@@ -77,7 +115,9 @@ fn parse_tui_args(args: &[String]) -> Result<PathBuf> {
                 project_dir = Some(PathBuf::from(dir));
                 i += 2;
             }
-            other if other.starts_with('-') => bail!("unknown tui option `{other}`"),
+            other if parse_options && other.starts_with('-') => {
+                bail!("unknown tui option `{other}`")
+            }
             other => {
                 if project_dir.is_some() {
                     bail!("unexpected extra project directory `{other}`");
@@ -477,6 +517,22 @@ mod tests {
         let inv = parse_agent_args(&["--".into(), "--literal prompt".into()]).unwrap();
         assert_eq!(inv.prompt, "--literal prompt");
         assert!(inv.review);
+    }
+
+    #[test]
+    fn tui_double_dash_allows_a_dash_prefixed_project_path() {
+        assert_eq!(
+            parse_tui_args(&["--".into(), "--literal-project".into()]).unwrap(),
+            PathBuf::from("--literal-project")
+        );
+    }
+
+    #[test]
+    fn recognizes_only_standalone_help_requests() {
+        assert!(is_help_request(&["--help".into()]));
+        assert!(is_help_request(&["-h".into()]));
+        assert!(!is_help_request(&[]));
+        assert!(!is_help_request(&["--help".into(), "extra".into()]));
     }
 
     #[test]
