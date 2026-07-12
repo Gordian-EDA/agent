@@ -306,7 +306,7 @@ impl SchematicWriter {
     /// keyed on `cluster:{net}:{x}:{y}` (position-derived) and carries no stub —
     /// it sits directly on the cluster wire it labels.
     pub fn add_cluster_label(&mut self, net: &str, at: impl Into<Point2>, dir: Dir, global: bool) {
-        let at = GRID_50_MIL.snap_point(at.into());
+        let at = GRID_50_MIL.snap_point(at);
         self.labels.push(PinLabel {
             net: net.to_string(),
             at,
@@ -477,9 +477,20 @@ impl SchematicWriter {
         refdes: &str,
         at: [f64; 2],
     ) -> io::Result<()> {
+        let at = GRID_50_MIL.snap_point(at);
         self.add_symbol(env, "power:PWR_FLAG", refdes, "PWR_FLAG", at, 0.0)?;
-        // Label the flag's single pin with the net so it drives that net.
-        self.add_pin_label(env, refdes, "1", net)?;
+        // A PWR_FLAG's only pin is exactly at the instance origin. Attach the
+        // label directly to this instance rather than resolving by refdes: two
+        // independently built groups (or a malformed caller) may temporarily
+        // reuse the same hidden ref before composition namespaces it.
+        self.labels.push(PinLabel {
+            net: net.to_owned(),
+            at,
+            uuid_key: format!("{refdes}:1:{net}:0"),
+            dir: Dir::East,
+            stub: None,
+            global: false,
+        });
         Ok(())
     }
 
@@ -706,7 +717,7 @@ impl SchematicWriter {
             token
         };
         let namespace = token(namespace, "group");
-        let mut renamed: std::collections::BTreeMap<String, String> =
+        let mut renamed: std::collections::BTreeMap<String, Vec<(String, Point2)>> =
             std::collections::BTreeMap::new();
         let mut used = std::collections::HashSet::new();
         for inst in &mut self.instances {
@@ -723,35 +734,45 @@ impl SchematicWriter {
                 suffix += 1;
             }
             inst.refdes = new.clone();
-            renamed.entry(old).or_insert(new);
+            renamed.entry(old).or_default().push((new, inst.at));
         }
         if renamed.is_empty() {
             return;
         }
         for label in &mut self.labels {
-            if let Some((old, new)) = renamed
+            if let Some((old, instances)) = renamed
                 .iter()
                 .find(|(old, _)| label.uuid_key.starts_with(&format!("{old}:")))
             {
+                let new = instances
+                    .iter()
+                    .min_by(|(_, a), (_, b)| a.dist(label.at).total_cmp(&b.dist(label.at)))
+                    .map(|(new, _)| new)
+                    .expect("renamed hidden ref has at least one instance");
                 label.uuid_key = format!("{new}:{}", &label.uuid_key[old.len() + 1..]);
             }
         }
         for nc in &mut self.no_connects {
-            if let Some((old, new)) = renamed
+            if let Some((old, instances)) = renamed
                 .iter()
                 .find(|(old, _)| nc.uuid_key.starts_with(&format!("{old}:")))
             {
+                let new = instances
+                    .iter()
+                    .min_by(|(_, a), (_, b)| a.dist(nc.at).total_cmp(&b.dist(nc.at)))
+                    .map(|(new, _)| new)
+                    .expect("renamed hidden ref has at least one instance");
                 nc.uuid_key = format!("{new}:{}", &nc.uuid_key[old.len() + 1..]);
             }
         }
         self.fields_above = self
             .fields_above
             .iter()
-            .map(|refdes| {
-                renamed
-                    .get(refdes)
-                    .cloned()
-                    .unwrap_or_else(|| refdes.clone())
+            .flat_map(|refdes| {
+                renamed.get(refdes).map_or_else(
+                    || vec![refdes.clone()],
+                    |instances| instances.iter().map(|(new, _)| new.clone()).collect(),
+                )
             })
             .collect();
     }
@@ -771,7 +792,12 @@ impl SchematicWriter {
                 let label_prefix = format!("{}:", inst.refdes);
                 self.labels
                     .iter()
-                    .find(|label| label.uuid_key.starts_with(&label_prefix))
+                    .find(|label| label.uuid_key.starts_with(&label_prefix) && label.at == inst.at)
+                    .or_else(|| {
+                        self.labels
+                            .iter()
+                            .find(|label| label.uuid_key.starts_with(&label_prefix))
+                    })
                     .map(|label| (label.net.clone(), i))
                     .or_else(|| {
                         inst.refdes
@@ -805,12 +831,19 @@ impl SchematicWriter {
         for &i in idx.iter().rev() {
             let inst = self.instances.remove(i);
             // Drop any pin label that drove this flag (keyed to its refdes' pin).
-            if !self
+            let tag = format!("{}:", inst.refdes);
+            if inst.lib_id == "power:PWR_FLAG"
+                && let Some(label_idx) = self
+                    .labels
+                    .iter()
+                    .position(|label| label.uuid_key.starts_with(&tag) && label.at == inst.at)
+            {
+                self.labels.remove(label_idx);
+            } else if !self
                 .instances
                 .iter()
                 .any(|remaining| remaining.refdes == inst.refdes)
             {
-                let tag = format!("{}:", inst.refdes);
                 self.labels.retain(|l| !l.uuid_key.starts_with(&tag));
             }
         }
@@ -1070,6 +1103,56 @@ mod tests {
         assert_eq!(w.wires[0].uuid_key, "13.97:27.94:16.51:27.94");
         assert_eq!(w.junctions[0].uuid_key, "16.51:27.94");
         assert_eq!(w.labels[0].uuid_key, "cluster:SIG:16.51:27.94");
+    }
+
+    #[test]
+    fn repeated_hidden_refs_relink_position_owned_metadata() {
+        let Some(env) = detect_env() else { return };
+        let mut w = SchematicWriter::new();
+        w.add_power_flag(&env, "VCC", "#SHARED", [12.7, 12.7])
+            .unwrap();
+        w.add_power_flag(&env, "GND", "#SHARED", [38.1, 12.7])
+            .unwrap();
+        w.no_connects.push(NoConnect {
+            at: [12.7, 12.7].into(),
+            uuid_key: "#SHARED:1:0".to_owned(),
+        });
+        w.no_connects.push(NoConnect {
+            at: [38.1, 12.7].into(),
+            uuid_key: "#SHARED:1:0".to_owned(),
+        });
+        w.prefer_fields_above(&std::collections::BTreeSet::from(["#SHARED".to_owned()]));
+
+        assert_eq!(
+            w.pwr_flag_nets()
+                .into_iter()
+                .map(|(net, _)| net)
+                .collect::<Vec<_>>(),
+            vec!["VCC", "GND"]
+        );
+        w.namespace_hidden_references("a/b");
+
+        assert_eq!(w.instances[0].refdes, "#a_b_SHARED");
+        assert_eq!(w.instances[1].refdes, "#a_b_SHARED_2");
+        assert!(
+            w.labels
+                .iter()
+                .any(|label| { label.net == "VCC" && label.uuid_key.starts_with("#a_b_SHARED:") })
+        );
+        assert!(
+            w.labels.iter().any(|label| {
+                label.net == "GND" && label.uuid_key.starts_with("#a_b_SHARED_2:")
+            })
+        );
+        assert!(w.no_connects[0].uuid_key.starts_with("#a_b_SHARED:"));
+        assert!(w.no_connects[1].uuid_key.starts_with("#a_b_SHARED_2:"));
+        assert_eq!(
+            w.fields_above,
+            std::collections::BTreeSet::from([
+                "#a_b_SHARED".to_owned(),
+                "#a_b_SHARED_2".to_owned(),
+            ])
+        );
     }
 
     #[test]

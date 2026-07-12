@@ -203,6 +203,51 @@ mod grid_tests {
         assert!(!schematic.contains("SOURCE_B"));
     }
 
+    #[test]
+    fn composition_relinks_repeated_flag_refdes_by_instance_position() {
+        let Some(env) = kicad_env::KicadEnv::detect() else {
+            eprintln!("SKIP: no KiCad environment detected");
+            return;
+        };
+        let mut writer = SchematicWriter::new();
+        writer
+            .add_power_flag(&env, "VCC", "#SHARED", [12.7, 12.7])
+            .unwrap();
+        writer
+            .add_power_flag(&env, "GND", "#SHARED", [38.1, 12.7])
+            .unwrap();
+        writer
+            .add_power_flag(&env, "VCC", "#SHARED", [63.5, 12.7])
+            .unwrap();
+
+        let schematic = compose_writers(vec![("power/io".to_owned(), writer)], None);
+
+        assert_eq!(
+            schematic.matches("(lib_id \"power:PWR_FLAG\")").count(),
+            2,
+            "duplicate VCC must drop while distinct GND remains"
+        );
+        assert!(schematic.contains("(property \"Reference\" \"#power_io_SHARED\""));
+        assert!(schematic.contains("(property \"Reference\" \"#power_io_SHARED_2\""));
+        assert!(schematic.contains("(label \"VCC\""));
+        assert!(schematic.contains("(label \"GND\""));
+        let uuids = schematic
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("(uuid \"")?.strip_suffix("\")"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            uuids.iter().collect::<std::collections::HashSet<_>>().len(),
+            uuids.len(),
+            "relinked flag objects must keep unique UUIDs"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repeated-flags.kicad_sch");
+        std::fs::write(&path, schematic).unwrap();
+        kicad_cli::KicadCli::new(&env)
+            .erc(&path)
+            .expect("KiCad must load relinked repeated hidden references");
+    }
+
     fn block(refs: &[&str], layout: LayoutGrid) -> Block {
         let mut components = IndexMap::new();
         for r in refs {
