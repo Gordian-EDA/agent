@@ -34,7 +34,9 @@ pub mod ui;
 #[cfg(test)]
 mod screenshot;
 
+use std::future::Future;
 use std::io::{self, Stdout};
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -51,7 +53,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     supports_keyboard_enhancement,
 };
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use gordian_core::AgentRuntime;
 use gordian_core::GordianConfig;
 use gordian_core::prompts::system_prompt;
@@ -97,6 +99,23 @@ impl Approvals for TuiApprovals {
 /// turn's duration. `Rc<Mutex<...>>` keeps the TUI side single-threaded, so the
 /// main loop can hold the same agent across turns.
 type SharedAgent = Rc<Mutex<Agent>>;
+
+/// Convert an unexpected panic inside a local turn task into the same explicit
+/// error path as provider/tool failures. User cancellation still aborts the
+/// outer task and is reported separately by `cancel_turn`.
+async fn guard_turn_task(future: impl Future<Output = TurnEndReason>) -> TurnEndReason {
+    match AssertUnwindSafe(future).catch_unwind().await {
+        Ok(reason) => reason,
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown panic payload");
+            TurnEndReason::Error(format!("agent task panicked: {message}"))
+        }
+    }
+}
 
 /// Launch the cockpit over a project directory. Sets up the terminal, builds the
 /// agent, and runs the event loop until the user quits.
@@ -230,39 +249,42 @@ impl Shell {
         // spawn_local: the TUI shares the agent through Rc, so turns run on this
         // thread's LocalSet rather than the shared scheduler.
         self.turn_task = Some(tokio::task::spawn_local(async move {
-            let mut approvals = TuiApprovals { gate_tx };
-            let mut agent = handle.lock().await;
-            // Route through the self-correction loop: after a turn that COMMITS a
-            // design change, an independent reviewer scores the netlist and feeds
-            // high-confidence defects into one follow-up fix turn. The reviewer is
-            // skipped on read-only/conversational turns (nothing applied). The
-            // user's prompt is the design intent the reviewer judges against;
-            // `ReviewStarted` / `Reviewed` events flow through `events_tx` to the
-            // running detail row and transcript.
-            let result = if post_commit_review {
-                agent
-                    .run_turn_reviewed(
-                        &prompt,
-                        &prompt,
-                        &mut approvals,
-                        Some(&events_tx),
-                        review_fix_rounds,
-                    )
-                    .await
-            } else {
-                agent
-                    .run_turn(&prompt, &mut approvals, Some(&events_tx))
-                    .await
-            };
-            let reason = match result {
-                Ok(o) => match o.stop_reason {
-                    StopReason::Completed => TurnEndReason::Completed,
-                    StopReason::ProviderRequestLimit { requests } => {
-                        TurnEndReason::ProviderRequestLimit { requests }
-                    }
-                },
-                Err(e) => TurnEndReason::Error(format!("{e:#}")),
-            };
+            let reason = guard_turn_task(async move {
+                let mut approvals = TuiApprovals { gate_tx };
+                let mut agent = handle.lock().await;
+                // Route through the self-correction loop: after a turn that COMMITS a
+                // design change, an independent reviewer scores the netlist and feeds
+                // high-confidence defects into one follow-up fix turn. The reviewer is
+                // skipped on read-only/conversational turns (nothing applied). The
+                // user's prompt is the design intent the reviewer judges against;
+                // `ReviewStarted` / `Reviewed` events flow through `events_tx` to the
+                // running detail row and transcript.
+                let result = if post_commit_review {
+                    agent
+                        .run_turn_reviewed(
+                            &prompt,
+                            &prompt,
+                            &mut approvals,
+                            Some(&events_tx),
+                            review_fix_rounds,
+                        )
+                        .await
+                } else {
+                    agent
+                        .run_turn(&prompt, &mut approvals, Some(&events_tx))
+                        .await
+                };
+                match result {
+                    Ok(o) => match o.stop_reason {
+                        StopReason::Completed => TurnEndReason::Completed,
+                        StopReason::ProviderRequestLimit { requests } => {
+                            TurnEndReason::ProviderRequestLimit { requests }
+                        }
+                    },
+                    Err(e) => TurnEndReason::Error(format!("{e:#}")),
+                }
+            })
+            .await;
             let _ = done_tx.send(reason);
         }));
     }
@@ -364,11 +386,14 @@ impl Shell {
         let events_tx = self.events_tx.clone();
         let done_tx = self.done_tx.clone();
         self.turn_task = Some(tokio::task::spawn_local(async move {
-            let mut agent = handle.lock().await;
-            let reason = match agent.compact(Some(&events_tx)).await {
-                Ok(_) => TurnEndReason::Compacted,
-                Err(e) => TurnEndReason::Error(format!("{e:#}")),
-            };
+            let reason = guard_turn_task(async move {
+                let mut agent = handle.lock().await;
+                match agent.compact(Some(&events_tx)).await {
+                    Ok(_) => TurnEndReason::Compacted,
+                    Err(e) => TurnEndReason::Error(format!("{e:#}")),
+                }
+            })
+            .await;
             let _ = done_tx.send(reason);
         }));
     }
@@ -581,5 +606,18 @@ mod shell_tests {
         drop(shell);
 
         assert!(!answer.await.expect("shell sends an explicit decision"));
+    }
+
+    #[tokio::test]
+    async fn panicking_local_turn_becomes_an_explicit_error() {
+        let reason = guard_turn_task(async {
+            panic!("simulated turn panic");
+        })
+        .await;
+
+        assert_eq!(
+            reason,
+            TurnEndReason::Error("agent task panicked: simulated turn panic".into())
+        );
     }
 }
