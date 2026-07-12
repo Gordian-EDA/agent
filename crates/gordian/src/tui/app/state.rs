@@ -6,6 +6,12 @@ use std::time::{Duration, Instant};
 use super::{Entry, NoticeLevel, PendingApproval, TurnEndReason, UnwindPicker};
 use crate::tui::pricing::Ledger;
 
+#[derive(Clone, Debug)]
+pub(super) struct StashedPaste {
+    pub token: String,
+    pub text: String,
+}
+
 /// Static-ish status shown in the status bar.
 #[derive(Clone, Debug)]
 pub struct Status {
@@ -69,9 +75,10 @@ pub struct App {
     /// A prompt queued (via Tab) while a turn was running, auto-submitted when the
     /// turn ends so the next instruction isn't dropped. `None` when nothing waits.
     pub queued: Option<String>,
-    /// The full text of a large pasted block, stashed while the composer shows a
-    /// compact `[Pasted N chars]` placeholder; expanded back in on submit.
-    pub paste: Option<String>,
+    /// Large pasted blocks hidden behind compact, unique composer tokens. A
+    /// vector preserves multiple pastes in one prompt without overwriting the
+    /// first payload.
+    pub(super) pastes: Vec<StashedPaste>,
     /// Previously submitted prompts, oldest first.
     pub history: Vec<String>,
     /// While browsing history: the index being shown. `None` = live draft.
@@ -149,7 +156,7 @@ impl App {
             input: String::new(),
             cursor: 0,
             queued: None,
-            paste: None,
+            pastes: Vec::new(),
             history: Vec::new(),
             history_pos: None,
             draft: String::new(),

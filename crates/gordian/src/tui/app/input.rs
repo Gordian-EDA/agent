@@ -3,6 +3,7 @@
 //! `input`/`cursor`/`history` fields.
 
 use super::App;
+use super::state::StashedPaste;
 
 /// A paste longer than this many chars is collapsed to a `[Pasted N chars]`
 /// placeholder in the composer instead of flooding it with the raw text.
@@ -109,9 +110,17 @@ impl App {
     pub(super) fn paste_text(&mut self, text: String) {
         let n = text.chars().count();
         if n > PASTE_PLACEHOLDER_THRESHOLD {
-            self.paste = Some(text);
-            let placeholder = format!("[Pasted {n} chars]");
-            for c in placeholder.chars() {
+            let ordinal = self.pastes.len() + 1;
+            let token = if ordinal == 1 {
+                format!("[Pasted {n} chars]")
+            } else {
+                format!("[Pasted {n} chars #{ordinal}]")
+            };
+            self.pastes.push(StashedPaste {
+                token: token.clone(),
+                text,
+            });
+            for c in token.chars() {
                 self.insert_char(c);
             }
         } else {
@@ -133,18 +142,36 @@ impl App {
         self.clear_input();
     }
 
-    /// The composer text with any `[Pasted N chars]` placeholder expanded back to
-    /// the stashed paste payload (used at submit / queue time).
+    /// The composer text with each intact paste token expanded exactly once.
+    /// Scanning only the visible input prevents token-looking text inside one
+    /// payload from recursively expanding another payload.
     pub(super) fn expanded_input(&self) -> String {
-        match &self.paste {
-            Some(full) => {
-                // Replace the single placeholder token with the real text.
-                let n = full.chars().count();
-                let token = format!("[Pasted {n} chars]");
-                self.input.replacen(&token, full, 1)
-            }
-            None => self.input.clone(),
+        if self.pastes.is_empty() {
+            return self.input.clone();
         }
+        let mut out = String::with_capacity(self.input.len());
+        let mut used = vec![false; self.pastes.len()];
+        let mut at = 0usize;
+        while at < self.input.len() {
+            if let Some((idx, paste)) = self
+                .pastes
+                .iter()
+                .enumerate()
+                .find(|(idx, paste)| !used[*idx] && self.input[at..].starts_with(&paste.token))
+            {
+                out.push_str(&paste.text);
+                used[idx] = true;
+                at += paste.token.len();
+            } else {
+                let c = self.input[at..]
+                    .chars()
+                    .next()
+                    .expect("at is before the string end");
+                out.push(c);
+                at += c.len_utf8();
+            }
+        }
+        out
     }
 
     pub(super) fn char_len(&self) -> usize {
@@ -209,7 +236,7 @@ impl App {
     pub(super) fn clear_input(&mut self) {
         self.input.clear();
         self.cursor = 0;
-        self.paste = None;
+        self.pastes.clear();
         self.history_pos = None;
         self.completion_stem = None;
         self.completion_idx = None;

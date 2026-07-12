@@ -247,11 +247,30 @@ mod tests {
             a.input, "[Pasted 500 chars]",
             "composer shows the placeholder"
         );
-        assert_eq!(a.paste.as_deref(), Some(big.as_str()), "real text stashed");
+        assert_eq!(a.pastes.len(), 1, "real text stashed");
+        assert_eq!(a.pastes[0].text, big);
         // Submitting expands the placeholder back to the real pasted text.
         let action = a.update(Msg::Submit);
         assert_eq!(action, Action::SpawnTurn(big.clone()));
-        assert!(a.paste.is_none(), "the stash clears on submit");
+        assert!(a.pastes.is_empty(), "the stash clears on submit");
+    }
+
+    #[test]
+    fn multiple_large_pastes_expand_without_overwriting_each_other() {
+        let mut a = app();
+        let first = "x".repeat(300);
+        let second = "y".repeat(400);
+        a.update(Msg::Paste(first.clone()));
+        a.update(Msg::Paste(" between ".into()));
+        a.update(Msg::Paste(second.clone()));
+
+        assert_eq!(a.input, "[Pasted 300 chars] between [Pasted 400 chars #2]");
+        assert_eq!(a.pastes.len(), 2);
+        assert_eq!(
+            a.update(Msg::Submit),
+            Action::SpawnTurn(format!("{first} between {second}"))
+        );
+        assert!(a.pastes.is_empty());
     }
 
     #[test]
@@ -259,7 +278,7 @@ mod tests {
         let mut a = app();
         a.update(Msg::Paste("add a 10k resistor".into()));
         assert_eq!(a.input, "add a 10k resistor");
-        assert!(a.paste.is_none(), "no stash for a small paste");
+        assert!(a.pastes.is_empty(), "no stash for a small paste");
     }
 
     #[test]
@@ -780,7 +799,7 @@ mod tests {
             assert_eq!(a.update(msg), Action::None);
             assert_eq!(a.input, "draft");
             assert_eq!(a.cursor, 3);
-            assert!(a.paste.is_none());
+            assert!(a.pastes.is_empty());
             assert!(a.pending.is_some());
         }
     }
