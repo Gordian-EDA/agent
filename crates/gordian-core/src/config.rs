@@ -48,6 +48,13 @@ pub struct GordianConfig {
     pub project: ProjectConfig,
     /// Agent loop policy.
     pub agent: AgentConfig,
+    /// Compatibility sink for the retrieval settings shipped in schema v1
+    /// before retrieval support was removed.  The values no longer affect
+    /// behavior and are omitted when serializing new configs, but accepting
+    /// them keeps existing schema-v1 files loadable.
+    #[serde(default, rename = "retrieval", skip_serializing)]
+    #[doc(hidden)]
+    pub legacy_retrieval: Option<LegacyRetrievalConfig>,
     /// Independent post-generation review behavior.
     pub review: ReviewConfig,
     /// Tool-level defaults shared across schematic and PCB tools.
@@ -64,9 +71,30 @@ impl Default for GordianConfig {
             kicad: KicadConfig::default(),
             project: ProjectConfig::default(),
             agent: AgentConfig::default(),
+            legacy_retrieval: None,
             review: ReviewConfig::default(),
             tools: ToolConfig::default(),
             engines: EngineConfig::default(),
+        }
+    }
+}
+
+/// Retired schema-v1 retrieval settings retained only for deserialization.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+#[doc(hidden)]
+pub struct LegacyRetrievalConfig {
+    pub enabled: bool,
+    pub corpus_dir: Option<PathBuf>,
+    pub references_per_query: usize,
+}
+
+impl Default for LegacyRetrievalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            corpus_dir: None,
+            references_per_query: 3,
         }
     }
 }
@@ -632,6 +660,36 @@ mod tests {
         }))
         .unwrap_err();
         assert!(nested.to_string().contains("apiKEy"));
+    }
+
+    #[test]
+    fn retired_schema_v1_retrieval_section_remains_loadable() {
+        let cfg: GordianConfig = toml::from_str(
+            r#"
+            schemaVersion = 1
+
+            [retrieval]
+            enabled = true
+            corpusDir = "/tmp/reference-corpus"
+            referencesPerQuery = 3
+            "#,
+        )
+        .unwrap();
+
+        let legacy = cfg
+            .legacy_retrieval
+            .as_ref()
+            .expect("legacy retrieval section is accepted");
+        assert!(legacy.enabled);
+        assert_eq!(
+            legacy.corpus_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/reference-corpus"))
+        );
+        assert_eq!(legacy.references_per_query, 3);
+        cfg.validate().unwrap();
+
+        let serialized = toml::to_string(&cfg).unwrap();
+        assert!(!serialized.contains("retrieval"), "{serialized}");
     }
 
     #[test]
