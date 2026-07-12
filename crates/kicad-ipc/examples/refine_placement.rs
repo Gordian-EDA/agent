@@ -26,12 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Classify by reference designator prefix.
     let refs: Vec<(String, Vector2)> = fps
         .iter()
-        .map(|f| {
-            (
-                footprint_reference(f),
-                f.position.clone().unwrap_or_default(),
-            )
-        })
+        .map(|f| (footprint_reference(f), f.position.unwrap_or_default()))
         .collect();
     let pos = |pred: &dyn Fn(&str) -> bool| -> Vec<(String, Vector2)> {
         refs.iter().filter(|(r, _)| pred(r)).cloned().collect()

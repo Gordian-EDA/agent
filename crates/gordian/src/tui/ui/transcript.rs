@@ -296,16 +296,16 @@ fn draw_image(
     );
     let (cap_rect, img_rect) = split_caption(full_rect);
     text_label(&caption, Color::Cyan).render(cap_rect, &mut scratch);
-    if img_rect.height > 0 {
-        if let ImageState::Ready { proto, .. } = &mut app.images[idx].state {
-            proto.resize_encode_render(&Resize::Crop(None), img_rect, &mut scratch);
-        }
+    if img_rect.height > 0
+        && let ImageState::Ready { proto, .. } = &mut app.images[idx].state
+    {
+        proto.resize_encode_render(&Resize::Crop(None), img_rect, &mut scratch);
     }
     copy_visible_image_rows(&scratch, skip_rows, rect, f.buffer_mut());
 }
 
 fn image_preview_cols(width: u16) -> u16 {
-    width.min(IMAGE_PREVIEW_COLS).max(1)
+    width.clamp(1, IMAGE_PREVIEW_COLS)
 }
 
 fn copy_visible_image_rows(src: &Buffer, skip_rows: u16, dst_rect: Rect, dst: &mut Buffer) {
@@ -719,15 +719,13 @@ fn code_row_spans(ml: &MdLine, row: Vec<Span<'static>>, opening: bool) -> Vec<Sp
     for s in row {
         spans.push(Span::styled(s.content, bg(s.style)));
     }
-    if opening {
-        if let LineKind::Code { lang: Some(lang) } = &ml.kind {
-            spans.push(Span::styled(
-                format!("  {lang}"),
-                bg(Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM)),
-            ));
-        }
+    if opening && let LineKind::Code { lang: Some(lang) } = &ml.kind {
+        spans.push(Span::styled(
+            format!("  {lang}"),
+            bg(Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM)),
+        ));
     }
     spans
 }

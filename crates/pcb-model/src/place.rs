@@ -680,6 +680,7 @@ pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> Rou
         // Carry the custom outline so the router keeps copper inside the true shape.
         outline: problem.outline.clone(),
         escape_layers: Default::default(),
+            plane_nets: Default::default(),
     }
 }
 
@@ -732,15 +733,21 @@ pub trait RouteRanker {
 
     /// Richer route-quality key for equally-faulty placements. Existing rankers
     /// may rely on the default, which preserves the old fault-only behaviour.
-    /// Built-in rankers can override this to expose failed-net count, via count,
-    /// and routed wirelength without changing the oracle's injected-router shape.
-    fn rank_key(&self, rp: &RouteProblem) -> (usize, usize, usize, u64) {
-        (self.faults(rp), 0, 0, 0)
+    /// Built-in rankers can override this to expose geometry DRC count, failed-net
+    /// count, via count, and routed wirelength without changing the oracle's
+    /// injected-router shape.
+    fn rank_key(&self, rp: &RouteProblem) -> RouteRankKey {
+        (self.faults(rp), 0, 0, 0, 0)
     }
 }
 
-/// Full placement selection key: route quality first, then layout cost, then HPWL.
-pub type PlacementRankKey = ((usize, usize, usize, u64), u64, u64);
+pub type RouteRankKey = (usize, usize, usize, usize, u64);
+type PlacementRouteCacheKey = Vec<(String, i64, i64, i64)>;
+type PlacedCandidate = (usize, Option<PlacementRouteCacheKey>, PlaceResult);
+
+/// Full placement selection key: route quality first, then hint adherence, then
+/// layout cost, then HPWL.
+pub type PlacementRankKey = (RouteRankKey, u64, u64, u64);
 
 /// The routability oracle: a [`Placer`] that runs a portfolio of inner [`Placer`]s,
 /// routes each candidate with the injected [`RouteRanker`], and KEEPS the one that
@@ -772,13 +779,13 @@ impl RoutabilityOracle {
 
     /// Run every inner placer, route each unique LEGAL placement via the injected ranker,
     /// and return the lowest-ranked one. The rank key is `(route_rank,
-    /// layout_cost, hpwl)`: routing faults dominate (a worse-routed layout is
-    /// never chosen), richer route quality may decide among equally-routable
-    /// layouts, then layout cost/HPWL break final ties. Duplicate placements from
-    /// different placers share the route-ranker result, avoiding repeated routing
-    /// work while still keeping each candidate's own layout-cost tie-breaks. An
-    /// illegal candidate ranks saturated (it can never win). `placers[0]` wins
-    /// exact ties.
+    /// hint_penalty, layout_cost, hpwl)`: routing faults dominate (a worse-routed
+    /// layout is never chosen), richer route quality may decide among equally-
+    /// routable layouts, explicit placement hints decide next, then layout
+    /// cost/HPWL break final ties. Duplicate placements from different placers
+    /// share the route-ranker result, avoiding repeated routing work while still
+    /// keeping each candidate's own layout-cost tie-breaks. An illegal candidate
+    /// ranks saturated (it can never win). `placers[0]` wins exact ties.
     pub fn place_with_rank_key(
         &self,
         problem: &PlaceProblem,
@@ -788,49 +795,48 @@ impl RoutabilityOracle {
         // placement. Ranking then reuses route results for duplicate placement
         // geometries before the deterministic winner sort.
         use rayon::prelude::*;
-        let placed: Vec<(usize, PlaceResult)> = self
+        let placed: Vec<PlacedCandidate> = self
             .placers
             .par_iter()
             .enumerate()
             .map(|(i, p)| {
                 let r = p.place(problem, hints);
-                (i, r)
+                let placement_key = r.legal.then(|| placement_route_cache_key(&r.placements));
+                (i, placement_key, r)
             })
             .collect();
 
-        let mut unique_routes: BTreeMap<Vec<(String, i64, i64, i64)>, RouteProblem> =
-            BTreeMap::new();
-        for (_, result) in &placed {
-            if result.legal {
-                let placement_key = placement_route_cache_key(&result.placements);
+        let mut unique_routes: BTreeMap<PlacementRouteCacheKey, RouteProblem> = BTreeMap::new();
+        for (_, placement_key, result) in &placed {
+            if let Some(placement_key) = placement_key {
                 unique_routes
-                    .entry(placement_key)
+                    .entry(placement_key.clone())
                     .or_insert_with(|| to_route_problem(problem, &result.placements));
             }
         }
-        let route_rank_cache: BTreeMap<Vec<(String, i64, i64, i64)>, (usize, usize, usize, u64)> =
-            unique_routes
-                .par_iter()
-                .map(|(placement_key, rp)| (placement_key.clone(), self.ranker.rank_key(rp)))
-                .collect();
+        let route_rank_cache: BTreeMap<PlacementRouteCacheKey, RouteRankKey> = unique_routes
+            .par_iter()
+            .map(|(placement_key, rp)| (placement_key.clone(), self.ranker.rank_key(rp)))
+            .collect();
 
         let mut scored: Vec<(usize, PlacementRankKey, PlaceResult)> =
             Vec::with_capacity(placed.len());
-        for (i, r) in placed {
-            let key = if r.legal {
-                let placement_key = placement_route_cache_key(&r.placements);
+        for (i, placement_key, r) in placed {
+            let key = if let Some(placement_key) = placement_key {
                 let route_key = route_rank_cache
                     .get(&placement_key)
                     .copied()
                     .expect("legal placement was pre-ranked");
                 (
                     route_key,
+                    placement_hint_penalty_um(problem, hints, &r),
                     (r.report.layout_cost * 1000.0) as u64,
                     (r.report.hpwl * 1000.0) as u64,
                 )
             } else {
                 (
-                    (usize::MAX, usize::MAX, usize::MAX, u64::MAX),
+                    (usize::MAX, usize::MAX, usize::MAX, usize::MAX, u64::MAX),
+                    u64::MAX,
                     u64::MAX,
                     u64::MAX,
                 )
@@ -858,6 +864,59 @@ impl RoutabilityOracle {
     }
 }
 
+fn placement_hint_penalty_um(
+    problem: &PlaceProblem,
+    hints: &PlacementHints,
+    result: &PlaceResult,
+) -> u64 {
+    if hints.edge_seek.is_empty() && hints.corner_seek.is_empty() {
+        return 0;
+    }
+    let placements: BTreeMap<&str, &Placement> = result
+        .placements
+        .iter()
+        .map(|placement| (placement.reference.as_str(), placement))
+        .collect();
+    let mut penalty = 0.0_f64;
+    for reference in &hints.edge_seek {
+        let Some(part_idx) = problem
+            .parts
+            .iter()
+            .position(|part| part.reference == *reference)
+        else {
+            continue;
+        };
+        let Some(placement) = placements.get(reference.as_str()) else {
+            continue;
+        };
+        let (hw, hh) = rotated_courtyard_half(&problem.parts[part_idx], placement.rotation);
+        let dx = (placement.at.x - hw - problem.bounds.min_x)
+            .min(problem.bounds.max_x - (placement.at.x + hw));
+        let dy = (placement.at.y - hh - problem.bounds.min_y)
+            .min(problem.bounds.max_y - (placement.at.y + hh));
+        penalty += dx.min(dy).max(0.0);
+    }
+    for reference in &hints.corner_seek {
+        let Some(part_idx) = problem
+            .parts
+            .iter()
+            .position(|part| part.reference == *reference)
+        else {
+            continue;
+        };
+        let Some(placement) = placements.get(reference.as_str()) else {
+            continue;
+        };
+        let (hw, hh) = rotated_courtyard_half(&problem.parts[part_idx], placement.rotation);
+        let dx = (placement.at.x - hw - problem.bounds.min_x)
+            .min(problem.bounds.max_x - (placement.at.x + hw));
+        let dy = (placement.at.y - hh - problem.bounds.min_y)
+            .min(problem.bounds.max_y - (placement.at.y + hh));
+        penalty += dx.max(0.0) + dy.max(0.0);
+    }
+    (penalty * 1000.0).round() as u64
+}
+
 impl Placer for RoutabilityOracle {
     fn name(&self) -> &'static str {
         "oracle"
@@ -868,7 +927,7 @@ impl Placer for RoutabilityOracle {
     }
 }
 
-fn placement_route_cache_key(placements: &[Placement]) -> Vec<(String, i64, i64, i64)> {
+fn placement_route_cache_key(placements: &[Placement]) -> PlacementRouteCacheKey {
     let mut key: Vec<_> = placements
         .iter()
         .map(|p| {
@@ -931,10 +990,10 @@ mod tests {
             0
         }
 
-        fn rank_key(&self, rp: &RouteProblem) -> (usize, usize, usize, u64) {
+        fn rank_key(&self, rp: &RouteProblem) -> (usize, usize, usize, usize, u64) {
             let x = rp.obstacles.first().map_or(0.0, |o| o.center.x);
             // Pretend left placement needs one via and right placement needs none.
-            (0, 0, if x < 5.0 { 1 } else { 0 }, 0)
+            (0, 0, 0, if x < 5.0 { 1 } else { 0 }, 0)
         }
     }
 
@@ -989,6 +1048,167 @@ mod tests {
         );
     }
 
+    struct EqualRanker;
+
+    impl RouteRanker for EqualRanker {
+        fn faults(&self, _rp: &RouteProblem) -> usize {
+            0
+        }
+
+        fn rank_key(&self, _rp: &RouteProblem) -> (usize, usize, usize, usize, u64) {
+            (0, 0, 0, 0, 0)
+        }
+    }
+
+    struct FixedXyPlacer {
+        x: f64,
+        y: f64,
+        layout_cost: f64,
+    }
+
+    impl Placer for FixedXyPlacer {
+        fn name(&self) -> &'static str {
+            "fixed-xy"
+        }
+
+        fn place(&self, _problem: &PlaceProblem, _hints: &PlacementHints) -> PlaceResult {
+            PlaceResult {
+                placements: vec![Placement {
+                    reference: "P1".to_owned(),
+                    at: Point2 {
+                        x: self.x,
+                        y: self.y,
+                    },
+                    rotation: 0.0,
+                }],
+                legal: true,
+                report: PlaceReport {
+                    overlaps_resolved: 0,
+                    out_of_bounds_clamps: 0,
+                    hpwl: self.layout_cost,
+                    layout_cost: self.layout_cost,
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn routability_oracle_honors_edge_seek_before_layout_cost() {
+        let problem = PlaceProblem {
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 10.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            parts: vec![Part {
+                reference: "P1".to_owned(),
+                courtyard_w: 1.0,
+                courtyard_h: 1.0,
+                pads: vec![PartPad {
+                    number: "1".to_owned(),
+                    offset: Point2 { x: 0.0, y: 0.0 },
+                    width: 0.4,
+                    height: 0.4,
+                    layers: vec![LayerRef::top()],
+                    net: Some("N".to_owned()),
+                }],
+                locked: None,
+            }],
+            keepouts: vec![],
+            outline: None,
+        };
+        let oracle = RoutabilityOracle::new(
+            vec![
+                Box::new(FixedPlacer {
+                    x: 5.0,
+                    layout_cost: 1.0,
+                }),
+                Box::new(FixedPlacer {
+                    x: 0.5,
+                    layout_cost: 100.0,
+                }),
+            ],
+            Box::new(EqualRanker),
+        );
+
+        let result = oracle.place(
+            &problem,
+            &PlacementHints {
+                edge_seek: vec!["P1".to_owned()],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            result.placements[0].at.x, 0.5,
+            "an equally routed edge-seek part should stay on the perimeter before layout-cost tie-breaks"
+        );
+    }
+
+    #[test]
+    fn routability_oracle_honors_corner_seek_before_layout_cost() {
+        let problem = PlaceProblem {
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 10.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            parts: vec![Part {
+                reference: "P1".to_owned(),
+                courtyard_w: 1.0,
+                courtyard_h: 1.0,
+                pads: vec![PartPad {
+                    number: "1".to_owned(),
+                    offset: Point2 { x: 0.0, y: 0.0 },
+                    width: 0.4,
+                    height: 0.4,
+                    layers: vec![LayerRef::top()],
+                    net: Some("N".to_owned()),
+                }],
+                locked: None,
+            }],
+            keepouts: vec![],
+            outline: None,
+        };
+        let oracle = RoutabilityOracle::new(
+            vec![
+                Box::new(FixedXyPlacer {
+                    x: 0.5,
+                    y: 5.0,
+                    layout_cost: 1.0,
+                }),
+                Box::new(FixedXyPlacer {
+                    x: 0.5,
+                    y: 0.5,
+                    layout_cost: 100.0,
+                }),
+            ],
+            Box::new(EqualRanker),
+        );
+
+        let result = oracle.place(
+            &problem,
+            &PlacementHints {
+                corner_seek: vec!["P1".to_owned()],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            result.placements[0].at,
+            Point2 { x: 0.5, y: 0.5 },
+            "an equally routed corner-seek part should prefer a board corner before layout-cost tie-breaks"
+        );
+    }
+
     struct CountingRanker {
         calls: Arc<AtomicUsize>,
     }
@@ -998,9 +1218,9 @@ mod tests {
             0
         }
 
-        fn rank_key(&self, _rp: &RouteProblem) -> (usize, usize, usize, u64) {
+        fn rank_key(&self, _rp: &RouteProblem) -> (usize, usize, usize, usize, u64) {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            (0, 0, 0, 0)
+            (0, 0, 0, 0, 0)
         }
     }
 
@@ -1057,7 +1277,7 @@ mod tests {
             1,
             "identical placement geometry should be routed only once"
         );
-        assert_eq!(key.0, (0, 0, 0, 0));
+        assert_eq!(key.0, (0, 0, 0, 0, 0));
         assert_eq!(
             result.report.layout_cost, 5.0,
             "duplicate route rank must still leave layout cost as the tie-break"

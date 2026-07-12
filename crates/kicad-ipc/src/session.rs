@@ -140,11 +140,10 @@ impl SessionManager {
     }
 
     fn attach_or_launch(&self, board: &Path) -> Result<Session, Error> {
-        if self.attach_running {
-            match Session::connect_running_board(board) {
-                Ok(session) => return Ok(session),
-                Err(_) => {}
-            }
+        if self.attach_running
+            && let Ok(session) = Session::connect_running_board(board)
+        {
+            return Ok(session);
         }
         Session::launch_headless(board)
     }

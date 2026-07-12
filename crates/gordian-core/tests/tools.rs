@@ -1436,3 +1436,55 @@ fn render_board_after_route_returns_ok_and_png_magic() {
         "IMAGE_PATH_KEY must equal png_path"
     );
 }
+
+#[test]
+fn four_layer_plane_fanout_passes_kicad_drc() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    // Power-heavy mini board: enough VCC/GND pads for the plane assignment,
+    // one signal net so routing still runs.
+    let yaml = "version: 1\nblocks: {main: {components: {\
+R1: {part: 'Device:R', footprint: 'Resistor_SMD:R_0603_1608Metric', pins: {1: VCC, 2: S}}, \
+R2: {part: 'Device:R', footprint: 'Resistor_SMD:R_0603_1608Metric', pins: {1: S, 2: GND}}, \
+C1: {part: 'Device:C', footprint: 'Capacitor_SMD:C_0603_1608Metric', pins: {1: VCC, 2: GND}}, \
+C2: {part: 'Device:C', footprint: 'Capacitor_SMD:C_0603_1608Metric', pins: {1: VCC, 2: GND}}}}}";
+    let applied = run_tool(
+        "apply_design",
+        serde_json::json!({ "yaml": yaml, "__commit": true }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(applied["ok"], serde_json::json!(true), "apply: {applied}");
+
+    let out = run_tool(
+        "regenerate_board",
+        serde_json::json!({
+            "bounds": {"min_x": 0.0, "min_y": 0.0, "max_x": 30.0, "max_y": 20.0},
+            "rules": {"layer_count": 4},
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert!(out["error"].is_null(), "{out}");
+    let board_text = std::fs::read_to_string(ctx.pcb_path()).unwrap();
+    assert!(
+        board_text.contains("(layer \"In1.Cu\")") && board_text.contains("(layer \"In2.Cu\")"),
+        "seed must carry plane zones on both inner layers"
+    );
+
+    run_tool("place_board", serde_json::json!({}), &ctx).unwrap();
+    let routed = run_tool("route_board", serde_json::json!({}), &ctx).unwrap();
+    assert!(
+        routed["failed"].as_array().is_some_and(Vec::is_empty),
+        "plane-fanout board must route cleanly: {routed}"
+    );
+
+    let checked = run_tool("check_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(
+        checked["ok"],
+        serde_json::json!(true),
+        "kicad-cli DRC must accept via-to-plane power connectivity: {checked}"
+    );
+}

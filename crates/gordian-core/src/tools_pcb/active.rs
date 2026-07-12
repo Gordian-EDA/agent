@@ -13,9 +13,16 @@ pub fn save_live_board(ctx: &AgentRuntime) -> std::result::Result<PathBuf, Strin
     if !path.exists() {
         return Err("no board exists yet — run regenerate_board first".to_owned());
     }
-    ctx.kicad()
+    // A wedged live session must not block file-based consumers: the offline
+    // write paths keep the on-disk board current, so drop the session and hand
+    // back the file.
+    if ctx
+        .kicad()
         .with_session(&path, |session| session.kicad().save())
-        .map_err(|e| format!("could not open/save live KiCAD board: {e}"))?;
+        .is_err()
+    {
+        ctx.close_kicad_session();
+    }
     Ok(path)
 }
 
@@ -65,7 +72,7 @@ pub(super) fn imported_placements(board: &ImportedBoard) -> Vec<Placement> {
         .iter()
         .map(|p| Placement {
             reference: p.reference.clone(),
-            at: p.at.clone(),
+            at: p.at,
             rotation: p.rotation as f64,
         })
         .collect()

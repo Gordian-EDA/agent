@@ -657,6 +657,7 @@ pub(super) fn best_decoupling_anchor(
 /// bank — then shifts the whole row PAST one vertical edge (the side the crystal
 /// idiom did not claim) so every GND riser drops clear of the package. Returns
 /// `None` if nothing qualifies (the caps fall back to the generic loop).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn place_decoupling(
     items: &[Item],
     inc: &Incidence,
@@ -834,6 +835,7 @@ pub(super) fn place_i2c_pullup(
     ])
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn place_crystal(
     items: &[Item],
     inc: &Incidence,
@@ -910,7 +912,7 @@ pub(super) fn place_crystal(
             return None;
         };
         // The two osc pins must be a close pair (consecutive pins of one port).
-        if ::geom::Point2::from(paa).dist(pba.into()) > 12.7 {
+        if paa.dist(pba) > 12.7 {
             return None;
         }
         let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
@@ -1203,12 +1205,12 @@ fn order_anchors(items: &[Item], inc: &Incidence, anchors: &[usize]) -> Vec<usiz
     // One hop: a 2-pin satellite bridging two anchors through its SIGNAL nets (a series R
     // between two ICs). Rail-only bridges (a decoupling cap) are skipped — they'd link
     // every anchor through the shared supply.
-    for si in 0..items.len() {
-        if items[si].geom.pins.len() != 2 {
+    for item in items {
+        if item.geom.pins.len() != 2 {
             continue;
         }
         let mut ancs: Vec<usize> = Vec::new();
-        for (_, _, net) in &items[si].pins {
+        for (_, _, net) in &item.pins {
             if let Some(net) = net {
                 if is_power_net(net) {
                     continue;

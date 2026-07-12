@@ -46,6 +46,7 @@ pub use crate::problem::FailedNet;
 
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "naive";
+const VIA_POINT_KEY_SCALE: f64 = 1000.0;
 
 /// The inner copper layers that carry a solid GND/VCC plane, CENTRED in the stack:
 /// 4-layer → In1,In2 (`{1,2}`); 6-layer → In2,In3 (`{2,3}`, leaving In1/In4 as signal);
@@ -146,15 +147,16 @@ pub fn route_orthogonal_lenient(problem: &RouteProblem) -> RouteResult {
 /// ties those and reduces vias/wirelength. This relieves the greedy router's corridor
 /// contention without a full rip-up engine.
 fn route_iterated(problem: &RouteProblem, costs: AStarCosts) -> RouteResult {
+    let metrics = net_order_metrics(problem);
     let empty = std::collections::BTreeSet::new();
-    let mut best = route_order_portfolio(problem, costs, &empty);
+    let mut best = route_order_portfolio(problem, costs, &empty, &metrics);
     for _ in 0..3 {
         if best.failed.is_empty() {
             break;
         }
         let pri: std::collections::BTreeSet<String> =
             best.failed.iter().map(|f| f.connection.clone()).collect();
-        let cand = route_order_portfolio(problem, costs, &pri);
+        let cand = route_order_portfolio(problem, costs, &pri, &metrics);
         if grid_candidate_better(problem, &cand, &best) {
             best = cand;
         } else {
@@ -164,38 +166,44 @@ fn route_iterated(problem: &RouteProblem, costs: AStarCosts) -> RouteResult {
     best
 }
 
-/// Try a small deterministic net-order portfolio on a fresh grid. The legacy
-/// shortest-first order is always first; extra orders are paid only if it leaves
-/// failures, and are accepted only when the shared route-quality key improves.
-/// This borrows the same "route-order portfolio" idea used by negotiated routing
-/// while preserving the grid router's greedy semantics and fast clean-board path.
+/// Try a small deterministic net-order portfolio on a fresh grid. The baseline
+/// shortest-first order is always first; extra orders are paid when it leaves
+/// failures or when the clean result still spent vias, and are accepted only when
+/// the shared route-quality key improves. This borrows the same "route-order
+/// portfolio" idea used by negotiated routing while preserving the grid router's
+/// greedy semantics and fast clean, via-free board path.
 fn route_order_portfolio(
     problem: &RouteProblem,
     costs: AStarCosts,
     priority: &std::collections::BTreeSet<String>,
+    metrics: &[NetOrderMetric],
 ) -> RouteResult {
-    let mut orders = net_order_portfolio(problem, priority);
+    let mut orders = net_order_portfolio_with_metrics(problem, priority, metrics);
     let first = orders
         .next()
-        .expect("net_order_portfolio always yields the legacy order");
+        .expect("net_order_portfolio always yields the baseline order");
     let mut best = route_with_order(problem, costs, first);
-    reconcile(problem, &mut best);
+    reconcile_with_options(problem, &mut best, costs.diag != u32::MAX);
 
-    if best.failed.is_empty() {
+    if grid_portfolio_can_short_circuit(&best) {
         return best;
     }
 
     for order in orders {
         let mut cand = route_with_order(problem, costs, order);
-        reconcile(problem, &mut cand);
+        reconcile_with_options(problem, &mut cand, costs.diag != u32::MAX);
         if grid_candidate_better(problem, &cand, &best) {
             best = cand;
-            if best.failed.is_empty() {
+            if grid_portfolio_can_short_circuit(&best) {
                 break;
             }
         }
     }
     best
+}
+
+fn grid_portfolio_can_short_circuit(result: &RouteResult) -> bool {
+    result.failed.is_empty() && result.solution.vias.is_empty()
 }
 
 fn grid_quality(problem: &RouteProblem, result: &RouteResult) -> RouteQuality {
@@ -208,7 +216,7 @@ fn grid_quality(problem: &RouteProblem, result: &RouteResult) -> RouteQuality {
 
 /// Is `candidate` a better grid-router result than `incumbent`? Routability is
 /// primary, then failed-net count, then fewer vias, then shorter copper. Exact
-/// ties keep the incumbent so strict/legacy order remains the deterministic path.
+/// ties keep the incumbent so the baseline order remains the deterministic path.
 fn grid_candidate_better(
     problem: &RouteProblem,
     candidate: &RouteResult,
@@ -247,7 +255,22 @@ pub fn route_lenient(problem: &RouteProblem) -> RouteResult {
 /// engine must never emit copper that fails DRC — then drop any net left
 /// unconnected or shorted. Every dropped net is reported failed, so `failed`
 /// never undercounts and the surviving copper is DRC-clean.
+#[cfg(test)]
 fn reconcile(problem: &RouteProblem, result: &mut RouteResult) {
+    reconcile_with_options(problem, result, false);
+}
+
+fn reconcile_with_options(
+    problem: &RouteProblem,
+    result: &mut RouteResult,
+    allow_octilinear_shortcuts: bool,
+) {
+    if allow_octilinear_shortcuts {
+        shortcut_octilinear_traces(problem, &mut result.solution);
+    }
+    pull_orthogonal_trace_corners(problem, &mut result.solution);
+    drop_duplicate_vias(&mut result.solution);
+    drop_covered_vias(problem, &mut result.solution);
     let mut dropped = crate::lint::drop_violating_copper(problem, &mut result.solution);
     dropped.extend(crate::lint::drop_unconnected_copper(
         problem,
@@ -270,6 +293,270 @@ fn reconcile(problem: &RouteProblem, result: &mut RouteResult) {
         })
         .collect();
     result.failed.extend(added);
+}
+
+/// Pull grid trace corners tight with conservative straight/45-degree shortcuts.
+/// A candidate replaces `p[i]..p[j]` with the direct segment only when it shortens
+/// copper and introduces no new lint finding.
+fn shortcut_octilinear_traces(problem: &RouteProblem, solution: &mut RouteSolution) {
+    if !has_octilinear_shortcut_candidate_shape(solution) {
+        return;
+    }
+
+    let mut baseline = crate::lint::lint(problem, solution);
+    let mut lint_budget = 256usize;
+
+    loop {
+        let mut improved = false;
+        'candidate: for ti in 0..solution.traces.len() {
+            let n = solution.traces[ti].path.len();
+            if n < 3 {
+                continue;
+            }
+            for span in (2..n).rev() {
+                for i in 0..(n - span) {
+                    if lint_budget == 0 {
+                        return;
+                    }
+                    let j = i + span;
+                    let a = solution.traces[ti].path[i];
+                    let b = solution.traces[ti].path[j];
+                    if !is_octilinear_segment(a, b) {
+                        continue;
+                    }
+
+                    let old_len = path_len(&solution.traces[ti].path[i..=j]);
+                    let new_len = a.dist(b);
+                    if new_len + 0.01 >= old_len {
+                        continue;
+                    }
+
+                    let mut candidate = solution.clone();
+                    candidate.traces[ti].path.drain(i + 1..j);
+                    let findings = crate::lint::lint(problem, &candidate);
+                    lint_budget -= 1;
+                    if !introduces_new_findings(&baseline, &findings) {
+                        *solution = candidate;
+                        baseline = findings;
+                        improved = true;
+                        break 'candidate;
+                    }
+                }
+            }
+        }
+
+        if !improved {
+            break;
+        }
+    }
+}
+
+fn has_octilinear_shortcut_candidate_shape(solution: &RouteSolution) -> bool {
+    solution.traces.iter().any(|trace| {
+        let n = trace.path.len();
+        if n < 3 {
+            return false;
+        }
+        for span in (2..n).rev() {
+            for i in 0..(n - span) {
+                let j = i + span;
+                let a = trace.path[i];
+                let b = trace.path[j];
+                if !is_octilinear_segment(a, b) {
+                    continue;
+                }
+                let old_len = path_len(&trace.path[i..=j]);
+                let new_len = a.dist(b);
+                if new_len + 0.01 < old_len {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+}
+
+/// Line-pull grid detours after path emission. A candidate replaces `a..b` with
+/// one of the two Manhattan L-shapes and is accepted only when it shortens copper
+/// without introducing any new lint finding, so via anchors and existing DRC
+/// semantics remain under the same oracle as reconciliation.
+fn pull_orthogonal_trace_corners(problem: &RouteProblem, solution: &mut RouteSolution) {
+    if !has_orthogonal_pull_candidate_shape(solution) {
+        return;
+    }
+
+    let mut baseline = crate::lint::lint(problem, solution);
+    let mut lint_budget = 256usize;
+
+    loop {
+        let mut improved = false;
+        'candidate: for ti in 0..solution.traces.len() {
+            let n = solution.traces[ti].path.len();
+            if n < 4 {
+                continue;
+            }
+            for span in (3..n).rev() {
+                for i in 0..(n - span) {
+                    if lint_budget == 0 {
+                        return;
+                    }
+                    let j = i + span;
+                    let a = solution.traces[ti].path[i];
+                    let b = solution.traces[ti].path[j];
+                    if (a.x - b.x).abs() < geom::EPS || (a.y - b.y).abs() < geom::EPS {
+                        continue;
+                    }
+
+                    let old_len = path_len(&solution.traces[ti].path[i..=j]);
+                    for corner in [Point2 { x: a.x, y: b.y }, Point2 { x: b.x, y: a.y }] {
+                        let new_len = a.dist(corner) + corner.dist(b);
+                        if new_len + 0.01 >= old_len {
+                            continue;
+                        }
+
+                        let mut candidate = solution.clone();
+                        candidate.traces[ti].path.splice(i + 1..j, [corner]);
+                        candidate.traces[ti].path =
+                            geom::Polyline::new(candidate.traces[ti].path.clone())
+                                .simplify()
+                                .into_points();
+                        let findings = crate::lint::lint(problem, &candidate);
+                        lint_budget -= 1;
+                        if !introduces_new_findings(&baseline, &findings)
+                            && candidate.metrics().wirelength + 1e-9 < solution.metrics().wirelength
+                        {
+                            *solution = candidate;
+                            baseline = findings;
+                            improved = true;
+                            break 'candidate;
+                        }
+                        if lint_budget == 0 {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !improved {
+            break;
+        }
+    }
+}
+
+fn has_orthogonal_pull_candidate_shape(solution: &RouteSolution) -> bool {
+    solution.traces.iter().any(|trace| {
+        let n = trace.path.len();
+        if n < 4 {
+            return false;
+        }
+        for span in (3..n).rev() {
+            for i in 0..(n - span) {
+                let j = i + span;
+                let a = trace.path[i];
+                let b = trace.path[j];
+                if (a.x - b.x).abs() < geom::EPS || (a.y - b.y).abs() < geom::EPS {
+                    continue;
+                }
+                let old_len = path_len(&trace.path[i..=j]);
+                let new_len = (a.x - b.x).abs() + (a.y - b.y).abs();
+                if new_len + 0.01 < old_len {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+}
+
+fn is_octilinear_segment(a: Point2, b: Point2) -> bool {
+    let dx = (a.x - b.x).abs();
+    let dy = (a.y - b.y).abs();
+    dx < geom::EPS || dy < geom::EPS || (dx - dy).abs() < 0.01
+}
+
+fn path_len(path: &[Point2]) -> f64 {
+    path.windows(2).map(|w| w[0].dist(w[1])).sum()
+}
+
+fn drop_duplicate_vias(solution: &mut RouteSolution) {
+    let mut seen = std::collections::BTreeSet::new();
+    solution.vias.retain(|via| {
+        seen.insert((
+            via.connection.clone(),
+            via.at.quantized_key(VIA_POINT_KEY_SCALE),
+            (via.diameter * 1000.0).round() as i64,
+            (via.drill * 1000.0).round() as i64,
+            via_span_key(&via.span),
+        ))
+    });
+}
+
+fn via_span_key(span: &ViaSpan) -> (u32, u32, bool, bool) {
+    match span {
+        ViaSpan::Through => (0, 0, false, false),
+        ViaSpan::Partial { from, to, micro } => (*from, *to, *micro, true),
+    }
+}
+
+fn drop_covered_vias(problem: &RouteProblem, solution: &mut RouteSolution) {
+    let mut baseline = crate::lint::lint(problem, solution);
+    let mut idx = 0usize;
+    while idx < solution.vias.len() {
+        if !via_is_covered_by_another(problem, solution, idx) {
+            idx += 1;
+            continue;
+        }
+
+        let mut candidate = solution.clone();
+        candidate.vias.remove(idx);
+        let findings = crate::lint::lint(problem, &candidate);
+        if !introduces_new_findings(&baseline, &findings)
+            && candidate.metrics().via_count < solution.metrics().via_count
+        {
+            *solution = candidate;
+            baseline = findings;
+        } else {
+            idx += 1;
+        }
+    }
+}
+
+fn introduces_new_findings(
+    baseline: &[crate::lint::DrcViolation],
+    candidate: &[crate::lint::DrcViolation],
+) -> bool {
+    candidate
+        .iter()
+        .any(|finding| !baseline.iter().any(|known| known == finding))
+}
+
+fn via_is_covered_by_another(problem: &RouteProblem, solution: &RouteSolution, idx: usize) -> bool {
+    let via = &solution.vias[idx];
+    let Some(span) = via_layer_span(problem, &via.span) else {
+        return false;
+    };
+    solution.vias.iter().enumerate().any(|(other_idx, other)| {
+        other_idx != idx
+            && other.connection == via.connection
+            && other.at.dist(via.at) < geom::EPS
+            && via_layer_span(problem, &other.span).is_some_and(|other_span| {
+                other_span.0 <= span.0
+                    && other_span.1 >= span.1
+                    && (other_span.0, other_span.1) != span
+            })
+    })
+}
+
+fn via_layer_span(problem: &RouteProblem, span: &ViaSpan) -> Option<(u32, u32)> {
+    match span {
+        ViaSpan::Through => Some((0, problem.layer_count.saturating_sub(1))),
+        ViaSpan::Partial { from, to, .. } => {
+            let lo = (*from).min(*to);
+            let hi = (*from).max(*to);
+            (hi < problem.layer_count).then_some((lo, hi))
+        }
+    }
 }
 
 /// Route `problem` with explicit design constants and an optional `priority` set of
@@ -355,6 +642,7 @@ fn route_with_order(problem: &RouteProblem, costs: AStarCosts, order: Vec<usize>
             layer_mask,
             ..costs
         };
+        let prefer_planar_leg = prefer_planar_tree_leg(problem, &conn.name);
 
         // The routed tree starts as point 0's cell; each further point is
         // routed to the nearest cell already in the tree. A fine-pitch peripheral
@@ -398,7 +686,18 @@ fn route_with_order(problem: &RouteProblem, costs: AStarCosts, order: Vec<usize>
                 &mut vias,
             );
             // A* from the new point's cell to the nearest cell of the tree.
-            let path = astar::search(&grid, conn_idx, &starts, &tree_cells, costs);
+            // For same-layer legs, try a planar search first: it skips the
+            // expensive via-barrel scan and avoids spending vias when a legal
+            // same-layer detour exists. If planar routing is impossible, fall
+            // back to the caller's via-enabled search.
+            let path = route_tree_leg(
+                &grid,
+                conn_idx,
+                &starts,
+                &tree_cells,
+                costs,
+                prefer_planar_leg,
+            );
             let Some(path) = path else {
                 net_failed = Some(format!(
                     "no grid path from point {pi} to the routed tree (congestion or enclosure)"
@@ -434,6 +733,42 @@ fn route_with_order(problem: &RouteProblem, costs: AStarCosts, order: Vec<usize>
     }
 }
 
+fn route_tree_leg(
+    grid: &RouteGrid,
+    conn_idx: usize,
+    starts: &[State],
+    tree_cells: &[State],
+    costs: AStarCosts,
+    prefer_planar: bool,
+) -> Option<Vec<State>> {
+    if prefer_planar && costs.allow_via && same_layer_reachable(starts, tree_cells) {
+        let planar_costs = AStarCosts {
+            allow_via: false,
+            ..costs
+        };
+        if let Some(path) = astar::search(grid, conn_idx, starts, tree_cells, planar_costs) {
+            return Some(path);
+        }
+    }
+    astar::search(grid, conn_idx, starts, tree_cells, costs)
+}
+
+fn same_layer_reachable(starts: &[State], targets: &[State]) -> bool {
+    starts
+        .iter()
+        .any(|start| targets.iter().any(|target| start.layer == target.layer))
+}
+
+fn prefer_planar_tree_leg(problem: &RouteProblem, connection: &str) -> bool {
+    !problem.obstacles.iter().any(|obstacle| {
+        obstacle.kind.starts_with("route-")
+            && !obstacle
+                .connected_to
+                .iter()
+                .any(|owner| owner == connection)
+    })
+}
+
 fn terminal_tree_route_key(tree_cells: &[State], terminal: State) -> (usize, u64) {
     tree_cells
         .iter()
@@ -464,17 +799,23 @@ fn net_order(problem: &RouteProblem, priority: &std::collections::BTreeSet<Strin
 struct NetOrderMetric {
     pin_count: usize,
     half_perimeter: f64,
+    segment_obstacle_pressure: u64,
     obstacle_pressure: u64,
+    crossing_pressure: usize,
 }
 
 fn net_order_metrics(problem: &RouteProblem) -> Vec<NetOrderMetric> {
+    let crossing_pressures = connection_crossing_pressures(problem);
     problem
         .connections
         .iter()
-        .map(|conn| NetOrderMetric {
+        .enumerate()
+        .map(|(idx, conn)| NetOrderMetric {
             pin_count: conn.points_to_connect.len(),
             half_perimeter: conn.half_perimeter(),
+            segment_obstacle_pressure: connection_segment_obstacle_pressure(problem, conn),
             obstacle_pressure: connection_obstacle_pressure(problem, conn),
+            crossing_pressure: crossing_pressures[idx],
         })
         .collect()
 }
@@ -482,9 +823,11 @@ fn net_order_metrics(problem: &RouteProblem) -> Vec<NetOrderMetric> {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum NetOrderKind {
     ShortestFirst,
+    SegmentObstaclePressure,
     ObstaclePressure,
     LongestFirst,
     MostPinsFirst,
+    CrossingPressure,
     Name,
 }
 
@@ -529,8 +872,18 @@ fn priority_net_cmp(
         .cmp(&metrics[a].pin_count)
         .then_with(|| {
             metrics[b]
+                .segment_obstacle_pressure
+                .cmp(&metrics[a].segment_obstacle_pressure)
+        })
+        .then_with(|| {
+            metrics[b]
                 .obstacle_pressure
                 .cmp(&metrics[a].obstacle_pressure)
+        })
+        .then_with(|| {
+            metrics[b]
+                .crossing_pressure
+                .cmp(&metrics[a].crossing_pressure)
         })
         .then_with(|| {
             metrics[b]
@@ -555,6 +908,24 @@ fn net_order_kind_cmp(
         NetOrderKind::ShortestFirst => metrics[a]
             .half_perimeter
             .total_cmp(&metrics[b].half_perimeter)
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            }),
+        NetOrderKind::SegmentObstaclePressure => metrics[b]
+            .segment_obstacle_pressure
+            .cmp(&metrics[a].segment_obstacle_pressure)
+            .then_with(|| {
+                metrics[b]
+                    .obstacle_pressure
+                    .cmp(&metrics[a].obstacle_pressure)
+            })
+            .then_with(|| {
+                metrics[b]
+                    .half_perimeter
+                    .total_cmp(&metrics[a].half_perimeter)
+            })
             .then_with(|| {
                 problem.connections[a]
                     .name
@@ -594,28 +965,62 @@ fn net_order_kind_cmp(
                     .name
                     .cmp(&problem.connections[b].name)
             }),
+        NetOrderKind::CrossingPressure => metrics[b]
+            .crossing_pressure
+            .cmp(&metrics[a].crossing_pressure)
+            .then_with(|| {
+                metrics[b]
+                    .segment_obstacle_pressure
+                    .cmp(&metrics[a].segment_obstacle_pressure)
+            })
+            .then_with(|| {
+                metrics[b]
+                    .obstacle_pressure
+                    .cmp(&metrics[a].obstacle_pressure)
+            })
+            .then_with(|| {
+                metrics[b]
+                    .half_perimeter
+                    .total_cmp(&metrics[a].half_perimeter)
+            })
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            }),
         NetOrderKind::Name => problem.connections[a]
             .name
             .cmp(&problem.connections[b].name),
     }
 }
 
+#[cfg(test)]
 fn net_order_portfolio(
     problem: &RouteProblem,
     priority: &std::collections::BTreeSet<String>,
 ) -> std::vec::IntoIter<Vec<usize>> {
     let metrics = net_order_metrics(problem);
+    net_order_portfolio_with_metrics(problem, priority, &metrics)
+}
+
+fn net_order_portfolio_with_metrics(
+    problem: &RouteProblem,
+    priority: &std::collections::BTreeSet<String>,
+    metrics: &[NetOrderMetric],
+) -> std::vec::IntoIter<Vec<usize>> {
     let mut orders = Vec::new();
     for kind in [
         NetOrderKind::ShortestFirst,
+        NetOrderKind::SegmentObstaclePressure,
         NetOrderKind::ObstaclePressure,
         NetOrderKind::LongestFirst,
         NetOrderKind::MostPinsFirst,
+        NetOrderKind::CrossingPressure,
         NetOrderKind::Name,
     ] {
         push_unique_order(
             &mut orders,
-            net_order_by_with_metrics(problem, priority, kind, &metrics),
+            net_order_by_with_metrics(problem, priority, kind, metrics),
         );
     }
     orders.into_iter()
@@ -666,6 +1071,189 @@ fn connection_obstacle_pressure(problem: &RouteProblem, conn: &Connection) -> u6
         }
     }
     pressure
+}
+
+fn connection_segment_obstacle_pressure(problem: &RouteProblem, conn: &Connection) -> u64 {
+    let expand = problem.clearance + problem.net_width(&conn.name) / 2.0;
+    let mut pressure = 0;
+    for segment in connection_tree_segments_for_pressure(conn) {
+        let line = geom::Segment::new(segment.a, segment.b);
+        for obstacle in &problem.obstacles {
+            if obstacle.connected_to.iter().any(|net| net == &conn.name) {
+                continue;
+            }
+            if !segment
+                .layers
+                .iter()
+                .any(|layer| obstacle.layers.iter().any(|ob_layer| ob_layer == layer))
+            {
+                continue;
+            }
+            let obstacle_rect = geom::Rect::from_center_half(
+                obstacle.center,
+                (obstacle.width / 2.0, obstacle.height / 2.0),
+            )
+            .inflate(expand);
+            if obstacle_rect.dist_to_segment(line) <= geom::EPS {
+                let len_um = (segment.a.dist(segment.b) * 1000.0).round().max(0.0) as u64;
+                pressure += 1_000_000 + len_um;
+            }
+        }
+    }
+    pressure
+}
+
+fn connection_crossing_pressures(problem: &RouteProblem) -> Vec<usize> {
+    let segments: Vec<Vec<TreeSegment>> = problem
+        .connections
+        .iter()
+        .map(connection_tree_segments_for_pressure)
+        .collect();
+    let mut pressure = vec![0; problem.connections.len()];
+
+    for i in 0..segments.len() {
+        for j in i + 1..segments.len() {
+            let mut crossings = 0usize;
+            for a in &segments[i] {
+                for b in &segments[j] {
+                    if segment_layers_overlap(a, b) && segments_cross(a.a, a.b, b.a, b.b) {
+                        crossings += 1;
+                    }
+                }
+            }
+            pressure[i] += crossings;
+            pressure[j] += crossings;
+        }
+    }
+
+    pressure
+}
+
+#[cfg(test)]
+fn connection_tree_segments(conn: &Connection) -> Vec<(Point2, Point2)> {
+    connection_tree_segment_indices(conn)
+        .into_iter()
+        .map(|(a, b)| {
+            (
+                conn.points_to_connect[a].point(),
+                conn.points_to_connect[b].point(),
+            )
+        })
+        .collect()
+}
+
+#[derive(Clone)]
+struct TreeSegment {
+    a: Point2,
+    b: Point2,
+    layers: Vec<LayerRef>,
+}
+
+fn connection_tree_segments_for_pressure(conn: &Connection) -> Vec<TreeSegment> {
+    connection_tree_segment_indices(conn)
+        .into_iter()
+        .map(|(a, b)| {
+            let mut layers = vec![
+                conn.points_to_connect[a].layer.clone(),
+                conn.points_to_connect[b].layer.clone(),
+            ];
+            if layers[0] == layers[1] {
+                layers.pop();
+            }
+            TreeSegment {
+                a: conn.points_to_connect[a].point(),
+                b: conn.points_to_connect[b].point(),
+                layers,
+            }
+        })
+        .collect()
+}
+
+fn segment_layers_overlap(a: &TreeSegment, b: &TreeSegment) -> bool {
+    a.layers
+        .iter()
+        .any(|layer| b.layers.iter().any(|other| other == layer))
+}
+
+fn connection_tree_segment_indices(conn: &Connection) -> Vec<(usize, usize)> {
+    match conn.points_to_connect.as_slice() {
+        [] | [_] => Vec::new(),
+        [_, _] => vec![(0, 1)],
+        points => {
+            let positions: Vec<Point2> = points.iter().map(|pt| pt.point()).collect();
+            let mut segments = Vec::with_capacity(points.len().saturating_sub(1));
+            let mut in_tree = vec![false; points.len()];
+            in_tree[0] = true;
+            for _ in 1..points.len() {
+                let mut best: Option<(usize, usize)> = None;
+                for (ai, &ai_in_tree) in in_tree.iter().enumerate() {
+                    if !ai_in_tree {
+                        continue;
+                    }
+                    for (bi, &bi_in_tree) in in_tree.iter().enumerate() {
+                        if bi_in_tree {
+                            continue;
+                        }
+                        let replace = best.is_none_or(|(old_a, old_b)| {
+                            connection_tree_segment_pair_better(
+                                conn, &positions, ai, bi, old_a, old_b,
+                            )
+                        });
+                        if replace {
+                            best = Some((ai, bi));
+                        }
+                    }
+                }
+                let Some((ai, bi)) = best else {
+                    break;
+                };
+                in_tree[bi] = true;
+                segments.push((ai, bi));
+            }
+            segments
+        }
+    }
+}
+
+fn connection_tree_segment_pair_better(
+    conn: &Connection,
+    positions: &[Point2],
+    a: usize,
+    b: usize,
+    old_a: usize,
+    old_b: usize,
+) -> bool {
+    let dist = positions[a].dist(positions[b]);
+    let old_dist = positions[old_a].dist(positions[old_b]);
+    if dist < old_dist - 1e-9 {
+        return true;
+    }
+    if (dist - old_dist).abs() > 1e-9 {
+        return false;
+    }
+
+    let layer_change = conn.points_to_connect[a].layer != conn.points_to_connect[b].layer;
+    let old_layer_change =
+        conn.points_to_connect[old_a].layer != conn.points_to_connect[old_b].layer;
+    if layer_change != old_layer_change {
+        return !layer_change;
+    }
+
+    (a, b) < (old_a, old_b)
+}
+
+fn segments_cross(a: Point2, b: Point2, c: Point2, d: Point2) -> bool {
+    let orient = |p: Point2, q: Point2, r: Point2| {
+        let v = (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+        if v.abs() < geom::EPS {
+            0
+        } else if v > 0.0 {
+            1
+        } else {
+            -1
+        }
+    };
+    orient(a, b, c) * orient(a, b, d) < 0 && orient(c, d, a) * orient(c, d, b) < 0
 }
 
 fn push_unique_order(orders: &mut Vec<Vec<usize>>, order: Vec<usize>) {
@@ -1111,10 +1699,11 @@ fn layer_ref(layer: usize, layer_count: usize) -> LayerRef {
 /// **Per-board diagonal arbiter.** 8-way wins the bulk-maze boards but can leave a
 /// few escape nets unrouted on a dense, lattice-aligned via field where a 45° run
 /// costs more lateral room than an axis-aligned one. When the 8-way candidate left
-/// faults, the router also runs the ORTHOGONAL pair ([`route_orthogonal`] /
-/// [`route_orthogonal_lenient`]) and keeps it only when it is STRICTLY better by
-/// the same route-quality key — so diagonals are a pure capability ADD, never a
-/// via-field regression. Paid only on a board the 8-way pass did not already ace.
+/// faults or spent vias, the router also runs the ORTHOGONAL pair
+/// ([`route_orthogonal`] / [`route_orthogonal_lenient`]) and keeps it only when it
+/// is STRICTLY better by the same route-quality key — so diagonals are a pure
+/// capability ADD, never a via-field regression. Paid only on a board the 8-way
+/// pass did not already ace without vias.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GridAStarRouter;
 
@@ -1142,8 +1731,8 @@ impl Router for GridAStarRouter {
         } else {
             strict
         };
-        if grid_quality(problem, &diag).faults() == 0 {
-            return diag; // the 8-way pass aced the board — skip the orthogonal fallback
+        if grid_candidate_can_skip_orthogonal(problem, &diag) {
+            return diag; // the 8-way pass aced the board without vias
         }
         // The ORTHOGONAL candidate: the better-scoring of its strict (via-scan) and lenient
         // (no-scan) variants, by the SAME key. Keep it only when STRICTLY better;
@@ -1161,6 +1750,11 @@ impl Router for GridAStarRouter {
             diag
         }
     }
+}
+
+fn grid_candidate_can_skip_orthogonal(problem: &RouteProblem, result: &RouteResult) -> bool {
+    let q = grid_quality(problem, result);
+    q.faults() == 0 && q.via_count == 0
 }
 
 /// Count the GEOMETRY DRC violations of a solution (clearance / width / via /
@@ -1254,6 +1848,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
 
         // Without the stub these pins are unroutable (their own cell is BlockedAll);
@@ -1329,6 +1924,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let r = route(&p);
         assert!(
@@ -1413,6 +2009,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let r = route(&p);
         // Whatever routes (the body check may force B onto a non-parallel route) must be
@@ -1501,6 +2098,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers,
+            plane_nets: Default::default(),
         };
 
         let result = route(&problem);
@@ -1590,7 +2188,8 @@ mod tests {
             via_drill: 0.3,
             net_widths: Default::default(),
             outline: None,
-            escape_layers: Default::default(), // NO escape assignment
+            escape_layers: Default::default(),
+            plane_nets: Default::default(), // NO escape assignment
         };
         let result = route(&problem);
         assert_eq!(
@@ -1701,6 +2300,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
 
         let result = route_with_order(
@@ -1745,6 +2345,123 @@ mod tests {
         );
     }
 
+    #[test]
+    fn same_layer_tree_leg_tries_planar_before_cheap_via_hop() {
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![Obstacle {
+                kind: "rect".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: Point2 { x: 15.0, y: 10.0 },
+                width: 1.0,
+                height: 8.0,
+                connected_to: vec![],
+            }],
+            connections: vec![Connection {
+                name: "N".to_owned(),
+                points_to_connect: vec![
+                    RoutePoint {
+                        x: 2.1,
+                        y: 10.1,
+                        layer: LayerRef::top(),
+                    },
+                    RoutePoint {
+                        x: 28.1,
+                        y: 10.1,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 30.0,
+                min_y: 0.0,
+                max_y: 20.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+
+        let result = route_with_order(
+            &problem,
+            AStarCosts {
+                via: 1,
+                diag: DIAG_COST,
+                ..AStarCosts::default()
+            },
+            vec![0],
+        );
+
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert!(
+            result.solution.vias.is_empty(),
+            "same-layer leg should take the legal planar detour before considering a cheap via hop: {:?}",
+            result.solution.vias
+        );
+        let violations = crate::lint::lint(&problem, &result.solution);
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    #[test]
+    fn residual_route_copper_keeps_via_fallback_available() {
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![Obstacle {
+                kind: "route-trace".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: Point2 { x: 10.0, y: 5.0 },
+                width: 16.0,
+                height: 0.2,
+                connected_to: vec!["A".to_owned()],
+            }],
+            connections: vec![Connection {
+                name: "B".to_owned(),
+                points_to_connect: vec![
+                    RoutePoint {
+                        x: 10.1,
+                        y: 2.1,
+                        layer: LayerRef::top(),
+                    },
+                    RoutePoint {
+                        x: 10.1,
+                        y: 8.1,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 20.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+
+        let result = GridAStarRouter.route(&problem);
+
+        assert!(result.failed.is_empty(), "{:?}", result.failed);
+        assert!(
+            !result.solution.vias.is_empty(),
+            "foreign residual route copper should keep the via fallback available"
+        );
+        let violations = crate::lint::lint(&problem, &result.solution);
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
     fn point_eq(a: Point2, b: Point2) -> bool {
         (a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9
     }
@@ -1770,14 +2487,14 @@ mod tests {
     }
 
     #[test]
-    fn net_order_portfolio_keeps_legacy_first_and_dedupes_variants() {
+    fn net_order_portfolio_keeps_baseline_first_and_dedupes_variants() {
         let p = load("quad.json");
         let priority = std::collections::BTreeSet::new();
         let orders: Vec<Vec<usize>> = net_order_portfolio(&p, &priority).collect();
         assert_eq!(
             orders.first(),
             Some(&net_order(&p, &priority)),
-            "legacy shortest-first order must remain the first grid candidate"
+            "baseline shortest-first order must remain the first grid candidate"
         );
         for order in &orders {
             let mut sorted = order.clone();
@@ -1794,6 +2511,24 @@ mod tests {
                 "portfolio orders must be deduped"
             );
         }
+    }
+
+    #[test]
+    fn net_order_portfolio_cached_metrics_match_uncached_orders() {
+        let p = load("quad.json");
+        let mut priority = std::collections::BTreeSet::new();
+        priority.insert(p.connections[1].name.clone());
+        priority.insert(p.connections[3].name.clone());
+        let metrics = net_order_metrics(&p);
+
+        let cached: Vec<Vec<usize>> =
+            net_order_portfolio_with_metrics(&p, &priority, &metrics).collect();
+        let uncached: Vec<Vec<usize>> = net_order_portfolio(&p, &priority).collect();
+
+        assert_eq!(
+            cached, uncached,
+            "cached grid net-order metrics must preserve the retry portfolio"
+        );
     }
 
     #[test]
@@ -1861,6 +2596,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let priority = std::collections::BTreeSet::new();
         let shortest = net_order(&p, &priority);
@@ -1869,7 +2605,7 @@ mod tests {
 
         assert_eq!(
             shortest[0], 0,
-            "legacy shortest-first order stays open-net first"
+            "baseline shortest-first order stays open-net first"
         );
         assert_eq!(
             pressure[0], 1,
@@ -1878,6 +2614,106 @@ mod tests {
         assert!(
             orders.iter().any(|order| order == &pressure),
             "portfolio should include the pressure-first variant"
+        );
+    }
+
+    #[test]
+    fn net_order_portfolio_includes_crossing_pressure_order() {
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![
+                Connection {
+                    name: "OPEN".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 1.0,
+                            y: 1.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 6.0,
+                            y: 1.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                Connection {
+                    name: "CROSS_A".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 2.0,
+                            y: 10.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 18.0,
+                            y: 10.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                Connection {
+                    name: "CROSS_B".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 10.0,
+                            y: 2.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 10.0,
+                            y: 18.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                Connection {
+                    name: "LONG".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 1.0,
+                            y: 18.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 19.0,
+                            y: 18.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+            ],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 20.0,
+                min_y: 0.0,
+                max_y: 20.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+        let priority = std::collections::BTreeSet::new();
+        let metrics = net_order_metrics(&p);
+        let crossing = net_order_by(&p, &priority, NetOrderKind::CrossingPressure);
+        let orders: Vec<Vec<usize>> = net_order_portfolio(&p, &priority).collect();
+
+        assert_eq!(metrics[0].crossing_pressure, 0);
+        assert_eq!(metrics[1].crossing_pressure, 1);
+        assert_eq!(metrics[2].crossing_pressure, 1);
+        assert_eq!(
+            crossing[0], 1,
+            "crossing pressure should promote the first crossed net by deterministic name tie-break"
+        );
+        assert!(
+            orders.iter().any(|order| order == &crossing),
+            "portfolio should include the crossing-pressure-first variant"
         );
     }
 
@@ -1917,6 +2753,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
 
         let thin_pressure = connection_obstacle_pressure(&p, &p.connections[0]);
@@ -1930,6 +2767,166 @@ mod tests {
         assert_eq!(
             with_unrelated_fat_net, thin_pressure,
             "an unrelated wide net must not widen the pressure window for SIG"
+        );
+    }
+
+    #[test]
+    fn segment_obstacle_pressure_tracks_tree_corridors_not_whole_bbox() {
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![pad(&[], (8.0, 2.0), 0.5, 0.5, &["top"])],
+            connections: vec![Connection {
+                name: "BUS".to_owned(),
+                points_to_connect: vec![
+                    RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    RoutePoint {
+                        x: 1.0,
+                        y: 9.0,
+                        layer: LayerRef::top(),
+                    },
+                    RoutePoint {
+                        x: 9.0,
+                        y: 9.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 10.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+
+        assert!(connection_obstacle_pressure(&p, &p.connections[0]) > 0);
+        assert_eq!(
+            connection_segment_obstacle_pressure(&p, &p.connections[0]),
+            0,
+            "segment pressure should ignore obstacles away from the actual nearest-neighbour tree"
+        );
+    }
+
+    #[test]
+    fn tree_segment_indices_prefer_same_layer_edge_on_distance_tie() {
+        let conn = Connection {
+            name: "BUS".to_owned(),
+            points_to_connect: vec![
+                RoutePoint {
+                    x: 2.0,
+                    y: 2.0,
+                    layer: LayerRef::top(),
+                },
+                RoutePoint {
+                    x: 12.0,
+                    y: 2.0,
+                    layer: LayerRef::bottom(),
+                },
+                RoutePoint {
+                    x: 2.0,
+                    y: 12.0,
+                    layer: LayerRef::top(),
+                },
+            ],
+        };
+
+        let segments = connection_tree_segment_indices(&conn);
+
+        assert_eq!(
+            segments.first().copied(),
+            Some((0, 2)),
+            "equal-length tree pressure edges should prefer same-layer endpoints: {segments:?}"
+        );
+    }
+
+    #[test]
+    fn net_order_portfolio_includes_segment_obstacle_pressure_order() {
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![
+                pad(&[], (8.0, 2.0), 0.5, 0.5, &["top"]),
+                pad(&[], (5.0, 1.0), 0.5, 0.5, &["top"]),
+            ],
+            connections: vec![
+                Connection {
+                    name: "BBOX_ONLY".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 1.0,
+                            y: 1.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 1.0,
+                            y: 9.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 9.0,
+                            y: 9.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                Connection {
+                    name: "SEGMENT_BLOCKED".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 1.0,
+                            y: 1.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 9.0,
+                            y: 1.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+            ],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 10.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+        let priority = std::collections::BTreeSet::new();
+        let metrics = net_order_metrics(&p);
+        let segment_order = net_order_by(&p, &priority, NetOrderKind::SegmentObstaclePressure);
+        let orders: Vec<Vec<usize>> = net_order_portfolio(&p, &priority).collect();
+
+        assert_eq!(metrics[0].segment_obstacle_pressure, 0);
+        assert!(metrics[0].obstacle_pressure > 0);
+        assert!(metrics[1].segment_obstacle_pressure > 0);
+        assert_eq!(
+            segment_order,
+            vec![1, 0],
+            "segment-obstacle order should promote the actually blocked tree corridor"
+        );
+        assert!(
+            orders.iter().any(|order| order == &segment_order),
+            "portfolio should include the segment-obstacle-pressure-first variant"
         );
     }
 
@@ -1983,6 +2980,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
 
         let metrics = net_order_metrics(&p);
@@ -1994,6 +2992,89 @@ mod tests {
             connection_obstacle_pressure(&p, &p.connections[1])
         );
         assert!(metrics[1].obstacle_pressure > metrics[0].obstacle_pressure);
+        assert_eq!(metrics[0].crossing_pressure, 0);
+        assert_eq!(metrics[1].crossing_pressure, 0);
+    }
+
+    #[test]
+    fn net_order_metrics_count_multi_pin_tree_crossings() {
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![
+                Connection {
+                    name: "BUS".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 2.0,
+                            y: 10.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 18.0,
+                            y: 10.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 18.0,
+                            y: 14.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                Connection {
+                    name: "SIG".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 10.0,
+                            y: 2.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 10.0,
+                            y: 18.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                Connection {
+                    name: "OPEN".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 1.0,
+                            y: 1.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 4.0,
+                            y: 1.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+            ],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 20.0,
+                min_y: 0.0,
+                max_y: 20.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+
+        let metrics = net_order_metrics(&p);
+
+        assert_eq!(connection_tree_segments(&p.connections[0]).len(), 2);
+        assert_eq!(metrics[0].crossing_pressure, 1);
+        assert_eq!(metrics[1].crossing_pressure, 1);
+        assert_eq!(metrics[2].crossing_pressure, 0);
     }
 
     #[test]
@@ -2086,6 +3167,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut priority = std::collections::BTreeSet::new();
         priority.insert("SIG".to_owned());
@@ -2098,6 +3180,172 @@ mod tests {
                 "higher-pin failed BUS should claim retry corridors before smaller SIG"
             );
         }
+    }
+
+    #[test]
+    fn net_order_portfolio_prioritizes_failed_crossing_nets_after_pressure() {
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![
+                Connection {
+                    name: "OPEN".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 1.0,
+                            y: 1.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 6.0,
+                            y: 1.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                Connection {
+                    name: "CROSS_A".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 2.0,
+                            y: 10.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 18.0,
+                            y: 10.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                Connection {
+                    name: "CROSS_B".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 10.0,
+                            y: 2.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 10.0,
+                            y: 18.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+            ],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 20.0,
+                min_y: 0.0,
+                max_y: 20.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+        let mut priority = std::collections::BTreeSet::new();
+        priority.insert("OPEN".to_owned());
+        priority.insert("CROSS_A".to_owned());
+
+        let metrics = net_order_metrics(&p);
+        assert_eq!(metrics[0].pin_count, metrics[1].pin_count);
+        assert_eq!(metrics[0].obstacle_pressure, metrics[1].obstacle_pressure);
+        assert_eq!(metrics[0].crossing_pressure, 0);
+        assert_eq!(metrics[1].crossing_pressure, 1);
+
+        for order in net_order_portfolio(&p, &priority) {
+            assert_eq!(
+                &order[..priority.len()],
+                &[1, 0],
+                "failed net crossing another demand line should retry before an otherwise equal open net"
+            );
+        }
+    }
+
+    #[test]
+    fn crossing_pressure_ignores_disjoint_layer_crossings() {
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![
+                Connection {
+                    name: "TOP_H".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 2.0,
+                            y: 10.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 18.0,
+                            y: 10.0,
+                            layer: LayerRef::top(),
+                        },
+                    ],
+                },
+                Connection {
+                    name: "BOT_V".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 10.0,
+                            y: 2.0,
+                            layer: LayerRef::bottom(),
+                        },
+                        RoutePoint {
+                            x: 10.0,
+                            y: 18.0,
+                            layer: LayerRef::bottom(),
+                        },
+                    ],
+                },
+                Connection {
+                    name: "MIXED_D".to_owned(),
+                    points_to_connect: vec![
+                        RoutePoint {
+                            x: 2.0,
+                            y: 2.0,
+                            layer: LayerRef::top(),
+                        },
+                        RoutePoint {
+                            x: 18.0,
+                            y: 18.0,
+                            layer: LayerRef::bottom(),
+                        },
+                    ],
+                },
+            ],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 20.0,
+                min_y: 0.0,
+                max_y: 20.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+
+        let metrics = net_order_metrics(&p);
+
+        assert_eq!(
+            metrics
+                .iter()
+                .map(|metric| metric.crossing_pressure)
+                .collect::<Vec<_>>(),
+            vec![1, 1, 2],
+            "same-layer and mixed-layer crossings should add pressure, but disjoint top/bottom crossings should not"
+        );
     }
 
     fn result_with(vias: usize, wirelength: f64) -> RouteResult {
@@ -2152,6 +3400,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let via_heavy_short = result_with(2, 10.0);
         let via_free_long = result_with(0, 11.0);
@@ -2163,6 +3412,518 @@ mod tests {
         assert!(
             !grid_candidate_better(&p, &via_free_long, &via_free_long),
             "exact ties keep the incumbent"
+        );
+    }
+
+    #[test]
+    fn orthogonal_pull_candidate_shape_filters_trivial_routes() {
+        let straight = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![Point2 { x: 1.0, y: 1.0 }, Point2 { x: 5.0, y: 1.0 }],
+            }],
+            vias: vec![],
+        };
+        let already_tight_l = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![
+                    Point2 { x: 1.0, y: 1.0 },
+                    Point2 { x: 1.0, y: 4.0 },
+                    Point2 { x: 5.0, y: 4.0 },
+                ],
+            }],
+            vias: vec![],
+        };
+        let detour = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![
+                    Point2 { x: 1.0, y: 1.0 },
+                    Point2 { x: 1.0, y: 5.0 },
+                    Point2 { x: 3.0, y: 5.0 },
+                    Point2 { x: 3.0, y: 4.0 },
+                    Point2 { x: 5.0, y: 4.0 },
+                ],
+            }],
+            vias: vec![],
+        };
+
+        assert!(!has_orthogonal_pull_candidate_shape(&straight));
+        assert!(!has_orthogonal_pull_candidate_shape(&already_tight_l));
+        assert!(has_orthogonal_pull_candidate_shape(&detour));
+    }
+
+    #[test]
+    fn octilinear_shortcut_candidate_shape_filters_trivial_routes() {
+        let straight = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![Point2 { x: 1.0, y: 1.0 }, Point2 { x: 5.0, y: 1.0 }],
+            }],
+            vias: vec![],
+        };
+        let already_tight_l = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![
+                    Point2 { x: 1.0, y: 1.0 },
+                    Point2 { x: 1.0, y: 4.0 },
+                    Point2 { x: 5.0, y: 4.0 },
+                ],
+            }],
+            vias: vec![],
+        };
+        let diagonal_detour = RouteSolution {
+            traces: vec![Trace {
+                connection: "N".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.2,
+                path: vec![
+                    Point2 { x: 1.0, y: 1.0 },
+                    Point2 { x: 1.0, y: 4.0 },
+                    Point2 { x: 4.0, y: 4.0 },
+                ],
+            }],
+            vias: vec![],
+        };
+
+        assert!(!has_octilinear_shortcut_candidate_shape(&straight));
+        assert!(!has_octilinear_shortcut_candidate_shape(&already_tight_l));
+        assert!(has_octilinear_shortcut_candidate_shape(&diagonal_detour));
+    }
+
+    #[test]
+    fn reconcile_shortcuts_clean_octilinear_detour() {
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![Connection {
+                name: "N".to_owned(),
+                points_to_connect: vec![
+                    RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    RoutePoint {
+                        x: 4.0,
+                        y: 4.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 10.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+        let mut routed = RouteResult {
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "N".to_owned(),
+                    layer: LayerRef::top(),
+                    width: p.min_trace_width,
+                    path: vec![
+                        Point2 { x: 1.0, y: 1.0 },
+                        Point2 { x: 1.0, y: 4.0 },
+                        Point2 { x: 4.0, y: 4.0 },
+                    ],
+                }],
+                vias: vec![],
+            },
+            failed: vec![],
+            engine: ENGINE.to_owned(),
+        };
+        let before = routed.solution.metrics().wirelength;
+
+        reconcile_with_options(&p, &mut routed, true);
+
+        assert_eq!(
+            routed.solution.traces[0].path,
+            vec![Point2 { x: 1.0, y: 1.0 }, Point2 { x: 4.0, y: 4.0 }]
+        );
+        assert!(routed.solution.metrics().wirelength < before);
+        assert!(routed.failed.is_empty(), "{:?}", routed.failed);
+        assert!(crate::lint::lint(&p, &routed.solution).is_empty());
+    }
+
+    #[test]
+    fn reconcile_octilinear_shortcut_can_remove_existing_clearance_finding() {
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![Obstacle {
+                kind: "rect".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: Point2 { x: 2.0, y: 4.15 },
+                width: 0.4,
+                height: 0.4,
+                connected_to: vec![],
+            }],
+            connections: vec![Connection {
+                name: "N".to_owned(),
+                points_to_connect: vec![
+                    RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    RoutePoint {
+                        x: 4.0,
+                        y: 4.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 10.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+        let mut routed = RouteResult {
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "N".to_owned(),
+                    layer: LayerRef::top(),
+                    width: p.min_trace_width,
+                    path: vec![
+                        Point2 { x: 1.0, y: 1.0 },
+                        Point2 { x: 1.0, y: 4.0 },
+                        Point2 { x: 4.0, y: 4.0 },
+                    ],
+                }],
+                vias: vec![],
+            },
+            failed: vec![],
+            engine: ENGINE.to_owned(),
+        };
+        let before = crate::lint::lint(&p, &routed.solution);
+        assert!(
+            before.iter().any(|finding| matches!(
+                finding,
+                crate::lint::DrcViolation::ClearanceTraceObstacle { .. }
+            )),
+            "fixture should start with a trace-obstacle clearance finding: {before:?}"
+        );
+
+        reconcile_with_options(&p, &mut routed, true);
+
+        assert_eq!(
+            routed.solution.traces[0].path,
+            vec![Point2 { x: 1.0, y: 1.0 }, Point2 { x: 4.0, y: 4.0 }]
+        );
+        assert!(routed.failed.is_empty(), "{:?}", routed.failed);
+        assert!(crate::lint::lint(&p, &routed.solution).is_empty());
+    }
+
+    #[test]
+    fn reconcile_pulls_clean_orthogonal_detour() {
+        let p = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![Connection {
+                name: "N".to_owned(),
+                points_to_connect: vec![
+                    RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    RoutePoint {
+                        x: 5.0,
+                        y: 4.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 10.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+        let mut routed = RouteResult {
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "N".to_owned(),
+                    layer: LayerRef::top(),
+                    width: p.min_trace_width,
+                    path: vec![
+                        Point2 { x: 1.0, y: 1.0 },
+                        Point2 { x: 1.0, y: 5.0 },
+                        Point2 { x: 3.0, y: 5.0 },
+                        Point2 { x: 3.0, y: 4.0 },
+                        Point2 { x: 5.0, y: 4.0 },
+                    ],
+                }],
+                vias: vec![],
+            },
+            failed: vec![],
+            engine: ENGINE.to_owned(),
+        };
+        let before = routed.solution.metrics().wirelength;
+
+        reconcile(&p, &mut routed);
+
+        assert_eq!(
+            routed.solution.traces[0].path,
+            vec![
+                Point2 { x: 1.0, y: 1.0 },
+                Point2 { x: 1.0, y: 4.0 },
+                Point2 { x: 5.0, y: 4.0 },
+            ]
+        );
+        assert!(routed.solution.metrics().wirelength < before);
+        assert!(routed.failed.is_empty(), "{:?}", routed.failed);
+        assert!(crate::lint::lint(&p, &routed.solution).is_empty());
+    }
+
+    fn layer_change_result_with_vias(vias: Vec<Via>) -> (RouteProblem, RouteResult) {
+        let p = RouteProblem {
+            layer_count: 4,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![Connection {
+                name: "N".to_owned(),
+                points_to_connect: vec![
+                    RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    RoutePoint {
+                        x: 5.0,
+                        y: 1.0,
+                        layer: LayerRef::bottom(),
+                    },
+                ],
+            }],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 10.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+        let routed = RouteResult {
+            solution: RouteSolution {
+                traces: vec![
+                    Trace {
+                        connection: "N".to_owned(),
+                        layer: LayerRef::top(),
+                        width: p.min_trace_width,
+                        path: vec![Point2 { x: 1.0, y: 1.0 }, Point2 { x: 3.0, y: 1.0 }],
+                    },
+                    Trace {
+                        connection: "N".to_owned(),
+                        layer: LayerRef::bottom(),
+                        width: p.min_trace_width,
+                        path: vec![Point2 { x: 3.0, y: 1.0 }, Point2 { x: 5.0, y: 1.0 }],
+                    },
+                ],
+                vias,
+            },
+            failed: vec![],
+            engine: ENGINE.to_owned(),
+        };
+        (p, routed)
+    }
+
+    #[test]
+    fn top_level_arbiter_skips_orthogonal_only_for_clean_via_free() {
+        let top_problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![Connection {
+                name: "N".to_owned(),
+                points_to_connect: vec![
+                    RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    RoutePoint {
+                        x: 5.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: Rect {
+                min_x: 0.0,
+                max_x: 10.0,
+                min_y: 0.0,
+                max_y: 10.0,
+            },
+            clearance: 0.2,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+        let via_free = RouteResult {
+            solution: RouteSolution {
+                traces: vec![Trace {
+                    connection: "N".to_owned(),
+                    layer: LayerRef::top(),
+                    width: top_problem.min_trace_width,
+                    path: vec![Point2 { x: 1.0, y: 1.0 }, Point2 { x: 5.0, y: 1.0 }],
+                }],
+                vias: vec![],
+            },
+            failed: vec![],
+            engine: ENGINE.to_owned(),
+        };
+        assert!(
+            grid_candidate_can_skip_orthogonal(&top_problem, &via_free),
+            "clean via-free 8-way result should keep the fast top-level path"
+        );
+
+        let via = Via {
+            connection: "N".to_owned(),
+            at: Point2 { x: 3.0, y: 1.0 },
+            diameter: 0.6,
+            drill: 0.3,
+            span: ViaSpan::Through,
+        };
+        let (layer_problem, via_heavy) = layer_change_result_with_vias(vec![via]);
+        assert!(crate::lint::lint(&layer_problem, &via_heavy.solution).is_empty());
+        assert!(
+            !grid_candidate_can_skip_orthogonal(&layer_problem, &via_heavy),
+            "clean via-heavy 8-way result should still compete with orthogonal fallback"
+        );
+
+        let mut failed = via_free;
+        failed.failed.push(FailedNet {
+            connection: "N".to_owned(),
+            reason: "test".to_owned(),
+        });
+        assert!(
+            !grid_candidate_can_skip_orthogonal(&top_problem, &failed),
+            "failed 8-way result must run the orthogonal fallback"
+        );
+    }
+
+    #[test]
+    fn reconcile_drops_duplicate_same_net_vias_before_drc() {
+        let via = Via {
+            connection: "N".to_owned(),
+            at: Point2 { x: 3.0, y: 1.0 },
+            diameter: 0.6,
+            drill: 0.3,
+            span: ViaSpan::Through,
+        };
+        let (p, mut routed) = layer_change_result_with_vias(vec![via.clone(), via]);
+
+        reconcile(&p, &mut routed);
+
+        assert!(routed.failed.is_empty(), "{:?}", routed.failed);
+        assert_eq!(routed.solution.vias.len(), 1);
+        assert!(matches!(routed.solution.vias[0].span, ViaSpan::Through));
+        assert!(crate::lint::lint(&p, &routed.solution).is_empty());
+    }
+
+    #[test]
+    fn reconcile_drops_partial_via_covered_by_through_via() {
+        let (p, mut routed) = layer_change_result_with_vias(vec![
+            Via {
+                connection: "N".to_owned(),
+                at: Point2 { x: 3.0, y: 1.0 },
+                diameter: 0.6,
+                drill: 0.3,
+                span: ViaSpan::Through,
+            },
+            Via {
+                connection: "N".to_owned(),
+                at: Point2 { x: 3.0, y: 1.0 },
+                diameter: 0.6,
+                drill: 0.3,
+                span: ViaSpan::Partial {
+                    from: 0,
+                    to: 1,
+                    micro: false,
+                },
+            },
+        ]);
+
+        reconcile(&p, &mut routed);
+
+        assert!(routed.failed.is_empty(), "{:?}", routed.failed);
+        assert_eq!(routed.solution.vias.len(), 1);
+        assert!(matches!(routed.solution.vias[0].span, ViaSpan::Through));
+        assert!(crate::lint::lint(&p, &routed.solution).is_empty());
+    }
+
+    #[test]
+    fn grid_order_portfolio_keeps_competing_after_clean_via_route() {
+        let via_heavy = result_with(2, 10.0);
+        let via_free = result_with(0, 10.0);
+        let mut failed = via_free.clone();
+        failed.failed.push(FailedNet {
+            connection: "N".to_owned(),
+            reason: "test".to_owned(),
+        });
+
+        assert!(
+            grid_portfolio_can_short_circuit(&via_free),
+            "a clean via-free result is already optimal enough for the greedy grid portfolio"
+        );
+        assert!(
+            !grid_portfolio_can_short_circuit(&via_heavy),
+            "a clean via-heavy result should still let later deterministic orders compete"
+        );
+        assert!(
+            !grid_portfolio_can_short_circuit(&failed),
+            "failed results must continue into retry/order variants"
         );
     }
 

@@ -13,8 +13,8 @@ Thanks for your interest! This document covers how to build, test, and submit ch
 
 ```sh
 cargo build --release
-cargo test --workspace
-cargo clippy --workspace        # keep this clean
+cargo test --workspace --quiet
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ## The core invariant: never ship copper that lies
@@ -30,10 +30,20 @@ render looks nicer. Gate every engine change on:
 cargo test --release -p gordian-core
 ```
 
+For PCB router changes, also run the required corpus harness for the production portfolio and any
+explicit router strategy you touched:
+
+```sh
+cargo run -p gordian-core --example validate_pcb_corpus --quiet -- --required
+```
+
+Use `--router mesh`, `--router sequential`, or `--router mesh-detail` when isolating a specific
+strategy. `--all` is a stress sweep, not the required per-change gate.
+
 For the schematic side, the netlist oracle is authoritative:
 
 ```sh
-cargo test --release -p sch-layout
+cargo test --release -p sch-floorplan
 ```
 
 ## Working style
@@ -44,7 +54,7 @@ cargo test --release -p sch-layout
 - **The LLM never emits coordinates.** Spatial decisions (placement, routing, floorplanning) belong
   in the deterministic engines. The agent chooses parts, nets, and rules and triages failures.
 - **Match the surrounding code.** Comment density, naming, and idiom should read like the file you're
-  editing. Design notes for non-obvious decisions live in `docs/specs/`.
+  editing. Keep design rationale close to the code when it is needed to maintain the behavior.
 - **Determinism.** Engine output must be reproducible for the same input (seeded SA, no wall-clock /
   RNG in layout). Tests rely on this.
 
@@ -52,8 +62,9 @@ cargo test --release -p sch-layout
 
 1. Branch from `main`.
 2. Keep commits focused; explain *why* in the message, not just *what*.
-3. Ensure `cargo test --workspace` and `cargo clippy --workspace` are clean, and the board harness
-   stays at 0 copper faults.
+3. Ensure `cargo test --workspace --quiet`,
+   `cargo clippy --workspace --all-targets -- -D warnings`, and the required PCB corpus harness
+   stay clean.
 4. Open a pull request describing the change and how you verified it.
 
 ## Reporting issues

@@ -314,12 +314,12 @@ pub fn mst_edges(terminals: &[Point2]) -> Vec<(usize, usize)> {
     let mut edges = Vec::with_capacity(n - 1);
     for _ in 1..n {
         let mut best: Option<(f64, usize, usize)> = None;
-        for i in 0..n {
-            if !in_tree[i] {
+        for (i, &i_in_tree) in in_tree.iter().enumerate() {
+            if !i_in_tree {
                 continue;
             }
-            for j in 0..n {
-                if in_tree[j] {
+            for (j, &j_in_tree) in in_tree.iter().enumerate() {
+                if j_in_tree {
                     continue;
                 }
                 let d = dist(i, j);

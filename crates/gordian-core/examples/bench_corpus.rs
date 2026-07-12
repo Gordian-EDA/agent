@@ -2,7 +2,7 @@
 //! Reports parts/pins/nets, layout warnings, body/ic crossings, and anneal seconds
 //! (the 5s budget gate). PNGs land in the out dir (default /tmp/bench).
 //!
-//! Usage: cargo run --release -p agent --example bench_corpus -- [--out DIR] FILE.circuit.yaml ...
+//! Usage: cargo run --release -p gordian-core --example bench_corpus -- [--out DIR] FILE.circuit.yaml ...
 
 use kicad_cli::KicadCli;
 use kicad_env::KicadEnv;

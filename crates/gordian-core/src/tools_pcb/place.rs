@@ -13,16 +13,20 @@ use pcb_place::placement::{LockedAt, Part, PlaceProblem, Placement, PlacementHin
 
 use crate::AgentRuntime;
 
-fn part_from_footprint_layers(
+pub(super) fn part_from_footprint_layers(
     footprint: &Footprint,
     reference: &str,
     net_map: &BTreeMap<String, String>,
     layer_count: u32,
     locked: Option<LockedAt>,
 ) -> Part {
+    // Paste/mask-only apertures (KiCAD EP footprints carry unnumbered F.Paste
+    // stencil pads over the exposed pad) hold no copper: modeling them as pad
+    // obstacles walls the EP terminal in and makes every EP net unroutable.
     let pads = footprint
         .pads
         .iter()
+        .filter(|pad| has_copper(pad))
         .map(|pad| part_pad(pad, net_map, layer_count))
         .collect();
     let (courtyard_w, courtyard_h) = enclosing_courtyard(footprint);
@@ -56,6 +60,13 @@ fn all_copper_layers(layer_count: u32) -> Vec<LayerRef> {
     }
     layers.push(LayerRef::bottom());
     layers
+}
+
+fn has_copper(pad: &FootprintPad) -> bool {
+    matches!(
+        pad.technology,
+        PadTechnology::ThruHole | PadTechnology::NpThruHole
+    ) || pad.layers.iter().any(|l| l.ends_with(".Cu") || l == "*.Cu")
 }
 
 fn pad_layers(pad: &FootprintPad, layer_count: u32) -> Vec<LayerRef> {
@@ -400,9 +411,9 @@ const EDGE_CLEAR_MM: f64 = 0.5;
 /// clearance so place + route keep copper off the edge; the exported Edge.Cuts stays the user's
 /// real outline. (Inset the bbox; the lint also checks distance to the outline POLYGON edges,
 /// catching the non-bbox edges of a non-rectangular outline.)
-fn routing_bounds(bounds: &Rect, outline: Option<&pcb_model::Polygon>) -> Rect {
+pub(super) fn routing_bounds(bounds: &Rect, outline: Option<&pcb_model::Polygon>) -> Rect {
     if outline.is_none() {
-        return bounds.clone();
+        return *bounds;
     }
     // Never invert a small board: clamp the inset so min stays < max.
     let inset = EDGE_CLEAR_MM
@@ -431,7 +442,7 @@ fn placement_json(p: &Placement) -> Value {
 /// Whether a part is a board-edge part (connector / header / terminal block /
 /// mounting hole) that should hug the perimeter. Detected from the footprint
 /// library id, with the conventional `J` reference prefix as a fallback.
-fn is_connector(footprint: &str, reference: &str) -> bool {
+pub(super) fn is_connector(footprint: &str, reference: &str) -> bool {
     let fp = footprint.to_ascii_lowercase();
     fp.contains("connector")
         || fp.contains("pinheader")
@@ -447,7 +458,7 @@ fn is_connector(footprint: &str, reference: &str) -> bool {
 /// A mounting hole / mechanical fixing: pulled to a board CORNER (not just an
 /// edge), where a screw clears the components. Checked before [`is_connector`]
 /// (which also matches mounting holes) so these corner-seek rather than edge-seek.
-fn is_mounting_hole(footprint: &str) -> bool {
+pub(super) fn is_mounting_hole(footprint: &str) -> bool {
     footprint.to_ascii_lowercase().contains("mountinghole")
 }
 
@@ -522,13 +533,13 @@ pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
                 reference: p.reference.clone(),
                 x_nm: (p.at.x * 1_000_000.0).round() as i64,
                 y_nm: (p.at.y * 1_000_000.0).round() as i64,
-                rotation_deg: Some(p.rotation as f64),
+                rotation_deg: Some(p.rotation),
             })
             .collect();
         if !moves.is_empty()
             && let Err(e) = write_placement(ctx, &moves)
         {
-            return Ok(json!({ "error": format!("could not write placement to KiCAD: {e}") }));
+            return Ok(json!({ "error": format!("could not write placement: {e}") }));
         }
     }
     let positions: Vec<Value> = result.placements.iter().map(placement_json).collect();
@@ -633,12 +644,24 @@ pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
 fn write_placement(
     ctx: &AgentRuntime,
     moves: &[FootprintMove],
-) -> std::result::Result<(), kicad_ipc::Error> {
+) -> std::result::Result<(), String> {
     let path = ctx.pcb_path();
-    ctx.kicad().with_session(&path, |session| {
+    let live = ctx.kicad().with_session(&path, |session| {
         session.kicad().move_footprints(moves)?;
         session.kicad().save()
-    })
+    });
+    let Err(live_err) = live else { return Ok(()) };
+    // Headless / pre-9.0.3 fallback: apply the same moves to the board file
+    // as s-expression edits. Any open session now holds stale state — drop it
+    // so the next read reopens from disk.
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("{live_err}; offline fallback could not read the board: {e}"))?;
+    let patched = super::patch::patch_placements(&text, moves)
+        .map_err(|e| format!("{live_err}; offline fallback failed: {e}"))?;
+    std::fs::write(&path, patched)
+        .map_err(|e| format!("{live_err}; offline fallback could not write the board: {e}"))?;
+    ctx.close_kicad_session();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -690,6 +713,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let board = IpcBoardSnapshot {
             imported: ImportedBoard {

@@ -34,6 +34,13 @@ pub trait Provider: Send + Sync {
         ("test".to_string(), "(scripted)".to_string())
     }
 
+    /// Whether the model accepts image input; text-only models get tool-result
+    /// images dropped from the conversation (the saved file path stays in the
+    /// tool's JSON reply).
+    fn vision(&self) -> bool {
+        true
+    }
+
     /// Run one completion and await the whole result. Default: drain
     /// [`Provider::stream`] into its terminal [`StreamEnd`].
     async fn complete(

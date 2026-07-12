@@ -1,7 +1,7 @@
 //! End-to-end guard for the footprint round-trip: a footprint authored in the
 //! circuit model must survive emit -> .kicad_sch -> lift back into the model.
 //! This is the path the harnesses miss (they build PCB drafts from standalone
-//! JSON, never through the schematic). See docs/specs/unified-kicad-pcb-state.md §1.
+//! JSON, never through the schematic).
 
 use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;

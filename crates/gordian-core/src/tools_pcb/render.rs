@@ -375,6 +375,21 @@ fn fmt_axis_label(v: f64) -> String {
     }
 }
 
+fn push_outline_rect(
+    out: &mut String,
+    width: f64,
+    height: f64,
+    color: &str,
+    stroke: f64,
+    opacity: f64,
+) {
+    writeln!(
+        out,
+        "  <rect x=\"0\" y=\"0\" width=\"{width:.4}\" height=\"{height:.4}\" stroke=\"{color}\" stroke-width=\"{stroke:.4}\" stroke-opacity=\"{opacity:.2}\"/>"
+    )
+    .unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,19 +489,4 @@ mod tests {
         assert!(!svg.contains("width=\"80mm\""));
         assert!(!svg.contains("height=\"70mm\""));
     }
-}
-
-fn push_outline_rect(
-    out: &mut String,
-    width: f64,
-    height: f64,
-    color: &str,
-    stroke: f64,
-    opacity: f64,
-) {
-    writeln!(
-        out,
-        "  <rect x=\"0\" y=\"0\" width=\"{width:.4}\" height=\"{height:.4}\" stroke=\"{color}\" stroke-width=\"{stroke:.4}\" stroke-opacity=\"{opacity:.2}\"/>"
-    )
-    .unwrap();
 }

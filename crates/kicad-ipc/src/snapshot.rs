@@ -197,6 +197,7 @@ pub fn snapshot_from_items(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn snapshot_from_items_with_context(
     footprints: Vec<FootprintInstance>,
     tracks: Vec<Track>,
@@ -403,7 +404,7 @@ impl SnapshotBuilder {
                 min_y: 0.0,
                 max_y: 0.0,
             });
-        let connections = self
+        let connections: Vec<Connection> = self
             .net_points
             .into_iter()
             .filter(|(_, points)| points.len() >= 2)
@@ -413,6 +414,12 @@ impl SnapshotBuilder {
             })
             .collect();
 
+        let plane_nets = pcb_model::default_plane_nets(
+            layer_count,
+            connections
+                .iter()
+                .map(|c| (c.name.clone(), c.points_to_connect.len())),
+        );
         let problem = RouteProblem {
             layer_count,
             min_trace_width: self.rules.min_trace_width,
@@ -425,6 +432,7 @@ impl SnapshotBuilder {
             net_widths: self.rules.net_widths,
             outline: self.outline,
             escape_layers: BTreeMap::new(),
+            plane_nets,
         };
         let imported = ImportedBoard {
             layer_count,
@@ -710,13 +718,13 @@ fn infer_layer_names(
         }
         if let Some(definition) = &fp.definition {
             for item in &definition.items {
-                if let Ok(pad) = item.to_msg::<Pad>() {
-                    if let Some(stack) = &pad.pad_stack {
-                        layers.extend(stack.layers.iter().copied().filter(|l| is_copper(*l)));
-                        for copper in &stack.copper_layers {
-                            if is_copper(copper.layer) {
-                                layers.insert(copper.layer);
-                            }
+                if let Ok(pad) = item.to_msg::<Pad>()
+                    && let Some(stack) = &pad.pad_stack
+                {
+                    layers.extend(stack.layers.iter().copied().filter(|l| is_copper(*l)));
+                    for copper in &stack.copper_layers {
+                        if is_copper(copper.layer) {
+                            layers.insert(copper.layer);
                         }
                     }
                 }

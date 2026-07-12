@@ -1,0 +1,41 @@
+{
+ "description": "minimal EP repro: SOIC-8-1EP EP pad to one cap",
+ "rules": {
+  "layer_count": 2
+ },
+ "bounds": {
+  "min_x": 0,
+  "min_y": 0,
+  "max_x": 30,
+  "max_y": 20
+ },
+ "parts": [
+  {
+   "reference": "U1",
+   "footprint": "Package_SO:SOIC-8-1EP_3.9x4.9mm_P1.27mm_EP2.29x3mm",
+   "pad_nets": {
+    "9": "PGND",
+    "1": "A",
+    "8": "B"
+   },
+   "locked": {
+    "x": 15,
+    "y": 10,
+    "rotation": 0
+   }
+  },
+  {
+   "reference": "C1",
+   "footprint": "Capacitor_SMD:C_0805_2012Metric",
+   "pad_nets": {
+    "1": "PGND",
+    "2": "A"
+   },
+   "locked": {
+    "x": 15,
+    "y": 3,
+    "rotation": 0
+   }
+  }
+ ]
+}

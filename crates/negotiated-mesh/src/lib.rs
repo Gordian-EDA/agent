@@ -16,13 +16,17 @@ pub use grid_astar::{astar, grid, router};
 pub use pcb_model as problem;
 
 pub mod channel;
+pub(crate) mod copper;
 pub mod crossing;
 pub mod detail;
 pub mod direct;
+pub(crate) mod heuristics;
 pub mod layer_hop;
 pub mod mesh;
 pub mod pathing;
 pub mod pattern;
 pub mod pipeline;
+pub(crate) mod quality;
 pub mod sequential;
+pub(crate) mod via_cleanup;
 pub mod via_escape;

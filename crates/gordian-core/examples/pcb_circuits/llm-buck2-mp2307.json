@@ -1,0 +1,173 @@
+{
+ "description": "2nd LLM buck (DeepSeek round-3): router refused with 15 violations at this locked placement",
+ "rules": {
+  "layer_count": 4
+ },
+ "bounds": {
+  "min_x": 3.289999999999999,
+  "min_y": -0.5,
+  "max_x": 46.71,
+  "max_y": 40.5
+ },
+ "parts": [
+  {
+   "reference": "C1",
+   "footprint": "Capacitor_SMD:C_0805_2012Metric",
+   "pad_nets": {
+    "1": "12V_IN",
+    "2": "GND"
+   },
+   "locked": {
+    "x": 28.0,
+    "y": 8.0,
+    "rotation": 180.0
+   }
+  },
+  {
+   "reference": "C2",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pad_nets": {
+    "1": "12V_IN",
+    "2": "GND"
+   },
+   "locked": {
+    "x": 33.5,
+    "y": 9.5,
+    "rotation": 0.0
+   }
+  },
+  {
+   "reference": "C3",
+   "footprint": "Capacitor_SMD:C_0805_2012Metric",
+   "pad_nets": {
+    "1": "5V_OUT",
+    "2": "GND"
+   },
+   "locked": {
+    "x": 20.5,
+    "y": 27.0,
+    "rotation": 0.0
+   }
+  },
+  {
+   "reference": "C4",
+   "footprint": "Capacitor_SMD:C_0603_1608Metric",
+   "pad_nets": {
+    "1": "5V_OUT",
+    "2": "GND"
+   },
+   "locked": {
+    "x": 20.5,
+    "y": 31.5,
+    "rotation": 0.0
+   }
+  },
+  {
+   "reference": "D1",
+   "footprint": "Diode_SMD:D_SOD-323",
+   "pad_nets": {
+    "1": "/SW",
+    "2": "GND"
+   },
+   "locked": {
+    "x": 27.0,
+    "y": 13.0,
+    "rotation": 90.0
+   }
+  },
+  {
+   "reference": "J1",
+   "footprint": "TerminalBlock:TerminalBlock_bornier-2_P5.08mm",
+   "pad_nets": {
+    "1": "12V_IN",
+    "2": "GND"
+   },
+   "locked": {
+    "x": 41.71,
+    "y": 4.5,
+    "rotation": 0.0
+   }
+  },
+  {
+   "reference": "J2",
+   "footprint": "TerminalBlock:TerminalBlock_bornier-2_P5.08mm",
+   "pad_nets": {
+    "1": "5V_OUT",
+    "2": "GND"
+   },
+   "locked": {
+    "x": 8.29,
+    "y": 35.5,
+    "rotation": 0.0
+   }
+  },
+  {
+   "reference": "L1",
+   "footprint": "Inductor_SMD:L_1210_3225Metric",
+   "pad_nets": {
+    "1": "/SW",
+    "2": "5V_OUT"
+   },
+   "locked": {
+    "x": 21.5,
+    "y": 18.0,
+    "rotation": 180.0
+   }
+  },
+  {
+   "reference": "R1",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pad_nets": {
+    "1": "Net-(U1-~{ON}/OFF)",
+    "2": "12V_IN"
+   },
+   "locked": {
+    "x": 30.5,
+    "y": 23.5,
+    "rotation": 180.0
+   }
+  },
+  {
+   "reference": "R2",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pad_nets": {
+    "1": "/FB",
+    "2": "5V_OUT"
+   },
+   "locked": {
+    "x": 21.0,
+    "y": 23.0,
+    "rotation": 180.0
+   }
+  },
+  {
+   "reference": "R3",
+   "footprint": "Resistor_SMD:R_0603_1608Metric",
+   "pad_nets": {
+    "1": "/FB",
+    "2": "GND"
+   },
+   "locked": {
+    "x": 27.0,
+    "y": 18.5,
+    "rotation": 90.0
+   }
+  },
+  {
+   "reference": "U1",
+   "footprint": "Package_TO_SOT_SMD:TO-263-5_TabPin3",
+   "pad_nets": {
+    "1": "12V_IN",
+    "2": "/SW",
+    "3": "GND",
+    "4": "/FB",
+    "5": "Net-(U1-~{ON}/OFF)"
+   },
+   "locked": {
+    "x": 38.5,
+    "y": 16.5,
+    "rotation": 0.0
+   }
+  }
+ ]
+}

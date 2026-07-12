@@ -7,15 +7,28 @@
 //! possible route; on anything congested or layer-changing it loses to the
 //! grid/detailed routers by normal quality ranking.
 
+use crate::heuristics::{
+    connection_crossing_pressures, connection_obstacle_pressure_um,
+    connection_segment_obstacle_pressure_um, connection_span_um,
+};
 use crate::problem::{
-    Capabilities, Connection, FailedNet, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult,
+    Capabilities, FailedNet, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult,
     RouteSolution, Router, Trace,
 };
+use crate::quality::{keep_route_candidate as keep_candidate, route_quality, trace_route_cost_um};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "direct";
+const PROXIMITY_LENGTH_TIE_BUCKET_UM: u64 = 5_000;
+const EXHAUSTIVE_DIRECT_ORDER_MAX_CONNECTIONS: usize = 4;
+const DIRECT_MAX_MULTILAYER_CONNECTIONS: usize = 4;
+type DirectSolutionKey = (u64, u32, usize);
+type DirectLegKey = (u64, u32, usize, usize);
+type DirectTraceKey = (u64, u64, u64, u32, usize);
+type VisibilitySegmentKey = ((i64, i64), (i64, i64));
+type VisibilityCache = BTreeMap<VisibilitySegmentKey, bool>;
 
 /// A straight-line, no-via router for simple same-layer nets.
 #[derive(Debug, Clone, Copy, Default)]
@@ -37,27 +50,42 @@ impl Router for DirectLineRouter {
         }
     }
 
+    fn can_route(&self, problem: &RouteProblem) -> bool {
+        self.capabilities().can_route(problem)
+            && (problem.layer_count <= 2
+                || problem.connections.len() <= DIRECT_MAX_MULTILAYER_CONNECTIONS)
+    }
+
     fn route(&self, problem: &RouteProblem) -> RouteResult {
         route_direct(problem)
     }
 }
 
+thread_local! {
+    /// Remaining full-solution geometry checks for the CURRENT route_direct
+    /// call. Each check clones the solution and runs the whole lint (~100s of
+    /// µs), and the visibility search multiplies them: unbounded, a dense
+    /// board turns the portfolio's cheapest engine into a 10-minute runaway.
+    /// Count-based (never wall-clock) so results stay deterministic.
+    static GEOMETRY_CHECKS_LEFT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(DIRECT_GEOMETRY_CHECK_BUDGET) };
+}
+
+const DIRECT_GEOMETRY_CHECK_BUDGET: usize = 30_000;
+
 /// Route every eligible net as straight same-layer segments and reconcile the
 /// result through the same geometry/connectivity oracle used by the detailed router.
 pub fn route_direct(problem: &RouteProblem) -> RouteResult {
+    GEOMETRY_CHECKS_LEFT.with(|b| b.set(DIRECT_GEOMETRY_CHECK_BUDGET));
     let mut best: Option<(RouteResult, RouteQuality)> = None;
     for order in net_order_portfolio(problem) {
         let result = route_direct_order(problem, &order);
         let q = route_quality(problem, &result);
-        let stop = q.faults() == 0;
         best = match best.take() {
             None => Some((result, q)),
             Some((bi, bq)) if keep_candidate(&bq, &q) => Some((bi, bq)),
             Some(_) => Some((result, q)),
         };
-        if stop {
-            break;
-        }
     }
     best.map(|(r, _)| r)
         .unwrap_or_else(|| route_direct_order_once(problem, &[]))
@@ -65,14 +93,15 @@ pub fn route_direct(problem: &RouteProblem) -> RouteResult {
 
 fn route_direct_order(problem: &RouteProblem, order: &[usize]) -> RouteResult {
     let mut best = route_direct_order_once(problem, order);
-    let mut tried = vec![order.to_vec()];
+    let mut current_order = order.to_vec();
+    let mut tried = vec![current_order.clone()];
 
     for _ in 0..2 {
         if best.failed.is_empty() {
             break;
         }
 
-        let retry_order = failed_priority_order(problem, order, &best.failed);
+        let retry_order = failed_priority_order(problem, &current_order, &best.failed);
         if tried.iter().any(|existing| existing == &retry_order) {
             break;
         }
@@ -85,6 +114,7 @@ fn route_direct_order(problem: &RouteProblem, order: &[usize]) -> RouteResult {
             break;
         }
         best = candidate;
+        current_order = retry_order;
     }
 
     best
@@ -148,30 +178,28 @@ fn net_order_portfolio(problem: &RouteProblem) -> Vec<Vec<usize>> {
     let base: Vec<usize> = (0..problem.connections.len()).collect();
     let mut orders = Vec::new();
     push_order(&mut orders, base.clone());
+    if base.len() > EXHAUSTIVE_DIRECT_ORDER_MAX_CONNECTIONS {
+        return orders;
+    }
+
+    let metrics = net_order_metrics(problem);
 
     let mut short_first = base.clone();
     short_first.sort_by(|&a, &b| {
-        connection_span_um(&problem.connections[a])
-            .cmp(&connection_span_um(&problem.connections[b]))
-            .then_with(|| {
-                problem.connections[a]
-                    .name
-                    .cmp(&problem.connections[b].name)
-            })
+        metrics[a].span_um.cmp(&metrics[b].span_um).then_with(|| {
+            problem.connections[a]
+                .name
+                .cmp(&problem.connections[b].name)
+        })
     });
     push_order(&mut orders, short_first);
 
     let mut crowded_first = base.clone();
     crowded_first.sort_by(|&a, &b| {
-        connection_obstacle_pressure_um(problem, &problem.connections[b])
-            .cmp(&connection_obstacle_pressure_um(
-                problem,
-                &problem.connections[a],
-            ))
-            .then_with(|| {
-                connection_span_um(&problem.connections[b])
-                    .cmp(&connection_span_um(&problem.connections[a]))
-            })
+        metrics[b]
+            .obstacle_pressure_um
+            .cmp(&metrics[a].obstacle_pressure_um)
+            .then_with(|| metrics[b].span_um.cmp(&metrics[a].span_um))
             .then_with(|| {
                 problem.connections[a]
                     .name
@@ -180,16 +208,36 @@ fn net_order_portfolio(problem: &RouteProblem) -> Vec<Vec<usize>> {
     });
     push_order(&mut orders, crowded_first);
 
+    let mut segment_crowded_first = base.clone();
+    segment_crowded_first.sort_by(|&a, &b| {
+        metrics[b]
+            .segment_obstacle_pressure_um
+            .cmp(&metrics[a].segment_obstacle_pressure_um)
+            .then_with(|| {
+                metrics[b]
+                    .obstacle_pressure_um
+                    .cmp(&metrics[a].obstacle_pressure_um)
+            })
+            .then_with(|| metrics[b].span_um.cmp(&metrics[a].span_um))
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            })
+    });
+    push_order(&mut orders, segment_crowded_first);
+
     let mut many_pins_first = base.clone();
     many_pins_first.sort_by(|&a, &b| {
-        problem.connections[b]
-            .points_to_connect
-            .len()
-            .cmp(&problem.connections[a].points_to_connect.len())
+        metrics[b]
+            .pin_count
+            .cmp(&metrics[a].pin_count)
             .then_with(|| {
-                connection_span_um(&problem.connections[b])
-                    .cmp(&connection_span_um(&problem.connections[a]))
+                metrics[b]
+                    .segment_obstacle_pressure_um
+                    .cmp(&metrics[a].segment_obstacle_pressure_um)
             })
+            .then_with(|| metrics[b].span_um.cmp(&metrics[a].span_um))
             .then_with(|| {
                 problem.connections[a]
                     .name
@@ -198,7 +246,56 @@ fn net_order_portfolio(problem: &RouteProblem) -> Vec<Vec<usize>> {
     });
     push_order(&mut orders, many_pins_first);
 
+    let mut crossing_first = base;
+    crossing_first.sort_by(|&a, &b| {
+        metrics[b]
+            .crossing_pressure
+            .cmp(&metrics[a].crossing_pressure)
+            .then_with(|| {
+                metrics[b]
+                    .segment_obstacle_pressure_um
+                    .cmp(&metrics[a].segment_obstacle_pressure_um)
+            })
+            .then_with(|| {
+                metrics[b]
+                    .obstacle_pressure_um
+                    .cmp(&metrics[a].obstacle_pressure_um)
+            })
+            .then_with(|| metrics[b].span_um.cmp(&metrics[a].span_um))
+            .then_with(|| {
+                problem.connections[a]
+                    .name
+                    .cmp(&problem.connections[b].name)
+            })
+    });
+    push_order(&mut orders, crossing_first);
+
     orders
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirectOrderMetric {
+    pin_count: usize,
+    span_um: u64,
+    segment_obstacle_pressure_um: u64,
+    obstacle_pressure_um: u64,
+    crossing_pressure: usize,
+}
+
+fn net_order_metrics(problem: &RouteProblem) -> Vec<DirectOrderMetric> {
+    let crossing_pressures = connection_crossing_pressures(problem);
+    problem
+        .connections
+        .iter()
+        .enumerate()
+        .map(|(idx, conn)| DirectOrderMetric {
+            pin_count: conn.points_to_connect.len(),
+            span_um: connection_span_um(conn),
+            segment_obstacle_pressure_um: connection_segment_obstacle_pressure_um(problem, conn),
+            obstacle_pressure_um: connection_obstacle_pressure_um(problem, conn),
+            crossing_pressure: crossing_pressures[idx],
+        })
+        .collect()
 }
 
 fn push_order(orders: &mut Vec<Vec<usize>>, order: Vec<usize>) {
@@ -230,25 +327,37 @@ fn failed_priority_order(
         }
     }
 
-    promoted.sort_by(|&a, &b| failed_priority_cmp(problem, a, b));
+    let metrics = net_order_metrics(problem);
+    promoted.sort_by(|&a, &b| failed_priority_cmp_with_metrics(problem, &metrics, a, b));
     promoted.extend(rest);
     promoted
 }
 
-fn failed_priority_cmp(problem: &RouteProblem, a: usize, b: usize) -> std::cmp::Ordering {
-    problem.connections[b]
-        .points_to_connect
-        .len()
-        .cmp(&problem.connections[a].points_to_connect.len())
+fn failed_priority_cmp_with_metrics(
+    problem: &RouteProblem,
+    metrics: &[DirectOrderMetric],
+    a: usize,
+    b: usize,
+) -> std::cmp::Ordering {
+    metrics[b]
+        .pin_count
+        .cmp(&metrics[a].pin_count)
         .then_with(|| {
-            connection_obstacle_pressure_um(problem, &problem.connections[b]).cmp(
-                &connection_obstacle_pressure_um(problem, &problem.connections[a]),
-            )
+            metrics[b]
+                .segment_obstacle_pressure_um
+                .cmp(&metrics[a].segment_obstacle_pressure_um)
         })
         .then_with(|| {
-            connection_span_um(&problem.connections[b])
-                .cmp(&connection_span_um(&problem.connections[a]))
+            metrics[b]
+                .obstacle_pressure_um
+                .cmp(&metrics[a].obstacle_pressure_um)
         })
+        .then_with(|| {
+            metrics[b]
+                .crossing_pressure
+                .cmp(&metrics[a].crossing_pressure)
+        })
+        .then_with(|| metrics[b].span_um.cmp(&metrics[a].span_um))
         .then_with(|| {
             problem.connections[a]
                 .name
@@ -292,7 +401,7 @@ fn route_same_layer_tree_from_root(
         .collect();
 
     while !remaining.is_empty() {
-        let mut best_leg: Option<(usize, Trace, (u64, u32, usize, usize))> = None;
+        let mut best_leg: Option<(usize, Trace, DirectLegKey)> = None;
         for &from in &connected {
             for &to in &remaining {
                 let Some(trace) = route_leg(
@@ -324,14 +433,14 @@ fn route_same_layer_tree_from_root(
     Some(candidate)
 }
 
-fn solution_tree_key(before: &RouteSolution, after: &RouteSolution) -> (u64, u32, usize) {
+fn solution_tree_key(before: &RouteSolution, after: &RouteSolution) -> DirectSolutionKey {
     let added = &after.traces[before.traces.len()..];
     let length_um = added.iter().map(trace_length_um).sum();
     let bends = added.iter().map(trace_bends).sum();
     (length_um, bends, added.len())
 }
 
-fn trace_tree_key(trace: &Trace, from: usize, to: usize) -> (u64, u32, usize, usize) {
+fn trace_tree_key(trace: &Trace, from: usize, to: usize) -> DirectLegKey {
     (trace_length_um(trace), trace_bends(trace), to, from)
 }
 
@@ -353,82 +462,6 @@ fn trace_bends(trace: &Trace) -> u32 {
         .count() as u32
 }
 
-fn connection_span_um(conn: &Connection) -> u64 {
-    let Some(first) = conn.points_to_connect.first() else {
-        return 0;
-    };
-    let (mut min_x, mut max_x, mut min_y, mut max_y) = (first.x, first.x, first.y, first.y);
-    for pt in &conn.points_to_connect {
-        min_x = min_x.min(pt.x);
-        max_x = max_x.max(pt.x);
-        min_y = min_y.min(pt.y);
-        max_y = max_y.max(pt.y);
-    }
-    (((max_x - min_x) + (max_y - min_y)) * 1000.0).round() as u64
-}
-
-fn connection_obstacle_pressure_um(problem: &RouteProblem, conn: &Connection) -> u64 {
-    let Some(first) = conn.points_to_connect.first() else {
-        return 0;
-    };
-    let (mut min_x, mut max_x, mut min_y, mut max_y) = (first.x, first.x, first.y, first.y);
-    for pt in &conn.points_to_connect {
-        min_x = min_x.min(pt.x);
-        max_x = max_x.max(pt.x);
-        min_y = min_y.min(pt.y);
-        max_y = max_y.max(pt.y);
-    }
-    let expand = problem.clearance + problem.net_width(&conn.name) / 2.0;
-    min_x -= expand;
-    max_x += expand;
-    min_y -= expand;
-    max_y += expand;
-
-    let mut pressure = 0;
-    for obstacle in &problem.obstacles {
-        if obstacle.connected_to.iter().any(|net| net == &conn.name) {
-            continue;
-        }
-        if !conn
-            .points_to_connect
-            .iter()
-            .any(|pt| obstacle.layers.iter().any(|layer| layer == &pt.layer))
-        {
-            continue;
-        }
-        let ob_min_x = obstacle.center.x - obstacle.width / 2.0 - expand;
-        let ob_max_x = obstacle.center.x + obstacle.width / 2.0 + expand;
-        let ob_min_y = obstacle.center.y - obstacle.height / 2.0 - expand;
-        let ob_max_y = obstacle.center.y + obstacle.height / 2.0 + expand;
-        let overlap_x = max_x.min(ob_max_x) - min_x.max(ob_min_x);
-        let overlap_y = max_y.min(ob_max_y) - min_y.max(ob_min_y);
-        if overlap_x > 0.0 && overlap_y > 0.0 {
-            pressure += 1_000_000 + ((overlap_x + overlap_y) * 1000.0).round() as u64;
-        }
-    }
-    pressure
-}
-
-fn route_quality(problem: &RouteProblem, result: &RouteResult) -> RouteQuality {
-    RouteQuality::of(
-        problem,
-        result,
-        crate::router::geometry_violations(problem, &result.solution),
-    )
-}
-
-fn keep_candidate(incumbent: &RouteQuality, challenger: &RouteQuality) -> bool {
-    if incumbent.faults() != challenger.faults() {
-        incumbent.faults() < challenger.faults()
-    } else if incumbent.failed_nets != challenger.failed_nets {
-        incumbent.failed_nets < challenger.failed_nets
-    } else if incumbent.via_count != challenger.via_count {
-        incumbent.via_count < challenger.via_count
-    } else {
-        incumbent.wirelength <= challenger.wirelength
-    }
-}
-
 fn route_leg(
     problem: &RouteProblem,
     solution: &RouteSolution,
@@ -438,7 +471,7 @@ fn route_leg(
     b: &crate::problem::RoutePoint,
 ) -> Option<Trace> {
     let width = problem.net_width(connection);
-    let mut paths = candidate_paths(
+    let paths = candidate_paths(
         problem,
         solution,
         connection,
@@ -448,18 +481,6 @@ fn route_leg(
     );
     if paths.is_empty() {
         return None;
-    }
-    let first = paths.remove(0);
-    let trace = Trace {
-        connection: connection.to_owned(),
-        layer: layer.clone(),
-        width,
-        path: first,
-    };
-    let mut candidate = solution.clone();
-    candidate.traces.push(trace.clone());
-    if direct_candidate_is_geometry_clean(problem, &candidate, connection) {
-        return Some(trace);
     }
 
     if let Some(trace) =
@@ -492,7 +513,7 @@ fn best_clean_trace_for_paths(
     width: f64,
     paths: Vec<Vec<Point2>>,
 ) -> Option<Trace> {
-    let mut best: Option<(Trace, (u64, u32, usize))> = None;
+    let mut best: Option<(Trace, DirectTraceKey)> = None;
     for path in paths {
         let trace = Trace {
             connection: connection.to_owned(),
@@ -503,7 +524,7 @@ fn best_clean_trace_for_paths(
         let mut candidate = solution.clone();
         candidate.traces.push(trace.clone());
         if direct_candidate_is_geometry_clean(problem, &candidate, connection) {
-            let key = trace_quality_key(&trace);
+            let key = trace_quality_key(problem, solution, &trace);
             best = match best.take() {
                 None => Some((trace, key)),
                 Some((incumbent, incumbent_key)) if incumbent_key <= key => {
@@ -516,8 +537,19 @@ fn best_clean_trace_for_paths(
     best.map(|(trace, _)| trace)
 }
 
-fn trace_quality_key(trace: &Trace) -> (u64, u32, usize) {
-    (trace_length_um(trace), trace_bends(trace), trace.path.len())
+fn trace_quality_key(
+    problem: &RouteProblem,
+    solution: &RouteSolution,
+    trace: &Trace,
+) -> (u64, u64, u64, u32, usize) {
+    let length_um = trace_length_um(trace);
+    (
+        length_um / PROXIMITY_LENGTH_TIE_BUCKET_UM,
+        trace_route_cost_um(problem, solution, trace, length_um),
+        length_um,
+        trace_bends(trace),
+        trace.path.len(),
+    )
 }
 
 fn candidate_paths(
@@ -709,6 +741,15 @@ fn visibility_path(
     }
     let node_count = width * height;
     let state_count = node_count * VisibilityDir::ALL.len();
+    // Deterministic work budget (counts, never wall-clock): dense boards can
+    // grow the axis mesh quadratically, and each edge check runs a full lint —
+    // an unbounded search here is the portfolio's observed 10-minute runaway.
+    // Direct is the CHEAP first attempt; past this size the heavier engines
+    // are both faster and better.
+    const VISIBILITY_STATE_BUDGET: usize = 60_000;
+    if state_count > VISIBILITY_STATE_BUDGET {
+        return None;
+    }
     let node = |xi: usize, yi: usize| yi * width + xi;
     let state = |node: usize, dir: VisibilityDir| node * VisibilityDir::ALL.len() + dir.idx();
     let point = |node: usize| Point2 {
@@ -820,7 +861,7 @@ fn visibility_segment_is_clean(
     layer: &LayerRef,
     a: Point2,
     b: Point2,
-    cache: &mut BTreeMap<((i64, i64), (i64, i64)), bool>,
+    cache: &mut VisibilityCache,
 ) -> bool {
     if a.dist(b) < geom::EPS {
         return true;
@@ -890,6 +931,14 @@ fn direct_candidate_is_geometry_clean(
     solution: &RouteSolution,
     connection: &str,
 ) -> bool {
+    let exhausted = GEOMETRY_CHECKS_LEFT.with(|b| {
+        let left = b.get();
+        b.set(left.saturating_sub(1));
+        left == 0
+    });
+    if exhausted {
+        return false;
+    }
     for violation in crate::lint::lint(problem, solution) {
         match violation {
             crate::lint::DrcViolation::Connectivity {
@@ -909,6 +958,7 @@ fn same_layer(points: &[crate::problem::RoutePoint]) -> bool {
 }
 
 fn reconcile(problem: &RouteProblem, solution: &mut RouteSolution, failed: &mut Vec<FailedNet>) {
+    crate::via_cleanup::normalize_redundant_vias(problem, solution);
     let mut dropped = crate::lint::drop_violating_copper(problem, solution);
     dropped.extend(crate::lint::drop_unconnected_copper(problem, solution));
 
@@ -998,6 +1048,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         }
     }
 
@@ -1014,6 +1065,40 @@ mod tests {
         push_candidate_path(&mut paths, &mut seen, vec![pt(1.0, 1.0), pt(5.0, 1.0)]);
 
         assert_eq!(paths, vec![vec![pt(1.0, 1.0), pt(5.0, 1.0)]]);
+    }
+
+    #[test]
+    fn clean_candidate_ranking_prefers_roomier_detour_over_tight_straight() {
+        let p = base(
+            vec![conn("N", &[(2.0, 10.0, "top"), (18.0, 10.0, "top")])],
+            vec![
+                pad(&["N"], (2.0, 10.0)),
+                pad(&["N"], (18.0, 10.0)),
+                keepout((10.0, 9.2), 0.5, 0.5),
+            ],
+        );
+        let solution = RouteSolution {
+            traces: Vec::new(),
+            vias: Vec::new(),
+        };
+        let trace = best_clean_trace_for_paths(
+            &p,
+            &solution,
+            "N",
+            LayerRef::top(),
+            p.min_trace_width,
+            vec![
+                vec![pt(2.0, 10.0), pt(18.0, 10.0)],
+                vec![pt(2.0, 10.0), pt(2.0, 11.0), pt(18.0, 11.0), pt(18.0, 10.0)],
+            ],
+        )
+        .expect("both candidate traces should be legal");
+
+        assert_eq!(
+            trace.path,
+            vec![pt(2.0, 10.0), pt(2.0, 11.0), pt(18.0, 11.0), pt(18.0, 10.0)],
+            "direct router candidate ranking should avoid legal but tight obstacle margins"
+        );
     }
 
     #[test]
@@ -1053,6 +1138,155 @@ mod tests {
             &retry[2..],
             &[0, 3],
             "non-failed nets should keep their original relative order"
+        );
+    }
+
+    #[test]
+    fn failed_priority_order_chains_from_current_retry_order() {
+        let p = base(
+            vec![
+                conn("A", &[(1.0, 1.0, "top"), (4.0, 1.0, "top")]),
+                conn("B", &[(1.0, 3.0, "top"), (15.0, 3.0, "top")]),
+                conn("C", &[(1.0, 5.0, "top"), (15.0, 5.0, "top")]),
+                conn("D", &[(1.0, 7.0, "top"), (4.0, 7.0, "top")]),
+            ],
+            vec![],
+        );
+        let current_retry_order = vec![2, 1, 0, 3];
+        let failed = vec![FailedNet {
+            connection: "D".to_owned(),
+            reason: "still blocked".to_owned(),
+        }];
+
+        let retry = failed_priority_order(&p, &current_retry_order, &failed);
+
+        assert_eq!(
+            retry,
+            vec![3, 2, 1, 0],
+            "subsequent retries must promote the new failure from the accepted retry order"
+        );
+    }
+
+    #[test]
+    fn failed_priority_order_uses_segment_pressure_before_bbox_pressure() {
+        let p = base(
+            vec![
+                conn("BBOX_ONLY", &[(1.0, 1.0, "top"), (9.0, 9.0, "top")]),
+                conn("SEGMENT_BLOCKED", &[(1.0, 1.0, "top"), (9.0, 1.0, "top")]),
+                conn("TAIL", &[(1.0, 11.0, "top"), (4.0, 11.0, "top")]),
+            ],
+            vec![keepout((8.0, 2.0), 0.5, 0.5), keepout((5.0, 1.0), 0.5, 0.5)],
+        );
+        let failed = vec![
+            FailedNet {
+                connection: "BBOX_ONLY".to_owned(),
+                reason: "blocked".to_owned(),
+            },
+            FailedNet {
+                connection: "SEGMENT_BLOCKED".to_owned(),
+                reason: "blocked".to_owned(),
+            },
+        ];
+
+        let retry = failed_priority_order(&p, &[0, 1, 2], &failed);
+
+        assert_eq!(
+            &retry[..2],
+            &[1, 0],
+            "direct retry should prioritize actual segment-corridor blockage before bbox-only pressure"
+        );
+        assert_eq!(&retry[2..], &[2]);
+    }
+
+    #[test]
+    fn net_order_portfolio_includes_crossing_pressure_order() {
+        let p = base(
+            vec![
+                conn("TAIL", &[(1.0, 1.0, "top"), (3.0, 1.0, "top")]),
+                conn("V1", &[(5.0, 1.0, "top"), (5.0, 19.0, "top")]),
+                conn("V2", &[(8.0, 1.0, "top"), (8.0, 19.0, "top")]),
+                conn("SPINE", &[(1.0, 10.0, "top"), (19.0, 10.0, "top")]),
+            ],
+            vec![],
+        );
+
+        let orders = net_order_portfolio(&p);
+
+        assert!(
+            orders.iter().any(|order| order.as_slice() == [3, 1, 2, 0]),
+            "direct router should try the high-crossing spine before isolated tails: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn net_order_portfolio_includes_segment_obstacle_pressure_order() {
+        let p = base(
+            vec![
+                conn("BBOX_ONLY", &[(1.0, 1.0, "top"), (9.0, 9.0, "top")]),
+                conn("SEGMENT_BLOCKED", &[(1.0, 1.0, "top"), (9.0, 1.0, "top")]),
+                conn("TAIL", &[(1.0, 11.0, "top"), (4.0, 11.0, "top")]),
+            ],
+            vec![keepout((8.0, 2.0), 0.5, 0.5), keepout((5.0, 1.0), 0.5, 0.5)],
+        );
+        let metrics = net_order_metrics(&p);
+        let orders = net_order_portfolio(&p);
+
+        assert_eq!(metrics[0].segment_obstacle_pressure_um, 0);
+        assert!(metrics[0].obstacle_pressure_um > 0);
+        assert!(metrics[1].segment_obstacle_pressure_um > 0);
+        assert!(
+            orders.iter().any(|order| order.as_slice() == [1, 0, 2]),
+            "direct router should include the segment-obstacle-pressure-first order: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn net_order_portfolio_bounds_medium_boards_to_base_order() {
+        let p = base(
+            (0..5)
+                .map(|idx| {
+                    conn(
+                        &format!("N{idx}"),
+                        &[
+                            (1.0, idx as f64 + 1.0, "top"),
+                            (9.0, idx as f64 + 1.0, "top"),
+                        ],
+                    )
+                })
+                .collect(),
+            vec![keepout((5.0, 3.0), 0.5, 0.5)],
+        );
+
+        let orders = net_order_portfolio(&p);
+
+        assert_eq!(
+            orders.len(),
+            1,
+            "direct router is a cheap first-pass candidate; medium boards should not try the full ordering portfolio: {orders:?}"
+        );
+    }
+
+    #[test]
+    fn direct_router_declines_nontrivial_multilayer_boards() {
+        let mut p = base(
+            (0..5)
+                .map(|idx| {
+                    conn(
+                        &format!("N{idx}"),
+                        &[
+                            (1.0, idx as f64 + 1.0, "top"),
+                            (9.0, idx as f64 + 1.0, "top"),
+                        ],
+                    )
+                })
+                .collect(),
+            vec![],
+        );
+        p.layer_count = 4;
+
+        assert!(
+            !DirectLineRouter.can_route(&p),
+            "direct is a cheap no-via candidate and should not monopolize nontrivial multilayer boards"
         );
     }
 
@@ -1115,6 +1349,43 @@ mod tests {
         .expect("both candidates are clean");
 
         assert_eq!(trace.path, vec![pt(2.0, 2.0), pt(18.0, 2.0)]);
+    }
+
+    #[test]
+    fn route_direct_portfolio_checks_later_clean_wirelength() {
+        let p = base(
+            vec![
+                conn("LONG", &[(2.0, 10.0, "top"), (18.0, 10.0, "top")]),
+                conn("SHORT", &[(10.0, 9.0, "top"), (10.0, 11.0, "top")]),
+            ],
+            vec![
+                pad(&["LONG"], (2.0, 10.0)),
+                pad(&["LONG"], (18.0, 10.0)),
+                pad(&["SHORT"], (10.0, 9.0)),
+                pad(&["SHORT"], (10.0, 11.0)),
+            ],
+        );
+        let base_first = route_direct_order(&p, &[0, 1]);
+        let short_first = route_direct_order(&p, &[1, 0]);
+
+        assert!(base_first.failed.is_empty(), "{:?}", base_first.failed);
+        assert!(short_first.failed.is_empty(), "{:?}", short_first.failed);
+        assert!(
+            short_first.solution.metrics().wirelength < base_first.solution.metrics().wirelength,
+            "the later short-first order should be clean and shorter: base={:?} short={:?}",
+            base_first.solution,
+            short_first.solution
+        );
+
+        let r = route_direct(&p);
+
+        assert!(r.failed.is_empty(), "{:?}", r.failed);
+        assert_eq!(
+            r.solution.metrics().wirelength,
+            short_first.solution.metrics().wirelength,
+            "the portfolio should not stop at the first clean direct route"
+        );
+        assert!(crate::lint::lint(&p, &r.solution).is_empty());
     }
 
     #[test]

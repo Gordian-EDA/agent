@@ -3,7 +3,7 @@
 //!
 //! This makes the suite the single one-stop report: geometry findings first
 //! (the earlier rules), then connectivity defects folded in last, exactly as the
-//! legacy hardcoded `lint()` produced them.
+//! former hardcoded `lint()` produced them.
 
 use crate::{DrcCtx, Finding, Rule, connectivity};
 

@@ -555,6 +555,7 @@ impl RouteGrid {
     /// - Still blocks **every other net** (`Net(owner)` is foreign to them), so the
     ///   neighbour's clearance is preserved — this only relaxes the owner against
     ///   its own copper, never opens a foreign clearance corridor.
+    ///
     /// A true keepout / off-board cell (a `BlockedAll` NOT covered by this pad's own
     /// real copper) is untouched, and a genuine two-net copper overlap stays
     /// `BlockedAll` (a real short the lint must see).
@@ -699,6 +700,7 @@ mod tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         }
     }
 

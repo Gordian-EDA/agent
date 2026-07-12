@@ -592,7 +592,6 @@ pub(crate) fn add_orphan_label_columns(w: &mut SchematicWriter, design: &Design,
 }
 
 /// net -> list of (item index, pin number).
-
 pub(crate) fn incidence(items: &[Item]) -> Incidence {
     let mut inc: Incidence = BTreeMap::new();
     for (i, it) in items.iter().enumerate() {

@@ -8,7 +8,7 @@
 //! and the system-prompt PCB guidance — the way a real user drives it, end to end.
 //!
 //! ```text
-//! cargo run --release -p agent --example board_agent -- <out.kicad_pcb> "<prompt>"
+//! cargo run --release -p gordian-core --example board_agent -- <out.kicad_pcb> "<prompt>"
 //! ```
 //!
 //! Needs the platform Gordian TOML config populated with `llm.adapter`,

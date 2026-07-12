@@ -707,7 +707,7 @@ pub(crate) fn current_design_yaml(ctx: &AgentRuntime) -> Result<String> {
 
 fn validate_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let yaml = require_str(&input, "yaml")?;
-    let result = compile(&yaml, &ctx.provider());
+    let result = compile(&yaml, ctx.provider());
     Ok(compile_report(&result.diagnostics))
 }
 
@@ -792,7 +792,7 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .unwrap_or(false);
 
     // Compile first; never render or write a design with errors.
-    let result = compile(&yaml, &ctx.provider());
+    let result = compile(&yaml, ctx.provider());
     let Some(design) = result.design else {
         let mut report = compile_report(&result.diagnostics);
         // `ok` is already false here (errors > 0), but be explicit for the LLM.
@@ -804,7 +804,7 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let prior_design = if ctx.sch_path().exists() {
         let prior_yaml = lift(ctx.env(), ctx.sch_path())
             .with_context(|| format!("lifting prior {}", ctx.sch_path().display()))?;
-        compile(&prior_yaml, &ctx.provider()).design
+        compile(&prior_yaml, ctx.provider()).design
     } else {
         None
     };
@@ -1088,11 +1088,15 @@ fn run_erc(ctx: &AgentRuntime) -> Result<Value> {
         .violations
         .iter()
         .map(|v| {
-            json!({
+            let mut item = json!({
                 "severity": v.severity,
                 "type": v.kind,
                 "description": v.description,
-            })
+            });
+            if let Some(hint) = erc_hint(&v.kind, &v.description) {
+                item["hint"] = json!(hint);
+            }
+            item
         })
         .collect();
 
@@ -1101,6 +1105,36 @@ fn run_erc(ctx: &AgentRuntime) -> Result<Value> {
         "warnings": report.warning_count(),
         "violations": violations,
     }))
+}
+
+/// A resolution hint for the ERC violation classes agents repeatedly fight
+/// blind (observed: a model burning 26 design iterations on a driver
+/// conflict). Only the classes with one clearly-right next move get a hint.
+fn erc_hint(kind: &str, description: &str) -> Option<&'static str> {
+    match kind {
+        "pin_to_pin" if description.contains("Output and Power output") => Some(
+            "Two driving pins share a net. Usual causes: a regulator/IC OUT pin tied \
+             directly to a power symbol whose library pin is power-output, or two \
+             outputs shorted. Fix by checking get_symbol_info pin types: use a plain \
+             net label (not a power symbol) on driven rails, or pick the symbol \
+             variant whose pin is power-out only where the rail is truly sourced.",
+        ),
+        "pin_not_connected" => Some(
+            "Mark intentionally-unused pins no-connect in the YAML (pin: NC) instead \
+             of leaving them dangling.",
+        ),
+        "pin_not_driven" | "power_pin_not_driven" => Some(
+            "The net has only inputs/power-in pins. Add the sourcing connection, or \
+             if the rail is sourced off-board (connector power), KiCAD wants a \
+             PWR_FLAG-style source: connect the rail to the connector pin that \
+             feeds it.",
+        ),
+        "different_unit_net" | "multiple_net_names" => Some(
+            "The same wire carries two names. Keep one label per net; rename the \
+             other uses to match.",
+        ),
+        _ => None,
+    }
 }
 
 // ── 9. create_design / edit_design ────────────────────────────────────────
@@ -1119,7 +1153,7 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     ctx.workspace()
         .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
-    let mut report = compile_report(&compile(&yaml, &ctx.provider()).diagnostics);
+    let mut report = compile_report(&compile(&yaml, ctx.provider()).diagnostics);
     report["draft_written"] = json!(true);
     Ok(report)
 }
@@ -1135,7 +1169,7 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     if let Some(yaml) = full_yaml {
         ctx.workspace()
             .write_draft(yaml, current_sch_text(ctx).as_deref())?;
-        let mut report = compile_report(&compile(yaml, &ctx.provider()).diagnostics);
+        let mut report = compile_report(&compile(yaml, ctx.provider()).diagnostics);
         report["draft_written"] = json!(true);
         report["mode"] = json!("full_replace");
         return Ok(report);
@@ -1171,7 +1205,7 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     ctx.workspace()
         .write_draft(&edited, current_sch_text(ctx).as_deref())?;
 
-    let mut report = compile_report(&compile(&edited, &ctx.provider()).diagnostics);
+    let mut report = compile_report(&compile(&edited, ctx.provider()).diagnostics);
     report["replacements"] = json!(if replace_all { count } else { 1 });
     Ok(report)
 }

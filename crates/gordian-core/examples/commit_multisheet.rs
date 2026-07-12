@@ -2,7 +2,7 @@
 //! — the exact function `apply_design` calls for multi-block designs): compile a draft,
 //! compose ONE labeled-block-region `.kicad_sch`, run ERC.
 //!
-//! Usage: cargo run --release -p agent --example commit_multisheet -- <draft.yaml> <out_dir>
+//! Usage: cargo run --release -p gordian-core --example commit_multisheet -- <draft.yaml> <out_dir>
 
 use kicad_env::KicadEnv;
 use kicad_symbol::SymbolTable;

@@ -138,7 +138,7 @@ pub fn apply_surround(problem: &mut PlaceProblem, members: &[String], target: &s
 /// left alone. Pairs with [`apply_surround`]: IC + caps centred, connectors framed
 /// at the edges, the rest placed between, then the outline tightens to it.
 pub fn apply_edge_lock(problem: &mut PlaceProblem, refs: &[String]) {
-    let b = problem.bounds.clone();
+    let b = problem.bounds;
     let idxs: Vec<usize> = refs
         .iter()
         .filter_map(|r| {
@@ -632,7 +632,7 @@ pub fn unified_fanout_place(problem: &mut PlaceProblem) -> bool {
         return false; // respect any agent-pinned layout
     }
     let original = problem.clone();
-    let original_bounds = problem.bounds.clone();
+    let original_bounds = problem.bounds;
     let Some(ic) = (0..n)
         .filter(|&i| problem.parts[i].pads.len() >= 16)
         .max_by_key(|&i| problem.parts[i].pads.len())

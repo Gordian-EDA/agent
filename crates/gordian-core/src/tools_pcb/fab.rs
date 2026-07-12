@@ -32,12 +32,9 @@ pub fn export_fab(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         Some(p) => PathBuf::from(p),
         None => ctx.pcb_path(),
     };
-    if board == ctx.pcb_path()
-        && let Err(e) = super::interactive::save_session_if_open(ctx)
-    {
-        return Ok(
-            json!({ "error": format!("could not save live KiCAD board before fab export: {e}") }),
-        );
+    if board == ctx.pcb_path() && super::interactive::save_session_if_open(ctx).is_err() {
+        // Export the on-disk board — the offline write paths keep it current.
+        ctx.close_kicad_session();
     }
     if !board.is_file() {
         return Ok(json!({

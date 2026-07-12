@@ -3,7 +3,7 @@
 //! render the schematic it produced to a content-only PNG.
 //!
 //! Usage:
-//!   cargo run --release -p agent --example agent_design -- <out.png> "<prompt>"
+//!   cargo run --release -p gordian-core --example agent_design -- <out.png> "<prompt>"
 //!
 //! Needs the platform Gordian TOML config populated with `llm.adapter`,
 //! `llm.model`, and `llm.apiKey`. Prints the model's final reply, the tool-call

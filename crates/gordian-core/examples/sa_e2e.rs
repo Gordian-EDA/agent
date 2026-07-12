@@ -36,6 +36,12 @@ fn render(env: &KicadEnv, provider: &SymbolTable, name: &str) -> anyhow::Result<
 
 fn main() -> anyhow::Result<()> {
     let env = KicadEnv::detect().expect("no KiCAD environment");
+    let dir = std::path::Path::new("docs/validation");
+    if !dir.is_dir() {
+        anyhow::bail!(
+            "docs/validation corpus is not present; provide the validation fixtures before running sa_e2e"
+        );
+    }
     let provider = SymbolTable::from_env(&env);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let names: Vec<&str> = if args.is_empty() {

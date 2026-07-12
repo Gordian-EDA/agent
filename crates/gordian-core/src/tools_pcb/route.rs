@@ -11,10 +11,12 @@ use drc_lint::lint::{DrcViolation, drop_unconnected_copper, lint};
 use kicad_ipc::snapshot::ImportedPart;
 use negotiated_mesh::pathing::{GlobalRouteResult, global_route};
 use negotiated_mesh::pipeline::{
-    route_auto_with_diagnostics, route_mesh_with_diagnostics, select_best,
+    RouteEngineAttempt, route_auto_with_diagnostics, route_mesh_with_diagnostics,
+    route_sequential_with_diagnostics, select_best,
 };
 use pcb_model::{
-    FailedNet, LayerRef, Point2, RouteProblem, RouteResult, RouteSolution, Trace, Via, ViaSpan,
+    FailedNet, LayerRef, Point2, RouteProblem, RouteQuality, RouteResult, RouteSolution, Trace,
+    Via, ViaSpan,
 };
 
 use crate::{AgentRuntime, PcbRouterEngine};
@@ -181,6 +183,7 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     let rp = board.problem.clone();
     let routed = route_with_engine(&rp, ctx.config().engines.pcb_router);
     let global_diagnostics = routed.global;
+    let router_attempts = routed.attempts;
     let mut result = routed.result;
     let _used_direct_fallback = apply_direct_rescue_fallback(&rp, &mut result);
     let dropped_failed = drop_failed_net_copper(&mut result);
@@ -203,7 +206,7 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     }
 
     write_route(ctx, &rp, &result.solution, &board.layer_names)
-        .map_err(|e| format!("could not write route to live KiCAD board: {e}"))?;
+        .map_err(|e| format!("could not write route to the board: {e}"))?;
 
     let failed: Vec<Value> = result
         .failed
@@ -230,6 +233,7 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     let m = result.solution.metrics();
     Ok(json!({
         "router": result.engine,
+        "router_attempts": route_attempts_json(&router_attempts),
         "failed": failed,
         "metrics": {
             "wirelength": m.wirelength,
@@ -255,12 +259,23 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
     }))
 }
 
-fn clear_existing_copper(
-    ctx: &AgentRuntime,
-) -> std::result::Result<(usize, usize), kicad_ipc::Error> {
+fn clear_existing_copper(ctx: &AgentRuntime) -> std::result::Result<(usize, usize), String> {
     let path = ctx.pcb_path();
-    ctx.kicad()
-        .with_session(&path, |session| session.kicad().delete_tracks_and_vias())
+    let live = ctx
+        .kicad()
+        .with_session(&path, |session| session.kicad().delete_tracks_and_vias());
+    let Err(live_err) = live else {
+        return live.map_err(|e| e.to_string());
+    };
+    // Headless fallback: strip the copper from the board file directly.
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("{live_err}; offline fallback could not read the board: {e}"))?;
+    let (stripped, tracks, vias) = super::patch::strip_copper(&text)
+        .map_err(|e| format!("{live_err}; offline fallback failed: {e}"))?;
+    std::fs::write(&path, stripped)
+        .map_err(|e| format!("{live_err}; offline fallback could not write the board: {e}"))?;
+    ctx.close_kicad_session();
+    Ok((tracks, vias))
 }
 
 fn make_route_honest(rp: &RouteProblem, result: &mut RouteResult) -> Vec<String> {
@@ -421,6 +436,7 @@ fn append_failed(result: &mut RouteResult, connection: &str, reason: &str) {
 
 struct RouteRun {
     result: RouteResult,
+    attempts: Vec<RouteEngineAttempt>,
     global: Option<GlobalRouteResult>,
 }
 
@@ -430,13 +446,16 @@ fn route_with_engine(rp: &RouteProblem, engine: PcbRouterEngine) -> RouteRun {
             let run = route_auto_with_diagnostics(rp);
             RouteRun {
                 result: run.result,
+                attempts: run.attempts,
                 global: run.global,
             }
         }
         PcbRouterEngine::Astar => {
             let grid = grid_astar::router::GridAStarRouter;
+            let result = select_best(rp, &[&grid]);
             RouteRun {
-                result: select_best(rp, &[&grid]),
+                attempts: vec![route_engine_attempt(rp, &result)],
+                result,
                 global: None,
             }
         }
@@ -444,13 +463,64 @@ fn route_with_engine(rp: &RouteProblem, engine: PcbRouterEngine) -> RouteRun {
             let run = route_mesh_with_diagnostics(rp);
             RouteRun {
                 result: run.result,
+                attempts: run.attempts,
+                global: run.global,
+            }
+        }
+        PcbRouterEngine::Sequential => {
+            let run = route_sequential_with_diagnostics(rp);
+            RouteRun {
+                result: run.result,
+                attempts: run.attempts,
                 global: run.global,
             }
         }
     }
 }
 
-fn apply_direct_rescue_fallback(rp: &RouteProblem, result: &mut RouteResult) -> bool {
+fn route_engine_attempt(rp: &RouteProblem, result: &RouteResult) -> RouteEngineAttempt {
+    let geometry_violations = grid_astar::router::geometry_violations(rp, &result.solution);
+    let quality = RouteQuality::of(rp, result, geometry_violations);
+    RouteEngineAttempt {
+        engine: result.engine.clone(),
+        failed: result.failed.clone(),
+        elapsed_ms: 0,
+        fault_weight: quality.fault_weight,
+        geometry_violations,
+        failed_nets: quality.failed_nets,
+        vias: quality.via_count,
+        wirelength: quality.wirelength,
+    }
+}
+
+fn route_attempts_json(attempts: &[RouteEngineAttempt]) -> Value {
+    Value::Array(
+        attempts
+            .iter()
+            .map(|attempt| {
+                json!({
+                    "engine": attempt.engine,
+                    "elapsed_ms": attempt.elapsed_ms,
+                    "failed": attempt.failed.iter().map(|f| {
+                        json!({
+                            "connection": f.connection,
+                            "reason": f.reason,
+                        })
+                    }).collect::<Vec<_>>(),
+                    "quality": {
+                        "fault_weight": attempt.fault_weight,
+                        "geometry_violations": attempt.geometry_violations,
+                        "failed_nets": attempt.failed_nets,
+                        "vias": attempt.vias,
+                        "wirelength": attempt.wirelength,
+                    }
+                })
+            })
+            .collect(),
+    )
+}
+
+pub fn apply_direct_rescue_fallback(rp: &RouteProblem, result: &mut RouteResult) -> bool {
     if result.failed.is_empty() {
         return false;
     }
@@ -522,18 +592,18 @@ fn direct_multi_pin_candidate(
     solution: &RouteSolution,
     conn: &pcb_model::Connection,
 ) -> Option<RouteSolution> {
-    let anchor = conn.points_to_connect[0].point();
+    let pairs = direct_multi_pin_tree_pairs(conn);
     for layer in direct_candidate_layers_for_conn(rp, conn) {
         let mut candidate = solution.clone();
         for point in &conn.points_to_connect {
             push_terminal_via_if_needed(rp, &mut candidate, conn, point, &layer);
         }
         let mut ok = true;
-        for point in conn.points_to_connect.iter().skip(1) {
+        for (a_idx, b_idx) in &pairs {
+            let a = conn.points_to_connect[*a_idx].point();
+            let b = conn.points_to_connect[*b_idx].point();
             let mut routed_leg = false;
-            for path in
-                direct_candidate_paths(rp, &candidate, &conn.name, &layer, anchor, point.point())
-            {
+            for path in direct_candidate_paths(rp, &candidate, &conn.name, &layer, a, b) {
                 let mut leg = candidate.clone();
                 leg.traces.push(Trace {
                     connection: conn.name.clone(),
@@ -558,6 +628,80 @@ fn direct_multi_pin_candidate(
         }
     }
     None
+}
+
+fn direct_multi_pin_tree_pairs(conn: &pcb_model::Connection) -> Vec<(usize, usize)> {
+    match conn.points_to_connect.as_slice() {
+        [] | [_] => Vec::new(),
+        [_, _] => vec![(0, 1)],
+        points => {
+            let positions: Vec<Point2> = points.iter().map(|pt| pt.point()).collect();
+            let mut pairs = Vec::with_capacity(points.len().saturating_sub(1));
+            let mut in_tree = vec![false; points.len()];
+            in_tree[0] = true;
+            for _ in 1..points.len() {
+                let mut best: Option<(usize, usize)> = None;
+                for (ai, &ai_in_tree) in in_tree.iter().enumerate() {
+                    if !ai_in_tree {
+                        continue;
+                    }
+                    for (bi, &bi_in_tree) in in_tree.iter().enumerate() {
+                        if bi_in_tree {
+                            continue;
+                        }
+                        let replace = best.is_none_or(|(old_a, old_b)| {
+                            direct_multi_pin_tree_pair_better(
+                                conn, &positions, ai, bi, old_a, old_b,
+                            )
+                        });
+                        if replace {
+                            best = Some((ai, bi));
+                        }
+                    }
+                }
+                let Some((ai, bi)) = best else {
+                    break;
+                };
+                in_tree[bi] = true;
+                pairs.push((ai, bi));
+            }
+            pairs
+        }
+    }
+}
+
+fn direct_multi_pin_tree_pair_better(
+    conn: &pcb_model::Connection,
+    positions: &[Point2],
+    a: usize,
+    b: usize,
+    old_a: usize,
+    old_b: usize,
+) -> bool {
+    let dist = positions[a].dist(positions[b]);
+    let old_dist = positions[old_a].dist(positions[old_b]);
+    if dist < old_dist - 1e-9 {
+        return true;
+    }
+    if (dist - old_dist).abs() > 1e-9 {
+        return false;
+    }
+
+    let layer_change = direct_multi_pin_pair_requires_layer_change(conn, a, b);
+    let old_layer_change = direct_multi_pin_pair_requires_layer_change(conn, old_a, old_b);
+    if layer_change != old_layer_change {
+        return !layer_change;
+    }
+
+    (a, b) < (old_a, old_b)
+}
+
+fn direct_multi_pin_pair_requires_layer_change(
+    conn: &pcb_model::Connection,
+    a: usize,
+    b: usize,
+) -> bool {
+    conn.points_to_connect[a].layer != conn.points_to_connect[b].layer
 }
 
 fn direct_candidate_paths(
@@ -977,13 +1121,23 @@ fn write_route(
     rp: &RouteProblem,
     solution: &RouteSolution,
     layer_names: &[String],
-) -> std::result::Result<(), kicad_ipc::Error> {
+) -> std::result::Result<(), String> {
     let path = ctx.pcb_path();
-    ctx.kicad().with_session(&path, |session| {
+    let live = ctx.kicad().with_session(&path, |session| {
         session
             .kicad()
             .create_route_solution(rp, solution, layer_names)
-    })
+    });
+    let Err(live_err) = live else { return Ok(()) };
+    // Headless fallback: append the copper to the board file directly.
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("{live_err}; offline fallback could not read the board: {e}"))?;
+    let appended = super::patch::append_copper(&text, solution, rp.layer_count, layer_names)
+        .map_err(|e| format!("{live_err}; offline fallback failed: {e}"))?;
+    std::fs::write(&path, appended)
+        .map_err(|e| format!("{live_err}; offline fallback could not write the board: {e}"))?;
+    ctx.close_kicad_session();
+    Ok(())
 }
 
 fn is_seed_placement(bounds: &pcb_model::Rect, parts: &[ImportedPart]) -> bool {
@@ -1096,6 +1250,94 @@ mod escape_bottleneck_tests {
     }
 
     #[test]
+    fn explicit_astar_engine_reports_route_attempt_diagnostics() {
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![pcb_model::Connection {
+                name: "SIG".to_string(),
+                points_to_connect: vec![
+                    pcb_model::RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    pcb_model::RoutePoint {
+                        x: 5.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 6.0,
+                max_y: 3.0,
+            },
+            clearance: 0.15,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+
+        let run = route_with_engine(&problem, PcbRouterEngine::Astar);
+
+        assert_eq!(run.attempts.len(), 1);
+        assert_eq!(run.attempts[0].engine, run.result.engine);
+        assert_eq!(run.attempts[0].failed_nets, 0);
+        assert_eq!(run.attempts[0].geometry_violations, 0);
+    }
+
+    #[test]
+    fn explicit_sequential_engine_reports_route_attempt_diagnostics() {
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![pcb_model::Connection {
+                name: "SIG".to_string(),
+                points_to_connect: vec![
+                    pcb_model::RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    pcb_model::RoutePoint {
+                        x: 5.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 6.0,
+                max_y: 3.0,
+            },
+            clearance: 0.15,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+
+        let run = route_with_engine(&problem, PcbRouterEngine::Sequential);
+
+        assert_eq!(run.attempts.len(), 1);
+        assert_eq!(run.attempts[0].engine, run.result.engine);
+        assert_eq!(run.attempts[0].failed_nets, 0);
+        assert_eq!(run.attempts[0].geometry_violations, 0);
+    }
+
+    #[test]
     fn direct_rescue_fallback_rescues_clean_failed_net() {
         let problem = RouteProblem {
             layer_count: 2,
@@ -1128,6 +1370,7 @@ mod escape_bottleneck_tests {
             net_widths: [("FAT_POWER".to_string(), 2.0)].into_iter().collect(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1177,6 +1420,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1244,6 +1488,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1310,6 +1555,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1382,6 +1628,7 @@ mod escape_bottleneck_tests {
             net_widths: [("SIG".to_string(), 1.0)].into_iter().collect(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1452,6 +1699,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1507,6 +1755,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let direct = negotiated_mesh::direct::route_direct(&problem);
         assert!(!direct.failed.is_empty(), "direct router must not add vias");
@@ -1562,6 +1811,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1616,6 +1866,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1675,6 +1926,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             solution: RouteSolution {
@@ -1688,6 +1940,70 @@ mod escape_bottleneck_tests {
         assert!(apply_direct_rescue_fallback(&problem, &mut result));
         assert!(result.failed.is_empty());
         assert_eq!(result.solution.traces.len(), 2);
+    }
+
+    #[test]
+    fn direct_multi_pin_rescue_uses_nearest_tree_topology() {
+        let conn = pcb_model::Connection {
+            name: "BUS".to_string(),
+            points_to_connect: vec![
+                pcb_model::RoutePoint {
+                    x: 1.0,
+                    y: 1.0,
+                    layer: LayerRef::top(),
+                },
+                pcb_model::RoutePoint {
+                    x: 9.0,
+                    y: 1.0,
+                    layer: LayerRef::top(),
+                },
+                pcb_model::RoutePoint {
+                    x: 9.0,
+                    y: 2.0,
+                    layer: LayerRef::top(),
+                },
+            ],
+        };
+
+        let pairs = direct_multi_pin_tree_pairs(&conn);
+
+        assert_eq!(
+            pairs,
+            vec![(0, 1), (1, 2)],
+            "direct rescue should extend multi-pin nets through the nearest routed point, not a fixed first-pin star"
+        );
+    }
+
+    #[test]
+    fn direct_multi_pin_rescue_prefers_same_layer_edge_on_tie() {
+        let conn = pcb_model::Connection {
+            name: "BUS".to_string(),
+            points_to_connect: vec![
+                pcb_model::RoutePoint {
+                    x: 2.0,
+                    y: 2.0,
+                    layer: LayerRef::top(),
+                },
+                pcb_model::RoutePoint {
+                    x: 12.0,
+                    y: 2.0,
+                    layer: LayerRef::bottom(),
+                },
+                pcb_model::RoutePoint {
+                    x: 2.0,
+                    y: 12.0,
+                    layer: LayerRef::top(),
+                },
+            ],
+        };
+
+        let pairs = direct_multi_pin_tree_pairs(&conn);
+
+        assert_eq!(
+            pairs.first().copied(),
+            Some((0, 2)),
+            "equal-length direct rescue tree edges should prefer same-layer endpoints: {pairs:?}"
+        );
     }
 
     #[test]
@@ -1723,6 +2039,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut solution = RouteSolution {
             traces: vec![
@@ -1803,6 +2120,7 @@ mod escape_bottleneck_tests {
             net_widths: Default::default(),
             outline: None,
             escape_layers: Default::default(),
+            plane_nets: Default::default(),
         };
         let mut result = RouteResult {
             engine: "test".to_string(),

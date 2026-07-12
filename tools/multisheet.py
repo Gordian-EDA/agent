@@ -5,8 +5,7 @@ The single-sheet sprawl ceiling (a complete board crammed on one sheet scores ~5
 the professional way: draw each block on its own sheet. Each sheet is small enough to land where
 the clean fixtures do (9-10), and inter-block nets become labeled ports automatically (a shared
 net is single-pin within a block -> auto-port; power nets -> power symbols). Demonstrated: c01
-(composed = 5) -> power 9 / mcu 8 / io (fixable overlap). See
-docs/specs/schematic-quality-and-the-critic-ceiling.md.
+(composed = 5) -> power 9 / mcu 8 / io (fixable overlap).
 
     set -a; . ./.env; set +a
     python3 tools/multisheet.py MULTIBLOCK.circuit.yaml [--samples 3] [--circuit "desc"]

@@ -184,7 +184,7 @@ impl DrcSuite {
     /// The canonical in-house rule set, in its fixed reporting order:
     /// invalid-layer, trace-width, out-of-bounds, copper-to-board-edge,
     /// pairwise clearance, hole-to-hole/copper, via-diameter, then connectivity
-    /// (folded in last). This is the order the legacy hardcoded `lint()`
+    /// (folded in last). This is the order the former hardcoded `lint()`
     /// produced, so the findings are byte-identical.
     pub fn standard() -> Self {
         DrcSuite(rules::standard_rules())

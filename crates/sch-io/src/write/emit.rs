@@ -328,7 +328,7 @@ fn render_instance(inst: &Instance, root_uuid: &str) -> String {
             stable_uuid("symbol", &format!("{}#u{}", inst.refdes, inst.unit))
         }
     });
-    // Field anchors: solver-assigned when present, else the legacy fixed
+    // Field anchors: solver-assigned when present, else the fallback fixed
     // right-of-body offset (text clear of the glyph via the half-extent).
     let (rp, vp) = field_anchors(inst);
     let (ref_at, ref_j) = (rp.at, rp.justify);

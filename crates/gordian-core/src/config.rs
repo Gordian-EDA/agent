@@ -119,6 +119,11 @@ pub struct LlmConfig {
     pub reasoning_effort: Option<LlmReasoningEffort>,
     /// Whether to request provider reasoning summaries/content when supported.
     pub capture_reasoning: bool,
+    /// Whether the model accepts image input. Text-only models (most open
+    /// models on OpenAI-compatible gateways) reject image parts outright, so
+    /// the agent keeps rendered-image tool results on disk and out of the
+    /// conversation when this is false.
+    pub vision_capable: bool,
 }
 
 impl Default for LlmConfig {
@@ -132,6 +137,7 @@ impl Default for LlmConfig {
             ephemeral_cache: true,
             reasoning_effort: None,
             capture_reasoning: false,
+            vision_capable: true,
         }
     }
 }
@@ -153,21 +159,21 @@ impl LlmConfig {
                 ));
             }
         }
-        if let Some(model) = &self.model {
-            if model.trim().is_empty() {
-                return Err(ConfigError::new(
-                    format!("{path}.model"),
-                    "model must not be empty when set",
-                ));
-            }
+        if let Some(model) = &self.model
+            && model.trim().is_empty()
+        {
+            return Err(ConfigError::new(
+                format!("{path}.model"),
+                "model must not be empty when set",
+            ));
         }
-        if let Some(api_key) = &self.api_key {
-            if api_key.trim().is_empty() {
-                return Err(ConfigError::new(
-                    format!("{path}.apiKey"),
-                    "API key must not be empty when set",
-                ));
-            }
+        if let Some(api_key) = &self.api_key
+            && api_key.trim().is_empty()
+        {
+            return Err(ConfigError::new(
+                format!("{path}.apiKey"),
+                "API key must not be empty when set",
+            ));
         }
         if let Some(endpoint) = &self.endpoint {
             let endpoint = endpoint.trim();
@@ -485,15 +491,19 @@ impl EngineConfig {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PcbRouterEngine {
-    /// Current production portfolio: A* baseline plus negotiated mesh, selected
-    /// by routability/tidiness.
+    /// Current production portfolio: cheap special-case routers, contextual
+    /// sequential grid, negotiated mesh with adaptive rescue, and the grid A*
+    /// fallback, selected by routability/tidiness.
     #[default]
     Auto,
     /// Grid A* only.
     #[serde(alias = "astar", alias = "a-star", alias = "AStar")]
     Astar,
-    /// Negotiated capacity mesh only.
+    /// Negotiated capacity mesh with adaptive rescue only.
     Mesh,
+    /// Contextual sequential grid router only.
+    #[serde(alias = "sequential-grid", alias = "seq")]
+    Sequential,
 }
 
 /// One config validation failure.
@@ -527,13 +537,13 @@ fn validate_optional_path(
     field: &'static str,
     value: &Option<PathBuf>,
 ) -> Result<(), ConfigError> {
-    if let Some(path) = value {
-        if path.as_os_str().is_empty() {
-            return Err(ConfigError::new(
-                format!("{parent}.{field}"),
-                "path must not be empty when set",
-            ));
-        }
+    if let Some(path) = value
+        && path.as_os_str().is_empty()
+    {
+        return Err(ConfigError::new(
+            format!("{parent}.{field}"),
+            "path must not be empty when set",
+        ));
     }
     Ok(())
 }
@@ -640,6 +650,16 @@ mod tests {
         .unwrap();
 
         assert_eq!(cfg.engines.pcb_router, PcbRouterEngine::Astar);
+
+        let cfg: GordianConfig = toml::from_str(
+            r#"
+            [engines]
+            pcbRouter = "seq"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(cfg.engines.pcb_router, PcbRouterEngine::Sequential);
     }
 
     #[test]

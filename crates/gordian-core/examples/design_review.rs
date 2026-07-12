@@ -4,7 +4,7 @@
 //! topology errors — the class ERC and the layout critic both miss) and feeds any high-confidence
 //! defects back as fix turns. This example just drives the method and renders the result.
 //!
-//! Usage: cargo run --release -p agent --example design_review -- <out.png> "<prompt>"
+//! Usage: cargo run --release -p gordian-core --example design_review -- <out.png> "<prompt>"
 
 mod config_support;
 

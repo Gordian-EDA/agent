@@ -36,6 +36,7 @@ pub struct GenaiProvider {
     ephemeral_cache: bool,
     reasoning_effort: Option<ReasoningEffort>,
     capture_reasoning: bool,
+    vision: bool,
 }
 
 impl GenaiProvider {
@@ -86,6 +87,7 @@ impl GenaiProvider {
                 .as_ref()
                 .map(to_genai_reasoning_effort),
             capture_reasoning: config.capture_reasoning,
+            vision: config.vision_capable,
         })
     }
 }
@@ -96,6 +98,10 @@ impl Provider for GenaiProvider {
     /// configured genai adapter or the adapter inferred from the model name
     /// (`Anthropic`, `OpenAI`, `Bedrock`, ...). This is local routing metadata:
     /// no network or credentials are needed.
+    fn vision(&self) -> bool {
+        self.vision
+    }
+
     fn status(&self) -> (String, String) {
         let provider = self
             .client

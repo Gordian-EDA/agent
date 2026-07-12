@@ -352,6 +352,34 @@ fn sexpr_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+impl ProjectContext {
+    fn for_project(project_dir: PathBuf, sch_path: PathBuf) -> Result<Self> {
+        let workspace = crate::workspace::Workspace::for_project(&project_dir)
+            .with_context(|| format!("opening .gordian workspace in {}", project_dir.display()))?;
+        Ok(Self {
+            project_dir,
+            sch_path,
+            workspace,
+        })
+    }
+}
+
+impl ToolServices {
+    fn new(
+        provider: SymbolTable,
+        footprint_dir_override: Option<PathBuf>,
+        attach_running_kicad: bool,
+    ) -> Self {
+        Self {
+            provider,
+            index: OnceLock::new(),
+            footprint_catalog: OnceLock::new(),
+            footprint_dir_override,
+            kicad: kicad_ipc::SessionManager::with_attach_running(attach_running_kicad),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,33 +408,5 @@ mod tests {
         assert!(sym.contains("(name \"Device\")"));
         let fp = std::fs::read_to_string(project.join("fp-lib-table")).expect("fp table");
         assert!(fp.contains("(name \"Resistor_SMD\")"));
-    }
-}
-
-impl ProjectContext {
-    fn for_project(project_dir: PathBuf, sch_path: PathBuf) -> Result<Self> {
-        let workspace = crate::workspace::Workspace::for_project(&project_dir)
-            .with_context(|| format!("opening .gordian workspace in {}", project_dir.display()))?;
-        Ok(Self {
-            project_dir,
-            sch_path,
-            workspace,
-        })
-    }
-}
-
-impl ToolServices {
-    fn new(
-        provider: SymbolTable,
-        footprint_dir_override: Option<PathBuf>,
-        attach_running_kicad: bool,
-    ) -> Self {
-        Self {
-            provider,
-            index: OnceLock::new(),
-            footprint_catalog: OnceLock::new(),
-            footprint_dir_override,
-            kicad: kicad_ipc::SessionManager::with_attach_running(attach_running_kicad),
-        }
     }
 }

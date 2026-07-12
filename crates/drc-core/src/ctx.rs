@@ -95,7 +95,7 @@ pub fn collect_copper(problem: &RouteProblem, solution: &RouteSolution) -> Vec<C
         items.push(CopperItem {
             owners: ob.connected_to.clone(),
             geom: CopperGeom::Rect {
-                rect: geom::Rect::from_center_half(ob.center.into(), (hw, hh)),
+                rect: geom::Rect::from_center_half(ob.center, (hw, hh)),
                 layers: ob.layers.clone(),
             },
         });
@@ -116,11 +116,11 @@ pub fn collect_copper(problem: &RouteProblem, solution: &RouteSolution) -> Vec<C
             });
         };
         if trace.path.len() == 1 {
-            let p = geom::Point2::from(trace.path[0]);
+            let p = trace.path[0];
             push_seg(&mut items, p, p);
         }
         for w in trace.path.windows(2) {
-            push_seg(&mut items, w[0].into(), w[1].into());
+            push_seg(&mut items, w[0], w[1]);
         }
     }
 
@@ -129,7 +129,7 @@ pub fn collect_copper(problem: &RouteProblem, solution: &RouteSolution) -> Vec<C
         items.push(CopperItem {
             owners: vec![via.connection.clone()],
             geom: CopperGeom::Via {
-                at: via.at.into(),
+                at: via.at,
                 radius: via.diameter / 2.0,
             },
         });

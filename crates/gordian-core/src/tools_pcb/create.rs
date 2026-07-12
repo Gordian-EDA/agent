@@ -78,11 +78,11 @@ fn resolve_pour_layer(layer: &str, layer_count: u32) -> Option<(u32, String)> {
     match layer {
         "top" => Some((0, "F.Cu".to_string())),
         "bottom" => Some((layer_count - 1, "B.Cu".to_string())),
-        _ if layer_count >= 6 && layer.starts_with("inner") => layer
+        _ if layer.starts_with("inner") => layer
             .trim_start_matches("inner")
             .parse::<u32>()
             .ok()
-            .filter(|idx| *idx > 0 && *idx < layer_count - 1)
+            .filter(|idx| *idx > 0 && *idx < layer_count.max(1) - 1)
             .map(|idx| (idx, format!("In{idx}.Cu"))),
         _ => None,
     }
@@ -621,43 +621,73 @@ impl<'a> SeedBoardWriter<'a> {
                     ),
                 ));
             };
-            let clearance = fmt_num(self.rules.clearance);
-            let min_thickness = fmt_num(self.rules.min_trace_width.max(0.1));
-            let thermal_gap = fmt_num((self.rules.clearance * 2.0).max(0.2));
-            let thermal_bridge_width = fmt_num(self.rules.min_trace_width.max(0.25));
-            let x0 = fmt_num(self.bounds.min_x);
-            let y0 = fmt_num(self.bounds.min_y);
-            let x1 = fmt_num(self.bounds.max_x);
-            let y1 = fmt_num(self.bounds.max_y);
-            let uuid = seed_uuid(&format!("zone:{idx}:{}:{}", pour.net, layer_name));
-            let _ = write!(
-                out,
-                "\t(zone\n\
-                 \t\t(net {net_code})\n\
-                 \t\t(net_name \"{}\")\n\
-                 \t\t(layer \"{layer_name}\")\n\
-                 \t\t(uuid \"{uuid}\")\n\
-                 \t\t(name \"{}\")\n\
-                 \t\t(hatch full 0.508)\n\
-                 \t\t(connect_pads\n\
-                 \t\t\t(clearance {clearance})\n\
-                 \t\t)\n\
-                 \t\t(min_thickness {min_thickness})\n\
-                 \t\t(filled_areas_thickness no)\n\
-                 \t\t(fill\n\
-                 \t\t\t(thermal_gap {thermal_gap})\n\
-                 \t\t\t(thermal_bridge_width {thermal_bridge_width})\n\
-                 \t\t)\n\
-                 \t\t(polygon\n\
-                 \t\t\t(pts\n\
-                 \t\t\t\t(xy {x0} {y0}) (xy {x1} {y0}) (xy {x1} {y1}) (xy {x0} {y1})\n\
-                 \t\t\t)\n\
-                 \t\t)\n\
-                 \t)\n",
-                pour.net, pour.net
-            );
+            self.write_zone(out, net_code, &pour.net, &layer_name, &format!("{idx}"));
+        }
+        // Solid GND/VCC planes on the centred inner layers — the physical
+        // counterpart of the router's plane fanout (per-pad vias assume real
+        // plane copper, and kicad-cli DRC checks the file, not our oracle).
+        let pad_counts = self.parts.iter().flat_map(|p| p.pad_nets.values()).fold(
+            BTreeMap::<String, usize>::new(),
+            |mut acc, net| {
+                *acc.entry(net.clone()).or_default() += 1;
+                acc
+            },
+        );
+        for (net, layer_idx) in
+            pcb_model::default_plane_nets(self.rules.layer_count, pad_counts.into_iter())
+        {
+            let Some(net_code) = self.net_codes.get(&net).copied() else {
+                continue;
+            };
+            let layer_name = format!("In{layer_idx}.Cu");
+            self.write_zone(out, net_code, &net, &layer_name, "plane");
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_zone(
+        &self,
+        out: &mut String,
+        net_code: i32,
+        net: &str,
+        layer_name: &str,
+        tag: &str,
+    ) {
+        let clearance = fmt_num(self.rules.clearance);
+        let min_thickness = fmt_num(self.rules.min_trace_width.max(0.1));
+        let thermal_gap = fmt_num((self.rules.clearance * 2.0).max(0.2));
+        let thermal_bridge_width = fmt_num(self.rules.min_trace_width.max(0.25));
+        let x0 = fmt_num(self.bounds.min_x);
+        let y0 = fmt_num(self.bounds.min_y);
+        let x1 = fmt_num(self.bounds.max_x);
+        let y1 = fmt_num(self.bounds.max_y);
+        let uuid = seed_uuid(&format!("zone:{tag}:{net}:{layer_name}"));
+        let _ = write!(
+            out,
+            "\t(zone\n\
+             \t\t(net {net_code})\n\
+             \t\t(net_name \"{net}\")\n\
+             \t\t(layer \"{layer_name}\")\n\
+             \t\t(uuid \"{uuid}\")\n\
+             \t\t(name \"{net}\")\n\
+             \t\t(hatch full 0.508)\n\
+             \t\t(connect_pads\n\
+             \t\t\t(clearance {clearance})\n\
+             \t\t)\n\
+             \t\t(min_thickness {min_thickness})\n\
+             \t\t(filled_areas_thickness no)\n\
+             \t\t(fill\n\
+             \t\t\t(thermal_gap {thermal_gap})\n\
+             \t\t\t(thermal_bridge_width {thermal_bridge_width})\n\
+             \t\t)\n\
+             \t\t(polygon\n\
+             \t\t\t(pts\n\
+             \t\t\t\t(xy {x0} {y0}) (xy {x1} {y0}) (xy {x1} {y1}) (xy {x0} {y1})\n\
+             \t\t\t)\n\
+             \t\t)\n\
+             \t)\n",
+        );
     }
 
     fn emit_footprint(&self, part: &SeedFootprint) -> io::Result<String> {
@@ -1021,18 +1051,59 @@ pub(super) fn req_num(obj: &Value, key: &str, ctx: &str) -> std::result::Result<
         .ok_or_else(|| format!("{ctx}: missing or non-numeric `{key}`"))
 }
 
-/// Parse the board `bounds` from snake_case model input into the engine's
-/// [`Rect`] explicitly so the tool API owns its field names.
+/// Parse the board `bounds` from model input into the engine's [`Rect`].
+///
+/// This is a live LLM boundary: models send the rect in whatever shape their
+/// training favors, and a strict parser turns each guess into a dead retry
+/// loop (observed: DeepSeek burning 6+ calls on `missing max_x`). Accept the
+/// common shapes — snake_case/camelCase corners, `{x, y, width, height}`,
+/// `{width, height}` (origin 0), a `[min_x, min_y, max_x, max_y]` array,
+/// numbers-as-strings with an optional `mm` suffix — and teach the canonical
+/// shape in the error when nothing matches.
 fn parse_bounds(v: Option<&Value>) -> std::result::Result<Rect, String> {
-    let Some(obj) = v else {
-        return Err("missing required `bounds` ({min_x, max_x, min_y, max_y} in mm)".into());
+    const EXPECT: &str = r#"expected {"min_x":0,"min_y":0,"max_x":60,"max_y":40} in mm (or {x,y,width,height}, {width,height}, or [min_x,min_y,max_x,max_y])"#;
+    let Some(val) = v else {
+        return Err(format!("missing required `bounds`; {EXPECT}"));
     };
-    Ok(Rect {
-        min_x: req_num(obj, "min_x", "bounds")?,
-        max_x: req_num(obj, "max_x", "bounds")?,
-        min_y: req_num(obj, "min_y", "bounds")?,
-        max_y: req_num(obj, "max_y", "bounds")?,
-    })
+    fn num(v: &Value) -> Option<f64> {
+        v.as_f64().or_else(|| {
+            v.as_str()?
+                .trim()
+                .trim_end_matches("mm")
+                .trim()
+                .parse()
+                .ok()
+        })
+    }
+    let rect = |min_x: f64, min_y: f64, max_x: f64, max_y: f64| Rect {
+        min_x: min_x.min(max_x),
+        min_y: min_y.min(max_y),
+        max_x: min_x.max(max_x),
+        max_y: min_y.max(max_y),
+    };
+    if let Some(arr) = val.as_array() {
+        if let [a, b, c, d] = arr.as_slice()
+            && let (Some(a), Some(b), Some(c), Some(d)) = (num(a), num(b), num(c), num(d))
+        {
+            return Ok(rect(a, b, c, d));
+        }
+        return Err(format!("bounds: array must be 4 numbers; {EXPECT}"));
+    }
+    let get = |keys: &[&str]| keys.iter().find_map(|k| val.get(*k)).and_then(num);
+    let corners = (
+        get(&["min_x", "minX", "x0", "left"]),
+        get(&["min_y", "minY", "y0", "top"]),
+        get(&["max_x", "maxX", "x1", "right"]),
+        get(&["max_y", "maxY", "y1", "bottom"]),
+    );
+    if let (Some(x0), Some(y0), Some(x1), Some(y1)) = corners {
+        return Ok(rect(x0, y0, x1, y1));
+    }
+    if let (Some(w), Some(h)) = (get(&["width", "w"]), get(&["height", "h"])) {
+        let (x, y) = (get(&["x", "min_x", "minX"]).unwrap_or(0.0), get(&["y", "min_y", "minY"]).unwrap_or(0.0));
+        return Ok(rect(x, y, x + w, y + h));
+    }
+    Err(format!("bounds: could not read a rect from {val}; {EXPECT}"))
 }
 
 /// Parse optional `rules` from snake_case model input.
@@ -1139,16 +1210,15 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
                 None => {
                     return Err(format!(
                         "rules.pours[].layer '{layer}' is not a valid copper layer on a \
-                         {layer_count}-layer board — use top/bottom, or innerN on a 6-layer board"
+                         {layer_count}-layer board — use top/bottom, or an existing innerN"
                     ));
                 }
                 Some((idx, _))
                     if grid_astar::router::plane_layers(layer_count as usize).contains(&idx) =>
                 {
-                    return Err(format!(
-                        "rules.pours[].layer '{layer}' is a GND/VCC PLANE on a {layer_count}-layer \
-                         board — a plane is already full copper; pour on a signal layer instead"
-                    ));
+                    // Already a full copper plane there — the pour request is
+                    // satisfied by construction; don't fail the regenerate.
+                    continue;
                 }
                 Some(_) => {}
             }

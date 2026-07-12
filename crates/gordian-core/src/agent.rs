@@ -513,7 +513,7 @@ impl<P: Provider> Agent<P> {
                     (
                         json!({
                             "error": "PCB route retry budget exhausted",
-                            "note": "route_board has already reported failed nets several times this turn. Do not regenerate/place/route again without a schematic or tool fix; run check_board if needed, then report the honest status.",
+                            "note": route_retry_budget_note(),
                             "failed_route_attempts": failed_route_attempts,
                             "last_route_failure": last_route_failure,
                         })
@@ -531,17 +531,15 @@ impl<P: Provider> Agent<P> {
                     failed_route_attempts = 0;
                     last_route_failure = None;
                 }
-                if call.fn_name == "route_board" {
-                    if route_result_is_retry_failure(&parsed) {
-                        last_route_failure = Some(route_failure_context(&parsed));
-                        if parsed.get("error").is_some() {
-                            failed_route_attempts = MAX_FAILED_ROUTE_RETRIES;
-                        } else {
-                            failed_route_attempts += 1;
-                        }
-                        if failed_route_attempts >= 2 {
-                            content = add_route_retry_guidance(&content, failed_route_attempts);
-                        }
+                if call.fn_name == "route_board" && route_result_is_retry_failure(&parsed) {
+                    last_route_failure = Some(route_failure_context(&parsed));
+                    if parsed.get("error").is_some() {
+                        failed_route_attempts = MAX_FAILED_ROUTE_RETRIES;
+                    } else {
+                        failed_route_attempts += 1;
+                    }
+                    if failed_route_attempts >= 2 {
+                        content = add_route_retry_guidance(&content, failed_route_attempts);
                     }
                 }
                 emit(
@@ -563,7 +561,7 @@ impl<P: Provider> Agent<P> {
                 .push(ChatMessage::tool(MessageContent::from_tool_responses(
                     tool_responses,
                 )));
-            if !result_images.is_empty() {
+            if !result_images.is_empty() && self.client.vision() {
                 self.history
                     .push(ChatMessage::user(MessageContent::from_parts(result_images)));
                 prune_stale_images(&mut self.history);
@@ -733,7 +731,23 @@ fn route_retry_blocked(failed_route_attempts: usize, fn_name: &str) -> bool {
 }
 
 fn route_retry_budget_reset_by_fix(fn_name: &str, value: &Value) -> bool {
-    fn_name == "place_board" && value.get("error").is_none()
+    value.get("error").is_none()
+        && matches!(
+            fn_name,
+            "create_design"
+                | "edit_design"
+                | "apply_design"
+                | "place_board"
+                | "move_parts"
+                | "route_track"
+                | "delete_copper"
+                | "set_net_width"
+                | "update_board_outline"
+        )
+}
+
+fn route_retry_budget_note() -> &'static str {
+    "route_board has already reported failed nets several times this turn. Do not call route_board or regenerate_board again until you make one concrete recovery change: placement, copper, net-width, outline, schematic, or router strategy/config; run check_board if needed, then report the honest status."
 }
 
 fn route_failure_context(value: &Value) -> Value {
@@ -742,7 +756,12 @@ fn route_failure_context(value: &Value) -> Value {
         "error",
         "failed",
         "router",
+        "router_attempts",
         "metrics",
+        "lint_summary",
+        "expected_connectivity_gaps",
+        "dropped_failed_net_copper",
+        "dropped_violating_nets",
         "congestion",
         "escape_bottleneck",
         "note",
@@ -761,7 +780,7 @@ fn add_route_retry_guidance(content: &str, failed_route_attempts: usize) -> Stri
             "agent_guidance".to_string(),
             json!({
                 "failed_route_attempts": failed_route_attempts,
-                "note": "Do not keep regenerating/place/routing blindly. Try at most one concrete change with a stated reason; otherwise run check_board and report the current failed nets/unconnected count."
+                "note": route_retry_budget_note()
             }),
         );
         value.to_string()
@@ -1756,14 +1775,30 @@ mod tests {
     }
 
     #[test]
-    fn successful_place_board_resets_route_retry_budget() {
+    fn successful_route_fix_resets_route_retry_budget() {
         assert!(route_retry_budget_reset_by_fix(
             "place_board",
+            &json!({"ok": true})
+        ));
+        assert!(route_retry_budget_reset_by_fix(
+            "edit_design",
+            &json!({"ok": true})
+        ));
+        assert!(route_retry_budget_reset_by_fix(
+            "apply_design",
+            &json!({"ok": true})
+        ));
+        assert!(route_retry_budget_reset_by_fix(
+            "set_net_width",
             &json!({"ok": true})
         ));
         assert!(!route_retry_budget_reset_by_fix(
             "place_board",
             &json!({"error": "placement failed"})
+        ));
+        assert!(!route_retry_budget_reset_by_fix(
+            "edit_design",
+            &json!({"error": "bad yaml"})
         ));
         assert!(!route_retry_budget_reset_by_fix(
             "route_board",
@@ -1779,6 +1814,16 @@ mod tests {
             parsed["agent_guidance"]["failed_route_attempts"].as_u64(),
             Some(2)
         );
+        assert_eq!(
+            parsed["agent_guidance"]["note"].as_str(),
+            Some(route_retry_budget_note())
+        );
+        assert!(
+            parsed["agent_guidance"]["note"]
+                .as_str()
+                .is_some_and(|note| note.contains("router strategy/config")),
+            "route retry guidance should mention explicit router-strategy changes"
+        );
         assert_eq!(add_route_retry_guidance("not json", 2), "not json");
     }
 
@@ -1788,6 +1833,17 @@ mod tests {
             "router": "detailed",
             "failed": [{"connection": "GND", "reason": "blocked"}],
             "metrics": {"wirelength": 10.0, "vias": 1, "traces": 2},
+            "lint_summary": {"connectivity": 1},
+            "expected_connectivity_gaps": 1,
+            "dropped_failed_net_copper": 2,
+            "dropped_violating_nets": 3,
+            "router_attempts": [
+                {
+                    "engine": "direct",
+                    "failed": [{"connection": "GND", "reason": "blocked"}],
+                    "quality": {"fault_weight": 2}
+                }
+            ],
             "congestion": {"final_overflow": 3},
             "escape_bottleneck": {"reference": "U1"},
             "note": "routed and saved the KiCAD board with honest failed nets",
@@ -1798,6 +1854,11 @@ mod tests {
 
         assert_eq!(context["router"], "detailed");
         assert_eq!(context["failed"][0]["connection"], "GND");
+        assert_eq!(context["router_attempts"][0]["engine"], "direct");
+        assert_eq!(context["lint_summary"]["connectivity"], 1);
+        assert_eq!(context["expected_connectivity_gaps"], 1);
+        assert_eq!(context["dropped_failed_net_copper"], 2);
+        assert_eq!(context["dropped_violating_nets"], 3);
         assert_eq!(context["congestion"]["final_overflow"], 3);
         assert_eq!(context["escape_bottleneck"]["reference"], "U1");
         assert!(context.get("cleared_existing_copper").is_none());

@@ -50,7 +50,7 @@ impl SchematicWriter {
     ///
     /// **Foreign geometry** at pass start = every *fixed* connection point (power
     /// symbol pins — origin, net = the Value; no-connect markers — a reserved
-    /// sentinel net; legacy labels; and every signal stub's own pin endpoint,
+    /// sentinel net; direct labels; and every signal stub's own pin endpoint,
     /// always safe) plus every existing wire **segment**. Existing wires are
     /// registered under their own net when known (cluster wires added via
     /// `add_wire_on_net`) or the reserved `PWR` sentinel (power stubs/risers).
@@ -1237,7 +1237,7 @@ mod tests {
             .unwrap();
         // A fixed cluster label parked on a west-side pin endpoint, reading
         // East: the text runs back across the pin line over the pin name.
-        // (This is the legacy retracted-label shape the solver now avoids —
+        // (This is the fallback retracted-label shape the solver now avoids —
         // the lint must SEE it.)
         let (ep, _dir) = w.pin_dirs(&env, "U1", "2").unwrap()[0];
         w.add_cluster_label("X", ep, Dir::East, false);
