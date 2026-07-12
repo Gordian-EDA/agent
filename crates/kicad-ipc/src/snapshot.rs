@@ -84,8 +84,19 @@ impl IpcBoardSnapshot {
                     .iter()
                     .filter(|ob| ob.kind == format!("pad:{}", part.reference))
                     .collect::<Vec<_>>();
-                let (courtyard_w, courtyard_h) =
-                    footprint_extents(&footprint).unwrap_or((1.0, 1.0));
+                let (world_w, world_h) = footprint_extents(&footprint).unwrap_or((1.0, 1.0));
+                // IPC pad positions are relative to the footprint, but the
+                // routing obstacles above are world-space.  Part geometry is
+                // defined at rotation zero, so undo the imported footprint
+                // rotation before handing it to the placer.  Otherwise an
+                // already-rotated footprint gets its pad offsets and extents
+                // rotated a second time when the placement is routed.
+                let imported_rotation = part.rotation as f64;
+                let (courtyard_w, courtyard_h) = if rotation_swaps_axes(imported_rotation) {
+                    (world_h, world_w)
+                } else {
+                    (world_w, world_h)
+                };
                 Part {
                     reference: part.reference.clone(),
                     courtyard_w,
@@ -102,9 +113,18 @@ impl IpcBoardSnapshot {
                             offset: Point2 {
                                 x: ob.center.x - part.at.x,
                                 y: ob.center.y - part.at.y,
+                            }
+                            .rotate(-imported_rotation),
+                            width: if rotation_swaps_axes(imported_rotation) {
+                                ob.height
+                            } else {
+                                ob.width
                             },
-                            width: ob.width,
-                            height: ob.height,
+                            height: if rotation_swaps_axes(imported_rotation) {
+                                ob.width
+                            } else {
+                                ob.height
+                            },
                             layers: ob.layers.clone(),
                             net: ob.connected_to.first().cloned(),
                         })
@@ -800,11 +820,32 @@ fn infer_layer_names(
 }
 
 fn pad_world(fp: &FootprintInstance, pad: &Pad) -> Point2 {
-    pad.position
+    let origin = fp
+        .position
         .as_ref()
         .map(point)
-        .or_else(|| fp.position.as_ref().map(point))
-        .unwrap_or(Point2 { x: 0.0, y: 0.0 })
+        .unwrap_or(Point2 { x: 0.0, y: 0.0 });
+    let offset = pad
+        .position
+        .as_ref()
+        .map(point)
+        .unwrap_or(Point2 { x: 0.0, y: 0.0 });
+    let offset = offset.rotate(footprint_angle(fp));
+    Point2 {
+        x: origin.x + offset.x,
+        y: origin.y + offset.y,
+    }
+}
+
+fn footprint_angle(fp: &FootprintInstance) -> f64 {
+    fp.orientation
+        .as_ref()
+        .map(|angle| angle.value_degrees)
+        .unwrap_or(0.0)
+}
+
+fn rotation_swaps_axes(rotation: f64) -> bool {
+    matches!(geom::snap_quadrant(rotation) as i32, 90 | 270)
 }
 
 fn pad_size(pad: &Pad) -> (f64, f64) {
@@ -823,10 +864,7 @@ fn pad_size(pad: &Pad) -> (f64, f64) {
 }
 
 fn pad_angle(fp: &FootprintInstance, pad: &Pad) -> f64 {
-    fp.orientation
-        .as_ref()
-        .map(|a| a.value_degrees)
-        .unwrap_or(0.0)
+    footprint_angle(fp)
         + pad
             .pad_stack
             .as_ref()
@@ -1149,8 +1187,12 @@ fn nm_to_mm(nm: i64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::kiapi::board::types::{
+        BoardText, Field, Footprint, PadStackLayer, PadStackType,
+    };
     use crate::proto::kiapi::common::types::{
-        Distance, GraphicSegmentAttributes, GraphicShape, PolyLine, PolyLineNode, PolygonWithHoles,
+        Angle, Distance, GraphicSegmentAttributes, GraphicShape, PolyLine, PolyLineNode,
+        PolygonWithHoles, Text,
     };
 
     fn v(x_mm: f64, y_mm: f64) -> Vector2 {
@@ -1197,6 +1239,52 @@ mod tests {
         }
     }
 
+    fn footprint_with_pad(
+        origin: (f64, f64),
+        rotation: f64,
+        pad_offset: (f64, f64),
+        pad_size: (f64, f64),
+    ) -> FootprintInstance {
+        let pad = Pad {
+            number: "1".to_owned(),
+            position: Some(v(pad_offset.0, pad_offset.1)),
+            pad_stack: Some(PadStack {
+                r#type: PadStackType::PstNormal as i32,
+                layers: vec![BoardLayer::BlFCu as i32],
+                copper_layers: vec![PadStackLayer {
+                    layer: BoardLayer::BlFCu as i32,
+                    shape: PadStackShape::PssRectangle as i32,
+                    size: Some(v(pad_size.0, pad_size.1)),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        FootprintInstance {
+            position: Some(v(origin.0, origin.1)),
+            orientation: Some(Angle {
+                value_degrees: rotation,
+            }),
+            locked: LockedState::LsLocked as i32,
+            definition: Some(Footprint {
+                items: vec![prost_types::Any::from_msg(&pad).unwrap()],
+                ..Default::default()
+            }),
+            reference_field: Some(Field {
+                text: Some(BoardText {
+                    text: Some(Text {
+                        text: "U1".to_owned(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn fallback_layers_keep_top_and_bottom() {
         let snapshot = snapshot_from_items(
@@ -1214,6 +1302,30 @@ mod tests {
         );
         assert_eq!(snapshot.layer_names, vec!["F.Cu", "B.Cu"]);
         assert_eq!(snapshot.problem.layer_count, 2);
+    }
+
+    #[test]
+    fn rotated_footprint_pads_round_trip_between_ipc_and_placement_geometry() {
+        let fp = footprint_with_pad((10.0, 20.0), 90.0, (2.0, 1.0), (4.0, 2.0));
+        let snapshot = snapshot_from_items(vec![fp], vec![], vec![], vec![], vec![]);
+
+        let pad_obstacle = snapshot
+            .problem
+            .obstacles
+            .iter()
+            .find(|obstacle| obstacle.kind == "pad:U1")
+            .unwrap();
+        assert!(pad_obstacle.center.near_eq(Point2::new(11.0, 18.0), 1e-9));
+        assert!((pad_obstacle.width - 2.0).abs() < 1e-9);
+        assert!((pad_obstacle.height - 4.0).abs() < 1e-9);
+
+        let place = snapshot.place_problem();
+        let part = &place.parts[0];
+        assert!((part.courtyard_w - 4.0).abs() < 1e-9);
+        assert!((part.courtyard_h - 2.0).abs() < 1e-9);
+        assert!(part.pads[0].offset.near_eq(Point2::new(2.0, 1.0), 1e-9));
+        assert!((part.pads[0].width - 4.0).abs() < 1e-9);
+        assert!((part.pads[0].height - 2.0).abs() < 1e-9);
     }
 
     #[test]

@@ -339,7 +339,10 @@ pub fn append_copper(
             from, to, code, uuid("via"),
         ));
     }
-    let close = text.rfind(')').ok_or("unbalanced kicad_pcb document")?;
+    // Insert at the root document's own close, not the last `)` byte in the
+    // file.  KiCad files may legally carry trailing whitespace/comments; a
+    // parenthesis there must not move newly routed copper outside the board.
+    let (_, close) = root_body(text)?;
     let mut result = String::with_capacity(text.len() + out.len());
     result.push_str(&text[..close]);
     result.push_str(&out);
@@ -464,5 +467,34 @@ mod tests {
         let codes = parse_net_codes(BOARD).unwrap();
         assert_eq!(codes.get("GND"), Some(&1));
         assert_eq!(codes.get("VOUT"), Some(&2));
+    }
+
+    #[test]
+    fn append_copper_targets_document_close_not_trailing_parenthesis() {
+        let board = format!("{BOARD}; retained trailing comment )\n");
+        let solution = RouteSolution {
+            traces: vec![Trace {
+                connection: "GND".to_owned(),
+                layer: LayerRef::top(),
+                width: 0.25,
+                path: vec![Point2::new(2.0, 2.0), Point2::new(3.0, 2.0)],
+            }],
+            vias: vec![],
+        };
+        let out = append_copper(
+            &board,
+            &solution,
+            2,
+            &["F.Cu".to_owned(), "B.Cu".to_owned()],
+        )
+        .unwrap();
+
+        let copper = out.find("\t(segment\n").unwrap();
+        let root_close = out.find("\n)\n; retained").unwrap();
+        assert!(
+            copper < root_close,
+            "new copper must remain inside kicad_pcb"
+        );
+        assert!(out.ends_with("; retained trailing comment )\n"));
     }
 }
