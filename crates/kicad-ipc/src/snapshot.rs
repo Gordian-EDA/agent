@@ -954,28 +954,38 @@ fn zone_is_placement_keepout(zone: &Zone) -> bool {
 }
 
 fn zone_covers_board(points: &[Point2], outline: Option<&Polygon>) -> bool {
-    let (Some(zone_bounds), Some(board)) = (Rect::bounding(points), outline) else {
+    let (Ok(zone), Some(board)) = (Polygon::new(points.to_vec()), outline) else {
         return false;
     };
-    if !zone_bounds.contains_rect_eps(&board.bbox(), 1e-6) {
-        return false;
-    }
-    let Ok(zone) = Polygon::new(points.to_vec()) else {
-        return false;
-    };
-    // Matching bboxes alone are insufficient: a diamond or concave local pour
-    // can touch every board extreme without carrying a solid board-wide plane.
-    // Require the actual zone polygon to contain every board vertex and edge
-    // midpoint. False negatives only disable the plane optimization; false
-    // positives would invent connectivity, so this check intentionally errs safe.
-    board
-        .points()
-        .iter()
-        .copied()
-        .all(|p| zone.contains_point(p))
+    // Convexity turns vertex containment into a real polygon-containment proof:
+    // a convex zone containing every board vertex also contains their convex
+    // hull and therefore the whole board polygon. Concave zones are rejected
+    // conservatively; matching bboxes and sampled edge points cannot prove that
+    // an unsampled notch does not cut into the board.
+    polygon_is_convex(&zone)
         && board
-            .edges()
-            .all(|edge| zone.contains_point(edge.midpoint()))
+            .points()
+            .iter()
+            .all(|point| zone.contains_point(*point))
+}
+
+fn polygon_is_convex(polygon: &Polygon) -> bool {
+    let points = polygon.points();
+    let mut direction = 0.0_f64;
+    for idx in 0..points.len() {
+        let a = points[idx];
+        let b = points[(idx + 1) % points.len()];
+        let c = points[(idx + 2) % points.len()];
+        let cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+        if cross.abs() <= geom::EPS {
+            continue;
+        }
+        if direction != 0.0 && direction.signum() != cross.signum() {
+            return false;
+        }
+        direction = cross;
+    }
+    direction != 0.0
 }
 
 fn net_codes(nets: &[Net]) -> BTreeMap<String, i32> {
@@ -1370,10 +1380,31 @@ mod tests {
             Point2::new(20.0, 5.0),
             Point2::new(10.0, 10.0),
         ];
+        // Same bbox, every board corner contained, and every board-edge
+        // midpoint contained. The narrow left-side notch still removes real
+        // board area, so point sampling would falsely call this a plane.
+        let same_bbox_with_unsampled_notch = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(20.0, 0.0),
+            Point2::new(20.0, 10.0),
+            Point2::new(0.0, 10.0),
+            Point2::new(0.0, 6.0),
+            Point2::new(4.0, 6.0),
+            Point2::new(4.0, 5.0),
+            Point2::new(0.0, 5.0),
+        ];
 
         assert!(zone_covers_board(&full, Some(&outline)));
         assert!(!zone_covers_board(&local, Some(&outline)));
         assert!(!zone_covers_board(&same_bbox_but_local, Some(&outline)));
+        assert_eq!(
+            Rect::bounding(&same_bbox_with_unsampled_notch),
+            Some(outline.bbox())
+        );
+        assert!(!zone_covers_board(
+            &same_bbox_with_unsampled_notch,
+            Some(&outline)
+        ));
         assert!(!zone_covers_board(&full, None));
     }
 }

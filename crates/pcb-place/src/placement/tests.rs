@@ -195,6 +195,32 @@ fn placement_legalizer_moves_parts_out_of_keepouts() {
     assert!(ox <= geom::EPS || oy <= geom::EPS, "{courtyard:?}");
 }
 
+#[test]
+fn placement_keepout_does_not_override_a_locked_footprint() {
+    let locked_at = Point2 { x: 5.0, y: 5.0 };
+    let mut locked = r0603("R1", Some("A"), Some("B"));
+    locked.locked = Some(LockedAt {
+        at: locked_at,
+        rotation: 0.0,
+    });
+    let problem = PlaceProblem {
+        bounds: board(20.0, 20.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![Rect::new(4.0, 4.0, 6.0, 6.0)],
+        parts: vec![locked],
+        outline: None,
+    };
+
+    let result = place(&problem, &PlacementHints::default());
+    assert_eq!(result.placements[0].at, locked_at);
+    assert!(
+        !result.legal,
+        "a conflicting user lock must be reported, not silently moved"
+    );
+}
+
 // ── series co-placement detection ───────────────────────────────────────
 
 /// An anchor with `npads` pads, pad `Pi` on net `Si` (so each is a 1-pin net
