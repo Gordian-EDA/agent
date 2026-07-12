@@ -8,6 +8,7 @@
 
 use gordian_core::AgentRuntime;
 use gordian_core::tools::{run_tool, tool_defs};
+use kicad_env::KicadEnv;
 
 /// A tiny self-contained valid design: one resistor between two named nets.
 const TINY_YAML: &str =
@@ -152,6 +153,42 @@ fn apply_design_commit_writes_file_and_runs_erc() {
     assert!(
         out["erc"]["warnings"].is_number(),
         "expected erc.warnings: {out}"
+    );
+}
+
+#[test]
+fn apply_design_reports_a_written_commit_when_post_write_erc_cannot_run() {
+    let Some(mut env) = KicadEnv::detect() else {
+        eprintln!("SKIP: no KiCAD libraries detected");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    env.cli_path = dir.path().join("missing-kicad-cli");
+    let sch_path = dir.path().join("failure.kicad_sch");
+    let ctx = AgentRuntime::new_with_config(
+        env,
+        dir.path().to_path_buf(),
+        sch_path.clone(),
+        gordian_core::GordianConfig::default(),
+    )
+    .unwrap();
+
+    let out = run_tool(
+        "apply_design",
+        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
+        &ctx,
+    )
+    .expect("post-write ERC failure must remain a structured committed result");
+
+    assert!(sch_path.is_file(), "the irreversible write occurred: {out}");
+    assert_eq!(out["written"], serde_json::json!(true), "{out}");
+    assert_eq!(out["ok"], serde_json::json!(false), "{out}");
+    assert!(out["erc"]["error"].is_string(), "{out}");
+    assert!(
+        out["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("schematic was written")),
+        "{out}"
     );
 }
 

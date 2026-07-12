@@ -1078,22 +1078,7 @@ async fn run_kicad_tool(
                 let mut input = call.fn_arguments.clone();
                 input["__commit"] = json!(true);
                 let committed = run_blocking(ctx, "apply_design", input).await;
-                let apply = committed.as_ref().ok().map(|v| {
-                    let written = v.get("written").and_then(Value::as_bool) == Some(true);
-                    let errors = v
-                        .pointer("/erc/errors")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0);
-                    let warnings = v
-                        .pointer("/erc/warnings")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0);
-                    ApplyInfo {
-                        ready: true,
-                        committed: written,
-                        summary: format!("ERC {errors} errors, {warnings} warnings"),
-                    }
-                });
+                let apply = committed.as_ref().ok().map(commit_apply_info);
                 return into_outcome(committed, apply);
             }
             // A normal (commit-less) apply_design: dry-run, no gate.
@@ -1105,6 +1090,28 @@ async fn run_kicad_tool(
         run_blocking(ctx, &call.fn_name, call.fn_arguments.clone()).await,
         None,
     )
+}
+
+fn commit_apply_info(value: &Value) -> ApplyInfo {
+    let committed = value.get("written").and_then(Value::as_bool) == Some(true);
+    let summary = if let Some(error) = value.pointer("/erc/error").and_then(Value::as_str) {
+        format!("written; ERC failed: {error}")
+    } else {
+        let errors = value
+            .pointer("/erc/errors")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let warnings = value
+            .pointer("/erc/warnings")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        format!("ERC {errors} errors, {warnings} warnings")
+    };
+    ApplyInfo {
+        ready: true,
+        committed,
+        summary,
+    }
 }
 
 /// Run one synchronous tool on the blocking pool. Tools can take seconds (symbol-
@@ -1941,6 +1948,19 @@ mod tests {
             "source: draft\n\n```yaml\nversion: 1\n```"
         );
         assert_eq!(tool_result_text(&json!({"ok": true})), "{\"ok\":true}");
+    }
+
+    #[test]
+    fn committed_apply_info_preserves_a_write_when_erc_fails() {
+        let info = commit_apply_info(&json!({
+            "ok": false,
+            "written": true,
+            "erc": { "error": "kicad-cli unavailable" }
+        }));
+
+        assert!(info.ready);
+        assert!(info.committed);
+        assert_eq!(info.summary, "written; ERC failed: kicad-cli unavailable");
     }
 
     #[test]

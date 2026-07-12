@@ -833,30 +833,58 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     std::fs::write(ctx.sch_path(), &composed.sch)
         .with_context(|| format!("writing {}", ctx.sch_path().display()))?;
 
-    let erc = KicadCli::new(ctx.env())
-        .erc(ctx.sch_path())
-        .with_context(|| format!("running ERC on {}", ctx.sch_path().display()))?;
-
     // Record the hash of the just-written schematic (current_sch_text reads the
     // file we wrote above) so the applied draft is no longer flagged stale.
     // No-op when no draft exists (an explicit-yaml apply must not create one).
-    if ctx.workspace().read_draft().is_some() {
+    // Once the schematic write succeeds, later failures must be returned as an
+    // honest `written: true` result. Returning `Err` would make the agent report
+    // that nothing committed and potentially retry an already-applied change.
+    let draft_sync_error = if ctx.workspace().read_draft().is_some() {
         ctx.workspace()
-            .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
-    }
+            .write_draft(&yaml, current_sch_text(ctx).as_deref())
+            .err()
+            .map(|err| format!("updating applied draft metadata: {err}"))
+    } else {
+        None
+    };
+    let erc = KicadCli::new(ctx.env()).erc(ctx.sch_path());
 
-    Ok(json!({
+    let mut out = json!({
         "ok": true,
         "written": true,
         "path": ctx.sch_path().display().to_string(),
         "stale_draft_warning": stale,
         "diff": diff,
         "layout_mode": "composed",
-        "erc": { "errors": erc.error_count(), "warnings": erc.warning_count() },
         "layout_warnings": composed.layout_warnings,
         "wire_through_body": composed.crossings.body + composed.crossings.ic,
         "detected_idioms": detected_idioms.unwrap_or(json!([])),
-    }))
+    });
+    let mut post_write_errors = Vec::new();
+    if let Some(err) = draft_sync_error {
+        post_write_errors.push(err);
+    }
+    match erc {
+        Ok(report) => {
+            out["erc"] = json!({
+                "errors": report.error_count(),
+                "warnings": report.warning_count(),
+            });
+        }
+        Err(err) => {
+            let err = format!("running ERC on {}: {err}", ctx.sch_path().display());
+            out["erc"] = json!({ "error": err });
+            post_write_errors.push(err);
+        }
+    }
+    if !post_write_errors.is_empty() {
+        out["ok"] = json!(false);
+        out["error"] = json!(format!(
+            "schematic was written, but post-write validation failed: {}",
+            post_write_errors.join("; ")
+        ));
+    }
+    Ok(out)
 }
 
 pub(crate) fn schematic_placement_engine() -> Box<dyn sch_floorplan::contract::PlacementEngine> {
