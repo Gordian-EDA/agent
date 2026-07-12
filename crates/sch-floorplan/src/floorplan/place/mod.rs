@@ -109,6 +109,100 @@ mod grid_tests {
             .expect("KiCad must load the composed hidden references");
     }
 
+    #[test]
+    fn composition_identity_is_safe_unique_and_deterministic() {
+        let Some(env) = kicad_env::KicadEnv::detect() else {
+            eprintln!("SKIP: no KiCad environment detected");
+            return;
+        };
+        let render = || {
+            let mut first = SchematicWriter::new();
+            first
+                .add_power_symbol(&env, "power:GND", "#PWR/GND", "GND", [12.7, 12.7], 0.0)
+                .unwrap();
+            first
+                .add_power_symbol(&env, "power:GND", "#PWR/GND", "GND", [20.32, 12.7], 0.0)
+                .unwrap();
+            let mut second = SchematicWriter::new();
+            second
+                .add_power_symbol(&env, "power:GND", "#PWR?GND", "GND", [12.7, 12.7], 0.0)
+                .unwrap();
+            let mut third = SchematicWriter::new();
+            third
+                .add_power_symbol(&env, "power:GND", "#!!!", "GND", [12.7, 12.7], 0.0)
+                .unwrap();
+            compose_writers(
+                vec![
+                    ("control/io".to_owned(), first),
+                    ("control?io".to_owned(), second),
+                    ("💥".to_owned(), third),
+                ],
+                Some("identity test"),
+            )
+        };
+
+        let first = render();
+        assert_eq!(first, render(), "composition must be byte-deterministic");
+        for reference in [
+            "#control_io_PWR_GND",
+            "#control_io_PWR_GND_2",
+            "#control_io_2_PWR_GND",
+            "#group_hidden",
+        ] {
+            assert!(
+                first.contains(&format!("(property \"Reference\" \"{reference}\"")),
+                "missing safe unique reference {reference}"
+            );
+        }
+        let uuids = first
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("(uuid \"")?.strip_suffix("\")"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            uuids.iter().collect::<std::collections::HashSet<_>>().len(),
+            uuids.len(),
+            "every emitted object UUID must be unique"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.kicad_sch");
+        std::fs::write(&path, first).unwrap();
+        kicad_cli::KicadCli::new(&env)
+            .erc(&path)
+            .expect("KiCad must load arbitrary composed group identities");
+    }
+
+    #[test]
+    fn composition_deduplicates_arbitrarily_named_power_flags_by_labeled_net() {
+        let Some(env) = kicad_env::KicadEnv::detect() else {
+            eprintln!("SKIP: no KiCad environment detected");
+            return;
+        };
+        let mut first = SchematicWriter::new();
+        first
+            .add_power_flag(&env, "VCC", "#SOURCE_A", [12.7, 12.7])
+            .unwrap();
+        let mut second = SchematicWriter::new();
+        second
+            .add_power_flag(&env, "VCC", "#SOURCE_B", [12.7, 12.7])
+            .unwrap();
+
+        let schematic = compose_writers(
+            vec![
+                ("left/path".to_owned(), first),
+                ("left?path".to_owned(), second),
+            ],
+            None,
+        );
+
+        assert_eq!(
+            schematic.matches("(lib_id \"power:PWR_FLAG\")").count(),
+            1,
+            "one labeled VCC flag must remain globally"
+        );
+        assert!(schematic.contains("#left_path_SOURCE_A"));
+        assert!(!schematic.contains("SOURCE_B"));
+    }
+
     fn block(refs: &[&str], layout: LayoutGrid) -> Block {
         let mut components = IndexMap::new();
         for r in refs {

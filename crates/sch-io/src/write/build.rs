@@ -685,18 +685,45 @@ impl SchematicWriter {
     /// Namespace generated hidden references before composing independent
     /// writers. Authored references are globally unique, but each group emits
     /// its own `#PWR_*`/`#FLG_*` identifiers; without a group namespace their
-    /// symbol UUIDs collide in the combined document.
+    /// symbol UUIDs collide in the combined document. Namespace/reference text
+    /// is reduced to a KiCad-safe ASCII token, and repeated hidden references
+    /// get deterministic numeric suffixes.
     pub fn namespace_hidden_references(&mut self, namespace: &str) {
+        let token = |value: &str, fallback: &str| {
+            let mut token: String = value
+                .chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-') {
+                        ch
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            if token.is_empty() || token.chars().all(|ch| ch == '_') {
+                token = fallback.to_owned();
+            }
+            token
+        };
+        let namespace = token(namespace, "group");
         let mut renamed: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
+        let mut used = std::collections::HashSet::new();
         for inst in &mut self.instances {
             if !inst.refdes.starts_with('#') {
                 continue;
             }
             let old = inst.refdes.clone();
-            let new = format!("#{namespace}_{}", old.trim_start_matches('#'));
+            let hidden = token(old.trim_start_matches('#'), "hidden");
+            let base = format!("#{namespace}_{hidden}");
+            let mut new = base.clone();
+            let mut suffix = 2usize;
+            while !used.insert(new.clone()) {
+                new = format!("{base}_{suffix}");
+                suffix += 1;
+            }
             inst.refdes = new.clone();
-            renamed.insert(old, new);
+            renamed.entry(old).or_insert(new);
         }
         if renamed.is_empty() {
             return;
@@ -729,22 +756,28 @@ impl SchematicWriter {
             .collect();
     }
 
-    /// The PWR_FLAG instances in this writer, as `(net, index)` pairs — the flag's
-    /// `#FLG_<net>` refdes carries the net verbatim. Used by the composer to dedup
-    /// flags across groups (KiCAD ERCs "power output ↔ power output" when the same
-    /// rail is flagged on two groups). Index lets a caller drop a chosen flag.
+    /// The PWR_FLAG instances in this writer, as `(net, index)` pairs. The
+    /// attached pin label is authoritative, with legacy `#FLG_<net>` references
+    /// as a fallback for coincident flags that need no label. Used by the
+    /// composer to dedup flags across groups; index lets it drop a duplicate.
     pub fn pwr_flag_nets(&self) -> Vec<(String, usize)> {
         self.instances
             .iter()
             .enumerate()
             .filter_map(|(i, inst)| {
-                (inst.lib_id == "power:PWR_FLAG")
-                    .then(|| {
+                if inst.lib_id != "power:PWR_FLAG" {
+                    return None;
+                }
+                let label_prefix = format!("{}:", inst.refdes);
+                self.labels
+                    .iter()
+                    .find(|label| label.uuid_key.starts_with(&label_prefix))
+                    .map(|label| (label.net.clone(), i))
+                    .or_else(|| {
                         inst.refdes
                             .strip_prefix("#FLG_")
-                            .map(|n| (n.to_string(), i))
+                            .map(|net| (net.to_owned(), i))
                     })
-                    .flatten()
             })
             .collect()
     }
@@ -772,8 +805,14 @@ impl SchematicWriter {
         for &i in idx.iter().rev() {
             let inst = self.instances.remove(i);
             // Drop any pin label that drove this flag (keyed to its refdes' pin).
-            let tag = format!("{}:", inst.refdes);
-            self.labels.retain(|l| !l.uuid_key.starts_with(&tag));
+            if !self
+                .instances
+                .iter()
+                .any(|remaining| remaining.refdes == inst.refdes)
+            {
+                let tag = format!("{}:", inst.refdes);
+                self.labels.retain(|l| !l.uuid_key.starts_with(&tag));
+            }
         }
     }
 

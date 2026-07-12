@@ -44,26 +44,6 @@ pub fn sanitize(name: &str) -> String {
         .collect()
 }
 
-fn unique_sanitized_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut used = HashSet::new();
-    names
-        .into_iter()
-        .map(|name| {
-            let base = match sanitize(name) {
-                value if value.is_empty() => "group".to_owned(),
-                value => value,
-            };
-            let mut candidate = base.clone();
-            let mut suffix = 2usize;
-            while !used.insert(candidate.clone()) {
-                candidate = format!("{base}_{suffix}");
-                suffix += 1;
-            }
-            candidate
-        })
-        .collect()
-}
-
 /// The non-GND nets a block touches (component- and unit-level pins). A net shared by ≥2
 /// blocks is a cross-block PORT; GND/VSS are excluded (every sheet carries them, so they'd
 /// drown out the signal coupling that drives the merge target).
@@ -128,8 +108,7 @@ pub fn compose_design(env: &KicadEnv, design: &Design) -> anyhow::Result<EmitOut
     let mut crossings = sch_place::place::Crossings::default();
     let mut detected_idioms = Vec::new();
     let placer = crate::tools::schematic_placement_engine();
-    let tile_names = unique_sanitized_names(groups.iter().map(|(name, _)| name.as_str()));
-    for ((gname, block), tile_name) in groups.into_iter().zip(tile_names) {
+    for (gname, block) in groups {
         let mut sub = design.clone();
         sub.blocks = std::iter::once((gname.clone(), block)).collect();
         mark_cross_sheet_ports(&mut sub, &cross_sheet);
@@ -146,7 +125,7 @@ pub fn compose_design(env: &KicadEnv, design: &Design) -> anyhow::Result<EmitOut
         crossings.ic += out.crossings.ic;
         crossings.wire += out.crossings.wire;
         detected_idioms.extend(out.detected_idioms);
-        groups_w.push((tile_name, w));
+        groups_w.push((gname, w));
     }
 
     Ok(EmitOutput {
@@ -241,17 +220,5 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, "main");
         assert_eq!(groups[0].1.components.len(), 12);
-    }
-
-    #[test]
-    fn sanitized_group_names_remain_unique_after_collisions() {
-        let names = ["control/io", "control?io", "control_io_2", ""];
-        let got = unique_sanitized_names(names);
-
-        assert_eq!(got[0], "control_io");
-        assert_eq!(got[1], "control_io_2");
-        assert_eq!(got[2], "control_io_2_2");
-        assert_eq!(got[3], "group");
-        assert_eq!(got.iter().collect::<HashSet<_>>().len(), got.len());
     }
 }

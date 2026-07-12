@@ -266,6 +266,35 @@ pub(crate) fn pack_columns(sizes: &[[f64; 2]], margin: f64, target_aspect: f64) 
         .unwrap()
 }
 
+fn composition_group_ids<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut used = std::collections::HashSet::new();
+    names
+        .into_iter()
+        .map(|name| {
+            let mut base: String = name
+                .chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-') {
+                        ch
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            if base.is_empty() || base.chars().all(|ch| ch == '_') {
+                base = "group".to_owned();
+            }
+            let mut candidate = base.clone();
+            let mut suffix = 2usize;
+            while !used.insert(candidate.clone()) {
+                candidate = format!("{base}_{suffix}");
+                suffix += 1;
+            }
+            candidate
+        })
+        .collect()
+}
+
 /// Compose independently-laid-out block-GROUP writers into ONE `.kicad_sch`. Each
 /// group writer arrives finalized in its own coordinate space (min corner at the
 /// page margin); this column bin-packs the groups (via `pack_columns`) toward a
@@ -275,6 +304,8 @@ pub(crate) fn pack_columns(sizes: &[[f64; 2]], margin: f64, target_aspect: f64) 
 /// folds every group into one writer, and renders it via a single `finish`.
 /// Cross-group nets are already global labels (same name ⇒ KiCAD joins them on the
 /// one sheet), so no wire crosses a tile border and enlarging the page is free.
+/// Authored group names remain visible as frame titles; a separate sanitized,
+/// collision-free identity seeds graphic UUIDs and generated hidden references.
 pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&str>) -> String {
     /// Clear space around each group's content so two frames never touch.
     const TILE_MARGIN: f64 = 22.0;
@@ -285,24 +316,29 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
     // the same rail is flagged twice). DRIVEN = a group references the net but flags
     // no flag for it (a regulator drives it) ⇒ drop ALL its flags; UNDRIVEN raw rail
     // ⇒ keep exactly one flag globally.
-    let mut groups = groups;
+    let ids = composition_group_ids(groups.iter().map(|(name, _)| name.as_str()));
+    let mut groups: Vec<(String, String, SchematicWriter)> = groups
+        .into_iter()
+        .zip(ids)
+        .map(|((display_name, writer), id)| (display_name, id, writer))
+        .collect();
     let flag_nets: std::collections::HashSet<String> = groups
         .iter()
-        .flat_map(|(_, w)| w.pwr_flag_nets())
+        .flat_map(|(_, _, w)| w.pwr_flag_nets())
         .map(|(n, _)| n)
         .collect();
     // A flagged net is driven iff some group references it WITHOUT flagging it.
     let driven: std::collections::HashSet<String> = flag_nets
         .into_iter()
         .filter(|net| {
-            groups.iter().any(|(_, w)| {
+            groups.iter().any(|(_, _, w)| {
                 w.referenced_nets().contains(net)
                     && !w.pwr_flag_nets().iter().any(|(n, _)| n == net)
             })
         })
         .collect();
     let mut kept: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (_, w) in &mut groups {
+    for (_, _, w) in &mut groups {
         let drop: Vec<usize> = w
             .pwr_flag_nets()
             .into_iter()
@@ -313,8 +349,8 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
             w.remove_instances(drop);
         }
     }
-    for (name, w) in &mut groups {
-        w.namespace_hidden_references(name);
+    for (_, id, w) in &mut groups {
+        w.namespace_hidden_references(id);
     }
 
     // ── Column bin-pack onto a roughly-square sheet. A width-only shelf target degenerates
@@ -325,7 +361,7 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
     const TARGET_ASPECT: f64 = 1.4; // landscape sheets read better than square or portrait
     let sizes: Vec<[f64; 2]> = groups
         .iter()
-        .map(|(_, w)| w.content_size().unwrap_or([1.0, 1.0]))
+        .map(|(_, _, w)| w.content_size().unwrap_or([1.0, 1.0]))
         .collect();
     let tiles = pack_columns(&sizes, TILE_MARGIN, TARGET_ASPECT);
 
@@ -335,7 +371,7 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
     if let Some(t) = title {
         out.set_title(t);
     }
-    for (i, (name, mut w)) in groups.into_iter().enumerate() {
+    for (i, (display_name, id, mut w)) in groups.into_iter().enumerate() {
         let [tx, ty] = tiles[i];
         let [tw, th] = sizes[i];
         let (dx, dy) = (
@@ -346,13 +382,13 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
         // Frame: a dashed box hugging the tile's content + a bold name above it.
         let (rx0, ry0) = (tx + TILE_MARGIN - 6.0, ty + TILE_MARGIN - 6.0);
         let (rx1, ry1) = (tx + TILE_MARGIN + tw + 1.0, ty + TILE_MARGIN + th + 1.0);
-        out.add_rect([rx0, ry0], [rx1, ry1], &format!("frame:{name}"));
+        out.add_rect([rx0, ry0], [rx1, ry1], &format!("frame:{id}"));
         out.add_text(
-            &name,
+            &display_name,
             [rx0 + 1.0, ry0 - 1.5],
             3.0,
             true,
-            &format!("label:{name}"),
+            &format!("label:{id}"),
         );
         out.absorb(w);
     }
