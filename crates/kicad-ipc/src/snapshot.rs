@@ -53,6 +53,10 @@ pub struct ImportedBoard {
     pub layer_count: u32,
     pub bounds: Rect,
     pub parts: Vec<ImportedPart>,
+    /// Rule-area bounds that disallow footprint/pad placement.
+    pub placement_keepouts: Vec<Rect>,
+    /// Number of source rule areas with at least one basic keepout flag.
+    pub keepout_count: usize,
 }
 
 /// One placed footprint recovered from IPC.
@@ -118,7 +122,7 @@ impl IpcBoardSnapshot {
             layer_count: self.problem.layer_count,
             min_trace_width: self.problem.min_trace_width,
             parts,
-            keepouts: Vec::new(),
+            keepouts: self.imported.placement_keepouts.clone(),
             outline: self.problem.outline.clone(),
         }
     }
@@ -224,6 +228,8 @@ struct SnapshotBuilder {
     obstacles: Vec<Obstacle>,
     net_points: BTreeMap<String, Vec<RoutePoint>>,
     copper_zone_layers: BTreeMap<String, BTreeSet<u32>>,
+    placement_keepouts: Vec<Rect>,
+    keepout_count: usize,
     parts: Vec<ImportedPart>,
 }
 
@@ -236,6 +242,8 @@ impl SnapshotBuilder {
             obstacles: Vec::new(),
             net_points: BTreeMap::new(),
             copper_zone_layers: BTreeMap::new(),
+            placement_keepouts: Vec::new(),
+            keepout_count: 0,
             parts: Vec::new(),
         }
     }
@@ -374,8 +382,13 @@ impl SnapshotBuilder {
     }
 
     fn push_zone(&mut self, zone: &Zone) {
+        let points = polyset_points(zone.outline.as_ref());
+        if zone_has_keepout_flags(zone) {
+            self.keepout_count += 1;
+        }
         if let Some(zone::Settings::CopperSettings(settings)) = &zone.settings
             && let Some(net) = settings.net.as_ref().and_then(net_name)
+            && zone_covers_board(&points, self.outline.as_ref())
         {
             let layer_count = self.layer_names.len().max(2) as u32;
             for layer in zone_layers(zone, &self.layer_names) {
@@ -390,6 +403,11 @@ impl SnapshotBuilder {
                 }
             }
         }
+        if zone_is_placement_keepout(zone)
+            && let Some(bounds) = Rect::bounding(&points)
+        {
+            self.placement_keepouts.push(bounds);
+        }
         // Copper pours adapt around tracks, pads, and vias when KiCad refills
         // them. Treating their outline bbox as fixed copper makes the router see
         // a board-sized obstacle (and can invent cross-plane shorts). Plane
@@ -398,7 +416,6 @@ impl SnapshotBuilder {
             return;
         }
         let layers = zone_layers(zone, &self.layer_names);
-        let points = polyset_points(zone.outline.as_ref());
         if let Some(obstacle) = bbox_obstacle("zone", layers, Vec::new(), &points) {
             self.obstacles.push(obstacle);
         }
@@ -446,6 +463,8 @@ impl SnapshotBuilder {
             layer_count,
             bounds,
             parts: self.parts,
+            placement_keepouts: self.placement_keepouts,
+            keepout_count: self.keepout_count,
         };
         IpcBoardSnapshot {
             problem,
@@ -904,11 +923,59 @@ fn zone_layers(zone: &Zone, layer_names: &[String]) -> Vec<LayerRef> {
 }
 
 fn zone_is_routing_keepout(zone: &Zone) -> bool {
+    // RouteProblem has one generic obstacle kind, so a via-only area is
+    // intentionally conservative: it blocks tracks too rather than allowing a
+    // route that may later require an illegal via inside the area.
     matches!(
         zone.settings,
         Some(zone::Settings::RuleAreaSettings(ref area))
-            if area.keepout_copper || area.keepout_tracks || area.keepout_vias || area.keepout_pads
+            if area.keepout_tracks || area.keepout_vias
     )
+}
+
+fn zone_has_keepout_flags(zone: &Zone) -> bool {
+    matches!(
+        zone.settings,
+        Some(zone::Settings::RuleAreaSettings(ref area))
+            if area.keepout_copper
+                || area.keepout_tracks
+                || area.keepout_vias
+                || area.keepout_pads
+                || area.keepout_footprints
+    )
+}
+
+fn zone_is_placement_keepout(zone: &Zone) -> bool {
+    matches!(
+        zone.settings,
+        Some(zone::Settings::RuleAreaSettings(ref area))
+            if area.keepout_footprints || area.keepout_pads
+    )
+}
+
+fn zone_covers_board(points: &[Point2], outline: Option<&Polygon>) -> bool {
+    let (Some(zone_bounds), Some(board)) = (Rect::bounding(points), outline) else {
+        return false;
+    };
+    if !zone_bounds.contains_rect_eps(&board.bbox(), 1e-6) {
+        return false;
+    }
+    let Ok(zone) = Polygon::new(points.to_vec()) else {
+        return false;
+    };
+    // Matching bboxes alone are insufficient: a diamond or concave local pour
+    // can touch every board extreme without carrying a solid board-wide plane.
+    // Require the actual zone polygon to contain every board vertex and edge
+    // midpoint. False negatives only disable the plane optimization; false
+    // positives would invent connectivity, so this check intentionally errs safe.
+    board
+        .points()
+        .iter()
+        .copied()
+        .all(|p| zone.contains_point(p))
+        && board
+            .edges()
+            .all(|edge| zone.contains_point(edge.midpoint()))
 }
 
 fn net_codes(nets: &[Net]) -> BTreeMap<String, i32> {
@@ -1072,7 +1139,9 @@ fn nm_to_mm(nm: i64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::kiapi::common::types::{Distance, GraphicSegmentAttributes, GraphicShape};
+    use crate::proto::kiapi::common::types::{
+        Distance, GraphicSegmentAttributes, GraphicShape, PolyLine, PolyLineNode, PolygonWithHoles,
+    };
 
     fn v(x_mm: f64, y_mm: f64) -> Vector2 {
         Vector2 {
@@ -1091,6 +1160,29 @@ mod tests {
                 ..Default::default()
             }),
             layer: BoardLayer::BlEdgeCuts as i32,
+            ..Default::default()
+        }
+    }
+
+    fn rectangular_zone(settings: zone::Settings) -> Zone {
+        let nodes = [(2.0, 3.0), (8.0, 3.0), (8.0, 7.0), (2.0, 7.0)]
+            .into_iter()
+            .map(|(x, y)| PolyLineNode {
+                geometry: Some(poly_line_node::Geometry::Point(v(x, y))),
+            })
+            .collect();
+        Zone {
+            layers: vec![BoardLayer::BlFCu as i32],
+            outline: Some(PolySet {
+                polygons: vec![PolygonWithHoles {
+                    outline: Some(PolyLine {
+                        nodes,
+                        closed: true,
+                    }),
+                    holes: vec![],
+                }],
+            }),
+            settings: Some(settings),
             ..Default::default()
         }
     }
@@ -1165,6 +1257,17 @@ mod tests {
             ..Default::default()
         };
         assert!(!zone_is_routing_keepout(&placement_only));
+        assert!(zone_is_placement_keepout(&placement_only));
+
+        let zone_fill_only = Zone {
+            settings: Some(zone::Settings::RuleAreaSettings(RuleAreaSettings {
+                keepout_copper: true,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert!(!zone_is_routing_keepout(&zone_fill_only));
+        assert!(!zone_is_placement_keepout(&zone_fill_only));
 
         let routing_keepout = Zone {
             settings: Some(zone::Settings::RuleAreaSettings(RuleAreaSettings {
@@ -1174,6 +1277,43 @@ mod tests {
             ..Default::default()
         };
         assert!(zone_is_routing_keepout(&routing_keepout));
+        assert!(!zone_is_placement_keepout(&routing_keepout));
+    }
+
+    #[test]
+    fn rule_area_flags_survive_into_route_and_place_problems() {
+        use crate::proto::kiapi::board::types::RuleAreaSettings;
+
+        let combined = rectangular_zone(zone::Settings::RuleAreaSettings(RuleAreaSettings {
+            keepout_tracks: true,
+            keepout_footprints: true,
+            ..Default::default()
+        }));
+        let adaptive_copper = rectangular_zone(zone::Settings::CopperSettings(Default::default()));
+        let snapshot = snapshot_from_items_with_context(
+            vec![],
+            vec![],
+            vec![],
+            vec![combined, adaptive_copper],
+            vec![],
+            copper_layer_names(2),
+            None,
+            BoardRules {
+                min_trace_width: DEFAULT_MIN_TRACE_WIDTH_MM,
+                clearance: DEFAULT_CLEARANCE_MM,
+                via_diameter: DEFAULT_VIA_DIAMETER_MM,
+                via_drill: DEFAULT_VIA_DRILL_MM,
+                net_widths: BTreeMap::new(),
+            },
+        );
+
+        assert_eq!(snapshot.problem.obstacles.len(), 1);
+        assert_eq!(snapshot.problem.obstacles[0].kind, "zone");
+        assert_eq!(snapshot.imported.keepout_count, 1);
+        assert_eq!(
+            snapshot.place_problem().keepouts,
+            vec![Rect::new(2.0, 3.0, 8.0, 7.0)]
+        );
     }
 
     #[test]
@@ -1201,5 +1341,39 @@ mod tests {
             observed_plane_nets(4, &connections, &observed),
             BTreeMap::from([("GND".to_owned(), 1)])
         );
+    }
+
+    #[test]
+    fn only_board_spanning_inner_zones_can_be_planes() {
+        let outline = Polygon::new(vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(20.0, 0.0),
+            Point2::new(20.0, 10.0),
+            Point2::new(0.0, 10.0),
+        ])
+        .unwrap();
+        let full = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(20.0, 0.0),
+            Point2::new(20.0, 10.0),
+            Point2::new(0.0, 10.0),
+        ];
+        let local = vec![
+            Point2::new(5.0, 2.0),
+            Point2::new(15.0, 2.0),
+            Point2::new(15.0, 8.0),
+            Point2::new(5.0, 8.0),
+        ];
+        let same_bbox_but_local = vec![
+            Point2::new(0.0, 5.0),
+            Point2::new(10.0, 0.0),
+            Point2::new(20.0, 5.0),
+            Point2::new(10.0, 10.0),
+        ];
+
+        assert!(zone_covers_board(&full, Some(&outline)));
+        assert!(!zone_covers_board(&local, Some(&outline)));
+        assert!(!zone_covers_board(&same_bbox_but_local, Some(&outline)));
+        assert!(!zone_covers_board(&full, None));
     }
 }

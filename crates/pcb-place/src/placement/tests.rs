@@ -167,6 +167,34 @@ fn empty_hints_small_board_is_legal_and_deterministic() {
     assert_eq!(ja, jb, "two place() runs must serialize byte-equal");
 }
 
+#[test]
+fn placement_legalizer_moves_parts_out_of_keepouts() {
+    let keepout = Rect {
+        min_x: 0.0,
+        max_x: 6.0,
+        min_y: 0.0,
+        max_y: 20.0,
+    };
+    let problem = PlaceProblem {
+        bounds: board(20.0, 20.0),
+        clearance: 0.2,
+        layer_count: 2,
+        min_trace_width: 0.2,
+        keepouts: vec![keepout],
+        parts: vec![r0603("R1", Some("A"), Some("B"))],
+        outline: None,
+    };
+
+    let result = place(&problem, &PlacementHints::default());
+    assert!(result.legal, "free board space should be used: {result:?}");
+    let courtyard = Rect::from_center_half(
+        result.placements[0].at,
+        rotated_courtyard_half(&problem.parts[0], result.placements[0].rotation),
+    );
+    let (ox, oy) = courtyard.axis_penetration(&keepout);
+    assert!(ox <= geom::EPS || oy <= geom::EPS, "{courtyard:?}");
+}
+
 // ── series co-placement detection ───────────────────────────────────────
 
 /// An anchor with `npads` pads, pad `Pi` on net `Si` (so each is a 1-pin net

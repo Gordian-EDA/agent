@@ -196,7 +196,7 @@ pub fn get_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             "part_count": board.imported.parts.len(),
             "net_count": net_pins.len(),
             "nets": nets,
-            "keepout_count": 0,
+            "keepout_count": board.imported.keepout_count,
             "placed": placed,
             "routed": routed,
         },
@@ -388,7 +388,7 @@ pub(super) fn place_problem_from_snapshot(
         layer_count: board.problem.layer_count,
         min_trace_width: board.problem.min_trace_width,
         parts,
-        keepouts: Vec::new(),
+        keepouts: board.imported.placement_keepouts.clone(),
         outline: board.problem.outline.clone(),
     })
 }
@@ -743,6 +743,8 @@ mod tests {
                 layer_count: 2,
                 bounds: problem.bounds,
                 parts: vec![],
+                placement_keepouts: vec![],
+                keepout_count: 0,
             },
             problem,
             copper: RouteSolution {

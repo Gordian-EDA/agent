@@ -92,7 +92,9 @@ pub(crate) fn legalize(
             continue;
         }
         // Does the snapped cell collide with anything already placed?
-        if !collides(&pos[i], half[i], pos, half, margin, &placed) {
+        if !collides(&pos[i], half[i], pos, half, margin, &placed)
+            && !collides_keepout(problem, &pos[i], half[i])
+        {
             placed.push(i);
             continue;
         }
@@ -155,12 +157,22 @@ fn spiral_free_cell(
             {
                 continue;
             }
-            if !collides(&cand, geometry.half[i], pos, geometry.half, margin, placed) {
+            if !collides(&cand, geometry.half[i], pos, geometry.half, margin, placed)
+                && !collides_keepout(problem, &cand, geometry.half[i])
+            {
                 return Some(cand);
             }
         }
     }
     None
+}
+
+fn collides_keepout(problem: &PlaceProblem, cand: &Point2, cand_half: (f64, f64)) -> bool {
+    let courtyard = Rect::from_center_half(*cand, cand_half);
+    problem.keepouts.iter().any(|keepout| {
+        let (ox, oy) = courtyard.axis_penetration(keepout);
+        ox > geom::EPS && oy > geom::EPS
+    })
 }
 
 /// Does a part at `cand` with half-extent `cand_half` margin-overlap any part in
