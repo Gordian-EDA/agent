@@ -14,7 +14,7 @@ use kicad_footprint::FootprintCatalog;
 use kicad_symbol::SymbolTable;
 use kicad_symbol::search::SymbolIndex;
 
-use crate::config::{DEFAULT_SCHEMATIC_FILENAME, GordianConfig};
+use crate::config::GordianConfig;
 
 /// Per-agent runtime resources every KiCAD tool runs against.
 ///
@@ -82,6 +82,10 @@ impl AgentRuntime {
         sch_path: PathBuf,
         config: GordianConfig,
     ) -> Result<Self> {
+        config
+            .validate()
+            .map_err(|e| anyhow::anyhow!("invalid Gordian config: {e}"))?;
+        validate_project_schematic_path(&project_dir, &sch_path)?;
         let project = ProjectContext::for_project(project_dir, sch_path)?;
         ensure_project_files(&env, &project.project_dir, &project.sch_path)?;
         let provider = SymbolTable::from_env(&env);
@@ -107,14 +111,12 @@ impl AgentRuntime {
         project_dir: PathBuf,
         config: GordianConfig,
     ) -> Result<Self> {
+        config
+            .validate()
+            .map_err(|e| anyhow::anyhow!("invalid Gordian config: {e}"))?;
         std::fs::create_dir_all(&project_dir)
             .with_context(|| format!("creating project dir {}", project_dir.display()))?;
-        let schematic_filename = if config.project.schematic_filename.trim().is_empty() {
-            DEFAULT_SCHEMATIC_FILENAME
-        } else {
-            config.project.schematic_filename.as_str()
-        };
-        let sch_path = project_dir.join(schematic_filename);
+        let sch_path = project_dir.join(&config.project.schematic_filename);
         Self::new_with_config(env, project_dir, sch_path, config)
     }
 
@@ -227,6 +229,28 @@ impl AgentRuntime {
             .get()
             .expect("footprint catalog just set"))
     }
+}
+
+fn validate_project_schematic_path(project_dir: &Path, sch_path: &Path) -> Result<()> {
+    let relative = sch_path.strip_prefix(project_dir).map_err(|_| {
+        anyhow::anyhow!(
+            "schematic path {} must be a direct child of project directory {}",
+            sch_path.display(),
+            project_dir.display()
+        )
+    })?;
+    let mut components = relative.components();
+    let is_direct_schematic = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+        && relative.extension().is_some_and(|ext| ext == "kicad_sch");
+    if !is_direct_schematic {
+        anyhow::bail!(
+            "schematic path {} must be exactly one direct .kicad_sch child of project directory {}",
+            sch_path.display(),
+            project_dir.display()
+        );
+    }
+    Ok(())
 }
 
 fn ensure_project_files(env: &KicadEnv, project_dir: &Path, sch_path: &Path) -> Result<()> {
@@ -384,6 +408,53 @@ impl ToolServices {
 mod tests {
     use super::*;
 
+    fn fixture_env(root: &Path) -> KicadEnv {
+        let symbols = root.join("symbols");
+        let footprints = root.join("footprints");
+        std::fs::create_dir_all(&symbols).expect("symbols dir");
+        std::fs::create_dir_all(&footprints).expect("footprints dir");
+        KicadEnv::with_library_dirs(symbols, footprints)
+    }
+
+    fn assert_explicit_path_rejected_without_writes(
+        env: &KicadEnv,
+        project_dir: PathBuf,
+        sch_path: PathBuf,
+        case: &str,
+    ) {
+        std::fs::create_dir_all(&project_dir).expect("project dir");
+        std::fs::create_dir_all(sch_path.parent().expect("schematic parent"))
+            .expect("schematic parent dir");
+        let escaped_pro = sch_path.with_extension("kicad_pro");
+
+        let err = AgentRuntime::new_with_config(
+            env.clone(),
+            project_dir.clone(),
+            sch_path,
+            GordianConfig::default(),
+        )
+        .err()
+        .expect("invalid schematic path must fail");
+
+        assert!(
+            err.to_string().contains("schematic path"),
+            "{case}: {err:#}"
+        );
+        assert!(!escaped_pro.exists(), "{case}: wrote outside project");
+        assert!(
+            !project_dir.join(".gordian").exists(),
+            "{case}: workspace written"
+        );
+        assert!(
+            !project_dir.join("sym-lib-table").exists(),
+            "{case}: scaffold written"
+        );
+        assert!(
+            !project_dir.join("fp-lib-table").exists(),
+            "{case}: scaffold written"
+        );
+    }
+
     #[test]
     fn project_scaffold_writes_project_and_library_tables() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -408,5 +479,111 @@ mod tests {
         assert!(sym.contains("(name \"Device\")"));
         let fp = std::fs::read_to_string(project.join("fp-lib-table")).expect("fp table");
         assert!(fp.contains("(name \"Resistor_SMD\")"));
+    }
+
+    #[test]
+    fn invalid_configured_schematic_paths_are_rejected_before_writes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env = fixture_env(temp.path());
+
+        for (case, filename) in [
+            (
+                "absolute",
+                temp.path()
+                    .join("outside.kicad_sch")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            ("parent", "../outside.kicad_sch".to_string()),
+            ("subdir", "nested/design.kicad_sch".to_string()),
+        ] {
+            let project_dir = temp.path().join(format!("project-{case}"));
+            let mut config = GordianConfig::default();
+            config.project.schematic_filename = filename;
+
+            let err =
+                AgentRuntime::for_project_with_config(env.clone(), project_dir.clone(), config)
+                    .err()
+                    .expect("invalid schematic path must fail");
+
+            assert!(
+                err.to_string().contains("project.schematicFilename"),
+                "{case}: {err:#}"
+            );
+            assert!(
+                !project_dir.exists(),
+                "{case}: project directory was written"
+            );
+            assert!(
+                !temp.path().join("outside.kicad_sch").exists(),
+                "{case}: path escaped the project directory"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_schematic_path_must_be_a_direct_project_child() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env = fixture_env(temp.path());
+        assert_explicit_path_rejected_without_writes(
+            &env,
+            temp.path().join("project-absolute"),
+            temp.path().join("absolute-outside.kicad_sch"),
+            "absolute",
+        );
+
+        let parent_project = temp.path().join("project-parent");
+        assert_explicit_path_rejected_without_writes(
+            &env,
+            parent_project.clone(),
+            parent_project.join("../parent-outside.kicad_sch"),
+            "parent",
+        );
+
+        let subdir_project = temp.path().join("project-subdir");
+        assert_explicit_path_rejected_without_writes(
+            &env,
+            subdir_project.clone(),
+            subdir_project.join("nested/design.kicad_sch"),
+            "subdir",
+        );
+
+        assert_explicit_path_rejected_without_writes(
+            &env,
+            temp.path().join("project-mismatched-parent"),
+            temp.path().join("other-project/design.kicad_sch"),
+            "mismatched parent",
+        );
+
+        let extension_project = temp.path().join("project-wrong-extension");
+        assert_explicit_path_rejected_without_writes(
+            &env,
+            extension_project.clone(),
+            extension_project.join("design.sch"),
+            "wrong extension",
+        );
+    }
+
+    #[test]
+    fn explicit_direct_schematic_child_builds_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let env = fixture_env(temp.path());
+        let project_dir = temp.path().join("valid-project");
+        std::fs::create_dir_all(&project_dir).expect("project dir");
+        let sch_path = project_dir.join("custom.kicad_sch");
+
+        let runtime = AgentRuntime::new_with_config(
+            env,
+            project_dir.clone(),
+            sch_path.clone(),
+            GordianConfig::default(),
+        )
+        .expect("valid direct child");
+
+        assert_eq!(runtime.sch_path(), sch_path);
+        assert!(project_dir.join("custom.kicad_pro").is_file());
+        assert!(project_dir.join("sym-lib-table").is_file());
+        assert!(project_dir.join("fp-lib-table").is_file());
+        assert!(project_dir.join(".gordian").is_dir());
     }
 }

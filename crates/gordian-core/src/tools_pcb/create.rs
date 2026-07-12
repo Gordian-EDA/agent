@@ -8,7 +8,7 @@ use anyhow::Result;
 use kicad_cli::KicadCli;
 use serde_json::{Value, json};
 
-use kicad_footprint::FootprintId;
+use kicad_footprint::{FootprintCatalog, FootprintId};
 use pcb_model::{Point2, Polygon};
 use pcb_place::placement::{LockedAt, Rect};
 
@@ -20,30 +20,30 @@ use super::seed::{BoardSeedRules, PourSpec};
 // ── regenerate_board ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-struct BoardSeedSpec {
-    bounds: Rect,
-    rules: SeedRules,
-    parts: Vec<SeedPart>,
-    outline: Option<Polygon>,
+pub(super) struct BoardSeedSpec {
+    pub(super) bounds: Rect,
+    pub(super) rules: SeedRules,
+    pub(super) parts: Vec<SeedPart>,
+    pub(super) outline: Option<Polygon>,
 }
 
 #[derive(Debug, Clone)]
-struct SeedPart {
-    reference: String,
-    footprint: String,
-    pad_nets: BTreeMap<String, String>,
-    locked: Option<LockedAt>,
+pub(super) struct SeedPart {
+    pub(super) reference: String,
+    pub(super) footprint: String,
+    pub(super) pad_nets: BTreeMap<String, String>,
+    pub(super) locked: Option<LockedAt>,
 }
 
 #[derive(Debug, Clone)]
-struct SeedRules {
-    clearance: f64,
-    min_trace_width: f64,
-    via_diameter: f64,
-    via_drill: f64,
-    layer_count: u32,
-    net_widths: BTreeMap<String, f64>,
-    pours: Vec<PourSpec>,
+pub(super) struct SeedRules {
+    pub(super) clearance: f64,
+    pub(super) min_trace_width: f64,
+    pub(super) via_diameter: f64,
+    pub(super) via_drill: f64,
+    pub(super) layer_count: u32,
+    pub(super) net_widths: BTreeMap<String, f64>,
+    pub(super) pours: Vec<PourSpec>,
 }
 
 impl Default for SeedRules {
@@ -321,6 +321,20 @@ fn write_seed_board(spec: &BoardSeedSpec, ctx: &AgentRuntime) -> std::result::Re
     let catalog = ctx
         .footprint_catalog()
         .map_err(|e| format!("footprint catalog unavailable: {e}"))?;
+    let text = emit_seed_board(spec, catalog)?;
+    std::fs::write(ctx.pcb_path(), text)
+        .map_err(|e| format!("could not write {}: {e}", ctx.pcb_path().display()))
+}
+
+/// Synthesize the production seed-board representation without writing it.
+///
+/// Keeping the emitter independent of [`AgentRuntime`] lets offline validation
+/// compose the exact same seed writer with the production placement/copper
+/// patchers.
+pub(super) fn emit_seed_board(
+    spec: &BoardSeedSpec,
+    catalog: &FootprintCatalog,
+) -> std::result::Result<String, String> {
     let mut parts = Vec::with_capacity(spec.parts.len());
     let mut x = spec.bounds.min_x + 2.0;
     let y = spec.bounds.min_y + 2.0;
@@ -364,8 +378,7 @@ fn write_seed_board(spec: &BoardSeedSpec, ctx: &AgentRuntime) -> std::result::Re
     let text = SeedBoardWriter::new(&parts, &spec.bounds, &spec.rules, spec.outline.as_ref())
         .emit()
         .map_err(|e| format!("board synthesis failed: {e}"))?;
-    std::fs::write(ctx.pcb_path(), text)
-        .map_err(|e| format!("could not write {}: {e}", ctx.pcb_path().display()))
+    Ok(text)
 }
 
 fn add_default_power_pours(rules: &mut SeedRules, parts: &[SeedPart]) {
@@ -646,14 +659,7 @@ impl<'a> SeedBoardWriter<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn write_zone(
-        &self,
-        out: &mut String,
-        net_code: i32,
-        net: &str,
-        layer_name: &str,
-        tag: &str,
-    ) {
+    fn write_zone(&self, out: &mut String, net_code: i32, net: &str, layer_name: &str, tag: &str) {
         let clearance = fmt_num(self.rules.clearance);
         let min_thickness = fmt_num(self.rules.min_trace_width.max(0.1));
         let thermal_gap = fmt_num((self.rules.clearance * 2.0).max(0.2));
@@ -1100,10 +1106,15 @@ fn parse_bounds(v: Option<&Value>) -> std::result::Result<Rect, String> {
         return Ok(rect(x0, y0, x1, y1));
     }
     if let (Some(w), Some(h)) = (get(&["width", "w"]), get(&["height", "h"])) {
-        let (x, y) = (get(&["x", "min_x", "minX"]).unwrap_or(0.0), get(&["y", "min_y", "minY"]).unwrap_or(0.0));
+        let (x, y) = (
+            get(&["x", "min_x", "minX"]).unwrap_or(0.0),
+            get(&["y", "min_y", "minY"]).unwrap_or(0.0),
+        );
         return Ok(rect(x, y, x + w, y + h));
     }
-    Err(format!("bounds: could not read a rect from {val}; {EXPECT}"))
+    Err(format!(
+        "bounds: could not read a rect from {val}; {EXPECT}"
+    ))
 }
 
 /// Parse optional `rules` from snake_case model input.

@@ -12,6 +12,7 @@ jobs:
   test:
     name: build · test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -27,19 +28,20 @@ jobs:
         run: cargo build --workspace --all-targets
       - name: Test
         run: cargo test --workspace
+      - name: Required PCB corpus (real KiCAD DRC)
+        run: cargo run -p gordian-core --example validate_pcb_corpus -- --required
 
   lint:
     name: clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      # NOTE: the codebase uses a hand-maintained compact style, not stock rustfmt, so there is
-      # no `cargo fmt --check` gate. Adopting rustfmt is a future one-time, whole-workspace change.
-      # clippy runs informationally for now (sch-layout still has known warnings being addressed);
-      # tighten to `-- -D warnings` once the whole workspace is clean.
+      - name: Format
+        run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings

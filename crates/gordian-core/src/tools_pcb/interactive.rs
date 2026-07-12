@@ -55,6 +55,7 @@ pub fn move_parts(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             Err(err) => return Ok(Err(err)),
         };
         session.kicad().move_footprints(&plan.ipc_moves)?;
+        session.kicad().save()?;
         Ok(Ok(plan.output()))
     }) {
         Ok(Ok(out)) => Ok(out),
@@ -470,6 +471,14 @@ pub fn delete_copper(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 /// nets to it — "wide copper for power". (Note: also achievable per-track via
 /// route_track width.)
 pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
+    if !net_class_update_supported(&ctx.env().cli_version) {
+        return Ok(json!({
+            "error": format!(
+                "unsupported KiCAD IPC operation: KiCAD {} does not reliably support SetNetClasses; set_net_width requires KiCAD 9.0.3+ or KiCAD 10",
+                ctx.env().cli_version
+            )
+        }));
+    }
     let name = require_str(&input, "name")?;
     let width = input.get("width").and_then(Value::as_f64).unwrap_or(0.5);
     let clearance = input
@@ -489,11 +498,26 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     match ctx.kicad().with_session(&ctx.pcb_path(), |session| {
         session
             .kicad()
-            .set_net_class(&name, mm_to_nm(width), mm_to_nm(clearance), &net_refs)
+            .set_net_class(&name, mm_to_nm(width), mm_to_nm(clearance), &net_refs)?;
+        session.kicad().save()
     }) {
         Ok(()) => Ok(json!({ "ok": true, "net_class": name, "width": width, "nets": nets })),
         Err(e) => Ok(json!({ "error": e.to_string() })),
     }
+}
+
+fn net_class_update_supported(version: &str) -> bool {
+    let mut components = version.split('.').map(|part| {
+        part.chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>()
+            .parse::<u32>()
+            .unwrap_or(0)
+    });
+    let major = components.next().unwrap_or(0);
+    let minor = components.next().unwrap_or(0);
+    let patch = components.next().unwrap_or(0);
+    major >= 10 || (major == 9 && (minor > 0 || patch >= 3))
 }
 
 /// Save the live KiCAD board to disk if a session is open. Returns whether it saved.
@@ -1436,6 +1460,14 @@ mod tests {
                 .unwrap_err()
                 .contains("needs a movement mode")
         );
+    }
+
+    #[test]
+    fn net_class_update_version_gate_rejects_known_hanging_kicad() {
+        assert!(!net_class_update_supported("9.0.2+dfsg-1"));
+        assert!(net_class_update_supported("9.0.3"));
+        assert!(net_class_update_supported("9.1.0"));
+        assert!(net_class_update_supported("10.0.0"));
     }
 
     fn route_problem(obstacles: Vec<pcb_model::Obstacle>) -> RouteProblem {

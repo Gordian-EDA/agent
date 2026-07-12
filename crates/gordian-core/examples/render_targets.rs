@@ -47,7 +47,7 @@ fn render_fixture(
     out: &std::path::Path,
 ) -> anyhow::Result<()> {
     let src = std::fs::read_to_string(yaml_path)?;
-    let provider = SymbolTable::from_env(&env);
+    let provider = SymbolTable::from_env(env);
     let result = circuit_lang::compile(&src, &provider);
     let design = result.design.ok_or_else(|| {
         let errs: Vec<String> = result
@@ -77,7 +77,7 @@ fn render_fixture(
         Box::new(anneal_place::Anneal),
         Some(ir),
     )
-            .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
+    .map_err(|e| anyhow::anyhow!("emit failed: {e}"))?;
 
     let tmp = tempfile::tempdir()?;
     let sch_path = tmp.path().join("out.kicad_sch");

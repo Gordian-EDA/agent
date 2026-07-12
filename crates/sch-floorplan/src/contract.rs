@@ -34,10 +34,10 @@
 pub use crate::floorplan::place::{
     COL_GAP, FAST_PINS, GRID_KEY, PlacementEngine, PlacementOutput, ROW_GAP, RawMetrics,
     RouteRealization, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
-    align_idiom_clusters, align_led_chains, align_rail_cap_rows, apply_cells,
+    align_idiom_clusters, align_led_chains, align_rail_cap_rows, apply_cells, assign_cells,
     body_overlap_count, build_anchor_blocks, build_writer, cluster_group, cohesion_targets,
     decongest, grid_order_viol, item_rect, multi_unit_siblings, normalize, orient_angle,
-    overlaps_any, signal_anchor_centroid, supply_pin_target, assign_cells,
+    overlaps_any, signal_anchor_centroid, supply_pin_target,
 };
 
 pub use crate::floorplan::infer_ir;

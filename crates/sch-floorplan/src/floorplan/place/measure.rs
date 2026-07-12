@@ -25,6 +25,7 @@ use sch_place::place::Crossings;
 
 use sch_place::place::PlaceResult;
 
+use super::emit::{build_writer, compute_needs_flag};
 use super::problem::SchematicPlaceProblem;
 use super::score::{
     count_body_crossings, count_close_wires, count_collinear_body_crossings, count_congestion,
@@ -32,7 +33,6 @@ use super::score::{
     count_parallel_body_crossings, count_shorts, count_stray, grid_order_viol, item_rect,
 };
 use super::*;
-use super::emit::{build_writer, compute_needs_flag};
 
 /// A schematic placement+routing ENGINE: searches over a neutral
 /// [`SchematicPlaceProblem`] plus optional layout intent, and writes the final
@@ -183,7 +183,11 @@ impl<'a> RoutedEvaluator<'a> {
     pub fn rendered(&self, design: &Design, items: &[Item]) -> Option<(usize, Rect)> {
         let mut w = self
             .realizer
-            .realize_writer(design.name.as_deref(), items, RouteRealization::ShippedSheet)
+            .realize_writer(
+                design.name.as_deref(),
+                items,
+                RouteRealization::ShippedSheet,
+            )
             .ok()?;
         super::emit::add_orphan_label_columns(&mut w, design, self.realizer.inc);
         w.set_frame(true);
@@ -199,7 +203,11 @@ impl<'a> RoutedEvaluator<'a> {
     pub fn shipped(&self, design: &Design, items: &[Item]) -> Option<(Crossings, usize, Rect)> {
         let mut w = self
             .realizer
-            .realize_writer(design.name.as_deref(), items, RouteRealization::ShippedSheet)
+            .realize_writer(
+                design.name.as_deref(),
+                items,
+                RouteRealization::ShippedSheet,
+            )
             .ok()?;
         let cr = shipped_crossings(self.realizer.env, &w, items);
         super::emit::add_orphan_label_columns(&mut w, design, self.realizer.inc);
@@ -293,12 +301,11 @@ pub(crate) fn shipped_crossings(env: &KicadEnv, w: &SchematicWriter, items: &[It
 /// The 2-pin part body axes and the IC (3+ pin) body-interior rects of a placed item set
 /// — the wire-through-body obstacles. Shared by the routed measurements so every
 /// crossing count extracts identical geometry.
-fn bodies_and_ic_rects(
-    env: &KicadEnv,
-    w: &SchematicWriter,
-    items: &[Item],
-) -> (Vec<([f64; 2], [f64; 2])>, Vec<Rect>) {
-    let bodies: Vec<([f64; 2], [f64; 2])> = items
+type BodyAxis = ([f64; 2], [f64; 2]);
+type BodyObstacles = (Vec<BodyAxis>, Vec<Rect>);
+
+fn bodies_and_ic_rects(env: &KicadEnv, w: &SchematicWriter, items: &[Item]) -> BodyObstacles {
+    let bodies: Vec<BodyAxis> = items
         .iter()
         .filter(|i| i.geom.pins.len() == 2)
         .filter_map(|it| {
@@ -485,10 +492,7 @@ pub fn raw_metrics(
     let grid_order = grid_order_viol(items, ir);
     let mut by_refdes: BTreeMap<&str, Vec<Point2>> = BTreeMap::new();
     for it in items {
-        by_refdes
-            .entry(&it.refdes)
-            .or_default()
-            .push(Point2::from(it.at));
+        by_refdes.entry(&it.refdes).or_default().push(it.at);
     }
     let sib_spread: f64 = by_refdes
         .values()

@@ -383,7 +383,7 @@ pub(super) fn place_problem_from_snapshot(
     }
 
     Ok(PlaceProblem {
-        bounds: routing_bounds(&board.problem.bounds, board.problem.outline.as_ref()),
+        bounds: board.problem.bounds,
         clearance: board.problem.clearance,
         layer_count: board.problem.layer_count,
         min_trace_width: board.problem.min_trace_width,
@@ -403,22 +403,16 @@ fn pad_net_map(pads: &[(String, Option<String>)]) -> BTreeMap<String, String> {
 /// Edge.Cuts is a `copper_edge_clearance` fault.
 const EDGE_CLEAR_MM: f64 = 0.5;
 
-/// The bounds the placer + router actually work inside. For a board with NO custom outline the
-/// export auto-tightens the edge to copper + 1 mm, so any copper is already ≥ 1 mm from the
-/// finished edge — no inset needed. But a CUSTOM outline is exported verbatim, so copper routed
-/// to the raw `bounds` lands right on that edge and trips KiCAD's 0.5 mm copper-to-edge rule
-/// (a dense custom-outline board shipped 42 such faults). Inset the working bounds by the edge
-/// clearance so place + route keep copper off the edge; the exported Edge.Cuts stays the user's
-/// real outline. (Inset the bbox; the lint also checks distance to the outline POLYGON edges,
-/// catching the non-bbox edges of a non-rectangular outline.)
-pub(super) fn routing_bounds(bounds: &Rect, outline: Option<&pcb_model::Polygon>) -> Rect {
-    if outline.is_none() {
-        return *bounds;
-    }
+/// The bounds the placer + router actually work inside. The production seed
+/// writer emits Edge.Cuts at the requested bounds for both rectangular and
+/// polygon boards, so copper must stay inside KiCad's 0.5 mm edge clearance in
+/// both cases. (Inset the bbox; the lint also checks distance to polygon edges,
+/// catching non-bbox edges of a non-rectangular outline.)
+pub(super) fn routing_bounds(bounds: &Rect, _outline: Option<&pcb_model::Polygon>) -> Rect {
     // Never invert a small board: clamp the inset so min stays < max.
-    let inset = EDGE_CLEAR_MM
-        .min((bounds.max_x - bounds.min_x) / 2.0 - 0.1)
-        .min((bounds.max_y - bounds.min_y) / 2.0 - 0.1);
+    let max_x_inset = ((bounds.max_x - bounds.min_x) / 2.0 - 0.1).max(0.0);
+    let max_y_inset = ((bounds.max_y - bounds.min_y) / 2.0 - 0.1).max(0.0);
+    let inset = EDGE_CLEAR_MM.min(max_x_inset).min(max_y_inset);
     Rect {
         min_x: bounds.min_x + inset,
         max_x: bounds.max_x - inset,
@@ -641,10 +635,7 @@ pub fn place_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     Ok(out)
 }
 
-fn write_placement(
-    ctx: &AgentRuntime,
-    moves: &[FootprintMove],
-) -> std::result::Result<(), String> {
+fn write_placement(ctx: &AgentRuntime, moves: &[FootprintMove]) -> std::result::Result<(), String> {
     let path = ctx.pcb_path();
     let live = ctx.kicad().with_session(&path, |session| {
         session.kicad().move_footprints(moves)?;
@@ -671,6 +662,38 @@ mod tests {
     use kicad_footprint::PadTechnology;
     use kicad_ipc::snapshot::{ImportedBoard, IpcBoardSnapshot};
     use pcb_model::{RouteProblem, RouteSolution, Trace, Via};
+
+    #[test]
+    fn routing_bounds_reserve_kicad_edge_clearance_for_rectangles() {
+        let bounds = Rect {
+            min_x: 0.0,
+            min_y: 1.0,
+            max_x: 20.0,
+            max_y: 11.0,
+        };
+
+        assert_eq!(
+            routing_bounds(&bounds, None),
+            Rect {
+                min_x: 0.5,
+                min_y: 1.5,
+                max_x: 19.5,
+                max_y: 10.5,
+            }
+        );
+    }
+
+    #[test]
+    fn routing_bounds_never_expand_degenerate_boards() {
+        let bounds = Rect {
+            min_x: 4.0,
+            min_y: 7.0,
+            max_x: 4.1,
+            max_y: 7.1,
+        };
+
+        assert_eq!(routing_bounds(&bounds, None), bounds);
+    }
 
     #[test]
     fn footprint_pad_rotation_affects_route_obstacle_size() {

@@ -7,7 +7,10 @@
 //! overlap by a deterministic nearest-free-cell spiral; `is_legal` then RE-VERIFIES
 //! the result in exact geometry — the algorithm's verdict is never trusted.
 
-use super::geometry::{PLACE_GRID, PLACEMENT_GRID, SPIRAL_MAX_RING};
+use super::geometry::{
+    PLACE_GRID, PLACEMENT_GRID, SPIRAL_MAX_RING, clamp_center_for_envelope,
+    placement_bounds_envelope, placement_envelope_at,
+};
 use super::model::PlaceProblem;
 use crate::problem::{Point2, Rect};
 
@@ -19,6 +22,11 @@ pub(crate) struct LegalizeStats {
     pub(crate) out_of_bounds_clamps: usize,
 }
 
+struct LegalizeGeometry<'a> {
+    half: &'a [(f64, f64)],
+    envelopes: &'a [Rect],
+}
+
 /// Snap movable parts to the placement grid, then resolve residual courtyard
 /// overlaps by a deterministic nearest-free-cell spiral, processing parts
 /// area-descending (big parts seat first). Locked parts are fixed obstacles.
@@ -27,11 +35,17 @@ pub(crate) struct LegalizeStats {
 pub(crate) fn legalize(
     problem: &PlaceProblem,
     half: &[(f64, f64)],
+    copper_bbox: &[Rect],
     margin: f64,
     pos: &mut [Point2],
 ) -> LegalizeStats {
     let n = problem.parts.len();
     let locked: Vec<bool> = problem.parts.iter().map(|p| p.locked.is_some()).collect();
+    let envelopes: Vec<Rect> = half
+        .iter()
+        .zip(copper_bbox)
+        .map(|(&courtyard, &copper)| placement_bounds_envelope(courtyard, copper))
+        .collect();
 
     let mut out_of_bounds_clamps = 0;
     // Snap + clamp movable parts.
@@ -42,7 +56,7 @@ pub(crate) fn legalize(
         let before = pos[i];
         pos[i].x = PLACEMENT_GRID.snap(pos[i].x);
         pos[i].y = PLACEMENT_GRID.snap(pos[i].y);
-        pos[i] = problem.bounds.clamp_center_for_half(pos[i], half[i]);
+        pos[i] = clamp_center_for_envelope(&problem.bounds, pos[i], envelopes[i]);
         if (pos[i].x - before.x).abs() > PLACE_GRID || (pos[i].y - before.y).abs() > PLACE_GRID {
             // A real bounds clamp (more than a snap's worth of motion).
             out_of_bounds_clamps += 1;
@@ -69,6 +83,10 @@ pub(crate) fn legalize(
     }
 
     let mut overlaps_resolved = 0;
+    let geometry = LegalizeGeometry {
+        half,
+        envelopes: &envelopes,
+    };
     for &i in &order {
         if locked[i] {
             continue;
@@ -80,7 +98,8 @@ pub(crate) fn legalize(
         }
         // Spiral out from the snapped cell for the nearest free grid cell.
         let origin = pos[i];
-        if let Some(found) = spiral_free_cell(problem, half, margin, i, &placed, &origin, pos) {
+        if let Some(found) = spiral_free_cell(problem, &geometry, margin, i, &placed, &origin, pos)
+        {
             pos[i] = found;
             overlaps_resolved += 1;
             placed.push(i);
@@ -104,7 +123,7 @@ pub(crate) fn legalize(
 /// [`SPIRAL_MAX_RING`] rings.
 fn spiral_free_cell(
     problem: &PlaceProblem,
-    half: &[(f64, f64)],
+    geometry: &LegalizeGeometry<'_>,
     margin: f64,
     i: usize,
     placed: &[usize],
@@ -132,11 +151,11 @@ fn spiral_free_cell(
             // the probed cell and could re-collide).
             if !problem
                 .bounds
-                .contains_rect_eps(&Rect::from_center_half(cand, half[i]), 1e-9)
+                .contains_rect_eps(&placement_envelope_at(cand, geometry.envelopes[i]), 1e-9)
             {
                 continue;
             }
-            if !collides(&cand, half[i], pos, half, margin, placed) {
+            if !collides(&cand, geometry.half[i], pos, geometry.half, margin, placed) {
                 return Some(cand);
             }
         }

@@ -504,8 +504,8 @@ impl SpinePlace {
                         grouped[i] = true;
                     }
                 }
-                for i in 0..it.len() {
-                    if !grouped[i] {
+                for (i, is_grouped) in grouped.iter().enumerate() {
+                    if !is_grouped {
                         groups.push(vec![i]);
                     }
                 }
@@ -582,17 +582,18 @@ impl SpinePlace {
         }
 
         let warnings = eval.warnings(&problem.items);
-        if warnings > 0 && std::env::var_os("SPINE_DEBUG").is_some() {
-            if let Ok(mut w) = realizer.realize_writer(
+        if warnings > 0
+            && std::env::var_os("SPINE_DEBUG").is_some()
+            && let Ok(mut w) = realizer.realize_writer(
                 None,
                 &problem.items,
                 sch_floorplan::contract::RouteRealization::ShippedSheet,
-            ) {
-                w.set_frame(true);
-                w.prepare();
-                for msg in w.layout_warnings() {
-                    eprintln!("[spine] warn: {msg}");
-                }
+            )
+        {
+            w.set_frame(true);
+            w.prepare();
+            for msg in w.layout_warnings() {
+                eprintln!("[spine] warn: {msg}");
             }
         }
         PlacementOutput {

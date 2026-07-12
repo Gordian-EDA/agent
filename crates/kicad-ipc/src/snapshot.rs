@@ -223,6 +223,7 @@ struct SnapshotBuilder {
     rules: BoardRules,
     obstacles: Vec<Obstacle>,
     net_points: BTreeMap<String, Vec<RoutePoint>>,
+    copper_zone_layers: BTreeMap<String, BTreeSet<u32>>,
     parts: Vec<ImportedPart>,
 }
 
@@ -234,6 +235,7 @@ impl SnapshotBuilder {
             rules,
             obstacles: Vec::new(),
             net_points: BTreeMap::new(),
+            copper_zone_layers: BTreeMap::new(),
             parts: Vec::new(),
         }
     }
@@ -372,21 +374,32 @@ impl SnapshotBuilder {
     }
 
     fn push_zone(&mut self, zone: &Zone) {
+        if let Some(zone::Settings::CopperSettings(settings)) = &zone.settings
+            && let Some(net) = settings.net.as_ref().and_then(net_name)
+        {
+            let layer_count = self.layer_names.len().max(2) as u32;
+            for layer in zone_layers(zone, &self.layer_names) {
+                if let Some(idx) = layer.index(layer_count)
+                    && idx > 0
+                    && idx + 1 < layer_count
+                {
+                    self.copper_zone_layers
+                        .entry(net.clone())
+                        .or_default()
+                        .insert(idx);
+                }
+            }
+        }
+        // Copper pours adapt around tracks, pads, and vias when KiCad refills
+        // them. Treating their outline bbox as fixed copper makes the router see
+        // a board-sized obstacle (and can invent cross-plane shorts). Plane
+        // connectivity is modeled separately by `RouteProblem::plane_nets`.
+        if !zone_is_routing_keepout(zone) {
+            return;
+        }
         let layers = zone_layers(zone, &self.layer_names);
         let points = polyset_points(zone.outline.as_ref());
-        if let Some(mut obstacle) = bbox_obstacle(
-            "zone",
-            layers,
-            zone_net(zone).into_iter().collect(),
-            &points,
-        ) {
-            if matches!(
-                zone.settings,
-                Some(zone::Settings::RuleAreaSettings(ref area))
-                    if area.keepout_copper || area.keepout_tracks || area.keepout_vias || area.keepout_pads
-            ) {
-                obstacle.connected_to.clear();
-            }
+        if let Some(obstacle) = bbox_obstacle("zone", layers, Vec::new(), &points) {
             self.obstacles.push(obstacle);
         }
     }
@@ -414,12 +427,7 @@ impl SnapshotBuilder {
             })
             .collect();
 
-        let plane_nets = pcb_model::default_plane_nets(
-            layer_count,
-            connections
-                .iter()
-                .map(|c| (c.name.clone(), c.points_to_connect.len())),
-        );
+        let plane_nets = observed_plane_nets(layer_count, &connections, &self.copper_zone_layers);
         let problem = RouteProblem {
             layer_count,
             min_trace_width: self.rules.min_trace_width,
@@ -447,6 +455,25 @@ impl SnapshotBuilder {
             layer_names: self.layer_names,
         }
     }
+}
+
+fn observed_plane_nets(
+    layer_count: u32,
+    connections: &[Connection],
+    copper_zone_layers: &BTreeMap<String, BTreeSet<u32>>,
+) -> BTreeMap<String, u32> {
+    let mut assigned = pcb_model::default_plane_nets(
+        layer_count,
+        connections
+            .iter()
+            .map(|connection| (connection.name.clone(), connection.points_to_connect.len())),
+    );
+    assigned.retain(|net, layer| {
+        copper_zone_layers
+            .get(net)
+            .is_some_and(|layers| layers.contains(layer))
+    });
+    assigned
 }
 
 fn copper_from_ipc(tracks: &[Track], vias: &[Via], layer_names: &[String]) -> RouteSolution {
@@ -876,11 +903,12 @@ fn zone_layers(zone: &Zone, layer_names: &[String]) -> Vec<LayerRef> {
     }
 }
 
-fn zone_net(zone: &Zone) -> Option<String> {
-    match &zone.settings {
-        Some(zone::Settings::CopperSettings(settings)) => settings.net.as_ref().and_then(net_name),
-        _ => None,
-    }
+fn zone_is_routing_keepout(zone: &Zone) -> bool {
+    matches!(
+        zone.settings,
+        Some(zone::Settings::RuleAreaSettings(ref area))
+            if area.keepout_copper || area.keepout_tracks || area.keepout_vias || area.keepout_pads
+    )
 }
 
 fn net_codes(nets: &[Net]) -> BTreeMap<String, i32> {
@@ -1117,5 +1145,61 @@ mod tests {
         assert_eq!(snapshot.problem.bounds.max_x, 100.0);
         assert_eq!(snapshot.problem.bounds.max_y, 50.0);
         assert_eq!(snapshot.problem.outline.as_ref().unwrap().points().len(), 4);
+    }
+
+    #[test]
+    fn only_routing_rule_areas_become_zone_obstacles() {
+        use crate::proto::kiapi::board::types::{CopperZoneSettings, RuleAreaSettings};
+
+        let copper = Zone {
+            settings: Some(zone::Settings::CopperSettings(CopperZoneSettings::default())),
+            ..Default::default()
+        };
+        assert!(!zone_is_routing_keepout(&copper));
+
+        let placement_only = Zone {
+            settings: Some(zone::Settings::RuleAreaSettings(RuleAreaSettings {
+                keepout_footprints: true,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert!(!zone_is_routing_keepout(&placement_only));
+
+        let routing_keepout = Zone {
+            settings: Some(zone::Settings::RuleAreaSettings(RuleAreaSettings {
+                keepout_tracks: true,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert!(zone_is_routing_keepout(&routing_keepout));
+    }
+
+    #[test]
+    fn plane_assignment_requires_a_matching_inner_copper_zone() {
+        let connections = vec![Connection {
+            name: "GND".to_owned(),
+            points_to_connect: vec![
+                RoutePoint {
+                    x: 1.0,
+                    y: 1.0,
+                    layer: LayerRef::top(),
+                },
+                RoutePoint {
+                    x: 2.0,
+                    y: 1.0,
+                    layer: LayerRef::top(),
+                },
+            ],
+        }];
+
+        assert!(observed_plane_nets(4, &connections, &BTreeMap::new()).is_empty());
+
+        let observed = BTreeMap::from([("GND".to_owned(), BTreeSet::from([1]))]);
+        assert_eq!(
+            observed_plane_nets(4, &connections, &observed),
+            BTreeMap::from([("GND".to_owned(), 1)])
+        );
     }
 }

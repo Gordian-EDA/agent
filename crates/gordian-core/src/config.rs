@@ -35,7 +35,7 @@ pub const DEFAULT_SCHEMATIC_FILENAME: &str = "design.kicad_sch";
 /// overrides only; when absent, callers may use discovery, command-line values,
 /// profile settings, or any other frontend-specific source.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct GordianConfig {
     /// Config schema version. Bump only when the serialized shape changes in a
     /// way clients need to understand explicitly.
@@ -74,10 +74,13 @@ impl Default for GordianConfig {
 impl GordianConfig {
     /// Validate invariants that cannot be represented in the Rust type system.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.schema_version == 0 {
+        if self.schema_version != CONFIG_SCHEMA_VERSION {
             return Err(ConfigError::new(
                 "schemaVersion",
-                "schema version must be greater than zero",
+                format!(
+                    "unsupported schema version {}; expected {CONFIG_SCHEMA_VERSION}",
+                    self.schema_version
+                ),
             ));
         }
         self.llm.validate("llm")?;
@@ -91,8 +94,8 @@ impl GordianConfig {
 }
 
 /// LLM request behavior.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct LlmConfig {
     /// Optional explicit adapter namespace, such as `openai`, `anthropic`,
     /// `gemini`, `open_router`, `bedrock_api`, or `ollama`.
@@ -124,6 +127,22 @@ pub struct LlmConfig {
     /// the agent keeps rendered-image tool results on disk and out of the
     /// conversation when this is false.
     pub vision_capable: bool,
+}
+
+impl fmt::Debug for LlmConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LlmConfig")
+            .field("adapter", &self.adapter)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("endpoint", &self.endpoint)
+            .field("max_tokens", &self.max_tokens)
+            .field("ephemeral_cache", &self.ephemeral_cache)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("capture_reasoning", &self.capture_reasoning)
+            .field("vision_capable", &self.vision_capable)
+            .finish()
+    }
 }
 
 impl Default for LlmConfig {
@@ -323,7 +342,7 @@ impl<'de> Deserialize<'de> for LlmReasoningEffort {
 
 /// KiCAD discovery and live board session behavior.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct KicadConfig {
     /// Optional symbol library directory override.
     pub symbol_dir: Option<PathBuf>,
@@ -348,7 +367,7 @@ impl KicadConfig {
 /// Defaults for project construction. The project directory itself is supplied
 /// by the frontend and is not global config.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProjectConfig {
     /// Conventional schematic filename inside a project directory.
     pub schematic_filename: String,
@@ -364,15 +383,19 @@ impl Default for ProjectConfig {
 
 impl ProjectConfig {
     fn validate(&self, path: &'static str) -> Result<(), ConfigError> {
-        if self.schematic_filename.trim().is_empty() {
+        let field = format!("{path}.schematicFilename");
+        let mut components = std::path::Path::new(&self.schematic_filename).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+        {
             return Err(ConfigError::new(
-                format!("{path}.schematicFilename"),
-                "schematic filename must not be empty",
+                field,
+                "schematic filename must be exactly one relative filename component",
             ));
         }
         if !self.schematic_filename.ends_with(".kicad_sch") {
             return Err(ConfigError::new(
-                format!("{path}.schematicFilename"),
+                field,
                 "schematic filename must end with .kicad_sch",
             ));
         }
@@ -382,7 +405,7 @@ impl ProjectConfig {
 
 /// Agent loop policy.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentConfig {
     /// Run the independent post-commit review and bounded fix pass.
     pub post_commit_review: bool,
@@ -407,7 +430,7 @@ impl AgentConfig {
 
 /// Independent review behavior.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReviewConfig {
     /// Retry a malformed review JSON response once.
     pub retry_json: bool,
@@ -430,7 +453,7 @@ impl Default for ReviewConfig {
 
 /// Tool-level defaults shared across schematic and PCB tools.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToolConfig {
     /// Default max hits for symbol and footprint search tools.
     pub default_search_limit: usize,
@@ -467,7 +490,7 @@ impl ToolConfig {
 
 /// Deterministic engine selection.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct EngineConfig {
     /// PCB routing engine.
     pub pcb_router: PcbRouterEngine,
@@ -566,6 +589,21 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_schema_versions_are_rejected() {
+        for version in [0, CONFIG_SCHEMA_VERSION + 1, u32::MAX] {
+            let cfg = GordianConfig {
+                schema_version: version,
+                ..GordianConfig::default()
+            };
+
+            let err = cfg.validate().unwrap_err();
+            assert_eq!(err.path, "schemaVersion");
+            assert!(err.message.contains("unsupported schema version"));
+            assert!(err.message.contains(&CONFIG_SCHEMA_VERSION.to_string()));
+        }
+    }
+
+    #[test]
     fn partial_deserialize_fills_defaults() {
         let cfg: GordianConfig = serde_json::from_value(serde_json::json!({
             "llm": { "adapter": "openai", "model": "gpt-4o", "apiKey": "test-key" }
@@ -579,6 +617,58 @@ mod tests {
         assert_eq!(cfg.tools.default_search_limit, DEFAULT_SEARCH_LIMIT);
         assert_eq!(cfg.engines, EngineConfig::default());
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn unknown_config_fields_are_rejected_instead_of_silently_defaulted() {
+        let top_level = serde_json::from_value::<GordianConfig>(serde_json::json!({
+            "schemaVerzion": CONFIG_SCHEMA_VERSION
+        }))
+        .unwrap_err();
+        assert!(top_level.to_string().contains("schemaVerzion"));
+
+        let nested = serde_json::from_value::<GordianConfig>(serde_json::json!({
+            "llm": { "apiKEy": "secret" }
+        }))
+        .unwrap_err();
+        assert!(nested.to_string().contains("apiKEy"));
+    }
+
+    #[test]
+    fn llm_config_debug_redacts_the_api_key() {
+        let cfg = GordianConfig {
+            llm: LlmConfig {
+                api_key: Some("super-secret-token".to_owned()),
+                ..LlmConfig::default()
+            },
+            ..GordianConfig::default()
+        };
+
+        let debug = format!("{cfg:?}");
+
+        assert!(!debug.contains("super-secret-token"), "{debug}");
+        assert!(debug.contains("[REDACTED]"), "{debug}");
+        assert!(debug.contains("vision_capable"), "{debug}");
+    }
+
+    #[test]
+    fn schematic_filename_must_be_a_relative_filename() {
+        for filename in [
+            "/tmp/outside.kicad_sch",
+            "../outside.kicad_sch",
+            "subdir/design.kicad_sch",
+            "",
+        ] {
+            let mut cfg = GordianConfig::default();
+            cfg.project.schematic_filename = filename.to_string();
+
+            let err = cfg.validate().unwrap_err();
+            assert_eq!(err.path, "project.schematicFilename");
+            assert_eq!(
+                err.message,
+                "schematic filename must be exactly one relative filename component"
+            );
+        }
     }
 
     #[test]

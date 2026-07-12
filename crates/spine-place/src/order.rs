@@ -136,7 +136,7 @@ pub fn arrange(
     }
 
     for (ci, c) in g.chains.iter().enumerate() {
-        let Some(&(ea, eb)) = scene.ends.get(&ci).as_deref() else {
+        let Some(&(ea, eb)) = scene.ends.get(&ci) else {
             continue;
         };
         let va = end_vertex(&c.a, ea);
@@ -410,9 +410,9 @@ pub fn arrange(
 
     if variants.strap_col {
         let strap_layer = layer.iter().copied().max().unwrap_or(0) + 1;
-        for v in 0..n_scene {
+        for (v, item_layer) in layer.iter_mut().enumerate().take(n_scene) {
             if is_strapish(scene, v) {
-                layer[v] = strap_layer;
+                *item_layer = strap_layer;
             }
         }
     }

@@ -18,7 +18,11 @@ pub struct LoadedConfig {
 
 pub fn load_or_create() -> Result<LoadedConfig> {
     let path = default_config_path()?;
+    reject_config_symlink(&path)
+        .with_context(|| format!("validating config path {}", path.display()))?;
     if path.exists() {
+        set_owner_only_permissions(&path)
+            .with_context(|| format!("securing config permissions on {}", path.display()))?;
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
         let config: GordianConfig =
@@ -49,6 +53,8 @@ fn default_config_path() -> Result<PathBuf> {
 }
 
 fn write_default_config(path: &Path, config: &GordianConfig) -> Result<()> {
+    reject_config_symlink(path)
+        .with_context(|| format!("validating config path {}", path.display()))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating config dir {}", parent.display()))?;
@@ -66,8 +72,21 @@ fn write_default_config(path: &Path, config: &GordianConfig) -> Result<()> {
         toml::to_string_pretty(config).context("serializing default config")?
     );
     std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
-    set_owner_only_permissions(path).ok();
+    set_owner_only_permissions(path)
+        .with_context(|| format!("securing config permissions on {}", path.display()))?;
     Ok(())
+}
+
+fn reject_config_symlink(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "config file must not be a symbolic link",
+        )),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 #[cfg(unix)]
@@ -94,5 +113,41 @@ mod tests {
         let text = toml::to_string_pretty(&cfg).unwrap();
         let parsed: GordianConfig = toml::from_str(&text).unwrap();
         assert_eq!(parsed, cfg);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_permissions_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "secret").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+
+        set_owner_only_permissions(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_symlinks_are_rejected_without_touching_the_target() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("shared.toml");
+        let link = dir.path().join("config.toml");
+        std::fs::write(&target, "shared").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&target, &link).unwrap();
+
+        let err = reject_config_symlink(&link).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "shared");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
     }
 }

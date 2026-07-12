@@ -688,7 +688,7 @@ pub(crate) fn place_variant(
     }
 
     // 3. Legalize: snap + spiral-resolve overlaps + clamp. Locked immovable.
-    let leg = legalize(problem, &half, margin, &mut pos);
+    let leg = legalize(problem, &half, &copper_bbox, margin, &mut pos);
 
     polish_rotations(
         problem,

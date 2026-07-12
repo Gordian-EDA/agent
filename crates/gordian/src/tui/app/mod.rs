@@ -26,7 +26,7 @@ mod update;
 pub use image_cell::{ImageCell, ImageState};
 pub use input::*;
 pub use state::{App, Status};
-pub use transcript::{Entry, NoticeLevel, PendingDiff, Speaker, UnwindPicker};
+pub use transcript::{Entry, NoticeLevel, PendingApproval, Speaker, UnwindPicker};
 pub use update::{Action, Msg, TurnEndReason};
 
 #[cfg(test)]
@@ -694,11 +694,20 @@ mod tests {
     #[test]
     fn pending_diff_arrives_and_approve_resolves_it() {
         let mut a = app();
-        a.update(Msg::PendingDiff(dry_run_json()));
+        a.update(Msg::PendingApproval(dry_run_json()));
         let pending = a.pending.as_ref().expect("diff is pending");
-        assert_eq!(pending.added, vec!["U1", "R7"]);
-        assert_eq!(pending.changed, vec!["C2"]);
-        assert_eq!(pending.nets_after, 12);
+        let PendingApproval::Schematic {
+            added,
+            changed,
+            nets_after,
+            ..
+        } = pending
+        else {
+            panic!("expected schematic diff")
+        };
+        assert_eq!(added, &vec!["U1", "R7"]);
+        assert_eq!(changed, &vec!["C2"]);
+        assert_eq!(*nets_after, 12);
         assert!(!a.input_active(), "input locked while a gate is open");
 
         // Pressing 'a' resolves approval and clears the pending diff.
@@ -710,7 +719,7 @@ mod tests {
     #[test]
     fn reject_key_resolves_false() {
         let mut a = app();
-        a.update(Msg::PendingDiff(dry_run_json()));
+        a.update(Msg::PendingApproval(dry_run_json()));
         let action = a.update(Msg::Char('r'));
         assert_eq!(action, Action::ResolveApproval(false));
         assert!(a.pending.is_none());
@@ -724,7 +733,7 @@ mod tests {
         assert!(a.paused_since.is_none(), "no pause before a gate");
         // Opening the gate freezes the clock; resolving it resumes and banks the
         // paused span.
-        a.update(Msg::PendingDiff(dry_run_json()));
+        a.update(Msg::PendingApproval(dry_run_json()));
         assert!(a.paused_since.is_some(), "gate open → clock frozen");
         a.update(Msg::Char('a'));
         assert!(a.paused_since.is_none(), "resolved → clock running again");
@@ -737,9 +746,43 @@ mod tests {
     #[test]
     fn other_chars_do_not_leak_into_input_while_gate_open() {
         let mut a = app();
-        a.update(Msg::PendingDiff(dry_run_json()));
+        a.update(Msg::PendingApproval(dry_run_json()));
         a.update(Msg::Char('x'));
         assert!(a.input.is_empty(), "gate keys only while pending");
+    }
+
+    #[test]
+    fn approval_modal_preserves_the_hidden_draft_for_all_editor_inputs() {
+        let mut a = app();
+        a.input = "draft".into();
+        a.cursor = 3;
+        a.update(Msg::PendingApproval(dry_run_json()));
+
+        for msg in [
+            Msg::Char('x'),
+            Msg::Backspace,
+            Msg::Delete,
+            Msg::CursorLeft,
+            Msg::CursorRight,
+            Msg::WordLeft,
+            Msg::WordRight,
+            Msg::Home,
+            Msg::End,
+            Msg::KillToStart,
+            Msg::KillWordBack,
+            Msg::HistoryPrev,
+            Msg::HistoryNext,
+            Msg::Complete,
+            Msg::Submit,
+            Msg::Paste("pasted".into()),
+            Msg::Newline,
+        ] {
+            assert_eq!(a.update(msg), Action::None);
+            assert_eq!(a.input, "draft");
+            assert_eq!(a.cursor, 3);
+            assert!(a.paste.is_none());
+            assert!(a.pending.is_some());
+        }
     }
 
     #[test]
@@ -821,6 +864,18 @@ mod tests {
         assert!(!last.text.contains("tool call"), "{}", last.text);
         assert_eq!(last.level, NoticeLevel::Plain);
         assert!(!a.running && a.turn_started.is_none());
+
+        // Safety cutoff → red, distinct from a clean completion.
+        let mut a = app();
+        type_str(&mut a, "go");
+        a.update(Msg::Submit);
+        a.update(Msg::TurnEnded(TurnEndReason::ProviderRequestLimit {
+            requests: 32,
+        }));
+        let last = a.transcript.last().unwrap();
+        assert!(last.text.contains("32 model requests"), "{}", last.text);
+        assert!(last.text.contains("safety limit"), "{}", last.text);
+        assert_eq!(last.level, NoticeLevel::Error);
 
         // Error → red, carries the message.
         let mut a = app();

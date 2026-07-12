@@ -73,7 +73,7 @@ pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
     let diff_h = app
         .pending
         .as_ref()
-        .map(|d| composer::diff_height(d, area.width))
+        .map(|d| composer::approval_height(d, area.width))
         .unwrap_or(0);
     // The running indicator takes a row while a turn is in flight, plus a second
     // detail row when a named unit of work is currently executing.
@@ -100,7 +100,7 @@ pub fn draw_with(f: &mut Frame, app: &mut App, ctx: &mut RenderCtx) {
     transcript::draw_transcript(f, chunks[0], app, ctx);
     chrome::draw_scroll_indicator(f, chunks[0], app);
     if app.pending.is_some() {
-        composer::draw_diff(f, chunks[1], app);
+        composer::draw_approval(f, chunks[1], app);
     }
     if app.running {
         chrome::draw_running(f, chunks[2], app);
@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn pending_diff_shows_approve_and_reject() {
         let mut a = app();
-        a.update(Msg::PendingDiff(json!({
+        a.update(Msg::PendingApproval(json!({
             "ok": true,
             "would_write": true,
             "diff": { "added": ["U1"], "removed": [], "changed": [], "nets_before": 0, "nets_after": 5 }
@@ -444,6 +444,32 @@ mod tests {
         assert!(text.contains("+U1"), "added refdes:\n{text}");
         assert!(text.contains("approve"), "approve hint:\n{text}");
         assert!(text.contains("reject"), "reject hint:\n{text}");
+    }
+
+    #[test]
+    fn pending_operation_shows_name_and_arguments_not_an_empty_diff() {
+        let mut a = app();
+        a.update(Msg::PendingApproval(json!({
+            "approval_kind": "operation",
+            "operation": "update_board_outline",
+            "arguments": {"bounds": {"min_x": 2, "max_x": 18, "min_y": 3, "max_y": 15}}
+        })));
+
+        let text = render_to_string(&mut a, 96, 24);
+
+        assert!(
+            text.contains("operation pending"),
+            "operation header:\n{text}"
+        );
+        assert!(
+            text.contains("update_board_outline"),
+            "operation name:\n{text}"
+        );
+        assert!(text.contains("min_x"), "operation arguments:\n{text}");
+        assert!(
+            !text.contains("no component changes"),
+            "not a fake diff:\n{text}"
+        );
     }
 
     #[test]
@@ -729,7 +755,7 @@ mod tests {
             "running footer hides double-quit hint:\n{running}"
         );
 
-        a.update(Msg::PendingDiff(json!({
+        a.update(Msg::PendingApproval(json!({
             "diff": { "added": ["U1"], "removed": [], "changed": [] }
         })));
         let gated = render_to_string(&mut a, 80, 24);

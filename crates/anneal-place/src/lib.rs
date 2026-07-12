@@ -21,8 +21,8 @@ use sch_place::netclass::is_power_net;
 use sch_place::place::{Crossings, PlaceResult};
 
 use sch_floorplan::contract::{
-    COL_GAP, FAST_PINS, GRID_KEY, KicadEnv, PlacementEngine, PlacementOutput, ROW_GAP,
-    RawMetrics, RouteRealization, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
+    COL_GAP, FAST_PINS, GRID_KEY, KicadEnv, PlacementEngine, PlacementOutput, ROW_GAP, RawMetrics,
+    RouteRealization, RoutedEvaluator, RoutedSheetRealizer, SchematicPlaceProblem,
     align_idiom_clusters, align_led_chains, align_rail_cap_rows, apply_cells, assign_cells,
     body_overlap_count, build_anchor_blocks, cluster_group, cohesion_targets, decongest,
     grid_order_viol, infer_ir, item_rect, multi_unit_siblings, normalize, orient_angle,
@@ -154,11 +154,7 @@ fn amplified_energy(m: &RawMetrics) -> f64 {
 /// small enough to afford the accurate per-move text solve (`pins <= 250 && nets <= 40`)
 /// — a heavy weight on the REAL post-solve warning count, so the SA directly minimises
 /// shipped warnings. Anneal's own copy of `amplified_score_items`.
-fn amplified_score(
-    problem: &SchematicPlaceProblem,
-    eval: &RoutedEvaluator,
-    items: &[Item],
-) -> f64 {
+fn amplified_score(problem: &SchematicPlaceProblem, eval: &RoutedEvaluator, items: &[Item]) -> f64 {
     let aes = amplified_energy(&eval.measure(items));
     if !aes.is_finite() {
         return f64::INFINITY;
@@ -208,11 +204,7 @@ fn greedy_score(eval: &RoutedEvaluator, items: &[Item]) -> f64 {
 /// Greedy hill-climb over the satellites' mm positions/orientation (the SA's seeded
 /// descent candidate). Local moves kept only on strict improvement of the base routed
 /// cost. Anchors hold.
-fn refine_items(
-    problem: &SchematicPlaceProblem,
-    eval: &RoutedEvaluator,
-    items: &mut [Item],
-) {
+fn refine_items(problem: &SchematicPlaceProblem, eval: &RoutedEvaluator, items: &mut [Item]) {
     let satellites: Vec<usize> = (0..items.len())
         .filter(|&i| items[i].geom.pins.len() < 3 && !items[i].frozen)
         .collect();
@@ -352,7 +344,7 @@ fn compact(eval: &RoutedEvaluator, items: &mut [Item]) {
                 {
                     continue;
                 }
-                items[i].at = p.into();
+                items[i].at = p;
                 let sc = greedy_score(eval, items);
                 if sc + 0.25 < best {
                     best = sc;
@@ -416,11 +408,11 @@ fn free_nudge(eval: &RoutedEvaluator, items: &mut [Item]) {
                 {
                     continue;
                 }
-                items[i].at = p.into();
+                items[i].at = p;
                 let c = greedy_score(eval, items);
                 if c + 0.25 < best_cost {
                     best_cost = c;
-                    best_pos = p.into();
+                    best_pos = p;
                 }
             }
             items[i].at = best_pos;
@@ -488,11 +480,11 @@ fn align_to_pins(
             if (p[axis] - goal) * dir > EPS || overlaps_any(items, si, p) {
                 break;
             }
-            items[si].at = p.into();
+            items[si].at = p;
             let c = greedy_score(eval, items);
             if c + 0.5 < best_cost {
                 best_cost = c;
-                best_pos = p.into();
+                best_pos = p;
             }
         }
         items[si].at = best_pos;
@@ -572,7 +564,7 @@ pub fn anneal_place(
     // fast lane so it gets the route-aware crossing REFINEMENT (validated: io 7→8,
     // power_entry 8→9). Self-contained reference boards have <6 single-pin signal nets, so
     // they stay on the small path ⇒ snapshots byte-identical.
-    let port_heavy = {
+    let signal_ports = {
         let mut npins: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
         for it in problem.items.iter() {
@@ -582,15 +574,38 @@ pub fn anneal_place(
                 }
             }
         }
-        let mut signal_ports = 0usize;
-        for (net, c) in &npins {
-            if *c == 1 && !ir.rails.contains_key(net.as_str()) && !is_power_net(net) {
-                signal_ports += 1;
-            }
-        }
-        signal_ports >= 6
+        npins
+            .iter()
+            .filter(|(net, count)| {
+                **count == 1 && !ir.rails.contains_key(net.as_str()) && !is_power_net(net)
+            })
+            .count()
     };
+    let port_heavy = signal_ports >= 6;
     let force_fast = port_heavy || problem.options.force_fast;
+
+    // A tiny pair of two-pin passives with at most two shared nets has no third
+    // body and only a single direct path per net, so it has no routing topology for
+    // multi-start annealing to improve. Avoid hundreds of full route/text-solve
+    // evaluations in both the apply preview and commit passes; explicit refinement
+    // and port-heavy sheets always retain the full search.
+    let shared_nets = problem.inc.values().filter(|pins| pins.len() > 1).count();
+    let trivial_chain = problem.items.len() <= 2
+        && pins <= 4
+        && problem.items.iter().all(|item| item.geom.pins.len() <= 2)
+        && shared_nets <= 2
+        && signal_ports <= 2
+        && !force_fast;
+    if trivial_chain {
+        let seed_items = problem.items.clone();
+        decongest(&mut problem.items);
+        let quick = report(engine, problem, &eval);
+        if quick.truthfulness_breaks == 0 && quick.warnings == 0 && quick.crossings.total() == 0 {
+            return quick;
+        }
+        problem.items = seed_items;
+    }
+
     if pins > FAST_PINS || force_fast {
         let raw: Vec<Item> = problem.items.to_vec();
         // Diverse proxy-anneal starts; fewer for very large boards (each candidate
@@ -697,7 +712,12 @@ pub fn anneal_place(
             let b = eval.truthfulness_breaks(&m);
             let w = eval.warnings(&m);
             let cr = eval.crossings(&m);
-            (b, w, cr.total(), amplified_score_with_w(problem, &eval, &m, w))
+            (
+                b,
+                w,
+                cr.total(),
+                amplified_score_with_w(problem, &eval, &m, w),
+            )
         };
         let (bb, bw, bx, bc) = score(&candidates[best]);
         // SKIP the refinement when the winner is already clean (no breaks/warnings and
@@ -767,10 +787,7 @@ pub fn anneal_place(
                     eval.truthfulness_breaks(&fast_final),
                     eval.warnings(&fast_final),
                 );
-                let after = (
-                    eval.truthfulness_breaks(&cand),
-                    eval.warnings(&cand),
-                );
+                let after = (eval.truthfulness_breaks(&cand), eval.warnings(&cand));
                 if after <= before {
                     fast_final = cand;
                 }
@@ -783,20 +800,15 @@ pub fn anneal_place(
         // simple sheet gets the small path's cleaner routing. Cheap: only for force_fast smalls.
         if small_forced {
             let sp = small_path_search(
-                problem,
-                &realizer,
-                &eval,
-                &bases[0],
-                inc,
-                ir,
-                seed,
-                timed_top,
+                problem, &realizer, &eval, &bases[0], inc, ir, seed, timed_top,
             );
             let (fb, fw, fx, fc) = score(&fast_final);
             let (sb, sw, sx, sc) = score(&sp);
             let sp_wins = (sb, sw, sx).cmp(&(fb, fw, fx)) == std::cmp::Ordering::Less
                 || (sb == fb && sw == fw && sx == fx && sc + 0.5 < fc);
-            problem.items.clone_from_slice(if sp_wins { &sp } else { &fast_final });
+            problem
+                .items
+                .clone_from_slice(if sp_wins { &sp } else { &fast_final });
         } else {
             problem.items.clone_from_slice(&fast_final);
         }
@@ -850,6 +862,7 @@ fn report(engine: &str, problem: &SchematicPlaceProblem, eval: &RoutedEvaluator)
 /// (truthfulness, warnings, amplified cost). Operates on a COPY of `seed`, returns the
 /// POLISHED winner. Behaviour is byte-identical to the old inline else-branch (the
 /// placement_snapshot verifies it for the references that take the small path).
+#[allow(clippy::too_many_arguments)]
 fn small_path_search(
     problem: &SchematicPlaceProblem,
     realizer: &RoutedSheetRealizer,
@@ -877,7 +890,19 @@ fn small_path_search(
     let mut greedy_state: Vec<Item> = Vec::new();
     rayon::scope(|s| {
         s.spawn(|_| {
-            let mut f = || anneal_items(problem, eval, &mut state_b, inc, ir, true, false, rng_seed, None);
+            let mut f = || {
+                anneal_items(
+                    problem,
+                    eval,
+                    &mut state_b,
+                    inc,
+                    ir,
+                    true,
+                    false,
+                    rng_seed,
+                    None,
+                )
+            };
             tic("B broad", &mut f);
         });
         {
@@ -890,7 +915,19 @@ fn small_path_search(
         state_d = greedy_state.clone();
         rayon::join(
             || {
-                let mut f = || anneal_items(problem, eval, &mut state_a, inc, ir, false, false, rng_seed, None);
+                let mut f = || {
+                    anneal_items(
+                        problem,
+                        eval,
+                        &mut state_a,
+                        inc,
+                        ir,
+                        false,
+                        false,
+                        rng_seed,
+                        None,
+                    )
+                };
                 tic("A seeded", &mut f);
             },
             || {
@@ -913,7 +950,14 @@ fn small_path_search(
                     },
                     || {
                         let mut f = || {
-                            anneal_locality(problem, eval, &mut state_d, inc, ir, rng_seed ^ 0x517CC1B727220A95)
+                            anneal_locality(
+                                problem,
+                                eval,
+                                &mut state_d,
+                                inc,
+                                ir,
+                                rng_seed ^ 0x517CC1B727220A95,
+                            )
                         };
                         tic("D locality", &mut f);
                     },
@@ -966,6 +1010,7 @@ fn small_path_search(
 /// scored by `score_items`; the best layout seen is kept. `broad` runs hotter and
 /// longer (a wider global search from the raw seed). ANCHORS are mobile here: an
 /// anchor nudge frees a whole block to slide.
+#[allow(clippy::too_many_arguments)]
 fn anneal_items(
     problem: &SchematicPlaceProblem,
     eval: &RoutedEvaluator,
@@ -1142,13 +1187,10 @@ fn proxy_cost(
     let grid_order = grid_order_viol(items, ir);
     let mut hpwl = 0.0;
     for pins in inc.values() {
-        let pts: Vec<Point2> = pins
-            .iter()
-            .map(|(i, _)| Point2::from(items[*i].at))
-            .collect();
+        let pts: Vec<Point2> = pins.iter().map(|(i, _)| items[*i].at).collect();
         hpwl += Rect::bounding(&pts).map_or(0.0, |r| r.half_perimeter());
     }
-    let item_pts: Vec<Point2> = items.iter().map(|it| Point2::from(it.at)).collect();
+    let item_pts: Vec<Point2> = items.iter().map(|it| it.at).collect();
     let item_bbox = Rect::bounding(&item_pts);
     let spread = item_bbox.map_or(0.0, |r| r.half_perimeter());
     let mut cohere = 0.0;
@@ -1387,11 +1429,11 @@ fn polish_proxy(items: &mut [Item], inc: &Incidence, ir: &LayoutIr, magnet: bool
                 {
                     continue;
                 }
-                items[i].at = p.into();
+                items[i].at = p;
                 let c = proxy_cost(items, inc, ir, &cohesion);
                 if c + 0.25 < best_cost {
                     best_cost = c;
-                    best_pos = p.into();
+                    best_pos = p;
                 }
             }
             items[i].at = best_pos;

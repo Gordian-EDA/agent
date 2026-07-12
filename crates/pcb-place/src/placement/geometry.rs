@@ -5,7 +5,8 @@ use crate::problem::{Point2, Rect};
 
 // Shared placement geometry.
 pub(crate) use crate::problem::place::{
-    courtyard_margin, pad_world, rotated_copper_bbox, rotated_courtyard_half,
+    clamp_center_for_envelope, courtyard_margin, pad_world, placement_bounds_envelope,
+    placement_envelope_at, rotated_copper_bbox, rotated_courtyard_half,
 };
 
 // ── engine-private design constants ──────────────────────────────────────────

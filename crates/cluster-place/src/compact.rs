@@ -90,7 +90,11 @@ fn modules(items: &[Item], inc: &Incidence, ir: &sch_place::ir::LayoutIr) -> Vec
             if assigned.contains(&si) || items[si].geom.pins.len() != 2 {
                 continue;
             }
-            let nets: Vec<&str> = items[si].pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+            let nets: Vec<&str> = items[si]
+                .pins
+                .iter()
+                .filter_map(|(_, _, n)| n.as_deref())
+                .collect();
             if nets.len() != 2 || !nets.iter().all(|n| is_rail(n)) {
                 continue;
             }
@@ -120,7 +124,12 @@ fn modules(items: &[Item], inc: &Incidence, ir: &sch_place::ir::LayoutIr) -> Vec
     for &h in &hubs {
         let mut m = vec![h];
         in_module[h] = true;
-        for &s in blocks.get(&h).into_iter().flatten().chain(extra.get(&h).into_iter().flatten()) {
+        for &s in blocks
+            .get(&h)
+            .into_iter()
+            .flatten()
+            .chain(extra.get(&h).into_iter().flatten())
+        {
             if !in_module[s] {
                 m.push(s);
                 in_module[s] = true;
@@ -214,19 +223,21 @@ fn holistic_relayout(
     }
     let mut placed: Vec<Placed> = Vec::new();
     for m in &mods {
-        let hub = *m
-            .iter()
-            .max_by_key(|&&i| items[i].geom.pins.len())
-            .unwrap();
+        let hub = *m.iter().max_by_key(|&&i| items[i].geom.pins.len()).unwrap();
         let hp = items[hub].at;
         let caps: Vec<usize> = m
             .iter()
             .copied()
             .filter(|&i| {
                 items[i].geom.pins.len() == 2 && {
-                    let nets: Vec<&str> =
-                        items[i].pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
-                    nets.len() == 2 && nets.iter().all(|n| is_rail(n)) && nets.iter().any(|n| !is_ground(n))
+                    let nets: Vec<&str> = items[i]
+                        .pins
+                        .iter()
+                        .filter_map(|(_, _, n)| n.as_deref())
+                        .collect();
+                    nets.len() == 2
+                        && nets.iter().all(|n| is_rail(n))
+                        && nets.iter().any(|n| !is_ground(n))
                 }
             })
             .collect();
@@ -241,7 +252,13 @@ fn holistic_relayout(
         // A SINGLE ROW of vertical cap legs reads cleanest (the classic decoupling row beside
         // the IC) for a small bank; a LARGE bank (a DDR's 24 caps) in one row gets absurdly
         // wide and re-sprawls, so cap the width at 6 and let it wrap (BANK_ROW clears the legs).
-        let ncols = if ncap == 0 { 1 } else if ncap <= 8 { ncap } else { 6 };
+        let ncols = if ncap == 0 {
+            1
+        } else if ncap <= 8 {
+            ncap
+        } else {
+            6
+        };
         let nrows = ncap.div_ceil(ncols.max(1));
         let mut off = Vec::with_capacity(m.len());
         let mut ang = Vec::with_capacity(m.len());
@@ -295,7 +312,10 @@ fn holistic_relayout(
         let mut placed_o = vec![false; n];
         let mut ord = Vec::new();
         let start = (0..n).max_by(|&a, &b| {
-            adj[a].values().sum::<f64>().total_cmp(&adj[b].values().sum::<f64>())
+            adj[a]
+                .values()
+                .sum::<f64>()
+                .total_cmp(&adj[b].values().sum::<f64>())
         });
         if let Some(s) = start {
             ord.push(s);
@@ -304,8 +324,16 @@ fn holistic_relayout(
                 let pick = (0..n)
                     .filter(|&c| !placed_o[c])
                     .max_by(|&a, &b| {
-                        let ta: f64 = adj[a].iter().filter(|(m, _)| placed_o[**m]).map(|(_, &w)| w).sum();
-                        let tb: f64 = adj[b].iter().filter(|(m, _)| placed_o[**m]).map(|(_, &w)| w).sum();
+                        let ta: f64 = adj[a]
+                            .iter()
+                            .filter(|(m, _)| placed_o[**m])
+                            .map(|(_, &w)| w)
+                            .sum();
+                        let tb: f64 = adj[b]
+                            .iter()
+                            .filter(|(m, _)| placed_o[**m])
+                            .map(|(_, &w)| w)
+                            .sum();
                         ta.total_cmp(&tb)
                     })
                     .unwrap();
@@ -398,7 +426,11 @@ pub(crate) fn rail_relayout(
     // diodes): it MUST go in an inter-IC gap so its supply pin reaches the trunk straight up —
     // placed below the IC its riser would route up THROUGH the body (the residual crossings).
     let is_decouple = |it: &Item| {
-        it.geom.pins.len() == 2 && it.pins.iter().any(|(_, _, n)| n.as_deref() == Some(rail.as_str()))
+        it.geom.pins.len() == 2
+            && it
+                .pins
+                .iter()
+                .any(|(_, _, n)| n.as_deref() == Some(rail.as_str()))
     };
     // The rail's decoupling caps (often ALL folded onto one IC since they share the rail) are
     // pooled and DISTRIBUTED evenly across the inter-IC gaps as upright legs, so their supply
@@ -465,8 +497,11 @@ pub(crate) fn rail_relayout(
     for &i in &others {
         let idx = hub_of[i];
         let hub = hubs[idx];
-        let i_nets: std::collections::BTreeSet<&str> =
-            items[i].pins.iter().filter_map(|(_, _, n)| n.as_deref()).collect();
+        let i_nets: std::collections::BTreeSet<&str> = items[i]
+            .pins
+            .iter()
+            .filter_map(|(_, _, n)| n.as_deref())
+            .collect();
         let px = items[hub]
             .pins
             .iter()
@@ -505,8 +540,10 @@ pub(crate) fn rail_relayout(
         }
         let shift = Point2::new(px - x0, py - y0);
         for &i in m.iter().filter(|i| !cap_set.contains(i)) {
-            items[i].at = geom::GRID_50_MIL
-                .snap_point(Point2::new(items[i].at.x + shift.x, items[i].at.y + shift.y));
+            items[i].at = geom::GRID_50_MIL.snap_point(Point2::new(
+                items[i].at.x + shift.x,
+                items[i].at.y + shift.y,
+            ));
         }
         px += mw + GUT;
         row_h = row_h.max(mh);
@@ -552,7 +589,10 @@ pub(crate) fn compact_clusters(
     // rendering ships no new warnings, no routed regression, and a real de-sprawl — it is the
     // tightest acceptable one. If none qualifies, revert to the SA (post-pose) placement.
     let mut kept: Option<crate::eval::Snap> = None;
-    for (idx, gut) in [7.62_f64, 10.16, 12.7, 15.24, 17.78, 20.32].into_iter().enumerate() {
+    for (idx, gut) in [7.62_f64, 10.16, 12.7, 15.24, 17.78, 20.32]
+        .into_iter()
+        .enumerate()
+    {
         restore(items, &base);
         if !holistic_relayout(items, inc, ir, gut) {
             return; // fewer than 2 modules — nothing to pack, on any gutter
@@ -560,7 +600,13 @@ pub(crate) fn compact_clusters(
         // Freeze the banked decoupling caps so the emit's gather pile can't re-row them.
         for it in items.iter_mut() {
             let rail_cap = it.geom.pins.len() == 2
-                && it.pins.iter().filter_map(|(_, _, n)| n.as_deref()).filter(|n| is_rail(n)).count() == 2;
+                && it
+                    .pins
+                    .iter()
+                    .filter_map(|(_, _, n)| n.as_deref())
+                    .filter(|n| is_rail(n))
+                    .count()
+                    == 2;
             if rail_cap {
                 it.frozen = true;
             }
@@ -582,7 +628,10 @@ pub(crate) fn compact_clusters(
             && w <= sa_warnings
             && spr + 1e-3 < baseline_rendered;
         if debug {
-            eprintln!("[holistic] gut={gut:.1} rendered={spr:.1} w={w} routed={:?} ok={ok}", (s.0, s.1, s.2));
+            eprintln!(
+                "[holistic] gut={gut:.1} rendered={spr:.1} w={w} routed={:?} ok={ok}",
+                (s.0, s.1, s.2)
+            );
         }
         if ok {
             kept = Some(save(items));

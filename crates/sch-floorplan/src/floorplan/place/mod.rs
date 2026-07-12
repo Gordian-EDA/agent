@@ -44,9 +44,8 @@ mod grid_tests {
     use circuit_lang::model::{Block, Component, Design, LayoutGrid};
     use geom::{Dir, Rect};
     use indexmap::IndexMap;
-    use kicad_symbol::geometry::SymbolGeometry;
+    use sch_io::write::SchematicWriter;
     use sch_place::ir::Side;
-    use sch_place::item::Item;
 
     fn cells(names: &[&str]) -> Vec<Option<String>> {
         names
@@ -59,6 +58,55 @@ mod grid_tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn composed_groups_keep_identical_local_wires_after_translation() {
+        let mut first = SchematicWriter::new();
+        first.add_wire([12.7, 12.7], [17.78, 12.7]);
+        let mut second = SchematicWriter::new();
+        second.add_wire([12.7, 12.7], [17.78, 12.7]);
+
+        let schematic = compose_writers(
+            vec![("first".to_owned(), first), ("second".to_owned(), second)],
+            None,
+        );
+
+        assert_eq!(
+            schematic.matches("\t(wire\n").count(),
+            2,
+            "tiling must not deduplicate another group's translated wire"
+        );
+    }
+
+    #[test]
+    fn composed_groups_namespace_generated_power_references() {
+        let Some(env) = kicad_env::KicadEnv::detect() else {
+            eprintln!("SKIP: no KiCad environment detected");
+            return;
+        };
+        let mut first = SchematicWriter::new();
+        first
+            .add_power_symbol(&env, "power:GND", "#PWR_GND", "GND", [12.7, 12.7], 0.0)
+            .unwrap();
+        let mut second = SchematicWriter::new();
+        second
+            .add_power_symbol(&env, "power:GND", "#PWR_GND", "GND", [12.7, 12.7], 0.0)
+            .unwrap();
+
+        let schematic = compose_writers(
+            vec![("first".to_owned(), first), ("second".to_owned(), second)],
+            None,
+        );
+
+        assert!(schematic.contains("(property \"Reference\" \"#first_PWR_GND\""));
+        assert!(schematic.contains("(property \"Reference\" \"#second_PWR_GND\""));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("composed.kicad_sch");
+        std::fs::write(&path, schematic).unwrap();
+        kicad_cli::KicadCli::new(&env)
+            .erc(&path)
+            .expect("KiCad must load the composed hidden references");
     }
 
     fn block(refs: &[&str], layout: LayoutGrid) -> Block {
@@ -148,44 +196,6 @@ mod grid_tests {
     fn dir_to_side_inverts_side_dir() {
         for s in [Side::Left, Side::Right, Side::Top, Side::Bottom] {
             assert_eq!(dir_to_side(side_dir(s)), s);
-        }
-    }
-
-    /// Minimal `Item` for the decoupling-bank deferral tests: `geom.pins` is padded to the right COUNT
-    /// (the assignment only reads `geom.pins.len()`), while `pins` carries the (number,name,net) the
-    /// classifier inspects. `at` drives the nearest-anchor tie-break.
-    fn item(refdes: &str, part: &str, at: [f64; 2], nets: &[&str]) -> Item {
-        let pins: Vec<(String, String, Option<String>)> = nets
-            .iter()
-            .enumerate()
-            .map(|(k, n)| ((k + 1).to_string(), n.to_string(), Some(n.to_string())))
-            .collect();
-        let geom_pins = (0..nets.len())
-            .map(|k| kicad_symbol::geometry::PinGeom {
-                number: (k + 1).to_string(),
-                name: nets[k].to_string(),
-                at: [0.0, 0.0].into(),
-                angle: 0.0,
-                length: 2.54,
-                unit: 1,
-            })
-            .collect();
-        Item {
-            refdes: refdes.into(),
-            part: part.into(),
-            value: String::new(),
-            footprint: None,
-            geom: SymbolGeometry {
-                lib_id: part.into(),
-                pins: geom_pins,
-                raw_definition: String::new(),
-            },
-            pins,
-            at: at.into(),
-            angle: 0.0,
-            unit: 1,
-            mirror: false,
-            frozen: false,
         }
     }
 

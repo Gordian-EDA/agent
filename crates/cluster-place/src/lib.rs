@@ -71,10 +71,11 @@ impl PlacementEngine for ClusterPlace {
         // same way as the candidate so the comparison is apples-to-apples (a pose move that
         // spreads an IC can't lower the bar either).
         let n = problem.items.len();
-        let (sa_crossings, sa_warnings, baseline_rendered) = match eval.shipped(design, &problem.items) {
-            Some((cr, w, r)) => (cr.total(), w, compact::rendered_sprawl(&r, n)),
-            None => (usize::MAX, usize::MAX, f64::MAX),
-        };
+        let (sa_crossings, sa_warnings, baseline_rendered) =
+            match eval.shipped(design, &problem.items) {
+                Some((cr, w, r)) => (cr.total(), w, compact::rendered_sprawl(&r, n)),
+                None => (usize::MAX, usize::MAX, f64::MAX),
+            };
         let baseline_parts = compact::part_sprawl(&problem.items);
         // Snapshot the SA placement so the whole pose+compact result can fall back to it.
         let sa_snap = crate::eval::save(&problem.items);
@@ -105,10 +106,11 @@ impl PlacementEngine for ClusterPlace {
         //    1→4 warnings, crossings unchanged). Pose's genuine value is CROSSINGS, so measure
         //    the SHIPPED result and fall back to the SA snapshot unless pose/compact earned its
         //    keep: a real crossing cut, no new warnings, and no sprawl bloat.
-        let (final_crossings, final_warnings, final_rendered) = match eval.shipped(design, &problem.items) {
-            Some((cr, w, r)) => (cr.total(), w, compact::rendered_sprawl(&r, n)),
-            None => (usize::MAX, usize::MAX, f64::MAX),
-        };
+        let (final_crossings, final_warnings, final_rendered) =
+            match eval.shipped(design, &problem.items) {
+                Some((cr, w, r)) => (cr.total(), w, compact::rendered_sprawl(&r, n)),
+                None => (usize::MAX, usize::MAX, f64::MAX),
+            };
         // STRICT PARETO: ship pose+compact only if it regresses NOTHING — warnings, crossings,
         // and BOTH sprawl measures (the label-inclusive rendered extent AND the part-origin
         // spread). Two measures because each is blind where the other sees: rendered catches the
@@ -132,23 +134,29 @@ impl PlacementEngine for ClusterPlace {
         //    dominant power net in one top-aligned row so a shared trunk replaces their
         //    distributed per-pin power glyphs (the dominant residual sprawl). Snapshot first;
         //    keep it only if the SHIPPED rendered sheet (with the trunk forced) shrinks with no
-        //    new warnings — a colliding trunk reverts. Gate measures via a fresh realizer that
-        //    carries `rail_force`; anneal never sets it ⇒ references unaffected.
-        let cur = eval.shipped(design, &problem.items).map(|(_, w, r)| (w, compact::rendered_sprawl(&r, n)));
-        out.result = report(self.name(), &problem.items, &eval);
-        // `eval`/`realizer` borrow `out.ir`; their last use is the `report` above, so NLL frees
-        // that borrow here, letting the rail step below reassign `out.ir`.
-        if let Some((cur_w, cur_spr)) = cur {
+        //    new warnings or crossings — a colliding trunk reverts. Gate measures via a fresh
+        //    realizer that carries `rail_force`; anneal never sets it ⇒ references unaffected.
+        let cur = eval
+            .shipped(design, &problem.items)
+            .map(|(cr, w, r)| (cr.total(), w, compact::rendered_sprawl(&r, n)));
+        // `eval`/`realizer` borrow `out.ir`; their last use is the shipped measurement above,
+        // so NLL frees that borrow here and the rail step may replace `out.ir`.
+        if let Some((cur_x, cur_w, cur_spr)) = cur {
             let pre = crate::eval::save(&problem.items);
             if let Some(rail) = compact::rail_relayout(&mut problem.items, &problem.inc, &out.ir) {
                 let mut ir_rail = out.ir.clone();
                 ir_rail.rail_force.insert(rail);
                 let rz = RoutedSheetRealizer::new(env, &problem.inc, &ir_rail);
                 let ev = RoutedEvaluator::new(&rz);
-                let got = ev.rendered(design, &problem.items).map(|(w, r)| (w, compact::rendered_sprawl(&r, n)));
-                let keep = matches!(got, Some((w, s)) if w <= cur_w && s + 1e-3 < cur_spr);
+                let got = ev
+                    .shipped(design, &problem.items)
+                    .map(|(cr, w, r)| (cr.total(), w, compact::rendered_sprawl(&r, n)));
+                let keep = rail_candidate_wins((cur_x, cur_w, cur_spr), got);
                 if std::env::var_os("CLUSTER_DEBUG").is_some() {
-                    eprintln!("[cluster] rails: {cur_spr:.1} -> {:?}  keep={keep}", got.map(|g| g.1));
+                    eprintln!(
+                        "[cluster] rails: {cur_spr:.1} -> {:?}  keep={keep}",
+                        got.map(|g| g.2)
+                    );
                 }
                 if keep {
                     out.ir = ir_rail;
@@ -159,8 +167,21 @@ impl PlacementEngine for ClusterPlace {
                 crate::eval::restore(&mut problem.items, &pre);
             }
         }
+        let final_realizer = RoutedSheetRealizer::new(env, &problem.inc, &out.ir);
+        let final_eval = RoutedEvaluator::new(&final_realizer);
+        out.result = report(self.name(), &problem.items, &final_eval);
         out
     }
+}
+
+fn rail_candidate_wins(
+    current: (usize, usize, f64),
+    candidate: Option<(usize, usize, f64)>,
+) -> bool {
+    matches!(candidate, Some((crossings, warnings, sprawl))
+        if crossings <= current.0
+            && warnings <= current.1
+            && sprawl + 1e-3 < current.2)
 }
 
 /// Measure the FINAL placement for the diagnostic [`PlaceResult`].
@@ -180,5 +201,20 @@ fn report(engine: &str, items: &[Item], eval: &RoutedEvaluator) -> PlaceResult {
         warnings: eval.warnings(items),
         crossings: eval.crossings(items),
         cost: eval::cost(eval, items),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rail_candidate_wins;
+
+    #[test]
+    fn rail_gate_requires_sprawl_win_without_crossing_or_warning_regression() {
+        let current = (1, 2, 100.0);
+        assert!(rail_candidate_wins(current, Some((1, 2, 90.0))));
+        assert!(!rail_candidate_wins(current, Some((2, 2, 80.0))));
+        assert!(!rail_candidate_wins(current, Some((1, 3, 80.0))));
+        assert!(!rail_candidate_wins(current, Some((1, 2, 100.0))));
+        assert!(!rail_candidate_wins(current, None));
     }
 }

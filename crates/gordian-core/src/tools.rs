@@ -811,11 +811,8 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
     let diff = design_diff(prior_design.as_ref(), &design);
 
-    let composed = crate::multisheet::compose_design(
-        ctx.env(),
-        &design,
-    )
-    .context("composing schematic")?;
+    let composed =
+        crate::multisheet::compose_design(ctx.env(), &design).context("composing schematic")?;
 
     let detected_idioms = serde_json::to_value(&composed.detected_idioms).ok();
 

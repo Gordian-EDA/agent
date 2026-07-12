@@ -5,9 +5,12 @@
 //! directly (off-loaded onto a blocking pool at the call site). These types are
 //! just the structured facts the gate's choreography needs:
 //!
-//! - [`ToolEffect`] classifies a tool name (`ReadOnly` | `Authoring` | `Gated`).
+//! - [`ToolEffect`] distinguishes reads, draft authoring, pre-execution approval,
+//!   and previewed approval.
 //! - A [`ToolEffect::Gated`] write (`apply_design`) is driven
 //!   through preview → approve → commit ([`RunMode`]), reporting via [`ApplyInfo`].
+//! - A [`ToolEffect::ApprovalRequired`] mutation that has no dry-run is approved
+//!   from its operation name and arguments before it executes once.
 //! - An independent post-turn review comes back as a [`ReviewOutcome`].
 //!
 //! The KiCAD-concrete classifiers and the commit-forcing / `ApplyInfo`-lifting body
@@ -21,15 +24,18 @@ use serde_json::Value;
 pub enum ToolEffect {
     /// Reads only; never changes project state (search, info, render, validate).
     ReadOnly,
-    /// Mutates authoring state the loop does not gate: schematic drafts or the
-    /// live IPC board.
+    /// Mutates only project-local draft authoring state; a later gated apply is
+    /// required before this affects the schematic.
     Authoring,
+    /// Mutates project files or a live KiCAD board and must be approved before
+    /// its first and only execution because it has no dry-run implementation.
+    ApprovalRequired,
     /// A human-gated write: previewed, approved, then committed.
     Gated,
 }
 
-/// Which pass of a gated tool the loop is asking for. ReadOnly / Authoring tools
-/// always run [`RunMode::Normal`] and ignore this.
+/// Which pass of a preview-capable gated tool the loop is asking for. Other
+/// tools always run [`RunMode::Normal`] and ignore this.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunMode {
     /// A normal single run (every non-gated tool, and a gated tool the model did

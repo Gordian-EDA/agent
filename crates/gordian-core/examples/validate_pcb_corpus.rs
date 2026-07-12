@@ -14,7 +14,9 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use drc_lint::lint::lint;
 use gordian_core::tools_pcb::apply_direct_rescue_fallback;
-use gordian_core::tools_pcb::corpus::{load_corpus_board, route_problem_for_placement};
+use gordian_core::tools_pcb::corpus::{
+    load_corpus_board, route_problem_for_placement, run_kicad_drc,
+};
 use kicad_env::KicadEnv;
 use kicad_footprint::FootprintCatalog;
 use negotiated_mesh::crossing::{
@@ -59,7 +61,7 @@ fn main() -> Result<()> {
     let boards = resolve_boards(&corpus_dir, &args)?;
 
     println!(
-        "board,parts,nets,layers,place_ms,route_ms,failed,lints,vias,wirelength_mm,attempts,slowest_engine,slowest_ms,status"
+        "board,parts,nets,layers,place_ms,route_ms,failed,lints,vias,wirelength_mm,attempts,slowest_engine,slowest_ms,kicad_faults,drc_ms,status"
     );
     let mut failures = 0usize;
     for path in boards {
@@ -69,7 +71,7 @@ fn main() -> Result<()> {
             Ok(board) => board,
             Err(err) => {
                 failures += 1;
-                println!("{name},0,0,0,0,0,0,0,0,0.00,0,,0,LOAD_ERROR:{err}");
+                println!("{name},0,0,0,0,0,0,0,0,0.00,0,,0,,0,LOAD_ERROR:{err}");
                 continue;
             }
         };
@@ -79,7 +81,7 @@ fn main() -> Result<()> {
         if !placed.legal {
             failures += 1;
             println!(
-                "{name},{},0,{},{},0,0,0,0,0.00,0,,0,PLACE_ILLEGAL",
+                "{name},{},0,{},{},0,0,0,0,0.00,0,,0,,0,PLACE_ILLEGAL",
                 board.problem.parts.len(),
                 board.problem.layer_count,
                 place_ms
@@ -88,7 +90,7 @@ fn main() -> Result<()> {
         }
         if args.place_only {
             println!(
-                "{name},{},0,{},{},0,0,0,0,0.00,0,,0,PLACE_OK",
+                "{name},{},0,{},{},0,0,0,0,0.00,0,,0,,0,PLACE_OK",
                 board.problem.parts.len(),
                 board.problem.layer_count,
                 place_ms
@@ -114,7 +116,7 @@ fn main() -> Result<()> {
                     "ASSIGN_FAULT"
                 };
                 println!(
-                    "{name},{},{},{},{},{},{},{},{},{:.2},{},mesh-assign,{},{}",
+                    "{name},{},{},{},{},{},{},{},{},{:.2},{},mesh-assign,{},,0,{}",
                     board.problem.parts.len(),
                     rp.connections.len(),
                     rp.layer_count,
@@ -193,7 +195,7 @@ fn main() -> Result<()> {
                 "GLOBAL_FAULT"
             };
             println!(
-                "{name},{},{},{},{},{},{},{},{},{:.2},{},{},{},{}",
+                "{name},{},{},{},{},{},{},{},{},{:.2},{},{},{},,0,{}",
                 board.problem.parts.len(),
                 rp.connections.len(),
                 rp.layer_count,
@@ -253,6 +255,15 @@ fn main() -> Result<()> {
         }
         let route_ms = route_started.elapsed().as_millis();
         let findings = lint(&rp, &routed.result.solution);
+        let drc_started = Instant::now();
+        let kicad_drc = run_kicad_drc(
+            &board,
+            &placed.placements,
+            &routed.result.solution,
+            &catalog,
+            &env,
+        );
+        let drc_ms = drc_started.elapsed().as_millis();
         let metrics = routed.result.solution.metrics();
         let inspect_nets = inspect_nets_with_optional_failures(
             &args.inspect_nets,
@@ -274,14 +285,26 @@ fn main() -> Result<()> {
             .max_by_key(|attempt| attempt.elapsed_ms)
             .map(|attempt| (attempt.engine.as_str(), attempt.elapsed_ms))
             .unwrap_or(("", 0));
-        let status = if failed == 0 && findings.is_empty() {
-            "OK"
-        } else {
-            failures += 1;
+        let status = if failed != 0 || !findings.is_empty() {
             "ROUTE_FAULT"
+        } else {
+            match &kicad_drc {
+                Ok(drc) if drc.is_ok() => "OK",
+                Ok(_) => "KICAD_DRC_FAULT",
+                Err(_) => "KICAD_DRC_ERROR",
+            }
         };
+        if status != "OK" {
+            failures += 1;
+        }
+        let kicad_faults = kicad_drc
+            .as_ref()
+            .ok()
+            .map(|drc| drc.copper_violations + drc.unconnected_items)
+            .map(|count| count.to_string())
+            .unwrap_or_default();
         println!(
-            "{name},{},{},{},{},{},{},{},{},{:.2},{},{},{},{}",
+            "{name},{},{},{},{},{},{},{},{},{:.2},{},{},{},{},{},{}",
             board.problem.parts.len(),
             rp.connections.len(),
             rp.layer_count,
@@ -294,6 +317,8 @@ fn main() -> Result<()> {
             routed.attempts.len(),
             slowest_engine,
             slowest_ms,
+            kicad_faults,
+            drc_ms,
             status
         );
         if args.verbose && status != "OK" {
@@ -316,6 +341,20 @@ fn main() -> Result<()> {
             }
             for finding in findings.iter().take(12) {
                 eprintln!("  {name}: lint={finding:?}");
+            }
+            match &kicad_drc {
+                Ok(drc) => {
+                    eprintln!(
+                        "  {name}: kicad-drc copper={} unconnected={} ignored_zone_self={}",
+                        drc.copper_violations,
+                        drc.unconnected_items,
+                        drc.ignored_zone_self_unconnected
+                    );
+                    for issue in &drc.issues {
+                        eprintln!("  {name}: kicad-drc={issue}");
+                    }
+                }
+                Err(err) => eprintln!("  {name}: kicad-drc-error={err}"),
             }
             for attempt in &routed.attempts {
                 let failed_names = attempt

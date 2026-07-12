@@ -326,6 +326,47 @@ pub fn rotated_copper_bbox(part: &Part, rot: f64) -> Rect {
     }
 }
 
+/// Bounding box, relative to the part origin, that must remain inside the
+/// rectangular board bounds. It combines the courtyard and the pad-copper
+/// envelope required by KiCad's board-edge clearance.
+pub fn placement_bounds_envelope(half: (f64, f64), copper_bbox: Rect) -> Rect {
+    Rect::new(
+        (-half.0).min(copper_bbox.min_x - EDGE_CLEAR_PLACE_MM),
+        (-half.1).min(copper_bbox.min_y - EDGE_CLEAR_PLACE_MM),
+        half.0.max(copper_bbox.max_x + EDGE_CLEAR_PLACE_MM),
+        half.1.max(copper_bbox.max_y + EDGE_CLEAR_PLACE_MM),
+    )
+}
+
+/// Translate a part-relative placement envelope to world coordinates.
+pub fn placement_envelope_at(center: Point2, envelope: Rect) -> Rect {
+    Rect::new(
+        center.x + envelope.min_x,
+        center.y + envelope.min_y,
+        center.x + envelope.max_x,
+        center.y + envelope.max_y,
+    )
+}
+
+/// Clamp a part origin so an asymmetric placement envelope fits in `bounds`.
+/// Oversize envelopes are centered on the affected axis.
+pub fn clamp_center_for_envelope(bounds: &Rect, center: Point2, envelope: Rect) -> Point2 {
+    let (lo_x, hi_x) = (bounds.min_x - envelope.min_x, bounds.max_x - envelope.max_x);
+    let (lo_y, hi_y) = (bounds.min_y - envelope.min_y, bounds.max_y - envelope.max_y);
+    Point2::new(
+        if lo_x <= hi_x {
+            center.x.clamp(lo_x, hi_x)
+        } else {
+            bounds.center().x - envelope.center().x
+        },
+        if lo_y <= hi_y {
+            center.y.clamp(lo_y, hi_y)
+        } else {
+            bounds.center().y - envelope.center().y
+        },
+    )
+}
+
 /// World position of a pin's pad center given current part positions.
 pub fn pad_world(problem: &PlaceProblem, pos: &[Point2], pin: &Pin) -> Point2 {
     let part = &problem.parts[pin.part];
@@ -378,7 +419,12 @@ pub fn is_legal(
     let n = problem.parts.len();
     for i in 0..n {
         let courtyard = Rect::from_center_half(pos[i], half[i]);
-        if !problem.bounds.contains_rect_eps(&courtyard, 1e-9) {
+        let copper = copper_bbox[i];
+        let envelope = placement_bounds_envelope(half[i], copper);
+        if !problem
+            .bounds
+            .contains_rect_eps(&placement_envelope_at(pos[i], envelope), 1e-9)
+        {
             return false;
         }
         // On a custom outline, a part's CENTRE must be inside the true polygon (keeps parts out
@@ -392,7 +438,6 @@ pub fn is_legal(
             if !poly.contains_point(pos[i]) {
                 return false;
             }
-            let copper = copper_bbox[i];
             let ec = EDGE_CLEAR_PLACE_MM;
             for (dx, dy) in [
                 (copper.min_x - ec, copper.min_y - ec),
@@ -680,7 +725,7 @@ pub fn to_route_problem(problem: &PlaceProblem, placements: &[Placement]) -> Rou
         // Carry the custom outline so the router keeps copper inside the true shape.
         outline: problem.outline.clone(),
         escape_layers: Default::default(),
-            plane_nets: Default::default(),
+        plane_nets: Default::default(),
     }
 }
 

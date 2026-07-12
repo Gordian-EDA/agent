@@ -307,11 +307,13 @@ fn commit_free_opt(
 /// The cross-phase state module formation accumulates: the modules themselves
 /// plus the spatial ledgers (claims, wire runs, label reservations) and the
 /// tail-home registry every placement phase reads and extends.
+type RunReservation = (i64, f64, f64, Option<String>);
+
 struct FormState {
     form: ModuleForm,
     mod_of_anchor: BTreeMap<usize, usize>,
     claims: BTreeMap<usize, Vec<geom::Rect>>,
-    runs: BTreeMap<usize, Vec<(i64, f64, f64, Option<String>)>>,
+    runs: BTreeMap<usize, Vec<RunReservation>>,
     label_boxes: BTreeMap<usize, Vec<geom::Rect>>,
     tail_home: BTreeMap<String, (usize, Point2, f64)>,
 }
@@ -1628,7 +1630,7 @@ fn place_adopted_stubs(
         });
     }
     // Never-adoptable 2-pin stub modules are straps too.
-    for (&a, _) in &st.mod_of_anchor {
+    for &a in st.mod_of_anchor.keys() {
         if items[a].geom.pins.len() <= 2
             && !is_connector_like_part(&items[a].part)
             && st.form.modules[st.mod_of_anchor[&a]].sats.is_empty()

@@ -128,8 +128,10 @@ fn candidate_poses(it: &Item) -> Vec<(f64, bool)> {
     let wide = {
         let xs: Vec<f64> = it.geom.pins.iter().map(|p| p.at.x).collect();
         let ys: Vec<f64> = it.geom.pins.iter().map(|p| p.at.y).collect();
-        let w = xs.iter().cloned().fold(f64::MIN, f64::max) - xs.iter().cloned().fold(f64::MAX, f64::min);
-        let h = ys.iter().cloned().fold(f64::MIN, f64::max) - ys.iter().cloned().fold(f64::MAX, f64::min);
+        let w = xs.iter().cloned().fold(f64::MIN, f64::max)
+            - xs.iter().cloned().fold(f64::MAX, f64::min);
+        let h = ys.iter().cloned().fold(f64::MIN, f64::max)
+            - ys.iter().cloned().fold(f64::MAX, f64::min);
         w > h
     };
     let angles: &[f64] = if pins >= 8 && wide {

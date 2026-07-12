@@ -58,17 +58,24 @@ const MAX_FAILED_ROUTE_RETRIES: usize = 3;
 /// up. Bounded so a model that genuinely can't finish doesn't loop forever.
 const MAX_COMMIT_NUDGES: usize = 2;
 
-/// The human apply-gate. The loop calls [`Approvals::approve`] with the preview
-/// value before any gated commit; returning `false` cancels the write.
+/// Hard ceiling on provider invocations within one agent subturn. This is a
+/// last-resort guard against a model that keeps requesting tools forever: the
+/// narrower commit-nudge and routing retry budgets handle known stalls, while
+/// this bounds every other cycle (and therefore cost and context growth).
+const MAX_PROVIDER_REQUESTS_PER_TURN: usize = 32;
+
+/// The human mutation gate. The loop calls [`Approvals::approve`] with either a
+/// dry-run preview or a structured immediate-operation proposal; returning
+/// `false` prevents the mutation.
 ///
 /// `approve` is **async**: in a UI the gate blocks the turn until the user
 /// answers, which is inherently a wait on another task. Headless implementations
 /// ([`AutoApprove`]) return immediately.
 #[async_trait]
 pub trait Approvals: Send {
-    /// Decide whether to commit the proposed change, given the gated tool's
-    /// preview value.
-    async fn approve(&mut self, preview: &Value) -> bool;
+    /// Decide whether to execute the proposed change, given its preview or
+    /// structured operation payload.
+    async fn approve(&mut self, proposal: &Value) -> bool;
 }
 
 /// A non-interactive [`Approvals`] that always answers the same way. Used by
@@ -220,6 +227,11 @@ async fn stream_completion(
 pub enum StopReason {
     /// The model returned a final text with no pending tool calls — done.
     Completed,
+    /// The model kept requesting tools through the per-turn request ceiling.
+    ProviderRequestLimit {
+        /// Number of provider invocations made before the loop stopped.
+        requests: usize,
+    },
 }
 
 /// The result of one [`Agent::run_turn`].
@@ -232,7 +244,8 @@ pub struct TurnOutcome {
     /// How many tool calls the loop executed (the preview probe before an
     /// approved commit is internal and not counted).
     pub tool_calls_made: usize,
-    /// Whether the loop finished cleanly or was cut off at the iteration cap.
+    /// Whether the loop finished cleanly or was cut off at the provider-request
+    /// safety ceiling.
     pub stop_reason: StopReason,
 }
 
@@ -406,8 +419,22 @@ impl<P: Provider> Agent<P> {
         let mut nudges_left = MAX_COMMIT_NUDGES;
         let mut failed_route_attempts = 0usize;
         let mut last_route_failure: Option<Value> = None;
+        let mut provider_requests = 0usize;
+        let mut last_assistant_text = String::new();
 
         loop {
+            if provider_requests >= MAX_PROVIDER_REQUESTS_PER_TURN {
+                return Ok(TurnOutcome {
+                    applied,
+                    final_text: last_assistant_text,
+                    tool_calls_made,
+                    stop_reason: StopReason::ProviderRequestLimit {
+                        requests: provider_requests,
+                    },
+                });
+            }
+            provider_requests += 1;
+
             // Drive the provider's stream so assistant prose renders token-by-token
             // (each chunk forwarded as `AssistantDelta`), while the terminal End
             // event carries the assembled tool calls + usage. A non-streaming
@@ -423,6 +450,27 @@ impl<P: Provider> Agent<P> {
             let (text, end) = match streamed {
                 StreamCompletion::End { text, end } => (text, end),
                 StreamCompletion::MissingEnd { text } => {
+                    // The recovery completion is a second provider invocation,
+                    // so it consumes the same hard request budget as the stream.
+                    // If the stream itself used the last slot, preserve any
+                    // partial prose and stop without issuing request N+1.
+                    if provider_requests >= MAX_PROVIDER_REQUESTS_PER_TURN {
+                        if !text.is_empty() {
+                            last_assistant_text.clone_from(&text);
+                            emit(events, AgentEvent::AssistantText(text));
+                            self.history
+                                .push(ChatMessage::assistant(last_assistant_text.clone()));
+                        }
+                        return Ok(TurnOutcome {
+                            applied,
+                            final_text: last_assistant_text,
+                            tool_calls_made,
+                            stop_reason: StopReason::ProviderRequestLimit {
+                                requests: provider_requests,
+                            },
+                        });
+                    }
+                    provider_requests += 1;
                     let end = self
                         .client
                         .complete(&self.system, &self.history, &defs)
@@ -450,6 +498,7 @@ impl<P: Provider> Agent<P> {
             // Finalize the streamed prose so non-streaming consumers and the
             // transcript see the whole assistant text once.
             if !text.is_empty() {
+                last_assistant_text.clone_from(&text);
                 emit(events, AgentEvent::AssistantText(text.clone()));
             }
 
@@ -493,8 +542,9 @@ impl<P: Provider> Agent<P> {
             let mut tool_responses: Vec<ToolResponse> = Vec::new();
             let mut result_images: Vec<ContentPart> = Vec::new();
             for call in &tool_calls {
-                let gated_commit =
-                    tool_effect(&call.fn_name) == ToolEffect::Gated && wants_apply(call);
+                let effect = tool_effect(&call.fn_name);
+                let gated_commit = effect == ToolEffect::Gated && wants_apply(call);
+                let approval_required = effect == ToolEffect::ApprovalRequired;
                 if gated_commit {
                     commit_attempted = true;
                 }
@@ -523,8 +573,15 @@ impl<P: Provider> Agent<P> {
                     )
                 } else {
                     tool_calls_made += 1;
-                    self.run_tool_call(call, gated_commit, approvals, &mut applied, events)
-                        .await
+                    self.run_tool_call(
+                        call,
+                        gated_commit,
+                        approval_required,
+                        approvals,
+                        &mut applied,
+                        events,
+                    )
+                    .await
                 };
                 let parsed = parse_or_null(&content);
                 if route_retry_budget_reset_by_fix(&call.fn_name, &parsed) {
@@ -567,7 +624,6 @@ impl<P: Provider> Agent<P> {
                 prune_stale_images(&mut self.history);
             }
             prune_large_tool_arguments(&mut self.history);
-
         }
     }
 
@@ -592,7 +648,7 @@ impl<P: Provider> Agent<P> {
         let mut outcome = self.run_agent_subturn(user_msg, approvals, events).await?;
         // Gate: review only authoring/commit turns. Conversational and read-only
         // turns commit nothing, so there is nothing to independently review.
-        if !outcome.applied {
+        if !outcome.applied || outcome.stop_reason != StopReason::Completed {
             emit(events, AgentEvent::TurnDone);
             return Ok(outcome);
         }
@@ -615,6 +671,9 @@ impl<P: Provider> Agent<P> {
             }
             let fix = fix_prompt(&review.defects);
             outcome = self.run_agent_subturn(&fix, approvals, events).await?;
+            if outcome.stop_reason != StopReason::Completed {
+                break;
+            }
         }
         emit(events, AgentEvent::TurnDone);
         Ok(outcome)
@@ -622,12 +681,14 @@ impl<P: Provider> Agent<P> {
 
     /// Execute one tool call, returning the text result, any images to feed back,
     /// and the render PNG's on-disk path (for inline UI display). A
-    /// gated-commit call is routed through the apply-gate; every other call runs
-    /// once in [`RunMode::Normal`].
+    /// preview-capable gated commit is routed through preview → approval →
+    /// commit; an immediate mutation is approved before its single normal run.
+    /// Every other call runs once in [`RunMode::Normal`].
     async fn run_tool_call(
         &self,
         call: &ToolCall,
         gated_commit: bool,
+        approval_required: bool,
         approvals: &mut dyn Approvals,
         applied: &mut bool,
         events: Events<'_>,
@@ -635,6 +696,42 @@ impl<P: Provider> Agent<P> {
         if gated_commit {
             return self.gated_apply(call, approvals, applied, events).await;
         }
+        if approval_required {
+            return self.gated_operation(call, approvals).await;
+        }
+        let outcome = run_kicad_tool(&self.runtime, call, RunMode::Normal, &self.client).await;
+        (
+            tool_result_text(&outcome.value),
+            outcome.images,
+            outcome.image_path,
+        )
+    }
+
+    /// Gate a project mutation that cannot produce a dry-run. The approval
+    /// payload identifies the exact operation and model-supplied arguments; a
+    /// rejection returns a structured tool result without dispatching the tool.
+    async fn gated_operation(
+        &self,
+        call: &ToolCall,
+        approvals: &mut dyn Approvals,
+    ) -> (String, Vec<Binary>, Option<String>) {
+        let proposal = operation_approval(call);
+        if !approvals.approve(&proposal).await {
+            return (
+                json!({
+                    "ok": true,
+                    "executed": false,
+                    "written": false,
+                    "rejected": true,
+                    "operation": call.fn_name,
+                    "note": "user rejected the proposed operation; nothing was executed or written",
+                })
+                .to_string(),
+                Vec::new(),
+                None,
+            );
+        }
+
         let outcome = run_kicad_tool(&self.runtime, call, RunMode::Normal, &self.client).await;
         (
             tool_result_text(&outcome.value),
@@ -715,6 +812,15 @@ fn parse_or_null(result_json: &str) -> Value {
     serde_json::from_str(result_json).unwrap_or(Value::Null)
 }
 
+fn operation_approval(call: &ToolCall) -> Value {
+    json!({
+        "approval_kind": "operation",
+        "operation": call.fn_name,
+        "arguments": call.fn_arguments,
+        "note": "This operation can mutate project files or the live KiCAD board and has no dry-run preview.",
+    })
+}
+
 fn route_result_is_retry_failure(value: &Value) -> bool {
     if value.get("error").is_some() {
         return true;
@@ -732,6 +838,10 @@ fn route_retry_blocked(failed_route_attempts: usize, fn_name: &str) -> bool {
 
 fn route_retry_budget_reset_by_fix(fn_name: &str, value: &Value) -> bool {
     value.get("error").is_none()
+        && value.get("rejected").and_then(Value::as_bool) != Some(true)
+        && value.get("ok").and_then(Value::as_bool) != Some(false)
+        && value.get("legal").and_then(Value::as_bool) != Some(false)
+        && !(fn_name == "delete_copper" && value.get("deleted").and_then(Value::as_u64) == Some(0))
         && matches!(
             fn_name,
             "create_design"
@@ -875,10 +985,12 @@ fn tool_effect(name: &str) -> ToolEffect {
     match name {
         // The one human-gated write.
         "apply_design" => ToolEffect::Gated,
-        // Tools that mutate draft schematic text or the live IPC board.
-        "create_design"
-        | "edit_design"
-        | "regenerate_board"
+        // Project-local draft mutations are intentionally ungated: only
+        // apply_design can commit them to the schematic.
+        "create_design" | "edit_design" | "assign_footprints" => ToolEffect::Authoring,
+        // Immediate project/PCB mutations lack a safe dry-run, so approve the
+        // operation and arguments before their first execution.
+        "regenerate_board"
         | "place_board"
         | "route_board"
         | "open_board"
@@ -886,7 +998,8 @@ fn tool_effect(name: &str) -> ToolEffect {
         | "route_track"
         | "delete_copper"
         | "set_net_width"
-        | "update_board_outline" => ToolEffect::Authoring,
+        | "update_board_outline"
+        | "export_fab" => ToolEffect::ApprovalRequired,
         // Everything else reads only.
         _ => ToolEffect::ReadOnly,
     }
@@ -1257,6 +1370,9 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
     if let Some(err) = result.get("error").and_then(Value::as_str) {
         return format!("error: {err}");
     }
+    if result.get("rejected").and_then(Value::as_bool) == Some(true) {
+        return "rejected".to_string();
+    }
     match name {
         "search_symbols" => {
             let q = input.get("query").and_then(Value::as_str).unwrap_or("");
@@ -1512,6 +1628,210 @@ fn pop_n(history: &mut Vec<ChatMessage>, turn_starts: &mut Vec<usize>, k: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{ScriptedClient, final_text, tool_call};
+    use futures::stream;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn project_info_script(rounds: usize) -> Vec<StreamEnd> {
+        (0..rounds)
+            .map(|round| tool_call(&format!("project-info-{round}"), "project_info", json!({})))
+            .collect()
+    }
+
+    fn test_runtime() -> AgentRuntime {
+        let footprints = tempfile::tempdir().unwrap();
+        // `project_info` does not build the footprint catalog, so the fixture
+        // directory only needs to exist while the runtime is constructed.
+        AgentRuntime::with_footprint_dir_for_test(footprints.path().to_path_buf()).unwrap()
+    }
+
+    fn outline_mutation_script() -> Vec<StreamEnd> {
+        vec![
+            tool_call(
+                "update-outline",
+                "update_board_outline",
+                json!({
+                    "bounds": {
+                        "min_x": 2.0,
+                        "max_x": 18.0,
+                        "min_y": 3.0,
+                        "max_y": 15.0
+                    }
+                }),
+            ),
+            final_text("done"),
+        ]
+    }
+
+    /// First stream completes with a tool call; every later stream closes
+    /// without End, forcing the agent's one-shot fallback. Both entry points
+    /// increment the same counter so the test observes real provider invocations.
+    struct MissingEndProvider {
+        requests: Arc<AtomicUsize>,
+        fallback_requests: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for MissingEndProvider {
+        async fn complete(
+            &self,
+            _system: &str,
+            _messages: &[ChatMessage],
+            _tools: &[crate::Tool],
+        ) -> Result<StreamEnd> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
+            self.fallback_requests.fetch_add(1, Ordering::SeqCst);
+            Ok(tool_call(
+                &format!("fallback-{request}"),
+                "project_info",
+                json!({}),
+            ))
+        }
+
+        async fn stream<'a>(
+            &'a self,
+            _system: &'a str,
+            _messages: &'a [ChatMessage],
+            _tools: &'a [crate::Tool],
+        ) -> Result<EventStream<'a>> {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
+            if request == 1 {
+                let end = tool_call("initial", "project_info", json!({}));
+                return Ok(stream::once(async move { Ok(ChatStreamEvent::End(end)) }).boxed());
+            }
+            Ok(stream::empty().boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_end_fallback_never_exceeds_the_provider_request_limit() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let fallback_requests = Arc::new(AtomicUsize::new(0));
+        let client = MissingEndProvider {
+            requests: Arc::clone(&requests),
+            fallback_requests: Arc::clone(&fallback_requests),
+        };
+        let mut agent = Agent::new(client, test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn("inspect forever", &mut approvals, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::ProviderRequestLimit {
+                requests: MAX_PROVIDER_REQUESTS_PER_TURN
+            }
+        );
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            MAX_PROVIDER_REQUESTS_PER_TURN,
+            "the missing-End fallback must not become request N+1"
+        );
+        assert_eq!(fallback_requests.load(Ordering::SeqCst), 15);
+        assert_eq!(outcome.tool_calls_made, 16);
+    }
+
+    #[tokio::test]
+    async fn rejected_immediate_mutation_executes_nothing() {
+        let runtime = test_runtime();
+        let pcb_path = runtime.pcb_path();
+        let original = include_str!("../tests/fixtures/two_res.kicad_pcb");
+        std::fs::write(&pcb_path, original).unwrap();
+        let (client, seen) = ScriptedClient::recording(outline_mutation_script());
+        let mut agent = Agent::new(client, runtime, "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn("change the outline", &mut approvals, None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(std::fs::read_to_string(pcb_path).unwrap(), original);
+        let requests = seen.lock().unwrap();
+        let rejected = requests[1]
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .find_map(|part| match part {
+                ContentPart::ToolResponse(response) => {
+                    serde_json::from_str::<Value>(&response.content).ok()
+                }
+                _ => None,
+            })
+            .expect("the rejected operation is returned to the model as structured JSON");
+        assert_eq!(rejected["rejected"], true);
+        assert_eq!(rejected["executed"], false);
+        assert_eq!(rejected["written"], false);
+        assert_eq!(rejected["operation"], "update_board_outline");
+    }
+
+    #[tokio::test]
+    async fn approved_immediate_mutation_executes_once() {
+        let runtime = test_runtime();
+        let pcb_path = runtime.pcb_path();
+        let original = include_str!("../tests/fixtures/two_res.kicad_pcb");
+        std::fs::write(&pcb_path, original).unwrap();
+        let client = ScriptedClient::new(outline_mutation_script());
+        let mut agent = Agent::new(client, runtime, "system");
+        let mut approvals = AutoApprove::yes();
+
+        let outcome = agent
+            .run_turn("change the outline", &mut approvals, None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        let updated = std::fs::read_to_string(pcb_path).unwrap();
+        assert_ne!(updated, original);
+        assert!(updated.contains("(start 2 3)"), "{updated}");
+        assert!(updated.contains("(end 18 15)"), "{updated}");
+        assert!(
+            !outcome.applied,
+            "PCB mutations stay outside schematic review"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_request_limit_terminates_an_endless_tool_cycle() {
+        let client = ScriptedClient::new(project_info_script(MAX_PROVIDER_REQUESTS_PER_TURN));
+        let mut agent = Agent::new(client, test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn("inspect forever", &mut approvals, None)
+            .await
+            .expect("the safety limit must return an outcome without another provider call");
+
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::ProviderRequestLimit {
+                requests: MAX_PROVIDER_REQUESTS_PER_TURN
+            }
+        );
+        assert_eq!(outcome.tool_calls_made, MAX_PROVIDER_REQUESTS_PER_TURN);
+        assert!(!outcome.applied);
+    }
+
+    #[tokio::test]
+    async fn provider_request_limit_allows_a_final_reply_on_the_last_request() {
+        let mut script = project_info_script(MAX_PROVIDER_REQUESTS_PER_TURN - 1);
+        script.push(final_text("done at the boundary"));
+        let client = ScriptedClient::new(script);
+        let mut agent = Agent::new(client, test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn("inspect, then stop", &mut approvals, None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(outcome.final_text, "done at the boundary");
+        assert_eq!(outcome.tool_calls_made, MAX_PROVIDER_REQUESTS_PER_TURN - 1);
+    }
 
     #[tokio::test]
     async fn auto_approve_yes_and_no() {
@@ -1524,6 +1844,11 @@ mod tests {
     fn tool_effect_and_wants_apply_classify_the_gate() {
         assert_eq!(tool_effect("apply_design"), ToolEffect::Gated);
         assert_eq!(tool_effect("edit_design"), ToolEffect::Authoring);
+        assert_eq!(
+            tool_effect("update_board_outline"),
+            ToolEffect::ApprovalRequired
+        );
+        assert_eq!(tool_effect("export_fab"), ToolEffect::ApprovalRequired);
         assert_eq!(tool_effect("search_symbols"), ToolEffect::ReadOnly);
         let apply_call = ToolCall {
             call_id: "1".into(),
@@ -1539,6 +1864,22 @@ mod tests {
         };
         assert!(wants_apply(&apply_call));
         assert!(!wants_apply(&preview_call));
+    }
+
+    #[test]
+    fn immediate_operation_approval_identifies_name_and_arguments() {
+        let call = ToolCall {
+            call_id: "op-1".into(),
+            fn_name: "move_parts".into(),
+            fn_arguments: json!({"moves": [{"reference": "U1", "by": [1, 2]}]}),
+            thought_signatures: None,
+        };
+
+        let proposal = operation_approval(&call);
+
+        assert_eq!(proposal["approval_kind"], "operation");
+        assert_eq!(proposal["operation"], "move_parts");
+        assert_eq!(proposal["arguments"], call.fn_arguments);
     }
 
     #[test]
@@ -1775,10 +2116,10 @@ mod tests {
     }
 
     #[test]
-    fn successful_route_fix_resets_route_retry_budget() {
+    fn only_successful_route_fixes_reset_route_retry_budget() {
         assert!(route_retry_budget_reset_by_fix(
             "place_board",
-            &json!({"ok": true})
+            &json!({"legal": true})
         ));
         assert!(route_retry_budget_reset_by_fix(
             "edit_design",
@@ -1799,6 +2140,26 @@ mod tests {
         assert!(!route_retry_budget_reset_by_fix(
             "edit_design",
             &json!({"error": "bad yaml"})
+        ));
+        assert!(!route_retry_budget_reset_by_fix(
+            "move_parts",
+            &json!({"ok": true, "rejected": true})
+        ));
+        assert!(!route_retry_budget_reset_by_fix(
+            "edit_design",
+            &json!({"ok": false, "errors": 1})
+        ));
+        assert!(!route_retry_budget_reset_by_fix(
+            "place_board",
+            &json!({"legal": false})
+        ));
+        assert!(!route_retry_budget_reset_by_fix(
+            "delete_copper",
+            &json!({"ok": true, "deleted": 0})
+        ));
+        assert!(route_retry_budget_reset_by_fix(
+            "delete_copper",
+            &json!({"ok": true, "deleted": 1})
         ));
         assert!(!route_retry_budget_reset_by_fix(
             "route_board",

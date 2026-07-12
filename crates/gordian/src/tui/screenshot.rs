@@ -19,7 +19,7 @@ use ratatui::style::{Color, Modifier};
 
 use gordian_core::AgentEvent;
 
-use super::app::{App, Entry, Msg, NoticeLevel, PendingDiff, Speaker, Status};
+use super::app::{App, Entry, Msg, NoticeLevel, PendingApproval, Speaker, Status};
 use super::ui;
 
 /// Where the SVGs are written; `tools/tui_shot.sh` reads from here.
@@ -331,7 +331,7 @@ fn tui_screenshots() {
     // 2. The apply-gate: a change awaiting approval.
     let mut app = App::new(status());
     seed_conversation(&mut app);
-    app.pending = Some(PendingDiff {
+    app.pending = Some(PendingApproval::Schematic {
         added: vec!["C7 (100nF)".into(), "R5 (10k)".into()],
         removed: vec![],
         changed: vec!["U1 footprint".into()],

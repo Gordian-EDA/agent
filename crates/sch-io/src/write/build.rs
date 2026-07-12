@@ -682,6 +682,53 @@ impl SchematicWriter {
         self.fields_above.extend(other.fields_above);
     }
 
+    /// Namespace generated hidden references before composing independent
+    /// writers. Authored references are globally unique, but each group emits
+    /// its own `#PWR_*`/`#FLG_*` identifiers; without a group namespace their
+    /// symbol UUIDs collide in the combined document.
+    pub fn namespace_hidden_references(&mut self, namespace: &str) {
+        let mut renamed: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for inst in &mut self.instances {
+            if !inst.refdes.starts_with('#') {
+                continue;
+            }
+            let old = inst.refdes.clone();
+            let new = format!("#{namespace}_{}", old.trim_start_matches('#'));
+            inst.refdes = new.clone();
+            renamed.insert(old, new);
+        }
+        if renamed.is_empty() {
+            return;
+        }
+        for label in &mut self.labels {
+            if let Some((old, new)) = renamed
+                .iter()
+                .find(|(old, _)| label.uuid_key.starts_with(&format!("{old}:")))
+            {
+                label.uuid_key = format!("{new}:{}", &label.uuid_key[old.len() + 1..]);
+            }
+        }
+        for nc in &mut self.no_connects {
+            if let Some((old, new)) = renamed
+                .iter()
+                .find(|(old, _)| nc.uuid_key.starts_with(&format!("{old}:")))
+            {
+                nc.uuid_key = format!("{new}:{}", &nc.uuid_key[old.len() + 1..]);
+            }
+        }
+        self.fields_above = self
+            .fields_above
+            .iter()
+            .map(|refdes| {
+                renamed
+                    .get(refdes)
+                    .cloned()
+                    .unwrap_or_else(|| refdes.clone())
+            })
+            .collect();
+    }
+
     /// The PWR_FLAG instances in this writer, as `(net, index)` pairs — the flag's
     /// `#FLG_<net>` refdes carries the net verbatim. Used by the composer to dedup
     /// flags across groups (KiCAD ERCs "power output ↔ power output" when the same
@@ -759,12 +806,12 @@ impl SchematicWriter {
     /// geometry math. Caller keeps the shift grid-aligned to stay on the KiCAD grid.
     pub fn translate(&mut self, dx: f64, dy: f64) {
         let sh = |p: &mut Point2| {
-            p.x += dx;
-            p.y += dy;
+            *p = GRID_50_MIL.snap_point(Point2::new(p.x + dx, p.y + dy));
         };
         let sha = |p: &mut [f64; 2]| {
-            p[0] += dx;
-            p[1] += dy;
+            *p = GRID_50_MIL
+                .snap_point(Point2::new(p[0] + dx, p[1] + dy))
+                .into();
         };
         for i in &mut self.instances {
             sh(&mut i.at);
@@ -778,15 +825,20 @@ impl SchematicWriter {
         for w in &mut self.wires {
             sh(&mut w.a);
             sh(&mut w.b);
+            w.uuid_key = format!("{}:{}:{}:{}", w.a.x, w.a.y, w.b.x, w.b.y);
         }
         for l in &mut self.labels {
             sh(&mut l.at);
             if let Some(s) = &mut l.stub {
                 sh(&mut s.pin_at);
             }
+            if l.uuid_key.starts_with("cluster:") {
+                l.uuid_key = format!("cluster:{}:{}:{}", l.net, l.at.x, l.at.y);
+            }
         }
         for j in &mut self.junctions {
             sh(&mut j.at);
+            j.uuid_key = format!("{}:{}", j.at.x, j.at.y);
         }
         for nc in &mut self.no_connects {
             sh(&mut nc.at);
@@ -965,6 +1017,20 @@ mod tests {
         let inst = [127.0, 63.5];
         pt_close(pin_endpoint(&p, inst, 0.0, false), [129.54, 63.5]);
         pt_close(pin_endpoint(&p, inst, 0.0, true), [124.46, 63.5]);
+    }
+
+    #[test]
+    fn translate_refreshes_coordinate_derived_keys() {
+        let mut w = SchematicWriter::new();
+        w.add_wire_on_net([1.27, 2.54], [3.81, 2.54], "SIG");
+        w.add_junction([3.81, 2.54]);
+        w.add_cluster_label("SIG", [3.81, 2.54], Dir::East, false);
+
+        w.translate(12.7, 25.4);
+
+        assert_eq!(w.wires[0].uuid_key, "13.97:27.94:16.51:27.94");
+        assert_eq!(w.junctions[0].uuid_key, "16.51:27.94");
+        assert_eq!(w.labels[0].uuid_key, "cluster:SIG:16.51:27.94");
     }
 
     #[test]

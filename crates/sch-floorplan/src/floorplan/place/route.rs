@@ -628,20 +628,13 @@ pub(crate) fn route_signal(
                     .map(|(ep, dir)| {
                         let v = dir.vec();
                         let landing = |s: f64| {
-                            geom::GRID_50_MIL.snap_point(::geom::Point2::new(
-                                ep[0] + v.x * s,
-                                ep[1] + v.y * s,
-                            ))
+                            geom::GRID_50_MIL
+                                .snap_point(::geom::Point2::new(ep[0] + v.x * s, ep[1] + v.y * s))
                         };
                         [3.81, 6.35, 8.89, 11.43, 13.97]
                             .into_iter()
                             .find(|&s| {
-                                w.label_landing_clear(
-                                    landing(s),
-                                    dir,
-                                    net,
-                                    &items[*i].refdes,
-                                )
+                                w.label_landing_clear(landing(s), dir, net, &items[*i].refdes)
                             })
                             .unwrap_or(3.81)
                     })
@@ -968,9 +961,10 @@ pub(crate) fn nudge_port_exit(
     let bad = |at: [f64; 2]| {
         let r = port_label_obstacle(at, side, net);
         solids_hit(&scene.solids, &r)
-            || scene.segments.iter().any(|seg| {
-                seg.net != net && seg.segment.dist2_to_point(at.into()) < 0.01
-            })
+            || scene
+                .segments
+                .iter()
+                .any(|seg| seg.net != net && seg.segment.dist2_to_point(at.into()) < 0.01)
     };
     if !bad(at) {
         return at;
@@ -1236,7 +1230,11 @@ pub(crate) fn plan_riser_offsets(
         }
     }
     if std::env::var_os("RISER_DEBUG").is_some() {
-        eprintln!("[riser] {} risers, contested: {:?}", risers.len(), contested);
+        eprintln!(
+            "[riser] {} risers, contested: {:?}",
+            risers.len(),
+            contested
+        );
         for r in &risers {
             eprintln!("[riser]   {:?}", r);
         }

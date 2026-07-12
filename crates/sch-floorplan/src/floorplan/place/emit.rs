@@ -313,6 +313,9 @@ pub fn compose_writers(groups: Vec<(String, SchematicWriter)>, title: Option<&st
             w.remove_instances(drop);
         }
     }
+    for (name, w) in &mut groups {
+        w.namespace_hidden_references(name);
+    }
 
     // ── Column bin-pack onto a roughly-square sheet. A width-only shelf target degenerates
     // into a tall ribbon when blocks vary in height (one wide-but-short block forces a narrow

@@ -19,9 +19,9 @@
 //! ### The apply-gate across tasks
 //!
 //! The agent runs in a spawned task holding a [`TuiApprovals`]. When it reaches
-//! the apply-gate, `TuiApprovals::approve` sends the dry-run diff **plus a
+//! an approval gate, `TuiApprovals::approve` sends the proposal **plus a
 //! oneshot reply channel** over `gate_tx`. The main loop receives it, shows the
-//! diff in the App, and stashes the oneshot sender. When the user presses `a`/`r`
+//! diff or operation in the App, and stashes the oneshot sender. When the user presses `a`/`r`
 //! the loop fulfils the oneshot, unblocking the agent task. This is exactly why
 //! [`gordian_core::Approvals::approve`] is async.
 
@@ -69,13 +69,12 @@ use app::{Action, App, Msg, Status, TurnEndReason};
 /// How often the shell wakes the app for spinner/elapsed redraws.
 const TICK: Duration = Duration::from_millis(120);
 
-/// A pending apply-gate request: the dry-run diff and the channel the UI uses to
-/// answer it.
+/// A pending mutation proposal and the channel the UI uses to answer it.
 type GateRequest = (Value, oneshot::Sender<bool>);
 
 /// The [`Approvals`] implementation that bridges the agent's gate to the UI.
 ///
-/// On `approve`, it forwards the dry-run diff to the main loop and awaits the
+/// On `approve`, it forwards the preview/operation proposal to the main loop and awaits the
 /// user's decision over a oneshot. If auto-approve is on, the loop answers
 /// immediately; otherwise it waits for an `a`/`r` keypress.
 struct TuiApprovals {
@@ -84,9 +83,9 @@ struct TuiApprovals {
 
 #[async_trait]
 impl Approvals for TuiApprovals {
-    async fn approve(&mut self, diff: &Value) -> bool {
+    async fn approve(&mut self, proposal: &Value) -> bool {
         let (tx, rx) = oneshot::channel();
-        if self.gate_tx.send((diff.clone(), tx)).is_err() {
+        if self.gate_tx.send((proposal.clone(), tx)).is_err() {
             // UI is gone — fail safe (reject the write).
             return false;
         }
@@ -182,6 +181,17 @@ struct Shell {
 }
 
 impl Shell {
+    /// Fail closed on every shell exit path, including terminal-stream errors:
+    /// reject an unanswered mutation and stop any detached local turn.
+    fn shutdown(&mut self) {
+        if let Some(reply) = self.pending_gate.take() {
+            let _ = reply.send(false);
+        }
+        if let Some(task) = self.turn_task.take() {
+            task.abort();
+        }
+    }
+
     /// Perform the side effect an [`Action`] calls for.
     fn handle(&mut self, app: &mut App, action: Action) {
         match action {
@@ -247,6 +257,9 @@ impl Shell {
             let reason = match result {
                 Ok(o) => match o.stop_reason {
                     StopReason::Completed => TurnEndReason::Completed,
+                    StopReason::ProviderRequestLimit { requests } => {
+                        TurnEndReason::ProviderRequestLimit { requests }
+                    }
                 },
                 Err(e) => TurnEndReason::Error(format!("{e:#}")),
             };
@@ -255,9 +268,8 @@ impl Shell {
     }
 
     /// Esc on a running turn: abort the task mid-flight. The agent gives up
-    /// whatever it was doing (an LLM round-trip, a tool call) but nothing has
-    /// been written — writes only happen behind the gate, and an open gate is
-    /// answered "no" here.
+    /// whatever it was doing (an LLM round-trip, a tool call). An open gate is
+    /// answered "no" here, so no unapproved mutation begins.
     fn cancel_turn(&mut self, app: &mut App) {
         if let Some(task) = self.turn_task.take() {
             task.abort();
@@ -370,6 +382,12 @@ impl Shell {
     }
 }
 
+impl Drop for Shell {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 /// The async event loop: select over keyboard/mouse input, agent events, gate
 /// requests, and the animation tick; update the app; act on the returned
 /// action; redraw.
@@ -452,14 +470,14 @@ async fn event_loop(
                 app.update(Msg::Agent(ev));
             }
             // ── apply-gate requests from the agent task ───────────────
-            Some((diff, reply)) = gate_rx.recv() => {
+            Some((proposal, reply)) = gate_rx.recv() => {
                 if app.auto {
                     // Yolo mode: approve immediately, never show the gate.
                     let _ = reply.send(true);
                     app.transcript.push(app::Entry::system("auto-approved (yolo)"));
                 } else {
                     shell.pending_gate = Some(reply);
-                    app.update(Msg::PendingDiff(diff));
+                    app.update(Msg::PendingApproval(proposal));
                 }
             }
             // ── spawned turn finished ─────────────────────────────────
@@ -472,12 +490,7 @@ async fn event_loop(
         // A pending gate that's still open when we quit must be answered, or the
         // agent task would hang forever waiting on the oneshot.
         if app.should_quit {
-            if let Some(reply) = shell.pending_gate.take() {
-                let _ = reply.send(false);
-            }
-            if let Some(task) = shell.turn_task.take() {
-                task.abort();
-            }
+            shell.shutdown();
             break;
         }
         terminal.draw(|f| ui::draw_with(f, app, &mut ctx))?;
@@ -542,4 +555,31 @@ fn restore_terminal(
     )?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropping_shell_rejects_an_unanswered_approval() {
+        let (events_tx, _events_rx) = unbounded_channel();
+        let (gate_tx, _gate_rx) = unbounded_channel();
+        let (done_tx, _done_rx) = unbounded_channel();
+        let (reply, answer) = oneshot::channel();
+        let shell = Shell {
+            agent: None,
+            events_tx,
+            gate_tx,
+            done_tx,
+            post_commit_review: false,
+            review_fix_rounds: 0,
+            pending_gate: Some(reply),
+            turn_task: None,
+        };
+
+        drop(shell);
+
+        assert!(!answer.await.expect("shell sends an explicit decision"));
+    }
 }

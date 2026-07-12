@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use kicad_symbol::geometry::SymbolGeometry;
 
 use super::super::infer::anchor_tap;
-use sch_place::item::{Incidence, Item};
 use sch_place::ir::{LayoutIr, Orient};
+use sch_place::item::{Incidence, Item};
 use sch_place::netclass::{is_ground, is_power_net};
 
 /// each load cap two gaps out, level with its osc pin. Returns true if it moved
@@ -291,7 +291,6 @@ pub fn align_rail_cap_rows(items: &mut [Item], ir: &LayoutIr) -> bool {
     moved
 }
 
-
 /// Rotation (degrees) so a 2-pin part's pin1→pin2 axis matches `orient`.
 pub fn orient_angle(geom: &SymbolGeometry, orient: Orient) -> f64 {
     if geom.pins.len() != 2 {
@@ -459,6 +458,8 @@ pub fn cohesion_targets(
     inc: &Incidence,
     ir: &LayoutIr,
 ) -> Vec<(usize, Vec<(usize, usize)>)> {
+    type PinLocations = Vec<(usize, usize)>;
+
     let is_anchor = |i: usize| items[i].geom.pins.len() >= 3;
     // A BANKED multi-unit IC (FPGA) is the dominant consumer of its rails, but it shares those
     // rails with the regulators that feed it — so "nearest supply pin" parks the FPGA's own
@@ -474,11 +475,8 @@ pub fn cohesion_targets(
         if items[si].geom.pins.len() >= 3 || items[si].frozen {
             continue;
         }
-        let (mut sig, mut supply, mut gnd): (
-            Vec<(usize, usize)>,
-            Vec<(usize, usize)>,
-            Vec<(usize, usize)>,
-        ) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut sig, mut supply, mut gnd): (PinLocations, PinLocations, PinLocations) =
+            (Vec::new(), Vec::new(), Vec::new());
         for (_, _, net) in &items[si].pins {
             let Some(net) = net else { continue };
             let is_rail = ir.rails.contains_key(net);
@@ -546,12 +544,9 @@ pub fn cohesion_targets(
     // fires when a refdes has ≥2 anchor units (single-unit boards/references untouched).
     let mut by_refdes: std::collections::BTreeMap<&str, Vec<usize>> =
         std::collections::BTreeMap::new();
-    for i in 0..items.len() {
-        if items[i].geom.pins.len() >= 3 {
-            by_refdes
-                .entry(items[i].refdes.as_str())
-                .or_default()
-                .push(i);
+    for (i, item) in items.iter().enumerate() {
+        if item.geom.pins.len() >= 3 {
+            by_refdes.entry(item.refdes.as_str()).or_default().push(i);
         }
     }
     for group in by_refdes.values() {

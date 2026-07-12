@@ -71,10 +71,17 @@ fn parse_tui_args(args: &[String]) -> Result<PathBuf> {
                 let dir = args
                     .get(i + 1)
                     .context("--project requires a directory argument")?;
+                if project_dir.is_some() {
+                    bail!("project directory was specified more than once");
+                }
                 project_dir = Some(PathBuf::from(dir));
                 i += 2;
             }
+            other if other.starts_with('-') => bail!("unknown tui option `{other}`"),
             other => {
+                if project_dir.is_some() {
+                    bail!("unexpected extra project directory `{other}`");
+                }
                 project_dir = Some(PathBuf::from(other));
                 i += 1;
             }
@@ -128,20 +135,31 @@ fn parse_agent_args(args: &[String]) -> Result<AgentInvocation> {
     let mut project_dir: Option<PathBuf> = None;
     let mut positionals: Vec<String> = Vec::new();
     let mut review = true;
+    let mut parse_options = true;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--project" | "-p" => {
+            "--" if parse_options => {
+                parse_options = false;
+                i += 1;
+            }
+            "--project" | "-p" if parse_options => {
+                if project_dir.is_some() {
+                    bail!("project directory was specified more than once");
+                }
                 let dir = args
                     .get(i + 1)
                     .context("--project requires a directory argument")?;
                 project_dir = Some(PathBuf::from(dir));
                 i += 2;
             }
-            "--no-review" => {
+            "--no-review" if parse_options => {
                 review = false;
                 i += 1;
+            }
+            flag if parse_options && flag.starts_with('-') => {
+                bail!("unknown agent option `{flag}`");
             }
             other => {
                 positionals.push(other.to_string());
@@ -422,6 +440,43 @@ mod tests {
     fn errors_with_no_prompt() {
         assert!(parse_agent_args(&[]).is_err());
         assert!(parse_agent_args(&["--project".into(), "/tmp/demo".into()]).is_err());
+    }
+
+    #[test]
+    fn tui_args_reject_ambiguous_or_unknown_project_arguments() {
+        assert!(parse_tui_args(&["one".into(), "two".into()]).is_err());
+        assert!(
+            parse_tui_args(&[
+                "--project".into(),
+                "one".into(),
+                "--project".into(),
+                "two".into()
+            ])
+            .is_err()
+        );
+        assert!(parse_tui_args(&["--unknown".into()]).is_err());
+    }
+
+    #[test]
+    fn agent_args_reject_unknown_and_duplicate_options() {
+        assert!(parse_agent_args(&["--unknown".into(), "prompt".into()]).is_err());
+        assert!(
+            parse_agent_args(&[
+                "--project".into(),
+                "one".into(),
+                "--project".into(),
+                "two".into(),
+                "prompt".into(),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn agent_double_dash_allows_a_dash_prefixed_prompt() {
+        let inv = parse_agent_args(&["--".into(), "--literal prompt".into()]).unwrap();
+        assert_eq!(inv.prompt, "--literal prompt");
+        assert!(inv.review);
     }
 
     #[test]

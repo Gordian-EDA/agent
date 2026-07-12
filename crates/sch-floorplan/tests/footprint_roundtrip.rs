@@ -46,6 +46,16 @@ blocks:
     let ir = floorplan::baseline_ir(&design);
     let out = floorplan::emit_strategy(&env, &design, Box::new(anneal_place::Anneal), Some(ir))
         .expect("emit a .kicad_sch");
+    assert!(
+        out.layout_warnings.is_empty(),
+        "minimal parallel capacitors should emit without layout warnings: {:?}",
+        out.layout_warnings
+    );
+    assert_eq!(
+        out.crossings.total(),
+        0,
+        "minimal parallel capacitors should emit without crossings"
+    );
     let dir = tempfile::tempdir().unwrap();
     let sch_path = dir.path().join("rt.kicad_sch");
     std::fs::write(&sch_path, &out.sch).unwrap();

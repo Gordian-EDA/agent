@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::{Entry, NoticeLevel, PendingDiff, TurnEndReason, UnwindPicker};
+use super::{Entry, NoticeLevel, PendingApproval, TurnEndReason, UnwindPicker};
 use crate::tui::pricing::Ledger;
 
 /// Static-ish status shown in the status bar.
@@ -89,11 +89,12 @@ pub struct App {
     pub(super) completion_stem: Option<String>,
     /// Index into the stem's matches that the input currently shows.
     pub completion_idx: Option<usize>,
-    /// Apply-gate mode: when `false` (default) every write needs approval; when
-    /// `true` (`:auto`) writes commit without a prompt.
+    /// Approval mode: when `false` (default), schematic applies and immediate
+    /// project/board mutations need approval; project-local draft edits do not.
+    /// When `true` (`:auto`), gated mutations proceed without a prompt.
     pub auto: bool,
     /// A change awaiting approval, if any. While `Some`, `a`/`r` resolve it.
-    pub pending: Option<PendingDiff>,
+    pub pending: Option<PendingApproval>,
     /// Whether an agent turn is in flight (submit is blocked, typing is not).
     pub running: bool,
     /// When the in-flight turn started (drives the elapsed display).
@@ -233,6 +234,12 @@ impl App {
             TurnEndReason::Completed => Some(Entry::notice(
                 NoticeLevel::Plain,
                 format!("Worked for {elapsed}"),
+            )),
+            TurnEndReason::ProviderRequestLimit { requests } => Some(Entry::notice(
+                NoticeLevel::Error,
+                format!(
+                    "Worked for {elapsed} — stopped after {requests} model requests (safety limit)"
+                ),
             )),
             TurnEndReason::Interrupted => Some(Entry::notice(
                 NoticeLevel::Plain,

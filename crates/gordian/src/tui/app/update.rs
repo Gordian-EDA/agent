@@ -9,7 +9,7 @@
 use gordian_core::AgentEvent;
 use serde_json::Value;
 
-use super::{App, Entry, PendingDiff};
+use super::{App, Entry, PendingApproval};
 
 /// An input event or async arrival the [`App`] reacts to.
 #[derive(Clone, Debug)]
@@ -65,8 +65,8 @@ pub enum Msg {
     Tick,
     /// An event from the running agent turn.
     Agent(AgentEvent),
-    /// The apply-gate fired: a dry-run diff awaits a decision.
-    PendingDiff(Value),
+    /// A previewed schematic diff or immediate operation awaits approval.
+    PendingApproval(Value),
     /// A turn finished (the spawned task joined). This is the single, reliable
     /// teardown point — it fires exactly once per turn (from the join channel,
     /// or directly from the shell on a user abort) and carries *why* the turn
@@ -76,12 +76,14 @@ pub enum Msg {
 }
 
 /// Why an in-flight turn stopped, carried on [`Msg::TurnEnded`]. The agent loop
-/// reports `Completed` (via its `StopReason`); the shell adds `Interrupted`
-/// (user abort) and `Error`; `/compact` reports `Compacted`.
+/// reports `Completed` or `ProviderRequestLimit` (via its `StopReason`); the shell
+/// adds `Interrupted` (user abort) and `Error`; `/compact` reports `Compacted`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TurnEndReason {
     /// The model returned a final reply — a clean finish.
     Completed,
+    /// The model kept requesting tools until the safety ceiling was reached.
+    ProviderRequestLimit { requests: usize },
     /// The user pressed Esc to abort the turn.
     Interrupted,
     /// The turn failed (provider/network/tool error); carries the message.
@@ -128,7 +130,7 @@ impl App {
         // Any user action other than Ctrl-C disarms the two-step quit catcher.
         if !matches!(
             msg,
-            Msg::Tick | Msg::Agent(_) | Msg::PendingDiff(_) | Msg::TurnEnded(_)
+            Msg::Tick | Msg::Agent(_) | Msg::PendingApproval(_) | Msg::TurnEnded(_)
         ) {
             self.ctrl_c_armed = false;
         }
@@ -155,10 +157,37 @@ impl App {
             };
         }
 
+        // The approval card is modal. Preserve the existing draft byte-for-byte
+        // while it is open; bracketed paste and readline control keys must not
+        // edit a hidden composer behind the gate.
+        if self.pending.is_some()
+            && matches!(
+                msg,
+                Msg::Backspace
+                    | Msg::Delete
+                    | Msg::CursorLeft
+                    | Msg::CursorRight
+                    | Msg::WordLeft
+                    | Msg::WordRight
+                    | Msg::Home
+                    | Msg::End
+                    | Msg::KillToStart
+                    | Msg::KillWordBack
+                    | Msg::HistoryPrev
+                    | Msg::HistoryNext
+                    | Msg::Complete
+                    | Msg::Submit
+                    | Msg::Paste(_)
+                    | Msg::Newline
+            )
+        {
+            return Action::None;
+        }
+
         // Any user action other than another Esc disarms the pending unwind.
         if !matches!(
             msg,
-            Msg::Cancel | Msg::Tick | Msg::Agent(_) | Msg::PendingDiff(_) | Msg::TurnEnded(_)
+            Msg::Cancel | Msg::Tick | Msg::Agent(_) | Msg::PendingApproval(_) | Msg::TurnEnded(_)
         ) {
             self.esc_armed = false;
         }
@@ -171,7 +200,7 @@ impl App {
                 | Msg::Submit
                 | Msg::Tick
                 | Msg::Agent(_)
-                | Msg::PendingDiff(_)
+                | Msg::PendingApproval(_)
                 | Msg::TurnEnded(_)
                 | Msg::ScrollUp
                 | Msg::ScrollDown
@@ -306,8 +335,8 @@ impl App {
                 self.on_agent_event(ev);
                 Action::None
             }
-            Msg::PendingDiff(v) => {
-                self.pending = Some(PendingDiff::from_dry_run(&v));
+            Msg::PendingApproval(v) => {
+                self.pending = Some(PendingApproval::from_payload(&v));
                 // The turn is now blocked on the user — stop billing the elapsed
                 // clock for human deliberation.
                 self.pause_clock();

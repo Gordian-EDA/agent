@@ -310,6 +310,62 @@ pub struct Via {
     pub span: ViaSpan,
 }
 
+/// The inner copper layers that carry solid GND/VCC planes, centred in the
+/// stack: 4-layer → {1,2}, 6-layer → {2,3}, odd or <4 → none. The routing
+/// stack masks these against signal traces; `grid-astar` re-exports this.
+pub fn plane_layers(layer_count: u32) -> Vec<u32> {
+    if layer_count >= 4 && layer_count & 1 == 0 {
+        vec![layer_count / 2 - 1, layer_count / 2]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Default plane-net assignment for a plane-carrying stackup: the most-padded
+/// ground-named net takes the first plane, the most-padded supply-named net
+/// the second. `nets` are (name, pad count) pairs. Empty when the stack has
+/// no planes or no recognizable power nets.
+pub fn default_plane_nets(
+    layer_count: u32,
+    nets: impl Iterator<Item = (String, usize)>,
+) -> std::collections::BTreeMap<String, u32> {
+    let planes = plane_layers(layer_count);
+    let mut assigned = std::collections::BTreeMap::new();
+    let [gnd_layer, pwr_layer] = planes.as_slice() else {
+        return assigned;
+    };
+    let is_ground = |n: &str| {
+        let u = n.to_ascii_uppercase();
+        u == "GND" || u.ends_with("GND") || u == "VSS" || u == "AGND" || u == "PGND"
+    };
+    let is_supply = |n: &str| {
+        let u = n.to_ascii_uppercase();
+        u.starts_with("VCC")
+            || u.starts_with("VDD")
+            || u.starts_with("VBUS")
+            || u.starts_with("+")
+            || (u.starts_with('V') && u[1..].chars().all(|c| c.is_ascii_digit() || c == 'V'))
+    };
+    type RankedNet = Option<(String, usize)>;
+    let (mut gnd, mut pwr): (RankedNet, RankedNet) = (None, None);
+    for (name, pads) in nets {
+        if is_ground(&name) {
+            if gnd.as_ref().is_none_or(|(_, c)| pads > *c) {
+                gnd = Some((name, pads));
+            }
+        } else if is_supply(&name) && pwr.as_ref().is_none_or(|(_, c)| pads > *c) {
+            pwr = Some((name, pads));
+        }
+    }
+    if let Some((name, _)) = gnd {
+        assigned.insert(name, *gnd_layer);
+    }
+    if let Some((name, _)) = pwr {
+        assigned.insert(name, *pwr_layer);
+    }
+    assigned
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,59 +411,4 @@ mod tests {
         };
         assert_eq!(conn.half_perimeter(), 10.0);
     }
-}
-
-/// The inner copper layers that carry solid GND/VCC planes, centred in the
-/// stack: 4-layer → {1,2}, 6-layer → {2,3}, odd or <4 → none. The routing
-/// stack masks these against signal traces; `grid-astar` re-exports this.
-pub fn plane_layers(layer_count: u32) -> Vec<u32> {
-    if layer_count >= 4 && layer_count % 2 == 0 {
-        vec![layer_count / 2 - 1, layer_count / 2]
-    } else {
-        Vec::new()
-    }
-}
-
-/// Default plane-net assignment for a plane-carrying stackup: the most-padded
-/// ground-named net takes the first plane, the most-padded supply-named net
-/// the second. `nets` are (name, pad count) pairs. Empty when the stack has
-/// no planes or no recognizable power nets.
-pub fn default_plane_nets(
-    layer_count: u32,
-    nets: impl Iterator<Item = (String, usize)>,
-) -> std::collections::BTreeMap<String, u32> {
-    let planes = plane_layers(layer_count);
-    let mut assigned = std::collections::BTreeMap::new();
-    let [gnd_layer, pwr_layer] = planes.as_slice() else {
-        return assigned;
-    };
-    let is_ground = |n: &str| {
-        let u = n.to_ascii_uppercase();
-        u == "GND" || u.ends_with("GND") || u == "VSS" || u == "AGND" || u == "PGND"
-    };
-    let is_supply = |n: &str| {
-        let u = n.to_ascii_uppercase();
-        u.starts_with("VCC")
-            || u.starts_with("VDD")
-            || u.starts_with("VBUS")
-            || u.starts_with("+")
-            || (u.starts_with('V') && u[1..].chars().all(|c| c.is_ascii_digit() || c == 'V'))
-    };
-    let (mut gnd, mut pwr): (Option<(String, usize)>, Option<(String, usize)>) = (None, None);
-    for (name, pads) in nets {
-        if is_ground(&name) {
-            if gnd.as_ref().is_none_or(|(_, c)| pads > *c) {
-                gnd = Some((name, pads));
-            }
-        } else if is_supply(&name) && pwr.as_ref().is_none_or(|(_, c)| pads > *c) {
-            pwr = Some((name, pads));
-        }
-    }
-    if let Some((name, _)) = gnd {
-        assigned.insert(name, *gnd_layer);
-    }
-    if let Some((name, _)) = pwr {
-        assigned.insert(name, *pwr_layer);
-    }
-    assigned
 }

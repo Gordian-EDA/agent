@@ -87,21 +87,39 @@ impl Entry {
     }
 }
 
-/// A proposed change awaiting the user's apply-gate decision. Built from the
-/// `apply_design` dry-run JSON the agent surfaces.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub struct PendingDiff {
-    pub added: Vec<String>,
-    pub removed: Vec<String>,
-    pub changed: Vec<String>,
-    pub nets_before: usize,
-    pub nets_after: usize,
+/// A proposed mutation awaiting the user's decision. Schematic applies carry a
+/// real dry-run diff; immediate PCB/project operations carry their exact name
+/// and model-supplied arguments because they cannot be previewed safely.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PendingApproval {
+    Schematic {
+        added: Vec<String>,
+        removed: Vec<String>,
+        changed: Vec<String>,
+        nets_before: usize,
+        nets_after: usize,
+    },
+    Operation {
+        operation: String,
+        arguments: Value,
+    },
 }
 
-impl PendingDiff {
-    /// Parse the `apply_design` dry-run JSON (`{ok, would_write, diff: {...}}`)
-    /// into a [`PendingDiff`]. Missing fields default to empty.
-    pub fn from_dry_run(v: &Value) -> Self {
+impl PendingApproval {
+    /// Parse either an immediate-operation proposal or the `apply_design`
+    /// dry-run JSON. Missing schematic diff fields default to empty.
+    pub fn from_payload(v: &Value) -> Self {
+        if v.get("approval_kind").and_then(Value::as_str) == Some("operation") {
+            return Self::Operation {
+                operation: v
+                    .get("operation")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown operation")
+                    .to_string(),
+                arguments: v.get("arguments").cloned().unwrap_or(Value::Null),
+            };
+        }
+
         let diff = v.get("diff").cloned().unwrap_or(Value::Null);
         let strings = |key: &str| -> Vec<String> {
             diff.get(key)
@@ -114,7 +132,7 @@ impl PendingDiff {
                 .unwrap_or_default()
         };
         let num = |key: &str| diff.get(key).and_then(Value::as_u64).unwrap_or(0) as usize;
-        Self {
+        Self::Schematic {
             added: strings("added"),
             removed: strings("removed"),
             changed: strings("changed"),

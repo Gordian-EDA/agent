@@ -1255,6 +1255,86 @@ fn place_board_after_seed_snapshot_reopen_is_ready() {
 }
 
 #[test]
+#[ignore = "live KiCAD IPC: verifies an interactive footprint move survives session restart"]
+fn move_parts_persists_across_session_reopen() {
+    let (ctx, _guard) = placed_board_ctx();
+    if skip_unstable_footprint_update(&ctx) {
+        return;
+    }
+
+    let moved = run_tool(
+        "move_parts",
+        serde_json::json!({
+            "moves": [{"reference": "R1", "to": [12.0, 13.0], "rotation": 90.0}]
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert!(moved.get("error").is_none(), "move failed: {moved}");
+
+    ctx.close_kicad_session();
+    let reopened = run_tool("get_board", serde_json::json!({}), &ctx).unwrap();
+    let r1 = reopened["board"]["parts"]
+        .as_array()
+        .and_then(|parts| parts.iter().find(|part| part["reference"] == "R1"))
+        .expect("R1 present after reopening the saved board");
+    assert_eq!(r1["x"], serde_json::json!(12.0), "reopened: {reopened}");
+    assert_eq!(r1["y"], serde_json::json!(13.0), "reopened: {reopened}");
+    assert_eq!(
+        r1["rotation"],
+        serde_json::json!(90.0),
+        "reopened: {reopened}"
+    );
+    ctx.close_kicad_session();
+}
+
+#[test]
+#[ignore = "live KiCAD IPC: verifies net-class edits survive session restart"]
+fn set_net_width_persists_across_session_reopen() {
+    let (ctx, _guard) = placed_board_ctx();
+    let mut version = ctx.env().cli_version.split('.').map(|part| {
+        part.chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>()
+            .parse::<u32>()
+            .unwrap_or(0)
+    });
+    let (major, minor, patch) = (
+        version.next().unwrap_or(0),
+        version.next().unwrap_or(0),
+        version.next().unwrap_or(0),
+    );
+    if major < 9 || (major == 9 && minor == 0 && patch < 3) {
+        eprintln!(
+            "SKIP: KiCAD {} does not reliably support SetNetClasses",
+            ctx.env().cli_version
+        );
+        return;
+    }
+    let updated = run_tool(
+        "set_net_width",
+        serde_json::json!({
+            "name": "Power",
+            "width": 0.75,
+            "clearance": 0.25,
+            "nets": ["GND"]
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(updated["ok"], serde_json::json!(true), "update: {updated}");
+
+    ctx.close_kicad_session();
+    let reopened = run_tool("get_board", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(
+        reopened["board"]["rules"]["net_widths"]["GND"],
+        serde_json::json!(0.75),
+        "reopened: {reopened}"
+    );
+    ctx.close_kicad_session();
+}
+
+#[test]
 #[ignore = "live KiCAD IPC: requires place/route/check against an active board session"]
 fn check_board_after_place_and_route_reports_drc() {
     let (ctx, _g) = placed_board_ctx();

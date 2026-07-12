@@ -180,7 +180,8 @@ fn route_live_board(ctx: &AgentRuntime) -> std::result::Result<Value, String> {
         board = super::active::board_problem(ctx)?;
     }
 
-    let rp = board.problem.clone();
+    let mut rp = board.problem.clone();
+    rp.bounds = super::place::routing_bounds(&rp.bounds, rp.outline.as_ref());
     let routed = route_with_engine(&rp, ctx.config().engines.pcb_router);
     let global_diagnostics = routed.global;
     let router_attempts = routed.attempts;

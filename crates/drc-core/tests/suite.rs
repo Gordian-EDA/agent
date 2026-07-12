@@ -36,7 +36,7 @@ fn problem(connections: Vec<Connection>, obstacles: Vec<Obstacle>) -> RouteProbl
         net_widths: Default::default(),
         outline: None,
         escape_layers: Default::default(),
-            plane_nets: Default::default(),
+        plane_nets: Default::default(),
     }
 }
 

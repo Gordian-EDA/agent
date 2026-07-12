@@ -69,9 +69,7 @@ fn node_head<'a>(text: &'a str, node: &Node) -> &'a str {
 /// The body span of the document root `(kicad_pcb …)`: byte range strictly
 /// inside its parens.
 fn root_body(text: &str) -> Result<(usize, usize), String> {
-    let start = text
-        .find("(kicad_pcb")
-        .ok_or("not a kicad_pcb document")?;
+    let start = text.find("(kicad_pcb").ok_or("not a kicad_pcb document")?;
     let root = child_nodes(text, start, text.len())
         .into_iter()
         .next()
@@ -139,10 +137,7 @@ pub fn patch_placements(text: &str, moves: &[FootprintMove]) -> Result<String, S
             .ok_or_else(|| format!("footprint {reference}: malformed (at …)"))?;
         let old_rot = old_rot.unwrap_or(0.0);
         let new_rot = mv.rotation_deg.unwrap_or(old_rot);
-        let (x, y) = (
-            mv.x_nm as f64 / 1_000_000.0,
-            mv.y_nm as f64 / 1_000_000.0,
-        );
+        let (x, y) = (mv.x_nm as f64 / 1_000_000.0, mv.y_nm as f64 / 1_000_000.0);
         let new_at = if new_rot.rem_euclid(360.0).abs() < 1e-9 {
             format!("(at {} {})", fmt_num(x), fmt_num(y))
         } else {
@@ -326,8 +321,14 @@ pub fn append_copper(
                 None,
             ),
             ViaSpan::Partial { from, to, micro } => (
-                layer_names.get(*from as usize).map(String::as_str).unwrap_or("F.Cu"),
-                layer_names.get(*to as usize).map(String::as_str).unwrap_or("B.Cu"),
+                layer_names
+                    .get(*from as usize)
+                    .map(String::as_str)
+                    .unwrap_or("F.Cu"),
+                layer_names
+                    .get(*to as usize)
+                    .map(String::as_str)
+                    .unwrap_or("B.Cu"),
                 Some(if *micro { "micro" } else { "blind" }),
             ),
         };
@@ -338,9 +339,7 @@ pub fn append_copper(
             from, to, code, uuid("via"),
         ));
     }
-    let close = text
-        .rfind(')')
-        .ok_or("unbalanced kicad_pcb document")?;
+    let close = text.rfind(')').ok_or("unbalanced kicad_pcb document")?;
     let mut result = String::with_capacity(text.len() + out.len());
     result.push_str(&text[..close]);
     result.push_str(&out);

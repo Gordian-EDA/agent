@@ -785,13 +785,23 @@ impl SchematicWriter {
         };
         for i in &self.instances {
             let h = i.half_extents.rotated_half_extents(i.angle);
-            acc(i.at[0] - h[0], i.at[1] - h[1], i.at[0] + h[0], i.at[1] + h[1]);
+            acc(
+                i.at[0] - h[0],
+                i.at[1] - h[1],
+                i.at[0] + h[0],
+                i.at[1] + h[1],
+            );
             for p in [i.ref_pos, i.val_pos].into_iter().flatten() {
                 acc(p.at[0] - 5.0, p.at[1] - 1.6, p.at[0] + 5.0, p.at[1] + 1.6);
             }
         }
         for w in &self.wires {
-            acc(w.a[0].min(w.b[0]), w.a[1].min(w.b[1]), w.a[0].max(w.b[0]), w.a[1].max(w.b[1]));
+            acc(
+                w.a[0].min(w.b[0]),
+                w.a[1].min(w.b[1]),
+                w.a[0].max(w.b[0]),
+                w.a[1].max(w.b[1]),
+            );
         }
         for l in &self.labels {
             let tw = text_width(&l.net);

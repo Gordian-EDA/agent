@@ -19,7 +19,7 @@ use super::super::md::{self, LineKind, MdLine, WrapMode};
 use super::{RenderCtx, body};
 
 /// The most rows an inline image preview may occupy, so a render can never eat the
-/// viewport (mirrors the apply-gate's `diff_height` cap).
+/// viewport (mirrors the approval pane's height cap).
 const MAX_IMAGE_ROWS: u16 = 20;
 const IMAGE_PREVIEW_COLS: u16 = 60;
 const TOP_PADDING_ROWS: u16 = 1;

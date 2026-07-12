@@ -1,6 +1,5 @@
 //! `place::refine` — overlap relaxers and placement thresholds.
 
-
 use super::*;
 use sch_place::item::Item;
 

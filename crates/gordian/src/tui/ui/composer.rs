@@ -1,5 +1,5 @@
 //! The input composer and the panes that cluster around it: the flat input row
-//! ([`draw_input`]), the apply-gate card just above it ([`draw_diff`]), and the
+//! ([`draw_input`]), the approval card just above it ([`draw_approval`]), and the
 //! two popups that float over it — the `/command` completion list
 //! ([`draw_completions`]) and the double-Esc unwind picker ([`draw_unwind`]).
 
@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
-use super::super::app::{App, PendingDiff};
+use super::super::app::{App, PendingApproval};
 use super::{MARGIN, body};
 
 /// The `/command` completion popup, floated just above the input pane.
@@ -79,17 +79,20 @@ pub(super) fn draw_completions(f: &mut Frame, input_area: Rect, app: &App) {
     );
 }
 
-/// Rows the apply-gate pane needs for this diff at this terminal width: action
-/// row, summary row, and a wrapped preview, capped so a huge diff can't squeeze
+/// Rows the approval pane needs at this terminal width: action row, summary row,
+/// and a wrapped diff/argument preview, capped so a large proposal cannot squeeze
 /// out the transcript.
-pub(super) fn diff_height(d: &PendingDiff, width: u16) -> u16 {
+pub(super) fn approval_height(pending: &PendingApproval, width: u16) -> u16 {
     let inner_w = width.saturating_sub(2 * MARGIN).max(1) as usize;
-    let preview_rows = diff_preview_text(d, 8).chars().count().div_ceil(inner_w) as u16;
+    let preview_rows = approval_preview_text(pending)
+        .chars()
+        .count()
+        .div_ceil(inner_w) as u16;
     (2 + preview_rows).clamp(3, 5)
 }
 
-pub(super) fn draw_diff(f: &mut Frame, area: Rect, app: &App) {
-    let Some(d) = app.pending.as_ref() else {
+pub(super) fn draw_approval(f: &mut Frame, area: Rect, app: &App) {
+    let Some(pending) = app.pending.as_ref() else {
         return;
     };
 
@@ -99,8 +102,12 @@ pub(super) fn draw_diff(f: &mut Frame, area: Rect, app: &App) {
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(Color::DarkGray);
+    let pending_label = match pending {
+        PendingApproval::Schematic { .. } => "schematic change pending",
+        PendingApproval::Operation { .. } => "operation pending",
+    };
     let action = Line::from(vec![
-        Span::styled("change pending", accent),
+        Span::styled(pending_label, accent),
         Span::styled("   ", dim),
         Span::styled(
             format!("[{}] approve", super::super::event::APPROVE_KEY),
@@ -115,37 +122,89 @@ pub(super) fn draw_diff(f: &mut Frame, area: Rect, app: &App) {
         ),
         Span::styled("   Esc cancel", dim),
     ]);
-    let summary = Line::from(vec![
-        Span::styled(
-            format!("+{} added", d.added.len()),
-            Style::default().fg(Color::Green),
+    let (summary, preview) = match pending {
+        PendingApproval::Schematic {
+            added,
+            removed,
+            changed,
+            nets_before,
+            nets_after,
+        } => (
+            Line::from(vec![
+                Span::styled(
+                    format!("+{} added", added.len()),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled("   ", dim),
+                Span::styled(
+                    format!("-{} removed", removed.len()),
+                    Style::default().fg(Color::Red),
+                ),
+                Span::styled("   ", dim),
+                Span::styled(
+                    format!("~{} changed", changed.len()),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled("   ", dim),
+                Span::styled(
+                    format!("nets {nets_before} -> {nets_after}"),
+                    Style::default().fg(Color::Gray),
+                ),
+            ]),
+            Line::from(diff_preview_spans(added, removed, changed, 8)),
         ),
-        Span::styled("   ", dim),
-        Span::styled(
-            format!("-{} removed", d.removed.len()),
-            Style::default().fg(Color::Red),
+        PendingApproval::Operation {
+            operation,
+            arguments,
+        } => (
+            Line::from(vec![
+                Span::styled("run  ", dim),
+                Span::styled(
+                    operation.clone(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  (mutates project/board)", dim),
+            ]),
+            Line::from(vec![
+                Span::styled("args  ", dim),
+                Span::styled(
+                    operation_args_text(arguments),
+                    Style::default().fg(Color::Gray),
+                ),
+            ]),
         ),
-        Span::styled("   ", dim),
-        Span::styled(
-            format!("~{} changed", d.changed.len()),
-            Style::default().fg(Color::Yellow),
-        ),
-        Span::styled("   ", dim),
-        Span::styled(
-            format!("nets {} -> {}", d.nets_before, d.nets_after),
-            Style::default().fg(Color::Gray),
-        ),
-    ]);
-    let preview = Line::from(diff_preview_spans(d, 8));
+    };
 
     let para = Paragraph::new(vec![action, summary, preview]).wrap(Wrap { trim: true });
     f.render_widget(para, body(area));
 }
 
-fn diff_preview_text(d: &PendingDiff, limit: usize) -> String {
+fn approval_preview_text(pending: &PendingApproval) -> String {
+    match pending {
+        PendingApproval::Schematic {
+            added,
+            removed,
+            changed,
+            ..
+        } => diff_preview_text(added, removed, changed, 8),
+        PendingApproval::Operation {
+            operation,
+            arguments,
+        } => format!("run {operation}  args {}", operation_args_text(arguments)),
+    }
+}
+
+fn diff_preview_text(
+    added: &[String],
+    removed: &[String],
+    changed: &[String],
+    limit: usize,
+) -> String {
     let mut parts = Vec::new();
     let mut total = 0usize;
-    for (prefix, refs) in [("+", &d.added), ("-", &d.removed), ("~", &d.changed)] {
+    for (prefix, refs) in [("+", added), ("-", removed), ("~", changed)] {
         for r in refs {
             total += 1;
             if parts.len() < limit {
@@ -163,14 +222,19 @@ fn diff_preview_text(d: &PendingDiff, limit: usize) -> String {
     }
 }
 
-fn diff_preview_spans(d: &PendingDiff, limit: usize) -> Vec<Span<'static>> {
+fn diff_preview_spans(
+    added: &[String],
+    removed: &[String],
+    changed: &[String],
+    limit: usize,
+) -> Vec<Span<'static>> {
     let mut spans = vec![Span::styled("refs  ", Style::default().fg(Color::DarkGray))];
     let mut shown = 0usize;
     let mut total = 0usize;
     for (prefix, refs, color) in [
-        ("+", &d.added, Color::Green),
-        ("-", &d.removed, Color::Red),
-        ("~", &d.changed, Color::Yellow),
+        ("+", added, Color::Green),
+        ("-", removed, Color::Red),
+        ("~", changed, Color::Yellow),
     ] {
         for r in refs {
             total += 1;
@@ -199,6 +263,17 @@ fn diff_preview_spans(d: &PendingDiff, limit: usize) -> Vec<Span<'static>> {
         ));
     }
     spans
+}
+
+fn operation_args_text(arguments: &serde_json::Value) -> String {
+    const MAX_CHARS: usize = 240;
+    let raw = serde_json::to_string(arguments).unwrap_or_else(|_| "{}".into());
+    if raw.chars().count() <= MAX_CHARS {
+        return raw;
+    }
+    let mut shortened: String = raw.chars().take(MAX_CHARS - 1).collect();
+    shortened.push('…');
+    shortened
 }
 
 /// Rows the composer needs: top/bottom separators plus one row per draft line
@@ -468,19 +543,41 @@ mod tests {
 
     #[test]
     fn big_diffs_get_a_taller_pane_capped() {
-        let small = PendingDiff {
+        let small = PendingApproval::Schematic {
             added: vec!["U1".into()],
-            ..Default::default()
+            removed: vec![],
+            changed: vec![],
+            nets_before: 0,
+            nets_after: 1,
         };
-        assert_eq!(diff_height(&small, 80), 3);
-        let big = PendingDiff {
+        assert_eq!(approval_height(&small, 80), 3);
+        let big = PendingApproval::Schematic {
             added: (0..60).map(|i| format!("LONG_REF_{i}")).collect(),
-            ..Default::default()
+            removed: vec![],
+            changed: vec![],
+            nets_before: 0,
+            nets_after: 60,
         };
         assert_eq!(
-            diff_height(&big, 24),
+            approval_height(&big, 24),
             5,
             "capped so it can't eat the transcript"
         );
+    }
+
+    #[test]
+    fn operation_approval_names_the_tool_and_arguments() {
+        let pending = PendingApproval::Operation {
+            operation: "move_parts".into(),
+            arguments: serde_json::json!({
+                "moves": [{"reference": "U1", "by": [1, 2]}]
+            }),
+        };
+
+        let preview = approval_preview_text(&pending);
+
+        assert!(preview.contains("move_parts"), "{preview}");
+        assert!(preview.contains("U1"), "{preview}");
+        assert!(!preview.contains("no component changes"), "{preview}");
     }
 }

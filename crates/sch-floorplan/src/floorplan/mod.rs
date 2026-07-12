@@ -20,4 +20,4 @@ mod infer;
 pub(crate) mod place;
 
 pub use infer::{baseline_ir, infer_ir};
-pub use place::{compose_writers, emit_group, emit_strategy, emit_writer, SchematicPlaceProblem};
+pub use place::{SchematicPlaceProblem, compose_writers, emit_group, emit_strategy, emit_writer};

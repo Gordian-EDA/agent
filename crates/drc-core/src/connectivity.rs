@@ -110,17 +110,36 @@ pub fn check(problem: &RouteProblem, solution: &RouteSolution) -> Vec<Violation>
         }
     }
 
-    // Plane stitching: a net carried by a solid inner plane joins every one of
-    // its through-vias (each barrel meets the plane copper). Foreign copper is
-    // relieved by anti-pads on a real board, so planes contribute ONLY same-net
-    // unions, never merges. Modeled as unions between the net's via elements —
-    // no geometry needed.
-    for net in problem.plane_nets.keys() {
+    // Plane stitching: a net carried by a solid inner plane joins every through
+    // via and every pad present on that plane (notably through-hole pads). Foreign
+    // copper is relieved by anti-pads on a real board, so planes contribute only
+    // same-net unions, never merges.
+    for (net, plane_layer) in &problem.plane_nets {
         let mut first: Option<usize> = None;
         for (idx, el) in elements.iter().enumerate() {
-            let is_net_via = matches!(el.shape, Shape::Via { .. })
-                && el.owners.iter().any(|o| o == net);
-            if !is_net_via {
+            if !el.owners.iter().any(|owner| owner == net) {
+                continue;
+            }
+            let reaches_plane = match &el.shape {
+                Shape::Via { .. } => true,
+                Shape::Pad { layers, .. } => {
+                    layers
+                        .iter()
+                        .any(|layer| layer.index(problem.layer_count) == Some(*plane_layer))
+                        // Placement represents a plated through-hole pad by
+                        // its outer copper faces; the barrel implicitly spans
+                        // every inner plane between them.
+                        || (layers
+                            .iter()
+                            .any(|layer| layer.index(problem.layer_count) == Some(0))
+                            && layers.iter().any(|layer| {
+                                layer.index(problem.layer_count)
+                                    == problem.layer_count.checked_sub(1)
+                            }))
+                }
+                _ => false,
+            };
+            if !reaches_plane {
                 continue;
             }
             match first {
@@ -527,6 +546,39 @@ mod tests {
             escape_layers: Default::default(),
             plane_nets: Default::default(),
         }
+    }
+
+    #[test]
+    fn plane_joins_through_hole_pad_to_fanout_via() {
+        let mut p = problem(
+            vec![conn("GND", &[(2.0, 2.0, "top"), (8.0, 2.0, "top")])],
+            vec![
+                pad(
+                    &["GND"],
+                    (2.0, 2.0),
+                    1.0,
+                    1.0,
+                    // The plated barrel is implicit when both outer copper
+                    // faces are present; inner layers are not enumerated.
+                    &["top", "bottom"],
+                ),
+                pad(&["GND"], (8.0, 2.0), 1.0, 1.0, &["top"]),
+            ],
+        );
+        p.layer_count = 4;
+        p.plane_nets.insert("GND".to_owned(), 1);
+        let solution = RouteSolution {
+            traces: vec![],
+            vias: vec![Via {
+                connection: "GND".to_owned(),
+                at: Point2 { x: 8.0, y: 2.0 },
+                diameter: 0.6,
+                drill: 0.3,
+                span: ViaSpan::Through,
+            }],
+        };
+
+        assert!(check(&p, &solution).is_empty());
     }
 
     fn conn(name: &str, pts: &[(f64, f64, &str)]) -> Connection {

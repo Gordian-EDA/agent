@@ -458,9 +458,6 @@ fn route_sequential_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoR
     }
 }
 
-/// As [`route_auto`], but keeps the negotiated global-routing report from the
-/// primary detailed candidate when that candidate ran.
-
 /// Split plane-net connections out of `problem`: a net carried by a solid
 /// inner plane connects by ONE through-via per pad (the plane provides the
 /// tree), so the trace engines never see it — a 100-pad power net costs
@@ -510,26 +507,53 @@ fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, Vec<Via>)> {
             .collect()
     };
     let mut vias: Vec<Via> = Vec::new();
+    let mut handled_plane_connection = false;
     for c in &plane_conns {
-        let (viable, stubbed): (Vec<_>, Vec<_>) = c
+        let plane_layer = problem.plane_nets[&c.name];
+        let reaches_plane = |pt: &crate::problem::RoutePoint| {
+            problem.obstacles.iter().any(|ob| {
+                // A same-net zone spans most of the board and is represented as
+                // an obstacle too.  It proves that the plane exists, not that a
+                // surface-mount terminal physically reaches that plane.
+                ob.kind != "zone"
+                    && ob.connected_to.iter().any(|owner| owner == &c.name)
+                    && (ob
+                        .layers
+                        .iter()
+                        .any(|layer| layer.index(problem.layer_count) == Some(plane_layer))
+                        // Placement models through-hole pads by their two outer
+                        // copper faces.  The plated barrel spans the intervening
+                        // inner layers even though they are not enumerated.
+                        || (ob.layers.iter().any(|layer| {
+                            layer.index(problem.layer_count) == Some(0)
+                        }) && ob.layers.iter().any(|layer| {
+                            layer.index(problem.layer_count)
+                                == problem.layer_count.checked_sub(1)
+                        })))
+                    && (pt.x - ob.center.x).abs() <= ob.width / 2.0 + geom::EPS
+                    && (pt.y - ob.center.y).abs() <= ob.height / 2.0 + geom::EPS
+            })
+        };
+        let (anchors, stubbed): (Vec<_>, Vec<_>) = c
             .points_to_connect
             .iter()
-            .partition(|pt| via_fits(pt.point(), &c.name));
+            .partition(|pt| reaches_plane(pt) || via_fits(pt.point(), &c.name));
         // Every via-less pad must have a via site CLOSE BY (a 0.5mm-pitch QFN
         // power pin stubs 1-2mm to its decoupling cap). A far stub would just
         // re-create the long power trace the fanout exists to remove — such
         // nets route better as ordinary copper.
         const STUB_RADIUS_MM: f64 = 5.0;
         let stub_reachable = |pt: &crate::problem::RoutePoint| {
-            viable
+            anchors
                 .iter()
                 .any(|v| v.point().dist(pt.point()) <= STUB_RADIUS_MM)
         };
-        if viable.is_empty() || !stubbed.iter().all(|pt| stub_reachable(pt)) {
+        if anchors.is_empty() || !stubbed.iter().all(|pt| stub_reachable(pt)) {
             sub.connections.push(c.clone());
             continue;
         }
-        for pt in &viable {
+        handled_plane_connection = true;
+        for pt in anchors.iter().filter(|pt| !reaches_plane(pt)) {
             vias.push(Via {
                 connection: c.name.clone(),
                 at: pt.point(),
@@ -539,21 +563,21 @@ fn plane_fanout(problem: &RouteProblem) -> Option<(RouteProblem, Vec<Via>)> {
             });
         }
         for pt in stubbed {
-            let nearest = viable
+            let nearest = anchors
                 .iter()
                 .min_by(|a, b| {
                     a.point()
                         .dist(pt.point())
                         .total_cmp(&b.point().dist(pt.point()))
                 })
-                .expect("viable is non-empty");
+                .expect("anchors is non-empty");
             sub.connections.push(crate::problem::Connection {
                 name: c.name.clone(),
                 points_to_connect: vec![pt.clone(), (*nearest).clone()],
             });
         }
     }
-    if vias.is_empty() {
+    if !handled_plane_connection {
         return None;
     }
     // The signal engines must SEE the fanout barrels, or they route straight
@@ -606,8 +630,7 @@ fn route_auto_with_diagnostics_inner(problem: &RouteProblem) -> RouteAutoRun {
     // channels), so every one gets its shot, cheapest first — one engine's
     // failure never predicts the next's. A clean via-free result ships
     // immediately; sequential-grid then closes the cheap tier.
-    let specialists: [&dyn Router; 5] =
-        [&direct, &layer_hop, &via_escape, &pattern, &channel];
+    let specialists: [&dyn Router; 5] = [&direct, &layer_hop, &via_escape, &pattern, &channel];
     for engine in specialists {
         if !engine.can_route(problem) {
             continue;
@@ -2564,6 +2587,57 @@ mod tests {
             escape_layers: Default::default(),
             plane_nets: Default::default(),
         }
+    }
+
+    #[test]
+    fn plane_fanout_uses_through_hole_pad_without_redundant_via() {
+        let mut p = simple_two_point_problem();
+        p.layer_count = 4;
+        p.plane_nets.insert("N".to_owned(), 1);
+        p.obstacles = vec![
+            crate::problem::Obstacle {
+                kind: "zone".to_owned(),
+                layers: vec![LayerRef("inner1".to_owned())],
+                center: Point2 { x: 10.0, y: 5.0 },
+                width: 20.0,
+                height: 10.0,
+                connected_to: vec!["N".to_owned()],
+            },
+            crate::problem::Obstacle {
+                kind: "rect".to_owned(),
+                // `pcb-model::place::to_route_problem` represents a plated
+                // through-hole pad by its two outer copper faces; the barrel's
+                // inner-layer span is implicit.
+                layers: vec![LayerRef::top(), LayerRef::bottom()],
+                center: Point2 { x: 2.0, y: 5.0 },
+                width: 1.0,
+                height: 1.0,
+                connected_to: vec!["N".to_owned()],
+            },
+            crate::problem::Obstacle {
+                kind: "rect".to_owned(),
+                layers: vec![LayerRef::top()],
+                center: Point2 { x: 18.0, y: 5.0 },
+                width: 1.0,
+                height: 1.0,
+                connected_to: vec!["N".to_owned()],
+            },
+        ];
+
+        let (sub, vias) = plane_fanout(&p).expect("plane connection handled");
+        assert!(sub.connections.is_empty());
+        assert_eq!(vias.len(), 1);
+        assert_eq!(vias[0].at, Point2 { x: 18.0, y: 5.0 });
+        assert!(
+            crate::connectivity::check(
+                &p,
+                &RouteSolution {
+                    traces: vec![],
+                    vias
+                }
+            )
+            .is_empty()
+        );
     }
 
     fn top_blocked_two_point_problem() -> RouteProblem {

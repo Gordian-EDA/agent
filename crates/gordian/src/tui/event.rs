@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn up_scrolls_when_the_gate_is_open() {
         let mut a = app();
-        a.update(Msg::PendingDiff(json!({
+        a.update(Msg::PendingApproval(json!({
             "diff": { "added": ["U1"], "removed": [], "changed": [] }
         })));
         assert!(matches!(map_key(&a, key(KeyCode::Up)), Some(Msg::ScrollUp)));
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn a_key_resolves_gate_when_pending() {
         let mut a = app();
-        a.update(Msg::PendingDiff(json!({
+        a.update(Msg::PendingApproval(json!({
             "diff": { "added": ["U1"], "removed": [], "changed": [] }
         })));
         // With the gate open, 'a' maps to Approve and resolves it.

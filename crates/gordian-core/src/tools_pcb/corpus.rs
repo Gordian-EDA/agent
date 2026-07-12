@@ -9,8 +9,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use kicad_footprint::{FootprintCatalog, FootprintId};
+use kicad_ipc::FootprintMove;
 use pcb_model::place::{Edge, GroupHint, Placement, PlacementHints};
-use pcb_model::{LayerRef, Obstacle, Point2, Polygon, Rect, RouteProblem};
+use pcb_model::{LayerRef, Obstacle, Point2, Polygon, Rect, RouteProblem, RouteSolution};
 use pcb_place::placement::{LockedAt, PlaceProblem};
 use serde::Deserialize;
 
@@ -23,6 +24,30 @@ pub struct CorpusBoard {
     pub hints: PlacementHints,
     pub rules: CorpusRules,
     pub keepouts: Vec<CorpusKeepout>,
+    board_bounds: Rect,
+    seed_parts: Vec<CorpusSeedPart>,
+}
+
+#[derive(Debug, Clone)]
+struct CorpusSeedPart {
+    reference: String,
+    footprint: String,
+    pad_nets: BTreeMap<String, String>,
+    locked: Option<LockedAt>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CorpusDrcResult {
+    pub copper_violations: usize,
+    pub unconnected_items: usize,
+    pub ignored_zone_self_unconnected: usize,
+    pub issues: Vec<String>,
+}
+
+impl CorpusDrcResult {
+    pub fn is_ok(&self) -> bool {
+        self.copper_violations == 0 && self.unconnected_items == 0
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +93,7 @@ pub fn load_corpus_board(
 
 pub fn route_problem_for_placement(board: &CorpusBoard, placements: &[Placement]) -> RouteProblem {
     let mut rp = pcb_place::placement::to_route_problem(&board.problem, placements);
+    rp.bounds = routing_bounds(&rp.bounds, rp.outline.as_ref());
     rp.plane_nets = pcb_model::default_plane_nets(
         rp.layer_count,
         rp.connections
@@ -93,6 +119,117 @@ pub fn route_problem_for_placement(board: &CorpusBoard, placements: &[Placement]
         });
     }
     rp
+}
+
+/// Build a routed KiCad board for external DRC using the production seed
+/// writer and offline patchers.
+pub fn routed_board_text(
+    board: &CorpusBoard,
+    placements: &[Placement],
+    solution: &RouteSolution,
+    catalog: &FootprintCatalog,
+) -> std::result::Result<String, String> {
+    let spec = super::create::BoardSeedSpec {
+        bounds: board.board_bounds,
+        rules: super::create::SeedRules {
+            clearance: board.rules.clearance,
+            min_trace_width: board.rules.min_trace_width,
+            via_diameter: board.rules.via_diameter,
+            via_drill: board.rules.via_drill,
+            layer_count: board.rules.layer_count,
+            net_widths: board.rules.net_widths.clone(),
+            pours: Vec::new(),
+        },
+        parts: board
+            .seed_parts
+            .iter()
+            .map(|part| super::create::SeedPart {
+                reference: part.reference.clone(),
+                footprint: part.footprint.clone(),
+                pad_nets: part.pad_nets.clone(),
+                locked: part.locked.clone(),
+            })
+            .collect(),
+        outline: board.problem.outline.clone(),
+    };
+    let seed = super::create::emit_seed_board(&spec, catalog)?;
+    let moves = placements
+        .iter()
+        .map(|placement| FootprintMove {
+            reference: placement.reference.clone(),
+            x_nm: (placement.at.x * 1_000_000.0).round() as i64,
+            y_nm: (placement.at.y * 1_000_000.0).round() as i64,
+            rotation_deg: Some(placement.rotation),
+        })
+        .collect::<Vec<_>>();
+    let placed = super::patch::patch_placements(&seed, &moves)?;
+    let layer_names = copper_layer_names(board.rules.layer_count);
+    super::patch::append_copper(&placed, solution, board.rules.layer_count, &layer_names)
+}
+
+/// Synthesize a temporary routed board and check it with KiCad's DRC using the
+/// same acceptance policy as the live `check_board` tool.
+pub fn run_kicad_drc(
+    board: &CorpusBoard,
+    placements: &[Placement],
+    solution: &RouteSolution,
+    catalog: &FootprintCatalog,
+    env: &kicad_env::KicadEnv,
+) -> std::result::Result<CorpusDrcResult, String> {
+    let text = routed_board_text(board, placements, solution, catalog)?;
+    let dir = tempfile::Builder::new()
+        .prefix("gordian-corpus-drc-")
+        .tempdir()
+        .map_err(|e| format!("could not create temporary DRC directory: {e}"))?;
+    let path = dir.path().join("corpus.kicad_pcb");
+    std::fs::write(&path, text)
+        .map_err(|e| format!("could not write temporary routed board: {e}"))?;
+    let sessions = kicad_ipc::SessionManager::new();
+    let materialized = super::export::materialize_zones_for_drc(&path, env, &sessions);
+    sessions.close();
+    materialized?;
+    let report = kicad_cli::KicadCli::new(env)
+        .drc(&path)
+        .map_err(|e| format!("kicad-cli pcb drc failed: {e}"))?;
+    let gate = super::export::gate_drc(&report);
+    let issues = report
+        .violations
+        .iter()
+        .filter(|violation| !super::export::is_non_copper(violation))
+        .chain(
+            report
+                .unconnected_items
+                .iter()
+                .filter(|violation| !super::export::is_zone_self_unconnected(violation)),
+        )
+        .take(12)
+        .map(|violation| {
+            let items = violation
+                .items
+                .iter()
+                .map(|item| item.description.as_str())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!("{}: {} [{items}]", violation.kind, violation.description)
+        })
+        .collect();
+    Ok(CorpusDrcResult {
+        copper_violations: gate.copper_violations,
+        unconnected_items: gate.meaningful_unconnected,
+        ignored_zone_self_unconnected: gate.ignored_zone_self_unconnected,
+        issues,
+    })
+}
+
+fn copper_layer_names(layer_count: u32) -> Vec<String> {
+    let count = layer_count.max(2);
+    let mut names = Vec::with_capacity(count as usize);
+    names.push("F.Cu".to_owned());
+    for idx in 1..count.saturating_sub(1) {
+        names.push(format!("In{idx}.Cu"));
+    }
+    names.push("B.Cu".to_owned());
+    names
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,6 +268,7 @@ impl RawBoard {
         let place_keepouts = keepouts.iter().map(|k| k.rect).collect();
 
         let mut part_specs = Vec::with_capacity(self.parts.len());
+        let mut seed_parts = Vec::with_capacity(self.parts.len());
         let mut parts = Vec::with_capacity(self.parts.len());
         for raw_part in self.parts {
             let id = FootprintId::parse(&raw_part.footprint).map_err(|e| {
@@ -145,13 +283,20 @@ impl RawBoard {
                     raw_part.reference, raw_part.footprint
                 )
             })?;
+            let locked = raw_part.locked.map(RawLocked::into_locked);
             parts.push(part_from_footprint_layers(
                 &footprint,
                 &raw_part.reference,
                 &raw_part.pad_nets,
                 rules.layer_count,
-                raw_part.locked.map(RawLocked::into_locked),
+                locked.clone(),
             ));
+            seed_parts.push(CorpusSeedPart {
+                reference: raw_part.reference.clone(),
+                footprint: raw_part.footprint.clone(),
+                pad_nets: raw_part.pad_nets.clone(),
+                locked,
+            });
             part_specs.push((raw_part.reference, raw_part.footprint));
         }
 
@@ -159,7 +304,7 @@ impl RawBoard {
         add_auto_edge_hints(&mut hints, &part_specs);
 
         let problem = PlaceProblem {
-            bounds: routing_bounds(&bounds, outline.as_ref()),
+            bounds,
             clearance: rules.clearance,
             layer_count: rules.layer_count,
             min_trace_width: rules.min_trace_width,
@@ -173,6 +318,8 @@ impl RawBoard {
             hints,
             rules,
             keepouts,
+            board_bounds: bounds,
+            seed_parts,
         })
     }
 }
