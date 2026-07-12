@@ -301,7 +301,8 @@ impl Shell {
         }
         // The aborted task never sends done_tx, so close the turn ourselves —
         // flagged as a user interruption so the indicator reads "Interrupted".
-        app.update(Msg::TurnEnded(TurnEndReason::Interrupted));
+        let follow_up = app.update(Msg::TurnEnded(TurnEndReason::Interrupted));
+        self.handle(app, follow_up);
     }
 
     /// `/clear` — the transcript is already wiped; drop the agent's history

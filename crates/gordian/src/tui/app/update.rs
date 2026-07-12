@@ -343,11 +343,17 @@ impl App {
                 Action::None
             }
             Msg::TurnEnded(reason) => {
+                let interrupted = reason == TurnEndReason::Interrupted;
                 self.end_turn(reason);
-                // A message queued (via Tab) during the turn now runs.
+                // A queued message normally runs next. An explicit user
+                // interruption restores it to the composer instead: cancelling
+                // one task must not silently launch another.
                 if let Some(prompt) = self.queued.take() {
                     self.input = prompt;
                     self.cursor = self.char_len();
+                    if interrupted {
+                        return Action::None;
+                    }
                     return self.submit();
                 }
                 Action::None

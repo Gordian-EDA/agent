@@ -239,6 +239,24 @@ mod tests {
     }
 
     #[test]
+    fn interrupting_a_turn_restores_the_queue_without_starting_a_phantom_turn() {
+        let mut a = app();
+        type_str(&mut a, "first");
+        assert!(matches!(a.update(Msg::Submit), Action::SpawnTurn(_)));
+        type_str(&mut a, "do this later");
+        a.update(Msg::Complete);
+        assert_eq!(a.queued.as_deref(), Some("do this later"));
+
+        let action = a.update(Msg::TurnEnded(TurnEndReason::Interrupted));
+
+        assert_eq!(action, Action::None);
+        assert!(!a.running, "no task was spawned after cancellation");
+        assert!(a.queued.is_none());
+        assert_eq!(a.input, "do this later");
+        assert_eq!(a.cursor, "do this later".chars().count());
+    }
+
+    #[test]
     fn a_large_paste_collapses_to_a_placeholder_then_expands_on_submit() {
         let mut a = app();
         let big = "x".repeat(500);
