@@ -7,7 +7,7 @@
 //! `.gitignore` containing `*` so it never pollutes the user's repo. The
 //! `session/` subdirectory is reserved for a future resume feature.
 
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub struct Workspace {
@@ -18,10 +18,28 @@ impl Workspace {
     /// Open (creating if needed) the `.gordian/` directory under `project_dir`.
     pub fn for_project(project_dir: &Path) -> io::Result<Self> {
         let root = project_dir.join(".gordian");
-        std::fs::create_dir_all(root.join("renders"))?;
+        ensure_real_dir(&root)?;
+        ensure_real_dir(&root.join("renders"))?;
         let gi = root.join(".gitignore");
-        if !gi.exists() {
-            std::fs::write(&gi, "*\n")?;
+        match std::fs::symlink_metadata(&gi) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "workspace file must not be a symbolic link: {}",
+                        gi.display()
+                    ),
+                ));
+            }
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("workspace path is not a file: {}", gi.display()),
+                ));
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => atomic_write(&gi, b"*\n")?,
+            Err(err) => return Err(err),
         }
         Ok(Self { root })
     }
@@ -33,24 +51,27 @@ impl Workspace {
 
     /// The current draft text, if a draft exists.
     pub fn read_draft(&self) -> Option<String> {
-        std::fs::read_to_string(self.draft_path()).ok()
+        read_regular_to_string(&self.draft_path()).ok()
     }
 
     /// Write the draft and record which schematic text it was seeded from
     /// (`None` when no schematic exists yet). Passing `sch_text = None` records
     /// a null hash, so a later `draft_is_stale(Some(_))` returns `true`.
     pub fn write_draft(&self, yaml: &str, sch_text: Option<&str>) -> io::Result<()> {
-        std::fs::write(self.draft_path(), yaml)?;
+        atomic_write(&self.draft_path(), yaml.as_bytes())?;
         let meta = serde_json::json!({
             "seeded_from_sch_hash": sch_text.map(fnv1a64),
         });
-        std::fs::write(self.root.join("draft.meta.json"), meta.to_string())
+        atomic_write(
+            &self.root.join("draft.meta.json"),
+            meta.to_string().as_bytes(),
+        )
     }
 
     /// True when the on-disk schematic no longer matches what the draft was
     /// seeded from (the user edited it in KiCAD out-of-band).
     pub fn draft_is_stale(&self, current_sch_text: Option<&str>) -> bool {
-        let Ok(meta) = std::fs::read_to_string(self.root.join("draft.meta.json")) else {
+        let Ok(meta) = read_regular_to_string(&self.root.join("draft.meta.json")) else {
             // No meta: a draft without a recorded seed hash can't be trusted
             // (e.g. a partial write), so treat it as stale; a fresh workspace
             // with no draft at all is simply not stale.
@@ -77,6 +98,79 @@ impl Workspace {
         }
         Err(io::Error::other("renders/ directory is full"))
     }
+}
+
+fn ensure_real_dir(path: &Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "workspace directory must not be a symbolic link: {}",
+                path.display()
+            ),
+        )),
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("workspace path is not a directory: {}", path.display()),
+        )),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => std::fs::create_dir(path),
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(unix)]
+fn read_regular_to_string(path: &Path) -> io::Result<String> {
+    use std::os::unix::fs::MetadataExt;
+
+    // Open first, then compare the descriptor's identity to a non-following
+    // lookup of the leaf. This rejects both an ordinary symlink and a symlink
+    // swapped into place during the open without ever reading from its target.
+    let mut file = std::fs::File::open(path)?;
+    let opened = file.metadata()?;
+    let leaf = std::fs::symlink_metadata(path)?;
+    if leaf.file_type().is_symlink()
+        || !opened.is_file()
+        || opened.dev() != leaf.dev()
+        || opened.ino() != leaf.ino()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("workspace path is not a regular file: {}", path.display()),
+        ));
+    }
+    let mut out = String::new();
+    file.read_to_string(&mut out)?;
+    Ok(out)
+}
+
+#[cfg(not(unix))]
+fn read_regular_to_string(path: &Path) -> io::Result<String> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("workspace path is not a regular file: {}", path.display()),
+        ));
+    }
+    std::fs::read_to_string(path)
+}
+
+/// Replace one state file atomically from a temporary file in the same
+/// directory. Readers see either the complete old value or the complete new
+/// value; an existing leaf symlink is replaced rather than followed.
+fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("workspace path has no parent: {}", path.display()),
+        )
+    })?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(contents)?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|err| err.error)?;
+    Ok(())
 }
 
 /// FNV-1a 64-bit — tiny, dependency-free content hash for staleness checks.
@@ -131,5 +225,51 @@ mod tests {
         let b = ws.next_render_path().unwrap();
         assert!(a.ends_with("render-001.png"), "{}", a.display());
         assert!(b.ends_with("render-002.png"), "{}", b.display());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_directory_symlink_cannot_escape_the_project() {
+        use std::os::unix::fs::symlink;
+
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), project.path().join(".gordian")).unwrap();
+
+        let err = Workspace::for_project(project.path())
+            .err()
+            .expect("workspace symlink must be rejected");
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(!outside.path().join("renders").exists());
+        assert!(!outside.path().join(".gitignore").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn draft_symlink_is_never_read_or_followed_by_atomic_write() {
+        use std::os::unix::fs::symlink;
+
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ws = Workspace::for_project(project.path()).unwrap();
+        let target = outside.path().join("secret.kicad_sch");
+        std::fs::write(&target, "outside secret").unwrap();
+        symlink(&target, ws.draft_path()).unwrap();
+
+        assert!(
+            ws.read_draft().is_none(),
+            "draft reads must reject symlinks"
+        );
+        ws.write_draft("version: 1\n", None).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "outside secret");
+        assert_eq!(ws.read_draft().as_deref(), Some("version: 1\n"));
+        assert!(
+            !std::fs::symlink_metadata(ws.draft_path())
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 }
