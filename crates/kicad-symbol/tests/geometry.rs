@@ -113,6 +113,110 @@ fn split_symbol_dir_geometry_resolves_extends() {
 }
 
 #[test]
+fn derived_definition_overlays_child_properties_across_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Parts.kicad_sym"),
+        r#"(kicad_symbol_lib
+	(version 20231120)
+	(generator "test")
+	(symbol "Base"
+		(property "Value" "BASE-1V5" (at 0 0 0))
+		(property "Footprint" "Package:SOT-23-5" (at 0 0 0))
+		(property "Datasheet" "https://example.test/base.pdf" (at 0 0 0))
+		(property "Description" "150mA base regulator" (at 0 0 0))
+		(symbol "Base_1_1"
+			(pin power_in line (at 0 0 0) (length 2.54)
+				(name "VIN" (effects (font (size 1.27 1.27))))
+				(number "1" (effects (font (size 1.27 1.27)))))
+		)
+	)
+	(symbol "Mid"
+		(extends "Base")
+		(property "Description" "400mA intermediate regulator" (at 0 0 0))
+	)
+	(symbol "Child"
+		(extends "Mid")
+		(property "Value" "CHILD-3V3" (at 0 0 0))
+		(property "Datasheet" "https://example.test/child.pdf" (at 0 0 0))
+		(property "Manufacturer" "Example Semi" (at 0 0 0))
+	)
+)
+"#,
+    )
+    .unwrap();
+
+    let env = KicadEnv::with_symbol_dir(dir.path().to_path_buf());
+    let g = SymbolGeometry::load(&env, "Parts:Child").unwrap();
+    let def = g.definition_sexpr();
+
+    assert_eq!(g.pins.len(), 1);
+    assert!(def.contains("\"Parts:Child\""));
+    assert!(def.contains("\"CHILD-3V3\""), "{def}");
+    assert!(def.contains("https://example.test/child.pdf"), "{def}");
+    assert!(def.contains("400mA intermediate regulator"), "{def}");
+    assert!(def.contains("\"Package:SOT-23-5\""), "{def}");
+    assert!(def.contains("\"Manufacturer\" \"Example Semi\""), "{def}");
+    assert!(!def.contains("BASE-1V5"), "{def}");
+    assert!(!def.contains("150mA base regulator"), "{def}");
+    assert!(!def.contains("example.test/base.pdf"), "{def}");
+    assert!(!def.contains("(extends"), "{def}");
+    assert!(!def.contains("(symbol \"Base_"), "{def}");
+    assert_eq!(def.matches('(').count(), def.matches(')').count());
+}
+
+#[test]
+fn installed_derived_definitions_match_child_library_properties() {
+    let Some(env) = KicadEnv::detect() else {
+        eprintln!("SKIP: no KiCAD install detected");
+        return;
+    };
+    let g = SymbolGeometry::load(&env, "Regulator_Linear:AP2112K-3.3").unwrap();
+    let def = g.definition_sexpr();
+
+    assert!(def.contains("\"Value\" \"AP2112K-3.3\""), "{def}");
+    assert!(def.contains("Datasheets/AP2112.pdf"), "{def}");
+    assert!(def.contains("600mA low dropout linear regulator"), "{def}");
+    assert!(!def.contains("AP2204K-1.5"), "{def}");
+    assert!(!def.contains("Datasheets/AP2204.pdf"), "{def}");
+    assert!(!def.contains("150mA low dropout linear regulator"), "{def}");
+
+    // KiCad's own library parity check is the acceptance gate: the flattened
+    // cached copy must compare equal to the installed derived symbol.
+    let sch = build_schematic("Regulator_Linear:AP2112K-3.3", def, &g);
+    let tmp = tempfile::Builder::new()
+        .suffix(".kicad_sch")
+        .tempfile()
+        .unwrap();
+    std::fs::write(tmp.path(), sch).unwrap();
+    let erc = KicadCli::new(&env).erc(tmp.path()).unwrap();
+    let mismatches: Vec<_> = erc
+        .violations
+        .iter()
+        .filter(|v| v.kind == "lib_symbol_mismatch")
+        .collect();
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+
+    let g = SymbolGeometry::load(&env, "Power_Protection:USBLC6-2SC6").unwrap();
+    let def = g.definition_sexpr();
+    assert!(def.contains("\"Value\" \"USBLC6-2SC6\""), "{def}");
+    assert!(def.contains("Package_TO_SOT_SMD:SOT-23-6"), "{def}");
+    assert!(def.contains("2 data-line, SOT-23-6"), "{def}");
+    assert!(!def.contains("USBLC6-2P6"), "{def}");
+    assert!(!def.contains("Package_TO_SOT_SMD:SOT-666"), "{def}");
+
+    let sch = build_schematic("Power_Protection:USBLC6-2SC6", def, &g);
+    std::fs::write(tmp.path(), sch).unwrap();
+    let erc = KicadCli::new(&env).erc(tmp.path()).unwrap();
+    let mismatches: Vec<_> = erc
+        .violations
+        .iter()
+        .filter(|v| v.kind == "lib_symbol_mismatch")
+        .collect();
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+#[test]
 fn lib_symbols_definition_is_embeddable() {
     let Some(env) = KicadEnv::detect() else {
         eprintln!("SKIP: no KiCAD install detected");

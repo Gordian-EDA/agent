@@ -140,7 +140,7 @@ impl SymbolGeometry {
 
         // Raw definition: the parent body's block, retargeted to `lib_id` and
         // (when derived) with nested sub-block prefixes rewritten.
-        let raw_definition = build_definition(&library.texts, lib_id, name, body)?;
+        let raw_definition = build_definition(&library.texts, symbols, lib_id, name, sym, body)?;
 
         Ok(SymbolGeometry {
             lib_id: lib_id.to_string(),
@@ -301,8 +301,10 @@ fn unit_number(block_name: &str) -> Option<u8> {
 /// rewrite names so the block is valid inside `(lib_symbols)`.
 fn build_definition(
     texts: &[String],
+    symbols: &[Symbol],
     lib_id: &str,
     requested_name: &str,
+    requested: &Symbol,
     body: &Symbol,
 ) -> io::Result<String> {
     let body_name = body
@@ -320,8 +322,36 @@ fn build_definition(
             )
         })?;
 
+    // A derived symbol's body lives in its parent, but its properties do not:
+    // KiCad permits every descendant in an `extends` chain to override fields
+    // such as Value, Footprint, Datasheet, and Description.  Flatten those
+    // overrides from the body outward before retargeting the definition.  A
+    // plain copy of the parent body would silently advertise the parent's part
+    // number and ratings in the generated schematic.
+    let mut out = block;
+    for descendant in inheritance_chain(symbols, requested, body) {
+        let descendant_name = descendant.name.as_deref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "derived symbol in inheritance chain has no name",
+            )
+        })?;
+        let descendant_block = texts
+            .iter()
+            .find_map(|text| symbol_block(text, descendant_name))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "could not locate derived (symbol {descendant_name:?} …) block in source"
+                    ),
+                )
+            })?;
+        out = overlay_properties(out, &descendant_block)?;
+    }
+
     // 1) Retarget the top-level name atom to the fully-qualified lib_id.
-    let mut out = replace_top_name(&block, body_name, lib_id);
+    out = replace_top_name(&out, body_name, lib_id);
 
     // 2) Derived symbol: the body came from a different (parent) symbol, so
     //    rewrite the nested sub-block prefixes `Parent_*` -> `Requested_*` so
@@ -334,6 +364,117 @@ fn build_definition(
     }
 
     Ok(out)
+}
+
+/// Return descendants from the body toward `requested`, excluding the body.
+/// Applying their properties in this order implements nearest-child-wins
+/// inheritance for chains of arbitrary depth.
+fn inheritance_chain<'a>(
+    symbols: &'a [Symbol],
+    requested: &'a Symbol,
+    body: &'a Symbol,
+) -> Vec<&'a Symbol> {
+    let body_name = body.name.as_deref();
+    let mut cur = requested;
+    let mut descendants = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    while cur.name.as_deref() != body_name {
+        let Some(name) = cur.name.as_deref() else {
+            break;
+        };
+        if !seen.insert(name) {
+            break;
+        }
+        descendants.push(cur);
+        let Some(parent) = cur.extends.as_deref().and_then(|p| find_symbol(symbols, p)) else {
+            break;
+        };
+        cur = parent;
+    }
+
+    descendants.reverse();
+    descendants
+}
+
+/// Replace the base definition's direct `(property …)` nodes with the direct
+/// property nodes declared by one derived symbol.  CST spans keep arbitrary
+/// quoted strings and formatting intact.
+fn overlay_properties(mut base: String, derived: &str) -> io::Result<String> {
+    for (key, replacement) in direct_properties(derived)? {
+        if let Some(span) = direct_property_span(&base, &key)? {
+            base.replace_range(span, &replacement);
+        } else {
+            // Custom properties need not exist on the body.  Keep them at the
+            // top level, immediately before the first graphical unit block.
+            let insert_at = first_direct_symbol_span(&base)?
+                .map_or_else(|| base.rfind(')').unwrap_or(base.len()), |span| span.start);
+            base.insert_str(insert_at, &format!("{replacement}\n\t\t"));
+        }
+    }
+    Ok(base)
+}
+
+fn direct_properties(block: &str) -> io::Result<Vec<(String, String)>> {
+    let mut properties = Vec::new();
+    for (head, key, span) in direct_child_spans(block)? {
+        if head == "property"
+            && let Some(key) = key
+        {
+            properties.push((key, block[span].to_string()));
+        }
+    }
+    Ok(properties)
+}
+
+fn direct_property_span(block: &str, wanted: &str) -> io::Result<Option<std::ops::Range<usize>>> {
+    Ok(direct_child_spans(block)?
+        .into_iter()
+        .find_map(|(head, key, span)| {
+            (head == "property" && key.as_deref() == Some(wanted)).then_some(span)
+        }))
+}
+
+fn first_direct_symbol_span(block: &str) -> io::Result<Option<std::ops::Range<usize>>> {
+    Ok(direct_child_spans(block)?
+        .into_iter()
+        .find_map(|(head, _, span)| (head == "symbol").then_some(span)))
+}
+
+type ChildSpan = (String, Option<String>, std::ops::Range<usize>);
+
+fn direct_child_spans(block: &str) -> io::Result<Vec<ChildSpan>> {
+    let doc =
+        parse_one(block).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let Some(Node::List { items, .. }) = doc.nodes.first() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "symbol definition is not an S-expression list",
+        ));
+    };
+    Ok(items
+        .iter()
+        .filter_map(|node| {
+            let Node::List { items, span } = node else {
+                return None;
+            };
+            let Some(Node::Atom {
+                atom: Atom::Symbol(head),
+                ..
+            }) = items.first()
+            else {
+                return None;
+            };
+            let second = match items.get(1) {
+                Some(Node::Atom {
+                    atom: Atom::Quoted(value),
+                    ..
+                }) => Some(value.clone()),
+                _ => None,
+            };
+            Some((head.clone(), second, span.start..span.end))
+        })
+        .collect())
 }
 
 /// Slice the balanced `(symbol "<name>" …)` block out of `text` using the
