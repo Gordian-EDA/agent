@@ -206,10 +206,17 @@ fn spine_fast_path_pin_profile(pin_counts: impl Iterator<Item = usize>) -> bool 
     let dense_interactive = (5..=16).contains(&counts.len())
         && (24..=FAST_PINS).contains(&pins)
         && counts.iter().filter(|&&pins| pins >= 3).count() <= 2;
+    // A dual-op-amp symbol expands into three unit items that all inherit the
+    // package's full pin table. Small bias/filter blocks therefore look like
+    // three hubs even though they have one logical IC, and hit the same costly
+    // routed-search profile as the dense interactive case.
+    let compact_multi_unit = counts.len() <= 8
+        && (24..=FAST_PINS).contains(&pins)
+        && counts.iter().filter(|&&pins| pins >= 3).count() <= 3;
     if std::env::var_os("CLUSTER_DEBUG").is_some() {
         eprintln!("[cluster] pin profile {counts:?} total={pins}");
     }
-    single_anchor || dense_interactive
+    single_anchor || dense_interactive || compact_multi_unit
 }
 
 fn rail_candidate_wins(
@@ -274,6 +281,7 @@ mod tests {
         assert!(spine_fast_path_pin_profile(
             [8, 3, 2, 2, 2, 2, 2, 2, 2, 2].into_iter()
         ));
+        assert!(spine_fast_path_pin_profile([8, 8, 8, 2, 2, 2].into_iter()));
 
         // Genuinely large sheets retain their existing anneal path; three-anchor
         // sheets retain hub-pose search quality.
