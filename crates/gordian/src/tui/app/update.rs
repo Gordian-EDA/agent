@@ -76,14 +76,17 @@ pub enum Msg {
 }
 
 /// Why an in-flight turn stopped, carried on [`Msg::TurnEnded`]. The agent loop
-/// reports `Completed` or `ProviderRequestLimit` (via its `StopReason`); the shell
-/// adds `Interrupted` (user abort) and `Error`; `/compact` reports `Compacted`.
+/// reports a clean completion or a bounded safety stop (via its `StopReason`);
+/// the shell adds `Interrupted` (user abort) and `Error`; `/compact` reports
+/// `Compacted`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TurnEndReason {
     /// The model returned a final reply — a clean finish.
     Completed,
     /// The model kept requesting tools until the safety ceiling was reached.
     ProviderRequestLimit { requests: usize },
+    /// A project mutation timed out and may still be running in the background.
+    MutationTimedOut,
     /// The user pressed Esc to abort the turn.
     Interrupted,
     /// The turn failed (provider/network/tool error); carries the message.

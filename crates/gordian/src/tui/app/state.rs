@@ -248,6 +248,12 @@ impl App {
                     "Worked for {elapsed} — stopped after {requests} model requests (safety limit)"
                 ),
             )),
+            TurnEndReason::MutationTimedOut => Some(Entry::notice(
+                NoticeLevel::Error,
+                format!(
+                    "Worked for {elapsed} — stopped after a project mutation timed out (it may still be finishing)"
+                ),
+            )),
             TurnEndReason::Interrupted => Some(Entry::notice(
                 NoticeLevel::Plain,
                 format!("Worked for {elapsed}"),

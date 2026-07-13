@@ -929,6 +929,20 @@ mod tests {
         assert!(last.text.contains("safety limit"), "{}", last.text);
         assert_eq!(last.level, NoticeLevel::Error);
 
+        // Non-cancellable mutation timeout → red and explicit about background work.
+        let mut a = app();
+        type_str(&mut a, "go");
+        a.update(Msg::Submit);
+        a.update(Msg::TurnEnded(TurnEndReason::MutationTimedOut));
+        let last = a.transcript.last().unwrap();
+        assert!(last.text.contains("mutation timed out"), "{}", last.text);
+        assert!(
+            last.text.contains("may still be finishing"),
+            "{}",
+            last.text
+        );
+        assert_eq!(last.level, NoticeLevel::Error);
+
         // Error → red, carries the message.
         let mut a = app();
         type_str(&mut a, "go");

@@ -221,9 +221,26 @@ impl ToolPhase {
     }
 }
 
-fn tool_defs_for_phase(phase: ToolPhase) -> Vec<Tool> {
+fn tool_defs_for_phase(
+    phase: ToolPhase,
+    discovery_rounds_used: &HashMap<String, usize>,
+) -> Vec<Tool> {
     tool_defs()
         .into_iter()
+        // A budget that only rejects calls after the model makes them still
+        // spends a provider round (and replays the growing history) on a result
+        // that is guaranteed to fail. Once a discovery tool has had its two
+        // rounds, stop advertising it for the rest of this subturn. Keep the
+        // dispatch-side check below as defense against providers that return a
+        // stale/unadvertised tool call.
+        .filter(|tool| {
+            !is_discovery_tool(tool.name.as_str())
+                || discovery_rounds_used
+                    .get(tool.name.as_str())
+                    .copied()
+                    .unwrap_or(0)
+                    < MAX_DISCOVERY_ROUNDS_PER_SUBTURN
+        })
         .filter(|tool| match phase {
             ToolPhase::BoardActive => true,
             ToolPhase::BoardSeed => {
@@ -311,6 +328,10 @@ pub enum StopReason {
         /// Number of provider invocations made before the loop stopped.
         requests: usize,
     },
+    /// A non-cancellable project mutation timed out. Further mutations in the
+    /// same subturn are unsafe, so the loop reported the incomplete state
+    /// without spending more provider requests on impossible recovery.
+    MutationTimedOut,
 }
 
 /// The result of one [`Agent::run_turn`].
@@ -323,8 +344,7 @@ pub struct TurnOutcome {
     /// How many tool calls the loop executed (the preview probe before an
     /// approved commit is internal and not counted).
     pub tool_calls_made: usize,
-    /// Whether the loop finished cleanly or was cut off at the provider-request
-    /// safety ceiling.
+    /// Whether the loop finished cleanly or stopped at a bounded safety guard.
     pub stop_reason: StopReason,
 }
 
@@ -521,13 +541,20 @@ impl<P: Provider> Agent<P> {
         // Authoring invalidates a prior review; a fresh review of that draft
         // unlocks regeneration after it has been committed.
         let mut schematic_review_current = false;
-        let mut last_assistant_text = String::new();
+        let mut last_tool_status: Option<String> = None;
 
         loop {
             if provider_requests >= MAX_PROVIDER_REQUESTS_PER_TURN {
+                let final_text = provider_limit_final_text(
+                    None,
+                    applied,
+                    tool_calls_made,
+                    last_tool_status.as_deref(),
+                );
+                emit(events, AgentEvent::AssistantText(final_text.clone()));
                 return Ok(TurnOutcome {
                     applied,
-                    final_text: last_assistant_text,
+                    final_text,
                     tool_calls_made,
                     stop_reason: StopReason::ProviderRequestLimit {
                         requests: provider_requests,
@@ -537,7 +564,7 @@ impl<P: Provider> Agent<P> {
             provider_requests += 1;
 
             self.tool_phase = self.tool_phase.max(ToolPhase::observe(&self.runtime));
-            let defs = tool_defs_for_phase(self.tool_phase);
+            let defs = tool_defs_for_phase(self.tool_phase, &discovery_rounds_used);
 
             // Drive the provider's stream so assistant prose renders token-by-token
             // (each chunk forwarded as `AssistantDelta`), while the terminal End
@@ -560,14 +587,19 @@ impl<P: Provider> Agent<P> {
                     // partial prose and stop without issuing request N+1.
                     if provider_requests >= MAX_PROVIDER_REQUESTS_PER_TURN {
                         if !text.is_empty() {
-                            last_assistant_text.clone_from(&text);
-                            emit(events, AgentEvent::AssistantText(text));
-                            self.history
-                                .push(ChatMessage::assistant(last_assistant_text.clone()));
+                            emit(events, AgentEvent::AssistantText(text.clone()));
+                            self.history.push(ChatMessage::assistant(text.clone()));
                         }
+                        let final_text = provider_limit_final_text(
+                            (!text.trim().is_empty()).then_some(text.as_str()),
+                            applied,
+                            tool_calls_made,
+                            last_tool_status.as_deref(),
+                        );
+                        emit(events, AgentEvent::AssistantText(final_text.clone()));
                         return Ok(TurnOutcome {
                             applied,
-                            final_text: last_assistant_text,
+                            final_text,
                             tool_calls_made,
                             stop_reason: StopReason::ProviderRequestLimit {
                                 requests: provider_requests,
@@ -602,7 +634,6 @@ impl<P: Provider> Agent<P> {
             // Finalize the streamed prose so non-streaming consumers and the
             // transcript see the whole assistant text once.
             if !text.is_empty() {
-                last_assistant_text.clone_from(&text);
                 emit(events, AgentEvent::AssistantText(text.clone()));
             }
 
@@ -845,15 +876,14 @@ impl<P: Provider> Agent<P> {
                         pcb_recovery.retry_note(),
                     );
                 }
+                let summary =
+                    tool_summary(&call.fn_name, &call.fn_arguments, &parse_or_null(&content));
+                last_tool_status = Some(format!("{}: {summary}", call.fn_name));
                 emit(
                     events,
                     AgentEvent::ToolFinished {
                         name: call.fn_name.clone(),
-                        summary: tool_summary(
-                            &call.fn_name,
-                            &call.fn_arguments,
-                            &parse_or_null(&content),
-                        ),
+                        summary,
                         image_path,
                     },
                 );
@@ -871,6 +901,27 @@ impl<P: Provider> Agent<P> {
             }
             prune_large_tool_arguments(&mut self.history);
             prune_stale_tool_results(&mut self.history);
+
+            // `spawn_blocking` mutations continue after their async timeout.
+            // The dispatch guard above therefore blocks every later mutation
+            // in this subturn. Continuing to ask the model can only produce
+            // read churn or guaranteed blocked writes; end honestly now and
+            // let a fresh user turn inspect once the background work settles.
+            if let Some(tool) = timed_out_mutation_name(&timed_out_tool_calls) {
+                let final_text = mutation_timeout_final_text(
+                    tool,
+                    applied,
+                    tool_calls_made,
+                    last_tool_status.as_deref(),
+                );
+                emit(events, AgentEvent::AssistantText(final_text.clone()));
+                return Ok(TurnOutcome {
+                    applied,
+                    final_text,
+                    tool_calls_made,
+                    stop_reason: StopReason::MutationTimedOut,
+                });
+            }
         }
     }
 
@@ -1053,6 +1104,53 @@ fn tool_result_text(value: &Value) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
+/// Preserve a useful, honest outcome when a tool-only cycle reaches the hard
+/// request ceiling. Tool-call-only assistant messages legitimately contain no
+/// prose, so returning `last_assistant_text` verbatim could leave the UI blank.
+/// This fallback costs no additional provider request.
+fn provider_limit_final_text(
+    partial_assistant_text: Option<&str>,
+    applied: bool,
+    tool_calls_made: usize,
+    last_tool_status: Option<&str>,
+) -> String {
+    let committed = if applied {
+        " A schematic was committed, but the requested end-to-end workflow may be incomplete."
+    } else {
+        " No schematic commit was completed."
+    };
+    let last_tool = last_tool_status
+        .map(|status| format!(" Last tool result: {status}."))
+        .unwrap_or_default();
+    let mut report = format!(
+        "Stopped after the model exhausted the per-turn request safety limit ({tool_calls_made} tool calls).{committed}{last_tool}"
+    );
+    if let Some(partial) = partial_assistant_text {
+        report.push_str(" Last partial model response: ");
+        report.push_str(partial.trim());
+    }
+    report
+}
+
+fn mutation_timeout_final_text(
+    tool: &str,
+    applied: bool,
+    tool_calls_made: usize,
+    last_tool_status: Option<&str>,
+) -> String {
+    let committed = if applied {
+        " A schematic was committed earlier, but the requested end-to-end workflow is incomplete."
+    } else {
+        " No schematic commit was completed."
+    };
+    let last_tool = last_tool_status
+        .map(|status| format!(" Last tool result: {status}."))
+        .unwrap_or_default();
+    format!(
+        "Stopped after `{tool}` timed out ({tool_calls_made} tool calls). The operation may still be finishing in the background, so further project mutations are unsafe in this turn.{committed}{last_tool} Start a new turn to inspect the settled project state before retrying a changed operation."
+    )
+}
+
 /// Parse a tool result back into JSON (Null on a malformed result), for the UI
 /// one-liner.
 fn parse_or_null(result_json: &str) -> Value {
@@ -1205,6 +1303,13 @@ fn timed_out_mutation_blocked(timed_out: &[(String, Value, u64)], fn_name: &str)
         && timed_out
             .iter()
             .any(|(name, _, _)| tool_effect(name) != ToolEffect::ReadOnly)
+}
+
+fn timed_out_mutation_name(timed_out: &[(String, Value, u64)]) -> Option<&str> {
+    timed_out
+        .iter()
+        .find(|(name, _, _)| tool_effect(name) != ToolEffect::ReadOnly)
+        .map(|(name, _, _)| name.as_str())
 }
 
 fn tool_result_is_timeout(value: &Value) -> bool {
@@ -2521,6 +2626,8 @@ mod tests {
         );
         assert_eq!(outcome.tool_calls_made, MAX_PROVIDER_REQUESTS_PER_TURN);
         assert!(!outcome.applied);
+        assert!(outcome.final_text.contains("request safety limit"));
+        assert!(outcome.final_text.contains("project_info"));
     }
 
     #[tokio::test]
@@ -2854,9 +2961,19 @@ mod tests {
             &call("regenerate_board", json!({"bounds": {"w": 80, "h": 60}})),
             4,
         ));
+        assert_eq!(timed_out_mutation_name(&timed_out), Some("apply_design"));
+        let report = mutation_timeout_final_text(
+            "apply_design",
+            true,
+            12,
+            Some("apply_design: error: timed out"),
+        );
+        assert!(report.contains("may still be finishing"), "{report}");
+        assert!(report.contains("workflow is incomplete"), "{report}");
 
         let read_timeout = vec![("render_schematic".to_string(), json!({}), 3)];
         assert!(!timed_out_mutation_blocked(&read_timeout, "apply_design"));
+        assert_eq!(timed_out_mutation_name(&read_timeout), None);
     }
 
     #[test]
@@ -3253,9 +3370,9 @@ mod tests {
 
     #[test]
     fn tool_schemas_expand_with_project_phase() {
-        let schematic = tool_defs_for_phase(ToolPhase::Schematic);
-        let seed = tool_defs_for_phase(ToolPhase::BoardSeed);
-        let active = tool_defs_for_phase(ToolPhase::BoardActive);
+        let schematic = tool_defs_for_phase(ToolPhase::Schematic, &HashMap::new());
+        let seed = tool_defs_for_phase(ToolPhase::BoardSeed, &HashMap::new());
+        let active = tool_defs_for_phase(ToolPhase::BoardActive, &HashMap::new());
         let names = |tools: &[Tool]| {
             tools
                 .iter()
@@ -3294,6 +3411,30 @@ mod tests {
             seed_bytes < active_bytes / 2,
             "{seed_bytes} vs {active_bytes}"
         );
+    }
+
+    #[test]
+    fn exhausted_discovery_tools_are_no_longer_advertised() {
+        let mut rounds = HashMap::new();
+        rounds.insert(
+            "search_symbols".to_string(),
+            MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
+        );
+        rounds.insert("get_symbol_info".to_string(), 1);
+
+        let names = tool_defs_for_phase(ToolPhase::Schematic, &rounds)
+            .into_iter()
+            .map(|tool| tool.name.as_str().to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(!names.contains("search_symbols"));
+        assert!(
+            names.contains("get_symbol_info"),
+            "a discovery tool with a round remaining stays available"
+        );
+        assert!(names.contains("search_footprints"));
+        assert!(names.contains("create_design"));
+        assert!(names.contains("apply_design"));
     }
 
     #[test]

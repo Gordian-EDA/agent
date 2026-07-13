@@ -303,6 +303,7 @@ impl Shell {
                         StopReason::ProviderRequestLimit { requests } => {
                             TurnEndReason::ProviderRequestLimit { requests }
                         }
+                        StopReason::MutationTimedOut => TurnEndReason::MutationTimedOut,
                     },
                     Err(e) => TurnEndReason::Error(format!("{e:#}")),
                 }
