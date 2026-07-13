@@ -1572,8 +1572,9 @@ async fn review_design(
 }
 
 /// Run the diverse-lens LLM review on `netlist` and UNION in the deterministic
-/// exact-math ERC (feedback-divider ratios, LED current, dangling/crystal/
-/// polarity) — deduped by refdes so a fault both layers find isn't doubled.
+/// exact-math/metadata ERC (feedback-divider ratios, LED current,
+/// dangling/crystal/polarity, and symbol-pin rail contradictions) — deduped by
+/// refdes so a fault both layers find isn't doubled.
 async fn review_netlist_with_erc(
     ctx: &Arc<AgentRuntime>,
     reviewer: &dyn Provider,
@@ -1596,7 +1597,12 @@ async fn review_netlist_with_erc(
     )
     .await?;
     if let Some(design) = compiled.design {
-        for d in circuit_lang::erc::erc_checks(&design) {
+        let mut deterministic = circuit_lang::erc::erc_checks(&design);
+        deterministic.extend(crate::review_kicad::symbol_pin_rail_checks(
+            &design,
+            ctx.provider(),
+        ));
+        for d in deterministic {
             if !defects.iter().any(|e| crate::review::same_defect(e, &d)) {
                 defects.push(d);
             }

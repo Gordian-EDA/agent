@@ -156,6 +156,70 @@ pub(crate) fn annotate_netlist_for_review(
     lines.join("\n")
 }
 
+/// Catch symbol-backed rail contradictions that ordinary KiCAD ERC cannot see.
+///
+/// Several protection and connector symbols deliberately declare every pin as
+/// passive, so ERC permits mistakes such as wiring a pin named `VBUS` to ground.
+/// Keep this deliberately narrow: only exact, conventional supply/ground
+/// function names and unambiguous voltage/ground net names participate.
+pub(crate) fn symbol_pin_rail_checks(
+    design: &circuit_lang::Design,
+    provider: &circuit_lang::SymbolTable,
+) -> Vec<String> {
+    let mut findings = Vec::new();
+    for block in design.blocks.values() {
+        for (refdes, comp) in &block.components {
+            let Some(meta) = provider.symbol(&comp.part) else {
+                continue;
+            };
+            for (key, target) in comp.pins.iter().chain(comp.units.values().flatten()) {
+                let circuit_lang::model::PinTarget::Net(net) = target else {
+                    continue;
+                };
+                let by_number: Vec<_> = meta.pins.iter().filter(|pin| pin.number == *key).collect();
+                let hits = if by_number.is_empty() {
+                    meta.pins.iter().filter(|pin| pin.name == *key).collect()
+                } else {
+                    by_number
+                };
+                for pin in hits {
+                    let voltage = circuit_lang::erc::rail_voltage(net);
+                    if is_positive_supply_function(&pin.name) && voltage == Some(0.0) {
+                        findings.push(format!(
+                            "- {refdes}: symbol pin {}/{} is tied to ground net {net} — a positive supply pin cannot be grounded",
+                            pin.number, pin.name
+                        ));
+                    } else if is_ground_function(&pin.name)
+                        && voltage.is_some_and(|volts| volts > 0.0)
+                    {
+                        findings.push(format!(
+                            "- {refdes}: symbol pin {}/{} is tied to positive rail {net} — a ground pin cannot be powered",
+                            pin.number, pin.name
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    findings.sort();
+    findings.dedup();
+    findings
+}
+
+fn is_positive_supply_function(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_uppercase().as_str(),
+        "VBUS" | "VBAT" | "VCC" | "VDD" | "VDDA" | "VDDD" | "AVDD" | "DVDD" | "PVDD"
+    )
+}
+
+fn is_ground_function(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_uppercase().as_str(),
+        "GND" | "VSS" | "VSSA" | "VSSD" | "AGND" | "DGND" | "PGND"
+    )
+}
+
 fn decoupling_by_parent(design: &circuit_lang::Design) -> BTreeMap<&str, BTreeMap<&str, usize>> {
     let mut out: BTreeMap<&str, BTreeMap<&str, usize>> = BTreeMap::new();
     for block in design.blocks.values() {
@@ -225,7 +289,13 @@ fn explicit_ic_pin_facts(
     let Some(meta) = provider.symbol(&comp.part) else {
         return Vec::new();
     };
-    if meta.pins.len() <= 2 || meta.pins.iter().all(|pin| pin.etype == PinType::Passive) {
+    let has_semantic_rail_pin = meta
+        .pins
+        .iter()
+        .any(|pin| is_positive_supply_function(&pin.name) || is_ground_function(&pin.name));
+    if meta.pins.len() <= 2
+        || (meta.pins.iter().all(|pin| pin.etype == PinType::Passive) && !has_semantic_rail_pin)
+    {
         return Vec::new();
     }
 
@@ -460,6 +530,67 @@ blocks:
         assert!(subject.contains("7/~ -> VOUT"), "{subject}");
         assert!(subject.contains("4/V- -> GND"), "{subject}");
         assert!(subject.contains("8/V+ -> +5V"), "{subject}");
+    }
+
+    #[test]
+    fn passive_protection_supply_pin_is_annotated_and_cannot_be_grounded() {
+        let mut provider = circuit_lang::SymbolTable::with_basics();
+        provider.mock_add(
+            "Protection:USB_ESD",
+            vec![
+                ("1", "I/O1", circuit_lang::PinType::Passive, 1),
+                ("2", "GND", circuit_lang::PinType::Passive, 1),
+                ("3", "I/O2", circuit_lang::PinType::Passive, 1),
+                ("4", "I/O2", circuit_lang::PinType::Passive, 1),
+                ("5", "VBUS", circuit_lang::PinType::Passive, 1),
+                ("6", "I/O1", circuit_lang::PinType::Passive, 1),
+            ],
+        );
+        let netlist = r#"
+version: 1
+blocks:
+  main:
+    components:
+      U2:
+        part: Protection:USB_ESD
+        pins: {"1": DP_IN, "2": GND, "3": DM_IN, "4": DM_OUT, "5": GND, "6": DP_OUT}
+"#;
+        let compiled = circuit_lang::compile(netlist, &provider);
+        let design = compiled.design.expect("test design compiles");
+
+        let subject = annotate_netlist_for_review(netlist, &design, &provider);
+        assert!(subject.contains("5/VBUS [passive] -> GND"), "{subject}");
+
+        assert_eq!(
+            symbol_pin_rail_checks(&design, &provider),
+            vec![
+                "- U2: symbol pin 5/VBUS is tied to ground net GND — a positive supply pin cannot be grounded"
+            ]
+        );
+    }
+
+    #[test]
+    fn symbol_pin_rail_check_accepts_matching_supply_and_ground_rails() {
+        let mut provider = circuit_lang::SymbolTable::with_basics();
+        provider.mock_add(
+            "M:POWERED",
+            vec![
+                ("1", "VDD", circuit_lang::PinType::PowerInput, 1),
+                ("2", "VSS", circuit_lang::PinType::PowerInput, 1),
+                ("3", "OUT", circuit_lang::PinType::Other, 1),
+            ],
+        );
+        let netlist = r#"
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: M:POWERED, pins: {VDD: 3V3, VSS: GND, OUT: SIG}}
+"#;
+        let compiled = circuit_lang::compile(netlist, &provider);
+        let design = compiled.design.expect("test design compiles");
+
+        assert!(symbol_pin_rail_checks(&design, &provider).is_empty());
     }
 
     #[test]
