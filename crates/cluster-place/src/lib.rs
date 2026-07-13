@@ -60,7 +60,12 @@ impl PlacementEngine for ClusterPlace {
         // Spine is deterministic and route-aware, and solves this topology in one
         // pass. Keep the cluster engine identity in diagnostics because this is an
         // internal fast path, not a user-selected engine change.
-        if spine_fast_path_pin_profile(problem.items.iter().map(|item| item.geom.pins.len())) {
+        if spine_fast_path_pin_profile(
+            problem
+                .items
+                .iter()
+                .map(|item| (item.part.as_str(), item.geom.pins.len())),
+        ) {
             let mut out = spine_place::SpinePlace.place(env, design, problem, ir);
             out.result.engine = self.name().to_owned();
             return out;
@@ -192,8 +197,9 @@ impl PlacementEngine for ClusterPlace {
 /// routed objective is expensive and the four small-board searches can exceed the tool
 /// timeout (an 11-part NE555 draft spent 105 s in greedy refine alone). Spine is
 /// deterministic and route-aware, and finishes both profiles with bounded work.
-fn spine_fast_path_pin_profile(pin_counts: impl Iterator<Item = usize>) -> bool {
-    let counts: Vec<usize> = pin_counts.collect();
+fn spine_fast_path_pin_profile<'a>(pin_profiles: impl Iterator<Item = (&'a str, usize)>) -> bool {
+    let profiles: Vec<(&str, usize)> = pin_profiles.collect();
+    let counts: Vec<usize> = profiles.iter().map(|(_, pins)| *pins).collect();
     let pins = counts.iter().sum::<usize>();
     // A connector/IC plus a handful of passives is topologically simple even
     // when the anchor exposes many stacked terminals (USB-C is 15 pins). Its
@@ -213,24 +219,30 @@ fn spine_fast_path_pin_profile(pin_counts: impl Iterator<Item = usize>) -> bool 
     let compact_multi_unit = counts.len() <= 8
         && (24..=FAST_PINS).contains(&pins)
         && counts.iter().filter(|&&pins| pins >= 3).count() <= 3;
-    // A USB-C receptacle expands to a wide 25-pin item, so the otherwise-small
-    // input/protection block sits just above FAST_PINS and misses the dense-sheet
-    // case. Routed anneal plus cluster pose took 28 s on the reproduced 14-part
-    // draft; Spine finished in 3 s with fewer warnings and crossings. Keep this
-    // shape deliberately narrow: one wide connector, no other item above six
-    // pins, and at most three modest support hubs (regulator, protector, header).
-    // Multi-IC and MCU sheets retain routed anneal.
-    let wide_connectors = counts.iter().filter(|&&pins| (20..=26).contains(&pins));
+    // USB-C receptacle symbols expose 15, 17, or 25 placeable pins depending on
+    // whether stacked power/shield pins are collapsed. The otherwise-small
+    // input/protection block can therefore sit above FAST_PINS and miss the
+    // dense-sheet case. Keep this shape deliberately narrow: require an actual
+    // connector lib id (pin count alone could be a small MCU), exactly one wide
+    // connector, no other item above six pins, and at most three modest support
+    // hubs (regulator, protector, header). Multi-IC and MCU sheets retain anneal.
+    let is_wide_connector = |part: &str, pins: usize| {
+        (15..=26).contains(&pins) && sch_place::netclass::is_connector_like(part)
+    };
+    let wide_connector_count = profiles
+        .iter()
+        .filter(|&&(part, pins)| is_wide_connector(part, pins))
+        .count();
     let wide_connector_block = (8..=16).contains(&counts.len())
         && (FAST_PINS + 1..=64).contains(&pins)
-        && wide_connectors.count() == 1
-        && counts
+        && wide_connector_count == 1
+        && profiles
             .iter()
-            .filter(|&&pins| !(20..=26).contains(&pins))
-            .all(|&pins| pins <= 6)
-        && counts
+            .filter(|&&(part, pins)| !is_wide_connector(part, pins))
+            .all(|(_, pins)| *pins <= 6)
+        && profiles
             .iter()
-            .filter(|&&pins| (3..=6).contains(&pins))
+            .filter(|&&(part, pins)| !is_wide_connector(part, pins) && (3..=6).contains(&pins))
             .count()
             <= 3;
     if std::env::var_os("CLUSTER_DEBUG").is_some() {
@@ -273,66 +285,85 @@ fn report(engine: &str, items: &[Item], eval: &RoutedEvaluator) -> PlaceResult {
 mod tests {
     use super::{rail_candidate_wins, spine_fast_path_pin_profile};
 
+    fn profile(pin_counts: impl IntoIterator<Item = usize>) -> bool {
+        spine_fast_path_pin_profile(pin_counts.into_iter().map(|pins| ("Device:Generic", pins)))
+    }
+
+    fn connector_profile(
+        pin_counts: impl IntoIterator<Item = usize>,
+        connector_pins: usize,
+    ) -> bool {
+        spine_fast_path_pin_profile(pin_counts.into_iter().map(|pins| {
+            if pins == connector_pins {
+                ("Connector:USB_C_Receptacle_USB2.0", pins)
+            } else {
+                ("Device:Generic", pins)
+            }
+        }))
+    }
+
     #[test]
     fn tiny_simple_sheet_uses_deterministic_fast_path() {
-        assert!(spine_fast_path_pin_profile([3, 2, 2, 1].into_iter()));
-        assert!(spine_fast_path_pin_profile([2, 2].into_iter()));
-        assert!(spine_fast_path_pin_profile([2, 2, 1, 1, 1].into_iter()));
-        assert!(spine_fast_path_pin_profile([5, 2, 2, 2].into_iter()));
+        assert!(profile([3, 2, 2, 1]));
+        assert!(profile([2, 2]));
+        assert!(profile([2, 2, 1, 1, 1]));
+        assert!(profile([5, 2, 2, 2]));
 
-        assert!(!spine_fast_path_pin_profile([].into_iter()));
-        assert!(spine_fast_path_pin_profile(
-            [3, 2, 2, 2, 2, 2, 1].into_iter()
-        ));
-        assert!(spine_fast_path_pin_profile([15, 2, 2].into_iter()));
-        assert!(spine_fast_path_pin_profile([7, 2, 1].into_iter()));
-        assert!(!spine_fast_path_pin_profile([32, 2, 2].into_iter()));
-        assert!(!spine_fast_path_pin_profile([3, 3, 1].into_iter()));
+        assert!(!profile([]));
+        assert!(profile([3, 2, 2, 2, 2, 2, 1]));
+        assert!(profile([15, 2, 2]));
+        assert!(profile([7, 2, 1]));
+        assert!(!profile([32, 2, 2]));
+        assert!(!profile([3, 3, 1]));
     }
 
     #[test]
     fn dense_interactive_sheet_uses_deterministic_fast_path() {
         // The reproduced USB-C input block: one 15-pin connector, one 6-pin
         // protector and four two-pin parts = 29 routed pins over 6 items.
-        assert!(spine_fast_path_pin_profile([15, 6, 2, 2, 2, 2].into_iter()));
+        assert!(profile([15, 6, 2, 2, 2, 2]));
 
         // The reproduced NE555 sheet: one 8-pin hub, a 3-pin pot and eight
         // two-pin parts = 27 routed pins over 10 placeable items.
-        assert!(spine_fast_path_pin_profile(
-            [8, 3, 2, 2, 2, 2, 2, 2, 2, 2].into_iter()
-        ));
-        assert!(spine_fast_path_pin_profile([8, 8, 8, 2, 2, 2].into_iter()));
+        assert!(profile([8, 3, 2, 2, 2, 2, 2, 2, 2, 2]));
+        assert!(profile([8, 8, 8, 2, 2, 2]));
 
         // Genuinely large sheets retain their existing anneal path; three-anchor
         // sheets retain hub-pose search quality.
-        assert!(spine_fast_path_pin_profile([8, 2, 2, 2, 2].into_iter()));
-        assert!(!spine_fast_path_pin_profile(
-            [16, 8, 8, 2, 2, 2, 2, 2, 2, 2].into_iter()
-        ));
-        assert!(!spine_fast_path_pin_profile(
-            [8, 5, 3, 2, 2, 2, 2, 2, 2, 2].into_iter()
-        ));
+        assert!(profile([8, 2, 2, 2, 2]));
+        assert!(!profile([16, 8, 8, 2, 2, 2, 2, 2, 2, 2]));
+        assert!(!profile([8, 5, 3, 2, 2, 2, 2, 2, 2, 2]));
     }
 
     #[test]
     fn usb_c_support_block_uses_bounded_fast_path() {
         // Exact profile from the 14-component USB-C acceptance draft. The power
         // symbol is not placeable, leaving these 13 routed items / 58 pins.
-        assert!(spine_fast_path_pin_profile(
-            [25, 2, 5, 2, 2, 6, 4, 2, 2, 2, 2, 2, 2].into_iter()
+        assert!(connector_profile(
+            [25, 2, 5, 2, 2, 6, 4, 2, 2, 2, 2, 2, 2],
+            25
+        ));
+        // Exact compact 16P receptacle profile from the live acceptance run.
+        assert!(connector_profile(
+            [17, 2, 6, 5, 2, 2, 2, 2, 2, 2, 2, 2, 4],
+            17
+        ));
+        assert!(connector_profile(
+            [15, 2, 6, 5, 2, 2, 2, 2, 2, 2, 2, 2, 4],
+            15
         ));
 
         // Multiple wide/large hubs and a support-heavy MCU-style block still
         // need routed anneal and its hub-pose search.
-        assert!(!spine_fast_path_pin_profile(
-            [25, 8, 8, 6, 4, 2, 2, 2, 2].into_iter()
-        ));
-        assert!(!spine_fast_path_pin_profile(
-            [25, 6, 6, 6, 6, 2, 2, 2, 2].into_iter()
-        ));
-        assert!(!spine_fast_path_pin_profile(
-            [25, 24, 2, 2, 2, 2, 2, 2].into_iter()
-        ));
+        assert!(!connector_profile([25, 8, 8, 6, 4, 2, 2, 2, 2], 25));
+        assert!(!connector_profile([25, 6, 6, 6, 6, 2, 2, 2, 2], 25));
+        assert!(!connector_profile([25, 24, 2, 2, 2, 2, 2, 2], 25));
+
+        // A 15/17-pin MCU with the same support profile is not a connector and
+        // must not bypass the routed hub-pose search merely because of pin count.
+        assert!(!profile([17, 2, 6, 5, 2, 2, 2, 2, 2, 2, 2, 2, 4]));
+        assert!(!profile([15, 2, 6, 5, 2, 2, 2, 2, 2, 2, 2, 2, 4]));
+        assert!(!connector_profile([17, 16, 6, 5, 2, 2, 2, 2, 2, 2], 17));
     }
 
     #[test]
