@@ -488,6 +488,10 @@ impl<P: Provider> Agent<P> {
         let mut nudges_left = MAX_COMMIT_NUDGES;
         let mut failed_route_attempts = 0usize;
         let mut last_route_failure: Option<Value> = None;
+        // `spawn_blocking` work is not cancelled when its join handle times out.
+        // Remember exact timed-out invocations so the model cannot immediately
+        // overlap the same operation while the original may still be finishing.
+        let mut timed_out_tool_calls: Vec<(String, Value)> = Vec::new();
         let mut provider_requests = 0usize;
         let mut last_assistant_text = String::new();
 
@@ -629,8 +633,20 @@ impl<P: Provider> Agent<P> {
                         name: call.fn_name.clone(),
                     },
                 );
-                let retry_blocked = route_retry_blocked(failed_route_attempts, &call.fn_name);
-                let (mut content, images, image_path) = if retry_blocked {
+                let route_retry_blocked = route_retry_blocked(failed_route_attempts, &call.fn_name);
+                let timeout_retry_blocked = timed_out_retry_blocked(&timed_out_tool_calls, call);
+                let (mut content, images, image_path) = if timeout_retry_blocked {
+                    (
+                        json!({
+                            "error": "identical timed-out tool retry blocked",
+                            "tool": call.fn_name,
+                            "note": "the previous invocation may still be running; do not retry identical arguments in this turn — inspect project state or change/simplify the request",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if route_retry_blocked {
                     let last_route_failure = last_route_failure.clone();
                     (
                         json!({
@@ -656,6 +672,9 @@ impl<P: Provider> Agent<P> {
                     .await
                 };
                 let parsed = parse_or_null(&content);
+                if tool_result_is_timeout(&parsed) {
+                    timed_out_tool_calls.push((call.fn_name.clone(), call.fn_arguments.clone()));
+                }
                 if route_retry_budget_reset_by_fix(&call.fn_name, &parsed) {
                     failed_route_attempts = 0;
                     last_route_failure = None;
@@ -902,6 +921,22 @@ fn route_result_is_retry_failure(value: &Value) -> bool {
         .get("failed")
         .and_then(Value::as_array)
         .is_some_and(|failed| !failed.is_empty())
+}
+
+/// A timed-out `spawn_blocking` task may continue after its join handle is
+/// dropped. Block only an exact same-turn retry; changed arguments and later
+/// user turns remain available for deliberate recovery.
+fn timed_out_retry_blocked(timed_out: &[(String, Value)], call: &ToolCall) -> bool {
+    timed_out
+        .iter()
+        .any(|(name, arguments)| name == &call.fn_name && arguments == &call.fn_arguments)
+}
+
+fn tool_result_is_timeout(value: &Value) -> bool {
+    value
+        .get("error")
+        .and_then(Value::as_str)
+        .is_some_and(|error| error.contains(" timed out after "))
 }
 
 fn route_retry_blocked(failed_route_attempts: usize, fn_name: &str) -> bool {
@@ -1232,12 +1267,18 @@ async fn run_blocking(ctx: &Arc<AgentRuntime>, name: &str, input: Value) -> Resu
             if is_kicad_session_tool(&name) {
                 timeout_ctx.close_kicad_session();
             }
-            anyhow::bail!(
-                "{name} timed out after {}s; close any KiCAD dialogs/processes touching the project and retry, or simplify/batch the draft before applying",
-                timeout.as_secs()
-            );
+            anyhow::bail!(tool_timeout_message(&name, timeout));
         }
     }
+}
+
+fn tool_timeout_message(name: &str, timeout: Duration) -> String {
+    let recovery = if is_kicad_session_tool(name) {
+        "close any KiCad dialogs/processes touching the project, then inspect project state before trying a changed call"
+    } else {
+        "the operation may still be finishing; do not immediately retry identical arguments — inspect project state or simplify/batch the request"
+    };
+    format!("{name} timed out after {}s; {recovery}", timeout.as_secs())
 }
 
 fn is_kicad_session_tool(name: &str) -> bool {
@@ -2058,6 +2099,51 @@ mod tests {
         };
         assert!(wants_apply(&apply_call));
         assert!(!wants_apply(&preview_call));
+    }
+
+    #[test]
+    fn timed_out_retry_guard_blocks_only_the_identical_same_turn_call() {
+        let timed_out = vec![(
+            "apply_design".to_string(),
+            json!({"yaml": "components: []"}),
+        )];
+        let call = |name: &str, arguments: Value| ToolCall {
+            call_id: "retry".into(),
+            fn_name: name.into(),
+            fn_arguments: arguments,
+            thought_signatures: None,
+        };
+
+        assert!(timed_out_retry_blocked(
+            &timed_out,
+            &call("apply_design", json!({"yaml": "components: []"}))
+        ));
+        assert!(!timed_out_retry_blocked(
+            &timed_out,
+            &call("apply_design", json!({"yaml": "components: [R1]"}))
+        ));
+        assert!(!timed_out_retry_blocked(
+            &timed_out,
+            &call("validate_design", json!({"yaml": "components: []"}))
+        ));
+    }
+
+    #[test]
+    fn timeout_detection_and_advice_are_tool_specific() {
+        assert!(tool_result_is_timeout(&json!({
+            "error": "apply_design timed out after 120s; still running"
+        })));
+        assert!(!tool_result_is_timeout(&json!({
+            "error": "identical timed-out tool retry blocked"
+        })));
+
+        let compose = tool_timeout_message("apply_design", Duration::from_secs(120));
+        assert!(compose.contains("may still be finishing"));
+        assert!(!compose.contains("KiCad dialogs"));
+
+        let session = tool_timeout_message("route_board", Duration::from_secs(180));
+        assert!(session.contains("KiCad dialogs"));
+        assert!(session.contains("inspect project state"));
     }
 
     #[test]
