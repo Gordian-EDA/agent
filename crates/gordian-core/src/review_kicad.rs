@@ -40,6 +40,11 @@ trace its active-device functional pins and passive paths rather than accepting 
 same-order or superficially similar substitute. For timer/filter/feedback blocks,
 verify timing, cutoff, or gain from the actual topology and values.
 
+"Flow-through protection" is a concrete topology: every protected signal must
+enter and leave the protector on separate pins and separate connector-side and
+downstream-side nets. A single shunt/ESD pin attached to a net that directly joins
+both sides is not flow-through protection, even when it provides valid ESD clamping.
+
 Ground every defect in exact netlist evidence. Quote the component field(s) or
 pin/net/value assignments that prove the fault in `evidence`. Do NOT infer missing
 individual IC power pins from package pin numbers, a rendered image, or wording like
@@ -68,7 +73,7 @@ pub const LENSES: &[&str] = &[
 ];
 
 const QUICK_LENSES: &[&str] = &[
-    "check power/regulation math, polarity, essential support parts, feedback/bias topology, digital pin functions, clocks, resets, enables, straps, and interface direction; for every intent-required timer, filter, or feedback block, trace resolved functional pins and passive paths, enforce any named topology, and verify timing/cutoff/gain from the actual circuit",
+    "check power/regulation math, polarity, essential support parts, feedback/bias topology, digital pin functions, clocks, resets, enables, straps, interface direction, and intent-required flow-through protection (distinct in/out pins and nets per protected signal); for every intent-required timer, filter, or feedback block, trace resolved functional pins and passive paths, enforce any named topology, and verify timing/cutoff/gain from the actual circuit",
 ];
 
 fn netlist_lenses(config: &ReviewConfig) -> &'static [&'static str] {
@@ -172,6 +177,8 @@ pub(crate) fn symbol_pin_rail_checks(
             let Some(meta) = provider.symbol(&comp.part) else {
                 continue;
             };
+            let protection_part = is_protection_part(&comp.part, &meta);
+            let mut flow_pins: BTreeMap<String, FlowChannelPins<'_>> = BTreeMap::new();
             for (key, target) in comp.pins.iter().chain(comp.units.values().flatten()) {
                 let circuit_lang::model::PinTarget::Net(net) = target else {
                     continue;
@@ -197,6 +204,28 @@ pub(crate) fn symbol_pin_rail_checks(
                             pin.number, pin.name
                         ));
                     }
+                    if protection_part
+                        && let Some((channel, role)) = flow_through_pin_role(&pin.name)
+                    {
+                        let entry = flow_pins.entry(channel).or_default();
+                        match role {
+                            FlowRole::Input => entry.inputs.push((pin.name.as_str(), net.as_str())),
+                            FlowRole::Output => {
+                                entry.outputs.push((pin.name.as_str(), net.as_str()))
+                            }
+                        }
+                    }
+                }
+            }
+            for (_channel, pins) in flow_pins {
+                for (input_name, input_net) in &pins.inputs {
+                    for (output_name, output_net) in &pins.outputs {
+                        if input_net == output_net {
+                            findings.push(format!(
+                                "- {refdes}: protection pins {input_name} and {output_name} are both tied to {input_net} — flow-through input and output must use distinct nets or the protected channel is bypassed"
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -204,6 +233,52 @@ pub(crate) fn symbol_pin_rail_checks(
     findings.sort();
     findings.dedup();
     findings
+}
+
+fn is_protection_part(part: &str, meta: &circuit_lang::SymbolMeta) -> bool {
+    let mut text = part.to_ascii_lowercase();
+    if let Some(description) = &meta.description {
+        text.push(' ');
+        text.push_str(&description.to_ascii_lowercase());
+    }
+    if let Some(keywords) = &meta.keywords {
+        text.push(' ');
+        text.push_str(&keywords.to_ascii_lowercase());
+    }
+    text.contains("protection") || text.contains("esd") || text.contains("protector")
+}
+
+#[derive(Clone, Copy)]
+enum FlowRole {
+    Input,
+    Output,
+}
+
+#[derive(Default)]
+struct FlowChannelPins<'a> {
+    inputs: Vec<(&'a str, &'a str)>,
+    outputs: Vec<(&'a str, &'a str)>,
+}
+
+/// Resolve conventional paired channel functions such as `CH1In`/`CH1Out`.
+/// KiCad 9's TPD2S017 symbol spells CH2 input `CH2Int`; accept that known
+/// trailing-`t` variant only when a non-empty channel prefix remains.
+fn flow_through_pin_role(name: &str) -> Option<(String, FlowRole)> {
+    let normalized: String = name
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_uppercase())
+        .collect();
+    if let Some(channel) = normalized.strip_suffix("OUT").filter(|s| !s.is_empty()) {
+        return Some((channel.to_string(), FlowRole::Output));
+    }
+    if let Some(channel) = normalized.strip_suffix("IN").filter(|s| !s.is_empty()) {
+        return Some((channel.to_string(), FlowRole::Input));
+    }
+    normalized
+        .strip_suffix("INT")
+        .filter(|s| !s.is_empty())
+        .map(|channel| (channel.to_string(), FlowRole::Input))
 }
 
 fn is_positive_supply_function(name: &str) -> bool {
@@ -594,6 +669,72 @@ blocks:
     }
 
     #[test]
+    fn protection_flow_through_inputs_and_outputs_require_distinct_nets() {
+        let mut provider = circuit_lang::SymbolTable::with_basics();
+        provider.mock_add(
+            "Power_Protection:TPD2S017",
+            vec![
+                ("1", "CH1Out", circuit_lang::PinType::Passive, 1),
+                ("2", "GND", circuit_lang::PinType::PowerInput, 1),
+                ("3", "CH1In", circuit_lang::PinType::Passive, 1),
+                ("4", "CH2Int", circuit_lang::PinType::Passive, 1),
+                ("5", "VCC", circuit_lang::PinType::PowerInput, 1),
+                ("6", "CH2Out", circuit_lang::PinType::Passive, 1),
+            ],
+        );
+        let netlist = r#"
+version: 1
+blocks:
+  main:
+    components:
+      U2:
+        part: Power_Protection:TPD2S017
+        pins: {"1": DPLUS, "2": GND, "3": DPLUS, "4": DMINUS, "5": VBUS, "6": DMINUS}
+"#;
+        let design = circuit_lang::compile(netlist, &provider)
+            .design
+            .expect("test design compiles");
+
+        assert_eq!(
+            symbol_pin_rail_checks(&design, &provider),
+            vec![
+                "- U2: protection pins CH1In and CH1Out are both tied to DPLUS — flow-through input and output must use distinct nets or the protected channel is bypassed",
+                "- U2: protection pins CH2Int and CH2Out are both tied to DMINUS — flow-through input and output must use distinct nets or the protected channel is bypassed",
+            ]
+        );
+    }
+
+    #[test]
+    fn protection_flow_through_accepts_separate_connector_and_device_nets() {
+        let mut provider = circuit_lang::SymbolTable::with_basics();
+        provider.mock_add(
+            "Power_Protection:TPD2S017",
+            vec![
+                ("1", "CH1Out", circuit_lang::PinType::Passive, 1),
+                ("2", "GND", circuit_lang::PinType::PowerInput, 1),
+                ("3", "CH1In", circuit_lang::PinType::Passive, 1),
+                ("4", "CH2Int", circuit_lang::PinType::Passive, 1),
+                ("5", "VCC", circuit_lang::PinType::PowerInput, 1),
+                ("6", "CH2Out", circuit_lang::PinType::Passive, 1),
+            ],
+        );
+        let netlist = r#"
+version: 1
+blocks:
+  main:
+    components:
+      U2:
+        part: Power_Protection:TPD2S017
+        pins: {"1": DPLUS_OUT, "2": GND, "3": DPLUS_IN, "4": DMINUS_IN, "5": VBUS, "6": DMINUS_OUT}
+"#;
+        let design = circuit_lang::compile(netlist, &provider)
+            .design
+            .expect("test design compiles");
+
+        assert!(symbol_pin_rail_checks(&design, &provider).is_empty());
+    }
+
+    #[test]
     fn netlist_review_requires_named_topology_and_actual_transfer_checks() {
         assert!(NETLIST_REVIEW_SYSTEM.contains("explicitly named in the intent"));
         assert!(NETLIST_REVIEW_SYSTEM.contains("actual topology and values"));
@@ -607,5 +748,17 @@ blocks:
                 "review path is missing the functional-topology trace: {lenses:?}"
             );
         }
+    }
+
+    #[test]
+    fn netlist_review_defines_flow_through_as_distinct_pins_and_nets() {
+        assert!(NETLIST_REVIEW_SYSTEM.contains("Flow-through protection"));
+        assert!(NETLIST_REVIEW_SYSTEM.contains("separate pins and separate connector-side"));
+        assert!(NETLIST_REVIEW_SYSTEM.contains("single shunt/ESD pin"));
+        assert!(
+            QUICK_LENSES
+                .iter()
+                .any(|lens| lens.contains("distinct in/out pins and nets"))
+        );
     }
 }

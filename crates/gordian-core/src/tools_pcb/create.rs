@@ -257,6 +257,46 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         }));
     }
 
+    let catalog = ctx.footprint_catalog()?;
+    let mut footprint_pin_mismatches = Vec::new();
+    for component in &netlist.components {
+        let Some(symbol) = ctx.provider().symbol(&component.lib_id) else {
+            continue;
+        };
+        let Some(footprint_id) = component
+            .properties
+            .get("Footprint")
+            .and_then(|raw| FootprintId::parse(raw).ok())
+        else {
+            continue;
+        };
+        let Ok(footprint) = catalog.footprint(&footprint_id) else {
+            continue; // the seed writer below returns the more specific lookup error
+        };
+        let extra_pads = pad_numbers_missing_from_symbol(
+            symbol.pins.iter().map(|pin| pin.number.as_str()),
+            footprint.pads.iter().map(|pad| pad.number.as_str()),
+        );
+        if !extra_pads.is_empty() {
+            footprint_pin_mismatches.push(json!({
+                "reference": component.reference,
+                "symbol": component.lib_id,
+                "footprint": footprint_id.to_string(),
+                "footprint_pads_absent_from_symbol": extra_pads,
+            }));
+        }
+    }
+    if !footprint_pin_mismatches.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "error": "assigned footprint has named copper pads absent from its schematic symbol",
+            "footprint_pin_mismatches": footprint_pin_mismatches,
+            "next_tool": "assign_footprints",
+            "next": "choose a package whose named pad numbers match the symbol pins, apply_design(), then regenerate_board again",
+            "note": "An extra numbered footprint pad would have no schematic net. Use a matching symbol/footprint pair; unnumbered mechanical pads are allowed.",
+        }));
+    }
+
     add_default_power_pours(&mut rules, &parts);
 
     let spec = BoardSeedSpec {
@@ -276,6 +316,24 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         "path": ctx.pcb_path().display().to_string(),
         "note": "board regenerated from the committed schematic file (not F8 sync; existing placement/routing may be replaced) — run place_board, then route_board, then check_board",
     }))
+}
+
+fn pad_numbers_missing_from_symbol<'a>(
+    symbol_pin_numbers: impl IntoIterator<Item = &'a str>,
+    footprint_pad_numbers: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    let symbol_pins: std::collections::BTreeSet<&str> = symbol_pin_numbers
+        .into_iter()
+        .filter(|pin| !pin.is_empty())
+        .collect();
+    let mut extra: Vec<String> = footprint_pad_numbers
+        .into_iter()
+        .filter(|pad| !pad.is_empty() && !symbol_pins.contains(pad))
+        .map(str::to_owned)
+        .collect();
+    extra.sort();
+    extra.dedup();
+    extra
 }
 
 fn unapplied_draft_footprint_changes(
@@ -1441,5 +1499,14 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0]["type"], "same_local_global_label");
         assert_eq!(warnings[0]["items"][0], "Label 'USB_DP'");
+    }
+
+    #[test]
+    fn named_footprint_pads_must_exist_on_the_symbol() {
+        assert_eq!(
+            pad_numbers_missing_from_symbol(["1", "2"], ["1", "2", "3", "3", ""]),
+            vec!["3"]
+        );
+        assert!(pad_numbers_missing_from_symbol(["1", "2", "3"], ["1", "2", "3", ""]).is_empty());
     }
 }
