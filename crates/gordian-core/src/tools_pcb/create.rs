@@ -130,7 +130,7 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
             return Ok(json!({ "error": format!("could not export the schematic netlist: {e}") }));
         }
     };
-    let unapplied_footprints = unapplied_draft_footprint_changes(ctx, &netlist);
+    let unapplied_footprints = unapplied_draft_footprint_changes(ctx, &netlist)?;
     if !unapplied_footprints.is_empty() {
         return Ok(json!({
             "ok": false,
@@ -281,12 +281,12 @@ pub fn regenerate_board(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 fn unapplied_draft_footprint_changes(
     ctx: &AgentRuntime,
     netlist: &kicad_cli::Netlist,
-) -> Vec<Value> {
-    let Some(draft) = ctx.workspace().read_draft() else {
-        return Vec::new();
+) -> anyhow::Result<Vec<Value>> {
+    let Some(draft) = ctx.workspace().read_draft()? else {
+        return Ok(Vec::new());
     };
     let Some(design) = circuit_lang::compile(&draft, ctx.provider()).design else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let committed: BTreeMap<String, String> = netlist
         .components
@@ -314,7 +314,7 @@ fn unapplied_draft_footprint_changes(
             }
         }
     }
-    changes
+    Ok(changes)
 }
 
 fn write_seed_board(spec: &BoardSeedSpec, ctx: &AgentRuntime) -> std::result::Result<(), String> {

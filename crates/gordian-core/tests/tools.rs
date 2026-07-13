@@ -726,6 +726,60 @@ fn fixture_ctx() -> (AgentRuntime, tempfile::TempDir) {
 }
 
 #[test]
+fn create_design_does_not_replace_an_unreadable_draft() {
+    let (ctx, _guard) = fixture_ctx();
+    let invalid = [0xff, 0xfe];
+    std::fs::write(ctx.workspace().draft_path(), invalid).unwrap();
+
+    let err = run_tool(
+        "create_design",
+        serde_json::json!({ "yaml": TINY_YAML }),
+        &ctx,
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("UTF-8"),
+        "unexpected error: {err:#}"
+    );
+    assert_eq!(
+        std::fs::read(ctx.workspace().draft_path()).unwrap(),
+        invalid
+    );
+}
+
+#[test]
+fn apply_design_reports_a_written_commit_when_the_draft_is_unreadable() {
+    let (ctx, _guard) = fixture_ctx();
+    let invalid = [0xff, 0xfe];
+    std::fs::write(ctx.workspace().draft_path(), invalid).unwrap();
+
+    let out = run_tool(
+        "apply_design",
+        serde_json::json!({ "yaml": TINY_YAML, "__commit": true }),
+        &ctx,
+    )
+    .expect("a post-write draft error must remain a structured committed result");
+
+    assert!(
+        ctx.sch_path().is_file(),
+        "the schematic write occurred: {out}"
+    );
+    assert_eq!(out["written"], serde_json::json!(true), "{out}");
+    assert_eq!(out["ok"], serde_json::json!(false), "{out}");
+    assert!(
+        out["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("reading applied draft")),
+        "{out}"
+    );
+    assert_eq!(
+        std::fs::read(ctx.workspace().draft_path()).unwrap(),
+        invalid
+    );
+}
+
+#[test]
 fn search_footprints_finds_vendored_fixture() {
     let (ctx, _guard) = fixture_ctx();
     let out = run_tool(
@@ -832,6 +886,7 @@ blocks:
     let draft = ctx
         .workspace()
         .read_draft()
+        .unwrap()
         .expect("draft after assignment");
     assert!(
         draft.contains("footprint: \"Fixtures:R_0603_1608Metric\""),
@@ -883,7 +938,11 @@ blocks:
     assert_eq!(items[0]["reference"], serde_json::json!("R1"));
     assert_eq!(items[1]["reference"], serde_json::json!("R2"));
 
-    let draft = ctx.workspace().read_draft().expect("draft after batch");
+    let draft = ctx
+        .workspace()
+        .read_draft()
+        .unwrap()
+        .expect("draft after batch");
     assert_eq!(
         draft
             .matches("footprint: \"Fixtures:R_0603_1608Metric\"")

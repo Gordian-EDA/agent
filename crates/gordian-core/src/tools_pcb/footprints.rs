@@ -160,7 +160,7 @@ pub fn assign_footprints(input: Value, ctx: &AgentRuntime) -> anyhow::Result<Val
         }
     }
 
-    let Some(draft) = ctx.workspace().read_draft() else {
+    let Some(draft) = ctx.workspace().read_draft()? else {
         return Ok(json!({
             "error": "no draft exists — call read_schematic({source:\"draft\"}) (seeds a draft from the current schematic) or create_design first",
         }));

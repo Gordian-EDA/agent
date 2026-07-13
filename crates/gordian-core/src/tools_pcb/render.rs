@@ -49,8 +49,7 @@ pub fn render_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let svg = add_visual_overlays(&svg, board.problem.outline.as_ref(), &board.imported.bounds);
 
     let png = crate::render::svg_to_png(&svg, ctx.config().tools.render_max_px)?;
-    let path = ctx.workspace().next_render_path()?;
-    std::fs::write(&path, &png).with_context(|| format!("writing render to {}", path.display()))?;
+    let path = ctx.workspace().write_render(&png)?;
 
     let mut obj = json!({
         "ok": true,

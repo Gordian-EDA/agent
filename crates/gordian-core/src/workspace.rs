@@ -50,8 +50,28 @@ impl Workspace {
     }
 
     /// The current draft text, if a draft exists.
-    pub fn read_draft(&self) -> Option<String> {
-        read_regular_to_string(&self.draft_path()).ok()
+    ///
+    /// Missing drafts are distinct from drafts that cannot be read. Callers
+    /// must not treat corruption, permission errors, or an unsafe file type as
+    /// permission to seed or overwrite the user's existing work.
+    pub fn read_draft(&self) -> io::Result<Option<String>> {
+        let path = self.draft_path();
+        match read_regular_to_string(&path) {
+            Ok(draft) => Ok(Some(draft)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                // File::open reports NotFound for a dangling symlink too. Only
+                // translate the error to `None` when the leaf truly is absent.
+                match std::fs::symlink_metadata(&path) {
+                    Err(leaf_err) if leaf_err.kind() == io::ErrorKind::NotFound => Ok(None),
+                    Ok(_) => Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("workspace path is not a regular file: {}", path.display()),
+                    )),
+                    Err(leaf_err) => Err(leaf_err),
+                }
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Write the draft and record which schematic text it was seeded from
@@ -75,25 +95,47 @@ impl Workspace {
             // No meta: a draft without a recorded seed hash can't be trusted
             // (e.g. a partial write), so treat it as stale; a fresh workspace
             // with no draft at all is simply not stale.
-            return self.draft_path().exists();
+            return !matches!(
+                std::fs::symlink_metadata(self.draft_path()),
+                Err(err) if err.kind() == io::ErrorKind::NotFound
+            );
         };
-        let recorded: Option<u64> = serde_json::from_str::<serde_json::Value>(&meta)
-            .ok()
-            .and_then(|v| v.get("seeded_from_sch_hash").cloned())
-            .and_then(|v| v.as_u64());
+        let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta) else {
+            return true;
+        };
+        let recorded = match meta.get("seeded_from_sch_hash") {
+            Some(serde_json::Value::Null) => None,
+            Some(value) => match value.as_u64() {
+                Some(hash) => Some(hash),
+                None => return true,
+            },
+            None => return true,
+        };
         recorded != current_sch_text.map(fnv1a64)
     }
 
-    /// The next free `renders/render-NNN.png` path.
-    pub fn next_render_path(&self) -> io::Result<PathBuf> {
+    /// Atomically persist a PNG under the next free `renders/render-NNN.png`.
+    /// Existing leaves of every kind, including dangling symlinks, are never
+    /// followed or replaced.
+    pub fn write_render(&self, png: &[u8]) -> io::Result<PathBuf> {
         let dir = self.root.join("renders");
-        // TOCTOU note: the returned path is not reserved. This is a
-        // single-process UI tool, so we accept the tiny window between this
-        // existence check and the caller's write rather than locking.
         for n in 1..=999u32 {
             let p = dir.join(format!("render-{n:03}.png"));
-            if !p.exists() {
-                return Ok(p);
+            match std::fs::symlink_metadata(&p) {
+                Ok(_) => continue,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+            let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
+            temp.write_all(png)?;
+            temp.as_file().sync_all()?;
+            match temp.persist_noclobber(&p) {
+                Ok(_) => {
+                    sync_dir(&dir)?;
+                    return Ok(p);
+                }
+                Err(err) if err.error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err.error),
             }
         }
         Err(io::Error::other("renders/ directory is full"))
@@ -123,9 +165,18 @@ fn ensure_real_dir(path: &Path) -> io::Result<()> {
 fn read_regular_to_string(path: &Path) -> io::Result<String> {
     use std::os::unix::fs::MetadataExt;
 
-    // Open first, then compare the descriptor's identity to a non-following
-    // lookup of the leaf. This rejects both an ordinary symlink and a symlink
-    // swapped into place during the open without ever reading from its target.
+    // Reject special files before opening so an existing FIFO cannot block the
+    // agent indefinitely. Identity is checked again below to cover leaf swaps.
+    let before = std::fs::symlink_metadata(path)?;
+    if before.file_type().is_symlink() || !before.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("workspace path is not a regular file: {}", path.display()),
+        ));
+    }
+    // Compare the opened descriptor's identity to a second non-following leaf
+    // lookup. This rejects a symlink swapped into place during the open without
+    // ever reading from its target.
     let mut file = std::fs::File::open(path)?;
     let opened = file.metadata()?;
     let leaf = std::fs::symlink_metadata(path)?;
@@ -170,6 +221,19 @@ fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
     temp.write_all(contents)?;
     temp.as_file().sync_all()?;
     temp.persist(path).map_err(|err| err.error)?;
+    // The file sync above makes its contents durable; syncing the directory
+    // makes the rename itself durable across a sudden power loss.
+    sync_dir(parent)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -196,7 +260,7 @@ mod tests {
             std::fs::read_to_string(dir.path().join(".gordian/.gitignore")).unwrap(),
             "*\n"
         );
-        assert!(ws.read_draft().is_none());
+        assert!(ws.read_draft().unwrap().is_none());
     }
 
     #[test]
@@ -206,7 +270,7 @@ mod tests {
 
         ws.write_draft("version: 1\n", Some("sch contents v1"))
             .unwrap();
-        assert_eq!(ws.read_draft().as_deref(), Some("version: 1\n"));
+        assert_eq!(ws.read_draft().unwrap().as_deref(), Some("version: 1\n"));
         // Same sch text -> not stale; different -> stale.
         assert!(!ws.draft_is_stale(Some("sch contents v1")));
         assert!(ws.draft_is_stale(Some("sch contents v2")));
@@ -220,11 +284,12 @@ mod tests {
     fn render_paths_increment() {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::for_project(dir.path()).unwrap();
-        let a = ws.next_render_path().unwrap();
-        std::fs::write(&a, b"x").unwrap();
-        let b = ws.next_render_path().unwrap();
+        let a = ws.write_render(b"first").unwrap();
+        let b = ws.write_render(b"second").unwrap();
         assert!(a.ends_with("render-001.png"), "{}", a.display());
         assert!(b.ends_with("render-002.png"), "{}", b.display());
+        assert_eq!(std::fs::read(a).unwrap(), b"first");
+        assert_eq!(std::fs::read(b).unwrap(), b"second");
     }
 
     #[cfg(unix)]
@@ -257,19 +322,64 @@ mod tests {
         std::fs::write(&target, "outside secret").unwrap();
         symlink(&target, ws.draft_path()).unwrap();
 
-        assert!(
-            ws.read_draft().is_none(),
+        assert_eq!(
+            ws.read_draft().unwrap_err().kind(),
+            io::ErrorKind::InvalidInput,
             "draft reads must reject symlinks"
         );
         ws.write_draft("version: 1\n", None).unwrap();
 
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "outside secret");
-        assert_eq!(ws.read_draft().as_deref(), Some("version: 1\n"));
+        assert_eq!(ws.read_draft().unwrap().as_deref(), Some("version: 1\n"));
         assert!(
             !std::fs::symlink_metadata(ws.draft_path())
                 .unwrap()
                 .file_type()
                 .is_symlink()
         );
+    }
+
+    #[test]
+    fn unreadable_draft_is_not_reported_as_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::for_project(dir.path()).unwrap();
+        std::fs::write(ws.draft_path(), [0xff, 0xfe]).unwrap();
+
+        let err = ws.read_draft().unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(ws.draft_path()).unwrap(), [0xff, 0xfe]);
+    }
+
+    #[test]
+    fn malformed_draft_metadata_is_always_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::for_project(dir.path()).unwrap();
+        ws.write_draft("version: 1\n", None).unwrap();
+        std::fs::write(dir.path().join(".gordian/draft.meta.json"), "not json").unwrap();
+
+        assert!(ws.draft_is_stale(None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn render_dangling_symlink_is_not_followed() {
+        use std::os::unix::fs::symlink;
+
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ws = Workspace::for_project(project.path()).unwrap();
+        let target = outside.path().join("created-outside.png");
+        symlink(
+            &target,
+            project.path().join(".gordian/renders/render-001.png"),
+        )
+        .unwrap();
+
+        let written = ws.write_render(b"png").unwrap();
+
+        assert!(written.ends_with("render-002.png"), "{}", written.display());
+        assert_eq!(std::fs::read(written).unwrap(), b"png");
+        assert!(!target.exists());
     }
 }

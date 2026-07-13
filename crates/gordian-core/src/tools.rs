@@ -666,7 +666,7 @@ struct DraftRead {
 }
 
 fn read_draft_or_seed(ctx: &AgentRuntime) -> Result<DraftRead> {
-    if let Some(draft) = ctx.workspace().read_draft() {
+    if let Some(draft) = ctx.workspace().read_draft()? {
         let stale = ctx
             .workspace()
             .draft_is_stale(current_sch_text(ctx).as_deref());
@@ -771,7 +771,7 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .map(str::to_string);
     let yaml = match explicit_yaml.clone() {
         Some(y) => y,
-        None => match ctx.workspace().read_draft() {
+        None => match ctx.workspace().read_draft()? {
             Some(d) => d,
             None => {
                 return Ok(json!({
@@ -839,13 +839,14 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     // Once the schematic write succeeds, later failures must be returned as an
     // honest `written: true` result. Returning `Err` would make the agent report
     // that nothing committed and potentially retry an already-applied change.
-    let draft_sync_error = if ctx.workspace().read_draft().is_some() {
-        ctx.workspace()
+    let draft_sync_error = match ctx.workspace().read_draft() {
+        Ok(Some(_)) => ctx
+            .workspace()
             .write_draft(&yaml, current_sch_text(ctx).as_deref())
             .err()
-            .map(|err| format!("updating applied draft metadata: {err}"))
-    } else {
-        None
+            .map(|err| format!("updating applied draft metadata: {err}")),
+        Ok(None) => None,
+        Err(err) => Some(format!("reading applied draft: {err}")),
     };
     let erc = KicadCli::new(ctx.env()).erc(ctx.sch_path());
 
@@ -1170,7 +1171,7 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .get("overwrite")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if ctx.workspace().read_draft().is_some() && !overwrite {
+    if ctx.workspace().read_draft()?.is_some() && !overwrite {
         return Ok(json!({
             "error": "a draft already exists — pass overwrite=true to replace it, \
                       or use edit_design to modify it",
@@ -1185,7 +1186,7 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
 fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let full_yaml = input.get("yaml").and_then(Value::as_str);
-    let Some(draft) = ctx.workspace().read_draft() else {
+    let Some(draft) = ctx.workspace().read_draft()? else {
         return Ok(json!({
             "error": "no draft exists — call read_schematic({source:\"draft\"}) (seeds a draft from the \
                       current schematic) or create_design first",
@@ -1249,8 +1250,7 @@ fn render_schematic(ctx: &AgentRuntime) -> Result<Value> {
     }
     let png =
         crate::render::schematic_png(ctx.env(), ctx.sch_path(), ctx.config().tools.render_max_px)?;
-    let path = ctx.workspace().next_render_path()?;
-    std::fs::write(&path, &png).with_context(|| format!("writing {}", path.display()))?;
+    let path = ctx.workspace().write_render(&png)?;
     let mut obj = json!({
         "ok": true,
         "png_path": path.display().to_string(),
