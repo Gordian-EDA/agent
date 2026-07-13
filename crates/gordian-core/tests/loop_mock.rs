@@ -27,6 +27,13 @@ blocks:\n\
 \x20     R1: {part: R, value: 10k, between: [A, GND]}\n\
 \x20     R2: {part: R, value: 10k, between: [GND, B]}\n";
 
+const CLEAN_YAML: &str = "version: 1\n\
+blocks:\n\
+\x20 main:\n\
+\x20   components:\n\
+\x20     R1: {part: R, value: 10k, between: [A, GND]}\n\
+\x20     R2: {part: R, value: 10k, between: [A, GND]}\n";
+
 /// The shared script: (1) search_symbols, (2) apply_design, (3) done.
 fn script() -> Vec<gordian_core::StreamEnd> {
     vec![
@@ -78,10 +85,48 @@ async fn loop_runs_tools_and_gates_apply_on_yes() {
 }
 
 #[tokio::test]
-async fn stall_after_research_is_nudged_until_it_commits() {
-    // The bug: a model that RESEARCHES (search_symbols) then tries to stop with
-    // a text-only turn ships NOTHING (applied stays false). The loop must
-    // re-prompt it to finish + commit, so it lands the design instead.
+async fn clean_draft_flow_skips_redundant_validation_and_erc_calls() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let sch_path = ctx.sch_path().to_path_buf();
+    let script = vec![
+        tool_call(
+            "tu_1",
+            "create_design",
+            serde_json::json!({ "yaml": CLEAN_YAML }),
+        ),
+        tool_call("tu_2", "apply_design", serde_json::json!({})),
+        final_text("done"),
+    ];
+    let mut agent = agent(ctx, script);
+    let mut approvals = AutoApprove::yes();
+
+    let outcome = agent
+        .run_turn(
+            "create and commit this small resistor design",
+            &mut approvals,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert!(outcome.applied, "clean draft should commit: {outcome:?}");
+    assert!(
+        sch_path.exists(),
+        "approved apply should write the schematic"
+    );
+    assert_eq!(
+        outcome.tool_calls_made, 2,
+        "create_design already validates and apply_design already runs ERC"
+    );
+}
+
+#[tokio::test]
+async fn stall_after_draft_authoring_is_nudged_until_it_commits() {
+    // Once a model has WRITTEN A DRAFT, a text-only stop ships nothing. The loop
+    // must re-prompt it to finish + commit so the authored work lands.
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");
         return;
@@ -89,14 +134,15 @@ async fn stall_after_research_is_nudged_until_it_commits() {
     let sch_path = ctx.sch_path().to_path_buf();
     assert!(!sch_path.exists(), "fixture starts with no schematic");
 
-    // (1) research, (2) premature text-only stop → NUDGE, (3) apply+commit, (4) done.
+    // (1) author draft, (2) premature text-only stop → NUDGE,
+    // (3) apply+commit, (4) done.
     let script = vec![
         tool_call(
             "tu_1",
-            "search_symbols",
-            serde_json::json!({ "query": "resistor" }),
+            "create_design",
+            serde_json::json!({ "yaml": TINY_YAML }),
         ),
-        final_text("I looked up the parts."), // stalls without committing
+        final_text("I created the draft."), // stalls without committing
         tool_call(
             "tu_2",
             "apply_design",
@@ -125,7 +171,7 @@ async fn stall_after_research_is_nudged_until_it_commits() {
 
 #[tokio::test]
 async fn stall_nudge_is_bounded_and_gives_up() {
-    // A model that simply will NOT commit (research, then stop, repeatedly) must
+    // A model that simply will NOT commit (drafts, then stops repeatedly) must
     // not loop forever: at most MAX_COMMIT_NUDGES (2) re-prompts, then the turn
     // returns honestly unapplied. The script ends after the 3rd stop; if the loop
     // nudged a 3rd time it would exhaust the script and error.
@@ -137,8 +183,8 @@ async fn stall_nudge_is_bounded_and_gives_up() {
     let script = vec![
         tool_call(
             "tu_1",
-            "search_symbols",
-            serde_json::json!({ "query": "resistor" }),
+            "create_design",
+            serde_json::json!({ "yaml": TINY_YAML }),
         ),
         final_text("stop 1"), // → nudge 1
         final_text("stop 2"), // → nudge 2
@@ -154,6 +200,35 @@ async fn stall_nudge_is_bounded_and_gives_up() {
 
     assert!(!outcome.applied, "model never committed: {outcome:?}");
     assert_eq!(outcome.final_text, "stop 3", "returns the last stop's text");
+}
+
+#[tokio::test]
+async fn read_only_symbol_research_does_not_trigger_commit_nudges() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    // The script deliberately has no spare completion. An erroneous commit
+    // nudge would request a third response and exhaust it.
+    let script = vec![
+        tool_call(
+            "tu_1",
+            "search_symbols",
+            serde_json::json!({ "query": "resistor" }),
+        ),
+        final_text("I found the matching resistor symbols."),
+    ];
+    let mut agent = agent(ctx, script);
+    let mut approvals = AutoApprove::yes();
+
+    let outcome = agent
+        .run_turn("find resistor symbols", &mut approvals, None)
+        .await
+        .expect("read-only research should finish without a commit nudge");
+
+    assert!(!outcome.applied);
+    assert_eq!(outcome.final_text, "I found the matching resistor symbols.");
+    assert_eq!(outcome.tool_calls_made, 1);
 }
 
 #[tokio::test]

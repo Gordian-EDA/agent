@@ -172,6 +172,16 @@ async fn compact_replaces_history_with_a_summary_pair() {
 
     agent.run_turn("two", &mut approvals, None).await.unwrap();
     let seen = seen.lock().unwrap();
+    let compaction = &seen[1];
+    assert_eq!(
+        compaction.len(),
+        1,
+        "compaction uses one provider-neutral text transcript: {compaction:#?}"
+    );
+    assert_eq!(compaction[0].role, ChatRole::User);
+    assert!(text_of(&compaction[0]).contains("Conversation transcript:"));
+    assert!(text_of(&compaction[0]).contains("one"));
+    assert!(text_of(&compaction[0]).contains("a1"));
     let third = &seen[2];
     assert_eq!(third.len(), 3, "summary pair + new prompt: {third:#?}");
     assert_eq!(third[0].role, ChatRole::User);
