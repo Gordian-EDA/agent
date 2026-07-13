@@ -1543,6 +1543,23 @@ fn check_board_e2e_kicad_drc_clean() {
 
     let out = run_tool("check_board", serde_json::json!({}), &ctx).unwrap();
     assert_eq!(out["ok"], serde_json::json!(true), "check_board: {out}");
+    assert_eq!(
+        out["drc_clean"],
+        serde_json::json!(true),
+        "check_board: {out}"
+    );
+    assert_eq!(
+        out["blocking_findings"],
+        serde_json::json!(0),
+        "check_board: {out}"
+    );
+    assert!(out["reported_findings"].is_number(), "check_board: {out}");
+    assert!(
+        out["next"]
+            .as_str()
+            .is_some_and(|next| next.contains("Do not regenerate")),
+        "check_board: {out}"
+    );
     // Strict: zero copper-layer violations of ANY severity (the detailed router's
     // spurious via_dangling vias are dropped at the stitch source, so this stays
     // clean — and now guards against that regression).

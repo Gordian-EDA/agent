@@ -164,9 +164,14 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .iter()
         .filter(|v| !is_zone_self_unconnected(v))
         .collect();
+    let blocking_findings = gate.copper_violations + gate.meaningful_unconnected;
+    let reported_findings = report.violations.len() + report.unconnected_items.len();
     Ok(json!({
         "ok": gate.is_ok(),
+        "drc_clean": gate.is_ok(),
         "path": path.display().to_string(),
+        "blocking_findings": blocking_findings,
+        "reported_findings": reported_findings,
         "violations": report.violations.len(),
         "copper_violations": gate.copper_violations,
         "unconnected_items": gate.meaningful_unconnected,
@@ -180,6 +185,11 @@ pub fn check_board(_input: Value, ctx: &AgentRuntime) -> Result<Value> {
             format!("{note_prefix}KiCAD DRC passed.")
         } else {
             format!("{note_prefix}KiCAD DRC reported issues; inspect violations/unconnected counts.")
+        },
+        "next": if gate.is_ok() {
+            "DRC gate passed; finish the task. Do not regenerate, replace, or reroute this unchanged board. reported_findings may include tolerated non-copper warnings; blocking_findings is authoritative."
+        } else {
+            "Fix the top blocking violations/unconnected items, then call check_board again. Do not regenerate blindly."
         },
     }))
 }

@@ -478,7 +478,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "check_board".into(),
-                description: "Save live board and run PCB DRC."
+                description: "Run PCB DRC. If ok=true, stop; do not reroute unchanged."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },

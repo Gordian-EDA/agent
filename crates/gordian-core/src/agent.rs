@@ -1606,6 +1606,31 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                 format!("score {score:.0}/10 — {n} defect(s) to fix")
             }
         }
+        "check_board" => {
+            let blocking = result
+                .get("blocking_findings")
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| {
+                    result
+                        .get("copper_violations")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                        + result
+                            .get("unconnected_items")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0)
+                });
+            let reported = result
+                .get("reported_findings")
+                .and_then(Value::as_u64)
+                .or_else(|| result.get("violations").and_then(Value::as_u64))
+                .unwrap_or(0);
+            if result.get("ok").and_then(Value::as_bool) == Some(true) {
+                format!("DRC clean: 0 blocking findings ({reported} total reported)")
+            } else {
+                format!("DRC failed: {blocking} blocking findings")
+            }
+        }
         "assign_footprints" => {
             if let Some(count) = result.get("count").and_then(Value::as_u64) {
                 return format!("{count} footprint(s) assigned");
@@ -2077,6 +2102,12 @@ mod tests {
             &json!({ "written": true, "erc": { "errors": 0 }, "layout_mode": "composed" }),
         );
         assert!(s.contains("written"), "got: {s}");
+        let s = tool_summary(
+            "check_board",
+            &json!({}),
+            &json!({ "ok": true, "blocking_findings": 0, "reported_findings": 2 }),
+        );
+        assert_eq!(s, "DRC clean: 0 blocking findings (2 total reported)");
         let s = tool_summary("read_schematic", &json!({}), &json!({ "error": "boom" }));
         assert_eq!(s, "error: boom");
     }
