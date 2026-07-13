@@ -87,6 +87,31 @@ fn validate_design_tool_reports_errors_for_bad_part() {
 }
 
 #[test]
+fn empty_design_is_never_ready_or_written() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let empty = "version: 1\nname: empty\nblocks: {main: {components: {}}}\nnets: {}";
+
+    let created = run_tool("create_design", serde_json::json!({"yaml": empty}), &ctx).unwrap();
+    assert_eq!(created["ok"], false, "{created}");
+    assert!(created.to_string().contains("empty_design"), "{created}");
+
+    let preview = run_tool("apply_design", serde_json::json!({}), &ctx).unwrap();
+    assert_eq!(preview["ok"], false, "{preview}");
+    assert!(preview.get("would_write").is_none(), "{preview}");
+
+    let committed = run_tool("apply_design", serde_json::json!({"__commit": true}), &ctx).unwrap();
+    assert_eq!(committed["ok"], false, "{committed}");
+    assert!(committed.get("written").is_none(), "{committed}");
+    assert!(
+        !ctx.sch_path().exists(),
+        "empty schematic must not be written"
+    );
+}
+
+#[test]
 fn get_symbol_info_tool_returns_full_pin_table_for_stm32() {
     let Some(ctx) = AgentRuntime::detect_for_test() else {
         eprintln!("SKIP: no KiCAD detected");

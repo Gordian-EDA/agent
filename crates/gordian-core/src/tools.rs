@@ -824,9 +824,40 @@ fn compile_authoring_report(
 ) -> Result<Value> {
     let mut report = compile_report(&result.diagnostics);
     if let Some(design) = &result.design {
+        if add_empty_design_error(&mut report, design) {
+            return Ok(report);
+        }
         add_footprint_compatibility(&mut report, design, ctx)?;
     }
     Ok(report)
+}
+
+/// A syntactically valid document with no components is not an authored
+/// schematic. Treating it as clean lets an early/speculative `apply_design`
+/// replace a real project with an empty sheet while still reporting ERC 0/0.
+fn add_empty_design_error(report: &mut Value, design: &Design) -> bool {
+    if design
+        .blocks
+        .values()
+        .any(|block| !block.components.is_empty())
+    {
+        return false;
+    }
+
+    let errors = report.get("errors").and_then(Value::as_u64).unwrap_or(0) + 1;
+    report["ok"] = json!(false);
+    report["errors"] = json!(errors);
+    report["diagnostics"]
+        .as_array_mut()
+        .expect("compile_report diagnostics must be an array")
+        .push(json!(
+            "error[empty_design]: the draft has no components; author the complete requested circuit before applying it"
+        ));
+    report["next_tool"] = json!("edit_design");
+    report["next"] = json!(
+        "replace the empty draft with the complete circuit; an empty schematic cannot be applied"
+    );
+    true
 }
 
 /// Returns `true` when at least one incompatible assignment was found.
@@ -915,6 +946,9 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         report["ok"] = json!(false);
         return Ok(report);
     };
+    if add_empty_design_error(&mut report, &design) {
+        return Ok(report);
+    }
     if add_footprint_compatibility(&mut report, &design, ctx)? {
         return Ok(report);
     }

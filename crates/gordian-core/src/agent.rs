@@ -224,6 +224,7 @@ impl ToolPhase {
 fn tool_defs_for_phase(
     phase: ToolPhase,
     discovery_rounds_used: &HashMap<String, usize>,
+    draft_exists: bool,
 ) -> Vec<Tool> {
     tool_defs()
         .into_iter()
@@ -241,6 +242,11 @@ fn tool_defs_for_phase(
                     .unwrap_or(0)
                     < MAX_DISCOVERY_ROUNDS_PER_SUBTURN
         })
+        // `create_design` is a one-shot initializer. Once a durable draft
+        // exists, `edit_design` is the only safe authoring surface: advertising
+        // overwrite encourages the model to restart from a partial reconstruction
+        // and discard already-correct work.
+        .filter(|tool| !draft_exists || tool.name.as_str() != "create_design")
         .filter(|tool| match phase {
             ToolPhase::BoardActive => true,
             ToolPhase::BoardSeed => {
@@ -337,7 +343,8 @@ pub enum StopReason {
 /// The result of one [`Agent::run_turn`].
 #[derive(Clone, Debug)]
 pub struct TurnOutcome {
-    /// Whether an approved gated write actually committed this turn.
+    /// Whether the latest authored draft state was committed this turn. A
+    /// commit followed by an uncommitted edit reports `false`.
     pub applied: bool,
     /// The model's final text reply.
     pub final_text: String,
@@ -514,14 +521,11 @@ impl<P: Provider> Agent<P> {
 
         let mut applied = false;
         let mut tool_calls_made = 0usize;
-        // Whether the model ever DISPATCHED a gated-commit this turn. Distinguishes
-        // the genuine stall ("drafted but never tried to commit") from a deliberate
-        // human rejection (which DID attempt a commit) — we only nudge the former.
-        let mut commit_attempted = false;
-        // Whether the model did authoring-for-commit work this turn. The same loop
-        // also drives flows that legitimately never commit (a PCB board flow), so
-        // the "didn't commit" nudge must only fire on a stalled authoring turn.
-        let mut did_authoring_work = false;
+        // A commit earlier in the turn does not make later draft edits committed.
+        // Track the current draft separately so a partial post-commit rewrite
+        // cannot be reported as shipped merely because `applied` is sticky.
+        let mut draft_dirty = false;
+        let mut commit_attempted_for_current_draft = false;
         // Bounded re-prompts that push a stalled model past a premature stop.
         let mut nudges_left = MAX_COMMIT_NUDGES;
         let mut erc_cleanup_nudges_left = MAX_ERC_CLEANUP_NUDGES;
@@ -545,15 +549,16 @@ impl<P: Provider> Agent<P> {
 
         loop {
             if provider_requests >= MAX_PROVIDER_REQUESTS_PER_TURN {
+                let current_applied = applied && !draft_dirty;
                 let final_text = provider_limit_final_text(
                     None,
-                    applied,
+                    current_applied,
                     tool_calls_made,
                     last_tool_status.as_deref(),
                 );
                 emit(events, AgentEvent::AssistantText(final_text.clone()));
                 return Ok(TurnOutcome {
-                    applied,
+                    applied: current_applied,
                     final_text,
                     tool_calls_made,
                     stop_reason: StopReason::ProviderRequestLimit {
@@ -564,7 +569,18 @@ impl<P: Provider> Agent<P> {
             provider_requests += 1;
 
             self.tool_phase = self.tool_phase.max(ToolPhase::observe(&self.runtime));
-            let defs = tool_defs_for_phase(self.tool_phase, &discovery_rounds_used);
+            let draft_existed_before_completion = self
+                .runtime
+                .workspace()
+                .read_draft()
+                .ok()
+                .flatten()
+                .is_some();
+            let defs = tool_defs_for_phase(
+                self.tool_phase,
+                &discovery_rounds_used,
+                draft_existed_before_completion,
+            );
 
             // Drive the provider's stream so assistant prose renders token-by-token
             // (each chunk forwarded as `AssistantDelta`), while the terminal End
@@ -590,15 +606,16 @@ impl<P: Provider> Agent<P> {
                             emit(events, AgentEvent::AssistantText(text.clone()));
                             self.history.push(ChatMessage::assistant(text.clone()));
                         }
+                        let current_applied = applied && !draft_dirty;
                         let final_text = provider_limit_final_text(
                             (!text.trim().is_empty()).then_some(text.as_str()),
-                            applied,
+                            current_applied,
                             tool_calls_made,
                             last_tool_status.as_deref(),
                         );
                         emit(events, AgentEvent::AssistantText(final_text.clone()));
                         return Ok(TurnOutcome {
-                            applied,
+                            applied: current_applied,
                             final_text,
                             tool_calls_made,
                             stop_reason: StopReason::ProviderRequestLimit {
@@ -665,19 +682,18 @@ impl<P: Provider> Agent<P> {
                     continue;
                 }
 
-                // Catch the premature stop: the model did authoring work but ended
-                // the turn WITHOUT ever attempting a commit, so nothing ships.
-                // Re-prompt it to finish + commit (bounded). Excluded: a deliberate
-                // human rejection (DID attempt a commit), a pure-text stop (no
-                // authoring work), and a flow that never commits.
-                if did_authoring_work && !applied && !commit_attempted && nudges_left > 0 {
+                // Catch a premature stop with current uncommitted draft work.
+                // This also catches an edit made after an earlier commit. A human
+                // rejection counts as an attempt for that exact draft, so it is
+                // still respected rather than being re-prompted.
+                if draft_dirty && !commit_attempted_for_current_draft && nudges_left > 0 {
                     nudges_left -= 1;
                     self.history.push(ChatMessage::user(COMMIT_NUDGE));
                     continue;
                 }
 
                 return Ok(TurnOutcome {
-                    applied,
+                    applied: applied && !draft_dirty,
                     final_text: text,
                     tool_calls_made,
                     stop_reason: StopReason::Completed,
@@ -718,16 +734,15 @@ impl<P: Provider> Agent<P> {
             // though every later call can reason from the first result. Preserve
             // later completions for a deliberately filtered follow-up view.
             let mut board_read_dispatched_this_completion = false;
+            // An apply batched with authoring was planned against the old draft
+            // and cannot have observed the author's validation result. Whichever
+            // comes first may run; the dependent half must wait one completion.
+            let mut authoring_dispatched_this_completion = false;
+            let mut apply_dispatched_this_completion = false;
             for call in &tool_calls {
                 let effect = tool_effect(&call.fn_name);
                 let gated_commit = effect == ToolEffect::Gated && wants_apply(call);
                 let approval_required = effect == ToolEffect::ApprovalRequired;
-                if gated_commit {
-                    commit_attempted = true;
-                }
-                if is_authoring_for_commit(&call.fn_name) {
-                    did_authoring_work = true;
-                }
                 emit(
                     events,
                     AgentEvent::ToolStarted {
@@ -744,6 +759,13 @@ impl<P: Provider> Agent<P> {
                     discovery_tools_blocked.contains(call.fn_name.as_str());
                 let duplicate_board_read_blocked =
                     call.fn_name == "get_board" && board_read_dispatched_this_completion;
+                let speculative_mutation_blocked = speculative_apply_authoring_batch_blocked(
+                    &call.fn_name,
+                    authoring_dispatched_this_completion,
+                    apply_dispatched_this_completion,
+                );
+                let create_on_existing_draft_blocked =
+                    call.fn_name == "create_design" && draft_existed_before_completion;
                 let schematic_review_blocked = schematic_review_required_before_pcb(
                     applied,
                     schematic_review_current,
@@ -753,7 +775,9 @@ impl<P: Provider> Agent<P> {
                     && !timeout_retry_blocked
                     && !discovery_budget_blocked
                     && !duplicate_board_read_blocked
-                    && !schematic_review_blocked;
+                    && !schematic_review_blocked
+                    && !speculative_mutation_blocked
+                    && !create_on_existing_draft_blocked;
                 let (mut content, images, image_path) = if timed_out_mutation_blocked {
                     (
                         json!({
@@ -761,6 +785,29 @@ impl<P: Provider> Agent<P> {
                             "code": "timed_out_mutation_conflict",
                             "prior_timed_out_tools": timed_out_tool_calls.iter().map(|(name, _, _)| name).collect::<Vec<_>>(),
                             "note": "The prior mutation runs in non-cancellable blocking work and may still finish. No further schematic or PCB mutation is safe in this turn; use read-only inspection if useful, then report the timeout honestly.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if speculative_mutation_blocked {
+                    (
+                        json!({
+                            "error": "apply_design cannot be batched with draft authoring in one assistant completion",
+                            "code": "speculative_apply_authoring_batch_blocked",
+                            "tool": call.fn_name,
+                            "note": "The later call was planned from the old draft. Inspect the first call's validation/result, then author or apply in the next completion.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if create_on_existing_draft_blocked {
+                    (
+                        json!({
+                            "error": "create_design cannot replace an existing draft in an agent turn",
+                            "code": "existing_draft_requires_edit",
+                            "note": "Preserve the current work: use edit_design with one full corrected YAML document. Do not restart from a partial reconstruction.",
                         })
                         .to_string(),
                         Vec::new(),
@@ -827,6 +874,12 @@ impl<P: Provider> Agent<P> {
                     )
                 } else {
                     tool_calls_made += 1;
+                    if is_authoring_for_commit(&call.fn_name) {
+                        authoring_dispatched_this_completion = true;
+                    }
+                    if call.fn_name == "apply_design" {
+                        apply_dispatched_this_completion = true;
+                    }
                     if call.fn_name == "get_board" {
                         board_read_dispatched_this_completion = true;
                     }
@@ -852,6 +905,11 @@ impl<P: Provider> Agent<P> {
                     next_tool_state_revision(tool_state_revision, dispatched, effect, &parsed);
                 if dispatched && is_authoring_for_commit(&call.fn_name) {
                     schematic_review_current = false;
+                    if authoring_result_changed_draft(&parsed) {
+                        draft_dirty = true;
+                        commit_attempted_for_current_draft = false;
+                        last_committed_erc_cleanup_needed = None;
+                    }
                 }
                 if dispatched
                     && call.fn_name == "apply_design"
@@ -868,6 +926,16 @@ impl<P: Provider> Agent<P> {
                     && let Some(cleanup_needed) = apply_erc_cleanup_needed(&parsed)
                 {
                     last_committed_erc_cleanup_needed = Some(cleanup_needed);
+                }
+                if dispatched && call.fn_name == "apply_design" {
+                    let written = parsed.get("written").and_then(Value::as_bool) == Some(true);
+                    let rejected = parsed.get("rejected").and_then(Value::as_bool) == Some(true);
+                    if written {
+                        draft_dirty = false;
+                    }
+                    if written || rejected {
+                        commit_attempted_for_current_draft = true;
+                    }
                 }
                 if pcb_recovery.observe_tool_result(&call.fn_name, &parsed, dispatched) {
                     content = add_route_retry_guidance(
@@ -908,15 +976,16 @@ impl<P: Provider> Agent<P> {
             // read churn or guaranteed blocked writes; end honestly now and
             // let a fresh user turn inspect once the background work settles.
             if let Some(tool) = timed_out_mutation_name(&timed_out_tool_calls) {
+                let current_applied = applied && !draft_dirty;
                 let final_text = mutation_timeout_final_text(
                     tool,
-                    applied,
+                    current_applied,
                     tool_calls_made,
                     last_tool_status.as_deref(),
                 );
                 emit(events, AgentEvent::AssistantText(final_text.clone()));
                 return Ok(TurnOutcome {
-                    applied,
+                    applied: current_applied,
                     final_text,
                     tool_calls_made,
                     stop_reason: StopReason::MutationTimedOut,
@@ -1513,11 +1582,45 @@ fn prune_stale_images(history: &mut [ChatMessage]) {
     }
 }
 
-/// Replace large historical tool-call arguments with compact placeholders after
-/// their tool results have been recorded. The authoritative draft lives on disk,
-/// and retaining every old full-YAML `create_design`/`edit_design`/`validate`
-/// payload makes later LLM requests grow by thousands of tokens per repair pass.
+/// Replace superseded large tool-call arguments with compact placeholders after
+/// their tool results have been recorded. Preserve the newest successfully
+/// written full draft: it is the model's cheapest exact repair context, and
+/// immediately erasing it forces a redundant read or a reconstruction. The
+/// authoritative draft remains on disk.
 fn prune_large_tool_arguments(history: &mut [ChatMessage]) {
+    let successful_authoring_call_ids = history
+        .iter()
+        .filter(|message| message.role == ChatRole::Tool)
+        .flat_map(|message| message.content.iter())
+        .filter_map(|part| match part {
+            ContentPart::ToolResponse(response) => serde_json::from_str::<Value>(&response.content)
+                .ok()
+                .filter(authoring_result_changed_draft)
+                .map(|_| response.call_id.clone()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let latest_successful_full_authoring = history.iter().rev().find_map(|message| {
+        if message.role != ChatRole::Assistant {
+            return None;
+        }
+        message.content.iter().rev().find_map(|part| match part {
+            ContentPart::ToolCall(call)
+                if matches!(call.fn_name.as_str(), "create_design" | "edit_design")
+                    && call
+                        .fn_arguments
+                        .get("yaml")
+                        .and_then(Value::as_str)
+                        .is_some()
+                    && successful_authoring_call_ids.contains(&call.call_id) =>
+            {
+                Some(call)
+            }
+            _ => None,
+        })
+    });
+    let preserved_call_id = latest_successful_full_authoring.map(|call| call.call_id.clone());
+
     for msg in history {
         if msg.role != ChatRole::Assistant {
             continue;
@@ -1527,6 +1630,9 @@ fn prune_large_tool_arguments(history: &mut [ChatMessage]) {
                 continue;
             };
             if !tool_args_can_be_pruned(&call.fn_name) {
+                continue;
+            }
+            if preserved_call_id.as_deref() == Some(call.call_id.as_str()) {
                 continue;
             }
             prune_large_json_strings(&mut call.fn_arguments);
@@ -1646,11 +1752,38 @@ fn is_authoring_for_commit(name: &str) -> bool {
     matches!(name, "create_design" | "edit_design" | "assign_footprints")
 }
 
-/// The re-prompt sent when a stalled authoring turn never committed.
-const COMMIT_NUDGE: &str = "Your turn ended without a committed design — nothing was written. You MUST \
-     finish the schematic now: call `create_design`/`edit_design` to author the \
-     full design, then `apply_design` to submit it for approval. Do this now \
-     before ending your turn.";
+fn speculative_apply_authoring_batch_blocked(
+    name: &str,
+    authoring_already_dispatched: bool,
+    apply_already_dispatched: bool,
+) -> bool {
+    (name == "apply_design" && authoring_already_dispatched)
+        || (is_authoring_for_commit(name) && apply_already_dispatched)
+}
+
+/// Whether an authoring result actually changed the durable draft. Compile
+/// errors do not negate the write: create/full-edit deliberately persist an
+/// invalid draft so the next correction can patch it in place.
+fn authoring_result_changed_draft(value: &Value) -> bool {
+    if value.get("error").is_some() || value.get("rejected").and_then(Value::as_bool) == Some(true)
+    {
+        return false;
+    }
+    value.get("draft_written").and_then(Value::as_bool) == Some(true)
+        || value
+            .get("replacements")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0)
+        || value
+            .get("assigned")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+}
+
+/// The re-prompt sent when the current draft has not been committed.
+const COMMIT_NUDGE: &str = "Your latest draft changes are not committed. Finish the complete \
+     schematic with `edit_design` if needed, then call `apply_design` to submit \
+     this exact current draft for approval before ending your turn.";
 
 /// The re-prompt sent after a commit whose ERC report contains actionable
 /// findings. The result immediately before this message contains the exact
@@ -2899,6 +3032,30 @@ mod tests {
     }
 
     #[test]
+    fn apply_and_authoring_cannot_share_one_speculative_batch() {
+        assert!(speculative_apply_authoring_batch_blocked(
+            "apply_design",
+            true,
+            false
+        ));
+        assert!(speculative_apply_authoring_batch_blocked(
+            "edit_design",
+            false,
+            true
+        ));
+        assert!(!speculative_apply_authoring_batch_blocked(
+            "edit_design",
+            true,
+            false
+        ));
+        assert!(!speculative_apply_authoring_batch_blocked(
+            "route_board",
+            true,
+            true
+        ));
+    }
+
+    #[test]
     fn pcb_regeneration_requires_current_semantic_review_after_apply() {
         assert!(schematic_review_required_before_pcb(
             true,
@@ -3166,25 +3323,83 @@ mod tests {
     }
 
     #[test]
-    fn prune_large_tool_arguments_keeps_history_compact() {
-        let big_yaml = "version: 1\n".repeat(80);
-        let mut history = vec![ChatMessage::assistant(MessageContent::from_parts(vec![
-            ContentPart::ToolCall(ToolCall {
-                call_id: "tu_big".into(),
-                fn_name: "edit_design".into(),
-                fn_arguments: json!({ "yaml": big_yaml }),
-                thought_signatures: None,
-            }),
-        ]))];
+    fn prune_large_tool_arguments_keeps_latest_successful_full_draft() {
+        let old_yaml = "old: true\n".repeat(80);
+        let current_yaml = "current: true\n".repeat(80);
+        let authoring_call = |id: &str, yaml: String| {
+            ChatMessage::assistant(MessageContent::from_parts(vec![ContentPart::ToolCall(
+                ToolCall {
+                    call_id: id.into(),
+                    fn_name: "edit_design".into(),
+                    fn_arguments: json!({ "yaml": yaml }),
+                    thought_signatures: None,
+                },
+            )]))
+        };
+        let authoring_result = |id: &str| {
+            ChatMessage::tool(MessageContent::from_tool_responses(vec![
+                ToolResponse::new(id, json!({"draft_written": true, "ok": true}).to_string()),
+            ]))
+        };
+        let mut history = vec![
+            authoring_call("old", old_yaml),
+            authoring_result("old"),
+            authoring_call("current", current_yaml.clone()),
+            authoring_result("current"),
+        ];
 
         prune_large_tool_arguments(&mut history);
 
         let ContentPart::ToolCall(call) = &history[0].content.parts()[0] else {
-            panic!("expected tool call");
+            panic!("expected old tool call");
         };
         let yaml = call.fn_arguments["yaml"].as_str().unwrap();
         assert!(yaml.contains("omitted"), "{yaml}");
         assert!(yaml.len() < 200, "{yaml}");
+
+        let ContentPart::ToolCall(call) = &history[2].content.parts()[0] else {
+            panic!("expected current tool call");
+        };
+        assert_eq!(call.fn_arguments["yaml"], current_yaml);
+    }
+
+    #[test]
+    fn successful_patch_keeps_exact_full_draft_base() {
+        let full_yaml = "version: 1\n".repeat(80);
+        let mut history = vec![
+            ChatMessage::assistant(MessageContent::from_parts(vec![ContentPart::ToolCall(
+                ToolCall {
+                    call_id: "full".into(),
+                    fn_name: "create_design".into(),
+                    fn_arguments: json!({"yaml": full_yaml.clone()}),
+                    thought_signatures: None,
+                },
+            )])),
+            ChatMessage::tool(MessageContent::from_tool_responses(vec![
+                ToolResponse::new(
+                    "full",
+                    json!({"draft_written": true, "ok": true}).to_string(),
+                ),
+            ])),
+            ChatMessage::assistant(MessageContent::from_parts(vec![ContentPart::ToolCall(
+                ToolCall {
+                    call_id: "patch".into(),
+                    fn_name: "edit_design".into(),
+                    fn_arguments: json!({"old_string": "10k", "new_string": "12k"}),
+                    thought_signatures: None,
+                },
+            )])),
+            ChatMessage::tool(MessageContent::from_tool_responses(vec![
+                ToolResponse::new("patch", json!({"replacements": 1, "ok": true}).to_string()),
+            ])),
+        ];
+
+        prune_large_tool_arguments(&mut history);
+
+        let ContentPart::ToolCall(call) = &history[0].content.parts()[0] else {
+            panic!("expected full tool call");
+        };
+        assert_eq!(call.fn_arguments["yaml"], full_yaml);
     }
 
     #[test]
@@ -3370,9 +3585,9 @@ mod tests {
 
     #[test]
     fn tool_schemas_expand_with_project_phase() {
-        let schematic = tool_defs_for_phase(ToolPhase::Schematic, &HashMap::new());
-        let seed = tool_defs_for_phase(ToolPhase::BoardSeed, &HashMap::new());
-        let active = tool_defs_for_phase(ToolPhase::BoardActive, &HashMap::new());
+        let schematic = tool_defs_for_phase(ToolPhase::Schematic, &HashMap::new(), false);
+        let seed = tool_defs_for_phase(ToolPhase::BoardSeed, &HashMap::new(), false);
+        let active = tool_defs_for_phase(ToolPhase::BoardActive, &HashMap::new(), false);
         let names = |tools: &[Tool]| {
             tools
                 .iter()
@@ -3422,7 +3637,7 @@ mod tests {
         );
         rounds.insert("get_symbol_info".to_string(), 1);
 
-        let names = tool_defs_for_phase(ToolPhase::Schematic, &rounds)
+        let names = tool_defs_for_phase(ToolPhase::Schematic, &rounds, false)
             .into_iter()
             .map(|tool| tool.name.as_str().to_owned())
             .collect::<std::collections::BTreeSet<_>>();
@@ -3434,6 +3649,18 @@ mod tests {
         );
         assert!(names.contains("search_footprints"));
         assert!(names.contains("create_design"));
+        assert!(names.contains("apply_design"));
+    }
+
+    #[test]
+    fn existing_draft_hides_one_shot_create_tool() {
+        let names = tool_defs_for_phase(ToolPhase::Schematic, &HashMap::new(), true)
+            .into_iter()
+            .map(|tool| tool.name.as_str().to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(!names.contains("create_design"));
+        assert!(names.contains("edit_design"));
         assert!(names.contains("apply_design"));
     }
 

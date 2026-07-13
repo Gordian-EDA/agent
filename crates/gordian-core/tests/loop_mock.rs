@@ -34,6 +34,13 @@ blocks:\n\
 \x20     R1: {part: R, value: 10k, between: [A, GND]}\n\
 \x20     R2: {part: R, value: 10k, between: [A, GND]}\n";
 
+const CLEAN_EDITED_YAML: &str = "version: 1\n\
+blocks:\n\
+\x20 main:\n\
+\x20   components:\n\
+\x20     R1: {part: R, value: 12k, between: [A, GND]}\n\
+\x20     R2: {part: R, value: 12k, between: [A, GND]}\n";
+
 /// The shared script: (1) search_symbols, (2) apply_design, (3) done.
 fn script() -> Vec<gordian_core::StreamEnd> {
     vec![
@@ -205,6 +212,44 @@ async fn dirty_commit_is_nudged_until_a_clean_reapply() {
 
     assert!(outcome.applied, "both applies should commit: {outcome:?}");
     assert_eq!(outcome.final_text, "clean now");
+    assert_eq!(outcome.tool_calls_made, 4);
+}
+
+#[tokio::test]
+async fn edit_after_commit_is_not_reported_as_applied_until_recommitted() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let script = vec![
+        tool_call(
+            "tu_1",
+            "create_design",
+            serde_json::json!({"yaml": CLEAN_YAML}),
+        ),
+        tool_call("tu_2", "apply_design", serde_json::json!({})),
+        tool_call(
+            "tu_3",
+            "edit_design",
+            serde_json::json!({"yaml": CLEAN_EDITED_YAML}),
+        ),
+        final_text("edited, but forgot to apply"), // current-draft nudge
+        tool_call("tu_4", "apply_design", serde_json::json!({})),
+        final_text("recommitted"),
+    ];
+    let mut agent = agent(ctx, script);
+    let mut approvals = AutoApprove::yes();
+
+    let outcome = agent
+        .run_turn("commit every schematic change", &mut approvals, None)
+        .await
+        .unwrap();
+
+    assert!(
+        outcome.applied,
+        "latest draft must be committed: {outcome:?}"
+    );
+    assert_eq!(outcome.final_text, "recommitted");
     assert_eq!(outcome.tool_calls_made, 4);
 }
 
