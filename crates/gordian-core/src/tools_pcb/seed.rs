@@ -27,6 +27,18 @@ pub struct BoardSeedRules {
 pub struct PourSpec {
     pub net: String,
     pub layer: String,
+    /// Pad attachment policy. Thermal relief is the production-safe default;
+    /// solid is opt-in for requests that explicitly require it.
+    #[serde(default, rename = "connect")]
+    pub pad_connection: PourPadConnection,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PourPadConnection {
+    #[default]
+    Thermal,
+    Solid,
 }
 
 fn default_layers() -> u32 {

@@ -413,7 +413,7 @@ pub fn tool_defs() -> Vec<Tool> {
                         },
                         "rules": {
                             "type": "object",
-                            "description": "Copper rules. net_widths values are mm; pours target top/bottom/innerN. On 6+ layers, omitted pours default to existing GND/V3V3.",
+                            "description": "Copper rules. net_widths values are mm; pours target top/bottom/innerN and default to thermal pad relief. On 6+ layers, omitted pours default to existing GND/V3V3.",
                             "properties": {
                                 "layer_count": { "type": "integer", "enum": [2, 4, 6, 8] },
                                 "clearance": { "type": "number" },
@@ -430,7 +430,8 @@ pub fn tool_defs() -> Vec<Tool> {
                                         "type": "object",
                                         "properties": {
                                             "net": { "type": "string" },
-                                            "layer": { "type": "string", "description": "top, bottom, or innerN" }
+                                            "layer": { "type": "string", "description": "top, bottom, or innerN" },
+                                            "connect": { "type": "string", "enum": ["thermal", "solid"], "description": "Pad attachment; thermal is the production-safe default. Use solid only when explicitly required." }
                                         },
                                         "required": ["net", "layer"]
                                     }

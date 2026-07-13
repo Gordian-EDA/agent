@@ -603,6 +603,14 @@ fn direct_multi_pin_candidate(
         for (a_idx, b_idx) in &pairs {
             let a = conn.points_to_connect[*a_idx].point();
             let b = conn.points_to_connect[*b_idx].point();
+            // Stacked connector pads commonly give two logical pin numbers the
+            // same physical copper location (USB-C A4/B9, A9/B4, A1/B12, ...).
+            // They are already connected; asking the path generator for a
+            // zero-length leg produces no candidate and used to make the whole
+            // multi-pin rescue fail.
+            if a.dist(b) < geom::EPS {
+                continue;
+            }
             let mut routed_leg = false;
             for path in direct_candidate_paths(rp, &candidate, &conn.name, &layer, a, b) {
                 let mut leg = candidate.clone();
@@ -1386,6 +1394,60 @@ mod escape_bottleneck_tests {
         assert!(result.failed.is_empty());
         assert_eq!(result.solution.traces.len(), 1);
         assert_eq!(result.engine, "naive+direct-rescue");
+    }
+
+    #[test]
+    fn direct_rescue_treats_stacked_same_net_pads_as_connected() {
+        let problem = RouteProblem {
+            layer_count: 2,
+            min_trace_width: 0.2,
+            obstacles: vec![],
+            connections: vec![pcb_model::Connection {
+                name: "VBUS".to_string(),
+                points_to_connect: vec![
+                    pcb_model::RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    pcb_model::RoutePoint {
+                        x: 1.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                    pcb_model::RoutePoint {
+                        x: 5.0,
+                        y: 1.0,
+                        layer: LayerRef::top(),
+                    },
+                ],
+            }],
+            bounds: pcb_model::Rect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 6.0,
+                max_y: 2.0,
+            },
+            clearance: 0.15,
+            via_diameter: 0.6,
+            via_drill: 0.3,
+            net_widths: Default::default(),
+            outline: None,
+            escape_layers: Default::default(),
+            plane_nets: Default::default(),
+        };
+        let mut result = RouteResult {
+            solution: RouteSolution {
+                traces: vec![],
+                vias: vec![],
+            },
+            failed: failed(&["VBUS"]),
+            engine: "naive".to_string(),
+        };
+
+        assert!(apply_direct_rescue_fallback(&problem, &mut result));
+        assert!(result.failed.is_empty());
+        assert!(lint(&problem, &result.solution).is_empty());
     }
 
     #[test]

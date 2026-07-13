@@ -15,7 +15,7 @@ use pcb_place::placement::{LockedAt, Rect};
 use crate::AgentRuntime;
 
 use super::fmt_num;
-use super::seed::{BoardSeedRules, PourSpec};
+use super::seed::{BoardSeedRules, PourPadConnection, PourSpec};
 
 // ── regenerate_board ──────────────────────────────────────────────────────────────
 
@@ -410,16 +410,19 @@ fn add_default_power_pours(rules: &mut SeedRules, parts: &[SeedPart]) {
         rules.pours.push(PourSpec {
             net: "GND".to_string(),
             layer: "bottom".to_string(),
+            pad_connection: PourPadConnection::Thermal,
         });
         rules.pours.push(PourSpec {
             net: "GND".to_string(),
             layer: format!("inner{}", rules.layer_count - 2),
+            pad_connection: PourPadConnection::Thermal,
         });
     }
     if nets.contains("V3V3") {
         rules.pours.push(PourSpec {
             net: "V3V3".to_string(),
             layer: "inner1".to_string(),
+            pad_connection: PourPadConnection::Thermal,
         });
     }
 }
@@ -652,7 +655,14 @@ impl<'a> SeedBoardWriter<'a> {
                     ),
                 ));
             };
-            self.write_zone(out, net_code, &pour.net, &layer_name, &format!("{idx}"));
+            self.write_zone(
+                out,
+                net_code,
+                &pour.net,
+                &layer_name,
+                &format!("{idx}"),
+                pour.pad_connection == PourPadConnection::Solid,
+            );
         }
         // Solid GND/VCC planes on the centred inner layers — the physical
         // counterpart of the router's plane fanout (per-pad vias assume real
@@ -671,13 +681,21 @@ impl<'a> SeedBoardWriter<'a> {
                 continue;
             };
             let layer_name = format!("In{layer_idx}.Cu");
-            self.write_zone(out, net_code, &net, &layer_name, "plane");
+            self.write_zone(out, net_code, &net, &layer_name, "plane", false);
         }
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn write_zone(&self, out: &mut String, net_code: i32, net: &str, layer_name: &str, tag: &str) {
+    fn write_zone(
+        &self,
+        out: &mut String,
+        net_code: i32,
+        net: &str,
+        layer_name: &str,
+        tag: &str,
+        solid_pad_connections: bool,
+    ) {
         let clearance = fmt_num(self.rules.clearance);
         let min_thickness = fmt_num(self.rules.min_trace_width.max(0.1));
         let thermal_gap = fmt_num((self.rules.clearance * 2.0).max(0.2));
@@ -687,6 +705,11 @@ impl<'a> SeedBoardWriter<'a> {
         let x1 = fmt_num(self.bounds.max_x);
         let y1 = fmt_num(self.bounds.max_y);
         let uuid = seed_uuid(&format!("zone:{tag}:{net}:{layer_name}"));
+        let connect_pads = if solid_pad_connections {
+            "connect_pads yes"
+        } else {
+            "connect_pads"
+        };
         let _ = write!(
             out,
             "\t(zone\n\
@@ -696,7 +719,7 @@ impl<'a> SeedBoardWriter<'a> {
              \t\t(uuid \"{uuid}\")\n\
              \t\t(name \"{net}\")\n\
              \t\t(hatch full 0.508)\n\
-             \t\t(connect_pads\n\
+             \t\t({connect_pads}\n\
              \t\t\t(clearance {clearance})\n\
              \t\t)\n\
              \t\t(min_thickness {min_thickness})\n\
@@ -1254,6 +1277,7 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
     }
     // Copper pours: [{"net":"GND","layer":"bottom"}] — flood a net on a signal layer.
     let mut pours = Vec::new();
+    let mut pours_by_layer = BTreeMap::<u32, (String, PourPadConnection)>::new();
     if let Some(pv) = obj.get("pours") {
         let arr = pv
             .as_array()
@@ -1264,6 +1288,15 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
                 .and_then(Value::as_str)
                 .ok_or_else(|| "rules.pours[].net must be a string".to_string())?;
             let layer = p.get("layer").and_then(Value::as_str).unwrap_or("bottom");
+            let pad_connection = match p.get("connect").and_then(Value::as_str) {
+                None | Some("thermal") => PourPadConnection::Thermal,
+                Some("solid") => PourPadConnection::Solid,
+                Some(other) => {
+                    return Err(format!(
+                        "rules.pours[].connect must be 'thermal' or 'solid', got '{other}'"
+                    ));
+                }
+            };
             // A pour floods a SIGNAL layer (top/bottom, or an inner signal layer on a
             // 6-layer board) — never a GND/VCC PLANE (already a full copper layer) or a
             // non-existent layer. Resolve + reject up front rather than silently drop it.
@@ -1281,11 +1314,29 @@ fn parse_rules(v: Option<&Value>) -> std::result::Result<BoardSeedRules, String>
                     // satisfied by construction; don't fail the regenerate.
                     continue;
                 }
-                Some(_) => {}
+                Some((idx, _)) => {
+                    if let Some((existing_net, existing_connection)) = pours_by_layer.get(&idx) {
+                        if existing_net == net && *existing_connection == pad_connection {
+                            // Duplicate requests describe the same physical
+                            // full-board zone; emit it once.
+                            continue;
+                        }
+                        if existing_net == net {
+                            return Err(format!(
+                                "rules.pours assigns conflicting pad connections to net '{net}' on layer '{layer}'; use one connect policy per net/layer"
+                            ));
+                        }
+                        return Err(format!(
+                            "rules.pours assigns both '{existing_net}' and '{net}' to layer '{layer}'; a copper layer can have only one full-board pour net"
+                        ));
+                    }
+                    pours_by_layer.insert(idx, (net.to_string(), pad_connection));
+                }
             }
             pours.push(PourSpec {
                 net: net.to_string(),
                 layer: layer.to_string(),
+                pad_connection,
             });
         }
     }
@@ -1346,7 +1397,7 @@ mod tests {
         let rules = parse_seed_rules(Some(&json!({
             "layer_count": 6,
             "pours": [
-                { "net": "GND", "layer": "bottom" },
+                { "net": "GND", "layer": "bottom", "connect": "solid" },
                 { "net": "V3V3", "layer": "inner1" }
             ]
         })))
@@ -1358,13 +1409,58 @@ mod tests {
                 PourSpec {
                     net: "GND".to_string(),
                     layer: "bottom".to_string(),
+                    pad_connection: PourPadConnection::Solid,
                 },
                 PourSpec {
                     net: "V3V3".to_string(),
                     layer: "inner1".to_string(),
+                    pad_connection: PourPadConnection::Thermal,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn parse_seed_rules_rejects_competing_full_board_pours() {
+        let err = parse_seed_rules(Some(&json!({
+            "layer_count": 2,
+            "pours": [
+                { "net": "GND", "layer": "top" },
+                { "net": "3V3", "layer": "top" }
+            ]
+        })))
+        .unwrap_err();
+
+        assert!(err.contains("both 'GND' and '3V3'"), "{err}");
+        assert!(err.contains("only one full-board pour net"), "{err}");
+    }
+
+    #[test]
+    fn parse_seed_rules_deduplicates_identical_pours() {
+        let rules = parse_seed_rules(Some(&json!({
+            "layer_count": 2,
+            "pours": [
+                { "net": "GND", "layer": "bottom" },
+                { "net": "GND", "layer": "bottom" }
+            ]
+        })))
+        .unwrap();
+
+        assert_eq!(rules.pours.len(), 1);
+    }
+
+    #[test]
+    fn parse_seed_rules_rejects_conflicting_duplicate_pour_connections() {
+        let err = parse_seed_rules(Some(&json!({
+            "layer_count": 2,
+            "pours": [
+                { "net": "GND", "layer": "bottom", "connect": "thermal" },
+                { "net": "GND", "layer": "bottom", "connect": "solid" }
+            ]
+        })))
+        .unwrap_err();
+
+        assert!(err.contains("conflicting pad connections"), "{err}");
     }
 
     #[test]
@@ -1410,6 +1506,7 @@ mod tests {
         rules.pours.push(PourSpec {
             net: "GND".to_string(),
             layer: "bottom".to_string(),
+            pad_connection: PourPadConnection::Solid,
         });
 
         let board = SeedBoardWriter::new(&parts, &bounds, &rules, None)
@@ -1419,6 +1516,7 @@ mod tests {
         assert!(board.contains("\n\t(zone\n"));
         assert!(board.contains("\n\t\t(net_name \"GND\")\n"));
         assert!(board.contains("\n\t\t(layer \"B.Cu\")\n"));
+        assert!(board.contains("\n\t\t(connect_pads yes\n"));
         assert!(board.contains("(xy 0 0) (xy 20 0) (xy 20 10) (xy 0 10)"));
     }
 
@@ -1506,14 +1604,17 @@ mod tests {
                 PourSpec {
                     net: "GND".to_string(),
                     layer: "bottom".to_string(),
+                    pad_connection: PourPadConnection::Thermal,
                 },
                 PourSpec {
                     net: "GND".to_string(),
                     layer: "inner4".to_string(),
+                    pad_connection: PourPadConnection::Thermal,
                 },
                 PourSpec {
                     net: "V3V3".to_string(),
                     layer: "inner1".to_string(),
+                    pad_connection: PourPadConnection::Thermal,
                 },
             ]
         );

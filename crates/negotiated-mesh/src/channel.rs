@@ -22,6 +22,7 @@ use std::collections::BTreeSet;
 
 /// This engine's [`RouteResult::engine`] provenance tag.
 pub const ENGINE: &str = "channel";
+const CHANNEL_MAX_CONNECTIONS: usize = 6;
 const CHANNEL_MAX_MULTILAYER_CONNECTIONS: usize = 5;
 type ChannelLegKey = (usize, u64, u64, usize, usize);
 type ChannelBestLeg = (usize, RouteSolution, ChannelLegKey);
@@ -46,6 +47,7 @@ impl Router for ChannelRouter {
 
     fn can_route(&self, problem: &RouteProblem) -> bool {
         self.capabilities().can_route(problem)
+            && problem.connections.len() <= CHANNEL_MAX_CONNECTIONS
             && (problem.layer_count <= 2
                 || problem.connections.len() <= CHANNEL_MAX_MULTILAYER_CONNECTIONS)
     }
@@ -858,6 +860,25 @@ mod tests {
             "multi-pin channel tree should emit multiple clean legs: {:?}",
             result.solution
         );
+    }
+
+    #[test]
+    fn channel_declines_large_two_layer_portfolios() {
+        let p = problem(
+            (0..=CHANNEL_MAX_CONNECTIONS)
+                .map(|idx| {
+                    conn(
+                        &format!("N{idx}"),
+                        &[
+                            (1.0, idx as f64 + 1.0, "top"),
+                            (5.0, idx as f64 + 1.0, "top"),
+                        ],
+                    )
+                })
+                .collect(),
+        );
+
+        assert!(!ChannelRouter.can_route(&p));
     }
 
     #[test]
