@@ -132,6 +132,29 @@ pub fn route_orthogonal(problem: &RouteProblem) -> RouteResult {
     route_iterated(problem, costs)
 }
 
+/// One deterministic strict-orthogonal routing pass, with no alternative net
+/// orders and no rip-up retries.
+///
+/// Placement ranking evaluates several complete boards and only needs a bounded
+/// routability proxy.  Paying the export router's full order portfolio for every
+/// candidate multiplies badly on high-terminal boards, while this pass preserves
+/// the same shortest-first order, clearance model, and DRC reconciliation as the
+/// first (and normally winning) strict pass.
+pub fn route_orthogonal_single_pass(problem: &RouteProblem) -> RouteResult {
+    let costs = AStarCosts {
+        via_clear_radius_cells: via_clear_radius_cells(problem),
+        ..AStarCosts::default()
+    };
+    let metrics = net_order_metrics(problem);
+    let priority = std::collections::BTreeSet::new();
+    let first = net_order_portfolio_with_metrics(problem, &priority, &metrics)
+        .next()
+        .expect("net_order_portfolio always yields the baseline order");
+    let mut result = route_with_order(problem, costs, first);
+    reconcile_with_options(problem, &mut result, false);
+    result
+}
+
 /// The lenient ORTHOGONAL (4-way) naive route — orthogonal, WITHOUT the via-barrel
 /// clearance scan (the orthogonal twin of [`route_lenient`]). The other orthogonal
 /// candidate [`GridAStarRouter`]'s arbiter scores against [`route_orthogonal`]; a board
@@ -1959,6 +1982,10 @@ mod tests {
             !ortho_has_diag,
             "route_orthogonal must never emit a 45° diagonal"
         );
+
+        // A clean via-free baseline short-circuits the full strict portfolio, so
+        // the explicitly bounded placement-ranking pass is byte-identical here.
+        assert_eq!(route_orthogonal_single_pass(&p), ro);
     }
 
     /// Two adjacent nets that both want a parallel 45° diagonal corridor must emit

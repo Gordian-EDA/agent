@@ -16,7 +16,8 @@ use super::route::{
     EdgeLockedPlacer, GridAstarRanker, PlaceOpts, better_place_result,
     edge_seek_position_candidates, net_centroid_position_candidates,
     obstructing_part_position_candidates, obstructing_part_position_candidates_from_edges, place,
-    place_board, place_variant, polish_positions, polish_rotations, polish_swaps,
+    place_board, place_variant, placement_ranker_uses_bounded_pass,
+    placement_ranker_uses_layout_only, polish_positions, polish_rotations, polish_swaps,
     position_polish_part_order, rank_key_with_full_grid_fallback,
     ratline_crossing_position_candidates, ratline_crossing_position_candidates_from_edges,
     ratline_obstruction_position_candidates, ratline_obstruction_position_candidates_from_edges,
@@ -3096,6 +3097,45 @@ fn grid_ranker_uses_best_orthogonal_strictness_key() {
         GridAstarRanker.rank_key(&rp),
         expected,
         "placement ranker should mirror the grid router's orthogonal strict/lenient arbitration"
+    );
+}
+
+#[test]
+fn grid_ranker_bounds_high_terminal_candidate_work() {
+    let with_terminals = |count: usize| RouteProblem {
+        layer_count: 2,
+        min_trace_width: 0.2,
+        obstacles: vec![],
+        connections: vec![Connection {
+            name: "BUS".to_owned(),
+            points_to_connect: (0..count)
+                .map(|i| RoutePoint {
+                    x: i as f64,
+                    y: 1.0,
+                    layer: LayerRef::top(),
+                })
+                .collect(),
+        }],
+        bounds: board(50.0, 10.0),
+        clearance: 0.2,
+        via_diameter: 0.6,
+        via_drill: 0.3,
+        net_widths: Default::default(),
+        outline: None,
+        escape_layers: Default::default(),
+        plane_nets: Default::default(),
+    };
+
+    assert!(!placement_ranker_uses_bounded_pass(&with_terminals(40)));
+    assert!(placement_ranker_uses_bounded_pass(&with_terminals(41)));
+    assert!(placement_ranker_uses_bounded_pass(&with_terminals(48)));
+    assert!(!placement_ranker_uses_bounded_pass(&with_terminals(49)));
+    assert!(!placement_ranker_uses_layout_only(&with_terminals(48)));
+    assert!(placement_ranker_uses_layout_only(&with_terminals(49)));
+    assert_eq!(
+        GridAstarRanker.rank_key(&with_terminals(49)),
+        (0, 0, 0, 0, 0),
+        "layout-only candidates must share a neutral route key so the oracle uses geometry"
     );
 }
 

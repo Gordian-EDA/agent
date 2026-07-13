@@ -146,6 +146,14 @@ const FULL_GRID_RANKER_FALLBACK_MAX_CONNECTIONS: usize = 4;
 const FULL_GRID_RANKER_FALLBACK_MAX_TERMINALS: usize = 12;
 const FAULTY_FULL_GRID_RANKER_FALLBACK_MAX_CONNECTIONS: usize = 6;
 const FAULTY_FULL_GRID_RANKER_FALLBACK_MAX_TERMINALS: usize = 18;
+/// Above this size, each placement candidate gets exactly one strict routing
+/// pass. The full order/strictness portfolio belongs on the winning board, not
+/// multiplied across every placement candidate.
+const PLACEMENT_RANKER_PORTFOLIO_MAX_TERMINALS: usize = 40;
+/// Even one A* pass can become pathological once a candidate contains several
+/// large multi-pad buses. Above this ceiling placement selection stays purely
+/// geometric; `route_board` still runs the full router once on the winner.
+const PLACEMENT_RANKER_SINGLE_PASS_MAX_TERMINALS: usize = 48;
 
 impl RouteRanker for GridAstarRanker {
     /// Route with the fast naive router, count failed-pad weight + geometry DRC
@@ -162,12 +170,23 @@ impl RouteRanker for GridAstarRanker {
     /// fallback. If the orthogonal proxy still leaves faults, or routes a small
     /// local problem cleanly only by spending vias, the ranker pays for the full
     /// grid portfolio and keeps it when it proves strictly better; full-board
-    /// placement-oracle candidates stay on the fast proxy.
+    /// placement-oracle candidates stay on the fast proxy. High-terminal candidates
+    /// have an explicit work ceiling: first a single strict pass, then geometry-only
+    /// ranking once even that pass is no longer predictably interactive. The winning
+    /// board is still fully routed by `route_board`.
     fn faults(&self, rp: &RouteProblem) -> usize {
         self.rank_key(rp).0
     }
 
     fn rank_key(&self, rp: &RouteProblem) -> (usize, usize, usize, usize, u64) {
+        if placement_ranker_uses_layout_only(rp) {
+            // Equal route keys deliberately fall through to the oracle's existing
+            // hint-penalty, layout-cost, and HPWL tie-breaks.
+            return (0, 0, 0, 0, 0);
+        }
+        if placement_ranker_uses_bounded_pass(rp) {
+            return route_rank_key(rp, &crate::router::route_orthogonal_single_pass(rp));
+        }
         let routed = crate::router::route_orthogonal(rp);
         let strict_key = route_rank_key(rp, &routed);
         if route_rank_key_clean_via_free(strict_key) {
@@ -191,6 +210,25 @@ impl RouteRanker for GridAstarRanker {
             || route_rank_key(rp, &crate::router::GridAStarRouter.route(rp)),
         )
     }
+}
+
+pub(crate) fn placement_ranker_uses_bounded_pass(problem: &RouteProblem) -> bool {
+    let terminals = problem
+        .connections
+        .iter()
+        .map(|connection| connection.points_to_connect.len())
+        .sum::<usize>();
+    terminals > PLACEMENT_RANKER_PORTFOLIO_MAX_TERMINALS
+        && terminals <= PLACEMENT_RANKER_SINGLE_PASS_MAX_TERMINALS
+}
+
+pub(crate) fn placement_ranker_uses_layout_only(problem: &RouteProblem) -> bool {
+    problem
+        .connections
+        .iter()
+        .map(|connection| connection.points_to_connect.len())
+        .sum::<usize>()
+        > PLACEMENT_RANKER_SINGLE_PASS_MAX_TERMINALS
 }
 
 pub(crate) fn route_rank_key(
