@@ -213,10 +213,30 @@ fn spine_fast_path_pin_profile(pin_counts: impl Iterator<Item = usize>) -> bool 
     let compact_multi_unit = counts.len() <= 8
         && (24..=FAST_PINS).contains(&pins)
         && counts.iter().filter(|&&pins| pins >= 3).count() <= 3;
+    // A USB-C receptacle expands to a wide 25-pin item, so the otherwise-small
+    // input/protection block sits just above FAST_PINS and misses the dense-sheet
+    // case. Routed anneal plus cluster pose took 28 s on the reproduced 14-part
+    // draft; Spine finished in 3 s with fewer warnings and crossings. Keep this
+    // shape deliberately narrow: one wide connector, no other item above six
+    // pins, and at most three modest support hubs (regulator, protector, header).
+    // Multi-IC and MCU sheets retain routed anneal.
+    let wide_connectors = counts.iter().filter(|&&pins| (20..=26).contains(&pins));
+    let wide_connector_block = (8..=16).contains(&counts.len())
+        && (FAST_PINS + 1..=64).contains(&pins)
+        && wide_connectors.count() == 1
+        && counts
+            .iter()
+            .filter(|&&pins| !(20..=26).contains(&pins))
+            .all(|&pins| pins <= 6)
+        && counts
+            .iter()
+            .filter(|&&pins| (3..=6).contains(&pins))
+            .count()
+            <= 3;
     if std::env::var_os("CLUSTER_DEBUG").is_some() {
         eprintln!("[cluster] pin profile {counts:?} total={pins}");
     }
-    single_anchor || dense_interactive || compact_multi_unit
+    single_anchor || dense_interactive || compact_multi_unit || wide_connector_block
 }
 
 fn rail_candidate_wins(
@@ -291,6 +311,27 @@ mod tests {
         ));
         assert!(!spine_fast_path_pin_profile(
             [8, 5, 3, 2, 2, 2, 2, 2, 2, 2].into_iter()
+        ));
+    }
+
+    #[test]
+    fn usb_c_support_block_uses_bounded_fast_path() {
+        // Exact profile from the 14-component USB-C acceptance draft. The power
+        // symbol is not placeable, leaving these 13 routed items / 58 pins.
+        assert!(spine_fast_path_pin_profile(
+            [25, 2, 5, 2, 2, 6, 4, 2, 2, 2, 2, 2, 2].into_iter()
+        ));
+
+        // Multiple wide/large hubs and a support-heavy MCU-style block still
+        // need routed anneal and its hub-pose search.
+        assert!(!spine_fast_path_pin_profile(
+            [25, 8, 8, 6, 4, 2, 2, 2, 2].into_iter()
+        ));
+        assert!(!spine_fast_path_pin_profile(
+            [25, 6, 6, 6, 6, 2, 2, 2, 2].into_iter()
+        ));
+        assert!(!spine_fast_path_pin_profile(
+            [25, 24, 2, 2, 2, 2, 2, 2].into_iter()
         ));
     }
 
