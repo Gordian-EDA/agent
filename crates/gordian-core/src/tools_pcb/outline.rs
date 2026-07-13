@@ -58,13 +58,18 @@ pub fn update_board_outline(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     let path = ctx.pcb_path();
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("reading board {}", path.display()))?;
+    let changed = !edge_cuts_match(&text, &outline)?;
     let updated = replace_edge_cuts(&text, &outline)?;
-    std::fs::write(&path, updated).with_context(|| format!("writing board {}", path.display()))?;
-    ctx.close_kicad_session();
+    if changed {
+        std::fs::write(&path, updated)
+            .with_context(|| format!("writing board {}", path.display()))?;
+        ctx.close_kicad_session();
+    }
 
     let bounds = outline.bounds();
     Ok(json!({
         "ok": true,
+        "changed": changed,
         "path": path.display().to_string(),
         "bounds": bounds,
         "outline_points": outline.point_count(),
@@ -181,6 +186,100 @@ fn remove_edge_cut_shapes(board: &str) -> Result<String> {
     Ok(out)
 }
 
+fn edge_cut_blocks(board: &str) -> Result<Vec<String>> {
+    let mut blocks = Vec::new();
+    let mut pos = 0usize;
+    while let Some(rel) = board[pos..].find("(gr_") {
+        let start = pos + rel;
+        let end = sexpr_end(board, start).context("could not parse board graphic shape")?;
+        let block = &board[start..end];
+        if block.contains("(layer \"Edge.Cuts\")") {
+            blocks.push(block.to_owned());
+        }
+        pos = end;
+    }
+    Ok(blocks)
+}
+
+fn edge_cuts_match(board: &str, outline: &Outline) -> Result<bool> {
+    let current = edge_cut_segments(board)?;
+    let desired = outline_segments(outline);
+    if current.len() != desired.len() {
+        return Ok(false);
+    }
+    let mut used = vec![false; current.len()];
+    for desired_segment in desired {
+        let Some((idx, _)) = current.iter().enumerate().find(|(idx, current_segment)| {
+            !used[*idx] && segments_match(**current_segment, desired_segment)
+        }) else {
+            return Ok(false);
+        };
+        used[idx] = true;
+    }
+    Ok(true)
+}
+
+fn edge_cut_segments(board: &str) -> Result<Vec<(Point2, Point2)>> {
+    let mut segments = Vec::new();
+    for block in edge_cut_blocks(board)? {
+        let start = sexpr_point(&block, "start")
+            .with_context(|| format!("Edge.Cuts shape has no start point: {block}"))?;
+        let end = sexpr_point(&block, "end")
+            .with_context(|| format!("Edge.Cuts shape has no end point: {block}"))?;
+        if block.starts_with("(gr_rect") {
+            let a = Point2::new(start.x, start.y);
+            let b = Point2::new(end.x, start.y);
+            let c = Point2::new(end.x, end.y);
+            let d = Point2::new(start.x, end.y);
+            segments.extend([(a, b), (b, c), (c, d), (d, a)]);
+        } else if block.starts_with("(gr_line") {
+            segments.push((start, end));
+        } else {
+            return Ok(Vec::new());
+        }
+    }
+    Ok(segments)
+}
+
+fn outline_segments(outline: &Outline) -> Vec<(Point2, Point2)> {
+    match outline {
+        Outline::Rect(rect) => {
+            let a = Point2::new(rect.min_x, rect.min_y);
+            let b = Point2::new(rect.max_x, rect.min_y);
+            let c = Point2::new(rect.max_x, rect.max_y);
+            let d = Point2::new(rect.min_x, rect.max_y);
+            vec![(a, b), (b, c), (c, d), (d, a)]
+        }
+        Outline::Polygon(poly) => {
+            let points = poly.points();
+            (0..points.len())
+                .map(|idx| (points[idx], points[(idx + 1) % points.len()]))
+                .collect()
+        }
+    }
+}
+
+fn sexpr_point(block: &str, key: &str) -> Option<Point2> {
+    let marker = format!("({key} ");
+    let rest = block.split_once(&marker)?.1;
+    let mut values = rest
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == ')')
+        .filter(|value| !value.is_empty());
+    Some(Point2::new(
+        values.next()?.parse().ok()?,
+        values.next()?.parse().ok()?,
+    ))
+}
+
+fn segments_match(a: (Point2, Point2), b: (Point2, Point2)) -> bool {
+    (points_match(a.0, b.0) && points_match(a.1, b.1))
+        || (points_match(a.0, b.1) && points_match(a.1, b.0))
+}
+
+fn points_match(a: Point2, b: Point2) -> bool {
+    (a.x - b.x).abs() <= 1e-9 && (a.y - b.y).abs() <= 1e-9
+}
+
 fn sexpr_end(text: &str, start: usize) -> Option<usize> {
     let mut depth = 0i32;
     let mut in_str = false;
@@ -280,6 +379,24 @@ mod tests {
         assert!(updated.contains("(end 12 13)"));
         assert!(!updated.contains("(end 30 20)"));
         assert_eq!(updated.matches("(layer \"Edge.Cuts\")").count(), 1);
+    }
+
+    #[test]
+    fn outline_match_ignores_uuid_and_shape_representation() {
+        let board = r#"(kicad_pcb
+            (gr_line (start 12 13) (end 2 13) (layer "Edge.Cuts") (uuid "a"))
+            (gr_line (start 2 3) (end 12 3) (layer "Edge.Cuts") (uuid "b"))
+            (gr_line (start 2 13) (end 2 3) (layer "Edge.Cuts") (uuid "c"))
+            (gr_line (start 12 3) (end 12 13) (layer "Edge.Cuts") (uuid "d"))
+        )"#;
+        let outline = Outline::Rect(Rect {
+            min_x: 2.0,
+            min_y: 3.0,
+            max_x: 12.0,
+            max_y: 13.0,
+        });
+
+        assert!(edge_cuts_match(board, &outline).unwrap());
     }
 
     #[test]

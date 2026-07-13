@@ -82,6 +82,7 @@ struct MovePart {
 struct MovePlan {
     ipc_moves: Vec<FootprintMove>,
     positions: Vec<ResolvedPosition>,
+    changed: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +170,7 @@ impl MovePlan {
         json!({
             "ok": true,
             "moved": self.positions.len(),
+            "changed": self.changed,
             "positions": positions,
         })
     }
@@ -186,6 +188,7 @@ fn resolve_move_parts(
         return Err("move_parts needs at least one move".to_owned());
     }
 
+    let original_parts = board.parts.clone();
     let mut order = Vec::new();
     let mut seen = BTreeSet::new();
     let mut finals = BTreeMap::new();
@@ -297,9 +300,22 @@ fn resolve_move_parts(
             rotation_deg: Some(p.rotation),
         })
         .collect();
+    let changed = positions
+        .iter()
+        .filter(|position| {
+            original_parts
+                .get(&position.reference)
+                .is_none_or(|original| {
+                    (original.at.x - position.at.x).abs() > 1e-9
+                        || (original.at.y - position.at.y).abs() > 1e-9
+                        || (original.rotation - position.rotation).abs() > 1e-9
+                })
+        })
+        .count();
     Ok(MovePlan {
         ipc_moves,
         positions,
+        changed,
     })
 }
 
@@ -496,12 +512,43 @@ pub fn set_net_width(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .unwrap_or_default();
     let net_refs: Vec<&str> = nets.iter().map(String::as_str).collect();
     match ctx.kicad().with_session(&ctx.pcb_path(), |session| {
+        let requested: BTreeSet<&str> = net_refs.iter().copied().collect();
+        let selected: Vec<_> = session
+            .kicad()
+            .net_list()?
+            .into_iter()
+            .filter(|net| requested.contains(net.name.as_str()))
+            .collect();
+        let effective = session.kicad().net_classes_for_nets(selected.clone())?;
+        let width_nm = mm_to_nm(width);
+        let clearance_nm = mm_to_nm(clearance);
+        let changed = selected.iter().any(|net| {
+            let board = effective
+                .get(&net.name)
+                .and_then(|class| class.board.as_ref());
+            let current_width = board
+                .and_then(|settings| settings.track_width.as_ref())
+                .map(|distance| distance.value_nm);
+            let current_clearance = board
+                .and_then(|settings| settings.clearance.as_ref())
+                .map(|distance| distance.value_nm)
+                .unwrap_or(0);
+            current_width != Some(width_nm) || current_clearance != clearance_nm
+        });
         session
             .kicad()
-            .set_net_class(&name, mm_to_nm(width), mm_to_nm(clearance), &net_refs)?;
-        session.kicad().save()
+            .set_net_class(&name, width_nm, clearance_nm, &net_refs)?;
+        session.kicad().save()?;
+        Ok(changed)
     }) {
-        Ok(()) => Ok(json!({ "ok": true, "net_class": name, "width": width, "nets": nets })),
+        Ok(changed) => Ok(json!({
+            "ok": true,
+            "changed": changed,
+            "net_class": name,
+            "width": width,
+            "clearance": clearance,
+            "nets": nets,
+        })),
         Err(e) => Ok(json!({ "error": e.to_string() })),
     }
 }
@@ -1337,6 +1384,18 @@ mod tests {
         assert_eq!(plan.ipc_moves[0].x_nm, 25_000_000);
         assert_eq!(plan.ipc_moves[0].y_nm, 20_000_000);
         assert_eq!(plan.ipc_moves[0].rotation_deg, Some(180.0));
+        assert_eq!(plan.changed, 1);
+    }
+
+    #[test]
+    fn reports_an_explicit_move_to_the_current_pose_as_unchanged() {
+        let plan = resolve(json!({
+            "moves": [{ "reference": "U1", "to": [50.0, 25.0], "rotation": 0.0 }]
+        }));
+
+        assert_eq!(plan.positions.len(), 1);
+        assert_eq!(plan.changed, 0);
+        assert_eq!(plan.output()["changed"], json!(0));
     }
 
     #[test]

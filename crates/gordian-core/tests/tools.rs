@@ -1399,11 +1399,26 @@ fn update_board_outline_replaces_existing_rect_without_regeneration() {
     )
     .unwrap();
     assert_eq!(out["ok"], serde_json::json!(true), "got: {out}");
+    assert_eq!(out["changed"], serde_json::json!(true), "got: {out}");
     let board = std::fs::read_to_string(ctx.pcb_path()).unwrap();
     assert!(board.contains("(start 2 3)"), "{board}");
     assert!(board.contains("(end 18 15)"), "{board}");
     assert!(!board.contains("(end 30 20)"), "{board}");
     assert!(board.contains("(footprint \"Fixtures:R_0603_1608Metric\""));
+
+    let unchanged = run_tool(
+        "update_board_outline",
+        serde_json::json!({
+            "bounds": { "min_x": 2.0, "max_x": 18.0, "min_y": 3.0, "max_y": 15.0 }
+        }),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(
+        unchanged["changed"],
+        serde_json::json!(false),
+        "got: {unchanged}"
+    );
 }
 
 #[test]

@@ -506,12 +506,7 @@ impl<P: Provider> Agent<P> {
         let mut nudges_left = MAX_COMMIT_NUDGES;
         let mut erc_cleanup_nudges_left = MAX_ERC_CLEANUP_NUDGES;
         let mut last_committed_erc_cleanup_needed: Option<bool> = None;
-        let mut failed_route_attempts = 0usize;
-        let mut last_route_failure: Option<Value> = None;
-        // A route can write syntactically valid copper that KiCAD subsequently
-        // rejects. Remember that relationship so a failed DRC joins the same
-        // bounded recovery path as an explicit route failure.
-        let mut routed_since_recovery = false;
+        let mut pcb_recovery = PcbRecoveryState::default();
         // `spawn_blocking` work is not cancelled when its join handle times out.
         // Remember timed-out invocations so the model cannot overlap a mutation
         // while the original non-cancellable work may still be finishing.
@@ -708,7 +703,8 @@ impl<P: Provider> Agent<P> {
                         name: call.fn_name.clone(),
                     },
                 );
-                let route_retry_blocked = route_retry_blocked(failed_route_attempts, &call.fn_name);
+                let route_retry_blocked =
+                    route_retry_blocked(pcb_recovery.failed_route_attempts, &call.fn_name);
                 let timed_out_mutation_blocked =
                     timed_out_mutation_blocked(&timed_out_tool_calls, &call.fn_name);
                 let timeout_retry_blocked =
@@ -786,12 +782,12 @@ impl<P: Provider> Agent<P> {
                         None,
                     )
                 } else if route_retry_blocked {
-                    let last_route_failure = last_route_failure.clone();
+                    let last_route_failure = pcb_recovery.last_failure.clone();
                     (
                         json!({
                             "error": "PCB route retry budget exhausted",
-                            "note": route_retry_budget_note(),
-                            "failed_route_attempts": failed_route_attempts,
+                            "note": pcb_recovery.retry_note(),
+                            "failed_route_attempts": pcb_recovery.failed_route_attempts,
                             "last_route_failure": last_route_failure,
                         })
                         .to_string(),
@@ -842,46 +838,12 @@ impl<P: Provider> Agent<P> {
                 {
                     last_committed_erc_cleanup_needed = Some(cleanup_needed);
                 }
-                if dispatched && route_retry_budget_reset_by_fix(&call.fn_name, &parsed) {
-                    failed_route_attempts = 0;
-                    last_route_failure = None;
-                    routed_since_recovery = false;
-                }
-                if dispatched && call.fn_name == "route_board" {
-                    if parsed.get("error").is_none()
-                        && parsed.get("rejected").and_then(Value::as_bool) != Some(true)
-                        && parsed.get("executed").and_then(Value::as_bool) != Some(false)
-                    {
-                        routed_since_recovery = true;
-                    }
-                    if route_result_is_retry_failure(&parsed) {
-                        last_route_failure = Some(route_failure_context(&parsed));
-                        if parsed.get("error").is_some() {
-                            failed_route_attempts = MAX_FAILED_ROUTE_RETRIES;
-                        } else {
-                            failed_route_attempts += 1;
-                        }
-                        if failed_route_attempts >= 2 {
-                            content = add_route_retry_guidance(&content, failed_route_attempts);
-                        }
-                    }
-                }
-                if dispatched
-                    && call.fn_name == "check_board"
-                    && check_board_requires_route_recovery(routed_since_recovery, &parsed)
-                {
-                    failed_route_attempts = MAX_FAILED_ROUTE_RETRIES;
-                    last_route_failure = Some(route_failure_context(&parsed));
-                    content = add_route_retry_guidance(&content, failed_route_attempts);
-                } else if dispatched
-                    && call.fn_name == "check_board"
-                    && check_board_is_clean(&parsed)
-                {
-                    // A clean DRC is authoritative. Do not leave stale failure
-                    // state in the way of normal completion/export flows.
-                    failed_route_attempts = 0;
-                    last_route_failure = None;
-                    routed_since_recovery = false;
+                if pcb_recovery.observe_tool_result(&call.fn_name, &parsed, dispatched) {
+                    content = add_route_retry_guidance(
+                        &content,
+                        pcb_recovery.failed_route_attempts,
+                        pcb_recovery.retry_note(),
+                    );
                 }
                 emit(
                     events,
@@ -1116,8 +1078,85 @@ fn route_result_is_retry_failure(value: &Value) -> bool {
         .is_some_and(|failed| !failed.is_empty())
 }
 
-fn check_board_requires_route_recovery(routed_since_recovery: bool, value: &Value) -> bool {
-    routed_since_recovery
+#[derive(Default)]
+struct PcbRecoveryState {
+    failed_route_attempts: usize,
+    last_failure: Option<Value>,
+    // Becomes true only once route_board actually runs. Recovery mutations
+    // preserve it; only an authoritative clean DRC clears it. This makes a
+    // failed post-route check sticky without blocking the first route when a
+    // user checks a newly regenerated, still-unrouted board.
+    awaiting_clean_drc: bool,
+    verification_failed: bool,
+}
+
+impl PcbRecoveryState {
+    /// Observe one tool result. Returns true when retry guidance should be
+    /// attached to that result.
+    fn observe_tool_result(&mut self, fn_name: &str, value: &Value, dispatched: bool) -> bool {
+        if !dispatched {
+            return false;
+        }
+
+        if !self.verification_failed && route_retry_budget_reset_by_fix(fn_name, value) {
+            self.failed_route_attempts = 0;
+            self.last_failure = None;
+            // Deliberately preserve awaiting_clean_drc. Before the first route
+            // it remains false; after routing it remains true until clean DRC.
+        }
+
+        if fn_name == "route_board" {
+            if value.get("error").is_none()
+                && value.get("rejected").and_then(Value::as_bool) != Some(true)
+                && value.get("executed").and_then(Value::as_bool) != Some(false)
+            {
+                self.awaiting_clean_drc = true;
+            }
+            if route_result_is_retry_failure(value) {
+                self.last_failure = Some(route_failure_context(value));
+                if value.get("error").is_some() {
+                    self.failed_route_attempts = MAX_FAILED_ROUTE_RETRIES;
+                } else {
+                    self.failed_route_attempts += 1;
+                }
+                return self.failed_route_attempts >= 2;
+            }
+        }
+
+        if fn_name == "check_board" && self.awaiting_clean_drc && value.get("error").is_some() {
+            self.failed_route_attempts = MAX_FAILED_ROUTE_RETRIES;
+            self.last_failure = Some(route_failure_context(value));
+            self.verification_failed = true;
+            return true;
+        }
+        if fn_name == "check_board"
+            && check_board_requires_route_recovery(self.awaiting_clean_drc, value)
+        {
+            self.failed_route_attempts = MAX_FAILED_ROUTE_RETRIES;
+            self.last_failure = Some(route_failure_context(value));
+            self.verification_failed = false;
+            return true;
+        }
+        if fn_name == "check_board" && check_board_is_clean(value) {
+            self.failed_route_attempts = 0;
+            self.last_failure = None;
+            self.awaiting_clean_drc = false;
+            self.verification_failed = false;
+        }
+        false
+    }
+
+    fn retry_note(&self) -> &'static str {
+        if self.verification_failed {
+            drc_verification_retry_note()
+        } else {
+            route_retry_budget_note()
+        }
+    }
+}
+
+fn check_board_requires_route_recovery(pcb_awaiting_clean_drc: bool, value: &Value) -> bool {
+    pcb_awaiting_clean_drc
         && value.get("error").is_none()
         && (value
             .get("blocking_findings")
@@ -1247,24 +1286,61 @@ fn route_retry_blocked(failed_route_attempts: usize, fn_name: &str) -> bool {
 }
 
 fn route_retry_budget_reset_by_fix(fn_name: &str, value: &Value) -> bool {
-    value.get("error").is_none()
+    let successful = value.get("error").is_none()
         && value.get("rejected").and_then(Value::as_bool) != Some(true)
         && value.get("ok").and_then(Value::as_bool) != Some(false)
-        && value.get("legal").and_then(Value::as_bool) != Some(false)
-        && !(fn_name == "delete_copper" && value.get("deleted").and_then(Value::as_u64) == Some(0))
-        && matches!(
-            fn_name,
-            "apply_design"
-                | "move_parts"
-                | "route_track"
-                | "delete_copper"
-                | "set_net_width"
-                | "update_board_outline"
-        )
+        && value.get("legal").and_then(Value::as_bool) != Some(false);
+    if !successful {
+        return false;
+    }
+    match fn_name {
+        "apply_design" => apply_result_changed_design(value),
+        "move_parts" => value
+            .get("changed")
+            .or_else(|| value.get("moved"))
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0),
+        "route_track" => ["tracks", "vias"]
+            .iter()
+            .filter_map(|key| value.get(*key).and_then(Value::as_u64))
+            .any(|count| count > 0),
+        "delete_copper" => value
+            .get("deleted")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0),
+        "set_net_width" | "update_board_outline" => {
+            value.get("changed").and_then(Value::as_bool) == Some(true)
+        }
+        _ => false,
+    }
+}
+
+fn apply_result_changed_design(value: &Value) -> bool {
+    if value.get("written").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    let Some(diff) = value.get("diff") else {
+        return false;
+    };
+    ["added", "removed", "changed"].iter().any(|key| {
+        diff.get(*key)
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+    }) || match (
+        diff.get("nets_before").and_then(Value::as_u64),
+        diff.get("nets_after").and_then(Value::as_u64),
+    ) {
+        (Some(before), Some(after)) => before != after,
+        _ => false,
+    }
 }
 
 fn route_retry_budget_note() -> &'static str {
     "PCB routing or post-route DRC has failed. Do not call route_board or regenerate_board again until you make one concrete recovery change: move parts, edit copper, change net width or outline, or apply a schematic fix. Deterministic regenerate_board/place_board replay is not a recovery; run check_board after the changed route, then report the honest status."
+}
+
+fn drc_verification_retry_note() -> &'static str {
+    "Post-route check_board failed to complete, so the routed board is unverified. Do not regenerate, reroute, or mutate the board to bypass verification. Retry check_board once after inspecting the reported tool error; if verification remains unavailable, report that status honestly."
 }
 
 fn route_failure_context(value: &Value) -> Value {
@@ -1297,14 +1373,18 @@ fn route_failure_context(value: &Value) -> Value {
     Value::Object(out)
 }
 
-fn add_route_retry_guidance(content: &str, failed_route_attempts: usize) -> String {
+fn add_route_retry_guidance(
+    content: &str,
+    failed_route_attempts: usize,
+    note: &'static str,
+) -> String {
     let mut value = parse_or_null(content);
     if let Value::Object(obj) = &mut value {
         obj.insert(
             "agent_guidance".to_string(),
             json!({
                 "failed_route_attempts": failed_route_attempts,
-                "note": route_retry_budget_note()
+                "note": note
             }),
         );
         value.to_string()
@@ -3337,6 +3417,75 @@ mod tests {
     }
 
     #[test]
+    fn recovery_state_keeps_failed_drc_sticky_through_real_edits_only() {
+        let failed_drc = json!({"ok": false, "blocking_findings": 12});
+        let clean_drc = json!({"ok": true, "blocking_findings": 0});
+        let real_move = json!({"ok": true, "moved": 1, "changed": 1});
+        let noop_move = json!({"ok": true, "moved": 1, "changed": 0});
+
+        let mut state = PcbRecoveryState::default();
+        state.observe_tool_result("move_parts", &real_move, true);
+        state.observe_tool_result("check_board", &failed_drc, true);
+        assert_eq!(
+            state.failed_route_attempts, 0,
+            "a pre-route DRC must not block the first route"
+        );
+
+        state.observe_tool_result("route_board", &json!({"failed": []}), true);
+        assert!(state.awaiting_clean_drc);
+        assert!(state.observe_tool_result("check_board", &failed_drc, true));
+        assert!(route_retry_blocked(
+            state.failed_route_attempts,
+            "route_board"
+        ));
+
+        state.observe_tool_result("move_parts", &real_move, true);
+        assert_eq!(
+            state.failed_route_attempts, 0,
+            "a real edit unlocks one route"
+        );
+        assert!(
+            state.awaiting_clean_drc,
+            "recovery edits must preserve the post-route DRC obligation"
+        );
+        assert!(state.observe_tool_result("check_board", &failed_drc, true));
+        assert!(route_retry_blocked(
+            state.failed_route_attempts,
+            "regenerate_board"
+        ));
+
+        state.observe_tool_result("move_parts", &noop_move, true);
+        assert!(
+            route_retry_blocked(state.failed_route_attempts, "route_board"),
+            "a reported no-op must not unlock routing"
+        );
+        state.observe_tool_result("check_board", &clean_drc, true);
+        assert_eq!(state.failed_route_attempts, 0);
+        assert!(!state.awaiting_clean_drc);
+
+        state.observe_tool_result("route_board", &json!({"failed": []}), true);
+        assert!(state.observe_tool_result(
+            "check_board",
+            &json!({"error": "kicad-cli pcb drc failed"}),
+            true,
+        ));
+        assert!(state.verification_failed);
+        assert!(route_retry_blocked(
+            state.failed_route_attempts,
+            "route_board"
+        ));
+        state.observe_tool_result("move_parts", &real_move, true);
+        assert!(
+            route_retry_blocked(state.failed_route_attempts, "regenerate_board"),
+            "a PCB mutation must not bypass a failed verification tool"
+        );
+        assert!(state.retry_note().contains("Retry check_board"));
+        state.observe_tool_result("check_board", &clean_drc, true);
+        assert!(!state.verification_failed);
+        assert!(!state.awaiting_clean_drc);
+    }
+
+    #[test]
     fn route_retry_guard_blocks_blind_reroute_but_allows_replacement() {
         assert!(route_retry_blocked(MAX_FAILED_ROUTE_RETRIES, "route_board"));
         assert!(route_retry_blocked(
@@ -3363,13 +3512,61 @@ mod tests {
             "edit_design",
             &json!({"ok": true})
         ));
-        assert!(route_retry_budget_reset_by_fix(
+        assert!(!route_retry_budget_reset_by_fix(
             "apply_design",
             &json!({"ok": true})
         ));
         assert!(route_retry_budget_reset_by_fix(
+            "apply_design",
+            &json!({
+                "ok": true,
+                "written": true,
+                "diff": {"added": ["R1"], "removed": [], "changed": [], "nets_before": 0, "nets_after": 2}
+            })
+        ));
+        assert!(!route_retry_budget_reset_by_fix(
+            "apply_design",
+            &json!({
+                "ok": true,
+                "written": true,
+                "diff": {"added": [], "removed": [], "changed": [], "nets_before": 2, "nets_after": 2}
+            })
+        ));
+        assert!(!route_retry_budget_reset_by_fix(
             "set_net_width",
             &json!({"ok": true})
+        ));
+        assert!(route_retry_budget_reset_by_fix(
+            "set_net_width",
+            &json!({"ok": true, "changed": true})
+        ));
+        assert!(!route_retry_budget_reset_by_fix(
+            "set_net_width",
+            &json!({"ok": true, "changed": false})
+        ));
+        assert!(!route_retry_budget_reset_by_fix(
+            "move_parts",
+            &json!({"ok": true, "moved": 1, "changed": 0})
+        ));
+        assert!(route_retry_budget_reset_by_fix(
+            "move_parts",
+            &json!({"ok": true, "moved": 1, "changed": 1})
+        ));
+        assert!(!route_retry_budget_reset_by_fix(
+            "route_track",
+            &json!({"ok": true, "tracks": 0, "vias": 0})
+        ));
+        assert!(route_retry_budget_reset_by_fix(
+            "route_track",
+            &json!({"ok": true, "tracks": 1, "vias": 0})
+        ));
+        assert!(!route_retry_budget_reset_by_fix(
+            "update_board_outline",
+            &json!({"ok": true, "changed": false})
+        ));
+        assert!(route_retry_budget_reset_by_fix(
+            "update_board_outline",
+            &json!({"ok": true, "changed": true})
         ));
         assert!(!route_retry_budget_reset_by_fix(
             "place_board",
@@ -3407,7 +3604,11 @@ mod tests {
 
     #[test]
     fn route_retry_guidance_is_added_to_json_results() {
-        let with_guidance = add_route_retry_guidance(r#"{"failed":[{"connection":"GND"}]}"#, 2);
+        let with_guidance = add_route_retry_guidance(
+            r#"{"failed":[{"connection":"GND"}]}"#,
+            2,
+            route_retry_budget_note(),
+        );
         let parsed: Value = serde_json::from_str(&with_guidance).unwrap();
         assert_eq!(
             parsed["agent_guidance"]["failed_route_attempts"].as_u64(),
@@ -3423,7 +3624,10 @@ mod tests {
                 .is_some_and(|note| note.contains("regenerate_board/place_board replay")),
             "route retry guidance should reject deterministic replay as recovery"
         );
-        assert_eq!(add_route_retry_guidance("not json", 2), "not json");
+        assert_eq!(
+            add_route_retry_guidance("not json", 2, route_retry_budget_note()),
+            "not json"
+        );
     }
 
     #[test]
