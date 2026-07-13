@@ -1,12 +1,13 @@
 //! Engine-private placement geometry constants and edge affinity.
 
-use super::model::Edge;
+use super::model::{Edge, EdgeDatum, Part};
 use crate::problem::{Point2, Rect};
 
 // Shared placement geometry.
 pub(crate) use crate::problem::place::{
-    clamp_center_for_envelope, courtyard_margin, pad_world, placement_bounds_envelope,
-    placement_envelope_at, rotated_copper_bbox, rotated_courtyard_half,
+    clamp_center_for_envelope, courtyard_margin, pad_world, part_edge_distance,
+    part_placement_bounds_envelope, placement_envelope_at, rotated_copper_bbox,
+    rotated_courtyard_half,
 };
 
 // ── engine-private design constants ──────────────────────────────────────────
@@ -80,6 +81,80 @@ pub(crate) fn edge_target(edge: Edge, b: &Rect, h: (f64, f64)) -> f64 {
         Edge::W => b.min_x + h.0 + EDGE_BAND.min((b.max_x - b.min_x) / 2.0),
         Edge::E => b.max_x - h.0 - EDGE_BAND.min((b.max_x - b.min_x) / 2.0),
     }
+}
+
+/// Origin coordinate that puts a part's explicit PCB-edge datum exactly on the
+/// selected rectangular board edge. Returns `None` when the rotated datum is
+/// not tangent to that edge; callers then use ordinary courtyard affinity.
+pub(crate) fn datum_edge_target(part: &Part, rotation: f64, edge: Edge, b: &Rect) -> Option<f64> {
+    let datum = part.edge_datum?.rotated(rotation);
+    if !datum_tangent_to_edge(datum, edge) {
+        return None;
+    }
+    let midpoint = datum.midpoint();
+    match edge {
+        Edge::N => Some(b.min_y - midpoint.y),
+        Edge::S => Some(b.max_y - midpoint.y),
+        Edge::W => Some(b.min_x - midpoint.x),
+        Edge::E => Some(b.max_x - midpoint.x),
+    }
+}
+
+fn datum_tangent_to_edge(datum: EdgeDatum, edge: Edge) -> bool {
+    let dx = (datum.end.x - datum.start.x).abs();
+    let dy = (datum.end.y - datum.start.y).abs();
+    if dx <= geom::EPS && dy <= geom::EPS {
+        return false;
+    }
+    match edge {
+        Edge::N | Edge::S => dy <= geom::EPS,
+        Edge::E | Edge::W => dx <= geom::EPS,
+    }
+}
+
+pub(crate) fn part_edge_target(
+    part: &Part,
+    rotation: f64,
+    edge: Edge,
+    b: &Rect,
+    half: (f64, f64),
+) -> f64 {
+    datum_edge_target(part, rotation, edge, b).unwrap_or_else(|| edge_target(edge, b, half))
+}
+
+/// Quadrant rotation that makes the datum tangent to `edge` while preserving
+/// its library orientation whenever no rotation is needed.
+pub(crate) fn datum_rotation_for_edge(part: &Part, edge: Edge) -> f64 {
+    if part.edge_datum.is_none() {
+        return 0.0;
+    }
+    // A tangent line alone leaves a 180° ambiguity. Resolve it mechanically:
+    // choose the quadrant that puts the pad-copper centroid on the board side
+    // of the datum, so a north-edge receptacle does not point out of the board.
+    [0.0, 90.0, 180.0, 270.0]
+        .into_iter()
+        .filter_map(|rotation| {
+            let rotated_datum = part.edge_datum?.rotated(rotation);
+            if !datum_tangent_to_edge(rotated_datum, edge) {
+                return None;
+            }
+            let datum = rotated_datum.midpoint();
+            let copper = rotated_copper_bbox(part, rotation).center();
+            let inward = match edge {
+                Edge::N => copper.y - datum.y,
+                Edge::S => datum.y - copper.y,
+                Edge::W => copper.x - datum.x,
+                Edge::E => datum.x - copper.x,
+            };
+            Some((inward, rotation))
+        })
+        .max_by(|(a_score, a_rot), (b_score, b_rot)| {
+            a_score
+                .total_cmp(b_score)
+                .then_with(|| b_rot.total_cmp(a_rot))
+        })
+        .map(|(_, rotation)| rotation)
+        .unwrap_or(0.0)
 }
 
 /// The edge pull delta (only the edge-normal axis is driven; the tangential axis

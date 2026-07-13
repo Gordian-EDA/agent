@@ -82,6 +82,7 @@ fn r0603(reference: &str, pad1_net: Option<&str>, pad2_net: Option<&str>) -> Par
                 net: pad2_net.map(str::to_owned),
             },
         ],
+        edge_datum: None,
         locked: None,
     }
 }
@@ -99,6 +100,7 @@ fn single_pad(reference: &str, net: &str, offset: Point2) -> Part {
             layers: top(),
             net: Some(net.to_owned()),
         }],
+        edge_datum: None,
         locked: None,
     }
 }
@@ -120,6 +122,7 @@ fn tiny_single_pad_on(reference: &str, net: &str, offset: Point2, layers: Vec<La
             layers,
             net: Some(net.to_owned()),
         }],
+        edge_datum: None,
         locked: None,
     }
 }
@@ -245,6 +248,7 @@ fn dense_anchor(reference: &str, npads: usize) -> Part {
         courtyard_w: npads as f64 * 0.5 + 1.0,
         courtyard_h: 2.0,
         pads,
+        edge_datum: None,
         locked: None,
     }
 }
@@ -342,6 +346,7 @@ fn locked_anchor_with_unlocked_caps_does_not_move() {
                 net: Some("OUT".to_owned()),
             },
         ],
+        edge_datum: None,
         locked: None,
     };
     place_at(&mut ic, 4.0, 10.0, 0.0);
@@ -1531,7 +1536,10 @@ fn position_polish_candidates_are_snapped_clamped_and_deduped() {
 
     let candidates = unique_position_candidates(
         &problem,
+        0,
+        0.0,
         (1.0, 1.0),
+        rotated_copper_bbox(&problem.parts[0], 0.0),
         old,
         vec![
             old,
@@ -1570,7 +1578,7 @@ fn edge_seek_position_candidates_include_all_edge_band_targets() {
         .collect();
     let pos = vec![Point2 { x: 15.0, y: 10.0 }];
 
-    let candidates = edge_seek_position_candidates(&problem, &half, &pos, 0, &[0]);
+    let candidates = edge_seek_position_candidates(&problem, &half, 0.0, &pos, 0, &[0]);
 
     assert_eq!(
         candidates,
@@ -1595,7 +1603,7 @@ fn edge_seek_position_candidates_include_all_edge_band_targets() {
         "edge polish should offer direct non-local targets for every board edge"
     );
     assert!(
-        edge_seek_position_candidates(&problem, &half, &pos, 0, &[]).is_empty(),
+        edge_seek_position_candidates(&problem, &half, 0.0, &pos, 0, &[]).is_empty(),
         "non-edge-seeking parts should not pay extra edge candidates"
     );
 }
@@ -1756,6 +1764,7 @@ fn position_candidates_include_pad_median_to_ignore_far_outlier_net() {
                 net: Some((*net).to_owned()),
             })
             .collect(),
+        edge_datum: None,
         locked: None,
     };
     let problem = PlaceProblem {
@@ -1816,6 +1825,7 @@ fn position_candidates_include_pad_median_axis_targets() {
                 net: Some((*net).to_owned()),
             })
             .collect(),
+        edge_datum: None,
         locked: None,
     };
     let problem = PlaceProblem {
@@ -1897,6 +1907,7 @@ fn position_candidates_include_nearest_same_net_pad_target() {
             layers: top(),
             net: Some("N".to_owned()),
         }],
+        edge_datum: None,
         locked: None,
     };
     let problem = PlaceProblem {
@@ -2431,6 +2442,7 @@ fn ic_anchor(reference: &str, npads: usize, pwr: &str) -> Part {
         courtyard_w: npads as f64 * 0.5 + 1.0,
         courtyard_h: 3.0,
         pads,
+        edge_datum: None,
         locked: None,
     }
 }
@@ -2680,6 +2692,7 @@ fn edge_affinity_part_touches_edge_band() {
                         net: Some("NET2".to_owned()),
                     },
                 ],
+                edge_datum: None,
                 locked: None,
             },
             r0603("R1", Some("NET1"), Some("X")),
@@ -2741,6 +2754,7 @@ fn edge_locked_placer_pins_edge_seek_connector_to_frame() {
                         net: Some("SIG2".to_owned()),
                     },
                 ],
+                edge_datum: None,
                 locked: None,
             },
             r0603("R1", Some("SIG1"), Some("X")),
@@ -2915,6 +2929,7 @@ fn is_legal_uses_asymmetric_copper_bbox_for_off_centre_pads() {
                 net: Some("B".to_owned()),
             },
         ],
+        edge_datum: None,
         locked: None,
     };
     // Asymmetric bbox: +x only, nothing on −x.
@@ -3295,6 +3310,7 @@ fn place_result_selector_keeps_routable_layout_over_lower_cost_unroutable_one() 
             layers: vec![LayerRef::top(), LayerRef::bottom()],
             net: Some("SIG".to_owned()),
         }],
+        edge_datum: None,
         locked: None,
     };
     let blocker = Part {
@@ -3309,6 +3325,7 @@ fn place_result_selector_keeps_routable_layout_over_lower_cost_unroutable_one() 
             layers: vec![LayerRef::top(), LayerRef::bottom()],
             net: None,
         }],
+        edge_datum: None,
         locked: None,
     };
     let problem = PlaceProblem {
@@ -3372,6 +3389,7 @@ fn place_result_selector_prefers_lower_via_route_before_layout_cost() {
             layers: vec![LayerRef::top(), LayerRef::bottom()],
             net: Some("SIG".to_owned()),
         }],
+        edge_datum: None,
         locked: None,
     };
     let top_wall = Part {
@@ -3386,6 +3404,7 @@ fn place_result_selector_prefers_lower_via_route_before_layout_cost() {
             layers: vec![LayerRef::top()],
             net: None,
         }],
+        edge_datum: None,
         locked: None,
     };
     let problem = PlaceProblem {
@@ -3640,6 +3659,7 @@ fn ic8(reference: &str, pwr: &str) -> Part {
         courtyard_w: 5.0,
         courtyard_h: 3.0,
         pads,
+        edge_datum: None,
         locked: None,
     }
 }
@@ -3688,6 +3708,7 @@ fn oracle_placement_is_byte_identical_to_pinned_snapshot() {
                 net: Some("GND".into()),
             },
         ],
+        edge_datum: None,
         locked: None,
     });
     parts.push(r0603("R1", Some("U1_S3"), Some("U2_S3")));

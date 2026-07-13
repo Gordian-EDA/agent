@@ -79,9 +79,42 @@ pub struct Part {
     pub courtyard_h: f64,
     /// The part's pads (offsets are relative to the part origin at rotation 0).
     pub pads: Vec<PartPad>,
+    /// Footprint-local line where the finished PCB edge belongs. Present only
+    /// when the library footprint explicitly labels a mechanical edge datum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_datum: Option<EdgeDatum>,
     /// If present, the part is pinned at this position/rotation and never moves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locked: Option<LockedAt>,
+}
+
+/// A footprint-local PCB-edge datum carried from the footprint library into
+/// placement. The line is expected to lie tangent to the selected board edge.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EdgeDatum {
+    pub start: Point2,
+    pub end: Point2,
+}
+
+impl EdgeDatum {
+    pub fn rotated(self, rotation: f64) -> Self {
+        Self {
+            start: self.start.rotate(rotation),
+            end: self.end.rotate(rotation),
+        }
+    }
+
+    pub fn midpoint(self) -> Point2 {
+        Point2::new(
+            (self.start.x + self.end.x) / 2.0,
+            (self.start.y + self.end.y) / 2.0,
+        )
+    }
+
+    pub fn is_horizontal(self) -> bool {
+        (self.end.x - self.start.x).abs() >= (self.end.y - self.start.y).abs()
+    }
 }
 
 /// One pad: a number, an offset from the part origin (rotation 0), a size, the
@@ -338,6 +371,57 @@ pub fn placement_bounds_envelope(half: (f64, f64), copper_bbox: Rect) -> Rect {
     )
 }
 
+/// Bounds envelope for a concrete part. A labelled PCB-edge datum explicitly
+/// authorizes its mechanical body/courtyard to cross the outline; pad copper
+/// and the footprint origin must still remain inside with edge clearance.
+pub fn part_placement_bounds_envelope(part: &Part, half: (f64, f64), copper_bbox: Rect) -> Rect {
+    if part.edge_datum.is_none() {
+        return placement_bounds_envelope(half, copper_bbox);
+    }
+    Rect::new(
+        0.0_f64.min(copper_bbox.min_x - EDGE_CLEAR_PLACE_MM),
+        0.0_f64.min(copper_bbox.min_y - EDGE_CLEAR_PLACE_MM),
+        0.0_f64.max(copper_bbox.max_x + EDGE_CLEAR_PLACE_MM),
+        0.0_f64.max(copper_bbox.max_y + EDGE_CLEAR_PLACE_MM),
+    )
+}
+
+/// Distance from an explicit physical edge datum (or, for ordinary parts, its
+/// courtyard) to the nearest compatible rectangular board edge.
+pub fn part_edge_distance(
+    part: &Part,
+    rotation: f64,
+    at: Point2,
+    bounds: &Rect,
+    half: (f64, f64),
+) -> f64 {
+    if let Some(datum) = part.edge_datum.map(|datum| datum.rotated(rotation)) {
+        let midpoint = datum.midpoint();
+        let dx = (datum.end.x - datum.start.x).abs();
+        let dy = (datum.end.y - datum.start.y).abs();
+        let mut best = f64::INFINITY;
+        if dy <= geom::EPS {
+            let world_y = at.y + midpoint.y;
+            best = best.min((world_y - bounds.min_y).abs());
+            best = best.min((world_y - bounds.max_y).abs());
+        }
+        if dx <= geom::EPS {
+            let world_x = at.x + midpoint.x;
+            best = best.min((world_x - bounds.min_x).abs());
+            best = best.min((world_x - bounds.max_x).abs());
+        }
+        if best.is_finite() {
+            return best;
+        }
+    }
+
+    let dl = (at.x - half.0) - bounds.min_x;
+    let dr = bounds.max_x - (at.x + half.0);
+    let dt = (at.y - half.1) - bounds.min_y;
+    let db = bounds.max_y - (at.y + half.1);
+    dl.min(dr).min(dt).min(db).max(0.0)
+}
+
 /// Translate a part-relative placement envelope to world coordinates.
 pub fn placement_envelope_at(center: Point2, envelope: Rect) -> Rect {
     Rect::new(
@@ -420,7 +504,7 @@ pub fn is_legal(
     for i in 0..n {
         let courtyard = Rect::from_center_half(pos[i], half[i]);
         let copper = copper_bbox[i];
-        let envelope = placement_bounds_envelope(half[i], copper);
+        let envelope = part_placement_bounds_envelope(&problem.parts[i], half[i], copper);
         if !problem
             .bounds
             .contains_rect_eps(&placement_envelope_at(pos[i], envelope), 1e-9)
@@ -934,12 +1018,14 @@ fn placement_hint_penalty_um(
         let Some(placement) = placements.get(reference.as_str()) else {
             continue;
         };
-        let (hw, hh) = rotated_courtyard_half(&problem.parts[part_idx], placement.rotation);
-        let dx = (placement.at.x - hw - problem.bounds.min_x)
-            .min(problem.bounds.max_x - (placement.at.x + hw));
-        let dy = (placement.at.y - hh - problem.bounds.min_y)
-            .min(problem.bounds.max_y - (placement.at.y + hh));
-        penalty += dx.min(dy).max(0.0);
+        let half = rotated_courtyard_half(&problem.parts[part_idx], placement.rotation);
+        penalty += part_edge_distance(
+            &problem.parts[part_idx],
+            placement.rotation,
+            placement.at,
+            &problem.bounds,
+            half,
+        );
     }
     for reference in &hints.corner_seek {
         let Some(part_idx) = problem
@@ -1066,6 +1152,7 @@ mod tests {
                     layers: vec![LayerRef::top()],
                     net: Some("N".to_owned()),
                 }],
+                edge_datum: None,
                 locked: None,
             }],
             keepouts: vec![],
@@ -1161,6 +1248,7 @@ mod tests {
                     layers: vec![LayerRef::top()],
                     net: Some("N".to_owned()),
                 }],
+                edge_datum: None,
                 locked: None,
             }],
             keepouts: vec![],
@@ -1218,6 +1306,7 @@ mod tests {
                     layers: vec![LayerRef::top()],
                     net: Some("N".to_owned()),
                 }],
+                edge_datum: None,
                 locked: None,
             }],
             keepouts: vec![],
@@ -1293,6 +1382,7 @@ mod tests {
                     layers: vec![LayerRef::top()],
                     net: Some("N".to_owned()),
                 }],
+                edge_datum: None,
                 locked: None,
             }],
             keepouts: vec![],

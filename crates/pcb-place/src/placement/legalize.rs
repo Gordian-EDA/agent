@@ -9,7 +9,7 @@
 
 use super::geometry::{
     PLACE_GRID, PLACEMENT_GRID, SPIRAL_MAX_RING, clamp_center_for_envelope,
-    placement_bounds_envelope, placement_envelope_at,
+    part_placement_bounds_envelope, placement_envelope_at,
 };
 use super::model::PlaceProblem;
 use crate::problem::{Point2, Rect};
@@ -41,10 +41,14 @@ pub(crate) fn legalize(
 ) -> LegalizeStats {
     let n = problem.parts.len();
     let locked: Vec<bool> = problem.parts.iter().map(|p| p.locked.is_some()).collect();
-    let envelopes: Vec<Rect> = half
+    let envelopes: Vec<Rect> = problem
+        .parts
         .iter()
+        .zip(half)
         .zip(copper_bbox)
-        .map(|(&courtyard, &copper)| placement_bounds_envelope(courtyard, copper))
+        .map(|((part, &courtyard), &copper)| {
+            part_placement_bounds_envelope(part, courtyard, copper)
+        })
         .collect();
 
     let mut out_of_bounds_clamps = 0;

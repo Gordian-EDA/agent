@@ -56,6 +56,38 @@ fn standalone_parse_has_no_id() {
 }
 
 #[test]
+fn labelled_dwgs_user_line_is_parsed_as_pcb_edge_datum() {
+    let source = r#"(footprint "EdgeConnector"
+      (version 20240108)
+      (generator "test")
+      (layer "F.Cu")
+      (fp_line (start -5 4.34) (end 5 4.34)
+        (stroke (width 0.1) (type solid)) (layer "Dwgs.User"))
+      (fp_line (start -2 -2) (end 2 -2)
+        (stroke (width 0.1) (type solid)) (layer "Dwgs.User"))
+      (fp_text user "PCB Edge" (at 0 3.43) (layer "Dwgs.User")
+        (effects (font (size 1 1) (thickness 0.15))))
+      (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask")))"#;
+    let fp = Footprint::parse_str("EdgeConnector", source).expect("parse datum fixture");
+    let datum = fp.pcb_edge_datum.expect("labelled edge datum");
+    assert!(close(datum.start.y, 4.34));
+    assert!(close(datum.end.y, 4.34));
+}
+
+#[test]
+fn unlabelled_dwgs_user_line_is_not_an_edge_datum() {
+    let source = r#"(footprint "ConstructionLine"
+      (version 20240108)
+      (generator "test")
+      (layer "F.Cu")
+      (fp_line (start -5 4) (end 5 4)
+        (stroke (width 0.1) (type solid)) (layer "Dwgs.User"))
+      (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask")))"#;
+    let fp = Footprint::parse_str("ConstructionLine", source).expect("parse fixture");
+    assert!(fp.pcb_edge_datum.is_none());
+}
+
+#[test]
 fn arc_courtyard_bulge_is_captured() {
     let fp = load("ArcCourtyard");
     assert_eq!(fp.courtyard_source, CourtyardSource::ExplicitCourtyard);

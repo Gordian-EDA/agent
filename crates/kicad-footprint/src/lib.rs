@@ -40,4 +40,4 @@ pub use catalog::{FootprintCatalog, FootprintCatalogBuilder, FootprintEntry, Foo
 pub use error::{Error, Result};
 pub use id::{FootprintId, LibraryId};
 pub use search::{FootprintSearchHit, SearchQuery};
-pub use types::{CourtyardSource, Footprint, FootprintPad, PadTechnology};
+pub use types::{CourtyardSource, Footprint, FootprintPad, PadTechnology, PcbEdgeDatum};

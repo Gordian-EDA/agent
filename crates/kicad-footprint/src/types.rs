@@ -71,6 +71,17 @@ pub struct FootprintPad {
     pub drill: Option<f64>,
 }
 
+/// A footprint-local line explicitly identifying where the finished PCB edge belongs.
+///
+/// KiCad connector footprints commonly draw this on `Dwgs.User` beside a
+/// `PCB Edge` user-text marker. It is mechanical placement metadata, not part of
+/// the footprint courtyard or copper geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PcbEdgeDatum {
+    pub start: Point2,
+    pub end: Point2,
+}
+
 impl FootprintPad {
     /// The KiCAD layer tokens this pad occupies.
     pub fn copper_layers(&self) -> &[String] {
@@ -107,6 +118,10 @@ pub struct Footprint {
     pub courtyard_source: CourtyardSource,
     /// Overall bounding box over every pad and graphic element.
     pub bounds: Rect,
+    /// Explicit footprint-local PCB-edge line, when the library footprint
+    /// supplies a labelled `Dwgs.User` datum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pcb_edge_datum: Option<PcbEdgeDatum>,
 }
 
 impl Footprint {

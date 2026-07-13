@@ -75,8 +75,8 @@ pub use hints::{
     apply_edge_lock, apply_grid_hints, apply_surround, fan_out_rings, unified_fanout_place,
 };
 pub use model::{
-    Edge, GroupHint, LockedAt, LogicalNet, Part, PartPad, Pin, PlaceProblem, PlaceReport,
-    PlaceResult, Placement, PlacementHints, Rect, derive_nets,
+    Edge, EdgeDatum, GroupHint, LockedAt, LogicalNet, Part, PartPad, Pin, PlaceProblem,
+    PlaceReport, PlaceResult, Placement, PlacementHints, Rect, derive_nets,
 };
 pub use pairs::{decoupling_pairs, series_fanout_order, series_pairs};
 pub use route::{AnnealingPlacer, FanoutPlacer, GridAstarRanker, LegalizingPlacer};

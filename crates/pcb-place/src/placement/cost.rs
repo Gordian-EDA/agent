@@ -4,6 +4,9 @@
 //! cheap quality number every engine reports — lives in the kernel
 //! ([`pcb_model::place::compute_hpwl`]) and is re-exported here.
 
+use super::geometry::{
+    part_edge_distance, part_placement_bounds_envelope, placement_envelope_at, rotated_copper_bbox,
+};
 use super::model::{LogicalNet, Pin, PlaceProblem};
 use crate::problem::{LayerRef, Point2, Rect};
 
@@ -414,8 +417,14 @@ pub(crate) fn place_cost(
     // Out-of-bounds (hard).
     let b = &problem.bounds;
     for i in 0..n {
-        let courtyard = Rect::from_center_half(pos[i], half[i]);
-        let (dx, dy) = b.containment_overshoot(&courtyard);
+        let bounds_shape = if problem.parts[i].edge_datum.is_some() {
+            let copper = rotated_copper_bbox(&problem.parts[i], rotations[i]);
+            let envelope = part_placement_bounds_envelope(&problem.parts[i], half[i], copper);
+            placement_envelope_at(pos[i], envelope)
+        } else {
+            Rect::from_center_half(pos[i], half[i])
+        };
+        let (dx, dy) = b.containment_overshoot(&bounds_shape);
         cost += SA_BOUNDS_W * (dx + dy);
     }
 
@@ -462,12 +471,7 @@ pub(crate) fn place_cost(
         cost += SA_COHERE_W * cap_anchor_dist(problem, pos, rotations, cap, ic);
     }
     for &i in edge_idx {
-        let h = half[i];
-        let dl = (pos[i].x - h.0) - b.min_x;
-        let dr = b.max_x - (pos[i].x + h.0);
-        let dt = (pos[i].y - h.1) - b.min_y;
-        let db = b.max_y - (pos[i].y + h.1);
-        cost += SA_EDGE_W * dl.min(dr).min(dt).min(db).max(0.0);
+        cost += SA_EDGE_W * part_edge_distance(&problem.parts[i], rotations[i], pos[i], b, half[i]);
     }
     cost
 }
@@ -496,6 +500,7 @@ mod tests {
                 layers,
                 net: Some(net.to_owned()),
             }],
+            edge_datum: None,
             locked: None,
         }
     }

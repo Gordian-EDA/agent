@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use geom::{Point2, Rect};
 
 use crate::error::{Error, Result};
-use crate::{CourtyardSource, Footprint, FootprintPad, PadTechnology};
+use crate::{CourtyardSource, Footprint, FootprintPad, PadTechnology, PcbEdgeDatum};
 
 impl Footprint {
     /// Parse a single `.kicad_mod` file into a [`Footprint`].
@@ -57,10 +57,11 @@ fn build_footprint(
     raw_source: impl FnOnce() -> Option<String>,
 ) -> Footprint {
     let mut pads: Vec<FootprintPad> = ast.pads.iter().map(pad_detail).collect();
+    let raw = raw_source();
     if pads.iter().any(|p| p.shape == "custom")
-        && let Some(raw) = raw_source()
+        && let Some(raw) = raw.as_deref()
     {
-        let half_extents = custom_pad_half_extents(&raw);
+        let half_extents = custom_pad_half_extents(raw);
         for (bi, pad) in pads.iter_mut().filter(|p| p.shape == "custom").enumerate() {
             if let Some(half) = half_extents.get(bi) {
                 pad.size = Point2::new(pad.size.x.max(2.0 * half.x), pad.size.y.max(2.0 * half.y));
@@ -69,6 +70,7 @@ fn build_footprint(
     }
     let (courtyard, courtyard_source) = courtyard_bbox(ast, &pads);
     let bounds = overall_bbox(ast, &pads).unwrap_or_else(Rect::zero);
+    let pcb_edge_datum = pcb_edge_datum(ast, raw.as_deref());
 
     Footprint {
         id: None,
@@ -78,7 +80,91 @@ fn build_footprint(
         courtyard,
         courtyard_source,
         bounds,
+        pcb_edge_datum,
     }
+}
+
+/// Resolve the `Dwgs.User` line associated with a `PCB Edge` user-text marker.
+/// A footprint may contain other construction lines, so proximity to the
+/// marker is the deterministic association rule. Without the marker, ordinary
+/// drawing geometry is never promoted to placement metadata.
+fn pcb_edge_datum(
+    ast: &kiutils_kicad::FootprintAst,
+    raw_source: Option<&str>,
+) -> Option<PcbEdgeDatum> {
+    let mut markers: Vec<Point2> = ast
+        .graphics
+        .iter()
+        .filter(|g| {
+            g.token == "fp_text"
+                && g.layer.as_deref() == Some("Dwgs.User")
+                && g.text
+                    .as_deref()
+                    .is_some_and(|text| text.trim().eq_ignore_ascii_case("PCB Edge"))
+        })
+        .filter_map(|g| g.at.map(Point2::from))
+        .collect();
+    if let Some(raw) = raw_source {
+        markers.extend(raw_pcb_edge_markers(raw));
+    }
+    if markers.is_empty() {
+        return None;
+    }
+
+    ast.graphics
+        .iter()
+        .filter(|g| g.token == "fp_line" && g.layer.as_deref() == Some("Dwgs.User"))
+        .filter_map(|g| {
+            let start = Point2::from(g.start?);
+            let end = Point2::from(g.end?);
+            let line = geom::Segment::new(start, end);
+            (line.length() > geom::EPS).then(|| {
+                let distance = markers
+                    .iter()
+                    .map(|&marker| line.dist2_to_point(marker))
+                    .fold(f64::INFINITY, f64::min);
+                (distance, PcbEdgeDatum { start, end })
+            })
+        })
+        .min_by(|(ad, a), (bd, b)| {
+            ad.total_cmp(bd)
+                .then_with(|| a.start.x.total_cmp(&b.start.x))
+                .then_with(|| a.start.y.total_cmp(&b.start.y))
+                .then_with(|| a.end.x.total_cmp(&b.end.x))
+                .then_with(|| a.end.y.total_cmp(&b.end.y))
+        })
+        .map(|(_, datum)| datum)
+}
+
+/// `kiutils` 0.3 records the `fp_text` subtype (`user`) as its text field, so
+/// recover labelled marker positions from the raw block until the upstream AST
+/// exposes the following text atom. This parser is deliberately narrow: only
+/// `fp_text` blocks containing both the exact label and `Dwgs.User` qualify.
+fn raw_pcb_edge_markers(raw: &str) -> Vec<Point2> {
+    let mut markers = Vec::new();
+    let mut search = 0;
+    while let Some(rel) = raw[search..].find("(fp_text") {
+        let start = search + rel;
+        let Some(end) = matching_paren(raw, start) else {
+            break;
+        };
+        let block = &raw[start..end];
+        search = end;
+        if !block.contains("\"PCB Edge\"") || !block.contains("\"Dwgs.User\"") {
+            continue;
+        }
+        let Some(at_rel) = block.find("(at ") else {
+            continue;
+        };
+        let mut values = block[at_rel + "(at ".len()..].split_whitespace();
+        let (Some(x), Some(y)) = (values.next(), values.next()) else {
+            continue;
+        };
+        if let (Ok(x), Ok(y)) = (x.parse::<f64>(), y.trim_end_matches(')').parse::<f64>()) {
+            markers.push(Point2::new(x, y));
+        }
+    }
+    markers
 }
 
 /// Per custom pad, the primitive half-extents in file order.

@@ -4,8 +4,9 @@
 //! cap onto the nearest free ring slot around its anchor before the annealer runs.
 
 use super::geometry::{
-    PLACE_GRID, PLACEMENT_GRID, SPIRAL_MAX_RING, aspect_edge, edge_delta, edge_target,
-    nearest_edge, pad_world, sign_nonzero,
+    PLACE_GRID, PLACEMENT_GRID, SPIRAL_MAX_RING, aspect_edge, clamp_center_for_envelope,
+    edge_delta, nearest_edge, pad_world, part_edge_target, part_placement_bounds_envelope,
+    rotated_copper_bbox, sign_nonzero,
 };
 use super::legalize::collides;
 use super::model::{LogicalNet, PlaceProblem, PlacementHints};
@@ -168,7 +169,8 @@ pub(crate) fn force_layout(
             }
             if let Some(edge) = &g.edge {
                 for &m in members {
-                    let target = edge_target(*edge, &problem.bounds, half[m]);
+                    let target =
+                        part_edge_target(&problem.parts[m], 0.0, *edge, &problem.bounds, half[m]);
                     let (dx, dy) = edge_delta(*edge, &pos[m], target);
                     force[m].0 += EDGE_PULL_K * dx;
                     force[m].1 += EDGE_PULL_K * dy;
@@ -196,7 +198,7 @@ pub(crate) fn force_layout(
             } else {
                 nearest_edge(&pos[m], &problem.bounds)
             };
-            let target = edge_target(edge, &problem.bounds, half[m]);
+            let target = part_edge_target(&problem.parts[m], 0.0, edge, &problem.bounds, half[m]);
             let (dx, dy) = edge_delta(edge, &pos[m], target);
             force[m].0 += EDGE_SEEK_K * dx;
             force[m].1 += EDGE_SEEK_K * dy;
@@ -243,7 +245,13 @@ pub(crate) fn force_layout(
             }
             pos[i].x += force[i].0 * scale;
             pos[i].y += force[i].1 * scale;
-            pos[i] = problem.bounds.clamp_center_for_half(pos[i], half[i]);
+            pos[i] = if problem.parts[i].edge_datum.is_some() {
+                let copper = rotated_copper_bbox(&problem.parts[i], 0.0);
+                let envelope = part_placement_bounds_envelope(&problem.parts[i], half[i], copper);
+                clamp_center_for_envelope(&problem.bounds, pos[i], envelope)
+            } else {
+                problem.bounds.clamp_center_for_half(pos[i], half[i])
+            };
         }
     }
 }

@@ -2,8 +2,11 @@
 //! the unified radial fan-out fast-path. These all LOCK parts at computed cells so
 //! later stages lay out the rest around a tidy, overlap-free-by-construction core.
 
-use super::geometry::rotated_courtyard_half;
-use super::model::{LockedAt, Part, PlaceProblem, PlacementHints};
+use super::geometry::{
+    clamp_center_for_envelope, datum_rotation_for_edge, part_edge_target,
+    part_placement_bounds_envelope, rotated_copper_bbox, rotated_courtyard_half,
+};
+use super::model::{Edge, LockedAt, Part, PlaceProblem, PlacementHints};
 use super::pairs::{decoupling_pairs, series_pairs};
 use crate::problem::Point2;
 
@@ -155,34 +158,45 @@ pub fn apply_edge_lock(problem: &mut PlaceProblem, refs: &[String]) {
     let (w, h) = (b.max_x - b.min_x, b.max_y - b.min_y);
     let perim = 2.0 * (w + h);
     for (k, &i) in idxs.iter().enumerate() {
-        let (hw, hh) = (
-            problem.parts[i].courtyard_w / 2.0,
-            problem.parts[i].courtyard_h / 2.0,
-        );
         let t = (k as f64 + 0.5) / n as f64 * perim;
-        let mut at = if t < w {
-            Point2 {
-                x: b.min_x + t,
-                y: b.min_y + hh,
-            } // top edge, L→R
+        let (edge, tangent) = if t < w {
+            (Edge::N, b.min_x + t)
         } else if t < w + h {
-            Point2 {
-                x: b.max_x - hw,
-                y: b.min_y + (t - w),
-            } // right edge, T→B
+            (Edge::E, b.min_y + (t - w))
         } else if t < 2.0 * w + h {
-            Point2 {
-                x: b.max_x - (t - w - h),
-                y: b.max_y - hh,
-            } // bottom edge, R→L
+            (Edge::S, b.max_x - (t - w - h))
         } else {
-            Point2 {
-                x: b.min_x + hw,
-                y: b.max_y - (t - 2.0 * w - h),
-            } // left edge, B→T
+            (Edge::W, b.max_y - (t - 2.0 * w - h))
         };
-        at = b.clamp_center_for_half(at, (hw, hh));
-        problem.parts[i].locked = Some(LockedAt { at, rotation: 0.0 });
+        let rotation = datum_rotation_for_edge(&problem.parts[i], edge);
+        let half = rotated_courtyard_half(&problem.parts[i], rotation);
+        let normal = part_edge_target(&problem.parts[i], rotation, edge, &b, half);
+        let at = match edge {
+            Edge::N | Edge::S => Point2 {
+                x: tangent,
+                y: normal,
+            },
+            Edge::E | Edge::W => Point2 {
+                x: normal,
+                y: tangent,
+            },
+        };
+        let at = if problem.parts[i].edge_datum.is_some() {
+            let copper = rotated_copper_bbox(&problem.parts[i], rotation);
+            let envelope = part_placement_bounds_envelope(&problem.parts[i], half, copper);
+            let mut clamped = clamp_center_for_envelope(&b, at, envelope);
+            // Preserve the physical datum exactly. If copper cannot clear this
+            // edge at the mechanical position, legality must reject it instead
+            // of silently shifting the datum into the board.
+            match edge {
+                Edge::N | Edge::S => clamped.y = at.y,
+                Edge::E | Edge::W => clamped.x = at.x,
+            }
+            clamped
+        } else {
+            b.clamp_center_for_half(at, half)
+        };
+        problem.parts[i].locked = Some(LockedAt { at, rotation });
     }
 }
 

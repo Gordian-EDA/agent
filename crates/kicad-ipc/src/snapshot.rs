@@ -129,6 +129,7 @@ impl IpcBoardSnapshot {
                             net: ob.connected_to.first().cloned(),
                         })
                         .collect(),
+                    edge_datum: None,
                     locked: part.locked.then_some(LockedAt {
                         at: part.at,
                         rotation: part.rotation as f64,

@@ -9,7 +9,9 @@ use kicad_footprint::{Footprint, FootprintId, FootprintPad, PadTechnology};
 use kicad_ipc::{FootprintMove, snapshot::IpcBoardSnapshot};
 use pcb_model::place::PartPad;
 use pcb_model::{LayerRef, ViaSpan};
-use pcb_place::placement::{LockedAt, Part, PlaceProblem, Placement, PlacementHints, Rect};
+use pcb_place::placement::{
+    EdgeDatum, LockedAt, Part, PlaceProblem, Placement, PlacementHints, Rect,
+};
 
 use crate::AgentRuntime;
 
@@ -35,6 +37,10 @@ pub(super) fn part_from_footprint_layers(
         courtyard_w,
         courtyard_h,
         pads,
+        edge_datum: footprint.pcb_edge_datum.map(|datum| EdgeDatum {
+            start: datum.start,
+            end: datum.end,
+        }),
         locked,
     }
 }
@@ -688,7 +694,8 @@ fn write_placement(ctx: &AgentRuntime, moves: &[FootprintMove]) -> std::result::
 mod tests {
     use super::*;
     use geom::Point2;
-    use kicad_footprint::PadTechnology;
+    use kicad_env::KicadEnv;
+    use kicad_footprint::{FootprintCatalog, PadTechnology};
     use kicad_ipc::snapshot::{ImportedBoard, IpcBoardSnapshot};
     use pcb_model::{RouteProblem, RouteSolution, Trace, Via};
 
@@ -832,5 +839,169 @@ mod tests {
         assert!(message.contains("no positions were written"));
         assert!(message.contains("smaller appropriate footprints"));
         assert!(message.contains("69 x 46 mm"));
+    }
+
+    #[test]
+    fn real_palconn_usb_c_datum_locks_exactly_to_every_board_edge() {
+        let Some(env) = KicadEnv::detect() else {
+            eprintln!("SKIP: KiCad libraries not installed");
+            return;
+        };
+        let catalog = FootprintCatalog::from_env(&env).expect("installed footprint catalog");
+        let id = FootprintId::parse("Connector_USB:USB_C_Receptacle_Palconn_UTC16-G")
+            .expect("valid footprint id");
+        let footprint = catalog.footprint(&id).expect("installed Palconn footprint");
+        let datum = footprint.pcb_edge_datum.expect("Palconn PCB Edge datum");
+        assert!((datum.start.y - 4.34).abs() < 1e-9);
+        assert!((datum.end.y - 4.34).abs() < 1e-9);
+
+        let bounds = Rect::new(0.0, 0.0, 45.0, 30.0);
+        let parts: Vec<Part> = (1..=4)
+            .map(|n| {
+                part_from_footprint_layers(&footprint, &format!("J{n}"), &BTreeMap::new(), 2, None)
+            })
+            .collect();
+        let mut problem = PlaceProblem {
+            bounds,
+            clearance: 0.2,
+            layer_count: 2,
+            min_trace_width: 0.2,
+            parts,
+            keepouts: vec![],
+            outline: None,
+        };
+        let refs = ["J1", "J2", "J3", "J4"].map(str::to_owned);
+        pcb_place::placement::apply_edge_lock(&mut problem, &refs);
+
+        let expected_edges = [
+            pcb_place::placement::Edge::N,
+            pcb_place::placement::Edge::E,
+            pcb_place::placement::Edge::S,
+            pcb_place::placement::Edge::W,
+        ];
+        let mut positions = Vec::new();
+        let mut half = Vec::new();
+        let mut copper = Vec::new();
+        for (part, edge) in problem.parts.iter().zip(expected_edges) {
+            let locked = part.locked.as_ref().expect("edge-locked connector");
+            let placed_datum = part
+                .edge_datum
+                .expect("carried edge datum")
+                .rotated(locked.rotation);
+            let world_start = Point2::new(
+                locked.at.x + placed_datum.start.x,
+                locked.at.y + placed_datum.start.y,
+            );
+            let world_end = Point2::new(
+                locked.at.x + placed_datum.end.x,
+                locked.at.y + placed_datum.end.y,
+            );
+            let copper_box = pcb_model::place::rotated_copper_bbox(part, locked.rotation);
+            let copper_center = Point2::new(
+                locked.at.x + copper_box.center().x,
+                locked.at.y + copper_box.center().y,
+            );
+            let datum_center = Point2::new(
+                (world_start.x + world_end.x) / 2.0,
+                (world_start.y + world_end.y) / 2.0,
+            );
+            match edge {
+                pcb_place::placement::Edge::N => {
+                    assert!((world_start.y - bounds.min_y).abs() < 1e-9);
+                    assert!((world_end.y - bounds.min_y).abs() < 1e-9);
+                    assert!(
+                        copper_center.y > datum_center.y,
+                        "north copper must point inward"
+                    );
+                }
+                pcb_place::placement::Edge::S => {
+                    assert!((world_start.y - bounds.max_y).abs() < 1e-9);
+                    assert!((world_end.y - bounds.max_y).abs() < 1e-9);
+                    assert!(
+                        copper_center.y < datum_center.y,
+                        "south copper must point inward"
+                    );
+                }
+                pcb_place::placement::Edge::W => {
+                    assert!((world_start.x - bounds.min_x).abs() < 1e-9);
+                    assert!((world_end.x - bounds.min_x).abs() < 1e-9);
+                    assert!(
+                        copper_center.x > datum_center.x,
+                        "west copper must point inward"
+                    );
+                }
+                pcb_place::placement::Edge::E => {
+                    assert!((world_start.x - bounds.max_x).abs() < 1e-9);
+                    assert!((world_end.x - bounds.max_x).abs() < 1e-9);
+                    assert!(
+                        copper_center.x < datum_center.x,
+                        "east copper must point inward"
+                    );
+                }
+            }
+            positions.push(locked.at);
+            half.push(pcb_model::place::rotated_courtyard_half(
+                part,
+                locked.rotation,
+            ));
+            copper.push(copper_box);
+        }
+        assert!(
+            pcb_model::place::is_legal(
+                &problem,
+                &half,
+                &copper,
+                pcb_model::place::courtyard_margin(problem.clearance),
+                &positions,
+            ),
+            "datum-aligned connector bodies may overhang, but all pad copper must remain legal"
+        );
+
+        // Exercise the same top-level placement pipeline used by `place_board`,
+        // not just the edge-lock helper. The oracle must prefer a mechanically
+        // exact edge candidate over an otherwise-routable inboard connector.
+        for part in &mut problem.parts {
+            part.locked = None;
+        }
+        let hints = PlacementHints {
+            edge_seek: refs.to_vec(),
+            ..PlacementHints::default()
+        };
+        let result = pcb_place::placement::place_board(&problem, &hints);
+        assert!(result.legal, "real Palconn auto-placement must be legal");
+        let auto_positions: Vec<Point2> = result.placements.iter().map(|p| p.at).collect();
+        let auto_half: Vec<_> = problem
+            .parts
+            .iter()
+            .zip(&result.placements)
+            .map(|(part, placed)| {
+                let half = pcb_model::place::rotated_courtyard_half(part, placed.rotation);
+                assert!(
+                    pcb_model::place::part_edge_distance(
+                        part,
+                        placed.rotation,
+                        placed.at,
+                        &problem.bounds,
+                        half,
+                    ) < 1e-9,
+                    "{} PCB Edge datum must not be left inboard",
+                    part.reference,
+                );
+                half
+            })
+            .collect();
+        let auto_copper: Vec<_> = problem
+            .parts
+            .iter()
+            .zip(&result.placements)
+            .map(|(part, placed)| pcb_model::place::rotated_copper_bbox(part, placed.rotation))
+            .collect();
+        assert!(pcb_model::place::is_legal(
+            &problem,
+            &auto_half,
+            &auto_copper,
+            pcb_model::place::courtyard_margin(problem.clearance),
+            &auto_positions,
+        ));
     }
 }

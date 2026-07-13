@@ -13,7 +13,8 @@ use super::anneal::anneal_placement;
 use super::cost::{compute_hpwl_with_rotations, place_cost};
 use super::force::{force_layout, snap_caps_to_anchor_ring};
 use super::geometry::{
-    PLACEMENT_GRID, courtyard_margin, edge_target, rotated_copper_bbox, rotated_courtyard_half,
+    PLACEMENT_GRID, clamp_center_for_envelope, courtyard_margin, datum_edge_target,
+    part_edge_target, part_placement_bounds_envelope, rotated_copper_bbox, rotated_courtyard_half,
 };
 use super::hints::{apply_edge_lock, apply_grid_hints, unified_fanout_place};
 use super::legalize::{initial_grid, is_legal, legalize};
@@ -917,9 +918,22 @@ fn polish_positions_in_order(
             &ratline_edges,
         ));
         candidates.extend(edge_seek_position_candidates(
-            problem, half, pos, i, edge_idx,
+            problem,
+            half,
+            rotations[i],
+            pos,
+            i,
+            edge_idx,
         ));
-        for candidate in unique_position_candidates(problem, half[i], old, candidates) {
+        for candidate in unique_position_candidates(
+            problem,
+            i,
+            rotations[i],
+            half[i],
+            copper_bbox[i],
+            old,
+            candidates,
+        ) {
             pos[i] = candidate;
             if !is_legal(problem, half, copper_bbox, margin, pos) {
                 continue;
@@ -1030,20 +1044,61 @@ struct PositionPolishMetric {
 
 pub(crate) fn unique_position_candidates(
     problem: &PlaceProblem,
+    part_idx: usize,
+    rotation: f64,
     half: (f64, f64),
+    copper_bbox: Rect,
     old: Point2,
     targets: Vec<Point2>,
 ) -> Vec<Point2> {
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for target in targets {
-        let candidate = problem.bounds.clamp_center_for_half(
-            Point2 {
-                x: PLACEMENT_GRID.snap(target.x),
-                y: PLACEMENT_GRID.snap(target.y),
-            },
-            half,
-        );
+        let part = &problem.parts[part_idx];
+        let mut snapped = Point2 {
+            x: PLACEMENT_GRID.snap(target.x),
+            y: PLACEMENT_GRID.snap(target.y),
+        };
+        // Edge datums commonly sit at a fractional library coordinate. Keep an
+        // exact datum-normal target exact instead of moving it to the 0.5 mm
+        // component grid (UTC16-G uses y=4.34).
+        for edge in [Edge::N, Edge::S, Edge::W, Edge::E] {
+            let Some(normal) = datum_edge_target(part, rotation, edge, &problem.bounds) else {
+                continue;
+            };
+            match edge {
+                Edge::N | Edge::S if (target.y - normal).abs() <= geom::EPS => {
+                    snapped.y = normal;
+                }
+                Edge::W | Edge::E if (target.x - normal).abs() <= geom::EPS => {
+                    snapped.x = normal;
+                }
+                _ => {}
+            }
+        }
+        let candidate = if part.edge_datum.is_some() {
+            let envelope = part_placement_bounds_envelope(part, half, copper_bbox);
+            let mut clamped = clamp_center_for_envelope(&problem.bounds, snapped, envelope);
+            // Preserve an exact physical edge target after tangential/copper
+            // clamping. An impossible copper envelope is rejected by is_legal.
+            for edge in [Edge::N, Edge::S, Edge::W, Edge::E] {
+                let Some(normal) = datum_edge_target(part, rotation, edge, &problem.bounds) else {
+                    continue;
+                };
+                match edge {
+                    Edge::N | Edge::S if (target.y - normal).abs() <= geom::EPS => {
+                        clamped.y = normal;
+                    }
+                    Edge::W | Edge::E if (target.x - normal).abs() <= geom::EPS => {
+                        clamped.x = normal;
+                    }
+                    _ => {}
+                }
+            }
+            clamped
+        } else {
+            problem.bounds.clamp_center_for_half(snapped, half)
+        };
         if candidate.dist(old) < geom::EPS {
             continue;
         }
@@ -1061,6 +1116,7 @@ pub(crate) fn unique_position_candidates(
 pub(crate) fn edge_seek_position_candidates(
     problem: &PlaceProblem,
     half: &[(f64, f64)],
+    rotation: f64,
     pos: &[Point2],
     part_idx: usize,
     edge_idx: &[usize],
@@ -1070,25 +1126,29 @@ pub(crate) fn edge_seek_position_candidates(
     }
     let current = pos[part_idx];
     let h = half[part_idx];
-    [
-        Point2 {
-            x: current.x,
-            y: edge_target(Edge::N, &problem.bounds, h),
-        },
-        Point2 {
-            x: current.x,
-            y: edge_target(Edge::S, &problem.bounds, h),
-        },
-        Point2 {
-            x: edge_target(Edge::W, &problem.bounds, h),
-            y: current.y,
-        },
-        Point2 {
-            x: edge_target(Edge::E, &problem.bounds, h),
-            y: current.y,
-        },
-    ]
-    .into()
+    [Edge::N, Edge::S, Edge::W, Edge::E]
+        .into_iter()
+        .filter_map(|edge| {
+            if problem.parts[part_idx].edge_datum.is_some()
+                && datum_edge_target(&problem.parts[part_idx], rotation, edge, &problem.bounds)
+                    .is_none()
+            {
+                return None;
+            }
+            let normal =
+                part_edge_target(&problem.parts[part_idx], rotation, edge, &problem.bounds, h);
+            Some(match edge {
+                Edge::N | Edge::S => Point2 {
+                    x: current.x,
+                    y: normal,
+                },
+                Edge::W | Edge::E => Point2 {
+                    x: normal,
+                    y: current.y,
+                },
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn net_centroid_position_candidates(

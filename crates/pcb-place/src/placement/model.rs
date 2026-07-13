@@ -6,6 +6,6 @@
 /// Axis-aligned region/keep-out rectangle (mm) — the shared [`pcb_model::Rect`].
 pub use crate::problem::Rect;
 pub use crate::problem::place::{
-    Edge, GroupHint, LockedAt, LogicalNet, Part, PartPad, Pin, PlaceProblem, PlaceReport,
-    PlaceResult, Placement, PlacementHints, derive_nets,
+    Edge, EdgeDatum, GroupHint, LockedAt, LogicalNet, Part, PartPad, Pin, PlaceProblem,
+    PlaceReport, PlaceResult, Placement, PlacementHints, derive_nets,
 };
