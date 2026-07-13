@@ -77,6 +77,59 @@ fn root_body(text: &str) -> Result<(usize, usize), String> {
     Ok((root.start + 1, root.end - 1))
 }
 
+/// Copper layers enabled by the board file's authoritative `(layers ...)`
+/// table, in stack order. Unlike the live IPC stackup count, this cannot refer
+/// to a board that was open immediately before the current project.
+pub(super) fn board_copper_layer_names(text: &str) -> Result<Vec<String>, String> {
+    let (body_start, body_end) = root_body(text)?;
+    let layers = child_nodes(text, body_start, body_end)
+        .into_iter()
+        .find(|node| node_head(text, node) == "layers")
+        .ok_or("board has no (layers ...) table")?;
+    let mut names = Vec::new();
+    for node in child_nodes(text, layers.start + 1, layers.end - 1) {
+        let body = &text[node.start + 1..node.end - 1];
+        let Some(first_quote) = body.find('"') else {
+            continue;
+        };
+        let rest = &body[first_quote + 1..];
+        let Some(end_quote) = rest.find('"') else {
+            continue;
+        };
+        let name = &rest[..end_quote];
+        if name == "F.Cu" || name == "B.Cu" || (name.starts_with("In") && name.ends_with(".Cu")) {
+            names.push(name.to_owned());
+        }
+    }
+    if names.len() < 2 || names.first().is_none_or(|name| name != "F.Cu") {
+        return Err(format!(
+            "board layer table has invalid copper stack ({})",
+            names.join(", ")
+        ));
+    }
+    // KiCad writes B.Cu before inner layers in some file versions. Normalize
+    // by copper semantics rather than textual entry order.
+    names.sort_by_key(|name| {
+        if name == "F.Cu" {
+            0
+        } else if name == "B.Cu" {
+            u32::MAX
+        } else {
+            name.strip_prefix("In")
+                .and_then(|s| s.strip_suffix(".Cu"))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(u32::MAX - 1)
+        }
+    });
+    if names.last().is_none_or(|name| name != "B.Cu") {
+        return Err(format!(
+            "board layer table has invalid copper stack ({})",
+            names.join(", ")
+        ));
+    }
+    Ok(names)
+}
+
 /// `(property "Reference" "R1" …)` value inside a footprint body, if any.
 fn footprint_reference(text: &str, fp: &Node) -> Option<String> {
     let body = &text[fp.start + 1..fp.end - 1];
@@ -280,6 +333,7 @@ pub fn append_copper(
     layer_count: u32,
     layer_names: &[String],
 ) -> Result<String, String> {
+    validate_route_layers(solution, layer_count, layer_names)?;
     let codes = parse_net_codes(text)?;
     let net_code = |name: &str| -> Result<i32, String> {
         codes
@@ -287,9 +341,14 @@ pub fn append_copper(
             .copied()
             .ok_or_else(|| format!("net {name} not declared in the board file"))
     };
-    let layer_name = |layer: &LayerRef| -> &str {
-        let idx = layer.index(layer_count).unwrap_or(0) as usize;
-        layer_names.get(idx).map(String::as_str).unwrap_or("F.Cu")
+    let layer_name = |layer: &LayerRef| -> Result<&str, String> {
+        let idx = layer.index(layer_count).ok_or_else(|| {
+            format!(
+                "invalid route layer `{}` for {layer_count}-layer board",
+                layer.0
+            )
+        })? as usize;
+        Ok(layer_names[idx].as_str())
     };
     let mut out = String::new();
     let mut uuid_n = 0usize;
@@ -300,7 +359,7 @@ pub fn append_copper(
     };
     for trace in &solution.traces {
         let code = net_code(&trace.connection)?;
-        let layer = layer_name(&trace.layer);
+        let layer = layer_name(&trace.layer)?;
         for w in trace.path.windows(2) {
             if (w[0].x - w[1].x).abs() < 1e-9 && (w[0].y - w[1].y).abs() < 1e-9 {
                 continue;
@@ -348,6 +407,52 @@ pub fn append_copper(
     result.push_str(&out);
     result.push_str(&text[close..]);
     Ok(result)
+}
+
+fn validate_route_layers(
+    solution: &RouteSolution,
+    layer_count: u32,
+    layer_names: &[String],
+) -> Result<(), String> {
+    if layer_count < 2 || layer_names.len() != layer_count as usize {
+        return Err(format!(
+            "route stackup mismatch: problem has {layer_count} copper layers but board exposes {} ({})",
+            layer_names.len(),
+            layer_names.join(", ")
+        ));
+    }
+    for (idx, actual) in layer_names.iter().enumerate() {
+        let expected = if idx == 0 {
+            "F.Cu".to_owned()
+        } else if idx + 1 == layer_count as usize {
+            "B.Cu".to_owned()
+        } else {
+            format!("In{idx}.Cu")
+        };
+        if actual != &expected {
+            return Err(format!(
+                "route stackup mismatch: layer {idx} is `{actual}`, expected `{expected}`"
+            ));
+        }
+    }
+    for trace in &solution.traces {
+        if trace.layer.index(layer_count).is_none() {
+            return Err(format!(
+                "invalid route layer `{}` for {layer_count}-layer board",
+                trace.layer.0
+            ));
+        }
+    }
+    for via in &solution.vias {
+        if let ViaSpan::Partial { from, to, .. } = via.span
+            && (from >= layer_count || to >= layer_count)
+        {
+            return Err(format!(
+                "invalid via span {from}..{to} for {layer_count}-layer board"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -401,6 +506,19 @@ mod tests {
         assert!(out.contains("(at -0.7875 0 90)"), "{out}");
         assert!(out.contains("(at 0.7875 0 270)"), "{out}");
         assert!(out.contains("(at 0 -1.65 90)"), "{out}");
+    }
+
+    #[test]
+    fn board_layer_table_is_the_authoritative_copper_stack() {
+        let board = BOARD.replacen(
+            "\t(net 0 \"\")",
+            "\t(layers\n\t\t(0 \"F.Cu\" signal)\n\t\t(2 \"B.Cu\" signal)\n\t\t(5 \"F.SilkS\" user)\n\t)\n\t(net 0 \"\")",
+            1,
+        );
+        assert_eq!(
+            board_copper_layer_names(&board).unwrap(),
+            vec!["F.Cu", "B.Cu"]
+        );
     }
 
     #[test]
@@ -496,5 +614,52 @@ mod tests {
             "new copper must remain inside kicad_pcb"
         );
         assert!(out.ends_with("; retained trailing comment )\n"));
+    }
+
+    #[test]
+    fn append_copper_rejects_stale_or_disabled_route_layers() {
+        let bottom = RouteSolution {
+            traces: vec![Trace {
+                connection: "GND".to_owned(),
+                layer: LayerRef::bottom(),
+                width: 0.25,
+                path: vec![Point2::new(2.0, 2.0), Point2::new(3.0, 2.0)],
+            }],
+            vias: vec![],
+        };
+        let stale_stack = [
+            "F.Cu".to_owned(),
+            "In1.Cu".to_owned(),
+            "In2.Cu".to_owned(),
+            "B.Cu".to_owned(),
+        ];
+        assert!(
+            append_copper(BOARD, &bottom, 2, &stale_stack)
+                .unwrap_err()
+                .contains("stackup mismatch")
+        );
+        assert!(
+            append_copper(BOARD, &bottom, 2, &["F.Cu".to_owned(), "In1.Cu".to_owned()],)
+                .unwrap_err()
+                .contains("expected `B.Cu`")
+        );
+
+        let disabled_inner = RouteSolution {
+            traces: vec![Trace {
+                layer: LayerRef("inner1".to_owned()),
+                ..bottom.traces[0].clone()
+            }],
+            vias: vec![],
+        };
+        assert!(
+            append_copper(
+                BOARD,
+                &disabled_inner,
+                2,
+                &["F.Cu".to_owned(), "B.Cu".to_owned()],
+            )
+            .unwrap_err()
+            .contains("invalid route layer")
+        );
     }
 }

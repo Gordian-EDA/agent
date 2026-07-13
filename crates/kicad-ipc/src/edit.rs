@@ -135,6 +135,7 @@ fn route_solution_items(
     layer_names: &[String],
     nets: &BTreeMap<String, Net>,
 ) -> Result<Vec<prost_types::Any>, Error> {
+    validate_route_stackup(problem, solution, layer_names)?;
     let mut items = Vec::new();
     for trace in &solution.traces {
         let layer = board_layer_for_route_layer(&trace.layer, problem.layer_count, layer_names);
@@ -161,6 +162,54 @@ fn route_solution_items(
         })?);
     }
     Ok(items)
+}
+
+fn validate_route_stackup(
+    problem: &RouteProblem,
+    solution: &RouteSolution,
+    layer_names: &[String],
+) -> Result<(), Error> {
+    if problem.layer_count < 2 || layer_names.len() != problem.layer_count as usize {
+        return Err(Error::Unsupported(format!(
+            "route stackup mismatch: problem has {} copper layers but board exposes {} ({})",
+            problem.layer_count,
+            layer_names.len(),
+            layer_names.join(", ")
+        )));
+    }
+    for (idx, actual) in layer_names.iter().enumerate() {
+        let expected = if idx == 0 {
+            "F.Cu".to_owned()
+        } else if idx + 1 == problem.layer_count as usize {
+            "B.Cu".to_owned()
+        } else {
+            format!("In{idx}.Cu")
+        };
+        if actual != &expected {
+            return Err(Error::Unsupported(format!(
+                "route stackup mismatch: layer {idx} is `{actual}`, expected `{expected}`"
+            )));
+        }
+    }
+    for trace in &solution.traces {
+        if trace.layer.index(problem.layer_count).is_none() {
+            return Err(Error::Unsupported(format!(
+                "invalid route layer `{}` for {}-layer board",
+                trace.layer.0, problem.layer_count
+            )));
+        }
+    }
+    for via in &solution.vias {
+        if let ViaSpan::Partial { from, to, .. } = via.span
+            && (from >= problem.layer_count || to >= problem.layer_count)
+        {
+            return Err(Error::Unsupported(format!(
+                "invalid via span {from}..{to} for {}-layer board",
+                problem.layer_count
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn net_for_route<'a>(nets: &'a BTreeMap<String, Net>, name: &str) -> Result<&'a Net, Error> {
@@ -361,5 +410,61 @@ mod route_write_tests {
         let stack = via.pad_stack.unwrap();
         assert_eq!(stack.drill.unwrap().diameter.unwrap().x_nm, 300_000);
         assert_eq!(stack.copper_layers[0].size.as_ref().unwrap().x_nm, 600_000);
+    }
+
+    #[test]
+    fn route_write_rejects_stale_and_disabled_layers() {
+        let problem = route_problem();
+        let bottom = RouteSolution {
+            traces: vec![Trace {
+                connection: "GND".to_owned(),
+                layer: LayerRef::bottom(),
+                width: 0.25,
+                path: vec![Point2 { x: 1.0, y: 2.0 }, Point2 { x: 3.0, y: 4.0 }],
+            }],
+            vias: vec![],
+        };
+        let stale = [
+            "F.Cu".to_owned(),
+            "In1.Cu".to_owned(),
+            "In2.Cu".to_owned(),
+            "B.Cu".to_owned(),
+        ];
+        assert!(
+            route_solution_items(&problem, &bottom, &stale, &nets())
+                .unwrap_err()
+                .to_string()
+                .contains("stackup mismatch")
+        );
+        assert!(
+            route_solution_items(
+                &problem,
+                &bottom,
+                &["F.Cu".to_owned(), "In1.Cu".to_owned()],
+                &nets(),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("expected `B.Cu`")
+        );
+
+        let inner = RouteSolution {
+            traces: vec![Trace {
+                layer: LayerRef("inner1".to_owned()),
+                ..bottom.traces[0].clone()
+            }],
+            vias: vec![],
+        };
+        assert!(
+            route_solution_items(
+                &problem,
+                &inner,
+                &["F.Cu".to_owned(), "B.Cu".to_owned()],
+                &nets(),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("invalid route layer")
+        );
     }
 }
