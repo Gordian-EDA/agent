@@ -1017,6 +1017,7 @@ dependencies = [
  "image",
  "kicad-cli",
  "kicad-env",
+ "libc",
  "pulldown-cmark",
  "ratatui",
  "ratatui-image",
