@@ -109,7 +109,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "review_design".into(),
-                description: "Costly electrical review of the complete draft; call at most once and fix high-confidence defects."
+                description: "Costly electrical review of the complete draft; required once before PCB work. Fix high-confidence defects."
                     .into(),
                 input_schema: json!({
                     "type": "object",

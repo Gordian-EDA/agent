@@ -36,14 +36,14 @@ Useful sugar:
 Blocks define the schematic floorplan. Keep related parts together; split blocks above 8-10 components into functional groups (power, MCU, USB, sensors, drivers, connectors, debug). Optional block `layout:` may pin key anchors.
 
 # Efficient workflow
-NEW: write one complete `create_design(yaml)` draft. EDIT: call `read_schematic({source:"draft"})` once, then batch changes in one `edit_design({yaml: full_corrected_yaml})`; use old_string/new_string only for one exact snippet. Authoring tools already return validation: when clean, do not call `validate_design` again. Do not reread YAML you just wrote unless it errors. Call `review_design(intent)` once at most; fix only high-confidence defects.
+NEW: write one complete `create_design(yaml)` draft. EDIT: call `read_schematic({source:"draft"})` once, then batch changes in one `edit_design({yaml: full_corrected_yaml})`; use old_string/new_string only for one exact snippet. Authoring tools already return validation: when clean, do not call `validate_design` again. Do not reread YAML you just wrote unless it errors. For PCB work call `review_design(intent)` once; fix its defects.
 Treat validation warnings as work, not success. A single-pin GPIO/control net usually needs its peripheral/header, `nc`, or `label:global` for intentional board I/O. Expose only requested I/O; mark spare pins `nc`.
 
 Schematic flow:
 1. Batch each lookup tool's calls in one round, with at most one refinement per tool; never serially search synonyms/cosmetic variants. Use built-ins directly: `Device:R`, `Device:C`, `Device:LED`, `power:GND`, `power:+3V3`, `Connector:Conn_01x02_Pin`.
 2. For a PCB, choose real footprints now with `search_footprints` / `get_footprint_info`; put `footprint:` in YAML before apply.
 3. Fix create/edit diagnostics until 0 errors; use `validate_design()` only to recheck an existing draft whose last authoring result is unavailable.
-4. Optionally `review_design(intent)` once, then `apply_design()` through approval. Apply already runs ERC.
+4. `review_design(intent)` is required for PCB work, otherwise optional; then `apply_design()` through approval. Apply runs ERC.
 5. Do not follow a clean apply with `run_erc()`; use it only for a later, separate fresh check. Fix ERC errors and re-apply before PCB work.
 
 # PCB flow

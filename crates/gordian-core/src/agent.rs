@@ -518,6 +518,10 @@ impl<P: Provider> Agent<P> {
         let mut tool_state_revision = 0u64;
         let mut provider_requests = 0usize;
         let mut discovery_rounds_used: HashMap<String, usize> = HashMap::new();
+        // PCB regeneration should never outrun the semantic schematic check.
+        // Authoring invalidates a prior review; a fresh review of that draft
+        // unlocks regeneration after it has been committed.
+        let mut schematic_review_current = false;
         let mut last_assistant_text = String::new();
 
         loop {
@@ -700,9 +704,27 @@ impl<P: Provider> Agent<P> {
                     timed_out_retry_blocked(&timed_out_tool_calls, call, tool_state_revision);
                 let discovery_budget_blocked =
                     discovery_tools_blocked.contains(call.fn_name.as_str());
-                let dispatched =
-                    !route_retry_blocked && !timeout_retry_blocked && !discovery_budget_blocked;
-                let (mut content, images, image_path) = if discovery_budget_blocked {
+                let schematic_review_blocked = schematic_review_required_before_pcb(
+                    applied,
+                    schematic_review_current,
+                    &call.fn_name,
+                );
+                let dispatched = !route_retry_blocked
+                    && !timeout_retry_blocked
+                    && !discovery_budget_blocked
+                    && !schematic_review_blocked;
+                let (mut content, images, image_path) = if schematic_review_blocked {
+                    (
+                        json!({
+                            "error": "semantic schematic review required before PCB regeneration",
+                            "code": "schematic_review_required",
+                            "note": "Call review_design(intent) on the complete current draft. Fix any high-confidence defects before regenerating the PCB; ERC alone cannot catch reversed polarity, wrong feedback, ratings, or functional topology.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if discovery_budget_blocked {
                     (
                         json!({
                             "error": "discovery tool budget exhausted",
@@ -761,6 +783,20 @@ impl<P: Provider> Agent<P> {
                 }
                 tool_state_revision =
                     next_tool_state_revision(tool_state_revision, dispatched, effect, &parsed);
+                if dispatched && is_authoring_for_commit(&call.fn_name) {
+                    schematic_review_current = false;
+                }
+                if dispatched
+                    && call.fn_name == "apply_design"
+                    && call.fn_arguments.get("yaml").is_some()
+                    && parsed.get("written").and_then(Value::as_bool) == Some(true)
+                {
+                    // Inline YAML can differ from the draft that was reviewed.
+                    schematic_review_current = false;
+                }
+                if dispatched && call.fn_name == "review_design" && parsed.get("error").is_none() {
+                    schematic_review_current = true;
+                }
                 if call.fn_name == "apply_design"
                     && let Some(cleanup_needed) = apply_erc_cleanup_needed(&parsed)
                 {
@@ -1012,6 +1048,14 @@ fn route_result_is_retry_failure(value: &Value) -> bool {
         .get("failed")
         .and_then(Value::as_array)
         .is_some_and(|failed| !failed.is_empty())
+}
+
+fn schematic_review_required_before_pcb(
+    applied: bool,
+    review_current: bool,
+    fn_name: &str,
+) -> bool {
+    applied && !review_current && fn_name == "regenerate_board"
 }
 
 /// A timed-out `spawn_blocking` task may continue after its join handle is
@@ -2443,6 +2487,30 @@ mod tests {
         for name in ["project_info", "read_schematic", "create_design"] {
             assert!(!is_discovery_tool(name), "{name}");
         }
+    }
+
+    #[test]
+    fn pcb_regeneration_requires_current_semantic_review_after_apply() {
+        assert!(schematic_review_required_before_pcb(
+            true,
+            false,
+            "regenerate_board"
+        ));
+        assert!(!schematic_review_required_before_pcb(
+            true,
+            true,
+            "regenerate_board"
+        ));
+        assert!(!schematic_review_required_before_pcb(
+            false,
+            false,
+            "regenerate_board"
+        ));
+        assert!(!schematic_review_required_before_pcb(
+            true,
+            false,
+            "apply_design"
+        ));
     }
 
     #[test]
