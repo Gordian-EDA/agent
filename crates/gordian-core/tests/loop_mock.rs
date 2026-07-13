@@ -17,9 +17,9 @@ fn agent(ctx: AgentRuntime, completions: Vec<gordian_core::StreamEnd>) -> Agent<
     Agent::new(ScriptedClient::new(completions), ctx, system_prompt())
 }
 
-/// A tiny, self-contained valid design: two resistors so that GND has 2 pins and
-/// A / B are single-pin endpoints. Uses the `Device:R` alias (`R`) and the
-/// `between:` sugar. Compiles + emits cleanly against real libraries.
+/// A tiny, self-contained valid but ERC-dirty design: two resistors make GND a
+/// shared net while A / B remain dangling endpoints. Uses the `Device:R` alias
+/// (`R`) and the `between:` sugar.
 const TINY_YAML: &str = "version: 1\n\
 blocks:\n\
 \x20 main:\n\
@@ -45,7 +45,7 @@ fn script() -> Vec<gordian_core::StreamEnd> {
         tool_call(
             "tu_2",
             "apply_design",
-            serde_json::json!({ "yaml": TINY_YAML }),
+            serde_json::json!({ "yaml": CLEAN_YAML }),
         ),
         final_text("done"),
     ]
@@ -140,13 +140,13 @@ async fn stall_after_draft_authoring_is_nudged_until_it_commits() {
         tool_call(
             "tu_1",
             "create_design",
-            serde_json::json!({ "yaml": TINY_YAML }),
+            serde_json::json!({ "yaml": CLEAN_YAML }),
         ),
         final_text("I created the draft."), // stalls without committing
         tool_call(
             "tu_2",
             "apply_design",
-            serde_json::json!({ "yaml": TINY_YAML }),
+            serde_json::json!({ "yaml": CLEAN_YAML }),
         ),
         final_text("done"),
     ];
@@ -167,6 +167,45 @@ async fn stall_after_draft_authoring_is_nudged_until_it_commits() {
         "the post-nudge commit must write the .kicad_sch: {outcome:?}"
     );
     assert_eq!(outcome.final_text, "done");
+}
+
+#[tokio::test]
+async fn dirty_commit_is_nudged_until_a_clean_reapply() {
+    let Some(ctx) = AgentRuntime::detect_for_test() else {
+        eprintln!("SKIP: no KiCAD detected");
+        return;
+    };
+    let script = vec![
+        tool_call(
+            "tu_1",
+            "create_design",
+            serde_json::json!({ "yaml": TINY_YAML }),
+        ),
+        tool_call("tu_2", "apply_design", serde_json::json!({})),
+        final_text("done, despite dangling endpoints"), // → ERC cleanup nudge
+        tool_call(
+            "tu_3",
+            "edit_design",
+            serde_json::json!({ "yaml": CLEAN_YAML }),
+        ),
+        tool_call("tu_4", "apply_design", serde_json::json!({})),
+        final_text("clean now"),
+    ];
+    let mut agent = agent(ctx, script);
+    let mut approvals = AutoApprove::yes();
+
+    let outcome = agent
+        .run_turn(
+            "commit, inspect ERC, and clean up the design",
+            &mut approvals,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert!(outcome.applied, "both applies should commit: {outcome:?}");
+    assert_eq!(outcome.final_text, "clean now");
+    assert_eq!(outcome.tool_calls_made, 4);
 }
 
 #[tokio::test]

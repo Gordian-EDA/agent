@@ -58,6 +58,11 @@ const MAX_FAILED_ROUTE_RETRIES: usize = 3;
 /// genuinely can't finish doesn't loop forever.
 const MAX_COMMIT_NUDGES: usize = 2;
 
+/// How many times a committed schematic with actionable ERC findings is
+/// re-prompted for a batched cleanup pass. Some KiCad library-copy warnings are
+/// not design defects, so they do not consume this budget.
+const MAX_ERC_CLEANUP_NUDGES: usize = 2;
+
 /// Hard ceiling on provider invocations within one agent subturn. This is a
 /// last-resort guard against a model that keeps requesting tools forever: the
 /// narrower commit-nudge and routing retry budgets handle known stalls, while
@@ -486,12 +491,18 @@ impl<P: Provider> Agent<P> {
         let mut did_authoring_work = false;
         // Bounded re-prompts that push a stalled model past a premature stop.
         let mut nudges_left = MAX_COMMIT_NUDGES;
+        let mut erc_cleanup_nudges_left = MAX_ERC_CLEANUP_NUDGES;
+        let mut last_committed_erc_cleanup_needed: Option<bool> = None;
         let mut failed_route_attempts = 0usize;
         let mut last_route_failure: Option<Value> = None;
         // `spawn_blocking` work is not cancelled when its join handle times out.
         // Remember exact timed-out invocations so the model cannot immediately
         // overlap the same operation while the original may still be finishing.
-        let mut timed_out_tool_calls: Vec<(String, Value)> = Vec::new();
+        let mut timed_out_tool_calls: Vec<(String, Value, u64)> = Vec::new();
+        // Advances after any dispatched mutating tool. An unchanged apply/route
+        // retry stays blocked after a timeout, while a real draft/board fix makes
+        // the same argument shape (often `{}`) a distinct invocation.
+        let mut tool_state_revision = 0u64;
         let mut provider_requests = 0usize;
         let mut last_assistant_text = String::new();
 
@@ -593,6 +604,19 @@ impl<P: Provider> Agent<P> {
 
             // No tool calls → the model wants to stop.
             if tool_calls.is_empty() {
+                // A committed file can still carry actionable ERC findings. Give
+                // the model a bounded chance to batch-fix and re-apply them before
+                // accepting its final prose. Pure library-copy mismatch noise is
+                // excluded by `apply_erc_cleanup_needed` below.
+                if take_erc_cleanup_nudge(
+                    applied,
+                    last_committed_erc_cleanup_needed,
+                    &mut erc_cleanup_nudges_left,
+                ) {
+                    self.history.push(ChatMessage::user(ERC_CLEANUP_NUDGE));
+                    continue;
+                }
+
                 // Catch the premature stop: the model did authoring work but ended
                 // the turn WITHOUT ever attempting a commit, so nothing ships.
                 // Re-prompt it to finish + commit (bounded). Excluded: a deliberate
@@ -634,7 +658,9 @@ impl<P: Provider> Agent<P> {
                     },
                 );
                 let route_retry_blocked = route_retry_blocked(failed_route_attempts, &call.fn_name);
-                let timeout_retry_blocked = timed_out_retry_blocked(&timed_out_tool_calls, call);
+                let timeout_retry_blocked =
+                    timed_out_retry_blocked(&timed_out_tool_calls, call, tool_state_revision);
+                let dispatched = !route_retry_blocked && !timeout_retry_blocked;
                 let (mut content, images, image_path) = if timeout_retry_blocked {
                     (
                         json!({
@@ -673,7 +699,18 @@ impl<P: Provider> Agent<P> {
                 };
                 let parsed = parse_or_null(&content);
                 if tool_result_is_timeout(&parsed) {
-                    timed_out_tool_calls.push((call.fn_name.clone(), call.fn_arguments.clone()));
+                    timed_out_tool_calls.push((
+                        call.fn_name.clone(),
+                        call.fn_arguments.clone(),
+                        tool_state_revision,
+                    ));
+                }
+                tool_state_revision =
+                    next_tool_state_revision(tool_state_revision, dispatched, effect, &parsed);
+                if call.fn_name == "apply_design"
+                    && let Some(cleanup_needed) = apply_erc_cleanup_needed(&parsed)
+                {
+                    last_committed_erc_cleanup_needed = Some(cleanup_needed);
                 }
                 if route_retry_budget_reset_by_fix(&call.fn_name, &parsed) {
                     failed_route_attempts = 0;
@@ -926,10 +963,14 @@ fn route_result_is_retry_failure(value: &Value) -> bool {
 /// A timed-out `spawn_blocking` task may continue after its join handle is
 /// dropped. Block only an exact same-turn retry; changed arguments and later
 /// user turns remain available for deliberate recovery.
-fn timed_out_retry_blocked(timed_out: &[(String, Value)], call: &ToolCall) -> bool {
-    timed_out
-        .iter()
-        .any(|(name, arguments)| name == &call.fn_name && arguments == &call.fn_arguments)
+fn timed_out_retry_blocked(
+    timed_out: &[(String, Value, u64)],
+    call: &ToolCall,
+    state_revision: u64,
+) -> bool {
+    timed_out.iter().any(|(name, arguments, revision)| {
+        name == &call.fn_name && arguments == &call.fn_arguments && *revision == state_revision
+    })
 }
 
 fn tool_result_is_timeout(value: &Value) -> bool {
@@ -937,6 +978,72 @@ fn tool_result_is_timeout(value: &Value) -> bool {
         .get("error")
         .and_then(Value::as_str)
         .is_some_and(|error| error.contains(" timed out after "))
+}
+
+fn next_tool_state_revision(
+    current: u64,
+    dispatched: bool,
+    effect: ToolEffect,
+    result: &Value,
+) -> u64 {
+    if dispatched
+        && effect != ToolEffect::ReadOnly
+        && result.get("error").is_none()
+        && result.get("rejected").and_then(Value::as_bool) != Some(true)
+        && !tool_result_is_timeout(result)
+    {
+        current.saturating_add(1)
+    } else {
+        current
+    }
+}
+
+/// Return whether a committed apply has ERC findings the model can act on.
+/// KiCad's `lib_symbol_mismatch`/`lib_symbol_issues` findings describe embedded
+/// symbol copies or the local library configuration; re-authoring the circuit
+/// does not repair that bookkeeping noise, so it must not burn cleanup rounds.
+fn apply_erc_cleanup_needed(value: &Value) -> Option<bool> {
+    if value.get("written").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    if value.get("erc_clean").and_then(Value::as_bool) == Some(true) {
+        return Some(false);
+    }
+    let Some(erc) = value.get("erc") else {
+        return Some(false);
+    };
+    if erc.get("error").is_some() {
+        return Some(false);
+    }
+
+    if let Some(violations) = erc.get("violations").and_then(Value::as_array)
+        && !violations.is_empty()
+    {
+        return Some(violations.iter().any(|violation| {
+            !matches!(
+                violation
+                    .get("type")
+                    .or_else(|| violation.get("kind"))
+                    .and_then(Value::as_str),
+                Some("lib_symbol_mismatch" | "lib_symbol_issues")
+            )
+        }));
+    }
+
+    // Current apply results include exact violations. Retain a conservative
+    // fallback for older/partial results that only expose counts.
+    let errors = erc.get("errors").and_then(Value::as_u64).unwrap_or(0);
+    let warnings = erc.get("warnings").and_then(Value::as_u64).unwrap_or(0);
+    Some(errors > 0 || warnings > 0)
+}
+
+fn take_erc_cleanup_nudge(applied: bool, cleanup_needed: Option<bool>, left: &mut usize) -> bool {
+    if applied && cleanup_needed == Some(true) && *left > 0 {
+        *left -= 1;
+        true
+    } else {
+        false
+    }
 }
 
 fn route_retry_blocked(failed_route_attempts: usize, fn_name: &str) -> bool {
@@ -1160,6 +1267,11 @@ const COMMIT_NUDGE: &str = "Your turn ended without a committed design — nothi
      finish the schematic now: call `create_design`/`edit_design` to author the \
      full design, then `apply_design` to submit it for approval. Do this now \
      before ending your turn.";
+
+/// The re-prompt sent after a commit whose ERC report contains actionable
+/// findings. The result immediately before this message contains the exact
+/// violation details, so no redundant `run_erc` call is needed.
+const ERC_CLEANUP_NUDGE: &str = "The design was written, but the latest `apply_design` ERC report still contains actionable violations. Inspect those exact violations, batch-fix them with `edit_design`, and re-run `apply_design` before ending. Do not claim ERC is clean unless the new apply result says `erc_clean: true`; if a finding is genuinely unavoidable, explain it precisely.";
 
 /// The text fed back as a fix turn when the post-turn review finds defects.
 fn fix_prompt(defects: &[String]) -> String {
@@ -1600,7 +1712,11 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                     .pointer("/erc/errors")
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
-                format!("written (ERC {errors} errors)")
+                let warnings = result
+                    .pointer("/erc/warnings")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                format!("written (ERC {errors} errors, {warnings} warnings)")
             } else if result.get("rejected").and_then(Value::as_bool) == Some(true) {
                 "rejected".to_string()
             } else if result.get("would_write").and_then(Value::as_bool) == Some(true) {
@@ -1619,6 +1735,10 @@ fn tool_summary(name: &str, input: &Value, result: &Value) -> String {
                     .and_then(Value::as_str)
                     .unwrap_or("layout");
                 format!("preview {mode}: +{added} -{removed}")
+            } else if result.get("errors").is_some() || result.get("warnings").is_some() {
+                let errors = result.get("errors").and_then(Value::as_u64).unwrap_or(0);
+                let warnings = result.get("warnings").and_then(Value::as_u64).unwrap_or(0);
+                format!("not ready: {errors} errors, {warnings} warnings")
             } else {
                 "ok".to_string()
             }
@@ -2106,6 +2226,7 @@ mod tests {
         let timed_out = vec![(
             "apply_design".to_string(),
             json!({"yaml": "components: []"}),
+            3,
         )];
         let call = |name: &str, arguments: Value| ToolCall {
             call_id: "retry".into(),
@@ -2116,16 +2237,100 @@ mod tests {
 
         assert!(timed_out_retry_blocked(
             &timed_out,
-            &call("apply_design", json!({"yaml": "components: []"}))
+            &call("apply_design", json!({"yaml": "components: []"})),
+            3,
         ));
         assert!(!timed_out_retry_blocked(
             &timed_out,
-            &call("apply_design", json!({"yaml": "components: [R1]"}))
+            &call("apply_design", json!({"yaml": "components: [R1]"})),
+            3,
         ));
         assert!(!timed_out_retry_blocked(
             &timed_out,
-            &call("validate_design", json!({"yaml": "components: []"}))
+            &call("validate_design", json!({"yaml": "components: []"})),
+            3,
         ));
+        assert!(!timed_out_retry_blocked(
+            &timed_out,
+            &call("apply_design", json!({"yaml": "components: []"})),
+            4,
+        ));
+    }
+
+    #[test]
+    fn blocked_or_timed_out_mutations_do_not_advance_tool_state_revision() {
+        let revision = 7;
+        assert_eq!(
+            next_tool_state_revision(
+                revision,
+                false,
+                ToolEffect::Gated,
+                &json!({"error": "identical timed-out tool retry blocked"}),
+            ),
+            revision,
+            "a synthetic blocked result was not dispatched"
+        );
+        assert_eq!(
+            next_tool_state_revision(
+                revision,
+                true,
+                ToolEffect::Gated,
+                &json!({"error": "apply_design timed out after 120s; still running"}),
+            ),
+            revision,
+            "the still-running mutation must retain its original revision"
+        );
+        assert_eq!(
+            next_tool_state_revision(
+                revision,
+                true,
+                ToolEffect::Gated,
+                &json!({"rejected": true}),
+            ),
+            revision,
+            "a rejected gate did not mutate project state"
+        );
+        assert_eq!(
+            next_tool_state_revision(revision, true, ToolEffect::Authoring, &json!({"ok": true}),),
+            revision + 1
+        );
+    }
+
+    #[test]
+    fn erc_cleanup_nudges_only_actionable_findings_and_is_bounded() {
+        let library_noise = json!({
+            "written": true,
+            "erc_clean": false,
+            "erc": {
+                "errors": 0,
+                "warnings": 2,
+                "violations": [
+                    {"type": "lib_symbol_mismatch", "severity": "warning"},
+                    {"type": "lib_symbol_issues", "severity": "warning"}
+                ]
+            }
+        });
+        assert_eq!(apply_erc_cleanup_needed(&library_noise), Some(false));
+
+        let actionable = json!({
+            "written": true,
+            "erc_clean": false,
+            "erc": {
+                "errors": 0,
+                "warnings": 2,
+                "violations": [
+                    {"type": "lib_symbol_mismatch", "severity": "warning"},
+                    {"type": "global_label_dangling", "severity": "warning"}
+                ]
+            }
+        });
+        assert_eq!(apply_erc_cleanup_needed(&actionable), Some(true));
+
+        let mut left = MAX_ERC_CLEANUP_NUDGES;
+        assert!(take_erc_cleanup_nudge(true, Some(true), &mut left));
+        assert!(take_erc_cleanup_nudge(true, Some(true), &mut left));
+        assert!(!take_erc_cleanup_nudge(true, Some(true), &mut left));
+        assert!(!take_erc_cleanup_nudge(false, Some(true), &mut left));
     }
 
     #[test]
@@ -2185,9 +2390,15 @@ mod tests {
         let s = tool_summary(
             "apply_design",
             &json!({}),
-            &json!({ "written": true, "erc": { "errors": 0 }, "layout_mode": "composed" }),
+            &json!({ "written": true, "erc": { "errors": 0, "warnings": 3 }, "layout_mode": "composed" }),
         );
-        assert!(s.contains("written"), "got: {s}");
+        assert_eq!(s, "written (ERC 0 errors, 3 warnings)");
+        let s = tool_summary(
+            "apply_design",
+            &json!({}),
+            &json!({ "ok": false, "errors": 2, "warnings": 1 }),
+        );
+        assert_eq!(s, "not ready: 2 errors, 1 warnings");
         let s = tool_summary(
             "check_board",
             &json!({}),
