@@ -683,6 +683,11 @@ impl<P: Provider> Agent<P> {
             // message (genai's ToolResponse is text-only).
             let mut tool_responses: Vec<ToolResponse> = Vec::new();
             let mut result_images: Vec<ContentPart> = Vec::new();
+            // A live board snapshot is comparatively expensive. Models can emit
+            // several speculative `get_board` variants in one completion even
+            // though every later call can reason from the first result. Preserve
+            // later completions for a deliberately filtered follow-up view.
+            let mut board_read_dispatched_this_completion = false;
             for call in &tool_calls {
                 let effect = tool_effect(&call.fn_name);
                 let gated_commit = effect == ToolEffect::Gated && wants_apply(call);
@@ -706,6 +711,8 @@ impl<P: Provider> Agent<P> {
                     timed_out_retry_blocked(&timed_out_tool_calls, call, tool_state_revision);
                 let discovery_budget_blocked =
                     discovery_tools_blocked.contains(call.fn_name.as_str());
+                let duplicate_board_read_blocked =
+                    call.fn_name == "get_board" && board_read_dispatched_this_completion;
                 let schematic_review_blocked = schematic_review_required_before_pcb(
                     applied,
                     schematic_review_current,
@@ -714,6 +721,7 @@ impl<P: Provider> Agent<P> {
                 let dispatched = !route_retry_blocked
                     && !timeout_retry_blocked
                     && !discovery_budget_blocked
+                    && !duplicate_board_read_blocked
                     && !schematic_review_blocked;
                 let (mut content, images, image_path) = if timed_out_mutation_blocked {
                     (
@@ -722,6 +730,17 @@ impl<P: Provider> Agent<P> {
                             "code": "timed_out_mutation_conflict",
                             "prior_timed_out_tools": timed_out_tool_calls.iter().map(|(name, _, _)| name).collect::<Vec<_>>(),
                             "note": "The prior mutation runs in non-cancellable blocking work and may still finish. No further schematic or PCB mutation is safe in this turn; use read-only inspection if useful, then report the timeout honestly.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if duplicate_board_read_blocked {
+                    (
+                        json!({
+                            "error": "duplicate get_board call blocked in one assistant completion",
+                            "code": "duplicate_board_read_blocked",
+                            "note": "Reuse the first get_board result from this batch. Only if another view is still needed, request one get_board in a later completion, preferably with include_copper and a net/layer/kinds filter.",
                         })
                         .to_string(),
                         Vec::new(),
@@ -777,6 +796,9 @@ impl<P: Provider> Agent<P> {
                     )
                 } else {
                     tool_calls_made += 1;
+                    if call.fn_name == "get_board" {
+                        board_read_dispatched_this_completion = true;
+                    }
                     self.run_tool_call(
                         call,
                         gated_commit,
@@ -2467,6 +2489,62 @@ mod tests {
         assert_ne!(
             after_fifth_round["project-after-all"]["code"], "discovery_budget_exhausted",
             "a non-discovery call in the same completion must dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_board_reads_are_blocked_only_within_one_completion() {
+        let script = vec![
+            batched_tool_calls(&[
+                ("board-first", "get_board", json!({})),
+                (
+                    "board-duplicate",
+                    "get_board",
+                    json!({"include_copper": true, "layer": "top"}),
+                ),
+                ("project-unrelated", "project_info", json!({})),
+            ]),
+            tool_call(
+                "board-later",
+                "get_board",
+                json!({"include_copper": true, "net": "GND"}),
+            ),
+            final_text("used the first board snapshot"),
+        ];
+        let (client, seen) = ScriptedClient::recording(script);
+        let mut agent = Agent::new(client, test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn("inspect the board efficiently", &mut approvals, None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(
+            outcome.tool_calls_made, 3,
+            "one board read and the unrelated tool should dispatch in the first batch, then a later board read should remain available"
+        );
+
+        let requests = seen.lock().unwrap();
+        let results = tool_results(&requests[1]);
+        assert_eq!(
+            results["board-first"]["error"], "no board exists yet — run regenerate_board first",
+            "the first get_board must reach the real tool"
+        );
+        assert_eq!(
+            results["board-duplicate"]["code"],
+            "duplicate_board_read_blocked"
+        );
+        assert!(
+            results["project-unrelated"]["sch_path"].is_string(),
+            "an unrelated batched tool must still dispatch"
+        );
+        let later_results = tool_results(&requests[2]);
+        assert_eq!(
+            later_results["board-later"]["error"],
+            "no board exists yet — run regenerate_board first",
+            "the per-completion guard must reset for a later model response"
         );
     }
 
