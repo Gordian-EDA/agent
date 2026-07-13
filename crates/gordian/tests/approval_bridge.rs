@@ -41,7 +41,7 @@ blocks:\n\
 \x20 main:\n\
 \x20   components:\n\
 \x20     R1: {part: R, value: 10k, between: [A, GND]}\n\
-\x20     R2: {part: R, value: 10k, between: [GND, B]}\n";
+\x20     R2: {part: R, value: 10k, between: [A, GND]}\n";
 
 fn agent(ctx: AgentRuntime, completions: Vec<gordian_core::StreamEnd>) -> Agent<ScriptedClient> {
     Agent::new(ScriptedClient::new(completions), ctx, system_prompt())

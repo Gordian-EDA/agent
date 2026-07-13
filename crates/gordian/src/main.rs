@@ -14,6 +14,7 @@ mod tui;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use gordian_core::AgentRuntime;
@@ -368,40 +369,43 @@ fn run_agent_command(args: &[String]) -> Result<()> {
     let mut approvals = AutoApprove::yes();
 
     eprintln!("--- agent events ---");
-    let (outcome, usage) = runtime
-        .block_on(async {
-            let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-            let printer = tokio::spawn(async move {
-                let mut log = AgentDebugLog::default();
-                while let Some(ev) = events_rx.recv().await {
-                    if let Some(line) = log.observe(&ev) {
-                        eprintln!("{line}");
-                    }
+    let run = runtime.block_on(async {
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        let printer = tokio::spawn(async move {
+            let mut log = AgentDebugLog::default();
+            while let Some(ev) = events_rx.recv().await {
+                if let Some(line) = log.observe(&ev) {
+                    eprintln!("{line}");
                 }
-                log.usage
-            });
+            }
+            log.usage
+        });
 
-            let run = if review && config.agent.post_commit_review {
-                // intent == prompt: the design goal the reviewer judges against.
-                agent
-                    .run_turn_reviewed(
-                        &prompt,
-                        &prompt,
-                        &mut approvals,
-                        Some(&events_tx),
-                        config.agent.review_fix_rounds as usize,
-                    )
-                    .await
-            } else {
-                agent
-                    .run_turn(&prompt, &mut approvals, Some(&events_tx))
-                    .await
-            };
-            drop(events_tx);
-            let usage = printer.await.unwrap_or_default();
-            run.map(|outcome| (outcome, usage))
-        })
-        .context("running the agent turn")?;
+        let run = if review && config.agent.post_commit_review {
+            // intent == prompt: the design goal the reviewer judges against.
+            agent
+                .run_turn_reviewed(
+                    &prompt,
+                    &prompt,
+                    &mut approvals,
+                    Some(&events_tx),
+                    config.agent.review_fix_rounds as usize,
+                )
+                .await
+        } else {
+            agent
+                .run_turn(&prompt, &mut approvals, Some(&events_tx))
+                .await
+        };
+        drop(events_tx);
+        let usage = printer.await.unwrap_or_default();
+        run.map(|outcome| (outcome, usage))
+    });
+    // A timed-out `spawn_blocking` placement cannot be cancelled by Tokio. Do
+    // not let one detached tool keep the one-shot headless CLI alive forever
+    // after its turn result and diagnostics are already available.
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    let (outcome, usage) = run.context("running the agent turn")?;
 
     // 5. Report the outcome.
     println!("--- agent turn ---");
