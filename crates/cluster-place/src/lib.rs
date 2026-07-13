@@ -53,6 +53,18 @@ impl PlacementEngine for ClusterPlace {
         problem: &mut SchematicPlaceProblem,
         ir: Option<LayoutIr>,
     ) -> PlacementOutput {
+        // The routed annealer has a fixed multi-start budget of thousands of full
+        // route/text-solve evaluations.  On tiny, simple sheets that setup cost can
+        // dominate the entire commit (a connector + two-resistor divider took over
+        // two minutes), despite there being no useful global search to perform.
+        // Spine is deterministic and route-aware, and solves this topology in one
+        // pass. Keep the cluster engine identity in diagnostics because this is an
+        // internal fast path, not a user-selected engine change.
+        if tiny_layout_pin_profile(problem.items.iter().map(|item| item.geom.pins.len())) {
+            let mut out = spine_place::SpinePlace.place(env, design, problem, ir);
+            out.result.engine = self.name().to_owned();
+            return out;
+        }
         // 1. Baseline placement: the SA's own best (its strong leaf search + the
         //    route-aware refinement). The pose lever is layered ON TOP so it is isolated —
         //    where pose finds nothing the result is byte-identical to the SA.
@@ -174,6 +186,17 @@ impl PlacementEngine for ClusterPlace {
     }
 }
 
+/// Tiny sheets with at most one connector/IC-sized anchor do not have enough
+/// placement degrees of freedom to justify anneal's fixed routed-search budget.
+fn tiny_layout_pin_profile(pin_counts: impl Iterator<Item = usize>) -> bool {
+    let counts: Vec<usize> = pin_counts.collect();
+    !counts.is_empty()
+        && counts.len() <= 4
+        && counts.iter().sum::<usize>() <= 8
+        && counts.iter().all(|&pins| pins <= 3)
+        && counts.iter().filter(|&&pins| pins >= 3).count() <= 1
+}
+
 fn rail_candidate_wins(
     current: (usize, usize, f64),
     candidate: Option<(usize, usize, f64)>,
@@ -206,7 +229,18 @@ fn report(engine: &str, items: &[Item], eval: &RoutedEvaluator) -> PlaceResult {
 
 #[cfg(test)]
 mod tests {
-    use super::rail_candidate_wins;
+    use super::{rail_candidate_wins, tiny_layout_pin_profile};
+
+    #[test]
+    fn tiny_simple_sheet_uses_deterministic_fast_path() {
+        assert!(tiny_layout_pin_profile([3, 2, 2, 1].into_iter()));
+        assert!(tiny_layout_pin_profile([2, 2].into_iter()));
+
+        assert!(!tiny_layout_pin_profile([].into_iter()));
+        assert!(!tiny_layout_pin_profile([3, 2, 2, 1, 1].into_iter()));
+        assert!(!tiny_layout_pin_profile([4, 2, 1].into_iter()));
+        assert!(!tiny_layout_pin_profile([3, 3, 1].into_iter()));
+    }
 
     #[test]
     fn rail_gate_requires_sprawl_win_without_crossing_or_warning_regression() {

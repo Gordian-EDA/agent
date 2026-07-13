@@ -365,6 +365,7 @@ dependencies = [
  "rayon",
  "sch-floorplan",
  "sch-place",
+ "spine-place",
 ]
 
 [[package]]
