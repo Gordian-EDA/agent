@@ -69,6 +69,11 @@ const MAX_ERC_CLEANUP_NUDGES: usize = 2;
 /// this bounds every other cycle (and therefore cost and context growth).
 const MAX_PROVIDER_REQUESTS_PER_TURN: usize = 32;
 
+/// Cap catalog exploration before the model must reuse its best prior hits.
+/// One assistant completion may batch several discovery calls and still costs
+/// only one round.
+const MAX_DISCOVERY_ROUNDS_PER_SUBTURN: usize = 2;
+
 /// The human mutation gate. The loop calls [`Approvals::approve`] with either a
 /// dry-run preview or a structured immediate-operation proposal; returning
 /// `false` prevents the mutation.
@@ -246,6 +251,13 @@ fn is_schematic_phase_tool(name: &str) -> bool {
             | "search_footprints"
             | "get_footprint_info"
             | "assign_footprints"
+    )
+}
+
+fn is_discovery_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "search_symbols" | "get_symbol_info" | "search_footprints" | "get_footprint_info"
     )
 }
 
@@ -504,6 +516,7 @@ impl<P: Provider> Agent<P> {
         // the same argument shape (often `{}`) a distinct invocation.
         let mut tool_state_revision = 0u64;
         let mut provider_requests = 0usize;
+        let mut discovery_rounds_used = 0usize;
         let mut last_assistant_text = String::new();
 
         loop {
@@ -636,6 +649,19 @@ impl<P: Provider> Agent<P> {
                 });
             }
 
+            // Several symbol/footprint lookups batched into one assistant
+            // completion are one discovery round. After two such completions,
+            // synthesize only the discovery responses; unrelated calls in the
+            // same completion must still execute.
+            let has_discovery_calls = tool_calls
+                .iter()
+                .any(|call| is_discovery_tool(&call.fn_name));
+            let discovery_round_blocked =
+                has_discovery_calls && discovery_rounds_used >= MAX_DISCOVERY_ROUNDS_PER_SUBTURN;
+            if has_discovery_calls && !discovery_round_blocked {
+                discovery_rounds_used += 1;
+            }
+
             // Run every requested tool, collecting the responses into one `tool`
             // message; any images those results attached ride a trailing `user`
             // message (genai's ToolResponse is text-only).
@@ -660,8 +686,24 @@ impl<P: Provider> Agent<P> {
                 let route_retry_blocked = route_retry_blocked(failed_route_attempts, &call.fn_name);
                 let timeout_retry_blocked =
                     timed_out_retry_blocked(&timed_out_tool_calls, call, tool_state_revision);
-                let dispatched = !route_retry_blocked && !timeout_retry_blocked;
-                let (mut content, images, image_path) = if timeout_retry_blocked {
+                let discovery_budget_blocked =
+                    discovery_round_blocked && is_discovery_tool(&call.fn_name);
+                let dispatched =
+                    !route_retry_blocked && !timeout_retry_blocked && !discovery_budget_blocked;
+                let (mut content, images, image_path) = if discovery_budget_blocked {
+                    (
+                        json!({
+                            "error": "discovery tool budget exhausted",
+                            "code": "discovery_budget_exhausted",
+                            "tool": call.fn_name,
+                            "discovery_rounds_allowed": MAX_DISCOVERY_ROUNDS_PER_SUBTURN,
+                            "note": "Reuse the symbol and footprint hits already returned, choose the best candidates, and proceed to authoring; do not issue more discovery calls this subturn.",
+                        })
+                        .to_string(),
+                        Vec::new(),
+                        None,
+                    )
+                } else if timeout_retry_blocked {
                     (
                         json!({
                             "error": "identical timed-out tool retry blocked",
@@ -1993,6 +2035,23 @@ mod tests {
             .collect()
     }
 
+    fn batched_tool_calls(calls: &[(&str, &str, Value)]) -> StreamEnd {
+        StreamEnd {
+            captured_content: Some(MessageContent::from_tool_calls(
+                calls
+                    .iter()
+                    .map(|(id, name, arguments)| ToolCall {
+                        call_id: (*id).to_string(),
+                        fn_name: (*name).to_string(),
+                        fn_arguments: arguments.clone(),
+                        thought_signatures: None,
+                    })
+                    .collect(),
+            )),
+            ..Default::default()
+        }
+    }
+
     fn test_runtime() -> AgentRuntime {
         let footprints = tempfile::tempdir().unwrap();
         // `project_info` does not build the footprint catalog, so the fixture
@@ -2189,6 +2248,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_budget_counts_completions_and_preserves_other_calls() {
+        let script = vec![
+            batched_tool_calls(&[
+                ("first-a", "search_symbols", json!({"query": "resistor"})),
+                ("first-b", "search_symbols", json!({"query": "capacitor"})),
+            ]),
+            tool_call("second", "search_symbols", json!({"query": "connector"})),
+            batched_tool_calls(&[
+                ("third-a", "search_symbols", json!({"query": "diode"})),
+                ("third-b", "get_symbol_info", json!({"lib_id": "Device:R"})),
+                ("third-project", "project_info", json!({})),
+            ]),
+            final_text("authored with the prior hits"),
+        ];
+        let (client, seen) = ScriptedClient::recording(script);
+        let mut agent = Agent::new(client, test_runtime(), "system");
+        let mut approvals = AutoApprove::no();
+
+        let outcome = agent
+            .run_turn("find parts without searching forever", &mut approvals, None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(outcome.tool_calls_made, 4);
+
+        let requests = seen.lock().unwrap();
+        let final_request = requests.last().expect("final request was recorded");
+        let mut results = std::collections::HashMap::new();
+        for response in final_request
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|part| match part {
+                ContentPart::ToolResponse(response) => Some(response),
+                _ => None,
+            })
+        {
+            results.insert(
+                response.call_id.as_str(),
+                serde_json::from_str::<Value>(&response.content).unwrap(),
+            );
+        }
+        for id in ["third-a", "third-b"] {
+            assert_eq!(results[id]["code"], "discovery_budget_exhausted");
+            assert!(
+                results[id]["note"]
+                    .as_str()
+                    .unwrap()
+                    .contains("proceed to authoring")
+            );
+        }
+        assert_ne!(
+            results["third-project"]["code"], "discovery_budget_exhausted",
+            "a non-discovery call in the same completion must still dispatch"
+        );
+    }
+
+    #[tokio::test]
     async fn auto_approve_yes_and_no() {
         let diff = json!({ "diff": { "added": ["R1"] } });
         assert!(AutoApprove::yes().approve(&diff).await);
@@ -2219,6 +2336,21 @@ mod tests {
         };
         assert!(wants_apply(&apply_call));
         assert!(!wants_apply(&preview_call));
+    }
+
+    #[test]
+    fn discovery_tool_classification_is_exact() {
+        for name in [
+            "search_symbols",
+            "get_symbol_info",
+            "search_footprints",
+            "get_footprint_info",
+        ] {
+            assert!(is_discovery_tool(name), "{name}");
+        }
+        for name in ["project_info", "read_schematic", "create_design"] {
+            assert!(!is_discovery_tool(name), "{name}");
+        }
     }
 
     #[test]
