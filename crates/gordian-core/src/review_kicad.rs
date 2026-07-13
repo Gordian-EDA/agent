@@ -35,6 +35,11 @@ function, wrong value/ratio, missing essential support part, voltage-domain erro
 reversed polarity, or broken feedback/bias/topology. Do not report style,
 layout, optional protection, or guesses; a correct design scores 9-10.
 
+Treat every topology or operating mode explicitly named in the intent as a contract:
+trace its active-device functional pins and passive paths rather than accepting a
+same-order or superficially similar substitute. For timer/filter/feedback blocks,
+verify timing, cutoff, or gain from the actual topology and values.
+
 Ground every defect in exact netlist evidence. Quote the component field(s) or
 pin/net/value assignments that prove the fault in `evidence`. Do NOT infer missing
 individual IC power pins from package pin numbers, a rendered image, or wording like
@@ -55,13 +60,15 @@ pub const LENSES: &[&str] = &[
     "power, regulation and analog faults: for EVERY resistor divider feeding a regulator feedback or \
      reference pin, COMPUTE the resulting output voltage from the resistor values and verify it matches \
      the intended rail; also bias/reference networks, voltage-domain part supply ranges, and \
-     current-limit / gain resistor values",
+     current-limit / gain resistor values; for every intent-required timer, filter, or feedback block, \
+     trace resolved functional pins and passive paths, enforce any named topology, and compute its \
+     timing/cutoff/gain from the actual circuit",
     "digital interfaces and clocking: SPI/I2C/UART/ISP bus signals on the correct device pins, \
      crystal/oscillator pin placement, reset/boot/enable/chip-select straps, direction and address pins",
 ];
 
 const QUICK_LENSES: &[&str] = &[
-    "check power/regulation math, polarity, essential support parts, feedback/bias topology, digital pin functions, clocks, resets, enables, straps, and interface direction",
+    "check power/regulation math, polarity, essential support parts, feedback/bias topology, digital pin functions, clocks, resets, enables, straps, and interface direction; for every intent-required timer, filter, or feedback block, trace resolved functional pins and passive paths, enforce any named topology, and verify timing/cutoff/gain from the actual circuit",
 ];
 
 fn netlist_lenses(config: &ReviewConfig) -> &'static [&'static str] {
@@ -94,8 +101,8 @@ pub async fn review_netlist(
 }
 
 /// Add deterministic facts from the compiled design and KiCAD symbol table to the
-/// subject the LLM sees. This keeps the reviewer anchored to actual pin/net data
-/// for package power pins and synthesized support parts.
+/// subject the LLM sees. This keeps the reviewer anchored to actual pin/function/net
+/// data for active parts, package power pins, and synthesized support parts.
 pub(crate) fn annotate_netlist_for_review(
     netlist: &str,
     design: &circuit_lang::Design,
@@ -113,14 +120,18 @@ pub(crate) fn annotate_netlist_for_review(
                 continue;
             }
             let power = power_pin_facts(comp, provider);
+            let explicit = explicit_ic_pin_facts(comp, provider);
             let decouple = decoupling.get(refdes.as_str());
-            if power.is_empty() && decouple.is_none() {
+            if power.is_empty() && explicit.is_empty() && decouple.is_none() {
                 continue;
             }
 
             lines.push(format!("{refdes} {}:", comp.part));
             if !power.is_empty() {
                 lines.push(format!("  power pins: {}", power.join(", ")));
+            }
+            if !explicit.is_empty() {
+                lines.push(format!("  resolved explicit pins: {}", explicit.join(", ")));
             }
             if let Some(values) = decouple {
                 let entries = values
@@ -134,7 +145,9 @@ pub(crate) fn annotate_netlist_for_review(
     }
 
     if lines.len() == 2 {
-        lines.push("No symbol-backed power-pin or synthesized-decoupling facts.".to_string());
+        lines.push(
+            "No symbol-backed active-pin, power-pin, or synthesized-decoupling facts.".to_string(),
+        );
     }
     lines.push("=== END SYMBOL GROUND TRUTH ===".to_string());
     lines.push(String::new());
@@ -193,6 +206,60 @@ fn power_pin_facts(
             format!("{}/{} -> {}", pin.number, pin.name, target)
         })
         .collect::<Vec<_>>()
+}
+
+/// Resolve every author-mapped non-power-input pin on an active multi-pin part to
+/// the KiCAD library's physical number, function name, direction, and target net.
+///
+/// The committed-schematic lift keys every pin by number, which is electrically
+/// exact but strips the function names the reviewer needs for topology reasoning.
+/// Keep the annotation compact and IC-focused: passive/connective symbols never
+/// enter because they have no active pin type, and power-input facts already ride
+/// in [`power_pin_facts`] (including required pins absent from the YAML).
+fn explicit_ic_pin_facts(
+    comp: &circuit_lang::model::Component,
+    provider: &circuit_lang::SymbolTable,
+) -> Vec<String> {
+    use circuit_lang::{PinDir, PinType};
+
+    let Some(meta) = provider.symbol(&comp.part) else {
+        return Vec::new();
+    };
+    if meta.pins.len() <= 2 || meta.pins.iter().all(|pin| pin.etype == PinType::Passive) {
+        return Vec::new();
+    }
+
+    let mut facts = Vec::new();
+    for (key, target) in comp.pins.iter().chain(comp.units.values().flatten()) {
+        let by_number: Vec<_> = meta.pins.iter().filter(|pin| pin.number == *key).collect();
+        let hits = if by_number.is_empty() {
+            meta.pins.iter().filter(|pin| pin.name == *key).collect()
+        } else {
+            by_number
+        };
+        for pin in hits {
+            if pin.etype == PinType::PowerInput {
+                continue; // already reported above, including missing required inputs
+            }
+            let direction = match pin.dir {
+                PinDir::In => " [in]",
+                PinDir::Out => " [out]",
+                PinDir::Bidir => " [bidir]",
+                PinDir::Passive => " [passive]",
+                PinDir::Power => " [power]",
+                PinDir::Unknown => "",
+            };
+            facts.push(format!(
+                "{}/{}{direction} -> {}",
+                pin.number,
+                pin.name,
+                pin_target_text(target)
+            ));
+        }
+    }
+    facts.sort();
+    facts.dedup();
+    facts
 }
 
 fn pin_target_text(target: &circuit_lang::model::PinTarget) -> String {
@@ -353,8 +420,61 @@ blocks:
         assert!(subject.contains("24/VDD -> VDD"));
         assert!(subject.contains("8/VSS -> GND"));
         assert!(subject.contains("23/VSS -> GND"));
+        assert!(subject.contains("7/NRST -> NRST"));
         assert!(subject.contains("decouple: {100nF: 2}"));
         assert!(subject.contains("Netlist:\n"));
         assert!(subject.contains(netlist.trim()));
+    }
+
+    #[test]
+    fn review_subject_resolves_numeric_active_pin_functions() {
+        let mut provider = circuit_lang::SymbolTable::with_basics();
+        provider.mock_add(
+            "M:DUAL_OPAMP",
+            vec![
+                ("1", "~", circuit_lang::PinType::Other, 1),
+                ("2", "-", circuit_lang::PinType::Other, 1),
+                ("3", "+", circuit_lang::PinType::Other, 1),
+                ("4", "V-", circuit_lang::PinType::PowerInput, 3),
+                ("5", "+", circuit_lang::PinType::Other, 2),
+                ("6", "-", circuit_lang::PinType::Other, 2),
+                ("7", "~", circuit_lang::PinType::Other, 2),
+                ("8", "V+", circuit_lang::PinType::PowerInput, 3),
+            ],
+        );
+        let netlist = r#"
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: M:DUAL_OPAMP, pins: {"1": VVG, "2": VVG, "3": VVG_SENSE, "4": GND, "5": V2, "6": VOUT, "7": VOUT, "8": +5V}}
+"#;
+        let compiled = circuit_lang::compile(netlist, &provider);
+        let design = compiled.design.expect("test design compiles");
+
+        let subject = annotate_netlist_for_review(netlist, &design, &provider);
+
+        assert!(subject.contains("resolved explicit pins:"), "{subject}");
+        assert!(subject.contains("5/+ -> V2"), "{subject}");
+        assert!(subject.contains("6/- -> VOUT"), "{subject}");
+        assert!(subject.contains("7/~ -> VOUT"), "{subject}");
+        assert!(subject.contains("4/V- -> GND"), "{subject}");
+        assert!(subject.contains("8/V+ -> +5V"), "{subject}");
+    }
+
+    #[test]
+    fn netlist_review_requires_named_topology_and_actual_transfer_checks() {
+        assert!(NETLIST_REVIEW_SYSTEM.contains("explicitly named in the intent"));
+        assert!(NETLIST_REVIEW_SYSTEM.contains("actual topology and values"));
+        for lenses in [QUICK_LENSES, LENSES] {
+            assert!(
+                lenses.iter().any(|lens| {
+                    lens.contains("intent-required timer, filter, or feedback block")
+                        && lens.contains("enforce any named topology")
+                        && lens.contains("actual circuit")
+                }),
+                "review path is missing the functional-topology trace: {lenses:?}"
+            );
+        }
     }
 }

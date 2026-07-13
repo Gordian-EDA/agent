@@ -191,6 +191,12 @@ fn pin_nets(c: &Component) -> impl Iterator<Item = (&str, &str)> {
         })
 }
 
+fn pin_net_alias<'a>(comp: &'a Component, aliases: &[&str]) -> Option<&'a str> {
+    pin_nets(comp)
+        .find(|(key, _)| aliases.iter().any(|alias| key.eq_ignore_ascii_case(alias)))
+        .map(|(_, net)| net)
+}
+
 /// A 2-pin decoupling/bypass cap bridging `rail` and a ground net — the unit the
 /// decoupling idiom co-places beside its anchor IC.
 fn is_bypass_cap_on(it: &Item, rail: &str) -> bool {
@@ -231,6 +237,7 @@ pub fn erc_checks(d: &Design) -> Vec<String> {
     let mut out = Vec::new();
     check_led_current(&items, &net_items, &mut out);
     check_fb_divider(&items, &net_items, &mut out);
+    check_555_timing_topology(&items, &net_items, &mut out);
     check_dangling(&items, &mut out);
     check_crystal(&items, &net_items, &mut out);
     check_polarity(&items, &net_items, &mut out);
@@ -240,6 +247,46 @@ pub fn erc_checks(d: &Design) -> Vec<String> {
     check_undriven_rail(&items, &net_items, &mut out);
     check_output_short(&items, &net_items, &mut out);
     out
+}
+
+/// A 555 timer whose discharge transistor is wired directly onto the same
+/// capacitor node as both trigger and threshold cannot implement the standard
+/// astable/monostable timing path: DIS must reach that capacitor through a
+/// timing resistor. Restrict this to unambiguous single-555 Timer symbols and a
+/// grounded capacitor on the shared node, so unrelated numbered ICs and legal
+/// 555 modes stay silent.
+fn check_555_timing_topology(
+    items: &[Item],
+    net_items: &HashMap<&str, Vec<usize>>,
+    out: &mut Vec<String>,
+) {
+    for timer in items {
+        let part = timer.comp.part.to_uppercase();
+        if !part.starts_with("TIMER:") || !part.contains("555") || part.contains("556") {
+            continue;
+        }
+        let (Some(trigger), Some(threshold), Some(discharge)) = (
+            pin_net_alias(timer.comp, &["2", "TR", "TRIG", "TRIGGER"]),
+            pin_net_alias(timer.comp, &["6", "THR", "THRESH", "THRESHOLD"]),
+            pin_net_alias(timer.comp, &["7", "DIS", "DISCH", "DISCHARGE"]),
+        ) else {
+            continue;
+        };
+        if trigger != threshold || trigger != discharge {
+            continue;
+        }
+        let has_timing_cap = net_items
+            .get(trigger)
+            .into_iter()
+            .flatten()
+            .any(|&i| is_cap(items[i].comp) && on_gnd(&items[i]));
+        if has_timing_cap {
+            out.push(format!(
+                "- {}: 555 DIS, TR, and THR all tie directly to timing-capacitor net {trigger} — DIS must reach that node through the timing resistor, not short directly onto it",
+                timer.refdes
+            ));
+        }
+    }
 }
 
 /// Minimum pin count for the [`check_missing_decoupling`] anchor. Set high (caps the
@@ -790,6 +837,58 @@ mod tests {
         assert_eq!(rail_voltage("VOUT"), None); // ambiguous → skip
         assert_eq!(rail_voltage("VCC"), None);
         assert_eq!(rail_voltage("V5"), None); // single digit → ambiguous
+    }
+
+    #[test]
+    fn direct_555_discharge_on_timing_cap_is_flagged() {
+        let d = design(
+            "
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: Timer:NE555P, pins: {2: TIM, 6: TIM, 7: TIM}}
+      C1: {part: Device:C, value: 10uF, between: [TIM, GND]}
+",
+        );
+        let out = erc_checks(&d);
+        assert!(
+            out.iter().any(|finding| finding.contains("555 DIS")),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn normal_555_astable_and_monostable_topologies_are_not_flagged() {
+        let astable = design(
+            "
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: Timer:NE555P, pins: {TR: TIM, THR: TIM, DIS: DISCH}}
+      R1: {part: Device:R, value: 10k, between: [VCC, DISCH]}
+      R2: {part: Device:R, value: 68k, between: [DISCH, TIM]}
+      C1: {part: Device:C, value: 10uF, between: [TIM, GND]}
+",
+        );
+        let monostable = design(
+            "
+version: 1
+blocks:
+  main:
+    components:
+      U1: {part: Timer:LMC555xN, pins: {2: TRIGGER, 6: TIM, 7: TIM}}
+      C1: {part: Device:C, value: 10uF, between: [TIM, GND]}
+",
+        );
+        for design in [&astable, &monostable] {
+            let out = erc_checks(design);
+            assert!(
+                !out.iter().any(|finding| finding.contains("555 DIS")),
+                "{out:?}"
+            );
+        }
     }
 
     #[test]
