@@ -195,10 +195,13 @@ impl PlacementEngine for ClusterPlace {
 fn spine_fast_path_pin_profile(pin_counts: impl Iterator<Item = usize>) -> bool {
     let counts: Vec<usize> = pin_counts.collect();
     let pins = counts.iter().sum::<usize>();
-    let tiny = !counts.is_empty()
-        && counts.len() <= 6
-        && pins <= 12
-        && counts.iter().all(|&pins| pins <= 6)
+    // A connector/IC plus a handful of passives is topologically simple even
+    // when the anchor exposes many stacked terminals (USB-C is 15 pins). Its
+    // routed anneal objective is disproportionately expensive, while Spine has
+    // only one anchor pose to solve.
+    let single_anchor = !counts.is_empty()
+        && counts.len() <= 8
+        && pins <= FAST_PINS
         && counts.iter().filter(|&&pins| pins >= 3).count() <= 1;
     let dense_interactive = (5..=16).contains(&counts.len())
         && (24..=FAST_PINS).contains(&pins)
@@ -206,7 +209,7 @@ fn spine_fast_path_pin_profile(pin_counts: impl Iterator<Item = usize>) -> bool 
     if std::env::var_os("CLUSTER_DEBUG").is_some() {
         eprintln!("[cluster] pin profile {counts:?} total={pins}");
     }
-    tiny || dense_interactive
+    single_anchor || dense_interactive
 }
 
 fn rail_candidate_wins(
@@ -251,10 +254,12 @@ mod tests {
         assert!(spine_fast_path_pin_profile([5, 2, 2, 2].into_iter()));
 
         assert!(!spine_fast_path_pin_profile([].into_iter()));
-        assert!(!spine_fast_path_pin_profile(
+        assert!(spine_fast_path_pin_profile(
             [3, 2, 2, 2, 2, 2, 1].into_iter()
         ));
-        assert!(!spine_fast_path_pin_profile([7, 2, 1].into_iter()));
+        assert!(spine_fast_path_pin_profile([15, 2, 2].into_iter()));
+        assert!(spine_fast_path_pin_profile([7, 2, 1].into_iter()));
+        assert!(!spine_fast_path_pin_profile([32, 2, 2].into_iter()));
         assert!(!spine_fast_path_pin_profile([3, 3, 1].into_iter()));
     }
 
@@ -270,9 +275,9 @@ mod tests {
             [8, 3, 2, 2, 2, 2, 2, 2, 2, 2].into_iter()
         ));
 
-        // Smaller tuned sheets and genuinely large sheets retain their existing
-        // anneal paths; three-anchor sheets retain hub-pose search quality.
-        assert!(!spine_fast_path_pin_profile([8, 2, 2, 2, 2].into_iter()));
+        // Genuinely large sheets retain their existing anneal path; three-anchor
+        // sheets retain hub-pose search quality.
+        assert!(spine_fast_path_pin_profile([8, 2, 2, 2, 2].into_iter()));
         assert!(!spine_fast_path_pin_profile(
             [16, 8, 8, 2, 2, 2, 2, 2, 2, 2].into_iter()
         ));
