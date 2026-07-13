@@ -42,7 +42,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::llm::{
     Binary, ChatMessage, ChatRole, ChatStreamEvent, ContentPart, EventStream, GenaiProvider,
-    MessageContent, Provider, StreamEnd, ToolCall, ToolResponse, completed_text, token_usage,
+    MessageContent, Provider, StreamEnd, Tool, ToolCall, ToolResponse, completed_text, token_usage,
 };
 
 use crate::AgentRuntime;
@@ -177,9 +177,9 @@ pub struct ContextStats {
 /// A typed handle for the optional UI event sink. `None` is the headless case.
 type Events<'a> = Option<&'a UnboundedSender<AgentEvent>>;
 
-/// Keep enough recent visual context for follow-up inspection without re-sending
-/// every old base64 render on each model call.
-const RECENT_RENDER_IMAGE_MESSAGES_TO_KEEP: usize = 2;
+/// Keep the latest visual context for follow-up inspection without re-sending
+/// superseded base64 renders on each model call.
+const RECENT_RENDER_IMAGE_MESSAGES_TO_KEEP: usize = 1;
 /// Large tool outputs are useful for the next couple of reasoning steps, but
 /// replaying stale searches, renders, or full draft reads forever makes every
 /// later request progressively more expensive.
@@ -187,6 +187,62 @@ const RECENT_TOOL_RESULT_MESSAGES_TO_KEEP: usize = 2;
 const STALE_RENDER_IMAGE_PLACEHOLDER: &str = "[earlier render image omitted from model context; call render_schematic/render_board again if needed]";
 const LARGE_TOOL_ARGUMENT_TEXT_LIMIT: usize = 512;
 const LARGE_TOOL_RESULT_TEXT_LIMIT: usize = 2_048;
+
+/// Tool schemas expand with durable project state. Keeping the phase monotonic
+/// for an agent session preserves provider protocol history even if a project
+/// file is removed externally between requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ToolPhase {
+    Schematic,
+    BoardSeed,
+    BoardActive,
+}
+
+impl ToolPhase {
+    fn observe(ctx: &AgentRuntime) -> Self {
+        if ctx.pcb_path().exists() {
+            Self::BoardActive
+        } else if ctx.sch_path().exists() {
+            Self::BoardSeed
+        } else {
+            Self::Schematic
+        }
+    }
+}
+
+fn tool_defs_for_phase(phase: ToolPhase) -> Vec<Tool> {
+    tool_defs()
+        .into_iter()
+        .filter(|tool| match phase {
+            ToolPhase::BoardActive => true,
+            ToolPhase::BoardSeed => {
+                is_schematic_phase_tool(tool.name.as_str())
+                    || tool.name.as_str() == "regenerate_board"
+            }
+            ToolPhase::Schematic => is_schematic_phase_tool(tool.name.as_str()),
+        })
+        .collect()
+}
+
+fn is_schematic_phase_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "search_symbols"
+            | "get_symbol_info"
+            | "validate_design"
+            | "apply_design"
+            | "review_design"
+            | "run_erc"
+            | "project_info"
+            | "read_schematic"
+            | "render_schematic"
+            | "create_design"
+            | "edit_design"
+            | "search_footprints"
+            | "get_footprint_info"
+            | "assign_footprints"
+    )
+}
 
 /// Best-effort emit: a closed receiver (UI gone) is ignored.
 fn emit(events: Events<'_>, ev: AgentEvent) {
@@ -271,18 +327,23 @@ pub struct Agent<P: Provider = GenaiProvider> {
     /// `history.len()` at the start of each user turn, so [`Agent::pop_last_turn`]
     /// can unwind exactly one exchange.
     turn_starts: Vec<usize>,
+    /// Highest project phase observed in this session. Tool availability only
+    /// expands, avoiding stale-history/provider mismatches.
+    tool_phase: ToolPhase,
 }
 
 impl<P: Provider> Agent<P> {
     /// Build an agent over a project's [`AgentRuntime`] and a [`Provider`] client.
     /// `system` is the KiCAD system prompt.
     pub fn new(client: P, ctx: AgentRuntime, system: impl Into<String>) -> Self {
+        let tool_phase = ToolPhase::observe(&ctx);
         Self {
             client,
             runtime: Arc::new(ctx),
             system: system.into(),
             history: Vec::new(),
             turn_starts: Vec::new(),
+            tool_phase,
         }
     }
 
@@ -409,8 +470,6 @@ impl<P: Provider> Agent<P> {
         approvals: &mut dyn Approvals,
         events: Events<'_>,
     ) -> Result<TurnOutcome> {
-        let defs = tool_defs();
-
         repair_history(&mut self.history);
         self.turn_starts.push(self.history.len());
         self.history.push(ChatMessage::user(user_msg));
@@ -444,6 +503,9 @@ impl<P: Provider> Agent<P> {
                 });
             }
             provider_requests += 1;
+
+            self.tool_phase = self.tool_phase.max(ToolPhase::observe(&self.runtime));
+            let defs = tool_defs_for_phase(self.tool_phase);
 
             // Drive the provider's stream so assistant prose renders token-by-token
             // (each chunk forwarded as `AssistantDelta`), while the terminal End
@@ -2205,23 +2267,65 @@ mod tests {
             })
             .count();
         assert_eq!(
-            binary_messages, 2,
-            "only the two newest render images stay in context"
+            binary_messages, 1,
+            "only the newest render image stays in context"
         );
         assert!(
             matches!(history[1].content.parts().as_slice(), [ContentPart::Text(t)] if t.contains("earlier render image omitted"))
         );
         assert!(
-            history[3]
-                .content
-                .iter()
-                .any(|p| matches!(p, ContentPart::Binary(_)))
+            matches!(history[3].content.parts().as_slice(), [ContentPart::Text(t)] if t.contains("earlier render image omitted"))
         );
         assert!(
             history[5]
                 .content
                 .iter()
                 .any(|p| matches!(p, ContentPart::Binary(_)))
+        );
+    }
+
+    #[test]
+    fn tool_schemas_expand_with_project_phase() {
+        let schematic = tool_defs_for_phase(ToolPhase::Schematic);
+        let seed = tool_defs_for_phase(ToolPhase::BoardSeed);
+        let active = tool_defs_for_phase(ToolPhase::BoardActive);
+        let names = |tools: &[Tool]| {
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str().to_owned())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let schematic_names = names(&schematic);
+        let seed_names = names(&seed);
+        let active_names = names(&active);
+
+        assert_eq!(schematic.len(), 14);
+        assert!(schematic_names.contains("create_design"));
+        assert!(schematic_names.contains("search_footprints"));
+        assert!(schematic_names.contains("assign_footprints"));
+        assert!(!schematic_names.contains("regenerate_board"));
+        assert!(!schematic_names.contains("route_board"));
+
+        assert_eq!(seed.len(), 15);
+        assert!(schematic_names.is_subset(&seed_names));
+        assert!(seed_names.contains("regenerate_board"));
+        assert!(!seed_names.contains("route_board"));
+
+        assert_eq!(active.len(), tool_defs().len());
+        assert!(seed_names.is_subset(&active_names));
+        assert!(active_names.contains("route_board"));
+        assert!(active_names.contains("check_board"));
+
+        let schematic_bytes: usize = schematic.iter().map(Tool::size).sum();
+        let seed_bytes: usize = seed.iter().map(Tool::size).sum();
+        let active_bytes: usize = active.iter().map(Tool::size).sum();
+        assert!(
+            schematic_bytes < active_bytes / 2,
+            "{schematic_bytes} vs {active_bytes}"
+        );
+        assert!(
+            seed_bytes < active_bytes / 2,
+            "{seed_bytes} vs {active_bytes}"
         );
     }
 
