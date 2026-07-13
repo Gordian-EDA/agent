@@ -154,6 +154,16 @@ fn apply_design_commit_writes_file_and_runs_erc() {
         out["erc"]["warnings"].is_number(),
         "expected erc.warnings: {out}"
     );
+    assert_eq!(out["erc_checked"], serde_json::json!(true), "{out}");
+    if out["erc"]["errors"] == 0 && out["erc"]["warnings"] == 0 {
+        assert_eq!(out["erc_clean"], serde_json::json!(true), "{out}");
+        assert!(
+            out["next"]
+                .as_str()
+                .is_some_and(|next| next.contains("do not call run_erc again")),
+            "{out}"
+        );
+    }
 }
 
 #[test]
@@ -296,6 +306,16 @@ fn defs_lists_all_tools() {
             assert!(props.contains_key("kinds"));
         }
     }
+}
+
+#[test]
+fn tool_definitions_stay_within_static_context_budget() {
+    let defs = tool_defs();
+    let total: usize = defs.iter().map(|tool| tool.size()).sum();
+    assert!(
+        total <= 8_200,
+        "tool definitions use {total} bytes; keep the always-on schemas concise"
+    );
 }
 
 #[test]
@@ -723,6 +743,45 @@ fn fixture_ctx() -> (AgentRuntime, tempfile::TempDir) {
     let (guard, dir) = staged_footprint_dir();
     let ctx = AgentRuntime::with_footprint_dir_for_test(dir).expect("fixture ctx");
     (ctx, guard)
+}
+
+#[test]
+fn validate_design_uses_the_stored_draft_without_resending_yaml() {
+    let (ctx, _guard) = fixture_ctx();
+    let yaml = "version: 1\nblocks: {main: {components: {R1: {part: R, between: [A, GND]}, R2: {part: R, between: [A, GND]}}}}";
+    let created = run_tool("create_design", serde_json::json!({ "yaml": yaml }), &ctx).unwrap();
+    assert_eq!(created["ok"], serde_json::json!(true), "{created}");
+    assert_eq!(created["validated"], serde_json::json!(true), "{created}");
+    assert_eq!(
+        created["next_tool"],
+        serde_json::json!("apply_design"),
+        "{created}"
+    );
+    assert!(
+        created["next"]
+            .as_str()
+            .is_some_and(|next| next.contains("do not revalidate")),
+        "{created}"
+    );
+
+    let validated = run_tool("validate_design", serde_json::json!({}), &ctx).unwrap();
+
+    assert_eq!(validated["ok"], serde_json::json!(true), "{validated}");
+    assert_eq!(validated["errors"], serde_json::json!(0), "{validated}");
+}
+
+#[test]
+fn validate_design_without_yaml_or_draft_returns_recovery_guidance() {
+    let (ctx, _guard) = fixture_ctx();
+
+    let out = run_tool("validate_design", serde_json::json!({}), &ctx).unwrap();
+
+    assert!(
+        out["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("no draft exists")),
+        "{out}"
+    );
 }
 
 #[test]

@@ -62,13 +62,13 @@ pub fn tool_defs() -> Vec<Tool> {
     let defs = vec![
             Def {
                 name: "search_symbols".into(),
-                description: "Find KiCAD symbol `Lib:Name` ids. Skip stable built-ins like Device:R/C/LED, power:GND/+3V3, Connector:Conn_01x02_Pin; reuse hits."
+                description: "Find symbol `Lib:Name` ids; reuse hits. Built-ins include Device:R/C/LED, power:GND/+3V3, Connector:Conn_01x02_Pin."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "query": { "type": "string", "description": "Part name/fragment." },
-                        "limit": { "type": "integer", "description": "Max hits, default 8.", "minimum": 1 }
+                        "query": { "type": "string" },
+                        "limit": { "type": "integer", "description": "Max hits (default 8).", "minimum": 1 }
                     },
                     "required": ["query"]
                 }),
@@ -80,48 +80,47 @@ pub fn tool_defs() -> Vec<Tool> {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "lib_id": { "type": "string", "description": "Symbol id, e.g. Device:R." }
+                        "lib_id": { "type": "string", "description": "E.g. Device:R." }
                     },
                     "required": ["lib_id"]
                 }),
             },
             Def {
                 name: "validate_design".into(),
-                description: "Compile circuit-YAML without writing; returns ok/errors/warnings."
+                description: "Recheck YAML/draft; authoring tools already return validation. Omit yaml for draft."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "yaml": { "type": "string", "description": "circuit-YAML." }
-                    },
-                    "required": ["yaml"]
+                        "yaml": { "type": "string" }
+                    }
                 }),
             },
             Def {
                 name: "apply_design".into(),
-                description: "Compile/render schematic, preview the diff, and submit it through the approval gate. Omit yaml to use draft."
+                description: "Compile/render, approve/write the schematic, and run ERC. Omit yaml for draft."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "yaml": { "type": "string", "description": "Optional circuit-YAML; default draft." }
+                        "yaml": { "type": "string", "description": "Optional; defaults to draft." }
                     }
                 }),
             },
             Def {
                 name: "review_design".into(),
-                description: "Independent electrical review of the current draft. Costly: call once when the draft is complete, fix high-confidence defects, then continue."
+                description: "Costly electrical review of the complete draft; call at most once and fix high-confidence defects."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "intent": { "type": "string", "description": "Design goal with rails/key parts/interfaces." }
+                        "intent": { "type": "string", "description": "Goal, rails, key parts/interfaces." }
                     }
                 }),
             },
             Def {
                 name: "run_erc".into(),
-                description: "Run KiCAD ERC on the current schematic; returns counts and violations."
+                description: "Fresh KiCAD ERC; do not call immediately after a clean apply_design."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
@@ -133,12 +132,12 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "read_schematic".into(),
-                description: "Read circuit-YAML as plain text. source='draft' reads/seeds the project draft; otherwise source is a .kicad_sch path and does not change the draft."
+                description: "Read circuit-YAML text. source='draft' reads/seeds the draft; a .kicad_sch path does not."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "source": { "type": "string", "description": "'draft' (default) or a .kicad_sch path." }
+                        "source": { "type": "string", "description": "'draft' (default) or .kicad_sch path." }
                     }
                 }),
             },
@@ -150,41 +149,41 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "create_design".into(),
-                description: "Create a new circuit-YAML draft. Fails if one exists unless overwrite=true."
+                description: "Create a draft and return validation; overwrite=true replaces one."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "yaml": { "type": "string", "description": "Full draft." },
-                        "overwrite": { "type": "boolean", "description": "Replace existing draft." }
+                        "yaml": { "type": "string" },
+                        "overwrite": { "type": "boolean" }
                     },
                     "required": ["yaml"]
                 }),
             },
             Def {
                 name: "edit_design".into(),
-                description: "Edit draft. For multiple changes use one full `yaml` replacement; use old_string/new_string only for one exact copied snippet. Returns diagnostics."
+                description: "Edit draft and return validation: full yaml, or one exact old_string/new_string patch."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "yaml": { "type": "string", "description": "Full replacement draft." },
-                        "old_string": { "type": "string", "description": "Exact current snippet." },
-                        "new_string": { "type": "string", "description": "Replacement snippet." },
-                        "replace_all": { "type": "boolean", "description": "Replace all matches." }
+                        "yaml": { "type": "string", "description": "Full replacement." },
+                        "old_string": { "type": "string" },
+                        "new_string": { "type": "string" },
+                        "replace_all": { "type": "boolean" }
                     }
                 }),
             },
             // ── PCB tools (slice 5) ─────────────────────────────────────────
             Def {
                 name: "search_footprints".into(),
-                description: "Find real KiCAD footprint `Lib:Name` ids. Use during schematic drafting before apply_design; reuse hits."
+                description: "Find real footprint `Lib:Name` ids before apply_design; reuse hits."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "query": { "type": "string", "description": "Footprint name/fragment." },
-                        "limit": { "type": "integer", "description": "Max hits, default 8.", "minimum": 1 }
+                        "query": { "type": "string" },
+                        "limit": { "type": "integer", "description": "Max hits (default 8).", "minimum": 1 }
                     },
                     "required": ["query"]
                 }),
@@ -196,27 +195,27 @@ pub fn tool_defs() -> Vec<Tool> {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "lib_id": { "type": "string", "description": "Footprint id." }
+                        "lib_id": { "type": "string" }
                     },
                     "required": ["lib_id"]
                 }),
             },
             Def {
                 name: "assign_footprints".into(),
-                description: "Set component footprint fields in the circuit-YAML draft. Batch-only: pass `assignments`. After assignments, apply_design before regenerate_board."
+                description: "Batch-set draft footprints; apply_design before regenerate_board."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "assignments": {
                             "type": "array",
-                            "description": "Batch assignments; each item has reference and footprint. Use this even for one component.",
+                            "description": "Use even for one component.",
                             "minItems": 1,
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "reference": { "type": "string", "description": "Refdes." },
-                                    "footprint": { "type": "string", "description": "Footprint id." }
+                                    "reference": { "type": "string" },
+                                    "footprint": { "type": "string", "description": "Lib:Name." }
                                 },
                                 "required": ["reference", "footprint"]
                             }
@@ -227,46 +226,46 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "open_board".into(),
-                description: "Open the project .kicad_pcb in headless KiCAD for live IPC edits; returns the same rich state as get_board."
+                description: "Open project PCB for live IPC edits; returns get_board state."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "move_parts".into(),
-                description: "Batch move live-board footprints in one commit. Supports absolute `to`, relative `by`, `near` another footprint, board `edge`, offsets, and rotation."
+                description: "Batch-move live footprints by absolute to, relative by, near, or edge; supports rotation/offsets."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "moves": {
                             "type": "array",
-                            "description": "Sequential footprint moves. Each move requires reference and may use one movement mode plus optional rotation/horizontal_offset/vertical_offset.",
+                            "description": "Sequential moves; one movement mode per item.",
                             "minItems": 1,
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "reference": { "type": "string", "description": "Refdes." },
+                                    "reference": { "type": "string" },
                                     "to": {
                                         "type": "array",
-                                        "description": "Absolute [x, y] footprint position in mm.",
+                                        "description": "Absolute [x,y] mm.",
                                         "items": { "type": "number" },
                                         "minItems": 2,
                                         "maxItems": 2
                                     },
                                     "by": {
                                         "type": "array",
-                                        "description": "Nudge [dx, dy] from current position in mm.",
+                                        "description": "Relative [dx,dy] mm.",
                                         "items": { "type": "number" },
                                         "minItems": 2,
                                         "maxItems": 2
                                     },
-                                    "near": { "type": "string", "description": "Reference of target footprint for relative placement." },
+                                    "near": { "type": "string", "description": "Target refdes." },
                                     "side": { "type": "string", "enum": ["left", "right", "above", "below"] },
                                     "edge": { "type": "string", "enum": ["left", "right", "top", "bottom"] },
-                                    "gap": { "type": "number", "description": "Gap in mm for near/edge placement." },
-                                    "rotation": { "type": "number", "description": "Absolute rotation in degrees." },
-                                    "horizontal_offset": { "type": "number", "description": "Post-placement mm shift; positive right." },
-                                    "vertical_offset": { "type": "number", "description": "Post-placement mm shift; positive down." }
+                                    "gap": { "type": "number", "description": "near/edge gap, mm." },
+                                    "rotation": { "type": "number", "description": "Absolute degrees." },
+                                    "horizontal_offset": { "type": "number", "description": "mm; +right." },
+                                    "vertical_offset": { "type": "number", "description": "mm; +down." }
                                 },
                                 "required": ["reference"]
                             }
@@ -277,7 +276,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "route_track".into(),
-                description: "Route one live-board connection with grid-A* obstacle avoidance, optional layer change, and explicit via anchors."
+                description: "Route one live connection with obstacle avoidance, layer changes, and optional via anchors."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -287,22 +286,22 @@ pub fn tool_defs() -> Vec<Tool> {
                             "items": {"type":"number"},
                             "minItems": 2,
                             "maxItems": 2,
-                            "description": "Start [x, y] in mm."
+                            "description": "Start [x,y] mm."
                         },
                         "to": {
                             "type": "array",
                             "items": {"type":"number"},
                             "minItems": 2,
                             "maxItems": 2,
-                            "description": "End [x, y] in mm."
+                            "description": "End [x,y] mm."
                         },
-                        "net": { "type": "string", "description": "Net name to route." },
+                        "net": { "type": "string" },
                         "from_layer": { "type": "string", "description": "F.Cu/B.Cu/In1.Cu/top/bottom; default F.Cu." },
-                        "to_layer": { "type": "string", "description": "F.Cu/B.Cu/In1.Cu/top/bottom; default from_layer." },
-                        "width": { "type": "number", "description": "Track width in mm; default board net width." },
+                        "to_layer": { "type": "string", "description": "Same forms; default from_layer." },
+                        "width": { "type": "number", "description": "mm; default net width." },
                         "vias": {
                             "type": "array",
-                            "description": "Explicit via anchors. Each via is placed at `at` and changes from the current layer to `to_layer`.",
+                            "description": "Anchors changing current layer to to_layer.",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -323,7 +322,7 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "delete_copper".into(),
-                description: "Delete live-board track/via copper near a click point, with optional kind/net/layer filters."
+                description: "Delete live track/via copper near a point; optional kind/net/layer filters."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -333,46 +332,46 @@ pub fn tool_defs() -> Vec<Tool> {
                             "items": {"type":"number"},
                             "minItems": 2,
                             "maxItems": 2,
-                            "description": "Click point [x, y] in mm."
+                            "description": "Point [x,y] mm."
                         },
-                        "radius": { "type": "number", "description": "Search radius in mm; default 0.4." },
+                        "radius": { "type": "number", "description": "mm; default 0.4." },
                         "kinds": {
                             "type": "array",
                             "items": { "type": "string", "enum": ["track", "via"] },
-                            "description": "Copper kinds to consider; default both."
+                            "description": "Default both."
                         },
-                        "net": { "type": "string", "description": "Optional net name filter." },
-                        "layer": { "type": "string", "description": "Optional layer filter for tracks or vias spanning that layer." },
-                        "all": { "type": "boolean", "description": "Delete all matches in radius instead of only the nearest." }
+                        "net": { "type": "string" },
+                        "layer": { "type": "string" },
+                        "all": { "type": "boolean", "description": "All matches; default nearest." }
                     },
                     "required": ["at"]
                 }),
             },
             Def {
                 name: "set_net_width".into(),
-                description: "Set live-board net class width/clearance for nets. Prefer regenerate_board.rules.net_widths before routing."
+                description: "Set live net-class width/clearance; prefer regenerate_board rules before routing."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "name": { "type": "string", "description": "Class name." },
-                        "width": { "type": "number", "description": "mm, default 0.5." },
-                        "clearance": { "type": "number", "description": "mm, default 0.2." },
-                        "nets": { "type": "array", "items": {"type":"string"}, "description": "Net names." }
+                        "name": { "type": "string" },
+                        "width": { "type": "number", "description": "mm; default 0.5." },
+                        "clearance": { "type": "number", "description": "mm; default 0.2." },
+                        "nets": { "type": "array", "items": {"type":"string"} }
                     },
                     "required": ["name", "nets"]
                 }),
             },
             Def {
                 name: "update_board_outline".into(),
-                description: "Edit the existing PCB Edge.Cuts without regenerating. Use bounds for a rectangle, outline for polygon points, or fit_to_geometry=true with margin to shrink/center around current parts/copper."
+                description: "Edit existing Edge.Cuts: rectangle bounds, polygon outline, or fit_to_geometry plus margin."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "bounds": {
                             "type": "object",
-                            "description": "Rectangular Edge.Cuts, mm.",
+                            "description": "Rectangle, mm.",
                             "properties": {
                                 "min_x": { "type": "number" }, "max_x": { "type": "number" },
                                 "min_y": { "type": "number" }, "max_y": { "type": "number" }
@@ -380,7 +379,7 @@ pub fn tool_defs() -> Vec<Tool> {
                         },
                         "outline": {
                             "type": "array",
-                            "description": "Arbitrary closed polygon outline as [[x,y], ...] in mm.",
+                            "description": "Closed [[x,y],...] polygon, mm.",
                             "minItems": 3,
                             "items": {
                                 "type": "array",
@@ -391,22 +390,22 @@ pub fn tool_defs() -> Vec<Tool> {
                         },
                         "fit_to_geometry": {
                             "type": "boolean",
-                            "description": "Derive a rectangular outline around current footprints/copper plus margin."
+                            "description": "Fit rectangle around parts/copper."
                         },
-                        "margin": { "type": "number", "description": "Margin in mm for fit_to_geometry, default 2." }
+                        "margin": { "type": "number", "description": "Fit margin, mm; default 2." }
                     }
                 }),
             },
             Def {
                 name: "regenerate_board".into(),
-                description: "Destructively regenerate/seed the PCB from the committed schematic; not KiCAD F8 sync. May replace existing placement/routing. If footprints are missing/unapplied, fix YAML and apply_design first."
+                description: "Destructively seed PCB from committed schematic (not F8 sync); fix/apply missing footprints first."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "bounds": {
                             "type": "object",
-                            "description": "Board outline rect, mm.",
+                            "description": "Outline rectangle, mm.",
                             "properties": {
                                 "min_x": { "type": "number" }, "max_x": { "type": "number" },
                                 "min_y": { "type": "number" }, "max_y": { "type": "number" }
@@ -414,7 +413,7 @@ pub fn tool_defs() -> Vec<Tool> {
                         },
                         "rules": {
                             "type": "object",
-                            "description": "{layer_count, net_widths, clearance, min_trace_width, via_diameter, via_drill, pours}. net_widths is {GND: 0.6, V3V3: 0.5} in mm. pours is [{net:'GND', layer:'bottom'}] on top/bottom/innerN signal layers; on 6+ layer boards omitted pours default to GND/V3V3 power pours when those nets exist.",
+                            "description": "Copper rules. net_widths values are mm; pours target top/bottom/innerN. On 6+ layers, omitted pours default to existing GND/V3V3.",
                             "properties": {
                                 "layer_count": { "type": "integer", "enum": [2, 4, 6, 8] },
                                 "clearance": { "type": "number" },
@@ -431,7 +430,7 @@ pub fn tool_defs() -> Vec<Tool> {
                                         "type": "object",
                                         "properties": {
                                             "net": { "type": "string" },
-                                            "layer": { "type": "string", "description": "top, bottom, or innerN signal layer" }
+                                            "layer": { "type": "string", "description": "top, bottom, or innerN" }
                                         },
                                         "required": ["net", "layer"]
                                     }
@@ -443,55 +442,55 @@ pub fn tool_defs() -> Vec<Tool> {
             },
             Def {
                 name: "get_board".into(),
-                description: "Return live board parts/summary/state, optionally including filtered copper geometry."
+                description: "Return live board state; optionally filtered copper geometry."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "include_copper": { "type": "boolean", "description": "Include track/via geometry for inspection." },
+                        "include_copper": { "type": "boolean" },
                         "kinds": {
                             "type": "array",
                             "items": { "type": "string", "enum": ["track", "via"] },
-                            "description": "Copper kinds to include when include_copper is true; default both."
+                            "description": "Default both."
                         },
-                        "net": { "type": "string", "description": "Optional copper net filter." },
-                        "layer": { "type": "string", "description": "Optional copper layer filter." }
+                        "net": { "type": "string" },
+                        "layer": { "type": "string" }
                     }
                 }),
             },
             Def {
                 name: "place_board".into(),
-                description: "Auto-place the regenerated board and write placement. Run after regenerate_board."
+                description: "Auto-place regenerated board; run after regenerate_board."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "route_board".into(),
-                description: "Auto-route the placed board and write copper. Returns failed nets and metrics."
+                description: "Auto-route placed board; returns failed nets/metrics."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "render_board".into(),
-                description: "Render current board PNG. Use when visual inspection is needed."
+                description: "Render board PNG for visual inspection."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "check_board".into(),
-                description: "Save live board and run KiCAD PCB DRC; returns violations/unconnected counts."
+                description: "Save live board and run PCB DRC."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Def {
                 name: "export_fab".into(),
-                description: "Export Gerbers/drill/position/BOM fab bundle. Call last after check_board passes."
+                description: "Export Gerbers/drill/position/BOM after check_board passes."
                     .into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Input .kicad_pcb; default project board." },
-                        "out_dir": { "type": "string", "description": "Output dir; default fab/." }
+                        "path": { "type": "string", "description": "Default project PCB." },
+                        "out_dir": { "type": "string", "description": "Default fab/." }
                     }
                 }),
             },
@@ -706,7 +705,16 @@ pub(crate) fn current_design_yaml(ctx: &AgentRuntime) -> Result<String> {
 // ── 4. validate_design ─────────────────────────────────────────────────────
 
 fn validate_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
-    let yaml = require_str(&input, "yaml")?;
+    let yaml = if input.get("yaml").is_some() {
+        require_str(&input, "yaml")?
+    } else {
+        let Some(draft) = ctx.workspace().read_draft()? else {
+            return Ok(json!({
+                "error": "no yaml given and no draft exists — pass yaml, or create a draft with create_design/read_schematic first",
+            }));
+        };
+        draft
+    };
     let result = compile(&yaml, ctx.provider());
     Ok(compile_report(&result.diagnostics))
 }
@@ -867,10 +875,24 @@ fn apply_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
     }
     match erc {
         Ok(report) => {
+            let errors = report.error_count();
+            let warnings = report.warning_count();
             out["erc"] = json!({
-                "errors": report.error_count(),
-                "warnings": report.warning_count(),
+                "errors": errors,
+                "warnings": warnings,
             });
+            out["erc_checked"] = json!(true);
+            if errors == 0 && warnings == 0 {
+                out["erc_clean"] = json!(true);
+                out["next"] = json!(
+                    "ERC already ran and passed; do not call run_erc again unless the schematic changes"
+                );
+            } else {
+                out["erc_clean"] = json!(false);
+                out["next_tool"] = json!("edit_design");
+                out["next"] =
+                    json!("inspect the reported ERC findings, fix the draft, and re-apply");
+            }
         }
         Err(err) => {
             let err = format!("running ERC on {}: {err}", ctx.sch_path().display());
@@ -1181,6 +1203,7 @@ fn create_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         .write_draft(&yaml, current_sch_text(ctx).as_deref())?;
     let mut report = compile_report(&compile(&yaml, ctx.provider()).diagnostics);
     report["draft_written"] = json!(true);
+    add_draft_next_step(&mut report);
     Ok(report)
 }
 
@@ -1198,6 +1221,7 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
         let mut report = compile_report(&compile(yaml, ctx.provider()).diagnostics);
         report["draft_written"] = json!(true);
         report["mode"] = json!("full_replace");
+        add_draft_next_step(&mut report);
         return Ok(report);
     }
 
@@ -1233,7 +1257,23 @@ fn edit_design(input: Value, ctx: &AgentRuntime) -> Result<Value> {
 
     let mut report = compile_report(&compile(&edited, ctx.provider()).diagnostics);
     report["replacements"] = json!(if replace_all { count } else { 1 });
+    add_draft_next_step(&mut report);
     Ok(report)
+}
+
+fn add_draft_next_step(report: &mut Value) {
+    let errors = report.get("errors").and_then(Value::as_u64).unwrap_or(0);
+    let warnings = report.get("warnings").and_then(Value::as_u64).unwrap_or(0);
+    report["validated"] = json!(true);
+    if errors == 0 && warnings == 0 {
+        report["next_tool"] = json!("apply_design");
+        report["next"] = json!(
+            "draft already compiled cleanly; call apply_design() next and do not revalidate it unchanged"
+        );
+    } else {
+        report["next_tool"] = json!("edit_design");
+        report["next"] = json!("fix the reported diagnostics in one batched edit");
+    }
 }
 
 // ── 10. render_schematic ────────────────────────────────────────────────────
